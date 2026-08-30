@@ -50,7 +50,7 @@ public final class ProfileDescriptorIdentity {
     }
 
     /** Computes suite 1 identity over bytes already accepted as canonical by the codec. */
-    public static ProfileDescriptorIdentity compute(byte[] canonicalBytes) {
+    static ProfileDescriptorIdentity compute(byte[] canonicalBytes) {
         Objects.requireNonNull(canonicalBytes, "canonicalBytes");
         MessageDigest messageDigest = sha256();
         messageDigest.update(DOMAIN_SEPARATOR);
@@ -104,7 +104,7 @@ public final class ProfileDescriptorIdentity {
     }
 
     /** Constant-time comparison against the identity recomputed from canonical bytes. */
-    public boolean verifies(byte[] canonicalBytes) {
+    boolean verifies(byte[] canonicalBytes) {
         return MessageDigest.isEqual(toBytes(), compute(canonicalBytes).toBytes());
     }
 

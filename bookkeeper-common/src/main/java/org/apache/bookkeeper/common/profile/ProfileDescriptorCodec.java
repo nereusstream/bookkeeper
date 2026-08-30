@@ -102,6 +102,12 @@ public final class ProfileDescriptorCodec {
         return buffer.array();
     }
 
+    /** Encodes with the canonical writer and derives the frozen 36-byte identity. */
+    public static ProfileDescriptorIdentity identityOf(
+            ProfileDescriptor descriptor, ProfileDescriptorValidator validator) {
+        return ProfileDescriptorIdentity.compute(encode(descriptor, validator));
+    }
+
     /** Strictly decodes input bytes without normalization or re-encoding acceptance. */
     public static ProfileDescriptor decode(byte[] input, ProfileDescriptorValidator validator) {
         return decode(input, validator, ArrayList::new);

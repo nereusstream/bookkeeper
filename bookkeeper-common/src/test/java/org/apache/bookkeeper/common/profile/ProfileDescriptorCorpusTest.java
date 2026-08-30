@@ -30,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -124,6 +125,25 @@ public class ProfileDescriptorCorpusTest {
                     () -> ProfileDescriptorIdentity.fromBytes(bytes));
             assertEquals(ProfileDescriptorValidationException.Reason.INVALID_IDENTITY, exception.reason());
             assertFalse(exception.getMessage().contains("secret"));
+        }
+    }
+
+    @Test
+    public void noncanonicalAndOversizeLengthsFailBeforeCapabilityBodyAllocation() throws Exception {
+        for (String name : new String[] {"noncanonical-509", "noncanonical-1024", "oversize-1025"}) {
+            AtomicInteger allocations = new AtomicInteger();
+            byte[] bytes = resource("invalid/" + name + ".bin");
+            assertThrows(
+                    name,
+                    ProfileDescriptorValidationException.class,
+                    () -> ProfileDescriptorCodec.decode(
+                            bytes,
+                            VALIDATOR,
+                            size -> {
+                                allocations.incrementAndGet();
+                                return new java.util.ArrayList<>(size);
+                            }));
+            assertEquals(name, 0, allocations.get());
         }
     }
 

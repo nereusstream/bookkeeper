@@ -1,0 +1,30 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "implementationWave": 0,
+  "state": ["EXPERIMENTAL", "NON_PROMOTABLE", "NO_AUTHORITY", "DISCARDABLE"],
+  "sourceCommit": "9809bc099fa770979df4210d468483608992e094",
+  "designBaseline": "Unified WAL Round 7 Integrated",
+  "authority": "NONE",
+  "promotion": "FORBIDDEN",
+  "bookKeeperVersion": "4.18.0-SNAPSHOT",
+  "lightProtoVersion": "0.7.0",
+  "jdk": "Amazon Corretto 21.0.10",
+  "maven": "3.8.5",
+  "os": "macOS 14.8.9 arm64, Darwin 23.6.0",
+  "artifactDirectory": "bookkeeper-common/src/test/resources/profile-descriptor",
+  "receiptDirectory": "docs/rfcs/unified-wal/implementation/profile-descriptor",
+  "testSeedPolicy": "Fixed constants committed in ProfileDescriptorFuzzHarness; no clock, host, or environment seed input",
+  "designInputsAtSourceCommit": {
+    "docs/turbo-bk.md": "e3297953f6739d1d8092354226bfb88a0401feb5ac150efafe63e6363dd80cd9",
+    "docs/rfcs/unified-wal/RFC-0001-profile-capability-install.md": "1cea285dcf78f14f1caf74b1a701f73e8454ac44ac655f0e7689063209a38069",
+    "docs/rfcs/unified-wal/RFC-0002-sequenced-wal.md": "3a438ab1ccf534447817017f49672daca34e799ed10582abbc080e0714ea81d4",
+    "docs/rfcs/unified-wal/RFC-0003-segment-storage-allocator.md": "057f75306634550f639fd4c206a3a9c1818a65927f00c2f987ed7716f8867731",
+    "docs/rfcs/unified-wal/RFC-0004-range-recovery-delete.md": "e4065f43ed97648850fe8b37b7642eb39259beef4e8117533ea349aba8ee553f",
+    "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md": "24bfaeacc1b2810a5a1f055f717e1a45fa56a2f528de02c835fc2200df2ece2f",
+    "docs/rfcs/unified-wal/spikes/SPIKE-A-profile-install.md": "dacf1eea8ad232c3e0b2037d775e7d0e3a0cc22ef324984fd50b035fe2b6836b",
+    "docs/rfcs/unified-wal/spikes/SPIKE-B-allocator-block.md": "3f0c02667012c88e0d75a87d121bea71ab4fcb02979cbe41bc7ab1745ed75ad7",
+    "docs/rfcs/unified-wal/spikes/SPIKE-C-no-object-tla.md": "974a28176577a02b5f5cd0f2057bf34ad569b093ce9e57d8cf277fd9965df2c2",
+    "docs/rfcs/unified-wal/grill/ROUND-07-exact-implementation-manifest.md": "eec4bfadf4b3d73d45b7cf301b703b71f3727158737c5cdda77d275caa6c41a3"
+  },
+  "authorityTouches": []
+}

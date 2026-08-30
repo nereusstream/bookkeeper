@@ -65,7 +65,7 @@ public class ProfileDescriptorCodecTest {
     public void identityIsImmutableAndSafetySensitive() {
         ProfileDescriptor descriptor = TestProfileRegistries.descriptor(List.of());
         byte[] canonicalBytes = ProfileDescriptorCodec.encode(descriptor, validator);
-        ProfileDescriptorIdentity identity = ProfileDescriptorIdentity.compute(canonicalBytes);
+        ProfileDescriptorIdentity identity = ProfileDescriptorCodec.identityOf(descriptor, validator);
         byte[] identityBytes = identity.toBytes();
         byte[] digest = identity.digest();
 
