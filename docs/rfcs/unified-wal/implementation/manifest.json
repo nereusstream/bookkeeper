@@ -26,5 +26,18 @@
     "docs/rfcs/unified-wal/spikes/SPIKE-C-no-object-tla.md": "974a28176577a02b5f5cd0f2057bf34ad569b093ce9e57d8cf277fd9965df2c2",
     "docs/rfcs/unified-wal/grill/ROUND-07-exact-implementation-manifest.md": "eec4bfadf4b3d73d45b7cf301b703b71f3727158737c5cdda77d275caa6c41a3"
   },
+  "profileWire": {
+    "block": "D",
+    "blockBaseCommit": "be3d3d55b6787b84698fe428705b398bda57a1de",
+    "state": "CORPUS_COMPLETE_REAL_COMPATIBILITY_PENDING",
+    "artifactDirectory": "bookkeeper-common/src/test/resources/profile-wire",
+    "receiptDirectory": "docs/rfcs/unified-wal/implementation/profile-wire",
+    "frameManifest": "0x0FFE4250/protocol-1.0/header-32",
+    "fuzzSeedHex": "505746555a5a0001",
+    "fuzzIterations": 256,
+    "corpusVectors": 610,
+    "oldBinaryMatrix": ["4.14.8", "4.15.5", "4.16.7", "4.17.2"],
+    "g1": "PENDING_REAL_OLD_DECODER_AND_STOCK_BINARY_ZERO_EFFECT_EVIDENCE"
+  },
   "authorityTouches": []
 }

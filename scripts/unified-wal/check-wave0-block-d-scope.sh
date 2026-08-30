@@ -32,6 +32,7 @@ while IFS= read -r path; do
         bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/wire/* \
         |bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/wire/* \
         |bookkeeper-common/src/test/resources/profile-wire/* \
+        |bookkeeper-common/pom.xml \
         |docs/turbo-bk.md \
         |docs/rfcs/unified-wal/RFC-0001-profile-capability-install.md \
         |docs/rfcs/unified-wal/RFC-0004-range-recovery-delete.md \
