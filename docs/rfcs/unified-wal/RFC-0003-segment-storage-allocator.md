@@ -109,6 +109,8 @@ oldGeneration
 newGeneration
 ledgerId or shardOwner
 ledgerInstanceId
+semantic predecessor / expected generation
+operation identity and generation where externally retried
 payloadDigest
 checksum
 ```
@@ -148,6 +150,30 @@ durabilityBarrierOrDurableThroughCut
 `MOVE_PREPARE` 可以作为 orphan discovery 或 QoS 优化，但不是 safety 必需。exact record bytes、checksum、per-entry/range packing 与 batch 大小保持开放。
 
 group commit 中，只有明确覆盖该 `controlSequence` 的 durability completion 才允许 locator cutover；batch submission、内存 append 或其他 record 的完成都不够。locator 切换与阻断新的 old-location pin 必须形成一个本地同步 cut：cut 前已取得 old pin 的 reader 可以完成，cut 后的新 reader只能取得 new locator。`durableThrough` 不得跨越 control sequence gap 或 torn record。
+
+### 5.3 Conditional apply 与 durability result
+
+`ArenaControlLog` 对每个 Arena 提供一个 deterministic conditional state-machine order。现有 Classic Journal 的 group force可作为 batching参考，但其 append/fsync callback本身不具备 semantic predecessor、conditional apply、operation replay或state-conflict语义，不能直接冒充此接口。
+
+概念结果至少等价于：
+
+```text
+appendConditional(transition)
+    -> APPLIED_DURABLE | ALREADY_DURABLE | CONDITION_FAILED
+     | STALE | INCOMPATIBLE/CORRUPT
+    + operation identity
+    + assigned control sequence/range
+    + resulting generation/state identity
+    + durableThrough
+```
+
+predicate 必须在 per-Arena sequencer 对当前 committed/applied state 原子求值；condition failure不改变状态。authority consumer 只能消费完整 log prefix durable through该 transition自身 sequence之后的 durable result，enqueue/admit/内存 append 不是 cutover、free或reuse许可。一个 bounded transition可由一条或有限多条物理 record承载，但必须有明确 all-or-nothing replay；共享 group append/fsync 的相邻 operation仍保留独立 condition/result，不形成通用事务。
+
+externally retried transition绑定 Arena、operation identity/generation、expected predecessor/location/generation和payload identity。idempotency retention必须有界：current selector/free/checkpoint state能证明已提交时返回 `ALREADY_DURABLE`，已被后续 generation取代时返回 stale/conflict；不永久保存所有 request id或per-record future。unknown mandatory record、sequence gap或torn record阻断 `durableThrough` 并使 Arena fail closed。
+
+`MOVE_COMMIT`、conditional `FREE_AND_BUMP`、`ALLOC/ALLOC_POOL` 共用上述 per-Arena order、complete-prefix replay和group durability。Checkpoint data、inactive superblock publication与prefix reclaim仍按第11节分阶段执行；`CHECKPOINT_COMMIT`可以共用append/durability原语，但 `S` 必须是complete committed/applied cut，不能从任意fsync callback推断，也不需要三介质通用事务。
+
+reader cutover在 durable move result 后，通过同一个 local selector/pin gate 原子完成“发布 new selector + 禁止新的 old-location pin + 建立 cutover epoch”。`acquireReadPin` 必须在 bounded retry中验证 selector/epoch，cut后不能从 stale cached locator取得old pin；pre-cut volatile readers可以完成并drain。具体使用stripe lock、seqlock/epoch或RCU保持开放，individual reader/future/buffer history不得持久化。
 
 ## 6. 分配与 ACK 顺序
 
@@ -466,6 +492,10 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 13. checkpoint through `S` + complete suffix `>S` 与完整 control history 得到相同 current selector；历史 chain 可压缩，anti-ABA/retiring state 不得丢失。
 14. orphan GC 只证明 new location 未承载 authority；logical entry 的既存 local success 不阻止清理 uncommitted copy。
 15. conditional orphan free 与迟到 `MOVE_COMMIT` 不能同时成功；cutover 只晚于覆盖自身 sequence 的 durability completion。
+16. per-Arena predicate 对 committed/applied state 原子求值；condition failure不改变authority，pending/admitted append不授予cutover/free/reuse。
+17. duplicate externally retried transition只能得到同一durable result或stale/conflict，不产生第二winner或重复generation bump。
+18. unknown mandatory control record、sequence gap或torn tail必须阻断durable-through并使Arena fail closed。
+19. selector publish与block-new-old-pin形成同一同步cut；cut后read pin不能落回old location。
 
 ## 18. 接受 Gate
 
@@ -477,6 +507,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - checkpoint/control-log recovery 可由自动 crash matrix 重放；
 - cold/hot promotion、lifetime class 和同 Arena `MOVE_COMMIT` relocation 合同通过 crash、并发 move、reader pin 与 index rebuild 测试；
 - current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
+- conditional apply/result、duplicate/response-loss、bounded waiter/idempotency retention、unknown record和selector/pin竞态通过crash/replay与资源Gate；
 - 证明 shadow writer 可以与 Classic authority 隔离，失败不会影响 Classic ACK。
 
 即使 Spike 通过，也只解锁 shadow implementation。Segment 成为 ACK authority 仍需要 [RFC-0005](RFC-0005-segment-bookie-state.md) Accepted、独立 canary Gate、回滚合同和 RFC-0001 安装/activation 证据。
@@ -484,6 +515,8 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 ## 19. 开放问题
 
 - ArenaControlLog region sizing、segment rotation 和满盘行为；
+- conditional transition/result的exact Java API、physical record grouping、control-sequence encoding与operation summary packing；
+- sequencer/stripe线程布局、queue/waiter hard cap、batch size/wait阈值与selector/pin具体同步原语；
 - `ALLOC_POOL` 下放 ownership 的粒度与 crash 回收；
 - exact block/record bytes、checksum 和 torn-write detector；
 - direct I/O API、alignment、buffer ownership 与 kernel/filesystem 约束；

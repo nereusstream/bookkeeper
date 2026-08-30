@@ -41,6 +41,8 @@ I/O API and alignment
 JDK and JVM flags
 shard count
 control-log/checkpoint region sizes
+conditional API revision
+sequencer queue/waiter/idempotency hard caps
 block sizes under test
 extent sizes under test
 ledger state implementation
@@ -68,6 +70,7 @@ artifact output directory
 - durable `DELETE_TOMBSTONE`；
 - durable `FREE_AND_BUMP`；
 - same-Arena conditional durable `MOVE_COMMIT`；
+- per-Arena conditional apply/result、operation identity、assigned control sequence 与 group `durableThrough`；
 - Bookie/shard restart replay；
 - 100k idle ledger state；
 - 可删除并重建的最小 derived index。
@@ -93,6 +96,9 @@ free list excludes every still-live allocation
 checkpoint + suffix replay is deterministic
 every committed move chain has one unique authoritative successor
 checkpoint current selector + anti-ABA state equals full-chain oracle
+condition failure changed no authority state
+durable apply result covered its own control sequence
+duplicate operation produced no second winner/generation bump
 uncommitted relocation copy never becomes authoritative
 old allocation is not reused before move cutover and reader drain
 orphan new location has no lookup/local-success authority dependency,
@@ -175,8 +181,11 @@ Oracle：恢复的 ledger/entry/locator 集合与权威 payload 一致；stale g
 - logical entry已有local-success，但uncommitted new location从未成为success/lookup location；
 - orphan GC与late commit在同/不同group竞争，分别覆盖free先赢与commit先赢；
 - shared allocation一条orphan、一条live，以及writer-generation/pin quiescence race。
+- 同一operation在enqueue前、append后force前、force后response loss重试；
+- group内独立condition一成一败、`durableThrough < ownSequence`、middle gap/torn/unknown mandatory record；
+- idempotency summary compact后的extremely-late retry，以及queue/waiter/future cap压力。
 
-Oracle：无 commit 时 old authoritative、new copy 只是 orphan；durable commit 后 new authoritative 且 index 可重建；同一 predecessor 只有一个 winning successor；每个 live record 至少一个 authoritative lookup locator（允许cut前old reader pin）且不能有两个new lookup winners；old block只有在全部live records moved/dead、new pin被阻断、既有reader drain和durable free后回收。relocation不新增local-success fact；清理orphan new location不删除logical entry在current location承载的既存success。
+Oracle：无 commit 时 old authoritative、new copy 只是 orphan；durable commit 后 new authoritative 且 index 可重建；同一 predecessor 只有一个 winning successor；每个 live record 至少一个 authoritative lookup locator（允许cut前old reader pin）且不能有两个new lookup winners；old block只有在全部live records moved/dead、new pin被阻断、既有reader drain和durable free后回收。relocation不新增local-success fact；清理orphan new location不删除logical entry在current location承载的既存success。pending/admitted append不授予authority，condition failure无副作用；duplicate只返回same durable result或stale/conflict。
 
 ## 7. 资源规模场景
 
@@ -261,6 +270,8 @@ checkpoint bytes
 data padding bytes
 compaction copied bytes
 move control-log bytes and durability barriers
+sequencer queue depth and waiter/token count
+conditional retries and condition-failure counts
 dead but unreclaimed bytes
 dedicated tail waste
 ```
@@ -277,6 +288,7 @@ dedicated tail waste
 - response/local-success publication loss；
 - `MOVE_COMMIT` durability/response loss、concurrent move 与 reader-pin cutover；
 - checkpoint current-selector compaction、orphan free/late commit与durable-through gap；
+- conditional enqueue/append/force/result、duplicate response loss、unknown mandatory record与selector/pin acquire cut；
 - repeated restart；
 - fixed-seed random operation/fault sequences。
 
@@ -312,6 +324,12 @@ move created new local-success fact             = 0
 orphan GC removed current local-success payload = 0
 checkpoint selector differed from full chain    = 0
 late commit and orphan free both succeeded      = 0
+conditional failure mutated authority state     = 0
+durable result before own sequence durability   = 0
+duplicate operation created second winner/bump  = 0
+unknown mandatory record skipped writable       = 0
+selector cut allowed new old-location pin        = 0
+queue/waiter/idempotency hard-cap violations     = 0
 unreplayable executed failure                  = 0
 ```
 

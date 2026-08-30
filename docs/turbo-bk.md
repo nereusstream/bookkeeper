@@ -201,11 +201,11 @@ Cluster Lifecycle
 权威层次必须保持：
 
 - Standard LedgerMetadata：OSS state 与 ensemble membership 的唯一权威。
-- Profile sidecar namespace：ledger instance、immutable descriptor、READY/activation generation、有界 repair/delete operation、accepted loss ordering 与 distributed verifier strong completion 的权威；不复制 membership，不形成无界 root blob，digest/root 不能替代 verifier assertion。
+- Profile sidecar namespace：通过 domain-specific `ProfileControlStore` 的单-record versioned CAS、bounded domain heads与snapshot+complete suffix，承载 ledger instance、immutable descriptor、READY/activation generation、有界 repair/delete operation、accepted loss ordering 与 distributed verifier strong completion；store version不替代semantic generation，不复制 membership，也不形成ledger-global universal hot head或无界 root blob。
 - BookKeeper quorum：entry 是否达到 ACK quorum 的权威。
-- `ArenaControlLog`：Segment 本地空间 ownership、generation、reuse 与同 Arena relocation selection 的权威；checkpoint 中的 current selector、anti-ABA 和未退休状态必须等价于完整 move-chain oracle，derived locator 不能决定 move winner。
+- `ArenaControlLog`：以per-Arena deterministic conditional state machine承载空间 ownership、generation、reuse 与同 Arena relocation selection；只有覆盖transition自身sequence的durable result才授予cutover/free/reuse。checkpoint 中的 current selector、anti-ABA 和未退休状态必须等价于完整 move-chain oracle，derived locator 不能决定 move winner。
 - Data Arena：Segment payload 的权威。
-- RFC-0005 Segment Bookie state：install/activation/fence/recovery authorization 被消费后 local success 是否有资格参与 AQ 的权威。
+- RFC-0005 Segment Bookie state：逻辑 `LedgerRouteAuthority` 与 `BookieRegistrationAuthority` 决定install/normal admission/fence、bounded recovery grant/readable facts及assignment/incarnation readiness；normal、recovery与readable不是互斥flat role，物理owner仍由Spike选择。
 - RocksDB、footer、cache：可丢弃并重建的派生加速结构。
 
 ## 8. 跨 RFC 安全不变量
@@ -222,7 +222,7 @@ Cluster Lifecycle
 10. successor ledger 从 predecessor durable sealed prefix `P + 1` 开始；sealed prefix 外 AQ candidate 永远不能进入 WAL COMMITTED。
 11. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
 12. AutoRecovery target 接收第一份 durable payload 前必须有可由 delete freeze 枚举的 RepairIntent；recovery-only/committed-readable 不授予 normal writable。
-13. 删除、RepairIntent 和 ensemble change 对同一 ledger instance 的权威状态转换必须由标准 membership CAS 与 sidecar control generation 协同串行，任一中间态 fail closed。
+13. 标准 ensemble membership由LedgerMetadata CAS串行；sidecar只让`DELETE_INTENT`/delete fence与RepairIntent admission等真正冲突的transition共享ledger-instance lifecycle cut。未admit intent不授予grant/payload；cut前全部admitted intent进入frozen history。admission后的repair progress/loss/receipt/completion使用owning domain head，不推进universal ledger CAS，任一中间态fail closed。
 14. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
 15. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
 16. 同一 Arena compaction 只有 durable conditional `MOVE_COMMIT` 能切换 locator authority；old free 晚于 cutover、new-pin 阻断、reader drain 与 durable generation bump，cross-Arena move 首版 unsupported。
@@ -233,6 +233,10 @@ Cluster Lifecycle
 21. obligation-changing delete assignment 先 PREPARED、catch up snapshot+complete suffix，再原子 effective；安全的旧 generation 不因 PREPARED 无条件 demote，但新 generation 生效后 stale writable authority 必须失效。snapshot 必须可遍历并应用 delete effects，不能只有 digest；catch-up exemption proof 必须绑定 Bookie、old incarnation、device/storage scope、operation generation 与 cluster acceptance，不能跨 scope 重放。
 22. relocation orphan 只在 new allocation/location 未被任何 authority 依赖时回收；既存 logical success 继续由 old/current selector 承载。late `MOVE_COMMIT` 与 orphan `FREE_AND_BUMP` 由同一 Arena control order 条件互斥，cutover 不能早于覆盖该 move 自身 sequence 的 durable-through。
 23. recovery 必须区分 durable recovered close、temporary deferred、attempt incomplete、quarantine/authority-unrecoverable 与 required-coordinate evidence exhausted；authority loss、timeout、offline 或 speculative suffix 不得伪造 payload `DATA_LOSS`，open-ledger normal tail 需要 fenced exact write-set 的 quorum-intersection absence proof。
+24. sidecar store version与semantic generation分离；child/page只有被exact instance/domain head条件化发布后才有authority。compaction authority是committed snapshot+complete bounded suffix，publish/fallback proof先于reclaim；referenced unknown mandatory state、missing chunk或gap必须fail closed，普通Add不依赖sidecar读写。
+25. per-Arena conditional predicate对committed/applied state原子求值，condition failure无effect，duplicate operation不能产生第二winner；durable result覆盖自身sequence。selector publish与block-new-old-pin形成同一cut，cut后stale locator不能取得old pin。
+26. local route claim早于payload/handle lazy create；fence先关闭new admission并终结pre-cut Add，stale admission generation不能成功。tombstone原子收窄该instance的normal/recovery/read接受集合；registration readiness绑定incarnation、effective assignment和cursor/snapshot cut，不成为per-Add lease。
+27. 只有matching durable ledger close可以投影legacy recovery `OK`；fragment/partial/skip不计ledger recovered，不清intent/marker。generic legacy rc不能抹除coordinator/admin rich outcome，AutoRecovery按rich class调度。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
 
@@ -246,11 +250,11 @@ Cluster Lifecycle
 
 | 模型 | 范围 |
 | --- | --- |
-| Model A | BookKeeper E/W/A、write-set rotation、install/activation、legacy routing、AQ、LAC、fencing、ensemble change、failure-domain loss、strong verifier completion 与 bounded receipt compaction |
+| Model A | BookKeeper E/W/A、write-set rotation、sidecar child/head/snapshot+suffix、store-version/instance ABA、local route/admission/fence、install/activation、legacy routing、AQ、LAC、ensemble change、failure-domain loss、strong verifier completion 与 bounded receipt compaction |
 | Model B | sequence、appendId、ordered completion、old-ledger fencing、successor ledger |
-| Model C | `ALLOC/DATA/DELETE/FREE/MOVE_COMMIT`、generation、current-selector checkpoint、orphan cleanup、reader pin 与 power loss |
-| Model D | historical ensembles、partial delete、assignment handoff、applicable snapshot/incarnation、offline rejoin、AutoRecovery race |
-| Model E | TailSummary、required frontier、normal-tail proof、recovery outcome taxonomy、range fallback 与一般 E/W/A point-oracle equivalence；仅在推进该能力时必需 |
+| Model C | `ALLOC/DATA/DELETE/FREE/MOVE_COMMIT`、conditional apply/durable result、generation、current-selector checkpoint、orphan cleanup、selector/pin cut 与 power loss |
+| Model D | historical ensembles、partial delete、assignment handoff、applicable snapshot/incarnation、versioned registration readiness、offline rejoin、AutoRecovery race |
+| Model E | TailSummary、required frontier、normal-tail proof、rich outcome/legacy projection、skip/marker handling、range fallback 与一般 E/W/A point-oracle equivalence；仅在推进该能力时必需 |
 
 Model A-D 未通过前，Segment authority 不得进入 production candidate。
 
@@ -321,17 +325,17 @@ Segment production candidate 的最低 Gate：
 以下问题必须在对应 RFC 接受前闭合：
 
 - ProfileDescriptor 的规范序列化、hash 算法、版本升级和 master key 处理；
-- sidecar exact root/child schema、immutable backlink encoding、ledgerId reuse 和 profiled metadata mutation authority；
-- activation/recovery-only proof、local role mapping、receipt packing 与失败清理；
+- sidecar backend adapter、exact root/child/page schema、domain sharding与hard bounds、snapshot retention/hash、immutable backlink encoding、ledgerId reuse 和 profiled metadata mutation authority；
+- activation/recovery proof、bounded grant/readable packing、receipt packing 与失败清理；
 - profiled wire opcode、atomic Classic/Profile route claim 的实现与 exact errors；
 - successor ledger 的 publication record、owner 状态和跨 run continuity；
 - appendId suppressed-suffix/horizon、durable seal/footer authority；
-- `ArenaControlLog` segment、checkpoint A/B、current-selector/retiring-state packing、superblock 切换、conditional record predecessor、`MOVE_COMMIT` durability-cut encoding/orphan GC 与设备失败判定；
-- RFC-0005 exact durable state packing、Engine identity 与 operation capability matrix；
+- `ArenaControlLog` conditional transition/result exact API、sequencer/queue/batch bounds、segment、checkpoint A/B、selector/pin同步、current-selector/retiring-state packing、superblock 切换、`MOVE_COMMIT` encoding/orphan GC 与设备失败判定；
+- RFC-0005 logical state 的physical owner、format/downgrade、exact durable packing、registration CAS adapter、Engine identity 与 operation capability matrix；
 - shared slab 的 lifetime class、compaction policy 和 hot promotion threshold；
 - RepairIntent child enumeration/retention/orphan cleanup、strong completion record/page/snapshot schema、overlapping-range predecessor encoding、coverage audit commitment 与 compaction policy；
 - Delete Coordinator 的 stream topology、PREPARED/effective assignment encoding、snapshot chunk/schema、cluster-accepted wipe/decommission proof 和 tombstone retention；
-- streaming range 在一般 E/W/A 下的结果合并、required-coordinate/normal-tail oracle、outcome exact enum/wire/API mapping、可选 checkpoint 与 recovery-specific semantics；
+- streaming range 在一般 E/W/A 下的结果合并与point-oracle伪代码、required-coordinate/normal-tail proof、rich outcome exact enum/wire/admin API/legacy mapping、cancellation、可选 checkpoint 与 recovery-specific semantics；
 - 每个正式 Gate 的基准 commit、硬件和完整 manifest。
 
 开放问题存在时，对应章节只能标为 Proposed、Spike Ready 或 Blocked，不能标为 Implementation Ready。
@@ -343,11 +347,12 @@ Segment production candidate 的最低 Gate：
 - 固定 stock `BK_CLASSIC` benchmark；
 - 对 `BK_CLASSIC_TUNED` 做不改变 on-disk/wire semantics 的调优；
 - 继续逐轮评审五份子 RFC；
-- 在锁定环境和停止条件后执行三个 Spike。
+- 冻结并实现三个 Spike 的manifest-locked harness，在锁定环境和停止条件后执行；
+- 实现不接管authority的局部原型与隔离shadow prototype，用于否证接口、crash recovery、资源上限和p99假设。
 
 现在不能直接开始：
 
-- Segment WAL 正式实现或 authority 切换；
+- Segment WAL ACK authority实现、live Stage 5 promotion或authority切换；
 - 把 per-ledger minimum 8 MiB extent 当作不变量；
 - 在旧 Bookie 上实现 same-ledger epoch takeover；
 - 将本地 delete success 当作全物理删除完成；

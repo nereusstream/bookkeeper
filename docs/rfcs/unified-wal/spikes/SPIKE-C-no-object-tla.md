@@ -93,7 +93,11 @@ GeneralEwaRecovery.tla      Model E, optional until feature advances
 ```text
 standard ledger metadata version/state, immutable instance backlink
 ensemble history
-Profile sidecar instance/control generation and READY/availability facts
+Profile sidecar store version, semantic/control generation and READY/availability facts
+bounded authority-domain heads, child/page publication refs and snapshot manifests
+committed snapshot cut and complete bounded suffix per compacted authority domain
+sidecar format version, mandatory feature set and compatibility state
+sidecar operation identity -> semantic payload and durable result
 immutable Profile descriptor hash/generation and permanent-loss budget F
 client/coordinator Profile metadata-mutation authority
 E/W/A
@@ -113,13 +117,24 @@ client pending operations
 AQ evidence
 LAC/close state
 authoritative Classic/Profile route
-profile inactive install, normal-active and recovery-only/committed-readable roles
+profile inactive install, normal admission/fence generation,
+bounded recovery grants and committed-readable range facts
+Bookie storage incarnation, effective assignment readiness and writable registration generation
 ```
 
 ### 5.2 最小动作
 
 ```text
 AllocateLedgerInstance
+CreateSidecarChild
+PublishSidecarDomainHead
+BuildSidecarSnapshot
+PublishSidecarSnapshot
+ReclaimCoveredSidecarChild
+ReuseLedgerIdWithResetStoreVersion
+IntroduceReferencedUnknownMandatorySidecarRecord
+RetrySidecarOperationSamePayload
+RetrySidecarOperationConflictingPayload
 CreateProfileReservation
 InstallProfileOnBookie
 CreateStandardLedgerMetadata
@@ -128,6 +143,8 @@ ActivateProfileOnBookie
 PublishAvailabilityComplete
 SendAdd
 SendLegacyAdd
+ClaimClassicRouteBeforeLazyCreate
+ClaimProfileRouteBeforeLazyCreate
 AttemptProfileMembershipMutation
 BookieAcceptAdd
 BookieAck
@@ -137,7 +154,9 @@ RestartBookie
 PermanentlyLoseFailureDomain
 DetectCorruption
 BeginFence
+CloseAdmissionAndCaptureFenceCut
 FenceBookie
+RetryAddWithStaleAdmissionGeneration
 RecoverEntry
 CloseLedger
 BeginEnsembleChange
@@ -166,9 +185,15 @@ ReclaimCoveredRepairReceipts
 
 - AQ 定义与 recovery 保持一致；
 - normal profiled Add 没有 matching global READY 与 durable local normal activation 时不能被 Bookie 接受；
+- normal Add 不依赖 sidecar read/watch/CAS；sidecar unavailable不能扩张或隐式收窄已经durable的local admission truth；
 - legacy Add 不能绕过 Profile/Tombstoned route；
+- route claim早于payload/handle lazy create；store version重置、ledgerId reuse或old retry不能跨instance/semantic generation形成ABA；
+- unpublished child/page始终inert；published snapshot + complete suffix与未压缩authority history等价，publish/fallback proof前不能reclaim；
+- referenced unknown mandatory sidecar record、missing chunk或suffix gap必须fail closed，不能解释为ABSENT/default；
+- same sidecar operation identity只能绑定一个semantic payload；相同payload重试解析到同一durable result，冲突payload只能CONFLICT且无authority effect；
 - profiled LedgerMetadata membership/backlink mutation 必须有 Profile mutation authority；master key 单独不足；
 - fencing 后不能形成不合法的新 AQ；
+- fence先关闭new admission并使所有pre-cut Add terminal；stale handle/admission generation不能在durable fence后形成local success；
 - initial standard metadata 不得早于 all-E inactive Profile route claim，normal create/open success 晚于 all-E activation；
 - active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
 - bounded repair reset 只在每个 ACK-eligible coordinate 有 `F + 1` distinct valid domains、exact membership 已发布且 conditional completion durable 后成立；
@@ -178,7 +203,7 @@ ReclaimCoveredRepairReceipts
 - response loss 不产生两个 ledger instance/READY publication；
 - `E > W` 轮转覆盖全 ensemble 安装需求。
 
-repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、digest存在但verifier未完成、descriptor/`F`变化后重解释旧assertion、closed range无`NORMAL_ACTIVE`的合法reset、current target active但历史range不完整、`E > W` per-entry write-set coverage、duplicate loss、loss/completion两种先后、unobserved failure after proof cut、disjoint并发、overlapping stale completion、small-range merge、snapshot publish/response loss/child reclaim、delete freeze和root/page cap超限。
+repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、digest存在但verifier未完成、descriptor/`F`变化后重解释旧assertion、closed range无`NORMAL_ACTIVE`的合法reset、current target active但历史range不完整、`E > W` per-entry write-set coverage、duplicate loss、loss/completion两种先后、unobserved failure after proof cut、disjoint并发、overlapping stale completion、small-range merge、snapshot publish/response loss/child reclaim、delete freeze和root/page cap超限。sidecar falsification 另覆盖 child-before-head crash、head CAS conflict、snapshot build期间head推进、fallback损坏、store-version reset/instance reuse、unknown mandatory referenced record与normal Add期间sidecar不可用。
 
 ## 6. Model B：Sequenced Classic
 
@@ -244,6 +269,10 @@ locators and reader pins
 conditional MOVE_COMMIT records and move generations
 authoritative relocation chain and orphan copies
 per-move control sequence and durable-through cut
+per-Arena committed/applied conditional state
+conditional operation identity, expected predecessor and assigned control sequence
+pending vs durable conditional result and bounded idempotency summary
+selector/pin epoch, old-pin admission gate and pre-cut readers
 new-location lookup/local-success authority dependency
 device state
 ```
@@ -271,8 +300,16 @@ CorruptAuthority
 CopyForMove
 DurabilizeMovedPayload
 AppendMoveCommit
+EnqueueConditionalTransition
+EvaluateConditionalPredicate
+ApplyConditionalTransition
+DurabilizeConditionalResult
+RetryConditionalOperation
+IntroduceUnknownMandatoryControlRecord
 DurabilizeMoveCommit
 PublishMovedLocator
+AcquireReadPinAtSelectorEpoch
+PublishSelectorAndBlockNewOldPins
 DrainOldReader
 FreeMovedSource
 BuildCurrentSelectorCheckpoint
@@ -293,6 +330,9 @@ PublishDurableThrough
 - `MOVE_COMMIT` 为同一 Arena relocation 选择唯一 successor，未 commit copy 不成为 authoritative；
 - committed move 在 index 丢失后仍可重建，source free 晚于 cutover、new-pin 阻断和 reader drain；
 - move 不创造新的 local-success fact；logical entry已有success不阻止清理从未成为lookup authority的new-location orphan；
+- conditional predicate在同一Arena committed/applied state求值；condition failure无状态变化，duplicate operation不产生第二winner或generation bump；
+- `APPLIED_DURABLE/ALREADY_DURABLE`只在complete prefix durable through自身assigned sequence后成立，pending/enqueued result不授予cutover/free/reuse；
+- selector publication与block-new-old-pin形成同一cut；cut后stale cached locator不能取得old pin，pre-cut reader可drain；
 - checkpoint current selector + anti-ABA/retiring state与full-chain oracle等价；
 - orphan free与late commit不能都成功，cutover晚于覆盖自身control sequence的durable-through。
 
@@ -307,7 +347,8 @@ ledger metadata and version
 ensemble history
 delete manifest and per-ledger-instance epoch
 frozen historical target set
-durable RepairIntents and lifecycle/retention
+inert vs admitted durable RepairIntent children and lifecycle/retention
+ledger lifecycle/delete-fence generation and RepairIntent admission cut
 AutoRecovery target payload and ensemble publication
 per-target recovery-only/committed-readable role
 delete streams and committed heads
@@ -318,6 +359,8 @@ per-stream durable applied cursor
 snapshot generation, covered-through and digest
 snapshot bounded chunk manifest/completeness and applicable effects
 registration required-through cut
+durable local registration readiness bound to storage incarnation,
+effective assignment generation and cursor/snapshot cut
 per-Bookie local tombstone/effects
 Bookie online/offline/registered mode
 decommission proofs
@@ -332,7 +375,8 @@ ledger instances
 ```text
 BeginDeleteIntent
 PublishEnsembleChange
-CreateRepairIntent
+CreateInertRepairIntentChild
+AdmitRepairIntentAgainstDeleteFence
 GrantRecoveryOnlyAuthority
 WriteRecoveryPayload
 PublishRepairEnsemble
@@ -360,6 +404,7 @@ ActivateStreamAssignment
 ReplaceStorageIncarnation
 FetchRequiredThrough
 RegisterWritable
+PublishVersionedRegistrationReadiness
 PublishSnapshotChunk
 AcceptWipeProof
 ReplayOldTerminalProofAcrossScope
@@ -369,15 +414,22 @@ CompactTombstone
 ReuseLedgerIdWithNewInstance
 ```
 
+组合A+D时，Model A的`LoseResponse`参数化覆盖`AdmitRepairIntentAgainstDeleteFence`：分别展开admission已durable但response丢失、admission未提交而delete先赢，以及coordinator restart后以同一operation/payload重读重试；不另建第二套事务状态机。
+
 ### 8.3 检查目标
 
 - logical delete 后旧 instance 不再 open；
-- recovery target 第一份 durable payload 晚于可枚举 RepairIntent；
+- unadmitted RepairIntent child不授予recovery grant或第一份payload authority；
+- RepairIntent admission与DELETE_INTENT共享lifecycle/delete-fence cut：admission先赢则必被freeze枚举，delete先赢则后续admission失败；
+- admission response loss后，matching committed admission只恢复同一intent/target；delete先赢或结果无法证明时不能grant/write，也不能创建第二intent/target；
+- admitted后的progress/loss/receipt/completion使用owning domain head，stale update不能跨delete cut产生authority；
+- recovery target 第一份 durable payload 晚于可枚举的admitted RepairIntent；
 - frozen targets 覆盖历史 ensembles 与 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member/target；
 - DELETE_INTENT 后 AutoRecovery 不产生漏删副本；
 - recovery-only/committed-readable role 不产生 normal writable authority；
 - cursor 不跨 unexplained gap，且只能晚于对应 durable effect 或可验证 non-applicability；
 - offline Bookie 的 current storage incarnation 未对 authoritative finite assignment 全部 catch up 时不能 writable；
+- writable registration必须绑定current incarnation、effective assignment generation与durable readiness；旧registration generation不能在effective assignment前进后继续有效；
 - snapshot + complete suffix 是唯一 compacted-prefix bootstrap；assignment removal 不能丢失 delete obligation；
 - obligation-changing generation必须pre-catch并atomic activate，或旧writable先demote；PREPARED generation不必无条件demote；
 - snapshot root必须有complete、可遍历、可应用effects/chunks，digest-only不足；handoff允许duplicate不允许gap；
@@ -408,6 +460,9 @@ definitive absence, transient, corrupt and conflicting evidence
 later speculative vs required evidence
 recovery target writes and per-entry results
 attempt outcome class
+operation scope and bounded rich outcome reason
+legacy callback/future projection
+AutoRecovery/marker scheduling state
 published close/final prefix
 authority-unrecoverable reason
 ```
@@ -430,6 +485,9 @@ InvalidateCorruptEvidence
 DeclareEvidenceExhausted
 ProveNormalTail
 PublishRecoveredClose
+ProjectRichOutcomeToLegacyResult
+SkipUnrecoverableInLegacyAggregate
+ClearRecoveryMarker
 DeclareQuarantineConflict
 DeclareAuthorityUnrecoverable
 DeferUnavailableRecovery
@@ -446,6 +504,9 @@ DeferUnavailableRecovery
 - required frontier来自accepted authority，later speculative payload不制造required hole；
 - authority unrecoverable属于quarantine而非payload DATA_LOSS，required-coordinate finite evidence exhausted才是DATA_LOSS；
 - recovered outcome晚于durable close/final-prefix publication；
+- 只有matching durable `RECOVERED_AND_CLOSED`投影legacy `OK`；deferred、incomplete、quarantine和data loss都投影non-OK；
+- fragment/partial progress与legacy skipped ledger不计为ledger recovered；aggregate skip不能clear intent/marker或发布repair completion；
+- generic legacy rc不抹除coordinator/admin持有的rich outcome，AutoRecovery按rich class调度；
 - fast path + fallback 的最终结果与全 point-read oracle 完全一致；
 - proof cache、point-read 并发与内存保持 manifest-locked bounded。
 
@@ -461,7 +522,17 @@ ProfileAvailabilityImpliesAllEActive
 ProfiledNormalAckRequiresReadyAndLocalActive
 LegacyAddCannotBypassProfileRoute
 ProfileMembershipMutationRequiresAuthority
+SidecarStoreVersionDiffersFromSemanticGeneration
+UnpublishedSidecarChildHasNoAuthority
+SidecarSnapshotPlusSuffixComplete
+SidecarOperationIdentityBindsSinglePayload
+LedgerInstancePreventsStoreVersionABA
+ReferencedUnknownMandatoryStateFailsClosed
+NormalAddIndependentOfSidecarAvailability
 InitialMetadataAfterAllEProfileClaim
+LocalRouteClaimBeforeLazyCreate
+StaleAdmissionGenerationCannotSucceed
+RecoveryGrantAndReadableAreNotNormalWritable
 ReplacementInstallCasActivateResendOrder
 RepairIntentBeforeTargetPayload
 RecoveryRoleNeverGrantsNormalWrite
@@ -497,7 +568,16 @@ CheckpointSelectorEqualsFullChain
 OrphanCleanupPreservesExistingLogicalSuccess
 LateMoveCommitAndOrphanFreeAreExclusive
 MoveCutoverRequiresOwnDurableSequence
+ConditionalFailureHasNoEffect
+DurableApplyCoversOwnSequence
+DuplicateConditionalOpHasSingleResult
+SelectorCutBlocksNewOldPins
 LogicalDeleteIsIrreversible
+UnadmittedRepairIntentCannotGrantOrWrite
+DeleteFenceOrdersRepairIntentAdmission
+DeleteFreezeCoversAllAdmittedRepairIntents
+AdmissionResponseLossCannotDuplicateIntentOrTarget
+RepairProgressDoesNotAdvanceUniversalHead
 FrozenTargetsCoverReplicaAndRepairHistory
 NoWritableRejoinBeforeDeleteCatchup
 DeleteCursorImpliesDurableEffects
@@ -525,6 +605,9 @@ TransientUnavailableIsNotEvidenceExhausted
 SingleCorruptReplicaIsNotTerminal
 AuthorityLossIsNotPayloadDataLoss
 RecoveredOutcomeImpliesDurableClose
+LegacyOkImpliesDurableRecoveredClose
+LegacySkipDoesNotCreateRecoveryAuthority
+RichOutcomeSurvivesGenericProjection
 ```
 
 关键自然语言对应：
@@ -533,6 +616,9 @@ RecoveredOutcomeImpliesDurableClose
 - ACK 且永久 failure-domain losses 在声明预算内时，至少一个有效 payload evidence 存活；
 - contract-required coordinate 的有限合法 evidence全部确定性耗尽时才进入 payload `DATA_LOSS`；authority无法判定进入quarantine；
 - normal profiled Add ACK 之前有 matching global READY 与 durable local normal activation，legacy Add 不能绕过 route；
+- sidecar store version不替代semantic generation；unpublished child无authority，snapshot+suffix完整，referenced unknown mandatory state fail closed；
+- sidecar operation identity只绑定一个semantic payload；same-payload retry不产生第二结果，conflicting-payload retry无authority effect；
+- ledger instance隔离store-version reset/ID reuse；normal Add不等待sidecar read/watch/CAS；route claim先于lazy create，stale admission generation不能绕过fence；
 - initial standard metadata 晚于 all-E inactive Profile claim；写期 replacement 按 install/CAS/activate/resend 排序；
 - recovery payload 写入 target 前有 durable RepairIntent，recovery-only/committed-readable 不授予 normal write；
 - bounded range 只有完整 `F + 1` distinct-domain coverage proof 与 conditional completion authority 才 reset loss window；
@@ -542,12 +628,15 @@ RecoveredOutcomeImpliesDurableClose
 - FREE 未 durable 时 slot 不可复用；
 - 未 commit move copy 不成为 authoritative；commit 后 index 丢失仍可重建，reader drain 前 source 不 free；
 - checkpoint current selector等价full chain；orphan free不删除logical entry在current selector承载的既存success；
+- conditional failure无effect；durable result覆盖自身sequence，duplicate op只有一个result；selector cut后不能取得new old-location pin；
 - takeover ACTIVE 后旧 writer 不能把 sealed prefix 外数据发布为成功；
 - recovery 只发布最大连续可证明前缀；
 - logical delete 后不能重新 open；
+- unadmitted RepairIntent不授予grant/payload；delete fence与admission单序，cut前admitted intent全部freeze；admission response loss不复制intent/target，后续repair progress只推进owning domain head；
 - effective obligation-changing assignment不能让stale generation继续writable；snapshot必须可应用，wipe/decommission proof由cluster接受且不能跨incarnation/device/scope重放；
 - fast-path失败必须回退且不越hole；normal tail需要quorum-intersection absence；deadline/cancellation/authority loss不得伪造payload DATA_LOSS；
 - recovered success蕴含同generation durable close/final-prefix publication。
+- legacy `OK`蕴含matching durable recovered close；skip不产生recovery authority，generic projection不丢coordinator/admin rich outcome。
 
 ## 11. 最低配置矩阵
 
@@ -565,10 +654,14 @@ permanent failure-domain loss within and beyond F
 detected corruption
 client/coordinator response loss
 range repair verifier assertion, accepted-loss ordering and receipt compaction
+sidecar child/head publication, snapshot+suffix, store-version/instance ABA and unknown mandatory state
+local route claim, fence admission generation and registration readiness
 allocator generation reuse
+per-Arena conditional apply/durable result, duplicate retry and selector/pin cut
 same-Arena relocation, concurrent move and reader pin
 checkpoint current-selector compression, orphan free and late move commit
 offline Bookie delete and rejoin
+RepairIntent inert-child/admission/delete-fence races, admission response loss and domain-local progress
 delete stream gap, PREPARED/effective assignment handoff, applicable snapshot chunks and storage incarnation
 range fast-path partial result, normal-tail proof, recovery outcome classification and point fallback where Model E applies
 ```
@@ -587,17 +680,20 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-FD-EXHAUST | A | profile-specific | all valid ACK evidence exhausted |
 | A-REPAIR-LOSS | A | profile-specific | descriptor/`F` binding, verifier assertion vs digest, duplicate/disjoint/overlapping loss ordering, proven repair and second loss |
 | A-RECEIPT-COMPACT | A | bounded ranges | child/page caps, snapshot publication, response loss and covered-child reclaim |
+| A-SIDECAR | A | bounded authority domains | child/head ordering, snapshot+suffix, same/conflicting-payload retry, fallback/reclaim, store-version reset, instance reuse and referenced unknown mandatory record |
+| A-LOCAL | A+D | local authority | Classic/Profile route claim before lazy create, independent normal/grant/readable facts, fence cut, stale handle and registration readiness |
 | B-2W | A+B | 3/3/2 | two writers + takeover |
 | B-RESP | B | bounded | completion reorder/loss |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
 | C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
+| C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
 | D-OFF | D | historical ensembles | offline rejoin |
 | D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery |
-| D-INTENT | A+D | closed fragment | intent, first payload, CAS and delete at every crash boundary |
+| D-INTENT | A+D | closed fragment | inert child, admission/delete-fence winner, admission response loss/restart, domain progress, first payload, ensemble CAS and every crash boundary |
 | D-STREAM | D | bounded streams | gaps, PREPARED/effective handoff, applicable snapshot chunks, terminal-proof scope/replay, incarnation and registration cut |
 | CD-REUSE | C+D | local + cluster | delete, free, ledgerId reuse |
-| E-FALLBACK | E | E > W | partial range, required/speculative hole, normal-tail quorum-intersection proof, outcome taxonomy, authority loss, durable close and point-oracle equivalence |
+| E-FALLBACK | E | E > W | partial range, required/speculative hole, normal-tail proof, rich outcome/legacy projection, skip/marker handling, authority loss, durable close and point-oracle equivalence |
 
 正式运行前可增加 config，不得删除最低结构。
 
@@ -662,6 +758,10 @@ configs excluded after formal-run lock    = 0
 counterexamples discarded                 = 0
 model/checker errors                      = 0
 artifact checksum failures                = 0
+sidecar operation identity payload aliases = 0
+unadmitted RepairIntent grants/writes       = 0
+admitted RepairIntents omitted from freeze = 0
+admission response loss duplicated intent/target = 0
 ```
 
 每个 config 必须由 checker 报告 complete，或明确标为 INCONCLUSIVE。INCONCLUSIVE config 使整个 Spike 不能 PASS。

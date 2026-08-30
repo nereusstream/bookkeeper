@@ -162,7 +162,7 @@ RuntimePolicy {
 
 Profile 占用的 reserved `LedgerMetadata.customMetadata` entry 只保存一个小型 immutable backlink，至少能把 `ledgerId` 绑定到 `ledgerInstanceId/sidecar reference`，防止 ledgerId 删除重建后 metadata version 从头开始产生 ABA。完整 descriptor、receipt、repair/delete history 不得塞入该 reserved entry，也不得累积在一个无界增长的 sidecar root；其他现有 OSS/user custom metadata 不受本合同禁止。RFC-0004 拥有语义的 repair/delete operation 可以使用有界 child record。
 
-LedgerMetadata version、relevant ensemble/fragment digest、instance marker 与 sidecar operation generation 只作为冷控制路径的 publication/CAS evidence。普通 Add 不读取当前 metadata version，也不因不相关 metadata mutation 要求全 E 重新激活。每个 ledger instance 只需要一个冷控制 CAS generation/fencing token；本 RFC 不引入跨两个 metadata node 的通用事务、全局锁或 Add-time lease。
+LedgerMetadata version、relevant ensemble/fragment digest、instance marker 与 sidecar operation generation 只作为冷控制路径的 publication/CAS evidence。普通 Add 不读取当前 metadata version，也不因不相关 metadata mutation 要求全 E 重新激活。真正 ledger-global 的 lifecycle/READY/`DELETE_INTENT`/delete-fence/delete-terminal fact只共享一个 lifecycle CAS generation/fencing token；repair/loss/receipt等操作使用owning authority-domain predecessor/head，child/domain更新不因root存在而推进ledger-global head，只有实际冲突的domain共享顺序。本 RFC 不引入跨两个 metadata node 的通用事务、全局锁或 Add-time lease。
 
 初始创建的最低顺序固定为：
 
@@ -193,6 +193,31 @@ ACK(normal profiled Add)
 
 ### 6.1 Sidecar reservation 与 authority boundary
 
+sidecar 需要一个 domain-specific `ProfileControlStore` 语义 adapter。portable contract 只依赖单 record create/read/versioned CAS、bounded page enumeration 和显式 publication ordering；现有 `LedgerManager` 不提供通用 child namespace/multi-key transaction，底层 ZK multi-op 或 etcd transaction 可以作为 backend 优化，但不能成为跨 driver 的 safety 前提。
+
+每个 authority record 至少语义绑定：
+
+```text
+record family / semantic kind
+format version + mandatory feature set
+ledgerId + ledgerInstanceId
+authority-domain identity
+semantic generation / expected predecessor
+operation identity + generation       # externally retried mutation only
+payload/content identity
+snapshot/superseded-by identity where applicable
+```
+
+MetadataStore opaque store version 只负责单 key CAS；semantic/control generation 负责 lineage、ABA 与 response-loss 解析。两者不能互相替代，authority mutation/delete 禁止使用无条件 `Version.ANY`。immutable snapshot chunk 不要求各自维护 operation id，可以由 snapshot identity、ordinal 和 content digest 唯一标识。
+
+语义接口至少区分 `FOUND/ABSENT/INCOMPATIBLE_VERSION/CORRUPT` read，以及 `APPLIED/ALREADY_APPLIED/CONDITION_FAILED/CONFLICT/INCOMPATIBLE_VERSION` create/CAS 结果。exact Java API、类型名和 backend adapter 保持开放；该 wrapper 不向调用方暴露任意跨 key transaction。
+
+每个可外部重试的 operation identity不可变地绑定一个semantic payload/content identity。同identity重试相同payload时，若原transition已提交，必须返回等价`APPLIED/ALREADY_APPLIED`；同identity携带冲突payload必须返回`CONFLICT`，永远不能返回`APPLIED/ALREADY_APPLIED`或改变authority。current snapshot/terminal summary可以作为已吸收operation的有界证明；identity退出可证明retention后只能返回stale/conflict，不能为满足极晚retry保存无界history。
+
+root 必须有 manifest-locked hard bound，只保存 instance/descriptor/lifecycle summary、global lifecycle fence/control generation、有限 authority-family directory/head、current snapshot identity/cut 和 bounded suffix/page references。每个 child family/domain 声明 owner、semantic predecessor 与 bounded discovery；不同 domain 只在实际冲突时共享 order，已证明不相交的 repair range 不进入 ledger-global universal head。
+
+RepairIntent admission是与delete fence实际冲突的例外：先durable-create绑定exact instance/target/source-range/operation generation的immutable inert child，再以single-record conditional lifecycle/delete-fence head CAS发布admission reference。只有admitted intent可授予recovery grant或接收第一份durable payload；`DELETE_INTENT`先赢后任何新admission失败，并冻结cut前全部admitted intent的source/target。admission后的progress/loss/receipt/completion绑定该intent generation并校验lifecycle/delete-fence generation，但只推进owning authority-domain head，不为每次更新推进ledger-global head。未admit child始终inert并按orphan proof回收；该顺序不要求跨key transaction，exact directory/head layout与batching保持开放。
+
 PREPARING/reservation 至少绑定 `ledgerId + ledgerInstanceId + descriptorHash + creation request identity + planned initial ensemble`。它本身不授权 normal Add，也不是第二份 ensemble truth。同一 creation request 重试必须解析到相同 instance/descriptor；冲突请求失败。
 
 Profiled ledger 的标准 metadata mutation 只能由 Profile-aware coordinator 或等价 ACL/fencing authority 执行；持有 master key 本身不授予绕过 Profile lifecycle 修改 LedgerMetadata 的权限。exact credential/ACL 机制保持开放，但不能假设 sidecar 能约束一个拥有不受限 metadata 写权限的 legacy client。
@@ -220,6 +245,10 @@ receipt 的保存、压缩和审计布局保持开放；root record 不得保存
 
 标准 LedgerMetadata create-if-absent 必须携带 immutable instance backlink，且 initial ensemble 精确匹配已安装集合。之后 sidecar 以 CAS 发布 READY authorization，并绑定实际 metadata version、canonical ensemble digest、instance 与 control generation。任一 CAS response loss 都必须重读两份 authority，按 operation identity/version/digest 判断已提交、可重试或冲突；不得盲建第二个 instance。
 
+sidecar CAS response loss 时，重读 exact domain head：operation/snapshot identity匹配返回等价 `ALREADY_APPLIED`；若已被 current snapshot/terminal generation吸收，可返回等价完成；否则返回 stale/conflict并重建 lineage。不得为了永久回答所有 old request 保存无界 idempotency history。
+
+上述重读同时比较semantic payload/content identity：same operation + same payload只解析为同一既存结果；same operation + conflicting payload只能`CONFLICT`，不能借response loss或snapshot吸收伪装成幂等成功。
+
 Sidecar reservation 单独存在不授权 Add；标准 membership 单独存在不激活 Bookie；只有 post-publication authority 才允许 Bookie durable normal ACTIVE。所有中间态必须 inert 或可恢复，不能扩大接受集合。
 
 ### 6.4 Local activation 与 availability completion
@@ -227,6 +256,28 @@ Sidecar reservation 单独存在不授权 Add；标准 membership 单独存在�
 ACTIVATE 是幂等冷路径操作。Bookie 只有在 READY authority 匹配本地 instance/hash、且 durable fence/tombstone 未先发生时才能 durable normal-active；迟到 activation 不能重新打开 fenced/deleted route。watch/cache 只能提前触发 activation或优化失败响应，不是正确性依赖。
 
 create/open 正常成功必须晚于全部 E durable activation。availability completion 可以是有界 completion fact，或由 E 个 local state 的有界重查证明；exact state name、receipt packing、proof/certificate 与 partial-activation credential distribution 保持开放。普通 Add 仍只执行有界本地 lookup，不增加 MetadataStore I/O 或逐请求重型验证。
+
+### 6.5 Child publication、snapshot 与 unknown version
+
+child/page 在 owning family head/root CAS 引用前只是 inert orphan，不授权 activation、recovery、delete 或 loss reset。可 compact domain 的 authority 固定为：
+
+```text
+current committed snapshot through cut S
++ complete bounded suffix after S
+```
+
+最低 publication/compaction 顺序：
+
+```text
+1. choose stable authority-domain cut S
+2. persist and verify immutable chunks/pages
+3. create bounded manifest binding identity, chunks, cut S and content identity
+4. CAS owning domain head/root with the same expected predecessor and suffix anchor
+5. retain prior snapshot and required suffix as response-loss/corruption fallback
+6. only after no supported root/fallback references old data, reclaim covered children/pages
+```
+
+head 在 build 期间推进时，publication 必须 CAS 失败重试，或 manifest 明确从 cut `S` 接完整 suffix；不能发布 best-effort snapshot。referenced child缺失、page/suffix gap、corrupt content 或 unknown mandatory version使该 authority domain fail closed，不能解释为 `ABSENT/default`，旧 writer也不得覆盖。未被任何 authority引用的 unknown orphan只有在 generation fence、fallback/retention和GC proof完整后才可处理。
 
 ## 7. Bookie 安装语义
 
@@ -369,7 +420,7 @@ CAS 前的 inactive replacement 不接收 payload，因此不强制为每次写�
 
 ### 9.2 AutoRecovery repair
 
-AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RFC-0004 的 durable instance-specific repair intent，并获得仅绑定该 intent 的 recovery-only authority。copy 完成并 CAS standard ensemble 后，closed/historical fragment target 通常转换为 `COMMITTED_REPLICA/READABLE`，关闭 recovery-only authority，但不自动成为 normal-active。
+AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RFC-0004 的durable、已完成lifecycle/delete-fence admission的instance-specific RepairIntent，并获得仅绑定该admitted intent的recovery-only authority。copy 完成并 CAS standard ensemble 后，closed/historical fragment target 通常转换为 `COMMITTED_REPLICA/READABLE`，关闭 recovery-only authority，但不自动成为 normal-active。
 
 只有 target 同时成为当前 writable fragment member，并重新满足本节 9.1 的 post-CAS membership、fence 和 normal activation合同时，才可独立进入 normal-active。实际 surviving reader source 可以动态选择，不进入持久 authority；repair target、被替换 member、fragment identity 和 operation generation 必须可被 delete freeze 枚举。
 
@@ -382,6 +433,7 @@ sidecar reservation、标准 metadata create、READY publication 或 replacement
 - orphan install 不允许接收 normal Add，因为不存在匹配 READY/membership activation；
 - install 状态不得仅凭超时删除；
 - GC 必须读取 sidecar 与标准 membership authority，并使用 instance/hash、operation generation 与稳定 grace/window 证明该 install 永远不会发布或被迟到 response 激活；
+- GC 还必须证明 current/fallback root、snapshot、suffix或operation lineage均不再引用候选 child/page，且 delete discovery history 已由另一 durable summary 接管；timeout 单独不够；
 - GC 本身需要 durable tombstone，防止 response loss 后旧请求重新激活。
 
 orphan GC 的完整状态机是本 RFC 接受前的开放项，也是 Spike A 的必测场景。
@@ -429,6 +481,12 @@ placement 只把满足 descriptor mandatory requirements 的 Bookie 作为候选
 12. 普通 Add 热路径不依赖远程 MetadataStore I/O 或逐请求重型 proof 验证。
 13. failure-domain policy generation 或 domain identity 不能在 repair proof 中被重新标注以伪造 `F + 1` coverage。
 14. RFC-0004 的 accepted-loss generation 只排序 loss/reset authority，不能按 generation delta 计算物理损失数量；相同 domain/incarnation 的 duplicate declaration 不得重复消费预算。
+15. store version 与 semantic generation 分离；无条件 `Version.ANY` 不能更新或删除 authority。
+16. child/page 只有被 exact instance/domain head 条件化发布后才拥有 authority；snapshot publish先于covered-child reclaim。
+17. ledgerId reuse、store-version重新计数或旧 operation retry 都不能跨 `ledgerInstanceId + semantic generation` 形成 ABA。
+18. referenced unknown/newer mandatory record、missing chunk或suffix gap必须使对应 domain fail closed；watch/cache只做优化。
+19. sidecar operation identity只绑定一个semantic payload；冲突payload重试不能成功、不能返回`ALREADY_APPLIED`，也不能改变authority。
+20. RepairIntent只有在lifecycle/delete-fence cut完成admission后才可授予grant/接收payload；delete cut后的admission失败，admission后的domain progress不推进universal ledger head。
 
 ## 14. Spike 与接受 Gate
 
@@ -439,6 +497,8 @@ RFC 进入 Accepted 前必须：
 - canonical descriptor/hash 与未知字段规则冻结；
 - protected auth binding 经过安全评审且不会泄漏可离线验证的 credential material；
 - sidecar/backlink ABA、initial route-first publication、READY/availability 与 profiled metadata mutation authority 经过安全评审；
+- domain-specific single-record CAS adapter、store-version/semantic-generation 分离、bounded root/page、unknown mandatory version 与 snapshot publish-before-reclaim通过 fault/compatibility测试；
+- same operation identity的same/conflicting payload在response loss、snapshot吸收与bounded retention边界通过幂等/冲突测试；
 - orphan install 回收合同冻结；
 - protocol error mapping 和 mixed-version matrix 有确定测试；
 - route claim、legacy normal/recovery Add 与 activation gate 经过并发、restart 和源码评审；
@@ -449,7 +509,9 @@ RFC 进入 Accepted 前必须：
 ## 15. 开放问题
 
 - canonical serialization、hash 算法和 descriptor version negotiation；
-- sidecar exact path、root/child record schema、field numbers、状态名与 immutable backlink encoding；
+- sidecar exact path/backend adapter、root/child/page schema、field numbers、状态名与 immutable backlink encoding；
+- authority family/domain sharding、root/page/fan-out hard bounds、snapshot manifest bytes、compaction threshold与retention数值；
+- checksum/hash、watch/cache策略，以及backend内部是否使用ZK multi-op/etcd transaction；
 - activation proof、冷路径校验方式、exact binding fields 与 profiled metadata mutation ACL/credential enforcement；
 - receipt 的持久化位置、压缩和审计方式；
 - protected auth binding、install control record 与现有 master-key persistence 的整合；

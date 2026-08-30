@@ -70,17 +70,45 @@ Segment Bookie 必须消费 RFC-0001 的 authoritative local route：
 - `TOMBSTONED` route 永远不能重新进入 writable；
 - restart 后的接受集合不能大于 durable route/install/activation 授权集合。
 
-同一个 `PROFILE` route 至少需要表达以下互斥或受序约束的语义角色，但不要求现在冻结为独立 enum/control record：
+同一个 ledger instance 的 local authority 不能压成互斥 flat role enum：normal admission、bounded recovery grants与committed-readable range可以正交存在。逻辑形状至少表达：
 
 ```text
-NORMAL_INACTIVE
-NORMAL_ACTIVE
-RECOVERY_ONLY(intentGeneration, authorizedFragmentOrRange)
-COMMITTED_REPLICA_OR_READABLE
-TOMBSTONED
+LedgerRouteAuthority {
+    routeClass: ABSENT | CLASSIC | PROFILE | TOMBSTONED
+    ledgerInstance/Profile/Engine/protected-auth/install identity
+    normal admission state + activation generation
+    fence/admission generation
+    bounded recovery grants by intent/range
+    bounded committed-readable range facts
+    explicit LAC authority
+    tombstone/delete generation
+}
+
+BookieRegistrationAuthority {
+    bookie stable identity + storage/device incarnation/scope
+    effective assignment generation
+    durable cursor/snapshot readiness
+    writable-registration generation
+}
 ```
 
-`RECOVERY_ONLY` 和 `COMMITTED_REPLICA_OR_READABLE` 都不隐含 normal writable。activation proof、exact binding fields、角色 record packing 与 error mapping 仍保持开放。
+recovery grant和committed-readable都不隐含normal writable；active grants/range facts有manifest hard cap、snapshot/compaction和超限fail-closed。activation proof、exact binding fields、role index/record packing与error mapping保持开放。
+
+### 5.1 最小原子 transition 与物理 owner 边界
+
+以下语义必须在本地同一 conditional durable transition中绑定：
+
+- `ABSENT -> CLASSIC`：route claim + Classic/master-key binding，早于payload/lazy handle创建；
+- `ABSENT -> PROFILE_INSTALLED`：route + instance/Profile/Engine/auth + install generation + initial normal-inactive；
+- normal activation：exact route/instance + READY/membership activation generation + inactive-to-active；不能与initial install合并；
+- recovery grant：exact route/instance + RepairIntent/generation + target/range scope + capability generation；
+- recovery close/commit：对同一scope不可逆关闭recovery-write admission并发布committed-readable fact，或等价fail-closed有序transition；
+- tombstone：exact instance terminal route，同时撤销normal admission和全部该instance recovery grants并拒绝read/write；
+- Bookie registration readiness：storage incarnation + effective assignment generation + required-through满足证据。
+
+cluster READY/standard membership先提交、local activation后消费；route/install先于Arena allocation；fence是独立单调transition；tombstone admission gate早于reader drain/local delete/free；delete effect durable早于stream cursor；assignment按PREPARED/catch-up/local readiness/effective registration排序。这些只需条件化有序，不需要跨MetadataStore/Arena/payload的通用事务或巨型原子delete。
+
+本 RFC 锁定一个对调用方可见的logical ordered conditional durable transition interface，但不选择dedicated Bookie-level control log、扩展Classic Journal、独立state store或reserved control arena。Per-Arena `ArenaControlLog`不当然拥有跨Arena的ledger route；若语义拆到多个store，中间态必须fail closed，任一authority缺失不能default allow。exact physical owner由Spike restart、write amplification和p99数据决定。
 
 ## 6. Fence 与 Add
 
@@ -99,7 +127,20 @@ fence completion
     && restart cannot accept later normal Add as unfenced
 ```
 
-normal Add 与 fence 的并发线性化点必须明确。fence response loss 由 durable state reread/replay 解析，不能通过内存 callback 顺序猜测。
+normal Add 与 fence 使用同一个bounded per-ledger admission order：
+
+```text
+1. close new normal admissions and capture a fence cut/epoch
+2. every pre-cut admitted Add reaches terminal durable local-success/failure,
+   or is explicitly failed
+3. append/durable fence transition
+4. complete fence response
+5. reject post-cut or stale-admission generation
+```
+
+若data/fence共享sequencer，可用sequence证明pre-cut Add严格早于fence；物理日志分离时，drain/fail pre-cut admission是最小合同。network callback wall-clock不定义线性化：pre-cut local success的callback可以晚到，但durable fence后不能形成新的post-cut local success。response loss由durable state reread/replay解析。
+
+normal Add最低本地路径为：route gate早于HandleFactory/lazy storage create，bounded handle-state lookup匹配instance/Profile/auth，capture current admission generation，要求normal-active且非fenced/tombstoned，沿RFC-0003 allocation+payload durability，并在完成时服从captured admission order。route/activation/fence generation可以缓存进handle，但不能只在handle创建时检查；transition必须推进generation使stale handle fail closed。普通Add不读MetadataStore/sidecar/remote assignment，不写control record或等待per-Add control fsync。
 
 ## 7. Recovery Add
 
@@ -114,6 +155,8 @@ Recovery Add 是带有 recovery authority 的 payload 写入，不预设一条�
 - 不能让普通客户端仅靠设置一个 flag 获得 recovery 权限。
 
 Recovery-only authority 可以在 target 进入标准 ensemble 前存在。repair CAS 提交后，closed/historical target 通常转换为 `COMMITTED_REPLICA_OR_READABLE` 并关闭 recovery-only authority；只有 target 另行成为 current writable fragment member并满足 RFC-0001 post-CAS normal activation/fence 合同，才可独立进入 `NORMAL_ACTIVE`。
+
+对同一 intent/range 的 recovery completion 必须先关闭late recovery-write admission，再发布committed-readable fact；不得留下“已提交可读但同一grant仍能任意写”的窗口。recovery Add除现有recovery opcode外，还必须验证bounded local grant、exact intent generation、target/range/entry scope、protected authorization、delete/tombstone gate和payload identity；普通客户端设置flag不能取得grant。
 
 recovery authority 的集群来源、repair target、intent retention 与 delete discovery 由 RFC-0004 负责。Bookie local record 只消费该 authority，不复制 cluster schema。
 
@@ -145,6 +188,10 @@ restart 顺序至少满足：
 
 unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 payload 后继续 writable。Engine identity 的 cookie/superblock/registration exact encoding 是开放项，但 fail-closed 行为不是开放项。
 
+Bookie registration readiness最低顺序：恢复Engine/incarnation → 取得PREPARED assignment → apply verified snapshot+complete suffix → effect先于no-hole cursor → durable记录exact assignment/incarnation readiness → cluster effective/registration CAS校验同一事实 → 才注册writable。obligation-increasing generation只能在Bookie已durable catch-up后effective；PREPARED不无条件demote安全writer，effective前进后旧registration generation不能再被placement视为有效。local/cluster generation不匹配时Bookie转non-writable并重新协调，不在每次Add查询lease。
+
+现有registration接口没有上述versioned CAS/readiness语义，需由独立registration/assignment adapter或明确协调协议补足；不能把无version/response-loss合同的字段偷偷塞入普通register call。unknown mandatory local record按scope使ledger/device/Bookie non-writable；unknown optional diagnostic hint只有在不改变接受集合时可忽略。旧binary必须在Engine/superblock/registration gate、Journal replay或handle create前被阻止writable，不能依赖其跳过unknown special record后继续。
+
 ## 10. 性能边界
 
 必须保持：
@@ -159,6 +206,7 @@ unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 pay
 - compaction `MOVE_COMMIT` 可按有界 record/range group commit；它是 background relocation authority，不给 normal Add 增加 per-entry control fsync，也不创造新的 local success。
 - delete effect 与 per-stream cursor 可 batch/group commit，但 cursor 永远晚于对应 effect durability。
 - normal Add 不读取 repair receipt、loss ordering、delete assignment 或 cursor 的远程 authority；这些事实只在冷控制/restart/registration路径消费，不形成 Add-time lease。
+- route/install/activation/fence/grant/tombstone/registration等冷transition可group commit；active grant/range与idempotency summary有hard cap，不形成unbounded per-ledger state。
 
 所有 exact batching、record packing、cache layout 和阈值由 Spike 决定。不能用“正确性”作为无测量增加热路径 fsync、网络 hop 或全局锁的理由。
 
@@ -178,6 +226,12 @@ unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 pay
 12. obligation-changing effective assignment 已前进时，stale generation不能继续 authoritative writable；PREPARED generation 不无条件demote当前 safe writer。
 13. orphan GC只清理从未成为 authoritative lookup 的 new location；logical entry的既存 local-success事实继续由 current selector承接。
 14. required authority无法恢复时本地保持 quarantine/non-writable，不把“无法判定”上报为 payload DATA_LOSS；recovered success只消费RFC-0004 durable close outcome。
+15. route claim原子绑定instance/Profile/auth/install/initial inactive；Profile/Tombstoned请求不能在route gate前进入Classic lazy create。
+16. normal admission、bounded recovery grants与committed-readable facts不是互斥flat enum；grant/close/tombstone按exact scope条件化更新。
+17. fence先关闭new admission并处理pre-cut Add，再durable完成；callback到达时间不改变local-success authority order。
+18. tombstone原子收窄该instance normal/recovery/read接受集合，physical free必须后置。
+19. unknown mandatory local state或old-binary incompatibility不能skip后writable；missing/scattered authority不能default allow。
+20. assignment/incarnation readiness属于Bookie-scope registration authority，不是per-ledger Add lease。
 
 ## 12. 接受 Gate
 
@@ -196,16 +250,20 @@ unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 pay
 - prepared/effective assignment handoff、cluster terminal wipe/decommission fence 与 stale registration；
 - required authority loss、payload evidence exhaustion 与 normal-tail success的本地/API语义不混淆；
 - Classic baseline 对比下的 throughput、p99、CPU、fsync 与 lock contention；
+- Classic/Profile route atomic claim、stale handle generation、flat-role负向组合、unknown mandatory record和old-binary downgrade；
+- fence admission cut/pre-cut Add、multi-store fail-closed、multi-Arena route owner与Bookie registration response-loss/stale generation；
+- local control resident memory/active grant/waiter hard bounds，以及normal Add local lookup/lock/CPU/p99；
 - Model A/C 中 Segment Bookie state 与 allocator state 的组合无 safety counterexample。
 
 RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能解锁 Segment ACK authority。RFC-0005 Accepted 也只是 canary 的必要前置；仍需 canary-specific evidence 与所有实际启用路径的依赖闭合，才能执行对应 ACK authority canary。
 
 ## 13. 开放问题
 
-- durable state 的 exact record set、packing、checksum 与 group-commit 边界；
+- logical local authority的exact physical owner：dedicated control log、existing Journal extension、small state store或reserved control arena；
+- durable state 的 exact record set、format/version、packing、checksum、snapshot/rotation 与 group-commit 边界；
 - protected auth binding 的本地表示；
 - activation proof 的消费方式与 initial/replacement 差异；
-- normal-inactive/active、recovery-only、committed-readable 的 exact local state mapping 与 error mapping；
+- normal admission、bounded recovery grant/range index、committed-readable fact、idempotency summary的exact packing/caps/compaction与error mapping；
 - fence 与 inflight Add 的精确线性化实现；
 - explicit LAC 与 payload block 的写序；
 - read/LAC/list capability matrix；
@@ -213,6 +271,7 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 - local seal 是否确有需求；若有，其 authority 与 metadata CLOSED 的关系；
 - RFC-0003 `MOVE_COMMIT` exact local record packing、batch completion、reader cutover接口、orphan GC 与 cross-Arena unsupported 后续协议；
 - RFC-0004 delete stream topology、assignment/snapshot schema 与 exact local cursor packing；
+- assignment readiness/registration CAS adapter、storage incarnation bytes与response-loss/reconciliation接口；
 - recovery strong assertion/local evidence binding、accepted loss ordering与五类 outcome到现有Bookie API/error的exact dependency mapping；
 - performance Gate 的 exact thresholds。
 

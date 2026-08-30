@@ -36,6 +36,8 @@ sourceCommit
 RFC0001Revision
 prototypeCommit
 metadataDriverAndVersion
+profileControlStoreAdapterRevision
+root/page/fan-out/retention hard bounds
 BookieCount
 clientCount
 E/W/A configurations
@@ -43,6 +45,7 @@ Bookie engine cohorts
 protocol version matrix
 activation proof mechanism
 profiledMetadataMutationAuthority
+localAuthorityStoreAndFormatRevision
 Classic route throughput/p99 regression budget
 JDK and JVM flags
 fault injector version
@@ -66,10 +69,12 @@ artifact output directory
 
 - 经 RFC-0001 冻结的 metadata/activation 状态；
 - 独立 Profile sidecar、标准 LedgerMetadata 唯一 membership authority 与 immutable instance backlink；
+- domain-specific `ProfileControlStore`：single-record create/read/versioned CAS、store-version/semantic-generation分离、bounded family head/page/snapshot+suffix；
 - canonical descriptor 与 hash；
 - `INSTALL_LEDGER_PROFILE` request/receipt；
 - Bookie durable install 与 activation authority；
 - 单一、原子、可恢复的 Classic/Profile route slot；
+- logical local authority state machine：orthogonal normal admission、bounded recovery grant/readable facts、fence/tombstone generation与Bookie registration readiness；
 - Bookie restart replay；
 - Add 请求身份能够匹配 Bookie 本地 durable activation；exact binding fields 由已接受的 activation/auth 机制决定；
 - capability/engine placement filter；
@@ -78,6 +83,7 @@ artifact output directory
 - profiled membership mutation authority abstraction；
 - active replacement 的 inactive install → `LAC+1` CAS → normal activation → pending resend；
 - 可观测的 orphan install 状态；
+- unknown mandatory sidecar/local record与old-binary downgrade gate；
 - 精确错误码和 audit events。
 
 允许使用简化 payload engine，但不得用 in-memory install 代替 durable record。
@@ -91,7 +97,9 @@ testRunId
 scenarioId
 logicalStep
 metadataVersion
+sidecarStoreVersion
 sidecarControlGeneration
+sidecarAuthorityDomain/head/snapshotCut
 sidecarLifecycleFact
 ledgerId
 ledgerInstanceId
@@ -100,6 +108,7 @@ installRequestId
 bookieId
 localInstallGeneration
 localProfileRole
+localAdmissionGeneration
 requestType
 responseCode
 faultId
@@ -236,11 +245,24 @@ Oracle：普通 Add 的远程 MetadataStore I/O 与逐请求重型 proof verific
 
 Oracle：未授权 mutation 必须在标准 LedgerMetadata CAS 生效前被拒绝；master key 不能隐含 metadata write authority。若目标 metadata driver/ACL 配置无法提供等价 enforcement，则该 Profile 组合明确为 unsupported/FAIL，不能依赖 sidecar事后修复或仍让 Spike PASS。exact ACL/credential encoding 保持开放。
 
+### A21：Sidecar child/snapshot/ABA 与 unknown version
+
+步骤：分别在child/page durable、manifest complete、domain-head CAS、response send、old child reclaim前后crash；在response loss前后用同一operation identity分别重试相同semantic payload与冲突payload，并覆盖operation被snapshot/terminal summary吸收及退出bounded retention；并发推进head与snapshot cut；对同一ledgerId创建新instance且让backend store version重新计数；注入referenced unknown mandatory root/child、missing chunk、suffix gap和root/page cap溢出。
+
+Oracle：未被head发布的child只是inert orphan；same operation + same payload只返回同一`APPLIED/ALREADY_APPLIED`结果，same operation + conflicting payload只能`CONFLICT`且不改变authority；退出可证明retention后不得把任一payload当作新幂等成功。response loss按operation/snapshot identity返回already/stale/conflict；old/new instance绝不因store version重计数合并；snapshot只有verified chunks+manifest+stable cut+complete suffix才发布，publish早于reclaim；referenced unknown/missing/gap和超限使domain fail closed。已证明不相交repair domain不经过ledger-global universal head，normal Add路径不受sidecar fault/watch stale影响。
+
+### A22：Local authority composition、stale handle 与 downgrade
+
+步骤：在route+auth/install原子claim、normal activation、fence admission cut、recovery grant/close、tombstone、assignment readiness各边界crash/restart；保持stale handle并推进generation；让old binary读取unknown mandatory control format；覆盖multi-Arena ledger与control-store loss。
+
+Oracle：restart接受集合不扩大；normal/recovery/readable不是互斥flat enum；stale handle不能跨activation/fence/tombstone generation成功；old binary在writable registration/handle create前fail closed；任一scattered authority缺失不default allow；normal Add无remote lookup/per-entry control fsync。
+
 ## 7. 故障注入点
 
 至少覆盖：
 
 - sidecar reservation create/CAS 前后；
+- child/page/manifest/domain-head CAS、snapshot cut/suffix anchor、covered-child reclaim前后；
 - Bookie control record append、fsync、routing publish 前后；
 - install receipt serialization/send 前后；
 - standard LedgerMetadata create 与 immutable backlink publish 前后；
@@ -249,6 +271,7 @@ Oracle：未授权 mutation 必须在标准 LedgerMetadata CAS 生效前被拒�
 - Classic/Profile atomic route claim 与 durable publish 各边界；
 - active replacement install、`LAC+1` ensemble CAS、post-CAS activation、pending resend 各边界；
 - Bookie restart/replay 中；
+- local authority transition、stale-handle generation与old-binary format gate；
 - coordinator restart 和 leader change；
 - duplicate、delay、reorder、drop response。
 
@@ -263,6 +286,7 @@ create
 install
 activate
 retry
+retry sidecar operation with same/conflicting payload
 cancel
 profiled add
 legacy normal/recovery add
@@ -270,6 +294,8 @@ restart Bookie
 restart coordinator
 replace Bookie
 stale metadata read
+snapshot/compact sidecar domain
+inject unknown mandatory record
 legacy metadata mutation
 ```
 
@@ -300,6 +326,15 @@ normal Add remote metadata reads                    = 0
 normal Add per-request heavy proof verifications    = 0
 unreplayable executed fault scenarios               = 0
 unauthorized profiled membership mutations          = 0
+sidecar store-version/instance ABA                  = 0
+child/page authorized before domain-head publication = 0
+snapshot published without complete chunks/suffix  = 0
+covered child reclaimed before snapshot publication = 0
+referenced unknown mandatory record defaulted/overwritten = 0
+same sidecar operation identity accepted conflicting payload = 0
+old binary became writable on Segment control format = 0
+stale handle crossed admission generation          = 0
+normal Add per-entry control fsync                  = 0
 ```
 
 所有指定 deterministic scenarios 必须 100% 执行并命中 fault；所有断言为硬失败，不接受“低概率”。
@@ -317,6 +352,7 @@ unauthorized profiled membership mutations          = 0
 - standard metadata 在 all-E Profile route claim 前创建；
 - local normal ACTIVE 早于 matching READY，或 pending resend 早于 replacement activation；
 - crash/retry 产生两个 READY/AVAILABLE instance；
+- 同一sidecar operation identity接受两个冲突semantic payload，或把冲突payload返回为`ALREADY_APPLIED`；
 - 持有 master key 但无 Profile metadata authority 的 legacy client 成功修改 profiled membership/backlink；
 - Bookie restart 后接受未由 durable record 授权的请求；
 - orphan GC 能让旧请求重新激活。

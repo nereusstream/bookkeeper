@@ -17,3 +17,4 @@
 | [Round 2](ROUND-02-control-plane-authority.md) | Control-plane authority、activation 与 repair | `cc7e03c81571b01b7f9da97a4c9bf1154d743c1c` | Reviewed / Integrated |
 | [Round 3](ROUND-03-local-authority-recovery-reset.md) | Local relocation、recovery fallback、delete rejoin 与 repair reset | `4849e7559ad816cbea7ac5e76885138ab12cb9df` | Reviewed / Integrated |
 | [Round 4](ROUND-04-bounded-proof-interfaces.md) | Bounded proof、assignment handoff、relocation checkpoint 与 recovery outcome | `dbc0f7fee412e68d1cecd40efbf6d80edfdc8af0` | Reviewed / Integrated |
+| [Round 5](ROUND-05-implementation-interfaces.md) | Sidecar、ArenaControlLog、local durable authority 与 recovery compatibility 接口 | `ba820b28babd7683e8dfe6a724d1b8aeecf7c2e1` | Reviewed / Integrated |
