@@ -22,8 +22,11 @@ package org.apache.bookkeeper.common.profile;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
+import java.lang.reflect.RecordComponent;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 import org.junit.Test;
 
 public class ProfileDescriptorModelTest {
@@ -60,5 +63,23 @@ public class ProfileDescriptorModelTest {
         assertThrows(IllegalArgumentException.class, () -> new ProfileCapability(1, 0x1_0000));
         assertEquals(new ProfileCapability(0xffff_ffffL, 0xffff),
                 new ProfileCapability(0xffff_ffffL, 0xffff));
+    }
+
+    @Test
+    public void descriptorContainsOnlyFrozenImmutableSafetySemantics() {
+        List<String> componentNames = Arrays.stream(ProfileDescriptor.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .collect(Collectors.toList());
+        assertEquals(List.of(
+                "requiredEngine",
+                "payloadFormat",
+                "durabilityMode",
+                "ensembleSize",
+                "writeQuorumSize",
+                "ackQuorumSize",
+                "permanentLossBudget",
+                "failureDomainPolicyId",
+                "failureDomainPolicyGeneration",
+                "mandatoryCapabilities"), componentNames);
     }
 }
