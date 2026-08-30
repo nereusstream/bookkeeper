@@ -10,7 +10,7 @@
 
 正在执行的模块：
 
-- [`Experimental Profile wire 与真实 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard 已安装；codec、corpus 与真实兼容证据仍在执行，当前不是 G1 PASS。
+- [`Experimental Profile wire 与真实 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard 与 pure codec 已实现；corpus 与真实兼容证据仍在执行，当前不是 G1 PASS。
 
 输入锁见 [`manifest.json`](manifest.json)。每个模块自己的 source/test/artifact 范围、复现命令、证据结论和剩余 BLOCK 由模块目录拥有。实现证据不能自动提升五份 owner RFC 或三个 Spike 的状态。
 
