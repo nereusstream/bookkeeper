@@ -94,6 +94,7 @@ GeneralEwaRecovery.tla      Model E, optional until feature advances
 standard ledger metadata version/state, immutable instance backlink
 ensemble history
 Profile sidecar instance/control generation and READY/availability facts
+immutable Profile descriptor hash/generation and permanent-loss budget F
 client/coordinator Profile metadata-mutation authority
 E/W/A
 entryId -> write set
@@ -103,7 +104,11 @@ per-Bookie failure-domain identity and permanent-loss state
 per-range repair generation and immutable coverage cut
 valid evidence domains per coordinate
 failure-domain policy generation and loss generation
-durable range-scoped repair completion authority
+accepted loss event identity/domain/incarnation
+overlapping-range loss/reset predecessor or head
+durable range-scoped verifier assertion
+optional coverage audit commitment
+bounded child receipts and committed interval snapshot
 client pending operations
 AQ evidence
 LAC/close state
@@ -149,6 +154,12 @@ ActivateCurrentReplacement
 PublishRepairCompletion
 LoseRepairCompletionResponse
 PermanentLossAfterRepairProof
+AttemptReinterpretRepairAssertionUnderChangedProfile
+AcceptLossDeclaration
+ReplayDuplicateLossDeclaration
+BuildRepairReceiptSnapshot
+PublishRepairReceiptSnapshot
+ReclaimCoveredRepairReceipts
 ```
 
 ### 5.3 检查目标
@@ -162,10 +173,12 @@ PermanentLossAfterRepairProof
 - active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
 - bounded repair reset 只在每个 ACK-eligible coordinate 有 `F + 1` distinct valid domains、exact membership 已发布且 conditional completion durable 后成立；
 - target durability、membership 或 activation 任一单独不能 reset；proof cut 后的 loss 进入新 window，迟到 completion 不得清零；
+- verifier assertion必须存在；digest/root单独不reset，duplicate accepted loss不重复消费budget；
+- conflicting/overlapping range loss与completion单序，proven-disjoint range可并发；snapshot durable前不reclaim child receipt；
 - response loss 不产生两个 ledger instance/READY publication；
 - `E > W` 轮转覆盖全 ensemble 安装需求。
 
-repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、closed range 无 `NORMAL_ACTIVE` 的合法 reset、current target active 但历史 range 不完整、`E > W` per-entry write-set coverage、completion response loss 后新 loss、delayed old completion、overlapping ranges 与 detected corruption。
+repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、digest存在但verifier未完成、descriptor/`F`变化后重解释旧assertion、closed range无`NORMAL_ACTIVE`的合法reset、current target active但历史range不完整、`E > W` per-entry write-set coverage、duplicate loss、loss/completion两种先后、unobserved failure after proof cut、disjoint并发、overlapping stale completion、small-range merge、snapshot publish/response loss/child reclaim、delete freeze和root/page cap超限。
 
 ## 6. Model B：Sequenced Classic
 
@@ -220,6 +233,8 @@ CrashWriter
 slots/extents and generations
 durable vs volatile ArenaControlLog records
 allocator checkpoint generations
+checkpoint through-sequence and current-selector snapshot
+retiring source and anti-ABA/fencing state
 superblock A/B pointers
 shard allocation pools
 data records and durability
@@ -228,6 +243,8 @@ ledger tombstones
 locators and reader pins
 conditional MOVE_COMMIT records and move generations
 authoritative relocation chain and orphan copies
+per-move control sequence and durable-through cut
+new-location lookup/local-success authority dependency
 device state
 ```
 
@@ -258,6 +275,10 @@ DurabilizeMoveCommit
 PublishMovedLocator
 DrainOldReader
 FreeMovedSource
+BuildCurrentSelectorCheckpoint
+ConditionalFreeOrphan
+RetryLateMoveCommit
+PublishDurableThrough
 ```
 
 ### 7.3 检查目标
@@ -271,7 +292,9 @@ FreeMovedSource
 - delete/free 与 reader pin 顺序安全；
 - `MOVE_COMMIT` 为同一 Arena relocation 选择唯一 successor，未 commit copy 不成为 authoritative；
 - committed move 在 index 丢失后仍可重建，source free 晚于 cutover、new-pin 阻断和 reader drain；
-- move 不创造新的 local-success fact。
+- move 不创造新的 local-success fact；logical entry已有success不阻止清理从未成为lookup authority的new-location orphan；
+- checkpoint current selector + anti-ABA/retiring state与full-chain oracle等价；
+- orphan free与late commit不能都成功，cutover晚于覆盖自身control sequence的durable-through。
 
 shared slab 可先用一个 block 包含两个 ledger 的最小域建模；dedicated extent 用单 owner block 建模。不能只建模 dedicated extent 后宣称覆盖 shared delete。
 
@@ -289,13 +312,17 @@ AutoRecovery target payload and ensemble publication
 per-target recovery-only/committed-readable role
 delete streams and committed heads
 finite stream assignment and assignment generation
+assignment predecessor, PREPARED/effective status and handoff cut
 Bookie stable identity and storage incarnation
 per-stream durable applied cursor
 snapshot generation, covered-through and digest
+snapshot bounded chunk manifest/completeness and applicable effects
 registration required-through cut
 per-Bookie local tombstone/effects
 Bookie online/offline/registered mode
 decommission proofs
+cluster-accepted irreversible wipe/decommission proof scope,
+operation generation, acceptance version and permanent registration fence
 logical and physical completion
 ledger instances
 ```
@@ -326,9 +353,16 @@ LoseCursorResponse
 BuildDeleteSnapshot
 CompactJournalPrefix
 ChangeStreamAssignment
+PrepareStreamAssignment
+DualRouteDeleteEvent
+CatchUpPreparedAssignment
+ActivateStreamAssignment
 ReplaceStorageIncarnation
 FetchRequiredThrough
 RegisterWritable
+PublishSnapshotChunk
+AcceptWipeProof
+ReplayOldTerminalProofAcrossScope
 DecommissionBookie
 PublishPhysicalDelete
 CompactTombstone
@@ -345,7 +379,11 @@ ReuseLedgerIdWithNewInstance
 - cursor 不跨 unexplained gap，且只能晚于对应 durable effect 或可验证 non-applicability；
 - offline Bookie 的 current storage incarnation 未对 authoritative finite assignment 全部 catch up 时不能 writable；
 - snapshot + complete suffix 是唯一 compacted-prefix bootstrap；assignment removal 不能丢失 delete obligation；
+- obligation-changing generation必须pre-catch并atomic activate，或旧writable先demote；PREPARED generation不必无条件demote；
+- snapshot root必须有complete、可遍历、可应用effects/chunks，digest-only不足；handoff允许duplicate不允许gap；
 - old storage incarnation 不能伪装新节点或借 ordinary ensemble replacement 绕过 catch-up；
+- catch-up exemption只来自cluster-accepted irreversible wipe/permanent decommission fence；
+- terminal proof绑定bookie、old incarnation、device/storage scope、operation generation与cluster acceptance；旧proof跨incarnation/device/scope重放不能免除catch-up；
 - physical completion 需要每个 target 的 terminal proof；
 - 旧 instance delete 不影响新 instance；
 - tombstone compact 不允许极晚 rejoin 复活旧数据。
@@ -359,13 +397,19 @@ Model E 只在推进 general E/W/A range optimization 时启用，但一旦启�
 ```text
 immutable RecoveryContext and authority generation
 entry -> write-set and ensemble history
+required/committed frontier and CLOSED lastEntry boundary
+fenced generation
 TailSummary hints
 per-coordinate range evidence/results
 earliest unresolved coordinate
 bounded volatile continuation/proof cache
 point-read oracle evidence
+definitive absence, transient, corrupt and conflicting evidence
+later speculative vs required evidence
 recovery target writes and per-entry results
 attempt outcome class
+published close/final prefix
+authority-unrecoverable reason
 ```
 
 ### 9.2 最小动作
@@ -384,6 +428,11 @@ ChangeRecoveryAuthorityGeneration
 CancelOrExpireAttempt
 InvalidateCorruptEvidence
 DeclareEvidenceExhausted
+ProveNormalTail
+PublishRecoveredClose
+DeclareQuarantineConflict
+DeclareAuthorityUnrecoverable
+DeferUnavailableRecovery
 ```
 
 ### 9.3 检查目标
@@ -393,6 +442,10 @@ DeclareEvidenceExhausted
 - coordinator crash 丢失 volatile continuation 只导致重读，不产生 absence；
 - single corrupt replica 失效但其他 valid evidence 仍可恢复；
 - cancellation/deadline 只结束 attempt，不证明 DATA_LOSS；
+- normal tail必须在fenced exact write set上有`W-A+1` definitive absence coverage，offline/timeout不计；
+- required frontier来自accepted authority，later speculative payload不制造required hole；
+- authority unrecoverable属于quarantine而非payload DATA_LOSS，required-coordinate finite evidence exhausted才是DATA_LOSS；
+- recovered outcome晚于durable close/final-prefix publication；
 - fast path + fallback 的最终结果与全 point-read oracle 完全一致；
 - proof cache、point-read 并发与内存保持 manifest-locked bounded。
 
@@ -414,6 +467,12 @@ RepairIntentBeforeTargetPayload
 RecoveryRoleNeverGrantsNormalWrite
 RepairResetImpliesCompleteRangeCoverage
 RepairResetImpliesFPlusOneDistinctDomains
+RepairResetRequiresVerifierAssertion
+RepairAssertionBindsImmutableProfileF
+AuditCommitmentAloneNeverResets
+DuplicateLossDeclarationDoesNotDoubleCount
+ConflictingRangeLossAndResetAreOrdered
+RepairReceiptSnapshotBeforeChildReclaim
 MembershipAloneNeverResetsLossBudget
 ActivationAloneNeverResetsLossBudget
 LocalTargetDurabilityAloneNeverResetsLossBudget
@@ -434,6 +493,10 @@ UncommittedCopyNeverBecomesAuthoritative
 CommittedMoveSurvivesIndexLoss
 NoFreeBeforeMoveCommitAndReaderDrain
 MoveDoesNotCreateLocalSuccess
+CheckpointSelectorEqualsFullChain
+OrphanCleanupPreservesExistingLogicalSuccess
+LateMoveCommitAndOrphanFreeAreExclusive
+MoveCutoverRequiresOwnDurableSequence
 LogicalDeleteIsIrreversible
 FrozenTargetsCoverReplicaAndRepairHistory
 NoWritableRejoinBeforeDeleteCatchup
@@ -441,6 +504,12 @@ DeleteCursorImpliesDurableEffects
 NoCursorAdvanceAcrossUnexplainedGap
 WritableImpliesAllApplicableStreamsCaughtUp
 AssignmentRemovalCannotLoseDeleteObligation
+EffectiveAssignmentFencesStaleWritableGeneration
+PreparedAssignmentNeedNotDemoteSafeWriter
+DeleteHandoffHasNoRoutingGap
+SnapshotContainsApplicableEffects
+CatchupExemptionRequiresClusterTerminalProof
+TerminalProofCannotReplayAcrossIncarnationOrScope
 SnapshotPlusSuffixIsComplete
 OldStorageIncarnationCannotBypassCatchup
 PhysicalDeleteHasTerminalProofs
@@ -450,26 +519,35 @@ FallbackStartsAtEarliestUnprovenCoordinate
 RecoveryNeverSkipsHole
 AttemptDeadlineDoesNotProveDataLoss
 FastAndPointOracleEquivalent
+NormalTailRequiresAckQuorumIntersectionAbsence
+RequiredHoleNeverPublishesPrefixAcrossIt
+TransientUnavailableIsNotEvidenceExhausted
+SingleCorruptReplicaIsNotTerminal
+AuthorityLossIsNotPayloadDataLoss
+RecoveredOutcomeImpliesDurableClose
 ```
 
 关键自然语言对应：
 
 - recovery 没有有效 evidence 时永远不能返回成功；
 - ACK 且永久 failure-domain losses 在声明预算内时，至少一个有效 payload evidence 存活；
-- evidence 全部耗尽时进入 `UNRECOVERABLE/DATA_LOSS`，不能伪造恢复成功；
+- contract-required coordinate 的有限合法 evidence全部确定性耗尽时才进入 payload `DATA_LOSS`；authority无法判定进入quarantine；
 - normal profiled Add ACK 之前有 matching global READY 与 durable local normal activation，legacy Add 不能绕过 route；
 - initial standard metadata 晚于 all-E inactive Profile claim；写期 replacement 按 install/CAS/activate/resend 排序；
 - recovery payload 写入 target 前有 durable RepairIntent，recovery-only/committed-readable 不授予 normal write；
 - bounded range 只有完整 `F + 1` distinct-domain coverage proof 与 conditional completion authority 才 reset loss window；
+- verifier assertion是reset authority，并长期绑定immutable descriptor/`F`/policy；digest-only不足，duplicate loss不重复计数，receipt snapshot durable前不删child；
 - 同一 extent generation 不同时属于两个 ledger instance；
 - ALLOC 未 durable 时 DATA 不可被允许 ACK；
 - FREE 未 durable 时 slot 不可复用；
 - 未 commit move copy 不成为 authoritative；commit 后 index 丢失仍可重建，reader drain 前 source 不 free；
+- checkpoint current selector等价full chain；orphan free不删除logical entry在current selector承载的既存success；
 - takeover ACTIVE 后旧 writer 不能把 sealed prefix 外数据发布为成功；
 - recovery 只发布最大连续可证明前缀；
 - logical delete 后不能重新 open；
-- 返回 Bookie 对 finite authoritative stream assignment 无洞 catch up 前不能成为 writable；
-- fast-path 失败必须回退且不越 hole，deadline/cancellation 不得伪造 DATA_LOSS。
+- effective obligation-changing assignment不能让stale generation继续writable；snapshot必须可应用，wipe/decommission proof由cluster接受且不能跨incarnation/device/scope重放；
+- fast-path失败必须回退且不越hole；normal tail需要quorum-intersection absence；deadline/cancellation/authority loss不得伪造payload DATA_LOSS；
+- recovered success蕴含同generation durable close/final-prefix publication。
 
 ## 11. 最低配置矩阵
 
@@ -486,11 +564,13 @@ Bookie crash/restart
 permanent failure-domain loss within and beyond F
 detected corruption
 client/coordinator response loss
+range repair verifier assertion, accepted-loss ordering and receipt compaction
 allocator generation reuse
 same-Arena relocation, concurrent move and reader pin
+checkpoint current-selector compression, orphan free and late move commit
 offline Bookie delete and rejoin
-delete stream gap, snapshot and storage incarnation
-range fast-path partial result and point fallback where Model E applies
+delete stream gap, PREPARED/effective assignment handoff, applicable snapshot chunks and storage incarnation
+range fast-path partial result, normal-tail proof, recovery outcome classification and point fallback where Model E applies
 ```
 
 并非每个子模型都展开所有变量；例如 Model C 不复制 quorum 全状态，但组合 A+C 必须覆盖 local success 到 distributed ACK 的接口。
@@ -505,18 +585,19 @@ range fast-path partial result and point fallback where Model E applies
 | A-ACT | A | 3/3/2 | install complete, activation missing, legacy Add |
 | A-FD-OK | A | profile-specific | `F` losses across declared domains within budget |
 | A-FD-EXHAUST | A | profile-specific | all valid ACK evidence exhausted |
-| A-REPAIR-LOSS | A | profile-specific | partial/full range coverage, delayed completion, proven repair, second loss |
+| A-REPAIR-LOSS | A | profile-specific | descriptor/`F` binding, verifier assertion vs digest, duplicate/disjoint/overlapping loss ordering, proven repair and second loss |
+| A-RECEIPT-COMPACT | A | bounded ranges | child/page caps, snapshot publication, response loss and covered-child reclaim |
 | B-2W | A+B | 3/3/2 | two writers + takeover |
 | B-RESP | B | bounded | completion reorder/loss |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
-| C-CKPT | C | local | checkpoint/superblock crash |
-| C-MOVE | C | local | conditional move, response loss, index rebuild, reader drain |
+| C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
+| C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
 | D-OFF | D | historical ensembles | offline rejoin |
 | D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery |
 | D-INTENT | A+D | closed fragment | intent, first payload, CAS and delete at every crash boundary |
-| D-STREAM | D | bounded streams | gaps, snapshot+suffix, assignment/incarnation, registration cut |
+| D-STREAM | D | bounded streams | gaps, PREPARED/effective handoff, applicable snapshot chunks, terminal-proof scope/replay, incarnation and registration cut |
 | CD-REUSE | C+D | local + cluster | delete, free, ledgerId reuse |
-| E-FALLBACK | E | E > W | partial range, hole, fast budget, crash, point-oracle equivalence |
+| E-FALLBACK | E | E > W | partial range, required/speculative hole, normal-tail quorum-intersection proof, outcome taxonomy, authority loss, durable close and point-oracle equivalence |
 
 正式运行前可增加 config，不得删除最低结构。
 
@@ -553,7 +634,7 @@ range fast-path partial result and point fallback where Model E applies
 
 fairness assumptions 必须逐条记录。liveness 未完成不影响 safety counterexample 的有效性，但会使相应进展结论保持开放。
 
-`AckedPayloadSurvivesWithinBudget` 只证明 payload evidence survival，不证明继续写可用性、read quorum 可用性、metadata/auth authority 生存或 general E/W/A recovery liveness。超过预算后的 `DATA_LOSS` 是明确 terminal state；没有证据却返回恢复成功仍是 safety violation。
+`AckedPayloadSurvivesWithinBudget` 只证明 payload evidence survival，不证明继续写可用性、read quorum 可用性、metadata/auth authority 生存或 general E/W/A recovery liveness。超过 failure-domain 预算只终止 survival 保证，不自动证明 payload 丢失；只有 required-coordinate evidence 确定性耗尽后的 `DATA_LOSS` 才是明确 terminal state。没有证据却返回恢复成功仍是 safety violation。
 
 ## 14. Trace 对齐
 

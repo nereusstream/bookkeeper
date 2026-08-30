@@ -92,8 +92,11 @@ no locator crosses ledger instance or generation
 free list excludes every still-live allocation
 checkpoint + suffix replay is deterministic
 every committed move chain has one unique authoritative successor
+checkpoint current selector + anti-ABA state equals full-chain oracle
 uncommitted relocation copy never becomes authoritative
 old allocation is not reused before move cutover and reader drain
+orphan new location has no lookup/local-success authority dependency,
+while the logical entry may retain its existing success at the current selector
 ```
 
 checker 与在线 allocator 使用不同代码路径或至少独立解析实现，避免同一 bug 自证正确。
@@ -138,9 +141,9 @@ Oracle：reader 未 drain 时 slot 不复用；旧 locator 在新 generation 上
 
 ### B7：Checkpoint A/B rotation
 
-在 checkpoint build、fsync、commit、inactive superblock update、fsync、active generation switch、old-log reclaim 各点 crash。
+在 control cut `S`、bounded checkpoint chunks、fsync、`CHECKPOINT_COMMIT(generation,S,identity)`、inactive superblock update/fsync、active generation switch、fallback-dependency verification和 old-log reclaim各点 crash。把 `MOVE_COMMIT` 放在 `S-1/S/S+1`，并覆盖 current selector已保存但old source尚未free、old free后historic chain被压缩、A/B fallback仍依赖旧suffix等状态。
 
-Oracle：restart 选择一个完整 authority；不得选择损坏的较新 checkpoint；不得回收唯一必要 suffix。
+Oracle：restart选择一个完整authority，`checkpoint through S + complete suffix >S`与full-chain replay产生相同allocation/current selector/retiring/anti-ABA状态；不得选择损坏的较新checkpoint或回收任一fallback仍依赖的唯一suffix。
 
 ### B8：Control authority corruption
 
@@ -168,8 +171,12 @@ Oracle：恢复的 ledger/entry/locator 集合与权威 payload 一致；stale g
 - 只迁移部分 records 时尝试 whole-block free；
 - old reader/pin 跨越 cutover；
 - checkpoint 覆盖/未覆盖 `MOVE_COMMIT` 时 rotation crash。
+- checkpoint后stale old operation retry；
+- logical entry已有local-success，但uncommitted new location从未成为success/lookup location；
+- orphan GC与late commit在同/不同group竞争，分别覆盖free先赢与commit先赢；
+- shared allocation一条orphan、一条live，以及writer-generation/pin quiescence race。
 
-Oracle：无 commit 时 old authoritative、new copy 只是 orphan；durable commit 后 new authoritative 且 index 可重建；同一 predecessor 只有一个 winning successor；每个 live record 至少一个权威副本且最多一个 active locator；old block 只有在全部 live records moved/dead、new pin 被阻断、既有 reader drain 和 durable free 后回收。relocation 不新增 local-success fact。
+Oracle：无 commit 时 old authoritative、new copy 只是 orphan；durable commit 后 new authoritative 且 index 可重建；同一 predecessor 只有一个 winning successor；每个 live record 至少一个 authoritative lookup locator（允许cut前old reader pin）且不能有两个new lookup winners；old block只有在全部live records moved/dead、new pin被阻断、既有reader drain和durable free后回收。relocation不新增local-success fact；清理orphan new location不删除logical entry在current location承载的既存success。
 
 ## 7. 资源规模场景
 
@@ -269,6 +276,7 @@ dedicated tail waste
 - simulated torn sector/block where injector supports；
 - response/local-success publication loss；
 - `MOVE_COMMIT` durability/response loss、concurrent move 与 reader-pin cutover；
+- checkpoint current-selector compaction、orphan free/late commit与durable-through gap；
 - repeated restart；
 - fixed-seed random operation/fault sequences。
 
@@ -301,6 +309,9 @@ committed move lost after index deletion       = 0
 multiple winning successors per predecessor    = 0
 source freed before move commit/reader drain    = 0
 move created new local-success fact             = 0
+orphan GC removed current local-success payload = 0
+checkpoint selector differed from full chain    = 0
+late commit and orphan free both succeeded      = 0
 unreplayable executed failure                  = 0
 ```
 

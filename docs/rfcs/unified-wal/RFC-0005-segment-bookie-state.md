@@ -19,7 +19,7 @@ RFC 所有权固定为：
 | --- | --- |
 | Profile lifecycle、install、activation authority | [RFC-0001](RFC-0001-profile-capability-install.md) |
 | allocator、payload framing、generation、durable relocation authority/protocol 与 physical encoding | [RFC-0003](RFC-0003-segment-storage-allocator.md) |
-| cluster delete、repair target 与 recovery placement authority | [RFC-0004](RFC-0004-range-recovery-delete.md) |
+| cluster delete、repair target/placement、range reset assertion/loss ordering、delete assignment/snapshot 与 recovery outcome authority | [RFC-0004](RFC-0004-range-recovery-delete.md) |
 | 上述 authority 在 Segment Bookie 上的消费、durability、operation ordering 与 local success | 本 RFC |
 
 本 RFC 不复制其他 RFC 的 metadata schema，也不把 derived locator 提升为 authority。
@@ -136,11 +136,11 @@ Segment Bookie 只消费 RFC-0004 已授权的 instance-specific local tombstone
 restart 顺序至少满足：
 
 1. 验证 Engine/superblock/format identity；
-2. 恢复 allocator、payload 与同 Arena `MOVE_COMMIT` relocation authority；
+2. 恢复 allocator、payload 与 checkpoint current selector + suffix 的同 Arena relocation authority；
 3. 恢复 route、protected auth、normal activation、recovery-only/committed-readable role、fence、explicit LAC 和 tombstone 状态；
-4. 按 durable move chain 重建 derived handle/locator/index，不能从物理 generation 或 stale locator 猜 relocation winner；
+4. 按 checkpoint current selector + complete suffix 重建 derived handle/locator/index，不能从被压缩的历史 chain、物理 generation 或 stale locator 猜 relocation winner；
 5. 对未知或无法证明的 state fail closed；
-6. 按 RFC-0004 校验 storage incarnation、finite stream assignment、snapshot/suffix 与 per-stream durable cursors；
+6. 按 RFC-0004 校验 current effective assignment generation、storage incarnation、可应用 snapshot/complete suffix 与 per-stream durable cursors；
 7. 完成 delete/recovery reconciliation 和 registration required-through 后才注册 writable。
 
 unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 payload 后继续 writable。Engine identity 的 cookie/superblock/registration exact encoding 是开放项，但 fail-closed 行为不是开放项。
@@ -158,6 +158,7 @@ unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 pay
 - repair intent 与 local recovery authority 是 per-operation/per-fragment，不做 per-entry MetadataStore update 或 per-entry control fsync。
 - compaction `MOVE_COMMIT` 可按有界 record/range group commit；它是 background relocation authority，不给 normal Add 增加 per-entry control fsync，也不创造新的 local success。
 - delete effect 与 per-stream cursor 可 batch/group commit，但 cursor 永远晚于对应 effect durability。
+- normal Add 不读取 repair receipt、loss ordering、delete assignment 或 cursor 的远程 authority；这些事实只在冷控制/restart/registration路径消费，不形成 Add-time lease。
 
 所有 exact batching、record packing、cache layout 和阈值由 Spike 决定。不能用“正确性”作为无测量增加热路径 fsync、网络 hop 或全局锁的理由。
 
@@ -174,6 +175,9 @@ unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 pay
 9. 同 Arena relocation cutover 不改变既有 local-success/AQ 事实；未 commit copy 不能扩大 payload authority。
 10. durable `MOVE_COMMIT` 后新 lookup 走 new location，old allocation 的复用晚于 new-pin 阻断、reader drain 与 durable free/generation bump。
 11. writable registration 意味着当前 storage incarnation 对 RFC-0004 authoritative assignment 的全部 required-through stream 已无洞 catch up。
+12. obligation-changing effective assignment 已前进时，stale generation不能继续 authoritative writable；PREPARED generation 不无条件demote当前 safe writer。
+13. orphan GC只清理从未成为 authoritative lookup 的 new location；logical entry的既存 local-success事实继续由 current selector承接。
+14. required authority无法恢复时本地保持 quarantine/non-writable，不把“无法判定”上报为 payload DATA_LOSS；recovered success只消费RFC-0004 durable close outcome。
 
 ## 12. 接受 Gate
 
@@ -189,6 +193,8 @@ unknown/newer format 或 Classic/Segment 错误 downgrade 不得通过扫描 pay
 - derived index 全删重建不扩大接受集合；
 - `MOVE_COMMIT` response loss、index rebuild、reader pin、old free 与 restart 不改变唯一 payload authority；
 - delete stream gap、snapshot/assignment/incarnation mismatch 时保持 non-writable；
+- prepared/effective assignment handoff、cluster terminal wipe/decommission fence 与 stale registration；
+- required authority loss、payload evidence exhaustion 与 normal-tail success的本地/API语义不混淆；
 - Classic baseline 对比下的 throughput、p99、CPU、fsync 与 lock contention；
 - Model A/C 中 Segment Bookie state 与 allocator state 的组合无 safety counterexample。
 
@@ -207,7 +213,7 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 - local seal 是否确有需求；若有，其 authority 与 metadata CLOSED 的关系；
 - RFC-0003 `MOVE_COMMIT` exact local record packing、batch completion、reader cutover接口、orphan GC 与 cross-Arena unsupported 后续协议；
 - RFC-0004 delete stream topology、assignment/snapshot schema 与 exact local cursor packing；
-- recovery/delete integration 对 RFC-0004 的 exact dependency boundary；
+- recovery strong assertion/local evidence binding、accepted loss ordering与五类 outcome到现有Bookie API/error的exact dependency mapping；
 - performance Gate 的 exact thresholds。
 
 这些问题关闭、相关 Spike/Model 通过前，本 RFC 不得标为 Implementation Ready。

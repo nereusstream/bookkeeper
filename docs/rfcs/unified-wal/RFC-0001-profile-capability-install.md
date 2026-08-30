@@ -428,6 +428,7 @@ placement 只把满足 descriptor mandatory requirements 的 Bookie 作为候选
 11. metadata watch/cache 失效不能破坏上述不变量。
 12. 普通 Add 热路径不依赖远程 MetadataStore I/O 或逐请求重型 proof 验证。
 13. failure-domain policy generation 或 domain identity 不能在 repair proof 中被重新标注以伪造 `F + 1` coverage。
+14. RFC-0004 的 accepted-loss generation 只排序 loss/reset authority，不能按 generation delta 计算物理损失数量；相同 domain/incarnation 的 duplicate declaration 不得重复消费预算。
 
 ## 14. Spike 与接受 Gate
 

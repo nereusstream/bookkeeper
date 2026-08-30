@@ -139,11 +139,15 @@ expectedOldLocationAndGeneration
 newLocationAndGeneration
 payloadDigest
 moveOperationIdentityAndGeneration
+controlSequence
+durabilityBarrierOrDurableThroughCut
 ```
 
 同一 expected predecessor 只能有一个 winning successor。无 durable `MOVE_COMMIT` 时 old location 仍 authoritative；new copy 即使 payload durable 或 derived locator 已更新，也只是可证明后才能清理的 orphan。durable commit 后新 lookup 必须走 new location；new payload digest/identity 无法验证时 fail closed，old copy 不得自行夺回 authority。
 
 `MOVE_PREPARE` 可以作为 orphan discovery 或 QoS 优化，但不是 safety 必需。exact record bytes、checksum、per-entry/range packing 与 batch 大小保持开放。
+
+group commit 中，只有明确覆盖该 `controlSequence` 的 durability completion 才允许 locator cutover；batch submission、内存 append 或其他 record 的完成都不够。locator 切换与阻断新的 old-location pin 必须形成一个本地同步 cut：cut 前已取得 old pin 的 reader 可以完成，cut 后的新 reader只能取得 new locator。`durableThrough` 不得跨越 control sequence gap 或 torn record。
 
 ## 6. 分配与 ACK 顺序
 
@@ -316,7 +320,24 @@ FREE_AND_BUMP {
 8. expose the bumped generation
 ```
 
-一个 record move 完成不等于整个 shared block 可 free。`MOVE_COMMIT` 不产生新的 BookKeeper local success、AQ 或 ACK，只保持既有 payload authority。多个有界 move record 可以共享 control-log group-commit barrier；locator cutover 必须晚于覆盖自身的 durability completion，不要求每个 moved entry 独立 control fsync。
+一个 record move 完成不等于整个 shared block 可 free。`MOVE_COMMIT` 不产生新的 BookKeeper local success、AQ 或 ACK，只保持既有 payload authority。多个有界 move record 可以共享 control-log group-commit barrier；locator cutover 必须晚于覆盖自身 control sequence 的 durability completion，不要求每个 moved entry 独立 control fsync，也不能迫使 foreground Add 等待额外 relocation barrier。
+
+### 10.1 Uncommitted relocation orphan GC
+
+relocation 搬运的 logical entry 通常已有既存 local-success/AQ 事实。orphan 判定针对未 commit 的 **new allocation/location**，不能要求 logical entry 从未成功。
+
+new copy 只有在完整 authority state 证明以下事实后才能回收：
+
+- allocation owner、payload identity/location/generation 与该 move operation/generation 匹配；
+- current selector 从未选择该 new location，或另一个 winning successor 已条件化排除它；
+- checkpoint selector、完整 suffix 与 later authoritative reference 都不指向它；
+- 该 new location 从未被发布为 local-success lookup location，既存 logical success 仍由 current authoritative location承接；
+- move writer 已由 operation/control generation fence，迟到 commit 不可能成功；
+- 没有 live writer、reader、locator 或 inflight pin；
+- shared allocation 的其他 occupants 也都 dead/moved；
+- 最后以同一 authority order 下的 conditional `FREE_AND_BUMP` durable 后才 reuse。
+
+timeout 单独不是 orphan proof。`MOVE_COMMIT` 与 conditional free 在同一 `ArenaControlLog` apply order 中竞争：commit 先赢则 free 条件失败；free 先赢则 generation bump 使迟到 commit 的 expected generation/predecessor 失败，二者不能都成功。runtime GC 可以消费由完整 replay/checkpoint 构建的 current authority state，不要求每次全盘 replay；离线 checker 必须能从 checkpoint+suffix 独立复现结论。
 
 ## 11. Allocator checkpoint 与 rotation
 
@@ -325,31 +346,39 @@ FREE_AND_BUMP {
 control-log 旧段的唯一合法回收顺序：
 
 ```text
-1. build complete allocator checkpoint for generation N
-2. fsync checkpoint and verify checksum
-3. append/record CHECKPOINT_COMMIT
-4. update inactive superblock to point at N
-5. fsync inactive superblock
-6. atomically select active superblock generation
-7. only then reclaim covered control-log segments
+1. choose a complete applied control cut S
+2. freeze/COW allocator + current relocation selectors at S
+3. write bounded checkpoint chunks
+4. fsync and verify checkpoint content identity
+5. append/durable CHECKPOINT_COMMIT(generation, S, identity)
+6. update and fsync the inactive superblock
+7. atomically select the active superblock generation
+8. verify fallback checkpoint/suffix dependencies
+9. only then reclaim a prefix covered by surviving authority
 ```
 
 如果步骤中途 crash，restart 必须选择最后一个完整、可验证且依赖 suffix 仍存在的 generation。不能只按最大 generation number 选择损坏 checkpoint。
 
-checkpoint 必须包含所有仍有效 relocation cutover，或保留足以唯一重建其 move chain 的 control-log suffix。rotation 不得删除唯一 `MOVE_COMMIT` authority；move replay 只能沿条件化 predecessor 和 operation generation 前进，不能按最大物理 generation、mtime 或 derived locator 猜测 winner。
+checkpoint through `S` 必须完整保存 allocation ownership/generation、free/reusable/retiring state、current authoritative selector、old-source retirement state、new-old-pin gate state、whole-allocation reclaimability，以及拒绝 stale predecessor/operation 所需的 winning generation 或等价 anti-ABA fence。它是 ArenaControl authority 的 compact representation，不是 derived locator。
+
+完整历史 move chain 不是必需：已经由 current selector 与 durable free 完全取代、且不再存在可混淆副本的历史可以压缩；old source 尚未退休时必须保留 current selector/retiring gate，live process 中 cut 前已存在的 volatile readers 仍按 runtime drain。rotation 不得删除唯一 authority；旧 A/B checkpoint 仍作为 corruption fallback 时，其必要 suffix 不能先删。
+
+checkpoint 不持久化 individual reader、future、buffer reference 或 pin history。runtime reader/pin tracking 可以是 bounded volatile state；process crash 后旧进程的 volatile pins 不作为 durable history 继承，但 restart 必须先恢复 selector/retiring gate，再重新判断 source 是否满足 free 条件。
 
 ## 12. Restart 与 crash consistency
 
 启动顺序：
 
 1. 读取并验证 superblock A/B；
-2. 选择最高的完整 committed checkpoint generation；
-3. replay 其后的完整 control-log records，截断 torn tail；
+2. 选择最高的完整 committed checkpoint generation 及其 through-sequence `S`；
+3. replay sequence `> S` 的完整、连续、校验通过 control-log suffix，截断 torn tail；
 4. 重建 allocated/free/generation/device state；
 5. 扫描已授权 active data tail，验证 block framing；
 6. 重建 ledger directory 与 derived index；
 7. 对无法证明 ownership 或 payload durability 的对象 fail closed；
 8. 完成校验前 Bookie 保持 RECOVERING/READ_ONLY。
+
+suffix 出现 sequence gap、必要 record 缺失或 checkpoint content identity 无法验证时 fail closed。不得用更大的物理 generation、mtime 或 data scan跨过 authority gap。
 
 必须注入的 crash 边界：
 
@@ -362,6 +391,7 @@ checkpoint 必须包含所有仍有效 relocation cutover，或保留足以唯�
 - checkpoint data、commit、superblock switch 和 old-log reclaim 各边界；
 - compaction new allocation/data durability、`MOVE_COMMIT` append/durability/response loss、locator publish、new-pin 阻断、reader drain 和 old free 各边界；
 - 同一 predecessor 的并发 move、move chain、group-commit torn tail、new payload digest mismatch，以及每个边界删除 derived index 后的重建。
+- checkpoint cut `S-1/S/S+1` 的 move、current-selector 压缩、A/B fallback suffix dependency、orphan GC 与迟到 commit/free 竞争。
 
 ## 13. 内存与空间模型
 
@@ -402,7 +432,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - 不参与 payload ACK authority；
 - 不参与 allocator ownership authority；
 - key/value 带 format、instance 和 generation；
-- 全库删除后可从 control log + data arena 重建；relocation winner 只能由 durable `MOVE_COMMIT` chain 决定；
+- 全库删除后可从 control log + data arena 重建；relocation winner 只能由 committed checkpoint current selector + complete conditional `MOVE_COMMIT` suffix 决定，checkpoint selector 必须可证明由此前完整 control history 产生，不能由 RocksDB、mtime、最大物理 generation 或 data scan 猜测；
 - stale generation locator 在读取时被再次校验；
 - rebuild/compaction 有 foreground QoS 和 admission control。
 
@@ -433,6 +463,9 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 10. 未 commit 的 relocation copy 永远不能成为 authoritative；durable `MOVE_COMMIT` 在 derived index 丢失后仍唯一选择 new location。
 11. old allocation 的复用晚于 move cutover、new-pin 阻断、reader drain、whole-allocation reclaimability 与 durable `FREE_AND_BUMP`。
 12. relocation 不创造新的 local success、AQ 或 ACK。
+13. checkpoint through `S` + complete suffix `>S` 与完整 control history 得到相同 current selector；历史 chain 可压缩，anti-ABA/retiring state 不得丢失。
+14. orphan GC 只证明 new location 未承载 authority；logical entry 的既存 local success 不阻止清理 uncommitted copy。
+15. conditional orphan free 与迟到 `MOVE_COMMIT` 不能同时成功；cutover 只晚于覆盖自身 sequence 的 durability completion。
 
 ## 18. 接受 Gate
 
@@ -443,6 +476,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - on-disk framing、checksum、alignment 和 compatibility version 冻结；
 - checkpoint/control-log recovery 可由自动 crash matrix 重放；
 - cold/hot promotion、lifetime class 和同 Arena `MOVE_COMMIT` relocation 合同通过 crash、并发 move、reader pin 与 index rebuild 测试；
+- current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
 - 证明 shadow writer 可以与 Classic authority 隔离，失败不会影响 Classic ACK。
 
 即使 Spike 通过，也只解锁 shadow implementation。Segment 成为 ACK authority 仍需要 [RFC-0005](RFC-0005-segment-bookie-state.md) Accepted、独立 canary Gate、回滚合同和 RFC-0001 安装/activation 证据。
@@ -453,7 +487,8 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - `ALLOC_POOL` 下放 ownership 的粒度与 crash 回收；
 - exact block/record bytes、checksum 和 torn-write detector；
 - direct I/O API、alignment、buffer ownership 与 kernel/filesystem 约束；
-- shared slab lifetime classification、`MOVE_COMMIT` exact packing/batching、可选 `MOVE_PREPARE` 与 orphan GC；
+- shared slab lifetime classification、`MOVE_COMMIT` exact packing/batching、selector packing/dedup retention、可选 `MOVE_PREPARE` 与 orphan candidate index；
+- checkpoint bytes/page layout、through-sequence encoding、A/B exact superblock protocol 与 prefix-retention policy；
 - hot promotion/demotion 是否单向以及阈值；
 - multi-device placement、device evacuation、cross-Arena relocation 和 rebuild；
 - delete authorization receipt 的本地格式；
