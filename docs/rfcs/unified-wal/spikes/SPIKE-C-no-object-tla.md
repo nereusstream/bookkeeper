@@ -100,6 +100,10 @@ entryId -> write set
 Bookie up/down and fenced state
 per-Bookie volatile and durable accepted entries
 per-Bookie failure-domain identity and permanent-loss state
+per-range repair generation and immutable coverage cut
+valid evidence domains per coordinate
+failure-domain policy generation and loss generation
+durable range-scoped repair completion authority
 client pending operations
 AQ evidence
 LAC/close state
@@ -137,6 +141,14 @@ PublishEnsembleChange
 PublishReplacementActivationAuthority
 ActivateReplacement
 ResendPendingAdd
+BeginBoundedRepair
+DurabilizeReplacementEvidence
+VerifyRangeCoverage
+PublishRepairMembership
+ActivateCurrentReplacement
+PublishRepairCompletion
+LoseRepairCompletionResponse
+PermanentLossAfterRepairProof
 ```
 
 ### 5.3 检查目标
@@ -148,8 +160,12 @@ ResendPendingAdd
 - fencing 后不能形成不合法的新 AQ；
 - initial standard metadata 不得早于 all-E inactive Profile route claim，normal create/open success 晚于 all-E activation；
 - active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
+- bounded repair reset 只在每个 ACK-eligible coordinate 有 `F + 1` distinct valid domains、exact membership 已发布且 conditional completion durable 后成立；
+- target durability、membership 或 activation 任一单独不能 reset；proof cut 后的 loss 进入新 window，迟到 completion 不得清零；
 - response loss 不产生两个 ledger instance/READY publication；
 - `E > W` 轮转覆盖全 ensemble 安装需求。
+
+repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、closed range 无 `NORMAL_ACTIVE` 的合法 reset、current target active 但历史 range 不完整、`E > W` per-entry write-set coverage、completion response loss 后新 loss、delayed old completion、overlapping ranges 与 detected corruption。
 
 ## 6. Model B：Sequenced Classic
 
@@ -210,6 +226,8 @@ data records and durability
 local-success publications
 ledger tombstones
 locators and reader pins
+conditional MOVE_COMMIT records and move generations
+authoritative relocation chain and orphan copies
 device state
 ```
 
@@ -233,6 +251,13 @@ ReclaimOldControlSegment
 CrashDeviceProcess
 RecoverAllocator
 CorruptAuthority
+CopyForMove
+DurabilizeMovedPayload
+AppendMoveCommit
+DurabilizeMoveCommit
+PublishMovedLocator
+DrainOldReader
+FreeMovedSource
 ```
 
 ### 7.3 检查目标
@@ -243,7 +268,10 @@ CorruptAuthority
 - old locator 不能读新 generation；
 - checkpoint rotation 不丢失唯一 authority suffix；
 - authority 无法证明时 device 不变为 writable；
-- delete/free 与 reader pin 顺序安全。
+- delete/free 与 reader pin 顺序安全；
+- `MOVE_COMMIT` 为同一 Arena relocation 选择唯一 successor，未 commit copy 不成为 authoritative；
+- committed move 在 index 丢失后仍可重建，source free 晚于 cutover、new-pin 阻断和 reader drain；
+- move 不创造新的 local-success fact。
 
 shared slab 可先用一个 block 包含两个 ledger 的最小域建模；dedicated extent 用单 owner block 建模。不能只建模 dedicated extent 后宣称覆盖 shared delete。
 
@@ -254,12 +282,18 @@ shared slab 可先用一个 block 包含两个 ledger 的最小域建模；dedic
 ```text
 ledger metadata and version
 ensemble history
-delete manifest and epoch
+delete manifest and per-ledger-instance epoch
 frozen historical target set
 durable RepairIntents and lifecycle/retention
 AutoRecovery target payload and ensemble publication
 per-target recovery-only/committed-readable role
-per-Bookie local tombstone/apply watermark
+delete streams and committed heads
+finite stream assignment and assignment generation
+Bookie stable identity and storage incarnation
+per-stream durable applied cursor
+snapshot generation, covered-through and digest
+registration required-through cut
+per-Bookie local tombstone/effects
 Bookie online/offline/registered mode
 decommission proofs
 logical and physical completion
@@ -285,7 +319,15 @@ ApplyLocalDelete
 LoseDeleteReceipt
 TakeBookieOffline
 RejoinRecovering
-CatchUpDeleteWatermark
+AppendDeleteEvent
+DurabilizeDeleteEffect
+AdvanceDeleteCursor
+LoseCursorResponse
+BuildDeleteSnapshot
+CompactJournalPrefix
+ChangeStreamAssignment
+ReplaceStorageIncarnation
+FetchRequiredThrough
 RegisterWritable
 DecommissionBookie
 PublishPhysicalDelete
@@ -300,12 +342,61 @@ ReuseLedgerIdWithNewInstance
 - frozen targets 覆盖历史 ensembles 与 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member/target；
 - DELETE_INTENT 后 AutoRecovery 不产生漏删副本；
 - recovery-only/committed-readable role 不产生 normal writable authority；
-- offline Bookie 未 catch up 时不能 writable；
+- cursor 不跨 unexplained gap，且只能晚于对应 durable effect 或可验证 non-applicability；
+- offline Bookie 的 current storage incarnation 未对 authoritative finite assignment 全部 catch up 时不能 writable；
+- snapshot + complete suffix 是唯一 compacted-prefix bootstrap；assignment removal 不能丢失 delete obligation；
+- old storage incarnation 不能伪装新节点或借 ordinary ensemble replacement 绕过 catch-up；
 - physical completion 需要每个 target 的 terminal proof；
 - 旧 instance delete 不影响新 instance；
 - tombstone compact 不允许极晚 rejoin 复活旧数据。
 
-## 9. 核心不变量
+## 9. Model E：General E/W/A Recovery
+
+Model E 只在推进 general E/W/A range optimization 时启用，但一旦启用必须把 fast path 与现有 point-read oracle 放入同一模型，不能只证明新路径自己的内部一致性。
+
+### 9.1 最小状态
+
+```text
+immutable RecoveryContext and authority generation
+entry -> write-set and ensemble history
+TailSummary hints
+per-coordinate range evidence/results
+earliest unresolved coordinate
+bounded volatile continuation/proof cache
+point-read oracle evidence
+recovery target writes and per-entry results
+attempt outcome class
+```
+
+### 9.2 最小动作
+
+```text
+ReadTailSummary
+StartRangeFastPath
+ReturnPartialRange
+ExhaustFastPathBudget
+SwitchToPointFallback
+ReadPointEvidence
+RecoveryAddOneEntry
+LoseRangeOrAddResponse
+CrashRecoveryCoordinator
+ChangeRecoveryAuthorityGeneration
+CancelOrExpireAttempt
+InvalidateCorruptEvidence
+DeclareEvidenceExhausted
+```
+
+### 9.3 检查目标
+
+- unsupported、stale summary、partial response 与 fast budget exhaustion 从 earliest unresolved coordinate fallback；
+- hole 阻止 frontier，即使 later entry 已验证；
+- coordinator crash 丢失 volatile continuation 只导致重读，不产生 absence；
+- single corrupt replica 失效但其他 valid evidence 仍可恢复；
+- cancellation/deadline 只结束 attempt，不证明 DATA_LOSS；
+- fast path + fallback 的最终结果与全 point-read oracle 完全一致；
+- proof cache、point-read 并发与内存保持 manifest-locked bounded。
+
+## 10. 核心不变量
 
 规范中使用可执行 predicate 表达，至少包括：
 
@@ -321,6 +412,14 @@ InitialMetadataAfterAllEProfileClaim
 ReplacementInstallCasActivateResendOrder
 RepairIntentBeforeTargetPayload
 RecoveryRoleNeverGrantsNormalWrite
+RepairResetImpliesCompleteRangeCoverage
+RepairResetImpliesFPlusOneDistinctDomains
+MembershipAloneNeverResetsLossBudget
+ActivationAloneNeverResetsLossBudget
+LocalTargetDurabilityAloneNeverResetsLossBudget
+LossAfterProofCountsAgainstNewWindow
+ClosedRepairResetDoesNotRequireNormalActive
+CurrentNormalWritesRequirePostCasNormalActive
 NoOverlappingPublishedSequence
 AppendIdContentUnique
 OrderedFrontierIsContiguous
@@ -330,11 +429,27 @@ OneOwnerPerSlotGeneration
 NoReuseBeforeDurableGenerationBump
 OldLocatorNeverReadsNewGeneration
 AllocatorAuthorityOrDeviceFailed
+MoveCommitSelectsUniqueAuthority
+UncommittedCopyNeverBecomesAuthoritative
+CommittedMoveSurvivesIndexLoss
+NoFreeBeforeMoveCommitAndReaderDrain
+MoveDoesNotCreateLocalSuccess
 LogicalDeleteIsIrreversible
 FrozenTargetsCoverReplicaAndRepairHistory
 NoWritableRejoinBeforeDeleteCatchup
+DeleteCursorImpliesDurableEffects
+NoCursorAdvanceAcrossUnexplainedGap
+WritableImpliesAllApplicableStreamsCaughtUp
+AssignmentRemovalCannotLoseDeleteObligation
+SnapshotPlusSuffixIsComplete
+OldStorageIncarnationCannotBypassCatchup
 PhysicalDeleteHasTerminalProofs
 InstanceIsolation
+FastPathFailureDoesNotChangeRecoveryTruth
+FallbackStartsAtEarliestUnprovenCoordinate
+RecoveryNeverSkipsHole
+AttemptDeadlineDoesNotProveDataLoss
+FastAndPointOracleEquivalent
 ```
 
 关键自然语言对应：
@@ -345,15 +460,18 @@ InstanceIsolation
 - normal profiled Add ACK 之前有 matching global READY 与 durable local normal activation，legacy Add 不能绕过 route；
 - initial standard metadata 晚于 all-E inactive Profile claim；写期 replacement 按 install/CAS/activate/resend 排序；
 - recovery payload 写入 target 前有 durable RepairIntent，recovery-only/committed-readable 不授予 normal write；
+- bounded range 只有完整 `F + 1` distinct-domain coverage proof 与 conditional completion authority 才 reset loss window；
 - 同一 extent generation 不同时属于两个 ledger instance；
 - ALLOC 未 durable 时 DATA 不可被允许 ACK；
 - FREE 未 durable 时 slot 不可复用；
+- 未 commit move copy 不成为 authoritative；commit 后 index 丢失仍可重建，reader drain 前 source 不 free；
 - takeover ACTIVE 后旧 writer 不能把 sealed prefix 外数据发布为成功；
 - recovery 只发布最大连续可证明前缀；
 - logical delete 后不能重新 open；
-- 返回 Bookie 应用 tombstone 前不能成为 writable。
+- 返回 Bookie 对 finite authoritative stream assignment 无洞 catch up 前不能成为 writable；
+- fast-path 失败必须回退且不越 hole，deadline/cancellation 不得伪造 DATA_LOSS。
 
-## 10. 最低配置矩阵
+## 11. 最低配置矩阵
 
 每个适用模型必须覆盖的最小结构：
 
@@ -369,7 +487,10 @@ permanent failure-domain loss within and beyond F
 detected corruption
 client/coordinator response loss
 allocator generation reuse
+same-Arena relocation, concurrent move and reader pin
 offline Bookie delete and rejoin
+delete stream gap, snapshot and storage incarnation
+range fast-path partial result and point fallback where Model E applies
 ```
 
 并非每个子模型都展开所有变量；例如 Model C 不复制 quorum 全状态，但组合 A+C 必须覆盖 local success 到 distributed ACK 的接口。
@@ -384,19 +505,22 @@ offline Bookie delete and rejoin
 | A-ACT | A | 3/3/2 | install complete, activation missing, legacy Add |
 | A-FD-OK | A | profile-specific | `F` losses across declared domains within budget |
 | A-FD-EXHAUST | A | profile-specific | all valid ACK evidence exhausted |
-| A-REPAIR-LOSS | A | profile-specific | loss, proven repair, second loss |
+| A-REPAIR-LOSS | A | profile-specific | partial/full range coverage, delayed completion, proven repair, second loss |
 | B-2W | A+B | 3/3/2 | two writers + takeover |
 | B-RESP | B | bounded | completion reorder/loss |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
 | C-CKPT | C | local | checkpoint/superblock crash |
+| C-MOVE | C | local | conditional move, response loss, index rebuild, reader drain |
 | D-OFF | D | historical ensembles | offline rejoin |
 | D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery |
 | D-INTENT | A+D | closed fragment | intent, first payload, CAS and delete at every crash boundary |
+| D-STREAM | D | bounded streams | gaps, snapshot+suffix, assignment/incarnation, registration cut |
 | CD-REUSE | C+D | local + cluster | delete, free, ledgerId reuse |
+| E-FALLBACK | E | E > W | partial range, hole, fast budget, crash, point-oracle equivalence |
 
 正式运行前可增加 config，不得删除最低结构。
 
-## 11. 状态空间控制规则
+## 12. 状态空间控制规则
 
 允许：
 
@@ -419,7 +543,7 @@ offline Bookie delete and rejoin
 
 如果状态空间过大，应先缩小数据域但保留协议结构。仍无法 complete 的 config 标为 INCONCLUSIVE，并提供覆盖与资源证据；不能直接排除后宣称 PASS。
 
-## 12. Fairness 与 liveness
+## 13. Fairness 与 liveness
 
 首要 Gate 是 safety。可额外检查以下有界进展属性：
 
@@ -431,7 +555,7 @@ fairness assumptions 必须逐条记录。liveness 未完成不影响 safety cou
 
 `AckedPayloadSurvivesWithinBudget` 只证明 payload evidence survival，不证明继续写可用性、read quorum 可用性、metadata/auth authority 生存或 general E/W/A recovery liveness。超过预算后的 `DATA_LOSS` 是明确 terminal state；没有证据却返回恢复成功仍是 safety violation。
 
-## 13. Trace 对齐
+## 14. Trace 对齐
 
 每个模型 action 应映射到候选实现事件名和测试 fault point。至少产出：
 
@@ -445,7 +569,7 @@ fault injection hook
 
 这样 counterexample 才能转成 Spike A/B 或集成测试，而不是停留在抽象 trace。
 
-## 14. 硬 Gate
+## 15. 硬 Gate
 
 PASS 必须同时满足：
 
@@ -463,7 +587,7 @@ artifact checksum failures                = 0
 
 覆盖统计至少包含 generated states、distinct states、queue depth、diameter、runtime、worker count 和 peak memory。
 
-## 15. 立即停止条件
+## 16. 立即停止条件
 
 任一 safety invariant 出现 counterexample：
 
@@ -476,7 +600,7 @@ artifact checksum failures                = 0
 
 checker internal error、OOM、timeout 或 incomplete exploration 是 INCONCLUSIVE，不是 PASS。
 
-## 16. 必交 artifacts
+## 17. 必交 artifacts
 
 ```text
 manifest.json
@@ -500,7 +624,7 @@ README.md
 - 是否有 counterexample；
 - 与 BtrLog 模型的差异，特别是本模型没有 blob store。
 
-## 17. 结果解释
+## 18. 结果解释
 
 - PASS：在锁定的有界配置中未找到 counterexample，可支持 RFC 继续接受评审。
 - FAIL：至少一个真实 counterexample；相关 RFC/Segment 路径保持 P0 Blocked。

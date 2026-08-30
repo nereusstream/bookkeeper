@@ -91,6 +91,7 @@ NVMe device or WalArena
 ALLOC
 ALLOC_POOL
 LEDGER_PROFILE_BIND
+MOVE_COMMIT
 DELETE_TOMBSTONE
 FREE_AND_BUMP
 CHECKPOINT_BEGIN
@@ -124,6 +125,25 @@ allocator state = latest valid AllocatorCheckpoint
 data extent header 可以用于交叉校验和诊断，但不能在 control authority 丢失时通过猜测空闲空间恢复 writable 服务。
 
 如果 checkpoint A/B 和必要 control-log suffix 均无法验证，该设备进入 FAILED/QUARANTINED；不得扫描 data arena 后继续分配。
+
+### 5.2 Relocation selection authority
+
+首版 compaction relocation 只支持 old/new allocation 同属一个可线性化 `ArenaControlLog` authority domain。跨 Arena/device relocation 涉及两个独立 authority，首版明确 unsupported；若未来支持，必须另行评审，不能把单边 `MOVE_COMMIT` 扩展成隐式分布式事务。
+
+`MOVE_COMMIT` 是 derived locator 从 old location 切到 new location 的唯一 durable authority。它是条件化 transition，语义至少绑定：
+
+```text
+ledgerInstanceId
+logicalEntryOrBoundedRangeIdentity
+expectedOldLocationAndGeneration
+newLocationAndGeneration
+payloadDigest
+moveOperationIdentityAndGeneration
+```
+
+同一 expected predecessor 只能有一个 winning successor。无 durable `MOVE_COMMIT` 时 old location 仍 authoritative；new copy 即使 payload durable 或 derived locator 已更新，也只是可证明后才能清理的 orphan。durable commit 后新 lookup 必须走 new location；new payload digest/identity 无法验证时 fail closed，old copy 不得自行夺回 authority。
+
+`MOVE_PREPARE` 可以作为 orphan discovery 或 QoS 优化，但不是 safety 必需。exact record bytes、checksum、per-entry/range packing 与 batch 大小保持开放。
 
 ## 6. 分配与 ACK 顺序
 
@@ -282,9 +302,21 @@ FREE_AND_BUMP {
 - logical tombstone 立即让目标 ledger record 不可见；
 - dead accounting 在 authority 下可重建；
 - block 未全死时不执行 slot free；
-- compaction 复制 live record 时使用新的 allocation/generation，并在新副本 durable 后原子切换 locator authority。
+- compaction 复制 live record 时，必须按以下顺序执行：
 
-compaction locator 切换的完整协议仍是开放项。
+```text
+1. durable ALLOC/ALLOC_POOL for the new allocation
+2. copy full payload identity and make new DATA durable
+3. append conditional MOVE_COMMIT(expectedOld -> new)
+4. make MOVE_COMMIT durable                 # authority cutover
+5. publish/rebuild derived locator to new
+6. block new old-location pins; drain existing readers/pins
+7. only when every live record in the old allocation is moved/dead:
+   append durable FREE_AND_BUMP
+8. expose the bumped generation
+```
+
+一个 record move 完成不等于整个 shared block 可 free。`MOVE_COMMIT` 不产生新的 BookKeeper local success、AQ 或 ACK，只保持既有 payload authority。多个有界 move record 可以共享 control-log group-commit barrier；locator cutover 必须晚于覆盖自身的 durability completion，不要求每个 moved entry 独立 control fsync。
 
 ## 11. Allocator checkpoint 与 rotation
 
@@ -303,6 +335,8 @@ control-log 旧段的唯一合法回收顺序：
 ```
 
 如果步骤中途 crash，restart 必须选择最后一个完整、可验证且依赖 suffix 仍存在的 generation。不能只按最大 generation number 选择损坏 checkpoint。
+
+checkpoint 必须包含所有仍有效 relocation cutover，或保留足以唯一重建其 move chain 的 control-log suffix。rotation 不得删除唯一 `MOVE_COMMIT` authority；move replay 只能沿条件化 predecessor 和 operation generation 前进，不能按最大物理 generation、mtime 或 derived locator 猜测 winner。
 
 ## 12. Restart 与 crash consistency
 
@@ -326,7 +360,8 @@ control-log 旧段的唯一合法回收顺序：
 - DELETE_TOMBSTONE 前后；
 - reader drain 与 FREE_AND_BUMP 前后；
 - checkpoint data、commit、superblock switch 和 old-log reclaim 各边界；
-- compaction copy 与 locator switch 各边界。
+- compaction new allocation/data durability、`MOVE_COMMIT` append/durability/response loss、locator publish、new-pin 阻断、reader drain 和 old free 各边界；
+- 同一 predecessor 的并发 move、move chain、group-commit torn tail、new payload digest mismatch，以及每个边界删除 derived index 后的重建。
 
 ## 13. 内存与空间模型
 
@@ -367,13 +402,13 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - 不参与 payload ACK authority；
 - 不参与 allocator ownership authority；
 - key/value 带 format、instance 和 generation；
-- 全库删除后可从 control log + data arena 重建；
+- 全库删除后可从 control log + data arena 重建；relocation winner 只能由 durable `MOVE_COMMIT` chain 决定；
 - stale generation locator 在读取时被再次校验；
 - rebuild/compaction 有 foreground QoS 和 admission control。
 
 ## 16. 多设备与设备失败
 
-每个 device/WalArena 有独立 control authority 和 generation namespace。跨设备 ledger 可以有多个 extent locator，但任何单个 allocation 只由一个 arena 管理。
+每个 device/WalArena 有独立 control authority 和 generation namespace。跨设备 ledger 可以有多个 extent locator，但任何单个 allocation 只由一个 arena 管理。首版 compaction 只能在同一 Arena authority domain 内 relocation；device evacuation/cross-Arena move 保持 unsupported，不能由单边 `MOVE_COMMIT` 推断安全。
 
 设备出现以下任一情况时进入 FAILED/QUARANTINED：
 
@@ -395,6 +430,9 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 7. derived index 损坏或删除不改变 payload 恢复结果。
 8. 100k idle ledger 不产生 per-ledger extent 或 block-buffer reservation。
 9. shared slab 删除在 physical reclaim 前仍保持目标 record 不可见。
+10. 未 commit 的 relocation copy 永远不能成为 authoritative；durable `MOVE_COMMIT` 在 derived index 丢失后仍唯一选择 new location。
+11. old allocation 的复用晚于 move cutover、new-pin 阻断、reader drain、whole-allocation reclaimability 与 durable `FREE_AND_BUMP`。
+12. relocation 不创造新的 local success、AQ 或 ACK。
 
 ## 18. 接受 Gate
 
@@ -404,7 +442,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - [Spike C](spikes/SPIKE-C-no-object-tla.md) 的 Model C 无 counterexample；
 - on-disk framing、checksum、alignment 和 compatibility version 冻结；
 - checkpoint/control-log recovery 可由自动 crash matrix 重放；
-- cold/hot promotion、lifetime class 和 compaction locator switch 有确定合同；
+- cold/hot promotion、lifetime class 和同 Arena `MOVE_COMMIT` relocation 合同通过 crash、并发 move、reader pin 与 index rebuild 测试；
 - 证明 shadow writer 可以与 Classic authority 隔离，失败不会影响 Classic ACK。
 
 即使 Spike 通过，也只解锁 shadow implementation。Segment 成为 ACK authority 仍需要 [RFC-0005](RFC-0005-segment-bookie-state.md) Accepted、独立 canary Gate、回滚合同和 RFC-0001 安装/activation 证据。
@@ -415,9 +453,9 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - `ALLOC_POOL` 下放 ownership 的粒度与 crash 回收；
 - exact block/record bytes、checksum 和 torn-write detector；
 - direct I/O API、alignment、buffer ownership 与 kernel/filesystem 约束；
-- shared slab lifetime classification 和 compaction locator switch；
+- shared slab lifetime classification、`MOVE_COMMIT` exact packing/batching、可选 `MOVE_PREPARE` 与 orphan GC；
 - hot promotion/demotion 是否单向以及阈值；
-- multi-device placement、device evacuation 和 rebuild；
+- multi-device placement、device evacuation、cross-Arena relocation 和 rebuild；
 - delete authorization receipt 的本地格式；
 - metadata memory accounting 的实现与观测；
 - on-disk format upgrade 和 downgrade 策略。

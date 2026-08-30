@@ -116,6 +116,8 @@ ProfileDescriptor {
     payloadFormat
     durabilityMode
     quorumProfile
+    permanentLossBudgetF
+    failureDomainPolicyIdentityOrGeneration
     indexProfile
     sequenceProfile
     deleteProfile
@@ -150,6 +152,7 @@ RuntimePolicy {
 - 相同 request ID 携带冲突内容必须失败；
 - secret 或可离线验证的 credential material 不得进入普通日志、公开 metadata、receipt dump 或诊断输出；proof/certificate 是否可公开由后续冻结的 activation/auth 机制决定；
 - 只有确实影响跨实现 payload 解释、durability 或 recovery 正确性的 limit 才能进入 descriptor；`maxInflightEntries/maxInflightBytes` 等通常属于 runtime policy。
+- `permanentLossBudgetF` 与 declared failure-domain policy 是 immutable recovery safety contract：normal ACK 必须覆盖至少 `F + 1` 个 distinct declared domains；RFC-0004 只有在 bounded range 完整恢复到同等 coverage 并发布强 completion proof 后才能重置该 range 的 loss window。
 
 规范编码、hash 算法、受保护 `authBinding`、首版是否允许 key rotation，以及最终字段分类是 RFC 接受前必须关闭的开放项。不能在安全评审前把可离线验证的 `masterKeyDigest` 暴露为公开 descriptor 字段。
 
@@ -424,6 +427,7 @@ placement 只把满足 descriptor mandatory requirements 的 Bookie 作为候选
 10. Bookie restart 后的接受集合不能大于 crash 前由 durable install/activation 授权的集合。
 11. metadata watch/cache 失效不能破坏上述不变量。
 12. 普通 Add 热路径不依赖远程 MetadataStore I/O 或逐请求重型 proof 验证。
+13. failure-domain policy generation 或 domain identity 不能在 repair proof 中被重新标注以伪造 `F + 1` coverage。
 
 ## 14. Spike 与接受 Gate
 
@@ -456,5 +460,6 @@ RFC 进入 Accepted 前必须：
 - ledgerId reuse 最终策略，以及 instance 分配 authority；
 - profiled opcode/version、unknown operation 行为与 exact error mapping；
 - 哪些 limit 影响跨实现安全语义、哪些只属于 runtime admission policy。
+- failure-domain exact定义、domain identity来源、默认 `F`、policy evolution 与 compatibility rules。
 
 这些问题关闭并通过 Gate 前，本 RFC 不得标为 Implementation Ready。

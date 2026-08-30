@@ -147,7 +147,7 @@ fencing/recovery state
 - normal read 可以在现有 BookKeeper read contract 下尽早返回；
 - recovery 必须收集足以证明 entry 已达到可恢复条件或不可继续的证据；
 - missing bitmap 是传输格式，不是 quorum proof；
-- checksum/instance 冲突必须升级为 corruption/recovery error，不能任取一份。
+- 单副本 checksum/identity corruption 只使该 evidence 失效，必须继续向其他合法 replica 取证；只有 valid evidence exhausted 或出现不可调和的 identity/quorum-proof conflict 时才进入 terminal corruption/DATA_LOSS，不能任取一份。
 
 具体 merge 算法必须在实现前单独给出伪代码、复杂度和 Model E；本文不以“取多数最长 tail”代替一般证明。
 
@@ -183,7 +183,7 @@ TailSummary 的定位：
 - 用于快速选择读取范围和发现明显落后副本；
 - 单副本 summary 不是 AQ 或最大连续恢复前缀的证明；
 - summary 必须绑定 instance/generation；
-- 丢失或损坏时 fallback 到权威 scan；
+- 丢失、损坏、stale 或 unsupported 时 deterministic fallback 到权威 point-read/evidence scan；
 - general E/W/A 下仍需按 write set 合并证据。
 
 如果 summary 本身进入 quorum proof，必须另行冻结更新 durability、单调性和 ensemble-change 合同。
@@ -201,9 +201,25 @@ TailSummary 的定位：
 7. 更新/close ledger；
 8. 生成 immutable recovery receipt。
 
-所有步骤必须有 count、bytes、wall-clock 和 retry 上限。超过上限时返回明确的 non-promotable/需要人工处理状态，不能假装快速恢复完成。
+所有步骤必须有 count、bytes、wall-clock 和 retry 上限，但必须区分 fast-path 局部预算与整个 attempt 的 deadline/cancellation。fast-path budget 耗尽触发 deterministic fallback，不改变 recovery truth；authoritative fallback 临时不可用时返回 retryable/deferred 语义；caller deadline/cancellation 只使本次 attempt incomplete，不能单独证明 ledger 永久 non-promotable 或 DATA_LOSS。只有 valid evidence exhausted 或不可调和的 proof conflict 才能进入 terminal quarantine/DATA_LOSS。
 
-### 7.1 BatchRecoveryAdd 候选
+### 7.1 Deterministic point-recovery fallback
+
+range fast path 必须冻结一个 immutable `RecoveryContext`，至少绑定 ledger instance、sealed/fenced metadata version/digest、ensemble history、E/W/A 与 write-set mapping、fence/recovery generation，以及 RepairIntent/delete control generation。unsupported capability、TailSummary stale/invalid、partial range response 或 fast-path count/bytes/retry budget exhaustion 时：
+
+```text
+1. independently validate every returned coordinate/evidence
+2. identify the earliest unresolved coordinate
+3. resume with bounded-concurrency point-read/evidence merge
+4. use idempotent single-entry recovery-add for unresolved entries
+5. never publish a frontier across an earlier hole
+```
+
+同一 RecoveryContext 下的 later verified evidence 可以在有界内存内复用，也可以安全重读；本地未缓存 proof 不能被解释为 quorum absence。authority generation 变化时必须重读并证明 context 等价，或在新 generation 下重新开始。
+
+continuation、bitmap 和 proof cache 默认可以是 bounded volatile state。coordinator crash 后从 durable RepairIntent 与 immutable RecoveryContext 重读；不要求 per-entry MetadataStore progress、per-entry durable checkpoint 或 per-entry control fsync。若 benchmark 证明 operation-scoped checkpoint 必需，它只能是绑定 RepairIntent generation/context digest 的可丢弃优化，exact encoding/durability 保持开放。
+
+### 7.2 BatchRecoveryAdd 候选
 
 BatchRecoveryAdd 只优化传输与本地 I/O，不改变每个 entry 的 recovery 权限和幂等语义。
 
@@ -215,6 +231,7 @@ BatchRecoveryAdd 只优化传输与本地 I/O，不改变每个 entry 的 recove
 - fencing/master-key/recovery flag 与现有单 entry recovery 等价；
 - request/response 有硬资源上限；
 - 旧 Bookie 不支持时回退到现有单 entry path。
+- partial success 或 response loss 按 entry 验证并精确重试；最早 unresolved coordinate 阻止 frontier，不能把 batch 当作原子或跳过 hole。
 
 不在正式模型和兼容测试前宣称 batch 是原子操作。
 
@@ -273,13 +290,15 @@ RepairIntent {
 7. transition target to COMMITTED_REPLICA/READABLE
    - close/revoke RECOVERY_ONLY
    - do not grant normal writable authority
-8. durable mark intent COMMITTED
+8. durable mark replica/membership result COMMITTED
 9. compact intent only after delete-history or cleanup authority safely supersedes it
 ```
 
 CAS response loss 必须通过重读 exact fragment/replacement mapping 解析，不能盲选新 target。closed/historical fragment 的 committed target 不得 normal-active；只有 target 另行成为 current writable fragment member，并满足 RFC-0001 写期 replacement 的 post-CAS membership、fence 和 normal activation 合同，才能独立获得 normal writable authority。
 
-Intent 生命周期语义至少区分 PREPARED/RECOVERY_AUTHORIZED、COMMITTED、ABORTED 或 ORPHAN_CLEANUP_PENDING。CAS 前已经接收 payload 的 intent 不得直接删除；COMMITTED 仍保留 old member/target history；只有这些身份已进入另一个不会丢失的 durable delete-history authority，或 target-local durable cleanup proof 已成立，才能 compact。“tombstone”不能把 target 从 delete enumeration 中移除。
+Intent 生命周期语义至少区分 PREPARED/RECOVERY_AUTHORIZED、replica/membership COMMITTED、ABORTED 或 ORPHAN_CLEANUP_PENDING。CAS 前已经接收 payload 的 intent 不得直接删除；COMMITTED 仍保留 old member/target history；只有这些身份已进入另一个不会丢失的 durable delete-history authority，或 target-local durable cleanup proof 已成立，才能 compact。“tombstone”不能把 target 从 delete enumeration 中移除。
+
+replica/membership `COMMITTED` 只证明 copy 与 exact ensemble mapping 已发布，默认不等于 permanent-loss budget 已重置。只有它同时满足下一节的完整 range coverage proof 时，才能承担 `LOSS_BUDGET_RESET_PROVEN` 语义；否则两个事实必须分离，不能因状态名相同而混用。
 
 物理上是否复用 underreplication namespace 保持开放，但语义 owner 固定为：
 
@@ -291,7 +310,45 @@ Intent 生命周期语义至少区分 PREPARED/RECOVERY_AUTHORIZED、COMMITTED�
 
 新增成本严格限定为每 repair operation/fragment 的 intent create CAS、一次 target recovery-only control durability、现有 ensemble CAS 与 intent completion CAS。recovery payload 热路径不增加 per-entry metadata round trip、per-entry control fsync 或 per-entry intent update。
 
-### 9.2 LedgerDeleteManifest
+### 9.2 Range-scoped permanent-loss budget reset
+
+Round 1 的 `F` 合同按 Profile 声明的 failure-domain policy 生效。repair/re-replication 只能对一个 bounded、immutable fragment/range 重置 loss window，不能把整个 ledger 无条件清零。proof context 至少绑定：
+
+```text
+ledgerInstanceId
+sealed/fenced metadata version or digest
+ensemble and write-set history
+Profile failure-domain policy identity/generation
+repair operation/generation
+coverage start/end cut
+observed loss generation at proof cut
+```
+
+该 range 中每个 ACK-eligible entry 都必须有匹配 payload/identity evidence，且在 proof cut 上重新具备至少 `F + 1` 个 distinct declared permanent-failure domains 的 valid durable evidence；任何 hole、domain coverage 不足或不可验证 domain identity 都禁止 reset。membership CAS、target local durability、`NORMAL_ACTIVE` 或 generic `COMMITTED` 任一单独都不是 reset proof。
+
+最低顺序：
+
+```text
+1. create durable RepairIntent and freeze bounded range/context
+2. grant target RECOVERY_ONLY
+3. stream and validate every required entry with bounded memory
+4. make replacement payload/identity durable
+5. prove complete per-entry F+1-domain coverage at the cut
+6. CAS exact standard ensemble replacement
+7. transition target role for its actual purpose
+8. CAS durable repair completion conditioned on the same
+   membership mapping, control/repair generation,
+   failure-domain policy generation and observed loss generation
+   -- reset for this exact range linearizes here --
+```
+
+closed/historical target 不需要 normal activation；其 strong completion receipt 在证明完整 range、exact mapping 与 `F+1` coverage 后可以 reset。current writable replacement 若要承接未来 normal Adds，必须另行 post-CAS `NORMAL_ACTIVE`；这只授权未来写入，不能替代 CAS 前已 ACK prefix 的 coverage proof。写期 `install → LAC+1 CAS → activate → resend` 不复制历史 fragment，因此绝不能自行清零旧 loss window。
+
+completion authority 必须幂等、可重放，并绑定 RepairIntent、range/cut、metadata CAS result、coverage/domain digest 或等价 receipt、policy/loss generation 与 completion generation。proof cut 后的新永久 loss 进入新 window；迟到旧 response 或 overlapping repair 不能抹掉它。overlapping range 必须由 control generation 串行或单调合并，不得重复“减掉”loss。
+
+该 proof 按 operation/range 持久化；允许 bounded-memory streaming coverage、一个 completion CAS 与相邻同 generation interval 的安全压缩，不要求 stop-the-world、全 ledger 重复制、per-entry MetadataStore update、per-entry control fsync 或无界 receipt history。exact receipt encoding、domain identity 来源、loss-generation namespace 与 interval compaction 保持开放。
+
+### 9.3 LedgerDeleteManifest
 
 删除需要一个集群级协调器。逻辑 manifest：
 
@@ -413,6 +470,8 @@ DELETE_LEDGER_INSTANCE {
     ledgerInstanceId
     deleteRequestId
     deleteEpoch
+    deleteDeliveryStreamIdentityAndGeneration
+    deleteJournalSequence
     sealedMetadataVersion
     ensembleHistoryDigest
 }
@@ -426,33 +485,60 @@ Bookie 必须：
 4. drain active reader、zero-copy pin 和 cache reference；
 5. 对 Classic/Direct 路径执行对应清理；
 6. 对 Segment 路径按 RFC-0003 执行 invalidate 与 durable free/generation bump；
-7. 持久化 `localDeleteAppliedThrough` 或等价 watermark；
-8. 返回绑定 local generation 的 durable receipt。
+7. 持久化绑定 Bookie/storage incarnation、stream 与 sequence 的 local effect/receipt；
+8. effect durable 后才允许推进对应 per-stream cursor；
+9. 返回绑定 local generation 与 delivery coordinate 的 durable receipt。
 
 重复请求幂等。相同 request 不同 instance/digest/epoch 必须冲突。
 
-## 12. 离线 Bookie 与 rejoin barrier
+## 12. Delete delivery stream 与 rejoin barrier
 
-Bookie 重新注册为 writable 前必须证明：
+`deleteEpoch` 只表示单个 ledger instance 的 delete fencing/version；它不是跨 ledger 的 Bookie catch-up coordinate。delete delivery progress 使用独立、stream-scoped authority：
 
 ```text
-localDeleteAppliedThrough >= clusterRequiredDeleteEpoch
+DeleteDeliveryAssignment {
+    assignmentGeneration
+    bookieStableIdentity
+    storageOrDeviceIncarnation
+    applicableStreams[]
+    requiredThroughByStream
+}
+
+DeleteStreamCoordinate {
+    streamIdentity
+    streamGeneration
+    deleteJournalSequence
+}
 ```
+
+物理 schema 保持开放，但以下语义锁定：
+
+- 每个 committed stream 的 sequence 单调、无洞；cursor 不能越过 unexplained sequence；
+- cursor 绑定 Bookie stable identity、storage/device incarnation、stream identity/generation 和 applied-through sequence；
+- cursor 推进到 `N` 意味着 `<= N` 的每个 event 都已 durable 应用 delete/tombstone/free 所需 effect，或由可验证 routing/membership proof 判定为不适用；
+- 新磁盘、重装或新 storage incarnation 不能继承旧 cursor，只能 verified bootstrap，或提供不可逆 wipe/decommission proof；
+- cluster-authoritative assignment 给出有限的 applicable stream set 与 registration required-through；Bookie 不能只报告自己知道的 stream；
+- 每 Bookie/storage incarnation 的 applicable stream 数有 manifest-locked finite maximum，超限或 assignment 无法证明时 fail closed；禁止每 ledger 一个长期 stream；
+- ordinary ensemble replacement 既不删除旧节点数据，也不阻止旧 incarnation 返回，因此不能替代 decommission/wipe proof。
+
+snapshot 必须绑定 stream identity/generation、snapshot generation、covered-through sequence、assignment/membership generation 与内容/effect proof digest。bootstrap 只能是 verified snapshot + complete no-hole suffix；journal prefix 只有在所有仍支持的 bootstrap 路径都有有效 snapshot 或 terminal decommission proof 后才能 compact。
 
 候选启动流程：
 
 ```text
 1. register as RECOVERING or READ_ONLY
-2. fetch unapplied delete manifests/tombstones
-3. apply local deletes and generation bumps
-4. persist applied watermark
-5. reconcile AutoRecovery/device state
-6. only then register writable
+2. fetch verified assignment generation and required-through vector
+3. for each applicable stream, verify local cursor or snapshot
+4. apply snapshot and complete suffix without sequence holes
+5. durably apply each effect before advancing its stream cursor
+6. reconcile RepairIntent and device state
+7. registration CAS validates the same assignment generation/cursors
+8. only then become writable
 ```
 
-长期离线节点带着旧 instance 数据直接返回 writable 是 safety violation。
+writable registration 必须与新 delete publication 有明确线性化 cut：delete 先赢则进入 required-through；registration 先赢则后续 delete 将该 Bookie 视为在线适用 target。不能依赖 watch callback 时序。local cursor/snapshot 丢失、suffix 缺口或 snapshot generation/digest 无法验证时，Bookie 保持 RECOVERING/READ_ONLY。
 
-集群必须定义 required watermark 的 authority、manifest pagination、丢失历史补偿和 bootstrap 行为。
+exact topology 继续 OPEN：可以是 per-Bookie inbox、固定数量 global shards、hierarchical snapshot 或等价 bounded 方案。不要求全局单 sequence；共享 shard 中的 non-applicable event 必须有可验证 routing proof，不能无证明跳过。
 
 ## 13. API 完成语义
 
@@ -497,6 +583,14 @@ logical tombstone 是最终 authority。已打开 reader 在 local delete 前被
 
 所有操作绑定 `ledgerInstanceId`。新 instance 不能因旧 tombstone 被误删，旧 locator 不能因 ledgerId 相同读取新数据。
 
+### 14.5 Registration vs delete stream publication
+
+registration CAS 必须校验相同 assignment generation、storage incarnation 与 required-through vector。delete event 先于 registration cut 提交时必须进入 required-through；registration 先赢时，后续 delete 通过在线 target gate 正常投递。assignment watch、poll 或 response 到达顺序不构成线性化 authority。
+
+### 14.6 Repair completion vs permanent loss
+
+range-scoped completion CAS 必须条件化校验相同 failure-domain policy generation、observed loss generation、membership mapping 与 coverage cut。新 permanent loss 若在 proof cut 后发生，必须计入新 window；旧 completion response 迟到不能把该 loss 清零。delete 先赢时 repair 不得 completion；repair completion 先赢时 delete history 保留其 receipt/target。
+
 ## 15. Tombstone retention
 
 retention 至少覆盖：
@@ -519,6 +613,9 @@ all historical targets acknowledged or durably decommissioned
 4. TailSummary 失效时回退，不伪造最大恢复前缀。
 5. BatchRecoveryAdd 部分失败可精确重试，不引入不同 payload 覆盖。
 6. recovery 只发布最大可证明连续前缀。
+7. fast-path 失败或局部预算耗尽从 earliest unresolved coordinate 回退，不改变全 point-read oracle 的结果。
+8. deadline/cancellation 只终止 attempt；单 replica corruption 在其他 valid evidence 存在时不能伪造 DATA_LOSS。
+9. loss-budget reset 只覆盖有完整 `F+1` distinct-domain evidence 的 bounded range；membership、activation 或 local durability 单独都不能 reset。
 
 ### 16.2 Delete
 
@@ -532,6 +629,9 @@ all historical targets acknowledged or durably decommissioned
 8. PHYSICALLY_DELETED 只在每个 target 有 durable terminal proof 时成立。
 9. target 的第一份 durable recovery payload 晚于可由 delete freeze 枚举的 RepairIntent。
 10. recovery-only authority 永不隐式授予 normal writable authority。
+11. delete cursor 只在对应 durable effect 或可验证 non-applicability 后推进，且不能跨越 stream gap。
+12. writable registration 意味着该 storage incarnation 对 cluster-authoritative finite assignment 的全部 required-through stream 已 catch up。
+13. snapshot + suffix 必须完整；旧 storage incarnation 不能借新 identity 或 ordinary ensemble replacement 绕过 catch-up。
 
 ## 17. Model D/E 最低场景
 
@@ -543,6 +643,12 @@ Model D：
 - ensemble CAS response loss 与 intent COMMITTED response loss；
 - 部分 Bookie 收到请求、response loss、协调器 crash；
 - Bookie 长期离线后 rejoin；
+- 两个 delete stream 交错、middle sequence 缺失、duplicate/same-sequence conflict；
+- cursor-before-effect 负向场景与 cursor response loss；
+- snapshot build/apply/compact 各 crash boundary、snapshot+suffix gap；
+- assignment add/remove 与 registration/delete publish 竞争；
+- storage incarnation replacement、极晚 rejoin 与 decommission/wipe proof；
+- applicable stream maximum 超限时 fail closed；
 - local tombstone durable 前后 crash；
 - reader drain、free、generation bump 各边界；
 - ledgerId reuse/new instance；
@@ -556,6 +662,11 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - partial range response、missing bitmap 和 timeout；
 - TailSummary stale/corrupt；
 - batch recovery partial success；
+- unsupported/partial/fast-budget fallback 与 earliest unresolved hole；
+- fallback 期间 coordinator crash、delete/control generation 变化；
+- single corrupt replica、irreconcilable conflict 与 evidence exhausted；
+- cancellation/deadline 不产生永久 DATA_LOSS；
+- fast+fallback 与全 point-read oracle 等价；
 - response loss 和 recovery coordinator crash。
 
 模型不能依赖 durable blob store。
@@ -568,9 +679,10 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - streaming continuation、per-entry result、limits 和 cancellation wire contract 冻结；
 - normal read 与 recovery evidence 的成功条件分别定义；
 - general E/W/A merge 有伪代码、复杂度、Model E 和故障测试；
-- RepairIntent identity、retention、target discovery 与 delete/repair CAS 线性化点冻结；
+- deterministic fallback 的 RecoveryContext、earliest-unresolved 与 outcome class 有 executable tests；
+- RepairIntent identity、retention、target discovery、range-scoped `F+1` coverage 与 delete/repair/loss-generation CAS 线性化点冻结；
 - DeleteManifest schema、target freeze 和 CAS 线性化点冻结；
-- offline Bookie rejoin watermark 有集群级端到端测试；
+- bounded stream assignment、storage incarnation、snapshot+suffix、per-stream cursor 与 registration cut 有集群级端到端测试；
 - logical/physical API completion 可分别观测；
 - Model D 无 safety counterexample；
 - Segment local reclaim 与 RFC-0003 generation tests 联动通过。
@@ -583,10 +695,13 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - continuation token 的签名、过期和跨 Bookie 行为；
 - general E/W/A recovery merge 的精确算法；
 - TailSummary 是否仅为 hint，还是进入未来 quorum proof；
-- recovery scan 的 hard bounds 和超限运维流程；
+- recovery fast-path/global attempt 的 hard bounds、outcome exact error mapping 与超限运维流程；
+- volatile proof cache 与可选 operation-scoped checkpoint 的 exact encoding/durability；
 - Delete Coordinator 的部署、leader election 和 manifest namespace；
 - RepairIntent exact path、child enumeration/watermark/index、状态名和 compaction encoding；
+- repair coverage receipt encoding、failure-domain identity/policy generation、loss-generation namespace 与 overlapping interval compaction；
 - recovery-only local record packing、BatchRecoveryAdd wire schema 与 batch limits；
+- delete stream topology/count、assignment store、event batching、snapshot encoding/proof 与 journal compaction；
 - decommission/unrecoverable 的授权流程和 durable proof；
 - maximum rejoin window 与 compact tombstone 生命周期；
 - Classic/Direct/Segment reader drain 的统一 API；

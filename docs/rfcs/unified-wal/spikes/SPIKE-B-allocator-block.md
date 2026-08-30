@@ -67,6 +67,7 @@ artifact output directory
 - locator 的 generation + ledger instance 校验；
 - durable `DELETE_TOMBSTONE`；
 - durable `FREE_AND_BUMP`；
+- same-Arena conditional durable `MOVE_COMMIT`；
 - Bookie/shard restart replay；
 - 100k idle ledger state；
 - 可删除并重建的最小 derived index。
@@ -90,6 +91,9 @@ every local-success record has durable allocation and valid payload
 no locator crosses ledger instance or generation
 free list excludes every still-live allocation
 checkpoint + suffix replay is deterministic
+every committed move chain has one unique authoritative successor
+uncommitted relocation copy never becomes authoritative
+old allocation is not reused before move cutover and reader drain
 ```
 
 checker 与在线 allocator 使用不同代码路径或至少独立解析实现，避免同一 bug 自证正确。
@@ -152,9 +156,20 @@ Oracle：恢复的 ledger/entry/locator 集合与权威 payload 一致；stale g
 
 ### B10：Compaction copy
 
-对部分死亡 shared block 执行 compact，在新 allocation、copy、durability、locator switch、old free 各点 crash。
+对部分死亡 shared block 执行 same-Arena compact，在新 allocation、copy、DATA durability、conditional `MOVE_COMMIT` append/durability/response loss、locator publish、new-pin 阻断、reader drain、old free 各点 crash。
 
-Oracle：每个 live record 至少有一个权威副本且最多一个 active locator；旧 block 只在新 locator durable/authoritative 后回收。
+必须覆盖：
+
+- 同一 predecessor 的两个 concurrent moves；
+- move chain `A -> B -> C`；
+- batch/group-commit torn tail；
+- new payload digest mismatch；
+- 每个边界删除 derived index 后重建；
+- 只迁移部分 records 时尝试 whole-block free；
+- old reader/pin 跨越 cutover；
+- checkpoint 覆盖/未覆盖 `MOVE_COMMIT` 时 rotation crash。
+
+Oracle：无 commit 时 old authoritative、new copy 只是 orphan；durable commit 后 new authoritative 且 index 可重建；同一 predecessor 只有一个 winning successor；每个 live record 至少一个权威副本且最多一个 active locator；old block 只有在全部 live records moved/dead、new pin 被阻断、既有 reader drain 和 durable free 后回收。relocation 不新增 local-success fact。
 
 ## 7. 资源规模场景
 
@@ -238,6 +253,7 @@ control-log bytes
 checkpoint bytes
 data padding bytes
 compaction copied bytes
+move control-log bytes and durability barriers
 dead but unreclaimed bytes
 dedicated tail waste
 ```
@@ -252,6 +268,7 @@ dedicated tail waste
 - process kill；
 - simulated torn sector/block where injector supports；
 - response/local-success publication loss；
+- `MOVE_COMMIT` durability/response loss、concurrent move 与 reader-pin cutover；
 - repeated restart；
 - fixed-seed random operation/fault sequences。
 
@@ -279,6 +296,11 @@ reader-pinned slot reused                      = 0
 checkpoint replay authority divergence         = 0
 authority-loss device resumed writable         = 0
 derived-index rebuild changed payload facts    = 0
+uncommitted move copy became authoritative     = 0
+committed move lost after index deletion       = 0
+multiple winning successors per predecessor    = 0
+source freed before move commit/reader drain    = 0
+move created new local-success fact             = 0
 unreplayable executed failure                  = 0
 ```
 
