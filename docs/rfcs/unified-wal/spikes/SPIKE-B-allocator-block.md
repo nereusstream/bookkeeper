@@ -2,7 +2,7 @@
 
 > 状态：**Planned / Not Executed**<br>
 > 对应 RFC：[RFC-0003](../RFC-0003-segment-storage-allocator.md)<br>
-> 性质：否证型；PASS 最多解锁 Segment shadow implementation
+> 性质：否证型；PASS最多解锁不会污染Classic cohort的isolated/discardable shadow prototype，不解锁live shadow
 
 ## 1. 要回答的问题
 
@@ -33,12 +33,13 @@ sourceCommit
 RFC0003Revision
 RFC0005Revision
 prototypeCommit
-supported stock old Bookie commits and exact built artifacts
-Bookie/storage compatibility-fence candidate and bytes
+supported stock old Bookie commits/exact built artifacts/startup modes/tools
+sameScopeCandidate=BKPF1 metadata/local Cookie sentinel exact bytes
+newScopeFallback=BookieId/roots/incarnation/OS-service-credential-ACL manifest
 Cookie/layout/version and auto-stamp policy
 storage incarnation/device-manifest schema
 Arena superblock/mandatory-feature/migration schema
-registration readiness/CAS adapter revision
+persistent ProfileRegistrationStore + ephemeral registration adapter revision
 migration/rollback tooling revision
 hardwareHostId
 CPU and NUMA topology
@@ -68,8 +69,10 @@ artifact output directory
 必须实现真实可崩溃恢复的：
 
 - superblock A/B；
-- RFC-0005 candidate Bookie/storage compatibility fence located on an old-binary mandatory pre-replay path；
+- Round 7 `BKPF1` metadata/local Cookie sentinel candidate及atomic local publication；same-scope仍BLOCK，原型结果不能写成accepted format；
+- new BookieId/new journal/ledger/index/Arena roots/new incarnation/new OS-service credential/ACL scope fallback，且旧service无法打开或写新scope；
 - storage incarnation、required-device manifest、migration generation与versioned registration readiness；
+- compatibility hook位于`EmbeddedServer`创建任何可能触碰Profile/Segment storage的component之前；
 - `ArenaControlLog`；
 - allocator checkpoint A/B 与 rotation；
 - `ALLOC/ALLOC_POOL`；
@@ -243,15 +246,15 @@ total ledger metadata resident memory   <= 128 MiB per Bookie
 
 ### B14：Stock old binary pre-replay downgrade fence
 
-步骤：用manifest锁定的真实stock old binaries打开分别包含compatibility-fence candidate、仅Cookie version bump、仅Cookie optional property、仅new superblock/file、仅unknown negative Journal meta-entry、仅registration property的storage scope；覆盖正常启动、data-integrity Cookie auto-stamp、Journal replay和writable registration探针。
+步骤：用manifest锁定的每个真实stock old binary/release/commit和启动模式/tool/storage-expansion入口，打开分别包含metadata/local `BKPF1` sentinel、仅Cookie version bump、仅Cookie optional property、仅new superblock/file、仅unknown negative Journal meta-entry、仅registration property的scope；覆盖data-integrity enabled/disabled、Cookie auto-stamp、旧进程已运行/未完全退出、stale exclusive lock、BookieId reuse、Journal replay与writable registration。instrument old process在退出前触碰的每个file/path/byte和write/open动作。
 
-Oracle：唯一可接受candidate必须让每个supported old binary在Journal replay、Arena/data writer、handle/lazy storage、registration与任何write之前确定退出/保持不可写。Cookie optional/version、registration、new file/superblock或unknown Journal record若被忽略、restamp或skip，必须记录为被否证，不能组合成“可能安全”。若无candidate可证明，Gate结果只能选择new BookieId/new storage scope/access credentials，原scope不可写。
+Oracle：唯一可接受same-scope candidate必须让每个supported old binary在任何Profile storage open、Journal replay、Arena/data writer、handle/lazy storage、registration与write前确定退出，且不stamp over sentinel。仅“最终未注册”不足；data-integrity路径先创建LedgerStorage时任何不允许的file touch都使candidate FAIL。Cookie optional/version、registration、new file/superblock或unknown Journal record被忽略/restamp/skip必须记录为否证。若无candidate可证明，正式结果锁new BookieId/new roots/new credentials/ACL fallback，原scope不可写且旧service无access。
 
 ### B15：Partial migration、device manifest 与 rollback
 
-步骤：按`CLASSIC_COMPATIBLE -> PREPARED_NON_WRITABLE -> FORMAT_READY -> REGISTRATION_READY`在每个Bookie fence、各required device superblock、checkpoint/control init、local route recovery、delete catch-up、local readiness与registration CAS边界crash/response loss；覆盖多device只完成子集、missing/corrupt/unknown mandatory、device removal/replacement、stale registration、old-binary rollback尝试、验证reverse/wipe与new-incarnation路径。
+步骤：按drain/connection close → exclusive storage lock → persistent PREPARED/Cookie sentinel CAS → 每required directory atomic local sentinel → device superblock → control/route recovery → delete catch-up → durable local readiness → persistent `ProfileRegistrationStore` CAS → matching BookieServiceInfo/ephemeral registration，在每个边界crash/response loss；覆盖多device子集、missing/corrupt/unknown mandatory、device replacement、stale registration、rollback/reverse/wipe/new-incarnation，以及new BookieId/new-scope fallback的access-denied与placement/readiness。
 
-Oracle：任何partial/mismatch/unknown/corrupt状态整个Bookie non-writable并重试同一migration generation；全部required device匹配且local/cluster readiness同generation后才writable。存在Segment/Profile local success、durability unknown或不兼容authority时old-binary rollback拒绝；只有完整negative proof、cluster accepted decommission/new incarnation、stale registration fence和verified reverse/wipe/rollback marker CAS同时成立时才允许。合法device removal使用cluster-authorized新incarnation/manifest generation。
+Oracle：任何partial/mismatch/unknown/corrupt状态整个Bookie non-writable并重试同一migration generation；persistent readiness CAS先于ephemeral registration，response loss重读两层且generation/incarnation mismatch demote。存在任一local success/route/activation/fence/grant/tombstone/Arena authority/durability unknown时same-scope old-binary rollback拒绝；恢复只可roll-forward、verified export/rebuild、irreversible wipe/decommission或new incarnation。new-scope fallback只在旧BookieId drained/readonly/decommissioned且旧credential不能访问时可writable。
 
 ## 8. 性能场景
 
@@ -279,8 +282,10 @@ cold and warm Classic-only startup baseline
 cold and warm Segment startup
 1 and manifest-maximum required-device counts, plus intermediate points
 compatibility-fence read bytes and I/O count
+pre-storage-open hook latency and files/bytes touched
 device-manifest + per-Arena superblock read bytes and I/O count
 allocator/route/delete recovery and readiness/registration phase latency
+persistent readiness CAS + ephemeral registration latency
 total time to read-only and writable readiness
 ```
 
@@ -369,12 +374,16 @@ unknown mandatory record skipped writable       = 0
 selector cut allowed new old-location pin        = 0
 queue/waiter/idempotency hard-cap violations     = 0
 unreplayable executed failure                  = 0
-supported old binary crossed compatibility fence into replay/write/registration = 0
+supported old binary crossed compatibility fence into storage-open/replay/write/registration = 0
+supported old binary touched Profile authority/Arena before fail-stop = 0
+supported old binary stamped over BKPF1 candidate      = 0
 Cookie/new-file/registration-only false downgrade gate = 0
 partial required-device migration became writable = 0
 unknown/corrupt mandatory format became writable = 0
 stale readiness/registration generation became writable = 0
+persistent readiness missing/mismatch registered ephemeral writable = 0
 unsafe old-binary rollback accepted             = 0
+old service credential opened/wrote new-scope fallback = 0
 missing startup/read-amplification raw metrics   = 0
 format/readiness validation executed on normal Add = 0
 ```
@@ -393,7 +402,7 @@ format/readiness validation executed on normal Add = 0
 
 不得把 counterexample 标成 flaky 后删除，不得通过跳过 fault point 或扫描猜测 free list 继续。
 
-stock old binary越过candidate fence进入Journal replay、registration或write，partial migration变成writable，或没有negative proof却允许rollback，均属于同等级立即停止的safety violation。
+stock old binary越过candidate fence触碰Profile storage、进入Journal replay/registration/write、stamp over mandatory sentinel，partial migration变成writable，或旧service credential能打开new-scope fallback，均属于同等级立即停止的safety violation。
 
 ## 13. 必交 artifacts
 
@@ -412,6 +421,8 @@ fault-injection-log/
 failed-seed-reproducers/
 stock-old-binary-boot-matrix/
 cookie-autostamp-results/
+pre-storage-open-file-touch-traces/
+new-bookieid-new-scope-access-matrix/
 migration-crash-matrix/
 registration-readiness-history/
 rollback-proof-results/
@@ -423,7 +434,7 @@ README.md
 
 ## 14. 结果解释
 
-- PASS：未在锁定矩阵中否证 allocator/资源模型，只解锁 RFC-0003 接受评审和 shadow implementation。
+- PASS：未在锁定矩阵中否证allocator/资源模型，只解锁RFC-0003接受评审和isolated/discardable shadow prototype；若same-scope candidate失败但new-scope fallback通过，PASS必须明确记录该限定，不能继续宣称原地格式兼容。
 - FAIL：存在 safety、resource 或 locked performance Gate 失败，Segment 保持 P0 Blocked。
 - INCONCLUSIVE：证据不全、fault 未命中、环境漂移或结果不可重放。
 

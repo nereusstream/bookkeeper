@@ -22,7 +22,7 @@
 ## 2. 非目标
 
 - 不测 Segment payload 性能；
-- 不决定最终 proto field number 或 on-disk layout；
+- 不把Round 7 executable frame/control-tail candidate提前声明为stable production wire，也不决定on-disk local authority layout；
 - 不实现 Sequenced takeover；
 - 不证明 general E/W/A recovery；
 - 不把 happy-path demo 当作 RFC acceptance。
@@ -44,16 +44,19 @@ E/W/A configurations
 Bookie engine cohorts
 protocol version matrix
 supported old Bookie/client commits and built artifacts
-canonical descriptor codec/field manifest
-fixed-length collision-resistant hash suite/length/domain separator and candidate eligibility check
-descriptor/parser/capability hard bounds
-control endpoint/auth plugin and non-anonymous principal policy
+descriptorV1=strict-flat-TLV/BKPD/10-fields/big-endian
+descriptorIdentitySuite=SHA-256/suite-1/36-byte-identity/exact-domain-separator
+descriptorBounds=legal-124-plus-6N/124..508-bytes/absolute-input-cap-1024/10-fields/0..64-capabilities/depth-1
+accepted failure-domain policy and capability registries
+controlEndpoint=bookie-profile-v1/immediate-TLS1.3/mTLS
+principalMappingMode=SUBJECT_UNIQUE_WITHIN_TRUST_SET|TRUST_DOMAIN_ISSUER_PLUS_SUBJECT
+principal/X509 allowlist, trust-set uniqueness evidence and non-anonymous policy
 exact operation/instance/target-scope authorization policy
-credential-bearing Profile transport confidentiality/integrity mechanism
-protected local auth binding revision
+protectedCredential=kind-1/20-byte-verifier/redaction-revision
 cold authority read/reference and activation mechanism
-Profile framing/discriminator/opcode/subtype manifest
-connection handshake and semantic error mapping
+ProfileFrameV1=0x0FFE4250/32-byte-header/exact-subtype-table
+HELLO/connection-context/status-retry-durable-result mapping
+Profile/Classic pool isolation revision
 profiledMetadataMutationAuthority
 localAuthorityStoreAndFormatRevision
 Classic route throughput/p99 regression budget
@@ -80,16 +83,17 @@ artifact output directory
 - 经 RFC-0001 冻结的 metadata/activation 状态；
 - 独立 Profile sidecar、标准 LedgerMetadata 唯一 membership authority 与 immutable instance backlink；
 - domain-specific `ProfileControlStore`：single-record create/read/versioned CAS、store-version/semantic-generation分离、bounded family head/page/snapshot+suffix；
-- canonical descriptor 与 hash；
-- frozen golden descriptor corpus、bounded parser与独立reference recomputation；
+- RFC-0001 `ProfileDescriptorV1/ProfileDescriptorCodecV1/ProfileDescriptorIdentity` exact TLV/SHA-256 codec；
+- authoritative `.bin` golden corpus、typed fixture、expected digest/36-byte identity/field dump、strict bounded parser与不共享production parser helper的独立recomputation；
 - `INSTALL_LEDGER_PROFILE` request/receipt；
-- authenticated non-anonymous cold control endpoint、Bookie direct-read committed authority、protected local binding与secret-free status/receipt；
+- 独立immediate-TLS1.3/mTLS `bookie-profile-v1` listener、X509 principal、exact authorizer、Bookie direct-read committed authority、protected kind-1 20-byte credential与secret-free status/receipt；
 - Bookie durable install 与 activation authority；
 - 单一、原子、可恢复的 Classic/Profile route slot；
 - logical local authority state machine：orthogonal normal admission、bounded recovery grant/readable facts、fence/tombstone generation与Bookie registration readiness；
 - Bookie restart replay；
-- Add 请求身份能够匹配 Bookie 本地 durable activation；exact binding fields 由已接受的 activation/auth 机制决定；
-- distinct Profile normal/recovery operation、mandatory non-ambiguous framing、connection-amortized handshake与semantic error propagation；
+- `LedgerContextV1`、`ADD_NORMAL/ADD_RECOVERY` executable bodies与Bookie本地durable activation/grant匹配；
+- exact outer length/32-byte header/magic/subtype、HELLO/connection context、status/retry/durable result、connection-amortized handshake与no-fallback parser；
+- V1 `RANGE_READ/BATCH_RECOVERY_ADD` reserved/disabled behavior；
 - capability/engine placement filter；
 - initial all-E inactive route claim before standard LedgerMetadata create；
 - READY authorization before local normal ACTIVE，all-E activation before create/open success；
@@ -116,8 +120,9 @@ sidecarAuthorityDomain/head/snapshotCut
 sidecarLifecycleFact
 ledgerId
 ledgerInstanceId
-descriptorHash
-installRequestId
+descriptorIdentity[36]
+operationId[16]
+publicSemanticPayloadIdentity[32]
 bookieId
 localInstallGeneration
 bookieStorageIncarnation
@@ -251,9 +256,9 @@ Oracle：最终只能存在一个 authoritative `CLASSIC` 或 `PROFILE` owner；
 
 ### A19：Hot-path performance boundary
 
-步骤：对未启用 Profile 的 Classic-only baseline 与加入统一 route gate 后的 Classic path 做 matched offered-load 对比；对 Profile Add 记录 route lookup、CPU、allocation、metadata I/O 和 proof verification。
+步骤：对未启用Profile的Classic-only endpoint/decoder/pool与加入统一route gate后的Classic path做matched offered-load对比；对Profile Add记录TLS record CPU、fixed frame/context bytes、route lookup、constant-time 20-byte credential compare、allocation、metadata I/O和proof verification。
 
-Oracle：普通 Add 的远程 MetadataStore I/O、descriptor canonical/hash、auth-binding hash/HMAC、KMS/signature/certificate与逐请求重型 proof verification均为0，只做缓存固定长度identity/verifier comparison；Classic throughput/p99与legacy connection建立wire/latency回归不超过运行前manifest锁定预算，且legacy Classic connection不执行Profile handshake。超限为FAIL或经预定义规则判为INCONCLUSIVE，不能事后放宽。
+Oracle：normal Add的远程MetadataStore I/O、descriptor parse/hash、auth-binding hash/HMAC、KMS/signature/certificate与逐请求重型proof均为0，只解析fixed header/context并比较36-byte identity/20-byte verifier；Classic throughput/p99和connection wire/latency回归不超过运行前预算，legacy Classic连接不执行TLS/HELLO/Profile framing。Profile TLS AEAD、约60–100 bytes identity/header和local lookup单独报告；超限为FAIL或按预定义规则INCONCLUSIVE，不能事后放宽。
 
 ### A20：Legacy metadata mutation authority
 
@@ -275,27 +280,27 @@ Oracle：restart接受集合不扩大；normal/recovery/readable不是互斥flat
 
 ### A23：Canonical descriptor golden corpus
 
-步骤：用至少两个独立codec/reference implementation覆盖同语义不同输入顺序、set/list顺序、absent/default、duplicate singular/map/set、unknown schema/field/enum/mandatory capability、optional hint变化、oversize/deep/numeric-bound输入、known-field old-reader rewrite/strip、declared hash mismatch与跨schema输入；持久化canonical bytes/hash后重启并重新计算。
+步骤：production codec严格执行`BKPD` 16-byte header、十个递增TLV、合法长度`124 + 6 * capabilityCount`（124..508 bytes）、allocation前1024-byte绝对input cap和SHA-256 suite 1/domain separator；用不共享production parser helper的独立verifier覆盖capability count 0/1/64、508-byte合法向量、509/1024-byte非法向量、1025-byte allocation前oversize拒绝、E/W/A/F边界、policy generation，以及duplicate/out-of-order/missing/unknown schema/type/field/enum/capability、nonzero flags、wrong scalar/set/total length、truncation/oversize/trailing bytes/default alias、known-field old-reader rewrite/strip、declared identity mismatch与跨schema输入。
 
-Oracle：同schema同semantic contract产生完全相同bytes/hash；任何safety semantics变化改变identity；duplicate/unknown/oversize在allocation/state mutation前拒绝；optional neutral hint不改变semantic identity；cross-schema不自行等价；consumer不信任declared hash且旧writer不能strip/rewrite后发布。hash不被任何路径当作authorization；candidate必须固定长度、对对抗输入collision-resistant，CRC/checksum/不满足属性的过短截断candidate在正式运行前拒绝。
+Oracle：authoritative `.bin`、typed fixture、expected SHA-256、36-byte identity和field dump逐byte一致；input必须原生canonical而不是parse→normalize后接受；任何safety语义变化改变identity；全部非法输入在allocation/state mutation前拒绝；cross-schema不自行等价；consumer重算identity，hash不授权。optional hint不存在于V1 bytes；policy/capability registry未接受的production descriptor不得mint。
 
 ### A24：Control principal、protected binding 与 secret leak
 
-步骤：分别用authenticated authorized、authenticated unauthorized、`AuthDisabledPlugin`/anonymous、只有合法master key、stale initial/replacement purpose、wrong target/incarnation/generation调用INSTALL/ACTIVATE/recovery grant/status；在direct authority read、local durable transition和response各边界丢包/restart。扫描全部log、metric、receipt、exception、event artifact，并触发`LedgerDescriptorImpl.checkAccess` mismatch。
+步骤：用独立immediate-TLS1.3 listener分别覆盖valid/invalid/missing client cert、authorized/unauthorized X509 principal、coarse-OU-only role、`AuthDisabledPlugin`/anonymous、SASL-without-consumable-principal、只有合法master key、stale initial/replacement purpose及wrong operation/ledger/instance/target/range/incarnation/generation；根据manifest选择并验证受信CA集合内subject唯一性，或把trust-domain/issuer纳入principal mapping，并覆盖不同issuer/trust-domain签发相同subject。按 TLS/mTLS → bounded parse → non-anonymous/static operation precheck → fixed authority key → direct-read committed authority → exact post-read authorizer → credential validation → conditional local transition 的顺序，在static precheck、direct read、post-read AuthZ、local durable transition和response各边界丢包/restart。扫描全部log/metric/receipt/status/exception/event/admin dump并触发`LedgerDescriptorImpl.checkAccess` mismatch与secret wrapper `toString()`。
 
-Oracle：只有non-anonymous且对exact operation/ledger instance/target scope有授权的principal、并且exact committed authority匹配时control transition成功；AuthN-only/master key不授权control，AuthN/AuthZ早于route/credential/allocation/durable effect；initial/replacement/recovery purpose不能重放；response loss只解析同一operation/generation；credential-bearing Profile control/data transport满足manifest confidentiality/integrity；公开/诊断面不出现master key/password/verifier/offline digest/bearer capability，secret leak count为0。
+Oracle：只有non-anonymous mTLS principal、static operation precheck、exact post-read tuple authorizer与exact committed authority全部匹配时control transition成功；两处AuthZ fault rejection的route/credential/allocation/durable effect均为0，且整个cold operation只有一次authority read。AuthN-only/coarse role/master key不授权；manifest选择`SUBJECT_UNIQUE_WITHIN_TRUST_SET`时发现重复subject必须fail Gate，选择`TRUST_DOMAIN_ISSUER_PLUS_SUBJECT`时不同issuer/trust-domain不得映射为同一principal；initial/replacement/recovery purpose不能重放；same operation/public payload/secret幂等，conflicting payload或secret只返回coarse conflict；公开/诊断面master key/password/verifier/credential digest/bearer capability为0，secret wrapper固定`<redacted>`，normal Add certificate/signature验证为0。
 
 ### A25：Raw Profile decoder corpus 与 no downgrade
 
-步骤：将每个合法Profile operation以及损坏、截断、length变异、unknown version/op/subtype、protobuf parse exception、随机prefix/suffix语料直接投喂manifest中的真实stock old v2/v3 decoder与new decoder；特别覆盖当前v3 decode `RuntimeException`后用同bytes切pre-v3的路径。捕获route claim、handle/master-key persistence、payload、ACK与connection mode。
+步骤：将TLS ClientHello、完整合法`0x0FFE4250` frame、每个subtype、magic逐byte翻转、1..31-byte header truncation、outer/body length/oversize、major/minor/headerLength/flags/reserved/subtype、malformed HELLO、合法v3 prefix后接Profile magic、触发current v3各种`RuntimeException`、pre-v3 version=0/nonzero与接近legacy ADD opcode的prefix、normal/recovery互换及seeded fuzz，投喂每个受支持真实stock old v2/v3 decoder/binary与new decoder。
 
-Oracle：old decoder对任何Profile corpus均不产生legacy `ADDENTRY/RECOVERY_ADD` effect；new decoder识别Profile framing后parse error明确拒绝/关闭连接且不legacy fallback；client在unsupported、response loss或durability unknown后不Classic downgrade、不双写。
+Oracle：每个vector的Classic route claim、handle create、master-key persistence、ledger allocation、payload/journal write、ACK/OK与permanent legacy decoder downgrade followed by effect全为0；new decoder错误关闭连接且不legacy fallback；legacy resolver仍只选`bookie-rpc`。任一失败只调整magic/framing并重跑，不Classic downgrade或双写。
 
 ### A26：Handshake、mixed matrix 与 semantic error propagation
 
-步骤：覆盖old/old Classic、old/new `ABSENT/CLASSIC/PROFILE/TOMBSTONED`、new Profile/old、mixed ensemble、Bookie restart/incarnation/protocol generation change、unknown capability与每类semantic failure；检查registration hint→connection handshake→durable receipt三层证据，贯通processor/client future/admin/metric。
+步骤：覆盖old/old Classic、old/new route matrix、new Profile/old、mixed ensemble、Bookie restart/incarnation/protocol generation change、HELLO第一帧/4KiB bound/strict capability order、server HELLO全部字段的byte-exact golden vector及`reserved:u16=0`/nonzero拒绝、BookieId/incarnation/readiness mismatch、Profile/Classic physical pool key、unknown capability，以及全部12类status（1 OK + 11 non-OK）、5类retry与4类durable result的固定数值golden vector；贯通processor/client future/admin/metric。
 
-Oracle：Profile create/open在old/mixed target上payload前失败；准备发送Profile operation的Profile-capable connection只在connect/reconnect协商，restart/generation变化重新handshake；old Classic client无需新handshake仍保持现行`ABSENT/CLASSIC`路径，共享pool中的Profile operation只能使用已协商context；registration/handshake不替代install receipt；unsupported、identity conflict、not-active/stale、fenced/deleted、grant mismatch、transient、durability unknown和unknown mandatory/corrupt不被压成会误导retry的generic success/unauthorized；协商不发生在每个Add。
+Oracle：Profile create/open在old/mixed target上payload前失败；Profile只在独立mTLS connection首次HELLO，restart/generation变化重连；Classic client/endpoint/pool没有Profile TLS/HELLO；physical channel key包含protocol/BookieId/incarnation/generation/TLS identity；registration hint、HELLO与durable receipt分层；unsupported/identity/stale/fenced/deleted/grant/transient/unknown/quarantine/unauthorized/bad-request/durability-unknown不坍缩成OK，external unauthorized可coarse但internal class保留，协商不发生在每Add。
 
 ## 7. 故障注入点
 
@@ -383,18 +388,25 @@ stale handle crossed admission generation          = 0
 normal Add per-entry control fsync                  = 0
 descriptor golden-vector divergence                = 0
 duplicate/unknown/oversize descriptor accepted     = 0
-declared descriptor hash trusted without recompute = 0
-descriptor hash used as authorization              = 0
+noncanonical descriptor alias accepted              = 0
+descriptor V1 bytes/identity mismatch              = 0
+declared descriptor digest trusted without recompute = 0
+descriptor digest used as authorization              = 0
 anonymous/master-key-only control accepted         = 0
 authenticated-but-unauthorized control accepted    = 0
+ambiguous X509 subject principal accepted          = 0
 control purpose/target/incarnation replay accepted = 0
 secret/offline-verifier disclosure                 = 0
+raw credential rendered outside redacted wrapper   = 0
 Profile bytes decoded as legacy ADD/RECOVERY_ADD   = 0
 Profile parse failure triggered legacy fallback    = 0
+Profile corpus caused Classic route/handle/allocation/journal/payload/ACK effect = 0
 Profile failure caused Classic fallback/double write = 0
 mixed/old Profile target received payload          = 0
 normal Add per-request capability negotiation      = 0
 legacy Classic connection forced Profile handshake = 0
+Profile operation used Classic physical pool/channel = 0
+HELLO identity/incarnation/readiness mismatch accepted = 0
 normal Add auth-binding hash/HMAC/KMS/signature/certificate invocations = 0
 credential observed on unprotected Profile transport = 0
 semantic safety error collapsed to success         = 0
@@ -440,6 +452,8 @@ failed-seed-reproducers/
 descriptor-golden-corpus/
 raw-wire-corpus/
 old-new-decoder-results/
+tls-mtls-authz-matrix/
+hello-status-projection-matrix/
 secret-leak-scan/
 checksums.txt
 README.md

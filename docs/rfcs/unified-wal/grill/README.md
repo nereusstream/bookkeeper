@@ -19,3 +19,4 @@
 | [Round 4](ROUND-04-bounded-proof-interfaces.md) | Bounded proof、assignment handoff、relocation checkpoint 与 recovery outcome | `dbc0f7fee412e68d1cecd40efbf6d80edfdc8af0` | Reviewed / Integrated |
 | [Round 5](ROUND-05-implementation-interfaces.md) | Sidecar、ArenaControlLog、local durable authority 与 recovery compatibility 接口 | `ba820b28babd7683e8dfe6a724d1b8aeecf7c2e1` | Reviewed / Integrated |
 | [Round 6](ROUND-06-profile-security-wire-downgrade.md) | Profile canonical/security、wire compatibility 与 format downgrade gate | `1c2fc1b30aa69b55cbfac4116609c4f4e78fb2b5` | Reviewed / Integrated |
+| [Round 7](ROUND-07-exact-implementation-manifest.md) | Descriptor/control/wire/format exact implementation manifest 与实施解锁边界 | `9885dbda26f55dbe3c20c530a36b22109d76b7e2` | Reviewed / Integrated |

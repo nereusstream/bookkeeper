@@ -82,6 +82,7 @@ NVMe device or WalArena
 - superblock A/B 必须能检测 torn write、checksum failure 和 generation 回退。
 - 每个 superblock 必须绑定Bookie storage incarnation、Arena/device identity、Arena format/mandatory feature set、control/checkpoint generation和device-manifest generation；任一required device missing/mismatch/partial migration使整个Segment Bookie non-writable；
 - Arena superblock保护新实现之间的format/recovery，不能单独阻止stock old binary启动。RFC-0005的Bookie/storage compatibility fence必须在任何Journal replay/Arena writer/registration之前由旧binary mandatory path fail-stop；仅创建新文件或unknown control record不是downgrade fence。
+- Round 7未证明同BookieId/同storage scope的stock-old-binary fence，因此same-scope format保持BLOCK；如果Spike B不能证明mandatory pre-open gate，首版必须采用RFC-0005锁定的new BookieId + new journal/ledger/index/Arena roots + new storage incarnation +独立OS/service credential scope，allocator不得继续假设原地升级。
 
 区域大小、对齐、冗余、多设备布局、superblock bytes与mandatory feature encoding是 Spike 后冻结的参数，不在本骨架中写成生产默认。
 
@@ -411,7 +412,7 @@ checkpoint 不持久化 individual reader、future、buffer reference 或 pin hi
 
 suffix 出现 sequence gap、必要 record 缺失或 checkpoint content identity 无法验证时 fail closed。不得用更大的物理 generation、mtime 或 data scan跨过 authority gap。
 
-upgrade/migration不要求跨device transaction：每个Arena按同一Bookie migration generation写入prepared/format-ready事实；只有全部required devices匹配时Bookie级readiness才可前进。任一边界crash、部分device完成或unknown mandatory feature都保持non-writable并重试同一generation。device移除必须由cluster-authorized新storage incarnation/device-manifest generation完成。存在Segment payload/control authority后能否rollback由RFC-0005 negative-proof gate决定，allocator不得因old binary可打开目录而宣称兼容。
+upgrade/migration不要求跨device transaction：每个Arena按同一Bookie migration generation写入prepared/format-ready事实；只有全部required devices匹配时Bookie级readiness才可前进。任一边界crash、部分device完成或unknown mandatory feature都保持non-writable并重试同一generation。device移除必须由cluster-authorized新storage incarnation/device-manifest generation完成。存在Segment payload/control authority后能否rollback由RFC-0005 negative-proof gate决定，allocator不得因old binary可打开目录而宣称兼容。same-scope candidate未通过前，本节只允许isolated format prototype；不得把candidate superblock bytes发布为stable on-disk contract，也不得污染可继续运行的Classic scope。
 
 必须注入的 crash 边界：
 
@@ -518,7 +519,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - cold/hot promotion、lifetime class 和同 Arena `MOVE_COMMIT` relocation 合同通过 crash、并发 move、reader pin 与 index rebuild 测试；
 - current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
 - conditional apply/result、duplicate/response-loss、bounded waiter/idempotency retention、unknown record和selector/pin竞态通过crash/replay与资源Gate；
-- 真实stock old binary compatibility fence由RFC-0005 Gate先行验证；Spike B同时覆盖Cookie auto-stamp/unknown-record负向候选、superblock A/B corruption、partial device migration、device-manifest change、migration response loss与rollback禁止条件；
+- 真实stock old binary compatibility fence由RFC-0005 Gate先行验证；Spike B同时覆盖Round 7 `BKPF1` Cookie sentinel candidate、data-integrity pre-storage-open instrumentation、Cookie auto-stamp、superblock A/B corruption、partial device migration、device-manifest change、migration response loss与rollback禁止条件；candidate失败时必须正式采用new BookieId/new scope fallback；
 - 证明 shadow writer 可以与 Classic authority 隔离，失败不会影响 Classic ACK。
 
 即使 Spike 通过，也只解锁 shadow implementation。Segment 成为 ACK authority 仍需要 [RFC-0005](RFC-0005-segment-bookie-state.md) Accepted、独立 canary Gate、回滚合同和 RFC-0001 安装/activation 证据。
@@ -537,6 +538,6 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - multi-device placement、device evacuation、cross-Arena relocation 和 rebuild；
 - delete authorization receipt 的本地格式；
 - metadata memory accounting 的实现与观测；
-- Bookie/storage compatibility fence与Arena superblock的边界、format/migration generation、minimum compatible reader/writer、device-manifest encoding，以及upgrade/downgrade/rollback工具与策略。
+- same-scope Bookie/storage compatibility fence（当前BLOCK）、Arena/device exact superblock bytes、format/migration generation、minimum compatible reader/writer、device-manifest encoding，以及upgrade/reverse/wipe/rollback工具与策略；new BookieId/new scope fallback语义由RFC-0005锁定。
 
 这些问题关闭、Spike B/C 通过且 RFC Accepted 前，Segment WAL 保持 P0 Blocked。

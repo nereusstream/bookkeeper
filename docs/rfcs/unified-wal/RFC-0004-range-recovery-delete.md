@@ -81,7 +81,7 @@ RECOVERY_EVIDENCE
 SEQUENCE_LOOKUP
 ```
 
-Profile range/read必须位于RFC-0001无歧义Profile envelope及mandatory logical subtype中，并由per-connection capability negotiation启用；不能只复用legacy Add/Read的optional字段，也不能在unknown/partial/response loss后降级成语义不同的Classic请求。首版 exact wire schema/opcode、token 编码和 feature bit 由协议评审冻结。请求必须在分配前验证 hard count/bytes/deadline 上限。
+Profile range/read必须位于RFC-0001独立Profile endpoint及mandatory subtype中；不能复用legacy Add/Read optional字段，也不能在unknown/partial/response loss后降级Classic。Round 7只为executable corpus预留`RANGE_READ=0x0301`，V1 capability必须absent、body不接受并返回UNSUPPORTED；正式wire schema、token与hard count/bytes/deadline在Model E/API闭合后用新capability/version评审，不能把预留opcode写成已实现能力。
 
 ### 4.2 逻辑响应
 
@@ -223,9 +223,9 @@ continuation、bitmap 和 proof cache 默认可以是 bounded volatile state。c
 
 ### 7.2 BatchRecoveryAdd 候选
 
-BatchRecoveryAdd 只优化传输与本地 I/O，不改变每个 entry 的 recovery 权限和幂等语义。
+V1明确禁用`BATCH_RECOVERY_ADD=0x0302`：不advertise capability、accepted body/count为0并返回UNSUPPORTED。single-entry recovery只使用RFC-0001 executable manifest的`ADD_RECOVERY=0x0202`，至少携带60-byte ledger context、`repairIntentId[16]`、intent/grant generation、range start/end、entryId及20-byte credential；range必须包含entryId，target incarnation来自matching HELLO/local grant。该layout在raw old-decoder Gate通过前仍不是stable production wire。
 
-最低约束：
+未来BatchRecoveryAdd只优化传输与本地I/O，不改变每个entry的recovery权限和幂等语义。启用前最低约束：
 
 - 每个 entry 保留独立 entryId、checksum 和 result；
 - batch 部分成功可以精确重试；
@@ -235,7 +235,7 @@ BatchRecoveryAdd 只优化传输与本地 I/O，不改变每个 entry 的 recove
 - batch capability不支持时，Profile ledger只回退到distinct single-entry Profile recovery operation；Classic ledger才可继续现有legacy single-entry path。Profile ledger遇旧Bookie/mixed ensemble必须在payload前fail closed，不得降级到legacy recovery flag。
 - partial success 或 response loss 按 entry 验证并精确重试；最早 unresolved coordinate 阻止 frontier，不能把 batch 当作原子或跳过 hole。
 
-不在正式模型和兼容测试前宣称 batch 是原子操作。
+不在正式模型和兼容测试前启用batch，更不能宣称batch是原子操作。
 
 ### 7.3 Required frontier、normal tail 与 outcome taxonomy
 
@@ -251,7 +251,7 @@ open-ledger recovery 的首个 missing coordinate `x` 只有同时满足以下�
 
 较早 hole 后的 later payload 若没有 required authority，只是必须 suppress 的 speculative suffix，不得把 hole 命名为 DATA_LOSS；若 later accepted authority 使该 coordinate required，则根据证据进入 deferred、quarantine 或 DATA_LOSS，且绝不能发布跨 hole prefix。
 
-顶层必须保留五类语义，exact enum/exception/wire code 保持开放：
+顶层必须保留五类语义，exact Java enum/exception/admin API继续BLOCK；RFC-0001 transport status不替代本taxonomy：
 
 ```text
 RECOVERED_AND_CLOSED(P)
@@ -391,7 +391,7 @@ RepairIntent {
 
 inactive install与admission之间不锁定先后，可并行或交换；不可删合同是grant、第一份payload和ensemble publication都晚于有效admission。admission CAS response loss必须重读exact lifecycle/delete-fence head或其已提交snapshot/summary：matching operation identity+payload已admit时继续同一intent/target；delete先赢时child保持inert；conflicting payload、unknown mandatory state、head gap或无法判定时fail closed/deferred。timeout不得盲建第二个intent、选择第二个target或授予grant。
 
-master key只继续作为data credential，不能授权grant/close；`AuthDisabledPlugin`/anonymous以及authenticated-but-unauthorized caller必须拒绝。caller必须被授权执行exact grant/close operation + ledger instance + target/range scope，且AuthN/AuthZ检查早于local grant、allocation或任何durable effect。grant/reference按recovery purpose domain-separate，并绑定ledger/instance/descriptor、RepairIntent identity/generation、target stable identity/storage incarnation、exact range、local grant generation、delete fence和operation payload identity。Bookie只在cold direct-read committed authority并durable写入本地bounded grant后接受Profile recovery Add；receipt/status不得泄漏secret、offline verifier或bearer/replay capability。exact ACL/RBAC/plugin、auth channel与reference encoding保持OPEN。
+master key只继续作为data credential，不能授权grant/close；control只走RFC-0001独立TLS1.3/mTLS endpoint，`AuthDisabledPlugin`/anonymous、SASL-without-consumable-principal以及authenticated-but-unauthorized caller必须拒绝。caller必须被授权执行exact grant/close operation + ledger instance + target/range scope，且AuthN/AuthZ检查早于local grant、allocation或任何durable effect。grant/reference按recovery purpose domain-separate，并绑定ledger/instance/descriptor、RepairIntent identity/generation、target stable identity/storage incarnation、exact range、local grant generation、delete fence和operation payload identity。Bookie只在cold direct-read committed authority并durable写入本地bounded grant后接受Profile recovery Add；receipt/status不得泄漏secret、offline verifier或bearer/replay capability。principal allowlist/backend路径与local record packing保持OPEN/BLOCK，不再把首版transport泛化为待选机制。
 
 ensemble CAS response loss 必须通过重读 exact fragment/replacement mapping 解析，不能盲选新 target。closed/historical fragment 的 committed target 不得 normal-active；只有 target 另行成为 current writable fragment member，并满足 RFC-0001 写期 replacement 的 post-CAS membership、fence 和 normal activation 合同，才能独立获得 normal writable authority。
 
@@ -712,7 +712,7 @@ awaitPhysicalDeletion()
 - physical completion time；
 - tombstone retention state。
 
-Profile range/recovery wire、coordinator、admin status与scheduler必须贯通RFC-0001 semantic error class：unsupported protocol/op/capability/Engine；instance/descriptor conflict；not-ready/stale generation；fenced/tombstoned/deleted；grant missing/stale/out-of-scope/closed；transient/read-only/overload；durability unknown/response loss；unknown mandatory/corrupt/quarantine。exact numeric code、BKException与legacy projection保持OPEN，但unsupported batch只能回退到single-entry Profile recovery，不能回退legacy flag；durability unknown不能触发Classic retry/double write；外部unauthorized可以coarse，内部rich outcome/authority reason不能被抹除。
+Profile range/recovery wire、coordinator、admin status与scheduler必须贯通RFC-0001冻结的transport `statusClass + retryDisposition + durableResult`：unsupported、identity conflict、not-ready/stale、fenced/deleted、grant invalid、transient、durability unknown、quarantine、unauthorized与bad request不能坍缩成OK。该transport status只是operation结果，不替代本RFC五类recovery outcome；尤其`QUARANTINED_OR_UNKNOWN_MANDATORY`或authority loss不得投影成payload `DATA_LOSS`。exact BKException/detailCode与legacy projection继续BLOCK；unsupported batch只能回退distinct single-entry Profile recovery，durability unknown只能same Profile operation/status query，绝不legacy flag/Classic/double write。
 
 ## 14. 并发规则
 
@@ -777,6 +777,8 @@ all historical targets acknowledged or durably decommissioned
 15. rich outcome保留operation scope；fragment repair、legacy skipped ledger或partial progress不得计为ledger recovered。
 16. Profile recovery Add使用distinct logical operation并匹配bounded local grant；legacy flag、Classic fallback或mixed old Bookie不能获得recovery authority。
 17. recovery control grant/close要求non-anonymous且获授权执行exact operation/instance/target-range scope的principal，并由Bookie direct-read committed authority；AuthN-only/master key不授权control transition，receipt/status不泄漏secret或replay capability。
+18. V1 `ADD_RECOVERY`与`ADD_NORMAL` subtype/body不可互换；range/batch subtype只预留且disabled，unsupported不得回退legacy recovery flag。
+19. operation transport status不得把authority loss、quarantine、incomplete或durability unknown命名为payload DATA_LOSS或legacy OK。
 
 ### 16.2 Delete
 
@@ -856,7 +858,7 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - deterministic fallback 的 RecoveryContext、earliest-unresolved 与 outcome class 有 executable tests；
 - required frontier、normal-tail quorum-intersection absence 与五类 recovery outcome有 executable point-read oracle tests；
 - internal rich outcome、durable-close-only legacy `OK`、admin/AutoRecovery投影和compatibility matrix有executable tests；
-- Profile normal/recovery opcode separation、batch→single Profile fallback、legacy flag伪造、old/mixed Bookie no-downgrade、unknown subtype与response-loss exact retry有raw-wire/端到端测试；
+- RFC-0001 Round 7 `ADD_NORMAL/ADD_RECOVERY` executable body、batch/range disabled behavior、legacy flag伪造、old/mixed Bookie no-downgrade、unknown subtype与response-loss exact retry有raw-wire/端到端测试；
 - non-anonymous且exact operation/instance/target-range scope authorized repair control principal、authenticated-but-unauthorized负向路径、target incarnation/purpose/range/grant-generation binding、direct-read committed RepairIntent/delete fence、secret leak与grant status query通过测试；
 - RepairIntent identity、lifecycle/delete-fence admission、retention、target discovery、strong assertion、range-scoped `F+1` coverage、conflicting-range loss ordering 与 bounded receipt snapshot冻结；
 - DeleteManifest schema、target freeze 和 CAS 线性化点冻结；
@@ -869,19 +871,19 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 
 ## 19. 开放问题
 
-- streaming range wire opcode 与现有 BatchRead 的兼容/复用方式；
+- future streaming range body/token与现有BatchRead的兼容/复用方式；`0x0301`在V1只是disabled reservation；
 - continuation token 的签名、过期和跨 Bookie 行为；
 - general E/W/A recovery merge 的精确算法；
 - TailSummary 是否仅为 hint，还是进入未来 quorum proof；
 - recovery fast-path/global attempt 的 hard bounds、outcome exact error mapping 与超限运维流程；
-- recovery outcome exact enum/exception/wire mapping、additive admin result/status、cancellation API与metrics names/thresholds；
+- recovery outcome exact Java enum/exception、additive admin result/status、cancellation API与metrics names/thresholds；RFC-0001 transport status不能替代该API；
 - `DataUnknownException` factory/mixed-version修复或generic quarantine mapping的最终选择；
 - volatile proof cache 与可选 operation-scoped checkpoint 的 exact encoding/durability；
 - Delete Coordinator 的部署、leader election 和 manifest namespace；
 - RepairIntent exact path、admission directory/head、child enumeration/watermark/index、状态名、sharding/batching和compaction encoding；
 - repair strong-assertion receipt schema、audit commitment、failure-domain identity/policy、accepted-loss namespace、range-sharded/global topology 与 interval page/fan-out/compaction；
-- recovery-only local record packing、BatchRecoveryAdd wire schema 与 batch limits；
-- Profile single/batch recovery logical subtype/opcode、grant reference/auth channel、target-incarnation binding、exact semantic error与legacy projection；
+- recovery-only local record packing、future BatchRecoveryAdd body/schema与batch limits；`0x0302`在V1 disabled；
+- grant reference exact packing、principal allowlist/backend、target-incarnation binding、BKException/detailCode与legacy projection；single `ADD_RECOVERY` subtype/context不再OPEN但stable wire仍受RFC-0001 raw corpus Gate阻塞；
 - delete stream topology/count、assignment store、handoff encoding、event batching、snapshot chunk/manifest encoding 与 journal compaction；
 - decommission/unrecoverable 的授权流程和 durable proof；
 - maximum rejoin window 与 compact tombstone 生命周期；
