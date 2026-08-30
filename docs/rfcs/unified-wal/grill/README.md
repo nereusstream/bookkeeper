@@ -14,3 +14,4 @@
 | Round | 主题 | 基线 | 状态 |
 | --- | --- | --- | --- |
 | [Round 1](ROUND-01-root-contracts.md) | P0 根合同 | `3a476baa6005881e34de3ac876a4f4294487d645` | Reviewed / Integrated |
+| [Round 2](ROUND-02-control-plane-authority.md) | Control-plane authority、activation 与 repair | `cc7e03c81571b01b7f9da97a4c9bf1154d743c1c` | Reviewed / Integrated |

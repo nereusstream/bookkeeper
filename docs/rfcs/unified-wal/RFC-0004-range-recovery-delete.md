@@ -22,6 +22,7 @@
 - TailSummary 的证据边界；
 - recovery-specific range merge 和 BatchRecoveryAdd 候选；
 - general E/W/A 与 ensemble history；
+- instance-specific RepairIntent、recovery-only authority 与 target history；
 - LedgerDeleteCoordinator、manifest、逻辑/物理删除；
 - 离线 Bookie、decommission、rejoin watermark；
 - delete 与 open、ensemble change、AutoRecovery 的并发。
@@ -233,7 +234,64 @@ DEFERRED_SYNC_LEGACY
 
 `DEFERRED_SYNC_V2` 如需推进，必须单独定义 durability barrier、failure detection、ensemble replacement、recovery 和 response-loss 语义。
 
-## 9. LedgerDeleteCoordinator
+## 9. AutoRecovery Repair Intent 与 LedgerDeleteCoordinator
+
+### 9.1 Durable instance-specific RepairIntent
+
+现有 underreplication marker 只拥有“ledger 需要检查/修复”和 missing replica scheduling 事实；worker lock 只提供当前执行者排他性。二者都不保存 target、fragment、instance 或 operation identity，也不能承担 crash 后的 recovery authorization 与 delete discovery。
+
+任何 target 接收该 ledger instance 第一份 durable recovery payload 前，必须先有 cluster-authoritative、可由 delete freeze 枚举的 durable repair intent：
+
+```text
+RepairIntent {
+    ledgerId
+    ledgerInstanceId
+    repairOperationId
+    profileDescriptorHashOrGeneration
+    baseLedgerMetadataVersion
+    fragmentStart
+    fragmentEndOrCanonicalRangeIdentity
+    oldEnsembleDigest
+    replacedMemberOrSlot
+    targetBookie
+    recoveryOnlyAuthorityGeneration
+    lifecycleOrResultState
+}
+```
+
+字段名和物理 schema 保持开放，但上述语义身份不可省略。`replacedMemberOrSlot` 必须持久化，因为 `replaceEnsembleEntry` 可能覆盖旧 membership，delete 仍需发现旧成员；本次实际从哪个 surviving replica 读取不属于 authority，可以动态重试且不得制造 metadata churn。不得向 MetadataStore 写每 entry progress、receipt、reader history 或无界 retry ID。
+
+最低 AutoRecovery 顺序：
+
+```text
+1. CAS create instance-specific RepairIntent
+2. target durable install, normal-inactive
+3. target durable grant RECOVERY_ONLY(intent generation)
+4. copy through the existing recovery Add data path
+5. after copy, reread and validate standard LedgerMetadata
+6. CAS standard ensemble replacement
+7. transition target to COMMITTED_REPLICA/READABLE
+   - close/revoke RECOVERY_ONLY
+   - do not grant normal writable authority
+8. durable mark intent COMMITTED
+9. compact intent only after delete-history or cleanup authority safely supersedes it
+```
+
+CAS response loss 必须通过重读 exact fragment/replacement mapping 解析，不能盲选新 target。closed/historical fragment 的 committed target 不得 normal-active；只有 target 另行成为 current writable fragment member，并满足 RFC-0001 写期 replacement 的 post-CAS membership、fence 和 normal activation 合同，才能独立获得 normal writable authority。
+
+Intent 生命周期语义至少区分 PREPARED/RECOVERY_AUTHORIZED、COMMITTED、ABORTED 或 ORPHAN_CLEANUP_PENDING。CAS 前已经接收 payload 的 intent 不得直接删除；COMMITTED 仍保留 old member/target history；只有这些身份已进入另一个不会丢失的 durable delete-history authority，或 target-local durable cleanup proof 已成立，才能 compact。“tombstone”不能把 target 从 delete enumeration 中移除。
+
+物理上是否复用 underreplication namespace 保持开放，但语义 owner 固定为：
+
+- underreplication marker：missing replica scheduling；
+- worker lock：临时排他执行；
+- standard LedgerMetadata：唯一最终 ensemble membership；
+- RepairIntent：pre-publication target、recovery-only authorization 与 delete history；
+- Bookie local authority：target 对该 intent 的 durable recovery-only acceptance。
+
+新增成本严格限定为每 repair operation/fragment 的 intent create CAS、一次 target recovery-only control durability、现有 ensemble CAS 与 intent completion CAS。recovery payload 热路径不增加 per-entry metadata round trip、per-entry control fsync 或 per-entry intent update。
+
+### 9.2 LedgerDeleteManifest
 
 删除需要一个集群级协调器。逻辑 manifest：
 
@@ -302,7 +360,7 @@ TOMBSTONE_COMPACTABLE
 
 - initial ensemble；
 - 每次 ensemble change 的旧/新成员；
-- recovery 中间态可能写入的节点；
+- incomplete、completed、aborted-but-dirty RepairIntent 中的 replaced member 与 target；
 - 已记录但尚未完成的 replacement。
 
 目标集合生成后，新 replica creation 对该 instance 必须被拒绝。
@@ -423,13 +481,13 @@ awaitPhysicalDeletion()
 
 ### 14.1 Delete vs ensemble change
 
-对 ledger metadata version 使用 CAS 串行化。DELETE_INTENT 获胜后，新的 ensemble change 失败；ensemble change 已提交时，delete 重新读取并将其纳入 frozen history。
+标准 ensemble membership 仍以 LedgerMetadata CAS 串行化；delete/repair operation 还必须共享同一 ledger-instance control generation/CAS。DELETE_INTENT 获胜后，新的 ensemble change/repair intent 失败；ensemble change 或 repair intent 已提交时，delete 重新读取并将其纳入 frozen history。不能用“先 list child，再写 DELETE_INTENT”的非原子顺序冻结 targets。
 
 ### 14.2 Delete vs AutoRecovery
 
-AutoRecovery 在创建副本和发布 ensemble 前都检查 delete state/version。DELETE_INTENT 后不得产生该 instance 的新 replica。
+AutoRecovery 在创建 RepairIntent、授予 recovery-only authority、写 payload 和发布 ensemble 前都检查 instance control generation 与 delete state。DELETE_INTENT 先赢后不得创建新 intent、授予 recovery authority或产生该 instance 的新 replica。
 
-如果 replica write 已发生但 metadata 尚未发布，协调器必须通过 recovery operation record 或 placement receipt 找到该节点；该发现机制是开放项。
+RepairIntent 先赢时，delete frozen target 必须包含其 replaced member 与 target，无论 copy/CAS 是未开始、部分完成、COMMITTED 还是 aborted-but-dirty。该 intent 在 target 接收第一份 durable payload 前已存在，因此 metadata 尚未发布的 target 也可被集群完整发现。exact child enumeration、watermark/index 和 compaction encoding 保持开放。
 
 ### 14.3 Delete vs open/read
 
@@ -465,20 +523,24 @@ all historical targets acknowledged or durably decommissioned
 ### 16.2 Delete
 
 1. LOGICALLY_DELETED 后该 ledger instance 永远不能重新 OPEN。
-2. frozen target set 覆盖固定 metadata version 的全部历史 ensembles。
+2. frozen target set 覆盖固定 metadata version 的历史 ensembles，以及所有 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member 与 target。
 3. unresolved offline Bookie 不能被超时自动解释为物理删除。
 4. Bookie 缺失 required tombstone 时不能注册 writable。
 5. local free/reuse 晚于 durable tombstone 和 reader drain。
 6. 新 ledger instance 不受旧 instance delete 请求影响。
 7. AutoRecovery 在 DELETE_INTENT 后不能创建或发布新副本。
 8. PHYSICALLY_DELETED 只在每个 target 有 durable terminal proof 时成立。
+9. target 的第一份 durable recovery payload 晚于可由 delete freeze 枚举的 RepairIntent。
+10. recovery-only authority 永不隐式授予 normal writable authority。
 
 ## 17. Model D/E 最低场景
 
 Model D：
 
 - delete 与 ensemble change 同时 CAS；
-- delete 与 AutoRecovery replica creation 竞争；
+- delete 与 RepairIntent create/recovery authority/first payload/ensemble CAS 逐边界竞争；
+- repair target 收到部分或全部 payload、CAS 前 crash，restart 后仍可枚举并清理；
+- ensemble CAS response loss 与 intent COMMITTED response loss；
 - 部分 Bookie 收到请求、response loss、协调器 crash；
 - Bookie 长期离线后 rejoin；
 - local tombstone durable 前后 crash；
@@ -506,7 +568,8 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - streaming continuation、per-entry result、limits 和 cancellation wire contract 冻结；
 - normal read 与 recovery evidence 的成功条件分别定义；
 - general E/W/A merge 有伪代码、复杂度、Model E 和故障测试；
-- DeleteManifest schema、target discovery 和 CAS 线性化点冻结；
+- RepairIntent identity、retention、target discovery 与 delete/repair CAS 线性化点冻结；
+- DeleteManifest schema、target freeze 和 CAS 线性化点冻结；
 - offline Bookie rejoin watermark 有集群级端到端测试；
 - logical/physical API completion 可分别观测；
 - Model D 无 safety counterexample；
@@ -522,7 +585,8 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - TailSummary 是否仅为 hint，还是进入未来 quorum proof；
 - recovery scan 的 hard bounds 和超限运维流程；
 - Delete Coordinator 的部署、leader election 和 manifest namespace；
-- 未发布 replacement replica 的 target discovery；
+- RepairIntent exact path、child enumeration/watermark/index、状态名和 compaction encoding；
+- recovery-only local record packing、BatchRecoveryAdd wire schema 与 batch limits；
 - decommission/unrecoverable 的授权流程和 durable proof；
 - maximum rejoin window 与 compact tombstone 生命周期；
 - Classic/Direct/Segment reader drain 的统一 API；

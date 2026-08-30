@@ -14,8 +14,9 @@
 - 相同 instance、不同 descriptor 被静默合并；
 - 安装信息重启后丢失；
 - 一般 `E > W` 的轮转 write set 触达未安装 Bookie；
-- replacement 先进入 metadata，随后才尝试 install；
-- response loss 产生第二个 instance 或不一致 OPEN；
+- 标准 LedgerMetadata 在 all-E Profile route claim 前暴露 Classic lazy-create 窗口；
+- 写期 replacement 先进入 metadata，随后才尝试 install/activation；
+- response loss 产生第二个 instance 或不一致 READY；
 - 创建失败留下可被误用的 orphan install。
 
 ## 2. 非目标
@@ -41,6 +42,7 @@ E/W/A configurations
 Bookie engine cohorts
 protocol version matrix
 activation proof mechanism
+profiledMetadataMutationAuthority
 Classic route throughput/p99 regression budget
 JDK and JVM flags
 fault injector version
@@ -63,6 +65,7 @@ artifact output directory
 原型必须包含：
 
 - 经 RFC-0001 冻结的 metadata/activation 状态；
+- 独立 Profile sidecar、标准 LedgerMetadata 唯一 membership authority 与 immutable instance backlink；
 - canonical descriptor 与 hash；
 - `INSTALL_LEDGER_PROFILE` request/receipt；
 - Bookie durable install 与 activation authority；
@@ -70,7 +73,10 @@ artifact output directory
 - Bookie restart replay；
 - Add 请求身份能够匹配 Bookie 本地 durable activation；exact binding fields 由已接受的 activation/auth 机制决定；
 - capability/engine placement filter；
-- replacement install-before-CAS；
+- initial all-E inactive route claim before standard LedgerMetadata create；
+- READY authorization before local normal ACTIVE，all-E activation before create/open success；
+- profiled membership mutation authority abstraction；
+- active replacement 的 inactive install → `LAC+1` CAS → normal activation → pending resend；
 - 可观测的 orphan install 状态；
 - 精确错误码和 audit events。
 
@@ -85,12 +91,15 @@ testRunId
 scenarioId
 logicalStep
 metadataVersion
+sidecarControlGeneration
+sidecarLifecycleFact
 ledgerId
 ledgerInstanceId
 descriptorHash
 installRequestId
 bookieId
 localInstallGeneration
+localProfileRole
 requestType
 responseCode
 faultId
@@ -109,15 +118,15 @@ Oracle 从三类证据独立计算：
 
 ### A1：Install 前 Add
 
-步骤：创建 PREPARING/INSTALLING ledger，在 0、部分和全部 Bookie install 前分别发送新 Profile Add。
+步骤：创建 sidecar reservation，在标准 LedgerMetadata 尚未创建时，于 0、部分和全部 Bookie inactive install 前分别发送新 Profile Add。
 
 Oracle：所有未 durable install 的目标 Bookie 返回 `EPROFILE_NOT_INSTALLED`；不能创建 Classic handle，不能写 payload。
 
 ### A2：部分安装成功
 
-步骤：E 个节点中只允许子集完成 install，阻断其余节点，尝试 OPEN 和 write-set rotation。
+步骤：E 个节点中只允许子集完成 install，阻断其余节点，尝试创建标准 LedgerMetadata、发布 READY 和 write-set rotation。
 
-Oracle：metadata 不得进入 OPEN；任何轮转 entry 都不能绕过未安装节点形成被客户端视为合法的创建完成。
+Oracle：标准 LedgerMetadata 不得创建、READY 不得发布；任何轮转 entry 都不能绕过未安装节点形成被客户端视为合法的创建完成。
 
 ### A3：Install response loss
 
@@ -125,11 +134,11 @@ Oracle：metadata 不得进入 OPEN；任何轮转 entry 都不能绕过未安�
 
 Oracle：返回同一 instance/hash 的幂等 receipt；不产生第二个 local generation owner，不产生冲突 metadata。
 
-### A4：Metadata OPEN CAS response loss/failure
+### A4：Standard metadata create / READY CAS response loss
 
-步骤：全部 install 后，在 OPEN CAS 提交前、提交后 response loss、CAS conflict 三处注入。
+步骤：全部 install 后，分别在标准 LedgerMetadata create-if-absent 与 sidecar READY CAS 的提交前、提交后 response loss、CAS conflict 注入；另注入 metadata create 成功但 READY 永久失败。
 
-Oracle：重新读取 authority 后只能得到一个 OPEN instance，或维持非 OPEN；不得盲建第二个 ledger instance。
+Oracle：重读标准 metadata 与 sidecar 后只能得到一个 backlink 一致的 instance；非 READY instance 不得 normal-active或返回 create/open success；不得盲建第二个 ledger instance。
 
 ### A5：相同 instance、不同 Profile
 
@@ -141,7 +150,7 @@ Oracle：确定返回 `EPROFILE_MISMATCH`；不得更新既有 routing，不得�
 
 步骤：并发创建两个 instance，或在旧 instance 未终结时安装新 instance。
 
-Oracle：至多一个 instance 可进入 OPEN；Bookie routing 不得把两者合并。
+Oracle：至多一个 instance 可进入 READY/AVAILABLE；Bookie routing 与 immutable backlink 不得把两者合并。
 
 ### A7：Engine/capability mismatch
 
@@ -153,19 +162,19 @@ Oracle：placement 排除或 install 明确失败；无 payload 写入，无 laz
 
 步骤：全部 E install 后逐 entry 轮转；另做只安装 W 个节点的负向控制。
 
-Oracle：全 E 安装时所有 write set 可用；只安装 W 的负向控制必须无法 OPEN。
+Oracle：全 E 安装并激活时所有 write set 可用；只安装 W 的负向控制必须无法创建标准 metadata或发布 READY。
 
-### A9：Ensemble replacement happy path
+### A9：Active write-time ensemble replacement
 
-步骤：选择满足 capability 的 replacement，install，恢复数据，CAS metadata，再发送命中新节点的 Add。
+步骤：在 active write failure 后选择满足 capability 的 replacement，durable inactive install，以现有 `LAC+1` fragment authority CAS 标准 metadata，发布 post-CAS activation authority，等待 replacement durable normal-active，再 resend pending Add。
 
-Oracle：durable replacement receipt 的时间/序列严格早于 active ensemble metadata。
+Oracle：durable replacement install 早于 membership CAS；normal activation 晚于 exact CAS；pending resend 晚于 activation。该路径不复制历史 fragment，不做 per-entry metadata update。
 
 ### A10：Replacement install 失败
 
-步骤：在 validation、control write、fsync、receipt 各处失败或丢包。
+步骤：在 install validation/control durability/receipt、membership CAS response、activation authority/local durability/receipt 各处失败或丢包，并与 `IN_RECOVERY/CLOSED`、durable fence 竞争。
 
-Oracle：失败节点不进入 active ensemble；不能先 CAS 后补装；允许选择新节点但不降低 Profile。
+Oracle：install 失败节点不进入 ensemble；CAS winner 以 exact mapping 重读恢复；CAS 后 activation 未完成时不 resend；fence/tombstone 不被迟到 activation重开；允许选择新节点但不降低 Profile或盲目制造多个 target。
 
 ### A11：Bookie restart
 
@@ -187,9 +196,9 @@ Oracle：client-only 按 Classic 兼容合同工作；installed/Segment Profile 
 
 ### A14：Orphan install
 
-步骤：全部或部分 install 后永久放弃创建；触发候选 GC，并重放极晚 install response/retry。
+步骤：分别在 sidecar reservation、部分/全部 install、标准 metadata create 和 READY CAS 各阶段永久放弃创建；触发候选 GC，并重放极晚 install/activation response与 retry。
 
-Oracle：orphan 从未接受 Add；GC 只在权威 metadata 证明后执行；GC 后旧请求不能重新激活。
+Oracle：orphan 从未接受 normal Add；GC 同时读取 sidecar与标准 membership authority，并以 stable grace + durable tombstone 证明；GC 后旧请求不能重新激活。
 
 ### A15：Watch/cache stale
 
@@ -199,9 +208,9 @@ Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正�
 
 ### A16：Install 完成但 activation/READY 未成立
 
-步骤：全部 E 个 Bookie durable install 后，分别在 OPEN/READY authority 提交前、确定失败后、activation durable 前后，由持有合法 master key 的客户端发送 profiled Add；在 activation request/receipt response loss 时重试并重启 Bookie。
+步骤：全部 E 个 Bookie durable install 后，分别在标准 metadata create 前后、READY authority 提交前/确定失败后、local normal activation durable 前后，由持有合法 master key 的客户端发送 profiled Add；在 activation request/receipt response loss 时重试并重启 Bookie。
 
-Oracle：缺少匹配 durable activation 的 Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；restart 后接受集合不扩大。
+Oracle：缺少 matching global READY 或 local durable normal ACTIVE 的 normal Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；READY 可早于部分 local active，但 create/open success 必须晚于 all-E activation；restart 后接受集合不扩大。
 
 ### A17：Legacy Add targeting Profile route
 
@@ -221,18 +230,24 @@ Oracle：最终只能存在一个 authoritative `CLASSIC` 或 `PROFILE` owner；
 
 Oracle：普通 Add 的远程 MetadataStore I/O 与逐请求重型 proof verification 均为 0；Classic throughput/p99 回归不超过运行前 manifest 锁定预算，超限为 FAIL 或经预定义规则判为 INCONCLUSIVE，不能事后放宽。
 
+### A20：Legacy metadata mutation authority
+
+步骤：让持有合法 master key、但没有 Profile metadata mutation authority 的 stale/legacy client，分别尝试 CAS 更换 profiled ledger ensemble、删除或替换 immutable Profile backlink，并与合法 Profile-aware replacement并发。
+
+Oracle：未授权 mutation 必须在标准 LedgerMetadata CAS 生效前被拒绝；master key 不能隐含 metadata write authority。若目标 metadata driver/ACL 配置无法提供等价 enforcement，则该 Profile 组合明确为 unsupported/FAIL，不能依赖 sidecar事后修复或仍让 Spike PASS。exact ACL/credential encoding 保持开放。
+
 ## 7. 故障注入点
 
 至少覆盖：
 
-- metadata create write 前后；
-- PREPARING -> INSTALLING CAS 前后；
+- sidecar reservation create/CAS 前后；
 - Bookie control record append、fsync、routing publish 前后；
 - install receipt serialization/send 前后；
-- INSTALLED/OPEN CAS 前后；
+- standard LedgerMetadata create 与 immutable backlink publish 前后；
+- READY authorization CAS、availability completion 前后；
 - activation authority publish、Bookie activation durable、receipt send 前后；
 - Classic/Profile atomic route claim 与 durable publish 各边界；
-- replacement install、data recovery、ensemble CAS 各边界；
+- active replacement install、`LAC+1` ensemble CAS、post-CAS activation、pending resend 各边界；
 - Bookie restart/replay 中；
 - coordinator restart 和 leader change；
 - duplicate、delay、reorder、drop response。
@@ -255,6 +270,7 @@ restart Bookie
 restart coordinator
 replace Bookie
 stale metadata read
+legacy metadata mutation
 ```
 
 每个 seed 的操作序列、fault sequence 和最终 oracle dump 必须保留。失败 seed 必须可单独重放。
@@ -265,21 +281,25 @@ PASS 必须同时满足：
 
 ```text
 uninstalled new-profile Add accepted                = 0
-pre-activation profiled Add accepted                = 0
+profiled Add accepted without matching READY/local NORMAL_ACTIVE = 0
 legacy Add bypassed Profile/Tombstoned route        = 0
 dual Classic/Profile authoritative route owners     = 0
 profile mismatch silently downgraded                = 0
 instance mismatch silently merged                   = 0
 engine/capability mismatch payload writes           = 0
 ensemble metadata active before replacement install = 0
-OPEN without all-E durable receipts                 = 0
+standard metadata before all-E Profile route claim = 0
+normal ACTIVE before matching READY                 = 0
+create/open success before all-E activation         = 0
+pending resend before replacement normal ACTIVE    = 0
 restart lost durable install                        = 0
 restart resurrected non-durable install             = 0
 restart expanded durable activation acceptance      = 0
-duplicate OPEN instances                            = 0
+duplicate READY/AVAILABLE instances                 = 0
 normal Add remote metadata reads                    = 0
 normal Add per-request heavy proof verifications    = 0
 unreplayable executed fault scenarios               = 0
+unauthorized profiled membership mutations          = 0
 ```
 
 所有指定 deterministic scenarios 必须 100% 执行并命中 fault；所有断言为硬失败，不接受“低概率”。
@@ -289,12 +309,15 @@ unreplayable executed fault scenarios               = 0
 发现以下任一项立即停止扩展原型，保留现场并回到 RFC：
 
 - 未安装 ledger 的新 Profile Add 被接受；
-- 未激活 ledger 的 profiled Add 被接受；
+- 缺少 matching READY/local NORMAL_ACTIVE 的 profiled Add 被接受；
 - legacy normal/recovery Add 绕过 Profile/Tombstoned route；
 - 并发 claim 产生 Classic/Profile 双重 owner；
 - mismatch 进入 Classic 或其他静默降级；
 - replacement metadata 先于 durable install 生效；
-- crash/retry 产生两个 OPEN instance；
+- standard metadata 在 all-E Profile route claim 前创建；
+- local normal ACTIVE 早于 matching READY，或 pending resend 早于 replacement activation；
+- crash/retry 产生两个 READY/AVAILABLE instance；
+- 持有 master key 但无 Profile metadata authority 的 legacy client 成功修改 profiled membership/backlink；
 - Bookie restart 后接受未由 durable record 授权的请求；
 - orphan GC 能让旧请求重新激活。
 

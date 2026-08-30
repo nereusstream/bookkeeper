@@ -91,8 +91,10 @@ GeneralEwaRecovery.tla      Model E, optional until feature advances
 ### 5.1 最小状态
 
 ```text
-ledger metadata version and state
+standard ledger metadata version/state, immutable instance backlink
 ensemble history
+Profile sidecar instance/control generation and READY/availability facts
+client/coordinator Profile metadata-mutation authority
 E/W/A
 entryId -> write set
 Bookie up/down and fenced state
@@ -102,18 +104,22 @@ client pending operations
 AQ evidence
 LAC/close state
 authoritative Classic/Profile route
-profile install and activation state for new-profile variant
+profile inactive install, normal-active and recovery-only/committed-readable roles
 ```
 
 ### 5.2 最小动作
 
 ```text
-CreateLedger
+AllocateLedgerInstance
+CreateProfileReservation
 InstallProfileOnBookie
-PublishOpen
+CreateStandardLedgerMetadata
+PublishReadyAuthorization
 ActivateProfileOnBookie
+PublishAvailabilityComplete
 SendAdd
 SendLegacyAdd
+AttemptProfileMembershipMutation
 BookieAcceptAdd
 BookieAck
 LoseResponse
@@ -128,16 +134,21 @@ CloseLedger
 BeginEnsembleChange
 InstallReplacement
 PublishEnsembleChange
+PublishReplacementActivationAuthority
+ActivateReplacement
+ResendPendingAdd
 ```
 
 ### 5.3 检查目标
 
 - AQ 定义与 recovery 保持一致；
-- profiled Add 没有 matching durable activation 时不能被 Bookie 接受；
+- normal profiled Add 没有 matching global READY 与 durable local normal activation 时不能被 Bookie 接受；
 - legacy Add 不能绕过 Profile/Tombstoned route；
+- profiled LedgerMetadata membership/backlink mutation 必须有 Profile mutation authority；master key 单独不足；
 - fencing 后不能形成不合法的新 AQ；
-- ensemble replacement 不绕过 Profile install；
-- response loss 不产生两个 ledger instance/OPEN publication；
+- initial standard metadata 不得早于 all-E inactive Profile route claim，normal create/open success 晚于 all-E activation；
+- active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
+- response loss 不产生两个 ledger instance/READY publication；
 - `E > W` 轮转覆盖全 ensemble 安装需求。
 
 ## 6. Model B：Sequenced Classic
@@ -245,7 +256,9 @@ ledger metadata and version
 ensemble history
 delete manifest and epoch
 frozen historical target set
-AutoRecovery operations
+durable RepairIntents and lifecycle/retention
+AutoRecovery target payload and ensemble publication
+per-target recovery-only/committed-readable role
 per-Bookie local tombstone/apply watermark
 Bookie online/offline/registered mode
 decommission proofs
@@ -258,8 +271,13 @@ ledger instances
 ```text
 BeginDeleteIntent
 PublishEnsembleChange
-StartAutoRecoveryReplica
-PublishAutoRecoveryReplica
+CreateRepairIntent
+GrantRecoveryOnlyAuthority
+WriteRecoveryPayload
+PublishRepairEnsemble
+CommitRepairIntent
+AbortDirtyRepairIntent
+CompactRepairIntent
 FreezeEnsembles
 PublishLogicalDelete
 DispatchLocalDelete
@@ -278,8 +296,10 @@ ReuseLedgerIdWithNewInstance
 ### 8.3 检查目标
 
 - logical delete 后旧 instance 不再 open；
-- frozen targets 覆盖所有可承载旧 instance 数据的历史节点；
+- recovery target 第一份 durable payload 晚于可枚举 RepairIntent；
+- frozen targets 覆盖历史 ensembles 与 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member/target；
 - DELETE_INTENT 后 AutoRecovery 不产生漏删副本；
+- recovery-only/committed-readable role 不产生 normal writable authority；
 - offline Bookie 未 catch up 时不能 writable；
 - physical completion 需要每个 target 的 terminal proof；
 - 旧 instance delete 不影响新 instance；
@@ -293,10 +313,14 @@ ReuseLedgerIdWithNewInstance
 NoFabricatedRecovery
 AckedPayloadSurvivesWithinBudget
 EvidenceExhaustedNeverReturnsSuccess
-OpenImpliesAllEInstalled
-ProfiledAckRequiresDurableActivation
+ProfileAvailabilityImpliesAllEActive
+ProfiledNormalAckRequiresReadyAndLocalActive
 LegacyAddCannotBypassProfileRoute
-ReplacementInstalledBeforeActive
+ProfileMembershipMutationRequiresAuthority
+InitialMetadataAfterAllEProfileClaim
+ReplacementInstallCasActivateResendOrder
+RepairIntentBeforeTargetPayload
+RecoveryRoleNeverGrantsNormalWrite
 NoOverlappingPublishedSequence
 AppendIdContentUnique
 OrderedFrontierIsContiguous
@@ -307,7 +331,7 @@ NoReuseBeforeDurableGenerationBump
 OldLocatorNeverReadsNewGeneration
 AllocatorAuthorityOrDeviceFailed
 LogicalDeleteIsIrreversible
-FrozenTargetsCoverReplicaHistory
+FrozenTargetsCoverReplicaAndRepairHistory
 NoWritableRejoinBeforeDeleteCatchup
 PhysicalDeleteHasTerminalProofs
 InstanceIsolation
@@ -318,7 +342,9 @@ InstanceIsolation
 - recovery 没有有效 evidence 时永远不能返回成功；
 - ACK 且永久 failure-domain losses 在声明预算内时，至少一个有效 payload evidence 存活；
 - evidence 全部耗尽时进入 `UNRECOVERABLE/DATA_LOSS`，不能伪造恢复成功；
-- profiled Add ACK 之前有 matching durable activation，legacy Add 不能绕过 route；
+- normal profiled Add ACK 之前有 matching global READY 与 durable local normal activation，legacy Add 不能绕过 route；
+- initial standard metadata 晚于 all-E inactive Profile claim；写期 replacement 按 install/CAS/activate/resend 排序；
+- recovery payload 写入 target 前有 durable RepairIntent，recovery-only/committed-readable 不授予 normal write；
 - 同一 extent generation 不同时属于两个 ledger instance；
 - ALLOC 未 durable 时 DATA 不可被允许 ACK；
 - FREE 未 durable 时 slot 不可复用；
@@ -365,6 +391,7 @@ offline Bookie delete and rejoin
 | C-CKPT | C | local | checkpoint/superblock crash |
 | D-OFF | D | historical ensembles | offline rejoin |
 | D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery |
+| D-INTENT | A+D | closed fragment | intent, first payload, CAS and delete at every crash boundary |
 | CD-REUSE | C+D | local + cluster | delete, free, ledgerId reuse |
 
 正式运行前可增加 config，不得删除最低结构。
@@ -396,7 +423,7 @@ offline Bookie delete and rejoin
 
 首要 Gate 是 safety。可额外检查以下有界进展属性：
 
-- 在足够 Bookie 可用且无持续故障时，install 最终 OPEN 或明确失败；
+- 在足够 Bookie 可用且无持续故障时，install 最终 AVAILABLE 或明确失败；
 - recovery authority 唯一时，predecessor 最终 SEALED 或明确失败；
 - delete targets 最终响应或被 durable decommission 时，physical delete 最终完成。
 

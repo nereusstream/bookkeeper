@@ -15,11 +15,12 @@
 - Ledger Contract Profile 由 immutable ProfileDescriptor 描述；
 - Client/Protocol Profile 不冒充 Bookie capability；
 - 新合同在 ledger `OPEN` 前安装到当前 ensemble 的全部 E 个 Bookie；
-- Profile Add 只有在目标 Bookie 已存在匹配的 durable install 与 durable activation 时才能 ACK；
+- 标准 LedgerMetadata 只拥有 OSS state/membership；独立 sidecar 拥有 Profile instance 与控制事实；
+- normal Profile Add 只有在 global READY 与目标 Bookie durable normal activation 都匹配时才能 ACK；
 - 每个新 Profile Add 的请求身份都必须足以匹配 Bookie 本地 durable activation；exact binding fields 保持开放；
 - 未安装、instance/hash/engine 不匹配全部 fail closed；
 - Classic/Profile routing 是单一、原子、可恢复的本地 claim；
-- replacement Bookie 的 durable install 先于 ensemble metadata CAS。
+- 写期 replacement 按 inactive install → `LAC+1` membership CAS → normal activation → resend 排序。
 
 本文是待接受合同，不是已存在的 wire protocol 或实现说明。
 
@@ -152,47 +153,52 @@ RuntimePolicy {
 
 规范编码、hash 算法、受保护 `authBinding`、首版是否允许 key rotation，以及最终字段分类是 RFC 接受前必须关闭的开放项。不能在安全评审前把可离线验证的 `masterKeyDigest` 暴露为公开 descriptor 字段。
 
-## 6. 创建状态机
+## 6. Profile control namespace 与 initial publication
+
+标准 `LedgerMetadata` 继续唯一拥有 OSS `OPEN / IN_RECOVERY / CLOSED` 状态和 ensemble membership。Profile 使用独立、带 CAS 语义的 sidecar namespace 保存 ledger instance 与 Profile 控制事实；sidecar 不复制或重新解释标准 membership。
+
+Profile 占用的 reserved `LedgerMetadata.customMetadata` entry 只保存一个小型 immutable backlink，至少能把 `ledgerId` 绑定到 `ledgerInstanceId/sidecar reference`，防止 ledgerId 删除重建后 metadata version 从头开始产生 ABA。完整 descriptor、receipt、repair/delete history 不得塞入该 reserved entry，也不得累积在一个无界增长的 sidecar root；其他现有 OSS/user custom metadata 不受本合同禁止。RFC-0004 拥有语义的 repair/delete operation 可以使用有界 child record。
+
+LedgerMetadata version、relevant ensemble/fragment digest、instance marker 与 sidecar operation generation 只作为冷控制路径的 publication/CAS evidence。普通 Add 不读取当前 metadata version，也不因不相关 metadata mutation 要求全 E 重新激活。每个 ledger instance 只需要一个冷控制 CAS generation/fencing token；本 RFC 不引入跨两个 metadata node 的通用事务、全局锁或 Add-time lease。
+
+初始创建的最低顺序固定为：
 
 ```text
-PREPARING
-    │ durable metadata contains full descriptor and initial ensemble
-    ▼
-INSTALLING
-    │ install to every Bookie in current ensemble
-    ▼
-INSTALLED
-    │ all E durable receipts recorded or provably referenced
-    ▼
-OPEN
+1. allocate ledgerId + ledgerInstanceId; select planned initial ensemble
+2. create-if-absent sidecar PREPARING/reservation
+3. durable install PROFILE on all E Bookies, normal-inactive
+   - each install atomically claims ABSENT -> PROFILE
+4. create-if-absent standard LedgerMetadata
+   - exact initial ensemble equals the installed set
+   - immutable instance/sidecar backlink is present
+5. sidecar CAS publishes READY authorization
+   - binds actual LedgerMetadata version + canonical ensemble digest
+   - requires verified all-E durable install
+6. idempotently ACTIVATE each Bookie from that READY authority
+7. only after all E are durably normal-active may create/open return normal success
 ```
 
-该图只表示创建方的逻辑阶段，不等同于已经冻结的 MetadataStore schema。Bookie 本地最低语义还必须区分“已安装但未激活”和“已激活”。具体 metadata 状态数量、命名空间、activation proof 以及 initial/replacement publication 顺序保持开放；无论选择何种机制，都必须满足：
+这些名称表达必须区分的事实，不冻结 exact enum/schema：全局 `READY_AUTHORIZED` 先于任何 local normal activation；`ALL_E_ACTIVATED/AVAILABLE` 晚于全部 E 的 durable activation。READY 可以早于部分 Bookie active；已 active target/write set 可能形成合法 local success 或 AQ，未 active target 必须明确 transient unavailable，且 create/open 正常成功仍晚于 all-E activation。是否通过 credential distribution 禁止所有 pre-return write 保持开放；任何情况都不能回退 Classic 或扩大错误 Profile/durability 接受集合。
+
+安全合同固定为：
 
 ```text
-ACK(profiled Add)
-    => matching durable install existed before Add processing
-    && matching durable activation existed before Add processing
+ACK(normal profiled Add)
+    => matching global READY authorization existed before Add processing
+    && matching local durable normal ACTIVE existed before Add processing
 ```
 
-### 6.1 PREPARING
+### 6.1 Sidecar reservation 与 authority boundary
 
-创建方通过 MetadataStore 写入完整 descriptor、initial ensemble 和 creation request identity。该状态：
+PREPARING/reservation 至少绑定 `ledgerId + ledgerInstanceId + descriptorHash + creation request identity + planned initial ensemble`。它本身不授权 normal Add，也不是第二份 ensemble truth。同一 creation request 重试必须解析到相同 instance/descriptor；冲突请求失败。
 
-- 不允许正常 open；
-- 不允许 Add；
-- 不对外声明 ledger 可用；
-- 同一个 creation request 重试必须解析到同一 instance/descriptor，冲突请求失败。
+Profiled ledger 的标准 metadata mutation 只能由 Profile-aware coordinator 或等价 ACL/fencing authority 执行；持有 master key 本身不授予绕过 Profile lifecycle 修改 LedgerMetadata 的权限。exact credential/ACL 机制保持开放，但不能假设 sidecar 能约束一个拥有不受限 metadata 写权限的 legacy client。
 
-### 6.2 INSTALLING
+### 6.2 All-E inactive install
 
-协调方对 initial ensemble 的全部 E 个 Bookie发送 `INSTALL_LEDGER_PROFILE`。不能只安装本次 write set 中的 W 个节点，因为一般 `E > W` 会轮转 write set。
+标准 LedgerMetadata 创建前，协调方必须对 planned initial ensemble 的全部 E 个 Bookie 执行 `INSTALL_LEDGER_PROFILE`，同时 durable claim `PROFILE` route，但保持 normal-inactive。不能只安装当前 write set 的 W 个节点，也不能先暴露标准 OPEN metadata 后再补 route claim。
 
-部分成功或 response loss 时维持 INSTALLING，并按相同 `installRequestId` 幂等重试。不能回退为 Classic lazy-create。
-
-### 6.3 INSTALLED
-
-只有全部 E 个节点返回可验证的 durable receipt 后才能进入 INSTALLED。receipt 至少绑定：
+部分成功或 response loss 时，只重试相同 install operation；未形成全部 E durable receipts 前不能创建标准 LedgerMetadata。receipt 至少绑定：
 
 ```text
 bookieId
@@ -205,13 +211,19 @@ bookieCapabilityDigest
 localInstallGeneration
 ```
 
-receipt 的存放位置和是否内嵌 metadata 是开放项，但必须能审计 `OPEN` CAS 的前置证据。
+receipt 的保存、压缩和审计布局保持开放；root record 不得保存无界 receipt history。
 
-### 6.4 OPEN
+### 6.3 Standard metadata 与 READY publication
 
-协调方以 metadata version CAS 从 INSTALLED 发布 OPEN。CAS 失败时不得开始 Add；必须重新读取 authority 并判断是幂等完成、并发修改还是创建失败。
+标准 LedgerMetadata create-if-absent 必须携带 immutable instance backlink，且 initial ensemble 精确匹配已安装集合。之后 sidecar 以 CAS 发布 READY authorization，并绑定实际 metadata version、canonical ensemble digest、instance 与 control generation。任一 CAS response loss 都必须重读两份 authority，按 operation identity/version/digest 判断已提交、可重试或冲突；不得盲建第二个 instance。
 
-`OPEN CAS` 不能单独授权 Bookie 接受 Add；目标 Bookie 还必须通过尚待冻结的冷路径 activation protocol，验证与该 OPEN authority 匹配的 proof 并 durable 激活本地 route。普通 Add 不要求远程读取 MetadataStore；watch/cache 只用于性能和提前失败。
+Sidecar reservation 单独存在不授权 Add；标准 membership 单独存在不激活 Bookie；只有 post-publication authority 才允许 Bookie durable normal ACTIVE。所有中间态必须 inert 或可恢复，不能扩大接受集合。
+
+### 6.4 Local activation 与 availability completion
+
+ACTIVATE 是幂等冷路径操作。Bookie 只有在 READY authority 匹配本地 instance/hash、且 durable fence/tombstone 未先发生时才能 durable normal-active；迟到 activation 不能重新打开 fenced/deleted route。watch/cache 只能提前触发 activation或优化失败响应，不是正确性依赖。
+
+create/open 正常成功必须晚于全部 E durable activation。availability completion 可以是有界 completion fact，或由 E 个 local state 的有界重查证明；exact state name、receipt packing、proof/certificate 与 partial-activation credential distribution 保持开放。普通 Add 仍只执行有界本地 lookup，不增加 MetadataStore I/O 或逐请求重型验证。
 
 ## 7. Bookie 安装语义
 
@@ -304,30 +316,44 @@ Bookie 校验顺序的语义要求：
 
 ```text
 authoritative route is CLASSIC/TOMBSTONED/conflicting -> fail closed
-install missing or inactive                            -> reject
+install missing                                        -> reject
 ledger instance mismatch                               -> reject
 descriptor hash mismatch                               -> reject
-request cannot match durable active route              -> reject
+normal request cannot match durable normal-active role -> reject
 engine mismatch                                        -> reject
 then existing fencing/auth/entry validation
 ```
 
-新 Profile 请求缺失已冻结 activation/auth 机制要求的 identity 字段时必须拒绝。请求如何匹配 durable active route、是否需要额外 proof/certificate，以及 exact binding fields 都保持开放。具体 profiled opcode/version 与 error mapping 保持开放；不能只增加会被旧 protobuf 实现忽略的 optional field。Classic 请求仅在 route 为 `ABSENT/CLASSIC` 时走现有路径，命中 `PROFILE/TOMBSTONED` 时必须在创建 Classic handle、master key 或 payload 前拒绝。
+新 Profile 请求缺失已冻结 activation/auth 机制要求的 identity 字段时必须拒绝。请求如何匹配 durable active route、是否需要额外 proof/certificate，以及 exact binding fields 都保持开放。normal Add 必须匹配 durable normal-active role；RFC-0004/0005 定义的 recovery Add 匹配 recovery-only authority，不能借此获得 normal writable 权限。具体 profiled opcode/version 与 error mapping 保持开放；不能只增加会被旧 protobuf 实现忽略的 optional field。Classic 请求仅在 route 为 `ABSENT/CLASSIC` 时走现有路径，命中 `PROFILE/TOMBSTONED` 时必须在创建 Classic handle、master key 或 payload 前拒绝。
 
 ## 9. Ensemble change
 
-replacement 的唯一合法顺序：
+Active write-time replacement 与 AutoRecovery 是两条不同流程，不能用同一个“copy then CAS”序列概括。
+
+### 9.1 Active write-time replacement
+
+写期换组的最低顺序固定为：
 
 ```text
 1. select Bookie satisfying engine and capabilities
-2. INSTALL_LEDGER_PROFILE on replacement
-3. wait for durable install receipt
-4. copy/recover data according to existing recovery contract
-5. CAS ensemble metadata
-6. allow write sets to address replacement
+2. durable install replacement, normal-inactive
+3. CAS standard LedgerMetadata at the existing LAC+1 fragment authority
+4. publish/verify post-CAS membership activation authority
+5. replacement becomes durable normal-active
+6. only then resend affected pending Adds
 ```
 
-第 4、5 步与现有 recovery 的精确相对次序需结合 BookKeeper ensemble-change 流程评审，但以下关系不可改变：replacement install 必须先于任何 metadata 或 write set 使其成为 active member。
+该路径不复制整个历史 fragment。CAS 到 activation 之间只能暂停写入或返回明确 transient failure；不能向 replacement resend、降级 Classic 或执行 per-entry metadata operation。install/activation 属于 `MetadataUpdateLoop.transform` 外的显式异步冷路径 phase，避免 CAS conflict 重放 transform 时重复外部副作用。
+
+并发和 response-loss 合同：
+
+- 继续继承 BookKeeper single-writer/fence；同一 handle replacement 串行，不新增多 writer consensus；
+- 标准 LedgerMetadata CAS winner 是唯一 membership winner；
+- CAS response loss 后重读 exact fragment start、old ensemble identity、replacement mapping、instance marker 与 operation generation；匹配才继续 activation，不匹配则 target 保持 inactive/orphan；
+- activation response loss 只重试/查询同一 operation，不因 timeout 盲选第二个 target；
+- ledger 已 `IN_RECOVERY/CLOSED` 时停止 normal activation/resend；
+- durable fence/tombstone 先发生时迟到 activation 失败；activation 先发生时后续 durable fence 关闭 normal Add；
+- sidecar post-CAS authority 只绑定 instance/profile、committed metadata version、relevant fragment start、new ensemble digest 和 activation generation，不复制 pending Add 或完整 metadata。
 
 如果 install 失败：
 
@@ -336,15 +362,23 @@ replacement 的唯一合法顺序：
 - 不降低 capability；
 - 不把首次 Add 当作安装触发器。
 
+CAS 前的 inactive replacement 不接收 payload，因此不强制为每次写期换组建立通用 repair transaction。若不记录 replacement-attempt，GC 必须从 sidecar/standard metadata、instance/hash、stable grace 与 durable tombstone 证明它从未 active、不会被迟到 response 激活，才能回收。
+
+### 9.2 AutoRecovery repair
+
+AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RFC-0004 的 durable instance-specific repair intent，并获得仅绑定该 intent 的 recovery-only authority。copy 完成并 CAS standard ensemble 后，closed/historical fragment target 通常转换为 `COMMITTED_REPLICA/READABLE`，关闭 recovery-only authority，但不自动成为 normal-active。
+
+只有 target 同时成为当前 writable fragment member，并重新满足本节 9.1 的 post-CAS membership、fence 和 normal activation合同时，才可独立进入 normal-active。实际 surviving reader source 可以动态选择，不进入持久 authority；repair target、被替换 member、fragment identity 和 operation generation 必须可被 delete freeze 枚举。
+
 ## 10. Restart 与 orphan install
 
 Bookie restart 必须从 durable control record 恢复 install、instance、hash、master key 状态和 routing，再注册为可接收相应 Profile 的节点。
 
-metadata OPEN CAS 失败可能留下 orphan install。候选处理：
+sidecar reservation、标准 metadata create、READY publication 或 replacement CAS 失败都可能留下 orphan install。处理最低要求：
 
-- orphan install 不允许接收 Add，因为 metadata 从未发布 OPEN；
+- orphan install 不允许接收 normal Add，因为不存在匹配 READY/membership activation；
 - install 状态不得仅凭超时删除；
-- GC 必须读取权威 metadata，并使用 instance/hash 与稳定 grace/window 证明该 install 永远不会发布；
+- GC 必须读取 sidecar 与标准 membership authority，并使用 instance/hash、operation generation 与稳定 grace/window 证明该 install 永远不会发布或被迟到 response 激活；
 - GC 本身需要 durable tombstone，防止 response loss 后旧请求重新激活。
 
 orphan GC 的完整状态机是本 RFC 接受前的开放项，也是 Spike A 的必测场景。
@@ -378,16 +412,18 @@ placement 只把满足 descriptor mandatory requirements 的 Bookie 作为候选
 
 ## 13. 安全不变量
 
-1. `OPEN => all current ensemble Bookies durably installed the same instance/hash`。
-2. `ACK(profiled Add) => matching durable install && matching durable activation existed before Add processing`。
+1. Profile create/open 正常成功意味着 initial ensemble 的全部 E 个 Bookie 已 durable install 且 normal-active。
+2. `ACK(normal profiled Add) => matching global READY authorization && matching local durable normal ACTIVE existed before Add processing`。
 3. Classic/Profile/Tombstoned route 对同一 ledgerId 是单一、原子、可恢复的 claim。
 4. legacy normal/recovery Add 不能绕过 `PROFILE/TOMBSTONED` route 进入 Classic lazy-create。
 5. 相同 ledgerId 的两个 live instance 不得共享同一 Bookie routing identity。
 6. descriptor 或 protected auth binding 冲突不能被重试、restart 或 lazy-create 消解为成功。
-7. ensemble metadata 不能先于 replacement durable install 引用 replacement。
-8. Bookie restart 后的接受集合不能大于 crash 前由 durable install/activation 授权的集合。
-9. metadata watch/cache 失效不能破坏上述不变量。
-10. 普通 Add 热路径不依赖远程 MetadataStore I/O 或逐请求重型 proof 验证。
+7. 标准 LedgerMetadata 是唯一 membership authority；sidecar intent或 membership CAS 单独存在都不能激活新 Bookie。
+8. 写期 replacement 必须按 inactive install → `LAC+1` membership CAS → normal activation → resend 排序，且不复制历史 fragment。
+9. AutoRecovery recovery-only authority不授予 normal writable；任何 target durable recovery payload 都晚于可枚举 repair intent。
+10. Bookie restart 后的接受集合不能大于 crash 前由 durable install/activation 授权的集合。
+11. metadata watch/cache 失效不能破坏上述不变量。
+12. 普通 Add 热路径不依赖远程 MetadataStore I/O 或逐请求重型 proof 验证。
 
 ## 14. Spike 与接受 Gate
 
@@ -397,6 +433,7 @@ RFC 进入 Accepted 前必须：
 - Model A 包含创建、安装、response loss 与 ensemble replacement 的抽象；
 - canonical descriptor/hash 与未知字段规则冻结；
 - protected auth binding 经过安全评审且不会泄漏可离线验证的 credential material；
+- sidecar/backlink ABA、initial route-first publication、READY/availability 与 profiled metadata mutation authority 经过安全评审；
 - orphan install 回收合同冻结；
 - protocol error mapping 和 mixed-version matrix 有确定测试；
 - route claim、legacy normal/recovery Add 与 activation gate 经过并发、restart 和源码评审；
@@ -407,15 +444,16 @@ RFC 进入 Accepted 前必须：
 ## 15. 开放问题
 
 - canonical serialization、hash 算法和 descriptor version negotiation；
-- metadata namespace，以及 PREPARING/INSTALLING/INSTALLED/OPEN/ACTIVATING/READY 的最终 schema；
-- activation proof、冷路径校验方式、initial/replacement publication 顺序与 exact binding fields；
+- sidecar exact path、root/child record schema、field numbers、状态名与 immutable backlink encoding；
+- activation proof、冷路径校验方式、exact binding fields 与 profiled metadata mutation ACL/credential enforcement；
 - receipt 的持久化位置、压缩和审计方式；
 - protected auth binding、install control record 与现有 master-key persistence 的整合；
 - 首版是否禁止 key rotation，以及未来 KMS/key-version 兼容边界；
 - create cancellation、orphan install tombstone 与 GC；
 - Bookie registration capability 的刷新与降级行为；
-- ensemble change 中 install、data recovery 与 CAS 的完整线性化点；
-- ledgerId reuse 是否允许，以及 instance 分配 authority；
+- CAS→activation gap 的 exact error/retry/backoff、availability completion 与 partial-activation credential distribution；
+- write-time inactive orphan/possibly-activated target 的 GC state machine；
+- ledgerId reuse 最终策略，以及 instance 分配 authority；
 - profiled opcode/version、unknown operation 行为与 exact error mapping；
 - 哪些 limit 影响跨实现安全语义、哪些只属于 runtime admission policy。
 

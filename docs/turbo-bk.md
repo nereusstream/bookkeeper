@@ -182,8 +182,8 @@ transaction and visibility state
 Client / Protocol Adapter
     │ sequence, appendId, ordered frontier
     ▼
-Ledger Metadata + Profile Coordinator
-    │ descriptor, install state, ensemble CAS
+Standard LedgerMetadata + Profile Sidecar Coordinator
+    │ OSS state/membership CAS + instance/READY/operation authority
     ▼
 Bookie Cohort selected by Engine Profile
     ├── CLASSIC_ENGINE
@@ -194,13 +194,14 @@ Bookie Cohort selected by Engine Profile
             └── Derived Index       rebuildable acceleration
 
 Cluster Lifecycle
-    ├── AutoRecovery
+    ├── AutoRecovery + durable RepairIntent
     └── LedgerDeleteCoordinator
 ```
 
 权威层次必须保持：
 
-- MetadataStore：ledger 状态、ensemble 和集群 delete manifest 的权威。
+- Standard LedgerMetadata：OSS state 与 ensemble membership 的唯一权威。
+- Profile sidecar namespace：ledger instance、immutable descriptor、READY/activation generation 和有界 repair/delete operation 的权威；不复制 membership，不形成无界 root blob。
 - BookKeeper quorum：entry 是否达到 ACK quorum 的权威。
 - `ArenaControlLog`：Segment 本地空间 ownership、generation 和 reuse 的权威。
 - Data Arena：Segment payload 的权威。
@@ -209,10 +210,10 @@ Cluster Lifecycle
 
 ## 8. 跨 RFC 安全不变量
 
-1. 新 Profile ledger 在 `OPEN` 前，当前 ensemble 的全部 E 个 Bookie 都已 durable install。
-2. `ACK(profiled Add)` 之前，目标 Bookie 已存在匹配的 durable install 与 durable activation；普通 Add 不远程读取 MetadataStore。
+1. 新 Profile ledger 必须先在 planned initial ensemble 的全部 E 个 Bookie durable claim inactive Profile route，再创建带 immutable instance backlink 的标准 LedgerMetadata。
+2. `ACK(normal profiled Add)` 之前，matching global READY 与目标 Bookie durable local normal activation 均已成立；普通 Add 不远程读取 MetadataStore。
 3. Classic/Profile/Tombstoned route 是单一、原子、可恢复的本地 claim；legacy normal/recovery Add 不能绕过 Profile route。
-4. replacement Bookie 的 durable install 必须先于 ensemble metadata CAS 生效。
+4. 写期 replacement 按 inactive install → `LAC+1` membership CAS → normal activation → pending resend 排序，不复制历史 fragment。
 5. ACKed data 的物理空间必须已有 durable allocation authority。
 6. 同一 slot/extent generation 不得同时属于两个 ledger instance。
 7. `FREE` 或 generation bump 未 durable 前，空间不得复用。
@@ -220,9 +221,10 @@ Cluster Lifecycle
 9. BookKeeper AQ evidence 与上层 WAL COMMITTED 分离；published WalSequence 只推进连续前缀。
 10. successor ledger 从 predecessor durable sealed prefix `P + 1` 开始；sealed prefix 外 AQ candidate 永远不能进入 WAL COMMITTED。
 11. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
-12. 删除、AutoRecovery 和 ensemble change 对同一 ledger 的权威状态转换必须由 MetadataStore CAS 串行化。
-13. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
-14. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
+12. AutoRecovery target 接收第一份 durable payload 前必须有可由 delete freeze 枚举的 RepairIntent；recovery-only/committed-readable 不授予 normal writable。
+13. 删除、RepairIntent 和 ensemble change 对同一 ledger instance 的权威状态转换必须由标准 membership CAS 与 sidecar control generation 协同串行，任一中间态 fail closed。
+14. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
+15. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
 
@@ -311,14 +313,15 @@ Segment production candidate 的最低 Gate：
 以下问题必须在对应 RFC 接受前闭合：
 
 - ProfileDescriptor 的规范序列化、hash 算法、版本升级和 master key 处理；
-- install/activation 状态、ledger metadata 的 CAS 结构及失败清理；
+- sidecar exact root/child schema、immutable backlink encoding、ledgerId reuse 和 profiled metadata mutation authority；
+- activation/recovery-only proof、local role mapping、receipt packing 与失败清理；
 - profiled wire opcode、atomic Classic/Profile route claim 的实现与 exact errors；
 - successor ledger 的 publication record、owner 状态和跨 run continuity；
 - appendId suppressed-suffix/horizon、durable seal/footer authority；
 - `ArenaControlLog` segment、checkpoint A/B、superblock 切换与设备失败判定；
 - RFC-0005 exact durable state packing、Engine identity 与 operation capability matrix；
 - shared slab 的 lifetime class、compaction policy 和 hot promotion threshold；
-- Delete Coordinator 的存储布局、decommission 证明、tombstone retention 和 rejoin watermark；
+- RepairIntent child enumeration/retention/orphan cleanup，以及 Delete Coordinator 的存储布局、decommission 证明、tombstone retention 和 rejoin watermark；
 - streaming range 在一般 E/W/A 下的结果合并与 recovery-specific semantics；
 - 每个正式 Gate 的基准 commit、硬件和完整 manifest。
 
