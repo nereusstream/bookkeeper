@@ -1,7 +1,7 @@
 # RFC-0003：Segment Storage、ArenaControlLog 与冷热混合 Allocator
 
 > 状态：**Proposed / P0 Blocked**<br>
-> 依赖：[RFC-0001](RFC-0001-profile-capability-install.md)<br>
+> 依赖：[RFC-0001](RFC-0001-profile-capability-install.md)；ACK authority 另依赖 [RFC-0005](RFC-0005-segment-bookie-state.md)<br>
 > 验证：必须通过 [Spike B](spikes/SPIKE-B-allocator-block.md) 与 [Spike C](spikes/SPIKE-C-no-object-tla.md)<br>
 > 解锁对象：Segment shadow writer；不直接解锁 Segment ACK authority
 
@@ -33,7 +33,8 @@
 - Profile 创建和 ensemble install，见 [RFC-0001](RFC-0001-profile-capability-install.md)；
 - sequence takeover，见 [RFC-0002](RFC-0002-sequenced-wal.md)；
 - 集群删除授权和离线 Bookie，见 [RFC-0004](RFC-0004-range-recovery-delete.md)；
-- BookKeeper quorum ACK、ensemble change 或 AutoRecovery 的总体协议。
+- Segment Bookie 的 activation、fence、explicit LAC、recovery Add 与 ACK authority，见 [RFC-0005](RFC-0005-segment-bookie-state.md)；
+- BookKeeper ensemble change 或 AutoRecovery 的总体协议。
 
 ## 3. Authority 分层
 
@@ -406,7 +407,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - cold/hot promotion、lifetime class 和 compaction locator switch 有确定合同；
 - 证明 shadow writer 可以与 Classic authority 隔离，失败不会影响 Classic ACK。
 
-即使 Spike 通过，也只解锁 shadow implementation。Segment 成为 ACK authority 仍需要独立 canary Gate、回滚合同和 RFC-0001 安装证据。
+即使 Spike 通过，也只解锁 shadow implementation。Segment 成为 ACK authority 仍需要 [RFC-0005](RFC-0005-segment-bookie-state.md) Accepted、独立 canary Gate、回滚合同和 RFC-0001 安装/activation 证据。
 
 ## 19. 开放问题
 

@@ -14,7 +14,7 @@
 1. `BK_CLASSIC` 是现有 OSS 基线；`BK_CLASSIC_TUNED` 可以立即进入基准和低风险优化。
 2. `DirectJournal` 是 Bookie 进程或部署 cohort 级 Engine Profile，不是任意 ledger 可切换的属性。
 3. `BK_SEQUENCED_CLASSIC_CLIENT_ONLY` 必须通过“fence 旧 ledger、recovery、seal、发布 successor ledger”完成 takeover；旧 Bookie 不理解 `writerEpoch`。
-4. Segment WAL 在 Profile install、`ArenaControlLog`、冷热混合 allocator 和无对象存储形式化模型闭合前保持 **P0 Blocked**。
+4. Segment WAL 在 Profile install/activation、`ArenaControlLog`、冷热混合 allocator、Segment Bookie state/ACK authority 和无对象存储形式化模型闭合前保持 **P0 Blocked**。
 5. Conditional delete 是集群协议，必须覆盖历史 ensemble、离线 Bookie、持久 tombstone、AutoRecovery 竞争和 Bookie rejoin barrier。
 6. 当前 OSS 已有 bounded Batch Read；新增范围是 streaming continuation、一般 E/W/A 合并、恢复语义、QoS 和 cancellation。
 7. BtrLog 只提供设计启发。它的对象存储恢复假设不能证明本方案安全。
@@ -40,6 +40,9 @@
 | [RFC-0002：Sequenced WAL](rfcs/unified-wal/RFC-0002-sequenced-wal.md) | sequence、appendId、ordered frontier、stale writer、successor ledger | Proposed |
 | [RFC-0003：Segment Storage 与 Allocator](rfcs/unified-wal/RFC-0003-segment-storage-allocator.md) | `ArenaControlLog`、slab/extent、generation、崩溃恢复、资源模型 | Proposed / P0 prerequisite |
 | [RFC-0004：Batch/Range、Recovery 与 Delete](rfcs/unified-wal/RFC-0004-range-recovery-delete.md) | OSS BatchRead 基线、streaming range、TailSummary、一般 E/W/A、集群删除 | Proposed |
+| [RFC-0005：Segment Bookie State 与 ACK Authority](rfcs/unified-wal/RFC-0005-segment-bookie-state.md) | Segment operation、activation/fence、recovery Add、explicit LAC、restart 与 local success | Proposed / P0 prerequisite |
+
+逐轮 P0 合同审查及固定 reviewer 的完整反馈见 [grill 记录](rfcs/unified-wal/grill/README.md)。
 
 否证型 Spike：
 
@@ -165,7 +168,7 @@ transaction and visibility state
 | `BK_DIRECT_JOURNAL` | Spike Ready，Engine/cohort 级 | 独立 cohort 原型与崩溃测试 |
 | `BK_SEQUENCED_CLASSIC_CLIENT_ONLY` | RFC Required | 接受 RFC-0002 与 Model B |
 | `BK_SEQUENCED_CLASSIC_INSTALLED` | Blocked | 接受 RFC-0001/0002，Spike A 通过 |
-| `BK_SEGMENT_WAL` | P0 Blocked | RFC-0001/0003 接受，Spike A/B/C 通过 |
+| `BK_SEGMENT_WAL` | P0 Blocked | RFC-0001/0003/0005 接受，Spike A/B/C 通过 |
 | `BK_SEQUENCED_SEGMENT_WAL` | P0 Blocked | Segment authority 与 Sequenced WAL 分别通过 Gate |
 | `DEFERRED_SYNC_LEGACY` | Existing with HA Restriction | 不作为首版 WAL 默认 |
 | `GENERAL_EWA_FAST_RECOVERY` | Research/Spike | RFC-0004 和 Model E |
@@ -201,22 +204,25 @@ Cluster Lifecycle
 - BookKeeper quorum：entry 是否达到 ACK quorum 的权威。
 - `ArenaControlLog`：Segment 本地空间 ownership、generation 和 reuse 的权威。
 - Data Arena：Segment payload 的权威。
+- RFC-0005 Segment Bookie state：install/activation/fence/recovery authorization 被消费后 local success 是否有资格参与 AQ 的权威。
 - RocksDB、footer、cache：可丢弃并重建的派生加速结构。
 
 ## 8. 跨 RFC 安全不变量
 
 1. 新 Profile ledger 在 `OPEN` 前，当前 ensemble 的全部 E 个 Bookie 都已 durable install。
-2. 新 Profile Add 必须携带并匹配 `ledgerInstanceId + profileDescriptorHash`；不匹配时 fail closed。
-3. replacement Bookie 的 durable install 必须先于 ensemble metadata CAS 生效。
-4. ACKed data 的物理空间必须已有 durable allocation authority。
-5. 同一 slot/extent generation 不得同时属于两个 ledger instance。
-6. `FREE` 或 generation bump 未 durable 前，空间不得复用。
-7. 旧 generation locator 永远不能读取新 generation payload。
-8. recovery 只发布可证明的最大连续前缀，不把 outcome-unknown 自动解释为失败或成功。
-9. successor ledger 进入 ACTIVE 后，旧 ledger 不得形成新的可提交前缀；fence 前已经形成 AQ 的结果不被追溯撤销。
-10. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
-11. 删除、AutoRecovery 和 ensemble change 对同一 ledger 的权威状态转换必须由 MetadataStore CAS 串行化。
-12. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
+2. `ACK(profiled Add)` 之前，目标 Bookie 已存在匹配的 durable install 与 durable activation；普通 Add 不远程读取 MetadataStore。
+3. Classic/Profile/Tombstoned route 是单一、原子、可恢复的本地 claim；legacy normal/recovery Add 不能绕过 Profile route。
+4. replacement Bookie 的 durable install 必须先于 ensemble metadata CAS 生效。
+5. ACKed data 的物理空间必须已有 durable allocation authority。
+6. 同一 slot/extent generation 不得同时属于两个 ledger instance。
+7. `FREE` 或 generation bump 未 durable 前，空间不得复用。
+8. 旧 generation locator 永远不能读取新 generation payload。
+9. BookKeeper AQ evidence 与上层 WAL COMMITTED 分离；published WalSequence 只推进连续前缀。
+10. successor ledger 从 predecessor durable sealed prefix `P + 1` 开始；sealed prefix 外 AQ candidate 永远不能进入 WAL COMMITTED。
+11. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
+12. 删除、AutoRecovery 和 ensemble change 对同一 ledger 的权威状态转换必须由 MetadataStore CAS 串行化。
+13. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
+14. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
 
@@ -230,7 +236,7 @@ Cluster Lifecycle
 
 | 模型 | 范围 |
 | --- | --- |
-| Model A | BookKeeper E/W/A、write-set rotation、AQ、LAC、fencing、ensemble change |
+| Model A | BookKeeper E/W/A、write-set rotation、install/activation、legacy routing、AQ、LAC、fencing、ensemble change、failure-domain loss |
 | Model B | sequence、appendId、ordered completion、old-ledger fencing、successor ledger |
 | Model C | `ALLOC/DATA/DELETE/FREE`、generation、checkpoint rotation、power loss |
 | Model D | historical ensembles、partial delete、offline Bookie、rejoin、AutoRecovery race |
@@ -241,7 +247,7 @@ Model A-D 未通过前，Segment authority 不得进入 production candidate。
 ## 10. 实施顺序
 
 ```text
-Stage 0  总体文档降级；建立四份子 RFC 与三个 Spike 规范
+Stage 0  总体文档降级；建立五份子 RFC、三个 Spike 与逐轮 grill 记录
 Stage 1  BK_CLASSIC / BK_CLASSIC_TUNED 可复现基线
 Stage 2  Spike A：Profile install
          Spike B：Allocator/block
@@ -249,7 +255,7 @@ Stage 2  Spike A：Profile install
 Stage 3  接受 RFC-0001/0002；实现 Sequenced Classic client-only
 Stage 4  DirectJournal 独立 cohort prototype；不声称一次本地 payload 写
 Stage 5  接受 RFC-0003；Segment shadow writer，Classic 仍为 ACK authority
-Stage 6  Segment authority canary，ArenaControlLog 成为本地 authority
+Stage 6  接受 RFC-0005；完成 normal Add/fence local authority 的必要合同；具体 Segment authority canary 仍受 canary-specific evidence 与已启用路径依赖约束，不含 recovery/delete 集成
 Stage 7  接受 RFC-0004；Streaming Range / Recovery / Delete
 Stage 8  Sequenced Segment WAL、derived index、production canary
 ```
@@ -305,9 +311,12 @@ Segment production candidate 的最低 Gate：
 以下问题必须在对应 RFC 接受前闭合：
 
 - ProfileDescriptor 的规范序列化、hash 算法、版本升级和 master key 处理；
-- install 状态与 ledger metadata 的 CAS 结构及失败清理；
+- install/activation 状态、ledger metadata 的 CAS 结构及失败清理；
+- profiled wire opcode、atomic Classic/Profile route claim 的实现与 exact errors；
 - successor ledger 的 publication record、owner 状态和跨 run continuity；
+- appendId suppressed-suffix/horizon、durable seal/footer authority；
 - `ArenaControlLog` segment、checkpoint A/B、superblock 切换与设备失败判定；
+- RFC-0005 exact durable state packing、Engine identity 与 operation capability matrix；
 - shared slab 的 lifetime class、compaction policy 和 hot promotion threshold；
 - Delete Coordinator 的存储布局、decommission 证明、tombstone retention 和 rejoin watermark；
 - streaming range 在一般 E/W/A 下的结果合并与 recovery-specific semantics；
@@ -321,7 +330,7 @@ Segment production candidate 的最低 Gate：
 
 - 固定 stock `BK_CLASSIC` benchmark；
 - 对 `BK_CLASSIC_TUNED` 做不改变 on-disk/wire semantics 的调优；
-- 评审四份子 RFC；
+- 继续逐轮评审五份子 RFC；
 - 在锁定环境和停止条件后执行三个 Spike。
 
 现在不能直接开始：

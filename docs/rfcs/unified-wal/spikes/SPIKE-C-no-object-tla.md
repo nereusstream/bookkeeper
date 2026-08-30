@@ -1,7 +1,7 @@
 # Spike C：无对象存储 TLA+ 安全模型否证规范
 
 > 状态：**Planned / Not Executed**<br>
-> 对应 RFC：[RFC-0001](../RFC-0001-profile-capability-install.md)、[RFC-0002](../RFC-0002-sequenced-wal.md)、[RFC-0003](../RFC-0003-segment-storage-allocator.md)、[RFC-0004](../RFC-0004-range-recovery-delete.md)<br>
+> 对应 RFC：[RFC-0001](../RFC-0001-profile-capability-install.md)、[RFC-0002](../RFC-0002-sequenced-wal.md)、[RFC-0003](../RFC-0003-segment-storage-allocator.md)、[RFC-0004](../RFC-0004-range-recovery-delete.md)、[RFC-0005](../RFC-0005-segment-bookie-state.md)<br>
 > 性质：有界安全模型检查；PASS 不等于无限状态证明或生产就绪
 
 ## 1. 要回答的问题
@@ -23,6 +23,29 @@ BtrLog 可作为建模风格参考，但它的 durable blob-store entity、flush
 - 不允许用“对象存储最终保存所有数据”作为恢复动作或不变量前提；
 - Model E 的 general E/W/A range optimization 可在推进该功能时单独增加。
 
+### 2.1 故障分类与保证边界
+
+模型必须区分：
+
+```text
+ProcessCrash
+    volatile state lost; durable media retained
+
+PermanentFailureDomainLoss
+    one declared placement failure domain's durable evidence
+    is permanently unavailable
+
+DetectedCorruption
+    affected evidence is invalid and cannot count as surviving
+
+ResponseLoss
+    durable outcome may exist while the client does not know it
+```
+
+对 Profile 声明的永久损失预算 `F`：每个成功 ACK 必须包含来自至少 `F + 1` 个 distinct declared permanent-failure domains 的 durable acknowledgements。自上一次已证明完成的 repair/re-replication 后损失不超过 `F`，才承诺至少一个有效 payload/identity evidence 存活。
+
+`A >= F + 1` 只是必要条件；ACK set 的 failure-domain 覆盖与 repair window 同样是合同的一部分。Profile 可以声明 `F = 0`，不能为了模型方便无条件提高所有部署的 A。metadata/auth authority 的生存预算独立于 payload evidence，本 Spike 不能把两者混为一个性质。
+
 ## 3. 运行前锁定 manifest
 
 ```text
@@ -36,6 +59,9 @@ worker count
 heap/direct-memory limits
 symmetry and constraints
 config matrix
+declared permanent-failure domain model
+per-Profile permanent-loss budget F
+repair/re-replication budget reset point
 random seed where applicable
 state/time budgets
 artifact output directory
@@ -70,11 +96,13 @@ ensemble history
 E/W/A
 entryId -> write set
 Bookie up/down and fenced state
-per-Bookie accepted entries
+per-Bookie volatile and durable accepted entries
+per-Bookie failure-domain identity and permanent-loss state
 client pending operations
 AQ evidence
 LAC/close state
-profile install state for new-profile variant
+authoritative Classic/Profile route
+profile install and activation state for new-profile variant
 ```
 
 ### 5.2 最小动作
@@ -83,12 +111,16 @@ profile install state for new-profile variant
 CreateLedger
 InstallProfileOnBookie
 PublishOpen
+ActivateProfileOnBookie
 SendAdd
+SendLegacyAdd
 BookieAcceptAdd
 BookieAck
 LoseResponse
 CrashBookie
 RestartBookie
+PermanentlyLoseFailureDomain
+DetectCorruption
 BeginFence
 FenceBookie
 RecoverEntry
@@ -101,6 +133,8 @@ PublishEnsembleChange
 ### 5.3 检查目标
 
 - AQ 定义与 recovery 保持一致；
+- profiled Add 没有 matching durable activation 时不能被 Bookie 接受；
+- legacy Add 不能绕过 Profile/Tombstoned route；
 - fencing 后不能形成不合法的新 AQ；
 - ensemble replacement 不绕过 Profile install；
 - response loss 不产生两个 ledger instance/OPEN publication；
@@ -115,7 +149,7 @@ SequenceDomain and reservations
 run/predecessor/successor metadata
 writer epochs and local caches
 appendId -> payload digest
-inflight Adds and completion order
+inflight Adds, AQ candidates and completion order
 predecessor fence/recovery/seal state
 published contiguous frontier
 ```
@@ -126,6 +160,7 @@ published contiguous frontier
 ReserveSequenceRange
 IssueAppend
 ReachAQ
+PublishWalCommitted
 DeliverOrLoseCompletion
 CompeteForRecoveryAuthority
 FencePredecessor
@@ -142,8 +177,9 @@ CrashWriter
 - sequence interval 不重叠；
 - ordered frontier 不越过 hole；
 - 相同 appendId 不绑定两个 payload；
-- fence 前 AQ 的合法结果不被追溯撤销；
+- 已形成的 AQ evidence 不被伪造或抹除，但 sealed prefix 外 candidate 不成为 WAL COMMITTED；
 - successor ACTIVE 后 predecessor sealed prefix 外的数据不再发布；
+- successor 从 durable sealed prefix `P + 1` 开始；
 - 两 writer 竞争不产生两个 ACTIVE successor；
 - old Bookie 模式不假设 server 读取 epoch。
 
@@ -254,8 +290,12 @@ ReuseLedgerIdWithNewInstance
 规范中使用可执行 predicate 表达，至少包括：
 
 ```text
-AckedEntryRecoverable
+NoFabricatedRecovery
+AckedPayloadSurvivesWithinBudget
+EvidenceExhaustedNeverReturnsSuccess
 OpenImpliesAllEInstalled
+ProfiledAckRequiresDurableActivation
+LegacyAddCannotBypassProfileRoute
 ReplacementInstalledBeforeActive
 NoOverlappingPublishedSequence
 AppendIdContentUnique
@@ -275,7 +315,10 @@ InstanceIsolation
 
 关键自然语言对应：
 
-- ACKed entry 必须可恢复；
+- recovery 没有有效 evidence 时永远不能返回成功；
+- ACK 且永久 failure-domain losses 在声明预算内时，至少一个有效 payload evidence 存活；
+- evidence 全部耗尽时进入 `UNRECOVERABLE/DATA_LOSS`，不能伪造恢复成功；
+- profiled Add ACK 之前有 matching durable activation，legacy Add 不能绕过 route；
 - 同一 extent generation 不同时属于两个 ledger instance；
 - ALLOC 未 durable 时 DATA 不可被允许 ACK；
 - FREE 未 durable 时 slot 不可复用；
@@ -296,6 +339,8 @@ at least one E > W write-set rotation
 ensemble change
 two competing writers
 Bookie crash/restart
+permanent failure-domain loss within and beyond F
+detected corruption
 client/coordinator response loss
 allocator generation reuse
 offline Bookie delete and rejoin
@@ -310,6 +355,10 @@ offline Bookie delete and rejoin
 | A-332 | A | 3/3/2 | response loss + Bookie crash |
 | A-333 | A | 3/3/3 | fence + ensemble change |
 | A-322 | A | 3/2/2 | write-set rotation |
+| A-ACT | A | 3/3/2 | install complete, activation missing, legacy Add |
+| A-FD-OK | A | profile-specific | `F` losses across declared domains within budget |
+| A-FD-EXHAUST | A | profile-specific | all valid ACK evidence exhausted |
+| A-REPAIR-LOSS | A | profile-specific | loss, proven repair, second loss |
 | B-2W | A+B | 3/3/2 | two writers + takeover |
 | B-RESP | B | bounded | completion reorder/loss |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
@@ -352,6 +401,8 @@ offline Bookie delete and rejoin
 - delete targets 最终响应或被 durable decommission 时，physical delete 最终完成。
 
 fairness assumptions 必须逐条记录。liveness 未完成不影响 safety counterexample 的有效性，但会使相应进展结论保持开放。
+
+`AckedPayloadSurvivesWithinBudget` 只证明 payload evidence survival，不证明继续写可用性、read quorum 可用性、metadata/auth authority 生存或 general E/W/A recovery liveness。超过预算后的 `DATA_LOSS` 是明确 terminal state；没有证据却返回恢复成功仍是 safety violation。
 
 ## 13. Trace 对齐
 

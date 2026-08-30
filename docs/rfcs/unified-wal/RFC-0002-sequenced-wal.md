@@ -91,7 +91,20 @@ WalSequence        SequenceDomain 内逻辑顺序
 protocolPosition   Kafka/Pulsar/DB 等上层坐标
 ```
 
-写入回执至少表达：
+必须区分底层 BookKeeper durability evidence 与上层 WAL commit：
+
+```text
+AQ_CANDIDATE
+    BookKeeper 已形成有效的 durable quorum evidence，
+    但该 interval 尚未必进入连续 published frontier。
+
+WAL_COMMITTED
+    有有效 AQ evidence
+    && 所有更早 sequence 已 committed
+    && published frontier 已覆盖该 interval
+```
+
+只有进入 `WAL_COMMITTED` 后，才有资格对外生成和发送 final 写入回执。response loss 或回执发送失败不会撤销已经成立的 commit；调用方可以观察到 `OUTCOME_UNKNOWN`，再通过权威连续前缀与 appendId 解析。回执至少表达：
 
 ```text
 WalAppendReceipt {
@@ -101,11 +114,11 @@ WalAppendReceipt {
     sequenceStart
     sequenceEnd
     appendId
-    durability
+    commitState = WAL_COMMITTED
 }
 ```
 
-一个 entry 可以承载一条或多条逻辑记录，但 envelope 必须使 sequence interval、payload 边界和 checksum 可无歧义验证。
+一个 entry 可以承载一条或多条逻辑记录，但 envelope 必须使 sequence interval、payload 边界和 checksum 可无歧义验证。AQ candidate 可以作为内部恢复证据，但在进入连续 frontier 前不能以 final receipt 暴露为上层成功。
 
 ## 5. SequenceDomain 与 run
 
@@ -137,17 +150,18 @@ PREPARING -> ACTIVE -> FENCING -> RECOVERING -> SEALED
 
 ## 6. Sequence reservation
 
-sequence 必须在发送 Add 前分配，以便 envelope、appendId 和 ordered completion 使用稳定身份。候选 allocator 可以是上层单 writer、MetadataStore range allocator 或其他经 RFC 接受的 authority。
+sequence 必须在发送 Add 前分配，以便 envelope、appendId 和 ordered completion 使用稳定身份。首版固定为 single active writer 在本地 bounded in-flight window 内分配；普通 append 不执行 MetadataStore range allocation。
 
 最低要求：
 
-- reservation 是有界区间；
+- writer-local reservation 是有界区间；
 - range 不重叠；
-- crash 允许形成 hole，但 hole 处理不能伪造已提交记录；
+- published WalSequence 无洞；
+- crash 可以留下有 AQ evidence 但未发布的物理 suffix，该 suffix 必须在 predecessor seal 后永久 suppress；
 - `writerEpoch` 变化不能使旧 reservation 在 successor 上重新合法；
 - reservation authority 与 durable publication frontier 分离。
 
-首版不要求 Bookie 分配全局 sequence。
+首版不要求 Bookie 分配全局 sequence，也不冻结 exact window。窗口由内存、head-of-line latency、吞吐和 takeover scan benchmark 决定。future durable range allocator 必须另行评审 hole 与 takeover 语义。
 
 ## 7. appendId 与不确定结果
 
@@ -156,7 +170,8 @@ sequence 必须在发送 Add 前分配，以便 envelope、appendId 和 ordered 
 客户端把结果分为：
 
 ```text
-COMMITTED       可证明达到合同要求的 AQ/durability
+AQ_CANDIDATE    底层 AQ 已成立，但尚未进入连续发布前缀
+COMMITTED       已进入连续 published frontier；final success receipt 已具备发送资格
 REJECTED        可证明未被接受
 OUTCOME_UNKNOWN response loss、timeout 或 takeover 竞争
 ```
@@ -175,7 +190,7 @@ completed: yes yes no  yes
 frontier:  101
 ```
 
-entry 103 的网络 completion 不能让可见 frontier 跨过 102。实现必须对 inflight entry count 和 bytes 设置硬上限，避免一个 hole 导致无界缓存。
+entry 103 的网络 completion 或 AQ 不能让可见 frontier 跨过 102。实现必须对 inflight entry count 和 bytes 设置硬上限，避免一个早期慢 entry 导致无界缓存。被后续 seal suppress 的 AQ bytes、head-of-line latency 与 takeover scan 必须作为 benchmark 指标。
 
 首版 durability 仅允许 `SYNC_ON_ACK`。`DEFERRED_SYNC_LEGACY` 遇 failed Bookie 时不具备一般 ensemble-change 合同，不与首版 Sequenced WAL 自动 failover 组合。
 
@@ -214,11 +229,11 @@ predecessor ledger L1
 
 | 类别 | 语义 |
 | --- | --- |
-| fence 生效前已经取得 AQ | 合法 predecessor 成功；即使 response 晚到也不追溯撤销 |
+| fence 生效前已经取得 AQ | AQ evidence 的物理事实保留；只有进入最终 sealed continuous prefix 才成为 WAL COMMITTED |
 | 与 fence 并发且结果不确定 | 由 recovery 是否纳入最大连续前缀决定 |
 | fence 后才尝试形成 AQ | 不能重新达到 AQ；失败或维持 outcome unknown |
 
-owner metadata 的变化不能追溯宣布所有旧 completion 非法。反过来，response 在 successor ACTIVE 后到达也不能证明该操作是在 ACTIVE 后才提交；必须看 predecessor AQ/recovery 事实。
+owner metadata 的变化不能伪造或抹除已有 AQ evidence。反过来，response 在 successor ACTIVE 后到达也不能把 sealed prefix 外的 candidate 提升为 WAL COMMITTED；必须看 predecessor recovery 与 durable seal 事实。
 
 精确安全目标是：
 
@@ -240,17 +255,17 @@ writer 可以缓存/watch owner metadata 来提前停止发送，但它只是 ea
 
 1. 取得唯一 recovery authority；
 2. fence predecessor ledger；
-3. 读取足以证明 AQ/最大连续 entry 前缀的副本；
+3. 读取足以证明 AQ candidate 与最大连续 committable prefix 的副本；
 4. 校验 sequence interval、appendId 和 payload checksum；
-5. 截止在第一个不可证明连续的位置；
+5. 得到最大连续 committable prefix `P`，截止在第一个不可证明连续的位置；
 6. 以 BookKeeper 合同恢复/关闭 predecessor；
-7. 写入可审计的 run footer 或等价 seal record；
-8. 创建并准备 successor；
-9. 以 MetadataStore CAS 发布 predecessor SEALED 与 successor ACTIVE 的关系。
+7. durable seal predecessor at `P`，永久 suppress 所有 `sequence > P` 的 predecessor suffix；
+8. 创建并准备从 `P + 1` 开始的 successor；
+9. 以 MetadataStore CAS 发布 predecessor SEALED、`P` 与 successor ACTIVE/start 的关系。
 
 若第 9 步 response loss，恢复方必须读取 authority 解析，不得盲目创建第二个 successor。
 
-run footer 可以加速恢复，但不是唯一事实来源。footer 缺失或损坏时走 bounded scan/fallback；恢复上限和 fallback 成本需要 RFC-0004 闭合。
+run footer 可以加速恢复，但不是唯一事实来源。footer/等价 seal authority 的位置仍是开放项；无论采用何种编码，sequence 只有在 predecessor seal durable 且 successor authority 已绑定后才能复用。footer 缺失或损坏时走 bounded scan/fallback；恢复上限和 fallback 成本需要 RFC-0004 闭合。
 
 ## 11. Future epoch-aware capability
 
@@ -294,10 +309,11 @@ EPOCH_AWARE_ADD_V1
 3. 相同 appendId 不得映射到不同 payload digest 或两个 committed interval。
 4. successor ACTIVE 之前 predecessor 已 fence、恢复并 seal。
 5. successor ACTIVE 后，predecessor sealed prefix 之外的数据不得新进入 published committed state。
-6. fence 前已取得 AQ 的合法结果不被 owner metadata 追溯撤销。
-7. recovery 只发布最大可证明连续前缀。
-8. 删除全部 derived index 不改变可恢复结果。
-9. client-only Profile 不依赖旧 Bookie 解释 writerEpoch。
+6. 已形成的 AQ evidence 不被伪造或抹除，但 sealed prefix 外的 AQ candidate 永远不能成为 WAL COMMITTED。
+7. successor start 固定为 predecessor durable sealed prefix `P + 1`。
+8. recovery 只发布最大可证明连续前缀。
+9. 删除全部 derived index 不改变可恢复结果。
+10. client-only Profile 不依赖旧 Bookie 解释 writerEpoch。
 
 ## 14. Model B 最低场景
 
@@ -309,6 +325,8 @@ EPOCH_AWARE_ADD_V1
 - client crash before/after reservation；
 - recovery crash and retry；
 - successor publication CAS response loss；
+- suffix entry 已取得 AQ 但未进入 published frontier；
+- durable seal 后 late callback 到达；
 - Bookie crash 和 ensemble change；
 - appendId 相同内容重试与不同内容冲突；
 - 3/3/2、3/3/3、3/2/2 以及一般 `E > W` 的协议结构。
@@ -320,7 +338,7 @@ EPOCH_AWARE_ADD_V1
 本 RFC 进入 Accepted 前必须：
 
 - takeover 的 recovery authority、metadata schema 和 CAS 线性化点冻结；
-- successor 起始 sequence 和 reservation hole 规则冻结；
+- AQ candidate、WAL COMMITTED、durable seal 与 successor `P + 1` 规则冻结；
 - outcome-unknown 解析有确定算法和有界 fallback；
 - client-only mixed-version 集成测试证明不依赖 server epoch 解析；
 - Model B 无 safety counterexample；
@@ -333,10 +351,11 @@ EPOCH_AWARE_ADD_V1
 
 - SequenceDomain 与 run metadata 的 authority/schema；
 - recovery authority 的取得、租约失效和 CAS 细节；
-- sequence allocator 选择、range 大小和 hole policy；
-- successor 的起始 sequence 与 predecessor footer 的绑定；
+- exact in-flight window 与 future durable range allocator；
+- predecessor footer/等价 seal authority 的位置和编码；
+- run header/footer 是否占用普通 entryId，以及 control entry 与 DATA 的区分；
 - application batch 的原子边界；
-- appendId retention、索引大小和冲突窗口；
+- suppressed suffix 中 appendId 的 retry/ABORTED/查询语义，以及 retention、索引大小和冲突窗口；
 - recovery scan 的最大窗口与超限处理；
 - installed Profile 的 server-side sequence capabilities 是否拆成多个 feature bit；
 - pooled lane 是否永远 deferred，或另立专门 RFC。

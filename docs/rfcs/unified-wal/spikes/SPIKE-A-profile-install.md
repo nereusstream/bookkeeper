@@ -40,6 +40,8 @@ clientCount
 E/W/A configurations
 Bookie engine cohorts
 protocol version matrix
+activation proof mechanism
+Classic route throughput/p99 regression budget
 JDK and JVM flags
 fault injector version
 test seed policy
@@ -60,12 +62,13 @@ artifact output directory
 
 原型必须包含：
 
-- metadata 状态 `PREPARING/INSTALLING/INSTALLED/OPEN`；
+- 经 RFC-0001 冻结的 metadata/activation 状态；
 - canonical descriptor 与 hash；
 - `INSTALL_LEDGER_PROFILE` request/receipt；
-- Bookie durable `LEDGER_PROFILE_INSTALL` record；
+- Bookie durable install 与 activation authority；
+- 单一、原子、可恢复的 Classic/Profile route slot；
 - Bookie restart replay；
-- Add 的 `ledgerInstanceId + profileDescriptorHash` 校验；
+- Add 请求身份能够匹配 Bookie 本地 durable activation；exact binding fields 由已接受的 activation/auth 机制决定；
 - capability/engine placement filter；
 - replacement install-before-CAS；
 - 可观测的 orphan install 状态；
@@ -172,9 +175,9 @@ Oracle：接受集合只由 durable record 决定；未 durable install 不复�
 
 ### A12：Old client / new Bookie
 
-步骤：发送现有 Classic 请求。
+步骤：向 `ABSENT/CLASSIC` route 发送现有 Classic 请求。
 
-Oracle：保持 Classic 兼容；不能误要求新 Profile identity，也不能把 Classic handle 标记为已安装新 Profile。
+Oracle：保持 Classic 兼容；不能误要求新 Profile identity，也不能把 Classic handle 标记为已安装新 Profile。命中 Profile route 的负向场景由 A17 覆盖。
 
 ### A13：New client / old Bookie
 
@@ -194,6 +197,30 @@ Oracle：orphan 从未接受 Add；GC 只在权威 metadata 证明后执行；GC
 
 Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正确性依赖。
 
+### A16：Install 完成但 activation/READY 未成立
+
+步骤：全部 E 个 Bookie durable install 后，分别在 OPEN/READY authority 提交前、确定失败后、activation durable 前后，由持有合法 master key 的客户端发送 profiled Add；在 activation request/receipt response loss 时重试并重启 Bookie。
+
+Oracle：缺少匹配 durable activation 的 Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；restart 后接受集合不扩大。
+
+### A17：Legacy Add targeting Profile route
+
+步骤：使用 v2/v3 legacy normal Add 与 recovery Add 命中 `PROFILE/RESERVED`、installed、active 与 tombstoned route。
+
+Oracle：请求在 Classic handle、master key 和 payload 创建前 fail closed；normal/recovery 变体均不能绕过 route。
+
+### A18：首次 Classic Add 与 Profile install 并发
+
+步骤：让 legacy Add 与 Profile install 同时观察初始 `ABSENT`，在 route claim、durable write、handle publish 和 response 各边界 crash/retry。
+
+Oracle：最终只能存在一个 authoritative `CLASSIC` 或 `PROFILE` owner；不得同时持久化两种身份。legacy 先赢时 install 冲突；Profile 先赢时 legacy fail closed。
+
+### A19：Hot-path performance boundary
+
+步骤：对未启用 Profile 的 Classic-only baseline 与加入统一 route gate 后的 Classic path 做 matched offered-load 对比；对 Profile Add 记录 route lookup、CPU、allocation、metadata I/O 和 proof verification。
+
+Oracle：普通 Add 的远程 MetadataStore I/O 与逐请求重型 proof verification 均为 0；Classic throughput/p99 回归不超过运行前 manifest 锁定预算，超限为 FAIL 或经预定义规则判为 INCONCLUSIVE，不能事后放宽。
+
 ## 7. 故障注入点
 
 至少覆盖：
@@ -203,6 +230,8 @@ Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正�
 - Bookie control record append、fsync、routing publish 前后；
 - install receipt serialization/send 前后；
 - INSTALLED/OPEN CAS 前后；
+- activation authority publish、Bookie activation durable、receipt send 前后；
+- Classic/Profile atomic route claim 与 durable publish 各边界；
 - replacement install、data recovery、ensemble CAS 各边界；
 - Bookie restart/replay 中；
 - coordinator restart 和 leader change；
@@ -217,9 +246,11 @@ fault injector 必须输出实际命中计数。计划注入但未命中的 case
 ```text
 create
 install
+activate
 retry
 cancel
-add
+profiled add
+legacy normal/recovery add
 restart Bookie
 restart coordinator
 replace Bookie
@@ -234,6 +265,9 @@ PASS 必须同时满足：
 
 ```text
 uninstalled new-profile Add accepted                = 0
+pre-activation profiled Add accepted                = 0
+legacy Add bypassed Profile/Tombstoned route        = 0
+dual Classic/Profile authoritative route owners     = 0
 profile mismatch silently downgraded                = 0
 instance mismatch silently merged                   = 0
 engine/capability mismatch payload writes           = 0
@@ -241,7 +275,10 @@ ensemble metadata active before replacement install = 0
 OPEN without all-E durable receipts                 = 0
 restart lost durable install                        = 0
 restart resurrected non-durable install             = 0
+restart expanded durable activation acceptance      = 0
 duplicate OPEN instances                            = 0
+normal Add remote metadata reads                    = 0
+normal Add per-request heavy proof verifications    = 0
 unreplayable executed fault scenarios               = 0
 ```
 
@@ -252,6 +289,9 @@ unreplayable executed fault scenarios               = 0
 发现以下任一项立即停止扩展原型，保留现场并回到 RFC：
 
 - 未安装 ledger 的新 Profile Add 被接受；
+- 未激活 ledger 的 profiled Add 被接受；
+- legacy normal/recovery Add 绕过 Profile/Tombstoned route；
+- 并发 claim 产生 Classic/Profile 双重 owner；
 - mismatch 进入 Classic 或其他静默降级；
 - replacement metadata 先于 durable install 生效；
 - crash/retry 产生两个 OPEN instance；
