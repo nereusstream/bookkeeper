@@ -1,0 +1,11 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "vectors": {
+    "minimal.bin": {"length":124,"sha256":"b3d0cef878e8c897080978106cb9dc41e5c38f1bf82ac8540e380e0c45370cc5","identityHex":"00010001b3d0cef878e8c897080978106cb9dc41e5c38f1bf82ac8540e380e0c45370cc5"},
+    "single-capability.bin": {"length":130,"sha256":"636696ec32e1659aef768a5d97ff6d7e4ccb9fa78e8885f121f08644432241d3","identityHex":"00010001636696ec32e1659aef768a5d97ff6d7e4ccb9fa78e8885f121f08644432241d3"},
+    "quorum-boundary.bin": {"length":136,"sha256":"dadf5d83ae8b09cdcbc5d9070417ac6e86df179c05aad374f7da6972e2824363","identityHex":"00010001dadf5d83ae8b09cdcbc5d9070417ac6e86df179c05aad374f7da6972e2824363"},
+    "unsigned-policy-generation.bin": {"length":142,"sha256":"d01eea0c4415e6cfcedc716be7e36bbbebb0516dad921abd7b9b798dce4bdf5d","identityHex":"00010001d01eea0c4415e6cfcedc716be7e36bbbebb0516dad921abd7b9b798dce4bdf5d"},
+    "unsigned-capability.bin": {"length":130,"sha256":"beec4cacf2f8bc1da2d029985ac9d21454009e7eebe490c0d3325d261f2c3c9a","identityHex":"00010001beec4cacf2f8bc1da2d029985ac9d21454009e7eebe490c0d3325d261f2c3c9a"},
+    "maximal-capabilities.bin": {"length":508,"sha256":"7339e09bd3625c919766f7dc058a4851599ca75d53482fca0c12f4d15274909f","identityHex":"000100017339e09bd3625c919766f7dc058a4851599ca75d53482fca0c12f4d15274909f"}
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "status": "PASS",
+  "valid": {"seedHex":"504456414c494401","iterations":2000,"accepted":2000},
+  "mutation": {"seedHex":"50444d5554415445","iterations":5000,"acceptedCanonical":247,"rejected":4753},
+  "arbitrary": {"seedHex":"5044415242495452","iterations":5000,"acceptedCanonical":0,"rejected":5000},
+  "oversizePreAllocationViolations": 0
+}

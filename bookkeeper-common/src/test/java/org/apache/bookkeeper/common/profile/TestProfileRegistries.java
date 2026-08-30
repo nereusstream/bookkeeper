@@ -26,6 +26,7 @@ import java.util.List;
 final class TestProfileRegistries {
 
     static final long TEST_CAPABILITY_BASE = 0xff00_0000L;
+    static final long TEST_CAPABILITY_UNSIGNED_MAX = 0xffff_ffffL;
     static final long TEST_POLICY_ID = 0xfffe_0001L;
     static final long TEST_POLICY_ID_UNSIGNED_MAX = 0xffff_ffffL;
 
@@ -37,9 +38,10 @@ final class TestProfileRegistries {
     }
 
     static boolean validatorCapability(long capabilityId, int semanticVersion) {
-        return capabilityId > TEST_CAPABILITY_BASE
-                && capabilityId <= TEST_CAPABILITY_BASE + ProfileDescriptorValidator.MAX_CAPABILITIES
-                && semanticVersion == 1;
+        return (capabilityId > TEST_CAPABILITY_BASE
+                        && capabilityId <= TEST_CAPABILITY_BASE + ProfileDescriptorValidator.MAX_CAPABILITIES
+                        && semanticVersion == 1)
+                || (capabilityId == TEST_CAPABILITY_UNSIGNED_MAX && semanticVersion == 0xffff);
     }
 
     static boolean validatorPolicy(long policyId, long generation) {
