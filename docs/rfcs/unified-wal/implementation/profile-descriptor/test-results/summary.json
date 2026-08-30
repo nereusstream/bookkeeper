@@ -1,0 +1,56 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "testedCommit": "abbab76e89e1eeeb67383839b28b25ca246d8c6a",
+  "completedAt": "2026-08-30T21:06:31+08:00",
+  "environment": {
+    "jdk": "Amazon Corretto 21.0.10",
+    "maven": "3.8.5",
+    "os": "macOS 14.8.9 arm64, Darwin 23.6.0"
+  },
+  "runs": [
+    {
+      "command": "mvn -pl bookkeeper-common -Dtest='org.apache.bookkeeper.common.profile.*Test' -Dsurefire.rerunFailingTestsCount=0 test",
+      "result": "PASS",
+      "tests": 18,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "reruns": 0
+    },
+    {
+      "command": "mvn -pl bookkeeper-common -Dsurefire.rerunFailingTestsCount=0 verify",
+      "result": "PASS",
+      "tests": 174,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "reruns": 0
+    },
+    {
+      "command": "mvn -pl bookkeeper-common -DskipTests spotless:check checkstyle:check apache-rat:check",
+      "result": "PASS",
+      "checkstyleViolations": 0,
+      "ratUnapproved": 0,
+      "ratUnknown": 0
+    },
+    {
+      "command": "shasum -a 256 -c checksums.txt",
+      "workingDirectory": "bookkeeper-common/src/test/resources/profile-descriptor",
+      "result": "PASS",
+      "files": 52
+    }
+  ],
+  "fixedSeedFuzz": {
+    "valid": {"seedHex": "504456414c494401", "iterations": 2000, "accepted": 2000},
+    "mutation": {"seedHex": "50444d5554415445", "iterations": 5000, "acceptedCanonical": 247, "rejected": 4753},
+    "arbitrary": {"seedHex": "5044415242495452", "iterations": 5000, "acceptedCanonical": 0, "rejected": 5000},
+    "oversizePreAllocationViolations": 0
+  },
+  "resolvedDiagnostics": [
+    "Repository has no mvnw; used the installed Maven 3.8.5 binary.",
+    "Direct module resolution initially waited on same-version snapshot metadata; reactor-installed local dependencies removed that setup wait.",
+    "The first corpus updater depended on JUnit method order and produced one retried flake; generation moved to BeforeClass and all final runs disabled reruns.",
+    "The first RAT run rejected the one-line checksums license; the generator now emits the full Apache header and final RAT has zero unapproved files.",
+    "A read-only zsh scope-audit loop used the special variable name path and hid PATH for later commands; the audit was rerun with a task-specific variable and returned zero out-of-scope paths."
+  ]
+}

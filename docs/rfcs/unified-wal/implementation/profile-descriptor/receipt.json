@@ -1,0 +1,58 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "module": "ProfileDescriptor reference implementation",
+  "result": "REFERENCE_IMPLEMENTATION_COMPLETE",
+  "state": ["EXPERIMENTAL", "NON_PROMOTABLE", "NO_AUTHORITY", "DISCARDABLE"],
+  "sourceCommit": "9809bc099fa770979df4210d468483608992e094",
+  "testedCommit": "abbab76e89e1eeeb67383839b28b25ca246d8c6a",
+  "implementationCommits": [
+    "a7e9d4341a2b4636dcec35cc308cb50a5ef5932e",
+    "ac0341941a4cbf262aca6a804775e6da9ec00069",
+    "4e20a334c6c02f34a90d062ce463141780e14a86",
+    "abbab76e89e1eeeb67383839b28b25ca246d8c6a"
+  ],
+  "scope": {
+    "productionSourceFiles": 12,
+    "testSourceFiles": 9,
+    "corpusFiles": 52,
+    "changedPathsAtTestedCommit": 78,
+    "outOfScopePaths": 0,
+    "authorityTouches": []
+  },
+  "corpus": {
+    "validBinaryVectors": 6,
+    "invalidBinaryVectors": 40,
+    "checksumsFileSha256": "08adbe1e84564f4fb07aa031c06df43f8b12174ac34bb2b39cc527375352f9a0",
+    "checksumVerification": "52/52 PASS"
+  },
+  "verification": {
+    "profileTests": "18/18 PASS with reruns disabled",
+    "bookkeeperCommonTests": "174/174 PASS with reruns disabled",
+    "spotless": "PASS",
+    "checkstyle": "0 violations",
+    "apacheRat": "0 unapproved, 0 unknown",
+    "fuzz": "12000 fixed-seed iterations PASS",
+    "oversizePreAllocationViolations": 0,
+    "builtJarSha256": "5ebc38ce8e21d7633b78b73c7805bfc27dc88a5eaee1c312c6b4fc8fef9b8173"
+  },
+  "boundaries": {
+    "networkDependency": false,
+    "diskDependency": false,
+    "metadataStoreDependency": false,
+    "productionRegistryIds": false,
+    "stableWire": false,
+    "stableOnDisk": false,
+    "liveShadow": false,
+    "ackAuthority": false
+  },
+  "remainingBlocks": [
+    "production failure-domain policy registry",
+    "production capability registry and legal-combination table",
+    "RFC acceptance and Spike A/B/C",
+    "stable Profile wire and endpoint",
+    "same BookieId and same storage scope",
+    "live shadow and Segment ACK authority",
+    "production Cookie, registration, AutoRecovery, and delete"
+  ],
+  "testResults": "test-results/summary.json"
+}

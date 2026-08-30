@@ -67,6 +67,8 @@ mvn -pl bookkeeper-common -DskipTests spotless:check checkstyle:check
 mvn -pl bookkeeper-common -DskipTests apache-rat:check
 ```
 
+完整测试和构建结果见 [`test-results/summary.json`](test-results/summary.json)，精确实现提交和边界见 [`receipt.json`](receipt.json)。
+
 ## 未解除的 BLOCK
 
 - failure-domain policy production registry；
