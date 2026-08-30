@@ -22,6 +22,7 @@ BtrLog 可作为建模风格参考，但它的 durable blob-store entity、flush
 - 不把 Java 测试、性能 benchmark 或人工 trace 当作模型检查替代；
 - 不允许用“对象存储最终保存所有数据”作为恢复动作或不变量前提；
 - Model E 的 general E/W/A range optimization 可在推进该功能时单独增加。
+- 不建模hash密码学、PKI、wire bytes、filesystem或old binary parser内部；只抽象其Spike A/B已验证的布尔结果与generation关系，不能把未执行的candidate测试预设为真。
 
 ### 2.1 故障分类与保证边界
 
@@ -99,6 +100,12 @@ committed snapshot cut and complete bounded suffix per compacted authority domai
 sidecar format version, mandatory feature set and compatibility state
 sidecar operation identity -> semantic payload and durable result
 immutable Profile descriptor hash/generation and permanent-loss budget F
+descriptor canonical/matching identity state
+non-anonymous control principal, exact operation/instance/target-scope authorization,
+and committed-authority verification state
+protected local auth binding match
+wire negotiated, Profile logical opcode, capability match and no-downgrade state
+old decoder accepted-as-Classic effect flag
 client/coordinator Profile metadata-mutation authority
 E/W/A
 entryId -> write set
@@ -120,6 +127,9 @@ authoritative Classic/Profile route
 profile inactive install, normal admission/fence generation,
 bounded recovery grants and committed-readable range facts
 Bookie storage incarnation, effective assignment readiness and writable registration generation
+Bookie compatibility fence/old-binary-blocked state
+mandatory format known, device-manifest/incarnation match,
+migration/format/local-readiness/registration generations
 ```
 
 ### 5.2 最小动作
@@ -136,12 +146,22 @@ IntroduceReferencedUnknownMandatorySidecarRecord
 RetrySidecarOperationSamePayload
 RetrySidecarOperationConflictingPayload
 CreateProfileReservation
+CanonicalizeDescriptor
+RejectInvalidOrUnknownDescriptor
+AuthenticateControlPrincipal
+AuthorizeControlOperationScope
+DirectReadCommittedControlAuthority
 InstallProfileOnBookie
 CreateStandardLedgerMetadata
 PublishReadyAuthorization
 ActivateProfileOnBookie
 PublishAvailabilityComplete
 SendAdd
+NegotiateProfileConnection
+SendProfileNormalOpcode
+SendProfileRecoveryOpcode
+AttemptClassicDowngradeAfterProfileFailure
+OldDecoderInterpretsProfileAsClassic
 SendLegacyAdd
 ClaimClassicRouteBeforeLazyCreate
 ClaimProfileRouteBeforeLazyCreate
@@ -151,6 +171,13 @@ BookieAck
 LoseResponse
 CrashBookie
 RestartBookie
+PublishCompatibilityFence
+AttemptOldBinaryStartup
+PrepareFormatMigration
+FormatRequiredDevice
+PublishLocalFormatReadiness
+PublishWritableRegistration
+AttemptRollbackOldBinary
 PermanentlyLoseFailureDomain
 DetectCorruption
 BeginFence
@@ -184,6 +211,9 @@ ReclaimCoveredRepairReceipts
 ### 5.3 检查目标
 
 - AQ 定义与 recovery 保持一致；
+- descriptor identity不匹配、unknown mandatory或non-canonical输入不能安装/激活；hash identity不授权control operation；
+- Profile control transition要求non-anonymous principal、exact operation/instance/target-scope authorization、committed authority与matching protected local binding；AuthN-only/master key单独不足，拒绝路径无route/credential/allocation/durable effect；
+- Profile normal/recovery/Classic operation在抽象上distinct；未negotiated/capability mismatch/old decoder accepts-as-Classic时不能产生Profile/Classic effect，Profile失败不允许downgrade；
 - normal profiled Add 没有 matching global READY 与 durable local normal activation 时不能被 Bookie 接受；
 - normal Add 不依赖 sidecar read/watch/CAS；sidecar unavailable不能扩张或隐式收窄已经durable的local admission truth；
 - legacy Add 不能绕过 Profile/Tombstoned route；
@@ -202,6 +232,7 @@ ReclaimCoveredRepairReceipts
 - conflicting/overlapping range loss与completion单序，proven-disjoint range可并发；snapshot durable前不reclaim child receipt；
 - response loss 不产生两个 ledger instance/READY publication；
 - `E > W` 轮转覆盖全 ensemble 安装需求。
+- old binary只有在compatibility fence已证明blocked时才可接触Segment scope；mandatory format/device/incarnation/migration/readiness任一不匹配时不能writable registration；unsafe rollback不能前进。
 
 repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、digest存在但verifier未完成、descriptor/`F`变化后重解释旧assertion、closed range无`NORMAL_ACTIVE`的合法reset、current target active但历史range不完整、`E > W` per-entry write-set coverage、duplicate loss、loss/completion两种先后、unobserved failure after proof cut、disjoint并发、overlapping stale completion、small-range merge、snapshot publish/response loss/child reclaim、delete freeze和root/page cap超限。sidecar falsification 另覆盖 child-before-head crash、head CAS conflict、snapshot build期间head推进、fallback损坏、store-version reset/instance reuse、unknown mandatory referenced record与normal Add期间sidecar不可用。
 
@@ -520,6 +551,15 @@ AckedPayloadSurvivesWithinBudget
 EvidenceExhaustedNeverReturnsSuccess
 ProfileAvailabilityImpliesAllEActive
 ProfiledNormalAckRequiresReadyAndLocalActive
+DescriptorIdentityMatchesBeforeInstallOrActivate
+DescriptorHashDoesNotAuthorizeControl
+ProfileControlRequiresNonAnonymousCommittedAuthority
+ProfileControlRequiresExactOperationScopeAuthorization
+SecretCredentialDoesNotGrantControl
+ProfileNormalRecoveryAndClassicOpcodesAreDistinct
+ProfileEffectRequiresNegotiatedCapability
+OldDecoderCannotCreateClassicEffectFromProfile
+ProfileFailureNeverDowngradesOrDoubleWrites
 LegacyAddCannotBypassProfileRoute
 ProfileMembershipMutationRequiresAuthority
 SidecarStoreVersionDiffersFromSemanticGeneration
@@ -572,6 +612,11 @@ ConditionalFailureHasNoEffect
 DurableApplyCoversOwnSequence
 DuplicateConditionalOpHasSingleResult
 SelectorCutBlocksNewOldPins
+OldBinaryBlockedBeforeReplayOrWrite
+WritableImpliesKnownMandatoryFormat
+WritableImpliesCompleteDeviceManifestAndMigration
+WritableRegistrationMatchesIncarnationAndReadiness
+UnsafeRollbackCannotReachOldWritable
 LogicalDeleteIsIrreversible
 UnadmittedRepairIntentCannotGrantOrWrite
 DeleteFenceOrdersRepairIntentAdmission
@@ -616,6 +661,8 @@ RichOutcomeSurvivesGenericProjection
 - ACK 且永久 failure-domain losses 在声明预算内时，至少一个有效 payload evidence 存活；
 - contract-required coordinate 的有限合法 evidence全部确定性耗尽时才进入 payload `DATA_LOSS`；authority无法判定进入quarantine；
 - normal profiled Add ACK 之前有 matching global READY 与 durable local normal activation，legacy Add 不能绕过 route；
+- descriptor canonical/match是identity前置但不授权control；control transition要求non-anonymous principal、exact operation/instance/target-scope authorization、committed authority和matching local binding，AuthN-only/master key单独不足；
+- Profile normal/recovery/Classic opcode彼此distinct，未协商或capability mismatch无effect；old decoder接受Profile为Classic、Profile失败后downgrade/double-write都违反不变量；
 - sidecar store version不替代semantic generation；unpublished child无authority，snapshot+suffix完整，referenced unknown mandatory state fail closed；
 - sidecar operation identity只绑定一个semantic payload；same-payload retry不产生第二结果，conflicting-payload retry无authority effect；
 - ledger instance隔离store-version reset/ID reuse；normal Add不等待sidecar read/watch/CAS；route claim先于lazy create，stale admission generation不能绕过fence；
@@ -629,6 +676,7 @@ RichOutcomeSurvivesGenericProjection
 - 未 commit move copy 不成为 authoritative；commit 后 index 丢失仍可重建，reader drain 前 source 不 free；
 - checkpoint current selector等价full chain；orphan free不删除logical entry在current selector承载的既存success；
 - conditional failure无effect；durable result覆盖自身sequence，duplicate op只有一个result；selector cut后不能取得new old-location pin；
+- stock old binary在replay/write/registration前被compatibility fence阻断；partial/unknown format、device/incarnation或readiness mismatch不writable，缺少negative proof不能rollback；
 - takeover ACTIVE 后旧 writer 不能把 sealed prefix 外数据发布为成功；
 - recovery 只发布最大连续可证明前缀；
 - logical delete 后不能重新 open；
@@ -656,6 +704,8 @@ client/coordinator response loss
 range repair verifier assertion, accepted-loss ordering and receipt compaction
 sidecar child/head publication, snapshot+suffix, store-version/instance ABA and unknown mandatory state
 local route claim, fence admission generation and registration readiness
+descriptor/auth/wire negotiation and no-downgrade booleans
+old-binary fence, mandatory format, migration/device/incarnation/readiness generations
 allocator generation reuse
 per-Arena conditional apply/durable result, duplicate retry and selector/pin cut
 same-Arena relocation, concurrent move and reader pin
@@ -682,12 +732,14 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-RECEIPT-COMPACT | A | bounded ranges | child/page caps, snapshot publication, response loss and covered-child reclaim |
 | A-SIDECAR | A | bounded authority domains | child/head ordering, snapshot+suffix, same/conflicting-payload retry, fallback/reclaim, store-version reset, instance reuse and referenced unknown mandatory record |
 | A-LOCAL | A+D | local authority | Classic/Profile route claim before lazy create, independent normal/grant/readable facts, fence cut, stale handle and registration readiness |
+| A-PROFILE-COMPAT | A | 3/3/2 | descriptor match, anonymous/authenticated-but-unauthorized/authorized control scope, normal/recovery/Profile opcode, negotiation, old-decoder Classic effect and no downgrade |
 | B-2W | A+B | 3/3/2 | two writers + takeover |
 | B-RESP | B | bounded | completion reorder/loss |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
 | C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
 | C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
+| C-FORMAT | A+C | local | old-binary fence, partial required-device migration, unknown mandatory format, incarnation/readiness generations and unsafe rollback |
 | D-OFF | D | historical ensembles | offline rejoin |
 | D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery |
 | D-INTENT | A+D | closed fragment | inert child, admission/delete-fence winner, admission response loss/restart, domain progress, first payload, ensemble CAS and every crash boundary |
@@ -762,6 +814,8 @@ sidecar operation identity payload aliases = 0
 unadmitted RepairIntent grants/writes       = 0
 admitted RepairIntents omitted from freeze = 0
 admission response loss duplicated intent/target = 0
+descriptor/auth/wire compatibility invariant violations = 0
+old-binary/migration/readiness invariant violations = 0
 ```
 
 每个 config 必须由 checker 报告 complete，或明确标为 INCONCLUSIVE。INCONCLUSIVE config 使整个 Spike 不能 PASS。

@@ -18,3 +18,4 @@
 | [Round 3](ROUND-03-local-authority-recovery-reset.md) | Local relocation、recovery fallback、delete rejoin 与 repair reset | `4849e7559ad816cbea7ac5e76885138ab12cb9df` | Reviewed / Integrated |
 | [Round 4](ROUND-04-bounded-proof-interfaces.md) | Bounded proof、assignment handoff、relocation checkpoint 与 recovery outcome | `dbc0f7fee412e68d1cecd40efbf6d80edfdc8af0` | Reviewed / Integrated |
 | [Round 5](ROUND-05-implementation-interfaces.md) | Sidecar、ArenaControlLog、local durable authority 与 recovery compatibility 接口 | `ba820b28babd7683e8dfe6a724d1b8aeecf7c2e1` | Reviewed / Integrated |
+| [Round 6](ROUND-06-profile-security-wire-downgrade.md) | Profile canonical/security、wire compatibility 与 format downgrade gate | `1c2fc1b30aa69b55cbfac4116609c4f4e78fb2b5` | Reviewed / Integrated |

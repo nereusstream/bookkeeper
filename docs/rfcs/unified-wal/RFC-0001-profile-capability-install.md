@@ -57,6 +57,8 @@
 - Segment Bookie 对 install、activation、fence、recovery Add 和 ACK authority 的消费，见 [RFC-0005](RFC-0005-segment-bookie-state.md)；
 - master key 的现有安全模型重设计。
 
+现有 master key 可以继续作为首版 data-plane ledger credential，但不因此获得 Profile control-plane authority。本 RFC 只冻结两类 authority 的分离、secret non-disclosure 与 fail-closed 消费合同；它不把 P0 扩成 password/KDF、PKI 或 KMS 的全面重设计。
+
 ### 3.1 威胁模型与热路径边界
 
 本 RFC 锁定以下安全边界：
@@ -66,12 +68,19 @@
 - 任何客户端，包括持有合法 master key 的 stale/legacy client，都不被信任为遵守 `OPEN/READY` 时序；
 - Bookie 缺少匹配的 durable activation authority 时必须 fail closed；
 - `activationEpoch` 或其他客户端可复制字段本身不是 activation proof。
+- descriptor hash 只提供 identity/integrity，不提供 authorization、non-repudiation、secrecy 或 capability proof；
+- INSTALL、ACTIVATE、repair grant 与 delete 等 Profile control operation 必须来自 non-anonymous、且对exact operation + ledger instance + target/scope有明确授权的authenticated principal；`AuthDisabledPlugin`/`ANONYMOUS`或仅通过认证但无该scope权限都不满足合同；
+- master key、password、verifier、可离线验证派生物以及 bearer/replay capability 不得进入公开 metadata、sidecar、receipt、日志、metric 或 exception。
+- AuthN/AuthZ检查必须早于route claim、credential persistence、local allocation和任何durable effect；exact ACL/RBAC/plugin机制保持开放，不要求引入通用RBAC框架。
+- 任何携带master key、verifier或bearer secret的Profile control/data transport必须满足implementation manifest选定的confidentiality与integrity属性；exact TLS/SASL/mTLS机制保持开放，该要求不追溯重设计Classic wire/KDF。
 
 同时锁定以下性能边界：
 
 - 普通 Add 不远程读取 MetadataStore；
 - 普通 Add 不逐请求执行重型签名/证书验证；
 - 热路径只允许与 handle lookup 合并的本地 routing/state lookup，以及 instance/hash/activation identity 比较；
+- canonical encode/hash、完整 descriptor parse、control authority read 和 capability vector negotiation 都不进入普通 Add；
+- normal Add只允许对已验证、已缓存的固定长度descriptor/auth identity或verifier做bounded comparison；每请求auth-binding hash/HMAC、KMS调用、certificate/signature验证均为0；
 - install、activation、fence 和 delete 属于冷控制路径，可以 group commit；本 RFC 不要求每 ledger 单独 fsync。
 
 ## 4. Profile 分层
@@ -109,10 +118,10 @@ Ledger Contract Profile 是 immutable descriptor 的一部分。需要 Bookie �
 本 RFC 先冻结三类信息的边界，不在本轮冻结最终 wire 字段表：
 
 ```text
-ProfileDescriptor {
-    profileVersion
+SemanticProfileDescriptor {
+    canonicalSchemaVersion
     requiredEngineProfile
-    requiredCapabilities[]
+    mandatorySemanticCapabilities[]
     payloadFormat
     durabilityMode
     quorumProfile
@@ -122,7 +131,17 @@ ProfileDescriptor {
     sequenceProfile
     deleteProfile
     formatOrRecoverySafetyFields
+}
+
+ProfileDescriptorIdentity {
+    hashSuiteId
+    canonicalSchemaVersion
     descriptorHash
+}
+
+CanonicalProfileDescriptorEncoding {
+    canonicalSchemaVersion
+    canonicalSemanticBytes
 }
 
 InstallOperation {
@@ -139,22 +158,30 @@ RuntimePolicy {
     rateLimits
     resourceBudgets
 }
+
+OptionalHintEnvelope {
+    safetyNeutralHints
+}
 ```
 
 约束：
 
 - `ledgerInstanceId` 在 ledgerId 重用或重建时必须变化；
-- `descriptorHash` 只覆盖 immutable semantic contract，不覆盖 request identity、credential material 或可在线调整的 runtime policy；
-- 字段序列化、默认值和未知字段处理必须 canonical，禁止不同实现得到不同 hash；
+- semantic descriptor 只包含 immutable safety semantics：Engine、mandatory semantic capability及其版本、payload format、durability、E/W/A binding、`F`/failure-domain policy、sequence/recovery/delete safety semantics，以及真正影响跨实现安全的 limits；它不包含 ledger/instance/store version、当前 membership、operation/request identity、credential/receipt、runtime admission policy、implementation preference、benchmark threshold 或 safety-neutral hint；
+- `descriptorHash` 从 canonical semantic bytes 派生，不进入自己的 preimage。descriptor identity 由 `hashSuiteId + canonicalSchemaVersion + Hash(domainSeparator || hashSuiteId || canonicalSchemaVersion || canonicalSemanticBytes)` 共同定义；exact codec、suite、domain-separator bytes、field numbers 与大小上限保持开放；
+- implementation manifest选择的descriptor hash suite必须是固定长度、面向对抗输入的collision-resistant hash；CRC、普通checksum或无法满足该属性的过短截断值不能承担semantic identity。exact algorithm与length仍保持开放；
+- parser 必须在分配前执行 manifest-locked bounds。duplicate singular field、duplicate map key、duplicate set item全部拒绝；set按稳定数值顺序编码，semantic list保留声明顺序；只有 schema 明确等价时 absent/default 才可归一；canonical bytes不得依赖locale、map iteration order或实现默认值；
+- unknown semantic field/enum、unknown schema 或 mandatory capability 一律拒绝；safety-neutral optional hint在 semantic descriptor/hash之外，可忽略但不得改变接受集合；已知字段不能被旧 reader/writer strip、rewrite或降为default后重新发布；
+- consumer 必须同时持久化/取得 canonical semantic bytes 与 declared identity，并重新计算比较；同 schema 语义相同必须产生相同 bytes/hash，安全语义不同必须产生不同 identity，跨 schema 不假定语义等价；
 - mandatory capability 未识别时拒绝；optional hint 可以忽略，但不得改变 durability；
 - durable install 的语义身份至少绑定 `ledgerId + ledgerInstanceId + descriptorHash + protected auth binding`；
 - 相同语义的新 request 可以返回原 install generation，不为任意 request ID 建立无界 durable idempotency 表；
 - 相同 request ID 携带冲突内容必须失败；
-- secret 或可离线验证的 credential material 不得进入普通日志、公开 metadata、receipt dump 或诊断输出；proof/certificate 是否可公开由后续冻结的 activation/auth 机制决定；
+- secret 或可离线验证的 credential material 不得进入普通日志、公开 metadata、receipt dump、metric、exception 或诊断输出；receipt 也不得成为 bearer/replay capability；
 - 只有确实影响跨实现 payload 解释、durability 或 recovery 正确性的 limit 才能进入 descriptor；`maxInflightEntries/maxInflightBytes` 等通常属于 runtime policy。
 - `permanentLossBudgetF` 与 declared failure-domain policy 是 immutable recovery safety contract：normal ACK 必须覆盖至少 `F + 1` 个 distinct declared domains；RFC-0004 只有在 bounded range 完整恢复到同等 coverage 并发布强 completion proof 后才能重置该 range 的 loss window。
 
-规范编码、hash 算法、受保护 `authBinding`、首版是否允许 key rotation，以及最终字段分类是 RFC 接受前必须关闭的开放项。不能在安全评审前把可离线验证的 `masterKeyDigest` 暴露为公开 descriptor 字段。
+同一 ledger instance 的 semantic descriptor 与 protected auth binding 均 immutable；任何变更使用新 ledger instance，首版不引入 key-rotation state machine。canonical 规则已经冻结，但规范编码、hash suite、受保护 `authBinding` 的物理机制、最终 safety-limit 字段表和未来 key/KMS evolution 仍是 RFC 接受前必须关闭的开放项。首版不要求 descriptor signature、Merkle tree、PKI、cluster HMAC 或 per-Add nonce/proof，也不能把可离线验证的 `masterKeyDigest` 暴露为公开 descriptor 字段。
 
 ## 6. Profile control namespace 与 initial publication
 
@@ -230,6 +257,7 @@ Profiled ledger 的标准 metadata mutation 只能由 Profile-aware coordinator 
 
 ```text
 bookieId
+bookieStorageIncarnation
 ledgerId
 ledgerInstanceId
 descriptorHash
@@ -239,7 +267,7 @@ bookieCapabilityDigest
 localInstallGeneration
 ```
 
-receipt 的保存、压缩和审计布局保持开放；root record 不得保存无界 receipt history。
+receipt 的保存、压缩和审计布局保持开放；root record 不得保存无界 receipt history。receipt 只证明目标本地 durable result，不替代 READY/membership authority，也不得携带任何 secret、offline verifier 或 replay capability。
 
 ### 6.3 Standard metadata 与 READY publication
 
@@ -279,6 +307,16 @@ current committed snapshot through cut S
 
 head 在 build 期间推进时，publication 必须 CAS 失败重试，或 manifest 明确从 cut `S` 接完整 suffix；不能发布 best-effort snapshot。referenced child缺失、page/suffix gap、corrupt content 或 unknown mandatory version使该 authority domain fail closed，不能解释为 `ABSENT/default`，旧 writer也不得覆盖。未被任何 authority引用的 unknown orphan只有在 generation fence、fallback/retention和GC proof完整后才可处理。
 
+### 6.6 Control authority 与 protected local binding
+
+Profile control plane 与现有 data credential 是两套权限：master key/password verifier 只参与 ledger data access，不能授权 INSTALL、READY publication、ACTIVATE、repair grant、tombstone 或 delete。首版推荐的最小实现形状是：满足manifest confidentiality/integrity要求的authenticated cold control channel上，non-anonymous principal还必须被授权执行exact operation/ledger instance/target scope；目标 Bookie 先完成该AuthZ，再直接读取并验证已提交的 MetadataStore authority；验证通过后才将受保护的 auth binding 与 route/instance/generation 一起 durable 落本地；普通 Add 只比较这个本地有界状态。watch、caller 携带的 generation、registration property 或客户端自述都不能替代该 direct-read verification。
+
+冷路径 authority/reference 必须按 purpose domain-separate，并至少绑定：logical opcode/purpose、ledger/instance、descriptor identity、target Bookie stable identity与storage incarnation、本地 install/activation generation、相关 READY/membership/RepairIntent authority generation，以及 operation payload identity。initial activation 与 replacement activation 使用不同 purpose；recovery grant 与 normal activation不能互相重放。exact control endpoint、auth plugin/mTLS、authority reference/certificate、本地受保护存储，以及未来跨instance credential/KMS rotation协议保持开放；首版同instance原地rotation已明确禁止。
+
+INSTALL 的最小验证与 durable effect 为：验证 caller non-anonymous且被授权执行exact INSTALL/ledger instance/target scope；cold-read exact PREPARING/descriptor authority；校验 ledger/instance/schema/hash/Engine/capability/target/incarnation/operation identity/generation/payload；建立 protected auth binding；再以一个本地 conditional durable transition原子写入 route、instance、descriptor、Engine、auth、install generation和normal-inactive。ACTIVATE 必须重新验证 caller对exact ACTIVATE/ledger instance/target scope的授权，并 direct-read exact READY或post-membership authority，校验target/incarnation、local inactive state、purpose、generation、fence与tombstone，再 durable active。任一 response loss只查询/重试相同 operation并重读authority；不能回退Classic、双写或盲建新 generation。
+
+receipt 只能公开 secret-free identity/result：ledger/instance/descriptor identity、target stable identity/incarnation、Engine/capability result、local generation、operation identity和durable result。它不得包含master key、password、verifier、可离线验证的unkeyed digest、bearer token或可重放控制能力。
+
 ## 7. Bookie 安装语义
 
 候选请求：
@@ -298,14 +336,14 @@ INSTALL_LEDGER_PROFILE {
 
 Bookie 必须按顺序完成：
 
-1. 验证请求大小、版本和认证；
-2. 验证 active Engine Profile；
-3. 验证全部 mandatory capability；
+1. 在分配前验证请求 hard bounds、canonical schema/hash identity、unknown mandatory semantics，以及caller non-anonymous并被授权执行exact INSTALL/ledger instance/target scope；
+2. cold-read并验证exact committed PREPARING/descriptor authority，绑定target Bookie stable identity/storage incarnation与operation identity/generation；
+3. 验证 active Engine Profile 和全部 mandatory capability；
 4. 对 ledgerId 的 authoritative route slot 执行单一原子 claim；
-5. 检查 instance、descriptorHash 和 protected auth binding 冲突；
-6. durable 写入 Profile reservation/install 与受保护认证状态；
+5. 检查 instance、descriptorHash、purpose/generation 和 protected auth binding 冲突；
+6. durable 写入 route、Profile reservation/install、受保护认证状态、install generation与normal-inactive；
 7. 建立可从 durable authority 恢复的 routing entry；
-8. 返回 durable receipt。
+8. 返回 secret-free durable receipt。
 
 仅在第 4-7 步的 durability barrier 完成后返回成功。内存对象创建不能替代 durable install。exact record packing 和是否合并为一次 group commit 由实现与 Spike 决定，不要求“一种语义一条记录”。
 
@@ -354,17 +392,20 @@ normal Add 与 legacy `RECOVERY_ADD` 变体都必须经过相同 routing gate。
 
 ## 8. AddRequest 身份
 
-所有需要安装的新 Profile Add 至少携带：
+所有需要安装的新 Profile normal Add 必须使用 distinct Profile logical operation，而不是现有 legacy `ADD_ENTRY` 的 optional 字段。其logical binding至少覆盖以下语义；activation/admission context可以由request携带，也可以由已协商channel或server local handle捕获，不锁定一个显式per-request generation wire field：
 
 ```text
 ledgerId
 ledgerInstanceId
 profileDescriptorHash
+current route/admission context identity or generation
 entryId
 masterKey/authentication data
 body
 writeFlags
 ```
+
+exact wire fields保持开放；不可删要求是stale request/channel/handle context不能跨instance、activation、fence或admission generation成功。
 
 Bookie 校验顺序的语义要求：
 
@@ -378,7 +419,9 @@ engine mismatch                                        -> reject
 then existing fencing/auth/entry validation
 ```
 
-新 Profile 请求缺失已冻结 activation/auth 机制要求的 identity 字段时必须拒绝。请求如何匹配 durable active route、是否需要额外 proof/certificate，以及 exact binding fields 都保持开放。normal Add 必须匹配 durable normal-active role；RFC-0004/0005 定义的 recovery Add 匹配 recovery-only authority，不能借此获得 normal writable 权限。具体 profiled opcode/version 与 error mapping 保持开放；不能只增加会被旧 protobuf 实现忽略的 optional field。Classic 请求仅在 route 为 `ABSENT/CLASSIC` 时走现有路径，命中 `PROFILE/TOMBSTONED` 时必须在创建 Classic handle、master key 或 payload 前拒绝。
+新 Profile 请求缺失已冻结 activation/auth 机制要求的 identity 字段时必须拒绝。normal Add 必须匹配 durable normal-active role；RFC-0004/0005 定义的 recovery Add 使用 distinct Profile recovery logical operation，匹配 exact instance/descriptor/auth、RepairIntent admission与bounded local grant、target/incarnation/range/grant generation、delete/tombstone和payload identity；legacy recovery flag不足以取得该权限，也不能借 recovery grant 获得 normal writable。
+
+普通 Add 不携带完整 descriptor、Engine/capability vector、READY certificate或per-request nonce，不做canonical hash、auth-binding hash/HMAC、MetadataStore read、KMS/signature/certificate verification或control fsync；只对已验证缓存的固定长度descriptor/auth identity或verifier做bounded comparison，再执行local route/active/fence/admission-generation与payload检查。携带data credential的Profile transport仍必须满足manifest confidentiality/integrity要求。具体 Profile opcode number、framing bytes、proof/reference表示与error code保持开放。Classic 请求仅在 route 为 `ABSENT/CLASSIC` 时走现有路径，命中 `PROFILE/TOMBSTONED` 时必须在创建 Classic handle、persist master key或payload前拒绝。
 
 ## 9. Ensemble change
 
@@ -444,6 +487,8 @@ orphan GC 的完整状态机是本 RFC 接受前的开放项，也是 Spike A �
 
 仅 `BK_SEQUENCED_CLASSIC_CLIENT_ONLY` 可以使用旧 Bookie，并且 sequence envelope 只作为 opaque payload。它不发送 install 请求，也不能要求 server-side hash、epoch、index 或 tail-summary 语义。
 
+任何需要 Bookie 执行 Profile safety semantics 的 create/open/install在发现旧 Bookie、缺少 mandatory handshake/capability或mixed ensemble时必须在payload前失败；不得把Profile请求改写成Classic、重试legacy opcode或双写。
+
 ### 11.2 新 Profile + 不支持 install 的 Bookie
 
 placement 阶段排除；若仍被选中则创建失败。不得静默降级。
@@ -452,18 +497,44 @@ placement 阶段排除；若仍被选中则创建失败。不得静默降级。
 
 旧 Classic 请求在 `ABSENT/CLASSIC` route 上维持现有行为。命中 `PROFILE/TOMBSTONED` route 时，normal 与 recovery Add 都必须在 Classic lazy-create 前 fail closed。具体 deleted/profile-required/fenced error code 由 wire 评审冻结。
 
+### 11.4 Profile wire discriminator 与 downgrade boundary
+
+Profile safety semantics不得通过现有`ADD_ENTRY`的optional protobuf字段或legacy recovery flag表达。wire必须存在mandatory Profile discriminator，使任何受支持旧decoder都不能把合法、损坏、截断、unknown-version或unknown-subtype Profile bytes解释为legacy `ADDENTRY/RECOVERY_ADD`。Profile连接一旦识别该framing，parse/version/subtype错误必须关闭或明确拒绝，不能触发现有v3→pre-v3 decoder fallback并用相同bytes重解释。client遇到unsupported、response loss或durability unknown也不得自动Classic fallback或双写。
+
+logical operation最少区分：
+
+```text
+cold control: INSTALL/STATUS, ACTIVATE/STATUS, RECOVERY_GRANT/CLOSE,
+              TOMBSTONE/DELETE_CONSUMPTION
+data:         PROFILE_ADD_NORMAL, PROFILE_ADD_RECOVERY, POINT_READ,
+              FENCE, READ_LAC, WRITE_LAC, FORCE/LIST or explicit reject
+optional:     BATCH/RANGE/RECOVERY_ADD only behind mandatory capability
+```
+
+物理协议可以使用一个versioned Profile control envelope、一个data envelope及mandatory subtype，也可以选择等价无歧义framing；exact opcode/framing保持开放。Spike A必须把raw byte corpus同时投喂真实受支持old v2/v3 decoder，证明无Profile byte sequence产生Classic route claim、handle/master-key persistence、payload write或ACK。
+
+### 11.5 Mixed/rolling matrix 与 semantic errors
+
+最低matrix固定为：old client+old Bookie的Classic不变；old client+new Bookie仅在`ABSENT/CLASSIC`接受；new Profile client+old Bookie拒绝且不降级；Profile create/open遇mixed ensemble失败；Bookie restart/incarnation或protocol generation变化后重新handshake；unknown Profile version/subtype拒绝且无effect；任何Profile bytes在旧Bookie上都不形成legacy Add。registration/capability hint、connection handshake和durable install receipt是三层证据，任一层不能替代下一层。
+
+wire/client/admin至少保留以下semantic error class，exact numeric/code/legacy projection保持开放：unsupported protocol/op/capability/Engine；identity conflict；not-ready/not-active/stale generation；fenced/tombstoned/deleted；recovery grant missing/stale/out-of-scope/closed；transient/read-only/overload/reconciling；durability unknown/response loss；unknown mandatory/corrupt/quarantine。外部unauthorized响应可以coarse，但内部不能把上述安全分类统一压成generic unauthorized；processor、callback/future、admin status和bounded metrics必须端到端保留足以做fail-closed retry的class。
+
 ## 12. Capability negotiation
 
 Bookie registration 至少发布：
 
 ```text
+bookieStableIdentity
+storageIncarnation
 engineProfile
+protocolGeneration
 protocolVersions[]
 mandatoryCapabilities[]
+readinessGeneration
 limitsDigest or bounded limits
 ```
 
-placement 只把满足 descriptor mandatory requirements 的 Bookie 作为候选。注册信息是选择输入，不是 install 完成证据；最终仍以目标 Bookie durable receipt 为准。
+placement 只把满足 descriptor mandatory requirements 的 Bookie 作为候选。注册信息只是选择hint；**准备发送Profile operation的Profile-capable connection**必须在连接上协商stable identity/incarnation/Engine/protocol generation/mandatory capabilities/readiness generation，restart或generation变化后重新协商；最终仍以目标 Bookie exact durable install/activation receipt为准。legacy Classic connection不要求、也不能被新Profile handshake阻断；共享pool同时承载两类流量时，Profile operation只能使用已经协商的channel/context。协商按Profile connection摊销，不在每个Add发送完整capability vector或查询registration。
 
 ## 13. 安全不变量
 
@@ -487,6 +558,11 @@ placement 只把满足 descriptor mandatory requirements 的 Bookie 作为候选
 18. referenced unknown/newer mandatory record、missing chunk或suffix gap必须使对应 domain fail closed；watch/cache只做优化。
 19. sidecar operation identity只绑定一个semantic payload；冲突payload重试不能成功、不能返回`ALREADY_APPLIED`，也不能改变authority。
 20. RepairIntent只有在lifecycle/delete-fence cut完成admission后才可授予grant/接收payload；delete cut后的admission失败，admission后的domain progress不推进universal ledger head。
+21. canonical descriptor identity只由schema/hash suite/canonical semantic bytes派生；hash不授权任何control/data operation，optional hint不改变identity或接受集合。
+22. descriptor semantic identity使用固定长度、面向对抗输入的collision-resistant hash；CRC/checksum不能替代。
+23. master key/verifier与Profile control authority分离；Profile control caller必须non-anonymous且获授权执行exact operation/instance/target scope，AuthN-only、anonymous或任何secret/offline verifier泄漏均不满足合同。
+24. Profile normal/recovery使用distinct logical operation；Profile framing在任何受支持旧decoder上都不能形成legacy Add/route/payload/ACK。
+25. Profile错误、response loss或unknown version后client不得Classic downgrade或双写；Profile capability negotiation只约束准备发送Profile operation的Profile-capable connection，不成为per-Add lease，也不强制legacy Classic connection执行新handshake。
 
 ## 14. Spike 与接受 Gate
 
@@ -495,12 +571,19 @@ RFC 进入 Accepted 前必须：
 - [Spike A](spikes/SPIKE-A-profile-install.md) 全场景通过；
 - Model A 包含创建、安装、response loss 与 ensemble replacement 的抽象；
 - canonical descriptor/hash 与未知字段规则冻结；
+- golden corpus覆盖same-semantics稳定bytes/hash、different-semantics identity变化、duplicate/default/order、unknown schema/field/enum/mandatory capability、optional hint hash不变、oversize-before-allocation、old writer rewrite/strip和declared hash mismatch；
+- hash manifest拒绝CRC/checksum、非固定长度或不满足对抗输入collision-resistance最低属性的candidate；
 - protected auth binding 经过安全评审且不会泄漏可离线验证的 credential material；
+- non-anonymous且exact operation/instance/target scope authorized control principal、Bookie direct-read committed authority、initial/replacement purpose separation、target/incarnation binding、secret-free receipt、response-loss status query，以及authenticated-but-unauthorized/`AuthDisabledPlugin`负向路径通过测试；
+- master key/proof/capability在日志、metric、receipt、exception中的hard leak regression通过，包括access mismatch路径；
+- credential-bearing Profile control/data transport的confidentiality/integrity验证通过，且normal Add auth-binding hash/HMAC/KMS/signature/certificate invocation计数为0；
 - sidecar/backlink ABA、initial route-first publication、READY/availability 与 profiled metadata mutation authority 经过安全评审；
 - domain-specific single-record CAS adapter、store-version/semantic-generation 分离、bounded root/page、unknown mandatory version 与 snapshot publish-before-reclaim通过 fault/compatibility测试；
 - same operation identity的same/conflicting payload在response loss、snapshot吸收与bounded retention边界通过幂等/冲突测试；
 - orphan install 回收合同冻结；
 - protocol error mapping 和 mixed-version matrix 有确定测试；
+- raw Profile wire corpus在真实受支持old v2/v3 decoder上证明合法/损坏/截断/unknown request均不产生legacy Add/RECOVERY_ADD effect，且Profile parse error不触发legacy fallback；
+- per-connection handshake、restart/incarnation重新协商、unknown subtype、mixed ensemble、response loss no-downgrade与semantic error端到端传播通过测试；
 - route claim、legacy normal/recovery Add 与 activation gate 经过并发、restart 和源码评审；
 - Classic-only throughput/p99 与 Profile Add CPU 成本证明 routing gate 未引入远程 I/O或不可接受回退。
 
@@ -509,19 +592,20 @@ RFC 进入 Accepted 前必须：
 ## 15. 开放问题
 
 - canonical serialization、hash 算法和 descriptor version negotiation；
+- canonical codec/field numbers、hash suite/length/domain-separator bytes、descriptor/parser hard bounds、optional hint envelope与最终safety-limit字段表；
 - sidecar exact path/backend adapter、root/child/page schema、field numbers、状态名与 immutable backlink encoding；
 - authority family/domain sharding、root/page/fan-out hard bounds、snapshot manifest bytes、compaction threshold与retention数值；
 - checksum/hash、watch/cache策略，以及backend内部是否使用ZK multi-op/etcd transaction；
-- activation proof、冷路径校验方式、exact binding fields 与 profiled metadata mutation ACL/credential enforcement；
+- control endpoint/auth plugin、credential-bearing Profile control/data transport的exact TLS/SASL/mTLS机制、cold authority reference/certificate、protected local binding物理表示、exact binding fields 与 profiled metadata mutation ACL/credential enforcement；
 - receipt 的持久化位置、压缩和审计方式；
 - protected auth binding、install control record 与现有 master-key persistence 的整合；
-- 首版是否禁止 key rotation，以及未来 KMS/key-version 兼容边界；
+- 未来跨instance credential/KMS rotation的协议、版本、迁移与兼容边界；首版同instance原地rotation不是OPEN；
 - create cancellation、orphan install tombstone 与 GC；
 - Bookie registration capability 的刷新与降级行为；
 - CAS→activation gap 的 exact error/retry/backoff、availability completion 与 partial-activation credential distribution；
 - write-time inactive orphan/possibly-activated target 的 GC state machine；
 - ledgerId reuse 最终策略，以及 instance 分配 authority；
-- profiled opcode/version、unknown operation 行为与 exact error mapping；
+- Profile opcode number/framing bytes、connection handshake exact fields、unknown operation行为、exact BKException/admin/error mapping，以及batch/range/recovery wire schema；
 - 哪些 limit 影响跨实现安全语义、哪些只属于 runtime admission policy。
 - failure-domain exact定义、domain identity来源、默认 `F`、policy evolution 与 compatibility rules。
 

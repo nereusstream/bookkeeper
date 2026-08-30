@@ -80,8 +80,10 @@ NVMe device or WalArena
 - data allocator 不能覆盖 active control-log/checkpoint generation；
 - control log 通过自己的 checkpoint/rotation 协议回收；
 - superblock A/B 必须能检测 torn write、checksum failure 和 generation 回退。
+- 每个 superblock 必须绑定Bookie storage incarnation、Arena/device identity、Arena format/mandatory feature set、control/checkpoint generation和device-manifest generation；任一required device missing/mismatch/partial migration使整个Segment Bookie non-writable；
+- Arena superblock保护新实现之间的format/recovery，不能单独阻止stock old binary启动。RFC-0005的Bookie/storage compatibility fence必须在任何Journal replay/Arena writer/registration之前由旧binary mandatory path fail-stop；仅创建新文件或unknown control record不是downgrade fence。
 
-区域大小、对齐、冗余和多设备布局是 Spike 后冻结的参数，不在本骨架中写成生产默认。
+区域大小、对齐、冗余、多设备布局、superblock bytes与mandatory feature encoding是 Spike 后冻结的参数，不在本骨架中写成生产默认。
 
 ## 5. ArenaControlLog
 
@@ -385,6 +387,8 @@ control-log 旧段的唯一合法回收顺序：
 
 如果步骤中途 crash，restart 必须选择最后一个完整、可验证且依赖 suffix 仍存在的 generation。不能只按最大 generation number 选择损坏 checkpoint。
 
+inactive→active superblock publication必须同时校验相同storage incarnation、Arena identity、format/mandatory features、device-manifest generation与migration generation；response loss后重读两份superblock和committed checkpoint解析同一generation，不创建新generation猜测成功。superblock不能覆盖或auto-restamp RFC-0005的Bookie/storage compatibility fence，也不能被用作“旧binary会看见”的假设。
+
 checkpoint through `S` 必须完整保存 allocation ownership/generation、free/reusable/retiring state、current authoritative selector、old-source retirement state、new-old-pin gate state、whole-allocation reclaimability，以及拒绝 stale predecessor/operation 所需的 winning generation 或等价 anti-ABA fence。它是 ArenaControl authority 的 compact representation，不是 derived locator。
 
 完整历史 move chain 不是必需：已经由 current selector 与 durable free 完全取代、且不再存在可混淆副本的历史可以压缩；old source 尚未退休时必须保留 current selector/retiring gate，live process 中 cut 前已存在的 volatile readers 仍按 runtime drain。rotation 不得删除唯一 authority；旧 A/B checkpoint 仍作为 corruption fallback 时，其必要 suffix 不能先删。
@@ -393,18 +397,21 @@ checkpoint 不持久化 individual reader、future、buffer reference 或 pin hi
 
 ## 12. Restart 与 crash consistency
 
-启动顺序：
+本节启动顺序只在RFC-0005的Bookie/storage compatibility fence已经验证、且尚未开放任何writer/registration之后执行：
 
-1. 读取并验证 superblock A/B；
-2. 选择最高的完整 committed checkpoint generation 及其 through-sequence `S`；
-3. replay sequence `> S` 的完整、连续、校验通过 control-log suffix，截断 torn tail；
-4. 重建 allocated/free/generation/device state；
-5. 扫描已授权 active data tail，验证 block framing；
-6. 重建 ledger directory 与 derived index；
-7. 对无法证明 ownership 或 payload durability 的对象 fail closed；
-8. 完成校验前 Bookie 保持 RECOVERING/READ_ONLY。
+1. 校验Bookie storage incarnation与完整required-device manifest；
+2. 对每个required Arena读取并验证 superblock A/B、Arena identity、format/mandatory features与migration generation；
+3. 选择最高的完整 committed checkpoint generation 及其 through-sequence `S`；
+4. replay sequence `> S` 的完整、连续、校验通过 control-log suffix，截断 torn tail；
+5. 重建 allocated/free/generation/device state；
+6. 扫描已授权 active data tail，验证 block framing；
+7. 重建 ledger directory 与 derived index；
+8. 对无法证明 ownership 或 payload durability 的对象 fail closed；
+9. 全部required Arena完成校验前Bookie保持RECOVERING/READ_ONLY，之后仍须完成RFC-0005 local route/delete/registration readiness才可writable。
 
 suffix 出现 sequence gap、必要 record 缺失或 checkpoint content identity 无法验证时 fail closed。不得用更大的物理 generation、mtime 或 data scan跨过 authority gap。
+
+upgrade/migration不要求跨device transaction：每个Arena按同一Bookie migration generation写入prepared/format-ready事实；只有全部required devices匹配时Bookie级readiness才可前进。任一边界crash、部分device完成或unknown mandatory feature都保持non-writable并重试同一generation。device移除必须由cluster-authorized新storage incarnation/device-manifest generation完成。存在Segment payload/control authority后能否rollback由RFC-0005 negative-proof gate决定，allocator不得因old binary可打开目录而宣称兼容。
 
 必须注入的 crash 边界：
 
@@ -475,6 +482,8 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 
 设备重新加入前必须完成 allocator recovery、delete watermark 同步和上层 BookKeeper recovery 判定；不能仅因块扫描可读就恢复 writable。
 
+同一Bookie任一manifest-required device处于FAILED/QUARANTINED、missing、incarnation mismatch或partial migration时，整个Bookie不能注册Segment writable；首版不以“剩余设备仍可用”自动缩容。合法移除或replacement必须先由cluster接受新的storage incarnation/device manifest generation，再按RFC-0005 startup/readiness重新建立authority。
+
 ## 17. 安全不变量
 
 1. DATA 使用或 local success 前，allocation authority 已 durable。
@@ -496,6 +505,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 17. duplicate externally retried transition只能得到同一durable result或stale/conflict，不产生第二winner或重复generation bump。
 18. unknown mandatory control record、sequence gap或torn tail必须阻断durable-through并使Arena fail closed。
 19. selector publish与block-new-old-pin形成同一同步cut；cut后read pin不能落回old location。
+20. Arena superblock/format state不能替代old-binary-visible Bookie compatibility fence；任何partial required-device migration都不注册writable。
 
 ## 18. 接受 Gate
 
@@ -508,6 +518,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - cold/hot promotion、lifetime class 和同 Arena `MOVE_COMMIT` relocation 合同通过 crash、并发 move、reader pin 与 index rebuild 测试；
 - current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
 - conditional apply/result、duplicate/response-loss、bounded waiter/idempotency retention、unknown record和selector/pin竞态通过crash/replay与资源Gate；
+- 真实stock old binary compatibility fence由RFC-0005 Gate先行验证；Spike B同时覆盖Cookie auto-stamp/unknown-record负向候选、superblock A/B corruption、partial device migration、device-manifest change、migration response loss与rollback禁止条件；
 - 证明 shadow writer 可以与 Classic authority 隔离，失败不会影响 Classic ACK。
 
 即使 Spike 通过，也只解锁 shadow implementation。Segment 成为 ACK authority 仍需要 [RFC-0005](RFC-0005-segment-bookie-state.md) Accepted、独立 canary Gate、回滚合同和 RFC-0001 安装/activation 证据。
@@ -526,6 +537,6 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 - multi-device placement、device evacuation、cross-Arena relocation 和 rebuild；
 - delete authorization receipt 的本地格式；
 - metadata memory accounting 的实现与观测；
-- on-disk format upgrade 和 downgrade 策略。
+- Bookie/storage compatibility fence与Arena superblock的边界、format/migration generation、minimum compatible reader/writer、device-manifest encoding，以及upgrade/downgrade/rollback工具与策略。
 
 这些问题关闭、Spike B/C 通过且 RFC Accepted 前，Segment WAL 保持 P0 Blocked。

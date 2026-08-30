@@ -31,7 +31,15 @@
 ```text
 sourceCommit
 RFC0003Revision
+RFC0005Revision
 prototypeCommit
+supported stock old Bookie commits and exact built artifacts
+Bookie/storage compatibility-fence candidate and bytes
+Cookie/layout/version and auto-stamp policy
+storage incarnation/device-manifest schema
+Arena superblock/mandatory-feature/migration schema
+registration readiness/CAS adapter revision
+migration/rollback tooling revision
 hardwareHostId
 CPU and NUMA topology
 memory size
@@ -60,6 +68,8 @@ artifact output directory
 必须实现真实可崩溃恢复的：
 
 - superblock A/B；
+- RFC-0005 candidate Bookie/storage compatibility fence located on an old-binary mandatory pre-replay path；
+- storage incarnation、required-device manifest、migration generation与versioned registration readiness；
 - `ArenaControlLog`；
 - allocator checkpoint A/B 与 rotation；
 - `ALLOC/ALLOC_POOL`；
@@ -231,6 +241,18 @@ total ledger metadata resident memory   <= 128 MiB per Bookie
 
 此场景用于选择 RFC 参数，不设“某个 extent size 必须胜出”的事后 Gate。
 
+### B14：Stock old binary pre-replay downgrade fence
+
+步骤：用manifest锁定的真实stock old binaries打开分别包含compatibility-fence candidate、仅Cookie version bump、仅Cookie optional property、仅new superblock/file、仅unknown negative Journal meta-entry、仅registration property的storage scope；覆盖正常启动、data-integrity Cookie auto-stamp、Journal replay和writable registration探针。
+
+Oracle：唯一可接受candidate必须让每个supported old binary在Journal replay、Arena/data writer、handle/lazy storage、registration与任何write之前确定退出/保持不可写。Cookie optional/version、registration、new file/superblock或unknown Journal record若被忽略、restamp或skip，必须记录为被否证，不能组合成“可能安全”。若无candidate可证明，Gate结果只能选择new BookieId/new storage scope/access credentials，原scope不可写。
+
+### B15：Partial migration、device manifest 与 rollback
+
+步骤：按`CLASSIC_COMPATIBLE -> PREPARED_NON_WRITABLE -> FORMAT_READY -> REGISTRATION_READY`在每个Bookie fence、各required device superblock、checkpoint/control init、local route recovery、delete catch-up、local readiness与registration CAS边界crash/response loss；覆盖多device只完成子集、missing/corrupt/unknown mandatory、device removal/replacement、stale registration、old-binary rollback尝试、验证reverse/wipe与new-incarnation路径。
+
+Oracle：任何partial/mismatch/unknown/corrupt状态整个Bookie non-writable并重试同一migration generation；全部required device匹配且local/cluster readiness同generation后才writable。存在Segment/Profile local success、durability unknown或不兼容authority时old-binary rollback拒绝；只有完整negative proof、cluster accepted decommission/new incarnation、stale registration fence和verified reverse/wipe/rollback marker CAS同时成立时才允许。合法device removal使用cluster-authorized新incarnation/manifest generation。
+
 ## 8. 性能场景
 
 entry sizes：
@@ -249,6 +271,20 @@ entry sizes：
 - shared-block reclaim；
 - compaction；
 - full derived-index rebuild。
+
+另设独立startup/read-amplification矩阵，不把它混入Add热路径：
+
+```text
+cold and warm Classic-only startup baseline
+cold and warm Segment startup
+1 and manifest-maximum required-device counts, plus intermediate points
+compatibility-fence read bytes and I/O count
+device-manifest + per-Arena superblock read bytes and I/O count
+allocator/route/delete recovery and readiness/registration phase latency
+total time to read-only and writable readiness
+```
+
+每个phase报告原始样本、分布、device-count scaling与matched baseline；exact latency/read-amplification threshold保持OPEN，不能看到结果后补Gate。最低证据要求是所有计数可独立归因，Classic-only startup不会执行Profile/Arena验证或连接handshake，且format/readiness检查只发生在startup/migration/registration，normal Add中的相关read/remote-I/O计数为0。
 
 核心硬 Gate：
 
@@ -292,6 +328,8 @@ dedicated tail waste
 - repeated restart；
 - fixed-seed random operation/fault sequences。
 
+B14/B15必须另执行完整stock binary/boot/migration matrix；模拟parser或mock registration不能替代正式结果。
+
 最低随机矩阵：
 
 ```text
@@ -331,6 +369,14 @@ unknown mandatory record skipped writable       = 0
 selector cut allowed new old-location pin        = 0
 queue/waiter/idempotency hard-cap violations     = 0
 unreplayable executed failure                  = 0
+supported old binary crossed compatibility fence into replay/write/registration = 0
+Cookie/new-file/registration-only false downgrade gate = 0
+partial required-device migration became writable = 0
+unknown/corrupt mandatory format became writable = 0
+stale readiness/registration generation became writable = 0
+unsafe old-binary rollback accepted             = 0
+missing startup/read-amplification raw metrics   = 0
+format/readiness validation executed on normal Add = 0
 ```
 
 外加 B11 资源硬 Gate 和 foreground p99 regression Gate 全部达到。
@@ -347,6 +393,8 @@ unreplayable executed failure                  = 0
 
 不得把 counterexample 标成 flaky 后删除，不得通过跳过 fault point 或扫描猜测 free list 继续。
 
+stock old binary越过candidate fence进入Journal replay、registration或write，partial migration变成writable，或没有negative proof却允许rollback，均属于同等级立即停止的safety violation。
+
 ## 13. 必交 artifacts
 
 ```text
@@ -355,12 +403,18 @@ results.json
 gate-summary.json
 resource-accounting.md
 performance-raw/
+startup-performance-raw/
 device-images-or-snapshots/
 control-log-dumps/
 checkpoint-dumps/
 rebuild-dumps/
 fault-injection-log/
 failed-seed-reproducers/
+stock-old-binary-boot-matrix/
+cookie-autostamp-results/
+migration-crash-matrix/
+registration-readiness-history/
+rollback-proof-results/
 checksums.txt
 README.md
 ```

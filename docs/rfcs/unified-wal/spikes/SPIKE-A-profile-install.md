@@ -43,7 +43,17 @@ clientCount
 E/W/A configurations
 Bookie engine cohorts
 protocol version matrix
-activation proof mechanism
+supported old Bookie/client commits and built artifacts
+canonical descriptor codec/field manifest
+fixed-length collision-resistant hash suite/length/domain separator and candidate eligibility check
+descriptor/parser/capability hard bounds
+control endpoint/auth plugin and non-anonymous principal policy
+exact operation/instance/target-scope authorization policy
+credential-bearing Profile transport confidentiality/integrity mechanism
+protected local auth binding revision
+cold authority read/reference and activation mechanism
+Profile framing/discriminator/opcode/subtype manifest
+connection handshake and semantic error mapping
 profiledMetadataMutationAuthority
 localAuthorityStoreAndFormatRevision
 Classic route throughput/p99 regression budget
@@ -71,12 +81,15 @@ artifact output directory
 - 独立 Profile sidecar、标准 LedgerMetadata 唯一 membership authority 与 immutable instance backlink；
 - domain-specific `ProfileControlStore`：single-record create/read/versioned CAS、store-version/semantic-generation分离、bounded family head/page/snapshot+suffix；
 - canonical descriptor 与 hash；
+- frozen golden descriptor corpus、bounded parser与独立reference recomputation；
 - `INSTALL_LEDGER_PROFILE` request/receipt；
+- authenticated non-anonymous cold control endpoint、Bookie direct-read committed authority、protected local binding与secret-free status/receipt；
 - Bookie durable install 与 activation authority；
 - 单一、原子、可恢复的 Classic/Profile route slot；
 - logical local authority state machine：orthogonal normal admission、bounded recovery grant/readable facts、fence/tombstone generation与Bookie registration readiness；
 - Bookie restart replay；
 - Add 请求身份能够匹配 Bookie 本地 durable activation；exact binding fields 由已接受的 activation/auth 机制决定；
+- distinct Profile normal/recovery operation、mandatory non-ambiguous framing、connection-amortized handshake与semantic error propagation；
 - capability/engine placement filter；
 - initial all-E inactive route claim before standard LedgerMetadata create；
 - READY authorization before local normal ACTIVE，all-E activation before create/open success；
@@ -107,6 +120,9 @@ descriptorHash
 installRequestId
 bookieId
 localInstallGeneration
+bookieStorageIncarnation
+protocolGeneration
+connectionHandshakeGeneration
 localProfileRole
 localAdmissionGeneration
 requestType
@@ -237,7 +253,7 @@ Oracle：最终只能存在一个 authoritative `CLASSIC` 或 `PROFILE` owner；
 
 步骤：对未启用 Profile 的 Classic-only baseline 与加入统一 route gate 后的 Classic path 做 matched offered-load 对比；对 Profile Add 记录 route lookup、CPU、allocation、metadata I/O 和 proof verification。
 
-Oracle：普通 Add 的远程 MetadataStore I/O 与逐请求重型 proof verification 均为 0；Classic throughput/p99 回归不超过运行前 manifest 锁定预算，超限为 FAIL 或经预定义规则判为 INCONCLUSIVE，不能事后放宽。
+Oracle：普通 Add 的远程 MetadataStore I/O、descriptor canonical/hash、auth-binding hash/HMAC、KMS/signature/certificate与逐请求重型 proof verification均为0，只做缓存固定长度identity/verifier comparison；Classic throughput/p99与legacy connection建立wire/latency回归不超过运行前manifest锁定预算，且legacy Classic connection不执行Profile handshake。超限为FAIL或经预定义规则判为INCONCLUSIVE，不能事后放宽。
 
 ### A20：Legacy metadata mutation authority
 
@@ -257,6 +273,30 @@ Oracle：未被head发布的child只是inert orphan；same operation + same payl
 
 Oracle：restart接受集合不扩大；normal/recovery/readable不是互斥flat enum；stale handle不能跨activation/fence/tombstone generation成功；old binary在writable registration/handle create前fail closed；任一scattered authority缺失不default allow；normal Add无remote lookup/per-entry control fsync。
 
+### A23：Canonical descriptor golden corpus
+
+步骤：用至少两个独立codec/reference implementation覆盖同语义不同输入顺序、set/list顺序、absent/default、duplicate singular/map/set、unknown schema/field/enum/mandatory capability、optional hint变化、oversize/deep/numeric-bound输入、known-field old-reader rewrite/strip、declared hash mismatch与跨schema输入；持久化canonical bytes/hash后重启并重新计算。
+
+Oracle：同schema同semantic contract产生完全相同bytes/hash；任何safety semantics变化改变identity；duplicate/unknown/oversize在allocation/state mutation前拒绝；optional neutral hint不改变semantic identity；cross-schema不自行等价；consumer不信任declared hash且旧writer不能strip/rewrite后发布。hash不被任何路径当作authorization；candidate必须固定长度、对对抗输入collision-resistant，CRC/checksum/不满足属性的过短截断candidate在正式运行前拒绝。
+
+### A24：Control principal、protected binding 与 secret leak
+
+步骤：分别用authenticated authorized、authenticated unauthorized、`AuthDisabledPlugin`/anonymous、只有合法master key、stale initial/replacement purpose、wrong target/incarnation/generation调用INSTALL/ACTIVATE/recovery grant/status；在direct authority read、local durable transition和response各边界丢包/restart。扫描全部log、metric、receipt、exception、event artifact，并触发`LedgerDescriptorImpl.checkAccess` mismatch。
+
+Oracle：只有non-anonymous且对exact operation/ledger instance/target scope有授权的principal、并且exact committed authority匹配时control transition成功；AuthN-only/master key不授权control，AuthN/AuthZ早于route/credential/allocation/durable effect；initial/replacement/recovery purpose不能重放；response loss只解析同一operation/generation；credential-bearing Profile control/data transport满足manifest confidentiality/integrity；公开/诊断面不出现master key/password/verifier/offline digest/bearer capability，secret leak count为0。
+
+### A25：Raw Profile decoder corpus 与 no downgrade
+
+步骤：将每个合法Profile operation以及损坏、截断、length变异、unknown version/op/subtype、protobuf parse exception、随机prefix/suffix语料直接投喂manifest中的真实stock old v2/v3 decoder与new decoder；特别覆盖当前v3 decode `RuntimeException`后用同bytes切pre-v3的路径。捕获route claim、handle/master-key persistence、payload、ACK与connection mode。
+
+Oracle：old decoder对任何Profile corpus均不产生legacy `ADDENTRY/RECOVERY_ADD` effect；new decoder识别Profile framing后parse error明确拒绝/关闭连接且不legacy fallback；client在unsupported、response loss或durability unknown后不Classic downgrade、不双写。
+
+### A26：Handshake、mixed matrix 与 semantic error propagation
+
+步骤：覆盖old/old Classic、old/new `ABSENT/CLASSIC/PROFILE/TOMBSTONED`、new Profile/old、mixed ensemble、Bookie restart/incarnation/protocol generation change、unknown capability与每类semantic failure；检查registration hint→connection handshake→durable receipt三层证据，贯通processor/client future/admin/metric。
+
+Oracle：Profile create/open在old/mixed target上payload前失败；准备发送Profile operation的Profile-capable connection只在connect/reconnect协商，restart/generation变化重新handshake；old Classic client无需新handshake仍保持现行`ABSENT/CLASSIC`路径，共享pool中的Profile operation只能使用已协商context；registration/handshake不替代install receipt；unsupported、identity conflict、not-active/stale、fenced/deleted、grant mismatch、transient、durability unknown和unknown mandatory/corrupt不被压成会误导retry的generic success/unauthorized；协商不发生在每个Add。
+
 ## 7. 故障注入点
 
 至少覆盖：
@@ -272,6 +312,8 @@ Oracle：restart接受集合不扩大；normal/recovery/readable不是互斥flat
 - active replacement install、`LAC+1` ensemble CAS、post-CAS activation、pending resend 各边界；
 - Bookie restart/replay 中；
 - local authority transition、stale-handle generation与old-binary format gate；
+- canonical parser/hash、cold authority direct-read、control principal与protected binding各边界；
+- Profile raw decoder corpus、connection handshake/reconnect与semantic error projection；
 - coordinator restart 和 leader change；
 - duplicate、delay、reorder、drop response。
 
@@ -297,6 +339,10 @@ stale metadata read
 snapshot/compact sidecar domain
 inject unknown mandatory record
 legacy metadata mutation
+mutate canonical descriptor input
+anonymous/stale-purpose control operation
+raw malformed Profile frame
+restart connection/renegotiate
 ```
 
 每个 seed 的操作序列、fault sequence 和最终 oracle dump 必须保留。失败 seed 必须可单独重放。
@@ -335,6 +381,23 @@ same sidecar operation identity accepted conflicting payload = 0
 old binary became writable on Segment control format = 0
 stale handle crossed admission generation          = 0
 normal Add per-entry control fsync                  = 0
+descriptor golden-vector divergence                = 0
+duplicate/unknown/oversize descriptor accepted     = 0
+declared descriptor hash trusted without recompute = 0
+descriptor hash used as authorization              = 0
+anonymous/master-key-only control accepted         = 0
+authenticated-but-unauthorized control accepted    = 0
+control purpose/target/incarnation replay accepted = 0
+secret/offline-verifier disclosure                 = 0
+Profile bytes decoded as legacy ADD/RECOVERY_ADD   = 0
+Profile parse failure triggered legacy fallback    = 0
+Profile failure caused Classic fallback/double write = 0
+mixed/old Profile target received payload          = 0
+normal Add per-request capability negotiation      = 0
+legacy Classic connection forced Profile handshake = 0
+normal Add auth-binding hash/HMAC/KMS/signature/certificate invocations = 0
+credential observed on unprotected Profile transport = 0
+semantic safety error collapsed to success         = 0
 ```
 
 所有指定 deterministic scenarios 必须 100% 执行并命中 fault；所有断言为硬失败，不接受“低概率”。
@@ -356,6 +419,10 @@ normal Add per-entry control fsync                  = 0
 - 持有 master key 但无 Profile metadata authority 的 legacy client 成功修改 profiled membership/backlink；
 - Bookie restart 后接受未由 durable record 授权的请求；
 - orphan GC 能让旧请求重新激活。
+- canonical descriptor出现跨实现identity分叉、unknown/duplicate被接受或hash被当作authorization；
+- anonymous/master-key-only caller完成Profile control transition，或任何secret/offline verifier进入公开/诊断surface；
+- 任一Profile byte corpus被old decoder解释成legacy Add/RECOVERY_ADD，或new decoder错误触发legacy fallback；
+- Profile失败/response loss触发Classic downgrade、双写或mixed target payload。
 
 停止后不得通过修改 oracle、忽略 seed 或缩小协议结构继续宣称 PASS。
 
@@ -370,6 +437,10 @@ metadata-history/
 bookie-control-dumps/
 fault-injection-log/
 failed-seed-reproducers/
+descriptor-golden-corpus/
+raw-wire-corpus/
+old-new-decoder-results/
+secret-leak-scan/
 checksums.txt
 README.md
 ```
