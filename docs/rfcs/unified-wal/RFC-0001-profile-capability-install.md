@@ -13,9 +13,9 @@
 
 - Engine Profile 由 Bookie 进程或部署 cohort 决定；
 - Ledger Contract Profile 由 immutable ProfileDescriptor 描述；
-- ProfileDescriptor V1使用strict flat TLV与SHA-256的36-byte identity；policy/capability registry仍由owner RFC接受；
+- ProfileDescriptor使用strict flat TLV与SHA-256的36-byte identity；policy/capability registry仍由owner RFC接受；
 - Client/Protocol Profile 不冒充 Bookie capability；
-- Profile control/data使用独立`bookie-profile-v1` immediate-TLS1.3/mTLS endpoint；legacy `bookie-rpc`不解析Profile frame；
+- Profile control/data使用独立`bookie-profile` immediate-TLS1.3/mTLS endpoint；legacy `bookie-rpc`不解析Profile frame；
 - 新合同在 ledger `OPEN` 前安装到当前 ensemble 的全部 E 个 Bookie；
 - 标准 LedgerMetadata 只拥有 OSS state/membership；独立 sidecar 拥有 Profile instance 与控制事实；
 - normal Profile Add 只有在 global READY 与目标 Bookie durable normal activation 都匹配时才能 ACK；
@@ -59,7 +59,7 @@
 - Segment Bookie 对 install、activation、fence、recovery Add 和 ACK authority 的消费，见 [RFC-0005](RFC-0005-segment-bookie-state.md)；
 - master key 的现有安全模型重设计。
 
-现有 master key 可以继续作为首版 data-plane ledger credential，但不因此获得 Profile control-plane authority。本 RFC 只冻结两类 authority 的分离、secret non-disclosure 与 fail-closed 消费合同；它不把 P0 扩成 password/KDF、PKI 或 KMS 的全面重设计。
+现有 master key 可以继续作为当前 data-plane ledger credential，但不因此获得 Profile control-plane authority。本 RFC 只冻结两类 authority 的分离、secret non-disclosure 与 fail-closed 消费合同；它不把 P0 扩成 password/KDF、PKI 或 KMS 的全面重设计。
 
 ### 3.1 威胁模型与热路径边界
 
@@ -73,7 +73,7 @@
 - descriptor hash 只提供 identity/integrity，不提供 authorization、non-repudiation、secrecy 或 capability proof；
 - INSTALL、ACTIVATE、repair grant 与 delete 等 Profile control operation 必须来自 non-anonymous、且对exact operation + ledger instance + target/scope有明确授权的authenticated principal；`AuthDisabledPlugin`/`ANONYMOUS`或仅通过认证但无该scope权限都不满足合同；
 - master key、password、verifier、可离线验证派生物以及 bearer/replay capability 不得进入公开 metadata、sidecar、receipt、日志、metric 或 exception。
-- AuthN/AuthZ检查必须早于route claim、credential persistence、local allocation和任何durable effect；首版使用mTLS principal与小型exact-scope authorizer，具体allowlist/backend配置保持开放，不引入通用RBAC框架。
+- AuthN/AuthZ检查必须早于route claim、credential persistence、local allocation和任何durable effect；当前合同使用mTLS principal与小型exact-scope authorizer，具体allowlist/backend配置保持开放，不引入通用RBAC框架。
 - 任何携带master key或verifier的Profile control/data transport只走独立TLS1.3+mTLS endpoint；该要求不追溯重设计Classic wire/KDF，也不要求每Add做certificate验证。
 
 同时锁定以下性能边界：
@@ -95,14 +95,14 @@ DIRECT_JOURNAL_ENGINE
 SEGMENT_WAL_ENGINE
 ```
 
-Engine Profile 是进程/cohort 级能力。Bookie 启动后公布唯一 active engine 及 capability set。首版不支持同一进程按 ledger 动态切换三种 engine。
+Engine Profile 是进程/cohort 级能力。Bookie 启动后公布唯一 active engine 及 capability set。当前合同不支持同一进程按 ledger 动态切换三种 engine。
 
 ### 4.2 Ledger Contract Profile
 
 候选合同维度：
 
 ```text
-payloadFormat       = OPAQUE_LEDGER_V1 | SEQUENCED_LEDGER_V1
+payloadFormat       = OPAQUE_LEDGER | SEQUENCED_LEDGER
 durabilityMode      = SYNC_ON_ACK | DEFERRED_SYNC_LEGACY
 quorumProfile       = existing E/W/A plus declared restrictions
 requiredCapabilities = exact capabilityId + semanticVersion set
@@ -116,12 +116,12 @@ Ledger Contract Profile 是 immutable descriptor 的一部分。需要 Bookie �
 
 ## 5. ProfileDescriptor
 
-### 5.1 V1 canonical codec
+### 5.1 Canonical codec
 
-V1 冻结为 JDK/Netty-only、扁平、严格、有序的固定宽度整数 TLV；不使用 ordinary protobuf canonicalization，也不接受 parse 后 normalize 的同义输入。所有整数均为 unsigned big-endian：
+当前codec冻结为 JDK/Netty-only、扁平、严格、有序的固定宽度整数 TLV；不使用 ordinary protobuf canonicalization，也不接受 parse 后 normalize 的同义输入。所有整数均为 unsigned big-endian：
 
 ```text
-DescriptorHeaderV1                 16 bytes
+DescriptorHeader                   16 bytes
   magic                            4 bytes = 42 4b 50 44 ("BKPD")
   codecVersion                    u16 = 1
   semanticSchemaVersion           u16 = 1
@@ -129,7 +129,7 @@ DescriptorHeaderV1                 16 bytes
   fieldCount                      u16 = 10
   flags                           u16 = 0
 
-FieldHeaderV1                       8 bytes
+FieldHeader                         8 bytes
   fieldId                         u16
   type                            u16
   valueLength                     u32
@@ -150,11 +150,11 @@ FieldHeaderV1                       8 bytes
 | 9 | `failureDomainPolicyGeneration` | `U64=3` | u64 |
 | 10 | `mandatoryCapabilities` | `CAPABILITY_SET=4` | `count:u16`，随后 `count` 个严格递增的 `capabilityId:u32 + semanticVersion:u16` |
 
-V1 基础枚举冻结为：
+当前基础枚举冻结为：
 
 ```text
 Engine:     1 CLASSIC_ENGINE; 2 DIRECT_JOURNAL_ENGINE; 3 SEGMENT_WAL_ENGINE
-Payload:    1 OPAQUE_LEDGER_V1; 2 SEQUENCED_LEDGER_V1
+Payload:    1 OPAQUE_LEDGER; 2 SEQUENCED_LEDGER
 Durability: 1 SYNC_ON_ACK; 2 DEFERRED_SYNC_LEGACY
 ```
 
@@ -162,7 +162,7 @@ failure-domain policy ID/default/domain semantics、capability ID/version regist
 
 ### 5.2 Strict validation 与 bounds
 
-V1 hard bounds：canonical descriptor 的合法长度精确为 `124 + 6 * capabilityCount`，即 124..508 bytes；`fieldCount=10`，capability count 为 0..64，nesting depth 为 1，semantic string/free-form bytes/optional semantic field 均为 0。1024 bytes 只是 parser 在任何 body allocation 前执行的绝对 input/allocation hard cap，不是合法 V1 最大长度；509..1024 bytes 在 V1 中同样非法。`CAPABILITY_SET.valueLength == 2 + count * 6`，全部 fixed scalar length 必须精确，`totalLength` 必须等于实际 bytes，且禁止 padding 与 trailing bytes。
+当前hard bounds：canonical descriptor 的合法长度精确为 `124 + 6 * capabilityCount`，即 124..508 bytes；`fieldCount=10`，capability count 为 0..64，nesting depth 为 1，semantic string/free-form bytes/optional semantic field 均为 0。1024 bytes 只是 parser 在任何 body allocation 前执行的绝对 input/allocation hard cap，不是合法 descriptor 最大长度；509..1024 bytes 同样非法。`CAPABILITY_SET.valueLength == 2 + count * 6`，全部 fixed scalar length 必须精确，`totalLength` 必须等于实际 bytes，且禁止 padding 与 trailing bytes。
 
 validator 必须满足：
 
@@ -170,11 +170,11 @@ validator 必须满足：
 - capability ID 严格递增、非零且不重复，semantic version 非零并表示一个 exact version；
 - `1 <= A <= W <= E <= 65535`、`0 <= F < A`，failure-domain policy ID/generation 均非零，且已接受的 cross-field Profile compatibility table 必须通过；
 - unknown/new schema 不得由旧 reader/writer 读取已知字段后 strip/rewrite；跨 schema 不推断 semantic equivalence；
-- safety-neutral hint 如将来需要，只存在于独立外层记录，不进入 V1 descriptor 或 identity。
+- safety-neutral hint 如需加入，只存在于独立外层记录，不进入当前 descriptor 或 identity。
 
 ### 5.3 Hash 与 identity
 
-V1 冻结：
+当前identity codec冻结：
 
 ```text
 hashSuiteId = 1
@@ -207,9 +207,11 @@ canonical bytes 与 declared 36-byte identity 必须一起持久化/传输，con
 - 只有确实影响跨实现 payload 解释、durability 或 recovery 正确性的 limit 才能进入 descriptor；`maxInflightEntries/maxInflightBytes` 等通常属于 runtime policy。
 - `permanentLossBudgetF` 与 declared failure-domain policy 是 immutable recovery safety contract：normal ACK 必须覆盖至少 `F + 1` 个 distinct declared domains；RFC-0004 只有在 bounded range 完整恢复到同等 coverage 并发布强 completion proof 后才能重置该 range 的 loss window。
 
-同一 ledger instance 的 semantic descriptor 与 protected auth binding 均 immutable；任何变更使用新 ledger instance，首版不引入 key-rotation state machine。受保护 local state 的物理 owner/record framing、policy/capability registry 和未来跨instance key/KMS evolution仍未关闭；codec/hash本身已不再OPEN。
+同一 ledger instance 的 semantic descriptor 与 protected auth binding 均 immutable；任何变更使用新 ledger instance，当前合同不引入 key-rotation state machine。受保护 local state 的物理 owner/record framing、policy/capability registry 和后续跨instance key/KMS改造仍未关闭；codec/hash本身已不再OPEN。
 
-reference implementation 由 `ProfileDescriptorV1`、`ProfileDescriptorCodecV1` 与 `ProfileDescriptorIdentity` 组成，生产 encoder 是唯一 canonical writer，decoder strict-validate input。golden corpus必须保存 authoritative `.bin`、typed fixture、expected SHA-256/36-byte identity与field dump，并由不共享 production parser helper 的 test verifier独立复算；覆盖合法组合和 duplicate/order/missing/unknown/length/trailing/E-W-A-F/policy generation/capability count等全部负向向量。该实现只允许 create/install/open/control 冷路径调用，normal Add只比较缓存的36-byte identity。
+reference implementation 由 `ProfileDescriptor`、`ProfileDescriptorCodec` 与 `ProfileDescriptorIdentity` 组成，生产 encoder 是唯一 canonical writer，decoder strict-validate input。golden corpus必须保存 authoritative `.bin`、typed fixture、expected SHA-256/36-byte identity与field dump，并由不共享 production parser helper 的 test verifier独立复算；覆盖合法组合和 duplicate/order/missing/unknown/length/trailing/E-W-A-F/policy generation/capability count等全部负向向量。该实现只允许 create/install/open/control 冷路径调用，normal Add只比较缓存的36-byte identity。
+
+项目内部只使用上述无代际后缀名称。`codecVersion=1`、`semanticSchemaVersion=1`与hash domain separator中的`/v1`是当前字节合同的technical discriminator，不是项目代际；后续改造直接修改本RFC和实现，并在不兼容时同步更新discriminator、migration/rollback边界与compatibility corpus，不建立并行代际类型或合同。
 
 ## 6. Profile control namespace 与 initial publication
 
@@ -340,9 +342,9 @@ head 在 build 期间推进时，publication 必须 CAS 失败重试，或 manif
 
 Profile control plane 与现有 data credential 是两套权限：master key/password verifier 只参与 ledger data access，不能授权 INSTALL、READY publication、ACTIVATE、repair grant、tombstone 或 delete。
 
-首版冻结一个独立 `bookie-profile-v1` TCP listener：连接第一字节即 TLS 1.3，不复用 legacy `bookie-rpc` port 或 legacy START_TLS；server authentication 与 client certificate 均 required，principal取 leaf X509 `X500Principal.CANONICAL`。实现复用现有 BookKeeper key/trust/provider配置，但需要 `startTls(false)` 与 `ClientAuth.REQUIRE` 的Profile context。证书验证只在连接建立；Classic endpoint、resolver、pool与handshake不变。正式部署 manifest 必须验证受信 CA 集合内 subject 唯一，或在配置层把 trust-domain/issuer identity 纳入 principal mapping；具体 allowlist/trust rotation 仍 OPEN，不引入 SPKI pinning或每请求证书检查。现有 `AuthDisabledPlugin`、SASL-without-consumable-principal或 `BookieAuthZFactory` 的coarse OU allowlist都不能单独满足Profile control AuthZ。
+当前合同冻结一个独立 `bookie-profile` TCP listener：连接第一字节即 TLS 1.3，不复用 legacy `bookie-rpc` port 或 legacy START_TLS；server authentication 与 client certificate 均 required，principal取 leaf X509 `X500Principal.CANONICAL`。实现复用现有 BookKeeper key/trust/provider配置，但需要 `startTls(false)` 与 `ClientAuth.REQUIRE` 的Profile context。证书验证只在连接建立；Classic endpoint、resolver、pool与handshake不变。正式部署 manifest 必须验证受信 CA 集合内 subject 唯一，或在配置层把 trust-domain/issuer identity 纳入 principal mapping；具体 allowlist/trust rotation 仍 OPEN，不引入 SPKI pinning或每请求证书检查。现有 `AuthDisabledPlugin`、SASL-without-consumable-principal或 `BookieAuthZFactory` 的coarse OU allowlist都不能单独满足Profile control AuthZ。
 
-首版只增加domain-specific authorizer，不建设通用RBAC：
+当前合同只增加domain-specific authorizer，不建设通用RBAC：
 
 ```text
 ProfileControlAuthorizer.authorize(
@@ -366,7 +368,7 @@ Bookie以request的ledger/instance/purpose派生domain key，通过`ProfileContr
 
 冷路径 authority/reference 按 purpose domain-separate。INSTALL 的顺序固定为 TLS/mTLS → bounded parse → non-anonymous与static operation precheck → 派生fixed authority key → direct-read PREPARING/descriptor committed authority → `authorize(principal, scope, committedAuthority)` exact AuthZ → 校验 ledger/instance/schema/descriptor identity/Engine/capability/target/incarnation/op identity/generation/public payload → 校验credential kind/length → 一个conditional local transition写入route/instance/descriptor/Engine/protected credential/install generation/normal-inactive → local durability barrier → secret-free response。最终 exact AuthZ 仍早于route claim、credential persistence、allocation和任何durable effect；每个INSTALL/ACTIVATE operation至多一次cold authority read，不增加通用RBAC或额外MetadataStore round trip。ACTIVATE_INITIAL读取exact READY和initial metadata/ensemble；ACTIVATE_REPLACEMENT读取post-membership authority；两者不能互相重放，且fence/tombstone先赢时迟到activation失败。
 
-首版data credential逻辑表示固定为 `credentialKind:u16=1 (BK_MASTER_KEY_SHA1_V1) + credentialLength:u16=20 + credentialBytes[20]`。它与ledger/instance/descriptor identity/install generation/route/activation/fence state一起进入`ProtectedProfileStateStore`语义接口；normal Add使用`MessageDigest.isEqual()`或等价constant-time comparison。不得生成或公开unkeyed `authBindingHash`，同instance credential immutable，物理owner、record packing、at-rest protection、group commit与secure deletion继续BLOCK。
+当前data credential逻辑表示固定为 `credentialKind:u16=1 (BK_MASTER_KEY_SHA1) + credentialLength:u16=20 + credentialBytes[20]`。它与ledger/instance/descriptor identity/install generation/route/activation/fence state一起进入`ProtectedProfileStateStore`语义接口；normal Add使用`MessageDigest.isEqual()`或等价constant-time comparison。不得生成或公开unkeyed `authBindingHash`，同instance credential immutable，物理owner、record packing、at-rest protection、group commit与secure deletion继续BLOCK。
 
 每个 `operationId[16]` 只绑定一个不含credential bytes的public semantic payload identity：same operation/same public payload/same secret返回原结果或`ALREADY_APPLIED`；任一public payload或secret冲突返回`CONFLICT`且不泄漏差异。status只返回`NOT_FOUND/APPLIED/ALREADY_APPLIED/CONFLICT/DURABILITY_UNKNOWN/STALE_OR_COMPACTED`。response loss只能在相同endpoint/subtype/operationId/payload下查询或重试，不能回退Classic、双写或盲建generation。
 
@@ -391,7 +393,7 @@ INSTALL_LEDGER_PROFILE {
 }
 ```
 
-这是 logical request contract；control tail 的最终 physical wire packing 仍 BLOCK。首版不接受 bearer install proof。
+这是 logical request contract；control tail 的最终 physical wire packing 仍 BLOCK。当前合同不接受 bearer install proof。
 
 Bookie 必须按顺序完成：
 
@@ -455,13 +457,13 @@ normal Add 与 legacy `RECOVERY_ADD` 变体都必须经过相同 routing gate。
 所有需要安装的新 Profile normal Add 必须使用 distinct Profile logical operation，而不是现有 legacy `ADD_ENTRY` 的 optional 字段。Round 7 executable wire manifest固定common context：
 
 ```text
-LedgerContextV1                    60 bytes
+LedgerContext                      60 bytes
   ledgerId                        i64
   ledgerInstanceId                16 opaque nonzero bytes
   descriptorIdentity              36 bytes
 
 ADD_NORMAL:
-  LedgerContextV1
+  LedgerContext
   entryId                         i64
   writeFlags                      u32
   credentialKind                  u16 = 1
@@ -471,7 +473,7 @@ ADD_NORMAL:
   entryPayload                    entryLength bytes
 
 ADD_RECOVERY:
-  LedgerContextV1
+  LedgerContext
   repairIntentId                  16 bytes
   repairIntentGeneration          u64
   grantGeneration                 u64
@@ -574,11 +576,11 @@ placement 阶段排除；若仍被选中则创建失败。不得静默降级。
 
 ### 11.4 Profile wire discriminator 与 downgrade boundary
 
-Round 7冻结一个**仅供reference implementation与raw corpus的executable manifest**：独立`bookie-profile-v1` endpoint在TLS解密后使用4-byte unsigned big-endian outer length，随后为固定32-byte header：
+Round 7冻结一个**仅供reference implementation与raw corpus的executable manifest**：独立`bookie-profile` endpoint在TLS解密后使用4-byte unsigned big-endian outer length，随后为固定32-byte header：
 
 ```text
 outerLength                         u32 BE, excludes prefix, equals 32 + bodyLength
-ProfileFrameHeaderV1                32 bytes
+ProfileFrameHeader                  32 bytes
   magic                             u32 = 0x0FFE4250
   protocolMajor                     u16 = 1
   protocolMinor                     u16 = 0
@@ -604,11 +606,11 @@ subtype分配：
 0x0203 READ_ENTRY              0x0204 FENCE_LEDGER
 0x0205 READ_LAC                0x0206 WRITE_LAC
 0x0207 FORCE_LEDGER            0x0208 LIST_ENTRIES
-0x0301 RANGE_READ              reserved/disabled in v1
-0x0302 BATCH_RECOVERY_ADD      reserved/disabled in v1
+0x0301 RANGE_READ              reserved/disabled in current manifest
+0x0302 BATCH_RECOVERY_ADD      reserved/disabled in current manifest
 ```
 
-response复用相同subtype并置`RESPONSE`；READY不是Bookie subtype。pre-HELLO frame最大4096 bytes，control frame最大65536 bytes，全部Profile frame最大5242880 bytes，descriptor input/allocation绝对hard cap为1024 bytes，而合法V1长度仍只能是`124 + 6 * capabilityCount`（最大508）；length必须在body allocation前验证。range/batch在V1不advertise capability、不接受body并返回UNSUPPORTED，不能凭空冻结batch参数。
+response复用相同subtype并置`RESPONSE`；READY不是Bookie subtype。pre-HELLO frame最大4096 bytes，control frame最大65536 bytes，全部Profile frame最大5242880 bytes，descriptor input/allocation绝对hard cap为1024 bytes，而当前合法长度仍只能是`124 + 6 * capabilityCount`（最大508）；length必须在body allocation前验证。range/batch在当前manifest中不advertise capability、不接受body并返回UNSUPPORTED，不能凭空冻结batch参数。
 
 magic的位级候选意图是让current v3 protobuf先遇invalid wire type，pre-v3再看到unknown opcode `0xfe`；这不是证据。Spike A必须把TLS ClientHello、全部合法subtype、bit flip、1..31-byte truncation、length/version/flag/subtype变体、current v3 `RuntimeException`变体、version=0/nonzero legacy prefix及fuzz corpus投喂每个受支持真实old decoder/binary，证明route claim、handle/master-key persistence、allocation、payload/journal write与ACK全部为0。任一失败只允许调整magic/framing后重跑，不允许fallback或双写；Gate PASS前本manifest不得晋升stable production wire。
 
@@ -692,7 +694,7 @@ registration只做hint；connection context也不替代durable install/activatio
 23. master key/verifier与Profile control authority分离；Profile control caller必须non-anonymous且获授权执行exact operation/instance/target scope，AuthN-only、anonymous或任何secret/offline verifier泄漏均不满足合同。
 24. Profile normal/recovery使用distinct logical operation；Profile framing在任何受支持旧decoder上都不能形成legacy Add/route/payload/ACK。
 25. Profile错误、response loss或unknown version后client不得Classic downgrade或双写；Profile capability negotiation只约束准备发送Profile operation的Profile-capable connection，不成为per-Add lease，也不强制legacy Classic connection执行新handshake。
-26. V1 descriptor input必须是严格canonical TLV，identity固定为suite/schema加32-byte SHA-256；normal Add不解析或hash descriptor。
+26. 当前descriptor input必须是严格canonical TLV，identity固定为suite/schema加32-byte SHA-256；normal Add不解析或hash descriptor。
 27. Profile只通过独立immediate-TLS/mTLS endpoint承载；legacy endpoint永远不解析Profile application frame，stable wire受raw old-decoder Gate阻塞。
 28. same operation identity只绑定一个public payload与一个protected secret；冲突不得回显secret差异，公开面不得出现credential或offline verifier。
 29. Profile connection HELLO context、persistent readiness、ephemeral registration与local durable receipt分层；任一层不能替代下一层。
@@ -724,7 +726,7 @@ RFC 进入 Accepted 前必须：
 ## 15. 开放问题
 
 - failure-domain policy ID/default/domain registry、mandatory capability ID/semanticVersion registry、各production Profile的exact capability组合与尚未接受的cross-field legal-combination条目；
-- future descriptor schema/hash-suite evolution与独立optional hint envelope；V1 codec/field/hash/bounds不再OPEN；
+- descriptor schema/hash-suite后续改造与独立optional hint envelope；任何改造直接更新当前合同并同步technical discriminator、migration边界与corpus，当前codec/field/hash/bounds不再OPEN；
 - sidecar exact path/backend adapter、root/child/page schema、field numbers、状态名与 immutable backlink encoding；
 - authority family/domain sharding、root/page/fan-out hard bounds、snapshot manifest bytes、compaction threshold与retention数值；
 - checksum/hash、watch/cache策略，以及backend内部是否使用ZK multi-op/etcd transaction；
@@ -732,13 +734,13 @@ RFC 进入 Accepted 前必须：
 - `ProtectedProfileStateStore`物理owner、local crash-record framing、at-rest protection、group commit与secure deletion；
 - receipt 的持久化位置、压缩和审计方式；
 - protected 20-byte credential、install control record与现有master-key persistence的物理整合；逻辑表示与non-disclosure已冻结；
-- 未来跨instance credential/KMS rotation的协议、版本、迁移与兼容边界；首版同instance原地rotation不是OPEN；
+- 后续跨instance credential/KMS rotation只能直接修改当前协议并同步technical discriminator、迁移与兼容边界；当前同instance原地rotation不是OPEN；
 - create cancellation、orphan install tombstone 与 GC；
 - persistent readiness CAS adapter/path/schema、ephemeral BookieServiceInfo刷新与降级行为；
 - CAS→activation gap 的 exact error/retry/backoff、availability completion 与 partial-activation credential distribution；
 - write-time inactive orphan/possibly-activated target 的 GC state machine；
 - ledgerId reuse 最终策略，以及 instance 分配 authority；
-- control subtype最终tail字段表、exact detailCode/BKException/admin mapping、general E/W/A recovery outcome API与future batch/range版本；
+- control subtype最终tail字段表、exact detailCode/BKException/admin mapping、general E/W/A recovery outcome API与batch/range body/schema后续改造；
 - stable production wire在raw old-decoder/stock-binary corpus PASS前保持BLOCK；Round 7 bytes只允许reference/corpus prototype；
 - 哪些 limit 影响跨实现安全语义、哪些只属于 runtime admission policy。
 

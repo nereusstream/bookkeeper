@@ -44,17 +44,17 @@ E/W/A configurations
 Bookie engine cohorts
 protocol version matrix
 supported old Bookie/client commits and built artifacts
-descriptorV1=strict-flat-TLV/BKPD/10-fields/big-endian
+descriptorCodec=strict-flat-TLV/BKPD/10-fields/big-endian
 descriptorIdentitySuite=SHA-256/suite-1/36-byte-identity/exact-domain-separator
 descriptorBounds=legal-124-plus-6N/124..508-bytes/absolute-input-cap-1024/10-fields/0..64-capabilities/depth-1
 accepted failure-domain policy and capability registries
-controlEndpoint=bookie-profile-v1/immediate-TLS1.3/mTLS
+controlEndpoint=bookie-profile/immediate-TLS1.3/mTLS
 principalMappingMode=SUBJECT_UNIQUE_WITHIN_TRUST_SET|TRUST_DOMAIN_ISSUER_PLUS_SUBJECT
 principal/X509 allowlist, trust-set uniqueness evidence and non-anonymous policy
 exact operation/instance/target-scope authorization policy
 protectedCredential=kind-1/20-byte-verifier/redaction-revision
 cold authority read/reference and activation mechanism
-ProfileFrameV1=0x0FFE4250/32-byte-header/exact-subtype-table
+ProfileFrame=0x0FFE4250/32-byte-header/exact-subtype-table
 HELLO/connection-context/status-retry-durable-result mapping
 Profile/Classic pool isolation revision
 profiledMetadataMutationAuthority
@@ -83,17 +83,17 @@ artifact output directory
 - 经 RFC-0001 冻结的 metadata/activation 状态；
 - 独立 Profile sidecar、标准 LedgerMetadata 唯一 membership authority 与 immutable instance backlink；
 - domain-specific `ProfileControlStore`：single-record create/read/versioned CAS、store-version/semantic-generation分离、bounded family head/page/snapshot+suffix；
-- RFC-0001 `ProfileDescriptorV1/ProfileDescriptorCodecV1/ProfileDescriptorIdentity` exact TLV/SHA-256 codec；
+- RFC-0001 `ProfileDescriptor/ProfileDescriptorCodec/ProfileDescriptorIdentity` exact TLV/SHA-256 codec；
 - authoritative `.bin` golden corpus、typed fixture、expected digest/36-byte identity/field dump、strict bounded parser与不共享production parser helper的独立recomputation；
 - `INSTALL_LEDGER_PROFILE` request/receipt；
-- 独立immediate-TLS1.3/mTLS `bookie-profile-v1` listener、X509 principal、exact authorizer、Bookie direct-read committed authority、protected kind-1 20-byte credential与secret-free status/receipt；
+- 独立immediate-TLS1.3/mTLS `bookie-profile` listener、X509 principal、exact authorizer、Bookie direct-read committed authority、protected kind-1 20-byte credential与secret-free status/receipt；
 - Bookie durable install 与 activation authority；
 - 单一、原子、可恢复的 Classic/Profile route slot；
 - logical local authority state machine：orthogonal normal admission、bounded recovery grant/readable facts、fence/tombstone generation与Bookie registration readiness；
 - Bookie restart replay；
-- `LedgerContextV1`、`ADD_NORMAL/ADD_RECOVERY` executable bodies与Bookie本地durable activation/grant匹配；
+- `LedgerContext`、`ADD_NORMAL/ADD_RECOVERY` executable bodies与Bookie本地durable activation/grant匹配；
 - exact outer length/32-byte header/magic/subtype、HELLO/connection context、status/retry/durable result、connection-amortized handshake与no-fallback parser；
-- V1 `RANGE_READ/BATCH_RECOVERY_ADD` reserved/disabled behavior；
+- 当前`RANGE_READ/BATCH_RECOVERY_ADD` reserved/disabled behavior；
 - capability/engine placement filter；
 - initial all-E inactive route claim before standard LedgerMetadata create；
 - READY authorization before local normal ACTIVE，all-E activation before create/open success；
@@ -282,7 +282,7 @@ Oracle：restart接受集合不扩大；normal/recovery/readable不是互斥flat
 
 步骤：production codec严格执行`BKPD` 16-byte header、十个递增TLV、合法长度`124 + 6 * capabilityCount`（124..508 bytes）、allocation前1024-byte绝对input cap和SHA-256 suite 1/domain separator；用不共享production parser helper的独立verifier覆盖capability count 0/1/64、508-byte合法向量、509/1024-byte非法向量、1025-byte allocation前oversize拒绝、E/W/A/F边界、policy generation，以及duplicate/out-of-order/missing/unknown schema/type/field/enum/capability、nonzero flags、wrong scalar/set/total length、truncation/oversize/trailing bytes/default alias、known-field old-reader rewrite/strip、declared identity mismatch与跨schema输入。
 
-Oracle：authoritative `.bin`、typed fixture、expected SHA-256、36-byte identity和field dump逐byte一致；input必须原生canonical而不是parse→normalize后接受；任何safety语义变化改变identity；全部非法输入在allocation/state mutation前拒绝；cross-schema不自行等价；consumer重算identity，hash不授权。optional hint不存在于V1 bytes；policy/capability registry未接受的production descriptor不得mint。
+Oracle：authoritative `.bin`、typed fixture、expected SHA-256、36-byte identity和field dump逐byte一致；input必须原生canonical而不是parse→normalize后接受；任何safety语义变化改变identity；全部非法输入在allocation/state mutation前拒绝；cross-schema不自行等价；consumer重算identity，hash不授权。optional hint不存在于当前descriptor bytes；policy/capability registry未接受的production descriptor不得mint。
 
 ### A24：Control principal、protected binding 与 secret leak
 
@@ -389,7 +389,7 @@ normal Add per-entry control fsync                  = 0
 descriptor golden-vector divergence                = 0
 duplicate/unknown/oversize descriptor accepted     = 0
 noncanonical descriptor alias accepted              = 0
-descriptor V1 bytes/identity mismatch              = 0
+descriptor bytes/identity mismatch                 = 0
 declared descriptor digest trusted without recompute = 0
 descriptor digest used as authorization              = 0
 anonymous/master-key-only control accepted         = 0

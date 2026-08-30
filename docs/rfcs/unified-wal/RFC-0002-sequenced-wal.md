@@ -14,7 +14,7 @@ BK_SEQUENCED_CLASSIC_CLIENT_ONLY
 BK_SEQUENCED_CLASSIC_INSTALLED
 ```
 
-首版最关键的约束是：旧 Bookie 不理解 `writerEpoch`，所以 client-only Profile 禁止 same-ledger epoch takeover。新 writer 必须 fence 并恢复旧 ledger，seal predecessor，然后在 successor ledger 上继续写。
+当前最关键的约束是：旧 Bookie 不理解 `writerEpoch`，所以 client-only Profile 禁止 same-ledger epoch takeover。新 writer 必须 fence 并恢复旧 ledger，seal predecessor，然后在 successor ledger 上继续写。
 
 ## 2. 范围
 
@@ -150,7 +150,7 @@ PREPARING -> ACTIVE -> FENCING -> RECOVERING -> SEALED
 
 ## 6. Sequence reservation
 
-sequence 必须在发送 Add 前分配，以便 envelope、appendId 和 ordered completion 使用稳定身份。首版固定为 single active writer 在本地 bounded in-flight window 内分配；普通 append 不执行 MetadataStore range allocation。
+sequence 必须在发送 Add 前分配，以便 envelope、appendId 和 ordered completion 使用稳定身份。当前合同固定为 single active writer 在本地 bounded in-flight window 内分配；普通 append 不执行 MetadataStore range allocation。
 
 最低要求：
 
@@ -161,7 +161,7 @@ sequence 必须在发送 Add 前分配，以便 envelope、appendId 和 ordered 
 - `writerEpoch` 变化不能使旧 reservation 在 successor 上重新合法；
 - reservation authority 与 durable publication frontier 分离。
 
-首版不要求 Bookie 分配全局 sequence，也不冻结 exact window。窗口由内存、head-of-line latency、吞吐和 takeover scan benchmark 决定。future durable range allocator 必须另行评审 hole 与 takeover 语义。
+当前合同不要求 Bookie 分配全局 sequence，也不冻结 exact window。窗口由内存、head-of-line latency、吞吐和 takeover scan benchmark 决定。若加入durable range allocator，必须直接修改本RFC并闭合hole、takeover语义与对应Gate。
 
 ## 7. appendId 与不确定结果
 
@@ -192,7 +192,7 @@ frontier:  101
 
 entry 103 的网络 completion 或 AQ 不能让可见 frontier 跨过 102。实现必须对 inflight entry count 和 bytes 设置硬上限，避免一个早期慢 entry 导致无界缓存。被后续 seal suppress 的 AQ bytes、head-of-line latency 与 takeover scan 必须作为 benchmark 指标。
 
-首版 durability 仅允许 `SYNC_ON_ACK`。`DEFERRED_SYNC_LEGACY` 遇 failed Bookie 时不具备一般 ensemble-change 合同，不与首版 Sequenced WAL 自动 failover 组合。
+当前 durability 仅允许 `SYNC_ON_ACK`。`DEFERRED_SYNC_LEGACY` 遇 failed Bookie 时不具备一般 ensemble-change 合同，不与当前 Sequenced WAL 自动 failover 组合。
 
 ## 9. Client-only stale-writer 合同
 
@@ -267,12 +267,12 @@ writer 可以缓存/watch owner metadata 来提前停止发送，但它只是 ea
 
 run footer 可以加速恢复，但不是唯一事实来源。footer/等价 seal authority 的位置仍是开放项；无论采用何种编码，sequence 只有在 predecessor seal durable 且 successor authority 已绑定后才能复用。footer 缺失或损坏时走 bounded scan/fallback；恢复上限和 fallback 成本需要 RFC-0004 闭合。
 
-## 11. Future epoch-aware capability
+## 11. Epoch-aware capability boundary
 
-如果将来要求 Bookie 解析 `writerEpoch`、拒绝 stale writer 并允许 same-ledger epoch change，必须定义独立能力：
+如果要求 Bookie 解析 `writerEpoch`、拒绝 stale writer 并允许 same-ledger epoch change，必须直接在当前capability set与本RFC中加入：
 
 ```text
-EPOCH_AWARE_ADD_V1
+EPOCH_AWARE_ADD
 ```
 
 它至少需要：
@@ -280,10 +280,10 @@ EPOCH_AWARE_ADD_V1
 - durable epoch install/fence authority；
 - Add 携带 epoch 与 instance/hash；
 - Bookie 对 epoch 单调性和冲突的 fail-closed 校验；
-- recovery、ensemble replacement 和 mixed-version 合同；
+- recovery、ensemble replacement 和 mixed-deployment compatibility 合同；
 - 独立形式化模型。
 
-该能力不属于 client-only Profile，也不在本 RFC 首版范围内。
+该能力不属于 client-only Profile，也不在本 RFC 当前范围内；加入时直接修改当前合同，不创建并行代际实现。
 
 ## 12. Derived sequence index
 

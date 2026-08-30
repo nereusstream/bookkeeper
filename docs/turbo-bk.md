@@ -21,6 +21,12 @@
 
 本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，也不冻结仍由Spike选择的physical owner、阈值或实现类。
 
+### 1.1 单一基线持续演进
+
+Unified WAL只维护一套当前设计与实现基线，不建立项目内部的代际产品线、并行合同或版本化类型后缀。后续改造直接修改本文、owner RFC、Spike与当前实现；新增能力直接加入当前capability set，并在同一变更中同步更新Gate、兼容矩阵和证据要求。
+
+`codecVersion`、`semanticSchemaVersion`、`protocolMajor/minor`及hash domain separator中的数值仅用于wire/format字节判别和fail-closed兼容，不构成项目代际。确需不兼容字节改造时，必须在当前合同中同步修改technical discriminator、migration/rollback边界与raw corpus，不能另建并行代际实现线。历史grill归档为保证reviewer反馈逐字完整，可能保留现已废弃的内部代际措辞；这些措辞不再是实现命名或规范来源。外部固定标识如旧BookKeeper v2/v3协议、TLS 1.3和SHA-1/SHA-256算法名不受此规则影响。
+
 ## 2. 文档边界
 
 本文只负责：
@@ -80,7 +86,7 @@
 ### 4.1 Bookie handle 与 Journal
 
 - 当前 [`HandleFactoryImpl`](../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/HandleFactoryImpl.java) 根据 `ledgerId + masterKey` 懒创建 handle；它不读取完整 Ledger Metadata，也没有 ProfileDescriptor 输入。
-- 当前 [`BookieImpl`](../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/BookieImpl.java) 将多个 ledger 路由到进程内 Journal。初版 `DirectJournal` 因而只能作为 Bookie/cohort 级引擎部署。
+- 当前 [`BookieImpl`](../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/BookieImpl.java) 将多个 ledger 路由到进程内 Journal。当前 `DirectJournal` 合同因而只能作为 Bookie/cohort 级引擎部署。
 - 仅在 Ledger Metadata 增加 `storage_format` 不能让 Bookie 获得 fail-closed 的 per-ledger 路由合同。
 
 ### 4.2 Batch Read
@@ -92,8 +98,8 @@
 ### 4.3 Deferred Sync
 
 - [`LedgerHandle`](../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java) 中的 `DEFERRED_SYNC_LEGACY` 是现有能力，但 failed Bookie 场景下不能按一般 HA WAL 假设执行正常 ensemble change。
-- 第一版 Sequenced WAL 只允许 `SYNC_ON_ACK`。
-- 如果将来需要可换 ensemble 的 deferred durability，必须另立 `DEFERRED_SYNC_V2` 合同。
+- 当前 Sequenced WAL 只允许 `SYNC_ON_ACK`。
+- 如果可换 ensemble 的 deferred durability 得到完整证据支持，直接修改当前 durability 合同并同步更新 failure detection、replacement、recovery、response-loss 与 Gate；不另立并行代际合同。
 
 ## 5. 三层 Profile 模型
 
@@ -107,19 +113,19 @@ DIRECT_JOURNAL_ENGINE
 SEGMENT_WAL_ENGINE
 ```
 
-初版使用独立 cohort，不支持一个 Bookie 进程内按 ledger 动态混用 Classic Journal、Direct Journal 和 Segment WAL。
+当前合同使用独立 cohort，不支持一个 Bookie 进程内按 ledger 动态混用 Classic Journal、Direct Journal 和 Segment WAL。
 
 ### 5.2 Ledger Contract Profile
 
 定义 ledger 在已选 Engine 上要求的持久化合同：
 
 ```text
-OPAQUE_LEDGER_V1
-SEQUENCED_LEDGER_V1
+OPAQUE_LEDGER
+SEQUENCED_LEDGER
 SYNC_ON_ACK
 DEFERRED_SYNC_LEGACY
-TAIL_SUMMARY_V1
-CONDITIONAL_DELETE_V1
+TAIL_SUMMARY
+CONDITIONAL_DELETE
 ```
 
 需要 Bookie 执行的新合同必须显式安装；仅由客户端解释的合同不冒充 Bookie 能力。
@@ -144,26 +150,26 @@ transaction and visibility state
 | --- | --- | --- | --- | --- |
 | `BK_CLASSIC` | `CLASSIC_ENGINE` | 现有 Classic | opaque | 现有模式 |
 | `BK_CLASSIC_TUNED` | `CLASSIC_ENGINE` | 与 Classic 相同 | opaque | 与基线匹配 |
-| `BK_DIRECT_JOURNAL` | `DIRECT_JOURNAL_ENGINE` | 首版仍为 opaque ledger | opaque | `SYNC_ON_ACK` |
+| `BK_DIRECT_JOURNAL` | `DIRECT_JOURNAL_ENGINE` | 当前仍为 opaque ledger | opaque | `SYNC_ON_ACK` |
 | `BK_SEQUENCED_CLASSIC_CLIENT_ONLY` | `CLASSIC_ENGINE` | 仍为 Classic opaque payload | sequence、appendId、ordered frontier | `SYNC_ON_ACK` |
 | `BK_SEQUENCED_CLASSIC_INSTALLED` | `CLASSIC_ENGINE` | 显式安装的 sequence capabilities | sequence、appendId、ordered frontier | `SYNC_ON_ACK` |
 | `BK_SEGMENT_WAL` | `SEGMENT_WAL_ENGINE` | 显式安装的 Segment contract | opaque | `SYNC_ON_ACK` |
 | `BK_SEQUENCED_SEGMENT_WAL` | `SEGMENT_WAL_ENGINE` | Segment + installed sequence capabilities | sequence、appendId、ordered frontier | `SYNC_ON_ACK` |
 
-每个需要Bookie执行的新组合由immutable semantic `ProfileDescriptorV1`定义。V1使用`BKPD` strict flat big-endian TLV、十个mandatory fields，合法长度精确为`124 + 6 * capabilityCount`（124..508 bytes、0..64 capabilities），1024 bytes仅是allocation前绝对input hard cap；JDK SHA-256 suite 1 identity为suite/schema加32-byte digest共36 bytes。duplicate/out-of-order/missing/unknown/default alias/509..1024-byte非法编码/trailing bytes全部拒绝。index/sequence/recovery/delete只进入mandatory capability registry，不维护第二份profile字段。failure-domain/capability registry与production legal-combination table仍BLOCK；codec/hash本身可开始reference implementation，normal Add不解析或hash descriptor。
+每个需要Bookie执行的新组合由immutable semantic `ProfileDescriptor`定义。当前codec使用`BKPD` strict flat big-endian TLV、十个mandatory fields，合法长度精确为`124 + 6 * capabilityCount`（124..508 bytes、0..64 capabilities），1024 bytes仅是allocation前绝对input hard cap；JDK SHA-256 suite 1 identity为suite/schema加32-byte digest共36 bytes。duplicate/out-of-order/missing/unknown/default alias/509..1024-byte非法编码/trailing bytes全部拒绝。index/sequence/recovery/delete只进入mandatory capability registry，不维护第二份profile字段。failure-domain/capability registry与production legal-combination table仍BLOCK；codec/hash本身可开始reference implementation，normal Add不解析或hash descriptor。
 
-Profile control plane与20-byte master-key data credential分离。所有Profile control/data只走独立`bookie-profile-v1` immediate-TLS1.3/mTLS endpoint，Classic endpoint/pool无Profile handshake；mTLS X509 principal还必须通过exact operation/ledger instance/target scope authorizer，目标Bookie冷路径direct-read committed authority后才durable local binding。普通Add只解析fixed header/60-byte ledger context，constant-time比较缓存的36-byte identity与20-byte verifier并检查active/fence；MetadataStore、descriptor/auth hash、KMS、certificate/signature、control fsync均为0。principal config、physical local owner/packing/at-rest protection仍BLOCK；不引入descriptor签名、Merkle、PKI扩张、per-Add proof/nonce或key rotation state machine。
+Profile control plane与20-byte master-key data credential分离。所有Profile control/data只走独立`bookie-profile` immediate-TLS1.3/mTLS endpoint，Classic endpoint/pool无Profile handshake；mTLS X509 principal还必须通过exact operation/ledger instance/target scope authorizer，目标Bookie冷路径direct-read committed authority后才durable local binding。普通Add只解析fixed header/60-byte ledger context，constant-time比较缓存的36-byte identity与20-byte verifier并检查active/fence；MetadataStore、descriptor/auth hash、KMS、certificate/signature、control fsync均为0。principal config、physical local owner/packing/at-rest protection仍BLOCK；不引入descriptor签名、Merkle、PKI扩张、per-Add proof/nonce或key rotation state machine。
 
-Round 7 wire executable manifest使用TLS后4-byte length + 32-byte header、magic `0x0FFE4250`、byte-exact HELLO、distinct control/normal/recovery/read/LAC subtypes和12类status（1 OK + 11 non-OK）；range/batch V1 reserved/disabled。它只授权reference codec与raw corpus，不是stable wire：每个受支持old decoder/binary对TLS ClientHello及合法/损坏/截断/fuzz bytes的Classic route/handle/master-key/allocation/journal/payload/ACK effect都必须为0，任何失败不得Classic fallback或双写。
+Round 7 wire executable manifest使用TLS后4-byte length + 32-byte header、magic `0x0FFE4250`、byte-exact HELLO、distinct control/normal/recovery/read/LAC subtypes和12类status（1 OK + 11 non-OK）；range/batch在当前manifest中reserved/disabled。它只授权reference codec与raw corpus，不是stable wire：每个受支持old decoder/binary对TLS ClientHello及合法/损坏/截断/fuzz bytes的Classic route/handle/master-key/allocation/journal/payload/ACK effect都必须为0，任何失败不得Classic fallback或双写。
 
-same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric Cookie sentinel只是Spike B candidate。若无法证明hook早于任何Profile storage open，首版必须使用new BookieId + new journal/ledger/index/Arena roots + new storage incarnation +旧service不可访问的credential/ACL scope。persistent readiness CAS先于BookieServiceInfo/ephemeral registration；Arena superblock不能替代Bookie fence，format/readiness检查不进入Add。
+same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric Cookie sentinel只是Spike B candidate。若无法证明hook早于任何Profile storage open，当前合同必须使用new BookieId + new journal/ledger/index/Arena roots + new storage incarnation +旧service不可访问的credential/ACL scope。persistent readiness CAS先于BookieServiceInfo/ephemeral registration；Arena superblock不能替代Bookie fence，format/readiness检查不进入Add。
 
-### 5.5 非法或首版禁止组合
+### 5.5 非法或当前禁止组合
 
 - 在 Classic cohort 中按单 ledger 切换 DirectJournal；
 - Segment ledger 未完成 RFC-0001 install 即接受 Add；
 - client-only Profile 声称具有 Bookie epoch/hash/index 能力；
-- `DEFERRED_SYNC_LEGACY` 与首版 Sequenced WAL 自动 failover；
+- `DEFERRED_SYNC_LEGACY` 与当前 Sequenced WAL 自动 failover；
 - 旧 Bookie 上的 same-ledger epoch takeover；
 - 在独立 fencing 合同前启用 pooled ledger lane。
 - 把Profile safety fields作为legacy `ADD_ENTRY` optional字段，或让legacy recovery flag取得Profile recovery grant；
@@ -182,7 +188,7 @@ same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric
 | `BK_SEQUENCED_CLASSIC_INSTALLED` | Blocked | 接受 RFC-0001/0002，Spike A 通过 |
 | `BK_SEGMENT_WAL` | P0 Blocked | RFC-0001/0003/0005 接受，Spike A/B/C 通过 |
 | `BK_SEQUENCED_SEGMENT_WAL` | P0 Blocked | Segment authority 与 Sequenced WAL 分别通过 Gate |
-| `DEFERRED_SYNC_LEGACY` | Existing with HA Restriction | 不作为首版 WAL 默认 |
+| `DEFERRED_SYNC_LEGACY` | Existing with HA Restriction | 不作为当前 WAL 默认 |
 | `GENERAL_EWA_FAST_RECOVERY` | Research/Spike | RFC-0004 和 Model E |
 | `POOLED_LEDGER_LANE` | Deferred | 独立 fencing 与资源合同 |
 
@@ -237,7 +243,7 @@ Cluster Lifecycle
 13. 标准 ensemble membership由LedgerMetadata CAS串行；sidecar只让`DELETE_INTENT`/delete fence与RepairIntent admission等真正冲突的transition共享ledger-instance lifecycle cut。未admit intent不授予grant/payload；cut前全部admitted intent进入frozen history。admission后的repair progress/loss/receipt/completion使用owning domain head，不推进universal ledger CAS，任一中间态fail closed。
 14. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
 15. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
-16. 同一 Arena compaction 只有 durable conditional `MOVE_COMMIT` 能切换 locator authority；old free 晚于 cutover、new-pin 阻断、reader drain 与 durable generation bump，cross-Arena move 首版 unsupported。
+16. 同一 Arena compaction 只有 durable conditional `MOVE_COMMIT` 能切换 locator authority；old free 晚于 cutover、new-pin 阻断、reader drain 与 durable generation bump，cross-Arena move 当前 unsupported。
 17. range/TailSummary/BatchRecovery fast path 的 unsupported、stale、partial 或局部预算耗尽必须从 earliest unresolved coordinate 回退；不能越过 hole，deadline/cancellation 不伪造 DATA_LOSS。
 18. offline rejoin 使用 cluster-authoritative finite stream assignment、storage incarnation、no-hole per-stream cursor 与 snapshot+complete suffix；per-ledger `deleteEpoch` 不能兼任 catch-up watermark。
 19. permanent-loss budget 只能对有完整 `F+1` distinct-domain evidence 的 bounded range reset；membership、local durability、activation 或 generic repair COMMITTED 单独都不够。
@@ -255,9 +261,9 @@ Cluster Lifecycle
 31. Bookie/storage compatibility fence必须在stock old binary mandatory pre-replay path fail-stop；Cookie optional/version、registration、new superblock/file或unknown Journal record均不能单独替代。
 32. startup按compatibility fence → required device/superblock → allocator/route/delete recovery → local readiness → registration排序；partial migration/unknown mandatory/incarnation mismatch保持non-writable。
 33. 现存Segment/Profile local success或durability-unknown authority没有完整negative proof时不得rollback old binary；format/readiness检查不进入normal Add；只有准备发送Profile operation的Profile-capable connection执行一次Profile negotiation，legacy Classic connection不承担该handshake。
-34. V1 descriptor input必须是严格canonical TLV并产生固定36-byte identity；未接受policy/capability registry时不得mint production descriptor。
+34. 当前descriptor input必须是严格canonical TLV并产生固定36-byte identity；未接受policy/capability registry时不得mint production descriptor。
 35. Profile只走独立immediate-TLS/mTLS endpoint与pool；Round 7 frame bytes在raw old-decoder Gate PASS前只属于executable test manifest。
-36. same BookieId/storage scope在stock binary pre-storage-open证据通过前保持BLOCK；失败时new BookieId/new roots/new incarnation/new credential scope fallback是唯一首版安全路径。
+36. same BookieId/storage scope在stock binary pre-storage-open证据通过前保持BLOCK；失败时new BookieId/new roots/new incarnation/new credential scope fallback是当前唯一安全路径。
 37. persistent readiness CAS先于ephemeral writable registration；generation/incarnation mismatch non-writable，registration hint不替代local receipt或old-binary fence。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
@@ -327,8 +333,8 @@ stop conditions
 在任何Profile/Segment稳定wire或format编码前，还必须冻结并归档：
 
 ```text
-ProfileDescriptorV1 BKPD strict TLV + ten fields + legal-124-plus-6N/124..508-byte + absolute-input-cap-1024-before-allocation + 0..64-capability bounds + SHA-256 suite 1/36-byte identity
-bookie-profile-v1 immediate-TLS1.3/mTLS + exact operation/instance/target-scope authorizer + cold authority-read + protected kind-1/20-byte credential interface
+ProfileDescriptor BKPD strict TLV + ten fields + legal-124-plus-6N/124..508-byte + absolute-input-cap-1024-before-allocation + 0..64-capability bounds + SHA-256 suite 1/36-byte identity
+bookie-profile immediate-TLS1.3/mTLS + exact operation/instance/target-scope authorizer + cold authority-read + protected kind-1/20-byte credential interface
 0x0FFE4250/32-byte-header/subtype/HELLO/status executable wire manifest, explicitly not stable before corpus PASS
 supported old client/Bookie exact commits and built artifacts + raw decoder corpus
 same-scope BKPF1 candidate + pre-storage-open instrumentation + Cookie/superblock/device-manifest relationship
@@ -365,7 +371,7 @@ Segment production candidate 的最低 Gate：
 
 以下问题必须在对应 RFC 接受前闭合：
 
-- failure-domain policy与mandatory capability ID/version registry、各production Profile exact combination、future descriptor schema/hash evolution与optional hint envelope；V1 codec/hash/bounds不再OPEN；
+- failure-domain policy与mandatory capability ID/semantic-version registry、各production Profile exact combination、optional hint envelope；descriptor schema/hash后续改造必须直接修改当前合同并同步technical discriminator、migration边界与compatibility corpus，当前codec/hash/bounds不再OPEN；
 - sidecar backend adapter、exact root/child/page schema、domain sharding与hard bounds、snapshot retention/hash、immutable backlink encoding、ledgerId reuse 和 profiled metadata mutation authority；
 - principal allowlist/backend配置、Profile metadata mutation ACL、cold authority reference packing、protected local physical owner/record framing/at-rest protection、bounded grant/readable packing、future corrected SASL与跨instance key rotation；endpoint/mTLS/exact authorizer逻辑不再OPEN；
 - control tail最终字段、batch/range future body、general E/W/A exact Java/admin outcome与BKException/detailCode；Round 7 frame/HELLO/subtype只待raw corpus晋升stable，不再作为任意设计空间；
@@ -389,7 +395,7 @@ Segment production candidate 的最低 Gate：
 - 对 `BK_CLASSIC_TUNED` 做不改变 on-disk/wire semantics 的调优；
 - 继续逐轮评审五份子 RFC；
 - 实现Spike A/B/C的manifest-locked harness/Model，并在锁定环境和停止条件后执行；
-- 实现`ProfileDescriptorV1` reference codec、golden corpus与独立verifier；不能分配未接受的policy/capability业务ID；
+- 实现`ProfileDescriptor` reference codec、golden corpus与独立verifier；不能分配未接受的policy/capability业务ID；
 - 实现独立immediate-TLS/mTLS endpoint、exact-scope authorizer、cold authority adapter、protected-state语义接口与redaction的隔离prototype；
 - 实现Round 7 frame/HELLO/status codec并运行raw old-decoder corpus；该codec标为experimental，不发布stable compatibility；
 - 实现`BKPF1` same-scope candidate与new BookieId/new-scope fallback harness、persistent readiness adapter prototype；same-scope结果在Spike PASS前保持BLOCK；
@@ -403,6 +409,6 @@ Segment production candidate 的最低 Gate：
 - 在旧 Bookie 上实现 same-ledger epoch takeover；
 - 将本地 delete success 当作全物理删除完成；
 - 把 BtrLog 模型结果当作本方案的形式化证明；
-- 将 `DEFERRED_SYNC_LEGACY` 与首版 Sequenced WAL 自动 failover 组合。
+- 将 `DEFERRED_SYNC_LEGACY` 与当前 Sequenced WAL 自动 failover 组合。
 
 本文的下一次状态提升，必须引用被接受的子 RFC、Spike immutable artifacts 和完整 Gate receipts。

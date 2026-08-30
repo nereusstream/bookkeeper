@@ -281,7 +281,7 @@ CrashWriter
 - 两 writer 竞争不产生两个 ACTIVE successor；
 - old Bookie 模式不假设 server 读取 epoch。
 
-模型中禁止 `SameLedgerEpochTakeover` 动作。若未来加入 `EPOCH_AWARE_ADD_V1`，必须另建 capability variant。
+模型中禁止 `SameLedgerEpochTakeover` 动作。若加入 `EPOCH_AWARE_ADD`，必须直接修改当前 capability set 与本模型，不创建并行代际 variant。
 
 ## 7. Model C：Segment Allocator
 

@@ -82,7 +82,7 @@ NVMe device or WalArena
 - superblock A/B 必须能检测 torn write、checksum failure 和 generation 回退。
 - 每个 superblock 必须绑定Bookie storage incarnation、Arena/device identity、Arena format/mandatory feature set、control/checkpoint generation和device-manifest generation；任一required device missing/mismatch/partial migration使整个Segment Bookie non-writable；
 - Arena superblock保护新实现之间的format/recovery，不能单独阻止stock old binary启动。RFC-0005的Bookie/storage compatibility fence必须在任何Journal replay/Arena writer/registration之前由旧binary mandatory path fail-stop；仅创建新文件或unknown control record不是downgrade fence。
-- Round 7未证明同BookieId/同storage scope的stock-old-binary fence，因此same-scope format保持BLOCK；如果Spike B不能证明mandatory pre-open gate，首版必须采用RFC-0005锁定的new BookieId + new journal/ledger/index/Arena roots + new storage incarnation +独立OS/service credential scope，allocator不得继续假设原地升级。
+- Round 7未证明同BookieId/同storage scope的stock-old-binary fence，因此same-scope format保持BLOCK；如果Spike B不能证明mandatory pre-open gate，当前合同必须采用RFC-0005锁定的new BookieId + new journal/ledger/index/Arena roots + new storage incarnation +独立OS/service credential scope，allocator不得继续假设原地升级。
 
 区域大小、对齐、冗余、多设备布局、superblock bytes与mandatory feature encoding是 Spike 后冻结的参数，不在本骨架中写成生产默认。
 
@@ -133,7 +133,7 @@ data extent header 可以用于交叉校验和诊断，但不能在 control auth
 
 ### 5.2 Relocation selection authority
 
-首版 compaction relocation 只支持 old/new allocation 同属一个可线性化 `ArenaControlLog` authority domain。跨 Arena/device relocation 涉及两个独立 authority，首版明确 unsupported；若未来支持，必须另行评审，不能把单边 `MOVE_COMMIT` 扩展成隐式分布式事务。
+当前 compaction relocation 只支持 old/new allocation 同属一个可线性化 `ArenaControlLog` authority domain。跨 Arena/device relocation 涉及两个独立 authority，当前明确 unsupported；如要支持，必须直接修改本RFC并重新评审，不能把单边 `MOVE_COMMIT` 扩展成隐式分布式事务。
 
 `MOVE_COMMIT` 是 derived locator 从 old location 切到 new location 的唯一 durable authority。它是条件化 transition，语义至少绑定：
 
@@ -472,7 +472,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 
 ## 16. 多设备与设备失败
 
-每个 device/WalArena 有独立 control authority 和 generation namespace。跨设备 ledger 可以有多个 extent locator，但任何单个 allocation 只由一个 arena 管理。首版 compaction 只能在同一 Arena authority domain 内 relocation；device evacuation/cross-Arena move 保持 unsupported，不能由单边 `MOVE_COMMIT` 推断安全。
+每个 device/WalArena 有独立 control authority 和 generation namespace。跨设备 ledger 可以有多个 extent locator，但任何单个 allocation 只由一个 arena 管理。当前 compaction 只能在同一 Arena authority domain 内 relocation；device evacuation/cross-Arena move 保持 unsupported，不能由单边 `MOVE_COMMIT` 推断安全。
 
 设备出现以下任一情况时进入 FAILED/QUARANTINED：
 
@@ -483,7 +483,7 @@ RocksDB 可保存 entry/sequence locator、ledger directory 和 tail summary，�
 
 设备重新加入前必须完成 allocator recovery、delete watermark 同步和上层 BookKeeper recovery 判定；不能仅因块扫描可读就恢复 writable。
 
-同一Bookie任一manifest-required device处于FAILED/QUARANTINED、missing、incarnation mismatch或partial migration时，整个Bookie不能注册Segment writable；首版不以“剩余设备仍可用”自动缩容。合法移除或replacement必须先由cluster接受新的storage incarnation/device manifest generation，再按RFC-0005 startup/readiness重新建立authority。
+同一Bookie任一manifest-required device处于FAILED/QUARANTINED、missing、incarnation mismatch或partial migration时，整个Bookie不能注册Segment writable；当前合同不以“剩余设备仍可用”自动缩容。合法移除或replacement必须先由cluster接受新的storage incarnation/device manifest generation，再按RFC-0005 startup/readiness重新建立authority。
 
 ## 17. 安全不变量
 

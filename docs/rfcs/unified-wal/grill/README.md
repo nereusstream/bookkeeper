@@ -10,6 +10,8 @@
 - `LOCK` 或经收紧后可 `LOCK` 的结论同步进入 Proposed RFC；
 - `OPEN`、性能参数和待 Spike 验证项只进入开放问题，不伪装成最终合同；
 - 每轮文档独立校验、commit 和 push 后才进入下一轮。
+- grill文件是逐字历史归档，可能保留当轮使用但现已废弃的内部代际命名；不得据此恢复项目代际线或覆盖当前owner RFC。
+- 当前规范只维护单一持续演进基线；后续改造直接更新总纲、owner RFC、Spike与实现，technical wire discriminator不等于产品版本。
 
 | Round | 主题 | 基线 | 状态 |
 | --- | --- | --- | --- |

@@ -64,7 +64,7 @@ local success eligibility for BookKeeper AQ
 
 “定义 operation 语义”不等于“一种语义必须独占一条 control record”。实现可以 group commit 或合并 framing，只要 crash/replay 后的状态、线性化点和拒绝集合可证明等价。
 
-首版logical operation/capability matrix至少为：
+当前logical operation/capability matrix至少为：
 
 | Operation family | Segment Profile 要求 | 路径 |
 | --- | --- | --- |
@@ -73,7 +73,7 @@ local success eligibility for BookKeeper AQ
 | `ADD_RECOVERY=0x0202`、grant/close/status | distinct data/control subtype；RepairIntent/grant/range + bounded local grant | recovery data/cold control |
 | READ/FENCE/LAC `0x0203..0x0206` | instance-aware等价语义；否则install/call-time capability reject | data/control |
 | FORCE/LIST/storage introspection | 显式支持或明确 capability reject | control |
-| `RANGE_READ=0x0301`、`BATCH_RECOVERY_ADD=0x0302` | V1 reserved/disabled，不advertise capability、不接受body并返回UNSUPPORTED | data |
+| `RANGE_READ=0x0301`、`BATCH_RECOVERY_ADD=0x0302` | 当前manifest reserved/disabled，不advertise capability、不接受body并返回UNSUPPORTED | data |
 | TOMBSTONE/DELETE consumption | instance/incarnation/generation bound control subtype | cold control |
 
 上述subtype、fixed context与status class是Round 7 executable test manifest，不是stable production wire；在真实old decoder/raw corpus PASS与control tail闭合前保持BLOCK。Profile normal/recovery/Classic不能共享会被旧decoder忽略的optional语义。
@@ -87,7 +87,7 @@ Segment Bookie 必须消费 RFC-0001 的 authoritative local route：
 - normal profiled Add 只有在匹配的 global READY authorization 和 durable local normal activation 存在后才能继续；
 - `TOMBSTONED` route 永远不能重新进入 writable；
 - restart 后的接受集合不能大于 durable route/install/activation 授权集合。
-- INSTALL/ACTIVATE等冷控制只走独立`bookie-profile-v1` immediate-TLS1.3/mTLS listener，来自non-anonymous X509 principal且通过exact operation/ledger instance/target scope authorizer，并由Bookie direct-read exact committed cluster authority后才可写本地状态；AuthN-only/coarse OU role、自述generation、registration hint或master key都不能替代该验证，AuthN/AuthZ早于route/credential/allocation/durable effect；
+- INSTALL/ACTIVATE等冷控制只走独立`bookie-profile` immediate-TLS1.3/mTLS listener，来自non-anonymous X509 principal且通过exact operation/ledger instance/target scope authorizer，并由Bookie direct-read exact committed cluster authority后才可写本地状态；AuthN-only/coarse OU role、自述generation、registration hint或master key都不能替代该验证，AuthN/AuthZ早于route/credential/allocation/durable effect；
 - local protected auth binding与semantic descriptor在同一instance内immutable，receipt只暴露secret-free identity/result。
 
 同一个 ledger instance 的 local authority 不能压成互斥 flat role enum：normal admission、bounded recovery grants与committed-readable range可以正交存在。逻辑形状至少表达：
@@ -96,7 +96,7 @@ Segment Bookie 必须消费 RFC-0001 的 authoritative local route：
 LedgerRouteAuthority {
     routeClass: ABSENT | CLASSIC | PROFILE | TOMBSTONED
     ledgerInstance/descriptorIdentity[36]/Engine
-    credentialKind=BK_MASTER_KEY_SHA1_V1 + protected credential[20]
+    credentialKind=BK_MASTER_KEY_SHA1 + protected credential[20]
     normal admission state + activation generation
     fence/admission generation
     bounded recovery grants by intent/range
@@ -216,21 +216,21 @@ cluster registration readiness
 
 第一层必须落在受支持stock old binary启动时**必然读取且在任何Profile storage open、Journal replay、Arena writer、handle/lazy storage、registration之前确定拒绝**的mandatory path。只增加Cookie optional property/version、registration property、Arena/superblock文件、unknown negative Journal meta-entry、文档/client placement或启动后demote都不足。
 
-Round 7对同BookieId/同storage scope给出明确`BLOCK`。源码只提供一个Spike B candidate：把metadata Cookie与每个required current/VERSION的第一行改为nonnumeric sentinel `"BKPF1\n"`，随后是`recordLength:u32 + BookieFormatRecordV1 + CRC32C:u32`；metadata使用versioned CAS，本地通过temp write → fsync temp → atomic rename → fsync parent发布。CRC32C只做corruption detection。该candidate不能进入最终合同，因为尚未证明全部stock old binary，data-integrity模式会在Cookie validation前创建`LedgerStorage`，现有local VERSION不是atomic publication，physical Segment owner未选，也未证明所有启动/tool/storage-expansion入口或已运行旧进程都被挡住。
+Round 7对同BookieId/同storage scope给出明确`BLOCK`。源码只提供一个Spike B candidate：把metadata Cookie与每个required current/VERSION的第一行改为nonnumeric sentinel `"BKPF1\n"`，随后是`recordLength:u32 + BookieFormatRecord + CRC32C:u32`；metadata使用versioned CAS，本地通过temp write → fsync temp → atomic rename → fsync parent发布。CRC32C只做corruption detection。该candidate不能进入最终合同，因为尚未证明全部stock old binary，data-integrity模式会在Cookie validation前创建`LedgerStorage`，现有local VERSION不是atomic publication，physical Segment owner未选，也未证明所有启动/tool/storage-expansion入口或已运行旧进程都被挡住。
 
-如果same-scope Gate不能证明，首版安全fallback立即锁定为：
+如果same-scope Gate不能证明，当前安全fallback立即锁定为：
 
 ```text
 new BookieId
 + new journal/ledger/index/Arena storage roots
 + new storageIncarnation
 + old service无法访问的独立OS/service credential或ACL scope
-+ separate bookie-profile-v1 endpoint/readiness
++ separate bookie-profile endpoint/readiness
 ```
 
 旧BookieId/storage必须drained、readonly或decommissioned；Profile placement只选择matching readiness的新BookieId。不能只改目录名而让旧binary/service account继续有写权限，也不能把ordinary ensemble replacement冒充wipe/decommission proof。新scope unknown/corrupt format仍non-writable，不允许in-place rollback到旧scope。
 
-Bookie compatibility/readiness record逻辑上绑定stable ID、storage incarnation、active Engine、Profile wire version、descriptor hash suite、mandatory local features、device-manifest identity/generation、local format generation、effective delete-assignment generation、minimum reader/writer及migration state/generation。device/Arena superblock另行绑定incarnation、device identity、Arena/control/checkpoint format与generation；它不能替代Bookie fence。
+Bookie compatibility/readiness record逻辑上绑定stable ID、storage incarnation、active Engine、Profile wire discriminator、descriptor hash suite、mandatory local features、device-manifest identity/generation、local format generation、effective delete-assignment generation、minimum reader/writer及migration state/generation。device/Arena superblock另行绑定incarnation、device identity、Arena/control/checkpoint format与generation；它不能替代Bookie fence。
 
 cluster persistent readiness record绑定Bookie ID/incarnation、Engine、protocol/capability、local format、device manifest、effective assignment、local readiness、minimum reader/writer和READY state。新增domain-specific interface：
 
@@ -243,7 +243,7 @@ ProfileRegistrationStore.compareAndSet(
     newRecord)
 ```
 
-BookieServiceInfo ephemeral registration只发布`bookie-profile-v1` endpoint、readiness generation/reference与capability hint。顺序固定为persistent readiness CAS → matching service info → existing ephemeral writable registration；response loss重读两者，generation/incarnation mismatch立即demote/non-writable。backend exact path/schema/escaping与adapter保持BLOCK，readiness不成为per-Add lease。
+BookieServiceInfo ephemeral registration只发布`bookie-profile` endpoint、readiness generation/reference与capability hint。顺序固定为persistent readiness CAS → matching service info → existing ephemeral writable registration；response loss重读两者，generation/incarnation mismatch立即demote/non-writable。backend exact path/schema/escaping与adapter保持BLOCK，readiness不成为per-Add lease。
 
 restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/Segment storage的组件之前，顺序锁定为：
 
@@ -340,7 +340,7 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 - fence admission cut/pre-cut Add、multi-store fail-closed、multi-Arena route owner与Bookie registration response-loss/stale generation；
 - non-anonymous且exact operation/instance/target scope authorized control principal、authenticated-but-unauthorized负向路径、direct-read exact READY/membership/RepairIntent、target/incarnation/purpose binding与secret-leak regression；
 - 独立immediate-TLS1.3/mTLS Profile endpoint、exact-scope authorizer、credential redaction，以及normal Add auth-binding hash/HMAC/KMS/signature/certificate invocation为0；
-- 真实stock old binary在mandatory compatibility fence上于Profile storage open/Journal replay/registration/write前退出；Round 7 `BKPF1` metadata/local Cookie candidate、data-integrity pre-storage-open file/byte instrumentation、auto-stamp、unknown Journal record与registration-only负向候选均被否证；candidate失败时new BookieId/new scope fallback成为唯一首版路径；
+- 真实stock old binary在mandatory compatibility fence上于Profile storage open/Journal replay/registration/write前退出；Round 7 `BKPF1` metadata/local Cookie candidate、data-integrity pre-storage-open file/byte instrumentation、auto-stamp、unknown Journal record与registration-only负向候选均被否证；candidate失败时new BookieId/new scope fallback成为当前唯一路径；
 - 全startup order、crash-at-each-migration-boundary、partial device、superblock corruption、device-manifest change、registration CAS、rollback positive/negative proof与new-incarnation路径；
 - cold/warm startup latency、compatibility/device/readiness read bytes与I/O count、required-device scaling及Classic-only baseline原始证据；normal Add中的format/readiness read或remote I/O为0；
 - local control resident memory/active grant/waiter hard bounds，以及normal Add local lookup/lock/CPU/p99；
