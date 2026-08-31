@@ -62,10 +62,18 @@
   },
   "startupReadiness": {
     "moduleBaseCommit": "df122c524ddc1739ef58e1f1ede3d8140ee0de86",
-    "state": "FACTS_COMPLETE_ORCHESTRATION_PENDING",
+    "factsMilestoneCommit": "f58fa6746ece845c1bb070d04d812fb16883fcb0",
+    "state": "REFERENCE_HARNESS_IMPLEMENTED_EVIDENCE_PENDING",
     "sourcePackage": "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/startup",
-    "testClasses": ["org.apache.bookkeeper.common.profile.startup.StartupReadinessFactsTest"],
-    "ordinaryTests": 6,
+    "testClasses": [
+      "org.apache.bookkeeper.common.profile.startup.StartupReadinessFactsTest",
+      "org.apache.bookkeeper.common.profile.startup.StartupReadinessHarnessTest"
+    ],
+    "ordinaryTests": 17,
+    "crashBoundaries": 9,
+    "persistentReadiness": "DOMAIN_SPECIFIC_VERSIONED_CAS_IN_MEMORY_REFERENCE",
+    "registrationOrder": "PERSISTENT_CAS_THEN_MATCHING_SERVICE_INFO_THEN_EPHEMERAL_WRITABLE",
+    "normalAddColdPathCounters": 0,
     "sameScopeBkpf1": "NOT_IMPLEMENTED_BLOCKED",
     "realOldBinaryOrFileTouchProbe": "DEFERRED_NOT_RUN",
     "productionIntegration": false,

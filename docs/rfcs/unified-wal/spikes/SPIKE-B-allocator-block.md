@@ -256,6 +256,8 @@ Oracle：唯一可接受same-scope candidate必须让每个supported old binary�
 
 Oracle：任何partial/mismatch/unknown/corrupt状态整个Bookie non-writable并重试同一migration generation；persistent readiness CAS先于ephemeral registration，response loss重读两层且generation/incarnation mismatch demote。存在任一local success/route/activation/fence/grant/tombstone/Arena authority/durability unknown时same-scope old-binary rollback拒绝；恢复只可roll-forward、verified export/rebuild、irreversible wipe/decommission或new incarnation。new-scope fallback只在旧BookieId drained/readonly/decommissioned且旧credential不能访问时可writable。
 
+Wave 0已有一个不访问真实filesystem、OS权限、registration backend或外部目标的typed reference harness，机械覆盖上述ordering、CAS/response loss、九个crash cut、device负向状态、stale demotion、rollback拒绝和new-scope access-isolation语义。它只证明reference state machine和内存adapter满足当前合同，不能替代本节要求的真实stock binary、file-touch、multi-device、physical durability、startup raw metrics或formal Spike运行；Spike状态继续是`Planned / Not Executed`。
+
 ## 8. 性能场景
 
 entry sizes：

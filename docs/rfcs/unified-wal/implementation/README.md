@@ -9,9 +9,9 @@
 - [`ProfileDescriptor` reference implementation](profile-descriptor/README.md)
 - [`Profile control/auth typed reference endpoint`](profile-control/README.md)：已完成interfaces、isolated endpoint、12项普通功能测试、机器回执与最终scope audit；仅消费transport facts与semantic store interfaces，不接入production listener/store/route/Add/ACK。
 
-当前实施中的模块：
+当前已完成源码与普通本地测试、等待immutable receipt收口的模块：
 
-- [`Bookie startup/readiness/new-scope reference harness`](startup-readiness/README.md)：typed immutable compatibility/device/recovery/new-scope/rollback facts与独立scope guard已完成；startup编排、persistent CAS、registration reconciliation和完整证据仍在本次Wave 0工作中继续，当前不得标为完整实现。
+- [`Bookie startup/readiness/new-scope reference harness`](startup-readiness/README.md)：typed immutable facts、固定fail-closed startup顺序、durable local readiness、persistent CAS/response-loss重读、matching service-info、stale demotion、ephemeral writable registration、new-scope access isolation、九个crash/restart边界和17项普通测试已完成；immutable receipt仍在本次Wave 0工作中收口，当前不得提升Spike/Gate/production状态。
 
 已冻结、延期验证的模块：
 
