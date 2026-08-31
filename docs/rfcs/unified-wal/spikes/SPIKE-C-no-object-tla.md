@@ -248,24 +248,30 @@ run/predecessor/successor metadata
 writer epochs and local caches
 appendId -> payload digest
 inflight Adds, AQ candidates and completion order
+admission linearization and entryId/sequence order
 predecessor fence/recovery/seal state
-published contiguous frontier
+writer committed frontier
+reader discoverable LAC/envelope frontier
+authoritative RunSeal/domain-head frontier
+partial/complete suppressed identity coverage
+E/W/A write-set rotation and local observation scope
 ```
 
 ### 6.2 最小动作
 
 ```text
-ReserveSequenceRange
-IssueAppend
+AcquireInflightCredit
+LinearizeSequenceEnvelopeAndAddAdmission
 ReachAQ
-PublishWalCommitted
+AdvanceOrderedWriterCommitted
+AdvanceOrLagReaderDiscoverable
 DeliverOrLoseCompletion
 CompeteForRecoveryAuthority
 FencePredecessor
 RecoverMaximumPrefix
-SealPredecessor
+CreateInertRunSeal
 CreateSuccessor
-PublishSuccessorActive
+PublishRunSealAndSuccessorActive
 RetryAppendId
 CrashWriter
 ```
@@ -273,13 +279,17 @@ CrashWriter
 ### 6.3 检查目标
 
 - sequence interval 不重叠；
+- admission order、entryId order 与 sequence order 一致，raw Add不能绕过；
 - ordered frontier 不越过 hole；
+- writer committed、reader discoverable 与sealed authority互不冒充；
 - 相同 appendId 不绑定两个 payload；
+- partial suppressed table 的 absence 不产生权威终态，从未 durable 的 reservation 不伪造`ABORTED_SUPPRESSED`；
 - 已形成的 AQ evidence 不被伪造或抹除，但 sealed prefix 外 candidate 不成为 WAL COMMITTED；
 - successor ACTIVE 后 predecessor sealed prefix 外的数据不再发布；
 - successor 从 durable sealed prefix `P + 1` 开始；
 - 两 writer 竞争不产生两个 ACTIVE successor；
-- old Bookie 模式不假设 server 读取 epoch。
+- old Bookie 模式不假设 server 读取 epoch；
+- 基础point recovery在3/3/2、3/3/3、3/2/2和一般`E > W`结构下与sequence oracle一致，不依赖range/TailSummary fast path或单副本全局index。
 
 模型中禁止 `SameLedgerEpochTakeover` 动作。若加入 `EPOCH_AWARE_ADD`，必须直接修改当前 capability set 与本模型，不创建并行代际 variant。
 
