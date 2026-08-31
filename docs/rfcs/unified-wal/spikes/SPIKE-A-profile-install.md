@@ -292,6 +292,8 @@ Oracle：只有non-anonymous mTLS principal、static operation precheck、exact 
 
 ### A25：Raw Profile decoder corpus 与 no downgrade
 
+状态：**DEFERRED_NOT_RUN**。当前 Wave 0 不执行 released decoder 或 localhost stock binary 回放，已存在的 corpus、harness 与 `0x0FFE4250` counterexample 只冻结保留。此状态既不是PASS也不是waiver；A25未闭合，Spike A与G1继续BLOCK，只有未来单独显式授权的fresh run才能产生结果。
+
 步骤：保留已否证`0x0FFE4250`的frozen反例，将TLS ClientHello、完整合法replacement `0x0FF04250` frame、每个subtype、magic逐byte翻转、1..31-byte header truncation、outer/body length/oversize、major/minor/headerLength/flags/reserved/subtype、malformed HELLO、合法v3 prefix后接Profile magic、触发current v3各种`RuntimeException`、pre-v3 version=0/nonzero与接近legacy ADD opcode的prefix、normal/recovery互换及seeded fuzz，投喂每个受支持真实stock old v2/v3 decoder/binary与new decoder。
 
 Oracle：每个vector的Classic route claim、handle create、master-key persistence、ledger allocation、payload/journal write、ACK/OK与permanent legacy decoder downgrade followed by effect全为0；new decoder错误关闭连接且不legacy fallback；legacy resolver仍只选`bookie-rpc`。任一失败只调整magic/framing并重跑，不Classic downgrade或双写。

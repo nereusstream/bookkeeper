@@ -618,7 +618,7 @@ subtype分配：
 
 response复用相同subtype并置`RESPONSE`；READY不是Bookie subtype。pre-HELLO frame最大4096 bytes，control frame最大65536 bytes，全部Profile frame最大5242880 bytes，descriptor input/allocation绝对hard cap为1024 bytes，而当前合法长度仍只能是`124 + 6 * capabilityCount`（最大508）；length必须在body allocation前验证。range/batch在当前manifest中不advertise capability、不接受body并返回UNSUPPORTED，不能凭空冻结batch参数。
 
-magic的位级候选意图是让current v3 protobuf先遇invalid wire type，pre-v3再看到unknown opcode `0xfe`；这不是证据。Spike A必须把TLS ClientHello、全部合法subtype、bit flip、1..31-byte truncation、length/version/flag/subtype变体、current v3 `RuntimeException`变体、version=0/nonzero legacy prefix及fuzz corpus投喂每个受支持真实old decoder/binary，证明route claim、handle/master-key persistence、allocation、payload/journal write与ACK全部为0。任一失败只允许调整magic/framing后重跑，不允许fallback或双写；Gate PASS前本manifest不得晋升stable production wire。
+magic的位级候选意图是让current v3 protobuf先遇invalid wire type，pre-v3再看到unknown opcode `0xfe`；这不是证据。Spike A必须把TLS ClientHello、全部合法subtype、bit flip、1..31-byte truncation、length/version/flag/subtype变体、current v3 `RuntimeException`变体、version=0/nonzero legacy prefix及fuzz corpus投喂每个受支持真实old decoder/binary，证明route claim、handle/master-key persistence、allocation、payload/journal write与ACK全部为0。任一失败只允许调整magic/framing后重跑，不允许fallback或双写；Gate PASS前本manifest不得晋升stable production wire。当前 Wave 0 将该真实binary矩阵标记为`DEFERRED_NOT_RUN`并排除出常规实现/CI；这不删除Gate或降低Oracle，G1保持`BLOCKED_UNVERIFIED`，未来只有在单独显式授权并产生fresh run identity与完整证据后才能重新判定。
 
 ### 11.5 Mixed/rolling matrix 与 semantic errors
 
@@ -747,7 +747,7 @@ RFC 进入 Accepted 前必须：
 - write-time inactive orphan/possibly-activated target 的 GC state machine；
 - ledgerId reuse 最终策略，以及 instance 分配 authority；
 - control subtype最终tail字段表、exact detailCode/BKException/admin mapping、general E/W/A recovery outcome API与batch/range body/schema后续改造；
-- stable production wire在raw old-decoder/stock-binary corpus PASS前保持BLOCK；Round 7 bytes只允许reference/corpus prototype；
+- stable production wire在raw old-decoder/stock-binary corpus PASS前保持BLOCK；当前矩阵为`DEFERRED_NOT_RUN`、G1为`BLOCKED_UNVERIFIED`，Round 7 bytes只允许reference/corpus prototype；
 - 哪些 limit 影响跨实现安全语义、哪些只属于 runtime admission policy。
 
 这些问题关闭并通过 Gate 前，本 RFC 不得标为 Implementation Ready。

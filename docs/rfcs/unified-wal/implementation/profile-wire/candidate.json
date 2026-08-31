@@ -18,6 +18,7 @@
     "errors": 0
   },
   "releasedDecoderAndBinaryMatrix": ["4.14.8", "4.15.5", "4.16.7", "4.17.2"],
-  "matrixStatus": "PENDING_NEW_RUN_IDENTITY",
-  "g1": "BLOCKED"
+  "matrixStatus": "DEFERRED_NOT_RUN",
+  "matrixExecution": "EXCLUDED_FROM_CURRENT_IMPLEMENTATION_AND_CI",
+  "g1": "BLOCKED_UNVERIFIED"
 }
