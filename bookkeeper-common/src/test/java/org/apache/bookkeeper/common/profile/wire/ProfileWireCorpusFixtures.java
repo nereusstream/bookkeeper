@@ -295,7 +295,7 @@ final class ProfileWireCorpusFixtures {
                 hex("160301002e0100002a0303aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"),
                 Phase.ESTABLISHED, ProfileWireValidationException.Reason.ABSOLUTE_FRAME_TOO_LARGE);
         addFrameReject(vectors, "adversarial/v3-prefix-profile-magic",
-                hex("0000000c0803100118000ffe4250"), Phase.ESTABLISHED,
+                hex("0000000c0803100118000ff04250"), Phase.ESTABLISHED,
                 ProfileWireValidationException.Reason.FRAME_TOO_SMALL);
         addFrameReject(vectors, "adversarial/v3-invalid-wire-type",
                 hex("000000010f"), Phase.ESTABLISHED, ProfileWireValidationException.Reason.FRAME_TOO_SMALL);

@@ -10,7 +10,7 @@
 
 正在执行的模块：
 
-- [`Experimental Profile wire 与真实 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard、pure codec 与610-vector corpus 已实现；真实4.14.8 decoder发现并冻结原magic counterexample，replacement candidate与全矩阵rerun正在执行，当前G1 FAIL。
+- [`Experimental Profile wire 与真实 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard、pure codec 与610-vector corpus 已实现；真实4.14.8 decoder发现并冻结原`0x0FFE4250`反例，replacement `0x0FF04250`与authoritative corpus已通过new-codec定向回归，完整released-decoder/localhost stock-binary矩阵仍待正式run，当前G1仍未解锁。
 
 输入锁见 [`manifest.json`](manifest.json)。每个模块自己的 source/test/artifact 范围、复现命令、证据结论和剩余 BLOCK 由模块目录拥有。实现证据不能自动提升五份 owner RFC 或三个 Spike 的状态。
 

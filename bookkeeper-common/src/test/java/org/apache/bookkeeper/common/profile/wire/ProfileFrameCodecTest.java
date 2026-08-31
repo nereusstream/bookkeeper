@@ -129,6 +129,17 @@ public class ProfileFrameCodecTest {
         assertEquals(ProfileStatus.unsupported(), unsupported.status());
     }
 
+    @Test
+    public void replacementMagicCannotMutateIntoSupportedPreV3Opcode() {
+        int opcode = (ProfileFrameHeader.MAGIC >>> 16) & 0xff;
+        assertEquals(0xf0, opcode);
+        assertNotClassicOpcode(opcode);
+        assertNotClassicOpcode(opcode ^ 0xff);
+        for (int bit = 0; bit < 8; bit++) {
+            assertNotClassicOpcode(opcode ^ (1 << bit));
+        }
+    }
+
     private static void assertRejectedBeforeAllocation(byte[] bytes, ProfileWireValidationException.Reason reason) {
         AtomicInteger allocations = new AtomicInteger();
         ProfileWireValidationException exception = assertThrows(
@@ -146,6 +157,10 @@ public class ProfileFrameCodecTest {
 
     private static void assertReason(ProfileWireValidationException.Reason reason, Runnable action) {
         assertEquals(reason, assertThrows(ProfileWireValidationException.class, action::run).reason());
+    }
+
+    private static void assertNotClassicOpcode(int opcode) {
+        org.junit.Assert.assertTrue("pre-v3 opcode must stay outside 1..7: " + opcode, opcode < 1 || opcode > 7);
     }
 
     private static byte[] lengthOnly(int outerLength) {

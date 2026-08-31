@@ -4,7 +4,7 @@
 
 本目录拥有 Unified WAL Wave 0 Block D 的实现锁、byte corpus、真实旧 decoder/stock binary 兼容证据与机器回执。Block D 只实现纯字节 codec 和隔离 compatibility harness；不实现 listener、endpoint、TLS 服务，不接入生产启动、Bookie Add/ACK、storage、registration、recovery 或 delete authority。
 
-当前状态：**COUNTEREXAMPLE FROZEN — candidate `0x0FFE4250` FAIL；replacement candidate 与全矩阵 rerun pending**。
+当前状态：**REPLACEMENT CORPUS PASS — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 的完整 released-decoder/localhost stock-binary run pending，G1仍未解锁**。
 
 ## Scope guard
 
@@ -34,8 +34,10 @@ guard 只允许本模块的 pure codec、test corpus、隔离 harness 和 owner 
 
 覆盖包括：每个subtype、client/server HELLO、全部240个status/retry/durable组合、normal/recovery distinct bodies、magic逐byte flip、1..31-byte header truncation、body truncation、outer/body mismatch、三个oversize边界、version/header/flags/reserved/subtype、malformed HELLO/status/data、normal/recovery interchange、TLS ClientHello、v3/pre-v3 adversarial prefixes、Profile后接legacy-like ADD prefix，以及seed `0x505746555a5a0001` 的256个arbitrary vectors。strict new-codec corpus test同时断言全部frame reject在body allocation前发生。
 
-本阶段15个wire/corpus单测通过。仓库锁定的真实 stock old Bookie 支持矩阵为 upgrade/downgrade support list `4.14.8 / 4.15.5 / 4.16.7 / 4.17.2`；released decoder与stock binary raw-corpus run、raw artifacts、machine receipt 和 G1 结论仍待下一里程碑。代码和new-codec corpus完成不等于 wire stable，也不等于 G1 PASS。
+replacement `0x0FF04250` 已重建同一组610个vector及全部checksums；新增的确定性回归要求pre-v3 opcode byte `0xf0`、其XOR `0xff`结果`0x0f`及全部single-bit flips均保持在Classic opcode `1..7`之外。本阶段16个wire/corpus单测通过。仓库锁定的真实 stock old Bookie 支持矩阵为 upgrade/downgrade support list `4.14.8 / 4.15.5 / 4.16.7 / 4.17.2`；正式released decoder与localhost stock binary raw-corpus run、raw artifacts、machine receipt 和 G1 结论仍待下一里程碑。代码和new-codec corpus完成不等于 wire stable，也不等于 G1 PASS。
 
 ## Frozen counterexample
 
 首个真实 released decoder run 在 Apache BookKeeper `4.14.8` 上发现 [`CE-20260831T105059Z`](counterexamples/ce-20260831T105059Z-4.14.8-magic-flip-1/README.md)：`0x0FFE4250` 的第二个magic byte被corpus逐byte XOR `0xff` 后成为 `0x01`，真实pre-v3 decoder把它识别为`ADDENTRY`并产生`ParsedAddRequest`。因此原候选硬 FAIL，G1保持FAIL，raw bytes/artifact digest/result/repro已冻结。后续只能更新owner RFC的candidate magic、保留deterministic regression并用新run identity重跑全部四个真实released decoder和stock binary；不能删除vector或放宽Oracle。
+
+replacement candidate 的机器锁见 [`candidate.json`](candidate.json)。它只记录当前实验候选与完整矩阵前置状态，不覆盖或重写上述counterexample。

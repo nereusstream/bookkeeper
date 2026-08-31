@@ -582,12 +582,12 @@ placement 阶段排除；若仍被选中则创建失败。不得静默降级。
 
 ### 11.4 Profile wire discriminator 与 downgrade boundary
 
-Round 7冻结一个**仅供reference implementation与raw corpus的executable manifest**：独立`bookie-profile` endpoint在TLS解密后使用4-byte unsigned big-endian outer length，随后为固定32-byte header：
+Round 7 的原始 candidate `0x0FFE4250` 被真实 Apache BookKeeper 4.14.8 decoder 的 frozen `magic-flip-1` 反例否证：第二个magic byte XOR `0xff` 后成为pre-v3 `ADDENTRY` opcode `0x01`。owner RFC 因此只替换 experimental discriminator 为 `0x0FF04250`；原始反例永久保留，其他header、subtype、HELLO、status、bound与zero-effect Oracle不变。replacement仍是**仅供reference implementation与raw corpus的executable manifest**：独立`bookie-profile` endpoint在TLS解密后使用4-byte unsigned big-endian outer length，随后为固定32-byte header：
 
 ```text
 outerLength                         u32 BE, excludes prefix, equals 32 + bodyLength
 ProfileFrameHeader                  32 bytes
-  magic                             u32 = 0x0FFE4250
+  magic                             u32 = 0x0FF04250
   protocolMajor                     u16 = 1
   protocolMinor                     u16 = 0
   headerLength                      u16 = 32

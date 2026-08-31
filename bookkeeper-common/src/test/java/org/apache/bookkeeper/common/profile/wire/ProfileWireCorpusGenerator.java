@@ -81,7 +81,7 @@ public final class ProfileWireCorpusGenerator {
                 + "  \"_license\": \"" + ProfileWireCorpusFixtures.LICENSE + "\",\n"
                 + "  \"state\": [\"EXPERIMENTAL_TEST_MANIFEST\", \"NOT_STABLE_WIRE\", "
                 + "\"NON_PROMOTABLE\", \"NO_AUTHORITY\", \"DISCARDABLE\"],\n"
-                + "  \"codec\": \"ProfileFrame/0x0FFE4250/protocol-1.0/header-32\",\n"
+                + "  \"codec\": \"ProfileFrame/0x0FF04250/protocol-1.0/header-32\",\n"
                 + "  \"fixtureSchema\": "
                 + "\"id,path,phase,frameResult,frameReason,typed,typedExpectation,close,bytes\",\n"
                 + "  \"fuzzSeedHex\": \"" + Long.toHexString(ProfileWireCorpusFixtures.FUZZ_SEED) + "\",\n"

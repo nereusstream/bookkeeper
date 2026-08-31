@@ -54,7 +54,7 @@ principal/X509 allowlist, trust-set uniqueness evidence and non-anonymous policy
 exact operation/instance/target-scope authorization policy
 protectedCredential=kind-1/20-byte-verifier/redaction-revision
 cold authority read/reference and activation mechanism
-ProfileFrame=0x0FFE4250/32-byte-header/exact-subtype-table
+ProfileFrame=0x0FF04250/32-byte-header/exact-subtype-table; original 0x0FFE4250 counterexample frozen
 HELLO/connection-context/status-retry-durable-result mapping
 Profile/Classic pool isolation revision
 profiledMetadataMutationAuthority
@@ -292,7 +292,7 @@ Oracle：只有non-anonymous mTLS principal、static operation precheck、exact 
 
 ### A25：Raw Profile decoder corpus 与 no downgrade
 
-步骤：将TLS ClientHello、完整合法`0x0FFE4250` frame、每个subtype、magic逐byte翻转、1..31-byte header truncation、outer/body length/oversize、major/minor/headerLength/flags/reserved/subtype、malformed HELLO、合法v3 prefix后接Profile magic、触发current v3各种`RuntimeException`、pre-v3 version=0/nonzero与接近legacy ADD opcode的prefix、normal/recovery互换及seeded fuzz，投喂每个受支持真实stock old v2/v3 decoder/binary与new decoder。
+步骤：保留已否证`0x0FFE4250`的frozen反例，将TLS ClientHello、完整合法replacement `0x0FF04250` frame、每个subtype、magic逐byte翻转、1..31-byte header truncation、outer/body length/oversize、major/minor/headerLength/flags/reserved/subtype、malformed HELLO、合法v3 prefix后接Profile magic、触发current v3各种`RuntimeException`、pre-v3 version=0/nonzero与接近legacy ADD opcode的prefix、normal/recovery互换及seeded fuzz，投喂每个受支持真实stock old v2/v3 decoder/binary与new decoder。
 
 Oracle：每个vector的Classic route claim、handle create、master-key persistence、ledger allocation、payload/journal write、ACK/OK与permanent legacy decoder downgrade followed by effect全为0；new decoder错误关闭连接且不legacy fallback；legacy resolver仍只选`bookie-rpc`。任一失败只调整magic/framing并重跑，不Classic downgrade或双写。
 

@@ -1,7 +1,7 @@
 {
   "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
   "state": ["EXPERIMENTAL_TEST_MANIFEST", "NOT_STABLE_WIRE", "NON_PROMOTABLE", "NO_AUTHORITY", "DISCARDABLE"],
-  "codec": "ProfileFrame/0x0FFE4250/protocol-1.0/header-32",
+  "codec": "ProfileFrame/0x0FF04250/protocol-1.0/header-32",
   "fixtureSchema": "id,path,phase,frameResult,frameReason,typed,typedExpectation,close,bytes",
   "fuzzSeedHex": "505746555a5a0001",
   "fuzzIterations": 256,

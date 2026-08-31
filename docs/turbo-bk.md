@@ -162,7 +162,7 @@ Wave 0 的 `ProfileDescriptor` reference implementation 已落在 `bookkeeper-co
 
 Profile control plane与20-byte master-key data credential分离。所有Profile control/data只走独立`bookie-profile` immediate-TLS1.3/mTLS endpoint，Classic endpoint/pool无Profile handshake；mTLS X509 principal还必须通过exact operation/ledger instance/target scope authorizer，目标Bookie冷路径direct-read committed authority后才durable local binding。普通Add只解析fixed header/60-byte ledger context，constant-time比较缓存的36-byte identity与20-byte verifier并检查active/fence；MetadataStore、descriptor/auth hash、KMS、certificate/signature、control fsync均为0。principal config、physical local owner/packing/at-rest protection仍BLOCK；不引入descriptor签名、Merkle、PKI扩张、per-Add proof/nonce或key rotation state machine。
 
-Round 7 wire executable manifest使用TLS后4-byte length + 32-byte header、magic `0x0FFE4250`、byte-exact HELLO、distinct control/normal/recovery/read/LAC subtypes和12类status（1 OK + 11 non-OK）；range/batch在当前manifest中reserved/disabled。它只授权reference codec与raw corpus，不是stable wire：每个受支持old decoder/binary对TLS ClientHello及合法/损坏/截断/fuzz bytes的Classic route/handle/master-key/allocation/journal/payload/ACK effect都必须为0，任何失败不得Classic fallback或双写。
+Round 7 原始 wire candidate `0x0FFE4250` 已被真实 Apache BookKeeper 4.14.8 decoder 的 `magic-flip-1` 反例否证并冻结；当前 replacement candidate 为 `0x0FF04250`。它继续使用TLS后4-byte length + 32-byte header、byte-exact HELLO、distinct control/normal/recovery/read/LAC subtypes和12类status（1 OK + 11 non-OK）；range/batch在当前manifest中reserved/disabled。新 candidate 仍只授权reference codec与raw corpus，不是stable wire：每个受支持old decoder/binary对TLS ClientHello及合法/损坏/截断/fuzz bytes的Classic route/handle/master-key/allocation/journal/payload/ACK effect都必须为0，任何失败不得Classic fallback或双写。
 
 same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric Cookie sentinel只是Spike B candidate。若无法证明hook早于任何Profile storage open，当前合同必须使用new BookieId + new journal/ledger/index/Arena roots + new storage incarnation +旧service不可访问的credential/ACL scope。persistent readiness CAS先于BookieServiceInfo/ephemeral registration；Arena superblock不能替代Bookie fence，format/readiness检查不进入Add。
 
@@ -337,7 +337,7 @@ stop conditions
 ```text
 ProfileDescriptor BKPD strict TLV + ten fields + legal-124-plus-6N/124..508-byte + absolute-input-cap-1024-before-allocation + 0..64-capability bounds + SHA-256 suite 1/36-byte identity
 bookie-profile immediate-TLS1.3/mTLS + exact operation/instance/target-scope authorizer + cold authority-read + protected kind-1/20-byte credential interface
-0x0FFE4250/32-byte-header/subtype/HELLO/status executable wire manifest, explicitly not stable before corpus PASS
+0x0FF04250/32-byte-header/subtype/HELLO/status replacement executable wire manifest, explicitly not stable before complete released-decoder and localhost stock-binary corpus PASS
 supported old client/Bookie exact commits and built artifacts + raw decoder corpus
 same-scope BKPF1 candidate + pre-storage-open instrumentation + Cookie/superblock/device-manifest relationship
 new BookieId/new roots/new incarnation/new credential-scope fallback

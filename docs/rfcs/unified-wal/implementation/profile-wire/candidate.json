@@ -1,0 +1,23 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "state": ["EXPERIMENTAL_TEST_MANIFEST", "NOT_STABLE_WIRE", "NON_PROMOTABLE", "NO_AUTHORITY", "DISCARDABLE"],
+  "candidate": "0x0FF04250",
+  "protocolMajor": 1,
+  "protocolMinor": 0,
+  "headerBytes": 32,
+  "preV3OpcodeByte": "0xF0",
+  "preV3OpcodeOracle": "original, XOR-0xFF, and every single-bit flip remain outside Classic opcodes 1..7",
+  "supersededCandidate": "0x0FFE4250",
+  "frozenCounterexample": "CE-20260831T105059Z",
+  "corpusVectors": 610,
+  "fuzzSeedHex": "505746555a5a0001",
+  "newCodecTests": {
+    "status": "PASS",
+    "tests": 16,
+    "failures": 0,
+    "errors": 0
+  },
+  "releasedDecoderAndBinaryMatrix": ["4.14.8", "4.15.5", "4.16.7", "4.17.2"],
+  "matrixStatus": "PENDING_NEW_RUN_IDENTITY",
+  "g1": "BLOCKED"
+}

@@ -32,7 +32,7 @@ public record ProfileFrameHeader(
         int bodyLength,
         long reserved) {
 
-    public static final int MAGIC = 0x0ffe_4250;
+    public static final int MAGIC = 0x0ff0_4250;
     public static final int PROTOCOL_MAJOR = 1;
     public static final int PROTOCOL_MINOR = 0;
     public static final int ENCODED_LENGTH = 32;
