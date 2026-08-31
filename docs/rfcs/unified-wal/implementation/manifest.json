@@ -43,12 +43,18 @@
   },
   "profileControl": {
     "moduleBaseCommit": "761f65a9b93626afaf16484a8d270df06989f5b3",
-    "state": "SCOPE_GUARD_ONLY_IMPLEMENTATION_IN_PROGRESS",
+    "state": "TYPED_REFERENCE_ENDPOINT_TESTED_RECEIPT_PENDING",
     "artifactDirectory": "docs/rfcs/unified-wal/implementation/profile-control",
+    "sourcePackage": "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/control",
+    "testClass": "org.apache.bookkeeper.common.profile.control.IsolatedProfileControlEndpointTest",
+    "ordinaryTests": 12,
     "endpoint": "bookie-profile typed isolated reference only",
     "transportAuthority": "NONE",
     "localDurabilityAuthority": "NONE",
-    "productionIntegration": false
+    "productionIntegration": false,
+    "normalAddIntegration": false,
+    "stableWire": false,
+    "g1": "BLOCKED_UNVERIFIED"
   },
   "authorityTouches": []
 }

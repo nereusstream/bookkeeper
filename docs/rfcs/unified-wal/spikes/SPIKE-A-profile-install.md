@@ -290,6 +290,8 @@ Oracle：authoritative `.bin`、typed fixture、expected SHA-256、36-byte ident
 
 Oracle：只有non-anonymous mTLS principal、static operation precheck、exact post-read tuple authorizer与exact committed authority全部匹配时control transition成功；两处AuthZ fault rejection的route/credential/allocation/durable effect均为0，且整个cold operation只有一次authority read。AuthN-only/coarse role/master key不授权；manifest选择`SUBJECT_UNIQUE_WITHIN_TRUST_SET`时发现重复subject必须fail Gate，选择`TRUST_DOMAIN_ISSUER_PLUS_SUBJECT`时不同issuer/trust-domain不得映射为同一principal；initial/replacement/recovery purpose不能重放；same operation/public payload/secret幂等，conflicting payload或secret只返回coarse conflict；公开/诊断面master key/password/verifier/credential digest/bearer capability为0，secret wrapper固定`<redacted>`，normal Add certificate/signature验证为0。
 
+Wave 0 partial evidence：typed reference endpoint的12项普通功能测试已覆盖immediate TLS1.3/mTLS transport facts、static/exact denial zero effect、single cold read、tuple/purpose/state、strict descriptor/Engine、durable-only success、redacted credential/status与dependency fail-closed。它不包含real listener/TLS provider/X509 extraction、concrete MetadataStore/protected local store、crash/restart、全surface secret scan或`LedgerDescriptorImpl.checkAccess()` regression，因此A24仍未PASS，Spike A状态不变。
+
 ### A25：Raw Profile decoder corpus 与 no downgrade
 
 状态：**DEFERRED_NOT_RUN**。当前 Wave 0 不执行 released decoder 或 localhost stock binary 回放，已存在的 corpus、harness 与 `0x0FFE4250` counterexample 只冻结保留。此状态既不是PASS也不是waiver；A25未闭合，Spike A与G1继续BLOCK，只有未来单独显式授权的fresh run才能产生结果。

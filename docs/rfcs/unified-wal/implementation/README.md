@@ -7,14 +7,11 @@
 当前已实现的完整模块：
 
 - [`ProfileDescriptor` reference implementation](profile-descriptor/README.md)
+- [`Profile control/auth typed reference endpoint`](profile-control/README.md)：已完成interfaces、isolated endpoint与12项普通功能测试；仅消费transport facts与semantic store interfaces，不接入production listener/store/route/Add/ACK。绑定源码commit的机器回执与最终scope audit待下一里程碑生成。
 
 已冻结、延期验证的模块：
 
 - [`Experimental Profile wire 与冻结的 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard、pure codec 与610-vector corpus 已实现；真实4.14.8 decoder发现并冻结原`0x0FFE4250`反例，replacement `0x0FF04250`与authoritative corpus已通过new-codec定向回归。released-decoder/localhost stock-binary矩阵为`DEFERRED_NOT_RUN`，harness与corpus只保留、不进入当前执行，G1保持`BLOCKED_UNVERIFIED`。
-
-正在执行的模块：
-
-- [`Profile control/auth 与隔离 bookie-profile endpoint`](profile-control/README.md)：已建立独立scope guard；typed cold-path interfaces、isolated endpoint tests与机器回执正在执行，不接入生产Bookie或normal Add。
 
 输入锁见 [`manifest.json`](manifest.json)。每个模块自己的 source/test/artifact 范围、复现命令、证据结论和剩余 BLOCK 由模块目录拥有。实现证据不能自动提升五份 owner RFC 或三个 Spike 的状态。
 

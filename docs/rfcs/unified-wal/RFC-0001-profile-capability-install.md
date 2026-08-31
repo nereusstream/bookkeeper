@@ -380,6 +380,12 @@ Bookie以request的ledger/instance/purpose派生domain key，通过`ProfileContr
 
 receipt/status/log/metric/exception只能公开ledger/instance/descriptor、target/incarnation、Engine/capability、local generation、operation identity与durable result；不得包含master key/password/verifier、credential digest、bearer/replay capability。secret wrapper的`toString()`固定为`<redacted>`，structured logger禁止raw credential，临时heap/ByteBuf尽力清零，并对`LedgerDescriptorImpl.checkAccess()`的完整master-key日志路径建立hard regression test。
 
+### 6.7 Wave 0 typed reference endpoint状态
+
+Wave 0 已在 `bookkeeper-common` internal unstable package实现typed principal/transport/scope、static与exact authorizer、fixed derived authority key、single cold-read store、committed authority、protected credential/state-store semantic interfaces，以及只消费transport facts的隔离`bookie-profile` reference endpoint。12项普通功能测试覆盖顺序、zero-effect denial、exact tuple/purpose/state、strict descriptor/Engine、durable-only success、secret-free status/redaction与dependency fail-closed。
+
+该实现没有socket listener、TLS termination、concrete MetadataStore/local-store adapter、production route/registration/Add/ACK接入或physical control bytes，不能证明real TLS/auth/secret-leak matrix、A24或stable wire，也不解锁G1和任何production authority。normal Add调用点仍为0，因而没有remote MetadataStore、per-request descriptor/auth hash、KMS、certificate/signature或control fsync增量。
+
 ## 7. Bookie 安装语义
 
 候选请求：
