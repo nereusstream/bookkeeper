@@ -1,0 +1,54 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "testedCommit": "a8773e5c84b602fb524bf294ae707f167cc29040",
+  "completedAt": "2026-08-31T20:27:48+08:00",
+  "environment": {
+    "jdk": "Amazon Corretto 21.0.10",
+    "maven": "3.8.5",
+    "os": "macOS 14.8.9 arm64, Darwin 23.6.0"
+  },
+  "runs": [
+    {
+      "command": "mvn -o -pl bookkeeper-common -DskipTests=false -Dtest=IsolatedProfileControlEndpointTest -Dsurefire.rerunFailingTestsCount=0 compiler:compile compiler:testCompile surefire:test",
+      "result": "PASS",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "reruns": 0,
+      "mavenLifecycleResourcePhases": false
+    },
+    {
+      "command": "mvn -o -pl bookkeeper-common -DskipTests spotless:check checkstyle:check",
+      "result": "PASS",
+      "checkstyleViolations": 0
+    },
+    {
+      "command": "scripts/unified-wal/check-wave0-profile-control-scope.sh",
+      "result": "PASS",
+      "outOfScopePaths": 0,
+      "productionJavaIntegrationPoints": 0
+    },
+    {
+      "command": "Apache license header audit restricted to the Profile control source and test packages",
+      "result": "PASS",
+      "files": 19,
+      "missingHeaders": 0
+    }
+  ],
+  "excludedByDesign": [
+    "Maven full test or verify lifecycle that would process the whole test-resource tree",
+    "Apache RAT module scan that would scan the whole existing module tree",
+    "released-decoder and stock-binary compatibility matrix",
+    "profile-wire compatibility tests, harness, corpus interpretation, counterexample interpretation, and probes",
+    "old Bookie or ZooKeeper startup",
+    "raw byte or socket replay"
+  ],
+  "boundaryIncident": {
+    "recorded": true,
+    "observation": "An earlier targeted lifecycle test invoked testResources and copied the existing module resource tree into target.",
+    "usedForFinalEvidence": false,
+    "compatibilityExecution": false,
+    "subsequentContainment": "offline direct compiler and Surefire plugin goals"
+  }
+}

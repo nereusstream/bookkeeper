@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL / NON-PROMOTABLE / NO AUTHORITY / DISCARDABLE**
 
-本目录拥有 Unified WAL Wave 0 的 Profile control/auth interfaces、隔离 `bookie-profile` endpoint reference implementation 与机器回执。typed cold-path implementation 与12项普通功能测试已经完成；本次里程碑之后只生成绑定已提交源码的机器回执并执行最终范围审计。
+本目录拥有 Unified WAL Wave 0 的 Profile control/auth interfaces、隔离 `bookie-profile` endpoint reference implementation 与机器回执。typed cold-path implementation、12项普通功能测试、机器回执与范围审计均已完成，并绑定源码提交`a8773e5c84b602fb524bf294ae707f167cc29040`。
 
 该模块不得接入生产 Bookie 启动、legacy `bookie-rpc`、普通 Add/ACK、`LedgerStorage`、`Journal`、`EntryLog`、Cookie/registration、AutoRecovery/delete或任何生产authority。released-decoder/stock-binary compatibility matrix继续为`DEFERRED_NOT_RUN`，G1继续为`BLOCKED_UNVERIFIED`，本模块不读取或执行其harness、corpus或旧artifact。
 
@@ -45,6 +45,15 @@ mvn -o -pl bookkeeper-common \
   -Dsurefire.rerunFailingTestsCount=0 \
   compiler:compile compiler:testCompile surefire:test
 ```
+
+格式与静态检查：
+
+```bash
+mvn -o -pl bookkeeper-common -DskipTests spotless:check checkstyle:check
+scripts/unified-wal/check-wave0-profile-control-scope.sh
+```
+
+完整机器结果见[`test-results/summary.json`](test-results/summary.json)，immutable source object、精确边界与剩余BLOCK见[`receipt.json`](receipt.json)。最终验证有意不运行会处理整个现有test-resource tree的Maven full lifecycle或module-wide RAT；一次较早的targeted lifecycle test曾由`testResources`把已有资源树复制到`target`，未执行或解析compatibility harness/test/probe/artifact，也未用作最终证据。该事件和后续direct-plugin containment已在receipt中记录。
 
 ## Remaining OPEN/BLOCK
 

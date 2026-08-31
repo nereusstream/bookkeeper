@@ -1,0 +1,91 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "module": "Profile control/auth typed isolated reference endpoint",
+  "result": "TYPED_REFERENCE_IMPLEMENTATION_COMPLETE",
+  "state": ["EXPERIMENTAL", "NON_PROMOTABLE", "NO_AUTHORITY", "DISCARDABLE"],
+  "moduleBaseCommit": "761f65a9b93626afaf16484a8d270df06989f5b3",
+  "testedCommit": "a8773e5c84b602fb524bf294ae707f167cc29040",
+  "implementationCommits": [
+    "8d81f43a8b7df4977ef7af76ca11a11da58081d2",
+    "a8773e5c84b602fb524bf294ae707f167cc29040"
+  ],
+  "immutableSource": {
+    "commitTreeObject": "269892e1a6e42cb2713d3d8e08c8ef48f220ed29",
+    "profileControlSourceTreeObject": "d59752a84dd2e89c6c2c9de7ae2c3bc3f2a837ff",
+    "testClassBlobObject": "8419449f2a64561947e3cdd818b5a17e36fc9e51"
+  },
+  "scope": {
+    "productionSourceFiles": 18,
+    "testSourceFiles": 1,
+    "ownerDocumentationFiles": 6,
+    "scopeGuardFiles": 1,
+    "changedPathsFromModuleBaseThroughTestedCommit": 26,
+    "outOfScopePaths": 0,
+    "productionJavaIntegrationPoints": 0,
+    "normalAddIntegrationPoints": 0,
+    "authorityTouches": []
+  },
+  "verification": {
+    "ordinaryEndpointTests": "12/12 PASS with reruns disabled",
+    "offlineDirectPluginExecution": true,
+    "mavenLifecycleResourcePhasesInFinalRun": false,
+    "spotless": "PASS",
+    "checkstyle": "0 violations",
+    "profileControlJavaLicenseHeaders": "19/19 PASS",
+    "scopeGuard": "PASS",
+    "fullBookkeeperCommonVerify": "NOT_RUN_BY_DESIGN",
+    "apacheRat": "NOT_RUN_BY_DESIGN"
+  },
+  "referenceSemantics": {
+    "operationClasses": 7,
+    "transportFacts": "bookie-profile immediate TLS1.3 mutual authentication",
+    "authorityRead": "one cold direct read through a fixed derived key",
+    "authorization": "static operation precheck plus exact principal/scope/committed-authority decision",
+    "credential": "kind 1, 20 bytes, immutable wrapper, constant-time comparison, no raw accessor, redacted public text",
+    "localEffect": "conditional semantic transition with durable-only success",
+    "response": "secret-free coordinates only"
+  },
+  "boundaries": {
+    "listenerOrTlsTermination": false,
+    "metadataStoreAdapter": false,
+    "physicalProtectedStateStore": false,
+    "productionStartup": false,
+    "productionRouting": false,
+    "productionStorageOrJournal": false,
+    "legacyBookieRpc": false,
+    "cookieOrRegistration": false,
+    "autoRecoveryOrDelete": false,
+    "normalAddRemoteMetadataStore": false,
+    "normalAddDescriptorOrAuthHash": false,
+    "normalAddKmsCertificateSignatureOrControlFsync": false,
+    "stableWire": false,
+    "g1Unlocked": false,
+    "authority": false
+  },
+  "deferredCompatibility": {
+    "oldDecoderOrStockBinaryMatrix": "DEFERRED_NOT_RUN",
+    "g1": "BLOCKED_UNVERIFIED",
+    "compatibilityHarnessExecuted": false,
+    "compatibilityTestsExecuted": false,
+    "decoderOrBinaryProbesExecuted": false,
+    "oldArtifactsParsed": false,
+    "rawSocketOrByteReplayExecuted": false
+  },
+  "boundaryIncident": {
+    "recorded": true,
+    "phase": "initial targeted Maven lifecycle test before final evidence run",
+    "observation": "Maven testResources copied the existing bookkeeper-common test-resource tree into target, including the deferred resource subtree.",
+    "impact": "No compatibility test, harness, decoder probe, stock binary, old artifact parser, socket replay, or source mutation ran. The copied output was not used as evidence.",
+    "containment": "Every subsequent and final test invoked compiler and Surefire plugin goals directly in offline mode, so no Maven resource lifecycle phase ran."
+  },
+  "remainingBlocks": [
+    "real listener, TLS provider configuration, X509 extraction, and trust rotation",
+    "concrete allowlist, committed-authority backend adapter, and timeout or retry policy",
+    "physical protected-state owner, crash framing, group commit, at-rest protection, and secure deletion",
+    "complete production secret-leak, TLS, and authorization negative matrix and Spike A A24",
+    "released-decoder and stock-binary compatibility matrix and G1",
+    "stable control wire and production integration",
+    "all route, storage, registration, delete, Add, ACK, and production authority"
+  ],
+  "testResults": "test-results/summary.json"
+}

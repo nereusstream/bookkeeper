@@ -43,8 +43,12 @@
   },
   "profileControl": {
     "moduleBaseCommit": "761f65a9b93626afaf16484a8d270df06989f5b3",
-    "state": "TYPED_REFERENCE_ENDPOINT_TESTED_RECEIPT_PENDING",
+    "state": "TYPED_REFERENCE_ENDPOINT_EVIDENCE_COMPLETE",
+    "testedCommit": "a8773e5c84b602fb524bf294ae707f167cc29040",
+    "sourceTreeObject": "d59752a84dd2e89c6c2c9de7ae2c3bc3f2a837ff",
     "artifactDirectory": "docs/rfcs/unified-wal/implementation/profile-control",
+    "receipt": "docs/rfcs/unified-wal/implementation/profile-control/receipt.json",
+    "testResults": "docs/rfcs/unified-wal/implementation/profile-control/test-results/summary.json",
     "sourcePackage": "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/control",
     "testClass": "org.apache.bookkeeper.common.profile.control.IsolatedProfileControlEndpointTest",
     "ordinaryTests": 12,

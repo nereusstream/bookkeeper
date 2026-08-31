@@ -7,7 +7,7 @@
 当前已实现的完整模块：
 
 - [`ProfileDescriptor` reference implementation](profile-descriptor/README.md)
-- [`Profile control/auth typed reference endpoint`](profile-control/README.md)：已完成interfaces、isolated endpoint与12项普通功能测试；仅消费transport facts与semantic store interfaces，不接入production listener/store/route/Add/ACK。绑定源码commit的机器回执与最终scope audit待下一里程碑生成。
+- [`Profile control/auth typed reference endpoint`](profile-control/README.md)：已完成interfaces、isolated endpoint、12项普通功能测试、机器回执与最终scope audit；仅消费transport facts与semantic store interfaces，不接入production listener/store/route/Add/ACK。
 
 已冻结、延期验证的模块：
 

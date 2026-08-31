@@ -50,4 +50,22 @@ if [[ "$blocked" -ne 0 ]]; then
     exit 1
 fi
 
-echo "PASS: Profile control changes stay outside production authority and deferred compatibility paths"
+if git grep -n -E \
+    'org\.apache\.bookkeeper\.common\.profile\.control|IsolatedProfileControlEndpoint|ProfileControlAuthorizer' \
+    HEAD -- \
+    '*.java' \
+    ':(exclude)bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/control/**' \
+    ':(exclude)bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/control/**'; then
+    echo "BLOCK: Profile control reference types are integrated into a production Java path" >&2
+    exit 1
+fi
+
+if git grep -n -E \
+    '^import org\.apache\.bookkeeper\.(bookie|meta|proto|replication|server)\.' \
+    HEAD -- \
+    'bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/control/*.java'; then
+    echo "BLOCK: Profile control reference package imports a production authority package" >&2
+    exit 1
+fi
+
+echo "PASS: Profile control changes stay outside production authority and deferred compatibility paths; production Java integration is zero"
