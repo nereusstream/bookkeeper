@@ -2,7 +2,7 @@
 
 > 状态：**EXPERIMENTAL / NON-PROMOTABLE / NO AUTHORITY / DISCARDABLE**
 
-本目录记录 Bookie startup/readiness/new-scope reference harness 的实现与机器证据。模块基线为 `df122c524ddc1739ef58e1f1ede3d8140ee0de86`。
+本目录记录 Bookie startup/readiness/new-scope reference harness 的实现与机器证据。模块基线为 `df122c524ddc1739ef58e1f1ede3d8140ee0de86`，完成普通本地测试的实现提交为`fa608accc64222c1971bab6aa8fec7eafc749723`。
 
 当前reference implementation已实现：
 
@@ -17,7 +17,7 @@
 - cold-path计数独立归因，normal Add的format/readiness read、remote I/O、hash、TLS、KMS/certificate与control fsync计数固定为0；
 - 独立scope guard与17项定向普通测试。
 
-模块状态是`REFERENCE_HARNESS_IMPLEMENTED_EVIDENCE_PENDING`：源码和普通本地测试已完成，immutable receipt、最终测试summary与源码对象绑定将在下一里程碑生成。该状态不能写成Spike B PASS、Gate通过、stable format或production readiness。
+模块状态是`REFERENCE_IMPLEMENTATION_COMPLETE`。不可变source/test Git objects与边界见[`receipt.json`](receipt.json)，运行输入与锁定合同见[`manifest.json`](manifest.json)，17项测试和独立检查见[`test-results/summary.json`](test-results/summary.json)。该结果只完成reference implementation，不能写成Spike B PASS、Gate通过、stable format或production readiness。
 
 该模块只处理调用方提供的typed facts，不读取或修改真实OS权限、Cookie、superblock bytes、storage roots、registration backend或外部目标。same-scope `BKPF1`、真实old binary/startup/file-touch probe、physical format、migration/wipe工具与production integration均不在本模块中。
 
@@ -34,3 +34,13 @@ scripts/unified-wal/check-wave0-startup-readiness-scope.sh
 ```
 
 命令不运行Maven完整lifecycle，不读取或执行延期compatibility harness/corpus/counterexample。
+
+格式、静态和范围检查：
+
+```bash
+mvn -o -pl bookkeeper-common -DskipTests spotless:check checkstyle:check
+scripts/unified-wal/check-wave0-startup-readiness-scope.sh
+git diff --check
+```
+
+`bookkeeper-common` module-wide verify与RAT均为`NOT_RUN_BY_DESIGN`，不能写成PASS。released decoder/stock binary、same-scope、真实startup/file-touch、physical format、真实credential/ACL与formal Spike B均保持未运行或BLOCK。

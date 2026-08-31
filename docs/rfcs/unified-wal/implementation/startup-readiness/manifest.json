@@ -1,0 +1,92 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "module": "Unified WAL Wave 0 Bookie startup/readiness/new-scope reference harness",
+  "implementationWave": 0,
+  "state": ["EXPERIMENTAL", "NON_PROMOTABLE", "NO_AUTHORITY", "DISCARDABLE"],
+  "moduleBaseCommit": "df122c524ddc1739ef58e1f1ede3d8140ee0de86",
+  "factsMilestoneCommit": "f58fa6746ece845c1bb070d04d812fb16883fcb0",
+  "testedImplementationCommit": "fa608accc64222c1971bab6aa8fec7eafc749723",
+  "designInputsAtTestedCommit": {
+    "docs/turbo-bk.md": "03ec5c1d521213ded68c37cf61c4c4e3a73eab1d9dd74185fd2fae3fe41fd6dd",
+    "docs/rfcs/unified-wal/RFC-0001-profile-capability-install.md": "13a7bed00507124e2788a9b56e8ea195aadd1dd4d0ecce7d93d99528821804d5",
+    "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md": "bc8bdbde9b98cfcf087ce512580de884d1b9dbc4364444dfcb5d6554c95aafac",
+    "docs/rfcs/unified-wal/spikes/SPIKE-B-allocator-block.md": "a1d65b9a541c0973e0307c8556fe3d206b6156096e71ad77479305fdbefadbd3",
+    "docs/rfcs/unified-wal/grill/ROUND-07-exact-implementation-manifest.md": "eec4bfadf4b3d73d45b7cf301b703b71f3727158737c5cdda77d275caa6c41a3"
+  },
+  "sourcePackage": "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/startup",
+  "testPackage": "bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/startup",
+  "scopeGuard": "scripts/unified-wal/check-wave0-startup-readiness-scope.sh",
+  "startupPhaseOrder": [
+    "COMPATIBILITY_FACT",
+    "REQUIRED_DEVICE_FACTS",
+    "ALLOCATOR_RECOVERY",
+    "ROUTE_RECOVERY",
+    "DELETE_RECOVERY",
+    "DURABLE_LOCAL_READINESS",
+    "PERSISTENT_READINESS",
+    "MATCHING_SERVICE_INFO",
+    "EPHEMERAL_WRITABLE_REGISTRATION"
+  ],
+  "persistentReadiness": {
+    "interface": "ProfileRegistrationStore",
+    "adapter": "InMemoryProfileRegistrationStore",
+    "compareAndSetArguments": [
+      "bookieId",
+      "expectedStoreVersion",
+      "expectedReadinessGeneration",
+      "newRecord"
+    ],
+    "responseLoss": "REREAD_EXACT_RECORD",
+    "generationOrIncarnationMismatch": "DEMOTE_NON_WRITABLE"
+  },
+  "newScopeFallback": {
+    "required": [
+      "new BookieId",
+      "new journal root",
+      "new ledger root",
+      "new index root",
+      "new Arena root",
+      "new storage incarnation",
+      "new credential scope"
+    ],
+    "oldScopeRequiredState": ["DRAINED", "READ_ONLY", "DECOMMISSIONED"],
+    "oldCredentialAccessToNewScope": "NONE",
+    "osPermissionMutation": false
+  },
+  "deterministicCoverage": {
+    "ordinaryTests": 17,
+    "crashBoundaries": 9,
+    "deviceFailures": ["MISSING", "PARTIAL", "CORRUPT", "UNKNOWN_MANDATORY"],
+    "recoveryFailures": ["MISSING", "CORRUPT", "UNKNOWN_MANDATORY", "DURABILITY_UNKNOWN"],
+    "registrationFailures": [
+      "CAS_CONFLICT",
+      "CAS_RESPONSE_LOSS",
+      "STALE_EPHEMERAL",
+      "GENERATION_MISMATCH",
+      "INCARNATION_MISMATCH",
+      "SERVICE_INFO_RESPONSE_LOSS",
+      "WRITABLE_REGISTRATION_RESPONSE_LOSS"
+    ],
+    "rollbackRefusal": true,
+    "oldIdentityAndCredentialRejectedFromNewScope": true
+  },
+  "normalAddIncrement": {
+    "formatOrReadinessReads": 0,
+    "remoteIo": 0,
+    "hashOperations": 0,
+    "tlsOperations": 0,
+    "kmsOrCertificateOperations": 0,
+    "controlFsyncs": 0
+  },
+  "notImplementedOrExecuted": {
+    "sameScopeBkpf1": "BLOCKED_NOT_IMPLEMENTED",
+    "realOldBinaryStartupOrFileTouchProbe": "DEFERRED_NOT_RUN",
+    "deferredProfileWireHarnessOrResources": "NOT_ACCESSED_OR_EXECUTED",
+    "physicalSuperblockOrCookieBytes": "NOT_IMPLEMENTED",
+    "realMigrationReverseOrWipeTool": "NOT_IMPLEMENTED",
+    "realCredentialOrAclChange": "NOT_PERFORMED",
+    "productionBookieIntegration": "NONE",
+    "formalSpikeB": "PLANNED_NOT_EXECUTED",
+    "moduleWideVerifyOrRat": "NOT_RUN_BY_DESIGN"
+  }
+}

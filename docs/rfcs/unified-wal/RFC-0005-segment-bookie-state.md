@@ -262,7 +262,7 @@ restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/
 
 ### 9.1 Wave 0 reference harness状态
 
-Wave 0已在`bookkeeper-common`的独立`profile.startup` package实现上述逻辑顺序的typed reference harness：compatibility、required-device/superblock、allocator/route/delete recovery、durable local readiness、persistent versioned CAS、matching service-info和ephemeral writable registration。reference adapters覆盖response loss重读、CAS conflict、generation/incarnation mismatch demotion、stale registration、九个边界crash/restart、partial/missing/corrupt/unknown mandatory device、rollback拒绝及new-scope旧身份/credential拒绝；normal Add没有调用点，相关cold-path增量计数为0。
+Wave 0已在`bookkeeper-common`的独立`profile.startup` package完成上述逻辑顺序的typed reference implementation与immutable receipt：compatibility、required-device/superblock、allocator/route/delete recovery、durable local readiness、persistent versioned CAS、matching service-info和ephemeral writable registration。reference adapters的17项普通测试覆盖response loss重读、CAS conflict、generation/incarnation mismatch demotion、stale registration、九个边界crash/restart、partial/missing/corrupt/unknown mandatory device、rollback拒绝及new-scope旧身份/credential拒绝；normal Add没有调用点，相关cold-path增量计数为0。
 
 这只是`EXPERIMENTAL / NON-PROMOTABLE / NO AUTHORITY / DISCARDABLE`的semantic reference implementation。它不接入`EmbeddedServer`或生产registration，不定义physical Cookie/superblock bytes、backend path、OS credential/ACL修改、migration/wipe工具，不运行same-scope `BKPF1`或真实old-binary Gate，也不改变本RFC的Proposed状态、Spike B状态或Segment ACK authority BLOCK。
 

@@ -63,7 +63,10 @@
   "startupReadiness": {
     "moduleBaseCommit": "df122c524ddc1739ef58e1f1ede3d8140ee0de86",
     "factsMilestoneCommit": "f58fa6746ece845c1bb070d04d812fb16883fcb0",
-    "state": "REFERENCE_HARNESS_IMPLEMENTED_EVIDENCE_PENDING",
+    "state": "REFERENCE_IMPLEMENTATION_COMPLETE",
+    "testedCommit": "fa608accc64222c1971bab6aa8fec7eafc749723",
+    "sourceTreeObject": "a386fb5db5a83220f8d609b4aa3865e9e261b617",
+    "testTreeObject": "78bb5f7c6cee74b8f0cfef9ab9ca4b09f31cd2d9",
     "sourcePackage": "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/startup",
     "testClasses": [
       "org.apache.bookkeeper.common.profile.startup.StartupReadinessFactsTest",
@@ -74,6 +77,9 @@
     "persistentReadiness": "DOMAIN_SPECIFIC_VERSIONED_CAS_IN_MEMORY_REFERENCE",
     "registrationOrder": "PERSISTENT_CAS_THEN_MATCHING_SERVICE_INFO_THEN_EPHEMERAL_WRITABLE",
     "normalAddColdPathCounters": 0,
+    "manifest": "docs/rfcs/unified-wal/implementation/startup-readiness/manifest.json",
+    "receipt": "docs/rfcs/unified-wal/implementation/startup-readiness/receipt.json",
+    "testResults": "docs/rfcs/unified-wal/implementation/startup-readiness/test-results/summary.json",
     "sameScopeBkpf1": "NOT_IMPLEMENTED_BLOCKED",
     "realOldBinaryOrFileTouchProbe": "DEFERRED_NOT_RUN",
     "productionIntegration": false,

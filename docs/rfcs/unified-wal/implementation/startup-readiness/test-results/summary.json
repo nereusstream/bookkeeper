@@ -1,0 +1,55 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "module": "Unified WAL Wave 0 Bookie startup/readiness/new-scope reference harness",
+  "testedCommit": "fa608accc64222c1971bab6aa8fec7eafc749723",
+  "executedAtUtc": "2026-08-31T13:58:20Z",
+  "execution": {
+    "offline": true,
+    "mavenLifecycleResourcePhases": false,
+    "rerunFailingTestsCount": 0,
+    "command": "mvn -o -pl bookkeeper-common -DskipTests=false -Dtest=StartupReadinessFactsTest,StartupReadinessHarnessTest -Dsurefire.rerunFailingTestsCount=0 compiler:compile compiler:testCompile surefire:test"
+  },
+  "environment": {
+    "maven": "3.8.5",
+    "java": "Amazon Corretto 21.0.10",
+    "os": "macOS 14.8.9 arm64, Darwin 23.6.0"
+  },
+  "results": {
+    "tests": 17,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "flakes": 0,
+    "classes": {
+      "org.apache.bookkeeper.common.profile.startup.StartupReadinessFactsTest": {
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "flakes": 0
+      },
+      "org.apache.bookkeeper.common.profile.startup.StartupReadinessHarnessTest": {
+        "tests": 11,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "flakes": 0
+      }
+    }
+  },
+  "additionalChecks": {
+    "spotless": "PASS",
+    "checkstyle": "0 violations",
+    "scopeGuard": "PASS",
+    "javaLicenseHeaders": "28/28 PASS",
+    "gitDiffCheck": "PASS",
+    "normalAddFormatReadinessRemoteIoHashTlsKmsCertificateControlFsync": "0"
+  },
+  "notRun": {
+    "bookkeeperCommonFullVerify": "NOT_RUN_BY_DESIGN",
+    "apacheRat": "NOT_RUN_BY_DESIGN",
+    "releasedDecoderOrStockBinaryMatrix": "DEFERRED_NOT_RUN",
+    "realOldBinaryStartupOrFileTouchProbe": "DEFERRED_NOT_RUN",
+    "formalSpikeB": "PLANNED_NOT_EXECUTED"
+  }
+}

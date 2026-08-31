@@ -403,7 +403,7 @@ Segment production candidate 的最低 Gate：
 - 实现独立immediate-TLS/mTLS endpoint、exact-scope authorizer、cold authority adapter、protected-state语义接口与redaction的隔离prototype；
 - 保留已实现的Round 7 frame/HELLO/status experimental codec、610-vector corpus与冻结反例；raw old-decoder/stock-binary执行延期，不发布stable compatibility；
 - 实现`BKPF1` same-scope candidate与new BookieId/new-scope fallback harness、persistent readiness adapter prototype；same-scope结果在Spike PASS前保持BLOCK；
-- Wave 0已实现隔离的startup/readiness/new-scope reference harness：typed compatibility/device/recovery facts、九阶段fail-closed顺序、durable local readiness、versioned persistent CAS、matching service-info、stale demotion、ephemeral writable registration及九个crash/restart边界；它不接入`EmbeddedServer`、生产registration、真实OS权限或normal Add，immutable receipt收口前状态为`REFERENCE_HARNESS_IMPLEMENTED_EVIDENCE_PENDING`；
+- Wave 0已完成隔离的startup/readiness/new-scope reference implementation及immutable receipt：typed compatibility/device/recovery facts、九阶段fail-closed顺序、durable local readiness、versioned persistent CAS、matching service-info、stale demotion、ephemeral writable registration、九个crash/restart边界和17项普通测试；它不接入`EmbeddedServer`、生产registration、真实OS权限或normal Add，不提升Spike/Gate/production状态；
 - 实现不接管authority、可丢弃且不污染Classic rollback cohort的局部/isolated shadow prototype，用于否证crash recovery、资源上限和p99假设。
 
 现在不能直接开始：
