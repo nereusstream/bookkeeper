@@ -29,7 +29,7 @@
   "profileWire": {
     "block": "D",
     "blockBaseCommit": "be3d3d55b6787b84698fe428705b398bda57a1de",
-    "state": "CORPUS_COMPLETE_REAL_COMPATIBILITY_PENDING",
+    "state": "COUNTEREXAMPLE_FROZEN_REPLACEMENT_CANDIDATE_PENDING",
     "artifactDirectory": "bookkeeper-common/src/test/resources/profile-wire",
     "receiptDirectory": "docs/rfcs/unified-wal/implementation/profile-wire",
     "frameManifest": "0x0FFE4250/protocol-1.0/header-32",
@@ -37,7 +37,8 @@
     "fuzzIterations": 256,
     "corpusVectors": 610,
     "oldBinaryMatrix": ["4.14.8", "4.15.5", "4.16.7", "4.17.2"],
-    "g1": "PENDING_REAL_OLD_DECODER_AND_STOCK_BINARY_ZERO_EFFECT_EVIDENCE"
+    "counterexample": "CE-20260831T105059Z",
+    "g1": "FAIL_CANDIDATE_0x0FFE4250"
   },
   "authorityTouches": []
 }

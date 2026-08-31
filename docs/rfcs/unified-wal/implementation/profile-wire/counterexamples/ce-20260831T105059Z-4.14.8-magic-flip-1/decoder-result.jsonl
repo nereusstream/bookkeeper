@@ -1,0 +1,2 @@
+{"_license":"Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0."}
+{"version":"4.14.8","vector":"invalid/magic-flip-1","extractedFrames":1,"incompleteFrames":0,"decoderExceptions":0,"fallbackTransitions":1,"recognizedRequests":1,"fallbackFollowedByEffect":1,"requestClasses":"org.apache.bookkeeper.proto.BookieProtocol$ParsedAddRequest"}

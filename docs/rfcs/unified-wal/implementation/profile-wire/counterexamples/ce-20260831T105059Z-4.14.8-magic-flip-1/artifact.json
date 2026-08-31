@@ -1,0 +1,16 @@
+{
+  "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0.",
+  "counterexampleId": "CE-20260831T105059Z",
+  "candidateMagic": "0x0FFE4250",
+  "version": "4.14.8",
+  "releaseCommit": "965c3627328787e2750f41c2a4eda6c1d709d7c6",
+  "mavenCoordinate": "org.apache.bookkeeper:bookkeeper-server:4.14.8",
+  "artifactSha256": "e88024bf7d2ae37e91c846e02a4954b2a256e4a8300f03a71f271d9823259567",
+  "artifactSha512": "433614ca2cdc1026f2c56cdb558f6401f90cab0795aaff126904c621cc06443463026df4dab3b3e1b07a17e58eefea60bda5109ecfdef3c101f7d5ba43ecd060",
+  "vector": "invalid/magic-flip-1",
+  "vectorSha256": "0bfe0f405e6aded84d58d736cea01875500af39b2fb14f595c454d7a7d0236a5",
+  "decoderResult": "org.apache.bookkeeper.proto.BookieProtocol$ParsedAddRequest",
+  "classicRouteClaims": 1,
+  "fallbackFollowedByEffect": 1,
+  "terminal": "FAIL"
+}

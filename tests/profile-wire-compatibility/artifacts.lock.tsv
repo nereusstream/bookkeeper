@@ -1,0 +1,22 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements. See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership. The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# version releaseCommit mavenCoordinate sha256 sha512 jdk mainClass args
+4.14.8	965c3627328787e2750f41c2a4eda6c1d709d7c6	org.apache.bookkeeper:bookkeeper-server:4.14.8	e88024bf7d2ae37e91c846e02a4954b2a256e4a8300f03a71f271d9823259567	433614ca2cdc1026f2c56cdb558f6401f90cab0795aaff126904c621cc06443463026df4dab3b3e1b07a17e58eefea60bda5109ecfdef3c101f7d5ba43ecd060	Zulu-17.0.6	org.apache.bookkeeper.server.Main	localbookie 1
+4.15.5	27de09989a6920b939e29dcf625720f437269b38	org.apache.bookkeeper:bookkeeper-server:4.15.5	bfe5b223d9453c67fbfb5bb5964f868799d6cbeb1a1f3f32c1fdc47a1441966f	b4e87aace69a753161a098e06e40e46af7c0b60c3503200b465f9913ff32ed8e2e276d72a356bc883e03d2e5f23c07c24ff535a2709a310be10577ce42aa9a85	Zulu-17.0.6	org.apache.bookkeeper.server.Main	localbookie 1
+4.16.7	aea1fea7558bdf0bc73d1062c53f672385aedf47	org.apache.bookkeeper:bookkeeper-server:4.16.7	e0111d3f51572ac8bff7b18d628a03cb2a7dd2ce61cf907870f1f77c39856068	1cd32188edddff3b46ee80bf9326482382a1e1d4d38e38ab52b5c183058131815cd2ac0f7147c828a940e0fb85c6fb799114147cf87ec8aa755d792af206d323	Zulu-17.0.6	org.apache.bookkeeper.server.Main	localbookie 1
+4.17.2	75f65df7b487a9ee29817dc849a40f627c9857b7	org.apache.bookkeeper:bookkeeper-server:4.17.2	53a0385ed5a6678f5a5abf4ee2f045f9a712423bd60ff4859c910acacd35de7d	6e16bfecca03524dcccb5d15232b53d10643dfc1db4ecdf6b28d783249ee9873d62a10fc44ad367a94322df0e844072bbee6a11b9dea3c9a6a790973ef6e2282	Zulu-17.0.6	org.apache.bookkeeper.server.Main	localbookie 1

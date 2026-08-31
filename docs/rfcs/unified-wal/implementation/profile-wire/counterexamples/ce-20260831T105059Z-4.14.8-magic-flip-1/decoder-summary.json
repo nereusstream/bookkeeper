@@ -1,0 +1,13 @@
+{
+  "version": "4.14.8",
+  "layer": "released-hybrid-v3-prev3-decoder",
+  "status": "FAIL",
+  "vectors": 610,
+  "extractedFrames": 306,
+  "incompleteFrames": 303,
+  "decoderExceptions": 305,
+  "fallbackTransitions": 305,
+  "recognizedRequests": 1,
+  "classicRouteClaims": 1,
+  "fallbackFollowedByEffect": 1
+}
