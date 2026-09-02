@@ -59,15 +59,15 @@ Corpus 默认只读核对。只有显式指定 `-DprofileDescriptor.updateCorpus
 ## 复现命令
 
 ```bash
-mvn -pl bookkeeper-common \
-  -Dtest='org.apache.bookkeeper.common.profile.*Test' \
+mvn -o -pl bookkeeper-common \
+  -Dtest='org.apache.bookkeeper.common.profile.ProfileDescriptor*Test' \
   -Dsurefire.rerunFailingTestsCount=0 test
 
-mvn -pl bookkeeper-common -DskipTests spotless:check checkstyle:check
-mvn -pl bookkeeper-common -DskipTests apache-rat:check
+mvn -o -pl bookkeeper-common -DskipTests spotless:check checkstyle:check
+mvn -o -pl bookkeeper-common -DskipTests apache-rat:check
 ```
 
-完整测试和构建结果见 [`test-results/summary.json`](test-results/summary.json)，精确实现提交和边界见 [`receipt.json`](receipt.json)。
+验证结果见 [`test-results/summary.json`](test-results/summary.json)，精确实现提交和边界见 [`receipt.json`](receipt.json)。
 
 ## 未解除的 BLOCK
 

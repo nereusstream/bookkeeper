@@ -214,7 +214,7 @@ reference implementation 由 `ProfileDescriptor`、`ProfileDescriptorCodec` 与 
 
 ### 5.5 Wave 0 reference implementation 状态
 
-截至 2026-08-30，`bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/` 已实现上述 immutable model、canonical codec、strict validator 与 identity；test source 中的独立 verifier、fixture-only registries、6 个 valid/40 个 invalid byte corpus、expected identities/field dumps/checksums 和 fixed-seed fuzz receipt 已提交。可复核范围、命令和机器回执见 [`implementation/profile-descriptor/`](implementation/profile-descriptor/README.md)。
+截至 2026-09-02，`bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/` 已实现上述 immutable model、canonical codec、strict validator 与 identity；test source 中的独立 verifier、fixture-only registries、6 个 valid/40 个 invalid byte corpus、expected identities/field dumps/checksums 和 fixed-seed fuzz receipt 已提交。可复核范围、命令和机器回执见 [`implementation/profile-descriptor/`](implementation/profile-descriptor/README.md)。
 
 该状态只表示 Wave 0 reference evidence 已落地，不改变本 RFC 的 Proposed 状态，不接受 production policy/capability ID 或 legal-combination table，不解锁 endpoint/stable wire/live shadow/Segment ACK authority，也不把本地测试结果冒充 Spike A/B/C 或 production Gate。
 
