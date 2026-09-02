@@ -21,8 +21,7 @@ package org.apache.bookkeeper.common.profile;
 
 /** Payload interpretation required by a Profile descriptor. */
 public enum PayloadFormat {
-    OPAQUE_LEDGER(1),
-    SEQUENCED_LEDGER(2);
+    OPAQUE_LEDGER(1);
 
     private final int wireValue;
 

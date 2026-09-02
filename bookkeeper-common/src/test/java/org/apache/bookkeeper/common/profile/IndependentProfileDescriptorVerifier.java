@@ -119,7 +119,7 @@ final class IndependentProfileDescriptorVerifier {
         }
 
         if (scalarValues[0] < 1 || scalarValues[0] > 3
-                || scalarValues[1] < 1 || scalarValues[1] > 2
+                || scalarValues[1] != 1
                 || scalarValues[2] < 1 || scalarValues[2] > 2) {
             throw invalid();
         }

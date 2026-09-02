@@ -64,7 +64,7 @@ final class TestProfileRegistries {
     static ProfileDescriptor descriptor(List<ProfileCapability> capabilities) {
         return new ProfileDescriptor(
                 EngineProfile.SEGMENT_WAL_ENGINE,
-                PayloadFormat.SEQUENCED_LEDGER,
+                PayloadFormat.OPAQUE_LEDGER,
                 DurabilityMode.SYNC_ON_ACK,
                 3,
                 3,

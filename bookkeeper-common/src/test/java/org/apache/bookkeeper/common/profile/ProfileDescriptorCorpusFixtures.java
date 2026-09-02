@@ -86,7 +86,7 @@ final class ProfileDescriptorCorpusFixtures {
                 List.of(TestProfileRegistries.capability(1))));
         descriptors.put("quorum-boundary", new ProfileDescriptor(
                 EngineProfile.SEGMENT_WAL_ENGINE,
-                PayloadFormat.SEQUENCED_LEDGER,
+                PayloadFormat.OPAQUE_LEDGER,
                 DurabilityMode.SYNC_ON_ACK,
                 3,
                 2,
@@ -120,7 +120,7 @@ final class ProfileDescriptorCorpusFixtures {
                         TestProfileRegistries.TEST_CAPABILITY_UNSIGNED_MAX, 0xffff))));
         descriptors.put("maximal-capabilities", new ProfileDescriptor(
                 EngineProfile.SEGMENT_WAL_ENGINE,
-                PayloadFormat.SEQUENCED_LEDGER,
+                PayloadFormat.OPAQUE_LEDGER,
                 DurabilityMode.SYNC_ON_ACK,
                 0xffff,
                 0xffff,
@@ -176,7 +176,7 @@ final class ProfileDescriptorCorpusFixtures {
         vectors.add(mutate("unknown-engine", minimal, UNKNOWN_ENUM,
                 bytes -> putU16(bytes, 24, 4)));
         vectors.add(mutate("unknown-payload", minimal, UNKNOWN_ENUM,
-                bytes -> putU16(bytes, 34, 3)));
+                bytes -> putU16(bytes, 34, 2)));
         vectors.add(mutate("unknown-durability", minimal, UNKNOWN_ENUM,
                 bytes -> putU16(bytes, 44, 3)));
         vectors.add(mutate("zero-ensemble", minimal, INVALID_QUORUM,
