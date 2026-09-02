@@ -17,7 +17,6 @@
   "designInputsAtSourceCommit": {
     "docs/turbo-bk.md": "e3297953f6739d1d8092354226bfb88a0401feb5ac150efafe63e6363dd80cd9",
     "docs/rfcs/unified-wal/RFC-0001-profile-capability-install.md": "1cea285dcf78f14f1caf74b1a701f73e8454ac44ac655f0e7689063209a38069",
-    "docs/rfcs/unified-wal/RFC-0002-sequenced-wal.md": "3a438ab1ccf534447817017f49672daca34e799ed10582abbc080e0714ea81d4",
     "docs/rfcs/unified-wal/RFC-0003-segment-storage-allocator.md": "057f75306634550f639fd4c206a3a9c1818a65927f00c2f987ed7716f8867731",
     "docs/rfcs/unified-wal/RFC-0004-range-recovery-delete.md": "e4065f43ed97648850fe8b37b7642eb39259beef4e8117533ea349aba8ee553f",
     "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md": "24bfaeacc1b2810a5a1f055f717e1a45fa56a2f528de02c835fc2200df2ece2f",

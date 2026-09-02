@@ -2,22 +2,21 @@
 
 > 状态：**Proposed / Not Implementation Ready**<br>
 > 文档类型：总体架构、边界与依赖导航<br>
-> 更新时间：2026-08-31<br>
+> 更新时间：2026-09-02<br>
 > 结论：保留 Unified WAL 方向；除 `BK_CLASSIC_TUNED` 外，不授权按本文直接进入正式实现。
 
 ## 1. 决策摘要
 
-本文取代此前的“Profile 化最终详细设计方案”定位。此前草稿形成了较完整的设计地图，但 Profile 安装、allocator authority、规模化资源模型、旧 Bookie stale-writer 合同和集群级删除仍未闭合，不能作为实现合同。
+本文取代此前的“Profile 化最终详细设计方案”定位。Profile 安装、allocator authority、规模化资源模型和集群级删除仍未闭合，不能作为实现合同。
 
 当前决策如下：
 
 1. `BK_CLASSIC` 是现有 OSS 基线；`BK_CLASSIC_TUNED` 可以立即进入基准和低风险优化。
 2. `DirectJournal` 是 Bookie 进程或部署 cohort 级 Engine Profile，不是任意 ledger 可切换的属性。
-3. WalSequence 由受信任的 `SequencedWalHandle` 在 Client 侧分配；sequence/envelope/existing Add admission 必须同序线性化，并复用现有 ordered callback 推进活动 commit。`BK_SEQUENCED_CLASSIC_CLIENT_ONLY` 必须通过“fence 旧 ledger、point recovery、RunSeal、domain-head CAS 发布 successor ledger”完成 takeover；旧 Bookie 不理解 `writerEpoch`。
-4. Segment WAL 在 Profile install/activation、`ArenaControlLog`、冷热混合 allocator、Segment Bookie state/ACK authority 和无对象存储形式化模型闭合前保持 **P0 Blocked**。
-5. Conditional delete 是集群协议，必须覆盖历史 ensemble、离线 Bookie、持久 tombstone、AutoRecovery 竞争和 Bookie rejoin barrier。
-6. 当前 OSS 已有 bounded Batch Read；新增范围是 streaming continuation、一般 E/W/A 合并、恢复语义、QoS 和 cancellation。
-7. BtrLog 只提供设计启发。它的对象存储恢复假设不能证明本方案安全。
+3. Segment WAL 在 Profile install/activation、`ArenaControlLog`、冷热混合 allocator、Segment Bookie state/ACK authority 和无对象存储形式化模型闭合前保持 **P0 Blocked**。
+4. Conditional delete 是集群协议，必须覆盖历史 ensemble、离线 Bookie、持久 tombstone、AutoRecovery 竞争和 Bookie rejoin barrier。
+5. 当前 OSS 已有 bounded Batch Read；新增范围是 streaming continuation、一般 E/W/A 合并、恢复语义、QoS 和 cancellation。
+6. BtrLog 只提供设计启发。它的对象存储恢复假设不能证明本方案安全。
 
 本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，也不冻结仍由Spike选择的physical owner、阈值或实现类。
 
@@ -25,7 +24,7 @@
 
 Unified WAL只维护一套当前设计与实现基线，不建立项目内部的代际产品线、并行合同或版本化类型后缀。后续改造直接修改本文、owner RFC、Spike与当前实现；新增能力直接加入当前capability set，并在同一变更中同步更新Gate、兼容矩阵和证据要求。
 
-`codecVersion`、`semanticSchemaVersion`、`protocolMajor/minor`及hash domain separator中的数值仅用于wire/format字节判别和fail-closed兼容，不构成项目代际。确需不兼容字节改造时，必须在当前合同中同步修改technical discriminator、migration/rollback边界与raw corpus，不能另建并行代际实现线。历史grill归档为保证reviewer反馈逐字完整，可能保留现已废弃的内部代际措辞；这些措辞不再是实现命名或规范来源。外部固定标识如旧BookKeeper v2/v3协议、TLS 1.3和SHA-1/SHA-256算法名不受此规则影响。
+`codecVersion`、`semanticSchemaVersion`、`protocolMajor/minor`及hash domain separator中的数值仅用于wire/format字节判别和fail-closed兼容，不构成项目代际。确需不兼容字节改造时，必须在当前合同中同步修改technical discriminator、migration/rollback边界与raw corpus，不能另建并行代际实现线。外部固定标识如旧BookKeeper v2/v3协议、TLS 1.3和SHA-1/SHA-256算法名不受此规则影响。
 
 ## 2. 文档边界
 
@@ -43,7 +42,6 @@ Unified WAL只维护一套当前设计与实现基线，不建立项目内部的
 | 文档 | 负责范围 | 当前状态 |
 | --- | --- | --- |
 | [RFC-0001：Profile、Capability 与安装协议](rfcs/unified-wal/RFC-0001-profile-capability-install.md) | Engine/Ledger/Client Profile，显式安装，capability，ensemble replacement | Proposed / P0 prerequisite |
-| [RFC-0002：Sequenced WAL](rfcs/unified-wal/RFC-0002-sequenced-wal.md) | sequence、appendId、ordered frontier、stale writer、successor ledger | Proposed |
 | [RFC-0003：Segment Storage 与 Allocator](rfcs/unified-wal/RFC-0003-segment-storage-allocator.md) | `ArenaControlLog`、slab/extent、generation、崩溃恢复、资源模型 | Proposed / P0 prerequisite |
 | [RFC-0004：Batch/Range、Recovery 与 Delete](rfcs/unified-wal/RFC-0004-range-recovery-delete.md) | OSS BatchRead 基线、streaming range、TailSummary、一般 E/W/A、集群删除 | Proposed |
 | [RFC-0005：Segment Bookie State 与 ACK Authority](rfcs/unified-wal/RFC-0005-segment-bookie-state.md) | Segment operation、activation/fence、recovery Add、explicit LAC、restart 与 local success | Proposed / P0 prerequisite |
@@ -65,7 +63,7 @@ Unified WAL只维护一套当前设计与实现基线，不建立项目内部的
 ### 3.1 目标
 
 - 在不破坏 BookKeeper quorum、fencing、recovery 和兼容边界的前提下，为多类 WAL 工作负载提供可选择的优化路径。
-- 将存储引擎、ledger durability 合同和上层 sequence 语义分离。
+- 将存储引擎、ledger durability 合同和上层协议语义分离。
 - 使所有新格式和新协议 fail closed；不得静默回退到 Classic lazy-create。
 - 将 ACK authority、allocator authority、derived index 和集群 metadata authority 明确分层。
 - 用数值 Gate、故障注入和独立形式化模型决定是否进入下一阶段。
@@ -98,7 +96,6 @@ Unified WAL只维护一套当前设计与实现基线，不建立项目内部的
 ### 4.3 Deferred Sync
 
 - [`LedgerHandle`](../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java) 中的 `DEFERRED_SYNC_LEGACY` 是现有能力，但 failed Bookie 场景下不能按一般 HA WAL 假设执行正常 ensemble change。
-- 当前 Sequenced WAL 只允许 `SYNC_ON_ACK`。
 - 如果可换 ensemble 的 deferred durability 得到完整证据支持，直接修改当前 durability 合同并同步更新 failure detection、replacement、recovery、response-loss 与 Gate；不另立并行代际合同。
 
 ## 5. 三层 Profile 模型
@@ -121,7 +118,6 @@ SEGMENT_WAL_ENGINE
 
 ```text
 OPAQUE_LEDGER
-SEQUENCED_LEDGER
 SYNC_ON_ACK
 DEFERRED_SYNC_LEGACY
 TAIL_SUMMARY
@@ -135,20 +131,9 @@ CONDITIONAL_DELETE
 由客户端或上层协议负责：
 
 ```text
-SequenceDomain
-appendId
-ordered durable frontier
 protocol-native position
 transaction and visibility state
 ```
-
-旧 Bookie 可以把 sequence envelope 当作 opaque payload，但不能据此宣称支持 server-side epoch rejection、sequence conflict detection、read pushdown 或 tail summary。
-
-同一 active run 的 `SequencedWalHandle` 必须独占写入入口；raw Add不能绕过其 admission order。sequence分配、immutable envelope与底层entryId分配/pending-add入队在同一短线性化边界内完成，Bookie RPC与AQ仍并发。活动`WAL_COMMITTED`由现有LedgerHandle队头ordered success推进，不增加第二套pending queue、reorder buffer、commit state machine、sequence LAC、per-append MetadataStore写、commit entry或额外fsync；当前不修改`PendingAddOp`，只有benchmark证明wrapper admission成为瓶颈时才评审最小enqueue seam。
-
-三个frontier不得混写：`writerCommittedSequence`由active writer ordered success推进；`readerDiscoverableSequence`由绑定正确run/instance并验证envelope后的LAC/explicit LAC给出且允许滞后；`sealedSequence`由fenced point recovery、durable CLOSED、immutable RunSeal child和single-record domain-head CAS最终冻结。RunSeal child在head引用前保持inert，head CAS同时绑定predecessor seal与successor start=`P+1`，不要求MetadataStore多key事务。
-
-`CLIENT_ONLY`与`INSTALLED`是并列能力/信任边界，不是演进阶段。`INSTALLED`不整体隐含epoch rejection、same-ledger takeover、全局appendId/sequence连续性、完整本地index或authoritative TailSummary；`EPOCH_AWARE_ADD`仍需独立capability和模型。基础client-side sequencing不要求`E=W`，其takeover oracle是现有fenced point recovery + envelope validation + RunSeal；`E=W`只能作为具体range/TailSummary fast path的局部前置，一般`E>W` fast recovery仍等待RFC-0004与Model E。
 
 ### 5.4 Canonical 组合
 
@@ -157,12 +142,9 @@ transaction and visibility state
 | `BK_CLASSIC` | `CLASSIC_ENGINE` | 现有 Classic | opaque | 现有模式 |
 | `BK_CLASSIC_TUNED` | `CLASSIC_ENGINE` | 与 Classic 相同 | opaque | 与基线匹配 |
 | `BK_DIRECT_JOURNAL` | `DIRECT_JOURNAL_ENGINE` | 当前仍为 opaque ledger | opaque | `SYNC_ON_ACK` |
-| `BK_SEQUENCED_CLASSIC_CLIENT_ONLY` | `CLASSIC_ENGINE` | 仍为 Classic opaque payload | sequence、appendId、ordered frontier | `SYNC_ON_ACK` |
-| `BK_SEQUENCED_CLASSIC_INSTALLED` | `CLASSIC_ENGINE` | 显式安装的 sequence capabilities | sequence、appendId、ordered frontier | `SYNC_ON_ACK` |
 | `BK_SEGMENT_WAL` | `SEGMENT_WAL_ENGINE` | 显式安装的 Segment contract | opaque | `SYNC_ON_ACK` |
-| `BK_SEQUENCED_SEGMENT_WAL` | `SEGMENT_WAL_ENGINE` | Segment + installed sequence capabilities | sequence、appendId、ordered frontier | `SYNC_ON_ACK` |
 
-每个需要Bookie执行的新组合由immutable semantic `ProfileDescriptor`定义。当前codec使用`BKPD` strict flat big-endian TLV、十个mandatory fields，合法长度精确为`124 + 6 * capabilityCount`（124..508 bytes、0..64 capabilities），1024 bytes仅是allocation前绝对input hard cap；JDK SHA-256 suite 1 identity为suite/schema加32-byte digest共36 bytes。duplicate/out-of-order/missing/unknown/default alias/509..1024-byte非法编码/trailing bytes全部拒绝。index/sequence/recovery/delete只进入mandatory capability registry，不维护第二份profile字段。failure-domain/capability registry与production legal-combination table仍BLOCK；codec/hash本身可开始reference implementation，normal Add不解析或hash descriptor。
+每个需要Bookie执行的新组合由immutable semantic `ProfileDescriptor`定义。当前codec使用`BKPD` strict flat big-endian TLV、十个mandatory fields，合法长度精确为`124 + 6 * capabilityCount`（124..508 bytes、0..64 capabilities），1024 bytes仅是allocation前绝对input hard cap；JDK SHA-256 suite 1 identity为suite/schema加32-byte digest共36 bytes。duplicate/out-of-order/missing/unknown/default alias/509..1024-byte非法编码/trailing bytes全部拒绝。index/recovery/delete只进入mandatory capability registry，不维护第二份profile字段。failure-domain/capability registry与production legal-combination table仍BLOCK；codec/hash本身可开始reference implementation，normal Add不解析或hash descriptor。
 
 Wave 0 的 `ProfileDescriptor` reference implementation 已落在 `bookkeeper-common` 内部 unstable 包，并提交 byte-exact valid/invalid corpus、独立 verifier、expected identity/field dump、checksums 与 fixed-seed fuzz receipt。该实现没有网络、磁盘、MetadataStore、registration 或 ACK 接入，registry 只有 test fixture；详见 [`implementation/profile-descriptor/`](rfcs/unified-wal/implementation/profile-descriptor/README.md)。这只关闭 reference implementation 交付，不接受 production registry/legal combinations，不提升本 RFC 或任何 Spike/Gate 状态。
 
@@ -179,10 +161,6 @@ same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric
 - 在 Classic cohort 中按单 ledger 切换 DirectJournal；
 - Segment ledger 未完成 RFC-0001 install 即接受 Add；
 - client-only Profile 声称具有 Bookie epoch/hash/index 能力；
-- raw Add 绕过同一 run 的 `SequencedWalHandle` admission order，或 sequence 分配与 entryId/Add 入队重排；
-- 从 `INSTALLED` 名称推断 epoch rejection、same-ledger takeover、全局 sequence/appendId authority 或完整本地 index；
-- `DEFERRED_SYNC_LEGACY` 与当前 Sequenced WAL 自动 failover；
-- 旧 Bookie 上的 same-ledger epoch takeover；
 - 在独立 fencing 合同前启用 pooled ledger lane。
 - 把Profile safety fields作为legacy `ADD_ENTRY` optional字段，或让legacy recovery flag取得Profile recovery grant；
 - Profile失败、response loss、unknown version/capability后自动Classic fallback或双写；
@@ -196,10 +174,7 @@ same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric
 | `BK_CLASSIC` | OSS Existing | 维护兼容基线 |
 | `BK_CLASSIC_TUNED` | Implementation Ready | 锁定可复现 benchmark manifest |
 | `BK_DIRECT_JOURNAL` | Spike Ready，Engine/cohort 级 | 独立 cohort 原型与崩溃测试 |
-| `BK_SEQUENCED_CLASSIC_CLIENT_ONLY` | RFC Required | 接受 RFC-0002 与 Model B |
-| `BK_SEQUENCED_CLASSIC_INSTALLED` | Blocked | 接受 RFC-0001/0002，Spike A 通过 |
 | `BK_SEGMENT_WAL` | P0 Blocked | RFC-0001/0003/0005 接受，Spike A/B/C 通过 |
-| `BK_SEQUENCED_SEGMENT_WAL` | P0 Blocked | Segment authority 与 Sequenced WAL 分别通过 Gate |
 | `DEFERRED_SYNC_LEGACY` | Existing with HA Restriction | 不作为当前 WAL 默认 |
 | `GENERAL_EWA_FAST_RECOVERY` | Research/Spike | RFC-0004 和 Model E |
 | `POOLED_LEDGER_LANE` | Deferred | 独立 fencing 与资源合同 |
@@ -210,7 +185,7 @@ same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric
 
 ```text
 Client / Protocol Adapter
-    │ sequence, appendId, ordered frontier
+    │ protocol request
     ▼
 Standard LedgerMetadata + Profile Sidecar Coordinator
     │ OSS state/membership CAS + instance/READY/operation authority
@@ -233,7 +208,6 @@ Cluster Lifecycle
 - Standard LedgerMetadata：OSS state 与 ensemble membership 的唯一权威。
 - Profile sidecar namespace：通过 domain-specific `ProfileControlStore` 的单-record versioned CAS、bounded domain heads与snapshot+complete suffix，承载 ledger instance、immutable descriptor、READY/activation generation、有界 repair/delete operation、accepted loss ordering 与 distributed verifier strong completion；store version不替代semantic generation，不复制 membership，也不形成ledger-global universal hot head或无界 root blob。
 - BookKeeper quorum：entry 是否达到 ACK quorum 的权威。
-- Sequenced WAL：existing ordered Add success只推进active writer commit；LAC + validated envelope只形成reader discoverable lower bound；immutable RunSeal经domain-head single-record CAS发布后才决定predecessor sealed frontier与successor `P+1`。三者都不由derived index或单副本TailSummary替代。
 - `ArenaControlLog`：以per-Arena deterministic conditional state machine承载空间 ownership、generation、reuse 与同 Arena relocation selection；只有覆盖transition自身sequence的durable result才授予cutover/free/reuse。checkpoint 中的 current selector、anti-ABA 和未退休状态必须等价于完整 move-chain oracle，derived locator 不能决定 move winner。
 - Data Arena：Segment payload 的权威。
 - RFC-0005 Segment Bookie state：逻辑 `LedgerRouteAuthority` 与 `BookieRegistrationAuthority` 决定install/normal admission/fence、bounded recovery grant/readable facts及assignment/incarnation readiness；normal、recovery与readable不是互斥flat role，物理owner仍由Spike选择。
@@ -249,36 +223,33 @@ Cluster Lifecycle
 6. 同一 slot/extent generation 不得同时属于两个 ledger instance。
 7. `FREE` 或 generation bump 未 durable 前，空间不得复用。
 8. 旧 generation locator 永远不能读取新 generation payload。
-9. BookKeeper AQ evidence 与上层 WAL COMMITTED 分离；sequence allocation、immutable envelope与existing Add enqueue按同一admission order线性化，现有ordered success只推进连续`writerCommittedSequence`，raw Add不能绕过。
-10. LAC数字本身不是WalSequence；只有绑定run/ledger instance并验证envelope后才能形成允许滞后的`readerDiscoverableSequence`。successor ledger从predecessor durable sealed prefix `P + 1`开始；sealed prefix外AQ candidate永远不能进入WAL COMMITTED。
-11. RunSeal immutable child在被SequenceDomain head引用前保持inert；single-record versioned head CAS同时绑定predecessor seal与successor `P+1`，response loss必须重读exact head。基础正确性不依赖`E=W`、range/TailSummary fast path或单Bookie全局index。
-12. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
-13. AutoRecovery target 接收第一份 durable payload 前必须有可由 delete freeze 枚举的 RepairIntent；recovery-only/committed-readable 不授予 normal writable。
-14. 标准 ensemble membership由LedgerMetadata CAS串行；sidecar只让`DELETE_INTENT`/delete fence与RepairIntent admission等真正冲突的transition共享ledger-instance lifecycle cut。未admit intent不授予grant/payload；cut前全部admitted intent进入frozen history。admission后的repair progress/loss/receipt/completion使用owning domain head，不推进universal ledger CAS，任一中间态fail closed。
-15. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
-16. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
-17. 同一 Arena compaction 只有 durable conditional `MOVE_COMMIT` 能切换 locator authority；old free 晚于 cutover、new-pin 阻断、reader drain 与 durable generation bump，cross-Arena move 当前 unsupported。
-18. range/TailSummary/BatchRecovery fast path 的 unsupported、stale、partial 或局部预算耗尽必须从 earliest unresolved coordinate 回退；不能越过 hole，deadline/cancellation 不伪造 DATA_LOSS。
-19. offline rejoin 使用 cluster-authoritative finite stream assignment、storage incarnation、no-hole per-stream cursor 与 snapshot+complete suffix；per-ledger `deleteEpoch` 不能兼任 catch-up watermark。
-20. permanent-loss budget 只能对有完整 `F+1` distinct-domain evidence 的 bounded range reset；membership、local durability、activation 或 generic repair COMMITTED 单独都不够。
-21. verifier strong completion 必须长期绑定 exact range/context/membership、immutable Profile descriptor、当时的 `F`、failure-domain policy、control fence 和 overlapping-range predecessor；audit digest 单独不能 reset，compaction 后也不能在新 descriptor/`F` 下重解释。只要求冲突或重叠 range 的 accepted loss/completion 单序，已证明不相交的 range 不进入 ledger-global hot CAS。
-22. obligation-changing delete assignment 先 PREPARED、catch up snapshot+complete suffix，再原子 effective；安全的旧 generation 不因 PREPARED 无条件 demote，但新 generation 生效后 stale writable authority 必须失效。snapshot 必须可遍历并应用 delete effects，不能只有 digest；catch-up exemption proof 必须绑定 Bookie、old incarnation、device/storage scope、operation generation 与 cluster acceptance，不能跨 scope 重放。
-23. relocation orphan 只在 new allocation/location 未被任何 authority 依赖时回收；既存 logical success 继续由 old/current selector 承载。late `MOVE_COMMIT` 与 orphan `FREE_AND_BUMP` 由同一 Arena control order 条件互斥，cutover 不能早于覆盖该 move 自身 sequence 的 durable-through。
-24. recovery 必须区分 durable recovered close、temporary deferred、attempt incomplete、quarantine/authority-unrecoverable 与 required-coordinate evidence exhausted；authority loss、timeout、offline 或 speculative suffix 不得伪造 payload `DATA_LOSS`，open-ledger normal tail 需要 fenced exact write-set 的 quorum-intersection absence proof。
-25. sidecar store version与semantic generation分离；child/page只有被exact instance/domain head条件化发布后才有authority。compaction authority是committed snapshot+complete bounded suffix，publish/fallback proof先于reclaim；referenced unknown mandatory state、missing chunk或gap必须fail closed，普通Add不依赖sidecar读写。
-26. per-Arena conditional predicate对committed/applied state原子求值，condition failure无effect，duplicate operation不能产生第二winner；durable result覆盖自身sequence。selector publish与block-new-old-pin形成同一cut，cut后stale locator不能取得old pin。
-27. local route claim早于payload/handle lazy create；fence先关闭new admission并终结pre-cut Add，stale admission generation不能成功。tombstone原子收窄该instance的normal/recovery/read接受集合；registration readiness绑定incarnation、effective assignment和cursor/snapshot cut，不成为per-Add lease。
-28. 只有matching durable ledger close可以投影legacy recovery `OK`；fragment/partial/skip不计ledger recovered，不清intent/marker。generic legacy rc不能抹除coordinator/admin rich outcome，AutoRecovery按rich class调度。
-29. descriptor identity由canonical immutable safety semantics与固定长度、对对抗输入collision-resistant hash派生；CRC/checksum不能替代，hash只做identity/integrity；unknown/duplicate mandatory语义拒绝，optional neutral hint不改变接受集合。
-30. master key只作为data credential；Profile control要求non-anonymous且获授权执行exact operation/instance/target scope的authority，AuthN-only不够；secret/offline verifier不得进入公开metadata、receipt、日志、metric或exception，credential-bearing Profile transport满足manifest confidentiality/integrity。
-31. Profile normal/recovery使用distinct logical operation和mandatory wire discriminator；任何Profile bytes在受支持旧decoder上都不能形成legacy Add effect，任何失败都不Classic downgrade或双写。
-32. Bookie/storage compatibility fence必须在stock old binary mandatory pre-replay path fail-stop；Cookie optional/version、registration、new superblock/file或unknown Journal record均不能单独替代。
-33. startup按compatibility fence → required device/superblock → allocator/route/delete recovery → local readiness → registration排序；partial migration/unknown mandatory/incarnation mismatch保持non-writable。
-34. 现存Segment/Profile local success或durability-unknown authority没有完整negative proof时不得rollback old binary；format/readiness检查不进入normal Add；只有准备发送Profile operation的Profile-capable connection执行一次Profile negotiation，legacy Classic connection不承担该handshake。
-35. 当前descriptor input必须是严格canonical TLV并产生固定36-byte identity；未接受policy/capability registry时不得mint production descriptor。
-36. Profile只走独立immediate-TLS/mTLS endpoint与pool；Round 7 frame bytes在raw old-decoder Gate PASS前只属于executable test manifest。
-37. same BookieId/storage scope在stock binary pre-storage-open证据通过前保持BLOCK；失败时new BookieId/new roots/new incarnation/new credential scope fallback是当前唯一安全路径。
-38. persistent readiness CAS先于ephemeral writable registration；generation/incarnation mismatch non-writable，registration hint不替代local receipt或old-binary fence。
+9. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
+10. AutoRecovery target 接收第一份 durable payload 前必须有可由 delete freeze 枚举的 RepairIntent；recovery-only/committed-readable 不授予 normal writable。
+11. 标准 ensemble membership由LedgerMetadata CAS串行；sidecar只让`DELETE_INTENT`/delete fence与RepairIntent admission等真正冲突的transition共享ledger-instance lifecycle cut。未admit intent不授予grant/payload；cut前全部admitted intent进入frozen history。admission后的repair progress/loss/receipt/completion使用owning domain head，不推进universal ledger CAS，任一中间态fail closed。
+12. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
+13. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
+14. 同一 Arena compaction 只有 durable conditional `MOVE_COMMIT` 能切换 locator authority；old free 晚于 cutover、new-pin 阻断、reader drain 与 durable generation bump，cross-Arena move 当前 unsupported。
+15. range/TailSummary/BatchRecovery fast path 的 unsupported、stale、partial 或局部预算耗尽必须从 earliest unresolved coordinate 回退；不能越过 hole，deadline/cancellation 不伪造 DATA_LOSS。
+16. offline rejoin 使用 cluster-authoritative finite stream assignment、storage incarnation、no-hole per-stream cursor 与 snapshot+complete suffix；per-ledger `deleteEpoch` 不能兼任 catch-up watermark。
+17. permanent-loss budget 只能对有完整 `F+1` distinct-domain evidence 的 bounded range reset；membership、local durability、activation 或 generic repair COMMITTED 单独都不够。
+18. verifier strong completion 必须长期绑定 exact range/context/membership、immutable Profile descriptor、当时的 `F`、failure-domain policy、control fence 和 overlapping-range predecessor；audit digest 单独不能 reset，compaction 后也不能在新 descriptor/`F` 下重解释。只要求冲突或重叠 range 的 accepted loss/completion 单序，已证明不相交的 range 不进入 ledger-global hot CAS。
+19. obligation-changing delete assignment 先 PREPARED、catch up snapshot+complete suffix，再原子 effective；安全的旧 generation 不因 PREPARED 无条件 demote，但新 generation 生效后 stale writable authority 必须失效。snapshot 必须可遍历并应用 delete effects，不能只有 digest；catch-up exemption proof 必须绑定 Bookie、old incarnation、device/storage scope、operation generation 与 cluster acceptance，不能跨 scope 重放。
+20. relocation orphan 只在 new allocation/location 未被任何 authority 依赖时回收；既存 logical success 继续由 old/current selector 承载。late `MOVE_COMMIT` 与 orphan `FREE_AND_BUMP` 由同一 Arena control order 条件互斥，cutover 不能早于覆盖该 move 自身 sequence 的 durable-through。
+21. recovery 必须区分 durable recovered close、temporary deferred、attempt incomplete、quarantine/authority-unrecoverable 与 required-coordinate evidence exhausted；authority loss、timeout、offline 或 speculative suffix 不得伪造 payload `DATA_LOSS`，open-ledger normal tail 需要 fenced exact write-set 的 quorum-intersection absence proof。
+22. sidecar store version与semantic generation分离；child/page只有被exact instance/domain head条件化发布后才有authority。compaction authority是committed snapshot+complete bounded suffix，publish/fallback proof先于reclaim；referenced unknown mandatory state、missing chunk或gap必须fail closed，普通Add不依赖sidecar读写。
+23. per-Arena conditional predicate对committed/applied state原子求值，condition failure无effect，duplicate operation不能产生第二winner；durable result覆盖自身sequence。selector publish与block-new-old-pin形成同一cut，cut后stale locator不能取得old pin。
+24. local route claim早于payload/handle lazy create；fence先关闭new admission并终结pre-cut Add，stale admission generation不能成功。tombstone原子收窄该instance的normal/recovery/read接受集合；registration readiness绑定incarnation、effective assignment和cursor/snapshot cut，不成为per-Add lease。
+25. 只有matching durable ledger close可以投影legacy recovery `OK`；fragment/partial/skip不计ledger recovered，不清intent/marker。generic legacy rc不能抹除coordinator/admin rich outcome，AutoRecovery按rich class调度。
+26. descriptor identity由canonical immutable safety semantics与固定长度、对对抗输入collision-resistant hash派生；CRC/checksum不能替代，hash只做identity/integrity；unknown/duplicate mandatory语义拒绝，optional neutral hint不改变接受集合。
+27. master key只作为data credential；Profile control要求non-anonymous且获授权执行exact operation/instance/target scope的authority，AuthN-only不够；secret/offline verifier不得进入公开metadata、receipt、日志、metric或exception，credential-bearing Profile transport满足manifest confidentiality/integrity。
+28. Profile normal/recovery使用distinct logical operation和mandatory wire discriminator；任何Profile bytes在受支持旧decoder上都不能形成legacy Add effect，任何失败都不Classic downgrade或双写。
+29. Bookie/storage compatibility fence必须在stock old binary mandatory pre-replay path fail-stop；Cookie optional/version、registration、new superblock/file或unknown Journal record均不能单独替代。
+30. startup按compatibility fence → required device/superblock → allocator/route/delete recovery → local readiness → registration排序；partial migration/unknown mandatory/incarnation mismatch保持non-writable。
+31. 现存Segment/Profile local success或durability-unknown authority没有完整negative proof时不得rollback old binary；format/readiness检查不进入normal Add；只有准备发送Profile operation的Profile-capable connection执行一次Profile negotiation，legacy Classic connection不承担该handshake。
+32. 当前descriptor input必须是严格canonical TLV并产生固定36-byte identity；未接受policy/capability registry时不得mint production descriptor。
+33. Profile只走独立immediate-TLS/mTLS endpoint与pool；Round 7 frame bytes在raw old-decoder Gate PASS前只属于executable test manifest。
+34. same BookieId/storage scope在stock binary pre-storage-open证据通过前保持BLOCK；失败时new BookieId/new roots/new incarnation/new credential scope fallback是当前唯一安全路径。
+35. persistent readiness CAS先于ephemeral writable registration；generation/incarnation mismatch non-writable，registration hint不替代local receipt或old-binary fence。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
 
@@ -293,7 +264,6 @@ Cluster Lifecycle
 | 模型 | 范围 |
 | --- | --- |
 | Model A | BookKeeper E/W/A、write-set rotation、sidecar child/head/snapshot+suffix、store-version/instance ABA、descriptor/auth/wire compatibility abstraction、local route/admission/fence、install/activation、legacy routing、AQ、LAC、ensemble change、failure-domain loss、strong verifier completion 与 bounded receipt compaction |
-| Model B | sequence、appendId、ordered completion、old-ledger fencing、successor ledger |
 | Model C | `ALLOC/DATA/DELETE/FREE/MOVE_COMMIT`、conditional apply/durable result、generation、current-selector checkpoint、orphan cleanup、selector/pin cut、old-binary/format/migration/readiness abstraction 与 power loss |
 | Model D | historical ensembles、partial delete、assignment handoff、applicable snapshot/incarnation、versioned registration readiness、offline rejoin、AutoRecovery race |
 | Model E | TailSummary、required frontier、normal-tail proof、rich outcome/legacy projection、skip/marker handling、range fallback 与一般 E/W/A point-oracle equivalence；仅在推进该能力时必需 |
@@ -303,7 +273,7 @@ Model A-D 未通过前，Segment authority 不得进入 production candidate。
 ## 10. 实施顺序
 
 ```text
-Stage 0  总体文档降级；建立五份子 RFC、三个 Spike 与逐轮 grill 记录
+Stage 0  总体文档降级；建立四份子 RFC、三个 Spike 与逐轮 grill 记录
 Stage 1  BK_CLASSIC / BK_CLASSIC_TUNED 可复现基线
 Stage 2  Round 7 exact manifest：descriptor与control interface已冻结；wire为test candidate；
          same-scope format BLOCK，new BookieId/new scope fallback已冻结
@@ -312,16 +282,15 @@ Stage 2  Round 7 exact manifest：descriptor与control interface已冻结；wire
          Spike B：Allocator/block
                   + stock old binary pre-replay fence、partial migration/rollback
          Spike C：No-object TLA+
-Stage 3  接受 RFC-0001/0002；实现 Sequenced Classic client-only
-Stage 4  DirectJournal 独立 cohort prototype；不声称一次本地 payload 写
-Stage 5  接受 RFC-0003；仅在Spike证据后进入isolated/discardable Segment shadow；
+Stage 3  DirectJournal 独立 cohort prototype；不声称一次本地 payload 写
+Stage 4  接受 RFC-0003；仅在Spike证据后进入isolated/discardable Segment shadow；
          live shadow仍需证明不污染Classic rollback cohort，Classic仍为ACK authority
-Stage 6  接受 RFC-0005；完成 normal Add/fence local authority 的必要合同；具体 Segment authority canary 仍受 canary-specific evidence 与已启用路径依赖约束，不含 recovery/delete 集成
-Stage 7  接受 RFC-0004；Streaming Range / Recovery / Delete
-Stage 8  Sequenced Segment WAL、derived index、production canary
+Stage 5  接受 RFC-0005；完成 normal Add/fence local authority 的必要合同；具体 Segment authority canary 仍受 canary-specific evidence 与已启用路径依赖约束，不含 recovery/delete 集成
+Stage 6  接受 RFC-0004；Streaming Range / Recovery / Delete
+Stage 7  完成全部 Gate、derived index 与 production canary
 ```
 
-禁止跨越依赖：Round 7 test manifest不等于stable contract；raw decoder/stock old binary Gate未通过、physical owner未闭合时，不得写入稳定wire/disk compatibility surface。isolated shadow prototype完成不等于live shadow或Segment authority，Segment authority不等于Sequenced Segment WAL或production readiness。Stage 6 ACK authority仍要求RFC-0001/0003/0005接受、Spike A/B/C实际PASS和canary-specific ACK/fence/rollback evidence。
+禁止跨越依赖：Round 7 test manifest不等于stable contract；raw decoder/stock old binary Gate未通过、physical owner未闭合时，不得写入稳定wire/disk compatibility surface。isolated shadow prototype完成不等于live shadow、Segment authority或production readiness。Stage 5 ACK authority仍要求RFC-0001/0003/0005接受、Spike A/B/C实际PASS和canary-specific ACK/fence/rollback evidence。
 
 ## 11. Gate 与证据合同
 
@@ -389,10 +358,7 @@ Segment production candidate 的最低 Gate：
 - sidecar backend adapter、exact root/child/page schema、domain sharding与hard bounds、snapshot retention/hash、immutable backlink encoding、ledgerId reuse 和 profiled metadata mutation authority；
 - principal allowlist/backend配置、Profile metadata mutation ACL、cold authority reference packing、protected local physical owner/record framing/at-rest protection、bounded grant/readable packing、future corrected SASL与跨instance key rotation；endpoint/mTLS/exact authorizer逻辑不再OPEN；
 - control tail最终字段、batch/range future body、general E/W/A exact Java/admin outcome与BKException/detailCode；Round 7 frame/HELLO/subtype只有未来显式恢复并通过raw corpus后才能晋升stable，当前执行延期且不再作为任意设计空间；
-- Sequenced WAL admission linearization 的 exact Java/internal seam、control entry排序/entryId/sequence consumption与inflight hard bounds；语义上的sequence/envelope/Add入队同序及复用existing ordered callback已锁定，不预设修改`PendingAddOp`；
-- RunSeal immutable child与SequenceDomain head的exact schema/path/hard bound、recovery authority租约、active reader freshness/explicit LAC policy；三种frontier分工、inert child + single-record head CAS与successor `P+1`已锁定；
-- appendId suppressed identity table的evidence predicate、partial/complete coverage、retry、retention/horizon、overflow/compaction与run删除后的conflict window；没有durable identity的reservation不能获得权威`ABORTED_SUPPRESSED`；
-- production exact E/W/A/failure-domain/capability组合，以及`E>W`下local validation/index coverage；基础point recovery不要求`E=W`，general range/TailSummary fast path仍由RFC-0004和Model E阻塞；
+- production exact E/W/A/failure-domain/capability组合，以及`E>W`下local validation/index coverage；general range/TailSummary fast path仍由RFC-0004和Model E阻塞；
 - `ArenaControlLog` conditional transition/result exact API、sequencer/queue/batch bounds、segment、checkpoint A/B、selector/pin同步、current-selector/retiring-state packing、superblock 切换、`MOVE_COMMIT` encoding/orphan GC 与设备失败判定；
 - RFC-0005 logical state的physical owner/exact durable packing；same-scope old-binary-visible fence当前BLOCK且`BKPF1`仅candidate；Cookie/superblock/device-manifest exact bytes、minimum reader/writer、migration/reverse/wipe tooling与persistent readiness backend adapter；new BookieId/new scope fallback语义不再OPEN；
 - shared slab 的 lifetime class、compaction policy 和 hot promotion threshold；
@@ -409,9 +375,8 @@ Segment production candidate 的最低 Gate：
 
 - 固定 stock `BK_CLASSIC` benchmark；
 - 对 `BK_CLASSIC_TUNED` 做不改变 on-disk/wire semantics 的调优；
-- 继续逐轮评审五份子 RFC；
+- 继续逐轮评审四份子 RFC；
 - 实现Spike A/B/C的manifest-locked harness/Model，并在锁定环境和停止条件后执行；
-- Model B必须显式覆盖admission重排、writer/discoverable/sealed三种frontier、partial suppressed identity、RunSeal/head response loss，以及3/3/2、3/3/3、3/2/2和一般`E>W` point-recovery结构；
 - 实现`ProfileDescriptor` reference codec、golden corpus与独立verifier；不能分配未接受的policy/capability业务ID；
 - 实现独立immediate-TLS/mTLS endpoint、exact-scope authorizer、cold authority adapter、protected-state语义接口与redaction的隔离prototype；
 - 保留已实现的Round 7 frame/HELLO/status experimental codec、610-vector corpus与冻结反例；raw old-decoder/stock-binary执行延期，不发布stable compatibility；
@@ -424,9 +389,7 @@ Segment production candidate 的最低 Gate：
 - Segment WAL ACK authority实现、live Stage 5 promotion或authority切换；
 - 在raw decoder/stock old binary Gates、policy/capability registry、local physical owner与control tail闭合前提交stable wire/on-disk兼容面，或让shadow污染可rollback Classic cohort；
 - 把 per-ledger minimum 8 MiB extent 当作不变量；
-- 在旧 Bookie 上实现 same-ledger epoch takeover；
 - 将本地 delete success 当作全物理删除完成；
 - 把 BtrLog 模型结果当作本方案的形式化证明；
-- 将 `DEFERRED_SYNC_LEGACY` 与当前 Sequenced WAL 自动 failover 组合。
 
 本文的下一次状态提升，必须引用被接受的子 RFC、Spike immutable artifacts 和完整 Gate receipts。

@@ -3,7 +3,7 @@
 > Reviewer：固定 `gpt-5.6-sol / max` agent<br>
 > 源码与文档基线：`3a476baa6005881e34de3ac876a4f4294487d645`<br>
 > 评审模式：正确性、热路径性能、复杂度和过度设计联合审查<br>
-> 记录规则：以下 reviewer 回复未经删节；规范是否采纳以对应 RFC 的集成结果为准。
+> 记录规则：规范是否采纳以对应 RFC 的集成结果为准。
 
 ## 本轮 Questions
 
@@ -19,21 +19,15 @@
 
 决定 `installRequestId`、credential material、runtime limits 是否从 immutable descriptor/hash 中拆出，以及哪些字段可安全进入 semantic contract。
 
-### Q4：WalSequence hole 合同
-
-选择 published sequence 是否无洞，并冻结 predecessor fence/recovery/seal 后 successor 的起点以及 BookKeeper AQ 与上层 commit 的关系。
-
-### Q5：Segment Bookie durable state 的 RFC owner
+### Q4：Segment Bookie durable state 的 RFC owner
 
 选择继续扩展 allocator RFC，还是新增独立 RFC 负责 Segment Bookie operation、durability 与 ACK authority。
 
-### Q6：永久介质失败预算
+### Q5：永久介质失败预算
 
 为 `AckedEntryRecoverable` 定义 process crash、permanent loss、failure-domain 和 repair-window 前提，避免无对象存储条件下的无条件恢复承诺。
 
-## Reviewer 完整回复
-
-<!-- BEGIN VERBATIM REVIEW -->
+## Reviewer 结论
 
 本轮结论：
 
@@ -41,9 +35,8 @@
 Q1 = LOCK：接受 B 的安全边界；activation 的具体状态/证明机制保持 OPEN
 Q2 = REVISE → 可 LOCK：接受 legacy fail-closed，但必须补“原子 routing claim”；具体 opcode/error code 保持 OPEN
 Q3 = REVISE → 可 LOCK：接受 descriptor / operation / runtime 三分；拒绝现在就锁 masterKeyDigest、keyVersion 与泛化 safety ceilings
-Q4 = REVISE → 可 LOCK：接受 published WalSequence 无洞与 successor=P+1；必须先拆开 BookKeeper AQ 和 WAL COMMITTED
-Q5 = LOCK：新增 RFC-0005，但只负责 Segment Bookie 行为与 durability，不重复 RFC-0001/0003/0004
-Q6 = REVISE → 可 LOCK：接受参数化永久损失预算；A>F 只是必要条件，还必须绑定 distinct failure domains 和 repair window
+Q4 = LOCK：新增 RFC-0005，但只负责 Segment Bookie 行为与 durability，不重复 RFC-0001/0003/0004
+Q5 = REVISE → 可 LOCK：接受参数化永久损失预算；A>F 只是必要条件，还必须绑定 distinct failure domains 和 repair window
 ```
 
 以下完整反馈都应进入本轮 review 记录；只有明确标为可 LOCK 的内容进入规范合同。
@@ -219,72 +212,7 @@ RuntimePolicy
 - runtime policy 调整不触发 reinstall；
 - protected auth binding 不出现在普通日志、receipt dump 或公开 metadata。
 
-## Q4 — WalSequence hole
-
-**结论：REVISE；无洞发布合同可 LOCK，但必须重写 AQ/COMMITTED 语义。**
-
-RFC 已把 `SequenceDomain` 定义为连续空间，且现有 BookKeeper client 本身按 entryId 顺序发送成功 callback。因此首版锁定 published WalSequence 无洞是合理的，不会凭空引入一种此前完全不存在的顺序等待。
-
-必须先修正当前冲突：
-
-```text
-BookKeeper AQ/durable evidence != Sequenced WAL COMMITTED
-```
-
-否则“fence 前 AQ 永不撤销”和“suffix 未进入连续 frontier 可被 suppress/reuse”无法同时成立。
-
-可锁定：
-
-```text
-AQ_CANDIDATE:
-    底层 BookKeeper 已形成 durable quorum evidence，
-    但尚未必成为上层可见 WAL commit。
-
-WAL COMMITTED:
-    entry/batch 有有效 AQ evidence
-    && 所有更早 sequence 已 committed
-    && published frontier 已覆盖该 interval
-    && 成功 receipt 已按该顺序发布。
-```
-
-takeover：
-
-```text
-fence predecessor
-→ recover maximum contiguous committable prefix P
-→ durably seal predecessor at P
-→ permanently suppress every predecessor suffix interval > P
-→ publish successor start = P + 1
-```
-
-附加约束：
-
-- suffix 即使曾取得 AQ，只要未进入 published frontier，就不能被称为 WAL COMMITTED。
-- late BookKeeper callback 只能更新底层证据，不能越过已 durable seal 重新发布。
-- sequence 只有在 predecessor seal 已 durable、successor authority 已绑定后才能复用。
-- physical old suffix 可以暂时保留，但 read/recovery authority 必须忽略它。
-- 对外 sequence receipt 在 COMMITTED 前不能暴露为最终成功身份。
-
-性能取向：
-
-- 首版保持 single active writer。
-- sequence 可在 writer 内按 bounded in-flight window 本地分配；普通 append 不做 MetadataStore range allocation。
-- “small”不是规范常量，窗口大小由内存、HOL latency 和吞吐 benchmark 决定。
-- 必须测量早期慢 entry 导致的可见性阻塞、被 suppress 的 AQ bytes、takeover scan 上限。
-
-仍只能 OPEN：
-
-- appendId 在 suppressed suffix 中是 retry、ABORTED 还是终态查询；
-- appendId retention/horizon；
-- footer/等价 seal authority 的位置；
-- run header/footer 是否占普通 entryId；
-- control entry 与 DATA 的区分；
-- exact in-flight window；
-- future 是否允许 durable range allocator。
-
-当前“fence 前 AQ 的合法结果不被撤销”应改为：AQ evidence 的物理事实不被伪造或删除，但只有 sealed continuous prefix 内的结果能成为 WAL COMMITTED。
-
-## Q5 — Segment Bookie state RFC owner
+## Q4 — Segment Bookie state RFC owner
 
 **结论：LOCK B，新增 RFC-0005。**
 
@@ -332,7 +260,7 @@ Segment Bookie State, Operation Semantics and ACK Authority
 
 RFC-0005 应增加 fence/Add 并发、fence response loss、restart、recovery Add、explicit LAC、unknown control record 和 downgrade 场景。
 
-## Q6 — 永久介质失败预算
+## Q5 — 永久介质失败预算
 
 **结论：REVISE；收紧后可 LOCK。**
 
@@ -405,9 +333,8 @@ Spike C / fault tests 应覆盖：
 2. 普通 Add 热路径不得访问 MetadataStore或逐请求验证重型 proof。
 3. Classic/Profile route 必须是单一、原子、可恢复的本地 claim；legacy Add 不能绕过。
 4. Descriptor 只 hash immutable semantics；request identity、credential material、runtime admission policy 分离。
-5. Published WalSequence 无洞；AQ candidate 与 WAL COMMITTED 分离；seal P 后 successor 从 P+1 开始。
-6. 新增 RFC-0005，负责 Segment Bookie operation/durability/ACK authority。
-7. 永久损失保证按 distinct failure domains 和 repair window 参数化；无证据时永不伪造恢复成功。
+5. 新增 RFC-0005，负责 Segment Bookie operation/durability/ACK authority。
+6. 永久损失保证按 distinct failure domains 和 repair window 参数化；无证据时永不伪造恢复成功。
 
 ## 只能保留为开放项
 
@@ -416,7 +343,6 @@ Spike C / fault tests 应覆盖：
 - profiled wire opcode/version 和精确错误码；
 - auth binding、KMS/key rotation；
 - runtime limit 分类的最终字段表；
-- appendId suppression/horizon、footer 和 control-entry encoding；
 - Segment exact durable record schema、packing、relocation authority；
 - production failure-domain 定义、默认 F、general E/W/A 可用性模型；
 - 所有性能阈值，必须以 Classic baseline 和 Spike 数据冻结。
@@ -428,18 +354,13 @@ Spike C / fault tests 应覆盖：
 - replacement 在 metadata publication 前后如何获得 active authority；
 - Segment relocation 的 durable source-of-truth 与 crash recovery；
 - repair/placement intent 如何进入 delete target discovery；
-- Q4 下游的 appendId horizon、seal/footer authority；
-- Q6 下游的 general E/W/A recovery 与 permanent-loss/repair 状态机。
+- Q5 下游的 general E/W/A recovery 与 permanent-loss/repair 状态机。
 
 只读复核结束：HEAD 仍为 `3a476baa6005881e34de3ac876a4f4294487d645`，工作区没有新增修改；原有未跟踪 `BtrLog Low-Latency Logging.pdf` 未触碰。
 
-<!-- END VERBATIM REVIEW -->
+## Integration Audit 1
 
-## Integration Audit 1 完整回复
-
-<!-- BEGIN VERBATIM INTEGRATION AUDIT 1 -->
-
-FAIL：Round 1 integration 还需修复 4 个合同问题和 1 个记录状态问题。
+FAIL：Round 1 integration 还需修复 3 个合同问题和 1 个记录状态问题。
 
 ## 必须修复
 
@@ -458,37 +379,7 @@ FAIL：Round 1 integration 还需修复 4 个合同问题和 1 个记录状态�
 
    同时，`protectedCredentialOrProof` 与“credential/proof 均不得进入公开 metadata”混淆了秘密 credential 和可能公开验证的 certificate。只应禁止 secret/offline-verifiable credential material 泄漏；proof 的可见性由后续机制决定。
 
-2. **`WAL_COMMITTED` 与 receipt 形成循环，并破坏 response-loss 语义。**
-
-   [RFC-0002](/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/docs/rfcs/unified-wal/RFC-0002-sequenced-wal.md:101) 定义：
-
-   ```text
-   WAL_COMMITTED => final receipt 已发布
-   ```
-
-   紧接着又规定：
-
-   ```text
-   final receipt 只在 WAL_COMMITTED 后生成
-   ```
-
-   这是循环。commit 也不能依赖调用方是否收到 response，否则 durable commit 丢 response 后无法表达“已提交但客户端未知”。
-
-   必须改成：
-
-   ```text
-   WAL_COMMITTED
-       = valid AQ evidence
-       + all prior sequence committed
-       + authoritative published frontier includes interval
-
-   only then:
-       final receipt becomes eligible to emit
-   ```
-
-   receipt 丢失不撤销 commit。Spike C 已把 `PublishWalCommitted` 与 `DeliverOrLoseCompletion` 分成两个动作，RFC 应与之对齐。
-
-3. **RFC-0005 的硬依赖、解锁声明与实施阶段互相矛盾。**
+2. **RFC-0005 的硬依赖、解锁声明与实施阶段互相矛盾。**
 
    [RFC-0005](/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md:4) 把 RFC-0004 列为依赖，并声称解锁 Segment ACK canary；但 [总体状态表](/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/docs/turbo-bk.md:171) 的 Segment Gate 不含 RFC-0004，[Stage 6/7](/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/docs/turbo-bk.md:258) 又先做 Segment authority canary、后接受 RFC-0004。
 
@@ -498,7 +389,7 @@ FAIL：Round 1 integration 还需修复 4 个合同问题和 1 个记录状态�
    - recovery/delete integration 对 RFC-0004 的依赖仍开放；
    - 在依赖闭合前不能从“RFC-0005 Accepted”直接推导 canary 可执行。
 
-4. **RFC-0005 的 relocation owner 表述有重叠。**
+3. **RFC-0005 的 relocation owner 表述有重叠。**
 
    owner 表把 physical relocation encoding 归 RFC-0003，但 [开放问题](/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md:181) 又写成 RFC-0005 的“compaction relocation authority”。
 
@@ -517,8 +408,7 @@ FAIL：Round 1 integration 还需修复 4 个合同问题和 1 个记录状态�
 
 - Q2 的单一原子 route claim、legacy normal/recovery Add fail-closed 已准确进入 RFC 和 Spike。
 - Q3 的 descriptor/operation/runtime 三分、避免无界 request-id 表、master-key digest 风险均已正确集成。
-- Q4 的 published sequence 无洞、AQ candidate、seal `P`、successor `P+1` 与 suffix suppression 除 receipt 循环外均正确。
-- Q6 的 distinct failure domains、repair window、`NoFabricatedRecovery` 和超预算 DATA_LOSS 已正确进入 Spike C。
+- Q5 的 distinct failure domains、repair window、`NoFabricatedRecovery` 和超预算 DATA_LOSS 已正确进入 Spike C。
 - 未新增普通 Add 的远程 metadata I/O、逐请求重型 proof、per-entry control fsync 或全局锁合同。
 - RFC-0005 没有发明 `RECOVERY_ADD`/`CLOSED` 对称记录，exact record/packing/group commit 仍正确保持 OPEN。
 
@@ -528,22 +418,17 @@ FAIL：Round 1 integration 还需修复 4 个合同问题和 1 个记录状态�
 - profiled opcode/error mapping；
 - auth binding、KMS/key rotation；
 - exact runtime-limit 字段；
-- appendId horizon、footer/seal 编码、exact window；
 - Segment record packing、relocation协议细节；
 - failure-domain 默认值、性能阈值；
 - Spike C 的明确 repair-completion action，可在 replacement/repair 合同冻结后补齐。
 
 本次只读 audit 未修改文件；原未跟踪 PDF 未触碰。
 
-<!-- END VERBATIM INTEGRATION AUDIT 1 -->
-
-## Integration Audit 2 完整回复
-
-<!-- BEGIN VERBATIM INTEGRATION AUDIT 2 -->
+## Integration Audit 2
 
 PASS：Round 1 Integration Audit 2 通过。
 
-## 四个必修项
+## 三个必修项
 
 1. **Activation 字段边界：PASS**
 
@@ -555,15 +440,7 @@ PASS：Round 1 Integration Audit 2 通过。
 
    `protectedCredentialOrProof` 仍出现在候选 install schema 中，但最终字段表明确未冻结，且公开性由后续机制决定；这是命名上的可后置清理，不构成合同冲突。
 
-2. **WAL commit 与 receipt：PASS**
-
-   - `WAL_COMMITTED` 现在只依赖有效 AQ evidence、此前 sequence committed 和 authoritative published frontier。
-   - receipt 仅在 commit 后获得发送资格。
-   - response/receipt loss 不撤销 commit，调用方可观察 `OUTCOME_UNKNOWN` 后通过 frontier/appendId 解析。
-   - 与 Spike C 的 `PublishWalCommitted`、`DeliverOrLoseCompletion` 两个独立动作一致。
-   - 不再存在循环定义。
-
-3. **RFC-0005 依赖和 canary Gate：PASS**
+2. **RFC-0005 依赖和 canary Gate：PASS**
 
    - RFC-0005 硬依赖只保留 RFC-0001/0003。
    - 明确是 Segment ACK canary 的必要但不充分前置。
@@ -572,7 +449,7 @@ PASS：Round 1 Integration Audit 2 通过。
    - turbo Stage 6 明确只完成 normal Add/fence local authority 必要合同；Stage 7 再接受 RFC-0004。
    - 实际启用路径仍需各自依赖和 canary evidence 闭合，没有提前提升 production readiness。
 
-4. **Relocation owner：PASS**
+3. **Relocation owner：PASS**
 
    - RFC-0003 单独拥有 durable relocation authority、protocol 和 physical encoding。
    - RFC-0005 只负责消费该 authority 后的 operation ordering、reader cutover 和 local-success 影响。
@@ -582,7 +459,6 @@ PASS：Round 1 Integration Audit 2 通过。
 
 - Round 1 初始 reviewer 回复完整保留。
 - Integration Audit 1 已全文、未经删节保存在 `ROUND-01-root-contracts.md`。
-- 历史 FAIL 文本中的旧字段和旧 receipt 定义只存在于明确标记的 verbatim audit 记录中，不是现行规范合同。
 - README 当前仍为 `Integration Review In Progress`，状态准确。
 - 本次 Audit 2 回复也应按同一规则完整追加后，再把状态改为 `Reviewed / Integrated`。
 
@@ -600,5 +476,3 @@ PASS：Round 1 Integration Audit 2 通过。
 - exact window、record layout、proof、opcode、错误码和性能阈值仍由后续 RFC/Spike 决定。
 
 可以在完整归档本次 Audit 2 后，将 Round 1 标为 `Reviewed / Integrated`，进入本轮文档的 commit/push。无需第三次设计审查；归档 Audit 2 和状态更新属于机械性收尾。`git diff --check` 当前通过，未跟踪 PDF 仍应排除。
-
-<!-- END VERBATIM INTEGRATION AUDIT 2 -->

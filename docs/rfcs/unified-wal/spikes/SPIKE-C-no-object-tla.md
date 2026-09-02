@@ -1,7 +1,7 @@
 # Spike C：无对象存储 TLA+ 安全模型否证规范
 
 > 状态：**Planned / Not Executed**<br>
-> 对应 RFC：[RFC-0001](../RFC-0001-profile-capability-install.md)、[RFC-0002](../RFC-0002-sequenced-wal.md)、[RFC-0003](../RFC-0003-segment-storage-allocator.md)、[RFC-0004](../RFC-0004-range-recovery-delete.md)、[RFC-0005](../RFC-0005-segment-bookie-state.md)<br>
+> 对应 RFC：[RFC-0001](../RFC-0001-profile-capability-install.md)、[RFC-0003](../RFC-0003-segment-storage-allocator.md)、[RFC-0004](../RFC-0004-range-recovery-delete.md)、[RFC-0005](../RFC-0005-segment-bookie-state.md)<br>
 > 性质：有界安全模型检查；PASS 不等于无限状态证明或生产就绪
 
 ## 1. 要回答的问题
@@ -9,7 +9,6 @@
 本 Spike 建立不依赖对象存储/blob store 的独立 TLA+ 模型，尝试在以下并发和故障下寻找 safety counterexample：
 
 - BookKeeper E/W/A、write-set rotation、fencing 和 ensemble change；
-- Sequenced Classic 两 writer、response loss、recovery 和 successor ledger；
 - allocator `ALLOC/DATA/DELETE/FREE/generation/checkpoint`；
 - historical ensemble delete、offline Bookie 和 rejoin barrier。
 
@@ -77,7 +76,6 @@ artifact output directory
 ```text
 UnifiedWalTypes.tla
 BookKeeperCore.tla          Model A
-SequencedClassic.tla        Model B
 SegmentAllocator.tla        Model C
 ClusterDelete.tla           Model D
 GeneralEwaRecovery.tla      Model E, optional until feature advances
@@ -85,7 +83,7 @@ GeneralEwaRecovery.tla      Model E, optional until feature advances
 
 共享类型模块只定义集合、record shape 和纯函数，不把任一子模型的 safety 结论当作另一个模型的假设。
 
-组合模型至少需要一次把 A+B、A+C 和 C+D 的关键边界共同展开，避免接口假设各自成立但组合后矛盾。
+组合模型至少需要一次把 A+C 和 C+D 的关键边界共同展开，避免接口假设各自成立但组合后矛盾。
 
 ## 5. Model A：BookKeeper Core
 
@@ -238,64 +236,9 @@ Model只抽象上述boolean/generation关系，不编码TLS、SHA-256、TLV byte
 
 repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、digest存在但verifier未完成、descriptor/`F`变化后重解释旧assertion、closed range无`NORMAL_ACTIVE`的合法reset、current target active但历史range不完整、`E > W` per-entry write-set coverage、duplicate loss、loss/completion两种先后、unobserved failure after proof cut、disjoint并发、overlapping stale completion、small-range merge、snapshot publish/response loss/child reclaim、delete freeze和root/page cap超限。sidecar falsification 另覆盖 child-before-head crash、head CAS conflict、snapshot build期间head推进、fallback损坏、store-version reset/instance reuse、unknown mandatory referenced record与normal Add期间sidecar不可用。
 
-## 6. Model B：Sequenced Classic
+## 6. Model C：Segment Allocator
 
 ### 6.1 最小状态
-
-```text
-SequenceDomain and reservations
-run/predecessor/successor metadata
-writer epochs and local caches
-appendId -> payload digest
-inflight Adds, AQ candidates and completion order
-admission linearization and entryId/sequence order
-predecessor fence/recovery/seal state
-writer committed frontier
-reader discoverable LAC/envelope frontier
-authoritative RunSeal/domain-head frontier
-partial/complete suppressed identity coverage
-E/W/A write-set rotation and local observation scope
-```
-
-### 6.2 最小动作
-
-```text
-AcquireInflightCredit
-LinearizeSequenceEnvelopeAndAddAdmission
-ReachAQ
-AdvanceOrderedWriterCommitted
-AdvanceOrLagReaderDiscoverable
-DeliverOrLoseCompletion
-CompeteForRecoveryAuthority
-FencePredecessor
-RecoverMaximumPrefix
-CreateInertRunSeal
-CreateSuccessor
-PublishRunSealAndSuccessorActive
-RetryAppendId
-CrashWriter
-```
-
-### 6.3 检查目标
-
-- sequence interval 不重叠；
-- admission order、entryId order 与 sequence order 一致，raw Add不能绕过；
-- ordered frontier 不越过 hole；
-- writer committed、reader discoverable 与sealed authority互不冒充；
-- 相同 appendId 不绑定两个 payload；
-- partial suppressed table 的 absence 不产生权威终态，从未 durable 的 reservation 不伪造`ABORTED_SUPPRESSED`；
-- 已形成的 AQ evidence 不被伪造或抹除，但 sealed prefix 外 candidate 不成为 WAL COMMITTED；
-- successor ACTIVE 后 predecessor sealed prefix 外的数据不再发布；
-- successor 从 durable sealed prefix `P + 1` 开始；
-- 两 writer 竞争不产生两个 ACTIVE successor；
-- old Bookie 模式不假设 server 读取 epoch；
-- 基础point recovery在3/3/2、3/3/3、3/2/2和一般`E > W`结构下与sequence oracle一致，不依赖range/TailSummary fast path或单副本全局index。
-
-模型中禁止 `SameLedgerEpochTakeover` 动作。若加入 `EPOCH_AWARE_ADD`，必须直接修改当前 capability set 与本模型，不创建并行代际 variant。
-
-## 7. Model C：Segment Allocator
-
-### 7.1 最小状态
 
 ```text
 slots/extents and generations
@@ -320,7 +263,7 @@ new-location lookup/local-success authority dependency
 device state
 ```
 
-### 7.2 最小动作
+### 6.2 最小动作
 
 ```text
 AppendAlloc
@@ -361,7 +304,7 @@ RetryLateMoveCommit
 PublishDurableThrough
 ```
 
-### 7.3 检查目标
+### 6.3 检查目标
 
 - local success 隐含 durable allocation 和 durable data；
 - slot/generation 唯一 owner；
@@ -381,9 +324,9 @@ PublishDurableThrough
 
 shared slab 可先用一个 block 包含两个 ledger 的最小域建模；dedicated extent 用单 owner block 建模。不能只建模 dedicated extent 后宣称覆盖 shared delete。
 
-## 8. Model D：Cluster Delete
+## 7. Model D：Cluster Delete
 
-### 8.1 最小状态
+### 7.1 最小状态
 
 ```text
 ledger metadata and version
@@ -413,7 +356,7 @@ logical and physical completion
 ledger instances
 ```
 
-### 8.2 最小动作
+### 7.2 最小动作
 
 ```text
 BeginDeleteIntent
@@ -459,7 +402,7 @@ ReuseLedgerIdWithNewInstance
 
 组合A+D时，Model A的`LoseResponse`参数化覆盖`AdmitRepairIntentAgainstDeleteFence`：分别展开admission已durable但response丢失、admission未提交而delete先赢，以及coordinator restart后以同一operation/payload重读重试；不另建第二套事务状态机。
 
-### 8.3 检查目标
+### 7.3 检查目标
 
 - logical delete 后旧 instance 不再 open；
 - unadmitted RepairIntent child不授予recovery grant或第一份payload authority；
@@ -483,11 +426,11 @@ ReuseLedgerIdWithNewInstance
 - 旧 instance delete 不影响新 instance；
 - tombstone compact 不允许极晚 rejoin 复活旧数据。
 
-## 9. Model E：General E/W/A Recovery
+## 8. Model E：General E/W/A Recovery
 
 Model E 只在推进 general E/W/A range optimization 时启用，但一旦启用必须把 fast path 与现有 point-read oracle 放入同一模型，不能只证明新路径自己的内部一致性。
 
-### 9.1 最小状态
+### 8.1 最小状态
 
 ```text
 immutable RecoveryContext and authority generation
@@ -510,7 +453,7 @@ published close/final prefix
 authority-unrecoverable reason
 ```
 
-### 9.2 最小动作
+### 8.2 最小动作
 
 ```text
 ReadTailSummary
@@ -536,7 +479,7 @@ DeclareAuthorityUnrecoverable
 DeferUnavailableRecovery
 ```
 
-### 9.3 检查目标
+### 8.3 检查目标
 
 - unsupported、stale summary、partial response 与 fast budget exhaustion 从 earliest unresolved coordinate fallback；
 - hole 阻止 frontier，即使 later entry 已验证；
@@ -553,7 +496,7 @@ DeferUnavailableRecovery
 - fast path + fallback 的最终结果与全 point-read oracle 完全一致；
 - proof cache、point-read 并发与内存保持 manifest-locked bounded。
 
-## 10. 核心不变量
+## 9. 核心不变量
 
 规范中使用可执行 predicate 表达，至少包括：
 
@@ -605,10 +548,6 @@ LocalTargetDurabilityAloneNeverResetsLossBudget
 LossAfterProofCountsAgainstNewWindow
 ClosedRepairResetDoesNotRequireNormalActive
 CurrentNormalWritesRequirePostCasNormalActive
-NoOverlappingPublishedSequence
-AppendIdContentUnique
-OrderedFrontierIsContiguous
-NoPostSealPublicationOutsideRecoveredPrefix
 AllocationDurableBeforeLocalSuccess
 OneOwnerPerSlotGeneration
 NoReuseBeforeDurableGenerationBump
@@ -695,7 +634,6 @@ RichOutcomeSurvivesGenericProjection
 - checkpoint current selector等价full chain；orphan free不删除logical entry在current selector承载的既存success；
 - conditional failure无effect；durable result覆盖自身sequence，duplicate op只有一个result；selector cut后不能取得new old-location pin；
 - `OldBinaryBlocked`或isolated-new-scope fallback必须先于任何Segment effect；`FormatCompatible`或`RegistrationGenerationMatches`为false时不writable，缺少negative proof不能rollback；
-- takeover ACTIVE 后旧 writer 不能把 sealed prefix 外数据发布为成功；
 - recovery 只发布最大连续可证明前缀；
 - logical delete 后不能重新 open；
 - unadmitted RepairIntent不授予grant/payload；delete fence与admission单序，cut前admitted intent全部freeze；admission response loss不复制intent/target，后续repair progress只推进owning domain head；
@@ -704,7 +642,7 @@ RichOutcomeSurvivesGenericProjection
 - recovered success蕴含同generation durable close/final-prefix publication。
 - legacy `OK`蕴含matching durable recovered close；skip不产生recovery authority，generic projection不丢coordinator/admin rich outcome。
 
-## 11. 最低配置矩阵
+## 10. 最低配置矩阵
 
 每个适用模型必须覆盖的最小结构：
 
@@ -767,7 +705,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 
 正式运行前可增加 config，不得删除最低结构。
 
-## 12. 状态空间控制规则
+## 11. 状态空间控制规则
 
 允许：
 
@@ -790,7 +728,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 
 如果状态空间过大，应先缩小数据域但保留协议结构。仍无法 complete 的 config 标为 INCONCLUSIVE，并提供覆盖与资源证据；不能直接排除后宣称 PASS。
 
-## 13. Fairness 与 liveness
+## 12. Fairness 与 liveness
 
 首要 Gate 是 safety。可额外检查以下有界进展属性：
 
@@ -802,7 +740,7 @@ fairness assumptions 必须逐条记录。liveness 未完成不影响 safety cou
 
 `AckedPayloadSurvivesWithinBudget` 只证明 payload evidence survival，不证明继续写可用性、read quorum 可用性、metadata/auth authority 生存或 general E/W/A recovery liveness。超过 failure-domain 预算只终止 survival 保证，不自动证明 payload 丢失；只有 required-coordinate evidence 确定性耗尽后的 `DATA_LOSS` 才是明确 terminal state。没有证据却返回恢复成功仍是 safety violation。
 
-## 14. Trace 对齐
+## 13. Trace 对齐
 
 每个模型 action 应映射到候选实现事件名和测试 fault point。至少产出：
 
@@ -816,7 +754,7 @@ fault injection hook
 
 这样 counterexample 才能转成 Spike A/B 或集成测试，而不是停留在抽象 trace。
 
-## 15. 硬 Gate
+## 14. 硬 Gate
 
 PASS 必须同时满足：
 
@@ -840,7 +778,7 @@ old-binary/migration/readiness invariant violations = 0
 
 覆盖统计至少包含 generated states、distinct states、queue depth、diameter、runtime、worker count 和 peak memory。
 
-## 16. 立即停止条件
+## 15. 立即停止条件
 
 任一 safety invariant 出现 counterexample：
 
@@ -853,7 +791,7 @@ old-binary/migration/readiness invariant violations = 0
 
 checker internal error、OOM、timeout 或 incomplete exploration 是 INCONCLUSIVE，不是 PASS。
 
-## 17. 必交 artifacts
+## 16. 必交 artifacts
 
 ```text
 manifest.json
@@ -877,7 +815,7 @@ README.md
 - 是否有 counterexample；
 - 与 BtrLog 模型的差异，特别是本模型没有 blob store。
 
-## 18. 结果解释
+## 17. 结果解释
 
 - PASS：在锁定的有界配置中未找到 counterexample，可支持 RFC 继续接受评审。
 - FAIL：至少一个真实 counterexample；相关 RFC/Segment 路径保持 P0 Blocked。

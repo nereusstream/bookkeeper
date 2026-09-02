@@ -191,7 +191,7 @@ durability mode
 quorum contract or binding to immutable E/W/A semantics
 permanent-loss budget F
 failure-domain policy identity/generation
-required index/sequence/recovery/delete semantics
+required index/recovery/delete semantics
 other fields whose difference changes:
   - legal payload interpretation
   - ACK eligibility

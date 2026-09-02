@@ -580,7 +580,6 @@ cross-Arena/device relocation 继续明确 unsupported / OPEN。
 - fenced RecoveryContext 下 quorum/coverage-proven LAC 及此前连续 prefix；
 - ensemble change 前已冻结的 historical fragment；
 - accepted durable AQ/ACK/recovery completion authority；
-- RFC-0002 将来接受的 ordered committed frontier；
 - 其他明确进入 Profile contract 的 durable publication。
 
 以下事实单独不够：
@@ -1166,7 +1165,6 @@ Required frontier 已正确限定为 accepted durable authority：
 - fenced context下 quorum/coverage-proven LAC及连续prefix；
 - frozen historical fragment；
 - accepted ACK/AQ/repair completion；
-- 未来接受的 ordered committed frontier。
 
 以下均没有被误提升为 required：
 

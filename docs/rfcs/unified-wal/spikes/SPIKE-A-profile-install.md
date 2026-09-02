@@ -23,7 +23,6 @@
 
 - 不测 Segment payload 性能；
 - 不把Round 7 executable frame/control-tail candidate提前声明为stable production wire，也不决定on-disk local authority layout；
-- 不实现 Sequenced takeover；
 - 不证明 general E/W/A recovery；
 - 不把 happy-path demo 当作 RFC acceptance。
 

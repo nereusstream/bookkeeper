@@ -31,7 +31,6 @@
 本 RFC 不负责：
 
 - Profile 创建和 ensemble install，见 [RFC-0001](RFC-0001-profile-capability-install.md)；
-- sequence takeover，见 [RFC-0002](RFC-0002-sequenced-wal.md)；
 - 集群删除授权和离线 Bookie，见 [RFC-0004](RFC-0004-range-recovery-delete.md)；
 - Segment Bookie 的 activation、fence、explicit LAC、recovery Add 与 ACK authority，见 [RFC-0005](RFC-0005-segment-bookie-state.md)；
 - BookKeeper ensemble change 或 AutoRecovery 的总体协议。

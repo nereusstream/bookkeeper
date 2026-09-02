@@ -29,7 +29,6 @@
 
 本 RFC 不负责：
 
-- Sequence run takeover，见 [RFC-0002](RFC-0002-sequenced-wal.md)；
 - Segment 本地 generation/free，见 [RFC-0003](RFC-0003-segment-storage-allocator.md)；
 - Profile install wire details，见 [RFC-0001](RFC-0001-profile-capability-install.md)。
 
@@ -167,15 +166,6 @@ EntryTailSummary {
     checksum
 }
 
-SequenceTailSummary {
-    sequenceDomainId
-    runId
-    ledgerInstanceId
-    localLastSequence
-    contiguousSequenceFrontier
-    indexGeneration
-    checksum
-}
 ```
 
 TailSummary 的定位：
@@ -239,7 +229,7 @@ continuation、bitmap 和 proof cache 默认可以是 bounded volatile state。c
 
 ### 7.3 Required frontier、normal tail 与 outcome taxonomy
 
-RecoveryContext 必须先从 accepted durable authority 推导 required coordinate。至少包括：CLOSED metadata 的 `[0,lastEntryId]`、fenced context 下 quorum/coverage-proven LAC 及此前连续 prefix、冻结的 historical fragment、accepted ACK/AQ/repair-completion authority，以及未来被接受的 ordered committed frontier。client pending Add、`lastAddPushed`、单副本 payload、TailSummary maximum、speculative range result 或 later payload 单独都不构成 required authority。
+RecoveryContext 必须先从 accepted durable authority 推导 required coordinate。至少包括：CLOSED metadata 的 `[0,lastEntryId]`、fenced context 下 quorum/coverage-proven LAC 及此前连续 prefix、冻结的 historical fragment，以及 accepted ACK/AQ/repair-completion authority。client pending Add、`lastAddPushed`、单副本 payload、TailSummary maximum、speculative range result 或 later payload 单独都不构成 required authority。
 
 open-ledger recovery 的首个 missing coordinate `x` 只有同时满足以下条件，才能证明 normal tail `P=x-1`：
 

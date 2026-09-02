@@ -2,7 +2,7 @@
 
 > 状态：**Proposed / P0 Prerequisite**<br>
 > 依赖：BookKeeper 现有 metadata CAS、ensemble 与 fencing 语义<br>
-> 解锁对象：`BK_SEQUENCED_CLASSIC_INSTALLED`、`BK_SEGMENT_WAL` 及其组合<br>
+> 解锁对象：`BK_SEGMENT_WAL` 及其组合<br>
 > 验证：必须通过 [Spike A](spikes/SPIKE-A-profile-install.md)
 
 ## 1. 摘要
@@ -53,7 +53,6 @@
 
 本 RFC 不负责：
 
-- sequence run 与 stale-writer takeover，见 [RFC-0002](RFC-0002-sequenced-wal.md)；
 - Segment 磁盘格式和 allocator，见 [RFC-0003](RFC-0003-segment-storage-allocator.md)；
 - range、recovery 和 delete，见 [RFC-0004](RFC-0004-range-recovery-delete.md)；
 - Segment Bookie 对 install、activation、fence、recovery Add 和 ACK authority 的消费，见 [RFC-0005](RFC-0005-segment-bookie-state.md)；
@@ -102,7 +101,7 @@ Engine Profile 是进程/cohort 级能力。Bookie 启动后公布唯一 active 
 候选合同维度：
 
 ```text
-payloadFormat       = OPAQUE_LEDGER | SEQUENCED_LEDGER
+payloadFormat       = OPAQUE_LEDGER
 durabilityMode      = SYNC_ON_ACK | DEFERRED_SYNC_LEGACY
 quorumProfile       = existing E/W/A plus declared restrictions
 requiredCapabilities = exact capabilityId + semanticVersion set
@@ -112,7 +111,7 @@ Ledger Contract Profile 是 immutable descriptor 的一部分。需要 Bookie �
 
 ### 4.3 Client/Protocol Profile
 
-`SequenceDomain`、`appendId`、ordered frontier、协议原生位置、事务和可见性属于客户端/适配层。它们只有在 Bookie capability 明确声明时，才能要求服务器解析或索引。
+协议原生位置、事务和可见性属于客户端/适配层，不进入 Bookie Profile 合同。
 
 ## 5. ProfileDescriptor
 
@@ -154,7 +153,7 @@ FieldHeader                         8 bytes
 
 ```text
 Engine:     1 CLASSIC_ENGINE; 2 DIRECT_JOURNAL_ENGINE; 3 SEGMENT_WAL_ENGINE
-Payload:    1 OPAQUE_LEDGER; 2 SEQUENCED_LEDGER
+Payload:    1 OPAQUE_LEDGER
 Durability: 1 SYNC_ON_ACK; 2 DEFERRED_SYNC_LEGACY
 ```
 
@@ -199,7 +198,7 @@ canonical bytes 与 declared 36-byte identity 必须一起持久化/传输，con
 约束：
 
 - `ledgerInstanceId` 在 ledgerId 重用或重建时必须变化；
-- semantic descriptor 只包含 immutable safety semantics：Engine、mandatory semantic capability及其版本、payload format、durability、E/W/A binding、`F`/failure-domain policy、sequence/recovery/delete safety semantics，以及真正影响跨实现安全的 limits；它不包含 ledger/instance/store version、当前 membership、operation/request identity、credential/receipt、runtime admission policy、implementation preference、benchmark threshold 或 safety-neutral hint；
+- semantic descriptor 只包含 immutable safety semantics：Engine、mandatory semantic capability及其版本、payload format、durability、E/W/A binding、`F`/failure-domain policy、recovery/delete safety semantics，以及真正影响跨实现安全的 limits；它不包含 ledger/instance/store version、当前 membership、operation/request identity、credential/receipt、runtime admission policy、implementation preference、benchmark threshold 或 safety-neutral hint；
 - durable install 的语义身份至少绑定 `ledgerId + ledgerInstanceId + descriptorIdentity + protected auth binding`；
 - 相同语义的新 `operationId` 可以返回原 install generation，不为任意 operation identity 建立无界 durable idempotency 表；
 - 相同 `operationId` 携带冲突的public semantic payload identity或secret必须失败且不改变authority；
@@ -573,8 +572,6 @@ orphan GC 的完整状态机是本 RFC 接受前的开放项，也是 Spike A �
 ## 11. Mixed-version 兼容
 
 ### 11.1 新 client + 旧 Bookie
-
-仅 `BK_SEQUENCED_CLASSIC_CLIENT_ONLY` 可以使用旧 Bookie，并且 sequence envelope 只作为 opaque payload。它不发送 install 请求，也不能要求 server-side hash、epoch、index 或 tail-summary 语义。
 
 任何需要 Bookie 执行 Profile safety semantics 的 create/open/install在发现旧 Bookie、缺少 mandatory handshake/capability或mixed ensemble时必须在payload前失败；不得把Profile请求改写成Classic、重试legacy opcode或双写。
 
