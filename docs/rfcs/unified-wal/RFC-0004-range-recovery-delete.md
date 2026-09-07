@@ -556,7 +556,7 @@ PHYSICALLY_DELETED
 TOMBSTONE_COMPACTABLE
 ```
 
-强访问撤销是独立、首批disabled的完成条件：`LOGICALLY_DELETED → ACCESS_BARRIER_PENDING → ACCESS_BARRIER_COMPLETE`，与物理清理进度分别查询。本地清理仍必须执行相同的撤权/drain/tombstone步骤；延期的是“普通API等待所有目标屏障”的保证，不是放宽本地free/reuse条件。
+强访问撤销是独立、首批disabled的完成条件：`LOGICALLY_DELETED → ACCESS_BARRIER_PENDING → ACCESS_BARRIER_COMPLETE`，与物理清理进度分别查询。本地清理仍按§11关闭准入、durable tombstone、确认delete-applied，再异步drain/回收；延期的是“普通API等待所有目标屏障”的保证，不是放宽本地free/reuse条件。
 
 ### 10.1 DELETE_INTENT
 
@@ -585,7 +585,7 @@ freeze之后membership CAS不得继续改变该instance的ensemble。cut前admit
 
 ### 10.2.1 ACCESS_BARRIER_PENDING / COMPLETE
 
-对全部冻结target执行instance-specific本地屏障：原子关闭normal/recovery/read admission，终结pre-cut服务操作与相关写I/O，持久化terminal tombstone/generation，返回独立的access-barrier receipt。它证明不再服务该instance，尚不证明全部空间已经回收。grant读取旧authority后迟到时，与本地tombstone在同一gate排序；tombstone先赢则grant失败，grant先赢则由该屏障撤销。
+对全部冻结target执行instance-specific本地屏障：原子关闭normal/recovery/read admission，持久化terminal tombstone/generation，再终结pre-cut服务操作与相关写I/O，满足后才返回access-barrier receipt。§11的delete-applied及cursor可在runtime drain结束前成立，二者不能代替屏障完成。屏障证明不再服务该instance，尚不证明全部空间已回收。grant读取旧authority后迟到时，与本地tombstone在同一gate排序；tombstone先赢则grant失败，grant先赢则由该屏障撤销。
 
 只有每个target都有matching durable barrier receipt，或有cluster-accepted且使旧incarnation无法再服务的永久decommission/wipe终结证明，才可进入COMPLETE。暂时offline、timeout、撤销writable registration或watch通知不足以证明旧read连接已失效；这些target使强访问撤销保持pending，但不阻止已满足§10.3的普通logical success。
 
@@ -648,17 +648,32 @@ DELETE_LEDGER_INSTANCE {
 }
 ```
 
-Bookie 必须：
+本地完成事实分为`delete-applied`与`physical-reclaimed`；强访问屏障另按§10.2.1判断。可推进cursor的delete-applied至少证明instance-specific terminal tombstone及拒绝新准入状态已durable，清理义务可在crash后重建，不证明runtime drain或物理释放完成。
 
-1. 验证 instance、delete epoch 和授权；
-2. 在统一gate关闭normal/recovery/read admission并捕获cut；
-3. 终结pre-cut reader/writer/I/O，durable写本地terminal tombstone并返回access-barrier receipt；
-4. drain剩余zero-copy pin/cache reference，确认无旧writer I/O可覆盖待复用空间；
-5. 对 Classic/Direct 路径执行对应清理；
-6. 对 Segment 路径按 RFC-0003 执行 invalidate 与 durable free/generation bump；
-7. 持久化绑定 Bookie/storage incarnation、stream 与 sequence 的 local effect/receipt；
-8. effect durable 后才允许推进对应 per-stream cursor；
-9. 返回绑定 local generation 与 delivery coordinate 的 durable receipt。
+Bookie执行顺序：
+
+```text
+verify instance / delete epoch / authorization / delivery identity
+    -> close new normal/recovery/read admission under the existing gate
+    -> durable terminal tombstone + reconstructible cleanup obligation
+    -> advance the no-hole delete-applied cursor through durable effects only
+    -> return the matching delete-applied result
+
+asynchronously, without blocking subsequent delete delivery:
+    -> terminate/wait for old readers, writers, I/O and pins
+    -> report access-barrier completion only when its service-drain conditions hold
+    -> rebuild/update dead accounting; compact remaining live shared-block records if needed
+    -> after whole-allocation reclaim conditions hold, durable FREE_AND_BUMP
+    -> record physical reclaim result bound to instance/generation/delivery identity
+```
+
+Classic/Direct仍执行其对应清理；Segment按RFC-0003判断whole-allocation free。每种result必须标明完成事实并绑定Bookie/storage incarnation、stream/sequence及local generation；不能用一个local delete receipt混淆applied、access-barrier和physical结果。
+
+清理义务从已有terminal tombstone、完整allocator/current-selector authority及有效DATA重建；派生队列和dead accounting只作加速，不新增持久化任务系统或逐entry metadata。checkpoint、snapshot及tombstone压缩不得丢失尚未physical-reclaimed的义务或其重建输入；队列为空不证明已清理。
+
+cursor可以与一组tombstone有序group commit，不要求每delete一次fsync。任何可恢复状态都不能出现cursor已durable而所覆盖tombstone/effect未durable。tombstone生效后迟到I/O不能发布新的local success；已经生成的响应仍可迟到。cursor不证明旧I/O已终结，buffer/slot复用仍等待真实I/O终结或可靠隔离。
+
+共享block含L1/L2时，delete L1的tombstone和applied cursor可完成，即使L2存活使block不可free；随后delete L2继续消费，不等待L1物理回收。不能释放的空间保留为debt，`awaitPhysicalDeletion()`仍等待真正物理终态。长期reader pin、慢I/O或compaction延迟只阻塞相应屏障/回收，不阻塞已满足applied条件的cursor。
 
 重复请求幂等。相同 request 不同 instance/digest/epoch 必须冲突。
 
@@ -689,7 +704,7 @@ DeleteStreamCoordinate {
 
 - 每个 committed stream 的 sequence 单调、无洞；cursor 不能越过 unexplained sequence；
 - cursor 绑定 Bookie stable identity、storage/device incarnation、stream identity/generation 和 applied-through sequence；
-- cursor 推进到 `N` 意味着 `<= N` 的每个 event 都已 durable 应用 delete/tombstone/free 所需 effect，或由可验证 routing/membership proof 判定为不适用；
+- delete-applied cursor推进到`N`表示`<=N`每个event的terminal tombstone/拒绝新准入及可重建清理义务已durable，或有可验证routing/membership non-applicability证明；不要求FREE、compaction、reader/writer/I/O drain已完成；
 - 新磁盘、重装或新 storage incarnation 不能继承旧 cursor，只能 verified bootstrap，或提供不可逆 wipe/decommission proof；
 - cluster-authoritative assignment 给出有限的 applicable stream set 与 registration required-through；Bookie 不能只报告自己知道的 stream；
 - 每 Bookie/storage incarnation 的 applicable stream 数有 manifest-locked finite maximum，超限或 assignment 无法证明时 fail closed；禁止每 ledger 一个长期 stream；
@@ -700,6 +715,8 @@ DeleteStreamCoordinate {
 snapshot 必须绑定 stream identity/generation、snapshot generation、covered-through sequence、assignment generation/target incarnation、bounded manifest/chunk completeness 与 content/integrity digest，并提供可遍历、可应用的 still-required instance-specific delete effects。每个 retained effect 至少包含 ledger instance、delete epoch/request identity、effect/tombstone identity 与应用或验证 non-applicability 所需的 authority binding。digest-only root 不足；缺 chunk、suffix gap 或内容不完整时不能 bootstrap/writable。
 
 snapshot 可以使用 bounded chunks/reference，root 不展开全部 effects；non-Byzantine 模型下不强制签名、Merkle proof 或 PKI。bootstrap 只能是 verified snapshot + complete no-hole suffix；journal prefix 只有在所有仍支持的 bootstrap 路径都有有效 snapshot 或 terminal decommission proof 后才能 compact。
+
+snapshot消费的是delete-applied语义，必须保留尚需应用的tombstone及未回收义务的可重建性。restart/rejoin catch-up等待required-through范围的applied effects，不等待共享block compaction或全部物理回收；必要tombstone缺失、cursor gap或authority无法恢复仍禁止writable。新服务启动前还须满足既有存储/I/O安全恢复条件，cursor本身不免除这些条件。
 
 assignment handoff 最低顺序：
 
@@ -723,8 +740,9 @@ Bookie 可以在 G active 且 G+1 PREPARED 时继续 writable；若 G+1 已预�
 2. fetch verified assignment generation and required-through vector
 3. for each applicable stream, verify local cursor or snapshot
 4. apply snapshot and complete suffix without sequence holes
-5. durably apply each effect before advancing its stream cursor
-6. reconcile RepairIntent and device state
+5. durably apply each terminal tombstone and reconstructible cleanup obligation
+   before advancing its delete-applied cursor; do not wait for physical reclaim
+6. reconcile RepairIntent/device state and rebuild bounded derived cleanup work
 7. registration CAS validates the same assignment generation/cursors
 8. only then become writable
 ```
@@ -761,6 +779,7 @@ awaitPhysicalDeletion()
 - unresolved Bookie IDs；
 - logical completion time；
 - admission cut、membership freeze与access-barrier完成时间；
+- 各stream的delete-applied cursor/追赶状态，以及与之独立的physical-reclaimed数量/bytes和待回收debt；
 - 请求的completion scope、强撤权能力是否启用，以及access-barrier pending target/incarnation及其原因；
 - physical completion time；
 - tombstone retention state。
@@ -869,7 +888,7 @@ all historical targets acknowledged or durably decommissioned
 8. PHYSICALLY_DELETED 只在每个 target 有 durable terminal proof 时成立。
 9. target 的第一份 durable recovery payload 晚于可由 delete freeze 枚举的 RepairIntent。
 10. recovery-only authority 永不隐式授予 normal writable authority。
-11. delete cursor 只在对应 durable effect 或可验证 non-applicability 后推进，且不能跨越 stream gap。
+11. delete-applied cursor只在对应durable tombstone及可重建清理义务、或可验证non-applicability后推进，不能跨gap；不等待FREE且不证明强屏障/物理回收。
 12. writable registration 意味着该 storage incarnation 对 cluster-authoritative finite assignment 的全部 required-through stream 已 catch up。
 13. snapshot + suffix 必须完整；旧 storage incarnation 不能借新 identity 或 ordinary ensemble replacement 绕过 catch-up。
 14. obligation-changing assignment generation只有在 handoff catch-up 后 effective；stale generation不能跨 effective cut继续 writable。
@@ -891,6 +910,7 @@ Model D：
 - Bookie 长期离线后 rejoin；
 - 两个 delete stream 交错、middle sequence 缺失、duplicate/same-sequence conflict；
 - cursor-before-effect 负向场景与 cursor response loss；
+- shared block中L1/L2的连续delete、L1 applied但不可free时仍应用L2；长期pin/未完成I/O、effect-before-cursor/cursor-before-free crash与清理队列丢失重建；
 - snapshot build/apply/compact 各 crash boundary、snapshot+suffix gap；
 - snapshot root valid但chunk缺失、content digest conflict、prefix过早reclaim；
 - assignment `G→G+1` prepare/catch-up/effective、stale watch/registration 与 delete handoff cut 前/同时/后；
@@ -957,6 +977,7 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - 增强reset启用时，domain prepare/lifecycle publication/resolve每个crash/response-loss边界及pending accepted-loss排序通过Model A+D和reconciler测试；首批只验证不创建token/不reset及旧token不可强删；
 - Model D 无 safety counterexample；
 - Segment local reclaim 与 RFC-0003 generation tests 联动通过。
+- delete-applied、强屏障和physical结果分开，restart catch-up不等待compaction；shared L1/L2、cursor-before-free、checkpoint/队列重建及无提前reuse通过既有B4/B6和Model D/C+D场景。
 
 首批可保留数据canary必须闭合基础恢复及实际启用的fenced-close普通删除/安全回收，不要求先接受disabled强撤权、strong reset或Range。任何局部通过不得自动提升其他scope；基础恢复不能借增强延期而省略。
 

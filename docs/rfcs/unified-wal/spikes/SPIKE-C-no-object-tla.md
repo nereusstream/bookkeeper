@@ -120,6 +120,8 @@ DescriptorCanonical and descriptor matching identity state
 non-anonymous control principal and ControlAuthorized exact operation/instance/target scope
 AuthorityRead committed-authority verification state
 protected local auth binding match
+installed immutable entry layout match and input integrity/coordinate validity
+open purpose: initial normal writer, read-only existing ledger, or recovery
 WireNegotiated, Profile logical opcode, capability match and no-downgrade state
 old decoder accepted-as-Classic effect flag
 client/coordinator Profile metadata-mutation authority
@@ -175,6 +177,8 @@ CreateStandardLedgerMetadata
 PublishReadyAuthorization
 ActivateProfileOnBookie
 PublishAvailabilityComplete
+OpenExistingLedgerReadOnly
+OpenLedgerForRecovery
 SendAdd
 EstablishWireNegotiated
 SendProfileNormalOpcode
@@ -251,7 +255,8 @@ ReclaimCoveredRepairReceipts
 - profiled LedgerMetadata membership/backlink mutation 必须有 Profile mutation authority；master key 单独不足；
 - fencing 后不能形成不合法的新 AQ；
 - fence先关闭new admission并使所有pre-cut Add terminal；stale handle/admission generation不能在durable fence后形成local success；
-- initial standard metadata 不得早于 all-E inactive Profile route claim，normal create/open success 晚于 all-E activation；
+- initial standard metadata不早于all-E inactive route claim，初始创建返回normal writer晚于all-E initial activation；只读open不触发或等待activation，恢复open消费显式grant，CLOSED/fenced但readable副本可读；
+- 安装布局与operation坐标/完整性不匹配不能接受；20-byte credential不推导HMAC能力。模型只抽象CRC32C布局匹配和输入有效性，实际bytes/碰撞慢路径由A26/B19验证；
 - active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
 - 普通Add unknown可在正式换组后重发同一identity；控制unknown不盲换operation。旧target/incarnation ACK不进入当前quorum/domain集合，成功保持连续前缀；
 - 同坐标相同payload幂等、不同payload冲突，DATA durable与readable publication未同时成立时不能local success；
@@ -285,6 +290,9 @@ retiring source and anti-ABA/fencing state
 superblock A/B pointers
 shard allocation pools
 data records and durability
+immutable submitted DATA blocks, stream generation and bounded batch sequences
+completed write ranges versus barrier coverage and contiguous physical durable-through
+recoverable prefix/cut and bounded full-lifecycle request/byte/batch credits
 local-success publications
 ledger tombstones
 locators and reader pins
@@ -305,8 +313,11 @@ device state
 AppendAlloc
 DurabilizeControl
 PublishSpaceToShard
+AssembleAndFreezeDataBatch
 WriteData
-DurabilizeData
+CompleteBatchWrites
+CompleteCoveringDataBarrier
+AdvanceContiguousPhysicalDurableThrough
 PublishLocalSuccess
 AppendDeleteTombstone
 DrainReader
@@ -349,7 +360,10 @@ RebuildAllAuthorizedLiveRanges
 
 ### 6.3 检查目标
 
-- local success 隐含 durable allocation 和 durable data；
+- local success隐含durable allocation、完整write/实际覆盖barrier、对应stream连续可恢复DATA前缀及readable publication；
+- submitted block不修改，后批不覆盖旧成功范围；batch 12完成不跨过11的gap发布成功，物理sequence不等于ledger entryId/LAC或控制日志sequence；
+- 重启扫描与成功前缀一致，required损坏不截断为无ACK后缀；move目标须可恢复发现才切换/释放old source；
+- 出队不归还仍持有的bytes/inflight credits，取消不终结真实I/O；只抽象已有有界资源转移，timer/大entry/慢读/控制容量的真实进展由B18验证；
 - slot/generation 唯一 owner；
 - free 未 durable 时不能 reuse；
 - old locator 不能读新 generation；
@@ -397,6 +411,7 @@ registration required-through cut
 durable local registration readiness bound to storage incarnation,
 effective assignment generation and cursor/snapshot cut
 per-Bookie local tombstone/effects
+delete-applied obligations/cursor independent of runtime drain and physical reclaim
 Bookie online/offline/registered mode
 decommission proofs
 cluster-accepted irreversible wipe/decommission proof scope,
@@ -434,6 +449,8 @@ PublishAccessBarrierComplete
 PublishLogicalDelete
 DispatchLocalDelete
 ApplyLocalDelete
+RebuildDerivedCleanupObligations
+CompleteTargetPhysicalReclaim
 LoseDeleteReceipt
 TakeBookieOffline
 RejoinRecovering
@@ -463,6 +480,8 @@ ReuseLedgerIdWithNewInstance
 
 组合A+D时，`LoseResponse`覆盖admission、metadata freeze、logical tombstone及local barrier receipt；增强配置另覆盖completion prepare/publication/resolve。每个cold read与local durable grant分开执行，使模型枚举读到旧authority后delete先赢的时序。不能把跨两个CAS及本地持久化包装成原子action，也不能用“generation有效”的不变量本身约束掉竞争。
 
+`ApplyLocalDelete/DurabilizeDeleteEffect`只形成terminal tombstone和可重建清理义务；`AdvanceDeleteCursor`在其durable后执行，不把reader/writer/I/O drain或physical free包装进同一action。C+D以共享L1/L2 block验证第一条applied但不能free时仍消费第二条，physical结果单独完成；checkpoint/队列丢失不能清除未回收义务。
+
 ### 7.3 检查目标
 
 - logical delete 后旧 instance 不再 open；
@@ -478,7 +497,7 @@ ReuseLedgerIdWithNewInstance
 - frozen targets 覆盖历史 ensembles 与 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member/target；
 - DELETE_INTENT 后 AutoRecovery 不产生漏删副本；
 - recovery-only/committed-readable role 不产生 normal writable authority；
-- cursor 不跨 unexplained gap，且只能晚于对应 durable effect 或可验证 non-applicability；
+- delete-applied cursor不跨gap，只依赖durable tombstone/可重建清理义务或可验证non-applicability，不等待physical reclaim；cursor不证明access barrier，reuse仍依赖真实drain/I/O和FREE；
 - offline Bookie 的 current storage incarnation 未对 authoritative finite assignment 全部 catch up 时不能 writable；
 - writable registration必须绑定current incarnation、effective assignment generation与durable readiness；旧registration generation不能在effective assignment前进后继续有效；
 - snapshot + complete suffix 是唯一 compacted-prefix bootstrap；assignment removal 不能丢失 delete obligation；
@@ -567,9 +586,18 @@ DeferUnavailableRecovery
 
 ```text
 NoFabricatedRecovery
+SubmittedDataBlocksAreImmutable
+BatchDurabilityRequiresCompleteCoveredWrites
+LocalSuccessIsWithinRecoverablePhysicalPrefix
+QueuedAndInflightResourcesRemainCharged
+DeleteAppliedCursorDoesNotRequirePhysicalReclaim
+AppliedCursorDoesNotProveAccessBarrierOrFree
 AckedPayloadSurvivesWithinBudget
 EvidenceExhaustedNeverReturnsSuccess
-ProfileAvailabilityImpliesAllEActive
+InitialNormalWriterReturnRequiresAllEActivated
+ReadOnlyOpenDoesNotRequireNormalActivation
+RecoveryOpenDoesNotGrantNormalWrite
+InstalledEntryLayoutAndInputCoordinatesMatch
 ProfiledNormalAckRequiresReadyAndLocalActive
 DescriptorIdentityMatchesBeforeInstallOrActivate
 DescriptorCanonicalBeforeInstallOrActivate
@@ -761,7 +789,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-332 | A | 3/3/2 | response loss + Bookie crash |
 | A-333 | A | 3/3/3 | fence + ensemble change |
 | A-322 | A | 3/2/2 | write-set rotation |
-| A-ACT | A | 3/3/2 | install complete, activation missing, legacy Add |
+| A-ACT | A | 3/3/2 | initial writer all-E activation; CLOSED/fenced read-only open with offline target; recovery grant without normal activation |
 | A-FD-OK | A | profile-specific | `F` losses across declared domains within budget |
 | A-FD-EXHAUST | A | profile-specific | all valid ACK evidence exhausted |
 | A-REPAIR-LOSS (DEFERRED strong reset) | A | whole ledger fenced+CLOSED | descriptor/`F` binding, verifier assertion vs digest, loss ordering, proven repair and second loss |
@@ -776,7 +804,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
 | C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
 | C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
-| C-TAIL | C | local | proven uncommitted tail vs required prefix corruption vs unclassified boundary |
+| C-TAIL | C | local | tail classification; immutable DATA batches, reordered writes/barriers, physical-prefix success/replay and required corruption |
 | C-WRITER | C | local | pool transfer/reuse with delayed old writer I/O and completion |
 | C-SPACE | C | local | foreground/maintenance budgets, exhaustion, bounded debt and restart |
 | AC-LOCAL-STORE | A+C | two Arenas | Bookie control-log partial durability, same-coordinate conflict and read-after-success |
@@ -790,7 +818,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | D-ACCESS | A+D | historical targets | local barrier vs old handle/grant/I/O, safe free and late response; no all-target wait for ordinary logical success |
 | D-STRONG-ACCESS (DEFERRED) | A+D | all serving targets | independent strong-revocation completion requires every barrier/permanent service-isolation proof |
 | D-STREAM | D | bounded streams | gaps, PREPARED/effective handoff, applicable snapshot chunks, terminal-proof scope/replay, incarnation and registration cut |
-| CD-REUSE | C+D | local + cluster | delete, free, ledgerId reuse |
+| CD-REUSE | C+D | local + cluster | shared L1/L2 delete-applied before free, runtime pin/I/O, queue rebuild, checkpoint, reuse and physical result |
 | E-FALLBACK | E | E > W | partial range, required/speculative hole, normal-tail proof, rich outcome/legacy projection, skip/marker handling, authority loss, durable close and point-oracle equivalence |
 
 正式运行前锁定各启用scope的必需config；可增加配置，不得删除对应最低结构。表中DEFERRED增强项不是首批完整性分母，必须在输出中单列未验证；首批仍覆盖其disabled拒绝与发现旧token时保留解析的负向场景。不得在run后移除失败config。
@@ -828,6 +856,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 - recovery authority 唯一时，predecessor 最终 SEALED 或明确失败；
 - delete targets 最终响应或被 durable decommission 时，physical delete 最终完成。
 - metadata可用且admission/freeze/targets可证明时，普通logical delete不因历史target离线等待全部屏障；强撤权/物理进展仍取决于目标或永久隔离证明；
+- tombstone持久化可推进时，delete-applied及rejoin追赶不依赖shared block物理回收；第一条delete不能因等待后续delete使block全死而阻塞后续投递；
 - 增强scope启用且authority/store恢复可用、无持续竞争时，prepared completion最终按durable publication/delete winner resolve，不永久占用conflicting domain；
 - 在锁定有界live set、admitted rate和维护调度份额下，maintenance可推进并使debt回落；超负载只要求有界拒绝及空间恢复后重新开放。
 

@@ -199,10 +199,11 @@ Spike B必须给出可执行replay oracle和原始故障镜像，证明截断不
 1. append ALLOC or ALLOC_POOL with generation and owner
 2. make control record durable
 3. expose space to WalAppendShard
-4. write DATA into authorized space
-5. complete DATA durability barrier
-6. publish the correct readable locator under the selector/admission gate
-7. allow local Bookie success to participate in quorum ACK
+4. assemble and freeze a DATA batch; write its authorized, previously unused ranges
+5. complete all batch writes, then the durability barrier covering those exact writes
+6. advance the stream's contiguous physical durable-through, without crossing a gap
+7. publish the correct readable locator under the selector/admission gate
+8. allow local Bookie success to participate in quorum ACK
 ```
 
 核心不变量：
@@ -211,6 +212,7 @@ Spike B必须给出可执行replay oracle和原始故障镜像，证明截断不
 local durable Add success
     => durable allocation authority existed before DATA use
     && DATA durability barrier completed
+    && batch belongs to the recoverable contiguous physical durable prefix
     && same-coordinate identity and readable location satisfy RFC-0005
 ```
 
@@ -227,6 +229,20 @@ pool refill 通过 control-log group commit；pool 内空间的使用仍必须�
 `ALLOC_POOL`的下一原型必须冻结：`Arena + pool range + owner shard + shard generation + allocation generation`，每个pool内record的used/unused识别方法，以及返还/转交的条件化状态机。未使用不能由“内存计数为0”推断；restart必须结合完整control authority与可恢复DATA framing确定live、unused或unknown，unknown不进入free pool。
 
 pool转交及所有free/reuse先关闭旧writer admission，等待已提交写I/O完成或获得可靠的设备/进程隔离证明，再conditional free/bump并授予新owner。旧completion的generation检查只能防止错误发布，不能阻止已经提交的旧I/O覆盖新owner磁盘字节；timeout、取消future或reader drain都不能单独作为写I/O终结证明。buffer、submission及completion必须携带owner/generation，late completion不得发布locator或success。崩溃后如何终结旧提交者的I/O同样进入真实故障矩阵。
+
+### 6.1 DATA批次的durability与恢复前缀
+
+首个真实文件原型采用“本批完整write completion → 覆盖本批的文件级durability barrier”这一种模式。逐个检查写结果与短写；只有所有范围完整写入后才发barrier，未完成短写、I/O错误、取消或unknown均不能发布该批成功。补写剩余范围仍须符合声明的alignment和错误处理规则，不能重写含既有成功数据的范围。Linux原型可将该模式映射为完整写入后`fdatasync()`，映射及文件系统/设备假设在同一实验manifest冻结；其他等价同步写模式后续单独验证，不叠加重复barrier却漏算成本。
+
+`write completed`、`durability completed`、`readable published`和`local success`是不同事实。`O_DIRECT`不单独提供`O_SYNC/O_DSYNC`的持久化保证；普通write完成（包括普通异步write CQE）不能直接授权成功。文件barrier也不自动保证新目录项durable，文件创建/预分配及所需parent-directory同步在冷路径完成后才公开可用空间。依据[Linux open(2)](https://man7.org/linux/man-pages/man2/open.2.html)和[fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)，实际硬件/I/O路径仍需故障实验。
+
+每份write/barrier completion绑定storage/stream generation、batch sequence及其实际物理范围。一个barrier可覆盖已完整write且明确列入覆盖集合的多个batch；不能因为更晚的fsync返回就把仍在飞行的异步write算作durable。批次跟踪有hard bound，不记录逐entry“ACK已完成”控制日志。
+
+首批选择**每个物理append stream的连续前缀恢复和成功发布**。bounded batch table记录乱序completion；只有从已验证起点开始连续的batch均取得durability，才推进内存中的physical durable-through并允许对应entry发布locator/local success。batch 11未durable而12先完成时，12保持等待，不能先ACK再在restart的11缺口截断后缀。该序号属于物理stream，不是ledger entryId或LAC，也不是Arena控制日志sequence；不同ledger可同批，`E>W`不要求本地entryId连续。
+
+允许有界I/O queue depth大于1；等待只在对应shard/stream内，不新增跨shard全局sequencer。batch边界、stream lineage与范围发现由§9的可恢复framing和allocator authority给出；physical durable-through可重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut开始扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。仅能截断已证明可丢弃的未成功后缀，required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
+
+涉及既有成功数据的compaction同样须保证new DATA在恢复可发现边界内，才允许`MOVE_COMMIT`、selector切换或释放旧位置。以后若要跨缺口独立发布，须先接受独立块发现/恢复算法；本次不并行建设第二套模式。分别报告write wait、durability wait、physical-prefix wait和locator wait，不将同stream排队归为NVMe延迟。
 
 ## 7. Shared Cold Slab
 
@@ -261,6 +277,8 @@ one block
 - allocator 应按 lifetime class 分组，降低冷热混合带来的碎片。
 
 因此，Segment 不能宣称全局“零 compaction whole-ledger reclaim”。
+
+共享block的物理等待不阻塞delete delivery：L1 tombstone durable且清理义务可重建后即可推进RFC-0004的delete-applied cursor，即使L2存活使该block不能free。后续delete L2仍可应用，或由compaction搬走live records；待回收bytes单独记debt。applied cursor不是物理释放或旧reader/writer/I/O drain完成证明。
 
 ## 8. Dedicated Hot Extent
 
@@ -321,19 +339,29 @@ entryId
 
 exact bytes、checksum 算法、commit marker 和 direct-I/O alignment 由 Spike B 数据决定。
 
+**DATA提交后冻结：** block由assembling转为submitted前完成header、record count、checksum和padding；此后内存内容及物理写入范围不可追加修改，不更新header/footer，不以read-modify-write重写包含既有成功记录的对齐块。下一批取得另一个有界pool buffer和新的、已授权未使用范围；旧buffer等真实I/O终结才可复用，旧物理范围只有按§10 durable free/generation bump后才可另用。控制日志checkpoint/superblock仍按自身发布协议，不套用本DATA规则。
+
+最大等待从最老请求计算，低负载到期即padding到声明alignment再提交。例如4 KiB对齐范围已保存并确认1 KiB数据，不能为了追加下一条数据重写该4 KiB；同generation不防后次torn write破坏旧成功数据。4 KiB仅为示例，alignment与padding预算由manifest冻结并计入磁盘写放大。
+
+framing还须能恢复§6.1的stream identity/generation、batch边界、物理sequence及范围映射，不靠易失batch table或最大ledger entryId定位后缀。多个block属于同一batch时，其完整性和barrier覆盖必须全部可判定；缺block/坏边界不能假装完整。不得把prototype framing写成已接受stable format。
+
 ## 10. Delete、Free 与 Reuse
 
-集群级 delete authorization 由 RFC-0004 提供。本地合法顺序：
+集群级delete authorization由RFC-0004提供；本地先应用terminal effect，再异步回收：
 
 ```text
 1. verify durable cluster/local delete authorization
 2. reject new reads/writes for ledger instance
-3. drain readers/pins and terminate or reliably isolate old writer I/O
-4. append durable DELETE_TOMBSTONE
-5. invalidate cache, locator and derived index
-6. append durable FREE_AND_BUMP(oldGeneration, newGeneration)
-7. expose new generation to allocator
+3. durable terminal tombstone with reconstructible cleanup obligations
+4. allow RFC-0004 no-hole delete-applied cursor/result; do not wait for physical reclaim
+asynchronously:
+5. drain readers/pins and terminate or reliably isolate old writer I/O
+6. clean derived state; compact live shared records if needed
+7. after whole-allocation reclaim conditions hold, durable FREE_AND_BUMP(oldGeneration, newGeneration)
+8. expose new generation to allocator and record physical reclaim result
 ```
+
+terminal tombstone由RFC-0005的Bookie级route/control authority持有，allocator消费该事实，不要求为推进cursor在每个Arena再造一份tombstone日志。删除准入关闭后旧locator也不能获得新pin；异步派生清理不代替这个gate。cleanup从tombstone、完整allocator/current-selector authority及有效DATA重建，cursor既不授权reuse也不证明强访问屏障完成。
 
 候选原子控制记录：
 
@@ -358,7 +386,7 @@ FREE_AND_BUMP {
 
 ```text
 1. durable ALLOC/ALLOC_POOL for the new allocation
-2. copy full payload identity and make new DATA durable
+2. copy full payload identity; make new DATA durable and recoverably discoverable under §6.1
 3. append conditional MOVE_COMMIT(expectedOld -> new)
 4. make MOVE_COMMIT durable                 # authority cutover
 5. atomic publishNewSelectorAndCloseOldPinAdmission()
@@ -471,6 +499,12 @@ Spike Gate：
 
 总资源账本还必须覆盖Bookie route/credential/fence state、allocation/pool/slot state、current selector/retirement/anti-ABA state、pending Add/grant/waiter、block buffers、checkpoint working set，以及derived index/cache。分别报告随ledger、entry、allocation、shard和pending operation增长的项；`1 KiB/idle ledger`不能替代总预算。
 
+每shard的同一套预算覆盖准入、待合批、已提交I/O、等待physical prefix/locator及响应阶段；request count、源/对齐bytes、inflight batches和duplicate waiters分别有上限。出队或移交future不释放credit，真实资源释放或转移到另一已计费owner后才归还对应份额；复制期间源与目标同时持有的bytes都计入。断连/取消而I/O仍在进行时保留其buffer/inflight费用，不能留下队列之外无上限的任务。复用请求对象，避免每层重新包装大对象。
+
+最老请求的单调时钟deadline不被新到达重置。最大可接受entry必须能走声明的batch/buffer路径：普通block放不下时使用同一总预算约束的有界大记录批次，或在明确size/capability检查处拒绝；不能永久堵在队首。wire frame、BK entry和存储record/alignment开销的上限关系写入manifest，不因扩大临时buffer突破总预算。
+
+重复坐标需要读盘核对时交给已有有界读取执行资源，不在append shard主循环同步等盘；正常新写不因此多一次索引I/O。连接/ledger只保留必要有界份额，控制持续热ledger的独占；fence/tombstone等撤权保留执行槽位、buffer及控制持久化预算，DATA满额不能永久阻止关闭DATA准入。超额返回明确可重试背压，不新增通用公平调度平台。
+
 ### 13.1 每Arena保留空间与进展
 
 前台分配不得耗尽compaction目标、checkpoint/control-log rotation、tombstone/FREE及故障恢复所需空间。下一原型为每Arena独立划分前台预算与维护保留预算；Bookie级控制日志也保留其checkpoint/terminal transition预算。跨Arena relocation未支持时，不能用另一Arena的空闲量掩盖当前Arena无法回收。
@@ -495,6 +529,8 @@ NORMAL -> THROTTLED -> REJECT_NEW_DATA -> MAINTENANCE_ONLY
 
 性能报告必须分别展示 logical deletion latency、physical bytes reclaimed、pending dead bytes 和 compaction debt。
 
+delete-applied/catch-up延迟另列，不以物理回收完成作为cursor条件；shared slab仍有live record、reader pin或旧I/O时，applied可完成而physical保持pending。
+
 ## 15. Derived index
 
 RocksDB可保存entry locator、ledger directory和tail summary，但必须：
@@ -510,7 +546,7 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 
 | 路径 | 必须扫描和验证的范围 |
 | --- | --- |
-| 正常restart | 验证仍有效的checkpoint/footer/derived-index覆盖证明，只对未覆盖且已授权的DATA范围扫描必要tail |
+| 正常restart | 验证仍有效的checkpoint/footer/derived-index覆盖证明，对未覆盖且已授权的DATA按§6.1物理stream前缀扫描必要tail，不用最大completion或ledger entryId越过缺口 |
 | 全部derived index丢失或覆盖证明无效 | 从完整allocator/current-selector authority枚举所有需要重建的live allocation和有效DATA范围，包含sealed/dedicated/shared数据；不能只扫描active tail |
 
 两条路径均报告扫描bytes/I/O、重建entry/locator数量、heap/direct/native峰值、到read-only/可写的时间及前台竞争。未验证范围不宣称确定absence；重建可以分批提供已验证读能力，但其覆盖与not-ready语义须冻结。RocksDB全删不会删除allocator/current-selector authority；这些持久映射的空间、写放大与重启成本必须计入账本。
@@ -532,7 +568,7 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 
 ## 17. 安全不变量
 
-1. DATA 使用或 local success 前，allocation authority 已 durable。
+1. DATA使用前allocation authority已durable；local success还要求本批完整write、覆盖barrier、所在物理stream连续durable前缀及readable publication。
 2. 同一 slot generation 不同时属于两个 owner。
 3. `FREE_AND_BUMP` durable 前旧 generation 不可复用。
 4. locator 的 generation/instance 不匹配时读取失败，不返回新 owner 数据。
@@ -540,7 +576,7 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 6. allocator authority 全损坏时设备 fail closed，不从 data scan 猜 free list。
 7. derived index 损坏或删除不改变 payload 恢复结果。
 8. 100k idle ledger 不产生 per-ledger extent 或 block-buffer reservation。
-9. shared slab 删除在 physical reclaim 前仍保持目标 record 不可见。
+9. shared slab的delete-applied/cursor晚于durable tombstone及可重建清理义务，不依赖physical reclaim；待回收record不可接受新访问，cursor也不证明旧I/O/pin终结或允许reuse。
 10. 未 commit 的 relocation copy 永远不能成为 authoritative；durable `MOVE_COMMIT` 在 derived index 丢失后仍唯一选择 new location。
 11. old allocation 的复用晚于 move cutover、new-pin 阻断、reader drain、whole-allocation reclaimability 与 durable `FREE_AND_BUMP`。
 12. relocation 不创造新的 local success、AQ 或 ACK。
@@ -549,13 +585,15 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 15. conditional orphan free 与迟到 `MOVE_COMMIT` 不能同时成功；cutover 只晚于覆盖自身 sequence 的 durability completion。
 16. per-Arena predicate 对 committed/applied state 原子求值；condition failure不改变authority，pending/admitted append不授予cutover/free/reuse。
 17. duplicate externally retried transition只能得到同一durable result或stale/conflict，不产生第二winner或重复generation bump。
-18. runtime的unknown mandatory/gap/torn阻断durable-through；restart只按§5.4证明后截断未提交末尾，必需prefix损坏或分类不明保持non-writable。
+18. control log的unknown mandatory/gap/torn阻断其durable-through；restart只按§5.4证明后截断未提交末尾，必需prefix损坏或分类不明保持non-writable。DATA另外遵守§6.1物理批次前缀，不以控制日志sequence或最大完成batch推导DATA成功。
 19. selector publish与block-new-old-pin形成同一同步cut；cut后read pin不能落回old location。
 20. Arena superblock/format state不能替代old-binary-visible Bookie compatibility fence；任何partial required-device migration都不注册writable。
+21. DATA block submitted后header/count/checksum/padding/payload不可修改或追加；后续写入不得覆盖已有成功记录，I/O buffer只在真实I/O终结后复用。
+22. 请求的实际bytes、inflight和waiter覆盖其完整生命周期，出队/取消不提前归还仍持有的credit；最老合批deadline、大entry路径、异步重复读及fence/tombstone控制容量受§13同一预算约束。
 
 ## 18. 接受 Gate
 
-除下列既有Gate外，必须完成§5.4三类tail oracle、§6 pool ownership与旧writer I/O终结、§13.1每Arena耗尽/恢复进展，以及§15两条index恢复路径；均保留独立原始证据。
+除下列既有Gate外，必须完成§5.4三类tail oracle、§6 pool ownership与旧writer I/O终结、§6.1/9 DATA冻结/完整写入/barrier覆盖/乱序完成前缀恢复、§13全生命周期预算、§13.1每Arena耗尽/恢复进展，以及§15两条index恢复路径；均保留独立原始证据。B4/B6及Model C+D还须证明共享L1/L2删除的applied cursor与rejoin不等待physical回收，checkpoint或派生队列丢失不遗漏清理义务，也不提前reuse。
 
 本 RFC 进入 Accepted 前必须：
 

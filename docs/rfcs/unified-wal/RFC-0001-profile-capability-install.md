@@ -206,6 +206,10 @@ canonical bytes 与 declared 36-byte identity 必须一起持久化/传输，con
 - 只有确实影响跨实现 payload 解释、durability 或 recovery 正确性的 limit 才能进入 descriptor；`maxInflightEntries/maxInflightBytes` 等通常属于 runtime policy。
 - `permanentLossBudgetF` 与 declared failure-domain policy 是 immutable recovery safety contract：normal ACK 必须覆盖至少 `F + 1` 个 distinct declared domains；RFC-0004 只有在 bounded range 完整恢复到同等 coverage 并发布强 completion proof 后才能重置该 range 的 loss window。
 
+**首批entry布局范围（2026-09-08，Planned / Not Executed）：** 新Profile存储原型只支持CRC32C BK entry布局，应用payload保持opaque。通过现有immutable required-capability及实验Profile manifest绑定布局语义和ledger instance，安装时校验客户端/metadata声明并缓存布局参数；不增加descriptor字段、60-byte ledger context字段或逐Add协商，不在registry Accepted前分配production capability ID。未知、不匹配及尚未支持的digest类型在创建/安装时明确拒绝，不能静默降级CRC32C；Classic不受此限制。replacement和recovery继续使用同一布局，不能由retry改变。
+
+20-byte master-key credential只证明data credential匹配，不表示拥有任意entry digest验证能力。当前`DigestManager.generateMasterKey()`使用`SHA-1("ledger" || password)`，`MacDigestManager`的HMAC key使用`SHA-1("mac" || password)`，两者不能互推。首批不支持HMAC entry，也不下发原始password或MAC key；布局、CRC覆盖及与Segment/TLS的分工由RFC-0005 §6.1固定。reference descriptor/wire corpus和历史receipt仍只证明原有字节合同，不是本次entry布局的验证证据。
+
 同一 ledger instance 的 semantic descriptor 与 protected auth binding 均 immutable；任何变更使用新 ledger instance，当前合同不引入 key-rotation state machine。受保护 local state 的物理 owner/record framing、policy/capability registry 和后续跨instance key/KMS改造仍未关闭；codec/hash本身已不再OPEN。
 
 reference implementation 由 `ProfileDescriptor`、`ProfileDescriptorCodec` 与 `ProfileDescriptorIdentity` 组成，生产 encoder 是唯一 canonical writer，decoder strict-validate input。golden corpus必须保存 authoritative `.bin`、typed fixture、expected SHA-256/36-byte identity与field dump，并由不共享 production parser helper 的 test verifier独立复算；覆盖合法组合和 duplicate/order/missing/unknown/length/trailing/E-W-A-F/policy generation/capability count等全部负向向量。该实现只允许 create/install/open/control 冷路径调用，normal Add只比较缓存的36-byte identity。
@@ -240,10 +244,10 @@ LedgerMetadata version、relevant ensemble/fragment digest、instance marker 与
    - binds actual LedgerMetadata version + canonical ensemble digest
    - requires verified all-E durable install
 6. idempotently ACTIVATE each Bookie from that READY authority
-7. only after all E are durably normal-active may create/open return normal success
+7. only after all E are durably normal-active may initial creation return a normal writer
 ```
 
-这些名称表达必须区分的事实，不冻结 exact enum/schema：全局 `READY_AUTHORIZED` 先于任何 local normal activation；`ALL_E_ACTIVATED/AVAILABLE` 晚于全部 E 的 durable activation。READY 可以早于部分 Bookie active；已 active target/write set 可能形成合法 local success 或 AQ，未 active target 必须明确 transient unavailable，且 create/open 正常成功仍晚于 all-E activation。是否通过 credential distribution 禁止所有 pre-return write 保持开放；任何情况都不能回退 Classic 或扩大错误 Profile/durability 接受集合。
+这些名称表达必须区分的事实，不冻结exact enum/schema：全局`READY_AUTHORIZED`先于任何local normal activation；`ALL_E_ACTIVATED/AVAILABLE`晚于全部E的durable activation。READY可以早于部分Bookie active；已active target/write set可能形成合法local success或AQ，未active target必须明确transient unavailable，且初始创建返回normal writer仍晚于all-E activation。该条件不用于只读打开或恢复打开，见§6.4。是否通过credential distribution禁止所有pre-return write保持开放；任何情况都不能回退Classic或扩大错误Profile/durability接受集合。
 
 安全合同固定为：
 
@@ -323,7 +327,17 @@ Sidecar reservation 单独存在不授权 Add；标准 membership 单独存在�
 
 ACTIVATE 是幂等冷路径操作。Bookie 只有在 READY authority 匹配本地 instance/hash、且 durable fence/tombstone 未先发生时才能 durable normal-active；迟到 activation 不能重新打开 fenced/deleted route。watch/cache 只能提前触发 activation或优化失败响应，不是正确性依赖。
 
-create/open 正常成功必须晚于全部 E durable activation。availability completion 可以是有界 completion fact，或由 E 个 local state 的有界重查证明；exact state name、receipt packing、proof/certificate 与 partial-activation credential distribution 保持开放。普通 Add 仍只执行有界本地 lookup，不增加 MetadataStore I/O 或逐请求重型验证。
+全部E durable install和initial activation仅是**初始创建并返回normal writer**的发布条件；availability completion可以是有界completion fact，或由E个local state有界重查证明。exact state name、receipt packing及partial-activation credential distribution仍开放；普通Add保持有界本地检查。
+
+| 操作 | 接受条件与结果 | 不执行的动作 |
+| --- | --- | --- |
+| 初始创建normal writer | 全E inactive install → 标准metadata → READY → 全E initial activation，满足后才返回writer | 不把install降为A或W，不向未激活target发送normal Add |
+| 只读打开已有ledger | 校验instance、descriptor/布局、生命周期及read边界；按所需坐标选择有效副本，未验证的恢复覆盖范围返回not-ready | 不ACTIVATE，不等待全E在线或normal-active，不因打开reader新增控制日志持久化 |
+| 打开以执行恢复 | 按RFC-0004执行fencing、取证、显式recovery grant、恢复与matching durable close，返回对应outcome | 不以normal activation替代recovery权限，不重新开放normal写入 |
+
+已安装且readable的CLOSED/fenced replica可以服务符合LAC/closed-boundary的读取；normal admission关闭不等于readable关闭。新open仍受authoritative delete检查，既有reader服从RFC-0004普通删除合同；这里不增加same-ledger writer takeover。读取所需副本不可用时按读合同失败/defer，但不能仅因无关副本离线而等待all-E activation。
+
+同一install或initial activation phase内对E个target的请求可有界并发，不逐Bookie串行往返；跨phase仍等待相应全部durable结果，response loss重试同operation。验证须覆盖CLOSED ledger部分副本离线仍可只读打开、recovery/readable不授予normal写，以及全E尚未安装/激活时初始writer不返回成功。
 
 ### 6.5 Child publication、snapshot 与 unknown version
 
@@ -619,7 +633,7 @@ orphan GC 的完整状态机是本 RFC 接受前的开放项，也是 Spike A �
 
 ### 11.1 新 client + 旧 Bookie
 
-任何需要 Bookie 执行 Profile safety semantics 的 create/open/install在发现旧 Bookie、缺少 mandatory handshake/capability或mixed ensemble时必须在payload前失败；不得把Profile请求改写成Classic、重试legacy opcode或双写。
+初始创建/install选中的target含旧Bookie、缺少mandatory handshake/capability或形成mixed ensemble时，必须在payload前失败。已有ledger按§6.4区分只读/恢复打开：实际选择执行Profile读、fencing或recovery操作的target也必须支持对应语义，否则拒绝该target操作，按已有读/恢复合同选择有效副本或返回失败；这不要求仅为打开reader探测全部E在线或执行activation。任何Profile请求均不得改写成Classic、重试legacy opcode或双写。
 
 ### 11.2 新 Profile + 不支持 install 的 Bookie
 
@@ -671,7 +685,7 @@ magic的位级候选意图是让current v3 protobuf先遇invalid wire type，pre
 
 ### 11.5 Mixed/rolling matrix 与 semantic errors
 
-最低matrix固定为：old client+old Bookie的Classic不变；old client+new Bookie仅在`ABSENT/CLASSIC`接受；new Profile client+old Bookie拒绝且不降级；Profile create/open遇mixed ensemble失败；Bookie restart/incarnation或protocol generation变化后重新handshake；unknown Profile version/subtype拒绝且无effect；任何Profile bytes在旧Bookie上都不形成legacy Add。registration/capability hint、connection handshake和durable install receipt是三层证据，任一层不能替代下一层。
+最低matrix固定为：old client+old Bookie的Classic不变；old client+new Bookie仅在`ABSENT/CLASSIC`接受；new Profile client+old Bookie操作拒绝且不降级；Profile初始创建/install遇mixed ensemble失败，只读/恢复打开按§6.4及§11.1校验所需target操作；Bookie restart/incarnation或protocol generation变化后重新handshake；unknown Profile version/subtype拒绝且无effect；任何Profile bytes在旧Bookie上都不形成legacy Add。registration/capability hint、connection handshake和durable install receipt是三层证据，任一层不能替代下一层。
 
 response body前缀冻结为`statusClass:u16 + retryDisposition:u8 + durableResult:u8 + detailCode:u16 + reserved:u16=0`。status class共有12类（1个OK + 11个non-OK）：`0 OK`、`1 UNSUPPORTED_PROTOCOL_OPCODE_CAPABILITY_ENGINE`、`2 PROFILE_IDENTITY_CONFLICT`、`3 PROFILE_NOT_READY_OR_STALE`、`4 FENCED`、`5 TOMBSTONED_OR_DELETED`、`6 RECOVERY_GRANT_INVALID`、`7 TRANSIENT_UNAVAILABLE`、`8 DURABILITY_RESULT_UNKNOWN`、`9 QUARANTINED_OR_UNKNOWN_MANDATORY`、`10 UNAUTHORIZED`、`11 BAD_REQUEST`。其余枚举值固定为：
 
@@ -730,7 +744,7 @@ registration只做hint；connection context也不替代durable install/activatio
 
 ## 13. 安全不变量
 
-1. Profile create/open 正常成功意味着 initial ensemble 的全部 E 个 Bookie 已 durable install 且 normal-active。
+1. Profile初始创建返回normal writer意味着initial ensemble全部E已durable install且initial normal-active；只读/恢复打开分别按§6.4检查，不调用或等待normal activation。
 2. `ACK(normal profiled Add) => matching global READY authorization && matching local durable normal ACTIVE existed before Add processing`。
 3. Classic/Profile/Tombstoned route 对同一 ledgerId 是单一、原子、可恢复的 claim。
 4. legacy normal/recovery Add 不能绕过 `PROFILE/TOMBSTONED` route 进入 Classic lazy-create。
@@ -776,6 +790,7 @@ RFC 进入 Accepted 前必须：
 - domain-specific single-record CAS adapter、store-version/semantic-generation 分离、bounded root/page、unknown mandatory version 与 snapshot publish-before-reclaim通过 fault/compatibility测试；
 - same operation identity的same/conflicting payload在response loss、snapshot吸收与bounded retention边界通过幂等/冲突测试；
 - orphan install 回收合同冻结；
+- §6.4初始writer/只读open/恢复open条件分离，同phase all-E并发不越过durable依赖；§5.4的immutable CRC32C布局及unsupported/mismatch拒绝由A16/A26/B19验证；
 - §11 exact header/magic/subtype/status executable manifest与mixed-version matrix有确定测试；
 - raw Profile wire corpus在真实受支持old v2/v3 decoder/stock binary上证明TLS ClientHello及合法/损坏/截断/unknown Profile request均不产生legacy route/handle/master-key/allocation/journal/payload/ACK effect，且Profile parse error不触发legacy fallback；
 - per-connection handshake、restart/incarnation重新协商、unknown subtype、mixed ensemble、response loss no-downgrade与semantic error端到端传播通过测试；

@@ -95,7 +95,7 @@ artifact output directory
 - 当前`RANGE_READ/BATCH_RECOVERY_ADD` reserved/disabled behavior；
 - capability/engine placement filter；
 - initial all-E inactive route claim before standard LedgerMetadata create；
-- READY authorization before local normal ACTIVE，all-E activation before create/open success；
+- READY authorization before local normal ACTIVE，all-E initial activation before returning a newly created normal writer；
 - profiled membership mutation authority abstraction；
 - active replacement 的 inactive install → `LAC+1` CAS → normal activation → pending resend；
 - 可观测的 orphan install 状态；
@@ -167,7 +167,7 @@ Oracle：返回同一 instance/hash 的幂等 receipt；不产生第二个 local
 
 步骤：全部 install 后，分别在标准 LedgerMetadata create-if-absent 与 sidecar READY CAS 的提交前、提交后 response loss、CAS conflict 注入；另注入 metadata create 成功但 READY 永久失败。
 
-Oracle：重读标准 metadata 与 sidecar 后只能得到一个 backlink 一致的 instance；非 READY instance 不得 normal-active或返回 create/open success；不得盲建第二个 ledger instance。
+Oracle：重读标准 metadata 与 sidecar 后只能得到一个 backlink 一致的 instance；非 READY instance 不得 normal-active或返回初始创建normal writer的success；不得盲建第二个 ledger instance。
 
 ### A5：相同 instance、不同 Profile
 
@@ -239,7 +239,9 @@ Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正�
 
 步骤：全部 E 个 Bookie durable install 后，分别在标准 metadata create 前后、READY authority 提交前/确定失败后、local normal activation durable 前后，由持有合法 master key 的客户端发送 profiled Add；在 activation request/receipt response loss 时重试并重启 Bookie。
 
-Oracle：缺少 matching global READY 或 local durable normal ACTIVE 的 normal Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；READY 可早于部分 local active，但 create/open success 必须晚于 all-E activation；restart 后接受集合不扩大。
+在同一场景补充open purpose：已有CLOSED/fenced ledger一个Bookie离线，其他有效副本可读时，只读open成功且ACTIVATE/新增控制持久化次数为0；未验证read范围not-ready，不伪造absence。恢复open使用显式grant/durable close，不重新normal-active。初始writer仍等待全部E initial install/activation；同phase请求有界并发，不能用串行E次网络往返作为默认实现，跨phase依赖不变。
+
+Oracle：缺少 matching global READY 或 local durable normal ACTIVE 的 normal Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；READY 可早于部分 local active，但 初始创建返回normal writer必须晚于all-E initial activation；restart 后接受集合不扩大。
 
 ### A17：Legacy Add targeting Profile route
 
@@ -301,9 +303,11 @@ Oracle：每个vector的Classic route claim、handle create、master-key persist
 
 ### A26：Handshake、mixed matrix 与 semantic error propagation
 
+补充首批CRC32C布局绑定：创建/安装核对immutable capability、实验manifest及客户端/metadata声明；未知、缺失、不匹配和HMAC/CRC32/DUMMY等未支持布局在入口拒绝。replacement、只读与recovery消费同一已安装布局，不新增60-byte context字段、逐Add协商或生产capability ID；拒绝不能触发静默CRC32C转换或password/MAC-key下发。CRC32C与具体entry字节验证由B19配合，不将frame corpus当作布局语义PASS。
+
 步骤：覆盖old/old Classic、old/new route matrix、new Profile/old、mixed ensemble、Bookie restart/incarnation/protocol generation change、HELLO第一帧/4KiB bound/strict capability order、server HELLO全部字段的byte-exact golden vector及`reserved:u16=0`/nonzero拒绝、BookieId/incarnation/readiness mismatch、Profile/Classic physical pool key、unknown capability，以及全部12类status（1 OK + 11 non-OK）、5类retry与4类durable result的固定数值golden vector；贯通processor/client future/admin/metric。
 
-Oracle：Profile create/open在old/mixed target上payload前失败；Profile只在独立mTLS connection首次HELLO，restart/generation变化重连；Classic client/endpoint/pool没有Profile TLS/HELLO；physical channel key包含protocol/BookieId/incarnation/generation/TLS identity；registration hint、HELLO与durable receipt分层；unsupported/identity/stale/fenced/deleted/grant/transient/unknown/quarantine/unauthorized/bad-request/durability-unknown不坍缩成OK，external unauthorized可coarse但internal class保留，协商不发生在每Add。
+Oracle：Profile初始创建/install在old/mixed target上payload前失败；只读/恢复校验实际所需target操作，不支持的target不执行Profile语义也不降级，按既有读/恢复规则选有效副本或失败，不把all-E探测/activation作为通用open前置。Profile只在独立mTLS connection首次HELLO，restart/generation变化重连；Classic client/endpoint/pool没有Profile TLS/HELLO；physical channel key包含protocol/BookieId/incarnation/generation/TLS identity；registration hint、HELLO与durable receipt分层；unsupported/identity/stale/fenced/deleted/grant/transient/unknown/quarantine/unauthorized/bad-request/durability-unknown不坍缩成OK，external unauthorized可coarse但internal class保留，协商不发生在每Add。
 
 ### A27：Add unknown、换组与ACK故障域
 
@@ -396,7 +400,7 @@ engine/capability mismatch payload writes           = 0
 ensemble metadata active before replacement install = 0
 standard metadata before all-E Profile route claim = 0
 normal ACTIVE before matching READY                 = 0
-create/open success before all-E activation         = 0
+initial normal writer returned before all-E activation         = 0
 pending resend before replacement normal ACTIVE    = 0
 restart lost durable install                        = 0
 restart resurrected non-durable install             = 0
@@ -452,6 +456,10 @@ basic recovery or membership result reset loss window = 0
 replacement completed with stale ACK/domain coverage = 0
 final response missed eligible recycler return = 0
 premature/double recycler or buffer release = 0
+read-only open invoked or waited for normal activation = 0
+recovery open implicitly re-enabled normal writes = 0
+unsupported/mismatched entry layout installed or silently converted = 0
+password or MAC key distributed for first-scope digest validation = 0
 ```
 
 所选启用scope的指定deterministic scenarios必须100%执行并命中fault；所有断言为硬失败，不接受“低概率”。manifest在run前锁定scope，延期增强矩阵保持DEFERRED，基础scope的拒绝能力测试不算增强PASS；不得运行后排除失败场景。单项客户端回归或局部原型结果不宣称整个Spike PASS。

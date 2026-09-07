@@ -2,7 +2,7 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
-2026-09-07基于`c79357d76f95dae4c27ffbddcc075b6385991daa`后的评审收敛已直接进入当前owner RFC：先修客户端ACK集合与迟到响应回收，最小ByteBuf/shard/批量DATA原型与启用路径模型并行；明确normal/recovery identity的LAC/digest边界；普通逻辑删除与强访问撤销分开，strong reset首批disabled且后续仅限整个ledger fenced+CLOSED。真实控制存储、tail、空间进展、目标可发现性及基础点恢复仍保留，实施导航见[当前清单](../implementation/README.md)。这是文档修订，状态仍Proposed/Planned，未执行修复、JUnit或性能run；下表各轮是当时的历史记录，未重新评审或晋升，也不覆盖当前owner RFC中的修订。历史逐字反馈和旧source-bound receipt保持不变。
+2026-09-08基于`7e62fadeb9418b5aa0e8ac216169228dfb7e9da6`的评审修订已直接进入当前owner RFC：全E激活限定初始normal writer，读取与恢复各自授权；首批immutable CRC32C entry布局；DATA提交后冻结、完整write与覆盖barrier及可恢复物理前缀；delete-applied cursor不等物理回收；资源预算覆盖请求全生命周期并保留撤权控制容量。对应反例归入现有Spike A/B/C与UW工作项，实施导航见[当前清单](../implementation/README.md)。此前客户端维护、最小ByteBuf/shard原型与启用路径模型并行、普通删除与强撤权分离和strong reset延期的安排保留。这是文档修订，状态仍Proposed/Planned，未执行修复、JUnit或性能run；下表各轮是当时的历史记录，未重新评审或晋升，也不覆盖当前owner RFC中的修订。历史逐字反馈和旧source-bound receipt保持不变。
 
 规则：
 

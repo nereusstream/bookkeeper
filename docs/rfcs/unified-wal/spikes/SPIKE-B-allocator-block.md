@@ -55,6 +55,12 @@ enabled paths and separately deferred feature/test scopes
 transport adapter/refcount ownership and reference-corpus revision
 logical identity byte ranges, LAC/digest rules and duplicate slow path
 batch byte/count/wait limits and actual durability-barrier definition
+immutable CRC32C capability/layout binding and outer/inner coordinate checks
+DATA freeze point, stream/batch framing and contiguous-prefix replay/publication
+full-write/short-write handling, file barrier coverage and cold directory durability
+end-to-end request/byte/batch/waiter credit ownership and release points
+oldest-request monotonic deadline, maximum entry path and reserved control capacity
+delete-applied cursor versus access barrier and physical reclaim predicates
 allocation/copy/CPU per-entry instrumentation and thread/queue/lock counters
 control-log/checkpoint region sizes
 Bookie-level protected control-log record/batch/checkpoint and credential protection
@@ -156,7 +162,11 @@ Oracle：未 durable allocation 的空间不能包含被视为 local success 的
 
 在block header、payload、checksum/commit marker、data fsync、readable locator publication、local success及response各边界crash；并发注入同坐标相同/不同payload、normal/recovery重试和fence/tombstone。
 
+扩充原场景：batch 11短写/未durable而12先完成、共享文件的barrier返回时另一批仍在飞行、普通write CQE先于barrier、barrier response loss、DATA submitted后误改header/count/checksum/padding、第二批重写含已成功record的对齐块。不同ledger共用一批；在write、durability、physical-prefix和locator各cut crash，并分别重建index/重启扫描。
+
 Oracle：local-success journal中的每条record可恢复且成功后授权点读立即可定位；不同payload不覆盖pending/durable winner，相同payload幂等、waiter有界。DATA durable但locator未发布不能成功；index缺失期间未覆盖坐标返回not-ready，不能伪造确定absence。
+
+追加oracle：每份completion只证明其实际覆盖范围；12不能跨11的物理缺口成功，未完成短写/错误/取消不算durable，后续DATA不覆盖旧成功范围。restart保留所有已允许成功的record，不能凭最大completion/entryId截断或跳洞。模型中的成功journal仅为外部测试oracle，不加入生产逐entry ACK日志。
 
 ### B3：ALLOC pool refill
 
@@ -168,6 +178,8 @@ Oracle：pool/shard generation ownership不重叠；restart后unused/live/unknow
 
 多个 ledger 交错写同一 block，分别删除一个、部分、全部 ledger。
 
+同一block混合L1/L2，按同一delete stream连续发送delete L1、delete L2。L1 tombstone durable但L2仍live导致block不可free时，L1 applied cursor先推进，L2仍可应用；加入checkpoint、清理派生队列丢失与restart/rejoin。不能以等待L1物理释放作为读取下一delete的前置。
+
 Oracle：单 ledger logical delete 不影响其他 record；block 全死前不进入 free list；全死后按 durable generation bump 回收。
 
 ### B5：Hot promotion
@@ -178,9 +190,9 @@ Oracle：shared 旧数据和 dedicated 新数据可组成唯一 ledger history�
 
 ### B6：Delete、reader drain 与 reuse
 
-保持reader/pin和未完成writer I/O，触发delete；在admission close、terminal tombstone、access-barrier receipt、invalidate、drain、FREE_AND_BUMP、新owner allocation各点crash。
+保持reader/pin和未完成writer I/O，触发delete；在admission close、durable terminal tombstone/可重建义务、applied cursor/result、access-barrier receipt、invalidate、drain、FREE_AND_BUMP、physical result及新owner allocation各点crash。覆盖effect-before-cursor、cursor-before-free和tombstone+cursor group commit。
 
-Oracle：reader/pin未drain或旧writer I/O未终结时slot不复用；barrier后旧handle/grant不再服务；旧locator在新generation上失败，旧I/O不能污染新owner数据。barrier receipt与physical-delete receipt分别验证。
+Oracle：cursor只依赖durable delete-applied effect，不等待drain/free；缺effect不能推进，队列丢失可重建义务。reader/pin未drain或旧writer I/O未终结时slot不复用；tombstone后不产生新local success，屏障完成后不再服务；旧locator在新generation失败。applied、barrier、physical result分别验证，restart catch-up不等待compaction。
 
 ### B7：Checkpoint A/B rotation
 
@@ -194,11 +206,15 @@ Oracle：restart选择一个完整authority，`checkpoint through S + complete s
 
 Oracle：按RFC-0003 §5.4独立分类；只截断可证明未提交的末尾，完整durable transition即使未回ACK也重放；必需prefix损坏/unknown/无法分类保持non-writable。判定不能仅依赖文件末尾、checksum失败或客户端未记录ACK。
 
+DATA部分另按§6.1验证物理前缀：从verified checkpoint/cut恢复，batch缺口后不得丢弃已允许成功的数据；required corruption保持fail closed，control已证明的free/retired区间不是未知gap。control durable-through、DATA physical durable-through与ledger LAC各自比较，不混用序号。
+
 ### B9：Derived index deletion
 
 分别运行保留有效index/checkpoint的正常restart，以及完整删除RocksDB/locator index的full rebuild；数据同时包含active tail、sealed dedicated extent、shared slab与relocated record。
 
 Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围，结果与独立全量authority oracle一致；normal restart只能在有覆盖证明时缩小扫描范围。stale generation不进入index，未验证范围不返回确定absence；分别记录scan bytes/I/O、peak memory、read-only/可写时间及前台竞争。
+
+包含乱序完成batch、已回收区间和搬迁目标；独立checker验证§6.1成功前缀/可发现性。physical durable-through丢失后从authority/framing重建，不假定内存table仍在；MOVE_COMMIT选择的新DATA不能落在恢复会截断的后缀。
 
 ### B10：Compaction copy
 
@@ -300,9 +316,15 @@ Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持�
 
 多个ledger合批，固定shard，bytes/count/wait均有上限；注入低负载等待、队列满、pool refill、slow/failed force、fence/delete race及compaction并发。验证不持ledger锁等待I/O，普通已准入写不串行等待三层control/DATA队列或三个future。真实barrier前无local success；不能将取消future当成I/O终结。计量实际entries/barrier、force次数、thread hops、queue wait、lock hold和各层控制写；每entry force不能仅因API名为group commit就算批量化。
 
+扩充现有B18负载：持续小请求不重置最老deadline；低负载到期padding；超过普通block但在声明entry上限内的请求走预算内大记录批次，否则明确拒绝；热ledger与低速ledger混合、重复核对慢读、locator/响应阻塞、断连/取消但I/O未终结、DATA满额时fence/tombstone到达。全阶段request/源与对齐bytes/inflight batches/waiters有界，出队不提前还credit，慢读不阻塞append主循环，控制保留容量可关闭准入。记录低负载、目标负载和过载结果，不只测queue.size()。
+
+DATA freeze和barrier/prefix沿B2 oracle，量化padding bytes、write/durability/prefix/locator wait及阶段资源峰值。相同durability与TLS范围才比较；局部无网络run不计端到端增益。
+
 ### B19：同坐标identity与基础恢复重写
 
 用现有DigestManager与LedgerRecoveryOp语义构造同instance/entryId/应用bytes/累计length、不同合法piggyback LAC及digest的normal/recovery重写，应幂等且不覆盖不同数据；另测不同应用payload、累计length冲突、坏digest、跨instance、并发pending、乱序/hole、`E>W`、restart及derived-index丢失。每份输入完整性与authority都验证，不以整包bytes或全BK digest判定逻辑冲突。
+
+首批向量固定32-byte BK metadata + 4-byte CRC32C + opaque payload，验证CRC覆盖、长度/截断、outer/inner ledger/entry mismatch、未知或非CRC32C安装拒绝及不改变60-byte context。构造不同bytes但相同CRC32C的碰撞向量，证明checksum命中不能跳过真实bytes核对；相同业务bytes而LAC/digest不同仍幂等。不得从20-byte ledger credential推导HMAC能力、下发password/MAC key或为每entry新增SHA-256。布局向量属于后续新run，历史frame/operation corpus保持原证据身份。
 
 独立oracle比较不可变字段及应用数据，重建后核对每个坐标；`entryId <= localLastEntryId`不能充当存在证明。正常新entry、pending retry、已有durable命中、冲突和rebuild慢路径分别计量索引reads、hash invocations、allocation/copy bytes；不强制每新entry一次RocksDB查询和独立SHA-256，不建立全量去重库。与恢复代码的真实端到端联调未运行时单独标NOT_EXECUTED。
 
@@ -432,6 +454,17 @@ hole treated as existing entry from localLastEntryId alone = 0
 buffer use after release or premature I/O-buffer reuse = 0
 buffer reference leak or duplicate release in tested paths = 0
 local success before readable location publication = 0
+submitted DATA block mutated or old successful range rewritten = 0
+ordinary write completion counted as durability = 0
+barrier attributed to incomplete or unrelated batch writes = 0
+local success outside recoverable physical durable prefix = 0
+delete-applied cursor depended on whole shared-block physical reclaim = 0
+cursor advanced before durable tombstone/reconstructible obligation = 0
+applied cursor falsely reported access-barrier/physical completion = 0
+end-to-end request/bytes/inflight/waiter budget exceeded = 0
+oldest batch deadline reset by newer arrival = 0
+accepted oversize entry stalled permanently at queue head = 0
+duplicate read blocked append loop or DATA exhaustion starved revocation = 0
 required durable prefix misclassified as discardable tail = 0
 unknown rebuild coverage reported definitive absence = 0
 cross-Arena partial state expanded Bookie authority = 0
