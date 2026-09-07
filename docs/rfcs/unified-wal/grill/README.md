@@ -2,6 +2,8 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
+2026-09-07当前owner RFC已直接补入删除竞争/访问屏障、Add重试/可读性、真实Bookie控制存储、tail分类、空间进展和基础点恢复要求，实施导航见[Wave 0清单](../implementation/README.md)。这是当前设计修订，状态仍Proposed/Planned；下表各轮是当时的历史记录，未重新评审或晋升，也不覆盖当前owner RFC中的修订。历史逐字反馈和旧source-bound receipt保持不变。
+
 规则：
 
 - 每轮只审查 design tree 当前 frontier；

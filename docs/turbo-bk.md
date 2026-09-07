@@ -2,7 +2,7 @@
 
 > 状态：**Proposed / Not Implementation Ready**<br>
 > 文档类型：总体架构、边界与依赖导航<br>
-> 更新时间：2026-09-02<br>
+> 更新时间：2026-09-07<br>
 > 结论：保留 Unified WAL 方向；除 `BK_CLASSIC_TUNED` 外，不授权按本文直接进入正式实现。
 
 ## 1. 决策摘要
@@ -17,8 +17,9 @@
 4. Conditional delete 是集群协议，必须覆盖历史 ensemble、离线 Bookie、持久 tombstone、AutoRecovery 竞争和 Bookie rejoin barrier。
 5. 当前 OSS 已有 bounded Batch Read；新增范围是 streaming continuation、一般 E/W/A 合并、恢复语义、QoS 和 cancellation。
 6. BtrLog 只提供设计启发。它的对象存储恢复假设不能证明本方案安全。
+7. 下一原型固定Bookie级独立控制日志、per-Arena控制日志和DATA三层拓扑；先闭合普通Add/点读/restart、基础点恢复和已fenced-close ledger的受限删除，再扩大Range与在线生命周期能力。
 
-本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，也不冻结仍由Spike选择的physical owner、阈值或实现类。
+本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，下一原型按RFC-0005选择Bookie级独立控制日志；其stable format、阈值和真实证据仍由Spike接受。
 
 ### 1.1 单一基线持续演进
 
@@ -148,7 +149,7 @@ transaction and visibility state
 
 Wave 0 的 `ProfileDescriptor` reference implementation 已落在 `bookkeeper-common` 内部 unstable 包，并提交 byte-exact valid/invalid corpus、独立 verifier、expected identity/field dump、checksums 与 fixed-seed fuzz receipt。该实现没有网络、磁盘、MetadataStore、registration 或 ACK 接入，registry 只有 test fixture；详见 [`implementation/profile-descriptor/`](rfcs/unified-wal/implementation/profile-descriptor/README.md)。这只关闭 reference implementation 交付，不接受 production registry/legal combinations，不提升本 RFC 或任何 Spike/Gate 状态。
 
-Profile control plane与20-byte master-key data credential分离。所有Profile control/data只走独立`bookie-profile` immediate-TLS1.3/mTLS endpoint，Classic endpoint/pool无Profile handshake；mTLS X509 principal还必须通过exact operation/ledger instance/target scope authorizer，目标Bookie冷路径direct-read committed authority后才durable local binding。普通Add只解析fixed header/60-byte ledger context，constant-time比较缓存的36-byte identity与20-byte verifier并检查active/fence；MetadataStore、descriptor/auth hash、KMS、certificate/signature、control fsync均为0。principal config、physical local owner/packing/at-rest protection仍BLOCK；不引入descriptor签名、Merkle、PKI扩张、per-Add proof/nonce或key rotation state machine。
+Profile control plane与20-byte master-key data credential分离。所有Profile control/data只走独立`bookie-profile` immediate-TLS1.3/mTLS endpoint，Classic endpoint/pool无Profile handshake；mTLS X509 principal还必须通过exact operation/ledger instance/target scope authorizer，目标Bookie冷路径direct-read committed authority后才durable local binding。普通Add只解析fixed header/60-byte ledger context，constant-time比较缓存的36-byte identity与20-byte verifier并检查active/fence；MetadataStore、descriptor/auth hash、KMS、certificate/signature、control fsync均为0。principal config、所选Bookie control-log原型的物理验证/packing/at-rest protection仍BLOCK；不引入descriptor签名、Merkle、PKI扩张、per-Add proof/nonce或key rotation state machine。
 
 Wave 0 已在 `bookkeeper-common` internal unstable package完成Profile control/auth typed interfaces与隔离endpoint reference implementation。它把immediate TLS1.3/mTLS transport facts、static precheck、fixed-key single cold authority read、exact post-read AuthZ、strict tuple/descriptor/Engine/credential检查、conditional semantic transition与durable-only secret-free result串成12项普通功能测试；不监听socket、不终止TLS、不实现physical protected store，也没有production startup、route、normal Add或ACK调用点。该结果只验证typed reference semantics；real TLS/listener/store、secret-leak完整矩阵、A24、stable wire、G1与production authority仍OPEN/BLOCK，详见 [`implementation/profile-control/`](rfcs/unified-wal/implementation/profile-control/README.md)。
 
@@ -174,7 +175,7 @@ same BookieId/same storage scope的old-binary fence仍BLOCK；`BKPF1` nonnumeric
 | `BK_CLASSIC` | OSS Existing | 维护兼容基线 |
 | `BK_CLASSIC_TUNED` | Implementation Ready | 锁定可复现 benchmark manifest |
 | `BK_DIRECT_JOURNAL` | Spike Ready，Engine/cohort 级 | 独立 cohort 原型与崩溃测试 |
-| `BK_SEGMENT_WAL` | P0 Blocked | RFC-0001/0003/0005 接受，Spike A/B/C 通过 |
+| `BK_SEGMENT_WAL` | P0 Blocked | RFC-0001/0003/0005及RFC-0004基础恢复/已启用删除Gate接受，Spike A/B/C通过 |
 | `DEFERRED_SYNC_LEGACY` | Existing with HA Restriction | 不作为当前 WAL 默认 |
 | `GENERAL_EWA_FAST_RECOVERY` | Research/Spike | RFC-0004 和 Model E |
 | `POOLED_LEDGER_LANE` | Deferred | 独立 fencing 与资源合同 |
@@ -195,6 +196,7 @@ Bookie Cohort selected by Engine Profile
     ├── DIRECT_JOURNAL_ENGINE
     └── SEGMENT_WAL_ENGINE
             ├── ArenaControlLog      allocation/generation/relocation-selection authority
+            ├── Bookie control log  route/fence/grant/tombstone authority across Arenas
             ├── Data Arena          payload authority
             └── Derived Index       rebuildable acceleration
 
@@ -210,7 +212,7 @@ Cluster Lifecycle
 - BookKeeper quorum：entry 是否达到 ACK quorum 的权威。
 - `ArenaControlLog`：以per-Arena deterministic conditional state machine承载空间 ownership、generation、reuse 与同 Arena relocation selection；只有覆盖transition自身sequence的durable result才授予cutover/free/reuse。checkpoint 中的 current selector、anti-ABA 和未退休状态必须等价于完整 move-chain oracle，derived locator 不能决定 move winner。
 - Data Arena：Segment payload 的权威。
-- RFC-0005 Segment Bookie state：逻辑 `LedgerRouteAuthority` 与 `BookieRegistrationAuthority` 决定install/normal admission/fence、bounded recovery grant/readable facts及assignment/incarnation readiness；normal、recovery与readable不是互斥flat role，物理owner仍由Spike选择。
+- RFC-0005 Segment Bookie state：逻辑 `LedgerRouteAuthority` 与 `BookieRegistrationAuthority` 决定install/normal admission/fence、bounded recovery grant/readable facts及assignment/incarnation readiness；normal、recovery与readable不是互斥flat role，下一原型的物理owner固定为RFC-0005 §5.2的Bookie级独立控制日志，尚待Spike验证。
 - RocksDB、footer、cache：可丢弃并重建的派生加速结构。
 
 ## 8. 跨 RFC 安全不变量
@@ -225,7 +227,7 @@ Cluster Lifecycle
 8. 旧 generation locator 永远不能读取新 generation payload。
 9. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
 10. AutoRecovery target 接收第一份 durable payload 前必须有可由 delete freeze 枚举的 RepairIntent；recovery-only/committed-readable 不授予 normal writable。
-11. 标准 ensemble membership由LedgerMetadata CAS串行；sidecar只让`DELETE_INTENT`/delete fence与RepairIntent admission等真正冲突的transition共享ledger-instance lifecycle cut。未admit intent不授予grant/payload；cut前全部admitted intent进入frozen history。admission后的repair progress/loss/receipt/completion使用owning domain head，不推进universal ledger CAS，任一中间态fail closed。
+11. membership由标准LedgerMetadata CAS串行，freeze/pending-publication marker固定其最终发布边界；RepairIntent admission和final completion publication与DELETE_INTENT共享lifecycle CAS。未admit intent不授予grant/payload，cut前全部admitted target进入history；copy progress与loss仍由domain排序，最终completion采用prepare/publication/resolve冷协议，不进入Add/per-entry路径。
 12. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
 13. derived index 全部删除后，系统仍可从权威 payload 和控制元数据恢复。
 14. 同一 Arena compaction 只有 durable conditional `MOVE_COMMIT` 能切换 locator authority；old free 晚于 cutover、new-pin 阻断、reader drain 与 durable generation bump，cross-Arena move 当前 unsupported。
@@ -259,7 +261,7 @@ Cluster Lifecycle
 
 不可继承：依赖 durable blob store 的 flush、repair、recovery 路径及其已经验证的安全结论。
 
-本方案至少需要五个相互可组合但独立检查的模型：
+当前有四个相互可组合但独立检查的模型，其中A/C/D是基础必需，E按扩展能力启用：
 
 | 模型 | 范围 |
 | --- | --- |
@@ -268,7 +270,7 @@ Cluster Lifecycle
 | Model D | historical ensembles、partial delete、assignment handoff、applicable snapshot/incarnation、versioned registration readiness、offline rejoin、AutoRecovery race |
 | Model E | TailSummary、required frontier、normal-tail proof、rich outcome/legacy projection、skip/marker handling、range fallback 与一般 E/W/A point-oracle equivalence；仅在推进该能力时必需 |
 
-Model A-D 未通过前，Segment authority 不得进入 production candidate。
+Model A、C、D及必要组合未通过前，Segment authority不得进入production candidate。Model A还必须验证首批受支持子集的基础point recovery与durable close；Model E延期不豁免该要求。当前没有Model B。
 
 ## 10. 实施顺序
 
@@ -283,14 +285,35 @@ Stage 2  Round 7 exact manifest：descriptor与control interface已冻结；wire
                   + stock old binary pre-replay fence、partial migration/rollback
          Spike C：No-object TLA+
 Stage 3  DirectJournal 独立 cohort prototype；不声称一次本地 payload 写
-Stage 4  接受 RFC-0003；仅在Spike证据后进入isolated/discardable Segment shadow；
+Stage 4  Bookie控制日志 + ALLOC/DATA/readable locator/local success + restart/fence/点读原型；
+         完成tail分类、pool writer quiescence、维护保留空间与全量index重建证据；
+         接受 RFC-0003；仅在Spike证据后进入isolated/discardable Segment shadow；
          live shadow仍需证明不污染Classic rollback cohort，Classic仍为ACK authority
-Stage 5  接受 RFC-0005；完成 normal Add/fence local authority 的必要合同；具体 Segment authority canary 仍受 canary-specific evidence 与已启用路径依赖约束，不含 recovery/delete 集成
-Stage 6  接受 RFC-0004；Streaming Range / Recovery / Delete
+Stage 5  最小集群闭环：受支持E/W/A与ACK故障域、install/activation、换组重试、
+         基础point recovery/durable close、fenced-close受限删除与access barrier；
+         接受RFC-0001/0003/0005及RFC-0004相应feature gates后，另行验证canary
+Stage 6  独立扩展Gate：Streaming Range/TailSummary/BatchRecoveryAdd、在线删除、
+         更多故障域组合、设备迁移与扩展离线rejoin
 Stage 7  完成全部 Gate、derived index 与 production canary
 ```
 
-禁止跨越依赖：Round 7 test manifest不等于stable contract；raw decoder/stock old binary Gate未通过、physical owner未闭合时，不得写入稳定wire/disk compatibility surface。isolated shadow prototype完成不等于live shadow、Segment authority或production readiness。Stage 5 ACK authority仍要求RFC-0001/0003/0005接受、Spike A/B/C实际PASS和canary-specific ACK/fence/rollback evidence。
+禁止跨越依赖：Round 7 test manifest不等于stable contract；raw decoder/stock old binary Gate未通过、所选control-store物理协议未验证时，不得发布stable wire/disk compatibility。isolated shadow不授予live shadow、Segment authority或production readiness。Stage 5可保留数据canary还必须闭合基础恢复及实际启用的受限删除，不能只凭Add/ACK实验晋升；Spike A/B/C、兼容与canary-specific evidence依旧必要。
+
+### 10.1 下一阶段实施顺序与交付物
+
+以下全部为**Planned / Not Executed**，具体合同直接归属现有owner RFC；实施跟踪见[Wave 0清单](rfcs/unified-wal/implementation/README.md)。
+
+| 顺序 | 实施内容 | Owner与必须提交的证据 |
+| --- | --- | --- |
+| 1 | delete admission、同记录membership freeze、completion prepare/publication/resolve、access barrier | RFC-0001/0004；逐CAS和本地durability动作、Model A+D、迟到grant/handle/response与离线pending测试 |
+| 2 | 普通Add逻辑identity、unknown后的正式换组、当前ACK与故障域记账 | RFC-0001/0005；同payload重发、冲突、旧ACK清除、连续前缀与domain coverage测试 |
+| 3 | Bookie级真实控制日志及跨Arena权限顺序 | RFC-0005；真实文件/fsync、A/B checkpoint、多Arena部分失败和restart镜像 |
+| 4 | 三类control tail、pool ownership与旧writer I/O终结 | RFC-0003；独立replay oracle、损坏/未提交边界和late I/O/reuse故障证据 |
+| 5 | 每Arena维护保留量、限流/拒绝/恢复与回收进展 | RFC-0003；锁定负载/live set、ENOSPC、维护调度、长期debt及停止新写后的排空数据 |
+| 6 | 最小集群基础点恢复与fenced-close受限删除 | RFC-0004/0005；受支持矩阵、durable close后重验、访问屏障与端到端故障矩阵 |
+| 7 | 完整资源账本、正常restart与全量index重建 | RFC-0003/0005；全部live范围覆盖、scan/I/O/内存及read-only/可写时间 |
+
+执行依赖为：先把1/2的竞争协议纳入Wave 0 Block G的A/C/D模型；随后以Block H隔离真实存储原型承接3/4/5/7；模型和存储证据闭合后再推进6的最小集群。表中编号是工作项，7不是可以在集群canary后补做的可选验证。Classic调优与DirectJournal各自保留独立cohort/基线，不替代Segment证明。
 
 ## 11. Gate 与证据合同
 
@@ -347,6 +370,9 @@ Segment production candidate 的最低 Gate：
 - allocator crash tests 为 0 safety violation；
 - 100k idle ledger 无固定 extent reservation、无 per-ledger block buffer；
 - background reclaim/compaction 使 foreground p99 回退不超过 5%。
+- 在锁定有界live set和admitted速率下debt/dead bytes有界、停止新写后按deadline排空，前台不能侵占维护保留量；
+- 同坐标不同payload不覆盖，local success后授权点读可定位，normal/full-index-loss两条恢复路径分别达标；
+- 基础point recovery、当前ACK故障域、delete竞争及access-barrier Gate通过；新增冷CAS/真实control-store成本计入资源与性能证据。
 
 候选阈值可以在正式测试前经一次评审调整；看到结果后不得追溯修改 Gate。
 
@@ -356,12 +382,12 @@ Segment production candidate 的最低 Gate：
 
 - failure-domain policy与mandatory capability ID/semantic-version registry、各production Profile exact combination、optional hint envelope；descriptor schema/hash后续改造必须直接修改当前合同并同步technical discriminator、migration边界与compatibility corpus，当前codec/hash/bounds不再OPEN；
 - sidecar backend adapter、exact root/child/page schema、domain sharding与hard bounds、snapshot retention/hash、immutable backlink encoding、ledgerId reuse 和 profiled metadata mutation authority；
-- principal allowlist/backend配置、Profile metadata mutation ACL、cold authority reference packing、protected local physical owner/record framing/at-rest protection、bounded grant/readable packing、future corrected SASL与跨instance key rotation；endpoint/mTLS/exact authorizer逻辑不再OPEN；
+- principal allowlist/backend配置、Profile metadata mutation ACL、cold authority reference packing、所选protected Bookie control-log的physical framing/at-rest protection与验证、bounded grant/readable packing、future corrected SASL与跨instance key rotation；endpoint/mTLS/exact authorizer逻辑不再OPEN；
 - control tail最终字段、batch/range future body、general E/W/A exact Java/admin outcome与BKException/detailCode；Round 7 frame/HELLO/subtype只有未来显式恢复并通过raw corpus后才能晋升stable，当前执行延期且不再作为任意设计空间；
 - production exact E/W/A/failure-domain/capability组合，以及`E>W`下local validation/index coverage；general range/TailSummary fast path仍由RFC-0004和Model E阻塞；
 - `ArenaControlLog` conditional transition/result exact API、sequencer/queue/batch bounds、segment、checkpoint A/B、selector/pin同步、current-selector/retiring-state packing、superblock 切换、`MOVE_COMMIT` encoding/orphan GC 与设备失败判定；
-- RFC-0005 logical state的physical owner/exact durable packing；same-scope old-binary-visible fence当前BLOCK且`BKPF1`仅candidate；Cookie/superblock/device-manifest exact bytes、minimum reader/writer、migration/reverse/wipe tooling与persistent readiness backend adapter；new BookieId/new scope fallback语义不再OPEN；
-- shared slab 的 lifetime class、compaction policy 和 hot promotion threshold；
+- RFC-0005选定Bookie级control-log原型的exact durable packing与真实故障证据；same-scope old-binary-visible fence当前BLOCK且`BKPF1`仅candidate；Cookie/superblock/device-manifest exact bytes、minimum reader/writer、migration/reverse/wipe tooling与persistent readiness backend adapter；new BookieId/new scope fallback语义不再OPEN；
+- shared slab的lifetime class、compaction policy/hot promotion、每Arena维护保留预算、准入阈值及长期回收进展证据；
 - RepairIntent child enumeration/retention/orphan cleanup、strong completion record/page/snapshot schema、overlapping-range predecessor encoding、coverage audit commitment 与 compaction policy；
 - Delete Coordinator 的 stream topology、PREPARED/effective assignment encoding、snapshot chunk/schema、cluster-accepted wipe/decommission proof 和 tombstone retention；
 - streaming range 在一般 E/W/A 下的结果合并与point-oracle伪代码、required-coordinate/normal-tail proof、rich outcome exact enum/wire/admin API/legacy mapping、cancellation、可选 checkpoint 与 recovery-specific semantics；
@@ -387,7 +413,7 @@ Segment production candidate 的最低 Gate：
 现在不能直接开始：
 
 - Segment WAL ACK authority实现、live Stage 5 promotion或authority切换；
-- 在raw decoder/stock old binary Gates、policy/capability registry、local physical owner与control tail闭合前提交stable wire/on-disk兼容面，或让shadow污染可rollback Classic cohort；
+- 在raw decoder/stock old binary Gates、policy/capability registry、所选local physical owner验证与control tail闭合前提交stable wire/on-disk兼容面，或让shadow污染可rollback Classic cohort；
 - 把 per-ledger minimum 8 MiB extent 当作不变量；
 - 将本地 delete success 当作全物理删除完成；
 - 把 BtrLog 模型结果当作本方案的形式化证明；

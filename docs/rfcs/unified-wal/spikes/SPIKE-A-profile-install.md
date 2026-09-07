@@ -305,6 +305,18 @@ Oracle：每个vector的Classic route claim、handle create、master-key persist
 
 Oracle：Profile create/open在old/mixed target上payload前失败；Profile只在独立mTLS connection首次HELLO，restart/generation变化重连；Classic client/endpoint/pool没有Profile TLS/HELLO；physical channel key包含protocol/BookieId/incarnation/generation/TLS identity；registration hint、HELLO与durable receipt分层；unsupported/identity/stale/fenced/deleted/grant/transient/unknown/quarantine/unauthorized/bad-request/durability-unknown不坍缩成OK，external unauthorized可coarse但internal class保留，协商不发生在每Add。
 
+### A27：Add unknown、换组与ACK故障域
+
+原target DATA durable后丢ACK并永久离线，按RFC-0001 §9.3执行inactive install → membership CAS → activation → resend同一entry/payload；再注入旧target/旧incarnation迟到ACK、重复ACK、换组slot撤销以及连续前缀未完成。另覆盖最快ACK来自同一声明域、unknown域身份与policy检查被关闭的负向路径。
+
+Oracle：有合法替代资源和明确控制结果时，原DATA outcome unknown不阻止正式换组；控制INSTALL/ACTIVATE的unknown仍重试同operation。成功只使用当前write set和声明故障域内的有效ACK，不拼接旧投递集合，不改变逻辑payload，不重复callback或Classic fallback。故障域模型/`F`在run前锁定。
+
+### A28：Delete cut、membership freeze与完成发布
+
+按RFC-0004 §14.1逐步展开admission、cold authority read、local grant、membership CAS、completion prepare、lifecycle final-publication CAS与resolve；在每两步间插入DELETE_INTENT、标准metadata freeze、本地access barrier、response loss与coordinator crash。覆盖prepared期间新的loss声明和delete后迟到的旧grant请求。
+
+Oracle：新admission在delete后失败；旧membership CAS与freeze marker按同记录version分出赢家；未最终发布的candidate不能recovered success/reset；prepare可由durable结果确定resolve，pending loss不丢。旧read捕获的grant在本地屏障前只能作用于已枚举scope，屏障后不能成功；logical completion必须等全部target屏障/terminal proof。记录新增冷CAS数量、等待与reconciliation成本。
+
 ## 7. 故障注入点
 
 至少覆盖：
@@ -413,6 +425,13 @@ HELLO identity/incarnation/readiness mismatch accepted = 0
 normal Add auth-binding hash/HMAC/KMS/signature/certificate invocations = 0
 credential observed on unprotected Profile transport = 0
 semantic safety error collapsed to success         = 0
+stale delivery ACK counted in current quorum/domain set = 0
+logical Add identity changed during replacement    = 0
+Profile ACK succeeded without declared domain coverage = 0
+membership mutation bypassed durable freeze marker = 0
+completion mapping changed while publication token held = 0
+unpublished completion candidate reset loss window = 0
+logical delete completed before all access barriers = 0
 ```
 
 所有指定 deterministic scenarios 必须 100% 执行并命中 fault；所有断言为硬失败，不接受“低概率”。

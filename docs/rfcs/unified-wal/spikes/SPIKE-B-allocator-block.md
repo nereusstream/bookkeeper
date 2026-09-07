@@ -50,6 +50,12 @@ I/O API and alignment
 JDK and JVM flags
 shard count
 control-log/checkpoint region sizes
+Bookie-level protected control-log record/batch/checkpoint and credential protection
+control-tail fault model and required durable-prefix classification oracle
+pool owner/shard generation and old writer I/O quiescence mechanism
+per-Arena foreground/maintenance reserves and throttle/reject/resume thresholds
+bounded live-set/churn rate, maintenance scheduling share and debt-drain deadline
+normal/full-index-rebuild coverage, scan/I/O/memory/readiness limits
 conditional API revision
 sequencer queue/waiter/idempotency hard caps
 block sizes under test
@@ -74,6 +80,7 @@ artifact output directory
 - storage incarnation、required-device manifest、migration generation与versioned registration readiness；
 - compatibility hook位于`EmbeddedServer`创建任何可能触碰Profile/Segment storage的component之前；
 - `ArenaControlLog`；
+- RFC-0005 §5.2选定的Bookie级protected control log及A/B checkpoint；route/fence/grant/tombstone不分散到Arena；
 - allocator checkpoint A/B 与 rotation；
 - `ALLOC/ALLOC_POOL`；
 - shared active slab blocks；
@@ -130,15 +137,15 @@ Oracle：未 durable allocation 的空间不能包含被视为 local success 的
 
 ### B2：DATA durability 与 local success
 
-在 block header、payload、checksum/commit marker、data fsync、local success publication 各边界 crash。
+在block header、payload、checksum/commit marker、data fsync、readable locator publication、local success及response各边界crash；并发注入同坐标相同/不同payload、normal/recovery重试和fence/tombstone。
 
-Oracle：local-success journal 中的每条 record restart 后可验证恢复；torn/uncommitted tail 不被当作成功。
+Oracle：local-success journal中的每条record可恢复且成功后授权点读立即可定位；不同payload不覆盖pending/durable winner，相同payload幂等、waiter有界。DATA durable但locator未发布不能成功；index缺失期间未覆盖坐标返回not-ready，不能伪造确定absence。
 
 ### B3：ALLOC pool refill
 
-反复 refill、部分使用、shard crash、Bookie crash、未使用 pool 回收。
+反复refill、部分使用、shard crash、Bookie crash、未使用pool回收；延迟真实write submission/completion，覆盖旧shard退出、pool转交及generation bump后才到达的completion。
 
-Oracle：pool ownership 不重叠；restart 后 unused/live classification 确定且可重复。
+Oracle：pool/shard generation ownership不重叠；restart后unused/live/unknown分类可独立重放。旧写I/O未终结或可靠隔离前不能转交/reuse；仅取消future、忽略late callback或reader drain的方案必须被否证，旧I/O不能改写新owner数据。
 
 ### B4：Shared slab 多 ledger
 
@@ -154,9 +161,9 @@ Oracle：shared 旧数据和 dedicated 新数据可组成唯一 ledger history�
 
 ### B6：Delete、reader drain 与 reuse
 
-保持 reader/pin，触发 delete；在 tombstone、invalidate、drain、FREE_AND_BUMP、新 owner allocation 各点 crash。
+保持reader/pin和未完成writer I/O，触发delete；在admission close、terminal tombstone、access-barrier receipt、invalidate、drain、FREE_AND_BUMP、新owner allocation各点crash。
 
-Oracle：reader 未 drain 时 slot 不复用；旧 locator 在新 generation 上明确失败；新 owner 数据不被旧 ledger 读取。
+Oracle：reader/pin未drain或旧writer I/O未终结时slot不复用；barrier后旧handle/grant不再服务；旧locator在新generation上失败，旧I/O不能污染新owner数据。barrier receipt与physical-delete receipt分别验证。
 
 ### B7：Checkpoint A/B rotation
 
@@ -166,19 +173,19 @@ Oracle：restart选择一个完整authority，`checkpoint through S + complete s
 
 ### B8：Control authority corruption
 
-分别损坏单个 superblock、单个 checkpoint、control tail、必要 control suffix、A/B 全部 authority。
+分别损坏单个superblock、单个checkpoint、可证明未提交的末尾、必需committed prefix、unknown mandatory完整记录、边界无法分类的tail，以及A/B全部authority；同时覆盖durable但response丢失的完整batch。
 
-Oracle：可证明时降级恢复；authority 无法证明时设备 FAILED/QUARANTINED，绝不扫描 data 后猜 free list 并 writable。
+Oracle：按RFC-0003 §5.4独立分类；只截断可证明未提交的末尾，完整durable transition即使未回ACK也重放；必需prefix损坏/unknown/无法分类保持non-writable。判定不能仅依赖文件末尾、checksum失败或客户端未记录ACK。
 
 ### B9：Derived index deletion
 
-完整删除 RocksDB/locator index，重启 rebuild。
+分别运行保留有效index/checkpoint的正常restart，以及完整删除RocksDB/locator index的full rebuild；数据同时包含active tail、sealed dedicated extent、shared slab与relocated record。
 
-Oracle：恢复的 ledger/entry/locator 集合与权威 payload 一致；stale generation 不进入新 index。
+Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围，结果与独立全量authority oracle一致；normal restart只能在有覆盖证明时缩小扫描范围。stale generation不进入index，未验证范围不返回确定absence；分别记录scan bytes/I/O、peak memory、read-only/可写时间及前台竞争。
 
 ### B10：Compaction copy
 
-对部分死亡 shared block 执行 same-Arena compact，在新 allocation、copy、DATA durability、conditional `MOVE_COMMIT` append/durability/response loss、locator publish、new-pin 阻断、reader drain、old free 各点 crash。
+对部分死亡shared block执行same-Arena compact，在新allocation、copy、DATA durability、conditional `MOVE_COMMIT` append/durability/response loss、原子selector发布并关闭old-pin admission、reader/writer quiescence、old free各点crash；不能把selector发布与new-old-pin阻断实现为两个独立cut。
 
 必须覆盖：
 
@@ -257,6 +264,18 @@ Oracle：唯一可接受same-scope candidate必须让每个supported old binary�
 Oracle：任何partial/mismatch/unknown/corrupt状态整个Bookie non-writable并重试同一migration generation；persistent readiness CAS先于ephemeral registration，response loss重读两层且generation/incarnation mismatch demote。存在任一local success/route/activation/fence/grant/tombstone/Arena authority/durability unknown时same-scope old-binary rollback拒绝；恢复只可roll-forward、verified export/rebuild、irreversible wipe/decommission或new incarnation。new-scope fallback只在旧BookieId drained/readonly/decommissioned且旧credential不能访问时可writable。
 
 Wave 0已完成一个不访问真实filesystem、OS权限、registration backend或外部目标的typed reference implementation与immutable receipt；17项普通测试机械覆盖上述ordering、CAS/response loss、九个crash cut、device负向状态、stale demotion、rollback拒绝和new-scope access-isolation语义。它只证明reference state machine和内存adapter满足当前合同，不能替代本节要求的真实stock binary、file-touch、multi-device、physical durability、startup raw metrics或formal Spike运行；Spike状态继续是`Planned / Not Executed`。
+
+### B16：Bookie控制日志与多Arena部分持久化
+
+一个ledger跨至少两个Arena，组合route/install/activation、fence、grant close/tombstone、DATA durability及各日志A/B checkpoint/rotation，在每个相邻持久化边界注入crash/response loss。保存Bookie控制日志和所有Arena原始镜像，使用独立parser比较replay。
+
+Oracle：Bookie级权限在所有Arena一致；部分成功不能扩张接受集合；required store不完整时不注册writable。normal Add无控制日志fsync或远程read，DATA不重复写入Bookie控制日志。报告真实fsync/bytes、cold/warm恢复时间及保护credential的非泄漏检查。
+
+### B17：空间耗尽与长期回收进展
+
+在manifest锁定的有界live set与admitted写入速率下持续create/write/delete，使大量shared block仅剩少量live records；另运行超过可持续能力的压力矩阵。分别耗尽前台whole-free blocks、compaction目标预算、Arena及Bookie控制日志/checkpoint预算；在maintenance与full-disk状态重启。
+
+Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持有界；维护得到锁定最低调度份额，恢复空间后按hysteresis重新开放。受支持负载下debt/dead bytes不持续增长，停止新写后在锁定deadline内回到目标水位；不能靠暂停compaction通过p99。超额负载只要求有界拒绝及可验证恢复，不要求无限容量。全部数值先于正式run冻结。
 
 ## 8. 性能场景
 
@@ -337,6 +356,8 @@ dedicated tail waste
 
 B14/B15必须另执行完整stock binary/boot/migration matrix；模拟parser或mock registration不能替代正式结果。
 
+B16必须运行完整Bookie-control/多Arena crash矩阵；B17必须完成空间耗尽、maintenance restart、持续churn与stop-write drain矩阵。不能只运行原B1-B10后声称新增要求PASS。
+
 最低随机矩阵：
 
 ```text
@@ -358,6 +379,13 @@ cross-ledger-instance successful read          = 0
 local-success payload lost after recovery      = 0
 FREE/reuse before durable generation bump      = 0
 reader-pinned slot reused                      = 0
+old writer I/O corrupted a reused generation   = 0
+same-coordinate conflicting payload overwritten = 0
+local success before readable location publication = 0
+required durable prefix misclassified as discardable tail = 0
+unknown rebuild coverage reported definitive absence = 0
+cross-Arena partial state expanded Bookie authority = 0
+foreground allocation consumed maintenance reserve = 0
 checkpoint replay authority divergence         = 0
 authority-loss device resumed writable         = 0
 derived-index rebuild changed payload facts    = 0
@@ -390,7 +418,7 @@ missing startup/read-amplification raw metrics   = 0
 format/readiness validation executed on normal Add = 0
 ```
 
-外加 B11 资源硬 Gate 和 foreground p99 regression Gate 全部达到。
+外加B11完整资源账本、foreground p99 regression及B17锁定负载下的debt有界/排空Gate全部达到。不能用单ledger shallow size代替route、pool、selector、grant、pending、buffer、checkpoint和index/cache总成本。
 
 ## 12. 立即停止条件
 
@@ -413,6 +441,11 @@ manifest.json
 results.json
 gate-summary.json
 resource-accounting.md
+tail-classification-results.json
+pool-writer-io-quiescence-results.json
+bookie-control-multi-arena-crash-results.json
+space-exhaustion-and-churn-raw/
+normal-and-full-rebuild-raw/
 performance-raw/
 startup-performance-raw/
 device-images-or-snapshots/

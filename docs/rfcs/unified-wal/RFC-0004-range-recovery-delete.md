@@ -77,8 +77,9 @@ RangeReadRequest {
 ```text
 NORMAL_BOUNDED
 RECOVERY_EVIDENCE
-SEQUENCE_LOOKUP
 ```
+
+当前payload合同为opaque ledger，不提供独立sequence lookup；上层位置由client/protocol adapter解释。
 
 Profile range/read必须位于RFC-0001独立Profile endpoint及mandatory subtype中；不能复用legacy Add/Read optional字段，也不能在unknown/partial/response loss后降级Classic。Round 7只为executable corpus预留`RANGE_READ=0x0301`，当前capability set必须absent、body不接受并返回UNSUPPORTED；正式wire schema、token与hard count/bytes/deadline在Model E/API闭合后直接修改当前capability合同并评审，不能把预留opcode写成已实现能力或另建并行代际路线。
 
@@ -310,6 +311,31 @@ close response loss按以下顺序解析：
 
 cancel/deadline只终止当前attempt，不能回滚已提交fence/payload/metadata；若与close CAS并发，status路径先重读authority。single corrupt replica只记endpoint corruption并继续其他evidence；valid-looking conflict进入quarantine，payload仍在但required authority丢失进入authority quarantine，只有required-coordinate finite evidence exhausted进入data loss。metrics reason/phase必须bounded，attempt与unique durable completion分开；metrics不是authority，不为exactly-once计数增加durable hot state。
 
+### 7.5 首批基础点恢复必须独立闭合
+
+基础恢复与streaming range分别接受。首批可保留数据的Segment canary必须先在RFC-0001 §9.4的受支持矩阵完成以下可执行算法；Range、TailSummary和BatchRecoveryAdd仍可disabled：
+
+```text
+CAS OPEN -> IN_RECOVERY under Profile metadata authority
+    -> durable fence coverage for every possible current write set
+    -> freeze instance, ensemble history, E/W/A and recovery context
+    -> collect authoritative LAC/required-frontier evidence
+    -> point-read each unresolved coordinate from its exact legal source set
+    -> apply §7.3 normal-tail / deferred / quarantine / loss rules
+    -> admitted, bounded single-entry Profile recovery Add
+    -> durable close with matching final prefix and pendingPublication binding
+    -> prepare / lifecycle final publication / resolve before recovered success
+    -> reconcile response loss and revalidate after restart
+```
+
+若读取到IN_RECOVERY，重读并绑定同一恢复上下文后继续；若已CLOSED，保持原final prefix并验证其durable结果，不能重新OPEN。CLOSED但缺少删除所需fence proof时，对固定最后fragment补做fence coverage并重验metadata/context，不能直接把writer close当成fenced close。metadata/context改变时重新取证或defer，不覆盖已有close结果。
+
+首批Profile recovered结果除matching durable close外，还需同operation的最终publication已成立；delete先赢时保留已CLOSED事实，当前attempt返回authority-changed/non-OK，不回滚close。已在delete前最终发布的结果可以有迟到response。exact legacy/rich outcome mapping须覆盖这一中间态，不能仅检查CLOSED就跳过未resolve operation。
+
+实现必须给出source selection、write-set覆盖、并发/内存/重试上限和终止判据的伪代码，并提供独立point oracle。`W-A+1`只计fenced context下的definitive absence，timeout/offline不计；单副本payload、TailSummary或后续speculative entry不能代替required frontier。新的repair target、grant和最终completion还须遵守§9及§14的delete竞争协议。
+
+接受场景包括ACK response loss、旧writer失联、单副本missing/corrupt、预算内domain loss、required hole、正常未提交tail、换组历史、recovery Add/close每个crash cut和重启后再次读取。没有基础恢复证据的Add/ACK实验只允许discardable数据，不作为可恢复WAL canary。Model A先承担受支持子集的point recovery、durable close和outcome检查；Model E负责扩展range与point oracle的等价性，不能借Model E延期来豁免基础恢复。
+
 ## 8. Deferred Sync 限制
 
 Profile 状态：
@@ -370,13 +396,17 @@ RepairIntent {
    target storage incarnation, range and fence/grant generation
 5. copy through the existing recovery Add data path
 6. after copy, reread exact LedgerMetadata, intent admission and delete fence
-7. CAS standard ensemble replacement
+7. CAS standard ensemble replacement, conditioned on exact instance/version
+   and absence of membershipFrozen/another pending publication;
+   publish this operation's pendingPublication token in the same metadata CAS
 8. transition target to COMMITTED_REPLICA/READABLE
    - close/revoke RECOVERY_ONLY
    - do not grant normal writable authority
-9. publish domain-local replica/membership result COMMITTED,
-   conditioned on the same intent/fence predecessor
-10. compact intent only after delete-history or cleanup authority safely supersedes it
+9. prepare a bounded domain-local terminal candidate under its predecessor
+10. CAS its publication reference on the lifecycle head, only while live
+11. resolve the same-record pendingPublication token and domain candidate
+    from that durable publication or delete winner
+12. compact intent only after delete-history or cleanup authority safely supersedes it
 ```
 
 inactive install与admission之间不锁定先后，可并行或交换；不可删合同是grant、第一份payload和ensemble publication都晚于有效admission。admission CAS response loss必须重读exact lifecycle/delete-fence head或其已提交snapshot/summary：matching operation identity+payload已admit时继续同一intent/target；delete先赢时child保持inert；conflicting payload、unknown mandatory state、head gap或无法判定时fail closed/deferred。timeout不得盲建第二个intent、选择第二个target或授予grant。
@@ -398,7 +428,7 @@ replica/membership `COMMITTED` 只证明 copy 与 exact ensemble mapping 已发�
 - RFC-0004 strong completion authority：range-scoped coverage assertion、accepted loss ordering 与 loss-window reset；
 - Bookie local authority：target 对该 intent 的 durable recovery-only acceptance。
 
-新增冷控制成本严格限定为每repair operation/fragment的single-record immutable inert-child create、一次lifecycle/delete-fence admission-head CAS、target normal-inactive install durable transition、target recovery-grant durable transition、现有standard membership CAS与domain-local completion CAS。matching durable install已存在时，install transition可幂等解析为既存结果；这些是语义transition，不要求各自独占物理fsync。exact record packing、queueing、group commit和fsync次数保持开放，backend可group/batch，但portable safety不依赖multi-key transaction。benchmark必须分别覆盖cold install与already-installed/idempotent retry；recovery payload热路径不增加per-entry metadata round trip、per-entry control fsync、per-entry intent update或ledger-global repair-progress CAS，normal Add不读取sidecar。
+冷控制成本按每repair operation/fragment计量：immutable inert-child create、lifecycle admission CAS、normal-inactive install与recovery-grant durable transition、携带pendingPublication token的standard membership CAS，以及§14.1的domain prepare、lifecycle final-publication CAS、metadata token清除CAS和domain resolve。这些完成阶段显式替代此前“一次domain-local completion CAS即可”的候选成本；这是为delete/完成发布建立共同提交点的待验证修订，不能在benchmark中隐藏新增CAS。matching install可复用已有结果，物理写可group commit；payload热路径仍无per-entry metadata/control fsync/intent update，normal Add不读取sidecar。
 
 ### 9.2 Range-scoped permanent-loss budget reset
 
@@ -443,12 +473,14 @@ MetadataStore 保存的是“受信 verifier 已完成完整、无洞、per-coor
 7. reread exact membership, admitted intent, Profile policy, delete/control fence,
    and overlapping range loss/reset head
 8. prove complete per-coordinate F+1-domain coverage at the cut
-9. CAS exact standard ensemble replacement
+9. CAS exact standard ensemble replacement and its pendingPublication token
 10. close/revoke recovery grant and transition target role for its actual purpose
-11. CAS domain-local durable strong completion conditioned on the same
-   membership mapping, control/repair/policy generation,
-   delete fence and overlapping loss/reset predecessor
-   -- reset for this exact range linearizes here --
+11. CAS domain-local COMPLETION_PREPARED with the exact proof cut,
+    mapping/policy/intent and overlapping loss/reset predecessor
+12. CAS final publication reference on the live lifecycle/delete-fence head
+    -- completion becomes eligible here; the loss window remains bound to the proof cut --
+13. resolve COMMITTED or ABORTED, clear the matching metadata publication token,
+    and release the conflicting-domain prepare
 ```
 
 closed/historical target 不需要 normal activation；其 strong completion receipt 在证明完整 range、exact mapping 与 `F+1` coverage 后可以 reset。current writable replacement 若要承接未来 normal Adds，必须另行 post-CAS `NORMAL_ACTIVE`；这只授权未来写入，不能替代 CAS 前已 ACK prefix 的 coverage proof。写期 `install → LAC+1 CAS → activate → resend` 不复制历史 fragment，因此绝不能自行清零旧 loss window。
@@ -457,7 +489,7 @@ completion authority 必须幂等、可重放，并绑定上述语义。accepted
 
 accepted-loss generation 是排序 token，不是物理 loss counter；相同 domain/incarnation 的 duplicate declaration不能重复消费预算。metadata只能排序 accepted/observed facts，不能宣称感知未观测的物理 failure；proof cut 后实际发生但尚未声明的 failure 仍在语义上进入新 window。迟到 response 或 overlapping stale completion不能抹掉它。
 
-该 assertion 按 operation/range 持久化；允许一个 post-membership completion CAS、bounded child pages + bounded root/head、同 RepairIntent/context/policy 下相邻 range 合并，以及 current interval snapshot + bounded suffix。不要求 stop-the-world、全 ledger 重复制、per-entry MetadataStore update、per-entry control fsync 或无界 receipt history。
+该assertion按operation/range持久化，采用§14.1的prepare/publication/resolve；允许bounded child pages/root、相同context相邻range合并和snapshot+suffix。只有最终publication成功的candidate才可承担reset；resolve不能把窗口起点移到更晚时刻，也不能抹掉proof cut之后已发生或待声明的loss。不要求stop-the-world、全ledger重复制、per-entry MetadataStore/control fsync或无界receipt history。
 
 boundedness 至少要求单 page 的 bytes/interval count、root fan-out 与 retained suffix 有配置前上限；超限或 compaction失败时 defer/fail closed，不能继续无界 append。snapshot 必须先 durable publish，才能删除被覆盖 child receipt；不同 policy/context/control generation 的 interval 不能直接 merge。receipt compact 前，RepairIntent source/target/delete-discovery history 必须已由另一 durable snapshot/summary 接管。exact schema、page size、topology、merge threshold、audit artifact 与可选 commitment encoding 保持开放。
 
@@ -475,8 +507,13 @@ LedgerDeleteManifest {
     deleteEpoch
 
     sealedMetadataVersion
+    fencedCloseProofIdentity
+    admissionCutGeneration
+    membershipFreezeVersionAndIdentity
     ensembleHistoryDigest
     historicalBookies[]
+    admittedIntentSnapshotIdentity
+    accessBarrierReceiptsByTargetAndIncarnation[]
 
     state
     acknowledgedBookies[]
@@ -490,14 +527,20 @@ LedgerDeleteManifest {
 
 manifest 是权威 metadata 的一部分或由同等 CAS 语义的专用命名空间持久化。
 
+上述target/receipt集合是逻辑形状，物理实现必须用有界pages/snapshot与bounded root引用，不能把全部历史或access-barrier receipts堆入单个无界记录。
+
 ## 10. Cluster delete 状态机
 
 ```text
-ACTIVE / SEALED
+FENCED_AND_CLOSED (verified prerequisite)
     ↓
 DELETE_INTENT
     ↓
 ENSEMBLES_FROZEN
+    ↓
+ACCESS_BARRIER_PENDING
+    ↓
+ACCESS_BARRIER_COMPLETE
     ↓
 LOGICALLY_DELETED
     ↓
@@ -515,16 +558,16 @@ TOMBSTONE_COMPACTABLE
 通过 MetadataStore CAS：
 
 - 绑定 ledgerId + instance + deleteRequestId；
-- 阻止新的 open/append；
-- 冻结或串行化 ensemble change；
-- 阻止 AutoRecovery 为该 instance 创建新副本；
-- 固定 ledger metadata version。
+- 关闭新的open、lifecycle/repair admission与final completion publication；
+- 固定cut前admitted intent的可枚举history；
+- 启动§14.1的标准metadata freeze，处理cut前已准入操作；
+- 返回可查询的in-progress状态，尚不承诺所有已有handle失效。
 
-如果 ledger 尚未 seal，是否由 delete 协调器触发 fence/recovery，或要求调用方先 seal，是接受前开放项；不能跳过并发写入处理。
+首批删除只接受已完成fenced close的ledger：既有matching durable CLOSED metadata，也有覆盖所有可能write set的fence/recovery证明。仅writer写入CLOSED不足以证明本地写权限已撤销；未满足前置条件时返回明确precondition/non-OK，调用方先执行基础恢复。在线删除及delete协调器代为fence/recovery延期为独立feature gate。
 
 ### 10.2 ENSEMBLES_FROZEN
 
-从固定 metadata version 枚举所有历史 ensembles，生成 immutable target Bookie set 和 digest。
+先按§14.1在标准LedgerMetadata同一记录CAS发布不可逆membership freeze，再从该版本及admission snapshot枚举历史，生成绑定Bookie/storage incarnation的immutable target set和digest。先list再CAS不能冻结完整集合。
 
 必须覆盖：
 
@@ -533,13 +576,22 @@ TOMBSTONE_COMPACTABLE
 - incomplete、completed、aborted-but-dirty RepairIntent 中的 replaced member 与 target；
 - 已记录但尚未完成的 replacement。
 
-目标集合生成后，新 replica creation 对该 instance 必须被拒绝。
+freeze之后membership CAS不得继续改变该instance的ensemble。cut前admitted操作可能留下局部payload，必须在其固定target scope被撤权/清理，不能新增未被枚举的target。
+
+### 10.2.1 ACCESS_BARRIER_PENDING / COMPLETE
+
+对全部冻结target执行instance-specific本地屏障：原子关闭normal/recovery/read admission，终结pre-cut服务操作与相关写I/O，持久化terminal tombstone/generation，返回独立的access-barrier receipt。它证明不再服务该instance，尚不证明全部空间已经回收。grant读取旧authority后迟到时，与本地tombstone在同一gate排序；tombstone先赢则grant失败，grant先赢则由该屏障撤销。
+
+只有每个target都有matching durable barrier receipt，或有cluster-accepted且使旧incarnation无法再服务的永久decommission/wipe终结证明，才可进入COMPLETE。暂时offline、timeout、撤销writable registration或watch通知不足以证明旧read连接已失效；这些target保持pending。可以先提交删除意图并查询进度，不能提前返回logical success。
+
+新部署首批实现以上强访问屏障；任何放宽旧reader语义或加入其他隔离证明的方案须修改此feature gate并重新验证。屏障只约束后续服务，不能撤回客户端已取得的数据或网络中已生成的响应。
 
 ### 10.3 LOGICALLY_DELETED
 
-cluster tombstone durable 后，客户端视角 ledger 已删除：
+`ACCESS_BARRIER_COMPLETE`后才durable发布cluster logical tombstone并完成`deleteLedgerAsync()`：
 
-- open/read/add 返回 deleted/instance-specific error；
+- 新open及屏障后发起的server read/add被拒绝；新请求不得沿已有handle绕过本地generation检查；
+- 与删除重叠、已在本地屏障前完成的操作可以有迟到响应，网络callback到达时刻不定义删除线性化；
 - metadata 不得回到 OPEN；
 - logical completion 不代表所有物理 bytes 已回收；
 - tombstone 必须可被重启和 watcher 丢失后的组件重新发现。
@@ -593,9 +645,9 @@ DELETE_LEDGER_INSTANCE {
 Bookie 必须：
 
 1. 验证 instance、delete epoch 和授权；
-2. durable 写本地 delete tombstone；
-3. 阻止新 reader/writer；
-4. drain active reader、zero-copy pin 和 cache reference；
+2. 在统一gate关闭normal/recovery/read admission并捕获cut；
+3. 终结pre-cut reader/writer/I/O，durable写本地terminal tombstone并返回access-barrier receipt；
+4. drain剩余zero-copy pin/cache reference，确认无旧writer I/O可覆盖待复用空间；
 5. 对 Classic/Direct 路径执行对应清理；
 6. 对 Segment 路径按 RFC-0003 执行 invalidate 与 durable free/generation bump；
 7. 持久化绑定 Bookie/storage incarnation、stream 与 sequence 的 local effect/receipt；
@@ -685,7 +737,7 @@ API 必须区分：
 
 ```text
 deleteLedgerAsync()
-    -> logical delete completion
+    -> logical completion only after the access barrier and durable cluster tombstone
 
 awaitPhysicalDeletion()
     -> every historical target resolved and physical state terminal
@@ -699,28 +751,52 @@ awaitPhysicalDeletion()
 - target/ack/pending/decommissioned counts；
 - unresolved Bookie IDs；
 - logical completion time；
+- admission cut、membership freeze与access-barrier完成时间；
+- access-barrier pending target/incarnation及其原因；
 - physical completion time；
 - tombstone retention state。
 
-Profile range/recovery wire、coordinator、admin status与scheduler必须贯通RFC-0001冻结的transport `statusClass + retryDisposition + durableResult`：unsupported、identity conflict、not-ready/stale、fenced/deleted、grant invalid、transient、durability unknown、quarantine、unauthorized与bad request不能坍缩成OK。该transport status只是operation结果，不替代本RFC五类recovery outcome；尤其`QUARANTINED_OR_UNKNOWN_MANDATORY`或authority loss不得投影成payload `DATA_LOSS`。exact BKException/detailCode与legacy projection继续BLOCK；unsupported batch只能回退distinct single-entry Profile recovery，durability unknown只能same Profile operation/status query，绝不legacy flag/Classic/double write。
+Profile range/recovery wire、coordinator、admin status与scheduler必须贯通RFC-0001冻结的transport `statusClass + retryDisposition + durableResult`：unsupported、identity conflict、not-ready/stale、fenced/deleted、grant invalid、transient、durability unknown、quarantine、unauthorized与bad request不能坍缩成OK。该transport status只是operation结果，不替代本RFC五类recovery outcome；尤其`QUARANTINED_OR_UNKNOWN_MANDATORY`或authority loss不得投影成payload `DATA_LOSS`。exact BKException/detailCode与legacy projection继续BLOCK；unsupported batch只能回退distinct single-entry Profile recovery，控制操作的durability unknown只查询/重试同一Profile operation；normal Add按RFC-0001 §9.3允许正式换组重发，recovery更换target必须先resolve原intent并重新admit，不能盲建。任何路径均不降级legacy flag/Classic或绕过协议双写。
 
 ## 14. 并发规则
 
 ### 14.1 Delete vs ensemble change
 
-标准 ensemble membership 仍以 LedgerMetadata CAS 串行化。sidecar只让真正冲突的`DELETE_INTENT`与RepairIntent admission/publication共享同一个ledger-instance lifecycle/delete-fence逻辑顺序：先durable-create immutable inert intent child，再以conditional lifecycle/delete-fence head CAS发布admission reference。`DELETE_INTENT`获胜后，新的ensemble change和RepairIntent admission失败；ensemble change或admission先提交时，delete重读exact authority并将其纳入frozen history。不能用“先list child，再写DELETE_INTENT”的非原子顺序冻结targets。
+下一原型采用以下竞争协议，状态仍为**Planned / Not Executed**；Model A+D必须展开每次远程读取、单记录CAS、本地durability与response loss，不能把整段抽象成一个原子动作。
 
-RepairIntent admission后，copy progress、accepted loss、receipt和completion只推进owning authority-domain predecessor/head，同时绑定admitted intent generation并校验lifecycle/delete-fence generation；它们不为每次更新共享或推进ledger-global universal CAS。delete cut后的stale domain update不能产生grant、payload或completion authority。该逻辑cut不要求跨key transaction，exact admission directory/head、sharding、batching和encoding保持开放。
+**关闭admission与冻结membership：**
+
+1. repair先持久化immutable inert child，再CAS lifecycle head发布admission；child绑定的target/range不能在admission后扩张。
+2. delete CAS同一lifecycle head进入`DELETE_INTENT`，关闭新admission和final completion publication，保留此前admitted目录/snapshot及未resolve publication引用。
+3. delete读取标准LedgerMetadata，以其版本CAS写入绑定instance/delete operation的不可逆`membershipFrozen`语义marker，并保持CLOSED。所有Profile membership updater必须在同一记录的CAS predicate检查instance、合法state、freeze marker absent且无其他pending publication；不能只在CAS前读sidecar。marker/token的exact custom-metadata encoding及拒绝legacy mutation的ACL须在原型前冻结。delete freeze可保留未resolve publication token并关闭metadata变更，但不得改写它所绑定的mapping。
+4. 旧membership CAS先赢时，freeze CAS冲突并重读，把赢家纳入历史后重试；freeze先赢时，旧CAS版本失败，重试读取marker后终止。marker durable后不再接受任何repair/replacement membership变更。
+5. 以freeze版本、admitted intents及完成history形成固定targets，逐target完成§10.2.1访问屏障，再发布logical delete。每个response loss重读同一identity/version/marker，不盲建新delete或repair。
+
+标准LedgerMetadata仍是唯一membership truth；freeze marker只阻止该记录继续变更，不复制ensemble。无权绕过marker的Profile metadata mutation控制是此前§9协议的必要前提；其enforcement未验证时不得启用删除。
+
+**最终completion与delete共享提交点：**
+
+在进入下列步骤前，repair的membership CAS必须把新mapping与`pendingPublication(instance, operation, mapping identity)`一起写入同一条标准LedgerMetadata。需要发布completion但无需换组时，也须用该记录的conditional CAS保留同样的token。其他membership updater看到token就defer，直到该operation的durable结果已解析；copy工作仍可并行。这保证final publication消费的mapping不会在跨key读取后被另一个repair替换，标准metadata仍是唯一membership truth。
+
+1. 在owning range/domain head CAS写`COMPLETION_PREPARED`，绑定immutable evidence、exact mapping/policy/intent、proof cut、accepted-loss predecessor及publication operation identity。该candidate本身不发布recovered success或loss reset。
+2. prepared期间仅对实际冲突/重叠domain阻止新的completion及accepted-loss head推进；新的loss观察/声明必须保留并在resolve后排序，不能丢弃、伪装未发生或重置其物理发生窗口。队列/等待有hard cap，超限defer。
+3. CAS lifecycle head条件检查相同live instance/delete generation，发布该candidate的bounded reference。它与`DELETE_INTENT`只会有一个先赢：delete先赢则candidate只能abort；publication先赢则形成完成authority，随后delete必须保留其history。
+4. coordinator按已提交publication或delete winner，条件化清除同operation的metadata token并resolve prepared domain为COMMITTED/ABORTED，再处理pending loss；清除时保留membershipFrozen及所有历史target。reset若成立仍绑定原proof cut，之后的loss计入新window；abort保留旧window。root仍live且无matching publication时重试同一publication CAS，不能猜abort。coordinator crash/response loss由reconciler重读metadata、domain与lifecycle记录完成同一结果；必要authority不可用时保留token并defer。
+5. unresolved prepare依赖的publication引用不得先compact；bounded snapshot接管后才回收。missing/gap/unknown导致deferred/quarantine，不能按NOT_FOUND猜abort或重做reset。
+
+这为最终完成增加operation级冷CAS和局部prepare等待，必须测量冲突率、时延与恢复进展；其正确性及资源Gate未通过前不能Accepted。普通copy progress、不相交range的数据工作和normal Add不经过这个publication CAS；不引入跨key通用事务、per-entry元数据更新或Add lease。
 
 ### 14.2 Delete vs AutoRecovery
 
 AutoRecovery 可以先durable-create inert RepairIntent child，但在授予recovery-only authority、写第一份payload或发布ensemble前必须完成上述admission，并检查exact instance、intent generation和lifecycle/delete-fence cut。`DELETE_INTENT`先赢后，未admit child保持inert，不得授予recovery authority或产生该instance的新replica，只能在orphan proof后回收。
 
-RepairIntent admission先赢时，delete frozen target 必须包含其 replaced member 与 target，无论 copy/CAS 是未开始、部分完成、COMMITTED 还是 aborted-but-dirty。admitted intent 在 target 接收第一份 durable payload 前已进入delete-discoverable authority，因此 metadata 尚未发布的 target 也可被集群完整发现。exact child enumeration、admission directory/head、watermark/index 和 compaction encoding 保持开放。
+RepairIntent admission先赢时，delete frozen target必须包含其replaced member与target，无论copy/CAS是未开始、部分完成、COMMITTED还是aborted-but-dirty。`DELETE_INTENT`至目标本地屏障之间，已admitted且读取了旧authority的操作可能完成限定scope的grant/payload写入；这是可追踪的待撤权中间态，不代表新的admission或最终completion获准。新cold read看到delete时拒绝grant；旧read与local tombstone的竞争由本地gate及drain解决，不能宣称远程CAS立即阻止所有磁盘写入。
+
+访问屏障之后不得再授予该instance的grant、发布新local success或服务新read；此前partial payload由冻结target的物理删除处理。任何扩大target/range的行为都需要新admission，delete后必然失败。exact child enumeration、bounded directory与compaction encoding仍待实现。
 
 ### 14.3 Delete vs open/read
 
-logical tombstone 是最终 authority。已打开 reader 在 local delete 前被 drain；新的 reader 被拒绝。是否允许 tombstone 前已开始的 read 完成必须形成统一合同，不能因存储引擎不同而变化。
+logical tombstone是最终authority。统一语义为：本地屏障前已准入的read可以完成或明确失败，屏障receipt前其服务工作必须terminal；屏障后的read即便复用旧handle也拒绝。已生成的网络响应可能晚于logical delete返回，不构成新read authority。只完成fencing quorum不能使所有旧reader失效，访问屏障必须覆盖所有可能服务该instance的冻结target。
 
 ### 14.4 Delete vs ledgerId reuse
 
@@ -732,7 +808,7 @@ registration CAS 必须校验相同 effective assignment generation、storage in
 
 ### 14.6 Repair completion vs permanent loss
 
-range-scoped completion CAS 必须条件化校验相同 failure-domain policy generation、accepted loss/reset predecessor、membership mapping、delete/control fence 与 coverage cut。影响相同/重叠 range 的 loss/completion单序，能证明不相交的 range 可以并发。新 permanent loss 若在 proof cut 后发生，必须计入新 window；旧 completion response 迟到不能把该 loss 清零。delete 先赢时 repair 不得 completion；repair completion 先赢时 delete history保留其 receipt/target。
+range-scoped completion按§14.1的metadata token、domain prepare、lifecycle publication及resolve绑定failure-domain policy、accepted loss/reset predecessor、membership mapping、delete fence与coverage cut，不能把跨记录校验伪装成一个CAS。影响相同/重叠 range 的 loss/completion单序，能证明不相交的 range 可以并发。新 permanent loss 若在 proof cut 后发生，必须计入新 window；旧 completion response 迟到不能把该 loss 清零。delete 先赢时 repair 不得 completion；repair completion 先赢时 delete history保留其 receipt/target。
 
 ## 15. Tombstone retention
 
@@ -776,9 +852,9 @@ all historical targets acknowledged or durably decommissioned
 2. frozen target set 覆盖固定 metadata version 的历史 ensembles，以及所有 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member 与 target。
 3. unresolved offline Bookie 不能被超时自动解释为物理删除。
 4. Bookie 缺失 required tombstone 时不能注册 writable。
-5. local free/reuse 晚于 durable tombstone 和 reader drain。
+5. local free/reuse晚于durable tombstone、reader/pin drain和旧writer I/O终结或可靠隔离。
 6. 新 ledger instance 不受旧 instance delete 请求影响。
-7. AutoRecovery 在 DELETE_INTENT 后不能创建或发布新副本。
+7. DELETE_INTENT关闭新repair admission/final completion；cut前固定scope内的partial写入必须可发现并在访问屏障撤销，membership freeze后不能发布新ensemble。
 8. PHYSICALLY_DELETED 只在每个 target 有 durable terminal proof 时成立。
 9. target 的第一份 durable recovery payload 晚于可由 delete freeze 枚举的 RepairIntent。
 10. recovery-only authority 永不隐式授予 normal writable authority。
@@ -854,10 +930,12 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - DeleteManifest schema、target freeze 和 CAS 线性化点冻结；
 - bounded stream assignment的 PREPARED/effective handoff、storage incarnation、可应用snapshot+suffix、per-stream cursor、registration cut 与 terminal wipe/decommission proof有集群级端到端测试；
 - logical/physical API completion 可分别观测；
+- admission、membership freeze、access barrier及physical reclaim四种cut可分别观测；已有handle、离线target、迟到grant/I/O/response和prepared completion与delete竞争有确定性测试；
+- domain prepare/lifecycle publication/resolve每个crash/response-loss边界及pending accepted-loss排序通过Model A+D和reconciler测试；
 - Model D 无 safety counterexample；
 - Segment local reclaim 与 RFC-0003 generation tests 联动通过。
 
-允许分阶段接受：Batch/Range 和 Cluster Delete 可以成为同一 RFC 的独立 feature gate；任何一部分通过不得自动提升另一部分。
+允许分阶段接受：基础点恢复、受限fenced-close删除、Batch/Range、在线删除及扩展离线rejoin分别是同一RFC的独立feature gate。首批可保留数据canary必须闭合基础恢复及其实际启用的受限删除合同，不要求先接受disabled Range；任何一部分通过不得自动提升其他部分。
 
 ## 19. 开放问题
 
@@ -870,6 +948,8 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - `DataUnknownException` factory/mixed-version修复或generic quarantine mapping的最终选择；
 - volatile proof cache 与可选 operation-scoped checkpoint 的 exact encoding/durability；
 - Delete Coordinator 的部署、leader election 和 manifest namespace；
+- §14.1 membership freeze/pending-publication marker的exact encoding/ACL、prepared completion及final-publication引用的bounded schema/reconciliation；并发算法已选为原型候选，尚无执行证据；
+- §10.2.1 access-barrier receipt的exact schema、旧连接/target终结证明与错误映射；在线删除继续延期；
 - RepairIntent exact path、admission directory/head、child enumeration/watermark/index、状态名、sharding/batching和compaction encoding；
 - repair strong-assertion receipt schema、audit commitment、failure-domain identity/policy、accepted-loss namespace、range-sharded/global topology 与 interval page/fan-out/compaction；
 - recovery-only local record packing、BatchRecoveryAdd body/schema与batch limits后续改造；`0x0302`在当前manifest disabled；

@@ -21,6 +21,7 @@ BtrLog 可作为建模风格参考，但它的 durable blob-store entity、flush
 - 不把 Java 测试、性能 benchmark 或人工 trace 当作模型检查替代；
 - 不允许用“对象存储最终保存所有数据”作为恢复动作或不变量前提；
 - Model E 的 general E/W/A range optimization 可在推进该功能时单独增加。
+- 受支持子集的基础point recovery、required frontier、normal-tail/outcome和durable close先由Model A检查，不能因Model E延期而省略。
 - 不建模hash密码学、PKI、wire bytes、filesystem或old binary parser内部；只抽象其Spike A/B已验证的布尔结果与generation关系，不能把未执行的candidate测试预设为真。
 
 ### 2.1 故障分类与保证边界
@@ -119,6 +120,9 @@ durable range-scoped verifier assertion
 optional coverage audit commitment
 bounded child receipts and committed interval snapshot
 client pending operations
+logical Add identities and current delivery target/incarnation ACK sets
+same-coordinate pending/durable payload identity and readable publication
+supported point-recovery context, source coverage and rich terminal outcome
 AQ evidence
 LAC/close state
 authoritative Classic/Profile route
@@ -190,6 +194,14 @@ PublishEnsembleChange
 PublishReplacementActivationAuthority
 ActivateReplacement
 ResendPendingAdd
+ReceiveLateOldTargetAck
+CheckCurrentAckFailureDomains
+RetrySameCoordinatePayload
+RejectConflictingCoordinatePayload
+PublishReadableLocation
+ReadPointRecoveryEvidence
+ClassifyRequiredHoleOrNormalTail
+PublishDurableRecoveredClose
 BeginBoundedRepair
 DurabilizeReplacementEvidence
 VerifyRangeCoverage
@@ -224,6 +236,9 @@ ReclaimCoveredRepairReceipts
 - fence先关闭new admission并使所有pre-cut Add terminal；stale handle/admission generation不能在durable fence后形成local success；
 - initial standard metadata 不得早于 all-E inactive Profile route claim，normal create/open success 晚于 all-E activation；
 - active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
+- 普通Add unknown可在正式换组后重发同一identity；控制unknown不盲换operation。旧target/incarnation ACK不进入当前quorum/domain集合，成功保持连续前缀；
+- 同坐标相同payload幂等、不同payload冲突，DATA durable与readable publication未同时成立时不能local success；
+- 受支持子集的point oracle区分required hole、normal tail、temporary unavailability和authority loss；recovered success晚于durable close，重启后重新验证；
 - bounded repair reset 只在每个 ACK-eligible coordinate 有 `F + 1` distinct valid domains、exact membership 已发布且 conditional completion durable 后成立；
 - target durability、membership 或 activation 任一单独不能 reset；proof cut 后的 loss 进入新 window，迟到 completion 不得清零；
 - verifier assertion必须存在；digest/root单独不reset，duplicate accepted loss不重复消费budget；
@@ -237,6 +252,8 @@ Model只抽象上述boolean/generation关系，不编码TLS、SHA-256、TLV byte
 repair falsification 至少覆盖：partial copy、仅缺一个 coordinate、target durable 但不足 `F+1` domains、membership-only、activation-only、digest存在但verifier未完成、descriptor/`F`变化后重解释旧assertion、closed range无`NORMAL_ACTIVE`的合法reset、current target active但历史range不完整、`E > W` per-entry write-set coverage、duplicate loss、loss/completion两种先后、unobserved failure after proof cut、disjoint并发、overlapping stale completion、small-range merge、snapshot publish/response loss/child reclaim、delete freeze和root/page cap超限。sidecar falsification 另覆盖 child-before-head crash、head CAS conflict、snapshot build期间head推进、fallback损坏、store-version reset/instance reuse、unknown mandatory referenced record与normal Add期间sidecar不可用。
 
 ## 6. Model C：Segment Allocator
+
+除既有allocator状态外，加入pool/shard ownership generation、inflight writer I/O、三类control tail、每Arena维护保留预算及index rebuild coverage。组合A+C加入Bookie级control log与多Arena部分durability，不能假设它们一次原子提交。
 
 ### 6.1 最小状态
 
@@ -293,7 +310,6 @@ DurabilizeConditionalResult
 RetryConditionalOperation
 IntroduceUnknownMandatoryControlRecord
 DurabilizeMoveCommit
-PublishMovedLocator
 AcquireReadPinAtSelectorEpoch
 PublishSelectorAndBlockNewOldPins
 DrainOldReader
@@ -302,6 +318,14 @@ BuildCurrentSelectorCheckpoint
 ConditionalFreeOrphan
 RetryLateMoveCommit
 PublishDurableThrough
+ClassifyControlTail
+TruncateProvenUncommittedTail
+ClosePoolWriterAdmission
+CompleteOrIsolateOldWriterIO
+TransferPoolOwnership
+ConsumeForegroundSpaceBudget
+RunReservedMaintenanceStep
+RebuildAllAuthorizedLiveRanges
 ```
 
 ### 6.3 检查目标
@@ -326,6 +350,8 @@ shared slab 可先用一个 block 包含两个 ledger 的最小域建模；dedic
 
 ## 7. Model D：Cluster Delete
 
+首批delete前置为可验证fenced close；admission cut、standard metadata freeze、target-local barrier和logical/physical completion分别建模。扩展online-delete/rejoin动作可以独立配置，但不能删掉首批协议中的offline pending与迟到请求。
+
 ### 7.1 最小状态
 
 ```text
@@ -335,6 +361,10 @@ delete manifest and per-ledger-instance epoch
 frozen historical target set
 inert vs admitted durable RepairIntent children and lifecycle/retention
 ledger lifecycle/delete-fence generation and RepairIntent admission cut
+standard LedgerMetadata membership freeze marker/version and pendingPublication token
+domain completion prepare, lifecycle publication reference and resolve state
+pending accepted-loss declarations in a prepared conflicting domain
+per-target access barrier admission cut, terminal state and durable receipt
 AutoRecovery target payload and ensemble publication
 per-target recovery-only/committed-readable role
 delete streams and committed heads
@@ -370,6 +400,18 @@ CommitRepairIntent
 AbortDirtyRepairIntent
 CompactRepairIntent
 FreezeEnsembles
+ReadAuthorityBeforeDelete
+CASStandardMembershipFreeze
+CASMembershipAndPendingPublication
+ResolveMetadataPublicationToken
+PrepareDomainCompletion
+CASLifecycleCompletionPublication
+ResolvePreparedCompletion
+QueueLossDuringPreparedCompletion
+CloseTargetAccessAdmission
+DrainTargetServiceAndWriterIO
+DurabilizeTargetAccessBarrier
+PublishAccessBarrierComplete
 PublishLogicalDelete
 DispatchLocalDelete
 ApplyLocalDelete
@@ -400,7 +442,7 @@ CompactTombstone
 ReuseLedgerIdWithNewInstance
 ```
 
-组合A+D时，Model A的`LoseResponse`参数化覆盖`AdmitRepairIntentAgainstDeleteFence`：分别展开admission已durable但response丢失、admission未提交而delete先赢，以及coordinator restart后以同一operation/payload重读重试；不另建第二套事务状态机。
+组合A+D时，`LoseResponse`覆盖admission、metadata freeze、completion prepare/publication/resolve及access-barrier receipt；每个cold read与local durable grant分开执行，使模型能枚举读到旧authority后delete先赢的时序。不能把跨两个CAS及本地持久化包装成原子action，也不能用“generation有效”的不变量本身约束掉竞争。
 
 ### 7.3 检查目标
 
@@ -408,7 +450,10 @@ ReuseLedgerIdWithNewInstance
 - unadmitted RepairIntent child不授予recovery grant或第一份payload authority；
 - RepairIntent admission与DELETE_INTENT共享lifecycle/delete-fence cut：admission先赢则必被freeze枚举，delete先赢则后续admission失败；
 - admission response loss后，matching committed admission只恢复同一intent/target；delete先赢或结果无法证明时不能grant/write，也不能创建第二intent/target；
-- admitted后的progress/loss/receipt/completion使用owning domain head，stale update不能跨delete cut产生authority；
+- progress与loss仍按domain排序，final completion通过lifecycle CAS与delete竞争；未发布candidate不能reset/recovered success，prepared期间loss保留且resolve不改变proof cut；
+- metadata freeze CAS前的winner纳入history，freeze之后旧版本/retry不能发布ensemble；
+- admission cut前已准入scope可能在本地barrier前留下payload，必须进入delete discovery；barrier后迟到grant、write success和新read均被拒绝；
+- logical completion晚于全部target barrier/terminal proof，旧网络响应晚到不产生新authority；
 - recovery target 第一份 durable payload 晚于可枚举的admitted RepairIntent；
 - frozen targets 覆盖历史 ensembles 与 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member/target；
 - DELETE_INTENT 后 AutoRecovery 不产生漏删副本；
@@ -532,6 +577,10 @@ LocalRouteClaimBeforeLazyCreate
 StaleAdmissionGenerationCannotSucceed
 RecoveryGrantAndReadableAreNotNormalWritable
 ReplacementInstallCasActivateResendOrder
+CurrentAckSetExcludesStaleDeliveries
+SuccessfulAckCoversDeclaredFailureDomains
+SameCoordinateNeverOverwritesConflictingPayload
+LocalSuccessImpliesReadableLocation
 RepairIntentBeforeTargetPayload
 RecoveryRoleNeverGrantsNormalWrite
 RepairResetImpliesCompleteRangeCoverage
@@ -551,6 +600,10 @@ CurrentNormalWritesRequirePostCasNormalActive
 AllocationDurableBeforeLocalSuccess
 OneOwnerPerSlotGeneration
 NoReuseBeforeDurableGenerationBump
+NoReuseBeforeOldWriterIOQuiescence
+TruncationExcludesRequiredDurablePrefix
+ForegroundPreservesMaintenanceBudget
+FullIndexRebuildCoversAllRequiredLiveRanges
 OldLocatorNeverReadsNewGeneration
 AllocatorAuthorityOrDeviceFailed
 MoveCommitSelectsUniqueAuthority
@@ -578,6 +631,10 @@ LogicalDeleteIsIrreversible
 UnadmittedRepairIntentCannotGrantOrWrite
 DeleteFenceOrdersRepairIntentAdmission
 DeleteFreezeCoversAllAdmittedRepairIntents
+MembershipPublicationTokenPreservesCompletionMapping
+CompletionRequiresLifecyclePublication
+PreparedCompletionRetainsPendingLoss
+LogicalDeleteRequiresAllAccessBarriers
 AdmissionResponseLossCannotDuplicateIntentOrTarget
 RepairProgressDoesNotAdvanceUniversalHead
 FrozenTargetsCoverReplicaAndRepairHistory
@@ -689,21 +746,31 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-SIDECAR | A | bounded authority domains | child/head ordering, snapshot+suffix, same/conflicting-payload retry, fallback/reclaim, store-version reset, instance reuse and referenced unknown mandatory record |
 | A-LOCAL | A+D | local authority | Classic/Profile route claim before lazy create, independent normal/grant/readable facts, fence cut, stale handle and registration readiness |
 | A-PROFILE-COMPAT | A | 3/3/2 | descriptor match, anonymous/authenticated-but-unauthorized/authorized control scope, normal/recovery/Profile opcode, negotiation, old-decoder Classic effect and no downgrade |
-| B-2W | A+B | 3/3/2 | two writers + takeover |
-| B-RESP | B | bounded | completion reorder/loss |
+| A-FENCE-STALE | A | 3/3/2 | stale writer vs recovery fence, delayed responses |
+| A-ACK-RESP | A | 3/3/2 | Add unknown/replacement, current ACK/domain set, ordered completion |
+| A-POINT | A | 3/3/2 and 3/3/3 | supported point recovery, required hole/normal tail, durable close/restart |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
 | C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
 | C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
+| C-TAIL | C | local | proven uncommitted tail vs required prefix corruption vs unclassified boundary |
+| C-WRITER | C | local | pool transfer/reuse with delayed old writer I/O and completion |
+| C-SPACE | C | local | foreground/maintenance budgets, exhaustion, bounded debt and restart |
+| AC-LOCAL-STORE | A+C | two Arenas | Bookie control-log partial durability, same-coordinate conflict and read-after-success |
+| C-REBUILD | C | local | normal restart coverage vs full live-range index reconstruction |
 | C-FORMAT | A+C | local | old-binary fence, partial required-device migration, unknown mandatory format, incarnation/readiness generations and unsafe rollback |
 | D-OFF | D | historical ensembles | offline rejoin |
 | D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery |
 | D-INTENT | A+D | closed fragment | inert child, admission/delete-fence winner, admission response loss/restart, domain progress, first payload, ensemble CAS and every crash boundary |
+| D-PUBLISH | A+D | closed fragment | membership freeze/publication token, domain prepare/lifecycle publish/resolve vs delete and pending loss |
+| D-ACCESS | A+D | historical targets | old handle/grant, offline pending, access barrier and late response |
 | D-STREAM | D | bounded streams | gaps, PREPARED/effective handoff, applicable snapshot chunks, terminal-proof scope/replay, incarnation and registration cut |
 | CD-REUSE | C+D | local + cluster | delete, free, ledgerId reuse |
 | E-FALLBACK | E | E > W | partial range, required/speculative hole, normal-tail proof, rich outcome/legacy projection, skip/marker handling, authority loss, durable close and point-oracle equivalence |
 
 正式运行前可增加 config，不得删除最低结构。
+
+当前模型为A/C/D及按能力启用的E，不存在Model B；上述A-FENCE-STALE/A-ACK-RESP保留stale writer、response loss和ordered completion场景，不恢复sequence/offset协议。
 
 ## 11. 状态空间控制规则
 
@@ -735,8 +802,12 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 - 在足够 Bookie 可用且无持续故障时，install 最终 AVAILABLE 或明确失败；
 - recovery authority 唯一时，predecessor 最终 SEALED 或明确失败；
 - delete targets 最终响应或被 durable decommission 时，physical delete 最终完成。
+- authority/store恢复可用且无持续竞争时，prepared completion最终按durable publication/delete winner resolve，不永久占用conflicting domain；
+- 在锁定有界live set、admitted rate和维护调度份额下，maintenance可推进并使debt回落；超负载只要求有界拒绝及空间恢复后重新开放。
 
 fairness assumptions 必须逐条记录。liveness 未完成不影响 safety counterexample 的有效性，但会使相应进展结论保持开放。
+
+对本轮新增的prepared-operation恢复与空间回收进展，safety PASS不能替代相应进展Gate；缺少fairness/资源前提或未complete时该能力保持BLOCK/INCONCLUSIVE。TLC中的有界进展也不能代替Spike B真实I/O与长期churn数据。
 
 `AckedPayloadSurvivesWithinBudget` 只证明 payload evidence survival，不证明继续写可用性、read quorum 可用性、metadata/auth authority 生存或 general E/W/A recovery liveness。超过 failure-domain 预算只终止 survival 保证，不自动证明 payload 丢失；只有 required-coordinate evidence 确定性耗尽后的 `DATA_LOSS` 才是明确 terminal state。没有证据却返回恢复成功仍是 safety violation。
 

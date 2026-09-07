@@ -85,5 +85,17 @@
     "normalAddIntegration": false,
     "authority": false
   },
+  "plannedWork": {
+    "revisionDate": "2026-09-07",
+    "planningBaseCommit": "030c6d75013acb72a0b530149b495f3b3a7f6efe",
+    "state": "PLANNED_NOT_EXECUTED",
+    "planDocument": "docs/rfcs/unified-wal/implementation/README.md",
+    "workItems": ["UW-1", "UW-2", "UW-3", "UW-4", "UW-5", "UW-6", "UW-7"],
+    "order": ["BLOCK_G_MODELS", "BLOCK_H_ISOLATED_STORAGE", "MINIMAL_CLUSTER_AFTER_REQUIRED_GATES"],
+    "receipt": null,
+    "productionIntegration": false,
+    "authority": "NONE",
+    "historicalEvidenceRebound": false
+  },
   "authorityTouches": []
 }

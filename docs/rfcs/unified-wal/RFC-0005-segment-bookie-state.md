@@ -113,7 +113,7 @@ BookieRegistrationAuthority {
 }
 ```
 
-recovery grant和committed-readable都不隐含normal writable；active grants/range facts有manifest hard cap、snapshot/compaction和超限fail-closed。logical descriptor/credential/control tuple已由RFC-0001冻结；local physical owner、role index/record packing、at-rest protection与general recovery error API仍BLOCK。
+recovery grant和committed-readable都不隐含normal writable；active grants/range facts有manifest hard cap、snapshot/compaction和超限fail-closed。logical descriptor/credential/control tuple已由RFC-0001冻结；所选Bookie级control-log原型的物理验证、role index/record packing、at-rest protection与general recovery error API仍BLOCK。
 
 ### 5.1 最小原子 transition 与物理 owner 边界
 
@@ -129,7 +129,33 @@ recovery grant和committed-readable都不隐含normal writable；active grants/r
 
 cluster READY/standard membership先提交、local activation后消费；route/install先于Arena allocation；fence是独立单调transition；tombstone admission gate早于reader drain/local delete/free；delete effect durable早于stream cursor；assignment按PREPARED/catch-up/local readiness/effective registration排序。这些只需条件化有序，不需要跨MetadataStore/Arena/payload的通用事务或巨型原子delete。
 
-本 RFC 锁定`ProtectedProfileStateStore`形状的logical ordered conditional durable transition interface，但不选择dedicated Bookie-level control log、扩展Classic Journal、独立state store或reserved control arena。Per-Arena `ArenaControlLog`不当然拥有跨Arena的ledger route；若语义拆到多个store，中间态必须fail closed，任一authority缺失不能default allow。exact physical owner、crash record framing与at-rest protection是Round 7后仍阻塞stable on-disk和Segment ACK的frontier，必须由Spike restart、write amplification与p99数据闭合。
+`ProtectedProfileStateStore`保留logical ordered conditional durable transition接口。下一隔离原型固定采用§5.2的Bookie级独立控制日志；这收敛此前四选一的原型路线，但不构成已接受的stable on-disk合同。record framing、at-rest protection和真实crash证据仍阻塞Segment ACK。
+
+### 5.2 下一原型的真实持久化拓扑
+
+状态：**Planned / Not Executed**。在new BookieId/new storage scope内实现：
+
+```text
+Bookie-level protected control log + A/B checkpoint
+    route / credential / install / activation / fence / recovery grant /
+    committed-readable / explicit LAC / tombstone / local delete cursor/readiness
+per-Arena ArenaControlLog + allocator checkpoint
+    allocation ownership / generation / relocation selector / retirement
+Data Arena
+    payload and recoverable record framing
+```
+
+Bookie级日志是跨Arena ledger权限的唯一持久化owner；不把相同route/fence/grant分别交给多个Arena决定。其conditional transition按bounded per-ledger顺序执行，物理append/fsync可跨ledger group commit；只记录控制事实，不重复记录DATA payload，不给normal Add增加控制日志fsync。实现前在Spike B manifest锁定record/batch边界、完整prefix、A/B checkpoint/rotation、credential protection及queue/waiter上限。
+
+跨三层的执行顺序固定为：
+
+1. durable route/install后才授予该instance的Arena allocation；normal activation是后续独立权限；
+2. Add先取得Bookie级admission，再使用durable allocation，DATA durable且可读定位发布后才local success；
+3. fence/grant close/tombstone在同一Bookie级gate关闭对应admission，终结已有Add和I/O；durable控制结果后才确认撤权。tombstone同时关闭normal、recovery与read；
+4. reader/writer/I/O均满足RFC-0003 quiescence条件后，才允许Arena free/reuse；
+5. restart先恢复Bookie控制日志的terminal gates，再恢复各Arena authority/data/index，最后重验delete/readiness。任一required store缺失、损坏或无法分类，整个Bookie保持non-writable，不能由另一个store的部分成功推断allow。
+
+Spike必须覆盖Bookie控制日志已durable但某Arena尚未完成、DATA durable但响应丢失、tombstone与迟到grant、多个Arena的部分失败，以及控制日志checkpoint/rotation各cut。内存adapter测试不能替代这些真实文件/fsync/restart结果；process kill也不能单独代表power-loss/torn-write覆盖。
 
 ## 6. Fence 与 Add
 
@@ -142,6 +168,8 @@ normal Add local success
     && ledger was not durably fenced before Add authorization
     && RFC-0003 allocation authority durable
     && payload durability barrier complete
+    && same-coordinate payload identity accepted
+    && authoritative point-read location published
 
 fence completion
     => durable fence authority exists
@@ -162,6 +190,28 @@ normal Add 与 fence 使用同一个bounded per-ledger admission order：
 若data/fence共享sequencer，可用sequence证明pre-cut Add严格早于fence；物理日志分离时，drain/fail pre-cut admission是最小合同。network callback wall-clock不定义线性化：pre-cut local success的callback可以晚到，但durable fence后不能形成新的post-cut local success。response loss由durable state reread/replay解析。
 
 normal Add使用RFC-0001 `ADD_NORMAL=0x0201`与60-byte ledger context；mTLS/HELLO只在Profile连接建立时完成。route gate早于HandleFactory/lazy storage create，bounded handle-state lookup constant-time比较缓存的36-byte descriptor identity与20-byte verifier，capture current route/admission generation，要求normal-active且非fenced/tombstoned，沿RFC-0003 allocation+payload durability，并在完成时服从captured admission order。route/activation/fence generation可以缓存进handle，但不能只在handle创建时检查；transition必须推进generation使stale handle fail closed。普通Add不解析/重算descriptor/hash或auth-binding hash/HMAC，不携带Engine/capability vector/READY/target/certificate，不读MetadataStore/sidecar/remote assignment，不做KMS/signature/certificate验证，不写control record或等待per-Add control fsync。
+
+### 6.1 同坐标写入、幂等与读可见性
+
+normal与recovery写入共享同一个`(ledgerInstanceId, entryId)`的冲突判定；recovery grant不授予覆盖不同payload的权限。logical payload identity必须绑定不可变应用数据与必要entry语义字段，不能把target、request/attempt ID等投递字段当成payload差异。具体字节范围、digest复用和比较方法须在原型输入manifest冻结，不增加descriptor/auth-binding hash或远程查验。
+
+```text
+local route/auth/admission check and capture generation
+    -> reserve bounded pending slot for (instance, entryId, payload identity)
+    -> use durable authorized allocation
+    -> complete DATA durability
+    -> publish readable locator under current selector/admission gate
+    -> terminal durable local success
+    -> client current ACK set and ordered-prefix completion (RFC-0001)
+```
+
+- 同坐标相同payload的并发重试复用pending result，waiter/bytes有hard cap；已有durable且可读结果时幂等返回，不另写覆盖副本。权限校验仍先执行，已tombstoned的重试不能返回旧成功。
+- 不同payload返回明确conflict，不能覆盖已有pending winner或durable payload；crash后从有效DATA/selector重建去重事实，不能以易失pending表丢失推断坐标为空。
+- DATA durable而locator未发布时不能local success；符合instance/权限的点读在成功后必须能找到数据。尚未覆盖的rebuild范围返回not-ready/transient，不能返回确定`NoSuchEntry`。
+- locator可在内存/可重建索引发布，不要求RocksDB独立fsync参与ACK。它必须与DATA、generation和current selector一致；普通client read仍服从BookKeeper LAC/可见性合同，local success不提升客户端LAC。
+- fence/tombstone竞争沿captured admission order终结；已durable但未成功的数据不能仅凭callback丢失当作free。冲突隔离、orphan回收和极晚重试使用有界authority proof，不保存无界request history。
+
+接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、DATA与locator间crash、ACK后立即点读、index全删恢复、stale handle与delete race。
 
 ## 7. Recovery Add
 
@@ -216,7 +266,7 @@ cluster registration readiness
 
 第一层必须落在受支持stock old binary启动时**必然读取且在任何Profile storage open、Journal replay、Arena writer、handle/lazy storage、registration之前确定拒绝**的mandatory path。只增加Cookie optional property/version、registration property、Arena/superblock文件、unknown negative Journal meta-entry、文档/client placement或启动后demote都不足。
 
-Round 7对同BookieId/同storage scope给出明确`BLOCK`。源码只提供一个Spike B candidate：把metadata Cookie与每个required current/VERSION的第一行改为nonnumeric sentinel `"BKPF1\n"`，随后是`recordLength:u32 + BookieFormatRecord + CRC32C:u32`；metadata使用versioned CAS，本地通过temp write → fsync temp → atomic rename → fsync parent发布。CRC32C只做corruption detection。该candidate不能进入最终合同，因为尚未证明全部stock old binary，data-integrity模式会在Cookie validation前创建`LedgerStorage`，现有local VERSION不是atomic publication，physical Segment owner未选，也未证明所有启动/tool/storage-expansion入口或已运行旧进程都被挡住。
+Round 7对同BookieId/同storage scope给出明确`BLOCK`。源码只提供一个Spike B candidate：把metadata Cookie与每个required current/VERSION的第一行改为nonnumeric sentinel `"BKPF1\n"`，随后是`recordLength:u32 + BookieFormatRecord + CRC32C:u32`；metadata使用versioned CAS，本地通过temp write → fsync temp → atomic rename → fsync parent发布。CRC32C只做corruption detection。该candidate不能进入最终合同，因为尚未证明全部stock old binary，data-integrity模式会在Cookie validation前创建`LedgerStorage`，现有local VERSION不是atomic publication，所选physical Segment control-store原型尚未验证，也未证明所有启动/tool/storage-expansion入口或已运行旧进程都被挡住。
 
 如果same-scope Gate不能证明，当前安全fallback立即锁定为：
 
@@ -252,8 +302,8 @@ restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/
 3. 校验device manifest；
 4. 校验每个required device/Arena superblock；
 5. missing/corrupt/unknown/partial mismatch进入non-writable quarantine；
-6. 恢复ArenaControlLog/checkpoint/allocator与relocation selector；
-7. 恢复route/credential/activation/fence/grant/readable/LAC/tombstone；
+6. 先恢复Bookie级control log/checkpoint中的route/credential/activation/fence/grant/readable/LAC/tombstone及local cursor/readiness，恢复terminal gates但不开放服务；
+7. 恢复各ArenaControlLog/checkpoint/allocator、relocation selector与DATA/index，再交叉验证Bookie级权限；
 8. apply delete assignment snapshot+complete suffix并完成reconciliation；
 9. durable local readiness；
 10. persistent readiness CAS；
@@ -262,7 +312,9 @@ restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/
 
 ### 9.1 Wave 0 reference harness状态
 
-Wave 0已在`bookkeeper-common`的独立`profile.startup` package完成上述逻辑顺序的typed reference implementation与immutable receipt：compatibility、required-device/superblock、allocator/route/delete recovery、durable local readiness、persistent versioned CAS、matching service-info和ephemeral writable registration。reference adapters的17项普通测试覆盖response loss重读、CAS conflict、generation/incarnation mismatch demotion、stale registration、九个边界crash/restart、partial/missing/corrupt/unknown mandatory device、rollback拒绝及new-scope旧身份/credential拒绝；normal Add没有调用点，相关cold-path增量计数为0。
+既有reference harness把recovery消费为typed semantic facts；其历史测试不证明本轮§5.2新增Bookie控制日志或上述物理replay子顺序。相关新验证归Spike B B16，历史receipt不重绑。
+
+截至2026-09-02，Wave 0在`bookkeeper-common`的独立`profile.startup` package已完成当时逻辑顺序的typed reference implementation与immutable receipt：compatibility、required-device/superblock、allocator/route/delete recovery、durable local readiness、persistent versioned CAS、matching service-info和ephemeral writable registration。reference adapters的17项普通测试覆盖response loss重读、CAS conflict、generation/incarnation mismatch demotion、stale registration、九个边界crash/restart、partial/missing/corrupt/unknown mandatory device、rollback拒绝及new-scope旧身份/credential拒绝；normal Add没有调用点，相关cold-path增量计数为0。
 
 这只是`EXPERIMENTAL / NON-PROMOTABLE / NO AUTHORITY / DISCARDABLE`的semantic reference implementation。它不接入`EmbeddedServer`或生产registration，不定义physical Cookie/superblock bytes、backend path、OS credential/ACL修改、migration/wipe工具，不运行same-scope `BKPF1`或真实old-binary Gate，也不改变本RFC的Proposed状态、Spike B状态或Segment ACK authority BLOCK。
 
@@ -329,6 +381,9 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 进入 Accepted 前必须至少覆盖：
 
 - normal Add 与 fence 的每个 durability/response-loss 边界；
+- §5.2真实Bookie控制日志与多个Arena的partial durability/restart、checkpoint/rotation及tail分类；
+- §6.1同坐标去重/冲突、DATA durable到locator publication间的crash、ACK后点读与全部index丢失；
+- RFC-0004 admission cut、membership freeze、final completion publication及access barrier与本地grant/tombstone的组合；
 - fence 后 normal Add 拒绝与 authorized recovery Add 成功；
 - recovery-only grant、scope、response loss、close/committed-readable transition 与 restart；
 - recovery Add 重试、payload conflict、普通 flag 伪造与 delete race；
@@ -356,7 +411,7 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 ## 13. 开放问题
 
-- logical local authority的exact physical owner：dedicated control log、existing Journal extension、small state store或reserved control arena；该项是stable on-disk与ACK authority的BLOCK；
+- §5.2选定Bookie级独立控制日志原型的真实durability、跨Arena顺序和资源证据；physical owner路线已收敛，stable on-disk与ACK authority仍BLOCK；
 - durable state 的 exact record set、format/version、packing、checksum、snapshot/rotation 与 group-commit 边界；
 - protected `credentialKind=1 + 20-byte verifier`、route/activation逻辑绑定已冻结；physical packing、at-rest protection与secure deletion仍BLOCK；
 - initial/replacement exact purpose与direct-read语义已冻结；physical record/authority-reference packing仍BLOCK；
