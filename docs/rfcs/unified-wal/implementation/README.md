@@ -18,32 +18,35 @@
 
 ## 下一阶段实施清单
 
-2026-09-07修订；规划基线`030c6d75013acb72a0b530149b495f3b3a7f6efe`。以下工作全部为**PLANNED / NOT EXECUTED**，没有新增实现、正式run或PASS receipt。安全要求、候选算法和验收条件直接写入现有owner RFC，不建立另一套设计基线。
+2026-09-07收敛修订；规划基线`c79357d76f95dae4c27ffbddcc075b6385991daa`。以下工作全部为**PLANNED / NOT EXECUTED**，没有新增修复、存储写入路径、JUnit/正式run或PASS receipt。两处客户端缺口和reference codec复制链已只读确认；实现与性能结论仍待验证。合同直接更新现有owner RFC，不建立另一套设计基线。
 
 | 工作项 | 实施与完成条件 | Owner / 验证入口 |
 | --- | --- | --- |
-| UW-1 删除竞争协议 | 关闭admission、标准metadata同记录freeze、domain prepare/lifecycle publish/resolve、已有handle/grant访问屏障；逐cut crash/response loss可恢复 | [RFC-0004 §10/14](../RFC-0004-range-recovery-delete.md)、[Spike A A28](../spikes/SPIKE-A-profile-install.md)、[Spike C D-PUBLISH/D-ACCESS](../spikes/SPIKE-C-no-object-tla.md) |
-| UW-2 普通Add闭环 | 同坐标去重/冲突、DATA后readable publication、unknown后正式换组、旧ACK排除、实际ACK故障域及连续前缀 | [RFC-0001 §9.3/9.4](../RFC-0001-profile-capability-install.md)、[RFC-0005 §6.1](../RFC-0005-segment-bookie-state.md)、Spike A A27 / B B2 |
-| UW-3 真实本地控制存储 | 独立Bookie控制日志+A/B checkpoint；多Arena部分durability与restart不扩张权限，无normal Add控制fsync/重复DATA写 | [RFC-0005 §5.2](../RFC-0005-segment-bookie-state.md)、[Spike B B16](../spikes/SPIKE-B-allocator-block.md) |
+| CLIENT-1 先修ACK状态 | 现有PendingAddOp换组同步撤销旧Bookie成功；数量和启用policy覆盖共同重算completed，优先同一有效ACK事实派生；兼顾timeout统计与关闭policy成本 | [RFC-0001 §9.5](../RFC-0001-profile-capability-install.md)、[Spike A A29](../spikes/SPIKE-A-profile-install.md) |
+| CLIENT-2 先修对象回收 | 旧地址响应分支补安全maybeRecycle；最后旧响应/当前响应/callback未完成均不遗漏、提前或重复回收 | RFC-0001 §9.5、Spike A A30 |
+| UW-1 普通删除竞争 | 关闭admission、同记录membership freeze、完整targets/清理义务+authoritative tombstone后普通logical success；本地撤权/drain/free异步安全推进，旧reader可在本地tombstone前继续读 | [RFC-0004 §10/14](../RFC-0004-range-recovery-delete.md)、Spike A A28、[Spike C D-LOGICAL/D-ACCESS](../spikes/SPIKE-C-no-object-tla.md) |
+| UW-2 普通Add与identity | 同坐标payload/累计length冲突，合法LAC/digest变化幂等；复用热尾/索引与bounded pending，无每entry RocksDB/额外SHA-256；DATA后readable、正式换组、当前ACK/域/连续前缀 | [RFC-0001 §9.3/9.4](../RFC-0001-profile-capability-install.md)、[RFC-0005 §6.1](../RFC-0005-segment-bookie-state.md)、A27/B2/B19 |
+| UW-3 最小真实写入路径 | ByteBuf受控view、固定shard、预分配和批量DATA→readable→success；Bookie/Arena控制日志预建条件；真实A/B checkpoint/restart，后续补多Arena矩阵 | RFC-0005 §5.2/10.1、[Spike B B18/B16](../spikes/SPIKE-B-allocator-block.md) |
 | UW-4 allocator恢复与复用 | 三类tail oracle、pool/shard ownership、old writer I/O终结/隔离、原子selector/pin cut与generation reuse | [RFC-0003 §5.4/6/10](../RFC-0003-segment-storage-allocator.md)、Spike B B3/B6/B8/B10 |
 | UW-5 空间耗尽与进展 | 每Arena维护保留预算、限流/拒绝/恢复、维护调度份额；有界live set下长期debt稳定并按deadline排空 | RFC-0003 §13.1、Spike B B17 / C C-SPACE |
-| UW-6 最小集群可恢复性 | 实验3/3/2与3/3/3、Bookie故障域F=1；基础point recovery/durable close/restart重验、fenced-close受限删除及屏障；旧binary/稳定协议依赖保持BLOCK | RFC-0004 §7.5/10/18、RFC-0001 §9.4、Spike C A-POINT/D-ACCESS |
+| UW-6 最小集群可恢复性 | 实验3/3/2与3/3/3、Bookie故障域F=1；基础point recovery/durable close/restart、fenced-close普通删除；不等待strong-publication、不reset loss window；旧binary/稳定协议依赖保持BLOCK | RFC-0004 §7.5/10/18、RFC-0001 §9.4、Spike C A-POINT/D-LOGICAL |
 | UW-7 全量重建与总资源 | 正常restart和full-index-loss分开扫描/计量；全部live范围覆盖；route/pool/selector/grant/pending/buffer/checkpoint/index完整账本 | RFC-0003 §13/15、Spike B B9/B11/B16 |
 
 实施顺序：
 
-1. **Block G**先把UW-1/UW-2的候选并发协议及UW-3/UW-4的跨层cut展开为Model A/C/D和A+C/A+D/C+D组合，保留`E>W`、response loss、offline/rejoin和generation reuse。锁定TLC/tool/config，冻结反例与独立receipt；不把多个CAS及local durability假设成一个原子动作。
-2. **Block H隔离存储原型**承接UW-2/3/4/5/7，真实control/DATA I/O与独立镜像oracle，先冻结record framing、保留预算和资源/进展阈值。模型不能证明真实fsync/framing，内存reference也不能替代物理实验。
-3. 在所需模型、真实存储、兼容和feature gates实际闭合后，推进UW-6最小集群。基础恢复不能随高级Range延期；没有该证据的Add/ACK实验只允许discardable数据。
+1. **CLIENT-1/2先修**：独立Classic维护补丁与确定性回归，不等待Segment模型；不借此修改新存储ACK authority。回归复现旧ACK残留、数量够但域不足和最后旧响应回收，不能仅以代码审查当作修复完成。
+2. **Block H与Block G并行**：H先交付UW-2/3一个Arena的隔离写入切片，再加入UW-4/5本地安全回收；G只展开实际启用路径的A/C及必要D/组合，仍保留`E>W`、response loss、offline/rejoin、generation reuse和逐CAS/local durability边界。两者各锁source/config和独立证据，不等待全部延期增强模型；模型不能证明真实fsync/CPU，性能run也不能证明quorum安全。
+3. **先得到可解释的测量**：固定硬件、durability、E/W/A及负载，优先普通写、换组、写入与回收并行；统一记录allocation/copy bytes/entry、CPU/entry、吞吐/p99、entries/durability barrier、磁盘写放大及compaction debt，另外观察队列/线程hop/锁和控制日志fsync。局部切片尚无replacement或网络的结果分别标NOT_EXECUTED/未覆盖，不新建庞大压测框架。
+4. **集群入口补足安全/资源证据**：UW-7全量重建、UW-3多Arena及UW-4/5故障/进展等实际所需Gate闭合后，推进UW-6。基础point recovery及普通删除不能随高级Range延期；缺少相关证据的实验仍只能用discardable数据，完整Gate和canary证据不得后补。
 
-首批不扩大为online delete、general streaming Range/TailSummary/BatchRecoveryAdd、rack/AZ多策略或cross-Arena迁移；每项后续能力独立Gate。same-scope旧binary以及当前延期的released-decoder矩阵保持原BLOCK/DEFERRED状态，本清单不构成执行这些实验或启用生产路径的回执。
+首批不扩大为强访问撤销、strong completion/loss reset、online delete、general streaming Range/TailSummary/BatchRecoveryAdd、rack/AZ多策略或cross-Arena迁移。普通删除不等待所有历史target在线；强撤权须独立全目标屏障。strong reset后续仅限整个ledger fenced+CLOSED，基础close/membership不创建pendingPublication、不自动续期loss budget；旧token仍按原协议解析，不得强删。每项后续能力有实际需求和独立证据后再启用。same-scope旧binary和released-decoder矩阵保持原BLOCK/DEFERRED，本清单不是执行或生产授权回执。
 
 `manifest.json`中的`sourceCommit`、`designInputsAtSourceCommit`和各模块receipt继续绑定原历史源码，不能改成当前文档hash来伪造新证据。新增`plannedWork`只导航本清单；正式实施时必须以新的source/config/run identity记录本轮合同验证，旧12/17项reference测试不证明上述协议已经实现。
 
-Wave 0 禁止触碰：
+CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/receipt；该计划不豁免Segment安全门槛。Wave 0仍禁止触碰：
 
 - `BookieImpl` 普通 Add 成功路径；
-- `PendingAddOp` ACK 决策；
+- 通过`PendingAddOp`接入Profile/Segment ACK决策；上述独立Classic缺陷修复不借Wave 0证据取得authority；
 - `LedgerStorage`、`Journal`、`EntryLog` 的生产 authority 或格式；
 - 现有 `bookie-rpc` fallback；
 - 生产 Cookie、registration、AutoRecovery 和 delete；

@@ -313,9 +313,23 @@ Oracle：有合法替代资源和明确控制结果时，原DATA outcome unknown
 
 ### A28：Delete cut、membership freeze与完成发布
 
-按RFC-0004 §14.1逐步展开admission、cold authority read、local grant、membership CAS、completion prepare、lifecycle final-publication CAS与resolve；在每两步间插入DELETE_INTENT、标准metadata freeze、本地access barrier、response loss与coordinator crash。覆盖prepared期间新的loss声明和delete后迟到的旧grant请求。
+基础scope按RFC-0004 §14.1逐步展开admission、cold authority read、local grant、membership CAS与history retention；在每两步间插入DELETE_INTENT、标准metadata freeze、普通logical tombstone、本地access barrier、response loss与coordinator crash。至少一个历史target离线，logical成功后仍用旧reader访问尚未tombstoned的目标，再恢复节点并执行本地屏障与回收。
 
-Oracle：新admission在delete后失败；旧membership CAS与freeze marker按同记录version分出赢家；未最终发布的candidate不能recovered success/reset；prepare可由durable结果确定resolve，pending loss不丢。旧read捕获的grant在本地屏障前只能作用于已枚举scope，屏障后不能成功；logical completion必须等全部target屏障/terminal proof。记录新增冷CAS数量、等待与reconciliation成本。
+Oracle：delete后新open/admission失败；membership与freeze按同记录version分出赢家；普通logical completion只在authoritative tombstone及完整可恢复清理目标已durable时成立，离线target使撤权/物理清理pending，旧reader在本地tombstone前可读。旧grant仅能作用于已枚举scope，本地屏障后read/grant/local success均拒绝，free晚于reader/writer/I/O终结。基础恢复matching durable close不依赖strong-publication token，也不reset loss window。
+
+强访问撤销及strong reset为独立DEFERRED配置，首批只验证能力拒绝及不创建token。后续启用时：强撤权必须等全部target屏障/永久服务隔离proof；strong reset必须整个ledger fenced+CLOSED，逐步执行token、prepare、lifecycle publication、resolve，注入sidecar故障、coordinator crash及pending loss，未最终发布candidate不能reset。已有token即使功能关闭也不得超时强删。记录新增冷CAS、membership阻塞时长、恢复解析和前台影响；不能因不在per-entry路径就忽略停顿。
+
+### A29：CLIENT-1当前ACK数量与故障域一致
+
+在现有`PendingAddOpTest`和真实rack-aware policy层构造`E/W/A=3/3/2`：旧ensemble为A/X、B/Y、C/Y；entry e先收到C ACK，另一pending entry超时触发C→D/X replacement，C仍在knownBookies。e随后仅收到A和D ACK，B未成功。必须仍不满足两rack约束；B的有效ACK到达后才可成功，迟到C不能补覆盖。
+
+另构造e的`completed=true`但callback被先前pending/换组阻挡：撤销唯一异域ACK后数量仍>=A而覆盖不足，必须撤销completed并等待有效新覆盖。覆盖多slot replacement、`E>W`未涉及本entry write set的变更、重复/旧地址响应、策略启用/关闭、timeout统计和对象复用。oracle从当前mapping与实际有效响应独立计算，不复用被测成功集合；关闭policy时不引入冗余集合或通用rack检查，数量及连续前缀不变。
+
+### A30：CLIENT-2最后响应与对象池归还
+
+控制请求计数、initiate完成和逻辑callback时序，分别令最后响应来自被替换旧Bookie、当前Bookie，以及所有响应先于逻辑callback。观察`PendingAddOp` recycler归还和`toSend`引用计数：满足既有回收条件时恰好归还一次，callback未完成时不提前归还，buffer不重复/提前释放，旧地址响应仍不计ACK。覆盖与timeout监控交错及下一次对象复用，保留既有同步保护。不能仅凭GC或heap曲线推断通过。
+
+A29/A30是独立Classic客户端修复的确定性回归，不运行Profile listener或Segment ACK。源码事实已检查，修复/测试均PLANNED / NOT EXECUTED；它们可先于Wave 0模型和原型实施，结果不提升Spike整体或production authority。
 
 ## 7. 故障注入点
 
@@ -431,10 +445,16 @@ Profile ACK succeeded without declared domain coverage = 0
 membership mutation bypassed durable freeze marker = 0
 completion mapping changed while publication token held = 0
 unpublished completion candidate reset loss window = 0
-logical delete completed before all access barriers = 0
+logical delete completed without durable tombstone and complete cleanup targets = 0
+strong access revocation completed before all access barriers = 0
+first-scope active ledger created strong-publication token = 0
+basic recovery or membership result reset loss window = 0
+replacement completed with stale ACK/domain coverage = 0
+final response missed eligible recycler return = 0
+premature/double recycler or buffer release = 0
 ```
 
-所有指定 deterministic scenarios 必须 100% 执行并命中 fault；所有断言为硬失败，不接受“低概率”。
+所选启用scope的指定deterministic scenarios必须100%执行并命中fault；所有断言为硬失败，不接受“低概率”。manifest在run前锁定scope，延期增强矩阵保持DEFERRED，基础scope的拒绝能力测试不算增强PASS；不得运行后排除失败场景。单项客户端回归或局部原型结果不宣称整个Spike PASS。
 
 ## 10. 立即停止条件
 

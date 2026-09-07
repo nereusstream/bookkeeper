@@ -222,7 +222,7 @@ reference implementation 由 `ProfileDescriptor`、`ProfileDescriptorCodec` 与 
 
 标准 `LedgerMetadata` 继续唯一拥有 OSS `OPEN / IN_RECOVERY / CLOSED` 状态和 ensemble membership。Profile 使用独立、带 CAS 语义的 sidecar namespace 保存 ledger instance 与 Profile 控制事实；sidecar 不复制或重新解释标准 membership。
 
-Profile的reserved `LedgerMetadata.customMetadata`保留小型immutable backlink，将`ledgerId`绑定到`ledgerInstanceId/sidecar reference`以防ABA。本轮候选协议另外增加RFC-0004 §14.1的固定大小`membershipFrozen`及单个`pendingPublication`语义marker，与membership在同一记录CAS；不得修改immutable backlink或累积operation列表。完整 descriptor、receipt、repair/delete history 不得塞入该 reserved entry，也不得累积在一个无界增长的 sidecar root；其他现有 OSS/user custom metadata 不受本合同禁止。RFC-0004 拥有语义的 repair/delete operation 可以使用有界 child record。
+Profile的reserved `LedgerMetadata.customMetadata`保留小型immutable backlink，将`ledgerId`绑定到`ledgerInstanceId/sidecar reference`以防ABA。RFC-0004 §14.1另定义固定大小`membershipFrozen`，与membership在同一记录CAS。单个`pendingPublication`仅属于延期的strong completion/reset，首批禁用，后续仅在整个ledger fenced且durable CLOSED后创建；基础恢复和写期replacement不创建它。不得修改immutable backlink或累积operation列表。完整descriptor、receipt、repair/delete history不得塞入该reserved entry或无界sidecar root；其他OSS/user custom metadata不受本合同禁止。repair/delete operation可以使用有界child record。
 
 LedgerMetadata version、relevant ensemble/fragment digest、instance marker 与 sidecar operation generation 只作为冷控制路径的 publication/CAS evidence。普通 Add 不读取当前 metadata version，也不因不相关 metadata mutation 要求全 E 重新激活。真正 ledger-global 的 lifecycle/READY/`DELETE_INTENT`/delete-fence/delete-terminal fact只共享一个 lifecycle CAS generation/fencing token；repair/loss/receipt等操作使用owning authority-domain predecessor/head，child/domain更新不因root存在而推进ledger-global head，只有实际冲突的domain共享顺序。本 RFC 不引入跨两个 metadata node 的通用事务、全局锁或 Add-time lease。
 
@@ -255,7 +255,7 @@ ACK(normal profiled Add)
 
 ### 6.1 Sidecar reservation 与 authority boundary
 
-RFC-0004 §14.1 completion协议中的admission/final-publication reference更新推进lifecycle记录的store version；只有真正的生命周期撤权cut推进delete/fencing generation。无关operation完成不能让既有grant或normal activation失效。domain progress不发布ledger-global head；最终completion是与delete实际冲突的operation级冷路径例外，root引用及retention必须有hard bound。
+RepairIntent admission以及后续启用的RFC-0004 §14.1 strong-publication reference更新推进lifecycle记录的store version；只有真正的生命周期撤权cut推进delete/fencing generation。无关operation完成不能让既有grant或normal activation失效。domain progress不发布ledger-global head；增强strong completion是与delete实际冲突的operation级冷路径例外，首批不运行，其root引用及retention必须有hard bound。
 
 sidecar 需要一个 domain-specific `ProfileControlStore` 语义 adapter。portable contract 只依赖单 record create/read/versioned CAS、bounded page enumeration 和显式 publication ordering；现有 `LedgerManager` 不提供通用 child namespace/multi-key transaction，底层 ZK multi-op 或 etcd transaction 可以作为 backend 优化，但不能成为跨 driver 的 safety 前提。
 
@@ -280,7 +280,7 @@ MetadataStore opaque store version 只负责单 key CAS；semantic/control gener
 
 root 必须有 manifest-locked hard bound，只保存 instance/descriptor/lifecycle summary、global lifecycle fence/control generation、有限 authority-family directory/head、current snapshot identity/cut 和 bounded suffix/page references。每个 child family/domain 声明 owner、semantic predecessor 与 bounded discovery；不同 domain 只在实际冲突时共享 order，已证明不相交range的progress/loss不进入ledger-global universal head；admission和最终completion publication按下述冷路径例外处理。
 
-RepairIntent admission与最终completion publication都实际冲突于delete fence。先durable-create绑定exact instance/target/source-range/operation generation的immutable inert child，再以single-record conditional lifecycle/delete-fence head CAS发布admission reference。只有admitted intent可授予recovery grant或接收第一份durable payload；`DELETE_INTENT`先赢后任何新admission失败，cut前全部admitted intent的source/target必须保留在delete discovery中。copy progress与loss排序仍由owning authority-domain head负责；最终completion采用RFC-0004 §14.1的domain prepare → lifecycle publication CAS → domain resolve候选协议，与delete获得可执行的单记录提交顺序。该CAS只发生在operation/range完成发布，不进入Add或每条progress；未admit child与未最终发布的completion均不授予完成authority。
+RepairIntent admission实际冲突于delete fence。先durable-create绑定exact instance/target/source-range/operation generation的immutable inert child，再以single-record conditional lifecycle/delete-fence head CAS发布admission reference。只有admitted intent可授予recovery grant或接收第一份durable payload；`DELETE_INTENT`先赢后任何新admission失败，cut前全部admitted intent的source/target必须保留在delete discovery中。首批copy/membership结果与matching durable close按RFC-0004 §9.1/7.5解析，不创建strong-publication token或重置loss window。延期的strong completion才使用§14.1的domain prepare → lifecycle publication CAS → resolve，并服从整个ledger fenced+CLOSED前置；未最终发布的candidate不授予strong assertion/reset authority。各路径均不增加per-entry metadata/control progress。
 
 `DELETE_INTENT`是关闭新准入的cut；已有授权的撤销、排空和访问屏障由RFC-0004分别定义。一次cold authority read加一次local conditional write不能被解释为跨MetadataStore/Bookie的原子撤权。所有中间态、response loss与crash必须按该RFC验证；不引入跨key通用事务或Add-time metadata read。
 
@@ -541,7 +541,7 @@ Active write-time replacement 与 AutoRecovery 是两条不同流程，不能用
 - CAS response loss 后重读 exact fragment start、old ensemble identity、replacement mapping、instance marker 与 operation generation；匹配才继续 activation，不匹配则 target 保持 inactive/orphan；
 - activation response loss 只重试/查询同一 operation，不因 timeout 盲选第二个 target；
 - ledger 已 `IN_RECOVERY/CLOSED` 时停止 normal activation/resend；
-- standard membership freeze marker或其他operation的pendingPublication存在时拒绝/defer metadata变更；本地durable fence/tombstone先发生时迟到activation失败，activation先发生时由后续本地屏障撤销；
+- standard membership freeze marker存在时拒绝metadata变更；若发现增强协议遗留的pendingPublication则保留并按RFC-0004解析，不得强删。首批活跃路径不创建这种token，不能让strong completion成为normal replacement的依赖；本地durable fence/tombstone先发生时迟到activation失败，activation先发生时由后续本地屏障撤销；
 - sidecar post-CAS authority 只绑定 instance/profile、committed metadata version、relevant fragment start、new ensemble digest 和 activation generation，不复制 pending Add 或完整 metadata。
 
 如果 install 失败：
@@ -584,9 +584,22 @@ AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RF
 
 最小集群原型先覆盖共同矩阵`3/3/2`与`3/3/3`，以stable Bookie identity作为声明故障域，测试`F=1`；storage incarnation用于区分证据身份，同一Bookie的新旧incarnation不得计为两个独立故障域。这是实验矩阵，不分配production policy/capability ID；更多组合、rack/AZ策略须独立接受。Model A仍保留`E>W`轮转场景。
 
-每次客户端成功必须同时满足当前write set的`A`个有效ACK、至少`F+1`个声明故障域和连续前缀要求。当前客户端已有可选的`enforceMinNumFaultDomainsForWrite`及`areAckedBookiesAdheringToPlacementPolicy()`入口；Profile必须绑定immutable policy/域身份，并证明所选policy确实实施检查，不能继承默认返回true或依赖运维可关闭的开关。placement只有在证明每个合法ACK子集均满足该policy时，才能替代逐ACK集合检查。
+每次客户端成功必须同时满足当前write set的`A`个有效ACK、至少`F+1`个声明故障域和连续前缀要求。当前客户端已有可选的`enforceMinNumFaultDomainsForWrite`及`areAckedBookiesAdheringToPlacementPolicy()`入口；Profile必须绑定immutable policy/域身份，并证明所选policy确实实施检查，不能继承默认返回true或依赖运维可关闭的开关。首批distinct-Bookie policy在已证明replica去重、当前write set和`F+1 <= A`时，直接由同一有效ACK状态推导域覆盖，无需每entry额外域证明、集合或通用rack lookup；此优化不能外推到rack/AZ。placement只有在证明每个合法ACK子集均满足该policy时，才能替代逐ACK集合检查。
 
 接受测试包括：最快ACK来自同一域、重复/迟到ACK、换组后的旧域计数清除、unknown/missing域身份、incarnation替换与预算内永久丢失。未满足覆盖时不发布成功，不把超时当成payload loss。
+
+### 9.5 先修现有客户端的两个缺口
+
+在`c79357d76f95dae4c27ffbddcc075b6385991daa`上只读确认以下源码问题；修复及回归均为**PLANNED / NOT EXECUTED**。它们是独立的Classic客户端维护项，不属于Wave 0的Segment ACK接入，也不授予新协议/存储authority。
+
+| 工作项 | 源码事实与实施要求 | 确定性验收 |
+| --- | --- | --- |
+| CLIENT-1 ACK状态一致性 | [`PendingAddOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)的`unsetSuccessAndSendWriteRequest()`撤销`ackSet`，但不撤销`addEntrySuccessBookies`中的旧Bookie；`completed`只按数量撤销。换组必须同步移除旧slot对应成功，并以当前有效ACK数量及已启用policy覆盖共同重算完成资格；优先从同一份当前write-set成功状态派生两种判断 | Spike A A29：旧Bookie仍在`knownBookies`、旧ACK残留；以及数量仍够但撤销唯一异域ACK、callback因队列/换组尚未发送的场景。仅当前有效ACK覆盖达标才可恢复`completed`并按连续前缀回调 |
+| CLIENT-2 迟到响应回收 | `writeComplete()`先减少`pendingWriteRequests`，旧地址分支直接return，漏掉`maybeRecycle()`。在该分支补安全回收检查并保持既有条件；回收后立即return，不能再访问已清空字段 | Spike A A30：最后一个旧地址响应、最后一个当前地址响应、逻辑callback未完成三种顺序；请求归零后恰好归还一次，buffer不提前或重复释放 |
+
+CLIENT-1同时检查timeout统计及recycle重置对成功集合的依赖；未启用故障域检查时避免维护冗余Bookie集合，但不能因此改变诊断含义或丢失必要ACK状态。具体复用/派生方式由小范围补丁决定，不要求新增协议或大规模重构。`RackawareEnsemblePlacementPolicyImpl.areAckedBookiesAdheringToPlacementPolicy()`会计入传入集合里仍属knownBookies的旧节点机架，因此只修policy内部而不修调用方状态不足。
+
+CLIENT-2是对象池归还缺口，尚未以测试证明内存影响；`toSend`通常已在callback后的`maybeRecycle()`释放，不将其表述为已证实的直接内存永久泄漏。回归沿用[`PendingAddOpTest`](../../../bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java)及相关placement测试，保留现有timeout/callback同步保护。
 
 ## 10. Restart 与 orphan install
 
@@ -679,6 +692,12 @@ durableResult:
 
 Profile client/admin必须保留完整三元组；legacy callback只能安全投影为non-OK，不能把partial/unknown变成OK。conflict/grant/quarantine/durability-unknown不得从coordinator/admin rich result丢失；exact新BKException、general E/W/A recovery outcome API与detail code继续BLOCK。protocol/header/length/unknown subtype错误关闭连接；control response loss只重试/查询same endpoint/subtype/opId/public payload；Add response loss保持same Profile subtype/instance/entry/payload；原DATA target的durability unknown可按§9.3正式换组后重发，不能盲改control operation/target或降级Classic。
 
+### 11.6 Reference codec与数据路径adapter
+
+`ProfileFrameCodec.decode()`、`ProfileFrame`构造/`body()`及`ProfileOperationCodec.AddNormal`解码/构造/`entryPayload()`会分配并复制body或payload。静态调用链说明多次payload量级复制，尚无压测结论。不可变`byte[]` reference codec继续作为字节合同、corpus和oracle；未来transport adapter使用受控`ByteBuf`视图原位解析固定header/context，并通过相同valid/invalid corpus验证等价拒绝，不原样串联整包clone接口进入热路径。
+
+派生`slice()`共享父buffer内存且不自动增加引用计数；异步跨组件持有必须明确retain/所有权转移及唯一release责任，不能提前释放父buffer。依据[Netty引用计数文档](https://netty.io/wiki/reference-counted-objects.html)。header、长度、subtype和上限检查仍早于大分配/排队。集中复制到shard对齐批量buffer可以接受；复制、取消、拒绝、断连、I/O失败及重试的生命周期按RFC-0005 §10.1和Spike B B18验证，不要求不切实际的全程零复制。
+
 ## 12. Capability negotiation
 
 HELLO是每个Profile connection的第一条application frame且最大4KiB。client body固定为：
@@ -745,7 +764,7 @@ registration只做hint；connection context也不替代durable install/activatio
 
 RFC 进入 Accepted 前必须：
 
-- [Spike A](spikes/SPIKE-A-profile-install.md) 全场景通过；
+- [Spike A](spikes/SPIKE-A-profile-install.md) 当前启用scope的全部必需场景通过；延期增强项保持独立BLOCK，不以disabled测试冒充其PASS；
 - Model A 包含创建、安装、response loss 与 ensemble replacement 的抽象；
 - strict TLV descriptor reference codec与独立golden verifier按§5的exact bytes/bounds/SHA-256 manifest通过；
 - golden corpus覆盖same-semantics稳定bytes/hash、different-semantics identity变化、duplicate/default/order、unknown schema/field/enum/mandatory capability、oversize-before-allocation、old writer rewrite/strip、declared hash mismatch，以及capability 0/1/64与E/W/A/F边界；
@@ -761,7 +780,8 @@ RFC 进入 Accepted 前必须：
 - raw Profile wire corpus在真实受支持old v2/v3 decoder/stock binary上证明TLS ClientHello及合法/损坏/截断/unknown Profile request均不产生legacy route/handle/master-key/allocation/journal/payload/ACK effect，且Profile parse error不触发legacy fallback；
 - per-connection handshake、restart/incarnation重新协商、unknown subtype、mixed ensemble、response loss no-downgrade与semantic error端到端传播通过测试；
 - route claim、legacy normal/recovery Add 与 activation gate 经过并发、restart 和源码评审；
-- §9.3普通Add unknown/正式换组/旧ACK清除、§9.4实际ACK故障域检查及RFC-0004 final-publication/delete竞争通过A27/A28；
+- §9.3普通Add unknown/正式换组/旧ACK清除、§9.4实际ACK故障域及RFC-0004普通delete/admission/freeze竞争通过A27/A28；strong-publication/强撤权仅在启用时接受其独立矩阵；
+- §9.5的CLIENT-1/2定向回归通过A29/A30，§11.6数据adapter与reference corpus等价并满足Spike B B18复制/分配/生命周期证据；
 - Classic-only throughput/p99 与 Profile Add CPU 成本证明 routing gate 未引入远程 I/O或不可接受回退。
 
 任一场景出现未安装 Add 被接受、mismatch 静默降级或 metadata 先于 replacement install 生效，RFC 保持 P0 Blocked。

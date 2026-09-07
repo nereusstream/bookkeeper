@@ -193,7 +193,21 @@ normal Add使用RFC-0001 `ADD_NORMAL=0x0201`与60-byte ledger context；mTLS/HEL
 
 ### 6.1 同坐标写入、幂等与读可见性
 
-normal与recovery写入共享同一个`(ledgerInstanceId, entryId)`的冲突判定；recovery grant不授予覆盖不同payload的权限。logical payload identity必须绑定不可变应用数据与必要entry语义字段，不能把target、request/attempt ID等投递字段当成payload差异。具体字节范围、digest复用和比较方法须在原型输入manifest冻结，不增加descriptor/auth-binding hash或远程查验。
+normal与recovery写入共享同一个`(ledgerInstanceId, entryId)`的冲突判定；recovery grant不授予覆盖不同payload的权限。logical payload identity绑定不可变应用数据及必要entry语义字段，传输完整性校验与逻辑重复判断分开。不能直接比较整个BK entry或将其digest当作不可变payload identity。
+
+源码依据：[`LedgerRecoveryOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerRecoveryOp.java)读取应用数据再调用`asyncRecoveryAddEntry()`；[`PendingAddOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)用当时的`lh.lastAddConfirmed`重新打包；[`DigestManager`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/checksum/DigestManager.java)的完整性校验覆盖`ledgerId / entryId / lastAddConfirmed / length / application payload`。合法重写可具有不同piggyback LAC与digest，不能因此误报不同业务数据。
+
+原型先冻结以下比较边界，再实现B19回归：
+
+| 字段 | 逻辑重复/冲突规则 |
+| --- | --- |
+| ledgerId、ledgerInstanceId、entryId | 验证route/context与坐标，跨instance绝不幂等命中 |
+| 应用payload长度及bytes | 同坐标必须相等；不同数据不能覆盖 |
+| BK `length`累计ledger长度等不可变entry语义 | 显式纳入一致性验证；`length`不等于本entry payload长度，不能作为LAC一样忽略。恢复重写必须重建相同值 |
+| piggyback `lastAddConfirmed` | 每份输入按其完整性合同校验，但可合法变化，不参与业务payload冲突；沿既有LAC authority/单调性规则处理，不能由重复Add擅自推进LAC |
+| BK digest、target、request/attempt、delivery generation及normal/recovery标志 | digest用于校验各自输入，其他字段用于权限/投递检查；不把封装差异当成payload差异 |
+
+每份输入先完成所需route/auth/grant及完整性验证，再做逻辑比较；接受合法LAC差异不能放宽corrupt frame/digest的拒绝。同数据重复可沿用已保存的合法entry表示，不为更新LAC重写整份DATA；向读接口返回的header/digest必须自洽。exact offset/length布局、digest类型和比较实现写入prototype manifest，保持现有wire corpus字节不变。
 
 ```text
 local route/auth/admission check and capture generation
@@ -207,11 +221,12 @@ local route/auth/admission check and capture generation
 
 - 同坐标相同payload的并发重试复用pending result，waiter/bytes有hard cap；已有durable且可读结果时幂等返回，不另写覆盖副本。权限校验仍先执行，已tombstoned的重试不能返回旧成功。
 - 不同payload返回明确conflict，不能覆盖已有pending winner或durable payload；crash后从有效DATA/selector重建去重事实，不能以易失pending表丢失推断坐标为空。
+- 普通新entry利用已有热尾状态与索引定位，不强制每entry读RocksDB或额外计算SHA-256；并发同坐标请求复用有界pending，仅可能命中已有坐标时进入数据核对慢路径，复用现有派生索引，不建全量去重数据库。缓存fingerprint不能单独替代必要数据相等验证；`entryId <= localLastEntryId`也不证明坐标存在，必须保留乱序、hole和`E>W`的分布语义。
 - DATA durable而locator未发布时不能local success；符合instance/权限的点读在成功后必须能找到数据。尚未覆盖的rebuild范围返回not-ready/transient，不能返回确定`NoSuchEntry`。
 - locator可在内存/可重建索引发布，不要求RocksDB独立fsync参与ACK。它必须与DATA、generation和current selector一致；普通client read仍服从BookKeeper LAC/可见性合同，local success不提升客户端LAC。
 - fence/tombstone竞争沿captured admission order终结；已durable但未成功的数据不能仅凭callback丢失当作free。冲突隔离、orphan回收和极晚重试使用有界authority proof，不保存无界request history。
 
-接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、DATA与locator间crash、ACK后立即点读、index全删恢复、stale handle与delete race。
+接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、合法LAC/digest变化、相同payload但累计length冲突、corrupt digest、乱序/holes/`E>W`、DATA与locator间crash、ACK后立即点读、index全删恢复、stale handle与delete race；分别记录正常新写与重复/冲突慢路径的索引读、hash、分配和复制成本。
 
 ## 7. Recovery Add
 
@@ -247,7 +262,7 @@ Profile read/LAC/list请求必须通过mandatory Profile discriminator并至少�
 
 ## 9. Delete 与 restart
 
-Segment Bookie 只消费 RFC-0004 已授权的 instance-specific local tombstone/delete。local free/reuse 仍服从 RFC-0003 的 reader drain 与 durable generation bump。
+Segment Bookie只消费RFC-0004已授权的instance-specific local tombstone/delete。普通cluster logical completion不等待全部Bookie屏障，旧reader在本地tombstone前仍可读；强访问撤销是延期的独立能力。本地收到delete后仍关闭normal/recovery/read admission并终结reader/writer/I/O，local free/reuse继续服从RFC-0003的drain与durable generation bump，不能随API保证收缩而省略。
 
 兼容与readiness分成三个scope，不能互相替代：
 
@@ -344,6 +359,32 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 所有 exact batching、record packing、cache layout 和阈值由 Spike 决定。不能用“正确性”作为无测量增加热路径 fsync、网络 hop 或全局锁的理由。
 
+### 10.1 第一批可测的最小存储路径
+
+状态：**PLANNED / NOT EXECUTED**。保留§5.2三层持久化owner，但普通Add收敛为一条固定shard执行路径：
+
+```text
+ByteBuf fixed-header/context parsing and bounded admission/local checks
+    -> route ledger to a fixed append shard
+    -> check/reserve coordinate using hot state and bounded pending
+    -> batch entries from multiple ledgers into an aligned shard buffer
+    -> write preallocated DATA space and complete the batch durability barrier
+    -> publish readable locators under selector/admission order
+    -> local success; release each buffer when its last user has finished
+```
+
+Bookie控制日志提前建立install/activation等条件，Arena控制日志提前建立pool allocation；普通已准入新写不逐条穿越三套队列、线程切换、锁或持久化future。pool不足时走有界refill/背压，不能把先决authority省掉；控制变化仍与captured admission/fence/tombstone order一致。
+
+- shard合批必须有bytes/count上限及最大等待时间；按真实durability barrier统计覆盖entry数，不能只有group-commit API而实际每entry `force()`。
+- ledger锁只保护短状态转换，不持锁等待磁盘future。固定shard是第一批执行模型，测量线程hop/queue wait/lock hold后再决定必要拆分，不新增调度框架。
+- adapter保留reference codec作oracle；使用受控payload视图，允许一次集中对齐复制。每层不可变包装不得反复clone整份payload。所有权覆盖拒绝、取消、断连、retry和I/O错误；若已复制且无引用可及源数据可释放源view，I/O仍引用的对齐buffer必须等真实I/O终结才复用，取消future不等于I/O已终结。
+- 热尾、pending、定位与权限状态尽量合并进现有handle/index；维持hard caps和hole语义，慢路径只处理实际需要核对的已有坐标。
+- 同时运行写入与回收，保留RFC-0003 §13.1的维护份额和空间保留；不能通过停止compaction改善p99。
+
+首个isolated/discardable性能切片可与实际启用路径的Model A/C及必要D子集验证并行，不必等待所有延期功能模型。切片先用真实control/DATA I/O、一个Arena及固定shards完成normal Add、点读、基础restart和本地回收；多Arena、全量重建和完整故障/资源Gate逐步补齐，未覆盖范围不得进入canary。无真实网络的shard测试不能证明transport/TLS成本，无真实恢复的性能run不能证明WAL可恢复性。
+
+Spike B B18/B19先固定硬件、I/O模式、durability、E/W/A、payload分布和负载，测正常写、replacement故障和写入/回收并行。必须同时报告allocation bytes/entry、payload copied bytes/entry、CPU time/entry、吞吐、p99、entries/durability barrier、实际磁盘写放大和compaction debt，并记录队列/线程hop/锁与各层fsync。最小局部切片尚未实现的replacement/集群场景明确NOT_EXECUTED，在集群入口补测，不用mock代替端到端证据。
+
 ## 11. 安全不变量
 
 1. `normal local success => matching durable route/install/global READY/local NORMAL_ACTIVE + valid authorization + durable allocation + durable payload`。
@@ -382,8 +423,9 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 - normal Add 与 fence 的每个 durability/response-loss 边界；
 - §5.2真实Bookie控制日志与多个Arena的partial durability/restart、checkpoint/rotation及tail分类；
-- §6.1同坐标去重/冲突、DATA durable到locator publication间的crash、ACK后点读与全部index丢失；
-- RFC-0004 admission cut、membership freeze、final completion publication及access barrier与本地grant/tombstone的组合；
+- §6.1同坐标去重/冲突及LAC/digest兼容边界、DATA durable到locator publication间的crash、ACK后点读与全部index丢失；
+- §10.1 ByteBuf生命周期、reference corpus等价、固定shard合批、分配/复制/CPU与真实durability指标通过B18/B19；
+- RFC-0004 admission cut、membership freeze、普通logical tombstone和本地grant/tombstone组合；延期strong publication/强撤权只在各自能力启用时验证，不作为首批前置；
 - fence 后 normal Add 拒绝与 authorized recovery Add 成功；
 - recovery-only grant、scope、response loss、close/committed-readable transition 与 restart；
 - recovery Add 重试、payload conflict、普通 flag 伪造与 delete race；

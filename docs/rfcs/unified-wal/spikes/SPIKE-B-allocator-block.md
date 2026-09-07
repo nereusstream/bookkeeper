@@ -28,6 +28,8 @@
 
 以下字段不得为 `TBD`：
 
+首个isolated/discardable性能切片按§4锁定实际启用scope；只有属于未启用路径的字段可标`NOT_APPLICABLE`并写明原因/后续Gate，不能伪造完整Spike输入。same-scope与released-old-binary实验维持原DEFERRED，不因本轮规划自动执行。
+
 ```text
 sourceCommit
 RFC0003Revision
@@ -49,6 +51,11 @@ filesystem and mount options
 I/O API and alignment
 JDK and JVM flags
 shard count
+enabled paths and separately deferred feature/test scopes
+transport adapter/refcount ownership and reference-corpus revision
+logical identity byte ranges, LAC/digest rules and duplicate slow path
+batch byte/count/wait limits and actual durability-barrier definition
+allocation/copy/CPU per-entry instrumentation and thread/queue/lock counters
 control-log/checkpoint region sizes
 Bookie-level protected control-log record/batch/checkpoint and credential protection
 control-tail fault model and required durable-prefix classification oracle
@@ -72,7 +79,17 @@ artifact output directory
 
 ## 4. 最小原型
 
-必须实现真实可崩溃恢复的：
+第一批先完成可测切片，与实际启用路径的Model A/C及必要D子集并行；不把完整stock binary、强撤权、strong reset和多Arena扩展全部作为第一份性能数据的前置。执行阶段为：
+
+| 切片 | 实施范围与输出 | 仍未取得的结论 |
+| --- | --- | --- |
+| 初始写入切片 | 隔离新storage scope、一个Arena、Bookie/Arena控制日志的必要记录、durable预分配、ByteBuf受控view、固定shard合批DATA、readable locator、点读/基础restart；跑B18/B19适用项 | 无生产listener/ACK、完整恢复、完整Spike或集群性能结论 |
+| 写入与本地回收 | 同一原型增加已启用的tombstone/drain/free/reuse、shared-block搬迁及维护预算，跑写入与回收并行、B17和所需fault cuts | 不证明cluster logical delete、强访问撤销或完整多Arena |
+| 完整存储/集群入口 | 补全所需tail/IO/rebuild/资源/多Arena矩阵和实际replacement/基础恢复；兼容Gate按既有边界独立闭合 | 仍需实际启用scope全部证据及canary-specific接受 |
+
+每份局部结果列出已实现/未执行路径，只报告测得性能和已覆盖故障，不称完整Spike PASS。无网络局部bench与真实transport bench分开；production adapter要走同一reference corpus验证。先复用现有测试/指标能力与小型workload runner，不为此次测量新建通用压测平台。
+
+完整Spike候选能力清单如下；按启用scope实现真实可崩溃恢复路径，以下清单不是初始切片的全部前置：
 
 - superblock A/B；
 - Round 7 `BKPF1` metadata/local Cookie sentinel candidate及atomic local publication；same-scope仍BLOCK，原型结果不能写成accepted format；
@@ -277,7 +294,33 @@ Oracle：Bookie级权限在所有Arena一致；部分成功不能扩张接受集
 
 Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持有界；维护得到锁定最低调度份额，恢复空间后按hysteresis重新开放。受支持负载下debt/dead bytes不持续增长，停止新写后在锁定deadline内回到目标水位；不能靠暂停compaction通过p99。超额负载只要求有界拒绝及可验证恢复，不要求无限容量。全部数值先于正式run冻结。
 
+### B18：ByteBuf、固定shard与批量DATA路径
+
+按RFC-0001 §11.6及RFC-0005 §10.1实现transport adapter到append shard的路径。reference immutable byte-array codec保留作oracle，以相同valid/invalid/truncated/oversize corpus验证解析和拒绝等价。跟踪从完整输入到readable publication的每次payload复制和所有权转移；允许一次集中对齐复制，禁止未计量的逐层整包clone。异步retain/release覆盖normal、拒绝、取消、断连、retry和I/O失败；源view最后使用后释放，已提交I/O的buffer直到真实I/O终结才可复用。
+
+多个ledger合批，固定shard，bytes/count/wait均有上限；注入低负载等待、队列满、pool refill、slow/failed force、fence/delete race及compaction并发。验证不持ledger锁等待I/O，普通已准入写不串行等待三层control/DATA队列或三个future。真实barrier前无local success；不能将取消future当成I/O终结。计量实际entries/barrier、force次数、thread hops、queue wait、lock hold和各层控制写；每entry force不能仅因API名为group commit就算批量化。
+
+### B19：同坐标identity与基础恢复重写
+
+用现有DigestManager与LedgerRecoveryOp语义构造同instance/entryId/应用bytes/累计length、不同合法piggyback LAC及digest的normal/recovery重写，应幂等且不覆盖不同数据；另测不同应用payload、累计length冲突、坏digest、跨instance、并发pending、乱序/hole、`E>W`、restart及derived-index丢失。每份输入完整性与authority都验证，不以整包bytes或全BK digest判定逻辑冲突。
+
+独立oracle比较不可变字段及应用数据，重建后核对每个坐标；`entryId <= localLastEntryId`不能充当存在证明。正常新entry、pending retry、已有durable命中、冲突和rebuild慢路径分别计量索引reads、hash invocations、allocation/copy bytes；不强制每新entry一次RocksDB查询和独立SHA-256，不建立全量去重库。与恢复代码的真实端到端联调未运行时单独标NOT_EXECUTED。
+
 ## 8. 性能场景
+
+首批固定硬件、durability和E/W/A（集群先3/3/2、3/3/3；局部shard测试注明quorum未执行），优先测正常写、实际换组故障、写入与回收并行。局部切片未实现的场景留作明确后续项，不用模拟吞吐宣称集群收益。除吞吐/p99外，每项同时记录：
+
+```text
+allocated heap/direct/native bytes per logical entry (with ownership scope)
+payload copied bytes per entry, broken down by layer
+CPU time per entry, including the declared background share
+entries per completed durability barrier and force count by log
+device bytes written / host application payload bytes
+compaction debt/dead bytes over time and stop-write drain
+queue wait/depth, thread hops and ledger lock hold time
+```
+
+分母区分logical entries与delivery attempts，重试放大不可被隐藏；明确process CPU/JVM allocation测量窗口、后台归因、device counter或I/O trace来源。与Classic在相同durability/offered load下比较；没有硬件/原始数据时只报告静态复制风险，不声称性能回归幅度或收益。数值预算先于正式run锁定，初始探索值不能追认成PASS。
 
 entry sizes：
 
@@ -358,6 +401,8 @@ B14/B15必须另执行完整stock binary/boot/migration matrix；模拟parser或
 
 B16必须运行完整Bookie-control/多Arena crash矩阵；B17必须完成空间耗尽、maintenance restart、持续churn与stop-write drain矩阵。不能只运行原B1-B10后声称新增要求PASS。
 
+B18/B19按锁定切片验证buffer生命周期、实际合批与LAC/digest兼容；局部PASS不覆盖后续真实transport、集群replacement或recovery场景，也不替代B16/B17/完整资源Gate。
+
 最低随机矩阵：
 
 ```text
@@ -381,6 +426,11 @@ FREE/reuse before durable generation bump      = 0
 reader-pinned slot reused                      = 0
 old writer I/O corrupted a reused generation   = 0
 same-coordinate conflicting payload overwritten = 0
+valid recovery rewrite rejected solely for LAC/digest variation = 0
+corrupt input accepted through logical dedup shortcut = 0
+hole treated as existing entry from localLastEntryId alone = 0
+buffer use after release or premature I/O-buffer reuse = 0
+buffer reference leak or duplicate release in tested paths = 0
 local success before readable location publication = 0
 required durable prefix misclassified as discardable tail = 0
 unknown rebuild coverage reported definitive absence = 0
@@ -441,6 +491,10 @@ manifest.json
 results.json
 gate-summary.json
 resource-accounting.md
+adapter-corpus-equivalence-results.json
+buffer-ownership-and-failure-results.json
+logical-identity-recovery-results.json
+allocation-copy-cpu-and-batch-raw/
 tail-classification-results.json
 pool-writer-io-quiescence-results.json
 bookie-control-multi-arena-crash-results.json

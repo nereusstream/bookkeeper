@@ -222,6 +222,8 @@ local durable Add success
 
 pool refill 通过 control-log group commit；pool 内空间的使用仍必须有可恢复的 block/record framing，但不要求每条 Add 写一条 allocator fsync。
 
+第一批数据路径采用RFC-0005 §10.1的固定append shard：多个BK entry合并进有界、对齐buffer，使用预先durable分配的pool空间，以真实batch durability完成后逐entry发布可读定位和local success。上述1/2是预分配先决条件，不意味着每条Add同步经过Bookie控制、Arena控制和DATA三条执行队列。refill异步预备并在资源不足时背压；锁内只做短状态变化，不等待磁盘完成。集中对齐复制可以接受，但要计量各层payload复制、分配、线程hop以及每次force覆盖的entry数，不能把每entry force称为已实现group commit。
+
 `ALLOC_POOL`的下一原型必须冻结：`Arena + pool range + owner shard + shard generation + allocation generation`，每个pool内record的used/unused识别方法，以及返还/转交的条件化状态机。未使用不能由“内存计数为0”推断；restart必须结合完整control authority与可恢复DATA framing确定live、unused或unknown，unknown不进入free pool。
 
 pool转交及所有free/reuse先关闭旧writer admission，等待已提交写I/O完成或获得可靠的设备/进程隔离证明，再conditional free/bump并授予新owner。旧completion的generation检查只能防止错误发布，不能阻止已经提交的旧I/O覆盖新owner磁盘字节；timeout、取消future或reader drain都不能单独作为写I/O终结证明。buffer、submission及completion必须携带owner/generation，late completion不得发布locator或success。崩溃后如何终结旧提交者的I/O同样进入真实故障矩阵。
