@@ -53,7 +53,7 @@ Block G模型与Block H隔离、可丢弃的存储性能切片可并行；实际
 
 | Scope | 首批检查与后续条件 |
 | --- | --- |
-| 基础A/C及必要D组合 | 当前ACK/write set、normal/recovery identity、基础点恢复/durable close、分配/持久化/readable/复用；启用普通删除时加入admission/freeze/完整targets/tombstone及异步本地回收 |
+| 基础A/C及必要D组合 | 首批shared block；当前ACK/write set、normal/recovery identity、客户端LAC与物理/恢复点读分离、逐entry/物理batch结果、提交后坐标保护和异常stream退出；启用普通删除时加入既有admission/freeze/targets/tombstone及异步回收 |
 | 普通删除 | logical completion不等全部target屏障，离线目标保持清理义务；允许旧reader在本地tombstone前继续读，新open/admission拒绝；本地free仍需全部必要drain/I/O条件 |
 | strong completion/reset | 首批disabled，不新建pendingPublication，不由普通membership/close reset预算；后续仅整个ledger fenced+CLOSED才允许启用，旧未resolve token保留原解析规则 |
 | 强访问撤销 | 首批disabled；将来独立验证全部target屏障或永久服务隔离proof后才完成 |
@@ -141,9 +141,11 @@ bounded child receipts and committed interval snapshot
 client pending operations
 logical Add identities and current delivery target/incarnation ACK sets
 same-coordinate pending/durable payload identity and readable publication
+per-request response wait versus submitted coordinate/write outcome
 supported point-recovery context, source coverage and rich terminal outcome
 AQ evidence
 LAC/close state
+client confirmed boundary versus Bookie local LAC and physical candidate presence
 authoritative Classic/Profile route
 profile inactive install, normal admission/fence generation,
 bounded recovery grants and committed-readable range facts
@@ -219,6 +221,7 @@ ReceiveLateOldTargetAck
 CheckCurrentAckFailureDomains
 RetrySameCoordinatePayload
 RejectConflictingCoordinatePayload
+CancelEntryResponseWait
 PublishReadableLocation
 ReadPointRecoveryEvidence
 ClassifyRequiredHoleOrNormalTail
@@ -260,8 +263,10 @@ ReclaimCoveredRepairReceipts
 - active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
 - 普通Add unknown可在正式换组后重发同一identity；控制unknown不盲换operation。旧target/incarnation ACK不进入当前quorum/domain集合，成功保持连续前缀；
 - 同坐标相同payload幂等、不同payload冲突，DATA durable与readable publication未同时成立时不能local success；
+- 取消/timeout只终止响应等待，已提交坐标仍占有或由不可写范围保护，迟到X与重试Y不能形成两个winner；同批其他entry失败不决定本entry结果；
 - 模型区分不可变应用数据/累计length与可变piggyback LAC/封装digest；合法normal/recovery重写不因后者差异冲突，hole不由localLastEntryId推断存在。真实字节/完整性与慢路径成本由B19验证；
 - 受支持子集的point oracle区分required hole、normal tail、temporary unavailability和authority loss；recovered success晚于durable close，重启后重新验证；
+- local LAC=99且100为有效候选时，合法物理/恢复点读可读100；confirmed范围由客户端限定，DATA完成与候选存在不推导quorum LAC或recovered close，未知定位不计definitive absence；
 - 基础durable close不依赖strong-publication、不reset；首批active ledger不生成增强token，不因增强coordinator/sidecar故障新增replacement等待。既有metadata/installation不可用仍可defer，不能把此性质夸成无条件可写；
 - 延期bounded repair reset启用后，只在整个ledger fenced+CLOSED、每个ACK-eligible coordinate有`F+1` distinct valid domains、exact membership已发布且conditional strong completion durable后成立；
 - target durability、membership 或 activation 任一单独不能 reset；proof cut 后的 loss 进入新 window，迟到 completion 不得清零；
@@ -292,6 +297,8 @@ shard allocation pools
 data records and durability
 immutable submitted DATA blocks, stream generation and bounded batch sequences
 completed write ranges versus barrier coverage and contiguous physical durable-through
+physical batch result independent of per-entry eligibility and response wait
+stream/file mapping, unresolved I/O outcomes and affected non-writable scope
 recoverable prefix/cut and bounded full-lifecycle request/byte/batch credits
 local-success publications
 ledger tombstones
@@ -317,6 +324,8 @@ AssembleAndFreezeDataBatch
 WriteData
 CompleteBatchWrites
 CompleteCoveringDataBarrier
+FailOrLoseDataDurabilityResult
+PauseAffectedDataStreams
 AdvanceContiguousPhysicalDurableThrough
 PublishLocalSuccess
 AppendDeleteTombstone
@@ -362,6 +371,8 @@ RebuildAllAuthorizedLiveRanges
 
 - local success隐含durable allocation、完整write/实际覆盖barrier、对应stream连续可恢复DATA前缀及readable publication；
 - submitted block不修改，后批不覆盖旧成功范围；batch 12完成不跨过11的gap发布成功，物理sequence不等于ledger entryId/LAC或控制日志sequence；
+- 同批L1的逻辑失败不撤销batch物理durability或L2资格；empty assembling不留下序号，submitted取消不移除record；
+- 写错误/unknown关闭受影响stream及必要file/device范围，不能任意跳号、换stream或凭重复sync成功解除；已提交坐标在恢复解析前不视为空，I/O终结后才释放实际引用资源；
 - 重启扫描与成功前缀一致，required损坏不截断为无ACK后缀；move目标须可恢复发现才切换/释放old source；
 - 出队不归还仍持有的bytes/inflight credits，取消不终结真实I/O；只抽象已有有界资源转移，timer/大entry/慢读/控制容量的真实进展由B18验证；
 - slot/generation 唯一 owner；
@@ -590,6 +601,10 @@ SubmittedDataBlocksAreImmutable
 BatchDurabilityRequiresCompleteCoveredWrites
 LocalSuccessIsWithinRecoverablePhysicalPrefix
 QueuedAndInflightResourcesRemainCharged
+EntryFailureDoesNotErasePhysicalBatchDurability
+SubmittedCoordinateSurvivesResponseCancellation
+UnresolvedIoCannotBeBypassedByNewStream
+LocalLacDoesNotHideLegalRecoveryCandidate
 DeleteAppliedCursorDoesNotRequirePhysicalReclaim
 AppliedCursorDoesNotProveAccessBarrierOrFree
 AckedPayloadSurvivesWithinBudget
@@ -782,6 +797,8 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 
 并非每个子模型都展开所有变量；例如 Model C 不复制 quorum 全状态，但组合 A+C 必须覆盖 local success 到 distributed ACK 的接口。
 
+`AssembleAndFreezeDataBatch`仅为非空封包分配sequence，已分配后submission失败仍按失败边界处理。`WriteData/CompleteCoveringDataBarrier`须枚举部分修改后错误、unknown及共享文件影响；`CancelEntryResponseWait`不能改变这些物理事实。组合A+C以同批L1被fence而L2仍合法、K/X提交后取消再到K/Y、11 unknown/12完成为确定性反例，不另建模型或持久成功日志。record字节、点读I/O放大、父buffer与dedicated池规模由B9/B12/B18/B19实测，模型只保留必要身份/pin/有界资源关系。
+
 建议 formal config 表：
 
 | Config | Model | E/W/A | Failure/Concurrency |
@@ -799,15 +816,15 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-PROFILE-COMPAT | A | 3/3/2 | descriptor match, anonymous/authenticated-but-unauthorized/authorized control scope, normal/recovery/Profile opcode, negotiation, old-decoder Classic effect and no downgrade |
 | A-FENCE-STALE | A | 3/3/2 | stale writer vs recovery fence, delayed responses |
 | A-ACK-RESP | A | 3/3/2 | Add unknown/replacement, current ACK/domain set, ordered completion |
-| A-POINT | A | 3/3/2 and 3/3/3 | point recovery, required hole/normal tail, durable close/restart without strong-publication/reset |
+| A-POINT | A | 3/3/2 and 3/3/3 | local LAC 99/candidate 100; confirmed versus recovery read; required hole/normal tail; durable close/restart without strong reset |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
 | C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
 | C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
-| C-TAIL | C | local | tail classification; immutable DATA batches, reordered writes/barriers, physical-prefix success/replay and required corruption |
+| C-TAIL | C | local | immutable DATA, reordered writes/barriers, 11 unknown/12 complete, shared-file error isolation, physical-prefix replay and required corruption |
 | C-WRITER | C | local | pool transfer/reuse with delayed old writer I/O and completion |
 | C-SPACE | C | local | foreground/maintenance budgets, exhaustion, bounded debt and restart |
-| AC-LOCAL-STORE | A+C | two Arenas | Bookie control-log partial durability, same-coordinate conflict and read-after-success |
+| AC-LOCAL-STORE | A+C | two Arenas | partial durability, same-batch L1 fence/L2 success, K/X timeout then K/Y, coordinate protection, read-after-success |
 | C-REBUILD | C | local | normal restart coverage vs full live-range index reconstruction |
 | C-FORMAT | A+C | local | old-binary fence, partial required-device migration, unknown mandatory format, incarnation/readiness generations and unsafe rollback |
 | D-OFF | D | historical ensembles | offline rejoin |

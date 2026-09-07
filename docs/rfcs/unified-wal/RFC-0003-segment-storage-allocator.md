@@ -10,7 +10,7 @@
 本 RFC 为 Segment WAL 定义本地 authority 分层和 allocator crash-consistency 骨架。核心修正有两项：
 
 1. 增加独立、不可随 data extent 回收的 `ArenaControlLog`，作为空间 ownership 与 generation 的权威；
-2. 删除“每个 ledger 创建时至少拥有一个 8 MiB dedicated extent”的不变量，改为冷 ledger 共享 slab、热 ledger 使用 dedicated extent。
+2. 删除“每个ledger创建时至少拥有一个8 MiB dedicated extent”的不变量；首批切片统一shared block，dedicated hot extent保留为有条件启用的后续优化。
 
 本文不冻结最终 on-disk bytes、extent 阈值或 direct-I/O 实现。任何正式编码都必须晚于 Spike B 的否证结果和本 RFC Accepted。
 
@@ -21,7 +21,7 @@
 - NVMe/WalArena 的物理 authority 区域；
 - `ArenaControlLog`、allocator checkpoint 与 superblock 切换；
 - allocation、data ACK、delete、free、generation bump 与 reuse 顺序；
-- shared cold slab 和 dedicated hot extent；
+- 首批shared block，以及后续有条件启用的dedicated hot extent；
 - block/record identity 的最小语义；
 - restart、power-loss、corruption 与 device-failure 行为；
 - 100k idle ledger 的空间和内存模型；
@@ -69,7 +69,7 @@ NVMe device or WalArena
 ├── AllocatorCheckpoint B
 └── Data Arena
     ├── Shared Slab regions
-    └── Dedicated Extents
+    └── Dedicated Extents (deferred for the first shared-block slice)
 ```
 
 约束：
@@ -220,7 +220,7 @@ local durable Add success
 
 - shard-owned free block pool；
 - shared slab block pool；
-- dedicated extent pool。
+- dedicated extent pool（仅在§8能力启用后）。
 
 pool refill 通过 control-log group commit；pool 内空间的使用仍必须有可恢复的 block/record framing，但不要求每条 Add 写一条 allocator fsync。
 
@@ -228,25 +228,37 @@ pool refill 通过 control-log group commit；pool 内空间的使用仍必须�
 
 `ALLOC_POOL`的下一原型必须冻结：`Arena + pool range + owner shard + shard generation + allocation generation`，每个pool内record的used/unused识别方法，以及返还/转交的条件化状态机。未使用不能由“内存计数为0”推断；restart必须结合完整control authority与可恢复DATA framing确定live、unused或unknown，unknown不进入free pool。
 
-pool转交及所有free/reuse先关闭旧writer admission，等待已提交写I/O完成或获得可靠的设备/进程隔离证明，再conditional free/bump并授予新owner。旧completion的generation检查只能防止错误发布，不能阻止已经提交的旧I/O覆盖新owner磁盘字节；timeout、取消future或reader drain都不能单独作为写I/O终结证明。buffer、submission及completion必须携带owner/generation，late completion不得发布locator或success。崩溃后如何终结旧提交者的I/O同样进入真实故障矩阵。
+pool转交及所有free/reuse先关闭旧writer admission，等待已提交写I/O完成或获得可靠的设备/进程隔离证明，再conditional free/bump并授予新owner。旧completion的generation检查只能防止错误发布，不能阻止已经提交的旧I/O覆盖新owner磁盘字节；timeout、取消future或reader drain都不能单独作为写I/O终结证明。buffer、submission及completion必须携带owner/generation，stale owner/generation的completion不得发布locator或success；仅RPC取消而storage generation仍有效的物理结果按§6.1保留。崩溃后如何终结旧提交者的I/O同样进入真实故障矩阵。
 
 ### 6.1 DATA批次的durability与恢复前缀
 
-首个真实文件原型采用“本批完整write completion → 覆盖本批的文件级durability barrier”这一种模式。逐个检查写结果与短写；只有所有范围完整写入后才发barrier，未完成短写、I/O错误、取消或unknown均不能发布该批成功。补写剩余范围仍须符合声明的alignment和错误处理规则，不能重写含既有成功数据的范围。Linux原型可将该模式映射为完整写入后`fdatasync()`，映射及文件系统/设备假设在同一实验manifest冻结；其他等价同步写模式后续单独验证，不叠加重复barrier却漏算成本。
+首个真实文件原型采用“本批完整write completion → 覆盖本批的文件级durability barrier”这一种模式。逐个检查写结果与短写；只有所有范围完整写入后才发barrier，未完成短写、I/O错误、底层I/O取消后结果不确定或durability unknown均不能证明该批durable。单条RPC取消与这个物理判断分开。补写剩余范围仍须符合声明的alignment和错误处理规则，不能重写含既有成功数据的范围。Linux原型可将该模式映射为完整写入后`fdatasync()`，映射及文件系统/设备假设在同一实验manifest冻结；其他等价同步写模式后续单独验证，不叠加重复barrier却漏算成本。
 
 `write completed`、`durability completed`、`readable published`和`local success`是不同事实。`O_DIRECT`不单独提供`O_SYNC/O_DSYNC`的持久化保证；普通write完成（包括普通异步write CQE）不能直接授权成功。文件barrier也不自动保证新目录项durable，文件创建/预分配及所需parent-directory同步在冷路径完成后才公开可用空间。依据[Linux open(2)](https://man7.org/linux/man-pages/man2/open.2.html)和[fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)，实际硬件/I/O路径仍需故障实验。
 
 每份write/barrier completion绑定storage/stream generation、batch sequence及其实际物理范围。一个barrier可覆盖已完整write且明确列入覆盖集合的多个batch；不能因为更晚的fsync返回就把仍在飞行的异步write算作durable。批次跟踪有hard bound，不记录逐entry“ACK已完成”控制日志。
 
+DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger/entry事务。batch table分别记录完整写入、实际barrier覆盖与是否进入可恢复前缀；entry的admission、fence/tombstone、取消和callback状态由RFC-0005的pending处理，不能用一个`batch.success`表达二者。物理完成后，同批L1因fence失去成功资格，不能阻止仍合法的L2或把物理batch变回缺口；L1也不能因同批durable跳过权限检查。
+
+物理batch sequence在非空容器封包、冻结并进入提交流程时分配；纯assembling且最终为空的容器不留下恢复必须解释的序号。序号分配后如果submission失败或结果不明，按真实失败边界解析，不能当空容器跳过。submitted后不因单条取消移除record/改写block或提前释放buffer，整个物理结果仍跟踪到终态。有效DATA未向原调用方返回成功也不能自动删除；fence候选与tombstoned数据分别按恢复/删除规则处理，保留同一locator/index的物理位置事实。
+
 首批选择**每个物理append stream的连续前缀恢复和成功发布**。bounded batch table记录乱序completion；只有从已验证起点开始连续的batch均取得durability，才推进内存中的physical durable-through并允许对应entry发布locator/local success。batch 11未durable而12先完成时，12保持等待，不能先ACK再在restart的11缺口截断后缀。该序号属于物理stream，不是ledger entryId或LAC，也不是Arena控制日志sequence；不同ledger可同批，`E>W`不要求本地entryId连续。
 
-允许有界I/O queue depth大于1；等待只在对应shard/stream内，不新增跨shard全局sequencer。batch边界、stream lineage与范围发现由§9的可恢复framing和allocator authority给出；physical durable-through可重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut开始扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。仅能截断已证明可丢弃的未成功后缀，required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
+允许有界I/O queue depth大于1；物理前缀排序在各stream内，不新增跨shard全局sequencer，但共享文件的barrier成本/错误范围不因此隔离。batch边界、stream lineage与范围发现由§9的可恢复framing和allocator authority给出；physical durable-through可重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut开始扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。仅能截断已证明可丢弃的未成功后缀，required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
+
+首个文件切片在一Arena内为固定append shard各设物理stream，共享预分配DATA文件；各自使用allocator授权的不重叠范围。实验manifest固定shard/stream/file映射、文件增长/rotation及最大文件数、活跃buffer上限，不为每ledger建文件。物理stream是恢复排序单位，不是独立设备或flush域：`fdatasync/fsync`作用于指定文件，不能同步一个应用定义的extent/shard而独立于同文件其他写入。先测共享文件的barrier数量、覆盖集合及等待；以后拆分文件须另给可比证据，本次不新增跨shard flush调度框架。[Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)
+
+发生既定I/O合同内无法解决的写错误或durability unknown时，首版不在线补洞：至少关闭受影响物理stream的新DATA准入，阻止越过失败batch发布后续成功。共享文件错误无法归因到更小范围时，暂停该文件相关stream；影响设备或required authority时沿§16及RFC-0005 non-writable/quarantine处理。batch 11 unknown、12已完成时，不因调用超时丢弃12，不用跳号、新stream或覆盖旧范围绕过11，全部按现有恢复/generation规则解析，不自动跨设备迁移。
+
+等待所有已提交I/O实际终结后，可释放确实没有使用者的buffer；未解析坐标仍由pending或已经接管该范围的不可写gate保护，关闭准入后不允许无限增长异常pending/waiter。重启默认在相关控制/allocator/DATA恢复解析前不开放这些坐标，不能仅因易失pending消失而再接收不同payload。请求timeout不等于I/O失败，更不等于未写入；direct I/O错误可能已部分修改范围，须按不一致数据处理。[Linux write(2)](https://man7.org/linux/man-pages/man2/write.2.html)
+
+`fdatasync()`错误可能报告此前写回失败；再次sync返回成功不是对先前全部DATA安全的证明。按上述存储错误恢复流程解析受影响范围，不以最后一次返回值清除unknown/失败状态。该保守策略由本原型选择，实际错误范围仍需故障实验核验；不为此引入逐entry成功日志或正常路径额外fsync。[Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)
 
 涉及既有成功数据的compaction同样须保证new DATA在恢复可发现边界内，才允许`MOVE_COMMIT`、selector切换或释放旧位置。以后若要跨缺口独立发布，须先接受独立块发现/恢复算法；本次不并行建设第二套模式。分别报告write wait、durability wait、physical-prefix wait和locator wait，不将同stream排队归为NVMe延迟。
 
 ## 7. Shared Cold Slab
 
-低流量 ledger 不拥有固定 extent，也不拥有专属 I/O block buffer。
+首批隔离切片统一采用固定shard和共享DATA block，低速及高吞吐ledger都在此路径验证batching、durability、点读、恢复和本地回收成本；dedicated extent不参与本切片性能结论。ledger不因活跃而拥有永久专属I/O buffer。
 
 ```text
 WalAppendShard
@@ -264,7 +276,7 @@ one block
 特点：
 
 - active block 数量是 `O(shards)`，不是 `O(ledgers)`；
-- 多个冷 ledger 共享 block write 和 durability barrier；
+- 多个ledger共享block write和durability barrier；
 - ledger state 只保存 locator/tail/inflight 等小型元数据；
 - block record header 必须携带 ledgerId、instance、entryId、length、checksum 和 generation identity。
 
@@ -282,7 +294,7 @@ one block
 
 ## 8. Dedicated Hot Extent
 
-ledger 达到任一经 Spike 冻结的阈值后，后续写入可晋升到 dedicated extent：
+本能力在首个shared-block切片中**DISABLED / DEFERRED**，不作为测清基础收益的前置，也不以模拟dedicated结果替代测量。后续只有对应资源/点读/恢复Gate接受且manifest启用后，ledger达到经Spike冻结的阈值才可对新allocation采用dedicated extent：
 
 - 累计 bytes；
 - 持续 throughput；
@@ -301,6 +313,8 @@ ledger 达到任一经 Spike 冻结的阈值后，后续写入可晋升到 dedic
 
 这些只是 Spike 搜索空间，不是架构默认。晋升不要求迁移旧 shared-slab record；旧记录仍由 locator 和 ledger instance 关联，并在 delete/compaction 时失效。
 
+dedicated空间只属于一个ledger，不能在同一专属block/range混入其他ledger DATA。跨ledger仍可共享已有的文件durability barrier，但共享barrier不等于共享物理block。不开每热ledger永久buffer、线程或文件；需要专属assembling state/buffer时从统一有界池按需取得，总数与峰值内存单列计量。达到上限时，后续新allocation可继续使用共享布局或明确背压，既有dedicated allocation不改为混写。布局选择不改变entry identity，也不要求搬迁旧记录。
+
 dedicated extent 的优势是按 extent 列表快速 logical/free；但只有集群 delete authorization、本地 reader drain 和 durable generation bump 完成后才能物理复用。
 
 ## 9. Block 与 locator 最小合同
@@ -317,7 +331,8 @@ blockSequence
 payloadLength
 recordCount
 headerChecksum
-payloadChecksum or per-record checksum
+per-record storage envelope integrity and BK entry CRC32C
+optional whole-block payloadChecksum for scan/recovery/diagnostics
 commit marker or torn-tail detector
 ```
 
@@ -335,9 +350,13 @@ ledgerInstanceId
 entryId
 ```
 
-读取时必须先验证 generation、ledger instance 和 record checksum。仅匹配物理 offset 不足以防止 ABA。
+首批必须能独立校验一个record，不扫描整个大batch。固定envelope/header完整性覆盖instance、allocation/generation、record length及必要存储坐标；内层BK CRC32C覆盖其自身metadata与应用payload。使用现有候选的record级校验方案，不以正确BK CRC替代外层身份校验，也不增加第三套逐entry密码学hash。整块checksum可用于扫描/恢复/诊断，不能成为单entry点读的唯一验证方法。仅匹配物理offset不足以防止ABA。
 
-exact bytes、checksum 算法、commit marker 和 direct-I/O alignment 由 Spike B 数据决定。
+读取先按现有locator取得allocation/generation pin并复核selector与权限，再使用匹配且已验证的cache，或发起覆盖目标record的必要对齐I/O。locator的offset/length须检查非负、溢出、声明最大record及allocation边界后才分配大buffer；损坏length不能扩大成无界读取。外层固定header有界读取并验证后才信任其长度，record自身CRC/坐标仍需核对。对齐范围不能越过合法allocation，布局必须提供合法padding/读取路径，不能靠越界读取凑alignment。
+
+同block相邻读可以有界合并，不等待未来请求或引入网络Range协议；孤立点读及时发起。返回目标entry后，buffer/pin随最后使用者和真实I/O终结释放；小slice长期占住大父buffer时可受控复制已验证小范围，及时释放不再依赖的父buffer/pin。缓存、父buffer、副本和pin全计入§13预算，不为形式零复制阻塞回收。示例1 MiB batch内读1 KiB若强制整批，读取bytes/返回bytes为1024；这是布局反例计算，非实测结果。
+
+exact bytes、外层record校验算法、commit marker和direct-I/O alignment由Spike B数据决定；独立record验证这一要求不再是whole-block checksum可替代的开放选择。
 
 **DATA提交后冻结：** block由assembling转为submitted前完成header、record count、checksum和padding；此后内存内容及物理写入范围不可追加修改，不更新header/footer，不以read-modify-write重写包含既有成功记录的对齐块。下一批取得另一个有界pool buffer和新的、已授权未使用范围；旧buffer等真实I/O终结才可复用，旧物理范围只有按§10 durable free/generation bump后才可另用。控制日志checkpoint/superblock仍按自身发布协议，不套用本DATA规则。
 
@@ -493,13 +512,15 @@ Spike Gate：
 - 100k idle active ledgers 的 ledger metadata resident memory 不高于 128 MiB/Bookie；
 - 创建 100k ledger 不预留固定 extent；
 - idle ledger 不拥有专属 block buffer；
-- active block buffers 为 `O(shards)`。
+- 首批shared assembling buffers为`O(shards)`，已提交/点读/cache等buffer另受统一hard cap；dedicated启用后的专属assembling池单列上限，不能把`O(active hot ledgers)`隐藏在该声明中。
 
 所有测量必须区分 heap、direct memory、native allocator 和 RocksDB block cache，不能只报告 Java object shallow size。
 
 总资源账本还必须覆盖Bookie route/credential/fence state、allocation/pool/slot state、current selector/retirement/anti-ABA state、pending Add/grant/waiter、block buffers、checkpoint working set，以及derived index/cache。分别报告随ledger、entry、allocation、shard和pending operation增长的项；`1 KiB/idle ledger`不能替代总预算。
 
 每shard的同一套预算覆盖准入、待合批、已提交I/O、等待physical prefix/locator及响应阶段；request count、源/对齐bytes、inflight batches和duplicate waiters分别有上限。出队或移交future不释放credit，真实资源释放或转移到另一已计费owner后才归还对应份额；复制期间源与目标同时持有的bytes都计入。断连/取消而I/O仍在进行时保留其buffer/inflight费用，不能留下队列之外无上限的任务。复用请求对象，避免每层重新包装大对象。
+
+同批物理buffer费用不随某条entry取消而归零；未解析写入的坐标保护按§6.1转交不可写范围后才收缩异常pending。账本同时覆盖点读缓存、对齐读buffer、大父buffer及小副本、pin数量/时长、DATA文件数与后续dedicated池。大量hot ledger或慢reader不能突破总量，也不能通过暂停回收改善短期p99。
 
 最老请求的单调时钟deadline不被新到达重置。最大可接受entry必须能走声明的batch/buffer路径：普通block放不下时使用同一总预算约束的有界大记录批次，或在明确size/capability检查处拒绝；不能永久堵在队首。wire frame、BK entry和存储record/alignment开销的上限关系写入manifest，不因扩大临时buffer突破总预算。
 
@@ -542,12 +563,14 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 - stale generation locator 在读取时被再次校验；
 - rebuild/compaction 有 foreground QoS 和 admission control。
 
+点读复用上述locator和§9独立record校验路径；confirmed边界由客户端、恢复候选范围由coordinator按RFC-0005 §8判定，Bookie不以陈旧local LAC截断合法物理点读。report实际读取bytes/返回bytes、每点读I/O数、cache命中、copy/父buffer持有及pin时长；批量写入大小不自动决定点读大小，未验证覆盖继续返回not-ready/unknown而非确定absence。
+
 恢复必须实现并分别测量两条路径：
 
 | 路径 | 必须扫描和验证的范围 |
 | --- | --- |
 | 正常restart | 验证仍有效的checkpoint/footer/derived-index覆盖证明，对未覆盖且已授权的DATA按§6.1物理stream前缀扫描必要tail，不用最大completion或ledger entryId越过缺口 |
-| 全部derived index丢失或覆盖证明无效 | 从完整allocator/current-selector authority枚举所有需要重建的live allocation和有效DATA范围，包含sealed/dedicated/shared数据；不能只扫描active tail |
+| 全部derived index丢失或覆盖证明无效 | 从完整allocator/current-selector authority枚举所有需要重建的live allocation和有效DATA范围；首批覆盖active/sealed shared及relocated数据，dedicated启用后必须同样覆盖；不能只扫描active tail |
 
 两条路径均报告扫描bytes/I/O、重建entry/locator数量、heap/direct/native峰值、到read-only/可写的时间及前台竞争。未验证范围不宣称确定absence；重建可以分批提供已验证读能力，但其覆盖与not-ready语义须冻结。RocksDB全删不会删除allocator/current-selector authority；这些持久映射的空间、写放大与重启成本必须计入账本。
 
@@ -590,6 +613,9 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 20. Arena superblock/format state不能替代old-binary-visible Bookie compatibility fence；任何partial required-device migration都不注册writable。
 21. DATA block submitted后header/count/checksum/padding/payload不可修改或追加；后续写入不得覆盖已有成功记录，I/O buffer只在真实I/O终结后复用。
 22. 请求的实际bytes、inflight和waiter覆盖其完整生命周期，出队/取消不提前归还仍持有的credit；最老合批deadline、大entry路径、异步重复读及fence/tombstone控制容量受§13同一预算约束。
+23. batch物理durability与逐entry结果分开；单条取消/fence不产生物理缺口，提交后坐标不因timeout视为空，未解析写入由bounded pending或不可写范围保护。
+24. 点读独立验证record外层身份及BK CRC，长度/对齐范围有界且pin/selector正确；不因整批大而强制读整批，不以local LAC拒绝必要候选。
+25. 首批shared布局及stream/file映射明确；dedicated启用后专属空间、buffer池及文件总量仍有界，共享barrier不表示共享block或独立flush域。
 
 ## 18. 接受 Gate
 
@@ -601,7 +627,8 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 - [Spike C](spikes/SPIKE-C-no-object-tla.md) 的 Model C 无 counterexample；
 - on-disk framing、checksum、alignment 和 compatibility version 冻结；
 - checkpoint/control-log recovery 可由自动 crash matrix 重放；
-- cold/hot promotion、lifetime class 和同 Arena `MOVE_COMMIT` relocation 合同通过 crash、并发 move、reader pin 与 index rebuild 测试；
+- 已启用的lifetime class与同Arena `MOVE_COMMIT` relocation通过crash、并发move、reader pin及index rebuild测试；dedicated cold/hot promotion启用时另通过B5/B13，首个shared切片不声称覆盖该能力；
+- B2/B8/B19证明物理batch与逐entry结果分离、timeout后坐标保护、写错误/unknown暂停及恢复，包含共享文件错误范围和重复sync不能抹除失败；B9/B12/B18验证小record独立点读、损坏length、慢reader/pin与大量hot ledger资源；
 - current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
 - conditional apply/result、duplicate/response-loss、bounded waiter/idempotency retention、unknown record和selector/pin竞态通过crash/replay与资源Gate；
 - 真实stock old binary compatibility fence由RFC-0005 Gate先行验证；Spike B同时覆盖Round 7 `BKPF1` Cookie sentinel candidate、data-integrity pre-storage-open instrumentation、Cookie auto-stamp、superblock A/B corruption、partial device migration、device-manifest change、migration response loss与rollback禁止条件；candidate失败时必须正式采用new BookieId/new scope fallback；

@@ -13,14 +13,14 @@
 
 1. `BK_CLASSIC` 是现有 OSS 基线；`BK_CLASSIC_TUNED` 可以立即进入基准和低风险优化。
 2. `DirectJournal` 是 Bookie 进程或部署 cohort 级 Engine Profile，不是任意 ledger 可切换的属性。
-3. Segment WAL 在 Profile install/activation、`ArenaControlLog`、冷热混合 allocator、Segment Bookie state/ACK authority 和无对象存储形式化模型闭合前保持 **P0 Blocked**。
+3. Segment WAL在Profile install/activation、`ArenaControlLog`、已启用布局的allocator、Segment Bookie state/ACK authority和无对象存储形式化模型闭合前保持**P0 Blocked**；首批shared block，dedicated hot extent有条件延期。
 4. Conditional delete 是集群协议，必须覆盖历史 ensemble、离线 Bookie、持久 tombstone、AutoRecovery 竞争和 Bookie rejoin barrier。
 5. 当前 OSS 已有 bounded Batch Read；新增范围是 streaming continuation、一般 E/W/A 合并、恢复语义、QoS 和 cancellation。
 6. BtrLog 只提供设计启发。它的对象存储恢复假设不能证明本方案安全。
 7. 下一步先修现有客户端ACK集合/换组与迟到响应回收两个缺口；固定Bookie控制日志、per-Arena控制日志和DATA三层拓扑，推进ByteBuf、固定shard、批量DATA及可读定位的最小隔离原型，与实际启用路径的模型验证并行。
 8. 首批集群闭合普通Add/点读/restart、基础点恢复和已fenced-close ledger的普通逻辑删除。强访问撤销、strong completion/loss reset及高级Range延期；strong reset后续也先限于整个ledger fenced+CLOSED，不让增强token阻塞活跃ledger的正常replacement。
 
-本轮基于`7e62fadeb9418b5aa0e8ac216169228dfb7e9da6`完善最小存储路径的现有合同：全E激活只约束初始normal writer，读取/恢复分别授权；首批通过immutable capability/实验manifest绑定CRC32C entry布局；DATA提交后冻结，完整write及覆盖barrier、可恢复物理前缀和readable定位共同约束local success；delete-applied cursor不等物理回收；请求全生命周期使用有界预算并保留fence/tombstone控制容量。均为拟实现设计，未生成新的实现或性能证据。
+本轮基于`63ff8e0876dcd7bbb229ff0712891b06c0182d06`完善现有执行边界：客户端confirmed范围与Bookie物理/恢复点读分离；合批物理完成与逐entry结果分离；提交后timeout不抹除坐标，I/O错误按受影响范围暂停/恢复；record可独立验证、点读I/O和buffer/pin有界；首批shared block，stream/file映射固定并按实际文件计量barrier。此前CRC32C、DATA冻结/恢复前缀、delete-applied和全阶段预算保持。均为拟实现设计，未生成新的实现或性能证据。
 
 本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，下一原型按RFC-0005选择Bookie级独立控制日志；其stable format、阈值和真实证据仍由Spike接受。
 
@@ -227,7 +227,7 @@ Cluster Lifecycle
 2. `ACK(normal profiled Add)` 之前，matching global READY 与目标 Bookie durable local normal activation 均已成立；普通 Add 不远程读取 MetadataStore。
 3. Classic/Profile/Tombstoned route 是单一、原子、可恢复的本地 claim；legacy normal/recovery Add 不能绕过 Profile route。
 4. 写期 replacement 按 inactive install → `LAC+1` membership CAS → normal activation → pending resend 排序，不复制历史 fragment。
-5. ACKed DATA必须已有durable allocation authority；submitted块不可再修改，完整write及覆盖本批的durability barrier、对应物理stream连续durable前缀和readable locator均成立才可local success。物理batch序号不等于entryId/LAC，恢复不能在前序缺口截断后丢弃已允许成功的数据。
+5. ACKed DATA必须已有durable allocation authority；submitted块不可修改，完整write/覆盖barrier、可恢复物理前缀及locator就绪后逐entry检查成功资格。单条取消/fence不把已durable batch变成物理gap，batch durable也不代替该entry权限；物理序号不等于entryId/LAC。timeout不抹除已提交坐标，未解析I/O暂停相应stream/file并恢复，不以跳号/新stream/重复sync成功绕过。
 6. 同一 slot/extent generation 不得同时属于两个 ledger instance。
 7. `FREE` 或 generation bump 未 durable 前，空间不得复用。
 8. 旧 generation locator 永远不能读取新 generation payload。
@@ -258,7 +258,8 @@ Cluster Lifecycle
 33. Profile只走独立immediate-TLS/mTLS endpoint与pool；Round 7 frame bytes在raw old-decoder Gate PASS前只属于executable test manifest。
 34. same BookieId/storage scope在stock binary pre-storage-open证据通过前保持BLOCK；失败时new BookieId/new roots/new incarnation/new credential scope fallback是当前唯一安全路径。
 35. persistent readiness CAS先于ephemeral writable registration；generation/incarnation mismatch non-writable，registration hint不替代local receipt或old-binary fence。
-36. shard预算覆盖准入、合批、I/O、prefix/locator和响应阶段的request/bytes/batch/waiter；出队或取消不等于真实资源释放。最老deadline不因新请求重置，大entry有预算内路径或明确拒绝，重复核对读盘不阻塞shard主循环，DATA满额仍可处理fence/tombstone。
+36. shard预算覆盖准入、合批、I/O、prefix/locator、响应及异常pending；出队/取消不等于资源释放。点读cache/父buffer/小副本/pin、文件数和后续dedicated池全部计费，最老deadline不重置，大entry有路径或拒绝，重复读不阻塞shard，DATA满额仍可处理fence/tombstone。
+37. confirmed可见范围由客户端LAC/CLOSED边界限定，Bookie不以local LAC截断合法物理点读，恢复候选不等于commit；DATA完成不推导quorum LAC或增加逐Add LAC fsync。点读须独立校验record外层身份与BK CRC，按有界必要对齐范围读取，未知覆盖不能伪造absence。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
 
@@ -292,7 +293,7 @@ Stage 2  Round 7 exact manifest：descriptor与control interface已冻结；wire
                   + stock old binary pre-replay fence、partial migration/rollback
          Spike C：No-object TLA+
 Stage 3  DirectJournal 独立 cohort prototype；不声称一次本地 payload 写
-Stage 4  ByteBuf + 固定shard合批 + Bookie控制日志/ALLOC/DATA/readable locator原型；
+Stage 4  ByteBuf + 固定shard/shared block + 控制日志/ALLOC/DATA/locator原型；
          先测普通写/点读/基础restart，再测写入与回收；与启用路径的模型验证并行；
          逐步完成tail、writer I/O、维护保留空间与全量index重建证据；
          接受 RFC-0003；仅在Spike证据后进入isolated/discardable Segment shadow；
@@ -301,7 +302,7 @@ Stage 5  最小集群闭环：受支持E/W/A与ACK故障域、install/activation
          基础point recovery/durable close、fenced-close普通逻辑删除与异步安全回收；
          接受RFC-0001/0003/0005及RFC-0004相应feature gates后，另行验证canary
 Stage 6  独立扩展Gate：Streaming Range/TailSummary/BatchRecoveryAdd、强访问撤销、
-         整个ledger关闭后的strong completion/reset、在线删除、rack/AZ、迁移与扩展rejoin
+         dedicated hot extent、整个ledger关闭后的strong completion/reset、在线删除、rack/AZ、迁移与扩展rejoin
 Stage 7  完成实际启用能力的全部Gate、derived index与production canary；延期能力保持disabled
 ```
 
@@ -314,15 +315,15 @@ Stage 7  完成实际启用能力的全部Gate、derived index与production cana
 | 优先级 | 实施内容 | Owner与必须提交的证据 |
 | --- | --- | --- |
 | 先修源码 | CLIENT-1当前ACK数量/故障域同步；CLIENT-2旧地址最后响应回收 | RFC-0001 §9.5、Spike A A29/A30；确定性复现、修复后无错误成功或重复/提前回收 |
-| 第一批原型 | ByteBuf受控view、固定shard与预分配；冻结DATA→完整write/覆盖barrier→物理连续durable前缀→readable→success | RFC-0003 §6.1/9、RFC-0005 §10.1、B2/B8/B18；乱序/短写/crash可恢复，padding及durability/prefix wait原始计量 |
-| 第一批原型 | 创建/读取/恢复分离，首批CRC32C布局和同坐标identity；normal Add正式换组/有效ACK | RFC-0001/0005、A16/A26/A27/B19；合法LAC变化、实际bytes冲突、不支持布局拒绝、慢路径成本 |
-| 随原型闭合 | 真实控制日志、tail分类、pool/旧writer I/O、全阶段预算、维护进展与全量重建 | RFC-0003/0005、B3/B6/B8/B9/B10/B11/B16/B17/B18；含最老deadline、大entry、慢重复读、DATA满额时控制进展 |
+| 第一批原型 | ByteBuf、固定shard/shared block与预分配；物理batch完整write/barrier/前缀与逐entry结果分开，共享文件映射明确 | RFC-0003 §6.1/7/9、RFC-0005 §10.1、B2/B8/B18；同批fence/取消不制造gap，文件barrier/等待分别计量 |
+| 第一批原型 | 创建/读取/恢复与CRC32C identity；客户端confirmed边界不变，Bookie物理点读不被local LAC截断；提交后timeout保留坐标保护 | RFC-0001/0004/0005、A16/A26/A27/B19；LAC 99/100、K/X timeout后K/Y、独立record校验与可恢复候选 |
+| 随原型闭合 | I/O错误/unknown隔离与恢复、tail/pool/旧I/O、点读对齐/cache/pin、全阶段预算与重建/回收 | RFC-0003/0005、B2/B3/B6/B8/B9/B10/B11/B12/B16/B17/B18；坏length、慢小slice、大量hot ledger及控制进展 |
 | 最小集群 | 基础point recovery/durable close、普通logical delete及异步回收 | RFC-0004、B4/B6/Model D；完整target/history与tombstone，applied cursor/rejoin不等共享block回收；访问屏障和physical结果独立，不含strong reset |
-| 后续扩展 | 强撤权、整个ledger关闭后的strong completion/reset、高级Range、在线删除、复杂故障域及迁移 | 各自独立模型/原型/feature Gate；无实际需求和证据时保持disabled |
+| 后续扩展 | dedicated hot extent、强撤权、整个ledger关闭后的strong completion/reset、高级Range、在线删除、复杂故障域及迁移 | 各自独立Gate；dedicated验证专属空间/有界池及B5/B13，无证据时不计首批收益 |
 
 执行依赖改为：CLIENT-1/2先做独立小范围修复；Block H最小隔离存储切片与Block G实际启用路径的模型可并行。先以固定硬件/durability/E/W/A得到普通写、换组、写入与回收并行的测量，尚未实现的集群场景明确NOT_EXECUTED；相关安全/恢复/兼容/资源Gate闭合后才能进入可保留数据canary。完整重建和维护进展不能推迟到canary之后，但不阻止更早收集discardable原型数据。Classic与DirectJournal基线不替代Segment证明，不新增通用事务/调度/压测框架。
 
-上述修订归入现有UW-1/2/3/4/5/7与Spike A/B/C，不新增全局sequencer、分布式去重数据库、逐entry成功日志或在线权限lease。首次数值实验保持一Arena、固定shard和少量E/W/A/Bookie故障域配置，以相同durability/TLS范围区分低负载、目标负载、过载、回收并行和重启/故障恢复；padding、physical prefix等待和全阶段资源不能隐藏在吞吐或NVMe延迟中。客户端未实施和reference codec oracle的clone不阻止完成本轮文档，也不把旧receipt改写为新验证。
+本轮归入既有UW-2/3/4/7和Spike A/B/C，不重新编号或新增控制层/在线补洞/flush调度平台。首批一Arena、固定shard、shared block及少量E/W/A/Bookie故障域配置不变；固定共享DATA文件映射后，按相同durability/TLS范围计量每文件barrier/错误范围、padding与prefix wait，以及点读bytes放大/I/O/cache hit、父buffer和pin持有。dedicated及网络等未执行路径不计收益，客户端维护与reference oracle不构成本轮文档前置，旧receipt不重绑。
 
 ## 11. Gate 与证据合同
 
@@ -384,6 +385,7 @@ Segment production candidate 的最低 Gate：
 - 基础point recovery、当前ACK故障域、普通delete竞争与安全本地回收Gate通过；普通logical success不等待全部访问屏障，旧reader在本地tombstone前可读，强撤权另行接受；
 - ByteBuf生命周期、normal/recovery LAC/digest兼容与实际shard合批通过；allocation/copy bytes/entry、CPU/entry、entries/durability barrier及全部control/compaction写成本均有原始计量；strong reset disabled不构成恢复保证续期。
 - 初始writer/只读/恢复接受条件与CRC32C布局单义；submitted DATA不覆写、barrier覆盖明确且全部允许成功的数据重启可发现；delete-applied不依赖physical回收也不冒充强屏障；全阶段预算、最老deadline、大entry和控制保留容量均有确定性反例验证。
+- LAC 99/候选100、同批L1 fence/L2合法、提交X超时后重试Y、11 unknown/12完成、独立小record点读及大量hot ledger/慢reader六组场景通过；未解析I/O不转为absence，点读完整性与buffer/pin有界，shared和dedicated证据分开。
 
 候选阈值可以在正式测试前经一次评审调整；看到结果后不得追溯修改 Gate。
 

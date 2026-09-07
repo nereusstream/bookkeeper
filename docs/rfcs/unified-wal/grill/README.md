@@ -2,7 +2,7 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
-2026-09-08基于`7e62fadeb9418b5aa0e8ac216169228dfb7e9da6`的评审修订已直接进入当前owner RFC：全E激活限定初始normal writer，读取与恢复各自授权；首批immutable CRC32C entry布局；DATA提交后冻结、完整write与覆盖barrier及可恢复物理前缀；delete-applied cursor不等物理回收；资源预算覆盖请求全生命周期并保留撤权控制容量。对应反例归入现有Spike A/B/C与UW工作项，实施导航见[当前清单](../implementation/README.md)。此前客户端维护、最小ByteBuf/shard原型与启用路径模型并行、普通删除与强撤权分离和strong reset延期的安排保留。这是文档修订，状态仍Proposed/Planned，未执行修复、JUnit或性能run；下表各轮是当时的历史记录，未重新评审或晋升，也不覆盖当前owner RFC中的修订。历史逐字反馈和旧source-bound receipt保持不变。
+2026-09-08基于`63ff8e0876dcd7bbb229ff0712891b06c0182d06`的修订已进入现有owner RFC：客户端confirmed范围、Bookie物理点读与恢复候选分层；batch物理结果与逐entry结果分开；timeout不抹除已提交坐标，I/O异常暂停相应范围并恢复；独立record校验和有界点读；首批shared block及固定stream/file映射，dedicated extent有条件延期。六组反例归入现有UW-2/3/4/7和Spike A/B/C，见[当前清单](../implementation/README.md)。此前CRC32C、DATA冻结/恢复前缀、delete-applied、资源预算、客户端维护及强能力延期保持。这是文档修订，状态仍Proposed/Planned，未执行修复、JUnit或性能run；下表各轮为历史记录，不覆盖当前owner修订，历史逐字反馈和source-bound receipt未重写或晋升。
 
 规则：
 

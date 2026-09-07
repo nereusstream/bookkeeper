@@ -333,11 +333,13 @@ CAS OPEN -> IN_RECOVERY under Profile metadata authority
 
 若读取到IN_RECOVERY，重读并绑定同一恢复上下文后继续；若已CLOSED，保持原final prefix并验证其durable结果，不能重新OPEN。CLOSED但缺少删除所需fence proof时，对固定最后fragment补做fence coverage并重验metadata/context，不能直接把writer close当成fenced close。metadata/context改变时重新取证或defer，不覆盖已有close结果。
 
+这里的point-read可读取LAC之后已正确持久化且可定位的候选，Bookie不能按`entryId > localLAC`拒绝或返回不存在。例：副本LAC=99，entry 100已达ACK quorum，writer在下一次piggyback前崩溃，必须读取100后再按本节取证/恢复写入/close判断；单份候选不等于quorum commit。客户端confirmed read由ReadHandle的已确认LAC/CLOSED边界限制，显式unconfirmed和恢复取证采用各自范围；已被当前恢复终态排除的数据不能因物理残留重新可见。locator/index覆盖未恢复或storage unknown返回not-ready/unknown，不计definitive absence。该分层消费RFC-0005 §8既有点读和本地权限检查，不新增每次读取的metadata查询。
+
 基础`RECOVERED_AND_CLOSED`以matching durable close为完成事实，不创建`pendingPublication`，不等待domain prepare/lifecycle strong-publication，也不重置loss window。响应丢失按§7.4重读同一close/context；发现删除或不兼容上下文时返回deleted/authority-changed或对应non-OK，不回滚CLOSED、不重新OPEN。与随后删除重叠的已提交close可以有迟到response；它只证明历史恢复完成，不重新授予open或写权限。新open仍检查authoritative tombstone。强reset启用后的额外assertion与基础恢复结果分别查询，不能把两者合成一个成功位。
 
 实现必须给出source selection、write-set覆盖、并发/内存/重试上限和终止判据的伪代码，并提供独立point oracle。`W-A+1`只计fenced context下的definitive absence，timeout/offline不计；单副本payload、TailSummary或后续speculative entry不能代替required frontier。新的repair target、grant、membership publication及history retention仍遵守§9.1及§14的delete竞争协议；normal/recovery相同应用数据的LAC/digest差异按RFC-0005 §6.1处理。
 
-接受场景包括ACK response loss、旧writer失联、单副本missing/corrupt、预算内domain loss、required hole、正常未提交tail、换组历史、recovery Add/close每个crash cut和重启后再次读取。没有基础恢复证据的Add/ACK实验只允许discardable数据，不作为可恢复WAL canary。Model A先承担受支持子集的point recovery、durable close和outcome检查；Model E负责扩展range与point oracle的等价性，不能借Model E延期来豁免基础恢复。
+接受场景包括ACK response loss、旧writer失联、LAC=99/候选100的confirmed与恢复读分离、单副本missing/corrupt、预算内domain loss、required hole、正常未提交tail、换组历史、recovery Add/close每个crash cut和重启后再次读取；同批其他entry失败及原RPC超时不抹除有效恢复候选。没有基础恢复证据的Add/ACK实验只允许discardable数据，不作为可恢复WAL canary。Model A先承担受支持子集的point recovery、durable close和outcome检查；Model E负责扩展range与point oracle的等价性，不能借Model E延期来豁免基础恢复。
 
 ## 8. Deferred Sync 限制
 

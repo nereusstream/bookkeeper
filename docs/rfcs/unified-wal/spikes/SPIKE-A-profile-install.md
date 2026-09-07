@@ -241,6 +241,8 @@ Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正�
 
 在同一场景补充open purpose：已有CLOSED/fenced ledger一个Bookie离线，其他有效副本可读时，只读open成功且ACTIVATE/新增控制持久化次数为0；未验证read范围not-ready，不伪造absence。恢复open使用显式grant/durable close，不重新normal-active。初始writer仍等待全部E initial install/activation；同phase请求有界并发，不能用串行E次网络往返作为默认实现，跨phase依赖不变。
 
+补充LAC分层：副本local LAC=99、entry 100已达ACK quorum且writer在下一次piggyback前崩溃，合法unconfirmed/恢复点读可读100，confirmed read仍由客户端确认边界限制。Bookie不能以local LAC拒绝候选或伪造absence，读取候选不直接发布recovered close；DATA completion不生成quorum LAC，显式LAC合法单调更新可合批，不增加每Add控制fsync。与B19及Model A-POINT联合验证。
+
 Oracle：缺少 matching global READY 或 local durable normal ACTIVE 的 normal Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；READY 可早于部分 local active，但 初始创建返回normal writer必须晚于all-E initial activation；restart 后接受集合不扩大。
 
 ### A17：Legacy Add targeting Profile route

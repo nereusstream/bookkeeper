@@ -332,10 +332,10 @@ ACTIVATE 是幂等冷路径操作。Bookie 只有在 READY authority 匹配本�
 | 操作 | 接受条件与结果 | 不执行的动作 |
 | --- | --- | --- |
 | 初始创建normal writer | 全E inactive install → 标准metadata → READY → 全E initial activation，满足后才返回writer | 不把install降为A或W，不向未激活target发送normal Add |
-| 只读打开已有ledger | 校验instance、descriptor/布局、生命周期及read边界；按所需坐标选择有效副本，未验证的恢复覆盖范围返回not-ready | 不ACTIVATE，不等待全E在线或normal-active，不因打开reader新增控制日志持久化 |
+| 只读打开已有ledger | 校验instance、descriptor/布局和生命周期；confirmed范围由客户端LAC/CLOSED边界限定，显式unconfirmed/恢复点读按自身合同选有效副本；未验证定位覆盖返回not-ready | 不ACTIVATE，不等待全E在线或normal-active，不因打开reader新增控制日志持久化，也不以副本local LAC截断合法点读 |
 | 打开以执行恢复 | 按RFC-0004执行fencing、取证、显式recovery grant、恢复与matching durable close，返回对应outcome | 不以normal activation替代recovery权限，不重新开放normal写入 |
 
-已安装且readable的CLOSED/fenced replica可以服务符合LAC/closed-boundary的读取；normal admission关闭不等于readable关闭。新open仍受authoritative delete检查，既有reader服从RFC-0004普通删除合同；这里不增加same-ledger writer takeover。读取所需副本不可用时按读合同失败/defer，但不能仅因无关副本离线而等待all-E activation。
+已安装的CLOSED/fenced replica可服务合法读取；normal admission关闭不等于读取权限关闭。RFC-0005 §8分别定义客户端confirmed边界、Bookie物理存在性和恢复候选范围，不能以单个readable/local LAC水位替代：LAC=99而entry 100已正确落盘时，合法unconfirmed/恢复点读可以读取100，是否进入恢复前缀由RFC-0004决定，物理存在本身不授予confirmed可见性。新open仍受authoritative delete检查，既有reader服从普通删除合同；不增加same-ledger writer takeover或逐次read MetadataStore查询。读取所需副本不可用时按读合同失败/defer，但不能仅因无关副本离线而等待all-E activation。
 
 同一install或initial activation phase内对E个target的请求可有界并发，不逐Bookie串行往返；跨phase仍等待相应全部durable结果，response loss重试同operation。验证须覆盖CLOSED ledger部分副本离线仍可只读打开、recovery/readable不授予normal写，以及全E尚未安装/激活时初始writer不返回成功。
 

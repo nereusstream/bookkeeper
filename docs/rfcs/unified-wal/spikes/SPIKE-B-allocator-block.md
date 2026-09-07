@@ -6,7 +6,7 @@
 
 ## 1. 要回答的问题
 
-本 Spike 验证候选 `ArenaControlLog + shared slab + dedicated extent` 是否能同时满足：
+本Spike先验证`ArenaControlLog + shared block`切片；dedicated extent为后续有条件启用配置。各已启用scope必须满足：
 
 - crash 后无 double allocation；
 - generation reuse 后无 stale read；
@@ -58,6 +58,12 @@ batch byte/count/wait limits and actual durability-barrier definition
 immutable CRC32C capability/layout binding and outer/inner coordinate checks
 DATA freeze point, stream/batch framing and contiguous-prefix replay/publication
 full-write/short-write handling, file barrier coverage and cold directory durability
+fixed shard/physical-stream/DATA-file mapping, file count and rotation bounds
+physical batch result versus per-entry admission/cancellation/response result
+submitted-coordinate retention and stream/file I/O-error isolation/recovery rules
+record envelope integrity, bounded aligned point-read ranges and cache/pin lifetime
+confirmed/unconfirmed/recovery read boundaries and LAC update/barrier accounting
+shared-only first slice and separately deferred dedicated buffer-pool scope
 end-to-end request/byte/batch/waiter credit ownership and release points
 oldest-request monotonic deadline, maximum entry path and reserved control capacity
 delete-applied cursor versus access barrier and physical reclaim predicates
@@ -89,7 +95,7 @@ artifact output directory
 
 | 切片 | 实施范围与输出 | 仍未取得的结论 |
 | --- | --- | --- |
-| 初始写入切片 | 隔离新storage scope、一个Arena、Bookie/Arena控制日志的必要记录、durable预分配、ByteBuf受控view、固定shard合批DATA、readable locator、点读/基础restart；跑B18/B19适用项 | 无生产listener/ACK、完整恢复、完整Spike或集群性能结论 |
+| 初始写入切片 | 隔离新storage scope、一个Arena、Bookie/Arena必要控制记录、durable预分配、ByteBuf受控view、固定shard共享DATA block/文件；逐entry结果、独立record点读与基础restart；跑B18/B19适用项 | 无dedicated收益、生产listener/ACK、完整恢复、完整Spike或集群性能结论 |
 | 写入与本地回收 | 同一原型增加已启用的tombstone/drain/free/reuse、shared-block搬迁及维护预算，跑写入与回收并行、B17和所需fault cuts | 不证明cluster logical delete、强访问撤销或完整多Arena |
 | 完整存储/集群入口 | 补全所需tail/IO/rebuild/资源/多Arena矩阵和实际replacement/基础恢复；兼容Gate按既有边界独立闭合 | 仍需实际启用scope全部证据及canary-specific接受 |
 
@@ -107,7 +113,7 @@ artifact output directory
 - allocator checkpoint A/B 与 rotation；
 - `ALLOC/ALLOC_POOL`；
 - shared active slab blocks；
-- dedicated extents；
+- dedicated extents（后续manifest显式启用，首个切片DISABLED/DEFERRED）；
 - block/record framing 与 checksums；
 - locator 的 generation + ledger instance 校验；
 - durable `DELETE_TOMBSTONE`；
@@ -166,7 +172,9 @@ Oracle：未 durable allocation 的空间不能包含被视为 local success 的
 
 Oracle：local-success journal中的每条record可恢复且成功后授权点读立即可定位；不同payload不覆盖pending/durable winner，相同payload幂等、waiter有界。DATA durable但locator未发布不能成功；index缺失期间未覆盖坐标返回not-ready，不能伪造确定absence。
 
-追加oracle：每份completion只证明其实际覆盖范围；12不能跨11的物理缺口成功，未完成短写/错误/取消不算durable，后续DATA不覆盖旧成功范围。restart保留所有已允许成功的record，不能凭最大completion/entryId截断或跳洞。模型中的成功journal仅为外部测试oracle，不加入生产逐entry ACK日志。
+追加oracle：每份completion只证明其实际覆盖范围；12不能跨11的物理缺口成功，未完成短写、物理I/O错误或取消后结果不明不算durable，单条RPC取消不改变物理完成。后续DATA不覆盖旧成功范围。restart保留所有已允许成功的record，不能凭最大completion/entryId截断或跳洞。模型中的成功journal仅为外部测试oracle，不加入生产逐entry ACK日志。
+
+同一batch封入L1/100与L2/200，submission后fence L1并明确终止其Add；完整write/barrier后batch进入前缀、L2可成功，L1不成功且不制造物理gap。注入单条cancel/disconnect/callback失败、封包前全部取消和分配sequence后submission失败：不修改submitted record/buffer，空assembling不占序号，已分配的失败边界不得任意跳过。未回成功的有效DATA保留作恢复候选，tombstone另按删除合同处理。
 
 ### B3：ALLOC pool refill
 
@@ -182,9 +190,9 @@ Oracle：pool/shard generation ownership不重叠；restart后unused/live/unknow
 
 Oracle：单 ledger logical delete 不影响其他 record；block 全死前不进入 free list；全死后按 durable generation bump 回收。
 
-### B5：Hot promotion
+### B5：Hot promotion（dedicated启用时）
 
-冷 ledger 在阈值边界晋升 dedicated extent，crash 于 promotion 决策、allocation、首条 dedicated write 各点。
+首个shared切片标NOT_APPLICABLE/DEFERRED，不纳入其性能结论。后续启用时在阈值边界晋升dedicated extent，crash于promotion决策、allocation、首条dedicated write各点；专属范围不混写其他ledger，共享barrier不要求共享block，不能产生每热ledger永久buffer/文件/线程。
 
 Oracle：shared 旧数据和 dedicated 新数据可组成唯一 ledger history；不要求迁移，不重复/丢失 local-success entry。
 
@@ -208,13 +216,17 @@ Oracle：按RFC-0003 §5.4独立分类；只截断可证明未提交的末尾，
 
 DATA部分另按§6.1验证物理前缀：从verified checkpoint/cut恢复，batch缺口后不得丢弃已允许成功的数据；required corruption保持fail closed，control已证明的free/retired区间不是未知gap。control durable-through、DATA physical durable-through与ledger LAC各自比较，不混用序号。
 
+注入direct I/O错误且范围已部分修改、fdatasync错误后再次sync返回成功、11 unknown/12完整，以及同文件多个stream。Oracle：至少暂停受影响stream，无法缩小错误范围则暂停共享文件相关stream；必要时升级既有设备/Bookie non-writable。后续DATA不跨缺口成功、不因RPC超时丢弃、不任意跳号/新建stream或覆写绕过；重复sync成功不清除未解析失败。实际I/O终结后才释放无使用者buffer，未知坐标由pending或不可写范围接管，恢复前不接受冲突写；异常对象保持上限。
+
 ### B9：Derived index deletion
 
-分别运行保留有效index/checkpoint的正常restart，以及完整删除RocksDB/locator index的full rebuild；数据同时包含active tail、sealed dedicated extent、shared slab与relocated record。
+分别运行保留有效index/checkpoint的正常restart，以及完整删除RocksDB/locator index的full rebuild；首批数据包含active/sealed shared block与relocated record，dedicated启用后必须增加sealed dedicated extent，不能借首批延期漏扫已经启用的布局。
 
 Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围，结果与独立全量authority oracle一致；normal restart只能在有覆盖证明时缩小扫描范围。stale generation不进入index，未验证范围不返回确定absence；分别记录scan bytes/I/O、peak memory、read-only/可写时间及前台竞争。
 
 包含乱序完成batch、已回收区间和搬迁目标；独立checker验证§6.1成功前缀/可发现性。physical durable-through丢失后从authority/framing重建，不假定内存table仍在；MOVE_COMMIT选择的新DATA不能落在恢复会截断的后缀。
+
+补充大batch内小entry点读，分别命中/未命中cache；只读目标record所需对齐范围，独立验证envelope/坐标/generation及BK CRC，不强制整批读取。注入locator与header坏length/溢出/越界、外层身份损坏但BK CRC正确、pin取得时selector切换、慢reader/断连；范围与buffer有界，未恢复覆盖不返回确定absence。记录真实I/O及pin，不以模型计数冒充磁盘测量。
 
 ### B10：Compaction copy
 
@@ -265,7 +277,7 @@ control metadata bytes
 ```text
 fixed extent reservation per idle ledger = 0
 per-ledger block buffer                  = 0
-active block buffers                    = O(shards)
+shared assembling block buffers         = O(shards), plus bounded inflight/read/cache pools
 idle ledger state                       <= 1 KiB per ledger
 total ledger metadata resident memory   <= 128 MiB per Bookie
 ```
@@ -276,11 +288,11 @@ total ledger metadata resident memory   <= 128 MiB per Bookie
 
 ### B12：Cold shared write
 
-1k、10k、100k low-rate ledgers 交错写，验证 active buffer 数量不随 ledger 线性增长，并记录 group commit、fragmentation 和 dead bytes。
+1k、10k、100k low-rate ledgers交错写，再混入大量hot ledger和慢点读者；首批仍shared block。验证assembling与全阶段buffer/cache/pin不随ledger无限增长，不停止回收来维持p99；记录group commit、fragmentation、dead bytes及父buffer驻留。小slice长期保留大父buffer时验证预算内复制与最后使用者释放。
 
-### B13：Hot dedicated write
+### B13：Hot dedicated write（dedicated启用时）
 
-1、10、100 个高吞吐 ledger，比较候选 extent size 的 allocation rate、tail waste、write amplification 和 recovery scan。
+首个shared切片标NOT_APPLICABLE/DEFERRED。后续以1、10、100及manifest资源上限的hot ledger比较allocation rate、tail waste、write amplification、point-read与recovery scan；按需dedicated assembling/buffer池、文件/线程数量和峰值内存单列，上限后新allocation回共享布局或背压，不混写既有专属范围或增加无界buffer。
 
 此场景用于选择 RFC 参数，不设“某个 extent size 必须胜出”的事后 Gate。
 
@@ -320,11 +332,15 @@ Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持�
 
 DATA freeze和barrier/prefix沿B2 oracle，量化padding bytes、write/durability/prefix/locator wait及阶段资源峰值。相同durability与TLS范围才比较；局部无网络run不计端到端增益。
 
+同一切片消费B2逐entry/物理结果分离及B8错误隔离；记录每个实际DATA文件的barrier次数/等待/覆盖和受影响stream，不将per-shard table当独立flush域。点读消费B9路径，孤立请求不等待凑批，相邻请求有界合并；小entry受控复制释放大父buffer/pin，读盘、cache、response和回收并行都在总预算内。
+
 ### B19：同坐标identity与基础恢复重写
 
 用现有DigestManager与LedgerRecoveryOp语义构造同instance/entryId/应用bytes/累计length、不同合法piggyback LAC及digest的normal/recovery重写，应幂等且不覆盖不同数据；另测不同应用payload、累计length冲突、坏digest、跨instance、并发pending、乱序/hole、`E>W`、restart及derived-index丢失。每份输入完整性与authority都验证，不以整包bytes或全BK digest判定逻辑冲突。
 
 首批向量固定32-byte BK metadata + 4-byte CRC32C + opaque payload，验证CRC覆盖、长度/截断、outer/inner ledger/entry mismatch、未知或非CRC32C安装拒绝及不改变60-byte context。构造不同bytes但相同CRC32C的碰撞向量，证明checksum命中不能跳过真实bytes核对；相同业务bytes而LAC/digest不同仍幂等。不得从20-byte ledger credential推导HMAC能力、下发password/MAC key或为每entry新增SHA-256。布局向量属于后续新run，历史frame/operation corpus保持原证据身份。
+
+K/X提交后timeout，再到K/Y：原坐标不变为空，Y不能成为新winner；分别令X迟到完成、部分写入、barrier unknown、restart重建，相同X重试只能复用已解析且权限有效的结果或暂不可用。未提交请求可原子撤销但不得与封包竞争后误释放；fenced原调用失败不抹除有效恢复候选。另按A16/RFC-0004 §7.5运行LAC=99/entry 100点读，confirmed/unconfirmed/恢复各守边界，DATA完成不伪造quorum LAC，explicit LAC合批不新增每Add控制fsync。
 
 独立oracle比较不可变字段及应用数据，重建后核对每个坐标；`entryId <= localLastEntryId`不能充当存在证明。正常新entry、pending retry、已有durable命中、冲突和rebuild慢路径分别计量索引reads、hash invocations、allocation/copy bytes；不强制每新entry一次RocksDB查询和独立SHA-256，不建立全量去重库。与恢复代码的真实端到端联调未运行时单独标NOT_EXECUTED。
 
@@ -337,7 +353,10 @@ allocated heap/direct/native bytes per logical entry (with ownership scope)
 payload copied bytes per entry, broken down by layer
 CPU time per entry, including the declared background share
 entries per completed durability barrier and force count by log
+DATA-file barrier count/wait/coverage and affected-stream scope
 device bytes written / host application payload bytes
+point-read bytes / returned bytes, I/O count, cache hit rate and copy bytes
+read pin duration, shared parent-buffer retention and bounded dedicated-pool peak
 compaction debt/dead bytes over time and stop-write drain
 queue wait/depth, thread hops and ledger lock hold time
 ```
@@ -458,6 +477,16 @@ submitted DATA block mutated or old successful range rewritten = 0
 ordinary write completion counted as durability = 0
 barrier attributed to incomplete or unrelated batch writes = 0
 local success outside recoverable physical durable prefix = 0
+physical batch failed solely from one entry's logical failure = 0
+entry succeeded solely because its batch was durable = 0
+submitted coordinate became absent solely from timeout/cancel = 0
+conflicting retry won before uncertain prior write was resolved = 0
+I/O-unknown stream bypassed by sequence skip or unverified sync retry = 0
+necessary point read rejected solely by stale local LAC = 0
+DATA completion fabricated quorum LAC or per-Add LAC control fsync = 0
+point read required whole batch as its only integrity check = 0
+bad record length caused unbounded or out-of-allocation read = 0
+unbounded dedicated buffers or slow-reader parent-buffer/pin retention = 0
 delete-applied cursor depended on whole shared-block physical reclaim = 0
 cursor advanced before durable tombstone/reconstructible obligation = 0
 applied cursor falsely reported access-barrier/physical completion = 0
