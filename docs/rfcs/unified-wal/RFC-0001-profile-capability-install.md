@@ -243,6 +243,7 @@ LedgerMetadata version、relevant ensemble/fragment digest、instance marker 与
 5. sidecar CAS publishes READY authorization
    - binds actual LedgerMetadata version + canonical ensemble digest
    - requires verified all-E durable install
+   - atomically publishes delete-enumerable activation targets for all E
 6. idempotently ACTIVATE each Bookie from that READY authority
 7. only after all E are durably normal-active may initial creation return a normal writer
 ```
@@ -259,7 +260,7 @@ ACK(normal profiled Add)
 
 ### 6.1 Sidecar reservation 与 authority boundary
 
-RepairIntent admission以及后续启用的RFC-0004 §14.1 strong-publication reference更新推进lifecycle记录的store version；只有真正的生命周期撤权cut推进delete/fencing generation。无关operation完成不能让既有grant或normal activation失效。domain progress不发布ledger-global head；增强strong completion是与delete实际冲突的operation级冷路径例外，首批不运行，其root引用及retention必须有hard bound。
+初始READY/写期activation authority及其target retention、RepairIntent admission，以及后续启用的RFC-0004 §14.1 strong-publication reference更新推进lifecycle记录的store version；只有真正的生命周期撤权cut推进delete/fencing generation。无关operation完成不能让既有grant或normal activation失效。domain progress不发布ledger-global head；上述与delete实际冲突的授权发布是operation级冷路径，root引用及retention必须有hard bound。增强strong completion首批仍不运行。
 
 sidecar 需要一个 domain-specific `ProfileControlStore` 语义 adapter。portable contract 只依赖单 record create/read/versioned CAS、bounded page enumeration 和显式 publication ordering；现有 `LedgerManager` 不提供通用 child namespace/multi-key transaction，底层 ZK multi-op 或 etcd transaction 可以作为 backend 优化，但不能成为跨 driver 的 safety 前提。
 
@@ -282,7 +283,7 @@ MetadataStore opaque store version 只负责单 key CAS；semantic/control gener
 
 每个可外部重试的 operation identity不可变地绑定一个semantic payload/content identity。同identity重试相同payload时，若原transition已提交，必须返回等价`APPLIED/ALREADY_APPLIED`；同identity携带冲突payload必须返回`CONFLICT`，永远不能返回`APPLIED/ALREADY_APPLIED`或改变authority。current snapshot/terminal summary可以作为已吸收operation的有界证明；identity退出可证明retention后只能返回stale/conflict，不能为满足极晚retry保存无界history。
 
-root 必须有 manifest-locked hard bound，只保存 instance/descriptor/lifecycle summary、global lifecycle fence/control generation、有限 authority-family directory/head、current snapshot identity/cut 和 bounded suffix/page references。每个 child family/domain 声明 owner、semantic predecessor 与 bounded discovery；不同 domain 只在实际冲突时共享 order，已证明不相交range的progress/loss不进入ledger-global universal head；admission和最终completion publication按下述冷路径例外处理。
+root必须有manifest-locked hard bound，只保存instance/descriptor/lifecycle summary、global lifecycle fence/control generation、有限authority-family directory/head、current snapshot identity/cut和bounded suffix/page references。每个child family/domain声明owner、semantic predecessor与bounded discovery；不同domain只在实际冲突时共享order，已证明不相交range的progress/loss不进入ledger-global universal head；activation authority/target retention、RepairIntent admission和启用后的最终completion publication按各自冷路径合同处理。
 
 RepairIntent admission实际冲突于delete fence。先durable-create绑定exact instance/target/source-range/operation generation的immutable inert child，再以single-record conditional lifecycle/delete-fence head CAS发布admission reference。只有admitted intent可授予recovery grant或接收第一份durable payload；`DELETE_INTENT`先赢后任何新admission失败，cut前全部admitted intent的source/target必须保留在delete discovery中。首批copy/membership结果与matching durable close按RFC-0004 §9.1/7.5解析，不创建strong-publication token或重置loss window。延期的strong completion才使用§14.1的domain prepare → lifecycle publication CAS → resolve，并服从整个ledger fenced+CLOSED前置；未最终发布的candidate不授予strong assertion/reset authority。各路径均不增加per-entry metadata/control progress。
 
@@ -316,6 +317,8 @@ receipt 的保存、压缩和审计布局保持开放；root record 不得保存
 ### 6.3 Standard metadata 与 READY publication
 
 标准 LedgerMetadata create-if-absent 必须携带 immutable instance backlink，且 initial ensemble 精确匹配已安装集合。之后 sidecar 以 CAS 发布 READY authorization，并绑定实际 metadata version、canonical ensemble digest、instance 与 control generation。任一 CAS response loss 都必须重读两份 authority，按 operation identity/version/digest 判断已提交、可重试或冲突；不得盲建第二个 instance。
+
+READY的同一次conditional lifecycle publication还须使全部初始E的Bookie identity、storage incarnation及对应激活授权进入delete可枚举的持久控制状态；有界child/page先durable，随后由该CAS发布有效引用。发布前child保持inert，不能授予normal activation。它与`DELETE_INTENT`按同一lifecycle cut排序，留存及压缩规则统一见§9.1；不要求标准metadata与sidecar跨key原子提交。
 
 sidecar CAS response loss 时，重读 exact domain head：operation/snapshot identity匹配返回等价 `ALREADY_APPLIED`；若已被 current snapshot/terminal generation吸收，可返回等价完成；否则返回 stale/conflict并重建 lineage。不得为了永久回答所有 old request 保存无界 idempotency history。
 
@@ -541,12 +544,23 @@ Active write-time replacement 与 AutoRecovery 是两条不同流程，不能用
 1. select Bookie satisfying engine and capabilities
 2. durable install replacement, normal-inactive
 3. CAS standard LedgerMetadata at the existing LAC+1 fragment authority
-4. publish/verify post-CAS membership activation authority
+4. publish/verify post-CAS activation authority together with retained cleanup target identity
 5. replacement becomes durable normal-active
 6. only then resend affected pending Adds
 ```
 
 该路径不复制整个历史 fragment。CAS 到 activation 之间只能暂停写入或返回明确 transient failure；不能向 replacement resend、降级 Classic 或执行 per-entry metadata operation。install/activation 属于 `MetadataUpdateLoop.transform` 外的显式异步冷路径 phase，避免 CAS conflict 重放 transform 时重复外部副作用。
+
+标准LedgerMetadata只保存当前有效fragment/ensemble映射，不保证保存同一起点被连续覆盖前的所有成员。当前[`LedgerHandle.ensembleChangeLoop()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java)在新起点等于最后起点时调用[`LedgerMetadataBuilder.replaceEnsembleEntry()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerMetadataBuilder.java)，覆盖该key。例如LAC始终为99，fragment 100先换到D并向D写入，再换到E，最终map可能不再含D。这个静态反例要求补全清理发现，不能由此推断已确认数据丢失，也不要求标准metadata保存全部版本。
+
+每个instance的初始激活和写期replacement都遵守同一目标留存合同：
+
+- 任何Bookie取得durable normal activation、接收第一份normal DATA前，其Bookie identity、storage incarnation及对应激活授权已进入可恢复、delete可枚举的控制状态。post-CAS authority与该目标引用由同一次conditional lifecycle CAS发布，复用§6.1/6.5的bounded child/page及snapshot；先写child不等于授权生效。
+- 发布检查相同live instance与delete/fencing generation，并与`DELETE_INTENT`竞争同一lifecycle cut。delete先赢则禁止新授权；membership CAS已经成功也不能绕过该条件，未获授权的target保持inactive。授权先赢则后续membership覆盖、activation响应丢失或target离线都不能抹掉其清理义务。
+- 留存可按instance内的target identity/storage incarnation去重，压缩为有界页和snapshot，并保留解析激活授权所需的摘要/lineage。旧记录的义务由已提交snapshot完整接管，或相应目标已有可验证终结证明后，还须满足§6.5的current/fallback/operation引用退出条件才可回收。达到资源上限时暂停新的冷路径发布，不能为满足上限丢弃可能持有DATA的target。
+- 历史仅承担清理发现和控制追踪，不替代membership authority，不让旧target/旧incarnation的迟到ACK重新计入当前write set。ACTIVATE消费本次已发布的exact authority，不为激活遍历全部留存历史；delete/reconcile才按snapshot/suffix枚举。普通Add不读取该历史、不更新metadata；成本计入换组冷路径的控制写入、CAS等待和留存空间。
+
+授权先发布并不表示远程delete CAS能瞬时阻止所有旧本地操作；迟到activation/DATA仍按已有本地gate、fence/tombstone与drain排序，由留存目标承担可发现的清理义务。这里不创建延期strong completion的`pendingPublication` token，也不建立通用repair transaction。
 
 并发和 response-loss 合同：
 
@@ -556,7 +570,7 @@ Active write-time replacement 与 AutoRecovery 是两条不同流程，不能用
 - activation response loss 只重试/查询同一 operation，不因 timeout 盲选第二个 target；
 - ledger 已 `IN_RECOVERY/CLOSED` 时停止 normal activation/resend；
 - standard membership freeze marker存在时拒绝metadata变更；若发现增强协议遗留的pendingPublication则保留并按RFC-0004解析，不得强删。首批活跃路径不创建这种token，不能让strong completion成为normal replacement的依赖；本地durable fence/tombstone先发生时迟到activation失败，activation先发生时由后续本地屏障撤销；
-- sidecar post-CAS authority 只绑定 instance/profile、committed metadata version、relevant fragment start、new ensemble digest 和 activation generation，不复制 pending Add 或完整 metadata。
+- sidecar post-CAS authority绑定instance/profile、committed metadata version、relevant fragment start、new ensemble digest、activation generation及上述target/incarnation留存引用，不复制pending Add或完整metadata。
 
 如果 install 失败：
 
@@ -565,7 +579,7 @@ Active write-time replacement 与 AutoRecovery 是两条不同流程，不能用
 - 不降低 capability；
 - 不把首次 Add 当作安装触发器。
 
-CAS 前的 inactive replacement 不接收 payload，因此不强制为每次写期换组建立通用 repair transaction。若不记录 replacement-attempt，GC 必须从 sidecar/standard metadata、instance/hash、stable grace 与 durable tombstone 证明它从未 active、不会被迟到 response 激活，才能回收。
+install成功但从未获激活授权的inactive replacement不接收payload，继续使用既有orphan清理，不为它建立复制事务。GC须从sidecar/standard metadata、instance/hash、完整activation retention、stable grace与durable tombstone证明它未获授权且不会被迟到response激活；仅最终ensemble map没有该target不能构成证明。已获授权的目标按留存历史解析，不能重新当作无历史inactive orphan。
 
 ### 9.2 AutoRecovery repair
 
@@ -592,7 +606,15 @@ AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RF
 4. local success、当前ACK quorum与客户端连续前缀completion分别记录，逻辑Add至多完成一次；
 5. recovery/delete/membership freeze先赢时停止normal activation/resend，返回保留unknown事实的non-OK结果。
 
-这些是待实现的Profile客户端要求，未改变当前production `PendingAddOp`或reference wire corpus的证据范围。
+**资源背压与故障重试：** 当前[`PendingAddOp.writeComplete()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)的未单独分类non-OK会进入Bookie failure处理；delayed ensemble change只改变触发条件，不能把暂时拥塞自动变成正确的Profile语义。因此Profile adapter必须在进入ensemble failure handling前消费§11.5完整`statusClass + retryDisposition + durableResult`，不能先压成通用`WriteException`。
+
+- 明确在本次DATA准入前因资源暂满拒绝时，有界退避并优先等待原target容量恢复，不立即换组；持续不可用仍可在满足既有故障判定条件后执行正式replacement。已知activation/control协调阶段等待已有操作解析，不由每条Add重新协调。
+- 本次拒绝的`durableResult=NONE`只描述本次尝试，不能抹掉此前同一逻辑Add的UNKNOWN。提交后、部分写入或结果不明沿原unknown合同处理，不能称为肯定未写入的资源拒绝；服务端不能因此清除旧坐标占位。
+- retry仍占用原逻辑Add的inflight/bytes预算，保持instance、entryId、累计length与payload；复用现有executor/timer/连接状态，waiter及请求副本有界。可按连接合并唤醒，但各Add的deadline、结果和ACK记账独立。
+- 初始客户端准入应尽量在分配entryId及递增累计ledger length前取得必要预算。已分配逻辑位置后，必须完成、在同一位置重试或进入既有ledger失败/恢复流程；退避不无限延长调用deadline，deadline到达按该流程结束等待，不能跳过此entry继续发布更高entry成功。
+- FENCED、TOMBSTONED、身份/payload冲突或无权限按对应终止语义处理，不能靠换target绕过。admission拒绝、重试与真正replacement分别计量，不把拥塞拒绝统计成磁盘故障，也不以无限丢弃新写取得低延迟。
+
+这些是待实现的Profile客户端要求，未改变当前production `PendingAddOp`或reference wire corpus的证据范围；不增加逐retry持久记录或通用流量调度平台。
 
 ### 9.4 首批故障域与ACK成功判定
 
@@ -706,6 +728,18 @@ durableResult:
 
 Profile client/admin必须保留完整三元组；legacy callback只能安全投影为non-OK，不能把partial/unknown变成OK。conflict/grant/quarantine/durability-unknown不得从coordinator/admin rich result丢失；exact新BKException、general E/W/A recovery outcome API与detail code继续BLOCK。protocol/header/length/unknown subtype错误关闭连接；control response loss只重试/查询same endpoint/subtype/opId/public payload；Add response loss保持same Profile subtype/instance/entry/payload；原DATA target的durability unknown可按§9.3正式换组后重发，不能盲改control operation/target或降级Classic。
 
+以下映射消费已有枚举，不分配新wire值或改写历史corpus；有界资源原因分类及exact detailCode仍由原型manifest冻结：
+
+| 事实 | 三元组与客户端处理 |
+| --- | --- |
+| 本次DATA准入前明确因资源暂满拒绝 | `TRANSIENT_UNAVAILABLE + SAME_PROFILE_OPERATION + NONE`；按§9.3有界退避原逻辑Add，优先原target，不直接进入Bookie failure handling。NONE仅描述本次尝试，保留此前UNKNOWN |
+| 已知activation/短暂control协调尚未完成 | `PROFILE_NOT_READY_OR_STALE + AFTER_CONTROL_RECONCILIATION`；durableResult如实描述该操作，等待已有协调，不为每条Add启动新install/activation |
+| DATA已提交且结果unknown | `DURABILITY_RESULT_UNKNOWN + SAME_PROFILE_OPERATION + UNKNOWN`；保持原逻辑身份重试，只有满足既有故障策略时才选择`REPLACE_TARGET`并完成§9.1后resend；不能回报为准入前NONE |
+| FENCED、TOMBSTONED、身份/payload冲突、无权限 | 对应终止status及`NEVER`，保留实际durableResult；不能用更换target绕过。payload冲突的exact detail/API映射仍BLOCK |
+| 确认target不可用或达到既有故障判定条件 | 保留实际status和durableResult，按正式replacement处理当前ACK/投递身份及unknown；资源暂满不被定义为永远禁止replacement |
+
+先执行该分类，再进行legacy callback的最终投影。提交阶段决定能否声明本次无DATA effect；caller timeout、后续重试的资源拒绝或回调失败都不能重写已提交事实。重试预算、deadline与entryId/累计length的分配顺序由§9.3约束，不能因背压制造可跳过的逻辑空洞。
+
 ### 11.6 Reference codec与数据路径adapter
 
 `ProfileFrameCodec.decode()`、`ProfileFrame`构造/`body()`及`ProfileOperationCodec.AddNormal`解码/构造/`entryPayload()`会分配并复制body或payload。静态调用链说明多次payload量级复制，尚无压测结论。不可变`byte[]` reference codec继续作为字节合同、corpus和oracle；未来transport adapter使用受控`ByteBuf`视图原位解析固定header/context，并通过相同valid/invalid corpus验证等价拒绝，不原样串联整包clone接口进入热路径。
@@ -751,7 +785,7 @@ registration只做hint；connection context也不替代durable install/activatio
 5. 相同 ledgerId 的两个 live instance 不得共享同一 Bookie routing identity。
 6. descriptor 或 protected auth binding 冲突不能被重试、restart 或 lazy-create 消解为成功。
 7. 标准 LedgerMetadata 是唯一 membership authority；sidecar intent或 membership CAS 单独存在都不能激活新 Bookie。
-8. 写期 replacement 必须按 inactive install → `LAC+1` membership CAS → normal activation → resend 排序，且不复制历史 fragment。
+8. 写期replacement按inactive install → `LAC+1` membership CAS → activation authority及目标留存发布 → normal activation → resend排序；初始E同样先留存后激活，同起点membership覆盖不丢删除目标，不复制历史fragment。
 9. AutoRecovery recovery-only authority不授予 normal writable；任何 target durable recovery payload 都晚于可枚举 repair intent。
 10. Bookie restart 后的接受集合不能大于 crash 前由 durable install/activation 授权的集合。
 11. metadata watch/cache 失效不能破坏上述不变量。
@@ -780,6 +814,8 @@ RFC 进入 Accepted 前必须：
 
 - [Spike A](spikes/SPIKE-A-profile-install.md) 当前启用scope的全部必需场景通过；延期增强项保持独立BLOCK，不以disabled测试冒充其PASS；
 - Model A 包含创建、安装、response loss 与 ensemble replacement 的抽象；
+- A9/A10/A16/A28及Model A+D证明初始/写期activation前已持久留存target/incarnation；LAC不变、同fragment起点D→E覆盖后删除/rejoin仍发现D，history snapshot/压缩和重启不丢清理义务；
+- A26/A27证明完整status三元组在failure handling前分类；资源拒绝/恢复容量不立即换组，当前NONE不抹除旧UNKNOWN，重试预算/deadline有界且不跳过逻辑位置；
 - strict TLV descriptor reference codec与独立golden verifier按§5的exact bytes/bounds/SHA-256 manifest通过；
 - golden corpus覆盖same-semantics稳定bytes/hash、different-semantics identity变化、duplicate/default/order、unknown schema/field/enum/mandatory capability、oversize-before-allocation、old writer rewrite/strip、declared hash mismatch，以及capability 0/1/64与E/W/A/F边界；
 - protected auth binding 经过安全评审且不会泄漏可离线验证的 credential material；

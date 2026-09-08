@@ -520,6 +520,8 @@ Spike Gate：
 
 每shard的同一套预算覆盖准入、待合批、已提交I/O、等待physical prefix/locator及响应阶段；request count、源/对齐bytes、inflight batches和duplicate waiters分别有上限。出队或移交future不释放credit，真实资源释放或转移到另一已计费owner后才归还对应份额；复制期间源与目标同时持有的bytes都计入。断连/取消而I/O仍在进行时保留其buffer/inflight费用，不能留下队列之外无上限的任务。复用请求对象，避免每层重新包装大对象。
 
+§15的热定位、异步index batch/队列、查询已可见但尚未flush的memtable及相关native/cache内存也计入总资源预算。local success或热定位淘汰不等于这些资源消失；转交实际可查询且已计费的owner后才归还原credit。索引stall耗尽预算时背压后续新DATA，fence/tombstone仍保留控制处理容量；不能以无界索引积压隐藏吞吐瓶颈。
+
 同批物理buffer费用不随某条entry取消而归零；未解析写入的坐标保护按§6.1转交不可写范围后才收缩异常pending。账本同时覆盖点读缓存、对齐读buffer、大父buffer及小副本、pin数量/时长、DATA文件数与后续dedicated池。大量hot ledger或慢reader不能突破总量，也不能通过暂停回收改善短期p99。
 
 最老请求的单调时钟deadline不被新到达重置。最大可接受entry必须能走声明的batch/buffer路径：普通block放不下时使用同一总预算约束的有界大记录批次，或在明确size/capability检查处拒绝；不能永久堵在队首。wire frame、BK entry和存储record/alignment开销的上限关系写入manifest，不因扩大临时buffer突破总预算。
@@ -560,8 +562,36 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 - 不参与 allocator ownership authority；
 - key/value 带 format、instance 和 generation；
 - 全库删除后可从 control log + data arena 重建；relocation winner 只能由 committed checkpoint current selector + complete conditional `MOVE_COMMIT` suffix 决定，checkpoint selector 必须可证明由此前完整 control history 产生，不能由 RocksDB、mtime、最大物理 generation 或 data scan 猜测；
-- stale generation locator 在读取时被再次校验；
+- stale generation/selector locator在读取时被再次校验，并按当前authority重新解析，不能将落后的缓存项当作payload丢失；
 - rebuild/compaction 有 foreground QoS 和 admission control。
+
+**运行时可读发布与异步维护：** 首批写路径固定为：
+
+```text
+DATA enters its recoverable contiguous durable prefix
+    -> publish locator in the existing bounded hot handle/index
+    -> check each entry's authority and publish eligible local success
+asynchronously:
+    -> apply bounded batches to the derived index
+    -> periodically persist the index contents
+    -> durably publish a coverage checkpoint matching those persisted contents
+```
+
+local success之前目标entry必须可被当前点读正确定位；已有有界热定位结构可以承担该事实，不要求本次RocksDB Put/WriteBatch或flush完成。正常新写不增加同步索引读，也不增建一套独立存储系统。append shard不在主循环中同步调用/等待可能阻塞的RocksDB写入、flush或compaction；异步执行资源及积压复用§13统一预算，满额后背压后续准入。
+
+`sync=false`不能证明调用不会阻塞：flush/compaction追不上时，RocksDB会延缓或停止写入调用。该成本须留在有界索引维护路径并计量，不能只用“没有index fsync”描述前台开销。依据[RocksDB Write Stalls](https://github.com/facebook/rocksdb/wiki/Write-Stalls)。
+
+热定位只有在另一条已计费、实际query-visible的定位路径接管后才可淘汰；先完成查询可见的接管，再删除旧热记录，立即点读不得出现空窗。接管不强制等待flush：运行时查询可见与重启持久覆盖分开，尚未覆盖的DATA在crash后重放。不能把flush延迟变成每条热定位的强制驻留条件；异步队列、memtable及热结构的实际占用仍全部有界。
+
+**持久覆盖与恢复：** DATA physical durable-through和index persisted coverage cut独立维护。后者只覆盖相关index更新已完整持久化的连续物理范围，并绑定storage incarnation、Arena/stream、index format/generation及解释这些映射所需的control/selector cut；不能从最大entryId、最后一次Put成功、最大异步完成序号或查询可见水位推导。
+
+首批纯派生RocksDB索引选择`disableWAL=true`，前置是实现并验证本节覆盖checkpoint。关闭WAL后的写入可能在进程crash后丢失，Put/WriteBatch返回不代表持久覆盖，见[RocksDB Basic Operations](https://github.com/facebook/rocksdb/wiki/Basic-Operations)。此选择不作用于Bookie控制日志、ArenaControlLog或其checkpoint，不能关闭权威状态的持久化。
+
+一次覆盖发布先选定有界update cut，确认到该cut的必要索引更新完成，再等待实际覆盖这些内容的flush持久化完成，最后沿既有checkpoint发布协议durable发布对应coverage marker。marker不能仅放入关闭WAL的未flush memtable后就用于跳过扫描；crash发生在flush后、marker发布前时，只能保守多重放。API、RocksDB版本、cut/marker编码与真实flush证据在同一实验manifest锁定，不凭一个异步回调猜覆盖。首批无需主动拆分更多column family；若使用多个CF，必须证明所有相关内容一致持久化后才推进cut，不能仅flush locator就将未flush的其他恢复信息算入。[RocksDB Atomic Flush](https://github.com/facebook/rocksdb/wiki/Atomic-flush)可用于此条件，但不是新增CF或全局索引事务的理由。
+
+原始Add、MOVE后索引更新与删除清理按坐标/selector代际保持必要顺序，陈旧异步update须被丢弃或从当前authority重新生成，不能覆盖新selector或复活tombstone后的定位。点读发现派生locator陈旧时重新解析当前权威selector，按§9重新pin/复核；暂不能解析则有界重试或not-ready，不能把旧locator失败当成确定NoSuchEntry。覆盖声明也必须纳入相应已完成的更新顺序，不能用旧Add回调越过尚未解析的MOVE/delete。
+
+coverage checkpoint仅缩短DATA重建扫描，不授权删除DATA、不替代allocator ownership、不决定relocation winner。完整allocator/current-selector/tombstone authority及其必要控制后缀仍按各自checkpoint恢复；index coverage不能省略后续MOVE/delete控制重放。
 
 点读复用上述locator和§9独立record校验路径；confirmed边界由客户端、恢复候选范围由coordinator按RFC-0005 §8判定，Bookie不以陈旧local LAC截断合法物理点读。report实际读取bytes/返回bytes、每点读I/O数、cache命中、copy/父buffer持有及pin时长；批量写入大小不自动决定点读大小，未验证覆盖继续返回not-ready/unknown而非确定absence。
 
@@ -569,10 +599,12 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 
 | 路径 | 必须扫描和验证的范围 |
 | --- | --- |
-| 正常restart | 验证仍有效的checkpoint/footer/derived-index覆盖证明，对未覆盖且已授权的DATA按§6.1物理stream前缀扫描必要tail，不用最大completion或ledger entryId越过缺口 |
+| 正常restart | 仅跳过由有效持久index checkpoint证明已覆盖的DATA；验证实际索引、storage/stream/index generation与连续cut，对未覆盖且已授权DATA按§6.1物理stream前缀扫描必要tail，不用Put成功、最大completion或ledger entryId越过缺口 |
 | 全部derived index丢失或覆盖证明无效 | 从完整allocator/current-selector authority枚举所有需要重建的live allocation和有效DATA范围；首批覆盖active/sealed shared及relocated数据，dedicated启用后必须同样覆盖；不能只扫描active tail |
 
 两条路径均报告扫描bytes/I/O、重建entry/locator数量、heap/direct/native峰值、到read-only/可写的时间及前台竞争。未验证范围不宣称确定absence；重建可以分批提供已验证读能力，但其覆盖与not-ready语义须冻结。RocksDB全删不会删除allocator/current-selector authority；这些持久映射的空间、写放大与重启成本必须计入账本。
+
+checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必要tail扫描或完整重建。B2/B9/B12/B18至少验证Put成功未flush时crash、热定位淘汰与查询接管并发、index stall同时新写/fence、旧Add update晚于MOVE/delete，以及多CF启用时部分flush。报告index入库等待、query-visible积压、persisted coverage落后量/扫描代价和真实资源峰值，分别统计资源拒绝、重试及replacement；不新建监控平台。
 
 ## 16. 多设备与设备失败
 
@@ -597,7 +629,7 @@ RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 4. locator 的 generation/instance 不匹配时读取失败，不返回新 owner 数据。
 5. checkpoint rotation 不得删除恢复当前 authority 所需的唯一 control suffix。
 6. allocator authority 全损坏时设备 fail closed，不从 data scan 猜 free list。
-7. derived index 损坏或删除不改变 payload 恢复结果。
+7. derived index损坏或删除不改变payload恢复结果；local success依赖可查询定位，index coverage只由真实持久内容证明。热定位接管不等flush，append shard不同步等待索引维护，未覆盖DATA必须可重放。
 8. 100k idle ledger 不产生 per-ledger extent 或 block-buffer reservation。
 9. shared slab的delete-applied/cursor晚于durable tombstone及可重建清理义务，不依赖physical reclaim；待回收record不可接受新访问，cursor也不证明旧I/O/pin终结或允许reuse。
 10. 未 commit 的 relocation copy 永远不能成为 authoritative；durable `MOVE_COMMIT` 在 derived index 丢失后仍唯一选择 new location。

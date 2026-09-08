@@ -109,7 +109,8 @@ GeneralEwaRecovery.tla      Model E, optional until feature advances
 
 ```text
 standard ledger metadata version/state, immutable instance backlink
-ensemble history
+effective fragment/ensemble map, including overwrite at the same fragment start
+durably published activation targets/incarnations and bounded snapshot/suffix retention
 Profile sidecar store version, semantic/control generation and READY/availability facts
 bounded authority-domain heads, child/page publication refs and snapshot manifests
 committed snapshot cut and complete bounded suffix per compacted authority domain
@@ -139,6 +140,8 @@ durable range-scoped verifier assertion
 optional coverage audit commitment
 bounded child receipts and committed interval snapshot
 client pending operations
+current-attempt status triple versus accumulated logical Add unknown result
+bounded logical Add credits, backoff/wakeup and caller deadline state
 logical Add identities and current delivery target/incarnation ACK sets
 same-coordinate pending/durable payload identity and readable publication
 per-request response wait versus submitted coordinate/write outcome
@@ -222,6 +225,9 @@ CheckCurrentAckFailureDomains
 RetrySameCoordinatePayload
 RejectConflictingCoordinatePayload
 CancelEntryResponseWait
+RejectDataBeforeAdmissionForCapacity
+BackoffAndRetrySameLogicalAdd
+ExpireAddDeadlineWithoutSkippingAssignedEntry
 PublishReadableLocation
 ReadPointRecoveryEvidence
 ClassifyRequiredHoleOrNormalTail
@@ -260,8 +266,10 @@ ReclaimCoveredRepairReceipts
 - fence先关闭new admission并使所有pre-cut Add terminal；stale handle/admission generation不能在durable fence后形成local success；
 - initial standard metadata不早于all-E inactive route claim，初始创建返回normal writer晚于all-E initial activation；只读open不触发或等待activation，恢复open消费显式grant，CLOSED/fenced但readable副本可读；
 - 安装布局与operation坐标/完整性不匹配不能接受；20-byte credential不推导HMAC能力。模型只抽象CRC32C布局匹配和输入有效性，实际bytes/碰撞慢路径由A26/B19验证；
-- active replacement 遵守 inactive install → `LAC+1` CAS → normal activation → resend，且不复制历史 fragment；
+- active replacement遵守inactive install → `LAC+1` CAS → activation authority及target retention publication → normal activation → resend，且不复制历史fragment；初始READY同样原子发布全部初始E的留存引用。两个publication动作必须检查lifecycle/delete cut，不能拆成先授权、后留存；
+- 同一起点D→E覆盖会真实移除effective map中的D，delete仍从持久activation-target snapshot+完整suffix发现D/incarnation；压缩只在义务接管或终结证明后回收，不能依赖模型保存的全metadata历史；
 - 普通Add unknown可在正式换组后重发同一identity；控制unknown不盲换operation。旧target/incarnation ACK不进入当前quorum/domain集合，成功保持连续前缀；
+- 准入前容量拒绝先按完整三元组分类，有界退避且不直接replacement；该次NONE不抹除原逻辑Add的UNKNOWN，提交后不声称肯定未写。retry保持原entry/payload及credits，deadline终止等待不形成可跳过hole；实际退避计时/调度和stall由A26/A27/B18验证；
 - 同坐标相同payload幂等、不同payload冲突，DATA durable与readable publication未同时成立时不能local success；
 - 取消/timeout只终止响应等待，已提交坐标仍占有或由不可写范围保护，迟到X与重试Y不能形成两个winner；同批其他entry失败不决定本entry结果；
 - 模型区分不可变应用数据/累计length与可变piggyback LAC/封装digest；合法normal/recovery重写不因后者差异冲突，hole不由localLastEntryId推断存在。真实字节/完整性与慢路径成本由B19验证；
@@ -303,6 +311,8 @@ recoverable prefix/cut and bounded full-lifecycle request/byte/batch credits
 local-success publications
 ledger tombstones
 locators and reader pins
+bounded hot locators, query-visible derived index and pending async updates
+persisted index contents and per-stream coverage checkpoint bound to storage/index generation
 conditional MOVE_COMMIT records and move generations
 authoritative relocation chain and orphan copies
 per-move control sequence and durable-through cut
@@ -327,6 +337,11 @@ CompleteCoveringDataBarrier
 FailOrLoseDataDurabilityResult
 PauseAffectedDataStreams
 AdvanceContiguousPhysicalDurableThrough
+PublishBoundedHotLocator
+ApplyDerivedIndexBatchInSelectorOrder
+TransferLocatorToQueryVisibleIndex
+FlushDerivedIndexCut
+PublishPersistedIndexCoverageCheckpoint
 PublishLocalSuccess
 AppendDeleteTombstone
 DrainReader
@@ -375,6 +390,9 @@ RebuildAllAuthorizedLiveRanges
 - 写错误/unknown关闭受影响stream及必要file/device范围，不能任意跳号、换stream或凭重复sync成功解除；已提交坐标在恢复解析前不视为空，I/O终结后才释放实际引用资源；
 - 重启扫描与成功前缀一致，required损坏不截断为无ACK后缀；move目标须可恢复发现才切换/释放old source；
 - 出队不归还仍持有的bytes/inflight credits，取消不终结真实I/O；只抽象已有有界资源转移，timer/大entry/慢读/控制容量的真实进展由B18验证；
+- local success可依赖bounded hot locator，不依赖DB Put/flush；热定位淘汰晚于已计费query-visible接管，不等flush且无点读空窗。index stall积压仍有界，满额背压后续DATA并保留control容量；
+- 关闭纯派生索引WAL时crash丢弃未持久内容，Put/query-visible不推进persisted coverage；仅全部相关更新真实持久后的连续cut可发布匹配storage/stream/index generation的checkpoint，未覆盖DATA重放；
+- 覆盖checkpoint缺失/损坏/代际不匹配不虚报absence或跳过DATA；它不替代allocator/current selector/tombstone及完整控制后缀，不授予free或MOVE winner。旧Add/MOVE/delete异步update不复活陈旧selector，陈旧派生locator按当前authority重解析；
 - slot/generation 唯一 owner；
 - free 未 durable 时不能 reuse；
 - old locator 不能读新 generation；
@@ -400,7 +418,8 @@ shared slab 可先用一个 block 包含两个 ledger 的最小域建模；dedic
 
 ```text
 ledger metadata and version
-ensemble history
+effective fragment/ensemble map with same-start overwrite
+initial/write-time activation-target retention, lifecycle publication cut and complete snapshot/suffix
 delete manifest and per-ledger-instance epoch
 frozen historical target set
 inert vs admitted durable RepairIntent children and lifecycle/retention
@@ -505,7 +524,8 @@ ReuseLedgerIdWithNewInstance
 - 普通logical completion晚于durable tombstone及完整targets/清理义务；旧reader在本地tombstone前可继续发起read，离线节点仅阻塞撤权/物理清理，新open/admission均拒绝；
 - 只有启用的强访问撤销完成晚于全部target barrier/永久服务隔离proof；旧网络响应晚到不产生新authority；
 - recovery target 第一份 durable payload 晚于可枚举的admitted RepairIntent；
-- frozen targets 覆盖历史 ensembles 与 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member/target；
+- frozen targets覆盖effective ensemble map、cut前所有已发布activation target/incarnation及incomplete/completed/aborted-but-dirty RepairIntent的replaced member/target；连续同起点D→E、history压缩/重启或D离线都不丢义务；
+- activation authority与target retention由同一lifecycle publication生效：delete先赢禁止新授权，authority先赢必入delete枚举；membership CAS成功不替代该publication，未授权inactive child沿orphan路径；
 - DELETE_INTENT 后 AutoRecovery 不产生漏删副本；
 - recovery-only/committed-readable role 不产生 normal writable authority；
 - delete-applied cursor不跨gap，只依赖durable tombstone/可重建清理义务或可验证non-applicability，不等待physical reclaim；cursor不证明access barrier，reuse仍依赖真实drain/I/O和FREE；
@@ -660,6 +680,9 @@ LocalTargetDurabilityAloneNeverResetsLossBudget
 LossAfterProofCountsAgainstNewWindow
 ClosedRepairResetDoesNotRequireNormalActive
 CurrentNormalWritesRequirePostCasNormalActive
+NormalActivationRequiresDurableRetainedTarget
+DeleteFreezeCoversActivationTargetsAfterSameStartOverwrite
+CurrentAttemptResourceNonePreservesPriorLogicalUnknown
 AllocationDurableBeforeLocalSuccess
 OneOwnerPerSlotGeneration
 NoReuseBeforeDurableGenerationBump
@@ -667,6 +690,9 @@ NoReuseBeforeOldWriterIOQuiescence
 TruncationExcludesRequiredDurablePrefix
 ForegroundPreservesMaintenanceBudget
 FullIndexRebuildCoversAllRequiredLiveRanges
+HotLocatorEvictionRequiresQueryVisibleChargedSuccessor
+IndexCoverageImpliesPersistedContentsAndMatchingGeneration
+AsyncIndexUpdateNeverOverridesCurrentSelectorOrTombstone
 OldLocatorNeverReadsNewGeneration
 AllocatorAuthorityOrDeviceFailed
 MoveCommitSelectsUniqueAuthority
@@ -746,7 +772,7 @@ RichOutcomeSurvivesGenericProjection
 - sidecar store version不替代semantic generation；unpublished child无authority，snapshot+suffix完整，referenced unknown mandatory state fail closed；
 - sidecar operation identity只绑定一个semantic payload；same-payload retry不产生第二结果，conflicting-payload retry无authority effect；
 - ledger instance隔离store-version reset/ID reuse；normal Add不等待sidecar read/watch/CAS；route claim先于lazy create，stale admission generation不能绕过fence；
-- initial standard metadata 晚于 all-E inactive Profile claim；写期 replacement 按 install/CAS/activate/resend 排序；
+- initial standard metadata晚于all-E inactive Profile claim；初始READY同次发布target retention，写期replacement按install/CAS/authority及target retention/activate/resend排序，delete cut前授权目标不因map覆盖或snapshot压缩丢失；
 - recovery payload 写入 target 前有 durable RepairIntent，recovery-only/committed-readable 不授予 normal write；
 - bounded range 只有完整 `F + 1` distinct-domain coverage proof 与 conditional completion authority 才 reset loss window；
 - verifier assertion是reset authority，并长期绑定immutable descriptor/`F`/policy；digest-only不足，duplicate loss不重复计数，receipt snapshot durable前不删child；
@@ -806,7 +832,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-332 | A | 3/3/2 | response loss + Bookie crash |
 | A-333 | A | 3/3/3 | fence + ensemble change |
 | A-322 | A | 3/2/2 | write-set rotation |
-| A-ACT | A | 3/3/2 | initial writer all-E activation; CLOSED/fenced read-only open with offline target; recovery grant without normal activation |
+| A-ACT | A | 3/3/2 | initial writer all-E activation with atomic target retention; CLOSED/fenced read-only open with offline target; recovery grant without normal activation |
 | A-FD-OK | A | profile-specific | `F` losses across declared domains within budget |
 | A-FD-EXHAUST | A | profile-specific | all valid ACK evidence exhausted |
 | A-REPAIR-LOSS (DEFERRED strong reset) | A | whole ledger fenced+CLOSED | descriptor/`F` binding, verifier assertion vs digest, loss ordering, proven repair and second loss |
@@ -815,7 +841,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-LOCAL | A+D | local authority | Classic/Profile route claim before lazy create, independent normal/grant/readable facts, fence cut, stale handle and registration readiness |
 | A-PROFILE-COMPAT | A | 3/3/2 | descriptor match, anonymous/authenticated-but-unauthorized/authorized control scope, normal/recovery/Profile opcode, negotiation, old-decoder Classic effect and no downgrade |
 | A-FENCE-STALE | A | 3/3/2 | stale writer vs recovery fence, delayed responses |
-| A-ACK-RESP | A | 3/3/2 | Add unknown/replacement, current ACK/domain set, ordered completion |
+| A-ACK-RESP | A | 3/3/2 | Add unknown/replacement, current ACK/domain set, ordered completion; capacity backoff, current NONE versus prior UNKNOWN, credits/deadline |
 | A-POINT | A | 3/3/2 and 3/3/3 | local LAC 99/candidate 100; confirmed versus recovery read; required hole/normal tail; durable close/restart without strong reset |
 | C-REUSE | C | local | crash at alloc/data/free/reuse |
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
@@ -825,10 +851,10 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | C-WRITER | C | local | pool transfer/reuse with delayed old writer I/O and completion |
 | C-SPACE | C | local | foreground/maintenance budgets, exhaustion, bounded debt and restart |
 | AC-LOCAL-STORE | A+C | two Arenas | partial durability, same-batch L1 fence/L2 success, K/X timeout then K/Y, coordinate protection, read-after-success |
-| C-REBUILD | C | local | normal restart coverage vs full live-range index reconstruction |
+| C-REBUILD | C | local | query-visible handoff vs persisted coverage, Put-before-flush crash, stale async MOVE/delete updates and full live-range reconstruction |
 | C-FORMAT | A+C | local | old-binary fence, partial required-device migration, unknown mandatory format, incarnation/readiness generations and unsafe rollback |
-| D-OFF | D | historical ensembles | offline rejoin |
-| D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery |
+| D-OFF | D | retained historical targets/incarnations | offline rejoin after membership overwrite and activation-history snapshot |
+| D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery; same-start D to E overwrite, activation-retention publication and snapshot/rejoin |
 | D-INTENT | A+D | closed fragment | inert child, admission/delete-fence winner, admission response loss/restart, domain progress, first payload, ensemble CAS and every crash boundary |
 | D-LOGICAL | A+D | historical targets | tombstone/complete targets before logical success, offline cleanup pending and old reader before local barrier |
 | D-PUBLISH (DEFERRED strong reset) | A+D | whole ledger fenced+CLOSED | token/prepare/publication/resolve, coordinator/sidecar outage, delete and pending loss |
@@ -912,6 +938,9 @@ artifact checksum failures                = 0
 sidecar operation identity payload aliases = 0
 unadmitted RepairIntent grants/writes       = 0
 admitted RepairIntents omitted from freeze = 0
+authorized activation targets omitted after overwrite/compaction = 0
+resource backpressure erased unknown or bypassed ordered completion = 0
+unpersisted index coverage or hot-locator query gap = 0
 admission response loss duplicated intent/target = 0
 descriptor/auth/wire compatibility invariant violations = 0
 old-binary/migration/readiness invariant violations = 0

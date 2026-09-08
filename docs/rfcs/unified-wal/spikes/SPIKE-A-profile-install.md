@@ -37,6 +37,8 @@ prototypeCommit
 metadataDriverAndVersion
 profileControlStoreAdapterRevision
 root/page/fan-out/retention hard bounds
+activation-target identity/incarnation retention, lifecycle publication and snapshot/reclaim encoding
+pre-admission resource status mapping, bounded retry/backoff/deadline and client credit limits
 BookieCount
 clientCount
 E/W/A configurations
@@ -195,15 +197,17 @@ Oracle：全 E 安装并激活时所有 write set 可用；只安装 W 的负向
 
 ### A9：Active write-time ensemble replacement
 
-步骤：在 active write failure 后选择满足 capability 的 replacement，durable inactive install，以现有 `LAC+1` fragment authority CAS 标准 metadata，发布 post-CAS activation authority，等待 replacement durable normal-active，再 resend pending Add。
+步骤：在active write failure后选择满足capability的replacement，durable inactive install，以现有`LAC+1` fragment authority CAS标准metadata，再由conditional lifecycle publication同时发布activation authority和delete可枚举target/incarnation，等待replacement durable normal-active后resend。
 
-Oracle：durable replacement install 早于 membership CAS；normal activation 晚于 exact CAS；pending resend 晚于 activation。该路径不复制历史 fragment，不做 per-entry metadata update。
+Oracle：durable replacement install早于membership CAS；normal activation晚于exact CAS及持久target retention，pending resend晚于activation。LAC固定99，在同一fragment 100先换D并接收部分/完整DATA，再换E，最终map可无D但清理历史必须保留D/incarnation；旧D迟到ACK不计当前write set。该路径不复制历史fragment、不做per-entry metadata update。
 
 ### A10：Replacement install 失败
 
 步骤：在 install validation/control durability/receipt、membership CAS response、activation authority/local durability/receipt 各处失败或丢包，并与 `IN_RECOVERY/CLOSED`、durable fence 竞争。
 
 Oracle：install 失败节点不进入 ensemble；CAS winner 以 exact mapping 重读恢复；CAS 后 activation 未完成时不 resend；fence/tombstone 不被迟到 activation重开；允许选择新节点但不降低 Profile或盲目制造多个 target。
+
+增加membership CAS已成功但delete先于activation-authority publication，以及authority/retention CAS已提交但响应丢失的顺序：前者无新授权、target仍inactive，后者即使离线也被delete枚举。inert child不授权；从未获授权的install沿原orphan GC，不用最终map缺席证明已授权目标无DATA。
 
 ### A11：Bookie restart
 
@@ -236,6 +240,8 @@ Oracle：orphan 从未接受 normal Add；GC 同时读取 sidecar与标准 membe
 Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正确性依赖。
 
 ### A16：Install 完成但 activation/READY 未成立
+
+初始E的READY与target/incarnation retention在同一lifecycle publication生效；注入child durable、READY CAS、local activation间crash/delete。任一初始目标激活或接收normal DATA前必须已可恢复枚举，history压缩后重试READY仍解析同一授权。
 
 步骤：全部 E 个 Bookie durable install 后，分别在标准 metadata create 前后、READY authority 提交前/确定失败后、local normal activation durable 前后，由持有合法 master key 的客户端发送 profiled Add；在 activation request/receipt response loss 时重试并重启 Bookie。
 
@@ -311,17 +317,25 @@ Oracle：每个vector的Classic route claim、handle create、master-key persist
 
 Oracle：Profile初始创建/install在old/mixed target上payload前失败；只读/恢复校验实际所需target操作，不支持的target不执行Profile语义也不降级，按既有读/恢复规则选有效副本或失败，不把all-E探测/activation作为通用open前置。Profile只在独立mTLS connection首次HELLO，restart/generation变化重连；Classic client/endpoint/pool没有Profile TLS/HELLO；physical channel key包含protocol/BookieId/incarnation/generation/TLS identity；registration hint、HELLO与durable receipt分层；unsupported/identity/stale/fenced/deleted/grant/transient/unknown/quarantine/unauthorized/bad-request/durability-unknown不坍缩成OK，external unauthorized可coarse但internal class保留，协商不发生在每Add。
 
+在既有三元组矩阵验证RFC-0001 §11.5的资源映射：准入前资源拒绝进入有界same-operation backoff，已知activation未完成复用协调等待，提交后unknown不能投影成NONE；terminal fence/delete/conflict/unauthorized不靠换组绕过。检查分类发生在`handleBookieFailure`之前，不先压成通用WriteException；不为该行为修订旧wire枚举/corpus或历史receipt。
+
 ### A27：Add unknown、换组与ACK故障域
 
-原target DATA durable后丢ACK并永久离线，按RFC-0001 §9.3执行inactive install → membership CAS → activation → resend同一entry/payload；再注入旧target/旧incarnation迟到ACK、重复ACK、换组slot撤销以及连续前缀未完成。另覆盖最快ACK来自同一声明域、unknown域身份与policy检查被关闭的负向路径。
+原target DATA durable后丢ACK并永久离线，按RFC-0001 §9.3执行inactive install → membership CAS → authority/target retention publication → activation → resend同一entry/payload；再注入旧target/旧incarnation迟到ACK、重复ACK、换组slot撤销以及连续前缀未完成。另覆盖最快ACK来自同一声明域、unknown域身份与policy检查被关闭的负向路径。
+
+增加暂时资源拒绝后容量恢复、持续不可用达到既有故障阈值、已提交unknown后的重试收到NONE、activation协调中多个Add，以及退避期间deadline到达。首次预算尽量早于entryId/累计length分配；分配后保持同位置/payload重试或按ledger失败/恢复结束，不能跳过hole。retry沿原inflight/bytes计费，timer/waiter有界，不延长调用deadline。
 
 Oracle：有合法替代资源和明确控制结果时，原DATA outcome unknown不阻止正式换组；控制INSTALL/ACTIVATE的unknown仍重试同operation。成功只使用当前write set和声明故障域内的有效ACK，不拼接旧投递集合，不改变逻辑payload，不重复callback或Classic fallback。故障域模型/`F`在run前锁定。
+
+资源Oracle：短暂拥塞不直接触发replacement；容量恢复后原逻辑Add继续。当前拒绝NONE不抹除旧UNKNOWN/占位，已提交不能返回肯定未写入；持续故障达到锁定条件后仍可正式换组。与B18索引stall/满额场景联动，分别记录拒绝、retry与replacement数，未执行真实网络时不宣称集群效果。
 
 ### A28：Delete cut、membership freeze与完成发布
 
 基础scope按RFC-0004 §14.1逐步展开admission、cold authority read、local grant、membership CAS与history retention；在每两步间插入DELETE_INTENT、标准metadata freeze、普通logical tombstone、本地access barrier、response loss与coordinator crash。至少一个历史target离线，logical成功后仍用旧reader访问尚未tombstoned的目标，再恢复节点并执行本地屏障与回收。
 
 Oracle：delete后新open/admission失败；membership与freeze按同记录version分出赢家；普通logical completion只在authoritative tombstone及完整可恢复清理目标已durable时成立，离线target使撤权/物理清理pending，旧reader在本地tombstone前可读。旧grant仅能作用于已枚举scope，本地屏障后read/grant/local success均拒绝，free晚于reader/writer/I/O终结。基础恢复matching durable close不依赖strong-publication token，也不reset loss window。
+
+复用A9同起点D→E：对已发布activation-target历史去重/分页，snapshot提交前后crash，回收旧页后重启再delete，D离线后rejoin。完整snapshot+suffix必须仍含D及其incarnation/授权义务，或有效终结证明；缺页/gap不能发布完整freeze。标准map不是全历史oracle，target retention与membership职责分开；记录冷路径CAS/留存bytes，不引入每Add控制更新。
 
 强访问撤销及strong reset为独立DEFERRED配置，首批只验证能力拒绝及不创建token。后续启用时：强撤权必须等全部target屏障/永久服务隔离proof；strong reset必须整个ledger fenced+CLOSED，逐步执行token、prepare、lifecycle publication、resolve，注入sidecar故障、coordinator crash及pending loss，未最终发布candidate不能reset。已有token即使功能关闭也不得超时强删。记录新增冷CAS、membership阻塞时长、恢复解析和前台影响；不能因不在per-entry路径就忽略停顿。
 
@@ -402,6 +416,12 @@ engine/capability mismatch payload writes           = 0
 ensemble metadata active before replacement install = 0
 standard metadata before all-E Profile route claim = 0
 normal ACTIVE before matching READY                 = 0
+normal activation without durable delete-enumerable target retention = 0
+authorized target lost by same-start replacement or history compaction = 0
+new activation authority published after delete admission cut = 0
+immediate replacement caused solely by transient resource rejection = 0
+prior logical Add UNKNOWN erased by current-attempt resource NONE = 0
+backpressure retry exceeded budget/deadline or skipped assigned entry = 0
 initial normal writer returned before all-E activation         = 0
 pending resend before replacement normal ACTIVE    = 0
 restart lost durable install                        = 0

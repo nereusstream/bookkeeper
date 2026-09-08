@@ -121,7 +121,7 @@ recovery grant和committed-readable都不隐含normal writable；active grants/r
 
 - `ABSENT -> CLASSIC`：route claim + Classic/master-key binding，早于payload/lazy handle创建；
 - `ABSENT -> PROFILE_INSTALLED`：route + instance/Profile/Engine/auth + install generation + initial normal-inactive；
-- normal activation：exact route/instance + target stable identity/storage incarnation + READY/membership activation generation + purpose + inactive-to-active；不能与initial install合并，initial/replacement purpose不能重放；
+- normal activation：exact route/instance + target stable identity/storage incarnation + 已按RFC-0001发布并持久留存target的READY/membership activation authority/generation + purpose + inactive-to-active；不能与initial install合并，initial/replacement purpose不能重放；
 - recovery grant：exact route/instance + RepairIntent/generation + target/range scope + capability generation；
 - recovery close/commit：对同一scope不可逆关闭recovery-write admission并发布committed-readable fact，或等价fail-closed有序transition；
 - tombstone：exact instance terminal route，同时撤销normal admission和全部该instance recovery grants并拒绝read/write；
@@ -235,9 +235,11 @@ local route/auth/admission check and capture generation
     -> use durable authorized allocation
     -> complete batch writes and the exact covering DATA durability barrier
     -> enter the recoverable contiguous physical durable prefix (RFC-0003 §6.1)
-    -> preserve physical location under matching storage generation/selector
-    -> check each entry's current operation admission and publish eligible readable/local success
+    -> publish matching storage generation/selector locator in the bounded hot handle/index
+    -> check each entry's current operation admission and publish eligible local success
     -> client current ACK set and ordered-prefix completion (RFC-0001)
+asynchronously:
+    -> bounded derived-index batch updates, periodic persistence and coverage checkpoint
 ```
 
 - 同坐标相同payload的并发重试复用pending result，waiter/bytes有hard cap；已有durable且可读结果时幂等返回，不另写覆盖副本。权限校验仍先执行，已tombstoned的重试不能返回旧成功。
@@ -245,7 +247,8 @@ local route/auth/admission check and capture generation
 - 普通新entry利用已有热尾状态与索引定位，不强制每entry读RocksDB或额外计算SHA-256；并发同坐标请求复用有界pending，仅可能命中已有坐标时进入数据核对慢路径，复用现有派生索引，不建全量去重数据库。缓存fingerprint不能单独替代必要数据相等验证；`entryId <= localLastEntryId`也不证明坐标存在，必须保留乱序、hole和`E>W`的分布语义。
 - DATA durable而locator未发布时不能local success；符合instance/权限的点读在成功后必须能找到数据。尚未覆盖的rebuild范围返回not-ready/transient，不能返回确定`NoSuchEntry`。
 - DATA batch虽已durable但前一物理batch仍有缺口时，同样不能local success；physical sequence不是entryId/LAC，不改变逻辑quorum与连续entry前缀的定义。
-- locator可在内存/可重建索引发布，不要求RocksDB独立fsync参与ACK。它必须与DATA、generation和current selector一致；普通client read仍服从BookKeeper LAC/可见性合同，local success不提升客户端LAC。
+- local success前的readable locator由已有有界热handle/index发布，与DATA、generation和current selector一致；append shard不同步等待RocksDB Put/WriteBatch、flush或compaction。本次索引入库/持久化都不是成功前置，async backlog持续计入总预算。热定位在另一已计费且实际可查询路径接管后淘汰，不等flush，也不允许查询空窗。普通client read仍服从BookKeeper LAC/可见性合同，local success不提升客户端LAC。
+- DATA durable-through与index persisted coverage cut按RFC-0003 §15分开；首批纯派生索引关闭WAL，以实际flush内容和匹配generation的durable checkpoint证明连续覆盖，未覆盖DATA重放。Put成功、查询可见或最后一个回调不能授权restart跳过扫描，也不能替代allocator/selector/tombstone authority。
 - fence/tombstone竞争沿captured admission order终结；已durable但未成功的数据不能仅凭callback丢失当作free。冲突隔离、orphan回收和极晚重试使用有界authority proof，不保存无界request history。
 
 物理batch table与逐entry pending各自维护完成事实。batch只共享写入、barrier和buffer生命周期，不提供跨entry/ledger事务原子性；完整物理结果不由RPC取消、断连、fence拒绝或回调失败决定。进入可恢复durable前缀后，每条entry分别按captured admission-generation、fence/tombstone、去重结果和定位条件发布成功。例如同批L1的Add被fence顺序明确终止而L2仍合法，batch的完整durable事实保留，L2可以成功，后续物理前缀不被L1的逻辑失败卡住；batch durable也不能替L1跳过权限检查。原Add不能成功不妨碍保留storage generation/selector有效的候选locator；它不授予read权限，读取仍走§8的独立检查。
@@ -322,6 +325,8 @@ check instance / descriptor / read authority / tombstone
     -> return only the target entry within the request's read contract
     -> release each buffer/pin after its last user or I/O has finished
 ```
+
+热定位与异步索引的接管遵守RFC-0003 §15；旧Add/MOVE/delete索引更新不得打乱当前selector/generation顺序。发现派生locator落后时，重新解析当前authority并重新pin/复核，不能直接把缓存失败当成payload丢失；解析未完成返回not-ready/unknown。runtime query-visible不等于persisted coverage，索引未flush不妨碍合法运行时查询，crash后由未覆盖DATA及完整控制恢复补齐。
 
 首批支持独立record校验，不能为读一条entry强制读取整个大batch。长度/范围检查先于大buffer分配，冷读不越过合法allocation；相邻读可有界合并但不等未来请求凑批。慢客户端持有小slice而阻留大父buffer时，允许复制已验证的必要小范围，在没有I/O/零复制引用依赖后及时释放父buffer和pin；原分配的pin不必跟随独立副本的网络等待。复用有界cache/read资源，测量实际读取bytes/返回bytes、I/O次数、cache hit、copy bytes、父buffer驻留与pin持有时间，不以形式零复制牺牲内存或回收。
 
@@ -435,9 +440,12 @@ ByteBuf fixed-header/context parsing and bounded admission/local checks
     -> seal a nonempty batch, assign physical sequence and freeze all bytes for submission
     -> complete full writes into unused preallocated DATA ranges, then the covering barrier
     -> advance only the recoverable contiguous physical durable prefix
-    -> preserve physical locations and check each entry's selector/admission/pending result
+    -> publish physical locators in the bounded hot handle/index
+    -> check each entry's selector/admission/pending result
     -> publish eligible entries' local success independently
     -> release each buffer when its last user/I/O has finished
+asynchronously:
+    -> bounded derived-index updates, periodic persistence and durable coverage checkpoint
 ```
 
 Bookie控制日志提前建立install/activation等条件，Arena控制日志提前建立pool allocation；普通已准入新写不逐条穿越三套队列、线程切换、锁或持久化future。pool不足时走有界refill/背压，不能把先决authority省掉；控制变化仍与captured admission/fence/tombstone order一致。
@@ -446,6 +454,7 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 - ledger锁只保护短状态转换，不持锁等待磁盘future。固定shard是第一批执行模型，测量线程hop/queue wait/lock hold后再决定必要拆分，不新增调度框架。
 - adapter保留reference codec作oracle；使用受控payload视图，允许一次集中对齐复制。每层不可变包装不得反复clone整份payload。所有权覆盖拒绝、取消、断连、retry和I/O错误；若已复制且无引用可及源数据可释放源view，I/O仍引用的对齐buffer必须等真实I/O终结才复用，取消future不等于I/O已终结。
 - 热尾、pending、定位与权限状态尽量合并进现有handle/index；维持hard caps和hole语义，慢路径只处理实际需要核对的已有坐标。
+- 派生索引维护按RFC-0003 §15有界异步批处理，不能让append shard同步卡在RocksDB WriteBatch/flush/compaction；无sync/fsync不保证WriteBatch不stall。热定位接管以实际query-visible为条件，coverage推进以真实持久化为条件，两者不互相等待；索引瓶颈通过统一预算对后续准入背压。
 - batch table管理物理结果，pending管理逐entry结果；单条fence/取消不污染同批其他entry或物理前缀。提交后的超时不释放坐标占位，无法解析的I/O走§6.1隔离/恢复，不以无界pending、任意跳号或重复sync掩盖异常。
 - shard、物理stream和DATA文件映射按RFC-0003 §6.1在manifest冻结；首个文件切片在一Arena内共享预分配DATA文件，barrier成本与错误影响按实际文件计量，不宣称shard之间独立flush。
 - 同时运行写入与回收，保留RFC-0003 §13.1的维护份额和空间保留；不能通过停止compaction改善p99。
@@ -459,13 +468,19 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 | I/O unknown与慢点读 | stream不可写gate承接未解析义务前不丢坐标保护；实际I/O终结后才释放不再使用的buffer。点读父buffer/独立副本/pin与cache均计费，小slice可受控复制以释放大父buffer |
 | 普通block放不下的entry | 在统一总预算下走有界大记录批次，或按size/capability检查明确拒绝；声明可接受的最大entry必须存在可行路径，不能永远卡队首 |
 | 重复/冲突核对旧坐标 | 复用有界读取执行资源，append shard主循环不同步等盘；pending/waiter和读取buffer计费，正常新写不因此多一次索引I/O |
+| 热定位、异步索引积压、query-visible未flush内容 | 队列/WriteBatch、hot记录、memtable/native/cache分别计实际bytes/对象；接管后转移credit，local success不提前释放后台仍占用资源。stall达上限背压后续DATA，控制容量仍可推进 |
+| 资源拒绝后的客户端退避/retry | 同一逻辑Add继续占用原inflight/bytes预算，deadline和ACK独立；拒绝不抹除旧unknown/坐标事实，不复制无界请求，不因短暂拥塞直接换组 |
 | 持续热ledger与撤权请求 | 连接/ledger只设必要有界份额；为fence/tombstone保留控制执行容量及持久化预算，DATA满额仍能关闭DATA准入 |
 
-实现复用现有shard/pending/buffer预算和请求对象，不新增通用调度平台。所有被接受的entry满足wire frame、36-byte BK overhead、Segment record/framing/alignment及runtime总预算的兼容上限；资源不足明确可重试背压，不先接收再无界积压。
+实现复用现有shard/pending/buffer预算和请求对象，不新增通用调度平台。所有被接受的entry满足wire frame、36-byte BK overhead、Segment record/framing/alignment及runtime总预算的兼容上限；资源不足在明确DATA准入前拒绝，不先接收再无界积压。此时使用RFC-0001 §11.5现有`TRANSIENT_UNAVAILABLE / SAME_PROFILE_OPERATION / NONE`，NONE仅针对本次尝试；已有同坐标unknown不能被覆盖。进入可能产生DATA的阶段后按§6.1如实保留unknown，不能伪装准入拒绝。
+
+Profile客户端在ensemble failure handling前消费完整三元组，按RFC-0001 §9.3有界退避原逻辑Add、等待已有activation协调或执行满足故障条件的正式replacement。FENCED/TOMBSTONED/冲突/无权限不得换目标绕过；客户端预算尽量先于entryId及累计length分配，已分配的Add不因背压/deadline变成可忽略的hole。以上不增加每entry远程状态查询、控制日志或独立持久retry任务。
 
 首个isolated/discardable性能切片可与实际启用路径的Model A/C及必要D子集验证并行，不必等待所有延期功能模型。切片先用真实control/DATA I/O、一个Arena及固定shards完成normal Add、点读、基础restart和本地回收；多Arena、全量重建和完整故障/资源Gate逐步补齐，未覆盖范围不得进入canary。无真实网络的shard测试不能证明transport/TLS成本，无真实恢复的性能run不能证明WAL可恢复性。
 
 Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS范围、E/W/A、payload分布及负载，分别测低负载延迟、目标负载吞吐/尾延迟、过载有界拒绝、写入与回收并行、restart/fault recovery。报告allocation/copy bytes/entry、CPU/entry、吞吐/p99、按文件计的entries/barrier、padding/实际磁盘写放大、debt，以及write/durability/physical-prefix/locator wait和全阶段资源峰值；补充点读bytes放大/I/O/cache hit/pin时长、大父buffer与大量hot ledger内存。首批shared-block结果不包含dedicated收益；replacement或真实网络未执行时单列NOT_EXECUTED，不把局部无网络结果当端到端增益。
+
+同一报告增加index入库等待、persisted coverage落后量、资源拒绝、retry和真正replacement数量；分别观察前台定位发布与后台索引stall。拥塞不统一计为磁盘故障，不能用无限积压、丢弃新写或停止回收改善p99。B2/B9/B18联动A26/A27验证索引stall下新写有界背压、fence推进、容量恢复后原逻辑Add重试及提交后unknown保留。
 
 ## 11. 安全不变量
 
@@ -506,6 +521,8 @@ Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS�
 - normal Add 与 fence 的每个 durability/response-loss 边界；
 - §5.2真实Bookie控制日志与多个Arena的partial durability/restart、checkpoint/rotation及tail分类；
 - §6.1同坐标去重/冲突及LAC/digest兼容边界、DATA durable到locator publication间的crash、ACK后点读与全部index丢失；
+- DATA durable且index Put成功但未flush时crash、热定位淘汰与query-visible接管并发、陈旧Add索引更新晚于MOVE/delete；持久覆盖不能虚报，已成功entry不出现临时NoSuchEntry；
+- index持续stall与新写/fence并发，预算有界且控制推进；短暂资源拒绝不立即触发replacement，重试NONE不覆盖旧UNKNOWN，deadline不制造可跳过的entry hole；
 - §8以LAC=99/entry 100验证confirmed、unconfirmed及恢复点读分层，Bookie不按local LAC截断，DATA completion不推导quorum LAC或增加逐Add LAC fsync；
 - 同批L1 fence/L2合法、已提交timeout后同坐标不同payload、batch 11 unknown/12已完成、共享文件错误与恢复；逐entry结果不污染物理前缀，异常pending及buffer有界；
 - 大batch中单entry独立envelope/CRC校验及必要对齐I/O、坏length、cache/pin竞态与慢客户端小slice持有；首批shared-only及后续dedicated池的资源/性能结论分别计量；

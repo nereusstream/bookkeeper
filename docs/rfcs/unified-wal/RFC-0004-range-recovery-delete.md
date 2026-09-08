@@ -565,8 +565,8 @@ TOMBSTONE_COMPACTABLE
 通过 MetadataStore CAS：
 
 - 绑定 ledgerId + instance + deleteRequestId；
-- 关闭新的open、lifecycle/repair admission与strong completion publication；
-- 固定cut前admitted intent的可枚举history；
+- 关闭新的open、lifecycle/repair admission、初始/写期activation authority发布与strong completion publication；
+- 固定cut前admitted intent及已发布activation target的可枚举history；
 - 启动§14.1的标准metadata freeze，处理cut前已准入操作；
 - 返回可查询的in-progress状态，尚不承诺所有已有handle失效。
 
@@ -574,16 +574,18 @@ TOMBSTONE_COMPACTABLE
 
 ### 10.2 ENSEMBLES_FROZEN
 
-先按§14.1在标准LedgerMetadata同一记录CAS发布不可逆membership freeze，再从该版本及admission snapshot枚举历史，生成绑定Bookie/storage incarnation的immutable target set和digest。先list再CAS不能冻结完整集合。
+先按§14.1在标准LedgerMetadata同一记录CAS发布不可逆membership freeze，再从该版本、lifecycle cut前已发布的完整activation-target snapshot/suffix及repair admission/history枚举目标，生成绑定Bookie/storage incarnation的immutable target set和digest。先list再CAS不能冻结完整集合；仅最终ensemble map加RepairIntent也不足以发现被同一起点后续换组覆盖的normal DATA目标。
 
 必须覆盖：
 
-- initial ensemble；
-- 每次 ensemble change 的旧/新成员；
+- initial ensemble及其获激活授权的target/incarnation；
+- 每次ensemble change中已获normal DATA授权的旧/新成员；普通写期目标由RFC-0001 §9.1持久activation retention补齐，即使最终map已没有该成员、activation响应丢失或其离线也保留；
 - incomplete、completed、aborted-but-dirty RepairIntent 中的 replaced member 与 target；
-- 已记录但尚未完成的 replacement。
+- 已获激活授权但尚未完成的replacement；从未获授权的inactive install另按orphan合同清理，不据此创建新的复制事务。
 
 freeze之后membership CAS不得继续改变该instance的ensemble。cut前admitted操作可能留下局部payload，必须在其固定target scope被撤权/清理，不能新增未被枚举的target。
+
+activation history只记录曾获接收DATA授权的目标及必要授权lineage，不保存逐Add投递或所有metadata版本，也不成为membership/ACK authority。其去重、bounded page/snapshot和压缩按RFC-0001 §6.5/9.1执行；snapshot必须接管可能持有DATA的全部target/incarnation，或保留其可验证终结证明。重启和离线rejoin从这些durable来源重建清理义务，不依赖旧coordinator内存；缺失必要页、suffix gap或无法证明完整覆盖时，不能发布完整target set/普通删除完成。
 
 ### 10.2.1 ACCESS_BARRIER_PENDING / COMPLETE
 
@@ -797,12 +799,14 @@ Profile range/recovery wire、coordinator、admin status与scheduler必须贯通
 **关闭admission与冻结membership：**
 
 1. repair先持久化immutable inert child，再CAS lifecycle head发布admission；child绑定的target/range不能在admission后扩张。
-2. delete CAS同一lifecycle head进入`DELETE_INTENT`，关闭新admission和strong completion publication，保留此前admitted目录/snapshot及未resolve publication引用。
+2. delete CAS同一lifecycle head进入`DELETE_INTENT`，关闭新repair admission、初始/写期activation authority发布和strong completion publication，保留此前admitted目录、activation-target snapshot/suffix及未resolve publication引用。normal activation与目标留存按RFC-0001 §6.3/9.1的同一次conditional publication生效；仅写入inert child不算获授权。
 3. delete读取标准LedgerMetadata，以其版本CAS写入绑定instance/delete operation的不可逆`membershipFrozen`语义marker，并保持CLOSED。所有Profile membership updater必须在同一记录的CAS predicate检查instance、合法state、freeze marker absent且无其他pending publication；不能只在CAS前读sidecar。marker/token的exact custom-metadata encoding及拒绝legacy mutation的ACL须在原型前冻结。delete freeze可保留未resolve publication token并关闭metadata变更，但不得改写它所绑定的mapping。
 4. 旧membership CAS先赢时，freeze CAS冲突并重读，把赢家纳入历史后重试；freeze先赢时，旧CAS版本失败，重试读取marker后终止。marker durable后不再接受任何repair/replacement membership变更。
-5. 以freeze版本、admitted intents及完成history形成固定targets和可恢复清理义务，持久化后发布普通logical tombstone；逐target屏障和物理清理异步推进。只有独立强撤权结果等待全部§10.2.1屏障。每个response loss重读同一identity/version/marker，不盲建新delete或repair。
+5. 以freeze版本、cut前已发布activation-target完整snapshot/suffix、admitted intents及完成history形成固定targets和可恢复清理义务，持久化后发布普通logical tombstone；逐target屏障和物理清理异步推进。只有独立强撤权结果等待全部§10.2.1屏障。每个response loss重读同一identity/version/marker，不盲建新delete或repair。
 
 标准LedgerMetadata仍是唯一membership truth；freeze marker只阻止该记录继续变更，不复制ensemble。无权绕过marker的Profile metadata mutation控制是此前§9协议的必要前提；其enforcement未验证时不得启用删除。
+
+写期membership CAS先完成、但delete在activation-authority publication前关闭lifecycle时，新target保持inactive，不得接收normal DATA；它按inactive orphan合同解析。activation authority先发布时，即使同一起点后来换到其他target、响应丢失或原target离线，delete仍从留存历史枚举该target/incarnation。remote delete cut到目标本地屏障之间的已授权操作按既有gate/drain撤销；不能把跨key读/CAS或远程cut当成即时本地写屏障。
 
 **仅用于延期的strong completion/reset：**
 
@@ -881,12 +885,12 @@ all historical targets acknowledged or durably decommissioned
 ### 16.2 Delete
 
 1. LOGICALLY_DELETED 后该 ledger instance 永远不能重新 OPEN。
-2. frozen target set 覆盖固定 metadata version 的历史 ensembles，以及所有 incomplete/completed/aborted-but-dirty RepairIntent 的 replaced member 与 target。
+2. frozen target set覆盖冻结metadata的有效ensemble、cut前已发布的初始/写期activation target/incarnation完整snapshot/suffix，以及所有incomplete/completed/aborted-but-dirty RepairIntent的replaced member/target；同起点membership覆盖不丢历史清理义务。
 3. unresolved offline Bookie 不能被超时自动解释为物理删除。
 4. Bookie 缺失 required tombstone 时不能注册 writable。
 5. local free/reuse晚于durable tombstone、reader/pin drain和旧writer I/O终结或可靠隔离。
 6. 新 ledger instance 不受旧 instance delete 请求影响。
-7. DELETE_INTENT关闭新repair admission/strong completion；cut前固定scope内的partial写入必须可发现并在访问屏障撤销，membership freeze后不能发布新ensemble。
+7. DELETE_INTENT关闭新activation authority publication、repair admission/strong completion；cut前固定scope内的partial写入必须可发现并在访问屏障撤销，membership freeze后不能发布新ensemble。
 8. PHYSICALLY_DELETED 只在每个 target 有 durable terminal proof 时成立。
 9. target 的第一份 durable recovery payload 晚于可由 delete freeze 枚举的 RepairIntent。
 10. recovery-only authority 永不隐式授予 normal writable authority。
@@ -905,6 +909,7 @@ all historical targets acknowledged or durably decommissioned
 Model D：
 
 - delete 与 ensemble change 同时 CAS；
+- LAC不变且同一起点D→E覆盖、activation authority/target retention与delete竞争，history压缩后重启并删除，D离线rejoin仍有完整清理义务；
 - delete 与 RepairIntent inert-child create/admission/recovery authority/first payload/ensemble CAS 逐边界竞争，覆盖child-before-admission crash、admission先赢、delete先赢及admission response loss/restart；
 - repair target 收到部分或全部 payload、CAS 前 crash，restart 后仍可枚举并清理；
 - ensemble CAS response loss 与 intent COMMITTED response loss；
@@ -973,6 +978,7 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - non-anonymous且exact operation/instance/target-range scope authorized repair control principal、authenticated-but-unauthorized负向路径、target incarnation/purpose/range/grant-generation binding、direct-read committed RepairIntent/delete fence、secret leak与grant status query通过测试；
 - 基础RepairIntent identity、lifecycle/delete-fence admission、retention和target discovery冻结；strong assertion、`F+1` coverage、loss ordering及receipt snapshot由增强reset独立Gate拥有；
 - DeleteManifest schema、target freeze 和 CAS 线性化点冻结；
+- 初始/写期activation retention与lifecycle cut、同起点连续D→E replacement、历史页/snapshot压缩后restart/delete/rejoin通过A9/A10/A28及Model A+D；最终map缺少D仍能枚举其incarnation与清理义务，missing history不虚报完整freeze；
 - bounded stream assignment的 PREPARED/effective handoff、storage incarnation、可应用snapshot+suffix、per-stream cursor、registration cut 与 terminal wipe/decommission proof有集群级端到端测试；
 - 普通logical/强撤权/physical API completion分别观测，禁用强能力返回unsupported/non-OK；
 - admission、membership freeze、logical tombstone、本地access barrier及physical reclaim的cut分别观测；已有reader、离线target、迟到grant/I/O/response通过确定性测试；

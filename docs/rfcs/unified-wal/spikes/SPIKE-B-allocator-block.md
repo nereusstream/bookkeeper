@@ -55,6 +55,8 @@ enabled paths and separately deferred feature/test scopes
 transport adapter/refcount ownership and reference-corpus revision
 logical identity byte ranges, LAC/digest rules and duplicate slow path
 batch byte/count/wait limits and actual durability-barrier definition
+derived-index RocksDB version/options, disableWAL=true, enabled column families and flush proof
+hot-to-query-visible handoff, bounded async index credits and persisted coverage/checkpoint cuts
 immutable CRC32C capability/layout binding and outer/inner coordinate checks
 DATA freeze point, stream/batch framing and contiguous-prefix replay/publication
 full-write/short-write handling, file barrier coverage and cold directory durability
@@ -176,6 +178,8 @@ Oracle：local-success journal中的每条record可恢复且成功后授权点�
 
 同一batch封入L1/100与L2/200，submission后fence L1并明确终止其Add；完整write/barrier后batch进入前缀、L2可成功，L1不成功且不制造物理gap。注入单条cancel/disconnect/callback失败、封包前全部取消和分配sequence后submission失败：不修改submitted record/buffer，空assembling不占序号，已分配的失败边界不得任意跳过。未回成功的有效DATA保留作恢复候选，tombstone另按删除合同处理。
 
+延迟RocksDB WriteBatch/flush/compaction，DATA进入前缀且有界热定位发布后，符合权限的entry可local success；append shard不等待本次index入库。热定位移交实际query-visible索引时立即点读，无临时NoSuchEntry；未flush不阻止运行时接管，积压仍占总预算。该场景与B9的crash恢复cut独立核对。
+
 ### B3：ALLOC pool refill
 
 反复refill、部分使用、shard crash、Bookie crash、未使用pool回收；延迟真实write submission/completion，覆盖旧shard退出、pool转交及generation bump后才到达的completion。
@@ -225,6 +229,10 @@ DATA部分另按§6.1验证物理前缀：从verified checkpoint/cut恢复，bat
 Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围，结果与独立全量authority oracle一致；normal restart只能在有覆盖证明时缩小扫描范围。stale generation不进入index，未验证范围不返回确定absence；分别记录scan bytes/I/O、peak memory、read-only/可写时间及前台竞争。
 
 包含乱序完成batch、已回收区间和搬迁目标；独立checker验证§6.1成功前缀/可发现性。physical durable-through丢失后从authority/framing重建，不假定内存table仍在；MOVE_COMMIT选择的新DATA不能落在恢复会截断的后缀。
+
+按RFC-0003 §15关闭纯派生索引WAL，注入DATA durable、Put/WriteBatch成功未flush、flush完成未发布coverage、coverage发布及热定位淘汰各cut的crash。重启仅跳过实际持久且generation匹配的连续覆盖；marker缺失/损坏、index generation变化和多CF启用时部分flush均不能错误跳过DATA。Bookie/Arena权威控制日志保持durable，完整selector/tombstone控制后缀仍恢复。
+
+并发交错旧Add索引update、MOVE新selector和delete清理，验证陈旧update不能复活旧定位；点读从当前selector重新pin/解析，不把旧缓存失败当作payload丢失。热定位淘汰只等实际query-visible接管，不等flush；runtime可见、persisted cut和物理durable-through各自有独立观测，不能以最后Put/回调当coverage。
 
 补充大batch内小entry点读，分别命中/未命中cache；只读目标record所需对齐范围，独立验证envelope/坐标/generation及BK CRC，不强制整批读取。注入locator与header坏length/溢出/越界、外层身份损坏但BK CRC正确、pin取得时selector切换、慢reader/断连；范围与buffer有界，未恢复覆盖不返回确定absence。记录真实I/O及pin，不以模型计数冒充磁盘测量。
 
@@ -333,6 +341,8 @@ Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持�
 DATA freeze和barrier/prefix沿B2 oracle，量化padding bytes、write/durability/prefix/locator wait及阶段资源峰值。相同durability与TLS范围才比较；局部无网络run不计端到端增益。
 
 同一切片消费B2逐entry/物理结果分离及B8错误隔离；记录每个实际DATA文件的barrier次数/等待/覆盖和受影响stream，不将per-shard table当独立flush域。点读消费B9路径，孤立请求不等待凑批，相邻请求有界合并；小entry受控复制释放大父buffer/pin，读盘、cache、response和回收并行都在总预算内。
+
+持续制造index WriteBatch/flush/compaction stall，同时新写、立即点读及fence/tombstone。append shard不能同步卡在索引调用；hot/async queue/WriteBatch/memtable/native/cache全部有界，达到统一预算后拒绝后续DATA，控制仍推进。容量恢复后按A26/A27有界重试，不产生每次拒绝都换组的风暴；先前submitted unknown不被当前NONE清除。增加index入库等待、持久覆盖落后量、资源拒绝/retry/replacement计数；真实网络未执行的部分维持NOT_EXECUTED。
 
 ### B19：同坐标identity与基础恢复重写
 
@@ -473,6 +483,11 @@ hole treated as existing entry from localLastEntryId alone = 0
 buffer use after release or premature I/O-buffer reuse = 0
 buffer reference leak or duplicate release in tested paths = 0
 local success before readable location publication = 0
+read-after-success gap during hot-to-query-visible index handoff = 0
+unpersisted index contents counted in durable coverage = 0
+stale async index update revived old selector or deleted entry = 0
+append shard synchronous wait on derived-index write/flush/compaction = 0
+index backlog exceeded total budget or starved fence/tombstone = 0
 submitted DATA block mutated or old successful range rewritten = 0
 ordinary write completion counted as durability = 0
 barrier attributed to incomplete or unrelated batch writes = 0

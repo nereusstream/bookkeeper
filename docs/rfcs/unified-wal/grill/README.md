@@ -2,7 +2,7 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
-2026-09-08基于`63ff8e0876dcd7bbb229ff0712891b06c0182d06`的修订已进入现有owner RFC：客户端confirmed范围、Bookie物理点读与恢复候选分层；batch物理结果与逐entry结果分开；timeout不抹除已提交坐标，I/O异常暂停相应范围并恢复；独立record校验和有界点读；首批shared block及固定stream/file映射，dedicated extent有条件延期。六组反例归入现有UW-2/3/4/7和Spike A/B/C，见[当前清单](../implementation/README.md)。此前CRC32C、DATA冻结/恢复前缀、delete-applied、资源预算、客户端维护及强能力延期保持。这是文档修订，状态仍Proposed/Planned，未执行修复、JUnit或性能run；下表各轮为历史记录，不覆盖当前owner修订，历史逐字反馈和source-bound receipt未重写或晋升。
+2026-09-08基于`4551f387b00b094b8f2afce13de6b1043cb3e750`的修订已进入现有owner RFC：初始/写期activation authority同时保留delete可枚举target/incarnation，同起点连续换组不丢历史；DATA成功依赖有界热定位，派生索引异步入库、实际持久内容才推进coverage；Profile在failure handling前消费完整status三元组，资源拒绝有界退避且保留旧UNKNOWN。六组场景归入原UW-1/2/3/7及Spike A/B/C，见[当前清单](../implementation/README.md)。此前读路径、batch/entry结果、I/O异常、CRC32C/shared block、DATA冻结/恢复前缀、delete-applied、预算及延期能力保持。状态仍Proposed/Planned，没有执行实现/性能run；下表各轮为历史记录，逐字反馈及source-bound receipt未重写或晋升。
 
 规则：
 
