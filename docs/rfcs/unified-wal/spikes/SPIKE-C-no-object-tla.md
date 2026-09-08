@@ -122,6 +122,7 @@ non-anonymous control principal and ControlAuthorized exact operation/instance/t
 AuthorityRead committed-authority verification state
 protected local auth binding match
 installed immutable entry layout match and input integrity/coordinate validity
+cached unified payload limit versus normal/recovery/read/storage capacity and runtime new-write threshold
 open purpose: initial normal writer, read-only existing ledger, or recovery
 WireNegotiated, Profile logical opcode, capability match and no-downgrade state
 old decoder accepted-as-Classic effect flag
@@ -143,6 +144,7 @@ client pending operations
 current-attempt status triple versus accumulated logical Add unknown result
 bounded logical Add credits, backoff/wakeup and caller deadline state
 logical Add identities and current delivery target/incarnation ACK sets
+completion gate, replaced slots and unfinished pending-map/ACK updates during local replacement
 same-coordinate pending/durable payload identity and readable publication
 per-request response wait versus submitted coordinate/write outcome
 supported point-recovery context, source coverage and rich terminal outcome
@@ -219,6 +221,9 @@ InstallReplacement
 PublishEnsembleChange
 PublishReplacementActivationAuthority
 ActivateReplacement
+UpdatePendingMappingAndRevokeOneReplacedSlot
+RecomputePendingCompletionEligibility
+ReleaseCompletionGateAfterAllPendingUpdates
 ResendPendingAdd
 ReceiveLateOldTargetAck
 CheckCurrentAckFailureDomains
@@ -266,9 +271,12 @@ ReclaimCoveredRepairReceipts
 - fence先关闭new admission并使所有pre-cut Add terminal；stale handle/admission generation不能在durable fence后形成local success；
 - initial standard metadata不早于all-E inactive route claim，初始创建返回normal writer晚于all-E initial activation；只读open不触发或等待activation，恢复open消费显式grant，CLOSED/fenced但readable副本可读；
 - 安装布局与operation坐标/完整性不匹配不能接受；20-byte credential不推导HMAC能力。模型只抽象CRC32C布局匹配和输入有效性，实际bytes/碰撞慢路径由A26/B19验证；
+- 统一N不大于normal/recovery/read/Segment各项表达能力，首次接受的entry须可完成后续读取/恢复；runtime新写阈值降低不改变旧entry服务能力。模型使用有界抽象大小，真实32/100/144/36-byte及44-byte差异、溢出/alignment由A26/B18/B19验证；
 - active replacement遵守inactive install → `LAC+1` CAS → activation authority及target retention publication → normal activation → resend，且不复制历史fragment；初始READY同样原子发布全部初始E的留存引用。两个publication动作必须检查lifecycle/delete cut，不能拆成先授权、后留存；
 - 同一起点D→E覆盖会真实移除effective map中的D，delete仍从持久activation-target snapshot+完整suffix发现D/incarnation；压缩只在义务接管或终结证明后回收，不能依赖模型保存的全metadata历史；
 - 普通Add unknown可在正式换组后重发同一identity；控制unknown不盲换operation。旧target/incarnation ACK不进入当前quorum/domain集合，成功保持连续前缀；
+- metadata/必要activation完成后completion gate仍关闭；逐pending/逐slot展开本地mapping/ACK撤销及资格重算，全部受影响更新完成才开gate/发布连续回调，不能抽象成一个无中间态的大动作。4/3/2中先处理write-set外slot 0再处理slot 1仍无提前成功，交错新响应只能按同步规则记账；
+- 未替换且identity/incarnation未变的有效ACK保留，只重发必要副本；不能把整个ensemble版本变化建模成所有ACK失效。全部更新后显式恢复回调，完全未受影响entry也不永久停滞；
 - 准入前容量拒绝先按完整三元组分类，有界退避且不直接replacement；该次NONE不抹除原逻辑Add的UNKNOWN，提交后不声称肯定未写。retry保持原entry/payload及credits，deadline终止等待不形成可跳过hole；实际退避计时/调度和stall由A26/A27/B18验证；
 - 同坐标相同payload幂等、不同payload冲突，DATA durable与readable publication未同时成立时不能local success；
 - 取消/timeout只终止响应等待，已提交坐标仍占有或由不可写范围保护，迟到X与重试Y不能形成两个winner；同批其他entry失败不决定本entry结果；
@@ -284,7 +292,7 @@ ReclaimCoveredRepairReceipts
 - `E > W` 轮转覆盖全 ensemble 安装需求。
 - old binary只有在`OldBinaryBlocked=true`或新scope已证明隔离时才可接近Segment scope；`FormatCompatible=false`或`RegistrationGenerationMatches=false`时不能writable registration；unsafe rollback不能前进。
 
-Model只抽象上述boolean/generation关系，不编码TLS、SHA-256、TLV bytes、Cookie/filesystem或decoder实现；这些由Spike A/B的真实bytes/binary Gate证明，Model中的true不能替代实际证据。
+Model只抽象上述boolean/generation及有界大小/资源关系，不编码TLS、SHA-256、TLV bytes、Cookie/filesystem或decoder实现；这些由Spike A/B的真实bytes/binary/I/O Gate证明，Model中的true不能替代实际证据。
 
 增强reset配置启用后，repair falsification至少覆盖：partial copy、仅缺一个coordinate、target durable但不足`F+1` domains、membership-only、activation-only、digest存在但verifier未完成、descriptor/`F`变化后重解释旧assertion、整个ledger CLOSED后无`NORMAL_ACTIVE`的合法reset、仅fragment sealed但ledger仍OPEN的拒绝、`E>W` per-entry write-set coverage、duplicate loss、loss/completion两种先后、unobserved failure after proof cut、disjoint并发、overlapping stale completion、small-range merge、snapshot publish/response loss/child reclaim、delete freeze和root/page cap超限。基础sidecar falsification仍覆盖child-before-head crash、head CAS conflict、snapshot期间head推进、fallback损坏、store-version reset/instance reuse、unknown mandatory referenced record与normal Add期间sidecar不可用。
 
@@ -302,11 +310,15 @@ checkpoint through-sequence and current-selector snapshot
 retiring source and anti-ABA/fencing state
 superblock A/B pointers
 shard allocation pools
+Arena reusable capacity versus shared-filesystem available/reserved maintenance space
+DATA preallocation and index/control/checkpoint concurrent temporary disk working sets
 data records and durability
+residual old-generation DATA bytes independent of current allocation ownership
 immutable submitted DATA blocks, stream generation and bounded batch sequences
 completed write ranges versus barrier coverage and contiguous physical durable-through
 physical batch result independent of per-entry eligibility and response wait
 stream/file mapping, unresolved I/O outcomes and affected non-writable scope
+non-overlapping allocation offsets versus per-stream batch order and logical tail exclusion
 recoverable prefix/cut and bounded full-lifecycle request/byte/batch credits
 local-success publications
 ledger tombstones
@@ -389,6 +401,9 @@ RebuildAllAuthorizedLiveRanges
 - 同批L1的逻辑失败不撤销batch物理durability或L2资格；empty assembling不留下序号，submitted取消不移除record；
 - 写错误/unknown关闭受影响stream及必要file/device范围，不能任意跳号、换stream或凭重复sync成功解除；已提交坐标在恢复解析前不视为空，I/O终结后才释放实际引用资源；
 - 重启扫描与成功前缀一致，required损坏不截断为无ACK后缀；move目标须可恢复发现才切换/释放old source；
+- 单stream逻辑后缀按完整allocator及当前stream/generation/sequence判定，不缩短/移动共享文件。S0低offset未完整不损及S1高offset已成功DATA，S1完整也不能填补S0的逻辑gap；
+- FREE/reallocate不在模型中擦掉旧字节；generation 7→8后新DATA未写/部分写crash时，旧合法header/CRC不复活owner或进入当前index。是否unused由当前分配/恢复依赖证明，未知保持不可写，旧generation本身不等同当前媒体损坏；
+- Arena FREE只增加内部reusable，不自动增加filesystem available；DATA预分配和并发SST/控制/checkpoint维护消费同一filesystem预算，共享此filesystem的Arena不能重复预留。低水位限制扩张/新DATA并保留已预算维护；实际fallocate/ENOSPC/磁盘峰值由B17/B18验证；
 - 出队不归还仍持有的bytes/inflight credits，取消不终结真实I/O；只抽象已有有界资源转移，timer/大entry/慢读/控制容量的真实进展由B18验证；
 - local success可依赖bounded hot locator，不依赖DB Put/flush；热定位淘汰晚于已计费query-visible接管，不等flush且无点读空窗。index stall积压仍有界，满额背压后续DATA并保留control容量；
 - 关闭纯派生索引WAL时crash丢弃未持久内容，Put/query-visible不推进persisted coverage；仅全部相关更新真实持久后的连续cut可发布匹配storage/stream/index generation的checkpoint，未覆盖DATA重放；
@@ -683,6 +698,9 @@ CurrentNormalWritesRequirePostCasNormalActive
 NormalActivationRequiresDurableRetainedTarget
 DeleteFreezeCoversActivationTargetsAfterSameStartOverwrite
 CurrentAttemptResourceNonePreservesPriorLogicalUnknown
+CompletionGateOpensAfterAllReplacementAckUpdates
+UnchangedValidReplicaAcksSurviveReplacement
+AcceptedEntryFitsRequiredReadRecoveryAndStorage
 AllocationDurableBeforeLocalSuccess
 OneOwnerPerSlotGeneration
 NoReuseBeforeDurableGenerationBump
@@ -690,6 +708,9 @@ NoReuseBeforeOldWriterIOQuiescence
 TruncationExcludesRequiredDurablePrefix
 ForegroundPreservesMaintenanceBudget
 FullIndexRebuildCoversAllRequiredLiveRanges
+StreamTailExclusionPreservesOtherStreamsInSharedFile
+ReusedAllocationNeverRevivesOldGenerationData
+ArenaFreeDoesNotCreateFilesystemSpace
 HotLocatorEvictionRequiresQueryVisibleChargedSuccessor
 IndexCoverageImpliesPersistedContentsAndMatchingGeneration
 AsyncIndexUpdateNeverOverridesCurrentSelectorOrTombstone
@@ -841,15 +862,15 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-LOCAL | A+D | local authority | Classic/Profile route claim before lazy create, independent normal/grant/readable facts, fence cut, stale handle and registration readiness |
 | A-PROFILE-COMPAT | A | 3/3/2 | descriptor match, anonymous/authenticated-but-unauthorized/authorized control scope, normal/recovery/Profile opcode, negotiation, old-decoder Classic effect and no downgrade |
 | A-FENCE-STALE | A | 3/3/2 | stale writer vs recovery fence, delayed responses |
-| A-ACK-RESP | A | 3/3/2 | Add unknown/replacement, current ACK/domain set, ordered completion; capacity backoff, current NONE versus prior UNKNOWN, credits/deadline |
+| A-ACK-RESP | A | 3/3/2 and 4/3/2 | Add unknown/current ACKs; multi-slot completion gate with outside-write-set slot first, unchanged ACK retention; capacity backoff/credits/deadline |
 | A-POINT | A | 3/3/2 and 3/3/3 | local LAC 99/candidate 100; confirmed versus recovery read; required hole/normal tail; durable close/restart without strong reset |
-| C-REUSE | C | local | crash at alloc/data/free/reuse |
+| C-REUSE | C | local | alloc/data/free/reuse crash; generation 7 to 8 with old valid bytes remaining before new DATA |
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
 | C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
 | C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
-| C-TAIL | C | local | immutable DATA, reordered writes/barriers, 11 unknown/12 complete, shared-file error isolation, physical-prefix replay and required corruption |
+| C-TAIL | C | local | immutable DATA, 11 unknown/12 complete; low-offset S0 tail versus successful high-offset S1 in shared file; no file-wide truncation |
 | C-WRITER | C | local | pool transfer/reuse with delayed old writer I/O and completion |
-| C-SPACE | C | local | foreground/maintenance budgets, exhaustion, bounded debt and restart |
+| C-SPACE | C | local, shared filesystem when multiple Arenas enabled | internal reusable versus filesystem available, bounded preallocation/SST/control maintenance and temporary-space peak |
 | AC-LOCAL-STORE | A+C | two Arenas | partial durability, same-batch L1 fence/L2 success, K/X timeout then K/Y, coordinate protection, read-after-success |
 | C-REBUILD | C | local | query-visible handoff vs persisted coverage, Put-before-flush crash, stale async MOVE/delete updates and full live-range reconstruction |
 | C-FORMAT | A+C | local | old-binary fence, partial required-device migration, unknown mandatory format, incarnation/readiness generations and unsafe rollback |
@@ -867,6 +888,8 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 正式运行前锁定各启用scope的必需config；可增加配置，不得删除对应最低结构。表中DEFERRED增强项不是首批完整性分母，必须在输出中单列未验证；首批仍覆盖其disabled拒绝与发现旧token时保留解析的负向场景。不得在run后移除失败config。
 
 当前模型为A/C/D及按能力启用的E，不存在Model B；上述A-FENCE-STALE/A-ACK-RESP保留stale writer、response loss和ordered completion场景，不恢复sequence/offset协议。
+
+A-ACK-RESP的4/3/2复用CLIENT-1一般E>W回归，不扩展首批存储性能矩阵。统一大小只用足以区分N-1/N/N+1的有限域，C-TAIL/C-REUSE保留S0/S1共享文件与旧代际字节，C-SPACE区分内部和filesystem容量；这些是现有模型的边界展开，不新增工作流或持久化状态平台。
 
 ## 11. 状态空间控制规则
 

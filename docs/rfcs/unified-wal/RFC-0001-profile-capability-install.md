@@ -516,6 +516,28 @@ ADD_RECOVERY:
 
 target Bookie/storage incarnation来自已验证的HELLO connection context并由local authority复核，不在每Add重复；服务端还必须验证现有BookKeeper entry payload内部ledger/entry coordinate与envelope一致。range必须包含entryId，normal/recovery不得互换。完整control tail、batch/range encoding与general E/W/A recovery outcome API仍BLOCK，因此本节字节布局只能用于reference codec/corpus，在raw old-decoder Gate通过前不是stable wire承诺。
 
+**跨操作一致的entry大小：** ledger instance的最大可接受应用payload必须同时满足normal Add、single-entry Recovery Add、读取响应和Segment record/batch的表达能力。创建/安装按已有capability/布局及同一实验manifest验证并缓存统一上限，普通Add不得只用自身frame余量放行：
+
+```text
+maxPayload = min(normalAddPayloadCapacity,
+                 recoveryAddPayloadCapacity,
+                 readResponsePayloadCapacity,
+                 segmentRecordBatchPayloadCapacity)
+```
+
+每项分别扣除自身frame/header、context、credential、entry metadata/checksum及存储framing开销；对齐项还须证明相应buffer和授权物理范围可分配。长度相加、减去固定开销、对齐向上取整和offset/range计算先做溢出与范围检查，再执行大分配或准入。安装缓存后的上限供正常路径常数时间检查，不增加逐请求协商、entry分片、descriptor/context字段或生产capability ID。
+
+本轮在`635c383e80ef353753712a7117aef32fd6b8f313`核对的[`ProfileFrameCodec`](../../../bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/wire/ProfileFrameCodec.java)以`ABSOLUTE_FRAME_MAX=5,242,880`限制不含最外层4-byte length prefix的frame，内部header为32 bytes；[`ProfileOperationCodec`](../../../bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/wire/ProfileOperationCodec.java)的normal/recovery固定body分别为100/144 bytes，均不含BK entry本身。首批CRC32C entry另含36-byte metadata/digest，因此静态计算为：
+
+| 当前实验布局的单项约束 | 最大应用payload bytes |
+| --- | --- |
+| ADD_NORMAL自身frame | `5,242,880 - 32 - 100 - 36 = 5,242,712` |
+| ADD_RECOVERY自身frame | `5,242,880 - 32 - 144 - 36 = 5,242,668` |
+
+区间`5,242,669..5,242,712`共44个长度值满足normal frame却超出recovery frame，首次普通写必须拒绝。`5,242,668`也只是上述两项的候选上界，读取响应和Segment布局可能进一步收紧；它不是生产默认值或完整支持承诺。原型必须先冻结并验证全部四项及统一N，不能将尚未冻结的read/record容量视为无限。历史reference codec/corpus仍只证明原wire边界，不因本轮文档成为统一entry限制的实现证据。
+
+运行时可在已声明能力内收紧新写准入阈值，但必须继续读取、恢复此前合法接收的entry。暂时缺少buffer/I/O/空间预算按§9.3背压；协议或实现根本无法表达的entry在首次写入前按size/capability明确拒绝，不能等到recovery再失败。验收覆盖统一N的N-1/N/N+1、上述44-byte区间，以及降低新写阈值后旧entry仍可读/恢复。
+
 Bookie 校验顺序的语义要求：
 
 ```text
@@ -600,11 +622,15 @@ AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RF
 
 客户端实现必须逐项保留以下记账规则，并以当前`PendingAddOp`的换组重发和旧地址响应过滤为源码起点：
 
-1. membership CAS与activation未完成时阻止受影响pending Add的成功发布；
-2. 换组撤销被替换slot的旧成功计数，再按新mapping接收ACK；迟到旧target或旧incarnation响应不计入当前ACK集合；
-3. ACK集合只包含该entry当前有效write set中的distinct replicas，不能将不同投递代的响应拼成quorum或故障域覆盖；
+1. membership CAS与必要activation完成后仍保持现有completion gate，直到全部受影响pending Add的映射及ACK状态完成切换；不能仅因远程phase完成就恢复成功回调；
+2. 为所有受影响pending Add更新当前mapping，撤销全部被替换slot的旧ACK及相应故障域状态，再按当前有效数量/已启用policy重算各entry完成资格；新响应按现有同步规则记账，但切换中途不得发布成功。迟到旧target/旧incarnation ACK不计入当前集合；
+3. ACK集合只包含该entry当前有效write set中的distinct replicas；被替换slot的旧投递响应不能拼回当前quorum/故障域覆盖。未变slot的有效ACK按下述身份规则保留，不能因ledger-global ensemble版本变化一律失效；
 4. local success、当前ACK quorum与客户端连续前缀completion分别记录，逻辑Add至多完成一次；
 5. recovery/delete/membership freeze先赢时停止normal activation/resend，返回保留unknown事实的non-OK结果。
+
+一次多slot replacement的本地完成顺序为：membership/activation完成 → 保持`changingEnsemble`或等价gate → 全部受影响pending Add完成映射更新、所有被替换slot撤销及完成资格重算 → 解除gate → 显式尝试原有连续entry前缀回调。某slot不在该entry write set中，只表示该slot无需撤销/重发，不能在逐slot处理中调用可越过gate的成功发布；全部更新后仍须触发回调，避免全是未受影响entry时无人推进。
+
+未被替换、仍属于当前write set且Bookie identity/storage incarnation未变的有效ACK可以保留；只重发实际需要替换的副本，不因ensemble整体变化清空全部ACK或无条件重发W份DATA。实现复用ledger执行顺序、completion gate及pending同步保护，具体回调/新响应/重发交错由CLIENT-1验证；不新增持久化epoch、metadata CAS或分布式协议，正常Add不增加新的持久化/协调工作。
 
 **资源背压与故障重试：** 当前[`PendingAddOp.writeComplete()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)的未单独分类non-OK会进入Bookie failure处理；delayed ensemble change只改变触发条件，不能把暂时拥塞自动变成正确的Profile语义。因此Profile adapter必须在进入ensemble failure handling前消费§11.5完整`statusClass + retryDisposition + durableResult`，不能先压成通用`WriteException`。
 
@@ -624,16 +650,18 @@ AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RF
 
 接受测试包括：最快ACK来自同一域、重复/迟到ACK、换组后的旧域计数清除、unknown/missing域身份、incarnation替换与预算内永久丢失。未满足覆盖时不发布成功，不把超时当成payload loss。
 
-### 9.5 先修现有客户端的两个缺口
+### 9.5 现有客户端的两个维护项
 
-在`c79357d76f95dae4c27ffbddcc075b6385991daa`上只读确认以下源码问题；修复及回归均为**PLANNED / NOT EXECUTED**。它们是独立的Classic客户端维护项，不属于Wave 0的Segment ACK接入，也不授予新协议/存储authority。
+在`c79357d76f95dae4c27ffbddcc075b6385991daa`上记录的两个源码维护项继续保留；本轮在`635c383e80ef353753712a7117aef32fd6b8f313`补充核对CLIENT-1的多slot本地切换顺序。修复及回归均为**PLANNED / NOT EXECUTED**，静态调用顺序不是已运行的故障复现。它们是独立的Classic客户端维护项，不属于Wave 0的Segment ACK接入，也不授予新协议/存储authority。
 
 | 工作项 | 源码事实与实施要求 | 确定性验收 |
 | --- | --- | --- |
-| CLIENT-1 ACK状态一致性 | [`PendingAddOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)的`unsetSuccessAndSendWriteRequest()`撤销`ackSet`，但不撤销`addEntrySuccessBookies`中的旧Bookie；`completed`只按数量撤销。换组必须同步移除旧slot对应成功，并以当前有效ACK数量及已启用policy覆盖共同重算完成资格；优先从同一份当前write-set成功状态派生两种判断 | Spike A A29：旧Bookie仍在`knownBookies`、旧ACK残留；以及数量仍够但撤销唯一异域ACK、callback因队列/换组尚未发送的场景。仅当前有效ACK覆盖达标才可恢复`completed`并按连续前缀回调 |
+| CLIENT-1 ACK状态一致性 | [`PendingAddOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)撤销`ackSet`却未同步清理`addEntrySuccessBookies`，`completed`只按数量撤销；此外[`LedgerHandle`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java)先解除`changingEnsemble`再逐slot unset，不在write set的分支会尝试成功回调。按§9.3保持整体completion gate，全部受影响pending/slot更新后共同重算当前有效数量和policy覆盖，再开放连续回调；保留身份未变的有效ACK | Spike A A29：保留旧ACK/故障域残留和数量够但域不足；增加4/3/2双slot替换，先处理entry write set外slot时仍不回调，后续slot旧ACK全部撤销后再判定；未变副本不被清空或无条件重发 |
 | CLIENT-2 迟到响应回收 | `writeComplete()`先减少`pendingWriteRequests`，旧地址分支直接return，漏掉`maybeRecycle()`。在该分支补安全回收检查并保持既有条件；回收后立即return，不能再访问已清空字段 | Spike A A30：最后一个旧地址响应、最后一个当前地址响应、逻辑callback未完成三种顺序；请求归零后恰好归还一次，buffer不提前或重复释放 |
 
 CLIENT-1同时检查timeout统计及recycle重置对成功集合的依赖；未启用故障域检查时避免维护冗余Bookie集合，但不能因此改变诊断含义或丢失必要ACK状态。具体复用/派生方式由小范围补丁决定，不要求新增协议或大规模重构。`RackawareEnsemblePlacementPolicyImpl.areAckedBookiesAdheringToPlacementPolicy()`会计入传入集合里仍属knownBookies的旧节点机架，因此只修policy内部而不修调用方状态不足。
+
+多slot确定性反例：`E/W/A=4/3/2`，旧slots为`[D,A,B,C]`，entry 1写入A/B/C并已获A、B ACK，作为队首因换组尚未callback；本轮替换0、1为D'、A'。源码先解除gate，若先unset slot 0，`hasEntry(1,0)=false`分支调用`sendAddSuccessCallbacks()`，可能在A旧ACK尚未撤销时返回成功；新write set A'/B/C此时仅B有效。测试须固定0→1处理顺序并交错新/旧响应，验证整体gate而非仅最终集合内容。首批存储矩阵E=W不覆盖此分支，不能替代一般E>W的CLIENT-1兼容回归。
 
 CLIENT-2是对象池归还缺口，尚未以测试证明内存影响；`toSend`通常已在callback后的`maybeRecycle()`释放，不将其表述为已证实的直接内存永久泄漏。回归沿用[`PendingAddOpTest`](../../../bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java)及相关placement测试，保留现有timeout/callback同步保护。
 
@@ -746,6 +774,8 @@ Profile client/admin必须保留完整三元组；legacy callback只能安全投
 
 派生`slice()`共享父buffer内存且不自动增加引用计数；异步跨组件持有必须明确retain/所有权转移及唯一release责任，不能提前释放父buffer。依据[Netty引用计数文档](https://netty.io/wiki/reference-counted-objects.html)。header、长度、subtype和上限检查仍早于大分配/排队。集中复制到shard对齐批量buffer可以接受；复制、取消、拒绝、断连、I/O失败及重试的生命周期按RFC-0005 §10.1和Spike B B18验证，不要求不切实际的全程零复制。
 
+adapter另消费§8统一maxPayload：wire absolute limit只证明frame可表达，不能单独决定普通Add准入。创建/安装缓存的N同时受normal/recovery/read response/Segment布局约束；检查应用payload、完整BK entry和对齐存储范围各自长度，N+1及溢出在大分配/准入前拒绝。reference frame仍按原枚举/绝对上限解析，统一entry限制由新adapter及独立边界场景验证，不修改旧wire corpus或其receipt。
+
 ## 12. Capability negotiation
 
 HELLO是每个Profile connection的第一条application frame且最大4KiB。client body固定为：
@@ -833,6 +863,7 @@ RFC 进入 Accepted 前必须：
 - route claim、legacy normal/recovery Add 与 activation gate 经过并发、restart 和源码评审；
 - §9.3普通Add unknown/正式换组/旧ACK清除、§9.4实际ACK故障域及RFC-0004普通delete/admission/freeze竞争通过A27/A28；strong-publication/强撤权仅在启用时接受其独立矩阵；
 - §9.5的CLIENT-1/2定向回归通过A29/A30，§11.6数据adapter与reference corpus等价并满足Spike B B18复制/分配/生命周期证据；
+- CLIENT-1/A29的4/3/2多slot撤销在整体gate内完成，不被write-set外slot或交错响应提前回调；未变有效ACK保留。A26/B18/B19证明统一entry上限N-1/N/N+1、44-byte差异区间和旧entry读/恢复能力不因新写阈值降低而丢失；
 - Classic-only throughput/p99 与 Profile Add CPU 成本证明 routing gate 未引入远程 I/O或不可接受回退。
 
 任一场景出现未安装 Add 被接受、mismatch 静默降级或 metadata 先于 replacement install 生效，RFC 保持 P0 Blocked。

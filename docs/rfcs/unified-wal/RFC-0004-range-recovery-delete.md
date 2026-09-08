@@ -776,6 +776,8 @@ awaitPhysicalDeletion()
 
 名称仍可调整，但一个boolean success不能同时表示“禁止新生命周期访问”“所有旧服务权限已撤销”和“物理清理终结”。普通删除明确允许旧reader在本地tombstone前继续读取；物理终态还须区分实际释放与接受的decommission/unrecoverable结果，不能声称已擦除所有字节。
 
+共享预分配DATA文件的实际回收按RFC-0003 §13.1/14首先表示安全返还Arena allocator供内部复用，不自动增加filesystem available bytes，也不承诺文件缩短或hole punch。`awaitPhysicalDeletion()`仍等待对应目标真实终态；将内部reusable bytes与文件系统返还空间分别报告，不用文件收缩代替tombstone、I/O终结或generation合同。
+
 进度查询至少返回：
 
 - manifest state；

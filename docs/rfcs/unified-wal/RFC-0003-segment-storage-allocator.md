@@ -228,6 +228,8 @@ pool refill 通过 control-log group commit；pool 内空间的使用仍必须�
 
 `ALLOC_POOL`的下一原型必须冻结：`Arena + pool range + owner shard + shard generation + allocation generation`，每个pool内record的used/unused识别方法，以及返还/转交的条件化状态机。未使用不能由“内存计数为0”推断；restart必须结合完整control authority与可恢复DATA framing确定live、unused或unknown，unknown不进入free pool。
 
+该识别须覆盖复用残留：slot从generation 7经durable `FREE_AND_BUMP`重新分配为8，新DATA未写入或未完整写入即crash时，盘上可能仍是generation 7的合法header/CRC。旧字节不得进入当前index、恢复旧owner或充当generation 8的DATA；旧generation本身也不证明新generation已发生媒体损坏。必须结合完整分配顺序、当前stream/batch及selector/恢复依赖和已锁定故障模型，证明当前范围属于unused/可安全回收，或保持unknown/non-writable。不能仅凭旧CRC正确就认领数据，或仅凭generation不匹配就猜free。首批不在每次复用时主动清零整个allocation；新DATA须携带完整当前身份/校验，清零不能替代恢复判定。
+
 pool转交及所有free/reuse先关闭旧writer admission，等待已提交写I/O完成或获得可靠的设备/进程隔离证明，再conditional free/bump并授予新owner。旧completion的generation检查只能防止错误发布，不能阻止已经提交的旧I/O覆盖新owner磁盘字节；timeout、取消future或reader drain都不能单独作为写I/O终结证明。buffer、submission及completion必须携带owner/generation，stale owner/generation的completion不得发布locator或success；仅RPC取消而storage generation仍有效的物理结果按§6.1保留。崩溃后如何终结旧提交者的I/O同样进入真实故障矩阵。
 
 ### 6.1 DATA批次的durability与恢复前缀
@@ -244,9 +246,13 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 首批选择**每个物理append stream的连续前缀恢复和成功发布**。bounded batch table记录乱序completion；只有从已验证起点开始连续的batch均取得durability，才推进内存中的physical durable-through并允许对应entry发布locator/local success。batch 11未durable而12先完成时，12保持等待，不能先ACK再在restart的11缺口截断后缀。该序号属于物理stream，不是ledger entryId或LAC，也不是Arena控制日志sequence；不同ledger可同批，`E>W`不要求本地entryId连续。
 
-允许有界I/O queue depth大于1；物理前缀排序在各stream内，不新增跨shard全局sequencer，但共享文件的barrier成本/错误范围不因此隔离。batch边界、stream lineage与范围发现由§9的可恢复framing和allocator authority给出；physical durable-through可重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut开始扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。仅能截断已证明可丢弃的未成功后缀，required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
+允许有界I/O queue depth大于1；物理前缀排序在各stream内，不新增跨shard全局sequencer，但共享文件的barrier成本/错误范围不因此隔离。batch边界、stream lineage与范围发现由§9的可恢复framing和完整allocator authority给出；physical durable-through可重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut按stream扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。所谓“截断DATA后缀”仅指将已证明可丢弃的特定stream/generation未成功后缀排除出有效批次范围，不等于缩短共享文件；required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
 
 首个文件切片在一Arena内为固定append shard各设物理stream，共享预分配DATA文件；各自使用allocator授权的不重叠范围。实验manifest固定shard/stream/file映射、文件增长/rotation及最大文件数、活跃buffer上限，不为每ledger建文件。物理stream是恢复排序单位，不是独立设备或flush域：`fdatasync/fsync`作用于指定文件，不能同步一个应用定义的extent/shard而独立于同文件其他写入。先测共享文件的barrier数量、覆盖集合及等待；以后拆分文件须另给可比证据，本次不新增跨shard flush调度框架。[Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)
+
+**共享文件的逻辑尾部恢复：** 完整allocator authority先确定当前allocation/generation，再按stream identity与batch sequence识别有效范围；文件offset只表示位置，不定义跨stream恢复顺序。若同文件低offset的S0/batch 11尾部不完整，高offset的S1/batch 50已durable并成功，S0的后缀判定不得删除、覆盖或忽略S1有效DATA；S1的完整块也不能充当S0跨越缺口的证据。
+
+首批单stream恢复不执行`ftruncate()`、移动文件内容、collapse中间范围或hole punch。`ftruncate()`缩短文件会丢弃指定长度之后的全部字节，它不识别应用stream，见[Linux truncate(2)](https://man7.org/linux/man-pages/man2/ftruncate.2.html)。证明可回收的allocation仍经I/O终结、条件化FREE/generation bump和allocator复用，不直接破坏文件范围。以后缩短/删除整个文件或归还物理区间须独立证明移除范围已无任何stream、current selector、必要恢复依赖及存活I/O，并验证发布/恢复协议；文件收缩不作为首批前置。控制日志§5.4按自身物理日志发布与尾部协议处理，不能把其操作直接套到共享DATA文件。
 
 发生既定I/O合同内无法解决的写错误或durability unknown时，首版不在线补洞：至少关闭受影响物理stream的新DATA准入，阻止越过失败batch发布后续成功。共享文件错误无法归因到更小范围时，暂停该文件相关stream；影响设备或required authority时沿§16及RFC-0005 non-writable/quarantine处理。batch 11 unknown、12已完成时，不因调用超时丢弃12，不用跳号、新stream或覆盖旧范围绕过11，全部按现有恢复/generation规则解析，不自动跨设备迁移。
 
@@ -362,7 +368,7 @@ exact bytes、外层record校验算法、commit marker和direct-I/O alignment由
 
 最大等待从最老请求计算，低负载到期即padding到声明alignment再提交。例如4 KiB对齐范围已保存并确认1 KiB数据，不能为了追加下一条数据重写该4 KiB；同generation不防后次torn write破坏旧成功数据。4 KiB仅为示例，alignment与padding预算由manifest冻结并计入磁盘写放大。
 
-framing还须能恢复§6.1的stream identity/generation、batch边界、物理sequence及范围映射，不靠易失batch table或最大ledger entryId定位后缀。多个block属于同一batch时，其完整性和barrier覆盖必须全部可判定；缺block/坏边界不能假装完整。不得把prototype framing写成已接受stable format。
+framing还须能恢复§6.1的stream identity/generation、batch边界、物理sequence及范围映射，不靠易失batch table、最大ledger entryId或文件offset顺序定位后缀。完整allocator/current-selector authority先于DATA归属判定，跨stream较高offset不能因另一stream尾部失败而被丢弃；复用后的旧generation header/CRC按§6识别残留，不能复活旧owner或猜测当前unused。多个block属于同一batch时，其完整性和barrier覆盖必须全部可判定；缺block/坏边界不能假装完整。不得把prototype framing写成已接受stable format。
 
 ## 10. Delete、Free 与 Reuse
 
@@ -471,12 +477,14 @@ checkpoint 不持久化 individual reader、future、buffer reference 或 pin hi
 3. 选择最高的完整 committed checkpoint generation 及其 through-sequence `S`；
 4. replay sequence `> S` 的完整、连续、校验通过control-log suffix；仅截断§5.4可证明未提交的物理末尾，其余分类保持non-writable；
 5. 重建 allocated/free/generation/device state；
-6. 扫描已授权 active data tail，验证 block framing；
-7. 重建 ledger directory 与 derived index；
+6. 从完整allocator/current-selector authority枚举当前allocation/generation，按stream/generation、batch sequence和有效coverage cut扫描所需DATA范围；验证framing及复用残留，不按全文件offset截断共享后缀；
+7. 重建ledger directory与derived index；仅纳入当前合法DATA，S0尾部不完整不得损及同文件S1成功范围，未覆盖或不能判定的坐标不返回确定absence；
 8. 对无法证明 ownership 或 payload durability 的对象 fail closed；
 9. 全部required Arena完成校验前Bookie保持RECOVERING/READ_ONLY，之后仍须完成RFC-0005 local route/delete/registration readiness才可writable。
 
 suffix 出现 sequence gap、必要 record 缺失或 checkpoint content identity 无法验证时 fail closed。不得用更大的物理 generation、mtime 或 data scan跨过 authority gap。
+
+DATA后缀按§6.1逻辑排除及§10条件化回收处理，不能因单stream恢复缩短共享文件。B3/B6/B9同时注入FREE generation 7→8、重新分配后未写/部分写即crash、旧header/CRC仍合法：不恢复旧owner、不以整块清零作为识别前提；仅在当前分配/依赖已证明可回收时释放，否则保持不可写。是否存在未使用新范围与是否存在required媒体损坏分别判定。
 
 upgrade/migration不要求跨device transaction：每个Arena按同一Bookie migration generation写入prepared/format-ready事实；只有全部required devices匹配时Bookie级readiness才可前进。任一边界crash、部分device完成或unknown mandatory feature都保持non-writable并重试同一generation。device移除必须由cluster-authorized新storage incarnation/device-manifest generation完成。存在Segment payload/control authority后能否rollback由RFC-0005 negative-proof gate决定，allocator不得因old binary可打开目录而宣称兼容。same-scope candidate未通过前，本节只允许isolated format prototype；不得把candidate superblock bytes发布为stable on-disk contract，也不得污染可继续运行的Classic scope。
 
@@ -524,22 +532,30 @@ Spike Gate：
 
 同批物理buffer费用不随某条entry取消而归零；未解析写入的坐标保护按§6.1转交不可写范围后才收缩异常pending。账本同时覆盖点读缓存、对齐读buffer、大父buffer及小副本、pin数量/时长、DATA文件数与后续dedicated池。大量hot ledger或慢reader不能突破总量，也不能通过暂停回收改善短期p99。
 
-最老请求的单调时钟deadline不被新到达重置。最大可接受entry必须能走声明的batch/buffer路径：普通block放不下时使用同一总预算约束的有界大记录批次，或在明确size/capability检查处拒绝；不能永久堵在队首。wire frame、BK entry和存储record/alignment开销的上限关系写入manifest，不因扩大临时buffer突破总预算。
+最老请求的单调时钟deadline不被新到达重置。最大可接受entry统一按RFC-0001 §8取normal Add、single-entry Recovery Add、read response及Segment record/batch容量的最小值；普通block放不下但符合统一N的entry须有预算内大记录路径。否则在首次写入前拒绝，不能永久堵队首或等recovery失败。wire/BK entry/存储framing及alignment开销和checked arithmetic写入manifest，不因扩大临时buffer突破总预算，也不因收紧新写阈值降低已有entry读/恢复能力。
+
+磁盘另按§13.1区分Arena内部可复用容量、文件系统可分配容量及索引/控制维护工作集。内存credits有界不证明SST/checkpoint有空间；Arena FREE也不自动增加文件系统available bytes。
 
 重复坐标需要读盘核对时交给已有有界读取执行资源，不在append shard主循环同步等盘；正常新写不因此多一次索引I/O。连接/ledger只保留必要有界份额，控制持续热ledger的独占；fence/tombstone等撤权保留执行槽位、buffer及控制持久化预算，DATA满额不能永久阻止关闭DATA准入。超额返回明确可重试背压，不新增通用公平调度平台。
 
 ### 13.1 每Arena保留空间与进展
 
-前台分配不得耗尽compaction目标、checkpoint/control-log rotation、tombstone/FREE及故障恢复所需空间。下一原型为每Arena独立划分前台预算与维护保留预算；Bookie级控制日志也保留其checkpoint/terminal transition预算。跨Arena relocation未支持时，不能用另一Arena的空闲量掩盖当前Arena无法回收。
+前台分配不得耗尽compaction目标、checkpoint/control-log rotation、tombstone/FREE及故障恢复所需空间。每Arena划分的是内部前台可用block与维护保留block；另按实际共享文件系统建立Bookie级磁盘总预算，为派生索引SST/flush/compaction输出、Bookie/Arena控制日志轮转、checkpoint发布及必要诊断文件保留真实可分配空间。跨Arena relocation未支持时，不能用另一Arena的内部空闲量掩盖当前Arena无法回收；多个Arena共用文件系统时也不能各自重复占用同一份文件系统余量。
 
-运行前锁定可用whole blocks、control/checkpoint余量、最大一次move/checkpoint工作集、并发维护上限、dead bytes/debt上限及各阈值。保留量由最坏一次有界维护步骤及其并发需求推导，不用未经测试的固定百分比代替。状态顺序为：
+`FREE_AND_BUMP`增加Arena reusable bytes，预分配DATA文件的物理占用不会因此自动返还文件系统。Linux预分配和释放文件区间空间是不同操作，见[fallocate(2)](https://man7.org/linux/man-pages/man2/fallocate.2.html)。首批回收以内部复用为主，不要求每次删除hole punch、缩短文件或返还磁盘；以后文件收缩按§6.1独立验证generation、I/O quiescence、selector及恢复依赖。
+
+DATA预分配总量/增长受该Bookie级预算约束；复用现有[`DiskChecker`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/util/DiskChecker.java)、[`LedgerDirsMonitor`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/LedgerDirsMonitor.java)的磁盘检查和配置接入，以实际filesystem identity去重计量并限制并发维护承诺，不新增集群空间协调器。现有检查入口不是Segment预算已实现的证据。
+
+运行前锁定各Arena可用whole blocks、DATA预分配总量、filesystem共享映射/available bytes、索引规模与SST/flush/compaction临时空间、control/checkpoint轮转发布余量、最大move/checkpoint工作集、并发维护上限、dead bytes/debt及低水位/hysteresis。真实保留量按允许同时执行的有界维护工作集推导，包含新旧文件发布期间并存的占用，不能只以DATA live bytes或未经验证的固定百分比代替。沿用现有状态顺序：
 
 ```text
 NORMAL -> THROTTLED -> REJECT_NEW_DATA -> MAINTENANCE_ONLY
     -> RECOVERING/READ_ONLY if the next required durable step cannot be proven
 ```
 
-阈值必须保证拒绝新数据发生在维护预算被侵占之前；maintenance仍可执行已预算的move、FREE、tombstone和checkpoint，并有最低调度份额。低水位恢复与hysteresis、restart后的保留预算恢复、ENOSPC结果和无法继续时的诊断均须显式实现；不在full-disk后无限排队。
+Arena内部预算或filesystem余量达到各自低水位时，先限制DATA文件继续扩张和新写准入，不能因Arena仍有free slot而继续侵占文件系统维护余量。maintenance保留已预算的index flush/必要compaction、move、FREE、tombstone和checkpoint及最低调度份额。可恢复索引压力沿既有异步索引/背压解析；I/O error或authority不确定仍走§6.1/16错误恢复，不用“还有free slot”解除。低水位恢复与hysteresis、restart保留预算恢复、ENOSPC与必要诊断均须显式实现；只释放Arena slot未增加filesystem available时不能宣称索引空间压力已解除。
+
+同一报告分别列`Arena reusable bytes`、`filesystem available bytes`、`derived-index disk bytes`和`maintenance temporary-space peak`，同时保留既有内存/负载/debt指标。B17/B18构造Arena有空闲块但filesystem不足、共享filesystem上的多Arena竞争、SST flush/compaction与控制checkpoint并行；限制新DATA后在声明保留量内验证维护可推进及恢复容量后的有界重新准入，不另建资源平台。
 
 进展Gate限定在manifest声明的有界live set、受控admitted写入速率和可用维护I/O下：长期创建/写入/删除之后，dead bytes与compaction debt不持续增长，并在停止新写后于锁定时间内排空到目标水位。超过可持续负载时要求有界拒绝和恢复路径，不承诺无限写入。短期p99达标而维护长期饥饿不能PASS。
 
@@ -553,6 +569,8 @@ NORMAL -> THROTTLED -> REJECT_NEW_DATA -> MAINTENANCE_ONLY
 性能报告必须分别展示 logical deletion latency、physical bytes reclaimed、pending dead bytes 和 compaction debt。
 
 delete-applied/catch-up延迟另列，不以物理回收完成作为cursor条件；shared slab仍有live record、reader pin或旧I/O时，applied可完成而physical保持pending。
+
+本布局的physical reclaim首先表示已满足安全条件的Arena内部复用；它不自动证明filesystem容量返还或介质字节擦除。报告按§13.1将内部reusable、文件系统available与实际文件收缩分开，普通删除不触发额外文件收缩协议。
 
 ## 15. Derived index
 
@@ -586,6 +604,8 @@ local success之前目标entry必须可被当前点读正确定位；已有有�
 **持久覆盖与恢复：** DATA physical durable-through和index persisted coverage cut独立维护。后者只覆盖相关index更新已完整持久化的连续物理范围，并绑定storage incarnation、Arena/stream、index format/generation及解释这些映射所需的control/selector cut；不能从最大entryId、最后一次Put成功、最大异步完成序号或查询可见水位推导。
 
 首批纯派生RocksDB索引选择`disableWAL=true`，前置是实现并验证本节覆盖checkpoint。关闭WAL后的写入可能在进程crash后丢失，Put/WriteBatch返回不代表持久覆盖，见[RocksDB Basic Operations](https://github.com/facebook/rocksdb/wiki/Basic-Operations)。此选择不作用于Bookie控制日志、ArenaControlLog或其checkpoint，不能关闭权威状态的持久化。
+
+关闭派生索引WAL不会消除SST、flush/compaction及其临时磁盘空间；这些输出和空间放大按§13.1计入真实filesystem维护预算，不能只计Java/direct/native内存。相关成本见[RocksDB Compaction](https://github.com/facebook/rocksdb/wiki/Compaction)。DATA过度预分配可能使index无法接管热定位，即使Arena内部仍有free slot；必须识别这一独立压力并有界背压，释放内部slot不算释放SST所需空间。
 
 一次覆盖发布先选定有界update cut，确认到该cut的必要索引更新完成，再等待实际覆盖这些内容的flush持久化完成，最后沿既有checkpoint发布协议durable发布对应coverage marker。marker不能仅放入关闭WAL的未flush memtable后就用于跳过扫描；crash发生在flush后、marker发布前时，只能保守多重放。API、RocksDB版本、cut/marker编码与真实flush证据在同一实验manifest锁定，不凭一个异步回调猜覆盖。首批无需主动拆分更多column family；若使用多个CF，必须证明所有相关内容一致持久化后才推进cut，不能仅flush locator就将未flush的其他恢复信息算入。[RocksDB Atomic Flush](https://github.com/facebook/rocksdb/wiki/Atomic-flush)可用于此条件，但不是新增CF或全局索引事务的理由。
 
@@ -626,7 +646,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 1. DATA使用前allocation authority已durable；local success还要求本批完整write、覆盖barrier、所在物理stream连续durable前缀及readable publication。
 2. 同一 slot generation 不同时属于两个 owner。
 3. `FREE_AND_BUMP` durable 前旧 generation 不可复用。
-4. locator 的 generation/instance 不匹配时读取失败，不返回新 owner 数据。
+4. locator的generation/instance不匹配时不返回错误owner数据；旧generation残留不进入当前index，也不单独证明unused或媒体损坏，当前分配/依赖无法证明时保持不可写。
 5. checkpoint rotation 不得删除恢复当前 authority 所需的唯一 control suffix。
 6. allocator authority 全损坏时设备 fail closed，不从 data scan 猜 free list。
 7. derived index损坏或删除不改变payload恢复结果；local success依赖可查询定位，index coverage只由真实持久内容证明。热定位接管不等flush，append shard不同步等待索引维护，未覆盖DATA必须可重放。
@@ -647,7 +667,8 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 22. 请求的实际bytes、inflight和waiter覆盖其完整生命周期，出队/取消不提前归还仍持有的credit；最老合批deadline、大entry路径、异步重复读及fence/tombstone控制容量受§13同一预算约束。
 23. batch物理durability与逐entry结果分开；单条取消/fence不产生物理缺口，提交后坐标不因timeout视为空，未解析写入由bounded pending或不可写范围保护。
 24. 点读独立验证record外层身份及BK CRC，长度/对齐范围有界且pin/selector正确；不因整批大而强制读整批，不以local LAC拒绝必要候选。
-25. 首批shared布局及stream/file映射明确；dedicated启用后专属空间、buffer池及文件总量仍有界，共享barrier不表示共享block或独立flush域。
+25. 首批shared布局及stream/file映射明确；单stream逻辑后缀不缩短共享文件或损害其他stream，offset不定义跨stream顺序。dedicated启用后专属空间、buffer池及文件总量仍有界，共享barrier不表示共享block或独立flush域。
+26. Arena FREE增加内部可复用容量，不自动增加filesystem available；DATA预分配和共享filesystem上的SST/控制维护受同一Bookie磁盘总预算约束，低水位先限制新DATA，不能重复预留或侵占维护余量。
 
 ## 18. 接受 Gate
 
@@ -661,6 +682,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 - checkpoint/control-log recovery 可由自动 crash matrix 重放；
 - 已启用的lifetime class与同Arena `MOVE_COMMIT` relocation通过crash、并发move、reader pin及index rebuild测试；dedicated cold/hot promotion启用时另通过B5/B13，首个shared切片不声称覆盖该能力；
 - B2/B8/B19证明物理batch与逐entry结果分离、timeout后坐标保护、写错误/unknown暂停及恢复，包含共享文件错误范围和重复sync不能抹除失败；B9/B12/B18验证小record独立点读、损坏length、慢reader/pin与大量hot ledger资源；
+- B2/B3/B6/B9证明共享文件S0低offset不完整/S1高offset成功、复用generation 7→8旧合法CRC的恢复与回收；不依赖全文件截断或每次整块清零。B17/B18证明Arena内部空间与filesystem/SST/控制维护预算分层，preallocation低水位与真实临时空间峰值可核验；
 - current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
 - conditional apply/result、duplicate/response-loss、bounded waiter/idempotency retention、unknown record和selector/pin竞态通过crash/replay与资源Gate；
 - 真实stock old binary compatibility fence由RFC-0005 Gate先行验证；Spike B同时覆盖Round 7 `BKPF1` Cookie sentinel candidate、data-integrity pre-storage-open instrumentation、Cookie auto-stamp、superblock A/B corruption、partial device migration、device-manifest change、migration response loss与rollback禁止条件；candidate失败时必须正式采用new BookieId/new scope fallback；

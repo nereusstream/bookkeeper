@@ -54,6 +54,7 @@ shard count
 enabled paths and separately deferred feature/test scopes
 transport adapter/refcount ownership and reference-corpus revision
 logical identity byte ranges, LAC/digest rules and duplicate slow path
+normal/recovery/read-response/Segment payload capacities, unified N and overflow/alignment rules
 batch byte/count/wait limits and actual durability-barrier definition
 derived-index RocksDB version/options, disableWAL=true, enabled column families and flush proof
 hot-to-query-visible handoff, bounded async index credits and persisted coverage/checkpoint cuts
@@ -61,6 +62,8 @@ immutable CRC32C capability/layout binding and outer/inner coordinate checks
 DATA freeze point, stream/batch framing and contiguous-prefix replay/publication
 full-write/short-write handling, file barrier coverage and cold directory durability
 fixed shard/physical-stream/DATA-file mapping, file count and rotation bounds
+logical stream-tail exclusion without shared-file truncate/collapse/punch and old-generation residual classification
+Arena-to-filesystem mapping, DATA preallocation cap, real SST/control/checkpoint reserves and concurrent temporary-space peak
 physical batch result versus per-entry admission/cancellation/response result
 submitted-coordinate retention and stream/file I/O-error isolation/recovery rules
 record envelope integrity, bounded aligned point-read ranges and cache/pin lifetime
@@ -180,11 +183,15 @@ Oracle：local-success journal中的每条record可恢复且成功后授权点�
 
 延迟RocksDB WriteBatch/flush/compaction，DATA进入前缀且有界热定位发布后，符合权限的entry可local success；append shard不等待本次index入库。热定位移交实际query-visible索引时立即点读，无临时NoSuchEntry；未flush不阻止运行时接管，积压仍占总预算。该场景与B9的crash恢复cut独立核对。
 
+同一预分配文件中，低offset的S0/batch 11留不完整尾部，高offset的S1/batch 50完整durable并已local success，随后crash。恢复先读完整allocator，按stream/generation/sequence识别范围：不因S0逻辑后缀排除而ftruncate、collapse、punch、覆盖或忽略S1；也不因S1完整而越过S0缺口。B9独立恢复oracle验证所有成功DATA及其selector仍可发现，允许回收仅经既有I/O终结与conditional FREE/bump。
+
 ### B3：ALLOC pool refill
 
 反复refill、部分使用、shard crash、Bookie crash、未使用pool回收；延迟真实write submission/completion，覆盖旧shard退出、pool转交及generation bump后才到达的completion。
 
 Oracle：pool/shard generation ownership不重叠；restart后unused/live/unknown分类可独立重放。旧写I/O未终结或可靠隔离前不能转交/reuse；仅取消future、忽略late callback或reader drain的方案必须被否证，旧I/O不能改写新owner数据。
+
+复用残留场景联动B6/B9：generation 7有合法header/CRC，durable FREE_AND_BUMP后重分配为8，分别在未写、部分写新DATA时crash，保留原磁盘字节。旧7不进入8的index、不恢复旧owner；按完整分配/stream/batch/selector依赖和故障模型区分unused与unknown，证据不足保持不可写，不能把旧generation本身当作当前媒体损坏。无需每次复用整块清零，记录实际复用写放大；模型/测试不得让FREE隐式擦掉旧字节来消除反例。
 
 ### B4：Shared slab 多 ledger
 
@@ -228,7 +235,9 @@ DATA部分另按§6.1验证物理前缀：从verified checkpoint/cut恢复，bat
 
 Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围，结果与独立全量authority oracle一致；normal restart只能在有覆盖证明时缩小扫描范围。stale generation不进入index，未验证范围不返回确定absence；分别记录scan bytes/I/O、peak memory、read-only/可写时间及前台竞争。
 
-包含乱序完成batch、已回收区间和搬迁目标；独立checker验证§6.1成功前缀/可发现性。physical durable-through丢失后从authority/framing重建，不假定内存table仍在；MOVE_COMMIT选择的新DATA不能落在恢复会截断的后缀。
+重放B2共享S0/S1不相邻offset与B3 generation 7→8残留镜像，normal/full rebuild均保持其他stream成功DATA及当前owner；不能把文件高offset当跨stream后缀或把旧合法CRC当当前DATA。文件长度保持首批共享布局合同，逻辑排除不直接产生filesystem free bytes。
+
+包含乱序完成batch、已回收区间和搬迁目标；独立checker验证§6.1成功前缀/可发现性。physical durable-through丢失后从authority/framing重建，不假定内存table仍在；MOVE_COMMIT选择的新DATA不能落在该stream恢复会逻辑排除的后缀。
 
 按RFC-0003 §15关闭纯派生索引WAL，注入DATA durable、Put/WriteBatch成功未flush、flush完成未发布coverage、coverage发布及热定位淘汰各cut的crash。重启仅跳过实际持久且generation匹配的连续覆盖；marker缺失/损坏、index generation变化和多CF启用时部分flush均不能错误跳过DATA。Bookie/Arena权威控制日志保持durable，完整selector/tombstone控制后缀仍恢复。
 
@@ -326,9 +335,11 @@ Oracle：Bookie级权限在所有Arena一致；部分成功不能扩张接受集
 
 ### B17：空间耗尽与长期回收进展
 
-在manifest锁定的有界live set与admitted写入速率下持续create/write/delete，使大量shared block仅剩少量live records；另运行超过可持续能力的压力矩阵。分别耗尽前台whole-free blocks、compaction目标预算、Arena及Bookie控制日志/checkpoint预算；在maintenance与full-disk状态重启。
+在manifest锁定的有界live set与admitted写入速率下持续create/write/delete，使大量shared block仅剩少量live records；另运行超过可持续能力的压力矩阵。分别耗尽Arena前台whole-free blocks、内部compaction目标预算，以及实际filesystem的SST/flush/compaction、Bookie/Arena控制日志/checkpoint预算；在maintenance与full-disk状态重启。构造Arena仍有free slot但filesystem低余量，以及多个Arena已启用时共享同一filesystem的预算竞争，不能重复预留同一余量。
 
 Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持有界；维护得到锁定最低调度份额，恢复空间后按hysteresis重新开放。受支持负载下debt/dead bytes不持续增长，停止新写后在锁定deadline内回到目标水位；不能靠暂停compaction通过p99。超额负载只要求有界拒绝及可验证恢复，不要求无限容量。全部数值先于正式run冻结。
+
+追加Oracle：DATA预分配/增长上限保留真实filesystem维护工作集，低水位先停增长/限制新DATA，SST flush/必要compaction及tombstone/checkpoint在声明保留量内继续推进。仅FREE内部slot而filesystem available未变时，不解除索引空间压力；真正I/O error/authority unknown走错误恢复。分别报告Arena reusable、filesystem available、derived-index disk bytes、maintenance temporary-space peak，普通删除不靠hole punch/缩短文件回空间，关闭index WAL不当作零SST空间成本。
 
 ### B18：ByteBuf、固定shard与批量DATA路径
 
@@ -344,11 +355,15 @@ DATA freeze和barrier/prefix沿B2 oracle，量化padding bytes、write/durabilit
 
 持续制造index WriteBatch/flush/compaction stall，同时新写、立即点读及fence/tombstone。append shard不能同步卡在索引调用；hot/async queue/WriteBatch/memtable/native/cache全部有界，达到统一预算后拒绝后续DATA，控制仍推进。容量恢复后按A26/A27有界重试，不产生每次拒绝都换组的风暴；先前submitted unknown不被当前NONE清除。增加index入库等待、持久覆盖落后量、资源拒绝/retry/replacement计数；真实网络未执行的部分维持NOT_EXECUTED。
 
+消费A26/B19统一N，核对N边界的normal/recovery/read/Segment实际buffer和对齐范围，以及负值/溢出在大分配前拒绝。与B17区分内存index backlog满和filesystem空间不足：Arena仍有free slot时也可因真实磁盘维护预算拒绝，分别计量四项磁盘指标，不增加层层资源管理器。
+
 ### B19：同坐标identity与基础恢复重写
 
 用现有DigestManager与LedgerRecoveryOp语义构造同instance/entryId/应用bytes/累计length、不同合法piggyback LAC及digest的normal/recovery重写，应幂等且不覆盖不同数据；另测不同应用payload、累计length冲突、坏digest、跨instance、并发pending、乱序/hole、`E>W`、restart及derived-index丢失。每份输入完整性与authority都验证，不以整包bytes或全BK digest判定逻辑冲突。
 
 首批向量固定32-byte BK metadata + 4-byte CRC32C + opaque payload，验证CRC覆盖、长度/截断、outer/inner ledger/entry mismatch、未知或非CRC32C安装拒绝及不改变60-byte context。构造不同bytes但相同CRC32C的碰撞向量，证明checksum命中不能跳过真实bytes核对；相同业务bytes而LAC/digest不同仍幂等。不得从20-byte ledger credential推导HMAC能力、下发password/MAC key或为每entry新增SHA-256。布局向量属于后续新run，历史frame/operation corpus保持原证据身份。
+
+统一大小向量由四条实际路径共同锁定N：N-1/N正常写、点读与single-entry recovery均可表达且内容一致；N+1首次准入拒绝。另覆盖normal单项允许但recovery超限的44-byte区间，不能因normal codec可编码而接受；read/Segment更小则相应收紧N。降低runtime新写阈值后旧N entry仍可读/恢复，临时预算不足只背压，不改写大小能力或拆分entry。此为待实现的新验证，不修改历史corpus/receipt。
 
 K/X提交后timeout，再到K/Y：原坐标不变为空，Y不能成为新winner；分别令X迟到完成、部分写入、barrier unknown、restart重建，相同X重试只能复用已解析且权限有效的结果或暂不可用。未提交请求可原子撤销但不得与封包竞争后误释放；fenced原调用失败不抹除有效恢复候选。另按A16/RFC-0004 §7.5运行LAC=99/entry 100点读，confirmed/unconfirmed/恢复各守边界，DATA完成不伪造quorum LAC，explicit LAC合批不新增每Add控制fsync。
 
@@ -473,6 +488,11 @@ double allocation                             = 0
 stale-generation successful read              = 0
 cross-ledger-instance successful read          = 0
 local-success payload lost after recovery      = 0
+other-stream DATA removed by logical tail recovery in a shared file = 0
+old-generation residual accepted as current DATA or owner = 0
+entry first accepted but unrepresentable by required read/recovery/storage = 0
+filesystem maintenance reserve consumed based solely on Arena free slots = 0
+same filesystem capacity reserved independently in full by multiple Arenas = 0
 FREE/reuse before durable generation bump      = 0
 reader-pinned slot reused                      = 0
 old writer I/O corrupted a reused generation   = 0

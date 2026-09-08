@@ -213,6 +213,10 @@ offset 36..   opaque application payload
 
 CRC32C按现有[`CRC32CDigestManager`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/checksum/CRC32CDigestManager.java)/DigestManager规则覆盖32-byte metadata及应用payload，跳过digest本身。先检查完整frame/entry长度、outer/inner ledger与entry坐标、route/auth/grant及输入CRC，再进入逻辑重复判定；有效entry大小包含36-byte BK overhead，还受存储record/block与总预算约束。安装时缓存布局参数，普通Add不重读descriptor或逐请求协商digest。
 
+本地长度检查消费RFC-0001 §8统一`maxPayload=N`，取normal Add、single-entry Recovery Add、read response、Segment record/batch各自可容纳应用数据的最小值。`entryPayload`是完整BK entry，首批其长度为`36 + applicationPayloadLength`；frame内外长度及对齐范围另按自身开销验证，不能混用应用bytes、BK entry bytes和wire frame bytes。所有计算先检查溢出，N+1或任一路径无法表达的entry在首次写入/大分配前拒绝；read/record容量尚未冻结时不把normal单项余量当完整支持上限。
+
+创建/安装验证ledger所需大小能力并缓存N，不新增逐Add协商或分片。资源暂满返回背压；运行时降低新写阈值不能降低既有合法entry的读取/恢复能力。当前实验normal/recovery frame单项差44 bytes的推导与N-1/N/N+1验收由RFC-0001 §8统一拥有，原wire corpus不重绑。
+
 [`MacDigestManager`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/checksum/MacDigestManager.java)用`genDigest("mac", password)`初始化HMAC，master key则由`genDigest("ledger", password)`产生；20-byte credential不能提供HMAC校验能力。首批不支持HMAC/CRC32/DUMMY等未声明布局，创建/安装明确拒绝，不静默改用CRC32C，也不下发password/MAC key。已有任意byte-array wire corpus仍只证明frame/operation解析，不证明新entry语义校验；B19在实际实施时增加独立布局/CRC向量，不重绑历史receipt。
 
 原型先冻结以下比较边界，再实现B19回归：
@@ -230,7 +234,8 @@ CRC32C按现有[`CRC32CDigestManager`](../../../bookkeeper-server/src/main/java/
 职责分开：BK CRC32C验证当前entry封装，Segment record/block checksum检测存储framing/媒体损坏，TLS与credential/grant负责连接/访问授权；三者不能互代，Bookie不解析Kafka/Pulsar消息内容。正常新写复用现有CRC32C与必要Segment校验，不新增第三套逐entry SHA-256、凭据派生或远程核验。
 
 ```text
-local route/auth/admission check and capture generation
+validate cached cross-operation payload limit and checked entry/frame lengths
+    -> local route/auth/admission check and capture generation
     -> reserve bounded pending slot for (instance, entryId, payload identity)
     -> use durable authorized allocation
     -> complete batch writes and the exact covering DATA durability barrier
@@ -434,7 +439,8 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 状态：**PLANNED / NOT EXECUTED**。保留§5.2三层持久化owner，首批采用固定shard与shared DATA block；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
 
 ```text
-ByteBuf fixed-header/context parsing and bounded admission/local checks
+client obtains bounded credits before assigning the logical entry where possible
+    -> Bookie parses fixed header/context and checks cached cross-operation size/local authority
     -> route ledger to a fixed append shard
     -> check/reserve coordinate using hot state and bounded pending
     -> seal a nonempty batch, assign physical sequence and freeze all bytes for submission
@@ -457,7 +463,7 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 - 派生索引维护按RFC-0003 §15有界异步批处理，不能让append shard同步卡在RocksDB WriteBatch/flush/compaction；无sync/fsync不保证WriteBatch不stall。热定位接管以实际query-visible为条件，coverage推进以真实持久化为条件，两者不互相等待；索引瓶颈通过统一预算对后续准入背压。
 - batch table管理物理结果，pending管理逐entry结果；单条fence/取消不污染同批其他entry或物理前缀。提交后的超时不释放坐标占位，无法解析的I/O走§6.1隔离/恢复，不以无界pending、任意跳号或重复sync掩盖异常。
 - shard、物理stream和DATA文件映射按RFC-0003 §6.1在manifest冻结；首个文件切片在一Arena内共享预分配DATA文件，barrier成本与错误影响按实际文件计量，不宣称shard之间独立flush。
-- 同时运行写入与回收，保留RFC-0003 §13.1的维护份额和空间保留；不能通过停止compaction改善p99。
+- 同时运行写入与回收，保留RFC-0003 §13.1的Arena内部维护块及实际filesystem余量；共享filesystem的DATA预分配受Bookie总预算约束，保留SST/compaction/控制checkpoint进展。free slot不等于文件系统available，不能通过停止compaction改善p99。
 
 准入预算贯穿整个请求生命周期，不只限制queue.size()：
 
@@ -466,21 +472,25 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 | 待合批、已出队、已提交I/O、等待physical prefix/locator/响应 | 同一预算持续计入request、源/对齐bytes、inflight batch；只在真实资源释放或转移到另一已计费owner时归还对应credit，不按出队释放 |
 | 复制、断连、取消、慢响应 | 源/目标同时存在则都计bytes；I/O仍在飞行则保留buffer/inflight费用，传输层持有的响应也必须有界，不能藏在future或executor队列 |
 | I/O unknown与慢点读 | stream不可写gate承接未解析义务前不丢坐标保护；实际I/O终结后才释放不再使用的buffer。点读父buffer/独立副本/pin与cache均计费，小slice可受控复制以释放大父buffer |
-| 普通block放不下的entry | 在统一总预算下走有界大记录批次，或按size/capability检查明确拒绝；声明可接受的最大entry必须存在可行路径，不能永远卡队首 |
+| 普通block放不下的entry | 首先满足RFC-0001 §8跨normal/recovery/read/storage统一N，再走同一预算内的大记录路径；无法表达在首次写入前拒绝，临时容量不足背压。已接收entry持续可读/恢复，不能永远卡队首 |
 | 重复/冲突核对旧坐标 | 复用有界读取执行资源，append shard主循环不同步等盘；pending/waiter和读取buffer计费，正常新写不因此多一次索引I/O |
 | 热定位、异步索引积压、query-visible未flush内容 | 队列/WriteBatch、hot记录、memtable/native/cache分别计实际bytes/对象；接管后转移credit，local success不提前释放后台仍占用资源。stall达上限背压后续DATA，控制容量仍可推进 |
 | 资源拒绝后的客户端退避/retry | 同一逻辑Add继续占用原inflight/bytes预算，deadline和ACK独立；拒绝不抹除旧unknown/坐标事实，不复制无界请求，不因短暂拥塞直接换组 |
 | 持续热ledger与撤权请求 | 连接/ledger只设必要有界份额；为fence/tombstone保留控制执行容量及持久化预算，DATA满额仍能关闭DATA准入 |
 
-实现复用现有shard/pending/buffer预算和请求对象，不新增通用调度平台。所有被接受的entry满足wire frame、36-byte BK overhead、Segment record/framing/alignment及runtime总预算的兼容上限；资源不足在明确DATA准入前拒绝，不先接收再无界积压。此时使用RFC-0001 §11.5现有`TRANSIENT_UNAVAILABLE / SAME_PROFILE_OPERATION / NONE`，NONE仅针对本次尝试；已有同坐标unknown不能被覆盖。进入可能产生DATA的阶段后按§6.1如实保留unknown，不能伪装准入拒绝。
+实现复用现有shard/pending/buffer预算和请求对象，不新增通用调度平台。所有被接受entry遵守§6.1/RFC-0001 §8统一应用payload上限、完整BK/frame/framing/alignment检查和runtime总预算。协议/实现不能表达时首次写入前size/capability拒绝；暂时资源不足才在明确DATA准入前背压，不先接收再无界积压。后者使用RFC-0001 §11.5现有`TRANSIENT_UNAVAILABLE / SAME_PROFILE_OPERATION / NONE`，NONE仅针对本次尝试；已有同坐标unknown不能被覆盖。进入可能产生DATA的阶段后按§6.1如实保留unknown，不能伪装准入拒绝。
 
 Profile客户端在ensemble failure handling前消费完整三元组，按RFC-0001 §9.3有界退避原逻辑Add、等待已有activation协调或执行满足故障条件的正式replacement。FENCED/TOMBSTONED/冲突/无权限不得换目标绕过；客户端预算尽量先于entryId及累计length分配，已分配的Add不因背压/deadline变成可忽略的hole。以上不增加每entry远程状态查询、控制日志或独立持久retry任务。
+
+replacement完成remote phase后按RFC-0001 §9.3继续阻塞成功发布，直到全部受影响pending Add完成所有被替换slot的ACK撤销及资格重算，再开放连续前缀回调；身份未变的有效ACK保留，不全量重发W份DATA。Bookie共享文件的单stream恢复按RFC-0003 §6.1/12逻辑判定范围，不缩短文件或丢弃其他stream有效DATA；旧generation残留不进入新index，回收按完整authority及I/O终结判定。
 
 首个isolated/discardable性能切片可与实际启用路径的Model A/C及必要D子集验证并行，不必等待所有延期功能模型。切片先用真实control/DATA I/O、一个Arena及固定shards完成normal Add、点读、基础restart和本地回收；多Arena、全量重建和完整故障/资源Gate逐步补齐，未覆盖范围不得进入canary。无真实网络的shard测试不能证明transport/TLS成本，无真实恢复的性能run不能证明WAL可恢复性。
 
 Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS范围、E/W/A、payload分布及负载，分别测低负载延迟、目标负载吞吐/尾延迟、过载有界拒绝、写入与回收并行、restart/fault recovery。报告allocation/copy bytes/entry、CPU/entry、吞吐/p99、按文件计的entries/barrier、padding/实际磁盘写放大、debt，以及write/durability/physical-prefix/locator wait和全阶段资源峰值；补充点读bytes放大/I/O/cache hit/pin时长、大父buffer与大量hot ledger内存。首批shared-block结果不包含dedicated收益；replacement或真实网络未执行时单列NOT_EXECUTED，不把局部无网络结果当端到端增益。
 
 同一报告增加index入库等待、persisted coverage落后量、资源拒绝、retry和真正replacement数量；分别观察前台定位发布与后台索引stall。拥塞不统一计为磁盘故障，不能用无限积压、丢弃新写或停止回收改善p99。B2/B9/B18联动A26/A27验证索引stall下新写有界背压、fence推进、容量恢复后原逻辑Add重试及提交后unknown保留。
+
+本轮沿既有指标另区分Arena reusable bytes、filesystem available bytes、derived-index disk bytes和maintenance temporary-space peak，并计量换组保留ACK/必要resend及复用写放大。场景包括A29多slot gate、B2/B9共享S0/S1尾部、B3/B6旧generation残留、A26/B18/B19统一N边界，以及B17/B18内部free但filesystem不足。数值与低水位均由同一manifest冻结，不以新架构或每次清零/收缩替代测量。
 
 ## 11. 安全不变量
 
@@ -521,6 +531,9 @@ Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS�
 - normal Add 与 fence 的每个 durability/response-loss 边界；
 - §5.2真实Bookie控制日志与多个Arena的partial durability/restart、checkpoint/rotation及tail分类；
 - §6.1同坐标去重/冲突及LAC/digest兼容边界、DATA durable到locator publication间的crash、ACK后点读与全部index丢失；
+- 跨normal/recovery/read/storage统一N的N-1/N/N+1及normal允许但recovery超限44-byte区间；首次拒绝不可表达entry，降低新写阈值后旧entry仍可读/恢复，溢出早于大分配；
+- A29/CLIENT-1整体gate在多slot ACK更新完成后恢复回调，未变有效ACK保留；B2/B3/B6/B9证明单stream逻辑后缀不损及同文件其他成功DATA，复用残留不复活且不依赖每次整块清零；
+- B17/B18分别核算Arena与filesystem空间，DATA预分配不侵占SST/控制维护余量；shared-filesystem多Arena不重复预留，实际I/O/authority异常仍沿错误恢复流程；
 - DATA durable且index Put成功但未flush时crash、热定位淘汰与query-visible接管并发、陈旧Add索引更新晚于MOVE/delete；持久覆盖不能虚报，已成功entry不出现临时NoSuchEntry；
 - index持续stall与新写/fence并发，预算有界且控制推进；短暂资源拒绝不立即触发replacement，重试NONE不覆盖旧UNKNOWN，deadline不制造可跳过的entry hole；
 - §8以LAC=99/entry 100验证confirmed、unconfirmed及恢复点读分层，Bookie不按local LAC截断，DATA completion不推导quorum LAC或增加逐Add LAC fsync；

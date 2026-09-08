@@ -39,6 +39,8 @@ profileControlStoreAdapterRevision
 root/page/fan-out/retention hard bounds
 activation-target identity/incarnation retention, lifecycle publication and snapshot/reclaim encoding
 pre-admission resource status mapping, bounded retry/backoff/deadline and client credit limits
+multi-slot pending-map/ACK transition, completion-gate release and unchanged-ACK retention rules
+unified maxPayload from normal/recovery/read-response/Segment capacities and checked alignment
 BookieCount
 clientCount
 E/W/A configurations
@@ -311,6 +313,8 @@ Oracle：每个vector的Classic route claim、handle create、master-key persist
 
 ### A26：Handshake、mixed matrix 与 semantic error propagation
 
+接入前按RFC-0001 §8冻结统一N，覆盖normal/recovery/read response/Segment容量及N-1/N/N+1。当前100/144-byte body固定开销差44 bytes，`5,242,669..5,242,712`虽满足normal frame仍必须首次写入拒绝；两个Add约束的较小值也不代表尚未冻结的read/storage已支持。降低runtime新写阈值后，旧合法entry仍可读/恢复；无表达能力与暂时预算不足分别返回size/capability拒绝和背压。不变更旧wire enum/corpus/receipt。
+
 补充首批CRC32C布局绑定：创建/安装核对immutable capability、实验manifest及客户端/metadata声明；未知、缺失、不匹配和HMAC/CRC32/DUMMY等未支持布局在入口拒绝。replacement、只读与recovery消费同一已安装布局，不新增60-byte context字段、逐Add协商或生产capability ID；拒绝不能触发静默CRC32C转换或password/MAC-key下发。CRC32C与具体entry字节验证由B19配合，不将frame corpus当作布局语义PASS。
 
 步骤：覆盖old/old Classic、old/new route matrix、new Profile/old、mixed ensemble、Bookie restart/incarnation/protocol generation change、HELLO第一帧/4KiB bound/strict capability order、server HELLO全部字段的byte-exact golden vector及`reserved:u16=0`/nonzero拒绝、BookieId/incarnation/readiness mismatch、Profile/Classic physical pool key、unknown capability，以及全部12类status（1 OK + 11 non-OK）、5类retry与4类durable result的固定数值golden vector；贯通processor/client future/admin/metric。
@@ -325,7 +329,7 @@ Oracle：Profile初始创建/install在old/mixed target上payload前失败；只
 
 增加暂时资源拒绝后容量恢复、持续不可用达到既有故障阈值、已提交unknown后的重试收到NONE、activation协调中多个Add，以及退避期间deadline到达。首次预算尽量早于entryId/累计length分配；分配后保持同位置/payload重试或按ledger失败/恢复结束，不能跳过hole。retry沿原inflight/bytes计费，timer/waiter有界，不延长调用deadline。
 
-Oracle：有合法替代资源和明确控制结果时，原DATA outcome unknown不阻止正式换组；控制INSTALL/ACTIVATE的unknown仍重试同operation。成功只使用当前write set和声明故障域内的有效ACK，不拼接旧投递集合，不改变逻辑payload，不重复callback或Classic fallback。故障域模型/`F`在run前锁定。
+Oracle：有合法替代资源和明确控制结果时，原DATA outcome unknown不阻止正式换组；控制INSTALL/ACTIVATE的unknown仍重试同operation。成功只使用当前write set和声明故障域内的有效ACK，不拼接被替换slot的旧投递响应；身份未变的有效ACK按RFC-0001 §9.3保留。不改变逻辑payload，不重复callback或Classic fallback。故障域模型/`F`在run前锁定。
 
 资源Oracle：短暂拥塞不直接触发replacement；容量恢复后原逻辑Add继续。当前拒绝NONE不抹除旧UNKNOWN/占位，已提交不能返回肯定未写入；持续故障达到锁定条件后仍可正式换组。与B18索引stall/满额场景联动，分别记录拒绝、retry与replacement数，未执行真实网络时不宣称集群效果。
 
@@ -339,11 +343,15 @@ Oracle：delete后新open/admission失败；membership与freeze按同记录versi
 
 强访问撤销及strong reset为独立DEFERRED配置，首批只验证能力拒绝及不创建token。后续启用时：强撤权必须等全部target屏障/永久服务隔离proof；strong reset必须整个ledger fenced+CLOSED，逐步执行token、prepare、lifecycle publication、resolve，注入sidecar故障、coordinator crash及pending loss，未最终发布candidate不能reset。已有token即使功能关闭也不得超时强删。记录新增冷CAS、membership阻塞时长、恢复解析和前台影响；不能因不在per-entry路径就忽略停顿。
 
-### A29：CLIENT-1当前ACK数量与故障域一致
+### A29：CLIENT-1当前ACK一致性与多slot completion gate
 
 在现有`PendingAddOpTest`和真实rack-aware policy层构造`E/W/A=3/3/2`：旧ensemble为A/X、B/Y、C/Y；entry e先收到C ACK，另一pending entry超时触发C→D/X replacement，C仍在knownBookies。e随后仅收到A和D ACK，B未成功。必须仍不满足两rack约束；B的有效ACK到达后才可成功，迟到C不能补覆盖。
 
 另构造e的`completed=true`但callback被先前pending/换组阻挡：撤销唯一异域ACK后数量仍>=A而覆盖不足，必须撤销completed并等待有效新覆盖。覆盖多slot replacement、`E>W`未涉及本entry write set的变更、重复/旧地址响应、策略启用/关闭、timeout统计和对象复用。oracle从当前mapping与实际有效响应独立计算，不复用被测成功集合；关闭policy时不引入冗余集合或通用rack检查，数量及连续前缀不变。
+
+固定新增反例为`4/3/2`、slots `[D,A,B,C]`、队首entry 1（entry 0已callback），其write set A/B/C已获A、B ACK，因换组被gate阻塞。同时换0、1为D'、A'，确定按0→1遍历；slot 0不属于entry 1，必须在slot 1的旧A ACK撤销、全部受影响pending映射/资格整理完成前保持无成功回调。交错A'新响应、A旧响应及其他pending Add回调尝试，验证中间状态与最终状态，而非只检查最后集合。
+
+Oracle：remote metadata/必要activation结束不提前开gate；全部本地更新后按连续前缀显式恢复callback，若entry完全未受影响也不永久等待。身份/incarnation未变且仍属write set的B ACK保留，C等未替换目标不无条件重发；A'有效ACK到达后可由A'+B满足A，无需重新收到全部W份ACK。记录必要resend和保留ACK数量。首批存储E=W结果不能代替该一般E>W客户端回归，仍归CLIENT-1，不新增工作项或持久化协议。
 
 ### A30：CLIENT-2最后响应与对象池归还
 
@@ -424,6 +432,10 @@ prior logical Add UNKNOWN erased by current-attempt resource NONE = 0
 backpressure retry exceeded budget/deadline or skipped assigned entry = 0
 initial normal writer returned before all-E activation         = 0
 pending resend before replacement normal ACTIVE    = 0
+successful callback before all affected pending/slot ACK updates = 0
+unchanged valid ACK discarded solely by ensemble version change = 0
+unconditional W-wide resend after replacing only some slots = 0
+normal Add accepted beyond unified read/recovery/storage payload limit = 0
 restart lost durable install                        = 0
 restart resurrected non-durable install             = 0
 restart expanded durable activation acceptance      = 0

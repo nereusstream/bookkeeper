@@ -2,7 +2,7 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
-2026-09-08基于`4551f387b00b094b8f2afce13de6b1043cb3e750`的修订已进入现有owner RFC：初始/写期activation authority同时保留delete可枚举target/incarnation，同起点连续换组不丢历史；DATA成功依赖有界热定位，派生索引异步入库、实际持久内容才推进coverage；Profile在failure handling前消费完整status三元组，资源拒绝有界退避且保留旧UNKNOWN。六组场景归入原UW-1/2/3/7及Spike A/B/C，见[当前清单](../implementation/README.md)。此前读路径、batch/entry结果、I/O异常、CRC32C/shared block、DATA冻结/恢复前缀、delete-applied、预算及延期能力保持。状态仍Proposed/Planned，没有执行实现/性能run；下表各轮为历史记录，逐字反馈及source-bound receipt未重写或晋升。
+2026-09-08基于`635c383e80ef353753712a7117aef32fd6b8f313`的本轮修订已合入现有owner RFC：CLIENT-1多slot ACK切换完成后才开放回调并保留未变ACK；共享DATA文件按stream逻辑排除后缀、旧generation残留不复活；写/恢复/读/存储统一entry上限；Arena内部与实际filesystem维护空间分层预算。场景归原CLIENT-1、UW-2/3/4/5/7及Spike A/B/C，见[当前清单](../implementation/README.md)。此前激活历史、异步索引/coverage、背压和首批范围保持；没有源码修改或新运行证据。状态仍Proposed/Planned，下表历史轮次、逐字反馈和source-bound receipt未重写或晋升。
 
 规则：
 
