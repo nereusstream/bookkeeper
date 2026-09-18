@@ -254,7 +254,8 @@ fence是按instance/目标副本建立的持久条件；匹配当前身份、上
 
 ```text
 RECOVERED_AND_CLOSED(P)
-    required prefix and normal tail proven; recovery-add and close publication durable
+    required prefix and normal tail proven; matching cumulative length L established;
+    recovery-add and CLOSED(P, L, context) publication durable
 
 RETRYABLE / DEFERRED
     temporary authority/evidence unavailability, no quorum, or global operational bound
@@ -282,7 +283,7 @@ API 语义至少携带 outcome class、retryable/terminal、RecoveryContext/auth
 semantic outcome class + operation scope
 ledgerId + ledgerInstanceId
 RecoveryContext identity/digest + attempt/operation generation
-proven prefix/range and close metadata identity for success
+proven prefix/range, matching cumulative application length and close metadata identity for success
 bounded reason/cause + retryability/terminality
 authority-conflict vs payload-evidence classification
 completion/close generation where applicable
@@ -294,7 +295,7 @@ legacy projection锁定为：
 
 | Semantic outcome | Legacy callback/future | Authority/scheduler |
 | --- | --- | --- |
-| durable `RECOVERED_AND_CLOSED(P)` | `OK` + handle | 唯一ledger recovery success |
+| durable `RECOVERED_AND_CLOSED(P)`，含匹配的L/context | `OK` + handle | 唯一ledger recovery success |
 | `RETRYABLE/DEFERRED` | non-OK；优先保留现有Timeout/Bookie/MetaStore/Read等transient cause，无精确码时generic recovery failure | backoff/retry，保留intent/marker |
 | `ATTEMPT_INCOMPLETE` | cancellation/Interrupted/Timeout或generic non-OK | 不写terminal state；durable progress重验 |
 | `QUARANTINED` | generic recovery non-OK | 隔离并保留conflict/authority reason |
@@ -306,17 +307,26 @@ Classic基础恢复已有write-set选择、恢复读fencing、`W-A+1`否定聚�
 
 Profile首批复用上述基础算法与现有验证场景，适配instance/descriptor、显式recovery grant、§7.3逐来源否定条件、unknown/not-ready分类及新存储持久化边界；不另建一套基础quorum算法，也不把未经身份/错误语义适配的Classic路径直接接入。`BookKeeperAdmin`的legacy `skipUnrecoverableLedgers`可保留aggregate completion，但skipped ledger必须出现在rich result中，不计recovered success，不清RepairIntent/underreplication/loss state，也不发布repair completion/reset；Profile automation不能消费aggregate `OK`作为authority。AutoRecovery/ReplicationWorker必须按rich outcome分别retry、结束attempt、quarantine或terminal，并只在durable metadata/receipt重验后clear marker。
 
-close response loss按以下顺序解析：
+**恢复前缀与长度绑定。** 成功的`CLOSED(P,L)`必须描述同一个连续前缀；LAC提示、承载提示的源entryId及该源entry累计length分别保留，不能将最大LAC与最大length独立拼接。内部提取提示时保留或能够重新取得source entryId，不新增持久LAC→length映射。
+
+静态源码基线`a861f470c47e12916a3c300d37d2b82131aee290`中，[`DigestManager.verifyDigestAndReturnLastConfirmed()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/checksum/DigestManager.java)跳过source entryId后返回piggyback LAC与源entry的length；[`LedgerRecoveryOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerRecoveryOp.java)将起点取为`max(LAC, lastFragmentStart-1)`而沿用该length。Profile复用时须验证长度锚点随起点同步匹配，不据此断言Classic每次恢复都错误。例如entry 99的累计length=1000、entry 100携带LAC=99及length=1100，提示`(99,1100)`不授权`CLOSED(99,1100)`。
+
+最终P已在本次合法取证中读到时复用其累计length；已有精确绑定P/context的权威关闭结果时按其校验；否则对P做一次必要合法点读取长度，不从entry 0重新累加。空ledger固定`P=-1,L=0`；非空tail missing不能用零或更晚speculative entry长度替代。起点因fragment或其他合法证据变化时重新匹配锚点；无法取得则DEFERRED，合法证据间长度冲突沿既有conflict/quarantine路径，不发布不确定CLOSED。
+
+相邻entry已被读到时核验`length(e)=length(e-1)+applicationPayloadBytes(e)`，检查长度和加法范围，不靠改统计值消除冲突。累计长度只计应用bytes，不含BK/Profile/Segment framing或padding；此检查不为所有entry增加前驱读。关闭同时固定lastEntry和length沿用[WriteHandle close合同](https://bookkeeper.apache.org/docs/latest/api/javadoc/org/apache/bookkeeper/client/api/WriteHandle.html)，新增成本仅为必要恢复边界点读，无普通Add metadata更新或逐entry日志。
+
+close与response loss按同一主流程解析：
 
 ```text
 1. verifier determines P in exact RecoveryContext
-2. required recovery Adds become durable
-3. standard metadata CAS publishes CLOSED(P, length, exact context/membership)
-4. on response loss, reread metadata
-   matching CLOSED(P/context)       -> RECOVERED_AND_CLOSED
+2. obtain and validate L bound to that exact P; empty ledger uses (-1, 0)
+3. required recovery Adds become durable
+4. standard metadata CAS publishes CLOSED(P, L, exact context/membership)
+5. on response loss, reread metadata
+   matching CLOSED(P/L/context)     -> RECOVERED_AND_CLOSED
    metadata temporarily unavailable -> DEFERRED
    still IN_RECOVERY                -> retry same close operation
-   incompatible CLOSED/prefix/instance -> QUARANTINED_CONFLICT
+   incompatible CLOSED/prefix/length/instance -> QUARANTINED_CONFLICT
 ```
 
 cancel/deadline只终止当前attempt，不能回滚已提交fence/payload/metadata；若与close CAS并发，status路径先重读authority。single corrupt replica只记endpoint corruption并继续其他evidence；valid-looking conflict进入quarantine，payload仍在但required authority丢失进入authority quarantine，只有required-coordinate finite evidence exhausted进入data loss。metrics reason/phase必须bounded，attempt与unique durable completion分开；metrics不是authority，不为exactly-once计数增加durable hot state。
@@ -329,18 +339,20 @@ cancel/deadline只终止当前attempt，不能回滚已提交fence/payload/metad
 CAS OPEN -> IN_RECOVERY under Profile metadata authority
     -> durable fence coverage for every possible current write set
     -> freeze instance, ensemble history, E/W/A and recovery context
-    -> collect authoritative LAC/required-frontier evidence
+    -> collect LAC/required-frontier evidence with source entryId and length provenance
     -> ensure the selected source's matching durable normal fence before using its missing evidence
     -> point-read each unresolved coordinate from its exact legal source set
     -> apply §7.3 normal-tail / deferred / quarantine / loss rules
-    -> admitted, bounded single-entry Profile recovery Add
-    -> standard metadata CAS publishes matching durable CLOSED(final prefix, length, context)
+    -> complete required admitted, bounded single-entry Profile recovery Adds durably
+    -> resolve cumulative application length L at final prefix P under the same context
+       from a read P, matching closed authority, or one necessary boundary point read
+    -> standard metadata CAS publishes matching durable CLOSED(P, L, context)
        while the same-record membership freeze and unresolved enhanced token are absent
     -> resolve the close result and retain admitted target/cleanup history
     -> reconcile response loss and revalidate after restart
 ```
 
-若读取到IN_RECOVERY，重读并绑定同一恢复上下文后继续；若已CLOSED，保持原final prefix并验证其durable结果，不能重新OPEN。CLOSED但缺少删除所需fence proof时，对固定最后fragment补做fence coverage并重验metadata/context，不能直接把writer close当成fenced close。metadata/context改变时重新取证或defer，不覆盖已有close结果。
+若读取到IN_RECOVERY，重读并绑定同一恢复上下文后继续；若已CLOSED，同时保持并核验原final prefix与length的durable结果，不能重新OPEN。CLOSED但缺少删除所需fence proof时，对固定最后fragment补做fence coverage并重验metadata/context，不能直接把writer close当成fenced close。metadata/context改变时重新取证或defer，不覆盖已有close结果。
 
 这里的point-read可读取LAC之后已正确持久化且可定位的候选，Bookie不能按`entryId > localLAC`拒绝或返回不存在。例：副本LAC=99，entry 100已达ACK quorum，writer在下一次piggyback前崩溃，必须读取100后再按本节取证/恢复写入/close判断；单份候选不等于quorum commit。客户端confirmed read由ReadHandle的已确认LAC/CLOSED边界限制，显式unconfirmed和恢复取证采用各自范围；已被当前恢复终态排除的数据不能因物理残留重新可见。locator/index覆盖未恢复或storage unknown返回not-ready/unknown，不计definitive absence。该分层消费RFC-0005 §8既有点读和本地权限检查，不新增每次读取的metadata查询。
 
@@ -349,6 +361,8 @@ CAS OPEN -> IN_RECOVERY under Profile metadata authority
 实现以§7.4现有Classic基础算法为入口，给出Profile适配的source selection、逐来源fence/identity验证、write-set覆盖、并发/内存/重试上限和终止判据，并提供独立point oracle做差异验证。`W-A+1`只计每个来源本地fence已durable且不存在未解析写入/定位覆盖的definitive absence，timeout/offline不计；单副本payload、TailSummary或后续speculative entry不能代替required frontier。新的repair target、grant、membership publication及history retention仍遵守§9.1及§14的delete竞争协议；normal/recovery相同应用数据的LAC/digest差异按RFC-0005 §6.1处理。
 
 接受场景包括ACK response loss、旧writer失联、LAC=99/候选100的confirmed与恢复读分离、单副本missing/corrupt、预算内domain loss、required hole、正常未提交tail、换组历史、recovery Add/close每个crash cut和重启后再次读取；补入§7.3未fenced的B先报missing再收旧写、fence durable但pre-cut I/O未解析、重复/旧incarnation否定响应。复用已有fence不得产生逐entry控制fsync。同批其他entry失败及原RPC超时不抹除有效恢复候选。没有基础恢复证据的Add/ACK实验只允许discardable数据，不作为可恢复WAL canary。Model A先承担受支持子集的point recovery、durable close和outcome检查；Model E负责扩展range与point oracle的等价性，不能借Model E延期来豁免基础恢复。
+
+同一A16/A26/B19及A-POINT另覆盖LAC落后于源entry、fragment起点抬升、没有新尾部、空ledger、相邻累计length冲突、边界读暂不可用，以及close响应丢失后P相同但length冲突；不得将hint length误作P的长度。Bookie重启后只有经RFC-0003 §12有效证据或必要恢复同步确认的候选才能提供durable recovery evidence，读取成功本身不证明local durability或AQ。
 
 ## 8. Deferred Sync 限制
 
@@ -885,8 +899,8 @@ all historical targets acknowledged or durably decommissioned
 10. strong completion 是 verifier assertion；digest/root 单独不能 reset，且 conflicting range loss/completion有单一 conditional predecessor。
 11. normal open-ledger tail需要required prefix无洞和exact write set上至少`W-A+1` distinct definitive absences；每个来源自身durably fenced、身份/incarnation/context匹配且pre-cut写/定位已解析，global coverage不替代本地条件，temporary/no-quorum/重复或旧响应不计。
 12. required coordinate只来自 accepted durable authority；speculative later payload不把前一个正常 tail变成 DATA_LOSS。
-13. recovered success晚于 recovery-add 与 durable close/final-prefix publication；authority unrecoverable属于 quarantine，不是 payload DATA_LOSS。
-14. legacy `OK`只投影matching durable ledger close；deferred、incomplete、quarantine和data loss均non-OK，generic rc不得成为repair completion authority。
+13. recovered success晚于recovery-add与durable CLOSED(P,L,context)；P与L须绑定同一连续应用数据前缀，不组合hint LAC与源entry length。缺少长度锚点defer、冲突quarantine，空ledger为(-1,0)；authority unrecoverable不是payload DATA_LOSS。
+14. legacy `OK`只投影P/length/context均matching的durable ledger close；deferred、incomplete、quarantine和data loss均non-OK，generic rc不得成为repair completion authority。
 15. rich outcome保留operation scope；fragment repair、legacy skipped ledger或partial progress不得计为ledger recovered。
 16. Profile recovery Add使用distinct logical operation并匹配bounded local grant；legacy flag、Classic fallback或mixed old Bookie不能获得recovery authority。
 17. recovery control grant/close要求non-anonymous且获授权执行exact operation/instance/target-range scope的principal，并由Bookie direct-read committed authority；AuthN-only/master key不授权control transition，receipt/status不泄漏secret或replay capability。

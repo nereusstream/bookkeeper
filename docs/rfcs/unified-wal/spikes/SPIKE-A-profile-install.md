@@ -251,6 +251,8 @@ Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正�
 
 补充LAC分层：副本local LAC=99、entry 100已达ACK quorum且writer在下一次piggyback前崩溃，合法unconfirmed/恢复点读可读100，confirmed read仍由客户端确认边界限制。Bookie不能以local LAC拒绝候选或伪造absence，读取候选不直接发布recovered close；DATA completion不生成quorum LAC，显式LAC合法单调更新可合批，不增加每Add控制fsync。与B19及Model A-POINT联合验证。
 
+在同一恢复流程验证终点与长度：entry 99累计length=1000，entry 100携带LAC=99、length=1100；若合法最终P=99，不得将该提示直接关闭为`CLOSED(99,1100)`。保留或重新取得提示的源entryId，复用已读P或精确匹配的权威close，否则只补必要的P点读。覆盖fragment边界提升起点、无新增尾部、空ledger `(-1,0)`、P暂不可读，以及已读相邻entry长度不一致/溢出；无匹配锚点不发布close，不从0全扫描或新增持久LAC-length表。
+
 沿现有Classic恢复取证算法做Profile差异验证：3/3/2中entry x已有A的ACK、B的旧写在途，恢复已fence A/C但尚未fence B；B/C先missing、A数据响应慢时，不把未fenced的B计票或close到x-1。令B随后接收旧写，再完成其本地fence并重新取证；另覆盖fence durable但pre-cut I/O/定位未解析、重复响应和旧incarnation。每个计入否定集合的source均须匹配当前instance/context且自身durably fenced，已有效的fence跨entry复用，无逐entry控制fsync或等待全E在线。
 
 Oracle：缺少 matching global READY 或 local durable normal ACTIVE 的 normal Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；READY 可早于部分 local active，但 初始创建返回normal writer必须晚于all-E initial activation；restart 后接受集合不扩大。
@@ -326,6 +328,8 @@ Oracle：Profile初始创建/install在old/mixed target上payload前失败；只
 在既有三元组矩阵验证RFC-0001 §11.5的资源映射：准入前资源拒绝进入有界same-operation backoff，已知activation未完成复用协调等待，提交后unknown不能投影成NONE；terminal fence/delete/conflict/unauthorized不靠换组绕过。检查分类发生在`handleBookieFailure`之前，不先压成通用WriteException；不为该行为修订旧wire枚举/corpus或历史receipt。
 
 恢复missing映射消费RFC-0004 §7.3/7.4的逐来源条件；unknown/not-ready、未fenced来源及未解析pre-cut写不能坍缩为可计票的NoSuchEntry/NoSuchLedger。复用Classic的missing聚合与顺序交付，不把上层聚合结果误作单副本响应，不新增错误枚举或第二套基础quorum算法。
+
+恢复close response loss后重读，只有`P/length/context`均匹配才投影为legacy OK；同P但不同length属于冲突，长度锚点暂不可用进入既有deferred语义。与A16/B19核对`RecoveryData`的源entryId、piggyback LAC及源累计length，不把终点正确但长度未知当作成功；不新增wire状态或修改历史receipt。
 
 ### A27：Add unknown、换组与ACK故障域
 

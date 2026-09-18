@@ -153,7 +153,7 @@ Bookie级日志是跨Arena ledger权限的唯一持久化owner；不把相同rou
 2. Add先取得Bookie级admission，再使用durable allocation，DATA durable且可读定位发布后才local success；
 3. fence/grant close仍按各自合同关闭admission并终结所需操作；tombstone先关闭normal/recovery/read admission并durable，使清理义务可重建后可确认delete-applied/推进cursor，runtime drain完成后才确认access barrier，不能混为同一完成结果；
 4. reader/writer/I/O均满足RFC-0003 quiescence条件后，才允许Arena free/reuse；
-5. restart先恢复Bookie控制日志的terminal gates，再恢复各Arena authority/data/index，最后重验delete/readiness。任一required store缺失、损坏或无法分类，整个Bookie保持non-writable，不能由另一个store的部分成功推断allow。
+5. restart先验证Bookie控制候选、完成必要恢复同步后恢复terminal gates，再按RFC-0003 §5.3/12处理各Arena条件命令、DATA候选及其同步/定位，最后重验delete/readiness。可读bytes或另一store的sync不证明目标DATA durable；任一required store缺失、损坏或无法分类仍non-writable。
 
 Spike必须覆盖Bookie控制日志已durable但某Arena尚未完成、DATA durable但响应丢失、tombstone与迟到grant、多个Arena的部分失败，以及控制日志checkpoint/rotation各cut。内存adapter测试不能替代这些真实文件/fsync/restart结果；process kill也不能单独代表power-loss/torn-write覆盖。
 
@@ -213,6 +213,8 @@ offset 32..35  CRC32C, 4 bytes
 offset 36..   opaque application payload
 ```
 
+这里的cumulative length属于该entryId的应用数据前缀，不属于同记录的piggyback LAC，不包含BK/Profile/Segment framing或padding。恢复沿RFC-0004 §7.4保留提示来源并为最终P取得匹配L；已经读到相邻entry时检查累计关系和溢出，不能改length掩盖冲突，也不要求普通新写逐次读前驱。合法同payload重试仍按本节比较累计length，LAC变化不改变这个身份字段。
+
 CRC32C按现有[`CRC32CDigestManager`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/checksum/CRC32CDigestManager.java)/DigestManager规则覆盖32-byte metadata及应用payload，跳过digest本身。先检查完整frame/entry长度、outer/inner ledger与entry坐标、route/auth/grant及输入CRC，再进入逻辑重复判定；有效entry大小包含36-byte BK overhead，还受存储record/block与总预算约束。安装时缓存布局参数，普通Add不重读descriptor或逐请求协商digest。
 
 本地长度检查消费RFC-0001 §8统一`maxPayload=N`，取normal Add、single-entry Recovery Add、read response、Segment record/batch各自可容纳应用数据的最小值。`entryPayload`是完整BK entry，首批其长度为`36 + applicationPayloadLength`；frame内外长度及对齐范围另按自身开销验证，不能混用应用bytes、BK entry bytes和wire frame bytes。所有计算先检查溢出，N+1或任一路径无法表达的entry在首次写入/大分配前拒绝；read/record容量尚未冻结时不把normal单项余量当完整支持上限。
@@ -268,7 +270,8 @@ asynchronously:
 | --- | --- |
 | 已证明没有提交任何DATA | 在同一准入/封包执行顺序内撤销pending并释放实际不再持有的资源，不能与submission竞争后仍按未提交处理 |
 | 已提交、部分写入或durability unknown | timeout/cancel/disconnect只终止该调用的响应等待；不删除坐标已有或可能写入的事实。相同数据重试绑定已有结果或返回明确暂不可用，不同数据不能成为第二winner；无法比对时fail closed，不猜absence |
-| 已确定完整durable、在可恢复前缀且可读 | 继续参与同坐标冲突检查；当前操作权限有效时幂等返回已有结果，是否向原调用者成功发过响应无关 |
+| restart扫描到完整且身份/CRC有效的候选，barrier证据尚未成立 | 保留坐标并按RFC-0003 §12完成必要文件恢复同步；不能仅凭locator/CRC对重试返回durable success，等待有界恢复或返回not-ready/unknown，不让冲突数据另成winner |
+| 已确定完整durable、在可恢复前缀且可读 | 须有有效持久证据，或必要恢复同步已完成；继续参与冲突检查。当前权限有效才幂等返回，是否向原调用者发过响应无关；不能由重建index或readiness推断DATA durable |
 | 无法按既定I/O合同解析的写错误/unknown | 按RFC-0003 §6.1暂停受影响stream/file范围的新DATA准入及跨缺口成功，等真实I/O终结，再释放无使用者的buffer；不可写gate承接未解析义务后才可收缩pending，不无限保留每次重试对象 |
 
 不可写范围必须覆盖该坐标原有和可能迟到的写入，不能通过换shard/stream重新接受冲突写；重启或恢复完成前不重新开放。隔离状态及解析依据消费已有storage generation、allocator/控制恢复事实，不新增逐entry成功回执日志。仅原调用超时而I/O仍可正常完成时，继续跟踪该物理结果，不将其误报为物理失败。
@@ -327,7 +330,8 @@ Profile read/LAC/list请求必须通过mandatory Profile discriminator并至少�
 
 ```text
 check instance / descriptor / read authority / tombstone
-    -> resolve existing locator
+    -> lookup hot locator first and protect the object on a hit
+    -> on hot miss, issue a fresh current-state derived-index Get after that lookup
     -> acquire allocation/generation read pin and revalidate locator/selector
     -> use a matching validated cache entry, or read the target record's required aligned ranges
     -> verify storage envelope identity/length, coordinates/generation and BK entry CRC32C
@@ -335,7 +339,7 @@ check instance / descriptor / read authority / tombstone
     -> release each buffer/pin after its last user or I/O has finished
 ```
 
-热定位与异步索引的接管遵守RFC-0003 §15；旧Add/MOVE/delete索引更新不得打乱当前selector/generation顺序。发现派生locator落后时，重新解析当前authority并重新pin/复核，不能直接把缓存失败当成payload丢失；解析未完成返回not-ready/unknown。runtime query-visible不等于persisted coverage，索引未flush不妨碍合法运行时查询，crash后由未覆盖DATA及完整控制恢复补齐。
+热定位与异步索引接管遵守RFC-0003 §15：写侧先query-visible再淘汰hot，读侧先hot、miss后才Get当前DB状态。fallback不复用早于hot查询的snapshot、iterator或negative-cache；不能先DB miss再hot miss后误判交接中的entry不存在。hot命中保护对象生命周期，两路locator都执行相同selector/generation/pin校验；陈旧则解析当前authority，未知覆盖返回not-ready/unknown。RocksDB I/O期间不持ledger锁，不增跨索引全局锁/事务。旧Add/MOVE/delete不打乱定位顺序，query-visible不等于persisted coverage；restart按§9恢复，索引重建不替代DATA同步。
 
 首批支持独立record校验，不能为读一条entry强制读取整个大batch。长度/范围检查先于大buffer分配，冷读不越过合法allocation；相邻读可有界合并但不等未来请求凑批。慢客户端持有小slice而阻留大父buffer时，允许复制已验证的必要小范围，在没有I/O/零复制引用依赖后及时释放父buffer和pin；原分配的pin不必跟随独立副本的网络等待。复用有界cache/read资源，测量实际读取bytes/返回bytes、I/O次数、cache hit、copy bytes、父buffer驻留与pin持有时间，不以形式零复制牺牲内存或回收。
 
@@ -396,10 +400,10 @@ restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/
 3. 校验device manifest；
 4. 校验每个required device/Arena superblock；
 5. missing/corrupt/unknown/partial mismatch进入non-writable quarantine；
-6. 先恢复Bookie级control log/checkpoint中的route/credential/activation/fence/grant/readable/LAC/tombstone及local cursor/readiness，恢复terminal gates但不开放服务；
-7. 恢复各ArenaControlLog/checkpoint/allocator、relocation selector与DATA/index，再交叉验证Bookie级权限；
+6. 验证Bookie级control checkpoint/后缀，按依赖对正常中断留下且缺少独立持久证据的完整控制内容完成恢复同步，再恢复route/fence/grant/tombstone等terminal gates但不开放服务；
+7. 按RFC-0003 §5.3/12恢复各Arena的durable命令并顺序apply，区分完整DATA候选与本地durable；对必要DATA文件批量恢复同步后才开放幂等durable success/恢复证据，再交叉核验权限和locator。index重建或另一个文件sync不替代目标barrier，未知/损坏/已知I/O错误不因后来sync成功解除；
 8. apply delete assignment snapshot+complete suffix中的terminal tombstone/可重建清理义务，按delete-applied cursor完成reconciliation并重建有界派生清理工作；不等待全部compaction/free；
-9. durable local readiness；
+9. 所有required控制/DATA持久依赖与恢复同步已验证后，durable local readiness；
 10. persistent readiness CAS；
 11. ephemeral registration；
 12. 最后开启Profile write acceptance。
@@ -539,15 +543,19 @@ Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS�
 
 - normal Add 与 fence 的每个 durability/response-loss 边界；
 - §5.2真实Bookie控制日志与多个Arena的partial durability/restart、checkpoint/rotation及tail分类；
+- B2/B9/B16两次故障：write完成但barrier前进程退出，重启处理重复Add后再模拟掉电，成功数据仍在；仅CRC/locator/readiness不授予durability，后一次sync不掩盖已知I/O错误；
+- B3/B7/B10/B16控制命令同批durable后顺序apply、同slot ALLOC竞争、apply中途crash、重复FREE、durable/applied cut分离及提交前quiescence gate；
 - §6.1同坐标去重/冲突及LAC/digest兼容边界、DATA durable到locator publication间的crash、ACK后点读与全部index丢失；
 - 跨normal/recovery/read/storage统一N的N-1/N/N+1及normal允许但recovery超限44-byte区间；首次拒绝不可表达entry，降低新写阈值后旧entry仍可读/恢复，溢出早于大分配；
 - A29/CLIENT-1整体gate在多slot ACK更新完成后恢复回调，未变有效ACK保留；B2/B3/B6/B9证明单stream逻辑后缀不损及同文件其他成功DATA，复用残留不复活且不依赖每次整块清零；
 - B17/B18分别核算Arena与filesystem空间，DATA预分配不侵占SST/控制维护余量；shared-filesystem多Arena不重复预留，实际I/O/authority异常仍沿错误恢复流程；
 - DATA durable且index Put成功但未flush时crash、热定位淘汰与query-visible接管并发、陈旧Add索引更新晚于MOVE/delete；持久覆盖不能虚报，已成功entry不出现临时NoSuchEntry；
+- B9/B18精确交错hot-first查询与DB接管/淘汰，禁止旧snapshot/iterator/negative-cache fallback；hot对象生命周期、selector/pin安全，DB I/O不持ledger锁；
 - index持续stall与新写/fence并发，预算有界且控制推进；短暂资源拒绝不立即触发replacement，重试NONE不覆盖旧UNKNOWN，deadline不制造可跳过的entry hole；
 - B18把入口payload推至准入上限并暂停提交或索引接管，再恢复下游；共享buffer/定位工作集保证已准入entry完成且资源最终释放，不超额、不阻塞event loop/shard/ledger锁、不永久互等；大entry无工作集时在接受前背压；
 - RFC-0004 §7.3的未fenced来源先missing再收旧写、fence durable但pre-cut I/O未解析、重复/旧incarnation响应；复用Classic quorum算法并适配Profile，不能误close或新增逐entryfence fsync；
 - §8以LAC=99/entry 100验证confirmed、unconfirmed及恢复点读分层，Bookie不按local LAC截断，DATA completion不推导quorum LAC或增加逐Add LAC fsync；
+- A16/A26/B19核验P与累计应用length同前缀，LAC落后、fragment抬升、无新尾部/空ledger、边界读不可用及同P不同L的close重读均不得错误成功；
 - 同批L1 fence/L2合法、已提交timeout后同坐标不同payload、batch 11 unknown/12已完成、共享文件错误与恢复；逐entry结果不污染物理前缀，异常pending及buffer有界；
 - 大batch中单entry独立envelope/CRC校验及必要对齐I/O、坏length、cache/pin竞态与慢客户端小slice持有；首批shared-only及后续dedicated池的资源/性能结论分别计量；
 - §10.1 ByteBuf生命周期、reference corpus等价、固定shard合批、分配/复制/CPU与真实durability指标通过B18/B19；

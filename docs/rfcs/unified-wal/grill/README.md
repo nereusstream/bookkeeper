@@ -2,7 +2,7 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
-2026-09-18基于`ffebee6f59a9c4113eabda39f5da41fe305616a2`的修订已合入现有owner RFC：纠正Classic恢复基线并复用其quorum/fencing算法，否定证据逐来源核验；DATA准入保留完成工作集；shared compaction使用冻结source及成组净收益；Arena不重复持有Bookie生命周期，FREE按整个allocation/generation判定。四组场景归原UW-3/4/5/6/7及Spike A/B/C，见[当前清单](../implementation/README.md)。此前合同与首批范围保持，无源码修改或新运行证据；状态仍Proposed/Planned，下表历史轮次、逐字反馈和source-bound receipt未重写或晋升。
+2026-09-18基于`a861f470c47e12916a3c300d37d2b82131aee290`的修订已合入现有owner RFC主流程：重启候选按有效证据或必要恢复同步取得durability；Arena条件命令合批持久后顺序apply、checkpoint取applied cut；恢复close绑定P/length/context；点读先hot、miss后fresh current DB Get。两次故障、同批竞争、长度锚点和查询交错归原UW-2/3/4/6/7及Spike A/B/C，见[当前清单](../implementation/README.md)。此前合同与首批范围保持，无源码修改或新运行证据；状态仍Proposed/Planned，下表历史轮次、逐字反馈和source-bound receipt未重写或晋升。
 
 规则：
 

@@ -30,7 +30,11 @@ BtrLog 可作为建模风格参考，但它的 durable blob-store entity、flush
 
 ```text
 ProcessCrash
-    volatile state lost; durable media retained
+    process-local state lost; durable media retained;
+    complete unsynced file bytes may remain readable in the OS cache
+
+PowerLoss
+    unsynced file bytes may be lost; established durable media retained
 
 PermanentFailureDomainLoss
     one declared placement failure domain's durable evidence
@@ -152,6 +156,8 @@ per-request response wait versus submitted coordinate/write outcome
 supported point-recovery context, source coverage and rich terminal outcome
 AQ evidence
 LAC/close state
+recovery hint source entryId, piggyback LAC and source cumulative application length
+resolved final prefix P and matching length L, with unavailable/conflicting anchor state
 client confirmed boundary versus Bookie local LAC and physical candidate presence
 authoritative Classic/Profile route
 profile inactive install, normal admission/fence generation,
@@ -238,6 +244,7 @@ ExpireAddDeadlineWithoutSkippingAssignedEntry
 PublishReadableLocation
 ReadPointRecoveryEvidence
 ClassifyRequiredHoleOrNormalTail
+ResolveMatchingPrefixLength
 PublishDurableRecoveredClose
 BeginBoundedRepair
 DurabilizeReplacementEvidence
@@ -284,6 +291,7 @@ ReclaimCoveredRepairReceipts
 - 取消/timeout只终止响应等待，已提交坐标仍占有或由不可写范围保护，迟到X与重试Y不能形成两个winner；同批其他entry失败不决定本entry结果；
 - 模型区分不可变应用数据/累计length与可变piggyback LAC/封装digest；合法normal/recovery重写不因后者差异冲突，hole不由localLastEntryId推断存在。真实字节/完整性与慢路径成本由B19验证；
 - 受支持子集的point oracle区分required hole、normal tail、temporary unavailability和authority loss；recovered success晚于durable close，重启后重新验证；
+- `ResolveMatchingPrefixLength`将源entryId/LAC/源累计length与最终`(P,L)`分开；复用已读P、精确匹配的权威close或必要边界点读。LAC落后、fragment提升起点和无新增尾部均不能组合独立最大值；空ledger只允许`(-1,0)`，缺失锚点defer、矛盾锚点conflict。已读相邻entry校验累计应用长度，close重试必须P/L/context均匹配；有限大小/长度关系由模型展开，真实字节、溢出及API映射由A16/A26/B19验证；
 - local LAC=99且100为有效候选时，合法物理/恢复点读可读100；confirmed范围由客户端限定，DATA完成与候选存在不推导quorum LAC或recovered close，未知定位不计definitive absence；
 - `ReadPointRecoveryEvidence`复用Classic的write-set/`W-A+1`聚合/顺序write-back语义，否定仅来自自身durably fenced、身份/incarnation/context匹配且pre-cut写/定位已解析的distinct source。展开A已有ACK、B旧写在途、A/C先fenced、B/C先missing的3/3/2时序，不能把global coverage抽象成所有副本已fenced；B迟到写仍可发生，错误提前close必须被oracle否证。重复/旧上下文missing不补票，fence事实跨entry复用；
 - 基础durable close不依赖strong-publication、不reset；首批active ledger不生成增强token，不因增强coordinator/sidecar故障新增replacement等待。既有metadata/installation不可用仍可defer，不能把此性质夸成无条件可写；
@@ -307,7 +315,8 @@ Model只抽象上述boolean/generation及有界大小/资源关系，不编码TL
 
 ```text
 slots/extents and generations
-durable vs volatile ArenaControlLog records
+readable candidate versus independently durability-covered ArenaControlLog command prefixes
+control durableThrough versus contiguous appliedThrough, including condition-failed no-ops
 allocator checkpoint generations
 checkpoint through-sequence and current-selector snapshot
 retiring source and anti-ABA/fencing state
@@ -315,7 +324,7 @@ superblock A/B pointers
 shard allocation pools
 Arena reusable capacity versus shared-filesystem available/reserved maintenance space
 DATA preallocation and index/control/checkpoint concurrent temporary disk working sets
-data records and durability
+readable unsynced DATA candidates versus durability-covered DATA and recovery-sync dependencies
 residual old-generation DATA bytes independent of current allocation ownership
 immutable submitted DATA blocks, stream generation and bounded batch sequences
 completed write ranges versus barrier coverage and contiguous physical durable-through
@@ -328,6 +337,7 @@ local-success publications
 Bookie-authoritative ledger tombstones consumed by Arena transitions, without independent Arena lifecycle
 locators and reader pins
 bounded hot locators, query-visible derived index and pending async updates
+point-read hot lookup phase, protected locator reference and subsequent current-state DB view
 persisted index contents and per-stream coverage checkpoint bound to storage/index generation
 conditional MOVE_COMMIT records and move generations
 authoritative relocation chain and orphan copies
@@ -335,7 +345,8 @@ frozen/resolved source occupancy, one normal task per source/generation and boun
 per-move control sequence and durable-through cut
 per-Arena committed/applied conditional state
 conditional operation identity, expected predecessor and assigned control sequence
-pending vs durable conditional result and bounded idempotency summary
+enqueued versus durable-unapplied versus applied conditional command and bounded result summary
+FREE pre-submit quiescence gate held through resolved transition
 selector/pin epoch, old-pin admission gate and pre-cut readers
 new-location lookup/local-success authority dependency
 device state
@@ -358,6 +369,8 @@ AdvanceContiguousPhysicalDurableThrough
 PublishBoundedHotLocator
 ApplyDerivedIndexBatchInSelectorOrder
 TransferLocatorToQueryVisibleIndex
+LookupHotAndProtectHit
+FallbackFreshCurrentIndexGetAfterHotMiss
 FlushDerivedIndexCut
 PublishPersistedIndexCoverageCheckpoint
 PublishLocalSuccess
@@ -370,15 +383,18 @@ DurabilizeCheckpoint
 SwitchSuperblock
 ReclaimOldControlSegment
 CrashDeviceProcess
+PowerLossDropsUnsyncedBytes
+ValidateRecoveredCandidatePrefixes
+SynchronizeRequiredRecoveryFilesInDependencyOrder
 RecoverAllocator
 CorruptAuthority
 CopyForMove
 DurabilizeMovedPayload
 AppendMoveCommit
 EnqueueConditionalTransition
-EvaluateConditionalPredicate
-ApplyConditionalTransition
-DurabilizeConditionalResult
+DurabilizeConditionalCommandGroup
+ApplyNextDurableConditionalCommand
+ReturnAppliedConditionalResult
 RetryConditionalOperation
 IntroduceUnknownMandatoryControlRecord
 DurabilizeMoveCommit
@@ -400,6 +416,10 @@ RunReservedMaintenanceStep
 RebuildAllAuthorizedLiveRanges
 ```
 
+`AppendAlloc/AppendMoveCommit/AppendFreeAndBump`只记录条件命令；`DurabilizeConditionalCommandGroup`允许多命令共享barrier。`ApplyNextDurableConditionalCommand`是按sequence对当前applied state进行predicate判断及状态修改的一个原子动作，不能拆成两次可交错的预检查/修改；失败形成确定性no-op并推进appliedThrough。T1/T2同批争同一slot时仅先应用者可成功，结果不再追加一次fsync。checkpoint仅覆盖applied前缀，durable未apply后缀重放；条件依赖checkpoint、前序命令及绑定的必要authority引用，不依赖重启时钟/网络/任意metadata。FREE在提交前建立并保持现有quiescence gate直到结果解析，重启pin=0不作为历史FREE条件的替代证据。
+
+`CrashDeviceProcess`必须允许未sync的完整bytes仍可读；`PowerLossDropsUnsyncedBytes`才丢弃未持久部分。恢复先验证候选与依赖，必要时按控制/DATA文件完成恢复同步，再重建可用于durable success的事实；index rebuild/readiness不能替代该动作。hot miss后的fallback必须新取当前DB视图，不能复用早于hot查询的snapshot/iterator/negative cache。模型只保留这些次序，真实文件sync及RocksDB视图交错由B2/B9/B16验证。
+
 ### 6.3 检查目标
 
 - local success隐含durable allocation、完整write/实际覆盖barrier、对应stream连续可恢复DATA前缀及readable publication；
@@ -407,16 +427,17 @@ RebuildAllAuthorizedLiveRanges
 - 同批L1的逻辑失败不撤销batch物理durability或L2资格；empty assembling不留下序号，submitted取消不移除record；
 - 写错误/unknown关闭受影响stream及必要file/device范围，不能任意跳号、换stream或凭重复sync成功解除；已提交坐标在恢复解析前不视为空，I/O终结后才释放实际引用资源；
 - 重启扫描与成功前缀一致，required损坏不截断为无ACK后缀；move目标须可恢复发现才切换/释放old source；
+- 完整framing/CRC/generation仅产生候选；独立有效durability证据或依赖顺序内的恢复同步完成前，不开放对应写入、返回幂等durable success或提供durable recovery evidence。写完成未barrier→进程退出→重启重试→掉电的两次故障不得丢失新允许成功的数据；恢复sync只建立本地durability，不推导AQ/LAC，已知I/O错误或损坏/缺失依赖仍fail closed；
 - 单stream逻辑后缀按完整allocator及当前stream/generation/sequence判定，不缩短/移动共享文件。S0低offset未完整不损及S1高offset已成功DATA，S1完整也不能填补S0的逻辑gap；
 - FREE/reallocate不在模型中擦掉旧字节；generation 7→8后新DATA未写/部分写crash时，旧合法header/CRC不复活owner或进入当前index。是否unused由当前分配/恢复依赖证明，未知保持不可写，旧generation本身不等同当前媒体损坏；
 - Arena FREE只增加内部reusable，不自动增加filesystem available；DATA预分配和并发SST/控制/checkpoint维护消费同一filesystem预算，共享此filesystem的Arena不能重复预留。低水位限制扩张/新DATA并保留已预算维护；实际fallocate/ENOSPC/磁盘峰值由B17/B18验证；
 - 出队不归还仍持有的bytes/inflight credits，取消不终结真实I/O；只抽象已有有界资源转移，timer/大entry/慢读/控制容量的真实进展由B18验证；
 - 准入前取得最低共享提交和定位/完成工作集，入口payload不能挤占；下游暂停再恢复时，已准入请求在既有fairness下继续完成并释放资源。用小有限容量展开source等destination、durable DATA等locator的循环反例；真实event loop/shard/锁阻塞和大entry由B18验证，不把瞬时超额设为逃逸动作；
-- local success可依赖bounded hot locator，不依赖DB Put/flush；热定位淘汰晚于已计费query-visible接管，不等flush且无点读空窗。index stall积压仍有界，满额背压后续DATA并保留control容量；
+- local success可依赖bounded hot locator，不依赖DB Put/flush；热定位淘汰晚于已计费query-visible接管，不等flush。读侧先hot、hit保护生命周期、miss再fresh current DB Get，同样验证selector/generation/pin；展开DB miss→接管/淘汰→hot miss及旧snapshot的错误路径，不能把“两处始终至少有一份”直接假设为点读无空窗。index stall积压仍有界，满额背压后续DATA并保留control容量；
 - 关闭纯派生索引WAL时crash丢弃未持久内容，Put/query-visible不推进persisted coverage；仅全部相关更新真实持久后的连续cut可发布匹配storage/stream/index generation的checkpoint，未覆盖DATA重放；
 - 覆盖checkpoint缺失/损坏/代际不匹配不虚报absence或跳过DATA；它不替代allocator/current selector/tombstone及完整控制后缀，不授予free或MOVE winner。旧Add/MOVE/delete异步update不复活陈旧selector，陈旧派生locator按当前authority重解析；
 - slot/generation 唯一 owner；
-- free 未 durable 时不能 reuse；
+- FREE命令未durable并成功apply时不能reuse；
 - old locator 不能读新 generation；
 - checkpoint rotation 不丢失唯一 authority suffix；
 - authority 无法证明时 device 不变为 writable；
@@ -426,10 +447,10 @@ RebuildAllAuthorizedLiveRanges
 - 正常compaction只选不再追加且原写已解析的source/generation，同source最多一个正常任务；OPEN ledger的旧物理范围可搬，异常并发任务仍检验条件化winner。victim组按实际source释放减destination占用判断净收益；无收益时有界背压而非无限复制，真实padding/成本曲线由B10/B17验证；
 - committed move 在 index 丢失后仍可重建，source free 晚于 cutover、new-pin 阻断和 reader drain；
 - move 不创造新的 local-success fact；logical entry已有success不阻止清理从未成为lookup authority的new-location orphan；
-- conditional predicate在同一Arena committed/applied state求值；condition failure无状态变化，duplicate operation不产生第二winner或generation bump；
-- `APPLIED_DURABLE/ALREADY_DURABLE`只在complete prefix durable through自身assigned sequence后成立，pending/enqueued result不授予cutover/free/reuse；
+- conditional command先合批durable，再由单一Arena sequencer按序原子求值/修改applied state；T1成功的owner对同组T2可见。condition failure不改业务状态、不回滚同组其他命令且不留sequence gap，duplicate不产生第二winner或generation bump；
+- `APPLIED_DURABLE/ALREADY_DURABLE`同时要求complete durable prefix覆盖自身sequence及成功apply，durable-unapplied或failed命令不授予cutover/free/reuse；FREE的易失排空前置由提交前并持续持有的gate保证，不能重放时以pin=0补造；
 - selector publication与block-new-old-pin形成同一cut；cut后stale cached locator不能取得old pin，pre-cut reader可drain；
-- checkpoint current selector + anti-ABA/retiring state与full-chain oracle等价；
+- checkpoint current selector + anti-ABA/retiring state与full-chain oracle等价，cut不超过连续appliedThrough；durableThrough领先时保留并重放未apply后缀，包含成功与失败no-op，不把fsync完成最大序号当作快照已应用边界；
 - orphan free与late commit不能都成功，cutover晚于覆盖自身control sequence的durable-through。
 
 shared slab 可先用一个 block 包含两个 ledger 的最小域建模；dedicated extent 用单 owner block 建模。不能只建模 dedicated extent 后宣称覆盖 shared delete。
@@ -588,7 +609,7 @@ attempt outcome class
 operation scope and bounded rich outcome reason
 legacy callback/future projection
 AutoRecovery/marker scheduling state
-published close/final prefix
+published close/final prefix and matching cumulative application length under Model A's contract
 authority-unrecoverable reason
 ```
 
@@ -628,7 +649,7 @@ DeferUnavailableRecovery
 - normal tail须在exact write set上有`W-A+1` distinct definitive absences；每个source自身durably fenced、身份/incarnation/context匹配且无未解析pre-cut写/定位覆盖，不能由global fence coverage代替；offline/timeout、重复或旧上下文不计。扩展range与复用Classic的point oracle使用同一规则；
 - required frontier来自accepted authority，later speculative payload不制造required hole；
 - authority unrecoverable属于quarantine而非payload DATA_LOSS，required-coordinate finite evidence exhausted才是DATA_LOSS；
-- recovered outcome晚于durable close/final-prefix publication；
+- recovered outcome晚于durable close，P/length/context沿Model A及RFC-0004 §7.4同前缀合同验证；
 - 只有matching durable `RECOVERED_AND_CLOSED`投影legacy `OK`；deferred、incomplete、quarantine和data loss都投影non-OK；
 - fragment/partial progress与legacy skipped ledger不计为ledger recovered；aggregate skip不能clear intent/marker或发布repair completion；
 - generic legacy rc不抹除coordinator/admin持有的rich outcome，AutoRecovery按rich class调度；
@@ -711,7 +732,9 @@ CompletionGateOpensAfterAllReplacementAckUpdates
 UnchangedValidReplicaAcksSurviveReplacement
 AcceptedEntryFitsRequiredReadRecoveryAndStorage
 NegativeEvidenceRequiresMatchingSourceFenceAndResolvedPreCutWrites
+RecoveredCloseBindsPrefixAndCumulativeLength
 AdmittedDataHasBoundedSubmissionAndLocatorWorkingSet
+RecoveredDurableSuccessRequiresValidEvidenceOrRecoverySync
 AllocationDurableBeforeLocalSuccess
 OneOwnerPerSlotGeneration
 NoReuseBeforeDurableGenerationBump
@@ -723,6 +746,7 @@ StreamTailExclusionPreservesOtherStreamsInSharedFile
 ReusedAllocationNeverRevivesOldGenerationData
 ArenaFreeDoesNotCreateFilesystemSpace
 HotLocatorEvictionRequiresQueryVisibleChargedSuccessor
+PointLookupUsesHotThenFreshCurrentIndexView
 IndexCoverageImpliesPersistedContentsAndMatchingGeneration
 AsyncIndexUpdateNeverOverridesCurrentSelectorOrTombstone
 OldLocatorNeverReadsNewGeneration
@@ -740,6 +764,8 @@ LateMoveCommitAndOrphanFreeAreExclusive
 MoveCutoverRequiresOwnDurableSequence
 ConditionalFailureHasNoEffect
 DurableApplyCoversOwnSequence
+ConditionalCommandsApplyInDurableSequenceOrder
+CheckpointCutNeverExceedsAppliedThrough
 DuplicateConditionalOpHasSingleResult
 SelectorCutBlocksNewOldPins
 OldBinaryBlockedBeforeReplayOrWrite
@@ -811,19 +837,20 @@ RichOutcomeSurvivesGenericProjection
 - bounded range 只有完整 `F + 1` distinct-domain coverage proof 与 conditional completion authority 才 reset loss window；
 - verifier assertion是reset authority，并长期绑定immutable descriptor/`F`/policy；digest-only不足，duplicate loss不重复计数，receipt snapshot durable前不删child；
 - 同一 extent generation 不同时属于两个 ledger instance；
-- ALLOC 未 durable 时 DATA 不可被允许 ACK；
-- FREE 未 durable 时 slot 不可复用；
+- ALLOC命令未durable并成功apply时DATA不可被允许ACK；
+- FREE命令未durable并成功apply时slot不可复用；
 - 未 commit move copy 不成为 authoritative；commit 后 index 丢失仍可重建，reader drain 前 source 不 free；
 - checkpoint current selector等价full chain；orphan free不删除logical entry在current selector承载的既存success；
-- conditional failure无effect；durable result覆盖自身sequence，duplicate op只有一个result；selector cut后不能取得new old-location pin；
+- 条件命令合批durable后按序原子求值并apply；失败只推进applied sequence、无业务effect，成功结果覆盖自身durable sequence，duplicate op只有一个result；checkpoint只取applied cut，selector cut后不能取得new old-location pin；
+- 重启可读候选需独立有效证据或必要恢复sync才可参与durable success，不能靠索引/readiness或后来的sync掩盖已知错误；hot-first点读miss后取fresh DB视图，接管中不虚报absence；
 - `OldBinaryBlocked`或isolated-new-scope fallback必须先于任何Segment effect；`FormatCompatible`或`RegistrationGenerationMatches`为false时不writable，缺少negative proof不能rollback；
 - recovery 只发布最大连续可证明前缀；
 - logical delete 后不能重新 open；
 - unadmitted RepairIntent不授予grant/payload；delete fence与admission单序，cut前admitted intent全部freeze；admission response loss不复制intent/target，后续repair progress只推进owning domain head；
 - effective obligation-changing assignment不能让stale generation继续writable；snapshot必须可应用，wipe/decommission proof由cluster接受且不能跨incarnation/device/scope重放；
 - fast-path失败必须回退且不越hole；normal tail需要quorum-intersection absence；deadline/cancellation/authority loss不得伪造payload DATA_LOSS；
-- recovered success蕴含同generation durable close/final-prefix publication。
-- legacy `OK`蕴含matching durable recovered close；skip不产生recovery authority，generic projection不丢coordinator/admin rich outcome。
+- recovered success蕴含同generation durable close及匹配同一前缀的`P/length`。
+- legacy `OK`蕴含P/length/context均matching的durable recovered close；skip不产生recovery authority，generic projection不丢coordinator/admin rich outcome。
 
 ## 10. 最低配置矩阵
 
@@ -846,7 +873,9 @@ local route claim, fence admission generation and registration readiness
 DescriptorCanonical/WireNegotiated/ControlAuthorized/AuthorityRead and no-downgrade booleans
 OldBinaryBlocked/FormatCompatible/RegistrationGenerationMatches, migration/device/incarnation generations and new-scope fallback
 allocator generation reuse
-per-Arena conditional apply/durable result, duplicate retry and selector/pin cut
+per-Arena batched command durability then ordered atomic apply, applied checkpoint cut, duplicate retry and selector/pin cut
+readable unsynced restart candidates, recovery synchronization and subsequent power loss
+recovery hint source coordinate versus final prefix length; hot-first lookup with fresh DB fallback
 same-Arena relocation, concurrent move and reader pin
 checkpoint current-selector compression, orphan free and late move commit
 offline Bookie delete and rejoin
@@ -876,16 +905,16 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-PROFILE-COMPAT | A | 3/3/2 | descriptor match, anonymous/authenticated-but-unauthorized/authorized control scope, normal/recovery/Profile opcode, negotiation, old-decoder Classic effect and no downgrade |
 | A-FENCE-STALE | A | 3/3/2 | stale writer vs recovery fence, delayed responses |
 | A-ACK-RESP | A | 3/3/2 and 4/3/2 | Add unknown/current ACKs; multi-slot completion gate with outside-write-set slot first, unchanged ACK retention; capacity backoff/credits/deadline |
-| A-POINT | A | 3/3/2 and 3/3/3 | LAC 99/candidate 100; per-source fence and resolved pre-cut writes before missing; unfenced B missing then old write, duplicate/stale evidence; Classic point oracle and durable close |
+| A-POINT | A | 3/3/2 and 3/3/3 | LAC 99/candidate 100; per-source fence and resolved pre-cut writes before missing; unfenced B missing then old write, duplicate/stale evidence; Classic point oracle and close with matching P/length/context, fragment-raised/empty/unavailable length anchor |
 | C-REUSE | C | local | alloc/data/free/reuse crash; generation 7 to 8 with old valid bytes remaining before new DATA |
-| C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
+| C-CKPT | C | local | checkpoint current selector through applied `S` while durableThrough may lead, replay unapplied suffix and superblock/control-segment crash |
 | C-MOVE | C | local | frozen/resolved source of OPEN ledger, one normal task per source, bounded victim-group gain; conditional move/orphan race, whole-allocation FREE and reader drain |
-| C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
+| C-COND | C | local | same-group T1/T2 ALLOC competition, durability before ordered atomic apply, mid-apply crash and failed no-op; duplicate FREE/response loss, applied checkpoint cut, unknown record and held quiescence gate |
 | C-TAIL | C | local | immutable DATA, 11 unknown/12 complete; low-offset S0 tail versus successful high-offset S1 in shared file; no file-wide truncation |
 | C-WRITER | C | local | pool transfer/reuse with delayed old writer I/O and completion |
 | C-SPACE | C | local, shared filesystem when multiple Arenas enabled | reserved submission/locator working set under full input and downstream pause/resume; bounded disk maintenance, low-gain compaction backpressure and capacity recovery |
-| AC-LOCAL-STORE | A+C | two Arenas | partial durability, same-batch L1 fence/L2 success, K/X timeout then K/Y, coordinate protection, read-after-success |
-| C-REBUILD | C | local | query-visible handoff vs persisted coverage, Put-before-flush crash, stale async MOVE/delete updates and full live-range reconstruction |
+| AC-LOCAL-STORE | A+C | two Arenas | partial durability, same-batch L1 fence/L2 success, K/X timeout then K/Y, coordinate protection; readable unsynced restart candidate, retry and second power loss; recovery sync without AQ/LAC inference |
+| C-REBUILD | C | local | hot-first/fresh-Get handoff, old-view negative fixture; query-visible vs persisted coverage, Put-before-flush crash, stale async MOVE/delete updates and full live-range reconstruction |
 | C-FORMAT | A+C | local | old-binary fence, partial required-device migration, unknown mandatory format, incarnation/readiness generations and unsafe rollback |
 | D-OFF | D | retained historical targets/incarnations | offline rejoin after membership overwrite and activation-history snapshot |
 | D-RACE | A+D | E > W | delete vs ensemble/AutoRecovery; same-start D to E overwrite, activation-retention publication and snapshot/rejoin |
@@ -903,6 +932,8 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 当前模型为A/C/D及按能力启用的E，不存在Model B；上述A-FENCE-STALE/A-ACK-RESP保留stale writer、response loss和ordered completion场景，不恢复sequence/offset协议。
 
 A-ACK-RESP的4/3/2复用CLIENT-1一般E>W回归，不扩展首批存储性能矩阵。统一大小只用足以区分N-1/N/N+1的有限域，C-TAIL/C-REUSE保留S0/S1共享文件与旧代际字节，C-SPACE区分内部/filesystem及共享完成工作集。A-POINT的逐来源fence与C-MOVE/C-SPACE的不可变source、整单元FREE、净收益及满载推进只展开已有状态，真实I/O/调度/成本仍由B10/B17/B18/B19验证；不新增工作流或持久化任务系统。
+
+本轮继续使用A-POINT、C-COND/C-CKPT、AC-LOCAL-STORE及C-REBUILD，分别展开P/length锚点、durable后顺序apply、进程退出后可读再掉电，以及hot查询/接管/fresh fallback交错。不得把process crash等同掉电、把可读候选直接置为durable、把condition预检查当最终apply，或将两级lookup压成消除反例的原子动作；不增加配置编号或持久成功日志。
 
 ## 11. 状态空间控制规则
 
