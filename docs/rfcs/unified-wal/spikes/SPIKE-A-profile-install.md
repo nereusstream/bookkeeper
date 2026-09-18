@@ -251,6 +251,8 @@ Oracle：Bookie 本地 durable install 校验仍 fail closed；watch 不是正�
 
 补充LAC分层：副本local LAC=99、entry 100已达ACK quorum且writer在下一次piggyback前崩溃，合法unconfirmed/恢复点读可读100，confirmed read仍由客户端确认边界限制。Bookie不能以local LAC拒绝候选或伪造absence，读取候选不直接发布recovered close；DATA completion不生成quorum LAC，显式LAC合法单调更新可合批，不增加每Add控制fsync。与B19及Model A-POINT联合验证。
 
+沿现有Classic恢复取证算法做Profile差异验证：3/3/2中entry x已有A的ACK、B的旧写在途，恢复已fence A/C但尚未fence B；B/C先missing、A数据响应慢时，不把未fenced的B计票或close到x-1。令B随后接收旧写，再完成其本地fence并重新取证；另覆盖fence durable但pre-cut I/O/定位未解析、重复响应和旧incarnation。每个计入否定集合的source均须匹配当前instance/context且自身durably fenced，已有效的fence跨entry复用，无逐entry控制fsync或等待全E在线。
+
 Oracle：缺少 matching global READY 或 local durable normal ACTIVE 的 normal Add 接受数为 0；客户端可复制的 epoch/field 不能单独激活；READY 可早于部分 local active，但 初始创建返回normal writer必须晚于all-E initial activation；restart 后接受集合不扩大。
 
 ### A17：Legacy Add targeting Profile route
@@ -322,6 +324,8 @@ Oracle：每个vector的Classic route claim、handle create、master-key persist
 Oracle：Profile初始创建/install在old/mixed target上payload前失败；只读/恢复校验实际所需target操作，不支持的target不执行Profile语义也不降级，按既有读/恢复规则选有效副本或失败，不把all-E探测/activation作为通用open前置。Profile只在独立mTLS connection首次HELLO，restart/generation变化重连；Classic client/endpoint/pool没有Profile TLS/HELLO；physical channel key包含protocol/BookieId/incarnation/generation/TLS identity；registration hint、HELLO与durable receipt分层；unsupported/identity/stale/fenced/deleted/grant/transient/unknown/quarantine/unauthorized/bad-request/durability-unknown不坍缩成OK，external unauthorized可coarse但internal class保留，协商不发生在每Add。
 
 在既有三元组矩阵验证RFC-0001 §11.5的资源映射：准入前资源拒绝进入有界same-operation backoff，已知activation未完成复用协调等待，提交后unknown不能投影成NONE；terminal fence/delete/conflict/unauthorized不靠换组绕过。检查分类发生在`handleBookieFailure`之前，不先压成通用WriteException；不为该行为修订旧wire枚举/corpus或历史receipt。
+
+恢复missing映射消费RFC-0004 §7.3/7.4的逐来源条件；unknown/not-ready、未fenced来源及未解析pre-cut写不能坍缩为可计票的NoSuchEntry/NoSuchLedger。复用Classic的missing聚合与顺序交付，不把上层聚合结果误作单副本响应，不新增错误枚举或第二套基础quorum算法。
 
 ### A27：Add unknown、换组与ACK故障域
 

@@ -238,9 +238,15 @@ open-ledger recovery 的首个 missing coordinate `x` 只有同时满足以下�
 
 - ledger 已在同一 generation 下 fenced，且所有 `<x` required coordinate 已无洞恢复；
 - `x` 位于 quorum-proven committed frontier之后；
-- exact write set 上有与每个可能 Ack quorum 相交的 definitive absence coverage；Round-robin `E/W/A` 基线至少为 `W-A+1` 个 distinct write-set members；
+- exact write set 上有与每个可能 Ack quorum 相交的 definitive absence coverage；Round-robin `E/W/A` 基线至少为 `W-A+1` 个distinct members，且每个否定来源都满足下述本地fence、身份与存储证据条件；
 - timeout、offline、connection failure 或 corrupt response 不算 definitive absence；
 - 没有 accepted authority 证明 `x` 或更晚 coordinate 属于 required committed prefix。
+
+**否定证据按来源核验。** 每个missing只能来自当前RecoveryContext允许的source/write set，匹配ledger instance、Bookie identity及storage incarnation，并且该副本已完成本instance的durable normal fence。其他副本形成fencing coverage不替代这个条件；所选source尚未fenced时，先完成现有Profile fencing操作，再读取并使用其否定结果。同一来源的重复响应只计一次，旧incarnation、旧上下文或身份不匹配的响应不计票。本地仍有该坐标未解析的pre-cut写入、定位覆盖未恢复或storage unknown时，返回not-ready/unknown而非definitive absence；旧RPC结束、Add失去成功资格或热索引未命中都不足以证明不存在。
+
+以3/3/2为例：旧writer已有A对entry x的ACK，发往B的写还在途；恢复方fence A/C后，未fenced的B与C先报missing，而A的数据响应慢。B仍可能接受旧写，不能把B/C计成两个稳定否定而close到x-1。这是接口适配必须防止的时序，不是已复现的Classic故障。集群fencing只需每个write quorum满足coverage，不要求所有E都在线或已fenced，见[BookKeeper协议的fencing说明](https://bookkeeper.apache.org/docs/development/protocol/)。恢复必须保留每个否定来源的保护，不能把集群coverage和本地absence混为一项证明。
+
+fence是按instance/目标副本建立的持久条件；匹配当前身份、上下文且仍有效的本地fenced状态可复用，不为每个entry重写fence日志。此检查不新增逐entry metadata查询、控制fsync或全E等待；durable fence后尚未解析的pre-cut I/O仍按RFC-0005 §6/8处理，不能借缓存fence跳过。
 
 较早 hole 后的 later payload 若没有 required authority，只是必须 suppress 的 speculative suffix，不得把 hole 命名为 DATA_LOSS；若 later accepted authority 使该 coordinate required，则根据证据进入 deferred、quarantine 或 DATA_LOSS，且绝不能发布跨 hole prefix。
 
@@ -296,7 +302,9 @@ legacy projection锁定为：
 
 只有matching durable close才能映射legacy `OK`；所有其他outcome必须non-OK，且generic rc不能擦除internal/admin rich outcome。`DataUnknownException`虽概念上接近quarantine，但当前legacy factory兼容不完整；是否修复factory、协商新code或继续generic mapping保持OPEN，不能提前锁为最终码或未经协商返回旧client。
 
-现有Classic首个 `NoSuchEntry/NoSuchLedger` 即终止tail的行为不能直接复用于general E/W/A Profile recovery；新路径必须先满足第7.3节normal-tail oracle。`BookKeeperAdmin` 的 legacy `skipUnrecoverableLedgers` 可以保留aggregate completion，但skipped ledger必须出现在rich result中，不计recovered success，不清RepairIntent/underreplication/loss state，也不发布repair completion/reset；Profile automation不能消费aggregate `OK`作为authority。AutoRecovery/ReplicationWorker必须按rich outcome分别retry、结束attempt、quarantine或terminal，并只在durable metadata/receipt重验后clear marker。
+Classic基础恢复已有write-set选择、恢复读fencing、`W-A+1`否定聚合、按entry顺序推进及recovery write-back。以`ffebee6f59a9c4113eabda39f5da41fe305616a2`为静态源码基线：[`LedgerRecoveryOp.RecoveryReadOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerRecoveryOp.java)经[`ListenerBasedPendingReadOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ListenerBasedPendingReadOp.java)继承[`PendingReadOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingReadOp.java)与[`ReadOpBase`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ReadOpBase.java)；后者计算`W-A+1`，顺序/并行恢复读聚合missing，`sendReadTo()`携带`FLAG_HIGH_PRIORITY | FLAG_DO_FENCING`，listener按entry顺序交付结果。因此`LedgerRecoveryOp.onEntryComplete()`接到的聚合missing不能描述为第一个Bookie的missing。
+
+Profile首批复用上述基础算法与现有验证场景，适配instance/descriptor、显式recovery grant、§7.3逐来源否定条件、unknown/not-ready分类及新存储持久化边界；不另建一套基础quorum算法，也不把未经身份/错误语义适配的Classic路径直接接入。`BookKeeperAdmin`的legacy `skipUnrecoverableLedgers`可保留aggregate completion，但skipped ledger必须出现在rich result中，不计recovered success，不清RepairIntent/underreplication/loss state，也不发布repair completion/reset；Profile automation不能消费aggregate `OK`作为authority。AutoRecovery/ReplicationWorker必须按rich outcome分别retry、结束attempt、quarantine或terminal，并只在durable metadata/receipt重验后clear marker。
 
 close response loss按以下顺序解析：
 
@@ -322,6 +330,7 @@ CAS OPEN -> IN_RECOVERY under Profile metadata authority
     -> durable fence coverage for every possible current write set
     -> freeze instance, ensemble history, E/W/A and recovery context
     -> collect authoritative LAC/required-frontier evidence
+    -> ensure the selected source's matching durable normal fence before using its missing evidence
     -> point-read each unresolved coordinate from its exact legal source set
     -> apply §7.3 normal-tail / deferred / quarantine / loss rules
     -> admitted, bounded single-entry Profile recovery Add
@@ -337,9 +346,9 @@ CAS OPEN -> IN_RECOVERY under Profile metadata authority
 
 基础`RECOVERED_AND_CLOSED`以matching durable close为完成事实，不创建`pendingPublication`，不等待domain prepare/lifecycle strong-publication，也不重置loss window。响应丢失按§7.4重读同一close/context；发现删除或不兼容上下文时返回deleted/authority-changed或对应non-OK，不回滚CLOSED、不重新OPEN。与随后删除重叠的已提交close可以有迟到response；它只证明历史恢复完成，不重新授予open或写权限。新open仍检查authoritative tombstone。强reset启用后的额外assertion与基础恢复结果分别查询，不能把两者合成一个成功位。
 
-实现必须给出source selection、write-set覆盖、并发/内存/重试上限和终止判据的伪代码，并提供独立point oracle。`W-A+1`只计fenced context下的definitive absence，timeout/offline不计；单副本payload、TailSummary或后续speculative entry不能代替required frontier。新的repair target、grant、membership publication及history retention仍遵守§9.1及§14的delete竞争协议；normal/recovery相同应用数据的LAC/digest差异按RFC-0005 §6.1处理。
+实现以§7.4现有Classic基础算法为入口，给出Profile适配的source selection、逐来源fence/identity验证、write-set覆盖、并发/内存/重试上限和终止判据，并提供独立point oracle做差异验证。`W-A+1`只计每个来源本地fence已durable且不存在未解析写入/定位覆盖的definitive absence，timeout/offline不计；单副本payload、TailSummary或后续speculative entry不能代替required frontier。新的repair target、grant、membership publication及history retention仍遵守§9.1及§14的delete竞争协议；normal/recovery相同应用数据的LAC/digest差异按RFC-0005 §6.1处理。
 
-接受场景包括ACK response loss、旧writer失联、LAC=99/候选100的confirmed与恢复读分离、单副本missing/corrupt、预算内domain loss、required hole、正常未提交tail、换组历史、recovery Add/close每个crash cut和重启后再次读取；同批其他entry失败及原RPC超时不抹除有效恢复候选。没有基础恢复证据的Add/ACK实验只允许discardable数据，不作为可恢复WAL canary。Model A先承担受支持子集的point recovery、durable close和outcome检查；Model E负责扩展range与point oracle的等价性，不能借Model E延期来豁免基础恢复。
+接受场景包括ACK response loss、旧writer失联、LAC=99/候选100的confirmed与恢复读分离、单副本missing/corrupt、预算内domain loss、required hole、正常未提交tail、换组历史、recovery Add/close每个crash cut和重启后再次读取；补入§7.3未fenced的B先报missing再收旧写、fence durable但pre-cut I/O未解析、重复/旧incarnation否定响应。复用已有fence不得产生逐entry控制fsync。同批其他entry失败及原RPC超时不抹除有效恢复候选。没有基础恢复证据的Add/ACK实验只允许discardable数据，不作为可恢复WAL canary。Model A先承担受支持子集的point recovery、durable close和outcome检查；Model E负责扩展range与point oracle的等价性，不能借Model E延期来豁免基础恢复。
 
 ## 8. Deferred Sync 限制
 
@@ -874,7 +883,7 @@ all historical targets acknowledged or durably decommissioned
 8. deadline/cancellation 只终止 attempt；单 replica corruption 在其他 valid evidence 存在时不能伪造 DATA_LOSS。
 9. loss-budget reset 只覆盖有完整 `F+1` distinct-domain evidence 的 bounded range；membership、activation 或 local durability 单独都不能 reset。
 10. strong completion 是 verifier assertion；digest/root 单独不能 reset，且 conflicting range loss/completion有单一 conditional predecessor。
-11. normal open-ledger tail 需要 fenced context、required prefix无洞，以及 exact write set 上至少 `W-A+1` definitive absences；temporary/no-quorum 不算 absence。
+11. normal open-ledger tail需要required prefix无洞和exact write set上至少`W-A+1` distinct definitive absences；每个来源自身durably fenced、身份/incarnation/context匹配且pre-cut写/定位已解析，global coverage不替代本地条件，temporary/no-quorum/重复或旧响应不计。
 12. required coordinate只来自 accepted durable authority；speculative later payload不把前一个正常 tail变成 DATA_LOSS。
 13. recovered success晚于 recovery-add 与 durable close/final-prefix publication；authority unrecoverable属于 quarantine，不是 payload DATA_LOSS。
 14. legacy `OK`只投影matching durable ledger close；deferred、incomplete、quarantine和data loss均non-OK，generic rc不得成为repair completion authority。
@@ -944,7 +953,7 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 - fallback 期间 coordinator crash、delete/control generation 变化；
 - single corrupt replica、irreconcilable conflict 与 evidence exhausted；
 - cancellation/deadline 不产生永久 DATA_LOSS；
-- CLOSED required entry missing、open normal tail、`W-A+1` absence与`W-A + offline`对照；
+- CLOSED required entry missing、open normal tail、`W-A+1` absence与`W-A + offline`对照；A/C已fenced但B先missing后接收旧写、未解析pre-cut I/O及重复/旧incarnation响应均不能提前证明tail；
 - later speculative vs later required evidence、authority corruption但payload存在；
 - close durable前后response loss、recovered outcome必须有durable close；
 - 五类rich outcome到legacy/non-legacy API exhaustive projection、unknown/new code mixed-version兼容；

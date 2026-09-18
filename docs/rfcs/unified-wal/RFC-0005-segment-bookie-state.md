@@ -192,6 +192,8 @@ normal Add 与 fence 使用同一个bounded per-ledger admission order：
 
 这里explicitly failed只终止该Add的normal-success资格，不证明底层I/O未写入或已终结；已提交坐标及共享batch按§6.1继续跟踪。合法recovery重试重新验证自身grant与当前物理结果，不能把原normal RPC的fenced/cancelled结果当作DATA不存在或永久不可恢复。
 
+durable fence response也不自动证明任意坐标为空。恢复点读的否定结果按RFC-0004 §7.3逐来源检查：本instance的normal fence已durable、target identity/incarnation及恢复上下文匹配，并且该坐标的pre-cut写入和定位覆盖已解析；否则返回not-ready/unknown。fence复用现有Bookie级控制事实，不新增逐entry控制记录或每Arena副本；restart重验该事实后才复用。
+
 normal Add使用RFC-0001 `ADD_NORMAL=0x0201`与60-byte ledger context；mTLS/HELLO只在Profile连接建立时完成。route gate早于HandleFactory/lazy storage create，bounded handle-state lookup constant-time比较缓存的36-byte descriptor identity与20-byte verifier，capture current route/admission generation，要求normal-active且非fenced/tombstoned，沿RFC-0003 allocation+payload durability，并在完成时服从captured admission order。route/activation/fence generation可以缓存进handle，但不能只在handle创建时检查；transition必须推进generation使stale handle fail closed。普通Add不解析/重算descriptor/hash或auth-binding hash/HMAC，不携带Engine/capability vector/READY/target/certificate，不读MetadataStore/sidecar/remote assignment，不做KMS/signature/certificate验证，不写control record或等待per-Add control fsync。
 
 ### 6.1 同坐标写入、幂等与读可见性
@@ -289,7 +291,7 @@ Recovery-only authority 可以在 target 进入标准 ensemble 前存在。repai
 
 对同一 intent/range 的 recovery completion 必须先关闭late recovery-write admission，再发布committed-readable fact；不得留下“已提交可读但同一grant仍能任意写”的窗口。Profile recovery Add必须验证exact instance/descriptor/auth、RepairIntent admission、bounded local grant、intent/grant generation、target stable identity/storage incarnation、range/entry scope、delete/tombstone gate和payload identity；legacy recovery flag不足以取得grant。
 
-recovery authority 的集群来源、repair target、intent retention 与 delete discovery 由 RFC-0004 负责。Bookie local record 只消费该 authority，不复制 cluster schema。
+recovery authority 的集群来源、repair target、intent retention 与 delete discovery 由 RFC-0004 负责。Bookie local record 只消费该 authority，不复制 cluster schema。基础恢复复用Classic的write-set、fencing read、`W-A+1`聚合、顺序交付及write-back，按RFC-0004 §7.4适配Profile身份/grant/错误分类；recovery Add的写授权不替代读取来源的本地fence或absence证据。
 
 ## 8. Explicit LAC 与读操作
 
@@ -314,6 +316,8 @@ Profile read/LAC/list请求必须通过mandatory Profile discriminator并至少�
 | 显式unconfirmed read与恢复点读取证 | 在各自合法上下文内允许读取LAC之后的可定位候选；读到DATA不表示已提交，恢复前缀由RFC-0004 §7.5取证、recovery Add和durable close决定 |
 
 索引未恢复、定位覆盖不确定或storage状态unknown时返回not-ready/unknown，不能返回确定`NoSuchEntry`。已有恢复上下文/终态已证明不属于合法读取范围的数据，不因磁盘上仍有bytes而重新对外可见；也不能用副本local LAC猜出这种排除证明。normal fence关闭写准入，不关闭合法读取；terminal tombstone按删除合同关闭该instance的新读准入。恢复写仍需显式grant，不使normal权限复活。本节复用点读接口、已安装的本地权限及恢复上下文，不新增读协议或逐次MetadataStore访问。
+
+恢复所用missing还须满足RFC-0004 §7.3：当前合法source/write set、matching instance/descriptor和Bookie identity/storage incarnation、该source自身durable normal fence，以及该坐标无未解析pre-cut写入/定位覆盖。尚未fenced的source先完成现有Profile fence再取证；不能因其他副本已构成fencing coverage而计入其missing。热索引未命中、旧RPC结束、normal Add被failed或仅收到`NoSuchLedger`都不能跳过这些检查。重复响应只计一次，旧上下文响应不计；已验证且仍有效的本地fence可跨entry复用，无逐entry metadata或fsync，也不要求全E在线。普通合法读取沿上表执行，不因本节的恢复否定证据要求而额外fence正常reader。
 
 源码依据：[`ReadHandle.readUnconfirmedAsync()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/api/ReadHandle.java)允许越过客户端LAC，[`LedgerHandle.readAsync()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java)在客户端检查confirmed范围；[`BookieImpl.readEntry()`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/BookieImpl.java)取得readonly handle后点读，入口不按local LAC截断。验证示例为local LAC=99、entry 100已达ACK quorum、writer在下一次piggyback前崩溃：恢复必须能读取100，再按证据判断结果，不能将其视为确定absence。
 
@@ -442,6 +446,7 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 client obtains bounded credits before assigning the logical entry where possible
     -> Bookie parses fixed header/context and checks cached cross-operation size/local authority
     -> route ledger to a fixed append shard
+    -> secure the bounded submission and locator/completion working set before DATA admission
     -> check/reserve coordinate using hot state and bounded pending
     -> seal a nonempty batch, assign physical sequence and freeze all bytes for submission
     -> complete full writes into unused preallocated DATA ranges, then the covering barrier
@@ -465,16 +470,20 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 - shard、物理stream和DATA文件映射按RFC-0003 §6.1在manifest冻结；首个文件切片在一Arena内共享预分配DATA文件，barrier成本与错误影响按实际文件计量，不宣称shard之间独立flush。
 - 同时运行写入与回收，保留RFC-0003 §13.1的Arena内部维护块及实际filesystem余量；共享filesystem的DATA预分配受Bookie总预算约束，保留SST/compaction/控制checkpoint进展。free slot不等于文件系统available，不能通过停止compaction改善p99。
 
-准入预算贯穿整个请求生命周期，不只限制queue.size()：
+准入预算贯穿整个请求生命周期，并保证已接受请求能完成下一步，不只限制queue.size()。首批在总账内保留每shard少量预分配对齐batch buffers；普通入口payload不得占用这份共享提交工作集。定位/完成状态优先由已有pending对象承接，其容量在DATA准入前计费并保障，不等DATA durable后再竞争最后一个locator槽位；不为每entry预留最大尺寸buffer。
+
+预算由入口payload、共享提交工作集、热定位/索引接管容量及已有控制/维护保留量组成，仍是一份总账。hot/index积压到准入阈值时先背压新DATA，已准入及已提交entry仍有完成定位/结果处理的预算。大entry即使符合统一N，也须在接受前取得对应有界工作集，否则明确背压。ownership转移或容量申请要么立即成功，要么立即失败后进入既有有界等待/重试；不阻塞Netty event loop、append shard主循环，不持ledger锁等其他阶段归还资源。索引恢复容量后须自动继续推进，不靠丢有效DATA、无界扩容或临时突破上限解围。
+
+各阶段计费规则：
 
 | 持有阶段/场景 | 计费、释放与进展规则 |
 | --- | --- |
 | 待合批、已出队、已提交I/O、等待physical prefix/locator/响应 | 同一预算持续计入request、源/对齐bytes、inflight batch；只在真实资源释放或转移到另一已计费owner时归还对应credit，不按出队释放 |
 | 复制、断连、取消、慢响应 | 源/目标同时存在则都计bytes；I/O仍在飞行则保留buffer/inflight费用，传输层持有的响应也必须有界，不能藏在future或executor队列 |
 | I/O unknown与慢点读 | stream不可写gate承接未解析义务前不丢坐标保护；实际I/O终结后才释放不再使用的buffer。点读父buffer/独立副本/pin与cache均计费，小slice可受控复制以释放大父buffer |
-| 普通block放不下的entry | 首先满足RFC-0001 §8跨normal/recovery/read/storage统一N，再走同一预算内的大记录路径；无法表达在首次写入前拒绝，临时容量不足背压。已接收entry持续可读/恢复，不能永远卡队首 |
+| 普通block放不下的entry | 首先满足RFC-0001 §8跨normal/recovery/read/storage统一N，接受前取得同一总预算内的大记录工作集；无法表达首次拒绝，暂时取不到工作集则背压。已接收entry持续可读/恢复，不能永远卡队首 |
 | 重复/冲突核对旧坐标 | 复用有界读取执行资源，append shard主循环不同步等盘；pending/waiter和读取buffer计费，正常新写不因此多一次索引I/O |
-| 热定位、异步索引积压、query-visible未flush内容 | 队列/WriteBatch、hot记录、memtable/native/cache分别计实际bytes/对象；接管后转移credit，local success不提前释放后台仍占用资源。stall达上限背压后续DATA，控制容量仍可推进 |
+| 热定位、异步索引积压、query-visible未flush内容 | 队列/WriteBatch、hot记录、memtable/native/cache分别计实际bytes/对象；准入为完成定位留容量，stall达阈值先背压新DATA，已接受entry不再争用被入口耗尽的额度。接管后转移credit，local success不提前释放后台费用，控制容量仍可推进 |
 | 资源拒绝后的客户端退避/retry | 同一逻辑Add继续占用原inflight/bytes预算，deadline和ACK独立；拒绝不抹除旧unknown/坐标事实，不复制无界请求，不因短暂拥塞直接换组 |
 | 持续热ledger与撤权请求 | 连接/ledger只设必要有界份额；为fence/tombstone保留控制执行容量及持久化预算，DATA满额仍能关闭DATA准入 |
 
@@ -490,7 +499,7 @@ Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS�
 
 同一报告增加index入库等待、persisted coverage落后量、资源拒绝、retry和真正replacement数量；分别观察前台定位发布与后台索引stall。拥塞不统一计为磁盘故障，不能用无限积压、丢弃新写或停止回收改善p99。B2/B9/B18联动A26/A27验证索引stall下新写有界背压、fence推进、容量恢复后原逻辑Add重试及提交后unknown保留。
 
-本轮沿既有指标另区分Arena reusable bytes、filesystem available bytes、derived-index disk bytes和maintenance temporary-space peak，并计量换组保留ACK/必要resend及复用写放大。场景包括A29多slot gate、B2/B9共享S0/S1尾部、B3/B6旧generation残留、A26/B18/B19统一N边界，以及B17/B18内部free但filesystem不足。数值与低水位均由同一manifest冻结，不以新架构或每次清零/收缩替代测量。
+既有指标继续区分Arena reusable bytes、filesystem available bytes、derived-index disk bytes、maintenance temporary-space peak及换组必要resend/复用写放大。B18另验证入口满载后下游恢复能完成已接受请求；B10/B17按RFC-0003分列compaction copied bytes和净可复用收益，冻结source、实际destination/padding及whole-allocation FREE不能被单ledger原因替代。A16/A26/B19验证逐来源fence否定证据，保留原A29、共享S0/S1、旧generation和统一N场景。数值由同一manifest冻结，不新增控制平台、逐entry控制fsync或持久任务系统。
 
 ## 11. 安全不变量
 
@@ -536,6 +545,8 @@ Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS�
 - B17/B18分别核算Arena与filesystem空间，DATA预分配不侵占SST/控制维护余量；shared-filesystem多Arena不重复预留，实际I/O/authority异常仍沿错误恢复流程；
 - DATA durable且index Put成功但未flush时crash、热定位淘汰与query-visible接管并发、陈旧Add索引更新晚于MOVE/delete；持久覆盖不能虚报，已成功entry不出现临时NoSuchEntry；
 - index持续stall与新写/fence并发，预算有界且控制推进；短暂资源拒绝不立即触发replacement，重试NONE不覆盖旧UNKNOWN，deadline不制造可跳过的entry hole；
+- B18把入口payload推至准入上限并暂停提交或索引接管，再恢复下游；共享buffer/定位工作集保证已准入entry完成且资源最终释放，不超额、不阻塞event loop/shard/ledger锁、不永久互等；大entry无工作集时在接受前背压；
+- RFC-0004 §7.3的未fenced来源先missing再收旧写、fence durable但pre-cut I/O未解析、重复/旧incarnation响应；复用Classic quorum算法并适配Profile，不能误close或新增逐entryfence fsync；
 - §8以LAC=99/entry 100验证confirmed、unconfirmed及恢复点读分层，Bookie不按local LAC截断，DATA completion不推导quorum LAC或增加逐Add LAC fsync；
 - 同批L1 fence/L2合法、已提交timeout后同坐标不同payload、batch 11 unknown/12已完成、共享文件错误与恢复；逐entry结果不污染物理前缀，异常pending及buffer有界；
 - 大batch中单entry独立envelope/CRC校验及必要对齐I/O、坏length、cache/pin竞态与慢客户端小slice持有；首批shared-only及后续dedicated池的资源/性能结论分别计量；

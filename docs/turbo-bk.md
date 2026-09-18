@@ -2,7 +2,7 @@
 
 > 状态：**Proposed / Not Implementation Ready**<br>
 > 文档类型：总体架构、边界与依赖导航<br>
-> 更新时间：2026-09-08<br>
+> 更新时间：2026-09-18<br>
 > 结论：保留 Unified WAL 方向；除 `BK_CLASSIC_TUNED` 外，不授权按本文直接进入正式实现。
 
 ## 1. 决策摘要
@@ -20,7 +20,7 @@
 7. 下一步先修现有客户端ACK集合/换组与迟到响应回收两个缺口；固定Bookie控制日志、per-Arena控制日志和DATA三层拓扑，推进ByteBuf、固定shard、批量DATA及可读定位的最小隔离原型，与实际启用路径的模型验证并行。
 8. 首批集群闭合普通Add/点读/restart、基础点恢复和已fenced-close ledger的普通逻辑删除。强访问撤销、strong completion/loss reset及高级Range延期；strong reset后续也先限于整个ledger fenced+CLOSED，不让增强token阻塞活跃ledger的正常replacement。
 
-本轮基于`635c383e80ef353753712a7117aef32fd6b8f313`收紧四处执行边界：多slot replacement完成全部pending/ACK整理后才恢复连续回调，未变有效ACK保留；共享DATA文件按stream/generation判定逻辑后缀，复用残留不成为新DATA；entry取normal/recovery/read/storage四项统一上限；Arena内部reusable与filesystem真实维护余量分开预算。此前激活目标留存、异步索引/持久coverage、背压、CRC32C/shared block和三层持久化主方向保持。均为拟实现设计与静态分析，没有新增源码修复或运行/性能证据。
+本轮基于`ffebee6f59a9c4113eabda39f5da41fe305616a2`纠正Classic恢复的旧概括：复用已有write-set、恢复读fencing、W-A+1聚合和顺序write-back，补每个否定来源自身fence/身份及未解析写入条件；准入保留提交/定位完成工作集；shared compaction按冻结source和成组净收益执行。同步移除Arena重复binding/tombstone职责，FREE以整个allocation/generation为主语。此前多slot ACK gate、统一entry上限、共享文件恢复、双层磁盘预算和三层持久化方向保持。均为静态核对与拟实现设计，没有新增源码修复或运行/性能证据。
 
 本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，下一原型按RFC-0005选择Bookie级独立控制日志；其stable format、阈值和真实证据仍由Spike接受。
 
@@ -228,25 +228,25 @@ Cluster Lifecycle
 3. Classic/Profile/Tombstoned route 是单一、原子、可恢复的本地 claim；legacy normal/recovery Add 不能绕过 Profile route。
 4. 写期replacement按inactive install → `LAC+1` membership CAS → authority/target retention → normal activation → pending本地切换排序。全部受影响pending的映射/被替换slot ACK及故障域资格更新后才开completion gate并恢复连续回调；未变identity/incarnation的有效ACK保留，只重发必要副本。初始E同样先留存后激活，同起点map覆盖不丢删除目标，不复制历史fragment。
 5. ACKed DATA必须已有durable allocation authority；submitted块不可修改，完整write/覆盖barrier、可恢复物理前缀及locator就绪后逐entry检查成功资格。单条取消/fence不把已durable batch变成物理gap，batch durable也不代替该entry权限；物理序号不等于entryId/LAC，也不以共享文件offset定义跨stream顺序。单stream逻辑尾部排除不得截短共享文件或破坏其他stream的有效DATA。timeout不抹除已提交坐标，未解析I/O暂停相应stream/file并恢复，不以跳号/新stream/重复sync成功绕过。
-6. 同一 slot/extent generation 不得同时属于两个 ledger instance。
-7. FREE/generation bump durable且旧I/O安全终结前不复用；复用后旧合法header/CRC不恢复旧owner或成为当前DATA，unused须有当前authority/依赖证明，不以每次整块清零代替。Arena内部FREE不自动增加filesystem available bytes。
+6. 同一slot/extent generation只有一个allocator owner；shared owner可承载多个ledger instance的record，不把allocator ownership与record所属ledger混为一项身份。
+7. FREE以allocation/generation为主语，整单元无live occupant/待完成写入/旧pin且满足selector及清理条件后才接受；单ledger删除、部分move或orphan原因不替代该证明。durable bump及旧I/O终结前不复用，旧generation残留不复活，unused不靠每次整块清零猜测；内部FREE不自动增加filesystem available。
 8. 旧 generation locator 永远不能读取新 generation payload。
 9. logical delete 后 ledger 不能重新 open；Bookie 应用缺失 tombstone 前不能重新成为 writable。
 10. AutoRecovery target 接收第一份 durable payload 前必须有可由 delete freeze 枚举的 RepairIntent；recovery-only/committed-readable 不授予 normal writable。
 11. membership由标准LedgerMetadata CAS串行，同记录freeze阻止删除后的新membership；初始/写期activation authority与目标留存、RepairIntent admission都与DELETE_INTENT共享lifecycle publication cut，cut前已授权target进入完整history。基础copy/membership/close不创建strong-publication token、不重置loss window；延期strong completion仍须整个ledger fenced+CLOSED并按token/prepare/publication/resolve执行，旧token不得超时强删。
 12. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
 13. DATA成功前通过有界热handle/index可定位，append shard不等RocksDB写/flush/compaction；热定位在已计费query-visible路径接管后淘汰，不等flush。首批纯派生索引关闭WAL，真实持久内容及matching generation才推进连续coverage checkpoint；未覆盖DATA重放，索引全删可重建，旧异步update不能复活陈旧selector/tombstone。coverage不替代allocator/控制authority或授权free。
-14. 同一 Arena compaction 只有 durable conditional `MOVE_COMMIT` 能切换 locator authority；old free 晚于 cutover、new-pin 阻断、reader drain 与 durable generation bump，cross-Arena move 当前 unsupported。
+14. 同Arena compaction只选停止追加、原写已解析的source，同source/generation最多一个正常任务；OPEN ledger旧不可变范围无需ledger close/fence。只有durable conditional MOVE切换selector，整单元FREE晚于cutover/drain；按有界victim组扣除destination/padding后计净收益，无获益时背压而非反复复制，cross-Arena仍unsupported。
 15. range/TailSummary/BatchRecovery fast path 的 unsupported、stale、partial 或局部预算耗尽必须从 earliest unresolved coordinate 回退；不能越过 hole，deadline/cancellation 不伪造 DATA_LOSS。
 16. offline rejoin使用cluster-authoritative finite stream assignment、storage incarnation、no-hole delete-applied cursor与snapshot+complete suffix；cursor只覆盖durable tombstone及可重建清理义务或有效non-applicability proof，不等drain/compaction/free，也不证明访问屏障或physical完成；per-ledger `deleteEpoch`不能兼任catch-up watermark。
 17. permanent-loss budget只能对有完整`F+1` distinct-domain evidence的bounded range reset；首批reset disabled，未获得有效proof前不刷新既有loss window。membership、local durability、activation或generic repair COMMITTED单独都不够；增强候选仅限整个ledger fenced+CLOSED。
 18. verifier strong completion 必须长期绑定 exact range/context/membership、immutable Profile descriptor、当时的 `F`、failure-domain policy、control fence 和 overlapping-range predecessor；audit digest 单独不能 reset，compaction 后也不能在新 descriptor/`F` 下重解释。只要求冲突或重叠 range 的 accepted loss/completion 单序，已证明不相交的 range 不进入 ledger-global hot CAS。
 19. obligation-changing delete assignment 先 PREPARED、catch up snapshot+complete suffix，再原子 effective；安全的旧 generation 不因 PREPARED 无条件 demote，但新 generation 生效后 stale writable authority 必须失效。snapshot 必须可遍历并应用 delete effects，不能只有 digest；catch-up exemption proof 必须绑定 Bookie、old incarnation、device/storage scope、operation generation 与 cluster acceptance，不能跨 scope 重放。
 20. relocation orphan 只在 new allocation/location 未被任何 authority 依赖时回收；既存 logical success 继续由 old/current selector 承载。late `MOVE_COMMIT` 与 orphan `FREE_AND_BUMP` 由同一 Arena control order 条件互斥，cutover 不能早于覆盖该 move 自身 sequence 的 durable-through。
-21. recovery 必须区分 durable recovered close、temporary deferred、attempt incomplete、quarantine/authority-unrecoverable 与 required-coordinate evidence exhausted；authority loss、timeout、offline 或 speculative suffix 不得伪造 payload `DATA_LOSS`，open-ledger normal tail 需要 fenced exact write-set 的 quorum-intersection absence proof。
+21. recovery保留durable close、temporary deferred、attempt incomplete、quarantine/authority loss及required evidence exhausted分类，复用Classic quorum算法作Profile适配。normal tail的每个否定来源须自身durably fenced、身份/incarnation/context匹配且pre-cut写/定位已解析，distinct W-A+1覆盖不能由global fence或重复响应代替；timeout/offline不伪造absence或DATA_LOSS。
 22. sidecar store version与semantic generation分离；child/page只有被exact instance/domain head条件化发布后才有authority。compaction authority是committed snapshot+complete bounded suffix，publish/fallback proof先于reclaim；referenced unknown mandatory state、missing chunk或gap必须fail closed，普通Add不依赖sidecar读写。
 23. per-Arena conditional predicate对committed/applied state原子求值，condition failure无effect，duplicate operation不能产生第二winner；durable result覆盖自身sequence。selector publish与block-new-old-pin形成同一cut，cut后stale locator不能取得old pin。
-24. local route claim早于payload/handle lazy create；fence先关闭new admission并终结pre-cut Add，stale admission generation不能成功。tombstone原子收窄该instance的normal/recovery/read接受集合；registration readiness绑定incarnation、effective assignment和cursor/snapshot cut，不成为per-Add lease。
+24. Bookie控制日志独占route/activation/fence/grant/tombstone，Arena只持allocation/generation/move/free并消费必要外部引用，不重复创建ledger生命周期。route claim先于lazy create，fence关闭new admission并终结pre-cut成功资格；RPC失败不证明物理不存在。tombstone收窄normal/recovery/read，readiness仍绑定incarnation/assignment/cursor，不成为per-Add lease。
 25. 只有matching durable ledger close可以投影legacy recovery `OK`；fragment/partial/skip不计ledger recovered，不清intent/marker。generic legacy rc不能抹除coordinator/admin rich outcome，AutoRecovery按rich class调度。
 26. descriptor identity由canonical immutable safety semantics与固定长度、对对抗输入collision-resistant hash派生；CRC/checksum不能替代，hash只做identity/integrity；unknown/duplicate mandatory语义拒绝，optional neutral hint不改变接受集合。
 27. master key只作为data credential，不是MAC key或entry布局说明。首批新Profile只接受immutable capability/manifest绑定的CRC32C entry布局，创建/安装拒绝不支持类型且不降级、不下发密码/MAC key；同数据不同LAC可幂等，CRC相等不能替代实际bytes比较。缓存的统一maxPayload取normal Add、recovery Add、read response和Segment record/batch容量的最小值，首次写入前执行；收紧新写阈值不降低已接受entry的读取/恢复能力。Profile control要求non-anonymous且获授权执行exact operation/instance/target scope的authority，AuthN-only不够；secret/offline verifier不得进入公开metadata、receipt、日志、metric或exception，credential-bearing Profile transport满足manifest confidentiality/integrity。
@@ -258,7 +258,7 @@ Cluster Lifecycle
 33. Profile只走独立immediate-TLS/mTLS endpoint与pool；Round 7 frame bytes在raw old-decoder Gate PASS前只属于executable test manifest。
 34. same BookieId/storage scope在stock binary pre-storage-open证据通过前保持BLOCK；失败时new BookieId/new roots/new incarnation/new credential scope fallback是当前唯一安全路径。
 35. persistent readiness CAS先于ephemeral writable registration；generation/incarnation mismatch non-writable，registration hint不替代local receipt或old-binary fence。
-36. 统一预算覆盖请求及异步索引全部持有资源，最老deadline不重置、大entry先满足统一N且有实际buffer/对齐范围，慢重复读不阻塞shard。Arena内部块与Bookie按实际filesystem去重的预分配/维护空间分别计量；SST/compaction/控制checkpoint有真实余量，free slot不证明文件系统够用。内存或磁盘低水位限制新DATA并保留控制/维护进展；客户端重试保留原逻辑位置、预算和旧UNKNOWN，不跳过hole。
+36. 统一预算覆盖请求/异步索引全生命周期，并在DATA准入前保障共享提交buffer及定位/完成容量，输入不可挤占；大entry先满足统一N并取得工作集，满载下游恢复后能继续完成，不阻塞event loop/shard或持ledger锁互等。最老deadline和重试身份不变；Arena与filesystem分别计量，维护有真实余量，低水位先限制新DATA，不能用free slot或临时超额掩盖压力。
 37. confirmed可见范围由客户端LAC/CLOSED边界限定，Bookie不以local LAC截断合法物理点读，恢复候选不等于commit；DATA完成不推导quorum LAC或增加逐Add LAC fsync。点读须独立校验record外层身份与BK CRC，按有界必要对齐范围读取，未知覆盖不能伪造absence。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
@@ -315,15 +315,15 @@ Stage 7  完成实际启用能力的全部Gate及production canary，包含派�
 | 优先级 | 实施内容 | Owner与必须提交的证据 |
 | --- | --- | --- |
 | 先修源码 | CLIENT-1当前ACK数量/故障域及多slot completion gate，保留未变ACK；CLIENT-2最后旧响应回收 | RFC-0001 §9.3/9.5、A29/A30；4/3/2先处理write-set外slot不提前callback、不无条件重发W份 |
-| 第一批原型 | ByteBuf、固定shard/shared block、受真实filesystem预算约束的预分配；DATA前缀/热定位/逐entry成功，索引异步维护 | RFC-0003 §6.1/9/13/15、RFC-0005 §10.1、B2/B9/B17/B18；单stream后缀不破坏同文件其他成功DATA |
+| 第一批原型 | ByteBuf、固定shard/shared block、预分配；DATA准入先保障提交与定位工作集，DATA前缀/热定位后逐entry成功，索引异步维护 | RFC-0003 §6.1/9/13/15、RFC-0005 §10.1、B2/B9/B17/B18；入口满载暂停/恢复下游无循环等待，保留共享文件边界 |
 | 第一批原型 | 创建/读取/恢复、CRC32C identity、统一normal/recovery/read/storage大小上限；保留提交后坐标及背压身份 | RFC-0001 §8/9/11、RFC-0005 §6.1/10.1、A26/B18/B19；N-1/N/N+1、44-byte差异、旧entry服务能力 |
-| 随原型闭合 | I/O异常/pool/reuse、旧generation残留判定、完整重建和双层磁盘预算 | RFC-0003/0005及原B2/B3/B6/B9/B17/B18；不靠清零识别unused，Arena free但filesystem不足仍正确背压/维护 |
-| 最小集群 | 基础point recovery/durable close、普通logical delete及异步回收；初始/写期activation target持久留存 | RFC-0001/0004、A9/A10/A28、B4/B6/Model A+D；同起点D→E与history压缩/restart不丢D，applied cursor/rejoin不等物理回收；强屏障另行延期 |
+| 随原型闭合 | I/O异常/reuse/重建及双层磁盘预算；冻结source成组compaction净收益与whole-allocation FREE，Arena消费Bookie生命周期 | RFC-0003 §5/10/13/14、B4/B10/B16/B17/B18及原tail/reuse场景；低收益背压，单ledger原因不误free，OPEN ledger无需close |
+| 最小集群 | 复用Classic基础point recovery并适配Profile身份/grant/unknown，逐来源fence否定条件、durable close和普通删除 | RFC-0004 §7.3—7.5、RFC-0005 §6—8、A16/A26/B19/A-POINT；未fenced先missing后旧写不能close；原activation历史/applied cursor合同保持 |
 | 后续扩展 | dedicated hot extent、强撤权、整个ledger关闭后的strong completion/reset、高级Range、在线删除、复杂故障域及迁移 | 各自独立Gate；dedicated验证专属空间/有界池及B5/B13，无证据时不计首批收益 |
 
 执行依赖改为：CLIENT-1/2先做独立小范围修复；Block H最小隔离存储切片与Block G实际启用路径的模型可并行。先以固定硬件/durability/E/W/A得到普通写、换组、写入与回收并行的测量，尚未实现的集群场景明确NOT_EXECUTED；相关安全/恢复/兼容/资源Gate闭合后才能进入可保留数据canary。完整重建和维护进展不能推迟到canary之后，但不阻止更早收集discardable原型数据。Classic与DirectJournal基线不替代Segment证明，不新增通用事务/调度/压测框架。
 
-本轮归入既有CLIENT-1与UW-2/3/4/5/7及Spike A/B/C。首批一Arena、固定shard/shared block和原存储E/W/A配置不变；4/3/2为一般E>W客户端/模型回归，不扩大首批存储性能结论。优先补整体ACK gate和统一entry上限，并验证共享文件逻辑尾部与Arena/filesystem两层空间；保留原指标，另记reusable/available/index disk/maintenance临时峰值及必要resend。阈值由同一原型测量决定，不新增控制平台，旧receipt不重绑。
+本轮归既有UW-3/4/5/6/7及Spike A/B/C，CLIENT-1/2等此前清单保留，首批范围不变。优先验证逐来源fence否定证据及满载完成工作集，再以简单compaction策略测copied bytes与net reusable bytes gained，扣除真实destination成本并关联debt/p99；shared整单元FREE及Bookie/Arena职责同步闭合。复用现有算法、预算和任务执行资源，不新增quorum实现、证明服务或持久化任务系统，旧receipt不重绑。
 
 ## 11. Gate 与证据合同
 

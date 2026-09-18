@@ -70,6 +70,7 @@ record envelope integrity, bounded aligned point-read ranges and cache/pin lifet
 confirmed/unconfirmed/recovery read boundaries and LAC update/barrier accounting
 shared-only first slice and separately deferred dedicated buffer-pool scope
 end-to-end request/byte/batch/waiter credit ownership and release points
+pre-admission submission/locator working set, shared-buffer reserve and downstream pause/resume schedule
 oldest-request monotonic deadline, maximum entry path and reserved control capacity
 delete-applied cursor versus access barrier and physical reclaim predicates
 allocation/copy/CPU per-entry instrumentation and thread/queue/lock counters
@@ -79,6 +80,8 @@ control-tail fault model and required durable-prefix classification oracle
 pool owner/shard generation and old writer I/O quiescence mechanism
 per-Arena foreground/maintenance reserves and throttle/reject/resume thresholds
 bounded live-set/churn rate, maintenance scheduling share and debt-drain deadline
+immutable compaction source eligibility, one normal task per source/generation, bounded victim-group net-gain threshold
+whole-allocation FREE reasons/references and Bookie-only route/tombstone ownership
 normal/full-index-rebuild coverage, scan/I/O/memory/readiness limits
 conditional API revision
 sequencer queue/waiter/idempotency hard caps
@@ -199,7 +202,7 @@ Oracle：pool/shard generation ownership不重叠；restart后unused/live/unknow
 
 同一block混合L1/L2，按同一delete stream连续发送delete L1、delete L2。L1 tombstone durable但L2仍live导致block不可free时，L1 applied cursor先推进，L2仍可应用；加入checkpoint、清理派生队列丢失与restart/rejoin。不能以等待L1物理释放作为读取下一delete的前置。
 
-Oracle：单 ledger logical delete 不影响其他 record；block 全死前不进入 free list；全死后按 durable generation bump 回收。
+Oracle：单ledger logical delete不影响其他record；一个ledger的deleteRequestId不能证明shared block可free。高live比例block中只删少量ledger，再组合部分move/orphan与旧pin/写I/O，仍须等全部occupants不再live、selector及清理条件满足、I/O/pin终结，最后durable generation bump才回收；FREE以allocation/generation为主语，不要求每条记录复制完整occupant名单。
 
 ### B5：Hot promotion（dedicated启用时）
 
@@ -247,11 +250,11 @@ Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围
 
 ### B10：Compaction copy
 
-对部分死亡shared block执行same-Arena compact，在新allocation、copy、DATA durability、conditional `MOVE_COMMIT` append/durability/response loss、原子selector发布并关闭old-pin admission、reader/writer quiescence、old free各点crash；不能把selector发布与new-old-pin阻断实现为两个独立cut。
+对部分死亡shared block执行same-Arena compact；source须已停止追加、原始写入已解析、内容/占用可确定。保留OPEN ledger在其他物理范围继续写入，证明搬旧不可变范围无需ledger close/fence/seal；仍接收record或I/O未解析的source不得入选。对同source/generation的正常任务调度去重，异常竞争另行注入。在新allocation、copy、DATA durability、conditional `MOVE_COMMIT` append/durability/response loss、原子selector发布并关闭old-pin admission、reader/writer quiescence、old free各点crash；不能把selector发布与new-old-pin阻断实现为两个独立cut。
 
 必须覆盖：
 
-- 同一 predecessor 的两个 concurrent moves；
+- 异常重试/迟到任务形成同一predecessor的两个concurrent moves；正常调度不主动重复搬同一source；
 - move chain `A -> B -> C`；
 - batch/group-commit torn tail；
 - new payload digest mismatch；
@@ -266,6 +269,8 @@ Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围
 - 同一operation在enqueue前、append后force前、force后response loss重试；
 - group内独立condition一成一败、`durableThrough < ownSequence`、middle gap/torn/unknown mandatory record；
 - idempotency summary compact后的extremely-late retry，以及queue/waiter/future cap压力。
+
+按有界victim组测试低/高live比例和allocation粒度：20%/90%/99%仅作成本对照输入，不是固定准入阈值。包含单source搬到同样大destination而零净收益、多个source打包后有净收益，以及padding/framing使预估失效；搬迁/FREE前复核selector/tombstone/generation。跨source复制与控制group commit应能合批，不要求每victim/entry fsync。报告实际copied bytes、释放source容量、新占destination容量和net reusable bytes gained；pin未释放前不得记已实现收益。
 
 Oracle：无 commit 时 old authoritative、new copy 只是 orphan；durable commit 后 new authoritative 且 index 可重建；同一 predecessor 只有一个 winning successor；每个 live record 至少一个 authoritative lookup locator（允许cut前old reader pin）且不能有两个new lookup winners；old block只有在全部live records moved/dead、new pin被阻断、既有reader drain和durable free后回收。relocation不新增local-success fact；清理orphan new location不删除logical entry在current location承载的既存success。pending/admitted append不授予authority，condition failure无副作用；duplicate只返回same durable result或stale/conflict。
 
@@ -331,13 +336,13 @@ Wave 0已完成一个不访问真实filesystem、OS权限、registration backend
 
 一个ledger跨至少两个Arena，组合route/install/activation、fence、grant close/tombstone、DATA durability及各日志A/B checkpoint/rotation，在每个相邻持久化边界注入crash/response loss。保存Bookie控制日志和所有Arena原始镜像，使用独立parser比较replay。
 
-Oracle：Bookie级权限在所有Arena一致；部分成功不能扩张接受集合；required store不完整时不注册writable。normal Add无控制日志fsync或远程read，DATA不重复写入Bookie控制日志。报告真实fsync/bytes、cold/warm恢复时间及保护credential的非泄漏检查。
+Oracle：Bookie级权限在所有Arena一致；部分成功不能扩张接受集合；required store不完整时不注册writable。route/profile binding、activation/fence/grant/tombstone只由Bookie控制日志持有，Arena仅消费必要引用，不要求逐Arena重复tombstone durable；Arena FREE按allocation/generation与整单元条件接受。normal Add无控制日志fsync或远程read，DATA不重复写入Bookie控制日志。报告真实fsync/bytes、cold/warm恢复时间及保护credential的非泄漏检查。
 
 ### B17：空间耗尽与长期回收进展
 
 在manifest锁定的有界live set与admitted写入速率下持续create/write/delete，使大量shared block仅剩少量live records；另运行超过可持续能力的压力矩阵。分别耗尽Arena前台whole-free blocks、内部compaction目标预算，以及实际filesystem的SST/flush/compaction、Bookie/Arena控制日志/checkpoint预算；在maintenance与full-disk状态重启。构造Arena仍有free slot但filesystem低余量，以及多个Arena已启用时共享同一filesystem的预算竞争，不能重复预留同一余量。
 
-Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持有界；维护得到锁定最低调度份额，恢复空间后按hysteresis重新开放。受支持负载下debt/dead bytes不持续增长，停止新写后在锁定deadline内回到目标水位；不能靠暂停compaction通过p99。超额负载只要求有界拒绝及可验证恢复，不要求无限容量。全部数值先于正式run冻结。
+Oracle：前台在侵占维护保留量前限流/拒绝，queue/memory有界，维护有最低调度份额；恢复空间后按hysteresis开放。在声明负载、可获益候选与维护I/O下，debt/dead bytes不持续增长，停止新写后在deadline内达到可行目标水位。另构造近乎全live且无净收益的候选：低水位不无限重复复制，须有界背压，待实际删除形成可获益victim组或容量恢复后继续。不能靠暂停必要compaction通过p99，也不能以复制量冒充回收量。候选分布、净收益阈值和保留量先于run冻结，不要求无限容量或所有高live布局立即排空。
 
 追加Oracle：DATA预分配/增长上限保留真实filesystem维护工作集，低水位先停增长/限制新DATA，SST flush/必要compaction及tombstone/checkpoint在声明保留量内继续推进。仅FREE内部slot而filesystem available未变时，不解除索引空间压力；真正I/O error/authority unknown走错误恢复。分别报告Arena reusable、filesystem available、derived-index disk bytes、maintenance temporary-space peak，普通删除不靠hole punch/缩短文件回空间，关闭index WAL不当作零SST空间成本。
 
@@ -348,6 +353,8 @@ Oracle：前台在侵占维护保留量之前限流/拒绝，queue/memory保持�
 多个ledger合批，固定shard，bytes/count/wait均有上限；注入低负载等待、队列满、pool refill、slow/failed force、fence/delete race及compaction并发。验证不持ledger锁等待I/O，普通已准入写不串行等待三层control/DATA队列或三个future。真实barrier前无local success；不能将取消future当成I/O终结。计量实际entries/barrier、force次数、thread hops、queue wait、lock hold和各层控制写；每entry force不能仅因API名为group commit就算批量化。
 
 扩充现有B18负载：持续小请求不重置最老deadline；低负载到期padding；超过普通block但在声明entry上限内的请求走预算内大记录批次，否则明确拒绝；热ledger与低速ledger混合、重复核对慢读、locator/响应阻塞、断连/取消但I/O未终结、DATA满额时fence/tombstone到达。全阶段request/源与对齐bytes/inflight batches/waiters有界，出队不提前还credit，慢读不阻塞append主循环，控制保留容量可关闭准入。记录低负载、目标负载和过载结果，不只测queue.size()。
+
+加入满载推进反例：分别暂停输出buffer归还、DATA completion和index接管，把入口推到准入上限；source payload不能挤占每shard已计费共享提交工作集，已准入entry有定位/完成容量，hot/index阈值在接收新DATA前生效。大entry无对应工作集时先背压。恢复下游后已接受请求须继续完成、资源最终归还，无总量超限、event loop/shard阻塞、持ledger锁等待或永久循环依赖；下游永久不可用时不要求继续收新写。禁用这些保留规则的负向fixture应显露source等destination、durable DATA等locator的循环，而非用临时超额解围。
 
 DATA freeze和barrier/prefix沿B2 oracle，量化padding bytes、write/durability/prefix/locator wait及阶段资源峰值。相同durability与TLS范围才比较；局部无网络run不计端到端增益。
 
@@ -366,6 +373,8 @@ DATA freeze和barrier/prefix沿B2 oracle，量化padding bytes、write/durabilit
 统一大小向量由四条实际路径共同锁定N：N-1/N正常写、点读与single-entry recovery均可表达且内容一致；N+1首次准入拒绝。另覆盖normal单项允许但recovery超限的44-byte区间，不能因normal codec可编码而接受；read/Segment更小则相应收紧N。降低runtime新写阈值后旧N entry仍可读/恢复，临时预算不足只背压，不改写大小能力或拆分entry。此为待实现的新验证，不修改历史corpus/receipt。
 
 K/X提交后timeout，再到K/Y：原坐标不变为空，Y不能成为新winner；分别令X迟到完成、部分写入、barrier unknown、restart重建，相同X重试只能复用已解析且权限有效的结果或暂不可用。未提交请求可原子撤销但不得与封包竞争后误释放；fenced原调用失败不抹除有效恢复候选。另按A16/RFC-0004 §7.5运行LAC=99/entry 100点读，confirmed/unconfirmed/恢复各守边界，DATA完成不伪造quorum LAC，explicit LAC合批不新增每Add控制fsync。
+
+恢复否定证据联动A16/A26及Model A-POINT：fence durable但坐标pre-cut I/O未解析、热索引miss或rebuild覆盖未恢复均不得返回definitive absence；未fenced来源先missing再收到旧写时不能提前close。身份/incarnation/上下文重验、重复响应去重和已持久fence跨entry复用沿Classic算法的Profile适配检查，不另建quorum实现或逐entry控制fsync。
 
 独立oracle比较不可变字段及应用数据，重建后核对每个坐标；`entryId <= localLastEntryId`不能充当存在证明。正常新entry、pending retry、已有durable命中、冲突和rebuild慢路径分别计量索引reads、hash invocations、allocation/copy bytes；不强制每新entry一次RocksDB查询和独立SHA-256，不建立全量去重库。与恢复代码的真实端到端联调未运行时单独标NOT_EXECUTED。
 
@@ -440,6 +449,7 @@ control-log bytes
 checkpoint bytes
 data padding bytes
 compaction copied bytes
+net reusable bytes gained (source capacity freed minus destination capacity charged)
 move control-log bytes and durability barriers
 sequencer queue depth and waiter/token count
 conditional retries and condition-failure counts
@@ -508,6 +518,8 @@ unpersisted index contents counted in durable coverage = 0
 stale async index update revived old selector or deleted entry = 0
 append shard synchronous wait on derived-index write/flush/compaction = 0
 index backlog exceeded total budget or starved fence/tombstone = 0
+admitted DATA stranded by input consuming submission/locator working set after downstream resumes = 0
+resource wait blocked Netty event loop, append shard or held ledger lock = 0
 submitted DATA block mutated or old successful range rewritten = 0
 ordinary write completion counted as durability = 0
 barrier attributed to incomplete or unrelated batch writes = 0
@@ -531,7 +543,9 @@ accepted oversize entry stalled permanently at queue head = 0
 duplicate read blocked append loop or DATA exhaustion starved revocation = 0
 required durable prefix misclassified as discardable tail = 0
 unknown rebuild coverage reported definitive absence = 0
+unfenced source or unresolved pre-cut write counted as definitive absence = 0
 cross-Arena partial state expanded Bookie authority = 0
+Arena independently recreated Bookie route/tombstone authority = 0
 foreground allocation consumed maintenance reserve = 0
 checkpoint replay authority divergence         = 0
 authority-loss device resumed writable         = 0
@@ -540,6 +554,10 @@ uncommitted move copy became authoritative     = 0
 committed move lost after index deletion       = 0
 multiple winning successors per predecessor    = 0
 source freed before move commit/reader drain    = 0
+single-ledger reason or partial move authorized whole shared-allocation FREE = 0
+normal compaction selected mutable/unresolved source or duplicated a source/generation task = 0
+no-gain victim set repeatedly copied without bounded backpressure = 0
+net reusable gain reported without deducting actual destination allocation/padding = 0
 move created new local-success fact             = 0
 orphan GC removed current local-success payload = 0
 checkpoint selector differed from full chain    = 0

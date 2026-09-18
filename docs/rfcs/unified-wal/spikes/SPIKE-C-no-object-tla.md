@@ -130,6 +130,8 @@ client/coordinator Profile metadata-mutation authority
 E/W/A
 entryId -> write set
 Bookie up/down and fenced state
+per-source durable normal fence bound to instance/incarnation/context, distinct from global fence coverage
+per-coordinate unresolved pre-cut writes, locator coverage and distinct negative-evidence sources
 per-Bookie volatile and durable accepted entries
 per-Bookie failure-domain identity and permanent-loss state
 per-range repair generation and immutable coverage cut
@@ -283,6 +285,7 @@ ReclaimCoveredRepairReceipts
 - 模型区分不可变应用数据/累计length与可变piggyback LAC/封装digest；合法normal/recovery重写不因后者差异冲突，hole不由localLastEntryId推断存在。真实字节/完整性与慢路径成本由B19验证；
 - 受支持子集的point oracle区分required hole、normal tail、temporary unavailability和authority loss；recovered success晚于durable close，重启后重新验证；
 - local LAC=99且100为有效候选时，合法物理/恢复点读可读100；confirmed范围由客户端限定，DATA完成与候选存在不推导quorum LAC或recovered close，未知定位不计definitive absence；
+- `ReadPointRecoveryEvidence`复用Classic的write-set/`W-A+1`聚合/顺序write-back语义，否定仅来自自身durably fenced、身份/incarnation/context匹配且pre-cut写/定位已解析的distinct source。展开A已有ACK、B旧写在途、A/C先fenced、B/C先missing的3/3/2时序，不能把global coverage抽象成所有副本已fenced；B迟到写仍可发生，错误提前close必须被oracle否证。重复/旧上下文missing不补票，fence事实跨entry复用；
 - 基础durable close不依赖strong-publication、不reset；首批active ledger不生成增强token，不因增强coordinator/sidecar故障新增replacement等待。既有metadata/installation不可用仍可defer，不能把此性质夸成无条件可写；
 - 延期bounded repair reset启用后，只在整个ledger fenced+CLOSED、每个ACK-eligible coordinate有`F+1` distinct valid domains、exact membership已发布且conditional strong completion durable后成立；
 - target durability、membership 或 activation 任一单独不能 reset；proof cut 后的 loss 进入新 window，迟到 completion 不得清零；
@@ -320,13 +323,15 @@ physical batch result independent of per-entry eligibility and response wait
 stream/file mapping, unresolved I/O outcomes and affected non-writable scope
 non-overlapping allocation offsets versus per-stream batch order and logical tail exclusion
 recoverable prefix/cut and bounded full-lifecycle request/byte/batch credits
+input credits versus reserved shared submission buffers and admitted locator/completion capacity
 local-success publications
-ledger tombstones
+Bookie-authoritative ledger tombstones consumed by Arena transitions, without independent Arena lifecycle
 locators and reader pins
 bounded hot locators, query-visible derived index and pending async updates
 persisted index contents and per-stream coverage checkpoint bound to storage/index generation
 conditional MOVE_COMMIT records and move generations
 authoritative relocation chain and orphan copies
+frozen/resolved source occupancy, one normal task per source/generation and bounded victim-group gain
 per-move control sequence and durable-through cut
 per-Arena committed/applied conditional state
 conditional operation identity, expected predecessor and assigned control sequence
@@ -342,6 +347,7 @@ device state
 AppendAlloc
 DurabilizeControl
 PublishSpaceToShard
+AcquireSubmissionAndLocatorWorkingSetBeforeDataAdmission
 AssembleAndFreezeDataBatch
 WriteData
 CompleteBatchWrites
@@ -405,6 +411,7 @@ RebuildAllAuthorizedLiveRanges
 - FREE/reallocate不在模型中擦掉旧字节；generation 7→8后新DATA未写/部分写crash时，旧合法header/CRC不复活owner或进入当前index。是否unused由当前分配/恢复依赖证明，未知保持不可写，旧generation本身不等同当前媒体损坏；
 - Arena FREE只增加内部reusable，不自动增加filesystem available；DATA预分配和并发SST/控制/checkpoint维护消费同一filesystem预算，共享此filesystem的Arena不能重复预留。低水位限制扩张/新DATA并保留已预算维护；实际fallocate/ENOSPC/磁盘峰值由B17/B18验证；
 - 出队不归还仍持有的bytes/inflight credits，取消不终结真实I/O；只抽象已有有界资源转移，timer/大entry/慢读/控制容量的真实进展由B18验证；
+- 准入前取得最低共享提交和定位/完成工作集，入口payload不能挤占；下游暂停再恢复时，已准入请求在既有fairness下继续完成并释放资源。用小有限容量展开source等destination、durable DATA等locator的循环反例；真实event loop/shard/锁阻塞和大entry由B18验证，不把瞬时超额设为逃逸动作；
 - local success可依赖bounded hot locator，不依赖DB Put/flush；热定位淘汰晚于已计费query-visible接管，不等flush且无点读空窗。index stall积压仍有界，满额背压后续DATA并保留control容量；
 - 关闭纯派生索引WAL时crash丢弃未持久内容，Put/query-visible不推进persisted coverage；仅全部相关更新真实持久后的连续cut可发布匹配storage/stream/index generation的checkpoint，未覆盖DATA重放；
 - 覆盖checkpoint缺失/损坏/代际不匹配不虚报absence或跳过DATA；它不替代allocator/current selector/tombstone及完整控制后缀，不授予free或MOVE winner。旧Add/MOVE/delete异步update不复活陈旧selector，陈旧派生locator按当前authority重解析；
@@ -414,7 +421,9 @@ RebuildAllAuthorizedLiveRanges
 - checkpoint rotation 不丢失唯一 authority suffix；
 - authority 无法证明时 device 不变为 writable；
 - delete/free 与 reader pin 顺序安全；
+- Bookie tombstone是外部权威输入，Arena不再生成独立route/tombstone；FREE主语为allocation/generation，所有occupants及I/O/pin/selector条件满足后才接受，delete/compaction/orphan原因或单ledger引用不替代whole-allocation证明；
 - `MOVE_COMMIT` 为同一 Arena relocation 选择唯一 successor，未 commit copy 不成为 authoritative；
+- 正常compaction只选不再追加且原写已解析的source/generation，同source最多一个正常任务；OPEN ledger的旧物理范围可搬，异常并发任务仍检验条件化winner。victim组按实际source释放减destination占用判断净收益；无收益时有界背压而非无限复制，真实padding/成本曲线由B10/B17验证；
 - committed move 在 index 丢失后仍可重建，source free 晚于 cutover、new-pin 阻断和 reader drain；
 - move 不创造新的 local-success fact；logical entry已有success不阻止清理从未成为lookup authority的new-location orphan；
 - conditional predicate在同一Arena committed/applied state求值；condition failure无状态变化，duplicate operation不产生第二winner或generation bump；
@@ -616,7 +625,7 @@ DeferUnavailableRecovery
 - coordinator crash 丢失 volatile continuation 只导致重读，不产生 absence；
 - single corrupt replica 失效但其他 valid evidence 仍可恢复；
 - cancellation/deadline 只结束 attempt，不证明 DATA_LOSS；
-- normal tail必须在fenced exact write set上有`W-A+1` definitive absence coverage，offline/timeout不计；
+- normal tail须在exact write set上有`W-A+1` distinct definitive absences；每个source自身durably fenced、身份/incarnation/context匹配且无未解析pre-cut写/定位覆盖，不能由global fence coverage代替；offline/timeout、重复或旧上下文不计。扩展range与复用Classic的point oracle使用同一规则；
 - required frontier来自accepted authority，later speculative payload不制造required hole；
 - authority unrecoverable属于quarantine而非payload DATA_LOSS，required-coordinate finite evidence exhausted才是DATA_LOSS；
 - recovered outcome晚于durable close/final-prefix publication；
@@ -701,6 +710,8 @@ CurrentAttemptResourceNonePreservesPriorLogicalUnknown
 CompletionGateOpensAfterAllReplacementAckUpdates
 UnchangedValidReplicaAcksSurviveReplacement
 AcceptedEntryFitsRequiredReadRecoveryAndStorage
+NegativeEvidenceRequiresMatchingSourceFenceAndResolvedPreCutWrites
+AdmittedDataHasBoundedSubmissionAndLocatorWorkingSet
 AllocationDurableBeforeLocalSuccess
 OneOwnerPerSlotGeneration
 NoReuseBeforeDurableGenerationBump
@@ -720,6 +731,8 @@ MoveCommitSelectsUniqueAuthority
 UncommittedCopyNeverBecomesAuthoritative
 CommittedMoveSurvivesIndexLoss
 NoFreeBeforeMoveCommitAndReaderDrain
+FreeRequiresWholeAllocationReclaimabilityRatherThanOneLedgerReason
+ArenaConsumesBookieLifecycleWithoutDuplicatingAuthority
 MoveDoesNotCreateLocalSuccess
 CheckpointSelectorEqualsFullChain
 OrphanCleanupPreservesExistingLogicalSuccess
@@ -863,14 +876,14 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 | A-PROFILE-COMPAT | A | 3/3/2 | descriptor match, anonymous/authenticated-but-unauthorized/authorized control scope, normal/recovery/Profile opcode, negotiation, old-decoder Classic effect and no downgrade |
 | A-FENCE-STALE | A | 3/3/2 | stale writer vs recovery fence, delayed responses |
 | A-ACK-RESP | A | 3/3/2 and 4/3/2 | Add unknown/current ACKs; multi-slot completion gate with outside-write-set slot first, unchanged ACK retention; capacity backoff/credits/deadline |
-| A-POINT | A | 3/3/2 and 3/3/3 | local LAC 99/candidate 100; confirmed versus recovery read; required hole/normal tail; durable close/restart without strong reset |
+| A-POINT | A | 3/3/2 and 3/3/3 | LAC 99/candidate 100; per-source fence and resolved pre-cut writes before missing; unfenced B missing then old write, duplicate/stale evidence; Classic point oracle and durable close |
 | C-REUSE | C | local | alloc/data/free/reuse crash; generation 7 to 8 with old valid bytes remaining before new DATA |
 | C-CKPT | C | local | checkpoint current selector through `S`, fallback suffix and superblock/control-segment crash |
-| C-MOVE | C | local | conditional move, orphan free vs late commit, own-sequence durable-through, index rebuild and reader drain |
+| C-MOVE | C | local | frozen/resolved source of OPEN ledger, one normal task per source, bounded victim-group gain; conditional move/orphan race, whole-allocation FREE and reader drain |
 | C-COND | C | local | predicate failure, group durability, response loss/duplicate retry, checkpoint cut, unknown record and selector/pin race |
 | C-TAIL | C | local | immutable DATA, 11 unknown/12 complete; low-offset S0 tail versus successful high-offset S1 in shared file; no file-wide truncation |
 | C-WRITER | C | local | pool transfer/reuse with delayed old writer I/O and completion |
-| C-SPACE | C | local, shared filesystem when multiple Arenas enabled | internal reusable versus filesystem available, bounded preallocation/SST/control maintenance and temporary-space peak |
+| C-SPACE | C | local, shared filesystem when multiple Arenas enabled | reserved submission/locator working set under full input and downstream pause/resume; bounded disk maintenance, low-gain compaction backpressure and capacity recovery |
 | AC-LOCAL-STORE | A+C | two Arenas | partial durability, same-batch L1 fence/L2 success, K/X timeout then K/Y, coordinate protection, read-after-success |
 | C-REBUILD | C | local | query-visible handoff vs persisted coverage, Put-before-flush crash, stale async MOVE/delete updates and full live-range reconstruction |
 | C-FORMAT | A+C | local | old-binary fence, partial required-device migration, unknown mandatory format, incarnation/readiness generations and unsafe rollback |
@@ -889,7 +902,7 @@ range fast-path partial result, normal-tail proof, recovery outcome classificati
 
 当前模型为A/C/D及按能力启用的E，不存在Model B；上述A-FENCE-STALE/A-ACK-RESP保留stale writer、response loss和ordered completion场景，不恢复sequence/offset协议。
 
-A-ACK-RESP的4/3/2复用CLIENT-1一般E>W回归，不扩展首批存储性能矩阵。统一大小只用足以区分N-1/N/N+1的有限域，C-TAIL/C-REUSE保留S0/S1共享文件与旧代际字节，C-SPACE区分内部和filesystem容量；这些是现有模型的边界展开，不新增工作流或持久化状态平台。
+A-ACK-RESP的4/3/2复用CLIENT-1一般E>W回归，不扩展首批存储性能矩阵。统一大小只用足以区分N-1/N/N+1的有限域，C-TAIL/C-REUSE保留S0/S1共享文件与旧代际字节，C-SPACE区分内部/filesystem及共享完成工作集。A-POINT的逐来源fence与C-MOVE/C-SPACE的不可变source、整单元FREE、净收益及满载推进只展开已有状态，真实I/O/调度/成本仍由B10/B17/B18/B19验证；不新增工作流或持久化任务系统。
 
 ## 11. 状态空间控制规则
 

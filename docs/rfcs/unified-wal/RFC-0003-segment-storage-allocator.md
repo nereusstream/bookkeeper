@@ -44,8 +44,11 @@ Cluster MetadataStore
 BookKeeper quorum
     distributed ACK and recovery authority
 
+Bookie-level protected control log
+    route / activation / fence / grant / terminal tombstone authority (RFC-0005)
+
 Per-device ArenaControlLog + AllocatorCheckpoint
-    local allocation ownership and generation authority
+    local allocation / generation / move / free authority
 
 Data Arena
     local payload authority
@@ -87,21 +90,21 @@ NVMe device or WalArena
 
 ## 5. ArenaControlLog
 
-候选 record 类型：
+首批Arena权威record候选类型（物理编码仍未冻结）：
 
 ```text
 ALLOC
 ALLOC_POOL
-LEDGER_PROFILE_BIND
 MOVE_COMMIT
-DELETE_TOMBSTONE
 FREE_AND_BUMP
 CHECKPOINT_BEGIN
 CHECKPOINT_COMMIT
 DEVICE_STATE
 ```
 
-每条记录至少有：
+route/profile binding与terminal tombstone分别属于RFC-0005的Bookie级控制日志；`LEDGER_PROFILE_BIND`、`DELETE_TOMBSTONE`不属于本Arena的独立权威记录。Arena transition可以引用已验证的Bookie控制事实，但不产生另一份ledger生命周期，不要求Bookie tombstone durable后再逐Arena写tombstone/fsync。Bookie持有route/activation/fence/grant/tombstone，Arena持有allocation/generation/move/free。
+
+记录的候选envelope与按类型使用的身份字段：
 
 ```text
 controlSequence
@@ -109,15 +112,15 @@ recordType
 slotOrExtentId
 oldGeneration
 newGeneration
-ledgerId or shardOwner
-ledgerInstanceId
+allocation/shard owner identity where required by record type
+ledger instance reference only where applicable
 semantic predecessor / expected generation
 operation identity and generation where externally retried
 payloadDigest
 checksum
 ```
 
-具体字段按 record type 裁剪。控制序号和 checksum 必须使 replay 能识别重复、缺口和 torn tail。
+具体字段按record type裁剪，shared allocation不以单个ledger作为完整owner。控制序号和checksum必须使replay能识别重复、缺口和torn tail；外部Bookie控制引用不成为本Arena的第二份生命周期authority。
 
 ### 5.1 Authority 规则
 
@@ -388,19 +391,20 @@ asynchronously:
 
 terminal tombstone由RFC-0005的Bookie级route/control authority持有，allocator消费该事实，不要求为推进cursor在每个Arena再造一份tombstone日志。删除准入关闭后旧locator也不能获得新pin；异步派生清理不代替这个gate。cleanup从tombstone、完整allocator/current-selector authority及有效DATA重建，cursor既不授权reuse也不证明强访问屏障完成。
 
-候选原子控制记录：
+`FREE_AND_BUMP`的主语是整个allocation/slot generation，不是某个ledger的删除。候选语义如下，不据此冻结完整二进制字段：
 
 ```text
 FREE_AND_BUMP {
-    slotId
-    oldGeneration
+    allocationOrSlotId
+    expectedOldGeneration
     newGeneration
-    oldLedgerInstanceId
-    deleteRequestId
+    reclaimReason and required authority references, as applicable
 }
 ```
 
-该记录 durable 前，空间不得用于新 owner。重复 delete/free 必须幂等；instance 或 oldGeneration 不匹配必须拒绝。
+接受条件是整个回收单元已无live occupant、待完成写入或旧pin，并满足current selector、tombstone及相应清理规则。delete、compaction、orphan清理可提供各自原因和必要引用，但原因不替代whole-allocation reclaimability。dedicated可附单ledger身份核验；shared不能用一个`oldLedgerInstanceId`/`deleteRequestId`证明所有occupants已终结，也不把完整occupant列表塞进每条FREE。判定消费完整allocator/selector和有效DATA，幂等/冲突依旧使用§5.3的operation、当前generation及条件化顺序。
+
+该记录durable前空间不得用于新owner。重复free返回既有结果或stale/conflict，不重复bump；expected generation或适用的authority引用不匹配时拒绝，不把任意一条ledger删除作为通用FREE前提。
 
 对于 shared slab：
 
@@ -421,7 +425,11 @@ FREE_AND_BUMP {
 8. expose the bumped generation
 ```
 
-一个 record move 完成不等于整个 shared block 可 free。`MOVE_COMMIT` 不产生新的 BookKeeper local success、AQ 或 ACK，只保持既有 payload authority。多个有界 move record 可以共享 control-log group-commit barrier；locator cutover 必须晚于覆盖自身 control sequence 的 durability completion，不要求每个 moved entry 独立 control fsync，也不能迫使 foreground Add 等待额外 relocation barrier。
+一个record move完成不等于整个shared block可free。`MOVE_COMMIT`不产生新的BookKeeper local success、AQ或ACK，只保持既有payload authority。有界source组的新DATA复制可合批，多个move record可跨source共享control-log group commit；每个cutover仍晚于覆盖自身sequence的durability completion，不要求每个victim或moved entry独立fsync，也不迫使foreground Add等额外relocation barrier。
+
+首批compaction只选择已停止追加、原始DATA写入已解析、内容及占用集合可确定的物理回收单元，不扫描仍接收record的allocation后猜测其已无其他live数据。这个条件只约束block/allocation；OPEN ledger的旧不可变范围也可搬迁，不要求ledger close、集群fence或新ledger seal协议。同一source/generation最多一个正常compaction任务；异常重试、迟到任务仍按条件化`MOVE_COMMIT`防多winner，运行时去重不需新增持久任务系统。
+
+候选优先取可整单元回收且live比例较低的冻结范围，dead/live accounting可以重建，但搬迁和FREE前仍复核当前selector、tombstone与generation。按有界的一组source估算`净可复用收益 = 可释放source容量 - 新占用destination容量`，后项计入实际allocation粒度、framing和对齐padding，不要求每个source单独盈利，也不把一换一搬迁记成净回收。存在旧pin或I/O时收益尚未实现；只有whole-allocation FREE后才计实际释放。选择阈值由既有Spike B负载测量冻结，不增加生命周期预测、classifier或通用成本框架。
 
 ### 10.1 Uncommitted relocation orphan GC
 
@@ -494,7 +502,7 @@ upgrade/migration不要求跨device transaction：每个Arena按同一Bookie mig
 - control-log durability 前后；
 - DATA write 中和 durability barrier 前后；
 - local ACK 前后；
-- DELETE_TOMBSTONE 前后；
+- Bookie级DELETE_TOMBSTONE持久化及Arena消费该外部事实前后，不追加Arena独立tombstone；
 - reader drain 与 FREE_AND_BUMP 前后；
 - checkpoint data、commit、superblock switch 和 old-log reclaim 各边界；
 - compaction new allocation/data durability、`MOVE_COMMIT` append/durability/response loss、原子selector发布并关闭old-pin admission、reader/writer quiescence和old free各边界；
@@ -528,7 +536,11 @@ Spike Gate：
 
 每shard的同一套预算覆盖准入、待合批、已提交I/O、等待physical prefix/locator及响应阶段；request count、源/对齐bytes、inflight batches和duplicate waiters分别有上限。出队或移交future不释放credit，真实资源释放或转移到另一已计费owner后才归还对应份额；复制期间源与目标同时持有的bytes都计入。断连/取消而I/O仍在进行时保留其buffer/inflight费用，不能留下队列之外无上限的任务。复用请求对象，避免每层重新包装大对象。
 
-§15的热定位、异步index batch/队列、查询已可见但尚未flush的memtable及相关native/cache内存也计入总资源预算。local success或热定位淘汰不等于这些资源消失；转交实际可查询且已计费的owner后才归还原credit。索引stall耗尽预算时背压后续新DATA，fence/tombstone仍保留控制处理容量；不能以无界索引积压隐藏吞吐瓶颈。
+**准入必须保留完成工作集。** 在DATA准入前保障封包、提交、定位发布及结果处理所需的最低资源，不能先让网络payload耗尽总预算，再等同一预算释放一个输出buffer。首批每shard少量预分配对齐batch buffers计入总账并免受入口payload挤占；定位/完成状态优先由已有pending对象承接并在准入时取得容量，不等DATA durable后再争用最后一个热locator槽位，也不为每entry预留最大buffer。
+
+入口payload、共享提交工作集、热定位/索引接管容量及控制/维护保留量是一份总账中的份额。ownership交接或有界申请必须立即成功或立即失败；容量等待使用已有有界调度，不阻塞Netty event loop、append shard主循环或持ledger锁等待其他阶段归还资源。大entry符合统一N但超过普通batch时，接受前取得对应有界工作集，否则返回背压，不能接受后永久堵队首。
+
+§15的热定位、异步index batch/队列、查询已可见但尚未flush的memtable及相关native/cache内存也计入总预算。local success或热定位淘汰不等于资源消失；实际可查询且已计费的owner接管后才归还原credit。hot/index积压达到准入阈值时先背压新DATA，已准入/提交的数据仍有预算完成必要定位和结果处理，fence/tombstone仍有控制容量。不得通过丢有效DATA、无界队列或临时超限退出。B18暂停下游并把入口推到准入上限，恢复容量后须自行完成已接受请求并最终释放资源；不要求在磁盘/index永久不可用时继续接受新写。
 
 同批物理buffer费用不随某条entry取消而归零；未解析写入的坐标保护按§6.1转交不可写范围后才收缩异常pending。账本同时覆盖点读缓存、对齐读buffer、大父buffer及小副本、pin数量/时长、DATA文件数与后续dedicated池。大量hot ledger或慢reader不能突破总量，也不能通过暂停回收改善短期p99。
 
@@ -557,7 +569,9 @@ Arena内部预算或filesystem余量达到各自低水位时，先限制DATA文�
 
 同一报告分别列`Arena reusable bytes`、`filesystem available bytes`、`derived-index disk bytes`和`maintenance temporary-space peak`，同时保留既有内存/负载/debt指标。B17/B18构造Arena有空闲块但filesystem不足、共享filesystem上的多Arena竞争、SST flush/compaction与控制checkpoint并行；限制新DATA后在声明保留量内验证维护可推进及恢复容量后的有界重新准入，不另建资源平台。
 
-进展Gate限定在manifest声明的有界live set、受控admitted写入速率和可用维护I/O下：长期创建/写入/删除之后，dead bytes与compaction debt不持续增长，并在停止新写后于锁定时间内排空到目标水位。超过可持续负载时要求有界拒绝和恢复路径，不承诺无限写入。短期p99达标而维护长期饥饿不能PASS。
+低水位可提高维护优先级，但仍按§10选择有净收益的有界victim组；没有足够候选时维持背压，等待实际删除或可用容量恢复，不循环搬迁近乎全live的块来声称进展。destination工作集和并发维护上限仍服从本节保留量；只累计copied bytes或source释放总量不足以证明净回收。
+
+进展Gate限定在manifest声明的有界live set、受控admitted写入速率和可用维护I/O下：有可回收候选时，长期创建/写入/删除后的dead bytes与compaction debt不持续增长，停止新写后于锁定时间内达到可行目标水位。须明确候选分布、净收益阈值及保留量，不把无法获益的高live布局要求成无限搬迁任务。超过可持续负载或无获益候选时有界拒绝并等待容量变化；短期p99达标而维护长期饥饿不能PASS。
 
 ## 14. Reclaim 能力分级
 
@@ -566,7 +580,9 @@ Arena内部预算或filesystem余量达到各自低水位时，先限制DATA文�
 | Dedicated extent | tombstone 后立即不可见 | reader drain + durable free 后按 extent 回收 | 通常不需要 |
 | Shared cold slab | tombstone 后立即不可见 | whole block 全死后回收 | 部分 block 需要低优先级 compact |
 
-性能报告必须分别展示 logical deletion latency、physical bytes reclaimed、pending dead bytes 和 compaction debt。
+性能报告分别展示logical deletion latency、physical bytes reclaimed、pending dead bytes、compaction debt，另分列`compaction copied bytes`与`net reusable bytes gained`。后者按任务/有界victim组核算实际释放source减去新占destination的容量，不能把总FREE字节当净收益；未释放的pin/I/O等待另记debt，并结合前台p99判断维护成本。
+
+理想化示例：大小B、live比例r的回收单元，复制约rB、净释放约(1-r)B，故复制/净释放约为r/(1-r)。r为20%、90%、99%时分别约0.25、9、99；这只是忽略allocation粒度、padding、索引和控制成本的算式，不是性能结果。实际按§10的一组victim及真实destination占用测量，不能由“有dead bytes”推断值得立即搬迁。
 
 delete-applied/catch-up延迟另列，不以物理回收完成作为cursor条件；shared slab仍有live record、reader pin或旧I/O时，applied可完成而physical保持pending。
 
@@ -645,7 +661,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 
 1. DATA使用前allocation authority已durable；local success还要求本批完整write、覆盖barrier、所在物理stream连续durable前缀及readable publication。
 2. 同一 slot generation 不同时属于两个 owner。
-3. `FREE_AND_BUMP` durable 前旧 generation 不可复用。
+3. `FREE_AND_BUMP`以allocation/generation为主语，整个单元无live occupant/待完成写入/旧pin且满足selector/清理条件后才可接受；durable前不可复用，单ledger删除原因不替代整单元证明。
 4. locator的generation/instance不匹配时不返回错误owner数据；旧generation残留不进入当前index，也不单独证明unused或媒体损坏，当前分配/依赖无法证明时保持不可写。
 5. checkpoint rotation 不得删除恢复当前 authority 所需的唯一 control suffix。
 6. allocator authority 全损坏时设备 fail closed，不从 data scan 猜 free list。
@@ -653,7 +669,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 8. 100k idle ledger 不产生 per-ledger extent 或 block-buffer reservation。
 9. shared slab的delete-applied/cursor晚于durable tombstone及可重建清理义务，不依赖physical reclaim；待回收record不可接受新访问，cursor也不证明旧I/O/pin终结或允许reuse。
 10. 未 commit 的 relocation copy 永远不能成为 authoritative；durable `MOVE_COMMIT` 在 derived index 丢失后仍唯一选择 new location。
-11. old allocation 的复用晚于 move cutover、new-pin 阻断、reader drain、whole-allocation reclaimability 与 durable `FREE_AND_BUMP`。
+11. compaction source停止追加且原DATA已解析；OPEN ledger的旧不可变范围不需ledger seal/fence。同source/generation最多一个正常任务，异常竞争仍条件化；old复用晚于cutover、new-pin阻断、drain、整单元可回收及durable FREE。
 12. relocation 不创造新的 local success、AQ 或 ACK。
 13. checkpoint through `S` + complete suffix `>S` 与完整 control history 得到相同 current selector；历史 chain 可压缩，anti-ABA/retiring state 不得丢失。
 14. orphan GC 只证明 new location 未承载 authority；logical entry 的既存 local success 不阻止清理 uncommitted copy。
@@ -664,7 +680,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 19. selector publish与block-new-old-pin形成同一同步cut；cut后read pin不能落回old location。
 20. Arena superblock/format state不能替代old-binary-visible Bookie compatibility fence；任何partial required-device migration都不注册writable。
 21. DATA block submitted后header/count/checksum/padding/payload不可修改或追加；后续写入不得覆盖已有成功记录，I/O buffer只在真实I/O终结后复用。
-22. 请求的实际bytes、inflight和waiter覆盖其完整生命周期，出队/取消不提前归还仍持有的credit；最老合批deadline、大entry路径、异步重复读及fence/tombstone控制容量受§13同一预算约束。
+22. 请求bytes、inflight/waiter覆盖完整生命周期，出队/取消不提前归还credit；DATA准入前保障共享提交和定位/完成工作集，输入不能挤占，满载不循环互等或阻塞event loop/shard/ledger锁。大entry和控制容量仍受同一总账约束。
 23. batch物理durability与逐entry结果分开；单条取消/fence不产生物理缺口，提交后坐标不因timeout视为空，未解析写入由bounded pending或不可写范围保护。
 24. 点读独立验证record外层身份及BK CRC，长度/对齐范围有界且pin/selector正确；不因整批大而强制读整批，不以local LAC拒绝必要候选。
 25. 首批shared布局及stream/file映射明确；单stream逻辑后缀不缩短共享文件或损害其他stream，offset不定义跨stream顺序。dedicated启用后专属空间、buffer池及文件总量仍有界，共享barrier不表示共享block或独立flush域。
@@ -683,6 +699,8 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 - 已启用的lifetime class与同Arena `MOVE_COMMIT` relocation通过crash、并发move、reader pin及index rebuild测试；dedicated cold/hot promotion启用时另通过B5/B13，首个shared切片不声称覆盖该能力；
 - B2/B8/B19证明物理batch与逐entry结果分离、timeout后坐标保护、写错误/unknown暂停及恢复，包含共享文件错误范围和重复sync不能抹除失败；B9/B12/B18验证小record独立点读、损坏length、慢reader/pin与大量hot ledger资源；
 - B2/B3/B6/B9证明共享文件S0低offset不完整/S1高offset成功、复用generation 7→8旧合法CRC的恢复与回收；不依赖全文件截断或每次整块清零。B17/B18证明Arena内部空间与filesystem/SST/控制维护预算分层，preallocation低水位与真实临时空间峰值可核验；
+- B18入口近满且下游暂停/恢复时，已准入请求有封包与定位资源、最终完成释放，无超额/执行线程阻塞/永久等待；B10/B17覆盖冻结source、OPEN ledger局部搬迁、每source正常任务去重、含padding的成组净收益和无获益时背压；
+- B4/B10/B16证明Arena不重复持有Bookie binding/tombstone，shared多ledger及delete/compaction/orphan原因均走whole-allocation FREE条件；单ledger原因、部分move或残留pin不能提前free；
 - current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
 - conditional apply/result、duplicate/response-loss、bounded waiter/idempotency retention、unknown record和selector/pin竞态通过crash/replay与资源Gate；
 - 真实stock old binary compatibility fence由RFC-0005 Gate先行验证；Spike B同时覆盖Round 7 `BKPF1` Cookie sentinel candidate、data-integrity pre-storage-open instrumentation、Cookie auto-stamp、superblock A/B corruption、partial device migration、device-manifest change、migration response loss与rollback禁止条件；candidate失败时必须正式采用new BookieId/new scope fallback；
