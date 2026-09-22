@@ -1,0 +1,88 @@
+{
+  "scope": "Classic CLIENT-2; real PendingAddOp and ByteBuf lifecycle with controlled client/recycler; no network or Segment authority",
+  "runs": [
+    {
+      "stage": "red",
+      "runId": "unified-wal-local-ZsiZklxx",
+      "sourceCommit": "d105ec7a115178bb474316f647168ae7e2f995b8",
+      "command": [
+        "mvn",
+        "-o",
+        "-P",
+        "!cargo-zigbuild",
+        "-pl",
+        "bookkeeper-server",
+        "-am",
+        "-Dtest=PendingAddOpTest",
+        "-Dsurefire.failIfNoSpecifiedTests=false",
+        "-Dsurefire.rerunFailingTestsCount=0",
+        "test"
+      ],
+      "sourceSha256": {
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java": "1f5e1d490176bcbdfb1681d1efe86fefb39c95303072892d7bb89b783880c4c3",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java": "7f52ea353db0211697e46f74a655a4b45abdd358c16cf29cf5e3fafa3eecf84d",
+        "scripts/unified-wal/run-local-storage-tests.sh": "f7753a186b4ad8fc9c6e2f5b948cf12448f75a871d68d579624d581d4e57ee5e"
+      },
+      "exitCode": 1,
+      "tests": {
+        "tests": "9",
+        "failures": "1",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.003"
+      },
+      "failedCases": [
+        "testLastOldResponseRecyclesAfterCallback"
+      ],
+      "artifacts": {
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-ZsiZklxx/inputs.json": "1cd090f9efa1b8e220282b595bd93fc8d24a3d6a0a0cf0c9981ec2a5fd32e99e",
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-ZsiZklxx/maven.log": "f0c823695dd37cc7c630be270dd0a338ce6d52ba0edf2363889ad4d9b520bd24",
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-ZsiZklxx/reports/TEST-org.apache.bookkeeper.client.PendingAddOpTest.xml": "17713fabd13aab601f1498644fcf4d1f53c9866fb245e3f826acd01369f6bbe9"
+      }
+    },
+    {
+      "stage": "green",
+      "runId": "unified-wal-local-rZiAgmKQ",
+      "sourceCommit": "d105ec7a115178bb474316f647168ae7e2f995b8",
+      "command": [
+        "mvn",
+        "-o",
+        "-P",
+        "!cargo-zigbuild",
+        "-pl",
+        "bookkeeper-server",
+        "-am",
+        "-Dtest=PendingAddOpTest",
+        "-Dsurefire.failIfNoSpecifiedTests=false",
+        "-DtestRetryCount=0",
+        "-Dsurefire.rerunFailingTestsCount=0",
+        "test"
+      ],
+      "sourceSha256": {
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java": "d04241de77180f30bfd01adb18ba5977ed020e70dc710d3b28ac4fa90bcac802",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java": "51d9d66595d0d0db06acbcfd7f23164da7bee4ed1dadb4707e3a89950bd5d22c",
+        "scripts/unified-wal/run-local-storage-tests.sh": "b86d8e88a72d1faaecb992dd76d057c26cfbca40997b73c3a25a765cf52709a3"
+      },
+      "exitCode": 0,
+      "tests": {
+        "tests": "9",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "1.156"
+      },
+      "failedCases": [],
+      "artifacts": {
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-rZiAgmKQ/inputs.json": "dd531cb332ecb2eea2a5ba45b2fb5c95bae810cbae19359e5d3441038ba550c8",
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-rZiAgmKQ/maven.log": "cb9e01188821285e436d3d93df5247e497a9fc76a7c469001351d90847bb6282",
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-rZiAgmKQ/reports/TEST-org.apache.bookkeeper.client.PendingAddOpTest.xml": "212329de9a0d97816050237859b7ecc6c99bdb9622c4c68dbaedaf3394ccf6e1"
+      }
+    }
+  ],
+  "style": {
+    "result": "PASS",
+    "command": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+    "log": "/private/tmp/unified-wal-client2-style.log",
+    "sha256": "161b572093fce4b2cb076e988de4a995bbad3f9369e1fb4be8d0cfdfb5806580"
+  }
+}

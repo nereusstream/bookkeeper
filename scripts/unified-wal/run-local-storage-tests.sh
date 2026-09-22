@@ -11,7 +11,7 @@ network_flags=(-o)
 if [[ "${UW_FETCH_DEPENDENCIES:-false}" == "true" ]]; then network_flags=(); fi
 command=(mvn "${network_flags[@]}" -P '!cargo-zigbuild' -pl bookkeeper-server -am
   "-Dtest=$tests" -Dsurefire.failIfNoSpecifiedTests=false
-  -Dsurefire.rerunFailingTestsCount=0 test)
+  -DtestRetryCount=0 -Dsurefire.rerunFailingTestsCount=0 test)
 python3 - "$run_dir" "${command[@]}" <<'PY'
 import hashlib, json, platform, subprocess, sys
 from pathlib import Path

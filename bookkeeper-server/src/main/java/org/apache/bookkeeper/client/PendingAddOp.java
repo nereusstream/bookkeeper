@@ -287,6 +287,7 @@ class PendingAddOp implements WriteCallback {
                     .attr("entryId", entryId)
                     .log("Write did not succeed. But we have already fixed it.");
 
+            maybeRecycle();
             return;
         }
 

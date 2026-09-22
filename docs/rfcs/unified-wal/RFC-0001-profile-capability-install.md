@@ -652,7 +652,7 @@ AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RF
 
 ### 9.5 现有客户端的两个维护项
 
-在`c79357d76f95dae4c27ffbddcc075b6385991daa`上记录的两个源码维护项继续保留；本轮在`635c383e80ef353753712a7117aef32fd6b8f313`补充核对CLIENT-1的多slot本地切换顺序。修复及回归均为**PLANNED / NOT EXECUTED**，静态调用顺序不是已运行的故障复现。它们是独立的Classic客户端维护项，不属于Wave 0的Segment ACK接入，也不授予新协议/存储authority。
+在`c79357d76f95dae4c27ffbddcc075b6385991daa`上记录的两个源码维护项继续保留；本轮在`635c383e80ef353753712a7117aef32fd6b8f313`补充核对CLIENT-1的多slot本地切换顺序。CLIENT-2已完成一行回收修复和4种响应/callback排列的确定性红绿回归（现有测试类共9项通过）；[实现回执](implementation/client-maintenance/README.md)限定其证据范围。CLIENT-1仍为**PLANNED / NOT EXECUTED**，静态调用顺序不是已运行的故障复现。它们是独立的Classic客户端维护项，不属于Wave 0的Segment ACK接入，也不授予新协议/存储authority。
 
 | 工作项 | 源码事实与实施要求 | 确定性验收 |
 | --- | --- | --- |
@@ -663,7 +663,7 @@ CLIENT-1同时检查timeout统计及recycle重置对成功集合的依赖；未�
 
 多slot确定性反例：`E/W/A=4/3/2`，旧slots为`[D,A,B,C]`，entry 1写入A/B/C并已获A、B ACK，作为队首因换组尚未callback；本轮替换0、1为D'、A'。源码先解除gate，若先unset slot 0，`hasEntry(1,0)=false`分支调用`sendAddSuccessCallbacks()`，可能在A旧ACK尚未撤销时返回成功；新write set A'/B/C此时仅B有效。测试须固定0→1处理顺序并交错新/旧响应，验证整体gate而非仅最终集合内容。首批存储矩阵E=W不覆盖此分支，不能替代一般E>W的CLIENT-1兼容回归。
 
-CLIENT-2是对象池归还缺口，尚未以测试证明内存影响；`toSend`通常已在callback后的`maybeRecycle()`释放，不将其表述为已证实的直接内存永久泄漏。回归沿用[`PendingAddOpTest`](../../../bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java)及相关placement测试，保留现有timeout/callback同步保护。
+CLIENT-2的确定性测试已证明最后旧响应漏归还对象池，修复后按原条件恰好归还一次；`toSend`通常已在callback后的`maybeRecycle()`释放，不将其表述为已证实的直接内存永久泄漏。回归沿用[`PendingAddOpTest`](../../../bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java)及相关placement测试，保留现有timeout/callback同步保护。
 
 ## 10. Restart 与 orphan install
 

@@ -27,11 +27,15 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.util.Recycler;
+import java.lang.reflect.Field;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.bookkeeper.client.BKException.Code;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
@@ -39,6 +43,7 @@ import org.apache.bookkeeper.client.api.WriteFlag;
 import org.apache.bookkeeper.common.util.MathUtils;
 import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.BookieClient;
 import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.junit.Before;
@@ -196,5 +201,73 @@ public class PendingAddOpTest {
         // (now-stale) ledger handle, which would cause spurious failures on a recycled op.
         op.timeoutQuorumWait();
         verify(lh, never()).handleUnrecoverableErrorDuringAdd(anyInt());
+    }
+    @Test
+    public void testLastOldResponseRecyclesAfterCallback() throws Exception {
+        assertResponseRecycling(true, true);
+    }
+
+    @Test
+    public void testLastCurrentResponseRecyclesAfterCallback() throws Exception {
+        assertResponseRecycling(false, true);
+    }
+
+    @Test
+    public void testLastOldResponseWaitsForCallback() throws Exception {
+        assertResponseRecycling(true, false);
+    }
+
+    @Test
+    public void testLastCurrentResponseWaitsForCallback() throws Exception {
+        assertResponseRecycling(false, false);
+    }
+
+    private void assertResponseRecycling(boolean oldResponseLast, boolean callbackFirst) throws Exception {
+        BookieId oldBookie = BookieId.parse("old:3181");
+        BookieId replacement = BookieId.parse("replacement:3181");
+        BookieId unchanged = BookieId.parse("unchanged:3181");
+        List<BookieId> ensemble = List.of(replacement, unchanged, BookieId.parse("third:3181"));
+        when(lh.getDistributionSchedule()).thenReturn(new RoundRobinDistributionSchedule(3, 2, 3));
+        AtomicInteger callbacks = new AtomicInteger();
+        PendingAddOp op = PendingAddOp.create(lh, mockClientContext, ensemble, payload, WriteFlag.NONE,
+                (rc, handle, entryId, latency, ctx) -> callbacks.incrementAndGet(), null);
+        // Count the real lifecycle's recycle call without relying on Netty's sampling ratio or pool order.
+        @SuppressWarnings("unchecked")
+        Recycler.Handle<PendingAddOp> recycler = mock(Recycler.Handle.class);
+        Field handleField = PendingAddOp.class.getDeclaredField("recyclerHandle");
+        handleField.setAccessible(true);
+        handleField.set(op, recycler);
+        op.entryId = 1;
+        op.hasRun = true;
+        op.completed = true;
+        op.toSend = payload;
+        op.payload = null;
+        op.pendingWriteRequests = 2;
+        // Each outstanding transport retains its own reference until its response is consumed.
+        payload.retain(2);
+        if (callbackFirst) {
+            op.submitCallback(Code.OK);
+            assertEquals(2, payload.refCnt());
+        }
+        for (int i = 0; i < 2; i++) {
+            boolean old = (i == 1) == oldResponseLast;
+            op.writeComplete(Code.OK, 0, 1, old ? oldBookie : unchanged, old ? 0 : 1);
+            payload.release();
+            if (i == 0 || !callbackFirst) {
+                verify(recycler, never()).recycle(op);
+                assertSame(lh, op.lh);
+            }
+        }
+        if (!callbackFirst) {
+            assertEquals(1, payload.refCnt());
+            assertEquals(0, callbacks.get());
+            op.submitCallback(Code.OK);
+        }
+        assertEquals(1, callbacks.get());
+        assertEquals(0, payload.refCnt());
+        assertNull(op.lh);
+        assertNull(op.toSend);
+        verify(recycler, times(1)).recycle(op);
+        assertFalse(op.maybeTimeout());
     }
 }
