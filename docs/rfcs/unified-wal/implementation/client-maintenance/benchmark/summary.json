@@ -1,0 +1,48 @@
+{
+  "runId": "uw-client1-benchmark-tqql2ya4",
+  "metrics": [
+    {
+      "version": "baseline",
+      "faultDomains": "false",
+      "nsPerOp": 163.17852885346093,
+      "nsPerOpError": 1.3618273391358746,
+      "cpuNsPerOp": 162.53284719976182,
+      "bytesPerOp": 504.00076692257016
+    },
+    {
+      "version": "baseline",
+      "faultDomains": "true",
+      "nsPerOp": 172.5085757849709,
+      "nsPerOpError": 14.64601277893415,
+      "cpuNsPerOp": 171.35457143499104,
+      "bytesPerOp": 504.00136116765236
+    },
+    {
+      "version": "current",
+      "faultDomains": "false",
+      "nsPerOp": 142.16642278219436,
+      "nsPerOpError": 2.5311435008731626,
+      "cpuNsPerOp": 141.69570979793474,
+      "bytesPerOp": 264.0011222062418
+    },
+    {
+      "version": "current",
+      "faultDomains": "true",
+      "nsPerOp": 165.09364552407112,
+      "nsPerOpError": 1.6173445872055934,
+      "cpuNsPerOp": 164.48692595220805,
+      "bytesPerOp": 504.001300454721
+    }
+  ],
+  "logs": {
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/uw-client1-benchmark-tqql2ya4/baseline.log": "96d781887a72ce0e7c428fca6bfe5f084e95ab01723f31c9ed44a6155f8424bc",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/uw-client1-benchmark-tqql2ya4/current.log": "8c1e5d2e936599f91473f7c6548a9df4585302d4c4ed20fc6495ee4ac64ab060",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/uw-client1-benchmark-tqql2ya4/compile.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "limitations": [
+    "Desktop macOS arm64, short local microbenchmark; no isolated performance host or acceptance threshold",
+    "Synthetic positive responses, no digest/transport/payload allocation/real I/O",
+    "Initiation mapping refresh is covered by correctness tests, not included in this bookkeeping microbenchmark",
+    "Not a TLS/quorum/end-to-end or sustainable-throughput result"
+  ]
+}

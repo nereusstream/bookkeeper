@@ -353,6 +353,8 @@ Oracle：delete后新open/admission失败；membership与freeze按同记录versi
 
 强访问撤销及strong reset为独立DEFERRED配置，首批只验证能力拒绝及不创建token。后续启用时：强撤权必须等全部target屏障/永久服务隔离proof；strong reset必须整个ledger fenced+CLOSED，逐步执行token、prepare、lifecycle publication、resolve，注入sidecar故障、coordinator crash及pending loss，未最终发布candidate不能reset。已有token即使功能关闭也不得超时强删。记录新增冷CAS、membership阻塞时长、恢复解析和前台影响；不能因不在per-entry路径就忽略停顿。
 
+当前Classic切片进展（2026-09-22）：[CLIENT-1/2实现与回执](../implementation/client-maintenance/README.md)已完成确定性红绿回归，当前85项本地测试通过。A29/A30的Classic反例有实际代码证据；Profile activation/transport、Model A-ACK-RESP及本Spike整体Gate仍未由此完成。
+
 ### A29：CLIENT-1当前ACK一致性与多slot completion gate
 
 在现有`PendingAddOpTest`和真实rack-aware policy层构造`E/W/A=3/3/2`：旧ensemble为A/X、B/Y、C/Y；entry e先收到C ACK，另一pending entry超时触发C→D/X replacement，C仍在knownBookies。e随后仅收到A和D ACK，B未成功。必须仍不满足两rack约束；B的有效ACK到达后才可成功，迟到C不能补覆盖。

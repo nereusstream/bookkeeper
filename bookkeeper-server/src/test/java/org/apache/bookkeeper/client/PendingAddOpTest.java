@@ -24,7 +24,11 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -34,8 +38,12 @@ import static org.mockito.Mockito.when;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.util.Recycler;
+import io.netty.util.ReferenceCounted;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.bookkeeper.client.BKException.Code;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
@@ -45,7 +53,11 @@ import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.BookieClient;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.WriteCallback;
+import org.apache.bookkeeper.stats.Counter;
 import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Versioned;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -269,5 +281,305 @@ public class PendingAddOpTest {
         assertNull(op.toSend);
         verify(recycler, times(1)).recycle(op);
         assertFalse(op.maybeTimeout());
+    }
+    @Test
+    public void testMultiSlotChangeStartsOutsideWriteSet() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(3, false)) {
+            PendingAddOp op = scenario.add(1);
+            scenario.handle.changingEnsemble = true;
+            scenario.ack(1, 1, scenario.original.get(1));
+            scenario.ack(1, 2, scenario.original.get(2));
+            assertTrue(op.completed);
+            scenario.handle.changingEnsemble = false;
+            scenario.handle.unsetSuccessAndSendWriteRequest(scenario.replacement,
+                    new LinkedHashSet<>(List.of(0, 1)));
+            assertTrue("slot outside write set must not publish success", scenario.successes.isEmpty());
+            assertFalse(op.completed);
+            assertEquals(4, scenario.sends.size()); // W initial sends, only the changed write-set slot resent
+            scenario.ack(1, 1, scenario.replacement.get(1));
+            assertEquals(List.of(1L), scenario.successes); // unchanged slot 2 ACK survived
+            scenario.ack(1, 3, scenario.original.get(3));
+            assertEquals(List.of(1L), scenario.successes);
+        }
+    }
+
+    @Test
+    public void testAllPendingMappedBeforeInlineReplacementResponse() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(3, false)) {
+            PendingAddOp first = scenario.add(1);
+            PendingAddOp second = scenario.add(2);
+            scenario.handle.changingEnsemble = true;
+            scenario.ack(1, 1, scenario.original.get(1));
+            scenario.ack(1, 2, scenario.original.get(2));
+            scenario.ack(2, 0, scenario.original.get(0));
+            scenario.ack(2, 2, scenario.original.get(2));
+            assertTrue(first.completed && second.completed);
+            scenario.onSend = send -> {
+                if (send.bookie.equals(scenario.replacement.get(1))) {
+                    assertEquals(scenario.replacement, second.ensemble);
+                    assertFalse(second.completed);
+                    send.ack();
+                    assertTrue("all pending must remain behind the gate", scenario.successes.isEmpty());
+                }
+            };
+            scenario.handle.unsetSuccessAndSendWriteRequest(scenario.replacement,
+                    new LinkedHashSet<>(List.of(0, 1)));
+            assertTrue(scenario.handle.changingEnsemble);
+            assertTrue(scenario.successes.isEmpty());
+            scenario.handle.changingEnsemble = false;
+            scenario.handle.sendAddSuccessCallbacks();
+            assertEquals(List.of(1L), scenario.successes);
+            scenario.ack(2, 0, scenario.replacement.get(0));
+            assertEquals(List.of(1L, 2L), scenario.successes);
+            assertEquals(8, scenario.sends.size()); // no resends for unchanged replicas
+        }
+    }
+
+    @Test
+    public void testQuantityQuorumLosesFaultDomainAfterReplacement() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(4, true)) {
+            PendingAddOp op = scenario.add(1);
+            scenario.handle.changingEnsemble = true;
+            scenario.ack(1, 0, scenario.original.get(0));
+            scenario.ack(1, 2, scenario.original.get(2));
+            scenario.ack(1, 3, scenario.original.get(3));
+            assertTrue(op.completed);
+            scenario.handle.unsetSuccessAndSendWriteRequest(
+                    List.of(scenario.replacement.get(0), scenario.original.get(1),
+                            scenario.original.get(2), scenario.original.get(3)), Set.of(0));
+            assertFalse("quantity quorum without fault-domain coverage is insufficient", op.completed);
+            assertEquals(Set.of(scenario.original.get(2), scenario.original.get(3)), op.addEntrySuccessBookies);
+            scenario.handle.changingEnsemble = false;
+            scenario.handle.sendAddSuccessCallbacks();
+            assertTrue(scenario.successes.isEmpty());
+            scenario.ack(1, 0, scenario.replacement.get(0));
+            assertEquals(List.of(1L), scenario.successes);
+        }
+    }
+
+    @Test
+    public void testNewAckCannotUseReplacedBookiesFaultDomain() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(4, true)) {
+            PendingAddOp op = scenario.add(1);
+            scenario.handle.changingEnsemble = true;
+            scenario.ack(1, 0, scenario.original.get(0));
+            scenario.ack(1, 2, scenario.original.get(2));
+            scenario.handle.unsetSuccessAndSendWriteRequest(
+                    List.of(scenario.replacement.get(0), scenario.original.get(1),
+                            scenario.original.get(2), scenario.original.get(3)), Set.of(0));
+            scenario.handle.changingEnsemble = false;
+            scenario.ack(1, 3, scenario.original.get(3));
+            assertFalse(op.completed);
+            assertTrue(scenario.successes.isEmpty());
+            assertEquals(Set.of(scenario.original.get(2), scenario.original.get(3)), op.addEntrySuccessBookies);
+            scenario.ack(1, 0, scenario.replacement.get(0));
+            assertEquals(List.of(1L), scenario.successes);
+        }
+    }
+
+    @Test
+    public void testDisabledFaultDomainPolicyDoesNotMaintainSuccessSet() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(3, false)) {
+            PendingAddOp op = scenario.add(1);
+            scenario.ack(1, 1, scenario.original.get(1));
+            assertTrue(op.addEntrySuccessBookies == null || op.addEntrySuccessBookies.isEmpty());
+            scenario.ack(1, 2, scenario.original.get(2));
+            assertEquals(List.of(1L), scenario.successes);
+        }
+    }
+
+    @Test
+    public void testLateOldResponseCannotRestoreFaultDomain() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(4, true)) {
+            PendingAddOp op = scenario.add(1);
+            scenario.ack(1, 2, scenario.original.get(2));
+            scenario.ack(1, 3, scenario.original.get(3));
+            scenario.handle.unsetSuccessAndSendWriteRequest(scenario.replacement, Set.of(0, 1));
+            scenario.ack(1, 0, scenario.original.get(0));
+            scenario.ack(1, 1, scenario.replacement.get(1));
+            assertFalse(op.completed);
+            assertTrue(scenario.successes.isEmpty());
+            assertFalse(op.addEntrySuccessBookies.contains(scenario.original.get(0)));
+            scenario.ack(1, 0, scenario.replacement.get(0));
+            assertEquals(List.of(1L), scenario.successes);
+        }
+    }
+
+    @Test
+    public void testRetrySameEnsembleKeepsCompletionGate() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(3, false)) {
+            PendingAddOp op = scenario.add(1);
+            scenario.handle.changingEnsemble = true;
+            scenario.ack(1, 1, scenario.original.get(1));
+            scenario.ack(1, 2, scenario.original.get(2));
+            scenario.handle.changingEnsemble = false;
+            scenario.handle.unsetSuccessAndSendWriteRequest(scenario.original, new LinkedHashSet<>(List.of(0, 1)));
+            assertFalse(op.completed);
+            assertTrue(scenario.successes.isEmpty());
+            scenario.ack(1, 1, scenario.original.get(1));
+            assertEquals(List.of(1L), scenario.successes);
+        }
+    }
+
+    @Test
+    public void testChangeOutsideWriteSetUnblocksCompletedEntry() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(3, false)) {
+            scenario.add(1);
+            scenario.handle.changingEnsemble = true;
+            scenario.ack(1, 1, scenario.original.get(1));
+            scenario.ack(1, 2, scenario.original.get(2));
+            scenario.handle.changingEnsemble = false;
+            scenario.handle.unsetSuccessAndSendWriteRequest(
+                    List.of(scenario.replacement.get(0), scenario.original.get(1),
+                            scenario.original.get(2), scenario.original.get(3)), Set.of(0));
+            assertEquals(List.of(1L), scenario.successes);
+            assertEquals(3, scenario.sends.size());
+        }
+    }
+
+    @Test
+    public void testFaultDomainTimeoutCounterRequiresCurrentQuantityQuorum() {
+        ClientConfiguration configuration = new ClientConfiguration();
+        configuration.setEnforceMinNumFaultDomainsForWrite(true);
+        when(mockClientContext.getConf()).thenReturn(ClientInternalConf.fromConfig(configuration));
+        BookKeeperClientStats stats = mock(BookKeeperClientStats.class);
+        Counter counter = mock(Counter.class);
+        when(stats.getWriteTimedOutDueToNotEnoughFaultDomains()).thenReturn(counter);
+        when(mockClientContext.getClientStats()).thenReturn(stats);
+        LedgerMetadata metadata = mock(LedgerMetadata.class);
+        when(metadata.getAckQuorumSize()).thenReturn(2);
+        when(lh.getLedgerMetadata()).thenReturn(metadata);
+        for (int count : new int[] {1, 2}) {
+            PendingAddOp op = PendingAddOp.create(lh, mockClientContext, List.of(), Unpooled.buffer(16).writeZero(16),
+                    WriteFlag.NONE, (rc, handle, id, latency, ctx) -> { }, null);
+            for (int i = 0; i < count; i++) {
+                op.addEntrySuccessBookies.add(BookieId.parse("current-" + i + ":3181"));
+            }
+            op.timeoutQuorumWait();
+            op.recyclePendAddOpObject();
+        }
+        verify(counter, times(1)).inc();
+        verify(lh, times(2)).handleUnrecoverableErrorDuringAdd(Code.AddEntryQuorumTimeoutException);
+    }
+
+    @Test
+    public void testUninitiatedAddQueuedAfterEnsembleSwitchUsesCurrentMapping() throws Exception {
+        try (EnsembleScenario scenario = new EnsembleScenario(3, false)) {
+            PendingAddOp op = PendingAddOp.create(scenario.handle, scenario.context, scenario.original,
+                    Unpooled.wrappedBuffer(new byte[16]), WriteFlag.NONE, (rc, handle, id, latency, ctx) -> { }, null);
+            op.setEntryId(1);
+            op.setLedgerLength(16);
+            // The app created the op before the metadata update but has not enqueued it yet.
+            Versioned<LedgerMetadata> original = scenario.handle.getVersionedLedgerMetadata();
+            assertTrue(scenario.handle.setLedgerMetadata(original, new Versioned<>(
+                    LedgerMetadataBuilder.from(original.getValue()).replaceEnsembleEntry(0, scenario.replacement)
+                            .build(), new LongVersion(1))));
+            scenario.handle.unsetSuccessAndSendWriteRequest(scenario.replacement, Set.of(0, 1));
+            scenario.handle.pendingAddOps.add(op);
+            op.initiate();
+            assertEquals(scenario.replacement, op.ensemble);
+            assertEquals(scenario.replacement.get(1), scenario.sends.get(0).bookie);
+        }
+    }
+
+    private static final class EnsembleScenario implements AutoCloseable {
+        final MockClientContext context;
+        final LedgerHandle handle;
+        final List<BookieId> original = List.of(BookieId.parse("d:3181"), BookieId.parse("a:3181"),
+                BookieId.parse("b:3181"), BookieId.parse("c:3181"));
+        final List<BookieId> replacement = List.of(BookieId.parse("d-new:3181"), BookieId.parse("a-new:3181"),
+                original.get(2), original.get(3));
+        final List<Long> successes = new ArrayList<>();
+        final List<ControlledSend> sends = new ArrayList<>();
+        java.util.function.Consumer<ControlledSend> onSend;
+
+        EnsembleScenario(int writeQuorum, boolean checkDomains) throws Exception {
+            context = MockClientContext.create();
+            ClientConfiguration configuration = new ClientConfiguration();
+            configuration.setEnforceMinNumFaultDomainsForWrite(checkDomains);
+            context.setConf(ClientInternalConf.fromConfig(configuration));
+            doAnswer(invocation -> {
+                Set<BookieId> acked = invocation.getArgument(0);
+                return acked.contains(original.get(0)) || acked.contains(replacement.get(0));
+            }).when(context.getPlacementPolicy()).areAckedBookiesAdheringToPlacementPolicy(any(), anyInt(), anyInt());
+            doAnswer(invocation -> {
+                ControlledSend send = new ControlledSend(invocation.getArgument(0), invocation.getArgument(3),
+                        invocation.getArgument(4), invocation.getArgument(5), invocation.getArgument(6));
+                sends.add(send);
+                if (onSend != null) {
+                    onSend.accept(send);
+                }
+                return null;
+            }).when(context.getBookieClient()).addEntry(any(), anyLong(), any(), anyLong(), any(), any(), any(),
+                    anyInt(), anyBoolean(), any());
+            Versioned<LedgerMetadata> metadata = ClientUtil.setupLedger(context, 42,
+                    LedgerMetadataBuilder.create().withEnsembleSize(4).withWriteQuorumSize(writeQuorum)
+                            .withAckQuorumSize(2).newEnsembleEntry(0, original));
+            handle = new LedgerHandle(context, 42, metadata, BookKeeper.DigestType.CRC32C,
+                    ClientUtil.PASSWD, WriteFlag.NONE);
+            handle.pendingAddsSequenceHead = 0;
+        }
+
+        PendingAddOp add(long entryId) {
+            PendingAddOp op = PendingAddOp.create(handle, context, original, Unpooled.wrappedBuffer(new byte[16]),
+                    WriteFlag.NONE, (rc, ledger, id, latency, ctx) -> {
+                        if (rc == Code.OK) {
+                            successes.add(id);
+                        }
+                    }, null);
+            op.setEntryId(entryId);
+            op.setLedgerLength(entryId * 16);
+            handle.pendingAddOps.add(op);
+            op.initiate();
+            return op;
+        }
+
+        void ack(long entry, int index, BookieId bookie) {
+            sends.stream().filter(s -> !s.responded && s.entryId == entry
+                            && s.index == index && s.bookie.equals(bookie))
+                    .findFirst().orElseThrow().ack();
+        }
+
+        @Override
+        public void close() {
+            onSend = null;
+            handle.errorOutPendingAdds(Code.InterruptedException);
+            for (ControlledSend send : sends) {
+                if (!send.responded) {
+                    send.ack();
+                }
+            }
+            if (handle.timeoutFuture != null) {
+                handle.timeoutFuture.cancel(false);
+            }
+            context.getScheduler().shutdown();
+        }
+    }
+
+    private static final class ControlledSend {
+        final BookieId bookie;
+        final long entryId;
+        final ReferenceCounted data;
+        final WriteCallback callback;
+        final int index;
+        boolean responded;
+
+        ControlledSend(BookieId bookie, long entryId, ReferenceCounted data, WriteCallback callback, int index) {
+            this.bookie = bookie;
+            this.entryId = entryId;
+            this.data = data.retain();
+            this.callback = callback;
+            this.index = index;
+        }
+
+        void ack() {
+            assertFalse("each request responds once", responded);
+            responded = true;
+            try {
+                callback.writeComplete(Code.OK, 42, entryId, bookie, index);
+            } finally {
+                data.release();
+            }
+        }
     }
 }

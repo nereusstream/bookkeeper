@@ -652,12 +652,12 @@ AutoRecovery 的 target 在接收第一份 durable payload 前，必须已有 RF
 
 ### 9.5 现有客户端的两个维护项
 
-在`c79357d76f95dae4c27ffbddcc075b6385991daa`上记录的两个源码维护项继续保留；本轮在`635c383e80ef353753712a7117aef32fd6b8f313`补充核对CLIENT-1的多slot本地切换顺序。CLIENT-2已完成一行回收修复和4种响应/callback排列的确定性红绿回归（现有测试类共9项通过）；[实现回执](implementation/client-maintenance/README.md)限定其证据范围。CLIENT-1仍为**PLANNED / NOT EXECUTED**，静态调用顺序不是已运行的故障复现。它们是独立的Classic客户端维护项，不属于Wave 0的Segment ACK接入，也不授予新协议/存储authority。
+在`c79357d76f95dae4c27ffbddcc075b6385991daa`上记录的两个源码维护项继续保留；本轮在`635c383e80ef353753712a7117aef32fd6b8f313`补充核对CLIENT-1的多slot本地切换顺序。CLIENT-2已完成一行回收修复和4种响应/callback排列的确定性红绿回归（现有测试类共9项通过）；[实现回执](implementation/client-maintenance/README.md)限定其证据范围。CLIENT-1现已完成整体gate、ACK/故障域同步撤销与保留未变ACK的修复；先获得5个反例及补充的入队交错反例，最终85项定向及既有测试通过。证据仅为Classic客户端切片，不提升Profile/Spike/Gate。它们是独立的Classic客户端维护项，不属于Wave 0的Segment ACK接入，也不授予新协议/存储authority。
 
 | 工作项 | 源码事实与实施要求 | 确定性验收 |
 | --- | --- | --- |
-| CLIENT-1 ACK状态一致性 | [`PendingAddOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)撤销`ackSet`却未同步清理`addEntrySuccessBookies`，`completed`只按数量撤销；此外[`LedgerHandle`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java)先解除`changingEnsemble`再逐slot unset，不在write set的分支会尝试成功回调。按§9.3保持整体completion gate，全部受影响pending/slot更新后共同重算当前有效数量和policy覆盖，再开放连续回调；保留身份未变的有效ACK | Spike A A29：保留旧ACK/故障域残留和数量够但域不足；增加4/3/2双slot替换，先处理entry write set外slot时仍不回调，后续slot旧ACK全部撤销后再判定；未变副本不被清空或无条件重发 |
-| CLIENT-2 迟到响应回收 | `writeComplete()`先减少`pendingWriteRequests`，旧地址分支直接return，漏掉`maybeRecycle()`。在该分支补安全回收检查并保持既有条件；回收后立即return，不能再访问已清空字段 | Spike A A30：最后一个旧地址响应、最后一个当前地址响应、逻辑callback未完成三种顺序；请求归零后恰好归还一次，buffer不提前或重复释放 |
+| CLIENT-1 ACK状态一致性 | [`PendingAddOp`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java)原先撤销`ackSet`却未同步清理`addEntrySuccessBookies`，`completed`只按数量撤销；原先[`LedgerHandle`](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java)先解除`changingEnsemble`再逐slot unset，不在write set的分支会尝试成功回调。现已按§9.3保持整体completion gate，全部受影响pending/slot更新后共同重算当前有效数量和policy覆盖，再开放连续回调；保留身份未变的有效ACK | Spike A A29：保留旧ACK/故障域残留和数量够但域不足；增加4/3/2双slot替换，先处理entry write set外slot时仍不回调，后续slot旧ACK全部撤销后再判定；未变副本不被清空或无条件重发 |
+| CLIENT-2 迟到响应回收 | `writeComplete()`旧地址分支原先漏掉`maybeRecycle()`；现已补安全回收检查并保持既有条件；回收后立即return，不能再访问已清空字段 | Spike A A30：最后一个旧地址响应、最后一个当前地址响应、逻辑callback未完成三种顺序；请求归零后恰好归还一次，buffer不提前或重复释放 |
 
 CLIENT-1同时检查timeout统计及recycle重置对成功集合的依赖；未启用故障域检查时避免维护冗余Bookie集合，但不能因此改变诊断含义或丢失必要ACK状态。具体复用/派生方式由小范围补丁决定，不要求新增协议或大规模重构。`RackawareEnsemblePlacementPolicyImpl.areAckedBookiesAdheringToPlacementPolicy()`会计入传入集合里仍属knownBookies的旧节点机架，因此只修policy内部而不修调用方状态不足。
 

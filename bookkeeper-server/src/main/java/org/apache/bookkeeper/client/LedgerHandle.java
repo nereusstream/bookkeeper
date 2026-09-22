@@ -2412,7 +2412,7 @@ public class LedgerHandle implements WriteHandle {
                                         .attr("newEnsemble", newEnsemble)
                                         .log("New Ensemble");
 
-                                changingEnsemble = false;
+                                // Keep callbacks blocked until every local pending op has switched.
                             }
                         }
 
@@ -2422,17 +2422,44 @@ public class LedgerHandle implements WriteHandle {
 
                         if (newEnsemble != null) { // unsetSuccess outside of lock
                             unsetSuccessAndSendWriteRequest(newEnsemble, replaced);
+                            synchronized (metadataLock) {
+                                if (delayedWriteFailedBookies.isEmpty()) {
+                                    changingEnsemble = false;
+                                } else {
+                                    // A replacement write may itself fail while local state is switching.
+                                    toReplace = new HashMap<>(delayedWriteFailedBookies);
+                                    delayedWriteFailedBookies.clear();
+                                }
+                            }
+                            if (toReplace != null && !toReplace.isEmpty()) {
+                                ensembleChangeLoop(newEnsemble, toReplace);
+                            } else {
+                                sendAddSuccessCallbacks();
+                            }
                         }
                     }
             }, clientCtx.getMainWorkerPool().chooseThread(ledgerId));
     }
 
     void unsetSuccessAndSendWriteRequest(List<BookieId> ensemble, final Set<Integer> bookies) {
-        for (PendingAddOp pendingAddOp : pendingAddOps) {
-            for (Integer bookieIndex: bookies) {
-                pendingAddOp.unsetSuccessAndSendWriteRequest(ensemble, bookieIndex);
-            }
+        final boolean wasChangingEnsemble;
+        synchronized (metadataLock) {
+            wasChangingEnsemble = changingEnsemble;
+            changingEnsemble = true;
         }
+        // Invalidate every affected ACK and fault-domain set before a resend can complete inline.
+        // An unexpected failure leaves the gate closed rather than publishing partially switched state.
+        for (PendingAddOp pendingAddOp : pendingAddOps) {
+            pendingAddOp.unsetSuccess(ensemble, bookies);
+        }
+        for (PendingAddOp pendingAddOp : pendingAddOps) {
+            pendingAddOp.sendReplacementWrites(bookies);
+        }
+        synchronized (metadataLock) {
+            changingEnsemble = wasChangingEnsemble;
+        }
+        // Also covers entries whose write set contains none of the replaced slots.
+        sendAddSuccessCallbacks();
     }
 
     void registerOperationFailureOnBookie(BookieId bookie, long entryId) {

@@ -1,0 +1,197 @@
+{
+  "scope": "Classic CLIENT-1 deterministic PendingAddOp/LedgerHandle regressions; no Segment, TLS or MetadataStore authority",
+  "runs": [
+    {
+      "stage": "red",
+      "runId": "unified-wal-local-xuti0AY9",
+      "sourceCommit": "30215501bb211c13ca4ffc0353c38622411005e3",
+      "command": [
+        "mvn",
+        "-o",
+        "-P",
+        "!cargo-zigbuild",
+        "-pl",
+        "bookkeeper-server",
+        "-am",
+        "-Dtest=PendingAddOpTest",
+        "-Dsurefire.failIfNoSpecifiedTests=false",
+        "-DtestRetryCount=0",
+        "-Dsurefire.rerunFailingTestsCount=0",
+        "test"
+      ],
+      "sourceSha256": {
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java": "e9c0782fd06da046c8f1bf0d4aee2585b63c6357ae9b17a1eb80245c76527de5",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java": "d04241de77180f30bfd01adb18ba5977ed020e70dc710d3b28ac4fa90bcac802",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ReadOnlyLedgerHandle.java": "d00d4558fe62745a74850933b1a443b74935f28bc2897485e13a37544e17955f",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/HandleFailuresTest.java": "633485fd8f81252171126f96148064ef5d222d955ef5b366872232f2bc3aefe2",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/MockLedgerHandle.java": "49470d2d2854c9f845c310f470459d968295b049f266ae4a8002e853a8d152db",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java": "4a14b0ff3fd11bf71bb24af5b9f7174782397ea52816b4e6674601004f23f652",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/TestRackawareEnsemblePlacementPolicy.java": "ffd09ce22282569cbf56c73595fd74bafa3f569d4147b19cd81b1524d514ef03"
+      },
+      "exitCode": 1,
+      "reports": [
+        {
+          "class": "org.apache.bookkeeper.client.PendingAddOpTest",
+          "tests": "14",
+          "errors": "0",
+          "failures": "5",
+          "skipped": "0",
+          "time": "1.43",
+          "failedCases": [
+            {
+              "name": "testMultiSlotChangeStartsOutsideWriteSet",
+              "message": "slot outside write set must not publish success"
+            },
+            {
+              "name": "testQuantityQuorumLosesFaultDomainAfterReplacement",
+              "message": "quantity quorum without fault-domain coverage is insufficient"
+            },
+            {
+              "name": "testNewAckCannotUseReplacedBookiesFaultDomain",
+              "message": null
+            },
+            {
+              "name": "testAllPendingMappedBeforeInlineReplacementResponse",
+              "message": "expected:<[d-new:3181, a-new:3181, b:3181, c:3181]> but was:<[d:3181, a:3181, b:3181, c:3181]>"
+            },
+            {
+              "name": "testDisabledFaultDomainPolicyDoesNotMaintainSuccessSet",
+              "message": null
+            }
+          ],
+          "report": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-xuti0AY9/reports/TEST-org.apache.bookkeeper.client.PendingAddOpTest.xml",
+          "sha256": "6f27908167191635cb64dc7af9c64996f9db790c62c0b9f8cfa01480370d6f8d"
+        }
+      ],
+      "artifacts": {
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-xuti0AY9/inputs.json": "755e7aaf26a04d436bb48be9f06f672f040e60b08d35d1654e54ca431dd1cbb2",
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-xuti0AY9/maven.log": "446762c1e1558e1aea3ff1752c18a95aa4e87676e974ef78782738962bfdcc06"
+      }
+    },
+    {
+      "stage": "admission-red",
+      "runId": "unified-wal-local-gmzjal8w",
+      "sourceCommit": "30215501bb211c13ca4ffc0353c38622411005e3",
+      "command": [
+        "mvn",
+        "-o",
+        "-P",
+        "!cargo-zigbuild",
+        "-pl",
+        "bookkeeper-server",
+        "-am",
+        "-Dtest=PendingAddOpTest#testUninitiatedAddQueuedAfterEnsembleSwitchUsesCurrentMapping",
+        "-Dsurefire.failIfNoSpecifiedTests=false",
+        "-DtestRetryCount=0",
+        "-Dsurefire.rerunFailingTestsCount=0",
+        "test"
+      ],
+      "sourceSha256": {
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java": "3f9a11aa6191c7028cd437be2951503ee48461d1279b52710a2faa38be306ee6",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java": "8389153a2bd294a9a92802b646e44afd96402963d32b1f51b32af2a30ee1e824",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ReadOnlyLedgerHandle.java": "d00d4558fe62745a74850933b1a443b74935f28bc2897485e13a37544e17955f",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/HandleFailuresTest.java": "633485fd8f81252171126f96148064ef5d222d955ef5b366872232f2bc3aefe2",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/MockLedgerHandle.java": "49470d2d2854c9f845c310f470459d968295b049f266ae4a8002e853a8d152db",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java": "f7035fded760fcea00ee843e5d916ed0677ab2afce416a517069594a5bea6326",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/TestRackawareEnsemblePlacementPolicy.java": "ffd09ce22282569cbf56c73595fd74bafa3f569d4147b19cd81b1524d514ef03"
+      },
+      "exitCode": 1,
+      "reports": [
+        {
+          "class": "org.apache.bookkeeper.client.PendingAddOpTest",
+          "tests": "1",
+          "errors": "0",
+          "failures": "1",
+          "skipped": "0",
+          "time": "1.303",
+          "failedCases": [
+            {
+              "name": "testUninitiatedAddQueuedAfterEnsembleSwitchUsesCurrentMapping",
+              "message": "expected:<[d-new:3181, a-new:3181, b:3181, c:3181]> but was:<[d:3181, a:3181, b:3181, c:3181]>"
+            }
+          ],
+          "report": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-gmzjal8w/reports/TEST-org.apache.bookkeeper.client.PendingAddOpTest.xml",
+          "sha256": "22b0caf672027d7c61f3e8a31b104aa0883d4ce559c6a0fc366549719b697ea3"
+        }
+      ],
+      "artifacts": {
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-gmzjal8w/inputs.json": "1b9eb58fbfb7fd98e76a895a7672952a971ba8bd927ba805f25948d3ba8d40a3",
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-gmzjal8w/maven.log": "2550605d2270d5014e805095c37411e815123cc2038ab8ffbeb4a3c5361cbb94"
+      }
+    },
+    {
+      "stage": "green",
+      "runId": "unified-wal-local-heqIPSk8",
+      "sourceCommit": "30215501bb211c13ca4ffc0353c38622411005e3",
+      "command": [
+        "mvn",
+        "-o",
+        "-P",
+        "!cargo-zigbuild",
+        "-pl",
+        "bookkeeper-server",
+        "-am",
+        "-Dtest=PendingAddOpTest,HandleFailuresTest,TestRackawareEnsemblePlacementPolicy",
+        "-Dsurefire.failIfNoSpecifiedTests=false",
+        "-DtestRetryCount=0",
+        "-Dsurefire.rerunFailingTestsCount=0",
+        "test"
+      ],
+      "sourceSha256": {
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java": "3f9a11aa6191c7028cd437be2951503ee48461d1279b52710a2faa38be306ee6",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java": "008a4c3475b02524fcf412ad752379b610b96defc1dbc3c2b085eb72301d99dd",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ReadOnlyLedgerHandle.java": "d00d4558fe62745a74850933b1a443b74935f28bc2897485e13a37544e17955f",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/HandleFailuresTest.java": "633485fd8f81252171126f96148064ef5d222d955ef5b366872232f2bc3aefe2",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/MockLedgerHandle.java": "49470d2d2854c9f845c310f470459d968295b049f266ae4a8002e853a8d152db",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/PendingAddOpTest.java": "f7035fded760fcea00ee843e5d916ed0677ab2afce416a517069594a5bea6326",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/TestRackawareEnsemblePlacementPolicy.java": "ffd09ce22282569cbf56c73595fd74bafa3f569d4147b19cd81b1524d514ef03"
+      },
+      "exitCode": 0,
+      "reports": [
+        {
+          "class": "org.apache.bookkeeper.client.HandleFailuresTest",
+          "tests": "12",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "time": "2.562",
+          "failedCases": [],
+          "report": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-heqIPSk8/reports/TEST-org.apache.bookkeeper.client.HandleFailuresTest.xml",
+          "sha256": "d4bd274b3a2aa17d8447f1157bb0a00ef7913d09618d5c56ed4f14af65a7beba"
+        },
+        {
+          "class": "org.apache.bookkeeper.client.PendingAddOpTest",
+          "tests": "19",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "time": "1.369",
+          "failedCases": [],
+          "report": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-heqIPSk8/reports/TEST-org.apache.bookkeeper.client.PendingAddOpTest.xml",
+          "sha256": "646f098b5f5a20ee46046200ce209fa33492e54dc767c82f8c1180df6a0e7d3b"
+        },
+        {
+          "class": "org.apache.bookkeeper.client.TestRackawareEnsemblePlacementPolicy",
+          "tests": "54",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "time": "2.299",
+          "failedCases": [],
+          "report": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-heqIPSk8/reports/TEST-org.apache.bookkeeper.client.TestRackawareEnsemblePlacementPolicy.xml",
+          "sha256": "d34cdb02b1c20a6058c8f03ee042de816387bd47bcad35ac18b143ca3ec826ff"
+        }
+      ],
+      "artifacts": {
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-heqIPSk8/inputs.json": "4f7238b06790bee396f02d220ea63c9a8dec73c10437f47f1126670b440b7d54",
+        "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-heqIPSk8/maven.log": "11f67d0d5227fca4692876688ad9aaaa5f91751bec55a40a0664068bca09ba83"
+      }
+    }
+  ],
+  "style": {
+    "command": "mvn -o -pl bookkeeper-server,microbenchmarks -DskipTests spotless:check checkstyle:check",
+    "result": "PASS",
+    "log": "/private/tmp/unified-wal-client1-style-final.log",
+    "sha256": "3b6f573a3a0401db250147750606e4d1e5992969395f927fb5484347fd2ae88b"
+  }
+}

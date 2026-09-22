@@ -108,7 +108,9 @@ class PendingAddOp implements WriteCallback {
         op.writeFlags = writeFlags;
 
         if (op.addEntrySuccessBookies == null) {
-            op.addEntrySuccessBookies = new HashSet<>();
+            if (clientCtx.getConf().enforceMinNumFaultDomainsForWrite) {
+                op.addEntrySuccessBookies = new HashSet<>();
+            }
         } else {
             op.addEntrySuccessBookies.clear();
         }
@@ -178,7 +180,8 @@ class PendingAddOp implements WriteCallback {
             return;
         }
 
-        if (addEntrySuccessBookies.size() >= lh.getLedgerMetadata().getAckQuorumSize()) {
+        if (clientCtx.getConf().enforceMinNumFaultDomainsForWrite
+                && addEntrySuccessBookies.size() >= lh.getLedgerMetadata().getAckQuorumSize()) {
             // If ackQuorum number of bookies have acknowledged the write but still not complete, indicates
             // failures due to not having been written to enough fault domains. Increment corresponding
             // counter.
@@ -188,56 +191,44 @@ class PendingAddOp implements WriteCallback {
         lh.handleUnrecoverableErrorDuringAdd(BKException.Code.AddEntryQuorumTimeoutException);
     }
 
-    synchronized void unsetSuccessAndSendWriteRequest(List<BookieId> ensemble, int bookieIndex) {
-        // update the ensemble
-        this.ensemble = ensemble;
-
-        if (toSend == null) {
-            // this addOp hasn't yet had its mac computed. When the mac is
-            // computed, its write requests will be sent, so no need to send it
-            // now
-            return;
-        }
-        // Suppose that unset doesn't happen on the write set of an entry. In this
-        // case we don't need to resend the write request upon an ensemble change.
-        // We do need to invoke #sendAddSuccessCallbacks() for such entries because
-        // they may have already completed, but they are just waiting for the ensemble
-        // to change.
-        // E.g.
-        // ensemble (A, B, C, D), entry k is written to (A, B, D). An ensemble change
-        // happens to replace C with E. Entry k does not complete until C is
-        // replaced with E successfully. When the ensemble change completes, it tries
-        // to unset entry k. C however is not in k's write set, so no entry is written
-        // again, and no one triggers #sendAddSuccessCallbacks. Consequently, k never
-        // completes.
-        //
-        // We call sendAddSuccessCallback when unsetting t cover this case.
-        if (!lh.distributionSchedule.hasEntry(entryId, bookieIndex)) {
-            lh.sendAddSuccessCallbacks();
-            return;
-        }
-
+    // Called for every pending op before any replacement writes are sent. The ledger completion
+    // gate covers the entire transition, including slots outside an individual entry's write set.
+    synchronized void unsetSuccess(List<BookieId> newEnsemble, Set<Integer> bookies) {
         if (callbackTriggered) {
             return;
         }
-
-
-        log.debug()
-                .ctx(lh.log)
-                .attr("entryId", entryId)
-                .attr("bookieIndex", bookieIndex)
-                .log("Unsetting success");
-
-
-        // if we had already heard a success from this array index, need to
-        // increment our number of responses that are pending, since we are
-        // going to unset this success
-        if (!ackSet.removeBookieAndCheck(bookieIndex)) {
-            // unset completed if this results in loss of ack quorum
+        boolean ackQuorum = completed;
+        for (int bookieIndex : bookies) {
+            if (lh.distributionSchedule.hasEntry(entryId, bookieIndex)) {
+                if (addEntrySuccessBookies != null) {
+                    addEntrySuccessBookies.remove(ensemble.get(bookieIndex));
+                }
+                ackQuorum = ackSet.removeBookieAndCheck(bookieIndex);
+            }
+        }
+        ensemble = newEnsemble;
+        if (completed && (!ackQuorum || !hasRequiredFaultDomains())) {
             completed = false;
         }
+    }
 
-        sendWriteRequest(ensemble, bookieIndex);
+    synchronized void sendReplacementWrites(Set<Integer> bookies) {
+        // An op not yet initiated will send to its updated ensemble when its MAC is computed.
+        if (toSend == null || callbackTriggered) {
+            return;
+        }
+        for (int bookieIndex : bookies) {
+            if (lh.distributionSchedule.hasEntry(entryId, bookieIndex)) {
+                sendWriteRequest(ensemble, bookieIndex);
+            }
+        }
+    }
+
+    private boolean hasRequiredFaultDomains() {
+        return !clientCtx.getConf().enforceMinNumFaultDomainsForWrite
+                || clientCtx.getPlacementPolicy().areAckedBookiesAdheringToPlacementPolicy(
+                        addEntrySuccessBookies, lh.getLedgerMetadata().getWriteQuorumSize(),
+                        lh.getLedgerMetadata().getAckQuorumSize());
     }
 
     /**
@@ -268,6 +259,11 @@ class PendingAddOp implements WriteCallback {
         // because of delayed write errors
         lh.maybeHandleDelayedWriteBookieFailure();
 
+        // Creation on an app thread may precede a metadata change, while enqueue/initiate happens
+        // after the pending-op transition has finished. No request has been sent yet, so bind to
+        // the currently published mapping rather than the stale creation snapshot.
+        ensemble = lh.getCurrentEnsemble();
+
         // Iterate over set and trigger the sendWriteRequests
         for (int i = 0; i < lh.distributionSchedule.getWriteQuorumSize(); i++) {
             sendWriteRequest(ensemble, lh.distributionSchedule.getWriteSetBookieIndex(entryId, i));
@@ -295,7 +291,9 @@ class PendingAddOp implements WriteCallback {
         boolean ackQuorum = false;
         if (BKException.Code.OK == rc) {
             ackQuorum = ackSet.completeBookieAndCheck(bookieIndex);
-            addEntrySuccessBookies.add(ensemble.get(bookieIndex));
+            if (clientCtx.getConf().enforceMinNumFaultDomainsForWrite) {
+                addEntrySuccessBookies.add(addr);
+            }
         }
 
         if (completed) {
@@ -360,6 +358,9 @@ class PendingAddOp implements WriteCallback {
             return;
         default:
             if (clientCtx.getConf().delayEnsembleChange) {
+                if (addEntrySuccessBookies != null) {
+                    addEntrySuccessBookies.remove(addr);
+                }
                 if (ackSet.failBookieAndCheck(bookieIndex, addr)
                         || rc == BKException.Code.WriteOnReadOnlyBookieException) {
                     Map<Integer, BookieId> failedBookies = ackSet.getFailedBookies();
@@ -394,11 +395,7 @@ class PendingAddOp implements WriteCallback {
         }
 
         if (ackQuorum && !completed) {
-            if (clientCtx.getConf().enforceMinNumFaultDomainsForWrite
-                && !(clientCtx.getPlacementPolicy()
-                              .areAckedBookiesAdheringToPlacementPolicy(addEntrySuccessBookies,
-                                                                        lh.getLedgerMetadata().getWriteQuorumSize(),
-                                                                        lh.getLedgerMetadata().getAckQuorumSize()))) {
+            if (!hasRequiredFaultDomains()) {
                 log.warn()
                         .ctx(lh.log)
                         .attr("entryId", entryId)
@@ -541,7 +538,9 @@ class PendingAddOp implements WriteCallback {
         hasRun = false;
         allowFailFast = false;
         writeFlags = null;
-        addEntrySuccessBookies.clear();
+        if (addEntrySuccessBookies != null) {
+            addEntrySuccessBookies.clear();
+        }
         writeDelayedStartTime = -1;
 
         recyclerHandle.recycle(this);
