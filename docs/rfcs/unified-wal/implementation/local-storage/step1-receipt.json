@@ -1,0 +1,45 @@
+{
+  "runId": "unified-wal-local-TrhdAZFy",
+  "sourceCommit": "e75c67f3514d1627ea790d052e2c9226e593aa3c",
+  "branch": "turbo-bk",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentConfig.java": "bbf4a4b95dc7c096feb540bf17d448bff053e8540b02d7ee0fd7a7d75c314112",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/package-info.java": "edca66946cc7e489cc2c6321d337367e25459a2e0c6802e13425ba16865a3768",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentConfigTest.java": "e1c1896c2c23c49c314bf6d78ea2e3344b5e453e4e8e44753cdeb282d8d85ae5",
+    "scripts/unified-wal/run-local-storage-tests.sh": "f7753a186b4ad8fc9c6e2f5b948cf12448f75a871d68d579624d581d4e57ee5e"
+  },
+  "command": [
+    "mvn",
+    "-o",
+    "-P",
+    "!cargo-zigbuild",
+    "-pl",
+    "bookkeeper-server",
+    "-am",
+    "-Dtest=IsolatedSegmentConfigTest",
+    "-Dsurefire.failIfNoSpecifiedTests=false",
+    "-Dsurefire.rerunFailingTestsCount=0",
+    "test"
+  ],
+  "platform": "macOS-14.8.9-arm64-arm-64bit",
+  "exitCode": 0,
+  "tests": {
+    "tests": "2",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "time": "0.033"
+  },
+  "artifacts": {
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-TrhdAZFy/inputs.json": "f6df35e890b2088b6db8452085afb6b20d4133c5c974bde34c338b2faf7ca65a",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-TrhdAZFy/maven.log": "278af9fd89a35abf06eb809b4c953c821b5dcaadf998da7913c589e185cc28fe",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-TrhdAZFy/reports/TEST-org.apache.bookkeeper.bookie.storage.segment.IsolatedSegmentConfigTest.xml": "87d6bfa617357fc39edc33f2384baea6ba0011b3b506955653c8825d5fc5989b"
+  },
+  "scope": "Configuration and Java build only. No file I/O, performance, Linux NUMA or production authority.",
+  "style": {
+    "command": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+    "result": "PASS",
+    "log": "/private/tmp/unified-wal-step1-style-final.log",
+    "sha256": "b13102c83b7f526db1c0d94202d3bdef913ce4ca10a462314380e72e7a53dd04"
+  }
+}

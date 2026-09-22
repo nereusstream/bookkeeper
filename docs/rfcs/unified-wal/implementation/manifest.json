@@ -165,5 +165,15 @@
     "authority": "NONE",
     "historicalEvidenceRebound": false
   },
+  "currentImplementation": {
+    "planningCommit": "e75c67f3514d1627ea790d052e2c9226e593aa3c",
+    "workspace": "/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper",
+    "branch": "turbo-bk",
+    "state": "STEP_1_CONFIG_BASELINE_TESTED",
+    "step1Receipt": "docs/rfcs/unified-wal/implementation/local-storage/step1-receipt.json",
+    "fileIo": "NOT_IMPLEMENTED",
+    "productionIntegration": false,
+    "authority": "NONE"
+  },
   "authorityTouches": []
 }
