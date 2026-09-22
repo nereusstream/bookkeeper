@@ -2,7 +2,7 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
-2026-09-18基于`87c346ff031c648747dd8e3126554e9589aeb484`的修订已合入现有owner RFC主流程：先重演完整控制再验证当前必要DATA，不追读合法退出的MOVE副本；framing持久区分entry/copy且完成分支分离；网络预算覆盖TLS/半包并保留有界控制连接。场景归原UW-2/3/4/7与B9/B10/B18、A26及C-MOVE/C-REBUILD，见[当前清单](../implementation/README.md)。此前合同与首批范围保持，无源码修改或新运行证据；状态仍Proposed/Planned，下表历史轮次、逐字反馈和source-bound receipt未重写或晋升。
+2026-09-22基于`6e5df388ab1882caaa4de7e03d078f6be7196a95`的修订已纳入现有owner RFC：固定shard→常驻owner→CPU计划分层，安全显式binding、NUMA池初始化/归还及独立PARK/有界spin随第一批线程模型交付；默认OFF/SYSTEM/PARK，Classic旧策略与持久身份不变。归既有UW-3/UW-7及B18分离对照，见[当前清单](../implementation/README.md)。此前恢复、来源和接收预算合同保持，无源码修改或新运行证据；状态仍Proposed/Planned，下表历史轮次、逐字反馈和source-bound receipt未重写或晋升。
 
 规则：
 

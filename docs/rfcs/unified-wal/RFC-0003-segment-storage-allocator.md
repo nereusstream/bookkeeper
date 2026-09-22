@@ -247,7 +247,7 @@ local durable Add success
 
 pool refill 通过 control-log group commit；pool 内空间的使用仍必须有可恢复的 block/record framing，但不要求每条 Add 写一条 allocator fsync。
 
-第一批数据路径采用RFC-0005 §10.1的固定append shard：多个BK entry合并进有界、对齐buffer，使用预先durable分配的pool空间，以真实batch durability完成后逐entry发布可读定位和local success。上述1/2是预分配先决条件，不意味着每条Add同步经过Bookie控制、Arena控制和DATA三条执行队列。refill异步预备并在资源不足时背压；锁内只做短状态变化，不等待磁盘完成。集中对齐复制可以接受，但要计量各层payload复制、分配、线程hop以及每次force覆盖的entry数，不能把每entry force称为已实现group commit。
+第一批数据路径采用RFC-0005 §10.1—10.5的固定append shard与常驻owner；CPU placement和等待策略独立，内存池按本RFC §6.2初始化。普通写入：多个BK entry合并进有界、对齐buffer，使用预先durable分配的pool空间，以真实batch durability完成后逐entry发布可读定位和local success。上述1/2是预分配先决条件，不意味着每条Add同步经过Bookie控制、Arena控制和DATA三条执行队列。refill异步预备并在资源不足时背压；锁内只做短状态变化，不等待磁盘完成。集中对齐复制可以接受，但要计量各层payload复制、分配、线程hop以及每次force覆盖的entry数，不能把每entry force称为已实现group commit。
 
 `ALLOC_POOL`的下一原型必须冻结：`Arena + pool range + owner shard + shard generation + allocation generation`，每个pool内record的used/unused识别方法，以及返还/转交的条件化状态机。未使用不能由“内存计数为0”推断；restart必须结合完整control authority与可恢复DATA framing确定live、unused或unknown，unknown不进入free pool。
 
@@ -261,7 +261,7 @@ pool转交及所有free/reuse先关闭旧writer admission，等待已提交写I/
 
 `write completed`、`durability completed`、`readable published`和`local success`是不同事实。`O_DIRECT`不单独提供`O_SYNC/O_DSYNC`的持久化保证；普通write完成（包括普通异步write CQE）不能直接授权成功。文件barrier也不自动保证新目录项durable，文件创建/预分配及所需parent-directory同步在冷路径完成后才公开可用空间。依据[Linux open(2)](https://man7.org/linux/man-pages/man2/open.2.html)和[fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)，实际硬件/I/O路径仍需故障实验。
 
-每份write/barrier completion绑定storage/stream generation、batch sequence及其实际物理范围。一个barrier可覆盖已完整write且明确列入覆盖集合的多个batch；不能因为更晚的fsync返回就把仍在飞行的异步write算作durable。批次跟踪有hard bound，不记录逐entry“ACK已完成”控制日志。
+每份write/barrier completion绑定storage/stream generation、batch sequence及其实际物理范围，通过已保留容量回原shard owner处理，不由I/O线程并发修改pending或前缀。阻塞write/barrier在有界I/O服务资源执行，不阻塞Netty/append owner。一个barrier可覆盖已完整write且明确列入覆盖集合的多个batch；不能因为更晚的fsync返回就把仍在飞行的异步write算作durable。批次跟踪有hard bound，不记录逐entry“ACK已完成”控制日志。
 
 普通/恢复entry与搬迁副本共用有界buffer、write、barrier及物理前缀跟踪，但上层completion按§9的内部来源区分。`ENTRY_DATA`消费§6/§15的权限、定位及local-success路径；`RELOCATION_COPY`只返回目标副本已durable的内部结果，随后走§10的条件MOVE与selector切换，不能直接进入普通hot-locator发布callback。来源不改变物理batch是否完成，也不增加一套I/O引擎。
 
@@ -286,6 +286,37 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 `fdatasync()`错误可能报告此前写回失败；再次sync返回成功不是对先前全部DATA安全的证明。按上述存储错误恢复流程解析受影响范围，不以最后一次返回值清除unknown/失败状态。该保守策略由本原型选择，实际错误范围仍需故障实验核验；不为此引入逐entry成功日志或正常路径额外fsync。[Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)
 
 涉及既有成功数据的compaction同样须保证new DATA在恢复可发现边界内，才允许`MOVE_COMMIT`、selector切换或释放旧位置。以后若要跨缺口独立发布，须先接受独立块发现/恢复算法；本次不并行建设第二套模式。分别报告write wait、durability wait、physical-prefix wait和locator wait，不将同stream排队归为NVMe延迟。
+
+### 6.2 对齐缓冲池的NUMA属地
+
+状态：**PLANNED / NOT EXECUTED**。WalArena/DATA设备尽量与append owner、I/O服务资源及对齐DATA buffer pool同节点；NUMA只影响运行时placement，不新增Arena、控制日志、ProfileDescriptor字段或DATA身份。`ALLOC_POOL`的持久空间owner/generation与内存buffer pool的属地是不同事实；CPU/worker数量变化不重新解释ledger→shard或既有stream，重启调整worker映射遵守RFC-0005 §10.2。
+
+首批仍一个Arena，优先在同时具备足够CPU、允许内存节点及本地NVMe的NUMA节点验证；未知设备归属必须标UNKNOWN。PCI sysfs `numa_node = -1`不能当node 0，复合设备归属无法证明时也不伪造本地性，见[Linux PCI sysfs ABI](https://cdn.kernel.org/doc/html/latest/admin-guide/abi-testing.html)。后续多Arena只为已有Arena分别规划worker/池属地，不在线跨Arena迁移。
+
+启用属地优化时的池初始化顺序：
+
+```text
+create owner / locality initialization thread
+    -> apply/verify planned affinity when enabled; OFF only records available placement observations
+    -> create fresh aligned pool memory on that locality
+    -> optionally set preferred-node policy on an owned mapping
+    -> first-touch the new pages, within the same memory budget
+    -> publish the initialized pool to its locality's execution path
+```
+
+不能由一个启动线程先分配并清零所有节点的buffer再宣称已就地分配。默认本地优先分配仍受内存策略、cpuset与余量影响；移动线程或后设策略不自动迁移已分配页。已有malloc/Netty池返回的页可能早已被触碰，因此owner-first-touch只是best-effort，须测实际分布，见[Linux NUMA memory policy](https://docs.kernel.org/admin-guide/mm/numa_memory_policy.html)。OFF或绑定降级后如实记录初始化线程位置，不能把触碰动作当成指定节点已达成。
+
+| `walBufferNumaPolicy`拟值 | 初始化与失败边界 |
+| --- | --- |
+| `SYSTEM`（默认） | 不修改内存策略，仍保留对齐池、统一预算、原池归还及I/O生命周期 |
+| `OWNER_TOUCH` | 在owner/本地初始化线程上创建并触碰新池页；已有页不因再触碰取得硬属地保证 |
+| `PREFERRED` | 仅对Segment拥有的完整新匿名大块映射设置`mbind(MPOL_PREFERRED)`，再触碰并分割；只在池初始化/有界扩容调用，不在每Add调用 |
+
+PREFERRED的目标须属于有效memory-node集合，配置非法仍报错；设备节点未知或native/策略调用失败时，按实验manifest预先声明的OWNER_TOUCH或SYSTEM回退并记录实际策略/原因，不伪称绑定。`MPOL_PREFERRED`允许内存不足时从其他节点分配，CPU REQUIRE不把它提升为页面硬绑定；策略不会默认搬迁已有页，见[Linux mbind(2)](https://man7.org/linux/man-pages/man2/mbind.2.html)。不能对任意Netty slice或可能共页的malloc范围执行mbind；只操作自己完整拥有的映射，不改进程全局内存策略或宿主机配置。
+
+buffer携带原池/属地及既有owner/generation信息。I/O完成或网络线程最后释放时，走原池的有界归还路径；归还通知所需容量在准入/提交工作集内预留，不会因DATA输入满额而无法释放，也不进入另一个节点的全局空闲池。跨节点归还积压、池映射/页与在飞行bytes持续计入§13总账。拓扑变化不在线迁移、释放或重建在飞行I/O使用的内存；仅取消future仍不能复用buffer，重启/退出等既有终结条件不变。
+
+网络与存储位于不同节点时允许一次必要交接：Netty在网络侧完成TLS/framing并移交受控view，owner集中复制进存储侧本地对齐buffer，后续batch/I/O/completion尽量留在存储侧。一次连接服务多个ledger不要求event loop与所有shard同节点；必要复制/远程访问计量，避免可变状态跨节点反复转交，不把形式上的零复制作为目标。NIC RSS/IRQ/irqbalance及NVMe完成中断属于部署记录，Bookie不自动配置，也不因Java线程已绑定就宣称I/O全程本地。
 
 ## 7. Shared Cold Slab
 
@@ -576,6 +607,8 @@ Spike Gate：
 
 所有测量必须区分 heap、direct memory、native allocator 和 RocksDB block cache，不能只报告 Java object shallow size。
 
+固定worker数量与逻辑shard数分别计量：worker栈、队列、completion通知、拓扑快照和placement plan均有界；多个shard共享worker不消除各自的batch/恢复状态。§6.2的NUMA池只是既有buffer总预算的属地划分，不能给每节点/worker各复制一份完整全局额度，不能随hot ledger数增加常驻池。页分布、归还队列和fallback计入内存账，CPU时间/quota及服务余量按RFC-0005 §10.3另列，不以更多核、spin或NUMA池突破原bytes/inflight上限。
+
 总资源账本还必须覆盖Bookie route/credential/fence state、allocation/pool/slot state、current selector/retirement/anti-ABA state、pending Add/grant/waiter、block buffers、checkpoint working set，以及derived index/cache。RFC-0001 §11.6的连接/TLS/header/read、半包及已解码未准入buffer也计入Bookie同一总量，向shard交接owner/credit而非整包后才开始计费；控制连接的有限份额不被DATA接收耗尽。分别报告随连接、ledger、entry、allocation、shard和pending operation增长的项；`1 KiB/idle ledger`不能替代总预算。
 
 每shard的同一套预算覆盖准入、待合批、已提交I/O、等待physical prefix/locator及响应阶段；request count、源/对齐bytes、inflight batches和duplicate waiters分别有上限。出队或移交future不释放credit，真实资源释放或转移到另一已计费owner后才归还对应份额；复制期间源与目标同时持有的bytes都计入。断连/取消而I/O仍在进行时保留其buffer/inflight费用，不能留下队列之外无上限的任务。复用请求对象，避免每层重新包装大对象。
@@ -738,7 +771,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 19. selector publish与block-new-old-pin形成同一同步cut；cut后read pin不能落回old location。
 20. Arena superblock/format state不能替代old-binary-visible Bookie compatibility fence；任何partial required-device migration都不注册writable。
 21. DATA block submitted后header/count/checksum/padding/payload不可修改或追加；后续写入不得覆盖已有成功记录，I/O buffer只在真实I/O终结后复用。
-22. 连接/TLS/read及半包先计费，大body累积前按header预留额度，接收→存储交接owner/credit；出队/暂停/取消不提前归还仍持有资源。DATA准入保障提交/定位工作集，满载不循环互等或阻塞event loop/shard/ledger锁。有限控制连接保持传输可达并受同一总账/授权约束。
+22. 连接/TLS/read及半包先计费，大body累积前按header预留额度，接收→存储交接owner/credit；出队/暂停/取消不提前归还仍持有资源。DATA准入保障提交/定位、回原owner的completion及原属地池归还工作集，满载不循环互等或阻塞event loop/shard/ledger锁。有限控制连接保持传输可达并受同一总账/授权约束；CPU/NUMA/等待策略不改持久身份、回收或I/O终结条件。
 23. batch物理durability与逐entry结果分开；单条取消/fence不产生物理缺口，提交后坐标不因timeout视为空，未解析写入由bounded pending或不可写范围保护。
 24. 点读独立验证record外层身份及BK CRC，长度/对齐范围有界且pin/selector正确；不因整批大而强制读整批，不以local LAC拒绝必要候选。
 25. 首批shared布局及stream/file映射明确；单stream逻辑后缀不缩短共享文件或损害其他stream，offset不定义跨stream顺序。dedicated启用后专属空间、buffer池及文件总量仍有界，共享barrier不表示共享block或独立flush域。
@@ -762,6 +795,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 - B2/B9/B16验证正常中断后的完整候选经必要恢复同步才可幂等成功/提供durable证据，并执行重启后再次掉电；B3/B7/B10验证同批竞争ALLOC、durable未apply及apply中途crash、重复FREE和applied checkpoint cut；
 - B9/B18验证hot-first后fresh Get与接管/淘汰交错，旧snapshot/iterator/negative-cache不参与当前点读的absence判断，DB I/O不持ledger锁；
 - B9/B10及C-MOVE/C-REBUILD验证A→B→C后A/B合法复用、无新checkpoint的恢复与fallback；不追读退休字节，最终C坏或后缀缺失仍隔离。索引/task丢失不提升无成功MOVE的copy，持久来源/内部completion分支可验证且MOVE不覆写DATA；
+- B18随固定owner验证安全binding、池初始化/归还及OFF→pin→NUMA→有界spin对照；启用路径的实际mask/页分布、quota/SMT/线程继承和降级有证据，开关优化不改ACK/fence/恢复或buffer生命周期。未验证/无收益的优化保留OFF/SYSTEM/PARK，OFF结果不替代其他组证据；
 - B18/A26验证多连接TLS/半包、预留与实际held交接、暂停前pipeline残留和关闭/错误释放；DATA暂停时控制连接仍有界可达、身份/operation校验不放宽；
 - current-selector checkpoint、orphan GC、late-commit/free competition 与 durable-through cutover 通过离线 oracle和 foreground p99 Gate；
 - conditional apply/result、duplicate/response-loss、bounded waiter/idempotency retention、unknown record和selector/pin竞态通过crash/replay与资源Gate；
@@ -774,7 +808,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 
 - ArenaControlLog region sizing、segment rotation，以及§13.1前台/维护预算、限流/拒绝/恢复阈值与长期进展数据；
 - conditional transition/result的exact Java API、physical record grouping、control-sequence encoding与operation summary packing；
-- sequencer/stripe线程布局、queue/waiter hard cap、batch size/wait阈值与selector/pin具体同步原语；
+- 线程角色及静态owner/placement边界按RFC-0005 §10.2—10.5；worker/shard比例、服务CPU余量、queue/waiter hard cap、batch/spin阈值与selector/pin具体同步原语由B18冻结；
 - §6 `ALLOC_POOL` owner/shard generation的exact packing、used/unused识别及真实I/O quiescence验证；
 - exact block/record bytes、checksum 和 torn-write detector；
 - direct I/O API、alignment、buffer ownership 与 kernel/filesystem 约束；

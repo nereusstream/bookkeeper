@@ -45,6 +45,13 @@ persistent ProfileRegistrationStore + ephemeral registration adapter revision
 migration/rollback tooling revision
 hardwareHostId
 CPU and NUMA topology
+initial deployment affinity, online/effective cpuset CPUs and memory nodes, quota and applicable parent limits
+physical package/core/SMT siblings, DATA-device NUMA node or UNKNOWN, service CPU reserve
+logical shard-to-owner-worker mapping, worker count and requested/actual per-thread CPU masks
+affinity mode/native API revision and verified fallback/cleanup, thread-creation inheritance policy
+owned aligned-pool mapping, NUMA policy/fallback, initialization/first-touch and bounded home-pool returns
+PARK or BOUNDED_SPIN, spin budget, wakeup primitive and oldest-batch deadline handling
+JVM/GC/JIT, NIC RSS/IRQ/irqbalance, NVMe completion placement and measurable interference scope
 memory size
 NVMe model, firmware and namespace
 filesystem and mount options
@@ -109,7 +116,7 @@ artifact output directory
 
 | 切片 | 实施范围与输出 | 仍未取得的结论 |
 | --- | --- | --- |
-| 初始写入切片 | 隔离新storage scope、一个Arena、Bookie/Arena必要控制记录、durable预分配、ByteBuf受控view、固定shard共享DATA block/文件；逐entry结果、独立record点读与基础restart；跑B18/B19适用项 | 无dedicated收益、生产listener/ACK、完整恢复、完整Spike或集群性能结论 |
+| 初始写入切片 | 隔离新storage scope、一个Arena、Bookie/Arena必要控制记录、durable预分配、ByteBuf受控view、固定shard/常驻owner共享DATA block/文件，默认OFF/SYSTEM/PARK且接入安全binding/池初始化；逐entry结果、独立record点读与基础restart；跑B18/B19适用项 | 无dedicated收益、生产listener/ACK、完整恢复、完整Spike或集群性能结论 |
 | 写入与本地回收 | 同一原型增加已启用的tombstone/drain/free/reuse、shared-block搬迁及维护预算，跑写入与回收并行、B17和所需fault cuts | 不证明cluster logical delete、强访问撤销或完整多Arena |
 | 完整存储/集群入口 | 补全所需tail/IO/rebuild/资源/多Arena矩阵和实际replacement/基础恢复；兼容Gate按既有边界独立闭合 | 仍需实际启用scope全部证据及canary-specific接受 |
 
@@ -372,7 +379,7 @@ Oracle：前台在侵占维护保留量前限流/拒绝，queue/memory有界，�
 
 ### B18：ByteBuf、固定shard与批量DATA路径
 
-按RFC-0001 §11.6及RFC-0005 §10.1实现网络接收到append shard的路径。reference immutable byte-array codec保留作oracle，以相同valid/invalid/truncated/oversize corpus验证解析和拒绝等价；增量接收测试独立组织，不重写历史corpus/receipt。跟踪socket/TLS、header/半包、完整未准入请求至readable publication的实际buffer/预留与每次复制/ownership交接；允许集中对齐复制，禁止未计量的逐层整包clone。异步retain/release覆盖normal、拒绝、取消、断连、retry和I/O失败；源view最后使用后释放，已提交I/O的buffer直到真实I/O终结才可复用。
+按RFC-0001 §11.6及RFC-0005 §10.1—10.5实现网络接收到固定shard owner的路径，NUMA池消费RFC-0003 §6.2。reference immutable byte-array codec保留作oracle，以相同valid/invalid/truncated/oversize corpus验证解析和拒绝等价；增量接收测试独立组织，不重写历史corpus/receipt。跟踪socket/TLS、header/半包、完整未准入请求至readable publication的实际buffer/预留与每次复制/ownership交接；允许集中对齐复制，禁止未计量的逐层整包clone。异步retain/release覆盖normal、拒绝、取消、断连、retry和I/O失败；源view最后使用后释放，已提交I/O的buffer直到真实I/O终结才可复用。
 
 多连接同时发送合法但不完整的大frame，另覆盖header/body同一read、TLS累积/解密、长度/阶段/subtype错误、超时/close和解析失败。大body累积前先通过固定header检查并取得连接/Bookie credit；初始连接/TLS/read工作集与暂停前pipeline残留均受总量限制，暂停本身不释放bytes。向存储交接不得漏计、重复永久扣款或挤占提交/定位工作集，无额度时非阻塞暂停/关闭而不是收完整包才拒绝。恢复读取与失败清理后credit/实际held资源一致；1,000连接各持4 MiB约3.9 GiB仅为容量反例，不是实测参数或结果。
 
@@ -391,6 +398,32 @@ DATA freeze和barrier/prefix沿B2 oracle，量化padding bytes、write/durabilit
 持续制造index WriteBatch/flush/compaction stall，同时新写、立即点读及fence/tombstone。append shard不能同步卡在索引调用；hot/async queue/WriteBatch/memtable/native/cache全部有界，达到统一预算后拒绝后续DATA，控制仍推进。容量恢复后按A26/A27有界重试，不产生每次拒绝都换组的风暴；先前submitted unknown不被当前NONE清除。增加index入库等待、持久覆盖落后量、资源拒绝/retry/replacement计数；真实网络未执行的部分维持NOT_EXECUTED。
 
 消费A26/B19统一N，核对N边界的normal/recovery/read/Segment实际buffer和对齐范围，以及负值/溢出在大分配前拒绝。与B17区分内存index backlog满和filesystem空间不足：Arena仍有free slot时也可因真实磁盘维护预算拒绝，分别计量四项磁盘指标，不增加层层资源管理器。
+
+**固定owner、CPU与NUMA的分离验证（仍属B18）。** 固定线程模型先交付，安全显式binding与拓扑测试归现有`cpu-affinity`模块；以下均为待实现/待运行，不用当前Classic acquireCore/busy-wait路径代替。先以相同实现运行四组：
+
+| B18内对照组 | 配置 | 单独解释的变化 |
+| --- | --- | --- |
+| A | 固定owner，affinity OFF，SYSTEM池，PARK | 固定线程模型基线 |
+| B | A＋CPU pin，仍SYSTEM/PARK | CPU绑定；同时记录页分布，不能假设默认分配完全相同 |
+| C | B＋指定OWNER_TOUCH或PREFERRED池，仍PARK | 内存属地策略；记录实际分布与fallback |
+| D | C＋BOUNDED_SPIN | 有界spin的增量收益与CPU成本 |
+
+四组保持worker数、逻辑shard数、batch/队列/内存预算、I/O/barrier、TLS、E/W/A、索引与compaction负载一致，锁定同一CPU/quota资源与机器环境。C如比较两种池策略分别命名run，D复用同一C策略；不把多开worker、停后台维护或更高资源额度算成affinity收益。保留低负载、目标负载、过载、维护压力和多ledger混合负载；支持环境不足时报告NOT_EXECUTED/降级，不伪造B/C/D成功。
+
+| 验证场景 | 必须得到的结果 |
+| --- | --- |
+| 8 shards/4 workers；恢复后改worker/CPU数量 | 每shard仍只有一个owner，CPU取模不重写ledger/stream身份；正常、恢复、搬迁completion消费原合同 |
+| 输入满额时completion、fence和跨线程归还到达 | 完成/控制/归还保留容量仍可用，I/O线程不并发改pending/前缀，原池最终收回buffer；不阻塞owner/Netty等盘 |
+| 双socket同号core、非连续cpuset、仅一个SMT sibling、可见16 CPU但quota约2 | 不跨socket误分组、不把编号当数量、不要求关闭sibling；服务余量与quota计入计划，不增加一批持续spin线程 |
+| 非root、native缺失、权限拒绝、无可用CPU、部分绑定失败 | 不写cpu online/宿主隔离/IRQ配置、不走文件锁抢核；PREFER清理并报告实际降级，REQUIRE服务开放前失败；非法列表/冲突仍明确报配置错 |
+| owner已绑单核后创建服务线程 | 服务线程入口取得其计划mask，不意外整池继承单核；OFF使用原部署mask创建路径；JVM内部线程不被强行改绑 |
+| 绑定后再创建/触碰池、预先被启动线程触碰的反例、设备node=-1、mbind拒绝 | 只对自有完整新映射设置策略，未知不当node 0，实际页分布/回退可观察；不把Netty slice再触碰当硬归属证明 |
+| 跨节点I/O/网络释放，cpuset/memory-node/quota运行时变化 | buffer回原池且有界，飞行I/O内存不迁移/早释放；PREFER原owner继续并关闭spin，REQUIRE绑定失效时停准入、drain/退出；不污染磁盘authority |
+| enqueue与park竞争，低负载deadline到期，持续DATA/多shard混合 | 无丢失唤醒，最老deadline不重置，spin有界，completion/控制不饥饿；PARK不无限等待下一条请求 |
+
+绑定fixture保留请求mask、实际mask、核/SMT/节点与设备映射、失败及清理结果，验证新接口不触发CPU上下线或宿主文件锁。拓扑/配置/作用域清理使用确定性单测；native绑定、真实线程继承/返回路径、NUMA页分布及干扰成本使用同一隔离存储切片，不另建模型或压测平台。启动探测不进入每Add，实例数量增大不出现每ledger线程/池；开关优化及失败降级后的ACK条件、fence顺序、重复/unknown结果和恢复DATA保持一致。
+
+报告吞吐、p99/p99.9、CPU time/entry、空闲CPU消耗、调度迁移、各阶段queue wait、quota throttling与服务线程占用；自有池记录映射/页分布、跨节点归还与fallback，NIC/IRQ/NVMe及JVM干扰单列。`numastat -p`可辅助观察进程节点分配，但`numa_hit/numa_miss`是分配统计，不等于实际远程访问率；访问成本须结合该硬件支持的计数器，不能测时标未知。依据[numastat(8)](https://man7.org/linux/man-pages/man8/numastat.8.html)。没有可比收益就保留OFF/SYSTEM/PARK，不以消耗更多核隐去成本，也不把优化开关作为正确性前置。
 
 ### B19：同坐标identity与基础恢复重写
 
@@ -423,6 +456,8 @@ point-read bytes / returned bytes, I/O count, cache hit rate and copy bytes
 read pin duration, shared parent-buffer retention and bounded dedicated-pool peak
 compaction debt/dead bytes over time and stop-write drain
 queue wait/depth, thread hops and ledger lock hold time
+B18 A/B/C/D p99.9, idle CPU, scheduling migrations, quota throttling and service CPU share
+requested/actual affinity masks, owned-pool page distribution and NUMA fallback/return costs
 ```
 
 分母区分logical entries与delivery attempts，重试放大不可被隐藏；明确process CPU/JVM allocation测量窗口、后台归因、device counter或I/O trace来源。与Classic在相同durability/offered load下比较；没有硬件/原始数据时只报告静态复制风险，不声称性能回归幅度或收益。数值预算先于正式run锁定，初始探索值不能追认成PASS。

@@ -446,23 +446,25 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 ### 10.1 第一批可测的最小存储路径
 
-状态：**PLANNED / NOT EXECUTED**。保留§5.2三层持久化owner，首批采用固定shard与shared DATA block；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
+状态：**PLANNED / NOT EXECUTED**。保留§5.2三层持久化owner，首批采用固定shard、常驻平台线程owner及shared DATA block；§10.2—10.5的执行映射随该切片落地，默认affinity OFF、PARK；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
 
 ```text
 client obtains bounded credits before assigning the logical entry where possible
     -> Bookie receives TLS/fixed header within bounded connection/read working set
     -> validate frame length/phase/subtype, reserve receive credits before accumulating large body
-    -> decode with charged buffers; check complete context, unified size and local authority
+    -> decode framing with charged buffers; reject invalid declared lengths/context encoding
     -> hand off buffer ownership and receive credits to storage admission
-    -> route ledger to a fixed append shard
+    -> route ledger to its fixed logical WalShard and hand off to its owner worker
+    -> owner validates complete context, unified size and local authority
     -> secure the bounded submission and locator/completion working set before DATA admission
     -> check/reserve coordinate using hot state and bounded pending
     -> seal a nonempty ENTRY_DATA batch, assign physical sequence and freeze all bytes for submission
-    -> complete full writes into unused preallocated DATA ranges, then the covering barrier
-    -> advance only the recoverable contiguous physical durable prefix
+    -> I/O backend completes full writes into unused preallocated DATA ranges, then the covering barrier
+    -> return batch completion to the original owner through reserved completion capacity
+    -> owner advances only the recoverable contiguous physical durable prefix
     -> publish physical locators in the bounded hot handle/index
     -> check each entry's selector/admission/pending result
-    -> publish eligible entries' local success independently
+    -> owner publishes eligible entries' local success independently and dispatches responses to the original connection
     -> release each buffer when its last user/I/O has finished
 asynchronously:
     -> bounded derived-index updates, periodic persistence and durable coverage checkpoint
@@ -473,7 +475,7 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 接收阶段按RFC-0001 §11.6先取连接级及Bookie总量内的额度，再继续累积大body；TLS、半包、已解码未准入请求及暂停前pipeline字节均入总账。逻辑预留不要求整包提前分配，接收credit不授予存储admission；交接后仍须取得既定提交/定位完成工作集，不能将接收预算挤占这份保留量。无额度时非阻塞暂停后续read或按明确策略关闭，close/timeout/解析错误释放不再持有的资源，不以暂停等同释放。
 
 - shard合批按bytes/count及最老请求的单调时钟deadline触发，新请求不重置等待；到期padding提交。DATA submitted后不可改写，下一批用新范围/有界buffer。按真实覆盖barrier计量entry数，不将write CQE当durable或每entry force称为group commit；物理前缀发布与恢复按RFC-0003 §6.1/9。
-- ledger锁只保护短状态转换，不持锁等待磁盘future。固定shard是第一批执行模型，测量线程hop/queue wait/lock hold后再决定必要拆分，不新增调度框架。
+- ledger锁只保护短状态转换，不持锁等待磁盘future。固定shard由§10.2的单一owner执行；阻塞write/fdatasync、索引与慢读在有界服务资源上执行，I/O完成回原owner。affinity OFF仍使用同一owner/队列模型；测量thread hops/queue wait/lock hold，不新增调度框架。
 - adapter保留reference codec作oracle；使用受控payload视图，允许一次集中对齐复制。每层不可变包装不得反复clone整份payload。所有权覆盖拒绝、取消、断连、retry和I/O错误；若已复制且无引用可及源数据可释放源view，I/O仍引用的对齐buffer必须等真实I/O终结才复用，取消future不等于I/O已终结。
 - 热尾、pending、定位与权限状态尽量合并进现有handle/index；维持hard caps和hole语义，慢路径只处理实际需要核对的已有坐标。
 - 派生索引维护按RFC-0003 §15有界异步批处理，不能让append shard同步卡在RocksDB WriteBatch/flush/compaction；无sync/fsync不保证WriteBatch不stall。热定位接管以实际query-visible为条件，coverage推进以真实持久化为条件，两者不互相等待；索引瓶颈通过统一预算对后续准入背压。
@@ -515,6 +517,79 @@ Spike B B18/B19固定硬件、I/O模式、stream/file映射、durability、TLS�
 B18在已有资源测量中分列TLS/decoder retained bytes、未完成frame数、接收reserved/实际held峰值、暂停/恢复与释放，以及DATA暂停时控制接收/完成等待。逐连接合法frame不证明合计有界；只注入已解码请求或只测控制执行队列不能覆盖本项。无真实网络/TLS时该部分保持NOT_EXECUTED，不另建流控协议或监控平台。
 
 既有指标继续区分Arena reusable bytes、filesystem available bytes、derived-index disk bytes、maintenance temporary-space peak及换组必要resend/复用写放大。B18另验证入口满载后下游恢复能完成已接受请求；B10/B17按RFC-0003分列compaction copied bytes和净可复用收益，冻结source、实际destination/padding及whole-allocation FREE不能被单ledger原因替代。A16/A26/B19验证逐来源fence否定证据，保留原A29、共享S0/S1、旧generation和统一N场景。数值由同一manifest冻结，不新增控制平台、逐entry控制fsync或持久任务系统。
+
+### 10.2 固定owner与执行线程分工
+
+本节与§10.3—10.5、RFC-0003 §6.2均为**PLANNED / NOT EXECUTED**，随第一批固定shard存储实现交付，不是当前已有线程映射或性能结果。明确分开：
+
+```text
+ledger instance -> logical WalShard -> fixed owner worker -> CPU / NUMA placement
+```
+
+WalShard保留现有路由/stream身份；owner是运行其状态机的常驻平台线程，CPU mask只是该线程的可运行位置。一个worker可承载一个或多个属地一致或明确兼容的shard，每个shard同一时刻只能由一个owner执行。首个切片可取1:1，比例不进入磁盘格式。例如8个shard分给4个worker，worker 0持0/4、1持1/5、2持2/6、3持3/7，属于启动计划，不改变8个逻辑shard。
+
+部署从16核变成8核时，不得按新CPU/worker数重新取模解释旧ledger/DATA。关闭旧执行者、按既有规则终结其I/O并完成恢复后，可在重启时调整shard→worker映射；既有stream、generation、allocator authority不因此改变。首批不做在线work stealing、热shard迁移或跨NUMA自动均衡，不为每ledger建线程，也不为每shard建立独占I/O/控制线程组。
+
+| 执行单元 | 职责 | CPU/并发边界 |
+| --- | --- | --- |
+| Netty event loop | TLS、framing、接收预算、分发及响应 | 网络/服务CPU集合；连接可承载多个ledger，不强行与append owner同核 |
+| Append owner worker | 本shard的pending、合批、物理前缀与逐entry完成 | 优先每worker使用不同物理核的一个逻辑CPU；只处理有界任务，不同步等盘 |
+| I/O执行/完成 | 实际write、barrier或异步I/O完成 | 尽量靠近DATA设备的服务CPU集合；线程数有界，不要求每shard独占 |
+| Bookie/Arena控制执行 | 各自既定控制命令顺序、apply、checkpoint协调 | 少量有界服务资源；保留控制容量，不等DATA队列腾空 |
+| 点读、派生索引、compaction | 读盘、RocksDB批处理、复制与维护 | 服务CPU集合和既有并发预算，不进入append owner同步主循环 |
+
+正常交接为Netty→目标owner→I/O backend→原owner→原连接。阻塞式write/fdatasync不得在Netty或append owner执行；真正非阻塞的backend可减少一次提交交接，但其提交调用本身也不得隐藏同步磁盘等待。completion线程不直接并发修改shard的pending、合批或前缀状态；可按batch合并通知，复用batch table/pending，不为每entry另建future/任务链。
+
+DATA准入前，沿§10.1既有完成工作集预留completion通知和buffer归还容量。DATA队列满时，已提交I/O的完成仍可进入原owner并释放资源；通知的owner/storage generation验证和物理终态跟踪仍按RFC-0003执行。owner必须处理输入、completion、控制通知和释放事件，多shard轮转有界，不能被一个热shard或持续DATA饿死其他工作。single owner和绑核均不替代点读、selector/pin、fence/tombstone的同步、内存可见性或既有linearization合同。
+
+### 10.3 启动拓扑计划与安全显式绑定
+
+静态源码核对锁定`6e5df388ab1882caaa4de7e03d078f6be7196a95`：[CpuAffinityImpl](../../../cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/CpuAffinityImpl.java)的`acquireCore()`检查root、选isolated CPU并取得同core的文件锁；[IsolatedProcessors](../../../cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/IsolatedProcessors.java)会写`cpu*/online`上下线sibling。[ProcessorsInfo](../../../cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/ProcessorsInfo.java)只按`core id`分组，未纳入socket，不能直接作为双插槽拓扑依据。[OrderedExecutor](../../../bookkeeper-common/src/main/java/org/apache/bookkeeper/common/util/OrderedExecutor.java)及[Journal/ForceWrite](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/Journal.java)在busy-wait分支调用该接口。这些是现有兼容路径，不是Segment的默认策略；本轮只记录独立接入合同，不修改Classic行为。
+
+Segment仅显式设置自身应用线程的affinity：不自动开关CPU、不改宿主机isolcpus/cpuset/IRQ配置、不以文件锁声称整机独占、不要求root。复用`cpu-affinity`模块及[JNI工程](../../../cpu-affinity/src/main/affinity/cpp/affinity_jni.c)，增加独立安全接口，不能只移除root检查后继续走自动抢核策略。Linux自身线程绑定受权限、online/cpuset和容器限制；必须读取实际mask，不能从调用成功推断完整请求已生效。依据[Linux sched_setaffinity(2)](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html)。
+
+启动时用拟议`CpuTopologySnapshot`只读采集：应用缩窄任何线程mask前保存的初始部署允许集合、online CPUs、cgroup有效CPU/memory-node集合与quota、socket/core/SMT sibling/NUMA拓扑、DATA设备NUMA归属。物理核按package及必要层级/经验证sibling集合识别，不跨socket合并同号core；拓扑未知如实标记，不能伪造独占物理核。sysfs拓扑依据[Linux CPU topology](https://docs.kernel.org/admin-guide/cputopology.html)。候选集合为：
+
+```text
+eligible CPUs = initial deployment mask ∩ online CPUs ∩ effective cgroup CPUs
+                ∩ configured candidate CPUs (when provided)
+```
+
+不得把某个已绑单核worker的当前mask当成全进程初始部署额度。cgroup v2使用`cpuset.cpus.effective`、`cpuset.mems.effective`及`cpu.max`，同时识别适用的上层限制；其他环境记录实际探测能力和未知项，不把探测缺失当无限资源。CPU quota是时间预算，不是CPU可运行集合：可见16个逻辑CPU但quota约2个CPU时间份额时，不能规划16个持续spin的owner。未知/不足的专用CPU余量不启用spin。依据[Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)。
+
+拟议`ExecutionPlacementPlan`保存shard→worker、worker→CPU mask、buffer pool→NUMA preference的静态映射，只校验placement，不定序DATA。先为Netty、I/O、控制、索引、compaction和JVM留CPU余量，再定worker数；同物理核优先只选一个SMT sibling给append，并避免把重负载服务线程放另一个sibling。应用只选CPU，不关闭sibling。单NUMA节点8个可用物理核时“4 append＋4服务共享”仅为实验起点，TLS/维护重时可减少append worker，不能随ledger数扩线程。
+
+安全接口候选为`CpuBinding bindCurrentThread(CpuSet requested)`，返回请求/实际mask及可释放作用域。Java/JNI须验证非空集合、编号/范围与native mask容量，读取验证实际mask，传播errno/不支持原因；不能把稀疏CPU编号当数组长度或让固定`cpu_set_t`越界。仅在绑定验证成功后登记进程内部placement占用；部分启动失败须清理登记，已绑定线程在自身作用域内恢复当前允许范围中的原mask并报告恢复结果。不能留下“登记已占用但未绑定”，也不能把恢复失败伪报为已降级成功；无法完成必要清理时在服务开放前退出，不修改宿主机状态。
+
+worker自身启动顺序为“按模式绑定并验证（OFF不设置mask）→按RFC-0003 §6.2初始化/触碰本地池→发布就绪→服务循环”。Linux新线程继承创建者的affinity，因此自建服务线程在入口应用自己的placement，不能让绑单核owner懒建一组服务线程而全部继承单核；OFF的线程从未缩窄部署mask的创建路径启动。首批不遍历改绑JVM内部GC/JIT线程，测量其干扰。依据[Linux pthread_setaffinity_np(3)](https://man7.org/linux/man-pages/man3/pthread_setaffinity_np.3.html)。
+
+### 10.4 等待策略独立于affinity
+
+首批默认`PARK`，`spin budget = 0`。`BOUNDED_SPIN`只在明确CPU余量及B18对照支持时显式启用：检查输入/completion/控制/归还事件→处理有界任务→空闲最多spin指定预算→仍无工作则park，新工作唤醒。spin与多shard轮转不能重置最老batch deadline；park时间服从最近合批deadline，到期仍须提交低负载批次，不能只等下一个请求唤醒。
+
+复用经验证的有界队列和等待原语，入睡前重查队列并处理enqueue/notification竞争，避免丢失唤醒。completion与fence/tombstone事件不能被DATA或spin饿死。affinity只回答线程在哪里运行，绑核成功后仍可park；首批没有无限busy-wait、实时调度或“所有I/O/索引/后台线程都spin”模式，也不消费Classic的`enableBusyWait`作为Segment绑核开关。
+
+### 10.5 配置、降级与实施顺序
+
+以下为拟配置名及设计默认值，**不是当前仓库已存在参数**；具体数量、CPU列表与阈值由同一实验manifest锁定，不进入ProfileDescriptor、DATA identity、quorum或持久shard数。
+
+| 拟配置 | 语义与默认 |
+| --- | --- |
+| `walAppendWorkerCount` | 常驻owner数量，与逻辑shard数分开；按服务余量/quota规划，不以机器标称核数或ledger数扩张 |
+| `walAffinityMode` | `OFF / PREFER / REQUIRE`，默认`OFF` |
+| `walAppendCpuList` | 显式候选CPU；未指定时由启动拓扑计划选择 |
+| `walServiceCpuList` | 应用服务线程CPU集合，可共享；校验与append物理核/sibling的冲突及服务余量 |
+| `walBufferNumaPolicy` | `SYSTEM / OWNER_TOUCH / PREFERRED`，默认`SYSTEM`；池行为与降级见RFC-0003 §6.2 |
+| `walWaitStrategy` | `PARK / BOUNDED_SPIN`，默认`PARK` |
+| `walSpinBudgetMicros` | 有界空闲spin时间，默认`0`；不改变batch deadline |
+
+CPU列表语法/编号非法、重复占用关键核、映射矛盾等是配置错误，任何模式都不静默忽略。环境不支持native/affinity、cpuset或quota不足按模式处理，不通过线程超额扩张强凑“每shard一核”。`OFF`不主动绑核，保留完全相同的owner、队列及存储逻辑；`PREFER`尝试合法计划，环境限制时清理部分绑定/登记、报告实际mask与降级原因，使用普通调度及PARK；`REQUIRE`在开放服务前验证所要求绑定全部成立，否则失败。REQUIRE只保证本进程所要求的线程mask，不承诺宿主机独占、NUMA页面硬绑定、无GC/IRQ或实时调度；NUMA策略的best-effort回退单独报告。
+
+低频后台检查运行时CPU/cpuset/memory-node/quota变化，不在每Add读sysfs。首批不在线迁移owner：PREFER保持原owner/shard，在当前合法CPU集合继续并关闭spin，记录属地降级；REQUIRE在所要求绑定失效时停止新准入、沿既有drain/I/O终结和退出流程重启。没有可运行资源或无法安全继续时按既有退出处理，不假设drain一定立刻成功。拓扑变化本身不是磁盘authority损坏，不能重分配ledger、创建新stream或改变ACK/fence/去重/恢复结果；已有buffer不因此迁移或提前释放。
+
+绑核不阻止其他线程、进程或中断使用该CPU。真正隔离由部署层提供，NIC RSS/IRQ/irqbalance、NVMe队列及完成中断配置单独记录，Bookie不自动修改。Kubernetes CPU Manager `static`可为符合条件的容器提供独占CPU；完整核、NUMA/内存对齐需相应策略及实际版本核验，普通CPU limit不证明这些条件。首批不开发Operator，见[Kubernetes CPU管理](https://kubernetes.io/docs/tasks/administer-cluster/cpu-management-policies/)。
+
+实现归既有UW-3/UW-7和B18：先交付固定owner＋PARK＋安全binding/拓扑校验，再接入owner初始化及可选preferred-node池，最后做有界spin与部署干扰对照。三项小职责仅为`CpuTopologySnapshot`、`ExecutionPlacementPlan`及`cpu-affinity`显式绑定作用域，不新建调度框架、NUMA classifier或持久化控制层。固定owner及安全接入点随第一批线程/池构建完成；可选优化没有测出收益就保持OFF/SYSTEM/PARK，不阻止隔离原型开工，也不以开启affinity作为存储正确性前提。
 
 ## 11. 安全不变量
 
@@ -571,7 +646,7 @@ B18在已有资源测量中分列TLS/decoder retained bytes、未完成frame数�
 - A16/A26/B19核验P与累计应用length同前缀，LAC落后、fragment抬升、无新尾部/空ledger、边界读不可用及同P不同L的close重读均不得错误成功；
 - 同批L1 fence/L2合法、已提交timeout后同坐标不同payload、batch 11 unknown/12已完成、共享文件错误与恢复；逐entry结果不污染物理前缀，异常pending及buffer有界；
 - 大batch中单entry独立envelope/CRC校验及必要对齐I/O、坏length、cache/pin竞态与慢客户端小slice持有；首批shared-only及后续dedicated池的资源/性能结论分别计量；
-- §10.1 ByteBuf生命周期、reference corpus等价、固定shard合批、分配/复制/CPU与真实durability指标通过B18/B19；
+- §10.1—10.5的ByteBuf、固定owner/shard、受保留容量保护的completion及真实durability通过B18/B19；B18用相同实现分离OFF/PARK、CPU pin、NUMA池和有界spin，对启用/可用路径验证实际mask/页分布、quota与降级、继承/唤醒竞争和语义不变。仅静态计划或无硬件run不能宣称收益；
 - 初始writer/只读/恢复打开分离，CRC32C布局/outer-inner坐标检查及unsupported digest在创建/安装拒绝；DATA不可改写、短写/barrier覆盖与physical prefix重建通过B2/B8/B9/B18/B19；
 - delete-applied/cursor先于异步drain/free仍无遗漏或提前reuse，shared L1/L2顺序和清理队列丢失可重建；全阶段预算、最老deadline、大entry、慢重复核对和DATA满额时fence/tombstone进展有确定性测试；
 - RFC-0004 admission cut、membership freeze、普通logical tombstone和本地grant/tombstone组合；延期strong publication/强撤权只在各自能力启用时验证，不作为首批前置；
