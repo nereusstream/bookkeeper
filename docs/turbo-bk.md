@@ -2,7 +2,7 @@
 
 > 状态：**Proposed / Not Implementation Ready**<br>
 > 文档类型：总体架构、边界与依赖导航<br>
-> 更新时间：2026-09-18<br>
+> 更新时间：2026-09-22<br>
 > 结论：保留 Unified WAL 方向；除 `BK_CLASSIC_TUNED` 外，不授权按本文直接进入正式实现。
 
 ## 1. 决策摘要
@@ -17,10 +17,10 @@
 4. Conditional delete 是集群协议，必须覆盖历史 ensemble、离线 Bookie、持久 tombstone、AutoRecovery 竞争和 Bookie rejoin barrier。
 5. 当前 OSS 已有 bounded Batch Read；新增范围是 streaming continuation、一般 E/W/A 合并、恢复语义、QoS 和 cancellation。
 6. BtrLog 只提供设计启发。它的对象存储恢复假设不能证明本方案安全。
-7. 下一步先修现有客户端ACK集合/换组与迟到响应回收两个缺口；固定Bookie控制日志、per-Arena控制日志和DATA三层拓扑，推进ByteBuf、固定shard、批量DATA及可读定位的最小隔离原型，与实际启用路径的模型验证并行。
+7. 下一步先固定基线，并行推进CLIENT-1/2独立Classic维护、实验格式/I/O及固定owner/安全binding/NUMA池，再完成Bookie控制日志、per-Arena控制日志、DATA写入、点读与restart闭环。客户端维护不阻塞本地文件原型，但须在客户端接入前完成；隔离存储与实际启用路径的模型验证并行。
 8. 首批集群闭合普通Add/点读/restart、基础点恢复和已fenced-close ledger的普通逻辑删除。强访问撤销、strong completion/loss reset及高级Range延期；strong reset后续也先限于整个ledger fenced+CLOSED，不让增强token阻塞活跃ledger的正常replacement。
 
-本轮基于`6e5df388ab1882caaa4de7e03d078f6be7196a95`把固定owner、显式CPU计划、NUMA对齐池和独立等待策略补入第一批存储切片：默认OFF/SYSTEM/PARK，I/O完成回原owner，安全绑定不自动上下线CPU，池先按placement初始化/触碰再发布；CPU数量变化不改变持久shard/stream身份。B18分离线程基线、pin、NUMA和有界spin收益。此前控制重演/当前DATA验证、entry/copy持久来源、接收预算和控制可达性保持；均为静态核对及拟实施合同，无新增源码修复或运行/性能证据。
+当前实施规划基于`e8b162076fd8cfa84a11351a82caac8c5ac1f939`（2026-09-22 08:29:33 UTC，北京时间16:29:33），按“基础与执行模型→单机可恢复存储→索引与回收→协议与集群→完整验收与灰度”推进，详见§10及[16步实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)。固定owner、安全binding、NUMA池随线程与缓冲池落地，默认OFF/SYSTEM/PARK，B18分离pin、属地池和有界spin收益。测试、故障注入和测量贯穿各模块；现有持久化、恢复、接收预算和控制可达合同保持。本次仅整理实施顺序，无新增源码修复、运行/性能证据或状态提升。
 
 本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，下一原型按RFC-0005选择Bookie级独立控制日志；其stable format、阈值和真实证据仍由Spike接受。
 
@@ -282,48 +282,35 @@ Cluster Lifecycle
 
 ## 10. 实施顺序
 
-```text
-Stage 0  总体文档降级；建立四份子 RFC、三个 Spike 与逐轮 grill 记录
-Stage 1  现有客户端CLIENT-1/2修复及定向回归；BK_CLASSIC / BK_CLASSIC_TUNED可复现基线
-Stage 2  Round 7 exact manifest：descriptor与control interface已冻结；wire为test candidate；
-         same-scope format BLOCK，new BookieId/new scope fallback已冻结
-         开始reference codec、harness与isolated prototype；不得发布stable wire/disk
-         Spike A：Profile install、mTLS/exact AuthZ；raw old-decoder wire compatibility合同保留、当前执行延期
-         Spike B：Allocator/block
-                  + stock old binary pre-replay fence、partial migration/rollback
-         Spike C：No-object TLA+
-Stage 3  DirectJournal 独立 cohort prototype；不声称一次本地 payload 写
-Stage 4  ByteBuf + 固定shard/owner、PARK、安全binding及NUMA池初始化 + 控制日志/ALLOC/DATA/locator原型；
-         先测普通写/点读/基础restart，再测写入与回收；与启用路径的模型验证并行；
-         有界热定位/异步index与持久coverage checkpoint，逐步完成tail、writer I/O、维护预算和全量重建证据；
-         接受 RFC-0003；仅在Spike证据后进入isolated/discardable Segment shadow；
-         live shadow仍需证明不污染Classic rollback cohort，Classic仍为ACK authority
-Stage 5  最小集群闭环：受支持E/W/A与ACK故障域、install/activation、换组重试、
-         基础point recovery/durable close、fenced-close普通逻辑删除与异步安全回收；
-         接受RFC-0001/0003/0005及RFC-0004相应feature gates后，另行验证canary
-Stage 6  独立扩展Gate：Streaming Range/TailSummary/BatchRecoveryAdd、强访问撤销、
-         dedicated hot extent、整个ledger关闭后的strong completion/reset、在线删除、rack/AZ、迁移与扩展rejoin
-Stage 7  完成实际启用能力的全部Gate及production canary，包含派生索引完整资源/恢复证据；延期能力保持disabled
-```
+以下为**PLANNED / NOT EXECUTED**的施工顺序，从当前reference implementation走到首个可保留数据的生产候选。完整依赖、实施内容与完成条件由[现有实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)维护；步骤号只用于排序，不新增RFC、Maven模块或工作项体系。UW-1～UW-7继续表示职责分类，例如UW-1集群删除依赖UW-6基础fenced-close，不能按UW编号施工。
 
-禁止跨越依赖：Round 7 test manifest不等于stable contract；raw decoder/stock old binary Gate未通过、所选control-store物理协议未验证时，不得发布stable wire/disk compatibility。isolated shadow不授予live shadow、Segment authority或production readiness。Stage 5可保留数据canary还必须闭合基础恢复及实际启用的受限删除，不能只凭Add/ACK实验晋升；Spike A/B/C、兼容与canary-specific evidence依旧必要。
+| 阶段 | 步骤与主线 | 完成边界 |
+| --- | --- | --- |
+| 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |
+| 单机可恢复存储 | 5 本地控制日志/启动检查/allocator → 6 普通Add/合批持久化/幂等 → 7 点读/restart | 第一里程碑：真实写入—点读—重启恢复；仅报告实际覆盖的局部性能 |
+| 索引与回收 | 8 checkpoint/rotation/异步索引/全量重建 → 9 本地tombstone/compaction/FREE/reuse → 10 空间耗尽/长期负载/多Arena | 第二里程碑：有界、可长期运行的本地存储；尚未证明分布式quorum和兼容 |
+| 协议与集群 | 11 Profile transport/接收背压 → 12 MetadataStore/install/activation/registration → 13 ACK/retry/replacement → 14 recovery/AutoRecovery → 15 集群删除/离线追赶/rejoin | 第三里程碑：创建、写、读、换组、恢复、关闭、删除、重返完整闭环；仍待综合验收 |
+| 完整验收与灰度 | 16 全链路故障、模型、性能、兼容、运维与独立小cohort canary | 实际启用能力证据闭合后，才提升对应RFC/feature状态和部署范围 |
+
+步骤2不阻塞本地文件原型，须在步骤13前完成；步骤3、4可并行，步骤11、12在接口稳定后可提前并行开发，真实集群成功路径联调等待本地存储通过对应验证。Block H与Block G实际启用A/C、必要D及组合并行，模型不能证明真实fsync/TLS/资源，性能run也不能替代quorum安全证据。测试、故障注入和测量随每个模块交付，步骤16负责组合验收。
+
+DirectJournal是独立对照/优化支线，可并行或等主线取得基础数据后开展，不是Segment开工前置。它保留Journal＋LedgerStorage结构，不宣称一份payload持久化，不替代Segment安全证据。首个完整WAL之后再按需求或测量推进dedicated extent、其他I/O backend、高级Range、rack/AZ、强撤权、strong reset、在线删除及跨Arena迁移；无证据时保持disabled，详见[延期能力及前置条件](rfcs/unified-wal/implementation/README.md#directjournal与延期能力)。
+
+可保留数据canary前必须完成启用范围的基础恢复、普通删除、全量重建、维护进展及资源Gate，并接受对应RFC与Spike证据。Round 7 test manifest和isolated shadow不授予stable wire/disk、live shadow、Segment authority或production readiness；live shadow仍须证明不污染Classic rollback cohort。raw old-decoder/stock-binary矩阵当前保持DEFERRED_NOT_RUN，但发布对应stable面前必须恢复执行并通过；所选control-store物理协议同样须验证，不能以永久延期宣称兼容。首个new-scope canary不额外要求原地same-scope迁移；退出时停止新写并保留新引擎读取/恢复能力，不能让旧binary打开Segment文件。
 
 ### 10.1 下一阶段实施顺序与交付物
 
-以下全部为**Planned / Not Executed**，具体合同直接归属现有owner RFC；实施跟踪见[Wave 0清单](rfcs/unified-wal/implementation/README.md)。
+当前先完成步骤1～4，紧接步骤5～7形成可运行闭环。具体合同仍由既有owner RFC拥有，后续索引/回收和网络/集群按上述依赖集成。
 
-| 优先级 | 实施内容 | Owner与必须提交的证据 |
+| 步骤 | 实施内容 | Owner与必须提交的证据 |
 | --- | --- | --- |
-| 先修源码 | CLIENT-1当前ACK数量/故障域及多slot completion gate，保留未变ACK；CLIENT-2最后旧响应回收 | RFC-0001 §9.3/9.5、A29/A30；4/3/2先处理write-set外slot不提前callback、不无条件重发W份 |
-| 第一批原型 | 固定shard/owner与shared block，先PARK＋安全binding，再属地池初始化/可选preferred-node；默认OFF/SYSTEM/PARK，阻塞I/O走有界backend且完成回原owner。保留热定位/异步索引、接收预算及控制可达 | RFC-0001 §11.6、RFC-0003 §6.1—6.2/13/15、RFC-0005 §8/10.1—10.5、A26/B2/B9/B17/B18；验证实际mask/页分布、继承/降级、完成保留容量和A/B/C/D对照 |
-| 第一批原型 | 创建/读取/恢复、CRC32C identity、统一normal/recovery/read/storage大小上限；保留提交后坐标及背压身份 | RFC-0001 §8/9/11、RFC-0005 §6.1/10.1、A26/B18/B19；N-1/N/N+1、44-byte差异、旧entry服务能力 |
-| 随原型闭合 | 先重演完整控制再验证当前必要DATA；ENTRY_DATA/RELOCATION_COPY持久来源及completion分支；保留按需同步、applied checkpoint、I/O/reuse和双层预算/净收益FREE | RFC-0003 §5.3/9—15、B2/B3/B7/B9/B10/B16/B17/B18；A/B复用后无新checkpoint恢复C、C坏/控制缺失隔离、未发布copy不提升 |
-| 最小集群 | 复用Classic point recovery及逐来源fence否定条件，适配Profile身份/grant/unknown；close固定同一前缀的P/length/context，普通删除范围保持 | RFC-0004 §7.3—7.5、RFC-0005 §6—8、A16/A26/B19/A-POINT；LAC提示/fragment提升/空ledger/缺锚点与重试长度冲突；原activation历史/applied cursor合同保持 |
-| 后续扩展 | dedicated hot extent、强撤权、整个ledger关闭后的strong completion/reset、高级Range、在线删除、复杂故障域及迁移 | 各自独立Gate；dedicated验证专属空间/有界池及B5/B13，无证据时不计首批收益 |
+| 1 | 固定source/config、单Arena/shared block、OFF/SYSTEM/PARK及最小测试入口 | 本文§11、Spike B manifest；明确构建/运行命令、独立结果目录，暂未实现操作拒绝，不覆盖旧receipt |
+| 2 | CLIENT-1 ACK/故障域/多slot整体gate，保留未变ACK；CLIENT-2最后旧响应回收 | RFC-0001 §9.3/9.5、A29/A30；4/3/2先处理write-set外slot不提前callback；确定性修复前失败、修复后通过 |
+| 3 | 实验framing、独立parser/固定向量、ENTRY_DATA/RELOCATION_COPY区分及一种真实I/O后端 | RFC-0003 §5/6/9、RFC-0005 §5.2；短写、sync失败、截断、坏长度/generation；固定容量满额停止 |
+| 4 | 固定owner＋PARK、安全binding，再owner本地池及可选PREFERRED，spin最后单测 | RFC-0003 §6.2/13、RFC-0005 §10.2—10.5、B18；实际mask、继承/降级、socket/SMT、原池归还及完成保留容量 |
+| 5～7 | 控制日志/ALLOC→DATA合批与幂等→点读/restart，先重演完整控制再验证当前必要DATA | UW-2/3/4/7、RFC-0003 §5.3/6.1/9/12、RFC-0005 §5.2/6.1/8/10.1；真实I/O、逐entry结果、连续物理前缀、统一N、unknown与双故障恢复 |
 
-执行依赖改为：CLIENT-1/2先做独立小范围修复；Block H最小隔离存储切片与Block G实际启用路径的模型可并行。先以固定硬件/durability/E/W/A得到普通写、换组、写入与回收并行的测量，尚未实现的集群场景明确NOT_EXECUTED；相关安全/恢复/兼容/资源Gate闭合后才能进入可保留数据canary。完整重建和维护进展不能推迟到canary之后，但不阻止更早收集discardable原型数据。Classic与DirectJournal基线不替代Segment证明，不新增通用事务/调度/压测框架。
-
-本轮归既有UW-3/UW-7与B18，CLIENT-1/2、其他UW/Spike及全部存储语义保持。固定owner与安全binding随线程模型落地，属地池随后接入，有界spin最后单独测；不走旧acquireCore自动抢核/下线sibling策略，不把CPU/NUMA加入持久身份。相同worker/batch/I/O/TLS/E/W/A/维护负载下分离OFF/PARK、pin、NUMA池和spin，报告实际mask/页分布、CPU/entry/空闲成本、p99.9及quota干扰；无收益保持默认，不另建调度平台或把可选优化变成开工前置，旧receipt不重绑。
+每个模块提交实际实现、对应测试、可重复测量及未覆盖范围说明；未执行范围保持NOT_EXECUTED。亲和性按相同worker/batch/I/O/TLS/E/W/A与维护负载分离A=OFF/SYSTEM/PARK、B=pin、C=NUMA池、D=有界spin，报告实际mask/页分布、CPU/entry、空闲成本、p99.9及quota干扰；无收益保持默认。CPU/NUMA不进入持久身份，不新增通用调度/测试平台，不重绑旧receipt。
 
 ## 11. Gate 与证据合同
 
@@ -410,23 +397,23 @@ Segment production candidate 的最低 Gate：
 
 ## 13. 当前可执行工作
 
-现在可以直接开始：
+当前工作按§10的施工顺序推进：
 
 - 固定 stock `BK_CLASSIC` benchmark；
 - 按CLIENT-1/2修复现有客户端并运行A29/A30定向回归；独立于Wave 0，不改变Segment生产authority；
 - 对 `BK_CLASSIC_TUNED` 做不改变 on-disk/wire semantics 的调优；
 - 随原型关闭实际遇到的四份子RFC问题，优先交付最小可测路径；不把新一轮全量架构扩展作为前置；
 - 实现Spike A/B/C的manifest-locked harness/Model，并在锁定环境和停止条件后执行；
-- 实现`ProfileDescriptor` reference codec、golden corpus与独立verifier；不能分配未接受的policy/capability业务ID；
-- 实现独立immediate-TLS/mTLS endpoint、exact-scope authorizer、cold authority adapter、protected-state语义接口与redaction的隔离prototype；
+- 复用已完成的`ProfileDescriptor` reference codec、golden corpus与独立verifier；不能分配未接受的policy/capability业务ID；
+- 复用已完成的Profile control/auth typed reference endpoint、exact-scope authorizer、cold authority与protected-state语义接口；真实TLS listener和MetadataStore adapter按步骤11、12接入隔离实验；
 - 保留已实现的Round 7 frame/HELLO/status experimental codec、610-vector corpus与冻结反例；raw old-decoder/stock-binary执行延期，不发布stable compatibility；
-- 实现`BKPF1` same-scope candidate与new BookieId/new-scope fallback harness、persistent readiness adapter prototype；same-scope结果在Spike PASS前保持BLOCK；
+- 首批使用new BookieId/new-scope隔离；persistent readiness真实adapter按步骤12推进，`BKPF1` same-scope candidate保持独立兼容Gate，原地迁移不作为首版额外功能；
 - Wave 0已完成隔离的startup/readiness/new-scope reference implementation及immutable receipt：typed compatibility/device/recovery facts、九阶段fail-closed顺序、durable local readiness、versioned persistent CAS、matching service-info、stale demotion、ephemeral writable registration、九个crash/restart边界和17项普通测试；它不接入`EmbeddedServer`、生产registration、真实OS权限或normal Add，不提升Spike/Gate/production状态；
 - 实现不接管authority、可丢弃且不污染Classic rollback cohort的局部/isolated shadow prototype，用于否证crash recovery、资源上限和p99假设。
 
 现在不能直接开始：
 
-- Segment WAL ACK authority实现、live Stage 5 promotion或authority切换；
+- 让Segment接管生产ACK authority、进入live shadow或生产promotion；
 - 在raw decoder/stock old binary Gates、policy/capability registry、所选local physical owner验证与control tail闭合前提交stable wire/on-disk兼容面，或让shadow污染可rollback Classic cohort；
 - 把 per-ledger minimum 8 MiB extent 当作不变量；
 - 将本地 delete success 当作全物理删除完成；

@@ -18,7 +18,11 @@
 
 ## 下一阶段实施清单
 
-2026-09-22收敛修订；规划基线`6e5df388ab1882caaa4de7e03d078f6be7196a95`。以下全部为**PLANNED / NOT EXECUTED**，没有新增源码修复、实现/故障测试或PASS receipt。本轮把固定owner、安全显式CPU绑定、NUMA对齐池和独立等待策略纳入第一批线程模型；默认OFF/SYSTEM/PARK，不沿用acquireCore自动抢核/下线sibling策略。此前控制重演/当前DATA验证、entry/copy来源、接收预算/控制可达及全部持久化合同保持，CLIENT-1/2与首批范围不扩大，reference codec和历史证据不重绑。
+规划基线为`origin/turbo-bk@e8b162076fd8cfa84a11351a82caac8c5ac1f939`，2026-09-22核对本地HEAD及远端引用一致；该提交时间为2026-09-22 08:29:33 UTC（北京时间16:29:33）。以下工作均为**PLANNED / NOT EXECUTED**；本次只整理从当前reference implementation到首个可保留数据生产候选的实施顺序，没有新增源码修复、实现/故障测试、性能结果或PASS receipt。
+
+继续复用已有ProfileDescriptor、Profile control/auth、startup/readiness reference implementation及experimental wire codec/corpus。它们提供接口、字节合同和测试依据，不能替代真实文件持久化、网络或MetadataStore。固定owner、安全显式绑核、NUMA池与独立等待策略沿用RFC-0005 §10.2—10.5、RFC-0003 §6.2；默认仍为OFF/SYSTEM/PARK。
+
+CLIENT-1/2和UW-1～UW-7是既有职责分类，下面的步骤1～16只表示施工顺序，不新增RFC、Maven模块或另一套工作项体系。尤其不能按UW编号机械施工：UW-1的首版集群删除依赖UW-6的基础fenced-close。各阶段测试、故障注入和测量随模块交付，最后一阶段负责综合验收。
 
 | 工作项 | 实施与完成条件 | Owner / 验证入口 |
 | --- | --- | --- |
@@ -32,16 +36,310 @@
 | UW-6 最小集群可恢复性 | 实验3/3/2与3/3/3、Bookie故障域F=1；复用Classic write-set/fencing/W-A+1/顺序write-back及逐来源否定条件。保留提示源entryId/LAC/累计length，取得匹配最终P的L后发布并重读核对CLOSED(P,L,context)；空ledger为(-1,0)，缺锚点defer、矛盾conflict，必要时只补边界点读。恢复sync不推导AQ/LAC | [RFC-0004 §7.3—7.5](../RFC-0004-range-recovery-delete.md)、RFC-0005 §6—8、A16/A26/B19、A-POINT/D-LOGICAL |
 | UW-7 全量重建与总资源 | 全量重建由最终控制状态及受校验来源选择位置，未发布copy不因index/task丢失提升；保留hot-first/fresh Get与真实persisted coverage。TLS/header/read、半包/已解码未准入请求加入既有总账，交接credit不漏计/永久重复；同Profile listener保留有界独立控制连接及接收/执行份额，DATA暂停仍可达且不豁免认证/总量。原内存/双层磁盘及完成工作集保持；接入NUMA属地池初始化/首次触碰/原池有界归还；CPU quota、服务余量与内存同一边界内计量，affinity/NUMA降级不改变存储事实，B18分离pin/池/spin收益。 | RFC-0001 §11.6、RFC-0003 §6.2/9/12/13/15、RFC-0005 §8/10.1—10.5、A26/B2/B3/B9/B10/B11/B12/B17/B18、C-REBUILD，dedicated仍另验B5/B13 |
 
-实施顺序：
+## 实施顺序
 
-1. **CLIENT-1/2先修**：独立Classic维护补丁与确定性回归，不等待Segment模型。CLIENT-1同时验证旧ACK/故障域残留与多slot整体gate，包括4/3/2先处理write-set外slot、新响应交错及未变ACK保留；CLIENT-2保持最后旧响应回收。仅修改文档不算修复，不借此取得新存储ACK authority。
-2. **Block H与Block G并行**：H先交付UW-2/3一个Arena、固定shard和shared block/共享DATA文件的隔离切片，再加入UW-4/5本地安全回收；dedicated extent不作为该切片前置或性能结论。H的线程/池同步落实固定owner＋PARK＋安全显式binding，随后owner本地初始化/可选preferred-node池，最后单独测有界spin；可选优化OFF不阻止切片正确运行。G只展开实际启用路径的A/C及必要D/组合，保留`E>W`、response loss、offline/rejoin、generation reuse和逐CAS/local durability边界。两者各锁source/config和独立证据，不等待全部延期增强模型；模型不能证明真实fsync/CPU，性能run也不能证明quorum安全。
-3. **先得到可解释的测量**：固定硬件、stream/file/filesystem映射、durability、TLS范围、E/W/A及负载，保留写/读/重建/回收、index coverage、拒绝/retry/replacement、内存与四项磁盘指标；compaction分列copied bytes与扣除destination后的net reusable bytes gained，关联debt/p99。复用同一测量记录恢复sync的文件/次数/等待、control commands/barrier与apply lag、必要恢复边界点读数；满载暂停/恢复下游记录已准入完成及资源归还。B18在同一worker/batch/I/O/TLS/E/W/A与维护负载下做A=OFF/PARK、B=pin、C=NUMA池、D=有界spin对照，分列实际mask/页分布、p99.9、CPU/entry与空闲CPU、迁移/queue wait及quota throttling。统一N、工作集、victim/净收益及维护/预分配上限由同一manifest冻结；未运行范围保持NOT_EXECUTED，不新建平台。
-4. **集群入口补足安全/资源证据**：UW-7全量重建、UW-3多Arena及UW-4/5故障/进展等实际所需Gate闭合后，推进UW-6。基础point recovery及普通删除不能随高级Range延期；缺少相关证据的实验仍只能用discardable数据，完整Gate和canary证据不得后补。
+主线按“基础与执行模型 → 单机可恢复存储 → 索引与回收 → 协议与集群 → 完整验收与灰度”推进：
 
-首批不扩大为强访问撤销、strong completion/loss reset、online delete、general streaming Range/TailSummary/BatchRecoveryAdd、rack/AZ多策略或cross-Arena迁移。普通删除不等待所有历史target在线；强撤权须独立全目标屏障。strong reset后续仅限整个ledger fenced+CLOSED，基础close/membership不创建pendingPublication、不自动续期loss budget；旧token仍按原协议解析，不得强删。每项后续能力有实际需求和独立证据后再启用。same-scope旧binary和released-decoder矩阵保持原BLOCK/DEFERRED，本清单不是执行或生产授权回执。
+```text
+1. 基线、实验范围与测试入口
+   ├─ 2. CLIENT-1/2独立Classic维护补丁
+   ├─ 3. 实验格式与文件I/O基础
+   └─ 4. 固定owner、安全CPU绑定与NUMA缓冲池
+                       ↓
+5. 本地控制日志、启动检查与allocator
+                       ↓
+6. 普通Add、合批持久化与幂等
+                       ↓
+7. 点读与基础restart
+   【第一里程碑：真实写入—点读—重启恢复】
+                       ↓
+8. checkpoint/rotation、异步索引与完整重建
+                       ↓
+9. 本地tombstone、compaction、FREE/reuse
+                       ↓
+10. 空间耗尽、长期负载与多Arena验证
+    【第二里程碑：有界、可长期运行的本地存储】
+                       ↓
+11. Profile网络接入与接收背压
+                       ↓
+12. MetadataStore、安装激活与registration
+                       ↓
+13. 客户端ACK、重试与写期换组
+                       ↓
+14. 基础ledger recovery与AutoRecovery
+                       ↓
+15. 集群删除、离线追赶与rejoin
+    【第三里程碑：完整分布式WAL闭环】
+                       ↓
+16. 综合验收、运维交付与受限canary
+```
 
-本轮归入既有UW-3/UW-7与B18，CLIENT-1/2及其他UW/Spike场景保持，不新编号或新建调度/测试平台。cpu-affinity模块后续扩展只绑定自身线程的显式API、实际mask校验/作用域清理和socket/SMT拓扑测试，Classic旧策略独立保留；NUMA只作用自有池映射，CPU/NUMA不进入持久身份。先固定owner与安全入口，再初始化属地池，最后依据分离测量决定spin/部署调优；不等待可选优化才能开工，也不在池/线程全部建完后用一个acquireCore调用补齐。旧恢复/网络/预算反例继续有效，未运行结果不晋升。
+图示是集成主线。步骤2不阻塞本地文件原型，但必须在步骤13接入对应客户端路径前完成。步骤3与4可并行；步骤11与12可在接口稳定后提前并行开发，真实集群成功路径联调仍等待本地存储通过对应验证。Block H隔离存储与Block G实际启用范围的模型验证继续并行，各自锁定source/config及独立证据。
+
+### 第一阶段：基础与执行模型
+
+#### 1. 固定实施范围、基线和最小测试入口
+
+固定本轮源码与配置、独立实验目录、一个Arena、shared block、固定逻辑shard及第一种真实I/O路径。暂未实现能力显式关闭，不用空方法返回成功。基准配置为：
+
+```text
+affinity = OFF
+NUMA policy = SYSTEM
+wait strategy = PARK
+```
+
+在现有测试及benchmark能力上准备小型可复用入口：创建实验ledger状态、追加、点读、终止进程、重启、注入短写和同步失败、读取原始文件镜像。不建设通用测试平台；实际操作随对应模块逐步接通，尚未接通的操作明确拒绝。
+
+**完成条件：** 一条明确命令能构建并运行基线，输入参数、源码版本和结果目录可追溯；不触碰生产目录，不覆盖历史receipt。每次正式比较前冻结格式、硬件、durability、负载、阈值和停止条件，沿用[总体RFC §11](../../../turbo-bk.md#11-gate-与证据合同)的1/4/32 KiB、ledger规模、负载与quorum矩阵。
+
+#### 2. 完成CLIENT-1/CLIENT-2独立维护补丁
+
+依赖步骤1的基线与测试入口，复用`LedgerHandle`、`PendingAddOp`及既有测试，拆成两个小变更。合同及反例见[RFC-0001 §9.5](../RFC-0001-profile-capability-install.md)、Spike A A29/A30。
+
+CLIENT-1先构造失败测试，再修复ACK集合、故障域状态和多slot整体completion gate。全部受影响pending/slot的映射、ACK撤销和资格重算完成后才恢复连续回调；身份未变的有效ACK保留，只重发必要副本。固定4/3/2下先处理write-set外slot的顺序，并交错新旧响应，不以最终集合正确代替中途无提前callback。
+
+CLIENT-2修复最后旧地址响应到达时的回收路径，覆盖callback已完成/未完成、最后响应来自当前/旧Bookie的组合。回收后立即返回，不再访问已重置字段；现有timeout/callback同步保护保持。
+
+**完成条件：** 确定性反例在修复前失败、修复后通过；没有重复回调、提前释放、漏回收或重复回收。检查timeout统计及正常单条Add的分配、CPU开销；未启用故障域检查时避免无必要集合成本。这两项属于Classic维护，不接入Segment、不扩大为客户端整体重构，也不借Wave 0证据取得新存储ACK authority。
+
+#### 3. 实现实验格式与文件I/O基础
+
+依赖步骤1，可与步骤2、4并行。在同一变更中交付实验格式说明、writer、独立reader/parser及固定字节向量，确定控制与DATA record的framing、长度、generation、checksum覆盖范围，持久区分`ENTRY_DATA`/`RELOCATION_COPY`，并明确batch边界、alignment、统一entry上限、溢出检查及superblock/checkpoint/日志的最小识别规则。
+
+I/O层先选择一种明确后端，完整写入并处理短写，再执行对应持久化屏障；提供有限错误注入点。先用固定数量的预创建DATA文件，容量达到实验上限就停止，不自动破坏性回收。不同时开发普通文件、O_DIRECT、io_uring三套后端。
+
+**完成条件：** 独立parser能读取writer输出；截断、坏长度、未知类型和错误generation都有确定结果；任意短写或同步失败都不能当作成功。文件创建及必要目录持久化纳入对应I/O合同。此时格式可随实验修改，数据可丢弃，不提前建设长期迁移框架或宣称稳定兼容。
+
+#### 4. 实现固定owner、安全CPU绑定与属地缓冲池
+
+依赖步骤1，与步骤3并行，随后共同接入写入。按[RFC-0005 §10.2—10.5](../RFC-0005-segment-bookie-state.md)、[RFC-0003 §6.2](../RFC-0003-segment-storage-allocator.md)分三个小交付：
+
+1. 固定`ledger → logical shard → worker`，使用常驻平台线程，一个worker可承载多个shard。默认PARK，同时处理输入、completion、控制通知和buffer归还；新DATA不能饿死完成事件，多shard轮转不重置最老batch deadline。
+2. 在现有`cpu-affinity`模块扩展拓扑读取、静态placement及只绑定自身线程的显式API，验证实际mask、部分启动失败清理与线程继承。不调用原`acquireCore`自动抢核/下线sibling策略，不改变Classic旧行为。
+3. owner绑定验证后才初始化、首次触碰自有对齐池；先SYSTEM和OWNER_TOUCH，再接可选PREFERRED。buffer始终回原池，归还容量有界且预留；每个NUMA节点不能各复制一份全局预算。CPU/worker数变化不改变持久shard/stream身份。
+
+**完成条件：** OFF与绑定模式使用同一存储逻辑；核不足、非连续cpuset、socket/SMT拓扑、native不可用、线程继承mask、部分启动失败及跨节点归还都有测试；无丢失唤醒，completion队列满载仍可推进。PREFER降级和REQUIRE失败遵守原合同，NUMA受允许memory-node集合约束，不能把设置preference当作页必然本地化。
+
+BOUNDED_SPIN最后加入并单独测量，不作为步骤5～7开工条件。亲和性从线程/池构建时就有正确接入点；未测得收益时保持OFF/SYSTEM/PARK。
+
+### 第二阶段：单机可恢复存储
+
+#### 5. 实现本地控制日志、启动检查与allocator
+
+依赖步骤3，执行资源使用步骤4。保持两个语义owner，底层framing、文件I/O和group commit可以复用：
+
+```text
+Bookie控制日志：route / credential / install / activation
+                fence / recovery grant / explicit LAC / tombstone
+Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
+```
+
+先实现真实控制记录持久化、顺序apply、重复操作解析、启动身份检查及ALLOC/ALLOC_POOL。条件命令按已选合同“合批durable → 顺序判断并apply”，不增加推测状态或结果日志。初版可完整重放且暂不删除旧日志，但必须设置日志空间上限，满额停止接收；完整checkpoint/rotation在步骤8补齐。
+
+**完成条件：** 同批两个ALLOC竞争同一slot只有一个成功；durable未apply、apply中途崩溃和重复请求的结果一致；错误storage identity不开放写入；DATA只使用已持久化且成功apply的空间授权。本地fence/grant先用受控DATA事件验证顺序，在步骤6补真实I/O交错测试。
+
+#### 6. 实现普通Add、合批持久化与同坐标幂等
+
+依赖步骤4、5，对应UW-2/UW-3。真实数据路径为：
+
+```text
+统一大小与权限检查 → 取得输入、提交和完成资源 → owner检查/占用坐标
+→ 合批并冻结DATA → 有界I/O backend写入与同步 → completion回原owner
+→ 推进连续物理前缀 → 发布热定位 → 完成逐entry的local result
+```
+
+同时实现相同坐标相同数据重试、不同数据冲突、合法LAC封装变化、提交后timeout/取消及I/O unknown。保持CRC32C identity与统一N边界，收紧新写阈值不能损害已接受entry的读取/恢复能力。正常Add不访问MetadataStore，不逐entry写控制日志。
+
+**完成条件：** 对应durability未完成绝不成功；源/对齐buffer及pending有界，完成事件不被DATA队列满额挡住。覆盖同批一条被fence而另一条成功、batch 12先于11完成、DATA durable但定位尚未发布、请求超时后旧I/O继续完成；未解析I/O保护原坐标并暂停受影响stream/file，不以跳号或新stream绕过。此时local result只供隔离测试，不接管生产Bookie ACK。
+
+#### 7. 实现点读与基础restart
+
+依赖步骤5、6。点读实现正确定位、allocation/generation pin、独立record校验和有界对齐读取，不为小entry强制读取整个DATA batch。restart顺序为：
+
+```text
+验证storage与控制文件 → 重演控制状态 → 枚举当前合法DATA
+→ 验证当前必要记录 → 完成必要恢复同步 → 重建定位 → 开放对应实验服务
+```
+
+尚未接RocksDB时，可在声明的小规模范围内使用有界定位结构，满额明确背压；不得用持续增长的内存Map得出长期性能结论。
+
+**完成条件：** 写入→确认本地持久化→读取→终止进程→重启→再读与重复写入可重复运行；未知覆盖不误报NoSuchEntry，不同stream恢复不截短共享文件，旧generation残留不复活。开始验证两次故障：write完成但barrier未完成时退出，重启处理重复请求后再次掉电；单次进程终止后可读不足以证明持久化保证。
+
+**第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
+
+### 第三阶段：索引、回收与长期运行
+
+#### 8. 完善checkpoint/rotation、派生索引与完整重建
+
+依赖步骤5～7，先控制checkpoint，再派生索引，分开提交。先完成Bookie/Arena checkpoint的applied cut、A/B发布、fallback依赖及旧控制日志回收；不能把日志fsync最大序号当作已apply位置。
+
+随后接入真实RocksDB派生索引：
+
+```text
+DATA durable → hot locator → local result
+                     ↓ 异步
+              RocksDB WriteBatch
+                     ↓
+              flush实际覆盖内容
+                     ↓
+              durable coverage checkpoint
+```
+
+实现hot-first、miss后fresh Get、query-visible后淘汰hot，以及Add/MOVE/delete的必要顺序。只有真实持久覆盖才允许restart跳过对应DATA扫描。纯派生索引可关闭WAL，但必须同时实现coverage与DATA重建，不能只修改RocksDB参数。
+
+**完成条件：** Put成功但未flush时崩溃不虚报覆盖，删除全部派生索引后能完整重建；index stall只通过预算背压新写，不阻塞append owner；checkpoint任一发布边界崩溃都能选择合法状态。query-visible只授权hot交接，不冒充persisted coverage。
+
+#### 9. 实现本地tombstone、compaction与FREE/reuse
+
+依赖步骤8，对应UW-4/UW-5。按本地tombstone禁止新访问→整块全死直接FREE/reuse→部分存活块compaction→多次搬迁/orphan/并发回收推进。搬迁复用DATA I/O，但使用独立内部完成分支：
+
+```text
+写RELOCATION_COPY → 副本durable → MOVE命令durable且apply成功
+→ selector/pin cutover → 旧读者与I/O结束 → 整allocation FREE
+```
+
+本地测试通过受控授权入口触发删除，不代表集群删除协议已完成。按有界victim组的实际净收益选候选，扣除destination占用及framing/padding；合批复制和控制持久化，不为每条moved entry单独fsync，不要求OPEN ledger先关闭。
+
+**完成条件：** 部分ledger删除不提前释放共享块；copy durable而MOVE未成功不成为当前数据；A→B→C且A/B已复用、没有新增checkpoint时仍能恢复C，C损坏或必要控制后缀缺失仍隔离；并发MOVE/FREE不产生两个winner，旧I/O不覆盖新owner。FREE以整allocation generation可回收为条件，不以单ledger删除原因代替。
+
+#### 10. 完成空间耗尽、长期负载与多Arena验证
+
+依赖步骤8、9，在真实压力下验证已有预算，不另建资源框架。覆盖Arena空闲块、filesystem余量、SST/compaction临时空间、控制checkpoint空间、内存和completion工作集。暂停再恢复下游，验证无循环等待、不突破上限、已准入请求可完成且资源归还，随后自动恢复准入；无净收益候选时背压，不反复搬近全live块。
+
+单Arena读写回收稳定后加入第二个Arena，验证同Bookie的route/fence/tombstone一致性、required device部分失败与共享filesystem预算，不实现跨Arena搬迁。
+
+亲和性沿用B18的分离对照，worker数、batch、I/O、TLS范围、E/W/A和维护负载保持相同：
+
+| 对照 | 配置 |
+| --- | --- |
+| A | 固定owner，OFF / SYSTEM / PARK |
+| B | A加CPU pin |
+| C | B加NUMA属地池 |
+| D | C加有界spin |
+
+报告实际mask、页分布、CPU/entry、空闲CPU、迁移/queue wait、p99.9与quota throttling，不一次全开只报总提升。维护测量分列copied bytes和扣除destination后的net reusable bytes gained，并关联debt/p99；同时记录恢复sync的文件/次数/等待、control commands/barrier与apply lag、必要恢复边界点读数、index coverage、拒绝/retry/replacement及内存/磁盘预算。
+
+**第二里程碑：有界、可长期运行的本地存储原型。** 持续create/write/read/delete下资源有界、有净回收、背压可解释，通过完整索引重建和所需多Arena测试；尚不代表分布式quorum、集群删除或协议兼容完成。
+
+### 第四阶段：协议与集群生命周期
+
+#### 11. 实现Profile transport adapter与接收背压
+
+依赖步骤3的格式/codec、步骤4的执行模型及步骤6、7的真实接口，可在接口稳定后提前独立开发。复用reference codec/corpus，增加ByteBuf adapter、TLS/HELLO、operation分发、完整status三元组及DATA/control连接分工。
+
+预算从socket/TLS/header/半包开始，固定header通过后先预留body额度，再向存储转移ownership；暂停前pipeline已持有的字节仍计账。控制连接使用总预算内有限保留份额，不排在暂停DATA连接的半包后，也不豁免认证。
+
+**完成条件：** 正常、截断、超长、错误subtype与reference corpus一致；多连接半包内存有界，关闭/取消/解析失败无泄漏；DATA暂停时控制仍可到达；普通Add无逐请求handshake或proof读取。测试可使用隔离listener，尚不发布stable wire承诺。
+
+#### 12. 实现真实MetadataStore adapter、安装激活与registration
+
+依赖步骤5、11的接口，可与步骤11并行开发，真实集群联调等待本地存储验证。先选一种实际MetadataStore后端实现`ProfileControlStore`、`ProfileRegistrationStore`，不同时开发所有驱动。
+
+范围包括immutable instance backlink、sidecar单记录CAS、有界child/page发布、READY、activation target留存、RepairIntent admission、delete cut及必要snapshot/retention。初始writer创建顺序为：
+
+```text
+分配instance/准备sidecar → 全E inactive install → 标准LedgerMetadata
+→ READY与目标留存 → 全E activation → 返回writer
+```
+
+同phase请求并发，不逐个串行安装E个节点。只读打开不激活；恢复打开另走fence/grant。将startup/readiness reference接到真实文件与registration：本地恢复和所需delete catch-up完成后，先持久readiness，再发布匹配的ephemeral registration；完整delete追赶在步骤15闭合，未实现状态不能默认就绪。
+
+**完成条件：** 每个CAS响应丢失都可查询同一结果；未知状态不放行，metadata不复制第二份membership权威；普通Add不查远端控制状态；断点重启不扩大权限。复用已有reference契约测试，不重新建设同名内存框架。
+
+#### 13. 接入客户端普通写、ACK、背压重试和写期换组
+
+依赖步骤2、11、12及本地存储验收。先跑通实验3/3/2、3/3/3和Bookie故障域F=1范围的普通写，再接背压、unknown与replacement。
+
+逻辑entry identity保持不变，区分当前投递目标；当前尝试的NONE不能清除前次UNKNOWN。短暂资源拒绝进入有界退避，不直接触发换组风暴；达到真实故障条件时仍可正式换组。replacement顺序为：
+
+```text
+新目标inactive install → membership CAS → activation authority及历史目标留存
+→ local activation → pending ACK/mapping整体切换
+→ 必要副本resend → 恢复连续回调
+```
+
+**完成条件：** 迟到/重复ACK、旧incarnation、同起点连续换组、多slot更新和响应丢失不提前成功；保留未变副本有效ACK；无无限请求副本、无限退避或跳过逻辑空洞。保留一般E>W的客户端兼容回归，其通过不代表首批Segment全配置性能已验证。
+
+#### 14. 实现基础ledger recovery与AutoRecovery
+
+依赖步骤13，使用步骤5的grant/fence和步骤12的RepairIntent，分两部分交付。
+
+先做open-ledger recovery：OPEN→IN_RECOVERY、fence、LAC/required-frontier取证、点读、合法recovery Add、匹配的`CLOSED(P,length,context)`和响应丢失解析。复用Classic的write-set、fencing read、W-A+1聚合、顺序推进及write-back，适配Profile身份与错误分类，不重建基础quorum算法。
+
+再做fragment AutoRecovery：先持久化并admit RepairIntent，再授予recovery-only grant；复制后CAS membership、关闭grant、保留清理历史。修复完成不自动授予normal writer，也不触发延期的strong loss reset。
+
+**完成条件：** 缺失证据来自正确且已fence的副本，timeout/unknown不算absence；LAC落后及fragment起点提升时P与length匹配，空ledger为(-1,0)，缺锚点defer、矛盾conflict；失败不伪造close，协调器重启不丢目标和清理义务。Model A随实现验证基础point recovery/durable close，Model E高级Range延期不豁免基础模型。
+
+#### 15. 实现集群删除、离线投递与rejoin
+
+依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
+
+```text
+验证fenced-close → DELETE_INTENT关闭新admission → membership freeze
+→ 枚举完整历史目标 → durable manifest/cluster tombstone
+→ 普通逻辑删除成功 → 异步投递本地删除
+```
+
+目标包含初始/写期activation历史及RepairIntent，不只取最终ensemble map。随后实现delete stream、no-hole applied cursor、snapshot/catch-up、离线重返与incarnation校验；startup/readiness接入真实删除追赶结果。
+
+**完成条件：** 离线Bookie不阻塞普通logical success，但清理义务不丢；applied cursor不等compaction；游标缺口、snapshot缺页、身份不符时不注册writable；coordinator崩溃后能继续同一删除。强访问撤销仍关闭，不把普通logical success宣称为全部旧reader立即失效。
+
+**第三里程碑：完整分布式WAL闭环。** 创建→写入→读取→换组→恢复→关闭→删除→离线重返均有对应实现与验证；集群跑通仍须经过步骤16的综合验收才能用于真实业务。
+
+### 第五阶段：完整验收与受限灰度
+
+#### 16. 完成全链路故障、性能、兼容和运维交付
+
+依赖前述各模块及其持续验证，在此组合执行，不把测试留到此时才补。
+
+故障验收覆盖process crash、power loss、响应丢失、媒体损坏、永久副本损失、MetadataStore暂不可用、空间耗尽与重启交错；在声明的故障预算内验证不丢成功数据、不产生重复owner、不错误close、不复活旧instance。
+
+模型验收完成实际启用A/C、必要D及组合边界，保留E>W、response loss、offline/rejoin、generation reuse和逐CAS/local durability边界。PASS只证明声明的有限模型范围，不替代真实fsync、TLS或资源测试；未执行/不适用范围在锁定manifest中明确说明。
+
+性能按同durability、CPU/内存预算和负载比较stock Classic、修复后Classic、Segment，分别报告无网络局部性能、真实TLS/quorum性能及带索引/回收的可持续性能。沿用既定Gate，不在看到结果后调整阈值；格式、统一N、工作集、维护及预分配上限同样预先冻结。
+
+兼容验收覆盖真实decoder、旧binary、新scope隔离与格式拒绝。当前延期的raw old-decoder/stock-binary验证，必须在发布对应stable面之前按既定流程恢复执行并通过；不能长期DEFERRED却宣称兼容。本次文档更新不执行该矩阵，G1仍为BLOCKED_UNVERIFIED；原地same-scope迁移不作为首个new-scope canary的额外功能。
+
+运维至少交付配置校验、实际CPU/NUMA placement、只读状态/文件诊断、恢复失败原因、背压/磁盘水位指标及drain/停止流程；诊断不增加“忽略校验强制恢复”。最后在配置明确的独立小cohort做受限canary。退出方案为停止新写、保留新引擎读取/恢复能力并按已验证流程处理已有数据，不能让旧binary打开Segment文件。
+
+**完成条件：** 实际启用能力的安全、恢复、资源、兼容、性能及canary证据闭合后，才提升对应RFC/feature状态与部署范围。完整重建、维护进展、基础恢复和普通删除的必要Gate都须在可保留数据canary前完成，不能用Add/ACK实验或Classic/DirectJournal基线替代。
+
+## 并行工作与集成依赖
+
+| 工作线 | 可并行内容 | 必须等待的节点 |
+| --- | --- | --- |
+| Classic维护 | CLIENT-1/2、基线与低风险调优 | 步骤13客户端接入前完成修复 |
+| 执行与内存 | owner、安全binding、NUMA池，与格式/I/O并行 | DATA写入集成前完成基础ownership及预算 |
+| 存储基础 | 格式、I/O及独立测试入口 | 控制日志/allocator→写入→点读/restart依次集成 |
+| 网络与控制后端 | codec adapter、TLS、MetadataStore adapter | 真实集群联调等待本地存储验证与身份接口稳定 |
+| 模型与故障测试 | 跟随模块同步展开，Block G与Block H并行 | authority/canary前完成实际启用范围的必要Gate |
+| 性能验证 | 每个里程碑测量，亲和性分项对照 | 总收益结论等待索引、回收和真实网络全部加入 |
+
+单人或小团队优先做成可运行闭环，避免同时展开许多未接通的框架。当前先交付步骤1～4，紧接步骤5～7取得第一份真实写入—点读—重启恢复结果，再加入索引/回收，最后接网络/集群；可选spin或延期增强不阻塞主线。
+
+## DirectJournal与延期能力
+
+DirectJournal是独立对照/优化支线，不是Segment开工前置。它保留Journal＋LedgerStorage结构，用独立cohort验证I/O、合批和线程收益，可与主线并行或等局部数据形成后开展；不宣称一份payload持久化，也不替代Segment安全证据。
+
+首个完整WAL版本之后，按需求或测量选择扩展：
+
+| 后续模块 | 前置条件 |
+| --- | --- |
+| 更换I/O backend、进一步barrier合并 | 已有稳定基线，可同条件比较 |
+| Dedicated extent、简单lifetime segregation | 已证明shared-block碎片或搬迁成本不可接受；dedicated另验B5/B13 |
+| Streaming Range、TailSummary、BatchRecoveryAdd | 基础点读恢复已完成，再验与point oracle等价 |
+| rack/AZ故障域 | placement、ACK判断和恢复模型共同扩展 |
+| 强访问撤销、在线删除 | 普通删除、fenced-close与rejoin稳定；强撤权独立验证全目标屏障 |
+| strong completion/loss reset | 整ledger fenced+CLOSED，通过独立证明和竞争协议 |
+| 跨Arena搬迁、设备evacuation、原地迁移 | 单Arena回收及多Arena失败处理成熟，随后单独接受 |
+
+无实际需求或证据时继续disabled，不把这些能力列为首版必须补齐的欠项。基础close/membership不创建pendingPublication、不自动续期loss budget，旧未resolve token仍按原协议解析，不得超时强删。
+
+## 每个模块的完成标准与证据边界
+
+每个模块交付实际实现、对应测试、可重复测量、状态与未覆盖范围说明。接口定义或内存测试不能作为真实存储模块完成证据；未运行范围仍为NOT_EXECUTED。
+
+热路径review检查是否新增逐entry fsync、MetadataStore往返、整包复制、线程交接或无界对象；后台review检查实际净回收、前台阻塞及故障后必要状态重建。每次正式比较锁定同一环境与阈值，旧恢复/网络/预算反例继续有效。
 
 `manifest.json`中的`sourceCommit`、`designInputsAtSourceCommit`和各模块receipt继续绑定原历史源码，不能改成当前文档hash来伪造新证据。`plannedWork`只导航本清单；正式实施时必须以新的source/config/run identity记录本轮合同验证，旧12/17项reference测试、wire corpus和codec clone oracle不证明上述协议已经实现。
 
