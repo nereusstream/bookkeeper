@@ -327,6 +327,8 @@ Oracle：Profile初始创建/install在old/mixed target上payload前失败；只
 
 在既有三元组矩阵验证RFC-0001 §11.5的资源映射：准入前资源拒绝进入有界same-operation backoff，已知activation未完成复用协调等待，提交后unknown不能投影成NONE；terminal fence/delete/conflict/unauthorized不靠换组绕过。检查分类发生在`handleBookieFailure`之前，不先压成通用WriteException；不为该行为修订旧wire枚举/corpus或历史receipt。
 
+与B18验证接收入口：固定header的length/phase/subtype检查先于大body积累，半包/TLS/已解码请求受连接和Bookie预算约束。DATA连接暂停时，现有listener的有界独立控制连接仍按相同TLS/HELLO和身份/operation授权完成fence/tombstone；用途标签不授予权限，DATA伪装或错误授权不能消费无上限保留量。沿原三元组处理已成形的拒绝，未成形frame按既有暂停/关闭策略，不能由连接关闭抹除此前同一Add的unknown；无新wire字段/枚举或历史证据变更。
+
 恢复missing映射消费RFC-0004 §7.3/7.4的逐来源条件；unknown/not-ready、未fenced来源及未解析pre-cut写不能坍缩为可计票的NoSuchEntry/NoSuchLedger。复用Classic的missing聚合与顺序交付，不把上层聚合结果误作单副本响应，不新增错误枚举或第二套基础quorum算法。
 
 恢复close response loss后重读，只有`P/length/context`均匹配才投影为legacy OK；同P但不同length属于冲突，长度锚点暂不可用进入既有deferred语义。与A16/B19核对`RecoveryData`的源entryId、piggyback LAC及源累计length，不把终点正确但长度未知当作成功；不新增wire状态或修改历史receipt。

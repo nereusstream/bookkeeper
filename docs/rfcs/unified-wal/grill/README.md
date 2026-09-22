@@ -2,7 +2,7 @@
 
 本目录保存 Unified WAL RFC 在进入实现前的逐轮合同审查。
 
-2026-09-18基于`a861f470c47e12916a3c300d37d2b82131aee290`的修订已合入现有owner RFC主流程：重启候选按有效证据或必要恢复同步取得durability；Arena条件命令合批持久后顺序apply、checkpoint取applied cut；恢复close绑定P/length/context；点读先hot、miss后fresh current DB Get。两次故障、同批竞争、长度锚点和查询交错归原UW-2/3/4/6/7及Spike A/B/C，见[当前清单](../implementation/README.md)。此前合同与首批范围保持，无源码修改或新运行证据；状态仍Proposed/Planned，下表历史轮次、逐字反馈和source-bound receipt未重写或晋升。
+2026-09-18基于`87c346ff031c648747dd8e3126554e9589aeb484`的修订已合入现有owner RFC主流程：先重演完整控制再验证当前必要DATA，不追读合法退出的MOVE副本；framing持久区分entry/copy且完成分支分离；网络预算覆盖TLS/半包并保留有界控制连接。场景归原UW-2/3/4/7与B9/B10/B18、A26及C-MOVE/C-REBUILD，见[当前清单](../implementation/README.md)。此前合同与首批范围保持，无源码修改或新运行证据；状态仍Proposed/Planned，下表历史轮次、逐字反馈和source-bound receipt未重写或晋升。
 
 规则：
 

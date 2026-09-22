@@ -20,7 +20,7 @@
 7. 下一步先修现有客户端ACK集合/换组与迟到响应回收两个缺口；固定Bookie控制日志、per-Arena控制日志和DATA三层拓扑，推进ByteBuf、固定shard、批量DATA及可读定位的最小隔离原型，与实际启用路径的模型验证并行。
 8. 首批集群闭合普通Add/点读/restart、基础点恢复和已fenced-close ledger的普通逻辑删除。强访问撤销、strong completion/loss reset及高级Range延期；strong reset后续也先限于整个ledger fenced+CLOSED，不让增强token阻塞活跃ledger的正常replacement。
 
-本轮基于`a861f470c47e12916a3c300d37d2b82131aee290`收紧四处主流程：重启可读候选须经独立durability证据或必要恢复同步才可参与本地成功；Arena条件命令先合批持久再按序apply；恢复close取得与最终P匹配的累计length；点读先hot、miss后fresh current DB Get。此前逐来源恢复否定条件、满载完成工作集、compaction净收益及Bookie/Arena职责保持，固定shard/shared block和三层持久化方向不变。均为静态核对与拟实现设计，没有新增源码修复或运行/性能证据。
+本轮基于`87c346ff031c648747dd8e3126554e9589aeb484`修正恢复与合法回收的冲突：先重演完整控制关系，再验证当前必要DATA，不追读已退出的MOVE中间副本；持久framing区分ENTRY_DATA与RELOCATION_COPY，copy完成不直接发布普通定位；预算覆盖TLS/半包并保留有界控制连接可达性。此前恢复同步、durable后顺序apply、P/length绑定与hot-first保持，固定shard/shared block和三层持久化方向不变。均为静态核对与拟实现设计，没有新增源码修复或运行/性能证据。
 
 本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，下一原型按RFC-0005选择Bookie级独立控制日志；其stable format、阈值和真实证据仍由Spike接受。
 
@@ -236,7 +236,7 @@ Cluster Lifecycle
 11. membership由标准LedgerMetadata CAS串行，同记录freeze阻止删除后的新membership；初始/写期activation authority与目标留存、RepairIntent admission都与DELETE_INTENT共享lifecycle publication cut，cut前已授权target进入完整history。基础copy/membership/close不创建strong-publication token、不重置loss window；延期strong completion仍须整个ledger fenced+CLOSED并按token/prepare/publication/resolve执行，旧token不得超时强删。
 12. permanent-loss 保证只在声明的 distinct failure-domain 预算与 repair window 内成立；无有效 evidence 时 recovery 永不返回成功。
 13. DATA成功前通过有界热handle/index可定位，append shard不等RocksDB写/flush/compaction；热定位在已计费query-visible路径接管后淘汰，不等flush。点读先hot并保护命中引用，miss后fresh current DB Get；早于hot查询的snapshot/iterator/negative cache不用于fallback的absence判断，两路径同样核对selector/generation/pin。首批纯派生索引关闭WAL，真实持久内容及matching generation才推进连续coverage checkpoint；未覆盖DATA重放，索引全删可重建，旧update不复活陈旧selector/tombstone。coverage不替代allocator/控制authority或授权free。
-14. 同Arena compaction只选停止追加、原写已解析的source，同source/generation最多一个正常任务；OPEN ledger旧不可变范围无需ledger close/fence。MOVE命令durable并成功apply才切换selector；FREE晚于cutover/drain，保持排空gate至条件transition解析。按有界victim组扣除destination/padding后计净收益，无获益时背压而非反复复制，cross-Arena仍unsupported。
+14. 同Arena compaction只选冻结且原写已解析source，同source/generation一个正常任务，OPEN ledger无需close/fence。framing持久区分ENTRY_DATA与绑定move/target身份的RELOCATION_COPY，来源由内部设置并受校验；copy durable只给内部结果，MOVE成功apply才切换selector，不覆写DATA来源/提交位。FREE晚于cutover/drain并保持gate；成组净收益扣除destination/padding，无获益背压，cross-Arena仍unsupported。
 15. range/TailSummary/BatchRecovery fast path 的 unsupported、stale、partial 或局部预算耗尽必须从 earliest unresolved coordinate 回退；不能越过 hole，deadline/cancellation 不伪造 DATA_LOSS。
 16. offline rejoin使用cluster-authoritative finite stream assignment、storage incarnation、no-hole delete-applied cursor与snapshot+complete suffix；cursor只覆盖durable tombstone及可重建清理义务或有效non-applicability proof，不等drain/compaction/free，也不证明访问屏障或physical完成；per-ledger `deleteEpoch`不能兼任catch-up watermark。
 17. permanent-loss budget只能对有完整`F+1` distinct-domain evidence的bounded range reset；首批reset disabled，未获得有效proof前不刷新既有loss window。membership、local durability、activation或generic repair COMMITTED单独都不够；增强候选仅限整个ledger fenced+CLOSED。
@@ -245,20 +245,20 @@ Cluster Lifecycle
 20. relocation orphan 只在 new allocation/location 未被任何 authority 依赖时回收；既存 logical success 继续由 old/current selector 承载。late `MOVE_COMMIT` 与 orphan `FREE_AND_BUMP` 由同一 Arena control order 条件互斥，cutover 不能早于覆盖该 move 自身 sequence 的 durable-through。
 21. recovery保留durable close、temporary deferred、attempt incomplete、quarantine/authority loss及required evidence exhausted分类，复用Classic quorum算法作Profile适配。normal tail的每个否定来源须自身durably fenced、身份/incarnation/context匹配且pre-cut写/定位已解析，distinct W-A+1覆盖不能由global fence或重复响应代替；timeout/offline不伪造absence或DATA_LOSS。
 22. sidecar store version与semantic generation分离；child/page只有被exact instance/domain head条件化发布后才有authority。compaction authority是committed snapshot+complete bounded suffix，publish/fallback proof先于reclaim；referenced unknown mandatory state、missing chunk或gap必须fail closed，普通Add不依赖sidecar读写。
-23. per-Arena条件命令先合批durable，再按sequence对当前applied state原子求值/修改；同批前一结果对后一可见，失败no-op消耗sequence但不改业务状态或回滚其他命令。结果成功须已durable且成功apply，duplicate不产生第二winner；checkpoint只取连续appliedThrough，未apply后缀按绑定依赖确定性重放。selector publish与block-new-old-pin形成同一cut，cut后stale locator不能取得old pin。
+23. per-Arena命令合批durable后按序原子判断/修改applied state，失败no-op消费sequence但不改业务状态或回滚其他命令；成功及duplicate仍受原条件约束，checkpoint只取appliedThrough。正常提交前受保护的数据/回收/gate检查与可重放metadata predicate分开；后者依赖控制状态及绑定事实，不读已合法回收的历史payload，也不因命令完整就无条件成功。selector publish与block-new-old-pin仍为同一cut。
 24. Bookie控制日志独占route/activation/fence/grant/tombstone，Arena只持allocation/generation/move/free并消费必要外部引用，不重复创建ledger生命周期。route claim先于lazy create，fence关闭new admission并终结pre-cut成功资格；RPC失败不证明物理不存在。tombstone收窄normal/recovery/read，readiness仍绑定incarnation/assignment/cursor，不成为per-Add lease。
 25. 恢复先为最终前缀P取得匹配的累计应用length L，再发布并核对durable CLOSED(P,L,context)；源entryId/piggyback LAC/源length不能混用或各取最大。空ledger为(-1,0)，缺锚点defer、矛盾conflict，必要时只补边界点读；重试P相同但L不同不算legacy `OK`。fragment/partial/skip不计ledger recovered，不清intent/marker，generic rc不抹除rich outcome。
 26. descriptor identity由canonical immutable safety semantics与固定长度、对对抗输入collision-resistant hash派生；CRC/checksum不能替代，hash只做identity/integrity；unknown/duplicate mandatory语义拒绝，optional neutral hint不改变接受集合。
 27. master key只作为data credential，不是MAC key或entry布局说明。首批新Profile只接受immutable capability/manifest绑定的CRC32C entry布局，创建/安装拒绝不支持类型且不降级、不下发密码/MAC key；同数据不同LAC可幂等，CRC相等不能替代实际bytes比较。缓存的统一maxPayload取normal Add、recovery Add、read response和Segment record/batch容量的最小值，首次写入前执行；收紧新写阈值不降低已接受entry的读取/恢复能力。Profile control要求non-anonymous且获授权执行exact operation/instance/target scope的authority，AuthN-only不够；secret/offline verifier不得进入公开metadata、receipt、日志、metric或exception，credential-bearing Profile transport满足manifest confidentiality/integrity。
 28. Profile normal/recovery使用distinct logical operation和mandatory wire discriminator；任何Profile bytes在受支持旧decoder上都不能形成legacy Add effect，任何失败都不Classic downgrade或双写。
 29. Bookie/storage compatibility fence必须在stock old binary mandatory pre-replay path fail-stop；Cookie optional/version、registration、new superblock/file或unknown Journal record均不能单独替代。
-30. startup按compatibility fence → required device/superblock → 控制/DATA候选验证、必要恢复同步及顺序apply → allocator/route/delete恢复完成 → local readiness → registration排序。完整framing/CRC/generation可读不证明durable；无独立有效证据时按文件及依赖顺序同步后才开放相应写入/幂等durable success/durable recovery evidence，索引或readiness不代替DATA barrier。同步不推导AQ/LAC，也不清除既有I/O错误、缺失依赖或ownership冲突；partial migration/unknown mandatory/incarnation mismatch保持non-writable。
+30. startup按compatibility fence → required device/superblock → 完整控制候选验证/必要同步及metadata predicate重演 → 最终selector与未完成依赖的DATA验证/同步 → route/delete/readiness → registration排序。A→B→C且A/B已合法FREE复用时不追读旧payload或强制FREE前checkpoint；最终C坏/控制后缀缺失仍隔离，不回退旧位置。可读/CRC、索引或readiness不替代DATA barrier，验证同步前不开放对应服务；同步不推导AQ/LAC或清除已知I/O错误，migration/format/incarnation gate保持。
 31. 现存Segment/Profile local success或durability-unknown authority没有完整negative proof时不得rollback old binary；format/readiness检查不进入normal Add；只有准备发送Profile operation的Profile-capable connection执行一次Profile negotiation，legacy Classic connection不承担该handshake。
 32. 当前descriptor input必须是严格canonical TLV并产生固定36-byte identity；未接受policy/capability registry时不得mint production descriptor。
 33. Profile只走独立immediate-TLS/mTLS endpoint与pool；Round 7 frame bytes在raw old-decoder Gate PASS前只属于executable test manifest。
 34. same BookieId/storage scope在stock binary pre-storage-open证据通过前保持BLOCK；失败时new BookieId/new roots/new incarnation/new credential scope fallback是当前唯一安全路径。
 35. persistent readiness CAS先于ephemeral writable registration；generation/incarnation mismatch non-writable，registration hint不替代local receipt或old-binary fence。
-36. 统一预算覆盖请求/异步索引全生命周期，并在DATA准入前保障共享提交buffer及定位/完成容量，输入不可挤占；大entry先满足统一N并取得工作集，满载下游恢复后能继续完成，不阻塞event loop/shard或持ledger锁互等。最老deadline和重试身份不变；Arena与filesystem分别计量，维护有真实余量，低水位先限制新DATA，不能用free slot或临时超额掩盖压力。
+36. 同一预算从连接/TLS/header/read、半包及已解码未准入请求延伸到存储/索引；固定header检查并预留额度后才积累大body，ownership交接与暂停前pipeline字节不漏计。DATA准入仍保障提交/定位完成工作集，大entry满足统一N，不阻塞event loop/shard/ledger锁。同Profile listener保留少量有界独立控制连接及接收/执行份额，DATA暂停仍可达且不豁免认证或总预算。最老deadline/重试身份、Arena/filesystem维护余量及满载推进合同保持。
 37. confirmed可见范围由客户端LAC/CLOSED边界限定，Bookie不以local LAC截断合法物理点读，恢复候选不等于commit；DATA完成不推导quorum LAC或增加逐Add LAC fsync。点读须独立校验record外层身份与BK CRC，按有界必要对齐范围读取，未知覆盖不能伪造absence。
 
 任何子 RFC 或 Spike 发现这些不变量不可同时满足，都必须停止相应路径，而不是降低不变量。
@@ -315,15 +315,15 @@ Stage 7  完成实际启用能力的全部Gate及production canary，包含派�
 | 优先级 | 实施内容 | Owner与必须提交的证据 |
 | --- | --- | --- |
 | 先修源码 | CLIENT-1当前ACK数量/故障域及多slot completion gate，保留未变ACK；CLIENT-2最后旧响应回收 | RFC-0001 §9.3/9.5、A29/A30；4/3/2先处理write-set外slot不提前callback、不无条件重发W份 |
-| 第一批原型 | ByteBuf、固定shard/shared block、预分配；DATA准入保障提交与定位工作集，DATA前缀/热定位后逐entry成功；索引异步接管，点读先hot、miss后fresh DB Get | RFC-0003 §6.1/9/13/15、RFC-0005 §8/10.1、B2/B9/B17/B18；满载推进、接管交错及旧视图拒绝，保留共享文件边界 |
+| 第一批原型 | 固定shard/shared block及entry前缀/热定位后成功，索引异步/hot-first保持；TLS/半包先计费，header后预留再收body，控制连接有界独立可达 | RFC-0001 §11.6、RFC-0003 §6.1/13/15、RFC-0005 §8/10.1、A26/B2/B9/B17/B18；满载推进、接收交接及DATA暂停时控制推进 |
 | 第一批原型 | 创建/读取/恢复、CRC32C identity、统一normal/recovery/read/storage大小上限；保留提交后坐标及背压身份 | RFC-0001 §8/9/11、RFC-0005 §6.1/10.1、A26/B18/B19；N-1/N/N+1、44-byte差异、旧entry服务能力 |
-| 随原型闭合 | 控制/DATA恢复候选按需同步；条件命令合批durable后顺序apply、checkpoint取applied cut；保留I/O/reuse、双层预算及冻结source净收益/whole-allocation FREE | RFC-0003 §5.3/10—14、B2/B3/B7/B10/B16/B17/B18；重启后再掉电、同组竞争、apply中途crash，原tail/reuse及整单元排空保持 |
+| 随原型闭合 | 先重演完整控制再验证当前必要DATA；ENTRY_DATA/RELOCATION_COPY持久来源及completion分支；保留按需同步、applied checkpoint、I/O/reuse和双层预算/净收益FREE | RFC-0003 §5.3/9—15、B2/B3/B7/B9/B10/B16/B17/B18；A/B复用后无新checkpoint恢复C、C坏/控制缺失隔离、未发布copy不提升 |
 | 最小集群 | 复用Classic point recovery及逐来源fence否定条件，适配Profile身份/grant/unknown；close固定同一前缀的P/length/context，普通删除范围保持 | RFC-0004 §7.3—7.5、RFC-0005 §6—8、A16/A26/B19/A-POINT；LAC提示/fragment提升/空ledger/缺锚点与重试长度冲突；原activation历史/applied cursor合同保持 |
 | 后续扩展 | dedicated hot extent、强撤权、整个ledger关闭后的strong completion/reset、高级Range、在线删除、复杂故障域及迁移 | 各自独立Gate；dedicated验证专属空间/有界池及B5/B13，无证据时不计首批收益 |
 
 执行依赖改为：CLIENT-1/2先做独立小范围修复；Block H最小隔离存储切片与Block G实际启用路径的模型可并行。先以固定硬件/durability/E/W/A得到普通写、换组、写入与回收并行的测量，尚未实现的集群场景明确NOT_EXECUTED；相关安全/恢复/兼容/资源Gate闭合后才能进入可保留数据canary。完整重建和维护进展不能推迟到canary之后，但不阻止更早收集discardable原型数据。Classic与DirectJournal基线不替代Segment证明，不新增通用事务/调度/压测框架。
 
-本轮归既有UW-2/3/4/6/7及Spike A/B/C，CLIENT-1/2及UW-1/5保留，首批范围不变。直接在restart、conditional apply、close和点读主流程验证两次故障、同批竞争/应用中断、P-length锚点和索引接管交错；沿现有指标记录恢复sync文件/次数/等待、commands/barrier及apply lag、必要边界点读数。不新增控制服务、全局索引锁、推测回滚状态或逐entry日志，旧receipt不重绑。
+本轮归既有UW-2/3/4/7及Spike A/B/C，CLIENT-1/2与UW-1/5/6保持，首批范围不变。B9/B10及C-MOVE/C-REBUILD验证历史副本合法退出与持久来源，B18/A26验证TLS/半包预算及控制可达性；现有测量分列当前必要DATA读取、receive reserved/held峰值与控制接收/完成等待。优先修正恢复追读历史payload，不增加FREE前checkpoint、listener、协议、集中流控服务或逐entry日志，旧receipt不重绑。
 
 ## 11. Gate 与证据合同
 

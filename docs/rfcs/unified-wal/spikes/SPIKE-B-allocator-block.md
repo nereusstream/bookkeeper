@@ -87,6 +87,9 @@ conditional API revision
 durable-command group then ordered apply, applied checkpoint cut and deterministic authority references
 recovery synchronization files/dependencies, independent durability evidence and process-crash/power-loss distinction
 hot-first locator lookup and fresh current-state fallback view
+control-history replay before validation of final required DATA, including retired move intermediates
+checked DATA origin and relocation operation/target binding, with separate upper-layer completions
+connection/TLS/header/read and partial-frame credits, ownership handoff and bounded control connections
 sequencer queue/waiter/idempotency hard caps
 block sizes under test
 extent sizes under test
@@ -155,11 +158,14 @@ no locator crosses ledger instance or generation
 free list excludes every still-live allocation
 checkpoint + suffix replay is deterministic
 every committed move chain has one unique authoritative successor
+complete control replay does not require legally retired intermediate payload bytes
+current required DATA is validated and synchronized before serving its recovered location
 checkpoint current selector + anti-ABA state equals full-chain oracle
 condition failure changed no authority state
 durable apply result covered its own control sequence
 duplicate operation produced no second winner/generation bump
 uncommitted relocation copy never becomes authoritative
+relocation origin and identity survive task/index loss without a mutable DATA commit bit
 old allocation is not reused before move cutover and reader drain
 orphan new location has no lookup/local-success authority dependency,
 while the logical entry may retain its existing success at the current selector
@@ -247,6 +253,10 @@ DATA部分另按§6.1验证物理前缀：从verified checkpoint/cut恢复，bat
 
 Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围，结果与独立全量authority oracle一致；normal restart只能在有覆盖证明时缩小扫描范围。stale generation不进入index，未验证范围不返回确定absence；分别记录scan bytes/I/O、peak memory、read-only/可写时间及前台竞争。
 
+复用B10的A→B→C控制后缀：A/B已FREE并由新generation覆盖，checkpoint仍引用A，删除全部派生索引后重启。先重演成功/失败metadata predicate得到C，再验证和按需同步最终必要DATA；不得因A/B已合法退出而隔离，也不得为了通过测试在FREE前偷偷生成checkpoint。C坏/缺失或必要控制后缀缺口必须隔离，不回退A/B；旧checkpoint作为fallback时仍须保留完整后缀并得到同一结果。
+
+另外在K的原位置A已有效时，将带受校验RELOCATION_COPY身份的B写完整并durable，MOVE尚无完整命令就crash并清空索引。分别取无MOVE、可证明未提交的尾部、完整但条件失败的MOVE，以及成功MOVE；前几种仅A为当前位置，最后一种由控制选B。未知/损坏的必需控制后缀仍fail closed，不当无MOVE。交换扫描顺序、offset/generation大小、删除任务对象均不改winner；来源/operation/target身份损坏拒绝，客户端伪造来源无效。MOVE前后DATA字节不修改提交位，正常/恢复ENTRY_DATA不因来源类型就被视作已ACK。
+
 重放B2共享S0/S1不相邻offset与B3 generation 7→8残留镜像，normal/full rebuild均保持其他stream成功DATA及当前owner；不能把文件高offset当跨stream后缀或把旧合法CRC当当前DATA。文件长度保持首批共享布局合同，逻辑排除不直接产生filesystem free bytes。
 
 包含乱序完成batch、已回收区间和搬迁目标；独立checker验证§6.1成功前缀/可发现性。内存physical durable-through丢失后，先从authority/framing找合法候选，再以独立证据或§12必要恢复同步确认durability，不能把扫描完成当barrier；MOVE_COMMIT成功选择的新DATA不得落在该stream逻辑排除后缀。
@@ -266,7 +276,7 @@ Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围
 必须覆盖：
 
 - 异常重试/迟到任务形成同一predecessor的两个concurrent moves；正常调度不主动重复搬同一source；
-- move chain `A -> B -> C`；
+- move chain `A -> B -> C`，control 101 MOVE A→B、102 FREE A、103 MOVE B→C、104 FREE B后A/B复用覆盖，未生成新checkpoint即crash；重演不读取已退出旧payload，最终C或必要控制缺失则隔离；
 - batch/group-commit torn tail；
 - new payload digest mismatch；
 - 每个边界删除 derived index 后重建；
@@ -275,6 +285,7 @@ Oracle：full rebuild枚举全部需要重建的live allocation/有效DATA范围
 - checkpoint 覆盖/未覆盖 `MOVE_COMMIT` 时 rotation crash。
 - checkpoint后stale old operation retry；
 - logical entry已有local-success，但uncommitted new location从未成为success/lookup location；
+- RELOCATION_COPY durable completion只形成内部copy结果，不直接调用普通Add定位发布；MOVE成功后才切换selector，record来源不覆写。与B9联合删除全部索引并改变扫描顺序，完整copy不能自行提升；
 - orphan GC与late commit在同/不同group竞争，分别覆盖free先赢与commit先赢；
 - shared allocation一条orphan、一条live，以及writer-generation/pin quiescence race。
 - 同一operation在enqueue前、append后force前、force后response loss重试；
@@ -361,7 +372,11 @@ Oracle：前台在侵占维护保留量前限流/拒绝，queue/memory有界，�
 
 ### B18：ByteBuf、固定shard与批量DATA路径
 
-按RFC-0001 §11.6及RFC-0005 §10.1实现transport adapter到append shard的路径。reference immutable byte-array codec保留作oracle，以相同valid/invalid/truncated/oversize corpus验证解析和拒绝等价。跟踪从完整输入到readable publication的每次payload复制和所有权转移；允许一次集中对齐复制，禁止未计量的逐层整包clone。异步retain/release覆盖normal、拒绝、取消、断连、retry和I/O失败；源view最后使用后释放，已提交I/O的buffer直到真实I/O终结才可复用。
+按RFC-0001 §11.6及RFC-0005 §10.1实现网络接收到append shard的路径。reference immutable byte-array codec保留作oracle，以相同valid/invalid/truncated/oversize corpus验证解析和拒绝等价；增量接收测试独立组织，不重写历史corpus/receipt。跟踪socket/TLS、header/半包、完整未准入请求至readable publication的实际buffer/预留与每次复制/ownership交接；允许集中对齐复制，禁止未计量的逐层整包clone。异步retain/release覆盖normal、拒绝、取消、断连、retry和I/O失败；源view最后使用后释放，已提交I/O的buffer直到真实I/O终结才可复用。
+
+多连接同时发送合法但不完整的大frame，另覆盖header/body同一read、TLS累积/解密、长度/阶段/subtype错误、超时/close和解析失败。大body累积前先通过固定header检查并取得连接/Bookie credit；初始连接/TLS/read工作集与暂停前pipeline残留均受总量限制，暂停本身不释放bytes。向存储交接不得漏计、重复永久扣款或挤占提交/定位工作集，无额度时非阻塞暂停/关闭而不是收完整包才拒绝。恢复读取与失败清理后credit/实际held资源一致；1,000连接各持4 MiB约3.9 GiB仅为容量反例，不是实测参数或结果。
+
+令DATA连接在未完成body时暂停，再发合法fence/tombstone；首批同一Profile listener上的有界独立控制连接仍完成TLS/HELLO、真实operation/身份/授权检查并进入保留执行资源。负向fixture把控制排在暂停DATA body后，应显露不可达；仅保留线程/日志buffer不能算PASS。覆盖控制连接/接收总额、DATA冒充控制、错误授权及资源归还；控制通路不绕过总账、不新增listener/每ledger连接。分列TLS/decoder retained bytes、partial-frame数、receive reserved/held峰值、暂停/恢复次数及控制接收/完成等待；只注入完整请求的无网络run对此标NOT_EXECUTED。
 
 多个ledger合批，固定shard，bytes/count/wait均有上限；注入低负载等待、队列满、pool refill、slow/failed force、fence/delete race及compaction并发。验证不持ledger锁等待I/O，普通已准入写不串行等待三层control/DATA队列或三个future。真实barrier前无local success；不能将取消future当成I/O终结。计量实际entries/barrier、force次数、thread hops、queue wait、lock hold和各层控制写；每entry force不能仅因API名为group commit就算批量化。
 
@@ -529,6 +544,8 @@ buffer use after release or premature I/O-buffer reuse = 0
 buffer reference leak or duplicate release in tested paths = 0
 local success before readable location publication = 0
 restart readable candidate reported durable before valid evidence or required recovery synchronization = 0
+recovery rejected a fully proven move chain solely because retired intermediate DATA was reused = 0
+recovery skipped missing current DATA or required control suffix, or fell back without authority = 0
 successful data lost after process restart followed by power loss = 0
 later sync success cleared unresolved I/O error or missing authority dependency = 0
 read-after-success gap during hot-to-query-visible index handoff = 0
@@ -579,6 +596,9 @@ no-gain victim set repeatedly copied without bounded backpressure = 0
 net reusable gain reported without deducting actual destination allocation/padding = 0
 move created new local-success fact             = 0
 orphan GC removed current local-success payload = 0
+index/task loss promoted an unselected relocation copy by scan order or physical generation = 0
+relocation durable callback published ordinary Add locator or local success before MOVE apply = 0
+MOVE publication rewrote DATA origin or commit bit = 0
 checkpoint selector differed from full chain    = 0
 late commit and orphan free both succeeded      = 0
 conditional failure mutated authority state     = 0
@@ -592,6 +612,11 @@ recovery CLOSED paired prefix P with another coordinate's cumulative length = 0
 unknown mandatory record skipped writable       = 0
 selector cut allowed new old-location pin        = 0
 queue/waiter/idempotency hard-cap violations     = 0
+uncharged TLS/decoder/partial-frame or decoded-before-admission bytes = 0
+large-body accumulation before required receive-credit reservation = 0
+receive-credit leak or permanent duplicate charge after handoff/close/error = 0
+DATA receive pause blocked all required bounded control paths = 0
+control connection bypassed operation authorization or total resource cap = 0
 unreplayable executed failure                  = 0
 supported old binary crossed compatibility fence into storage-open/replay/write/registration = 0
 supported old binary touched Profile authority/Arena before fail-stop = 0

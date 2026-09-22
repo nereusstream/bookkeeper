@@ -18,19 +18,19 @@
 
 ## 下一阶段实施清单
 
-2026-09-18收敛修订；规划基线`a861f470c47e12916a3c300d37d2b82131aee290`。以下全部为**PLANNED / NOT EXECUTED**，没有新增源码修复、实现/故障测试或PASS receipt。本轮将四项规则直接合入主流程：恢复候选经有效证据或必要恢复同步取得本地durability；Arena条件命令先合批持久再顺序apply；恢复close绑定同一前缀的P/length；点读先hot、miss后fresh DB Get。此前逐来源恢复否定证据、完成工作集、compaction净收益及Bookie/Arena职责保持，CLIENT-1/2和首批范围不扩大，reference codec oracle与历史证据不重绑。
+2026-09-18收敛修订；规划基线`87c346ff031c648747dd8e3126554e9589aeb484`。以下全部为**PLANNED / NOT EXECUTED**，没有新增源码修复、实现/故障测试或PASS receipt。本轮直接修改恢复、framing/completion及网络入口流程：先重演完整控制历史再验证当前必要DATA；持久区分entry与relocation copy，搬迁完成不直接发布普通定位；接收预算覆盖TLS/半包并保留有界控制通路。此前恢复同步、条件命令durable后顺序apply、P/length绑定和hot-first保持，CLIENT-1/2与首批范围不扩大，reference codec oracle与历史证据不重绑。
 
 | 工作项 | 实施与完成条件 | Owner / 验证入口 |
 | --- | --- | --- |
 | CLIENT-1 ACK状态与切换顺序 | 复用现有completion gate，remote phase结束后继续阻塞callback；全部受影响pending/被替换slot映射及ACK/故障域状态更新、资格重算后才恢复连续回调。保留未变identity/incarnation的有效ACK，只重发必要副本；兼顾原残留集合、timeout统计及policy关闭成本 | [RFC-0001 §9.3/9.5](../RFC-0001-profile-capability-install.md)、[Spike A A29](../spikes/SPIKE-A-profile-install.md)、Model A-ACK-RESP；4/3/2先处理write-set外slot不提前成功 |
 | CLIENT-2 先修对象回收 | 旧地址响应分支补安全maybeRecycle；最后旧响应/当前响应/callback未完成均不遗漏、提前或重复回收 | RFC-0001 §9.5、Spike A A30 |
 | UW-1 普通删除竞争 | 初始/写期activation authority发布时持久留存target/incarnation，并与delete共享lifecycle cut；同起点membership覆盖、snapshot压缩/restart不丢清理目标。完整target/tombstone后普通logical success；delete-applied cursor/rejoin不等drain/compaction/free，屏障和physical结果独立 | [RFC-0001 §6.3/9.1](../RFC-0001-profile-capability-install.md)、[RFC-0004 §10—14](../RFC-0004-range-recovery-delete.md)、A9/A10/A16/A28、B4/B6、[Spike C D-RACE/D-LOGICAL/D-ACCESS/CD-REUSE](../spikes/SPIKE-C-no-object-tla.md) |
-| UW-2 普通Add与identity | 保留CRC32C、读路径分层、逐entry结果及unknown/重试身份；创建/安装缓存normal/recovery/read response/Segment四项最小maxPayload，首次写入执行统一限制。N-1/N/N+1和44-byte区间闭合，runtime新写阈值降低不损害旧entry读/恢复。重启可读候选不直接幂等返回durable success，须有效证据或恢复同步；与CLIENT-1整体gate及完整status分类衔接 | [RFC-0001 §8/9/11](../RFC-0001-profile-capability-install.md)、[RFC-0005 §6.1/8/10.1](../RFC-0005-segment-bookie-state.md)、A26/A27/A29/B2/B18/B19 |
-| UW-3 最小真实写入路径 | 保留ByteBuf、固定shard/shared block、预分配及完整write/barrier→物理前缀→热定位→逐entry成功。DATA准入前保障共享提交buffer和定位/完成容量；索引异步接管不等flush，stall先背压新DATA。Arena条件命令按入队→合批durable→顺序原子apply→结果执行，不另写结果日志；Bookie持有route/fence/grant/tombstone | RFC-0003 §5.3/6.1/13/15、RFC-0005 §5.2/10.1、[Spike B B2/B3/B9/B16/B18](../spikes/SPIKE-B-allocator-block.md)；满载完成工作集及同批竞争ALLOC |
-| UW-4 allocator恢复与复用 | 先验证完整控制/DATA候选与依赖，无独立durability证据时按文件恢复同步；再开放相关写入/幂等成功，已知错误不凭后来sync清除。checkpoint仅取连续appliedThrough，durable未apply命令按序重放；FREE整单元quiescence gate提交前建立并保持到结果解析。共享文件逻辑尾部、旧generation、冻结source/成组compaction及selector/pin合同保持 | [RFC-0003 §5.3/10—12](../RFC-0003-segment-storage-allocator.md)、B2/B3/B4/B6/B7/B9/B10/B16、C-CKPT/C-COND/C-TAIL/C-REUSE/C-MOVE、AC-LOCAL-STORE |
+| UW-2 普通Add与identity | 保留CRC32C、统一maxPayload/N边界、读路径分层、逐entry结果及unknown身份，收紧新写不损害旧entry读/恢复。普通/合法恢复Add由内部设置ENTRY_DATA；存储来源不证明ACK，也不能由客户端伪造relocation身份。重启幂等成功仍须有效durability证据或恢复同步，完整status/CLIENT-1 gate保持 | [RFC-0001 §8/9/11.6](../RFC-0001-profile-capability-install.md)、[RFC-0003 §9](../RFC-0003-segment-storage-allocator.md)、[RFC-0005 §6.1/8/10.1](../RFC-0005-segment-bookie-state.md)、A26/A27/A29/B2/B9/B18/B19 |
+| UW-3 最小真实写入路径 | 保留固定shard/shared block/预分配及entry的barrier→物理前缀→热定位→成功。framing持久区分ENTRY_DATA/RELOCATION_COPY及move/target身份；同一I/O的copy完成只进内部MOVE路径，不直接发布普通定位、不覆写提交位。网络固定header后预留额度再收大body；DATA准入仍保障提交/定位工作集，Arena命令仍合批durable后顺序apply | RFC-0001 §11.6、RFC-0003 §5.3/6.1/9/15、RFC-0005 §5.2/6.1/10.1、[Spike B B2/B3/B9/B10/B16/B18](../spikes/SPIKE-B-allocator-block.md) |
+| UW-4 allocator恢复与复用 | 先验证checkpoint/完整后缀并重演metadata predicate，再验证最终selector及未完成操作仍需DATA；合法退出的历史MOVE副本不再要求存在，不因日志完整就判所有命令成功。必要恢复同步后开放服务，C坏/后缀缺失仍隔离且不回退旧位置。FREE前受保护回收/gate、applied checkpoint cut及原共享文件/reuse/compaction合同保持，不强制每FREE一次checkpoint | [RFC-0003 §5.3/10—12](../RFC-0003-segment-storage-allocator.md)、B2/B3/B4/B6/B7/B9/B10/B16、C-CKPT/C-COND/C-TAIL/C-REUSE/C-MOVE、AC-LOCAL-STORE |
 | UW-5 空间耗尽与进展 | 保留Arena内部/Bookie filesystem双层预算和维护份额；按有界victim组计算释放source减实际destination占用，计framing/padding，跨source复制/group commit可合批。低水位无获益候选时背压，等待真实删除/容量恢复，不反复搬近全live块；不靠hole punch或收缩解围 | RFC-0003 §10/13.1/14/15、B10/B17/B18、C-SPACE；copied bytes与net reusable bytes gained分列 |
 | UW-6 最小集群可恢复性 | 实验3/3/2与3/3/3、Bookie故障域F=1；复用Classic write-set/fencing/W-A+1/顺序write-back及逐来源否定条件。保留提示源entryId/LAC/累计length，取得匹配最终P的L后发布并重读核对CLOSED(P,L,context)；空ledger为(-1,0)，缺锚点defer、矛盾conflict，必要时只补边界点读。恢复sync不推导AQ/LAC | [RFC-0004 §7.3—7.5](../RFC-0004-range-recovery-delete.md)、RFC-0005 §6—8、A16/A26/B19、A-POINT/D-LOGICAL |
-| UW-7 全量重建与总资源 | 保留纯派生索引WAL关闭、真实persisted coverage与完整重建；索引/readiness不替代DATA sync。点读先hot并保护命中对象，miss后fresh current DB Get，再核对selector/generation/pin；旧snapshot/iterator/negative cache不能裁定不存在，未知覆盖not-ready。hot/async index/memtable/读buffer/pin及提交/完成工作集同一总账；SST/控制磁盘峰值和filesystem去重保持 | RFC-0003 §9/12/13/15、RFC-0005 §8/10.1、B2/B3/B9/B11/B12/B17/B18、C-REBUILD，dedicated仍另验B5/B13 |
+| UW-7 全量重建与总资源 | 全量重建由最终控制状态及受校验来源选择位置，未发布copy不因index/task丢失提升；保留hot-first/fresh Get与真实persisted coverage。TLS/header/read、半包/已解码未准入请求加入既有总账，交接credit不漏计/永久重复；同Profile listener保留有界独立控制连接及接收/执行份额，DATA暂停仍可达且不豁免认证/总量。原内存/双层磁盘及完成工作集保持 | RFC-0001 §11.6、RFC-0003 §9/12/13/15、RFC-0005 §8/10.1、A26/B2/B3/B9/B10/B11/B12/B17/B18、C-REBUILD，dedicated仍另验B5/B13 |
 
 实施顺序：
 
@@ -41,7 +41,7 @@
 
 首批不扩大为强访问撤销、strong completion/loss reset、online delete、general streaming Range/TailSummary/BatchRecoveryAdd、rack/AZ多策略或cross-Arena迁移。普通删除不等待所有历史target在线；强撤权须独立全目标屏障。strong reset后续仅限整个ledger fenced+CLOSED，基础close/membership不创建pendingPublication、不自动续期loss budget；旧token仍按原协议解析，不得强删。每项后续能力有实际需求和独立证据后再启用。same-scope旧binary和released-decoder矩阵保持原BLOCK/DEFERRED，本清单不是执行或生产授权回执。
 
-本轮归入既有UW-2/3/4/6/7与Spike A/B/C，CLIENT-1/2及UW-1/5保留，不重新编号。四组场景：write未barrier退出→重启重试→再次掉电；同组竞争ALLOC、apply中途crash及重复FREE；LAC落后/fragment提升/无尾部/空ledger的P-length绑定；hot→DB接管与fresh fallback交错。执行顺序直接归入restart、conditional apply、close与点读主流程，原一Arena/固定shard/shared block及E/W/A范围不变；不新增控制服务、推测回滚状态、跨索引锁、LAC-length持久映射或逐entry日志。
+本轮归入既有UW-2/3/4/7，CLIENT-1/2与UW-1/5/6保持，不重新编号。B9/B10及C-MOVE/C-REBUILD覆盖A→B→C中A/B复用后无新checkpoint重启、最终C坏/控制缺失，以及copy durable但无成功MOVE时清空索引；B18/A26覆盖多连接半包、ownership交接及DATA暂停时控制可达。先修恢复追读历史副本的冲突，再补持久来源和接收预算；真实framing/TLS/网络由既有原型测量，模型不替代实测。沿现有指标分列当前必要DATA读取、TLS/decoder/半包bytes与receive reserved/held峰值、控制接收/完成等待；原一Arena/固定shard/shared block及E/W/A不变，不新增listener、协议、集中流控服务或逐entry日志。
 
 `manifest.json`中的`sourceCommit`、`designInputsAtSourceCommit`和各模块receipt继续绑定原历史源码，不能改成当前文档hash来伪造新证据。`plannedWork`只导航本清单；正式实施时必须以新的source/config/run identity记录本轮合同验证，旧12/17项reference测试、wire corpus和codec clone oracle不证明上述协议已经实现。
 

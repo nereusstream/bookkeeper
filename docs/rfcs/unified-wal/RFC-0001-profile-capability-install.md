@@ -776,6 +776,26 @@ Profile client/admin必须保留完整三元组；legacy callback只能安全投
 
 adapter另消费§8统一maxPayload：wire absolute limit只证明frame可表达，不能单独决定普通Add准入。创建/安装缓存的N同时受normal/recovery/read response/Segment布局约束；检查应用payload、完整BK entry和对齐存储范围各自长度，N+1及溢出在大分配/准入前拒绝。reference frame仍按原枚举/绝对上限解析，统一entry限制由新adapter及独立边界场景验证，不修改旧wire corpus或其receipt。
 
+**接收预算早于完整请求。** 同一资源账本覆盖socket/TLS、decoder累积的未完成frame及已解码未准入请求，不能等pending Add创建后才计payload。首批接收顺序为：
+
+```text
+reserve bounded connection/TLS/header/read working set within the Bookie total
+    -> receive enough fixed header bytes to check length, phase, subtype and limits
+    -> reserve per-connection and Bookie receive credits before accumulating the large body
+    -> continue bounded reads/decryption/framing while charging all retained buffers
+    -> validate the complete operation, context, unified entry limit and local authority
+    -> transfer buffer ownership/credits to the bounded storage admission path
+    -> acquire its submission/locator working set before DATA admission (RFC-0005 §10.1)
+```
+
+body额度可逻辑预留，不按声明长度立即分配整块内存。连接数量、初始TLS/固定header及单次read工作集也有总量边界；header与body同次到达或暂停读取前已进入pipeline的字节仍计费。密文/明文/复制buffer同时持有时按实际资源计费，reservation与同一buffer的ownership交接不得漏记或永久重复扣款；接收额度不授予DATA写入权限。
+
+[ByteToMessageDecoder](https://netty.io/4.1/api/io/netty/handler/codec/ByteToMessageDecoder.html)会保留未解码完的累积buffer，而[LengthFieldBasedFrameDecoder](https://netty.io/4.1/api/io/netty/handler/codec/LengthFieldBasedFrameDecoder.html)的maxFrameLength约束单frame，不能代替连接合计预算。额度不足时用现有非阻塞read控制或明确关闭策略，不阻塞event loop，不继续收完整payload才拒绝。[ChannelConfig.setAutoRead](https://netty.io/4.1/api/io/netty/channel/ChannelConfig.html)可控制后续自动read，但不释放已进入pipeline的buffer；暂停/恢复、close、timeout、坏长度和解析失败均要解析reservation/ownership并释放实际不再持有的资源。计费可按buffer/read批次或credit，不逐byte增加全局原子计数；阈值与read粒度由B18锁定。
+
+**控制通路也须可达。** 首批在现有Profile listener/pool内保留少量有界的独立控制连接，客户端按连接用途隔离DATA发送，必要fence/tombstone不排在已暂停DATA连接的未完成body后。复用相同TLS/HELLO、认证授权及控制执行资源，不新增listener、wire字段/协商、每ledger连接或普通Add往返。每条连接仍绑定§12身份；连接用途只负责调度，不授予控制权限。
+
+控制连接数量及TLS/接收额度计入Bookie同一总量，保留的控制份额不能被DATA耗尽，也不能作为绕过预算的无限通道。实际header/subtype、operation与授权仍校验；DATA不能冒充控制请求占用保留通路，不能只凭自称控制类型跳过检查。B18覆盖多连接半包、暂停后pipeline残留、额度交接/失败释放，以及DATA暂停时合法控制请求仍能接收并推进；A26消费身份/operation拒绝边界。
+
 ## 12. Capability negotiation
 
 HELLO是每个Profile connection的第一条application frame且最大4KiB。client body固定为：
@@ -846,6 +866,7 @@ RFC 进入 Accepted 前必须：
 - Model A 包含创建、安装、response loss 与 ensemble replacement 的抽象；
 - A9/A10/A16/A28及Model A+D证明初始/写期activation前已持久留存target/incarnation；LAC不变、同fragment起点D→E覆盖后删除/rejoin仍发现D，history snapshot/压缩和重启不丢清理义务；
 - A26/A27证明完整status三元组在failure handling前分类；资源拒绝/恢复容量不立即换组，当前NONE不抹除旧UNKNOWN，重试预算/deadline有界且不跳过逻辑位置；
+- A26/B18验证§11.6接收预算早于大body累积、TLS/半包/已解码请求交接与失败释放，以及DATA暂停时同listener有界控制连接的可达性；实际operation/身份/授权和Bookie总量均不豁免，不以单frame limit证明所有连接有界；
 - strict TLV descriptor reference codec与独立golden verifier按§5的exact bytes/bounds/SHA-256 manifest通过；
 - golden corpus覆盖same-semantics稳定bytes/hash、different-semantics identity变化、duplicate/default/order、unknown schema/field/enum/mandatory capability、oversize-before-allocation、old writer rewrite/strip、declared hash mismatch，以及capability 0/1/64与E/W/A/F边界；
 - protected auth binding 经过安全评审且不会泄漏可离线验证的 credential material；
