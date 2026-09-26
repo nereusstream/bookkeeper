@@ -14,7 +14,9 @@
 
 步骤4的第一部分：`SegmentOwnerLoop` 用固定平台线程承载静态 shard 子集，ledger→shard 只依赖固定逻辑 shard 数，worker 数不进入持久身份。每个已准入批次预留一个 completion 槽，控制队列独立有界；循环每轮处理完成、控制和各 shard 的一个输入。PARK 遵守最老 batch deadline，后来的 deadline 不能推迟它。`SegmentIoExecutor` 在启动线程预创建固定数量服务线程，用有界队列执行阻塞 I/O，并将结果送回原 owner；提交后 handler 异常、停止准入或等待超时不提前释放在途义务。
 
-该循环尚未接入实际 append/allocator 状态机，尚无 group 启动、CPU绑定或NUMA池。容量由构造参数显式给定；多 owner 集成时必须从同一总预算分配，不能给每个 owner 复制全局额度。
+该循环尚未接入实际 append/allocator 状态机，尚无 group 启动、CPU绑定集成或NUMA池。容量由构造参数显式给定；多 owner 集成时必须从同一总预算分配，不能给每个 owner 复制全局额度。
+
+步骤4的显式绑定API：现有 `cpu-affinity` 模块新增 `CpuBinding`，只作用于调用平台线程，不调用旧 `acquireCore`，不改 root/CPU online/sibling/文件锁策略。动态 JNI mask 支持稀疏编号（上限65536），设置后读取实际mask核对；绑定失败回滚，关闭只允许原线程执行，恢复不完整明确报错。拒绝空mask、越界、超出初始mask和虚拟线程；提供运行期mask复查。该API尚未接入owner启动，实验配置仍只接受OFF。
 
 ## 验证入口
 
@@ -37,6 +39,18 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 
 2026-09-26 `unified-wal-local-Kjwv4bjm`：当前隔离测试20项通过，0失败/错误/跳过，Spotless/Checkstyle通过。[owner循环回执](owner-loop-receipt.json)记录本次源码和范围。新增6项测试验证满额4批仍可完成、控制队列保留容量、多shard轮转、无新输入deadline触发、实际FileChannel I/O线程与owner线程隔离、有界I/O拒绝/错误回传、异常后在途义务保留及100次空队列唤醒交错。I/O测试固定1线程＋1队列槽，第三次提交被拒绝并回原owner，不无限排队。测试工作量不证明CPU或延迟收益。
 
+显式绑定验证见[cpu-binding回执](cpu-binding-receipt.json)。macOS Maven测试11项：10通过，1个Linux原生测试按平台跳过。Linux aarch64容器中以UID 65534、cpuset=`0,2`、quota=1 CPU、512 MiB运行同一Java测试字节码，现场用gcc构建当前JNI：10通过，1个非Linux测试按平台跳过。真实初始/恢复mask均为`{0,2}`，测试验证单CPU绑定、子线程继承、非法native mask拒绝和恢复。稀疏高编号、内核缩小mask、恢复失败和运行期mask变化用kernel boundary模型覆盖，不冒充硬件结果。Spotless/Checkstyle通过。
+
+复现Java/native模块检查（Linux上会执行原生绑定测试）：
+
+```bash
+mvn -o -pl cpu-affinity -am -Dtest=CpuBindingTest,CpuInfoTest,IsolatedProcessorsTest \
+  -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test
+mvn -o -pl cpu-affinity -DskipTests spotless:check checkstyle:check
+```
+
+容器的完整编译/测试命令、image ID、classpath与源码/字节码hash保存在回执中。此处是Linux JNI路径证据，不是Linux Maven全构建、NUMA硬件、吞吐或绑核收益证据。
+
 ## 未覆盖范围
 
-步骤4的拓扑/绑定/NUMA池及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、Linux绑定/NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。
+步骤4的拓扑/placement、绑定与owner启动集成、PREFER/REQUIRE降级、NUMA池及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。

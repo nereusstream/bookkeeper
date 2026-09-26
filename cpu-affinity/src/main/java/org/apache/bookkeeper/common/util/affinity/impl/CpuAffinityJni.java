@@ -33,4 +33,8 @@ public class CpuAffinityJni {
     static native boolean isAvailable();
 
     static native void setAffinity(int cpuId) throws IOException;
+
+    static native long[] getAffinityMask() throws IOException;
+
+    static native void setAffinityMask(int[] cpuIds) throws IOException;
 }

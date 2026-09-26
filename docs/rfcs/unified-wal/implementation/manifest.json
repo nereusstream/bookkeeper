@@ -169,7 +169,7 @@
     "planningCommit": "e75c67f3514d1627ea790d052e2c9226e593aa3c",
     "workspace": "/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper",
     "branch": "turbo-bk",
-    "state": "STEP_4_OWNER_PARK_CORE_TESTED_BINDING_POOLS_PENDING",
+    "state": "STEP_4_OWNER_BINDING_API_TESTED_TOPOLOGY_POOLS_PENDING",
     "client2": "CLASSIC_RECYCLING_FIX_RED_GREEN_9_TESTS",
     "client2Receipt": "docs/rfcs/unified-wal/implementation/client-maintenance/client2-receipt.json",
     "client1": "CLASSIC_ACK_GATE_FIX_RED_GREEN_85_TESTS",
@@ -178,6 +178,7 @@
     "step3Receipt": "docs/rfcs/unified-wal/implementation/local-storage/step3-receipt.json",
     "fileIo": "FILE_CHANNEL_FIXED_CAPACITY_WRITE_FORCE_INDEPENDENT_PARSE",
     "ownerLoopReceipt": "docs/rfcs/unified-wal/implementation/local-storage/owner-loop-receipt.json",
+    "cpuBindingReceipt": "docs/rfcs/unified-wal/implementation/local-storage/cpu-binding-receipt.json",
     "remainingSteps": "4 PARTIAL; 5-16 NOT_COMPLETED",
     "productionIntegration": false,
     "authority": "NONE"

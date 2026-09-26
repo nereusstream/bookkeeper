@@ -196,6 +196,35 @@ public class CpuAffinityImpl {
         }
     }
 
+    /** Read only the calling thread's mask, independently of the legacy core acquisition policy. */
+    public static synchronized long[] currentThreadMask() throws IOException {
+        ensureMaskSupport();
+        try {
+            return CpuAffinityJni.getAffinityMask();
+        } catch (UnsatisfiedLinkError unavailable) {
+            throw new IOException("Explicit CPU mask JNI unavailable", unavailable);
+        }
+    }
+
+    /** Bind only the caller. This does not use isolated CPU locks, root checks, or sibling offlining. */
+    public static synchronized void setCurrentThreadMask(int[] cpuIds) throws IOException {
+        ensureMaskSupport();
+        try {
+            CpuAffinityJni.setAffinityMask(cpuIds);
+        } catch (UnsatisfiedLinkError unavailable) {
+            throw new IOException("Explicit CPU mask JNI unavailable", unavailable);
+        }
+    }
+
+    private static void ensureMaskSupport() throws IOException {
+        if (!isInitialized) {
+            init();
+        }
+        if (!isSupported) {
+            throw new IOException("Explicit current-thread affinity is unavailable");
+        }
+    }
+
     private static void init() {
         try {
             // Since this feature is only available in Linux, there's no point

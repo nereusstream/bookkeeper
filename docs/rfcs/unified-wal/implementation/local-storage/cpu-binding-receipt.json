@@ -1,0 +1,101 @@
+{
+  "runId": "cpu-binding-20260926-final",
+  "sourceCommit": "9292360ed240f40fb1f350bc00c9b3095b6389e2",
+  "sourceBinding": "base commit plus exact working-tree hashes",
+  "sourceSha256": {
+    "cpu-affinity/pom.xml": "d421198347a9cc072e78c62d3aed995d7ea4d13bd299d8c8bc807a5ce2dcb219",
+    "cpu-affinity/src/main/affinity/cpp/affinity_jni.c": "91891230565595d6090c6a3f5a9b809740cca1521f4699ed5fead4cc498451cf",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/CpuAffinity.java": "6af92b81f94ef84dabdd5fbaa6722825fbc5aab6362244354784585ff96588b5",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/CpuBinding.java": "0ad53a535530e1648ba33287b1ad1e4265d3c35e4ba2c6ba00cf3d58b88d309d",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/CpuAffinityImpl.java": "b7ebac154a9c16f0c9c33c77bdab06b6b903958635bfac4ba6293f0d7f9b6059",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/CpuAffinityJni.java": "800b9a6397cde5585533ae8e7e71194d0831cca4ad0a523138b5b587d36b1bbd",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/IsolatedProcessors.java": "c28aba02f280381515a0baefc8f2cd26716c142a5a8bfb16907bb245d18f9d5e",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/ProcessorsInfo.java": "836ff8bde9c3cadcdd90f6c0b2e0682bdaff3c5759bf116b0880d96479843088",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/package-info.java": "b399171f616a95158288d8b0a746927b5c1428d530e1040b561fba7c36ed71dc",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/package-info.java": "ccb30f32f2d227872947f054f9fecb8fae2679efde4961f2c890be91c84346e1",
+    "cpu-affinity/src/test/java/org/apache/bookkeeper/common/util/affinity/CpuBindingTest.java": "16113d861477afd10b27c80c46cd286902067c328768f5baf5aa3bd66ee4c66c",
+    "cpu-affinity/src/test/java/org/apache/bookkeeper/common/util/affinity/impl/CpuInfoTest.java": "19952903639a57840f429f8a29d29fb3a0c1557fb83506a0f7ad532a201f94c5",
+    "cpu-affinity/src/test/java/org/apache/bookkeeper/common/util/affinity/impl/IsolatedProcessorsTest.java": "69d63e907077c860b966314b5d602bb5d0d0c63b001f642fa7510dd31923eefe",
+    "pom.xml": "91dc65b74471508cb4f374eeaa11931bbf1600e24d433064e6771363b8c808c8"
+  },
+  "macOS": {
+    "command": "mvn -o -pl cpu-affinity -am -Dtest=CpuBindingTest,CpuInfoTest,IsolatedProcessorsTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test",
+    "tests": {
+      "org.apache.bookkeeper.common.util.affinity.CpuBindingTest": {
+        "tests": "9",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "1",
+        "time": "0.045"
+      },
+      "org.apache.bookkeeper.common.util.affinity.impl.CpuInfoTest": {
+        "tests": "1",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "time": "0.023"
+      },
+      "org.apache.bookkeeper.common.util.affinity.impl.IsolatedProcessorsTest": {
+        "tests": "1",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "time": "0.021"
+      }
+    },
+    "result": "10 PASS; 1 Linux-only test skipped",
+    "logSha256": "66f09603f6a8c4f8d627c08bc03197273baf13f1cda351d2473c9ef59739adb5"
+  },
+  "linuxContainer": {
+    "imageId": "sha256:3786bb5b9948fad47c85ef81187c3e3479ff5546ccee4ea8463418382cb41d7c",
+    "dockerfile": "FROM eclipse-temurin:21-jdk-jammy\nRUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*\n",
+    "runFlags": [
+      "--rm",
+      "--network",
+      "none",
+      "--user",
+      "65534:65534",
+      "--cpuset-cpus",
+      "0,2",
+      "--cpus",
+      "1",
+      "--memory",
+      "512m",
+      "--tmpfs",
+      "/work:rw,exec,mode=1777",
+      "--tmpfs",
+      "/tmp:rw,exec,mode=1777"
+    ],
+    "mounts": "repository and Maven repository read-only at original absolute paths; runner inputs read-only at /input",
+    "runner": "#!/usr/bin/env bash\nset -euo pipefail\nrepo=/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper\nmkdir -p /work/lib\nprintf 'UID='; id -u\nuname -a\njava -version\ngcc --version | head -1\ncat /proc/self/status | grep -E 'Cpus_allowed_list|Mems_allowed_list'\ncat /sys/fs/cgroup/cpu.max\ngcc -std=gnu11 -shared -fPIC -Werror=implicit-function-declaration \\\n  -I\"$JAVA_HOME/include\" -I\"$JAVA_HOME/include/linux\" \\\n  -I\"$repo/cpu-affinity/target/nar/javah-include\" \\\n  \"$repo/cpu-affinity/src/main/affinity/cpp/affinity_jni.c\" -o /work/lib/libcpu-affinity.so\nsha256sum /work/lib/libcpu-affinity.so\ncp_value=\"$(cat /input/classpath)\"\ncat > /work/LinuxBindingTests.java <<'JAVA'\nimport org.apache.bookkeeper.common.util.affinity.CpuBinding;\nimport org.junit.runner.JUnitCore;\nimport org.junit.runner.Result;\nimport org.junit.runner.notification.RunListener;\nimport org.junit.runner.notification.Failure;\nimport org.junit.runner.Description;\npublic class LinuxBindingTests {\n  public static void main(String[] args) throws Exception {\n    System.out.println(\"initialNativeMask=\" + CpuBinding.currentThreadMask());\n    JUnitCore core = new JUnitCore();\n    core.addListener(new RunListener() {\n      public void testStarted(Description d) { System.out.println(\"START \" + d.getMethodName()); }\n      public void testAssumptionFailure(Failure f) { System.out.println(\"ASSUMPTION \" + f); }\n      public void testFailure(Failure f) { System.out.println(\"FAIL \" + f.getTrace()); }\n    });\n    Result r = core.run(\n      org.apache.bookkeeper.common.util.affinity.CpuBindingTest.class,\n      org.apache.bookkeeper.common.util.affinity.impl.CpuInfoTest.class,\n      org.apache.bookkeeper.common.util.affinity.impl.IsolatedProcessorsTest.class);\n    System.out.println(\"restoredNativeMask=\" + CpuBinding.currentThreadMask());\n    System.out.println(\"tests=\" + r.getRunCount() + \" failures=\" + r.getFailureCount()\n      + \" assumptions=\" + r.getAssumptionFailureCount());\n    if (!r.wasSuccessful()) System.exit(1);\n  }\n}\nJAVA\njavac -proc:none -cp \"$cp_value\" -d /work /work/LinuxBindingTests.java\njava -cp \"$cp_value\" LinuxBindingTests\n",
+    "classpathInput": "/work:/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/cpu-affinity/target/test-classes:/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/cpu-affinity/target/classes:/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper/native-library-common/target/classes:/Users/liusinan/.m2/repository/com/google/guava/guava/32.0.1-jre/guava-32.0.1-jre.jar:/Users/liusinan/.m2/repository/com/google/guava/failureaccess/1.0.1/failureaccess-1.0.1.jar:/Users/liusinan/.m2/repository/com/google/guava/listenablefuture/9999.0-empty-to-avoid-conflict-with-guava/listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar:/Users/liusinan/.m2/repository/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar:/Users/liusinan/.m2/repository/org/checkerframework/checker-qual/3.33.0/checker-qual-3.33.0.jar:/Users/liusinan/.m2/repository/com/google/errorprone/error_prone_annotations/2.9.0/error_prone_annotations-2.9.0.jar:/Users/liusinan/.m2/repository/com/google/j2objc/j2objc-annotations/2.8/j2objc-annotations-2.8.jar:/Users/liusinan/.m2/repository/org/apache/commons/commons-lang3/3.20.0/commons-lang3-3.20.0.jar:/Users/liusinan/.m2/repository/org/projectlombok/lombok/1.18.42/lombok-1.18.42.jar:/Users/liusinan/.m2/repository/com/github/spotbugs/spotbugs-annotations/4.6.0/spotbugs-annotations-4.6.0.jar:/Users/liusinan/.m2/repository/io/github/merlimat/slog/slog/0.9.9/slog-0.9.9.jar:/Users/liusinan/.m2/repository/org/slf4j/slf4j-api/2.0.12/slf4j-api-2.0.12.jar:/Users/liusinan/.m2/repository/junit/junit/4.13.2/junit-4.13.2.jar:/Users/liusinan/.m2/repository/org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar:/Users/liusinan/.m2/repository/org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar:/Users/liusinan/.m2/repository/org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar:/Users/liusinan/.m2/repository/org/junit/platform/junit-platform-commons/1.10.2/junit-platform-commons-1.10.2.jar:/Users/liusinan/.m2/repository/org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar:/Users/liusinan/.m2/repository/org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar:/Users/liusinan/.m2/repository/org/junit/platform/junit-platform-engine/1.10.2/junit-platform-engine-1.10.2.jar:/Users/liusinan/.m2/repository/org/junit/vintage/junit-vintage-engine/5.10.2/junit-vintage-engine-5.10.2.jar:/Users/liusinan/.m2/repository/org/junit/jupiter/junit-jupiter-params/5.10.2/junit-jupiter-params-5.10.2.jar:/Users/liusinan/.m2/repository/org/assertj/assertj-core/3.27.7/assertj-core-3.27.7.jar:/Users/liusinan/.m2/repository/net/bytebuddy/byte-buddy/1.18.3/byte-buddy-1.18.3.jar:/Users/liusinan/.m2/repository/org/hamcrest/hamcrest-all/1.3/hamcrest-all-1.3.jar:/Users/liusinan/.m2/repository/org/mockito/mockito-inline/4.11.0/mockito-inline-4.11.0.jar:/Users/liusinan/.m2/repository/org/mockito/mockito-core/4.11.0/mockito-core-4.11.0.jar:/Users/liusinan/.m2/repository/net/bytebuddy/byte-buddy-agent/1.12.19/byte-buddy-agent-1.12.19.jar:/Users/liusinan/.m2/repository/org/objenesis/objenesis/3.3/objenesis-3.3.jar:",
+    "result": "10 PASS; 1 non-Linux-only test skipped",
+    "output": "UID=65534\nLinux 1e1fed81f00b 7.0.12-linuxkit #1 SMP PREEMPT Wed Aug 12 20:18:49 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux\nopenjdk version \"21.0.12.1\" 2026-08-18 LTS\nOpenJDK Runtime Environment Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS)\nOpenJDK 64-Bit Server VM Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS, mixed mode, sharing)\ngcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\nCpus_allowed_list:\t0,2\nMems_allowed_list:\t0\n100000 100000\n81e604b7eef4a0efcb00cff4bb56256edc36a97971b2f69041e59b924c8943c5  /work/lib/libcpu-affinity.so\nSLF4J(W): No SLF4J providers were found.\nSLF4J(W): Defaulting to no-operation (NOP) logger implementation\nSLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.\ninitialNativeMask={0, 2}\nSTART invalidConfigurationDoesNotAttemptNativeMutation\nSTART kernelRestrictionFailsAndRollsBackBeforePublishingBinding\nSTART runtimeMaskLossAndWrongThreadCloseAreVisible\nSTART failedCloseCanBeRetriedButCannotClaimRestoration\nSTART sparseMaskIsVerifiedAndRestoredWithoutEscapingMutableState\nSTART linuxNativeBindingAndChildInheritanceRestoreOnSameThread\nSTART unavailableNativeFailsExplicitlyOnNonLinux\nASSUMPTION unavailableNativeFailsExplicitlyOnNonLinux(org.apache.bookkeeper.common.util.affinity.CpuBindingTest): got: <true>, expected: is <false>\nSTART virtualThreadCannotBindItsTemporaryCarrier\nSTART incompleteRollbackIsNotReportedAsSuccessfulFallback\nSTART testParseCpuInfo\nSTART testParseProcessors\nrestoredNativeMask={0, 2}\ntests=11 failures=0 assumptions=1\n",
+    "scope": "Linux gcc compiles current JNI source. Current macOS-built release-17 Java/test bytecode runs on Linux Temurin 21. Native Linux binding, malformed mask rejection, child inheritance and restoration run as UID 65534. Not a Linux Maven reactor build, physical NUMA or performance test."
+  },
+  "compiledJavaSha256": {
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuAffinity.class": "244ba21d9e597b28a590181c3b14342017f024d3fb618261fe45bed19786dd76",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuBinding$1.class": "6a46f13b3dc99f59c0136ecfd14bd9a8c7ae823429ead8660fc8094473b3862f",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuBinding$Access.class": "d3452faabdc49e61c2122031642f5e039970f15a492d3758eb9eb41958cfd3b1",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuBinding.class": "bfdaa92751376c6aadb2b10e08049113eb78b7058c1b9b43713173855f461dea",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/impl/CpuAffinityImpl.class": "64bbf424ac65c0911c3b8c60b10aa80eb03c223ae5f327e5d0844fcb66665d45",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/impl/CpuAffinityJni.class": "eaac226e79d00f42f724a314b99f72db3beed77f3517aa899129e32387d634ef",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/impl/IsolatedProcessors.class": "c3713d10b25f3f024f37e90bbd8d2113da4903a57ff1f914faff1e8d6d7bc39d",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/impl/ProcessorsInfo.class": "fe0a2a5ff3f8c315845d378bd6fd6eb5f7e3810abdb49a2fb98ef6563f3a4ba9",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/impl/package-info.class": "90039f70cfc1cbea50a9cebe8a0e94ed25fc1899c7a744a0fc173848ca049eb2",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/package-info.class": "82c0a78e8d98867da250435b1475c1bc3ab0a78ba7f9656a89ce3f7a45029005",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/utils/affinity/NarSystem.class": "6ddee7f54bc49650d5abb967f749c6c34be758bb9a4b3034fe2a35f0517f440b",
+    "cpu-affinity/target/test-classes/org/apache/bookkeeper/common/util/affinity/CpuBindingTest$Kernel.class": "d1de99c24394d6a5ca35bdaca699a0733332bee3dab4bb2a3efb4807ee60f494",
+    "cpu-affinity/target/test-classes/org/apache/bookkeeper/common/util/affinity/CpuBindingTest.class": "b16695d2e6fc12874b0659c66cb81afb442572e2b3af25f107e4e5b351b2ac24",
+    "cpu-affinity/target/test-classes/org/apache/bookkeeper/common/util/affinity/impl/CpuInfoTest.class": "569cd5095d1abc994be5b0c22e666618d041f1e67241141503aa9551e510d9e7",
+    "cpu-affinity/target/test-classes/org/apache/bookkeeper/common/util/affinity/impl/IsolatedProcessorsTest.class": "3f8fd5104bcd7dec70db94f2fcfa61102af248dec9764cc6d0eb7f8d6c09cebb",
+    "native-library-common/target/classes/org/apache/bookkeeper/common/util/nativelib/NativeUtils.class": "342dd5f4b41014138ac6a409abec26e77339197a5172737d9653f43ef5f6eec0",
+    "native-library-common/target/classes/org/apache/bookkeeper/common/util/nativelib/package-info.class": "8fd925a8a0313df872293598aca7a9ea7c381aaea5347938d2164d6ecfc0095d"
+  },
+  "style": {
+    "command": "mvn -o -pl cpu-affinity -DskipTests spotless:check checkstyle:check",
+    "result": "PASS",
+    "logSha256": "c86eceb49ee9e9a687ec03a6a97e394f36b22909cd72cc8110f4d674fe1d2839"
+  },
+  "remaining": "Topology snapshot, placement plan, owner startup integration/partial-start cleanup, PREFER/REQUIRE policy and NUMA pools not implemented. Default OFF/SYSTEM/PARK unchanged."
+}
