@@ -520,7 +520,7 @@ B18在已有资源测量中分列TLS/decoder retained bytes、未完成frame数�
 
 ### 10.2 固定owner与执行线程分工
 
-2026-09-26：[隔离实现](implementation/local-storage/README.md)已交付固定owner/PARK循环和有界阻塞I/O服务，新增6项定向测试通过，连同格式/文件测试共20项。当前只验证执行核心，尚未接入append状态机；§10.3显式绑定API已完成单独验证，拓扑/启动集成、§10.5模式降级及RFC-0003 §6.2池仍未实现，无性能结论。目标映射明确分开：
+2026-09-26：[隔离实现](implementation/local-storage/README.md)已交付固定owner/PARK循环和有界阻塞I/O服务，新增6项定向测试通过，连同格式/文件测试共20项。当前只验证执行核心，尚未接入append状态机；§10.3显式绑定API已完成单独验证，拓扑/placement现已另验，启动集成、§10.5模式降级及RFC-0003 §6.2池仍未实现，无性能结论。目标映射明确分开：
 
 ```text
 ledger instance -> logical WalShard -> fixed owner worker -> CPU / NUMA placement
@@ -546,11 +546,11 @@ DATA准入前，沿§10.1既有完成工作集预留completion通知和buffer归
 
 静态源码核对锁定`6e5df388ab1882caaa4de7e03d078f6be7196a95`：[CpuAffinityImpl](../../../cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/CpuAffinityImpl.java)的`acquireCore()`检查root、选isolated CPU并取得同core的文件锁；[IsolatedProcessors](../../../cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/IsolatedProcessors.java)会写`cpu*/online`上下线sibling。[ProcessorsInfo](../../../cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/impl/ProcessorsInfo.java)只按`core id`分组，未纳入socket，不能直接作为双插槽拓扑依据。[OrderedExecutor](../../../bookkeeper-common/src/main/java/org/apache/bookkeeper/common/util/OrderedExecutor.java)及[Journal/ForceWrite](../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/Journal.java)在busy-wait分支调用该接口。这些是现有兼容路径，不是Segment的默认策略；本轮只记录独立接入合同，不修改Classic行为。
 
-2026-09-26实现补充：`cpu-affinity` 已新增 `CpuBinding` 与独立JNI mask接口，设置/读回/同线程恢复、非法参数和虚拟线程拒绝已有测试。非root Linux容器的真实绑定与子线程继承通过，输入/源码及具体覆盖见[绑定回执](implementation/local-storage/cpu-binding-receipt.json)。以下拓扑、placement、worker启动集成、模式降级和物理NUMA仍待实现/验证，不能将该API测试当作整个§10.3完成。
+2026-09-26实现补充：`cpu-affinity` 已新增 `CpuBinding` 与独立JNI mask接口，设置/读回/同线程恢复、非法参数和虚拟线程拒绝已有测试。非root Linux容器的真实绑定与子线程继承通过，输入/源码及具体覆盖见[绑定回执](implementation/local-storage/cpu-binding-receipt.json)。拓扑/placement现已加入只读快照和静态计划，macOS 16通过/2平台跳过，Linux容器17通过/1平台跳过，见[拓扑回执](implementation/local-storage/topology-placement-receipt.json)。以下worker启动集成、模式降级和物理NUMA仍待实现/验证，不能将该API测试当作整个§10.3完成。
 
 Segment仅显式设置自身应用线程的affinity：不自动开关CPU、不改宿主机isolcpus/cpuset/IRQ配置、不以文件锁声称整机独占、不要求root。复用`cpu-affinity`模块及[JNI工程](../../../cpu-affinity/src/main/affinity/cpp/affinity_jni.c)，增加独立安全接口，不能只移除root检查后继续走自动抢核策略。Linux自身线程绑定受权限、online/cpuset和容器限制；必须读取实际mask，不能从调用成功推断完整请求已生效。依据[Linux sched_setaffinity(2)](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html)。
 
-启动时用拟议`CpuTopologySnapshot`只读采集：应用缩窄任何线程mask前保存的初始部署允许集合、online CPUs、cgroup有效CPU/memory-node集合与quota、socket/core/SMT sibling/NUMA拓扑、DATA设备NUMA归属。物理核按package及必要层级/经验证sibling集合识别，不跨socket合并同号core；拓扑未知如实标记，不能伪造独占物理核。sysfs拓扑依据[Linux CPU topology](https://docs.kernel.org/admin-guide/cputopology.html)。候选集合为：
+`CpuTopologySnapshot`现已实现只读采集（尚未接入owner group启动）：：应用缩窄任何线程mask前保存的初始部署允许集合、online CPUs、cgroup有效CPU/memory-node集合与quota、socket/core/SMT sibling/NUMA拓扑、DATA设备NUMA归属。物理核按package及必要层级/经验证sibling集合识别，不跨socket合并同号core；拓扑未知如实标记，不能伪造独占物理核。sysfs拓扑依据[Linux CPU topology](https://docs.kernel.org/admin-guide/cputopology.html)。候选集合为：
 
 ```text
 eligible CPUs = initial deployment mask ∩ online CPUs ∩ effective cgroup CPUs
@@ -559,7 +559,7 @@ eligible CPUs = initial deployment mask ∩ online CPUs ∩ effective cgroup CPU
 
 不得把某个已绑单核worker的当前mask当成全进程初始部署额度。cgroup v2使用`cpuset.cpus.effective`、`cpuset.mems.effective`及`cpu.max`，同时识别适用的上层限制；其他环境记录实际探测能力和未知项，不把探测缺失当无限资源。CPU quota是时间预算，不是CPU可运行集合：可见16个逻辑CPU但quota约2个CPU时间份额时，不能规划16个持续spin的owner。未知/不足的专用CPU余量不启用spin。依据[Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)。
 
-拟议`ExecutionPlacementPlan`保存shard→worker、worker→CPU mask、buffer pool→NUMA preference的静态映射，只校验placement，不定序DATA。先为Netty、I/O、控制、索引、compaction和JVM留CPU余量，再定worker数；同物理核优先只选一个SMT sibling给append，并避免把重负载服务线程放另一个sibling。应用只选CPU，不关闭sibling。单NUMA节点8个可用物理核时“4 append＋4服务共享”仅为实验起点，TLS/维护重时可减少append worker，不能随ledger数扩线程。
+`ExecutionPlacementPlan`现已实现静态规划（尚未接入owner group）：保存shard→worker、worker→CPU mask、buffer pool→NUMA preference的静态映射，只校验placement，不定序DATA。先为Netty、I/O、控制、索引、compaction和JVM留CPU余量，再定worker数；同物理核优先只选一个SMT sibling给append，并避免把重负载服务线程放另一个sibling。应用只选CPU，不关闭sibling。单NUMA节点8个可用物理核时“4 append＋4服务共享”仅为实验起点，TLS/维护重时可减少append worker，不能随ledger数扩线程。
 
 安全接口候选为`CpuBinding bindCurrentThread(CpuSet requested)`，返回请求/实际mask及可释放作用域。Java/JNI须验证非空集合、编号/范围与native mask容量，读取验证实际mask，传播errno/不支持原因；不能把稀疏CPU编号当数组长度或让固定`cpu_set_t`越界。仅在绑定验证成功后登记进程内部placement占用；部分启动失败须清理登记，已绑定线程在自身作用域内恢复当前允许范围中的原mask并报告恢复结果。不能留下“登记已占用但未绑定”，也不能把恢复失败伪报为已降级成功；无法完成必要清理时在服务开放前退出，不修改宿主机状态。
 

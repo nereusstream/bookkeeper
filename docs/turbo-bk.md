@@ -282,7 +282,7 @@ Cluster Lifecycle
 
 ## 10. 实施顺序
 
-以下施工顺序已开始实施，从当前reference implementation走到首个可保留数据的生产候选。步骤1隔离配置与构建入口已交付，2项参数边界测试通过；步骤2的[CLIENT-1/2](rfcs/unified-wal/implementation/client-maintenance/README.md)已完成红绿回归（当前85项通过），步骤3实验格式与真实FileChannel I/O已通过14项定向测试，步骤4已交付固定owner/PARK核心（当前隔离测试20项通过），显式绑定API另经macOS/Linux容器验证，拓扑/绑定集成/池及步骤5～16尚未完成，当前结果见[本地存储状态](rfcs/unified-wal/implementation/local-storage/README.md)，不提升Gate。完整依赖、实施内容与完成条件由[现有实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)维护；步骤号只用于排序，不新增RFC、Maven模块或工作项体系。UW-1～UW-7继续表示职责分类，例如UW-1集群删除依赖UW-6基础fenced-close，不能按UW编号施工。
+以下施工顺序已开始实施，从当前reference implementation走到首个可保留数据的生产候选。步骤1隔离配置与构建入口已交付，2项参数边界测试通过；步骤2的[CLIENT-1/2](rfcs/unified-wal/implementation/client-maintenance/README.md)已完成红绿回归（当前85项通过），步骤3实验格式与真实FileChannel I/O已通过14项定向测试，步骤4已交付固定owner/PARK核心（当前隔离测试20项通过），显式绑定API另经macOS/Linux容器验证，拓扑/placement已交付，owner启动集成/池及步骤5～16尚未完成，当前结果见[本地存储状态](rfcs/unified-wal/implementation/local-storage/README.md)，不提升Gate。完整依赖、实施内容与完成条件由[现有实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)维护；步骤号只用于排序，不新增RFC、Maven模块或工作项体系。UW-1～UW-7继续表示职责分类，例如UW-1集群删除依赖UW-6基础fenced-close，不能按UW编号施工。
 
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |

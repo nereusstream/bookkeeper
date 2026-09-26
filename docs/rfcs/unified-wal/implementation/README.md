@@ -18,7 +18,7 @@
 
 ## 下一阶段实施清单
 
-规划基线为`origin/turbo-bk@e8b162076fd8cfa84a11351a82caac8c5ac1f939`，2026-09-22核对本地HEAD及远端引用一致；该提交时间为2026-09-22 08:29:33 UTC（北京时间16:29:33）。16步顺序现已开始实施。步骤1隔离配置、参数边界测试和可追溯构建入口已交付，2项测试通过；[本地存储状态与回执](local-storage/README.md)记录真实覆盖。步骤2的[CLIENT-1/2独立Classic补丁](client-maintenance/README.md)均已完成确定性红绿回归（当前85项测试通过），与隔离存储authority分离；步骤3已交付实验格式、独立parser与真实FileChannel I/O（14项定向测试通过）；步骤4已交付固定owner/PARK及有界I/O核心（当前隔离测试20项通过），显式绑定API另经macOS/Linux容器验证，拓扑/绑定集成/池及步骤5～16仍未完成。文件层验证不表示entry成功、restart、Spike或Gate通过。
+规划基线为`origin/turbo-bk@e8b162076fd8cfa84a11351a82caac8c5ac1f939`，2026-09-22核对本地HEAD及远端引用一致；该提交时间为2026-09-22 08:29:33 UTC（北京时间16:29:33）。16步顺序现已开始实施。步骤1隔离配置、参数边界测试和可追溯构建入口已交付，2项测试通过；[本地存储状态与回执](local-storage/README.md)记录真实覆盖。步骤2的[CLIENT-1/2独立Classic补丁](client-maintenance/README.md)均已完成确定性红绿回归（当前85项测试通过），与隔离存储authority分离；步骤3已交付实验格式、独立parser与真实FileChannel I/O（14项定向测试通过）；步骤4已交付固定owner/PARK及有界I/O核心（当前隔离测试20项通过），显式绑定API另经macOS/Linux容器验证，拓扑/placement已交付，owner启动集成/池及步骤5～16仍未完成。文件层验证不表示entry成功、restart、Spike或Gate通过。
 
 继续复用已有ProfileDescriptor、Profile control/auth、startup/readiness reference implementation及experimental wire codec/corpus。它们提供接口、字节合同和测试依据，不能替代真实文件持久化、网络或MetadataStore。固定owner、安全显式绑核、NUMA池与独立等待策略沿用RFC-0005 §10.2—10.5、RFC-0003 §6.2；默认仍为OFF/SYSTEM/PARK。
 

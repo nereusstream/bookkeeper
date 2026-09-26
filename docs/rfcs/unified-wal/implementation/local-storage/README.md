@@ -18,6 +18,10 @@
 
 步骤4的显式绑定API：现有 `cpu-affinity` 模块新增 `CpuBinding`，只作用于调用平台线程，不调用旧 `acquireCore`，不改 root/CPU online/sibling/文件锁策略。动态 JNI mask 支持稀疏编号（上限65536），设置后读取实际mask核对；绑定失败回滚，关闭只允许原线程执行，恢复不完整明确报错。拒绝空mask、越界、超出初始mask和虚拟线程；提供运行期mask复查。该API尚未接入owner启动，实验配置仍只接受OFF。
 
+步骤4的拓扑与静态placement：`CpuTopologySnapshot` 在缩窄应用线程mask前只读捕获初始mask、online CPU、cgroup v2有效CPU/memory-node集合及可见祖先最小quota，读取package/core/SMT sibling/NUMA信息。不跨socket合并同号core，不一致/缺失信息标未知；隐藏祖先明确不可观测。DATA设备节点只消费调用者已确认的sysfs `numa_node` 路径，未提供或-1保持UNKNOWN，不自动猜测复合设备归属。
+
+`ExecutionPlacementPlan` 按固定逻辑shard映射worker，每个append worker选一个不同物理核的CPU，并排除其整个SMT sibling组给服务线程留余量。显式配置冲突拒绝；quota未知/不足、核不足或物理拓扑未知不生成绑定计划。内存节点不在允许集合时不给pool节点偏好；该计划不设置NUMA策略，也不证明物理页属地。OFF映射不要求native拓扑，CPU/worker变化不改变逻辑shard数。绑定、group启动与pool接通仍是步骤4剩余工作。
+
 ## 验证入口
 
 ```bash
@@ -25,7 +29,7 @@ scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,Segment
 mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 ```
 
-脚本为每次运行创建独立临时结果目录，保存HEAD/branch、源码及测试SHA-256、命令、平台、Maven输出、退出码和本次生成的JUnit XML。脚本不覆写历史receipt，不扫描或复制用户PDF。默认离线使用已缓存依赖；首次缺依赖时用 `UW_FETCH_DEPENDENCIES=true scripts/unified-wal/run-local-storage-tests.sh` 联网获取，后续不重复请求snapshot元数据。它通过 `-P '!cargo-zigbuild'` 禁用本实验不使用的Linux Rust交叉编译profile；CPU affinity原模块仍构建，但没有进行Linux native/NUMA运行验证。
+脚本为每次运行创建独立临时结果目录，保存HEAD/branch、源码及测试SHA-256、命令、平台、Maven输出、退出码和本次生成的JUnit XML。脚本不覆写历史receipt，不扫描或复制用户PDF。默认离线使用已缓存依赖；首次缺依赖时用 `UW_FETCH_DEPENDENCIES=true scripts/unified-wal/run-local-storage-tests.sh` 联网获取，后续不重复请求snapshot元数据。它通过 `-P '!cargo-zigbuild'` 禁用本实验不使用的Linux Rust交叉编译profile；该入口构建CPU affinity模块；Linux native绑定和拓扑另有下述容器验证，物理NUMA仍未验证。
 
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
@@ -51,6 +55,13 @@ mvn -o -pl cpu-affinity -DskipTests spotless:check checkstyle:check
 
 容器的完整编译/测试命令、image ID、classpath与源码/字节码hash保存在回执中。此处是Linux JNI路径证据，不是Linux Maven全构建、NUMA硬件、吞吐或绑核收益证据。
 
+拓扑/placement验证见[本次回执](topology-placement-receipt.json)：macOS 18项中16通过、2个Linux测试按平台跳过；Linux容器18项中17通过、1个非Linux测试按平台跳过，Spotless/Checkstyle通过。固定fixture为2 socket、3物理核、6逻辑CPU，可见祖先quota为3.5 CPU；2个append worker保留1个服务物理核。另覆盖SMT冲突、非连续集合、缺失quota、异常sibling、允许内存节点及mount路径不能解析。实际容器只读结果为CPU `{0,2}`、quota=1、memory nodes `{0}`，测试逐项对照容器约束；不能据此声称物理NUMA或性能收益。
+
+```bash
+mvn -o -pl cpu-affinity -am -Dtest=CpuTopologySnapshotTest,CpuBindingTest,CpuInfoTest,IsolatedProcessorsTest \
+  -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test
+```
+
 ## 未覆盖范围
 
-步骤4的拓扑/placement、绑定与owner启动集成、PREFER/REQUIRE降级、NUMA池及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。
+步骤4的绑定与owner启动集成、部分启动失败清理、PREFER/REQUIRE降级、运行期拓扑变化处理、NUMA池及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。
