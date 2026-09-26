@@ -1,0 +1,99 @@
+{
+  "runId": "unified-wal-local-Kjwv4bjm",
+  "sourceCommit": "817cdfcab319e779c3a8e2f58d0c749071c03484",
+  "sourceBinding": "base commit plus exact working-tree hashes",
+  "sourceSha256": {
+    "bookkeeper-server/pom.xml": "0e4087c4375021ae0b19524896203703dbc2fc148ce83786201000901a83967e",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentConfig.java": "bbf4a4b95dc7c096feb540bf17d448bff053e8540b02d7ee0fd7a7d75c314112",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentFiles.java": "9f97fb79323b17002c29f8a0e39a217c7d492346230d202f1f12bd19c12b8505",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormat.java": "62ed460dd5de06c70c7076d03aa27559ecb18b5438a17bf3656ff75a6618830c",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchParser.java": "a8a45de8b5e9c123ef9c8b5f14d20bc76decd6104fbafed25fad8d7382ae25eb",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentControlFormat.java": "e5f4a260b4789f21232f2a4c442167581f8d0392ec4df03fa6050202629b156f",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentControlParser.java": "46bb4265e4fd11af0b80d06a9e78cd16d3f4a00ee1b6313adec0f4a052796e7c",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentFileHeader.java": "4272eef59f6c4f0d905abdd1ebc17bb265143809801bf739e903e8aec5a80ba7",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentFileIo.java": "1c3ba4e25b63d01f0503006f10ae6f78ad0e47454c380f8364f076a1738ff792",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentIoExecutor.java": "93c06af1d50351d6c8e7fda0563f12ea5b056d36b67a38fcf37f62cac5e58b3f",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoop.java": "55fb3a53af92c94dbf471d5bc52be397b4d3ad5f82be9eca7875892037e899ad",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/package-info.java": "edca66946cc7e489cc2c6321d337367e25459a2e0c6802e13425ba16865a3768",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentConfigTest.java": "e1c1896c2c23c49c314bf6d78ea2e3344b5e453e4e8e44753cdeb282d8d85ae5",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "33a619cf83a9934da450ef0f59bb053933ec4dc7f63eb87da2dc365721a0d1f8",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentControlFormatTest.java": "52a21c55ca51db4daf3d5422097045fdcdf277370759b67e63bbdf3b6accbdca",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoopTest.java": "5ff5a56253e288dd60cdeae00e71386fb0e54912e61fefb493fe590e3f322bcd",
+    "bookkeeper-server/src/test/resources/unified-wal-segment/arena-alloc-v1.hex": "f962deab28065ae4a05679a93bc1020cfa77ca49793a138c7537510e9475217a",
+    "bookkeeper-server/src/test/resources/unified-wal-segment/copy-v1.hex": "d6895ec052e9ba786625df49e15a982b3ced2935fa87f4e65b8ccca0454bb018",
+    "bookkeeper-server/src/test/resources/unified-wal-segment/entry-v1.hex": "a85fe7787f8ba745b7b4e0341c8a589203b60d70e77fba6f953424f0ec0f4948",
+    "pom.xml": "91dc65b74471508cb4f374eeaa11931bbf1600e24d433064e6771363b8c808c8",
+    "scripts/unified-wal/run-local-storage-tests.sh": "474b6b831244387857948afb90863e97125df6f61ab2d01590d5f6e1f415755a"
+  },
+  "command": [
+    "mvn",
+    "-o",
+    "-P",
+    "!cargo-zigbuild",
+    "-pl",
+    "bookkeeper-server",
+    "-am",
+    "-Dtest=SegmentOwnerLoopTest,IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest",
+    "-Dsurefire.failIfNoSpecifiedTests=false",
+    "-DtestRetryCount=0",
+    "-Dsurefire.rerunFailingTestsCount=0",
+    "test"
+  ],
+  "platform": "macOS-14.8.9-arm64-arm-64bit",
+  "exitCode": 0,
+  "tests": {
+    "org.apache.bookkeeper.bookie.storage.segment.IsolatedSegmentConfigTest": {
+      "tests": "2",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "0.032"
+    },
+    "org.apache.bookkeeper.bookie.storage.segment.SegmentBatchFormatTest": {
+      "tests": "9",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "0.676"
+    },
+    "org.apache.bookkeeper.bookie.storage.segment.SegmentControlFormatTest": {
+      "tests": "3",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "0.048"
+    },
+    "org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest": {
+      "tests": "6",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "time": "0.129"
+    }
+  },
+  "artifacts": {
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-Kjwv4bjm/inputs.json": "52f37abb20b39f82d3da36b8f4cacbfc79aae3b9c2e50ed48a617cf889f04c27",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-Kjwv4bjm/maven.log": "db22126c663d0ca358342b1f69ec2e028a91a014d1f062d4e41eca39c4ed1121",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-Kjwv4bjm/reports/TEST-org.apache.bookkeeper.bookie.storage.segment.IsolatedSegmentConfigTest.xml": "ee70deb922788be6386c073d5e2285f278b275dcde762147ea291d689280f501",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-Kjwv4bjm/reports/TEST-org.apache.bookkeeper.bookie.storage.segment.SegmentBatchFormatTest.xml": "6f2bd92503bf7d1f3ad183e6fa5c0652889653e0b01bcd2f7e5c947918336f9b",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-Kjwv4bjm/reports/TEST-org.apache.bookkeeper.bookie.storage.segment.SegmentControlFormatTest.xml": "e76ccb762470a5bf158b7a51a013fab5687a97c44e2cfb164cd046f9fb9b6ffe",
+    "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-Kjwv4bjm/reports/TEST-org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.xml": "2300b3c41e8cca6dd53eb6f0714aa682e986b860901964b2d12ff5a2775be5f5"
+  },
+  "style": {
+    "command": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+    "result": "PASS",
+    "logSha256": "a7651d501ab983c24a9e84809ebc618029352495b48783b3371980fff1230a10"
+  },
+  "measurements": {
+    "fullAdmissionTestPendingBatches": 4,
+    "independentControlSlots": 1,
+    "completionSlotsReservedBeforeAdmission": 4,
+    "ioTestThreads": 1,
+    "ioTestQueueSlots": 1,
+    "ioTestAdmittedRequests": 3,
+    "ioTestThirdRequest": "REJECTED_WITH_OWNER_COMPLETION",
+    "parkWakeTransitions": 100,
+    "performance": "NOT_EXECUTED"
+  },
+  "scope": "Step 4 fixed-owner/PARK core only, not complete step 4. No affinity, topology, NUMA pools, storage integration or production authority."
+}

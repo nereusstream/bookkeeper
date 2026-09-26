@@ -12,10 +12,14 @@
 
 步骤3：已实现[实验格式v1](format-v1.md)、DATA/控制framing writer与独立parser、固定字节向量、全容量预创建文件及必要目录同步。真实FileChannel处理短写后force，失败保留坐标并停止受影响文件写入；容量满额停止。控制文件目前只有身份块，control parser只校验framing。尚无allocator授权、逐entry成功、selector或restart服务。
 
+步骤4的第一部分：`SegmentOwnerLoop` 用固定平台线程承载静态 shard 子集，ledger→shard 只依赖固定逻辑 shard 数，worker 数不进入持久身份。每个已准入批次预留一个 completion 槽，控制队列独立有界；循环每轮处理完成、控制和各 shard 的一个输入。PARK 遵守最老 batch deadline，后来的 deadline 不能推迟它。`SegmentIoExecutor` 在启动线程预创建固定数量服务线程，用有界队列执行阻塞 I/O，并将结果送回原 owner；提交后 handler 异常、停止准入或等待超时不提前释放在途义务。
+
+该循环尚未接入实际 append/allocator 状态机，尚无 group 启动、CPU绑定或NUMA池。容量由构造参数显式给定；多 owner 集成时必须从同一总预算分配，不能给每个 owner 复制全局额度。
+
 ## 验证入口
 
 ```bash
-scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest
+scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentOwnerLoopTest
 mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 ```
 
@@ -31,6 +35,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 
 文件测试的可复现工作量：默认DATA预创建2×16 MiB；4096字节批次在每次最多7字节的故障注入下需要586次write及1次force；1024字节payload的record为1220字节，先读160字节header再读record共1380字节，小于整批4096字节。16 KiB文件扣除4096字节身份块后容纳3个4096字节批次，下一批被拒绝。上述为工作量/边界测量，不是性能对照；首份局部性能报告等待步骤5～7的实际闭环。
 
+2026-09-26 `unified-wal-local-Kjwv4bjm`：当前隔离测试20项通过，0失败/错误/跳过，Spotless/Checkstyle通过。[owner循环回执](owner-loop-receipt.json)记录本次源码和范围。新增6项测试验证满额4批仍可完成、控制队列保留容量、多shard轮转、无新输入deadline触发、实际FileChannel I/O线程与owner线程隔离、有界I/O拒绝/错误回传、异常后在途义务保留及100次空队列唤醒交错。I/O测试固定1线程＋1队列槽，第三次提交被拒绝并回原owner，不无限排队。测试工作量不证明CPU或延迟收益。
+
 ## 未覆盖范围
 
-步骤4执行模型、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、Linux绑定/NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。
+步骤4的拓扑/绑定/NUMA池及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、Linux绑定/NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。

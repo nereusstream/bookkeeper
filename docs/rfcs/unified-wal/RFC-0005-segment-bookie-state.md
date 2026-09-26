@@ -520,7 +520,7 @@ B18在已有资源测量中分列TLS/decoder retained bytes、未完成frame数�
 
 ### 10.2 固定owner与执行线程分工
 
-本节与§10.3—10.5、RFC-0003 §6.2均为**PLANNED / NOT EXECUTED**，随第一批固定shard存储实现交付，不是当前已有线程映射或性能结果。明确分开：
+2026-09-26：[隔离实现](implementation/local-storage/README.md)已交付固定owner/PARK循环和有界阻塞I/O服务，新增6项定向测试通过，连同格式/文件测试共20项。当前只验证执行核心，尚未接入append状态机；§10.3拓扑/绑定、§10.5模式降级及RFC-0003 §6.2池仍未实现，无性能结论。目标映射明确分开：
 
 ```text
 ledger instance -> logical WalShard -> fixed owner worker -> CPU / NUMA placement

@@ -1,0 +1,321 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie.storage.segment;
+
+import java.time.Duration;
+import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+
+/**
+ * Fixed platform-thread owner for a static subset of shards. DATA admission reserves its eventual
+ * completion slot. Handlers must be bounded and must not perform blocking I/O on this thread.
+ */
+final class SegmentOwnerLoop {
+    interface Command {
+        void run(Ticket ticket);
+
+        void failed(Throwable cause);
+    }
+
+    /** One admitted batch's completion obligation, retained across timeouts and I/O submission. */
+    final class Ticket {
+        private final Command command;
+        private boolean posted;
+        private boolean ioSubmitted;
+        private volatile Throwable commandFailure;
+        private Runnable completion;
+
+        private Ticket(Command command) {
+            this.command = command;
+        }
+
+        // May be called by an I/O thread. Even after admission closes, this slot remains reserved.
+        void complete(Runnable action) {
+            Objects.requireNonNull(action, "action");
+            synchronized (gate) {
+                if (posted) {
+                    throw new IllegalStateException("Completion already posted");
+                }
+                completion = action;
+                if (!completions.offer(this)) {
+                    throw new IllegalStateException("Reserved completion capacity violated");
+                }
+                posted = true;
+            }
+            LockSupport.unpark(thread);
+        }
+
+        void beginIo() {
+            requireOwner();
+            synchronized (gate) {
+                if (posted || ioSubmitted) {
+                    throw new IllegalStateException("Batch already submitted or completed");
+                }
+                ioSubmitted = true;
+            }
+        }
+
+        void fail(Throwable cause) {
+            complete(() -> command.failed(cause));
+        }
+    }
+
+    private final Object gate = new Object();
+    private final int logicalShards;
+    private final int workerId;
+    private final int workerCount;
+    private final int capacity;
+    private final ArrayBlockingQueue<Ticket>[] data;
+    private final ArrayBlockingQueue<Ticket> completions;
+    private final ArrayBlockingQueue<Runnable> controls;
+    private final long[] deadlines;
+    private final Runnable[] due;
+    private final Thread thread;
+    private int pending;
+    private boolean accepting = true;
+    private volatile Throwable failure;
+    private int nextShard;
+
+    @SuppressWarnings("unchecked")
+    SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity) {
+        if (logicalShards < 1 || logicalShards > 64 || workerCount < 1 || workerCount > logicalShards
+                || workerId < 0 || workerId >= workerCount || capacity < 1 || controlCapacity < 1) {
+            throw new IllegalArgumentException("Invalid fixed owner bounds");
+        }
+        this.logicalShards = logicalShards;
+        this.workerCount = workerCount;
+        this.workerId = workerId;
+        this.capacity = capacity;
+        data = new ArrayBlockingQueue[logicalShards];
+        for (int shard = workerId; shard < logicalShards; shard += workerCount) {
+            data[shard] = new ArrayBlockingQueue<>(capacity);
+        }
+        completions = new ArrayBlockingQueue<>(capacity);
+        controls = new ArrayBlockingQueue<>(controlCapacity);
+        deadlines = new long[logicalShards];
+        due = new Runnable[logicalShards];
+        nextShard = workerId;
+        thread = new Thread(this::run, "isolated-wal-owner-" + workerId);
+    }
+
+    // Called from the deployment/startup thread; later placement must occur in the thread entrypoint.
+    void start() {
+        thread.start();
+    }
+
+    static int shardFor(long ledgerId, int logicalShards) {
+        if (ledgerId < 0 || logicalShards < 1) {
+            throw new IllegalArgumentException("Invalid persistent routing input");
+        }
+        return (int) (ledgerId % logicalShards);
+    }
+
+    boolean submit(int shard, Command command) {
+        requireShard(shard);
+        Objects.requireNonNull(command, "command");
+        synchronized (gate) {
+            if (!accepting || pending == capacity) {
+                return false;
+            }
+            Ticket ticket = new Ticket(command);
+            if (!data[shard].offer(ticket)) {
+                throw new IllegalStateException("DATA capacity accounting violated");
+            }
+            pending++;
+        }
+        LockSupport.unpark(thread);
+        return true;
+    }
+
+    boolean control(Runnable action) {
+        Objects.requireNonNull(action, "action");
+        synchronized (gate) {
+            if (!accepting || !controls.offer(action)) {
+                return false;
+            }
+        }
+        LockSupport.unpark(thread);
+        return true;
+    }
+
+    /** Keep the oldest pending batch deadline; visiting another shard cannot postpone it. */
+    void deadline(int shard, long deadlineNanos, Runnable action) {
+        requireOwner();
+        requireShard(shard);
+        Objects.requireNonNull(action, "action");
+        if (due[shard] == null || deadlineNanos - deadlines[shard] < 0) {
+            deadlines[shard] = deadlineNanos;
+            due[shard] = action;
+        }
+    }
+
+    void cancelDeadline(int shard) {
+        requireOwner();
+        requireShard(shard);
+        due[shard] = null;
+    }
+
+    void stopAdmission() {
+        synchronized (gate) {
+            accepting = false;
+        }
+        LockSupport.unpark(thread);
+    }
+
+    boolean awaitTermination(Duration timeout) throws InterruptedException {
+        if (Thread.currentThread() == thread || timeout.isNegative() || timeout.isZero()) {
+            throw new IllegalArgumentException("Positive external wait required");
+        }
+        TimeUnit.NANOSECONDS.timedJoin(thread, timeout.toNanos());
+        return !thread.isAlive();
+    }
+
+    Throwable failure() {
+        return failure;
+    }
+
+    int pending() {
+        synchronized (gate) {
+            return pending;
+        }
+    }
+
+    private void requireShard(int shard) {
+        if (shard < 0 || shard >= logicalShards || shard % workerCount != workerId) {
+            throw new IllegalArgumentException("Shard belongs to another owner");
+        }
+    }
+
+    void requireOwner() {
+        if (Thread.currentThread() != thread) {
+            throw new IllegalStateException("Shard state accessed outside its owner");
+        }
+    }
+
+    private void recordFailure(Throwable cause) {
+        synchronized (gate) {
+            if (failure == null) {
+                failure = cause;
+            }
+            accepting = false;
+        }
+    }
+
+    private void run() {
+        for (;;) {
+            // Clear external interrupts instead of turning PARK into a busy loop. Shutdown is explicit.
+            Thread.interrupted();
+            boolean work = false;
+            Ticket completed = completions.poll();
+            if (completed != null) {
+                work = true;
+                try {
+                    if (completed.commandFailure != null) {
+                        completed.command.failed(completed.commandFailure);
+                    } else {
+                        completed.completion.run();
+                    }
+                } catch (Throwable cause) {
+                    recordFailure(cause);
+                } finally {
+                    synchronized (gate) {
+                        pending--;
+                    }
+                }
+            }
+            Runnable control = controls.poll();
+            if (control != null) {
+                work = true;
+                try {
+                    control.run();
+                } catch (Throwable cause) {
+                    recordFailure(cause);
+                }
+            }
+            // One DATA command from each owned shard per round, even under a permanently hot shard.
+            for (int visited = workerId; visited < logicalShards; visited += workerCount) {
+                int shard = nextShard;
+                nextShard += workerCount;
+                if (nextShard >= logicalShards) {
+                    nextShard = workerId;
+                }
+                Ticket ticket = data[shard].poll();
+                if (ticket != null) {
+                    work = true;
+                    try {
+                        if (failure != null) {
+                            ticket.fail(failure);
+                        } else {
+                            ticket.command.run(ticket);
+                        }
+                    } catch (Throwable cause) {
+                        recordFailure(cause);
+                        synchronized (gate) {
+                            ticket.commandFailure = cause;
+                            if (!ticket.posted && !ticket.ioSubmitted) {
+                                ticket.fail(cause);
+                            }
+                        }
+                    }
+                }
+            }
+            long delay = Long.MAX_VALUE;
+            for (int shard = workerId; shard < logicalShards; shard += workerCount) {
+                if (due[shard] != null) {
+                    long remaining = deadlines[shard] - System.nanoTime();
+                    if (remaining <= 0) {
+                        Runnable action = due[shard];
+                        due[shard] = null;
+                        work = true;
+                        try {
+                            action.run();
+                        } catch (Throwable cause) {
+                            recordFailure(cause);
+                        }
+                    } else {
+                        delay = Math.min(delay, remaining);
+                    }
+                }
+            }
+            synchronized (gate) {
+                if (!accepting && pending == 0 && controls.isEmpty() && !hasDeadline()) {
+                    return;
+                }
+            }
+            if (!work) {
+                // enqueue-before-park is safe: unpark retains a permit; inputs queued before start are polled first.
+                if (delay == Long.MAX_VALUE) {
+                    LockSupport.park(this);
+                } else {
+                    LockSupport.parkNanos(this, delay);
+                }
+            }
+        }
+    }
+
+    private boolean hasDeadline() {
+        for (Runnable action : due) {
+            if (action != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
