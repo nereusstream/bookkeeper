@@ -17,6 +17,7 @@ import hashlib, json, platform, subprocess, sys
 from pathlib import Path
 paths = set(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment').glob('*.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment').glob('*.java'))
+paths.update(Path('bookkeeper-server/src/test/resources/unified-wal-segment').glob('*'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/client').glob('*.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/client').glob('*.java'))
 paths.update([Path('pom.xml'), Path('bookkeeper-server/pom.xml'), Path('scripts/unified-wal/run-local-storage-tests.sh')])

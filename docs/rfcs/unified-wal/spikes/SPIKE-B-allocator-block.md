@@ -4,6 +4,8 @@
 > 对应 RFC：[RFC-0003](../RFC-0003-segment-storage-allocator.md)<br>
 > 性质：否证型；PASS最多解锁不会污染Classic cohort的isolated/discardable shadow prototype，不解锁live shadow
 
+2026-09-26实现进展：[步骤3文件基础](../implementation/local-storage/README.md)的14项定向测试覆盖真实FileChannel、framing和有限故障注入；尚未运行本Spike的allocator、恢复或性能切片，状态不提升。
+
 ## 1. 要回答的问题
 
 本Spike先验证`ArenaControlLog + shared block`切片；dedicated extent为后续有条件启用配置。各已启用scope必须满足：

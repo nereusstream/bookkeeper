@@ -1,0 +1,190 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie.storage.segment;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
+
+/** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
+final class IsolatedSegmentFiles implements AutoCloseable {
+    private final IsolatedSegmentConfig config;
+    private final List<FileChannel> data = new ArrayList<>();
+    private final long[] nextOffset;
+    private final boolean[] failed;
+    private final FileChannel lockChannel;
+    private final FileLock lock;
+    private boolean closed;
+    SegmentFileIo dataIo = new SegmentFileIo();
+
+    private IsolatedSegmentFiles(IsolatedSegmentConfig config, FileChannel lockChannel, FileLock lock) {
+        this.config = config;
+        this.lockChannel = lockChannel;
+        this.lock = lock;
+        nextOffset = new long[config.dataFiles()];
+        failed = new boolean[config.dataFiles()];
+        java.util.Arrays.fill(nextOffset, 4096);
+    }
+
+    static IsolatedSegmentFiles create(IsolatedSegmentConfig config, SegmentFileHeader identity) throws IOException {
+        return create(config, identity, new SegmentFileIo());
+    }
+
+    static IsolatedSegmentFiles create(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentFileIo io)
+            throws IOException {
+        // Never adopt, clean or truncate an existing directory, including symlinks to an existing scope.
+        Files.createDirectory(config.directory());
+        FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
+                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+        IsolatedSegmentFiles result = null;
+        try {
+            FileLock lock = guard.tryLock();
+            if (lock == null) {
+                throw new IOException("Isolated directory is locked");
+            }
+            result = new IsolatedSegmentFiles(config, guard, lock);
+            for (int i = 0; i < config.dataFiles(); i++) {
+                FileChannel channel = FileChannel.open(dataPath(config, i), StandardOpenOption.CREATE_NEW,
+                        StandardOpenOption.READ, StandardOpenOption.WRITE);
+                result.data.add(channel);
+                // Write the entire declared capacity, not a sparse seek-to-last-byte allocation.
+                ByteBuffer zeros = ByteBuffer.allocate(64 * 1024);
+                for (long offset = 0; offset < config.bytesPerFile();) {
+                    zeros.clear().limit((int) Math.min(zeros.capacity(), config.bytesPerFile() - offset));
+                    int n = zeros.remaining();
+                    io.writeFully(channel, zeros, offset);
+                    offset += n;
+                }
+                io.writeFully(channel, identity.encode(config, i), 0);
+                io.force(channel, true);
+            }
+            writeIdentity(config.directory().resolve("superblock-a"), identity.encode(config, -1), io);
+            writeIdentity(config.directory().resolve("superblock-b"), identity.encode(config, -2), io);
+            writeIdentity(config.directory().resolve("bookie-control"), identity.encode(config, -3), io);
+            writeIdentity(config.directory().resolve("arena-control"), identity.encode(config, -4), io);
+            io.force(guard, true);
+            syncDirectory(config.directory());
+            syncDirectory(config.directory().getParent());
+            return result;
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                if (result != null) {
+                    result.close();
+                } else {
+                    guard.close();
+                }
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            // Leave incomplete initialization on disk for diagnosis; it is never silently reopened.
+            throw failure;
+        }
+    }
+
+    static Path dataPath(IsolatedSegmentConfig config, int index) {
+        return config.directory().resolve("data-" + index);
+    }
+
+    synchronized void write(SegmentBatchFormat.FrozenBatch batch) throws IOException {
+        int file = batch.address().fileIndex();
+        if (closed || file < 0 || file >= data.size() || failed[file]
+                || batch.address().shard() >= config.logicalShards()
+                || file != batch.address().shard() % config.dataFiles()) {
+            throw new IOException("File is unavailable");
+        }
+        ByteBuffer bytes = batch.bytes();
+        long offset = batch.address().offset();
+        if (offset != nextOffset[file] || offset > config.bytesPerFile()
+                || bytes.remaining() > config.bytesPerFile() - offset) {
+            throw new IOException("Range is not unused or fixed capacity exhausted");
+        }
+        // Reserve before submission. Failure never returns the coordinates for reuse.
+        nextOffset[file] += bytes.remaining();
+        try {
+            dataIo.writeFully(data.get(file), bytes, offset);
+            dataIo.force(data.get(file), false);
+        } catch (IOException | RuntimeException | Error failure) {
+            failed[file] = true;
+            throw failure;
+        }
+    }
+
+    synchronized long nextOffset(int file) {
+        return nextOffset[file];
+    }
+
+    private static void writeIdentity(Path path, ByteBuffer bytes, SegmentFileIo io) throws IOException {
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            io.writeFully(channel, bytes, 0);
+            io.force(channel, true);
+        }
+    }
+
+    private static void syncDirectory(Path directory) throws IOException {
+        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+            channel.force(true);
+        }
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        IOException first = null;
+        for (FileChannel channel : data) {
+            try {
+                channel.close();
+            } catch (IOException failure) {
+                if (first == null) {
+                    first = failure;
+                } else {
+                    first.addSuppressed(failure);
+                }
+            }
+        }
+        try {
+            lock.release();
+        } catch (IOException failure) {
+            if (first == null) {
+                first = failure;
+            } else {
+                first.addSuppressed(failure);
+            }
+        }
+        try {
+            lockChannel.close();
+        } catch (IOException failure) {
+            if (first == null) {
+                first = failure;
+            } else {
+                first.addSuppressed(failure);
+            }
+        }
+        if (first != null) {
+            throw first;
+        }
+    }
+}

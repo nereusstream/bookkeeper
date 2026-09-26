@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-22）：[步骤1隔离配置](implementation/local-storage/README.md)已固定单Arena/shared-block后续实验的逻辑shard、容量、对齐与FILE_CHANNEL/OFF/SYSTEM/PARK，2项配置边界测试通过。实际文件格式/I/O、allocator和恢复尚未实现，本RFC的Gate未提升。
+实现进展（2026-09-26）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置与步骤3实验格式、独立parser、固定容量文件创建及真实FileChannel写入/同步，14项定向测试通过。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界。allocator、条件apply、entry成功、restart尚未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
