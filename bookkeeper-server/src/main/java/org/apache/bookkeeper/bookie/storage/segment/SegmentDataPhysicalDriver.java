@@ -213,6 +213,9 @@ final class SegmentDataPhysicalDriver {
         this.authority = Objects.requireNonNull(authority, "authority");
         this.prefix = Objects.requireNonNull(prefix, "prefix");
         this.hot = Objects.requireNonNull(hot, "hot");
+        if (!files.supportsLocalResults()) {
+            throw new IllegalArgumentException("Append-only physical restart has no local-result authority");
+        }
         if (!hot.matchesScope(files)) {
             throw new IllegalArgumentException("Physical driver and hot directory storage scopes differ");
         }

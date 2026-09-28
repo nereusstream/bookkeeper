@@ -21,11 +21,14 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
 final class IsolatedSegmentFiles implements AutoCloseable {
@@ -65,17 +68,19 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final boolean[] failed;
     private final FileChannel lockChannel;
     private final FileLock lock;
+    private final boolean appendOnlyRecovery;
     private int pendingReservations;
     private int activeIo;
     private boolean closed;
     SegmentFileIo dataIo = new SegmentFileIo();
 
     private IsolatedSegmentFiles(IsolatedSegmentConfig config, SegmentFileHeader identity,
-                                 FileChannel lockChannel, FileLock lock) {
+                                 FileChannel lockChannel, FileLock lock, boolean appendOnlyRecovery) {
         this.config = config;
         this.identity = identity;
         this.lockChannel = lockChannel;
         this.lock = lock;
+        this.appendOnlyRecovery = appendOnlyRecovery;
         nextOffset = new long[config.dataFiles()];
         dataIoGates = new Object[config.dataFiles()];
         java.util.Arrays.setAll(dataIoGates, ignored -> new Object());
@@ -99,7 +104,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             if (lock == null) {
                 throw new IOException("Isolated directory is locked");
             }
-            result = new IsolatedSegmentFiles(config, identity, guard, lock);
+            result = new IsolatedSegmentFiles(config, identity, guard, lock, false);
             for (int i = 0; i < config.dataFiles(); i++) {
                 FileChannel channel = FileChannel.open(dataPath(config, i), StandardOpenOption.CREATE_NEW,
                         StandardOpenOption.READ, StandardOpenOption.WRITE);
@@ -138,6 +143,63 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
     }
 
+    /** Isolated physical restart: abandon every previously granted block, including zero/unknown tails. */
+    static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                               SegmentArenaControlLog authority, SegmentFileIo recoveryIo)
+            throws IOException {
+        Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(identity, "identity");
+        Objects.requireNonNull(authority, "authority");
+        Objects.requireNonNull(recoveryIo, "recoveryIo");
+        synchronized (authority) {
+            authority.requireQuiescentRecovery(config, identity);
+            SegmentDataRecovery.validateAndSync(config, identity, authority, recoveryIo);
+            FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            IsolatedSegmentFiles result = null;
+            try {
+                FileLock lock;
+                try {
+                    lock = guard.tryLock();
+                } catch (OverlappingFileLockException overlapping) {
+                    throw new IOException("Isolated DATA writer is already active", overlapping);
+                }
+                if (lock == null) {
+                    throw new IOException("Isolated DATA writer is already active");
+                }
+                result = new IsolatedSegmentFiles(config, identity, guard, lock, true);
+                for (int file = 0; file < config.dataFiles(); file++) {
+                    FileChannel data = FileChannel.open(dataPath(config, file), StandardOpenOption.READ,
+                            StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                    result.data.add(data);
+                    if (data.size() != config.bytesPerFile()) {
+                        throw new IOException("DATA file size changed during restart");
+                    }
+                    ByteBuffer header = ByteBuffer.allocate(4096);
+                    SegmentFileIo.readFully(data, header, 0);
+                    identity.validate(header, config, file);
+                    long next = authority.grantedHighWatermark(file);
+                    if (next < 4096 || next > config.bytesPerFile() || next % config.alignment() != 0) {
+                        throw new IOException("Invalid durable allocation high watermark");
+                    }
+                    result.nextOffset[file] = next;
+                }
+                return result;
+            } catch (IOException | RuntimeException | Error failure) {
+                try {
+                    if (result == null) {
+                        guard.close();
+                    } else {
+                        result.close();
+                    }
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+                throw failure;
+            }
+        }
+    }
+
     static Path dataPath(IsolatedSegmentConfig config, int index) {
         return config.directory().resolve("data-" + index);
     }
@@ -147,6 +209,13 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     synchronized Reservation reserve(SegmentBatchFormat.FrozenBatch batch) throws IOException {
+        if (appendOnlyRecovery) {
+            throw new IOException("Restarted physical writer requires an applied Arena grant");
+        }
+        return reservePhysical(batch);
+    }
+
+    private Reservation reservePhysical(SegmentBatchFormat.FrozenBatch batch) throws IOException {
         int file = batch.address().fileIndex();
         if (closed || file < 0 || file >= data.size() || failed[file]
                 || batch.address().shard() >= config.logicalShards()
@@ -230,7 +299,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 address.generation().value())) {
             throw new IOException("DATA batch has no applied Arena allocation grant");
         }
-        return reserve(batch);
+        return reservePhysical(batch);
     }
 
     synchronized long nextOffset(int file) {
@@ -243,6 +312,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     SegmentFileHeader identity() {
         return identity;
+    }
+
+    boolean supportsLocalResults() {
+        return !appendOnlyRecovery;
     }
 
     synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {

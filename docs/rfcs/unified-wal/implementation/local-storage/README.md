@@ -66,7 +66,7 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 只读`recoverLocallyReadableStreamCandidate`完整校验目标stream的batch及每条record，并在返回候选前完成文件恢复同步；仅将Bookie重放后的本地状态中仍有exact读route且未被pending/durable tombstone切断的普通DATA位置计入有界候选；旧的未筛选物理入口保持原语义。同批两个ledger中一方被tombstone时，另一方可用一个locator名额恢复并通过本地读门槛；被终结记录即使不返回定位，其损坏仍使目标batch恢复失败。该筛选不是完整current-selector、网络授权或可写restart判定，控制状态并发变化仍由后续读取门槛复核。
 
-当前没有可写重开入口：扫描到的全零尾页不证明对应坐标从未预留或提交，不能把写指针简单退到最后一个完整batch后继续使用。只读物理清单和stream候选现携带每文件已授权范围的最高结束位置；水位以内的零页不能据此当作可重用空间。这个水位不能解除旧DATA同步错误，也不证明末端前缀或水位以后的空间已经可以写入。可写恢复仍需要完整控制关系判定必要DATA、空间used/unused与末端前缀事实及旧I/O终结证据。
+隔离文件层现可执行**仅用于物理追加**的重开：要求Arena控制状态没有未apply/I/O中的命令，先在目录锁下完整验证并同步DATA，再取得独占writer锁、复核文件身份与大小；每个文件的新指针设置在全部已apply授权块的最高结束位置。已授权块中的全零尾页、旧预留和失败坐标一律跳过，不按最后完整batch回退指针；后续仍须有新apply的Arena grant，重开句柄的原始无授权写入和会返回本地结果的DATA driver都拒绝。真实文件测试覆盖旧块零尾不复用、新stream在其后写入及双stream重开点读、活跃writer与恢复同步失败、未apply控制命令拒绝重开。此入口当前要求与Arena控制日志完全相同的隔离配置；非持久新写阈值的变更尚未接入该重开路径。该低层入口不解除旧DATA I/O错误，也不证明完整末端前缀、Bookie/current-selector或生产local success；完整服务级可写重启仍需要必要DATA选择、空间与旧I/O判定。
 
 ## 验证入口
 
@@ -80,6 +80,10 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentBatchFormatTest,SegmentBookieControlLogTest`：Arena控制、真实DATA格式/恢复及Bookie控制共83项定向测试通过，0失败/错误/跳过。此范围覆盖隔离物理append-only重开与既有owner/控制路径，不证明完整服务级可写restart或生产ACK。
+
+2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest`：隔离真实文件定向测试27项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。物理append-only重开按已apply授权水位跳过旧块零尾，在新grant后写入另一stream，重开点读仍保留两者；同步失败、活跃writer、未apply控制命令和未授权原始写入均被拒绝。此入口不返回local result，未验证服务级可写重启、旧I/O错误持久分类或掉电。
 
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：隔离Bookie控制真实文件定向测试47项通过，0失败/错误/跳过。两个独立Java子进程分别在recovery DATA本地持久结果后及DATA force前`Runtime.halt`；父进程重放双控制日志、执行DATA恢复同步并读回唯一候选，局部比对保持物理证据状态。未执行掉电、生产ACK或可写重启验证。
 

@@ -322,6 +322,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return !closed && !failed && config.equals(otherConfig) && identity.equals(otherIdentity);
     }
 
+    synchronized void requireQuiescentRecovery(IsolatedSegmentConfig otherConfig,
+                                               SegmentFileHeader otherIdentity) throws IOException {
+        if (!matchesScope(otherConfig, otherIdentity) || writing || pending != null) {
+            throw new IOException("Arena authority is unavailable or has unresolved control I/O");
+        }
+    }
+
     synchronized long durableThrough() {
         return durableThrough;
     }

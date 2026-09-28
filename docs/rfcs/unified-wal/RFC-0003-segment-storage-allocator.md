@@ -577,7 +577,7 @@ checkpoint不持久化individual reader、future、buffer reference或pin histor
 
 隔离子进程回归现分别在recovery DATA本地持久结果后、以及完整写入但DATA force前执行`Runtime.halt`。父进程重新打开Bookie/Arena控制日志，扫描并同步目标DATA，再点读并比对物理候选。这验证进程终止后的控制重放、文件锁释放与恢复同步入口；`Runtime.halt`不代表掉电，物理比对也不解除旧I/O错误未知或形成durable duplicate/ACK权威。
 
-当前`IsolatedSegmentFiles`没有可写重开入口。Arena的持久首序号不包含空间used/unused或末端durable-through。扫描零尾页无法区分未使用空间和已提交但结果不明的预留；仅凭最后完整batch位置回退写指针会冒复用未知坐标的风险。因此这一物理候选路径保持只读，直到空间使用authority、旧I/O终结及必要DATA依赖能在重启时判定。
+当前`IsolatedSegmentFiles`已有隔离的**物理append-only重开**入口：Arena控制状态须无未apply/I/O中的命令，完整验证并同步旧DATA后取得独占writer锁，重新核对文件身份；下一物理位置取每文件全部已apply授权块的最高结束位置，不复用块内全零尾页。新写必须另获已apply Arena grant；重开句柄不能交给返回local result的DATA driver，也拒绝无授权原始写入。Arena的持久首序号与授权水位仍不包含空间used/unused或末端durable-through；旧I/O错误、完整Bookie/current-selector及必要DATA依赖没有恢复判定，故此入口不等于服务级可写重启或durable duplicate权威。
 
 此路径只补正常中断留下的持久化确认，不能修补缺失/损坏prefix、ownership冲突、未解析写回错误或依赖不完整；这些仍沿原隔离/恢复规则处理，不以“再sync一次成功”解除。B2/B9/B16须执行两次故障：write完成但barrier前终止进程，重启处理重复请求，再模拟掉电；已允许成功的内容仍须存在。一次kill后可读检查不足，恢复barrier按文件报告次数/等待且不计正常Add增量。
 

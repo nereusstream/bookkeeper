@@ -1130,6 +1130,103 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void appendOnlyReopenSkipsPreviouslyGrantedZeroTailAndKeepsBothStreams() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("append-reopen"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        long nextBlock = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        ByteBuf firstEntry = entry(new byte[8], 11);
+        ByteBuf secondEntry = entry(new byte[8], 12);
+        SegmentBatchFormat.FrozenBatch first;
+        SegmentBatchFormat.FrozenBatch second;
+        try {
+            first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 11, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry)));
+            second = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 6, new Generation(1), new Generation(2), 1, nextBlock),
+                    List.of(SegmentBatchFormat.entry(context(), secondEntry)));
+        } finally {
+            firstEntry.release();
+            secondEntry.release();
+        }
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 1, 11)));
+            files.writeAuthorized(first, arena);
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(config, identity(),
+                    arena, new SegmentFileIo()));
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentFileIo failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(config, identity(),
+                    arena, failedSync));
+            assertEquals(1, failedSync.forces);
+            SegmentFileIo sync = new SegmentFileIo();
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), arena, sync)) {
+                assertEquals(1, sync.forces);
+                assertEquals(nextBlock, reopened.nextOffset(0));
+                assertThrows(IOException.class, () -> reopened.writeAuthorized(first, arena));
+                SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+                SegmentIoExecutor io = new SegmentIoExecutor(1, 1);
+                try {
+                    assertThrows(IllegalArgumentException.class, () -> new SegmentDataPhysicalDriver(
+                            0, owner, io, reopened, arena,
+                            new SegmentPhysicalPrefix(owner, 0, new Generation(2), 1, 1),
+                            new SegmentHotDirectory(owner, config, identity(), 2)));
+                } finally {
+                    io.shutdown();
+                    assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                }
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC, new UUID(0, 6), new Generation(1), 0,
+                        0, 0, new Generation(2), 6, nextBlock, 1, 1)));
+                assertThrows(IOException.class, () -> reopened.write(second));
+                assertEquals(nextBlock, reopened.nextOffset(0));
+                reopened.writeAuthorized(second, arena);
+                assertEquals(nextBlock + second.bytes().remaining(), reopened.nextOffset(0));
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentDataRecovery.PhysicalStreamCandidate oldStream =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity(), arena,
+                            new SegmentFileIo(), 0, new Generation(1), 11, 1, 1);
+            SegmentDataRecovery.PhysicalStreamCandidate newStream =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity(), arena,
+                            new SegmentFileIo(), 0, new Generation(2), 1, 1, 1);
+            assertEquals(11, SegmentPointRead.read(config, identity(), arena,
+                    oldStream.entries().get(0)).record().entryId());
+            assertEquals(12, SegmentPointRead.read(config, identity(), arena,
+                    newStream.entries().get(0)).record().entryId());
+        }
+    }
+
+    @Test
+    public void appendOnlyReopenWaitsForArenaControlApply() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("append-pending-control"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            files.close();
+            SegmentArenaControlLog.DurableBatch pending = arena.appendDurably(List.of(
+                    new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                            new UUID(0, 5), new Generation(1), 0, 0, 0,
+                            new Generation(1), 5, 4096, 1, 1)));
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), arena, new SegmentFileIo()));
+            arena.applyDurable(pending);
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), arena, new SegmentFileIo())) {
+                assertEquals(4096 + SegmentArenaControlLog.BLOCK_BYTES, reopened.nextOffset(0));
+            }
+        }
+    }
+
+    @Test
     public void laterDurableBatchWaitsForTheEarlierPhysicalStreamPrefix() throws Exception {
         runOutOfOrderPhysicalBatches(false);
     }
