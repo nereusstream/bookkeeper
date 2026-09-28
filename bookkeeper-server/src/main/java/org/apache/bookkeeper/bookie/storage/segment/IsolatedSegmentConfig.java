@@ -56,6 +56,14 @@ public record IsolatedSegmentConfig(Path directory, int arenaCount, int logicalS
                 4096, 1024 * 1024, 256, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
     }
 
+    /** Durable file scope; admission and placement limits may change after restart. */
+    boolean sameStorageScope(IsolatedSegmentConfig other) {
+        return other != null && directory.equals(other.directory)
+                && arenaCount == other.arenaCount && logicalShards == other.logicalShards
+                && dataFiles == other.dataFiles && bytesPerFile == other.bytesPerFile
+                && alignment == other.alignment && backend.equals(other.backend);
+    }
+
     private static void requireSupported(String actual, String supported, String feature) {
         if (!supported.equals(actual)) {
             throw new IllegalArgumentException(feature + " is not implemented: " + actual);

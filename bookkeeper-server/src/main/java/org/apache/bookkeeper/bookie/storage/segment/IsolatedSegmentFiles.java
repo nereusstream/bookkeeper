@@ -228,6 +228,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return nextOffset[file];
     }
 
+    synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
+        return !closed && config.sameStorageScope(otherConfig) && identity.equals(otherIdentity);
+    }
+
     private static void writeIdentity(Path path, ByteBuffer bytes, SegmentFileIo io) throws IOException {
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
             io.writeFully(channel, bytes, 0);

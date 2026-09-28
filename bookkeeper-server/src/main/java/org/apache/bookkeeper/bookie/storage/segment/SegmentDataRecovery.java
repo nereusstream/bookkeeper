@@ -34,8 +34,11 @@ final class SegmentDataRecovery {
     record Scan(long batches, long records, long validatedBytes, long zeroPages) { }
 
     /** A physical candidate only: the supplied start is not a persisted authority proof. */
-    record PhysicalStreamCandidate(Scan scan, long through, List<SegmentPointRead.Location> entries) {
+    record PhysicalStreamCandidate(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
+                                   Scan scan, long through, List<SegmentPointRead.Location> entries) {
         PhysicalStreamCandidate {
+            java.util.Objects.requireNonNull(sourceConfig, "sourceConfig");
+            java.util.Objects.requireNonNull(sourceIdentity, "sourceIdentity");
             entries = List.copyOf(entries);
         }
     }
@@ -132,7 +135,7 @@ final class SegmentDataRecovery {
         }
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
         PhysicalInventory inventory = scan(config, identity, authority, syncIo, maxEntries, probe);
-        return new PhysicalStreamCandidate(inventory.scan(), probe.contiguousThrough(firstSequence),
+        return new PhysicalStreamCandidate(config, identity, inventory.scan(), probe.contiguousThrough(firstSequence),
                 inventory.entries());
     }
 

@@ -208,7 +208,7 @@ public class SegmentBatchFormatTest {
         SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
         SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
         SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2);
-        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 2);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 2);
         CountDownLatch done = new CountDownLatch(2);
         AtomicReference<Throwable> failure = new AtomicReference<>();
         AtomicReference<List<SegmentPointRead.Location>> firstReady = new AtomicReference<>();
@@ -221,6 +221,11 @@ public class SegmentBatchFormatTest {
                     0, 0, new Generation(1), 5, 4096, 2)));
             SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, authority,
                     prefix, hot);
+            SegmentFileHeader anotherIdentity = new SegmentFileHeader(
+                    new StorageIncarnation(context().ledgerInstanceId()), new UUID(0, 10),
+                    BookieId.parse("isolated:3181"));
+            assertThrows(IllegalArgumentException.class, () -> new SegmentDataPhysicalDriver(0, owner, io, files,
+                    authority, prefix, new SegmentHotDirectory(owner, config, anotherIdentity, 2)));
             assertTrue(driver.submit(first, (candidates, cause) -> {
                 owner.requireOwner();
                 if (cause != null) {
@@ -288,7 +293,7 @@ public class SegmentBatchFormatTest {
             try {
                 SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, group.owner(0), group.io(),
                         files, authority, new SegmentPhysicalPrefix(group.owner(0), 0, new Generation(1), 1, 1),
-                        new SegmentHotDirectory(group.owner(0), config, 2));
+                        new SegmentHotDirectory(group.owner(0), config, identity(), 2));
                 assertTrue(driver.submit(batch, (locations, cause) -> {
                     group.owner(0).requireOwner();
                     published.set(locations);
@@ -331,7 +336,7 @@ public class SegmentBatchFormatTest {
         SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
         SegmentIoExecutor io = new SegmentIoExecutor(1, 2);
         SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2);
-        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 2);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 2);
         CountDownLatch done = new CountDownLatch(2);
         AtomicReference<Throwable> firstFailure = new AtomicReference<>();
         AtomicReference<Throwable> secondFailure = new AtomicReference<>();
@@ -443,7 +448,7 @@ public class SegmentBatchFormatTest {
             try {
                 SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, group.owner(0), group.io(),
                         files, authority, new SegmentPhysicalPrefix(group.owner(0), 0, new Generation(1), 1, 1),
-                        new SegmentHotDirectory(group.owner(0), config, 1));
+                        new SegmentHotDirectory(group.owner(0), config, identity(), 1));
                 assertTrue(driver.submit(batch, (locations, cause) -> {
                     group.owner(0).requireOwner();
                     published.set(locations);
@@ -718,14 +723,43 @@ public class SegmentBatchFormatTest {
                     try {
                         assertTrue(recoveredOwner.control(() -> {
                             try {
-                                SegmentHotDirectory tooSmall = new SegmentHotDirectory(recoveredOwner, config, 1);
+                                SegmentHotDirectory tooSmall = new SegmentHotDirectory(recoveredOwner, config,
+                                        identity(), 1);
                                 assertThrows(IOException.class, () -> tooSmall.restorePhysical(candidate));
                                 assertEquals(0, tooSmall.candidateCount());
-                                SegmentHotDirectory inFlight = new SegmentHotDirectory(recoveredOwner, config, 2);
+                                IsolatedSegmentConfig anotherDirectory = new IsolatedSegmentConfig(
+                                        config.directory().resolveSibling("another-directory"),
+                                        config.arenaCount(), config.logicalShards(), config.dataFiles(),
+                                        config.bytesPerFile(), config.alignment(), config.maxPayloadBytes(),
+                                        config.maxPendingEntries(), config.backend(), config.affinity(),
+                                        config.numaPolicy(), config.waitStrategy());
+                                SegmentHotDirectory wrongDirectory = new SegmentHotDirectory(recoveredOwner,
+                                        anotherDirectory, identity(), 2);
+                                assertThrows(IOException.class, () -> wrongDirectory.restorePhysical(candidate));
+                                assertEquals(0, wrongDirectory.candidateCount());
+                                SegmentFileHeader anotherIdentity = new SegmentFileHeader(
+                                        new StorageIncarnation(context().ledgerInstanceId()), new UUID(0, 10),
+                                        BookieId.parse("isolated:3181"));
+                                SegmentHotDirectory wrongIdentity = new SegmentHotDirectory(recoveredOwner, config,
+                                        anotherIdentity, 2);
+                                assertThrows(IOException.class, () -> wrongIdentity.restorePhysical(candidate));
+                                assertEquals(0, wrongIdentity.candidateCount());
+                                IsolatedSegmentConfig lowerAdmission = new IsolatedSegmentConfig(config.directory(),
+                                        config.arenaCount(), config.logicalShards(), config.dataFiles(),
+                                        config.bytesPerFile(), config.alignment(), 8, config.maxPendingEntries(),
+                                        config.backend(), config.affinity(), config.numaPolicy(),
+                                        config.waitStrategy());
+                                SegmentHotDirectory reconfigured = new SegmentHotDirectory(recoveredOwner,
+                                        lowerAdmission, identity(), 2);
+                                reconfigured.restorePhysical(candidate);
+                                assertEquals(2, reconfigured.candidateCount());
+                                SegmentHotDirectory inFlight = new SegmentHotDirectory(recoveredOwner, config,
+                                        identity(), 2);
                                 inFlight.reserve(first);
                                 assertThrows(IOException.class, () -> inFlight.restorePhysical(candidate));
                                 assertEquals(0, inFlight.candidateCount());
-                                SegmentHotDirectory hot = new SegmentHotDirectory(recoveredOwner, config, 2);
+                                SegmentHotDirectory hot = new SegmentHotDirectory(recoveredOwner, config,
+                                        identity(), 2);
                                 hot.restorePhysical(candidate);
                                 assertThrows(IOException.class, () -> hot.restorePhysical(candidate));
                                 assertEquals(2, hot.candidateCount());
@@ -889,7 +923,7 @@ public class SegmentBatchFormatTest {
         SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
         SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
         SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 11, 2);
-        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 2);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 2);
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch releaseFirst = new CountDownLatch(1);
         CountDownLatch laterCompleted = new CountDownLatch(1);
@@ -1089,7 +1123,7 @@ public class SegmentBatchFormatTest {
         SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
         SegmentIoExecutor io = new SegmentIoExecutor(1, 1);
         SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 1);
-        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 1);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 1);
         CountDownLatch done = new CountDownLatch(1);
         AtomicReference<Throwable> error = new AtomicReference<>();
         AtomicReference<List<SegmentPointRead.Location>> published = new AtomicReference<>();

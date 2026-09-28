@@ -50,6 +50,9 @@ final class SegmentDataPhysicalDriver {
         this.authority = Objects.requireNonNull(authority, "authority");
         this.prefix = Objects.requireNonNull(prefix, "prefix");
         this.hot = Objects.requireNonNull(hot, "hot");
+        if (!hot.matchesScope(files)) {
+            throw new IllegalArgumentException("Physical driver and hot directory storage scopes differ");
+        }
     }
 
     boolean submit(SegmentBatchFormat.FrozenBatch batch, Completion completion) {

@@ -50,7 +50,7 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 步骤6的重复慢路径局部原语：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`先复制至多1 MiB应用数据加36字节BK头的请求entry，再在候选位置上执行真实文件点读，比较同一ledger instance/entryId的应用payload bytes和累计ledger length。合法LAC及相应CRC差异不造成冲突，payload或累计length变化返回冲突，坏输入CRC、不同instance或entryId拒绝。调用方必须在有界I/O线程执行点读，独立完成Bookie route/auth/grant及完成时的权限复核；当前没有接入请求准入、并发pending重试或逐entry结果，`SegmentHotDirectory.reserve`仍在占用坐标前拒绝重复写入，故尚无可对外返回成功的幂等Add。
 
-步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读；`SegmentDataRecovery.recoverPhysicalStreamCandidate`还能在调用方给定shard、generation和预期起点后，对扫描到的batch按sequence排序并拒绝缺口、重复和容量超限。`SegmentHotDirectory.restorePhysical`可在原owner上把同步后的候选原子装入有界热目录，容量不足、重复坐标或仍有在途DATA时拒绝，不发布部分候选。该路径不证明传入起点来自持久authority，也不核对当前Bookie selector；当前Arena不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
+步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读；`SegmentDataRecovery.recoverPhysicalStreamCandidate`还能在调用方给定shard、generation和预期起点后，对扫描到的batch按sequence排序并拒绝缺口、重复和容量超限。`SegmentHotDirectory.restorePhysical`可在原owner上把同步后的候选原子装入有界热目录，核对候选的目录、持久文件配置及storage identity；容量不足、重复坐标、跨scope或仍有在途DATA时拒绝，不发布部分候选。新写入阈值等非持久准入设置可以变化。该路径不证明传入起点来自持久authority，也不核对当前Bookie selector；当前Arena不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
 
 当前没有可写重开入口：扫描到的全零尾页不证明对应坐标从未预留或提交，不能把写指针简单退到最后一个完整batch后继续使用。可写恢复还需要完整控制关系判定必要DATA、持久起点/空间使用事实和旧I/O终结证据；已有物理清单及恢复同步只供只读候选检查。
 
@@ -137,6 +137,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 2026-09-28 [物理合批回执](physical-batch-receipt.json)：macOS隔离定向测试34项中29执行通过、5项Linux专属测试跳过，0失败/错误；Spotless/Checkstyle通过。同一冻结DATA batch的两条不同entry经隔离group的owner/I/O路径完成一次真实FileChannel force，连续物理前缀释放后返回两个可点读候选。未实现逐entry local result或Bookie ACK。
 
 2026-09-28 本轮执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest`：22项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。真实文件关闭writer、重开控制日志、扫描同步后，候选在新owner的有界热目录恢复并再次点读；容量不足和重复恢复均不产生部分发布。此处没有持久起点、Bookie selector/权限或可写重启证据。
+
+2026-09-28 scope复核执行`scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest`：24项通过，0失败/错误/跳过。恢复候选装入新owner热目录前拒绝错误目录或storage identity；运行时物理驱动也拒绝与DATA文件不匹配的热目录。同一持久scope调整新写payload阈值后仍可装入旧候选。此为隔离路径的误接线防护，不证明Bookie selector或生产恢复权限。
 
 ## 未覆盖范围
 

@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -48,19 +49,26 @@ final class SegmentHotDirectory {
 
     private final SegmentOwnerLoop owner;
     private final IsolatedSegmentConfig config;
+    private final SegmentFileHeader identity;
     private final int maxEntries;
     private final Map<Key, SegmentPointRead.Location> candidates = new HashMap<>();
     private final Map<Key, Admission> pendingKeys = new HashMap<>();
     private final Map<SegmentBatchFormat.FrozenBatch, Admission> pendingBatches = new IdentityHashMap<>();
     private final Map<IsolatedSegmentFiles.Reservation, Admission> byPhysical = new IdentityHashMap<>();
 
-    SegmentHotDirectory(SegmentOwnerLoop owner, IsolatedSegmentConfig config, int maxEntries) {
+    SegmentHotDirectory(SegmentOwnerLoop owner, IsolatedSegmentConfig config, SegmentFileHeader identity,
+                        int maxEntries) {
         if (maxEntries < 1) {
             throw new IllegalArgumentException("Positive hot locator capacity required");
         }
         this.owner = owner;
-        this.config = config;
+        this.config = Objects.requireNonNull(config, "config");
+        this.identity = Objects.requireNonNull(identity, "identity");
         this.maxEntries = maxEntries;
+    }
+
+    boolean matchesScope(IsolatedSegmentFiles files) {
+        return files.matchesScope(config, identity);
     }
 
     Admission reserve(SegmentBatchFormat.FrozenBatch batch) throws IOException {
@@ -142,6 +150,9 @@ final class SegmentHotDirectory {
     /** Install only physical candidates from a quiesced, synced scan; no Bookie read or ACK authority. */
     void restorePhysical(SegmentDataRecovery.PhysicalStreamCandidate stream) throws IOException {
         owner.requireOwner();
+        if (!config.sameStorageScope(stream.sourceConfig()) || !identity.equals(stream.sourceIdentity())) {
+            throw new IOException("Physical recovery candidate belongs to another storage scope");
+        }
         if (!pendingBatches.isEmpty() || !pendingKeys.isEmpty() || !byPhysical.isEmpty()) {
             throw new IOException("Physical recovery cannot overlap DATA submissions");
         }
