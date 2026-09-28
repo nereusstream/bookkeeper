@@ -78,37 +78,18 @@ final class SegmentDuplicateCheck {
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog arena,
             SegmentBookieControlLog bookie, ProfileLedgerContext context, long entryId, ByteBuffer incoming,
             BooleanSupplier canComplete, SegmentFileIo syncIo, int maxBatches, int maxEntries) throws IOException {
-        if (!bookie.matchesScope(config, identity) || !arena.matchesScope(config, identity)) {
-            throw new IOException("Recovered duplicate authority belongs to another storage scope");
-        }
-        int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
-        SegmentArenaControlLog.SingleStream stream = arena.singleStreamForShard(shard).orElse(null);
-        if (stream == null) {
-            return PhysicalComparison.NOT_READY;
-        }
-        SegmentDataRecovery.PhysicalStreamCandidate recovered =
-                SegmentDataRecovery.recoverLocallyReadableStreamCandidate(config, identity, arena,
-                        bookie, syncIo, shard, stream.generation(), stream.firstSequence(), maxBatches, maxEntries);
-        SegmentPointRead.Location selected = null;
-        for (SegmentPointRead.Location location : recovered.entries()) {
-            if (location.context().equals(context) && location.entryId() == entryId) {
-                if (selected != null) {
-                    return PhysicalComparison.NOT_READY;
-                }
-                selected = location;
-            }
-        }
-        if (selected == null) {
-            return PhysicalComparison.NOT_READY;
-        }
-        boolean same = sameLogicalPayload(config, identity, arena, selected, context, incoming);
-        if (!canComplete.getAsBoolean()) {
-            return PhysicalComparison.STALE_ADMISSION;
-        }
-        if (!arena.singleStreamForShard(shard).filter(stream::equals).isPresent()) {
-            return PhysicalComparison.NOT_READY;
-        }
-        return same ? PhysicalComparison.MATCHED_CANDIDATE : PhysicalComparison.CONFLICTING_CANDIDATE;
+        return SegmentDataRecovery.withLocallyReadableSingleStreamLocation(config, identity, arena, bookie,
+                syncIo, context, entryId, maxBatches, maxEntries, selected -> {
+                    boolean same = sameLogicalPayload(config, identity, arena, selected.location(), context, incoming);
+                    if (!canComplete.getAsBoolean()) {
+                        return PhysicalComparison.STALE_ADMISSION;
+                    }
+                    int shard = selected.location().address().shard();
+                    if (!arena.singleStreamForShard(shard).filter(selected.stream()::equals).isPresent()) {
+                        return PhysicalComparison.NOT_READY;
+                    }
+                    return same ? PhysicalComparison.MATCHED_CANDIDATE : PhysicalComparison.CONFLICTING_CANDIDATE;
+                }).orElse(PhysicalComparison.NOT_READY);
     }
 
     static boolean sameLogicalPayload(IsolatedSegmentConfig config, SegmentFileHeader identity,

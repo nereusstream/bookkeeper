@@ -37,6 +37,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -1429,6 +1430,22 @@ public class SegmentBookieControlLogTest {
                     SegmentDuplicateCheck.inspectRecoveredNormalCandidate(config, identity, arena, bookie,
                             bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), conflict,
                             new SegmentFileIo(), 1, 1));
+            assertEquals(1, SegmentDataRecovery.withLocallyReadableSingleStreamLocation(
+                    config, identity, arena, bookie, new SegmentFileIo(), context(), 1, 1, 1, selected -> {
+                        assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                                config, identity, arena, new SegmentFileIo()));
+                        return SegmentPointRead.read(config, identity, arena, selected.location()).record().entryId();
+                    }).orElseThrow().longValue());
+            assertThrows(IOException.class, () -> SegmentDataRecovery.withLocallyReadableSingleStreamLocation(
+                    config, identity, arena, bookie, new SegmentFileIo(), context(), 1, 1, 1, selected -> {
+                        throw new IOException("Point read failed after selection");
+                    }));
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
+                    config, identity, arena, new SegmentFileIo())) {
+                assertTrue(reopened.matchesScope(config, identity));
+            }
+            assertThrows(IOException.class, () -> SegmentPointRead.readRecoveredSingleStreamLocallyGated(
+                    config, identity, arena, bookie, new SegmentFileIo(), context(), 2, 1, 1));
             assertThrows(IOException.class, () -> SegmentDuplicateCheck.inspectRecoveredNormalCandidate(
                     config, identity, arena, bookie,
                     bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), same,
@@ -1479,6 +1496,53 @@ public class SegmentBookieControlLogTest {
                 release.countDown();
                 assertEquals(SegmentDuplicateCheck.PhysicalComparison.STALE_ADMISSION,
                         duplicate.get(5, TimeUnit.SECONDS));
+            } finally {
+                release.countDown();
+                reader.join(5000);
+            }
+        }
+    }
+
+    @Test
+    public void recoveredReadLosesEligibilityWhenTombstonedDuringSync() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            files.writeAuthorized(batch(config, 1, 1, 4096), arena);
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo sync = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Recovered read sync was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            FutureTask<SegmentPointRead.Result> read = new FutureTask<>(
+                    () -> SegmentPointRead.readRecoveredSingleStreamLocallyGated(
+                            config, identity, arena, bookie, sync, context(), 1, 1, 1));
+            Thread reader = new Thread(read);
+            reader.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+                release.countDown();
+                assertTrue(assertThrows(ExecutionException.class,
+                        () -> read.get(5, TimeUnit.SECONDS)).getCause() instanceof IOException);
             } finally {
                 release.countDown();
                 reader.join(5000);
@@ -2698,6 +2762,8 @@ public class SegmentBookieControlLogTest {
             assertEquals(SegmentDuplicateCheck.PhysicalComparison.NOT_READY,
                     SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, arena, bookie,
                             bookie.admitRecovery(same).orElseThrow(), new SegmentFileIo(), 2, 2));
+            assertThrows(IOException.class, () -> SegmentPointRead.readRecoveredSingleStreamLocallyGated(
+                    config, identity, arena, bookie, new SegmentFileIo(), context(), 2, 2, 2));
         }
     }
 
@@ -2731,14 +2797,10 @@ public class SegmentBookieControlLogTest {
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
                         1024 * 1024, key((byte) 3), VALIDATOR)) {
             SegmentFileIo sync = new SegmentFileIo();
-            SegmentDataRecovery.PhysicalStreamCandidate candidate =
-                    SegmentDataRecovery.recoverLocallyReadableStreamCandidate(config, identity, arena, bookie,
-                            sync, 0, new Generation(1), 1, 1, 1);
-            assertEquals(1, candidate.through());
-            assertEquals(1, candidate.entries().size());
+            SegmentPointRead.Result recovered = SegmentPointRead.readRecoveredSingleStreamLocallyGated(
+                    config, identity, arena, bookie, sync, context(), 1, 1, 1);
             assertEquals(1, sync.forces);
-            assertEquals(1, SegmentPointRead.readLocallyGated(config, identity, arena, bookie,
-                    candidate.entries().get(0)).record().entryId());
+            assertEquals(1, recovered.record().entryId());
             assertEquals(SegmentDuplicateCheck.PhysicalComparison.MATCHED_CANDIDATE,
                     SegmentDuplicateCheck.inspectRecoveredNormalCandidate(config, identity, arena, bookie,
                             bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(),

@@ -179,6 +179,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 普通Add另有真实子进程回归：分别在本地结果之后和DATA barrier之前`Runtime.halt`，父进程重开双控制日志，对目标stream完成恢复同步，再持Bookie读票据点读和普通写票据比较候选。这验证普通路径跨进程恢复的物理证据，不模拟掉电，也不返回重启后的durable duplicate结果。
 
+当前无MOVE/FREE且目标shard只有一个Arena stream时，隔离恢复点读可从已重放的Bookie本地route取得读票据，在DATA writer排他锁内完成连续stream扫描、必要同步、唯一坐标选择和独立record点读，再复核route与stream。普通/recovery重复候选比较复用同一受锁保护的选择过程；无唯一位置或出现第二个stream时返回未就绪而非确定不存在。该受限选择不包含一般current selector、allocation pin、网络读授权或可写restart。
+
 隔离recovery DATA新增真实子进程边界测试：本地持久结果后或完整写入但barrier前直接终止进程，父进程重放双控制日志、执行DATA恢复同步并点读候选。它验证进程中断与只读恢复入口，不模拟掉电，也不将物理比对提升为durable duplicate或生产ACK。
 
 另一个两次`Runtime.halt`回归验证进程重启后的物理追加：新进程同步旧DATA并跳过旧授权块零尾，在新grant下写另一stream；再次终止后父进程分别点读两条物理stream，旧recovery重复请求仍因同shard多stream保持`NOT_READY`。此回归不完成服务级可写重启或第二次掉电验证。

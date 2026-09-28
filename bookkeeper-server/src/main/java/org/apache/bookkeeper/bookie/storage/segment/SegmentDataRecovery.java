@@ -27,7 +27,9 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
@@ -42,6 +44,92 @@ final class SegmentDataRecovery {
             java.util.Objects.requireNonNull(sourceIdentity, "sourceIdentity");
             entries = List.copyOf(entries);
             grantedHighWatermarks = List.copyOf(grantedHighWatermarks);
+        }
+    }
+
+    record SelectedPhysicalLocation(SegmentArenaControlLog.SingleStream stream, SegmentPointRead.Location location) { }
+
+    @FunctionalInterface
+    interface SelectedLocationAction<T> {
+        T apply(SelectedPhysicalLocation selected) throws IOException;
+    }
+
+    private static final class QuiescedFiles implements AutoCloseable {
+        private final FileChannel guard;
+        private final FileLock lock;
+
+        private QuiescedFiles(FileChannel guard, FileLock lock) {
+            this.guard = guard;
+            this.lock = lock;
+        }
+
+        private static QuiescedFiles acquire(IsolatedSegmentConfig config) throws IOException {
+            FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            try {
+                FileLock lock;
+                try {
+                    lock = guard.tryLock();
+                } catch (OverlappingFileLockException overlapping) {
+                    throw new IOException("DATA writer is active", overlapping);
+                }
+                if (lock == null) {
+                    throw new IOException("DATA writer is active");
+                }
+                return new QuiescedFiles(guard, lock);
+            } catch (IOException | RuntimeException | Error failure) {
+                try {
+                    guard.close();
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+                throw failure;
+            }
+        }
+
+        private boolean valid() {
+            return lock.isValid();
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                lock.release();
+            } finally {
+                guard.close();
+            }
+        }
+    }
+
+    /** Executes the read or comparison under writer exclusion in the isolated no-MOVE/FREE scope. */
+    static <T> Optional<T> withLocallyReadableSingleStreamLocation(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog arena,
+            SegmentBookieControlLog bookie, SegmentFileIo syncIo, ProfileLedgerContext context,
+            long entryId, int maxBatches, int maxEntries, SelectedLocationAction<T> action) throws IOException {
+        if (!bookie.matchesScope(config, identity) || !arena.matchesScope(config, identity)) {
+            throw new IOException("Recovered location authority belongs to another storage scope");
+        }
+        try (QuiescedFiles files = QuiescedFiles.acquire(config)) {
+            int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
+            SegmentArenaControlLog.SingleStream stream = arena.singleStreamForShard(shard).orElse(null);
+            if (stream == null) {
+                return Optional.empty();
+            }
+            PhysicalStreamCandidate recovered = recoverStreamCandidate(config, identity, arena, bookie,
+                    syncIo, shard, stream.generation(), stream.firstSequence(), maxBatches, maxEntries, files);
+            SegmentPointRead.Location selected = null;
+            for (SegmentPointRead.Location location : recovered.entries()) {
+                if (location.context().equals(context) && location.entryId() == entryId) {
+                    if (selected != null) {
+                        return Optional.empty();
+                    }
+                    selected = location;
+                }
+            }
+            if (selected == null || !arena.singleStreamForShard(shard).filter(stream::equals).isPresent()) {
+                return Optional.empty();
+            }
+            return Optional.of(action.apply(new SelectedPhysicalLocation(stream, selected)));
         }
     }
 
@@ -170,6 +258,19 @@ final class SegmentDataRecovery {
                                                                   Generation streamGeneration,
                                                                   long firstSequence, int maxBatches,
                                                                   int maxEntries) throws IOException {
+        return recoverStreamCandidate(config, identity, authority, bookie, syncIo, shard, streamGeneration,
+                firstSequence, maxBatches, maxEntries, null);
+    }
+
+    private static PhysicalStreamCandidate recoverStreamCandidate(IsolatedSegmentConfig config,
+                                                                  SegmentFileHeader identity,
+                                                                  SegmentArenaControlLog authority,
+                                                                  SegmentBookieControlLog bookie,
+                                                                  SegmentFileIo syncIo, int shard,
+                                                                  Generation streamGeneration,
+                                                                  long firstSequence, int maxBatches,
+                                                                  int maxEntries, QuiescedFiles files)
+            throws IOException {
         if (syncIo == null || shard < 0 || shard >= config.logicalShards() || streamGeneration == null
                 || firstSequence < 0 || maxBatches < 1 || maxEntries < 1) {
             throw new IllegalArgumentException("Bounded physical stream recovery inputs required");
@@ -178,7 +279,9 @@ final class SegmentDataRecovery {
             throw new IOException("Physical stream start is not backed by applied Arena control");
         }
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
-        PhysicalInventory inventory = scan(config, identity, authority, syncIo, maxEntries, probe, bookie);
+        PhysicalInventory inventory = files == null
+                ? scan(config, identity, authority, syncIo, maxEntries, probe, bookie)
+                : scanWhileLocked(config, identity, authority, syncIo, maxEntries, probe, bookie, files);
         if (bookie != null && !bookie.matchesScope(config, identity)) {
             throw new IOException("Bookie read route became unavailable during DATA recovery");
         }
@@ -190,108 +293,104 @@ final class SegmentDataRecovery {
                                           SegmentArenaControlLog authority, SegmentFileIo syncIo,
                                           int maxEntries, StreamProbe stream,
                                           SegmentBookieControlLog bookie) throws IOException {
-        if (!authority.matchesScope(config, identity)) {
+        try (QuiescedFiles files = QuiescedFiles.acquire(config)) {
+            return scanWhileLocked(config, identity, authority, syncIo, maxEntries, stream, bookie, files);
+        }
+    }
+
+    private static PhysicalInventory scanWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog authority, SegmentFileIo syncIo,
+                                                    int maxEntries, StreamProbe stream,
+                                                    SegmentBookieControlLog bookie, QuiescedFiles files)
+            throws IOException {
+        if (!files.valid() || !authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
-        try (FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
-                StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-            FileLock lock;
-            try {
-                lock = guard.tryLock();
-            } catch (OverlappingFileLockException overlapping) {
-                throw new IOException("DATA writer is active", overlapping);
-            }
-            if (lock == null) {
-                throw new IOException("DATA writer is active");
-            }
-            try (lock) {
-                long batches = 0;
-                long records = 0;
-                long validatedBytes = 0;
-                long zeroPages = 0;
-                List<SegmentPointRead.Location> entries = new ArrayList<>();
-                for (int file = 0; file < config.dataFiles(); file++) {
-                    try (FileChannel data = syncIo == null
-                            ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
-                                    StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
-                            : FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
-                                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-                        if (data.size() != config.bytesPerFile()) {
-                            throw new IOException("DATA file size mismatch");
-                        }
-                        ByteBuffer header = ByteBuffer.allocate(4096);
-                        SegmentFileIo.readFully(data, header, 0);
-                        identity.validate(header, config, file);
-                        for (long offset = 4096; offset < config.bytesPerFile();) {
-                            if (stream != null && !authority.hasAppliedStreamAt(file, offset,
-                                    stream.shard, stream.generation.value())) {
-                                offset += 4096;
-                                continue;
-                            }
-                            ByteBuffer page = ByteBuffer.allocate(4096);
-                            SegmentFileIo.readFully(data, page, offset);
-                            if (allZero(page)) {
-                                zeroPages++;
-                                offset += 4096;
-                                continue;
-                            }
-                            SegmentBatchFormat.Address address = address(page, offset);
-                            if (address.fileIndex() != file
-                                    || address.shard() % config.dataFiles() != file) {
-                                throw new IOException("DATA batch claims a different physical file");
-                            }
-                            int length = SegmentBatchParser.batchLength(page.slice(0, 128), address,
-                                    config.bytesPerFile());
-                            if (!authority.hasAppliedGrant(file, offset, length, address.shard(),
-                                    address.streamGeneration().value(), address.allocation(),
-                                    address.generation().value())) {
-                                throw new IOException("DATA batch has no matching applied grant");
-                            }
-                            ByteBuffer content = ByteBuffer.allocate(length);
-                            SegmentFileIo.readFully(data, content, offset);
-                            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
-                                    config.bytesPerFile());
-                            for (SegmentBatchParser.Record record : parsed.records()) {
-                                if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
-                                        != address.shard()) {
-                                    throw new IOException("DATA record belongs to another logical shard");
-                                }
-                            }
-                            if (stream != null) {
-                                stream.observe(address);
-                            }
-                            if (maxEntries > 0) {
-                                List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
-                                for (int i = 0; i < parsed.records().size(); i++) {
-                                    SegmentBatchParser.Record record = parsed.records().get(i);
-                                    if (record.origin() == SegmentBatchFormat.ENTRY_DATA
-                                            && (stream == null || stream.matches(address))
-                                            && (bookie == null || bookie.locallyReadableContext(record.context()))) {
-                                        if (entries.size() == maxEntries) {
-                                            throw new IOException("Physical recovery inventory capacity exhausted");
-                                        }
-                                        entries.add(locations.get(i));
-                                    }
-                                }
-                            }
-                            batches++;
-                            records += parsed.records().size();
-                            validatedBytes += length;
-                            offset += length;
-                        }
-                        if (syncIo != null) {
-                            syncIo.force(data, false);
+        long batches = 0;
+        long records = 0;
+        long validatedBytes = 0;
+        long zeroPages = 0;
+        List<SegmentPointRead.Location> entries = new ArrayList<>();
+        for (int file = 0; file < config.dataFiles(); file++) {
+            try (FileChannel data = syncIo == null
+                    ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
+                            StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                    : FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
+                            StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                if (data.size() != config.bytesPerFile()) {
+                    throw new IOException("DATA file size mismatch");
+                }
+                ByteBuffer header = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(data, header, 0);
+                identity.validate(header, config, file);
+                for (long offset = 4096; offset < config.bytesPerFile();) {
+                    if (stream != null && !authority.hasAppliedStreamAt(file, offset,
+                            stream.shard, stream.generation.value())) {
+                        offset += 4096;
+                        continue;
+                    }
+                    ByteBuffer page = ByteBuffer.allocate(4096);
+                    SegmentFileIo.readFully(data, page, offset);
+                    if (allZero(page)) {
+                        zeroPages++;
+                        offset += 4096;
+                        continue;
+                    }
+                    SegmentBatchFormat.Address address = address(page, offset);
+                    if (address.fileIndex() != file
+                            || address.shard() % config.dataFiles() != file) {
+                        throw new IOException("DATA batch claims a different physical file");
+                    }
+                    int length = SegmentBatchParser.batchLength(page.slice(0, 128), address,
+                            config.bytesPerFile());
+                    if (!authority.hasAppliedGrant(file, offset, length, address.shard(),
+                            address.streamGeneration().value(), address.allocation(),
+                            address.generation().value())) {
+                        throw new IOException("DATA batch has no matching applied grant");
+                    }
+                    ByteBuffer content = ByteBuffer.allocate(length);
+                    SegmentFileIo.readFully(data, content, offset);
+                    SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
+                            config.bytesPerFile());
+                    for (SegmentBatchParser.Record record : parsed.records()) {
+                        if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                                != address.shard()) {
+                            throw new IOException("DATA record belongs to another logical shard");
                         }
                     }
+                    if (stream != null) {
+                        stream.observe(address);
+                    }
+                    if (maxEntries > 0) {
+                        List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+                        for (int i = 0; i < parsed.records().size(); i++) {
+                            SegmentBatchParser.Record record = parsed.records().get(i);
+                            if (record.origin() == SegmentBatchFormat.ENTRY_DATA
+                                    && (stream == null || stream.matches(address))
+                                    && (bookie == null || bookie.locallyReadableContext(record.context()))) {
+                                if (entries.size() == maxEntries) {
+                                    throw new IOException("Physical recovery inventory capacity exhausted");
+                                }
+                                entries.add(locations.get(i));
+                            }
+                        }
+                    }
+                    batches++;
+                    records += parsed.records().size();
+                    validatedBytes += length;
+                    offset += length;
                 }
-                List<Long> grantedHighWatermarks = new ArrayList<>(config.dataFiles());
-                for (int file = 0; file < config.dataFiles(); file++) {
-                    grantedHighWatermarks.add(authority.grantedHighWatermark(file));
+                if (syncIo != null) {
+                    syncIo.force(data, false);
                 }
-                return new PhysicalInventory(new Scan(batches, records, validatedBytes, zeroPages), entries,
-                        grantedHighWatermarks);
             }
         }
+        List<Long> grantedHighWatermarks = new ArrayList<>(config.dataFiles());
+        for (int file = 0; file < config.dataFiles(); file++) {
+            grantedHighWatermarks.add(authority.grantedHighWatermark(file));
+        }
+        return new PhysicalInventory(new Scan(batches, records, validatedBytes, zeroPages), entries,
+                grantedHighWatermarks);
     }
 
     private static SegmentBatchFormat.Address address(ByteBuffer page, long offset) throws IOException {

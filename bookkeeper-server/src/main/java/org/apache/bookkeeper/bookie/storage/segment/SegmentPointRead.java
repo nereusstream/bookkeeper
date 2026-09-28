@@ -121,6 +121,31 @@ final class SegmentPointRead {
         }
     }
 
+    /** Isolated read-only restart path while the Arena has no MOVE/FREE or multi-stream selector. */
+    static Result readRecoveredSingleStreamLocallyGated(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog arena,
+            SegmentBookieControlLog bookie, SegmentFileIo syncIo, ProfileLedgerContext context,
+            long entryId, int maxBatches, int maxEntries) throws IOException {
+        SegmentBookieControlLog.ReadAdmission admission = bookie.admitRead(context)
+                .orElseThrow(() -> new IOException("Bookie read route is unavailable"));
+        try {
+            return SegmentDataRecovery.withLocallyReadableSingleStreamLocation(config, identity, arena, bookie,
+                    syncIo, context, entryId, maxBatches, maxEntries, selected -> {
+                        Result result = read(config, identity, arena, selected.location());
+                        if (!bookie.canCompleteRead(admission)) {
+                            throw new IOException("Bookie read route changed before completion");
+                        }
+                        int shard = selected.location().address().shard();
+                        if (!arena.singleStreamForShard(shard).filter(selected.stream()::equals).isPresent()) {
+                            throw new IOException("Recovered read stream changed before completion");
+                        }
+                        return result;
+                    }).orElseThrow(() -> new IOException("Recovered read is not ready or is ambiguous"));
+        } finally {
+            admission.finish();
+        }
+    }
+
     private static ByteBuffer readAligned(FileChannel data, long start, long end) throws IOException {
         if (end < start || end - start > SegmentBatchFormat.MAX_BATCH) {
             throw new IOException("Invalid aligned read span");
