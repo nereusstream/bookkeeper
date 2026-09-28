@@ -280,7 +280,7 @@ asynchronously:
 
 接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、合法LAC/digest变化、相同payload但累计length冲突、corrupt digest、乱序/holes/`E>W`、DATA与locator间crash、ACK后立即合法点读、index全删恢复、stale handle与delete race；补充同批L1 fence/L2成功、提交后timeout再到不同payload、batch 11 unknown/12已完成及隔离恢复。分别记录正常新写与重复/冲突慢路径的索引读、hash、分配和复制成本。
 
-2026-09-28局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。受控normal批次现于物理候选发布后、票据释放前按entry复核准入generation；真实force期间只有L1 activation generation改变时，L1为`STALE_ADMISSION`、L2为`LOCAL_DURABLE`，两条物理候选均保留。当前重复准入仍被隔离热目录拒绝；请求级route/auth、并发pending合并、慢路径幂等结果及同批明确fence失败场景尚未接入，上述合同和接受场景未完成。
+2026-09-28局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。受控normal批次现于物理候选发布后、票据释放前按entry复核准入generation；真实force期间只有L1 activation generation改变时，L1为`STALE_ADMISSION`、L2为`LOCAL_DURABLE`，两条物理候选均保留。已发布运行期候选的重复慢路径接入原owner和有界I/O服务，点读后再复核Bookie准入与候选；在途及仅由重启扫描恢复的物理候选返回`NOT_READY`，不能据此宣布absence或durable成功。当前重复物理写入仍被隔离热目录拒绝；请求级并发pending合并、完整route/auth/selector、恢复可发布前缀及同批明确fence失败场景尚未接入，上述合同和接受场景未完成。
 
 ## 7. Recovery Add
 

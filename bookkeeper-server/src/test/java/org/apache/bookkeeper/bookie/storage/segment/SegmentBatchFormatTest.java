@@ -763,6 +763,8 @@ public class SegmentBatchFormatTest {
                                 hot.restorePhysical(candidate);
                                 assertThrows(IOException.class, () -> hot.restorePhysical(candidate));
                                 assertEquals(2, hot.candidateCount());
+                                assertTrue(hot.liveDurableCandidate(context(), 11).isEmpty());
+                                assertTrue(hot.liveDurableCandidate(context(), 12).isEmpty());
                                 hotLocations.set(List.of(hot.candidate(context(), 11).orElseThrow(),
                                         hot.candidate(context(), 12).orElseThrow()));
                             } catch (Throwable failure) {

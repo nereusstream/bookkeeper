@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的真实DATA write/force接原owner volatile连续物理前缀/有界物理热候选驱动及真实点读的重复payload比较原语、步骤7的对齐单record点读/停写后文件同步、重启物理清单、单stream序号候选检查及新owner有界物理热目录重建局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储状态与回执。Bookie受控控制日志及normal批次逐entry准入复核已有局部实现；请求级幂等、完整allocator恢复、生产逐entry成功及restart仍未实现，本RFC的Gate未提升。
+实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的真实DATA write/force接原owner volatile连续物理前缀/有界物理热候选驱动、受控normal逐entry结果及运行期已发布候选的owner/I/O重复点读慢路径、步骤7的对齐单record点读/停写后文件同步、重启物理清单、单stream序号候选检查及新owner有界物理热目录重建局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储状态与回执。Bookie受控控制日志及normal批次逐entry准入复核已有局部实现；请求级幂等、完整allocator恢复、生产逐entry成功及restart仍未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
@@ -277,7 +277,7 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 首批选择**每个物理append stream的连续前缀恢复和成功发布**。bounded batch table记录乱序completion；只有从已验证起点开始连续的batch均取得durability，才推进内存中的physical durable-through并允许对应entry发布locator/local success。batch 11未durable而12先完成时，12保持等待，不能先ACK再在restart的11缺口截断后缀。该序号属于物理stream，不是ledger entryId或LAC，也不是Arena控制日志sequence；不同ledger可同批，`E>W`不要求本地entryId连续。
 
-实现状态：隔离物理驱动已将DATA坐标预留、真实write/force、owner连续前缀和有界热候选接成调用路径；热目录在DATA预留前占定位容量，只有连续结果才发布普通`ENTRY_DATA`候选，搬迁副本不进入普通候选。11/12乱序、首批force失败使两个未决回调报错且不发布候选、容量满额，以及同批两条entry共享一次force并各得可点读物理候选的局部真实文件测试已覆盖。起点尚非持久恢复证据；受控normal路径仅在候选发布后逐entry复核捕获的Bookie准入generation，完整请求级权限、幂等、生产成功和restart前缀重建仍未接通，不能以该候选直接ACK。
+实现状态：隔离物理驱动已将DATA坐标预留、真实write/force、owner连续前缀和有界热候选接成调用路径；热目录在DATA预留前占定位容量，只有连续结果才发布普通`ENTRY_DATA`候选，搬迁副本不进入普通候选。11/12乱序、首批force失败使两个未决回调报错且不发布候选、容量满额，以及同批两条entry共享一次force并各得可点读物理候选的局部真实文件测试已覆盖。起点尚非持久恢复证据；受控normal路径在候选发布后逐entry复核捕获的Bookie准入generation，已发布运行期候选还可经原owner和有界I/O服务点读比较重复payload。重启扫描候选仅是物理位置，不获得运行期durable标记；完整请求级权限、在途幂等、生产成功和restart前缀重建仍未接通，不能以该候选直接ACK。
 
 允许有界I/O queue depth大于1；物理前缀排序在各stream内，不新增跨shard全局sequencer，但共享文件的barrier成本/错误范围不因此隔离。batch边界、stream lineage与范围发现由§9的可恢复framing和完整allocator authority给出；physical durable-through按§12先验证候选，再凭独立有效证据或必要恢复同步重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut按stream扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。所谓“截断DATA后缀”仅指将已证明可丢弃的特定stream/generation未成功后缀排除出有效批次范围，不等于缩短共享文件；required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
 

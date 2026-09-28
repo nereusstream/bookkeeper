@@ -228,6 +228,14 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return nextOffset[file];
     }
 
+    IsolatedSegmentConfig config() {
+        return config;
+    }
+
+    SegmentFileHeader identity() {
+        return identity;
+    }
+
     synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
         return !closed && config.sameStorageScope(otherConfig) && identity.equals(otherIdentity);
     }

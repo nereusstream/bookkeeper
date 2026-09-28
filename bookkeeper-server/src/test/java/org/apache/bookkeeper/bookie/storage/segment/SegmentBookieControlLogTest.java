@@ -39,6 +39,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.crypto.SecretKey;
@@ -173,10 +174,15 @@ public class SegmentBookieControlLogTest {
     }
 
     private static ByteBuf entry(ProfileLedgerContext context, long entryId) throws Exception {
+        return entry(context, entryId, -1, 8, (byte) 0);
+    }
+
+    private static ByteBuf entry(ProfileLedgerContext context, long entryId, long lac,
+                                 long ledgerLength, byte payload) throws Exception {
         DigestManager digest = DigestManager.instantiate(context.ledgerId(), new byte[0], DigestType.CRC32C,
                 UnpooledByteBufAllocator.DEFAULT, false);
-        ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(entryId, -1, 8,
-                Unpooled.wrappedBuffer(new byte[8]), new byte[0], 0);
+        ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(entryId, lac, ledgerLength,
+                Unpooled.wrappedBuffer(filled(8, payload)), new byte[0], 0);
         ByteBuf entry = Unpooled.buffer(encoded.readableBytes());
         try {
             for (int i = 0; i < encoded.size(); i++) {
@@ -189,6 +195,18 @@ public class SegmentBookieControlLogTest {
             throw failure;
         } finally {
             encoded.release();
+        }
+    }
+
+    private static ByteBuffer entryBytes(ProfileLedgerContext context, long entryId, long lac,
+                                         long ledgerLength, byte payload) throws Exception {
+        ByteBuf entry = entry(context, entryId, lac, ledgerLength, payload);
+        try {
+            ByteBuffer result = ByteBuffer.allocate(entry.readableBytes());
+            entry.getBytes(entry.readerIndex(), result);
+            return result.flip();
+        } finally {
+            entry.release();
         }
     }
 
@@ -210,6 +228,23 @@ public class SegmentBookieControlLogTest {
         arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                 SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
                 0, 0, new Generation(1), 5, 4096, blocks)));
+    }
+
+    private static SegmentDataPhysicalDriver.DuplicateStatus checkPublishedDuplicate(
+            SegmentDataPhysicalDriver driver, SegmentBookieControlLog bookie, ByteBuffer entry) throws Exception {
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<SegmentDataPhysicalDriver.DuplicateStatus> status = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        assertTrue(driver.checkPublishedNormalDuplicate(bookie,
+                bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), entry,
+                (result, cause) -> {
+                    status.set(result);
+                    failure.set(cause);
+                    completed.countDown();
+                }));
+        assertTrue(completed.await(5, TimeUnit.SECONDS));
+        assertNull(failure.get());
+        return status.get();
     }
 
     @Test
@@ -620,6 +655,119 @@ public class SegmentBookieControlLogTest {
                         .record().entryId());
             } finally {
                 releaseForce.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void publishedNormalDuplicateUsesRealPointReadButPendingIsNotAbsence() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch written = new CountDownLatch(1);
+        CountDownLatch duplicateReading = new CountDownLatch(1);
+        CountDownLatch releaseDuplicate = new CountDownLatch(1);
+        AtomicBoolean holdNextRead = new AtomicBoolean();
+        AtomicReference<SegmentDataPhysicalDriver.NormalStatus> writeStatus = new AtomicReference<>();
+        AtomicReference<Throwable> writeFailure = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 4, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2,
+                    task -> new Thread(task, "isolated-duplicate-io"), () -> {
+                        if (holdNextRead.compareAndSet(true, false)) {
+                            duplicateReading.countDown();
+                            try {
+                                if (!releaseDuplicate.await(5, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException("Duplicate point-read was not released");
+                                }
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(interrupted);
+                            }
+                        }
+                    });
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                assertTrue(driver.submitNormal(bookie, batch(config, 1, 1, 4096), List.of(
+                        bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                        (results, failure) -> {
+                            writeStatus.set(results.get(0).status());
+                            writeFailure.set(failure);
+                            written.countDown();
+                        }));
+                owner.start();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.NOT_READY,
+                        checkPublishedDuplicate(driver, bookie, entryBytes(context(), 1, 0, 8, (byte) 0)));
+                releaseForce.countDown();
+                assertTrue(written.await(5, TimeUnit.SECONDS));
+                assertNull(writeFailure.get());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, writeStatus.get());
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE,
+                        checkPublishedDuplicate(driver, bookie, entryBytes(context(), 1, 0, 8, (byte) 0)));
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.CONFLICT,
+                        checkPublishedDuplicate(driver, bookie, entryBytes(context(), 1, 0, 8, (byte) 1)));
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.CONFLICT,
+                        checkPublishedDuplicate(driver, bookie, entryBytes(context(), 1, 0, 9, (byte) 0)));
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.NOT_READY,
+                        checkPublishedDuplicate(driver, bookie, entryBytes(context(), 2, 0, 8, (byte) 0)));
+                CountDownLatch checked = new CountDownLatch(1);
+                AtomicReference<SegmentDataPhysicalDriver.DuplicateStatus> checkedStatus = new AtomicReference<>();
+                AtomicReference<Throwable> checkedFailure = new AtomicReference<>();
+                holdNextRead.set(true);
+                assertTrue(driver.checkPublishedNormalDuplicate(bookie,
+                        bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(),
+                        entryBytes(context(), 1, 0, 8, (byte) 0), (result, failure) -> {
+                            checkedStatus.set(result);
+                            checkedFailure.set(failure);
+                            checked.countDown();
+                        }));
+                assertTrue(duplicateReading.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        bookie.submitBatch(List.of(activateReplacement(44, 4))).get(0).status());
+                releaseDuplicate.countDown();
+                assertTrue(checked.await(5, TimeUnit.SECONDS));
+                assertNull(checkedFailure.get());
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.STALE_ADMISSION, checkedStatus.get());
+                ByteBuffer corrupt = entryBytes(context(), 1, 0, 8, (byte) 0);
+                corrupt.put(32, (byte) (corrupt.get(32) ^ 1));
+                SegmentBookieControlLog.Admission invalid = bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow();
+                assertThrows(IOException.class, () -> driver.checkPublishedNormalDuplicate(
+                        bookie, invalid, corrupt, (result, failure) -> { }));
+                owner.stopAdmission();
+                assertFalse(driver.checkPublishedNormalDuplicate(bookie,
+                        bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(),
+                        entryBytes(context(), 1, 0, 8, (byte) 0), (result, failure) -> { }));
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
+                releaseForce.countDown();
+                releaseDuplicate.countDown();
                 io.shutdown();
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
                 owner.stopAdmission();

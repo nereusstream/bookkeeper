@@ -42,7 +42,7 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 步骤6的物理前缀局部切片：`IsolatedSegmentFiles`已将有界DATA坐标预留与已预留批次的实际write/force分开。预留在I/O前占用固定文件范围；失败不退回坐标，并停止该文件新写。`SegmentPhysicalPrefix`只在原shard owner上接收同一stream generation的递增batch sequence；I/O completion必须对应已预留batch且其真实force返回，才可推进连续物理前缀。较晚batch先durable仍等待前批；前批同步不确定时不释放后批，不凭后批完整字节报告本地成功。当前tracker的起点由隔离调用者显式提供，未从持久checkpoint证明；它只返回物理可发布候选，不实现Bookie权限复查、热定位或逐entry result。
 
-步骤6继续接入有界物理热候选：`SegmentHotDirectory`在原owner上从独立parser解析的冻结batch中提取普通`ENTRY_DATA`位置，在占用DATA坐标前预留固定locator与pending容量，再把预留绑定到同一真实文件reservation。只有`SegmentPhysicalPrefix`释放连续、已force的reservation后，才将这些位置从pending移入可点读候选；同批`RELOCATION_COPY`不进入普通候选。容量满额、重复逻辑坐标在写入前明确拒绝；目录准入仍不处理合法LAC封装变化，也不把拒绝冒充同坐标幂等。候选没有Bookie route/fence/tombstone/selector权限，也不等于local result；无RocksDB接管或淘汰时达到硬上限就背压新DATA。
+步骤6继续接入有界物理热候选：`SegmentHotDirectory`在原owner上从独立parser解析的冻结batch中提取普通`ENTRY_DATA`位置，在占用DATA坐标前预留固定locator与pending容量，再把预留绑定到同一真实文件reservation。只有`SegmentPhysicalPrefix`释放连续、已force的reservation后，才将这些位置从pending移入可点读候选；同批`RELOCATION_COPY`不进入普通候选。容量满额、重复逻辑坐标在写入前明确拒绝；目录准入仍不处理合法LAC封装变化，也不把拒绝冒充同坐标幂等。运行期force发布与重启扫描恢复的物理候选在目录中分别标记；后者可供点读验证，但缺少持久stream起点及selector证明，不能用于幂等durable成功。候选自身没有Bookie route/fence/tombstone/selector权限，也不等于local result；无RocksDB接管或淘汰时达到硬上限就背压新DATA。
 
 `SegmentDataPhysicalDriver`已把上述局部原语接成隔离的真实文件路径：原owner先占热候选容量、核对Arena grant并预留DATA坐标，再将write/force交给有界I/O服务；完成事件回原owner，只有连续前缀释放后才发布候选并回调。物理失败会将所有尚未完成的回调报错，保留已占坐标，不释放后批候选。受控normal入口在提交前核对冻结batch每条ENTRY_DATA与Bookie预准入票据的context，失败或owner拒收时释放票据；已提交批次直到实际I/O与原owner回调均终结才释放，较早batch失败时不会因后批提前收到失败回调而越过fence切点。原物理实验入口仍只产出候选；normal入口在候选发布后、票据释放前逐entry检查捕获的准入generation，同批可分别返回`LOCAL_DURABLE`或`STALE_ADMISSION`，物理失败返回`UNKNOWN`且不产生成功。pending fence在已准入ticket之后，仍等待该ticket终结；单条逻辑失败不删除已force的物理候选。此结果仅为隔离本地判定，尚无请求级幂等、完整read selector或Bookie ACK；重启前缀起点仍待实现。
 
@@ -50,7 +50,7 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 该驱动也已在`SegmentExecutionGroup`的现有owner/I/O服务上验证排空：已受理的真实DATA force挂起时，group关闭返回未终结且DATA文件拒绝关闭；force完成、原owner回调可点读候选后，group才排空退出。此为隔离执行组的局部生命周期证据，仍未接入Bookie服务启动与停止。
 
-步骤6的重复慢路径局部原语：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`先复制至多1 MiB应用数据加36字节BK头的请求entry，再在候选位置上执行真实文件点读，比较同一ledger instance/entryId的应用payload bytes和累计ledger length。合法LAC及相应CRC差异不造成冲突，payload或累计length变化返回冲突，坏输入CRC、不同instance或entryId拒绝。调用方必须在有界I/O线程执行点读，独立完成Bookie route/auth/grant及完成时的权限复核；当前没有接入请求级准入、并发pending重试或慢路径结果，`SegmentHotDirectory.reserve`仍在占用坐标前拒绝重复写入，故尚无可对外返回成功的幂等Add。
+步骤6的重复慢路径：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`比较真实候选中同一ledger instance/entryId的应用payload bytes和累计ledger length。受控`SegmentDataPhysicalDriver.checkPublishedNormalDuplicate`在捕获Bookie准入后，先复制并校验至多1 MiB应用数据加36字节BK头的输入，再在原owner上查询仅限运行期已force发布的候选；命中后由现有有界I/O服务点读，completion回原owner复核准入generation及候选位置，才返回`SAME_DURABLE`或`CONFLICT`。合法LAC及相应CRC差异不造成冲突，payload或累计length变化冲突，坏输入CRC在提交前拒绝；读失败返回`UNKNOWN`，在途/未定位或仅由重启扫描恢复的候选返回`NOT_READY`，不推断absence。当前尚无请求级坐标占用、并发pending合并与waiter/bytes总账；`SegmentHotDirectory.reserve`仍在物理写入前拒绝重复坐标，故这条已发布候选慢路径不能单独构成对外幂等Add。
 
 步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读；`SegmentDataRecovery.recoverPhysicalStreamCandidate`还能在调用方给定shard、generation和预期起点后，对扫描到的batch按sequence排序并拒绝缺口、重复和容量超限。`SegmentHotDirectory.restorePhysical`可在原owner上把同步后的候选原子装入有界热目录，核对候选的目录、持久文件配置及storage identity；容量不足、重复坐标、跨scope或仍有在途DATA时拒绝，不发布部分候选。新写入阈值等非持久准入设置可以变化。该路径不证明传入起点来自持久authority，也不核对当前Bookie selector；当前Arena不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
 
@@ -68,6 +68,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-28 本次执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest,SegmentBatchFormatTest`：隔离真实文件定向测试39项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。force未完成时重复检查返回`NOT_READY`；已发布候选的不同LAC同payload、不同payload、累计length冲突及坏CRC均沿实际owner/I/O/点读路径验证；受控点读被延迟时更新activation generation，完成时返回`STALE_ADMISSION`而非旧成功；坏CRC或owner拒收后无遗留Bookie准入票据，后续fence可推进；重启扫描候选没有运行期durable标记。尚未验证在途请求合并、整体内存字节上限、可写restart或掉电。
 
 2026-09-28 本次执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest,SegmentBatchFormatTest`：隔离真实文件定向测试38项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle检查通过。同批两条entry在一次force后按各自准入generation分别得到`STALE_ADMISSION`与`LOCAL_DURABLE`，较早物理前缀失败的回调只得到`UNKNOWN`；这不覆盖请求级幂等、同批明确fence失败、可写restart、掉电或生产ACK。
 
@@ -148,4 +150,4 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 ## 未覆盖范围
 
-步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制剩余状态及Arena/DATA恢复闭环、步骤6合批/权限化热定位/逐entry结果/请求级幂等、步骤7持久起点、selector与pin/完整restart尚未实现。物理热候选及其只读重建、重复比较、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
+步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制剩余状态及Arena/DATA恢复闭环、步骤6完整合批准入/权限化热定位/生产逐entry结果/请求级幂等、步骤7持久起点、selector与pin/完整restart尚未实现。物理热候选及其只读重建、重复比较、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。

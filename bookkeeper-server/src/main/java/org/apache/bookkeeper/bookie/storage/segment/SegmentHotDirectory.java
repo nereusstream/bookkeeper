@@ -33,6 +33,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 final class SegmentHotDirectory {
     private record Key(ProfileLedgerContext context, long entryId) { }
 
+    private record Candidate(SegmentPointRead.Location location, boolean liveDurable) { }
+
     static final class Admission {
         private final SegmentBatchFormat.FrozenBatch batch;
         private final List<Key> keys;
@@ -51,7 +53,7 @@ final class SegmentHotDirectory {
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
     private final int maxEntries;
-    private final Map<Key, SegmentPointRead.Location> candidates = new HashMap<>();
+    private final Map<Key, Candidate> candidates = new HashMap<>();
     private final Map<Key, Admission> pendingKeys = new HashMap<>();
     private final Map<SegmentBatchFormat.FrozenBatch, Admission> pendingBatches = new IdentityHashMap<>();
     private final Map<IsolatedSegmentFiles.Reservation, Admission> byPhysical = new IdentityHashMap<>();
@@ -140,7 +142,7 @@ final class SegmentHotDirectory {
         for (int i = 0; i < admission.keys.size(); i++) {
             Key key = admission.keys.get(i);
             pendingKeys.remove(key);
-            candidates.put(key, admission.locations.get(i));
+            candidates.put(key, new Candidate(admission.locations.get(i), true));
         }
         byPhysical.remove(ready.reservation());
         pendingBatches.remove(admission.batch);
@@ -168,13 +170,22 @@ final class SegmentHotDirectory {
             }
         }
         for (SegmentPointRead.Location location : entries) {
-            candidates.put(new Key(location.context(), location.entryId()), location);
+            candidates.put(new Key(location.context(), location.entryId()), new Candidate(location, false));
         }
     }
 
     Optional<SegmentPointRead.Location> candidate(ProfileLedgerContext context, long entryId) {
         owner.requireOwner();
-        return Optional.ofNullable(candidates.get(new Key(context, entryId)));
+        Candidate candidate = candidates.get(new Key(context, entryId));
+        return candidate == null ? Optional.empty() : Optional.of(candidate.location());
+    }
+
+    /** Restored physical candidates lack the stream/selector proof needed for local duplicate success. */
+    Optional<SegmentPointRead.Location> liveDurableCandidate(ProfileLedgerContext context, long entryId) {
+        owner.requireOwner();
+        Candidate candidate = candidates.get(new Key(context, entryId));
+        return candidate != null && candidate.liveDurable()
+                ? Optional.of(candidate.location()) : Optional.empty();
     }
 
     int pendingBatches() {

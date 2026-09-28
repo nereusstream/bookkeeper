@@ -89,7 +89,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    /** Held through physical DATA termination, including an RPC timeout or an explicitly failed normal result. */
+    /** Held through normal DATA termination or duplicate point-read completion. */
     static final class Admission {
         private final SegmentBookieControlLog owner;
         private final LedgerState state;
@@ -373,10 +373,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return Optional.of(new Admission(this, state));
     }
 
-    synchronized void claimForPhysical(List<Admission> admissions) throws IOException {
+    synchronized void claimForDriver(List<Admission> admissions) throws IOException {
         requireWritable();
         if (admissions.isEmpty()) {
-            throw new IllegalArgumentException("Physical DATA requires admission for every entry");
+            throw new IllegalArgumentException("Driver requires admission for every entry");
         }
         Map<Admission, Boolean> distinct = new IdentityHashMap<>();
         for (Admission admission : admissions) {
@@ -390,7 +390,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    /** Check the captured normal admission before its physical driver releases the ticket. */
+    /** Check the captured normal admission before its I/O driver releases the ticket. */
     synchronized boolean canCompleteNormal(Admission admission) {
         if (admission.owner != this || !admission.claimed || admission.terminal) {
             throw new IllegalArgumentException("Normal result requires a live physical admission");

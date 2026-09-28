@@ -18,12 +18,14 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Real DATA I/O and isolated normal results; no production Bookie ACK authority. */
@@ -43,6 +45,15 @@ final class SegmentDataPhysicalDriver {
     @FunctionalInterface
     interface NormalCompletion {
         void complete(List<NormalResult> results, Throwable failure);
+    }
+
+    enum DuplicateStatus {
+        SAME_DURABLE, CONFLICT, STALE_ADMISSION, NOT_READY, UNKNOWN
+    }
+
+    @FunctionalInterface
+    interface DuplicateCompletion {
+        void complete(DuplicateStatus status, Throwable failure);
     }
 
     private static final class Obligation {
@@ -127,7 +138,7 @@ final class SegmentDataPhysicalDriver {
         Objects.requireNonNull(batch, "batch");
         Objects.requireNonNull(completion, "completion");
         List<SegmentBookieControlLog.Admission> input = List.copyOf(admissions);
-        bookie.claimForPhysical(input);
+        bookie.claimForDriver(input);
         List<SegmentBatchParser.Record> records;
         try {
             if (!bookie.matchesScope(files)) {
@@ -169,6 +180,102 @@ final class SegmentDataPhysicalDriver {
         };
         Obligation obligation = new Obligation(physical, input);
         return submitPhysical(batch, obligation);
+    }
+
+    /**
+     * Slow path for a previously published live normal coordinate. No candidate is not proof of absence.
+     * The caller first acquires one Bookie admission; this method owns it after a successful claim.
+     */
+    boolean checkPublishedNormalDuplicate(SegmentBookieControlLog bookie,
+                                          SegmentBookieControlLog.Admission admission,
+                                          ByteBuffer incomingEntry, DuplicateCompletion completion)
+            throws IOException {
+        Objects.requireNonNull(bookie, "bookie");
+        Objects.requireNonNull(incomingEntry, "incomingEntry");
+        Objects.requireNonNull(completion, "completion");
+        bookie.claimForDriver(List.of(admission));
+        ProfileLedgerContext context = admission.context();
+        long entryId;
+        ByteBuffer copy;
+        try {
+            if (!bookie.matchesScope(files)) {
+                throw new IOException("Bookie control log and DATA files have different storage scopes");
+            }
+            int length = incomingEntry.remaining();
+            if (length < SegmentBatchFormat.ENTRY_OVERHEAD
+                    || length > 1024 * 1024 + SegmentBatchFormat.ENTRY_OVERHEAD) {
+                throw new IOException("Invalid duplicate BK entry length");
+            }
+            copy = ByteBuffer.allocate(length);
+            copy.put(incomingEntry.slice()).flip();
+            entryId = SegmentEntryIdentity.parse(context, copy).entryId();
+        } catch (IOException | RuntimeException | Error failure) {
+            admission.driverTerminal();
+            throw failure;
+        }
+        AtomicReference<DuplicateStatus> status = new AtomicReference<>(DuplicateStatus.NOT_READY);
+        AtomicReference<SegmentPointRead.Location> selected = new AtomicReference<>();
+        Obligation obligation = new Obligation((unused, failure) -> {
+            DuplicateStatus result = failure == null ? status.get() : DuplicateStatus.UNKNOWN;
+            if (result == DuplicateStatus.SAME_DURABLE || result == DuplicateStatus.CONFLICT) {
+                if (!bookie.canCompleteNormal(admission)) {
+                    result = DuplicateStatus.STALE_ADMISSION;
+                } else if (!hot.liveDurableCandidate(context, entryId).filter(selected.get()::equals).isPresent()) {
+                    result = DuplicateStatus.NOT_READY;
+                }
+            }
+            completion.complete(result, failure);
+        }, List.of(admission));
+        boolean accepted;
+        try {
+            accepted = owner.submit(shard, new SegmentOwnerLoop.Command() {
+                private final AtomicBoolean started = new AtomicBoolean();
+                private boolean submitted;
+
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    SegmentPointRead.Location location = hot.liveDurableCandidate(context, entryId).orElse(null);
+                    if (location == null) {
+                        obligation.physicalTerminal();
+                        ticket.complete(() -> deliverDuplicate(obligation, null));
+                        return;
+                    }
+                    selected.set(location);
+                    io.submit(ticket, () -> {
+                        started.set(true);
+                        try {
+                            boolean same = SegmentDuplicateCheck.sameLogicalPayload(files.config(),
+                                    files.identity(), authority, location, context, copy);
+                            status.set(same ? DuplicateStatus.SAME_DURABLE : DuplicateStatus.CONFLICT);
+                        } finally {
+                            obligation.physicalTerminal();
+                        }
+                    }, failure -> {
+                        if (!started.get()) {
+                            obligation.physicalTerminal();
+                        }
+                        deliverDuplicate(obligation, failure);
+                    });
+                    submitted = true;
+                }
+
+                @Override
+                public void failed(Throwable failure) {
+                    owner.requireOwner();
+                    if (!submitted && !started.get()) {
+                        obligation.physicalTerminal();
+                    }
+                    deliverDuplicate(obligation, failure);
+                }
+            });
+        } catch (RuntimeException | Error failure) {
+            obligation.abortBeforeOwner();
+            throw failure;
+        }
+        if (!accepted) {
+            obligation.abortBeforeOwner();
+        }
+        return accepted;
     }
 
     private boolean submitPhysical(SegmentBatchFormat.FrozenBatch batch, Obligation obligation) {
@@ -299,6 +406,13 @@ final class SegmentDataPhysicalDriver {
         }
         if (callbackFailure != null) {
             throw new IllegalStateException("Physical failure callback failed", callbackFailure);
+        }
+    }
+
+    private static void deliverDuplicate(Obligation obligation, Throwable failure) {
+        Throwable callbackFailure = deliver(obligation, null, failure, null);
+        if (callbackFailure != null) {
+            throw new IllegalStateException("Duplicate completion callback failed", callbackFailure);
         }
     }
 
