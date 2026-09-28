@@ -1,0 +1,21 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_ARENA_CONTROL_OWNER_IO_ONLY",
+  "sourceBaseCommit": "3cbe1e8695a844677e0aa4179a4765fa0cf2dd9a",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoop.java": "a779fe2937a5b57d01b7790850e7ab4925ec3a0dd313cb3e5a6f4117a7774a34",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLogTest.java": "4c8b3e1d745510a55ce19e9970ddcc7597d82f958d22f636a6851867c0e9ca38"
+  },
+  "fixture": "one owner with DATA admission capacity one and separate control capacity one, one bounded I/O worker, one real Arena control file; hold DATA and control I/O, stop admission, finish force and owner apply, then replay after close",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-JDoVLXvl",
+  "inputSha256": "2f6bf24222eaa502e8d6f421e69b5b2f1a245e9bd08b1ead8f4e6b8447c15cbf",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentOwnerLoopTest,SegmentBatchFormatTest",
+  "mavenLogSha256": "a74fb8998974f9bf72083d0d778dc9ef9b268616ad004aba601e09fa28064a3d",
+  "junit": {
+    "SegmentArenaControlLogTest": {"tests": 5, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "1fa00f56bed38bf765f2047a9dc8b766a1bf4f53e53aac80ce974b0efac0e636"},
+    "SegmentOwnerLoopTest": {"tests": 6, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "8f2209e59a73d1c0ac3ce3574573fc7202ef4c783c11d6b0bfb63e7fa5ea31d4"},
+    "SegmentBatchFormatTest": {"tests": 16, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "c104dc75fb8f8ad70b930e9c97303123a061f60fbae3583707602ceab20fefff"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Separate bounded owner-side control admission/completion and an Arena control I/O-to-owner apply test while the shared I/O worker had capacity. No reserved control I/O service/queue, Bookie control log, runtime service driver, cross-Arena ordering, protected credential persistence, local Add result, power-loss or production authority."
+}

@@ -25,8 +25,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
 /**
- * Fixed platform-thread owner for a static subset of shards. DATA admission reserves its eventual
- * completion slot. Handlers must be bounded and must not perform blocking I/O on this thread.
+ * Fixed platform-thread owner for a static subset of shards. DATA and asynchronous control admissions
+ * each reserve their eventual completion slots. Handlers must be bounded and never block on I/O here.
  */
 final class SegmentOwnerLoop {
     interface Command {
@@ -35,16 +35,20 @@ final class SegmentOwnerLoop {
         void failed(Throwable cause);
     }
 
-    /** One admitted batch's completion obligation, retained across timeouts and I/O submission. */
+    private record ControlTask(Runnable action, boolean awaitsCompletion) { }
+
+    /** One admitted operation's completion obligation, retained across timeouts and I/O submission. */
     final class Ticket {
         private final Command command;
+        private final boolean control;
         private boolean posted;
         private boolean ioSubmitted;
         private volatile Throwable commandFailure;
         private Runnable completion;
 
-        private Ticket(Command command) {
+        private Ticket(Command command, boolean control) {
             this.command = command;
+            this.control = control;
         }
 
         // May be called by an I/O thread. Even after admission closes, this slot remains reserved.
@@ -55,7 +59,7 @@ final class SegmentOwnerLoop {
                     throw new IllegalStateException("Completion already posted");
                 }
                 completion = action;
-                if (!completions.offer(this)) {
+                if (!(control ? controlCompletions : completions).offer(this)) {
                     throw new IllegalStateException("Reserved completion capacity violated");
                 }
                 posted = true;
@@ -83,13 +87,16 @@ final class SegmentOwnerLoop {
     private final int workerId;
     private final int workerCount;
     private final int capacity;
+    private final int controlCapacity;
     private final ArrayBlockingQueue<Ticket>[] data;
     private final ArrayBlockingQueue<Ticket> completions;
-    private final ArrayBlockingQueue<Runnable> controls;
+    private final ArrayBlockingQueue<Ticket> controlCompletions;
+    private final ArrayBlockingQueue<ControlTask> controls;
     private final long[] deadlines;
     private final Runnable[] due;
     private final Thread thread;
     private int pending;
+    private int controlPending;
     private boolean accepting = true;
     private volatile Throwable failure;
     private int nextShard;
@@ -112,11 +119,13 @@ final class SegmentOwnerLoop {
         this.workerCount = workerCount;
         this.workerId = workerId;
         this.capacity = capacity;
+        this.controlCapacity = controlCapacity;
         data = new ArrayBlockingQueue[logicalShards];
         for (int shard = workerId; shard < logicalShards; shard += workerCount) {
             data[shard] = new ArrayBlockingQueue<>(capacity);
         }
         completions = new ArrayBlockingQueue<>(capacity);
+        controlCompletions = new ArrayBlockingQueue<>(controlCapacity);
         controls = new ArrayBlockingQueue<>(controlCapacity);
         deadlines = new long[logicalShards];
         due = new Runnable[logicalShards];
@@ -165,7 +174,7 @@ final class SegmentOwnerLoop {
             if (!accepting || pending == capacity) {
                 return false;
             }
-            Ticket ticket = new Ticket(command);
+            Ticket ticket = new Ticket(command, false);
             if (!data[shard].offer(ticket)) {
                 throw new IllegalStateException("DATA capacity accounting violated");
             }
@@ -178,9 +187,27 @@ final class SegmentOwnerLoop {
     boolean control(Runnable action) {
         Objects.requireNonNull(action, "action");
         synchronized (gate) {
-            if (!accepting || !controls.offer(action)) {
+            if (!accepting || controlPending == controlCapacity
+                    || !controls.offer(new ControlTask(action, false))) {
                 return false;
             }
+            controlPending++;
+        }
+        LockSupport.unpark(thread);
+        return true;
+    }
+
+    boolean submitControl(Command command) {
+        Objects.requireNonNull(command, "command");
+        synchronized (gate) {
+            if (!accepting || controlPending == controlCapacity) {
+                return false;
+            }
+            Ticket ticket = new Ticket(command, true);
+            if (!controls.offer(new ControlTask(() -> dispatch(ticket), true))) {
+                throw new IllegalStateException("Control capacity accounting violated");
+            }
+            controlPending++;
         }
         LockSupport.unpark(thread);
         return true;
@@ -228,6 +255,12 @@ final class SegmentOwnerLoop {
         }
     }
 
+    int controlPending() {
+        synchronized (gate) {
+            return controlPending;
+        }
+    }
+
     private void requireShard(int shard) {
         if (shard < 0 || shard >= logicalShards || shard % workerCount != workerId) {
             throw new IllegalArgumentException("Shard belongs to another owner");
@@ -257,30 +290,29 @@ final class SegmentOwnerLoop {
                 placementCheck.run();
             }
             boolean work = pool != null && pool.drainReturns();
-            Ticket completed = completions.poll();
+            Ticket completed = controlCompletions.poll();
             if (completed != null) {
                 work = true;
-                try {
-                    if (completed.commandFailure != null) {
-                        completed.command.failed(completed.commandFailure);
-                    } else {
-                        completed.completion.run();
-                    }
-                } catch (Throwable cause) {
-                    recordFailure(cause);
-                } finally {
-                    synchronized (gate) {
-                        pending--;
-                    }
-                }
+                complete(completed);
             }
-            Runnable control = controls.poll();
+            completed = completions.poll();
+            if (completed != null) {
+                work = true;
+                complete(completed);
+            }
+            ControlTask control = controls.poll();
             if (control != null) {
                 work = true;
                 try {
-                    control.run();
+                    control.action().run();
                 } catch (Throwable cause) {
                     recordFailure(cause);
+                } finally {
+                    if (!control.awaitsCompletion()) {
+                        synchronized (gate) {
+                            controlPending--;
+                        }
+                    }
                 }
             }
             // One DATA command from each owned shard per round, even under a permanently hot shard.
@@ -293,21 +325,7 @@ final class SegmentOwnerLoop {
                 Ticket ticket = data[shard].poll();
                 if (ticket != null) {
                     work = true;
-                    try {
-                        if (failure != null) {
-                            ticket.fail(failure);
-                        } else {
-                            ticket.command.run(ticket);
-                        }
-                    } catch (Throwable cause) {
-                        recordFailure(cause);
-                        synchronized (gate) {
-                            ticket.commandFailure = cause;
-                            if (!ticket.posted && !ticket.ioSubmitted) {
-                                ticket.fail(cause);
-                            }
-                        }
-                    }
+                    dispatch(ticket);
                 }
             }
             long delay = Long.MAX_VALUE;
@@ -329,7 +347,7 @@ final class SegmentOwnerLoop {
                 }
             }
             synchronized (gate) {
-                if (!accepting && pending == 0 && controls.isEmpty() && !hasDeadline()
+                if (!accepting && pending == 0 && controlPending == 0 && controls.isEmpty() && !hasDeadline()
                         && (pool == null || pool.outstanding() == 0)) {
                     return;
                 }
@@ -343,6 +361,44 @@ final class SegmentOwnerLoop {
                     LockSupport.park(this);
                 } else {
                     LockSupport.parkNanos(this, delay);
+                }
+            }
+        }
+    }
+
+    private void dispatch(Ticket ticket) {
+        try {
+            if (failure != null) {
+                ticket.fail(failure);
+            } else {
+                ticket.command.run(ticket);
+            }
+        } catch (Throwable cause) {
+            recordFailure(cause);
+            synchronized (gate) {
+                ticket.commandFailure = cause;
+                if (!ticket.posted && !ticket.ioSubmitted) {
+                    ticket.fail(cause);
+                }
+            }
+        }
+    }
+
+    private void complete(Ticket ticket) {
+        try {
+            if (ticket.commandFailure != null) {
+                ticket.command.failed(ticket.commandFailure);
+            } else {
+                ticket.completion.run();
+            }
+        } catch (Throwable cause) {
+            recordFailure(cause);
+        } finally {
+            synchronized (gate) {
+                if (ticket.control) {
+                    controlPending--;
+                } else {
+                    pending--;
                 }
             }
         }
