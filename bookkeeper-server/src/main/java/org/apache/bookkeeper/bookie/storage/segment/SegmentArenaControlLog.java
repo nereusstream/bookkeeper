@@ -263,6 +263,18 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return true;
     }
 
+    /** Select recovery pages from applied allocation ownership; full batch identity is checked separately. */
+    synchronized boolean hasAppliedStreamAt(int file, long offset, int shard, long streamGeneration) {
+        if (failed || closed || file < 0 || file >= config.dataFiles()
+                || offset < FIRST_RECORD || offset >= config.bytesPerFile()
+                || offset % config.alignment() != 0) {
+            return false;
+        }
+        Grant grant = allocations.get(new Slot(file, (offset - FIRST_RECORD) / BLOCK_BYTES));
+        return grant != null && grant.command().ownerShard() == shard
+                && grant.command().ownerGeneration().value() == streamGeneration;
+    }
+
     synchronized OptionalLong streamFirstSequence(int shard, long generation) {
         if (failed || closed) {
             return OptionalLong.empty();

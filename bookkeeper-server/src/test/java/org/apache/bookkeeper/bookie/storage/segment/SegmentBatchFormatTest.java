@@ -861,7 +861,29 @@ public class SegmentBatchFormatTest {
             assertEquals(50, newerCandidate.through());
             assertEquals(50, newerCandidate.entries().get(0).entryId());
             assertEquals(1, newerCandidate.entries().size());
-            assertEquals(2, newerCandidate.scan().batches());
+            assertEquals(1, newerCandidate.scan().batches());
+
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                ByteBuffer original = ByteBuffer.allocate(1);
+                SegmentFileIo.readFully(data, original, 4096);
+                new SegmentFileIo().writeFully(data,
+                        ByteBuffer.wrap(new byte[] {(byte) (original.get(0) ^ 1)}), 4096);
+                data.force(false);
+            }
+            assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalInventory(
+                    config, identity(), replay, new SegmentFileIo(), 1));
+            assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
+                    config, identity(), replay, new SegmentFileIo(), 0, new Generation(1), 11, 1, 1));
+            SegmentDataRecovery.PhysicalStreamCandidate stillRequired =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity(), replay,
+                            new SegmentFileIo(), 0, new Generation(2), 50, 1, 1);
+            assertEquals(50, stillRequired.through());
+            assertEquals(1, stillRequired.scan().batches());
+            assertEquals(50, stillRequired.entries().get(0).entryId());
+            assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
+                    config, identity(), replay, new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false),
+                    0, new Generation(2), 50, 1, 1));
         }
     }
 

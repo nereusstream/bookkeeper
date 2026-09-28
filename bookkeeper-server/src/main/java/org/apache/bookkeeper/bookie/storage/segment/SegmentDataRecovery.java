@@ -191,6 +191,11 @@ final class SegmentDataRecovery {
                         SegmentFileIo.readFully(data, header, 0);
                         identity.validate(header, config, file);
                         for (long offset = 4096; offset < config.bytesPerFile();) {
+                            if (stream != null && !authority.hasAppliedStreamAt(file, offset,
+                                    stream.shard, stream.generation.value())) {
+                                offset += 4096;
+                                continue;
+                            }
                             ByteBuffer page = ByteBuffer.allocate(4096);
                             SegmentFileIo.readFully(data, page, offset);
                             if (allZero(page)) {
