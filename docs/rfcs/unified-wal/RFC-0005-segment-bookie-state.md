@@ -133,7 +133,7 @@ cluster READY/standard membership先提交、local activation后消费；route/i
 
 ### 5.2 下一原型的真实持久化拓扑
 
-状态：**局部隔离实现 / 整体未完成**。`INSTALL`与`ACTIVATE`的Bookie控制文件切片已有真实FileChannel写入、force、顺序apply及完整重放；它只接受调用方提供的typed committed authority，不接真实MetadataStore、mTLS授权、Bookie服务或DATA成功路径。fence/grant/tombstone、checkpoint/rotation与完整启动仍未实施。在new BookieId/new storage scope内的目标拓扑为：
+状态：**局部隔离实现 / 整体未完成**。`INSTALL`与`ACTIVATE`的Bookie控制文件切片已有真实FileChannel写入、force、顺序apply及完整重放；受控`FENCE`先切断新准入，等待已准入票据标记物理终结后再force，重放可恢复fenced状态。它只接受调用方提供的typed committed authority或受控fence凭据，尚未接真实MetadataStore、mTLS授权、Bookie服务或DATA成功路径。fence票据与真实DATA I/O、grant/tombstone、checkpoint/rotation及完整启动仍未实施。在new BookieId/new storage scope内的目标拓扑为：
 
 ```text
 Bookie-level protected control log + A/B checkpoint

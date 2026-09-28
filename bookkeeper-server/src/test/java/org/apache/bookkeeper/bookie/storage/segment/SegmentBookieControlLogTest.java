@@ -19,6 +19,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -30,6 +31,11 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.common.profile.DurabilityMode;
@@ -47,6 +53,7 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.net.BookieId;
 import org.junit.Rule;
 import org.junit.Test;
@@ -112,6 +119,12 @@ public class SegmentBookieControlLogTest {
         return new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(scope),
                 new CommittedProfileAuthority(scope, CommittedProfileAuthority.State.READY_INITIAL,
                         EngineProfile.SEGMENT_WAL_ENGINE, 2, true), null);
+    }
+
+    private static ProfileOperationCodec.FenceLedger fence(int operationId, byte verifier) {
+        byte[] id = new byte[16];
+        id[15] = (byte) operationId;
+        return new ProfileOperationCodec.FenceLedger(context(), id, filled(20, verifier));
     }
 
     @Test
@@ -260,6 +273,140 @@ public class SegmentBookieControlLogTest {
             assertTrue(accepted < 14);
             assertTrue(Files.size(config.directory().resolve("bookie-control")) <= maxBytes);
             assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+    }
+
+    @Test
+    public void fenceCutsNewAdmissionAndWaitsForPrecutPhysicalTermination() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentBookieControlLog.Admission prior = log.admitNormal(context(), filled(20, (byte) 5))
+                    .orElseThrow();
+            assertEquals(2, prior.generation());
+            long beforeFence = Files.size(config.directory().resolve("bookie-control"));
+            assertEquals(SegmentBookieControlLog.FenceStatus.REJECTED,
+                    log.submitFence(fence(3, (byte) 6)).status());
+            assertEquals(SegmentBookieControlLog.FenceStatus.REJECTED,
+                    log.submitFence(fence(1, (byte) 5)).status());
+            assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                    log.submitFence(fence(3, (byte) 5)).status());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertTrue(log.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+            assertEquals(beforeFence, Files.size(config.directory().resolve("bookie-control")));
+            assertThrows(IOException.class, log::close);
+            prior.physicalTerminal();
+            assertThrows(IllegalArgumentException.class, prior::physicalTerminal);
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    log.submitFence(fence(3, (byte) 5)).status());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
+                    log.submitFence(fence(3, (byte) 5)).status());
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(activate(4))).get(0).status());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertFalse(replay.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
+                    replay.submitFence(fence(3, (byte) 5)).status());
+        }
+    }
+
+    @Test
+    public void fencePreservesEarlierDurableActivationOrder() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5)));
+            SegmentBookieControlLog.DurableBatch activation = log.appendDurably(List.of(activate(2)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                    log.submitFence(fence(3, (byte) 5)).status());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.applyDurable(activation).get(0).status());
+            assertThrows(IllegalArgumentException.class, () -> log.submitBatch(List.of(activate(4))));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    log.submitFence(fence(3, (byte) 5)).status());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+    }
+
+    @Test
+    public void uncertainFenceForceNeverReopensNormalAdmissionInCurrentProcess() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false);
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertThrows(IOException.class, () -> log.submitFence(fence(3, (byte) 5)));
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertTrue(log.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertFalse(replay.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
+                    replay.submitFence(fence(3, (byte) 5)).status());
+        }
+    }
+
+    @Test
+    public void slowFenceForceDoesNotHoldAdmissionLockOrPermitNewData() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger forces = new AtomicInteger();
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (forces.incrementAndGet() == 2) {
+                forcing.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Fence force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+        });
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            AtomicReference<SegmentBookieControlLog.FenceResult> result = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread worker = new Thread(() -> {
+                try {
+                    result.set(log.submitFence(fence(3, (byte) 5)));
+                } catch (Throwable cause) {
+                    failure.set(cause);
+                }
+            });
+            worker.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                FutureTask<Boolean> query = new FutureTask<>(
+                        () -> log.normalAdmission(context(), filled(20, (byte) 5)));
+                new Thread(query).start();
+                assertFalse(query.get(1, TimeUnit.SECONDS));
+                assertThrows(IOException.class, log::close);
+            } finally {
+                release.countDown();
+                worker.join(5000);
+            }
+            assertFalse(worker.isAlive());
+            assertNull(failure.get());
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, result.get().status());
         }
     }
 }

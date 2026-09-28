@@ -34,6 +34,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.EngineProfile;
@@ -48,8 +49,9 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 
-/** Isolated Bookie-owned install/activation log; no production route, fence, DATA or ACK authority. */
+/** Isolated Bookie-owned control log; no production route, DATA or ACK authority. */
 final class SegmentBookieControlLog implements AutoCloseable {
     private static final long FIRST_RECORD = 4096;
     private static final Generation LOG_GENERATION = new Generation(1);
@@ -59,6 +61,34 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     record Result(Status status, UUID operationId, long sequence, long localGeneration) { }
+
+    enum FenceStatus {
+        APPLIED_DURABLE, ALREADY_DURABLE, WAITING_PRECUT, REJECTED
+    }
+
+    record FenceResult(FenceStatus status, long localGeneration) { }
+
+    /** Held through physical DATA termination, including an RPC timeout or an explicitly failed normal result. */
+    static final class Admission {
+        private final SegmentBookieControlLog owner;
+        private final LedgerState state;
+        private final long generation;
+        private boolean terminal;
+
+        private Admission(SegmentBookieControlLog owner, LedgerState state) {
+            this.owner = owner;
+            this.state = state;
+            this.generation = state.localGeneration;
+        }
+
+        long generation() {
+            return generation;
+        }
+
+        void physicalTerminal() {
+            owner.finishAdmission(this);
+        }
+    }
 
     record DurableBatch(long firstSequence, List<Command> commands) {
         DurableBatch {
@@ -105,6 +135,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private long localGeneration = 1;
         private long activationGeneration;
         private boolean active;
+        private boolean fenced;
+        private UUID pendingFence;
+        private int inFlight;
 
         private LedgerState(Command command) {
             install = command.scope;
@@ -124,6 +157,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final FileLock lock;
     private final Map<Long, LedgerState> ledgers = new HashMap<>();
     private final Map<UUID, AppliedOperation> operations = new HashMap<>();
+    private final Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
     private long appliedThrough = -1;
@@ -131,6 +165,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private boolean writing;
     private boolean failed;
     private boolean closed;
+    private int activeAdmissions;
 
     private SegmentBookieControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                     long maxLogBytes, SegmentFileIo io, SecretKey key,
@@ -216,6 +251,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
             if (writing || pending != null) {
                 throw new IllegalArgumentException("Invalid or unresolved Bookie control batch");
             }
+            for (Command command : commands) {
+                LedgerState state = ledgers.get(command.scope.ledgerId());
+                if (command.type == SegmentControlFormat.Type.ACTIVATE
+                        && state != null && state.pendingFence != null) {
+                    throw new IllegalArgumentException("Bookie activation is after the pending fence cut");
+                }
+            }
             long bytes = 0;
             first = durableThrough + 1;
             for (Command command : commands) {
@@ -282,10 +324,114 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return applyDurable(appendDurably(transitions));
     }
 
+    /** Diagnostic predicate only; a DATA request must hold an {@link Admission} through physical termination. */
     synchronized boolean normalAdmission(ProfileLedgerContext context, byte[] wireVerifier) {
         LedgerState state = ledgers.get(context.ledgerId());
-        return !closed && !failed && state != null && state.active && state.context.equals(context)
+        return !closed && !failed && state != null && state.active && !state.fenced
+                && state.pendingFence == null && state.context.equals(context)
                 && state.credential.matchesWireVerifier(wireVerifier);
+    }
+
+    synchronized Optional<Admission> admitNormal(ProfileLedgerContext context, byte[] wireVerifier) {
+        if (!normalAdmission(context, wireVerifier) || activeAdmissions == config.maxPendingEntries()) {
+            return Optional.empty();
+        }
+        LedgerState state = ledgers.get(context.ledgerId());
+        state.inFlight++;
+        activeAdmissions++;
+        return Optional.of(new Admission(this, state));
+    }
+
+    private synchronized void finishAdmission(Admission admission) {
+        if (admission.owner != this || admission.terminal) {
+            throw new IllegalArgumentException("Admission already finished or belongs to another Bookie control log");
+        }
+        admission.terminal = true;
+        admission.state.inFlight--;
+        activeAdmissions--;
+    }
+
+    /** Closes the admission cut first; caller retries WAITING_PRECUT after prior DATA becomes physical-terminal. */
+    FenceResult submitFence(ProfileOperationCodec.FenceLedger request) throws IOException {
+        Objects.requireNonNull(request, "request");
+        ProfileLedgerContext context = request.context();
+        UUID operationId = operationId(request.operationId());
+        ByteBuffer record;
+        long sequence;
+        long start;
+        synchronized (this) {
+            requireWritable();
+            LedgerState state = ledgers.get(context.ledgerId());
+            if (state == null || !state.context.equals(context)
+                    || !state.credential.matchesWireVerifier(request.credential())) {
+                return new FenceResult(FenceStatus.REJECTED, 0);
+            }
+            ProfileLedgerContext prior = fenceOperations.get(operationId);
+            if (prior != null) {
+                return new FenceResult(prior.equals(context) ? FenceStatus.ALREADY_DURABLE : FenceStatus.REJECTED,
+                        prior.equals(context) ? state.localGeneration : 0);
+            }
+            if (operations.containsKey(operationId)) {
+                return new FenceResult(FenceStatus.REJECTED, 0);
+            }
+            if (state.fenced) {
+                return new FenceResult(FenceStatus.ALREADY_DURABLE, state.localGeneration);
+            }
+            if (state.pendingFence != null && !state.pendingFence.equals(operationId)) {
+                return new FenceResult(FenceStatus.WAITING_PRECUT, state.localGeneration);
+            }
+            state.pendingFence = operationId;
+            if (state.inFlight != 0 || writing || pending != null) {
+                return new FenceResult(FenceStatus.WAITING_PRECUT, state.localGeneration);
+            }
+            sequence = durableThrough + 1;
+            record = SegmentControlFormat.encode(SegmentControlFormat.Type.FENCE, LOG_GENERATION,
+                    sequence, operationId, LOG_GENERATION, 0, ByteBuffer.wrap(context.encode()));
+            if (record.remaining() > maxLogBytes - nextOffset) {
+                throw new IOException("Bookie control log capacity exhausted");
+            }
+            start = nextOffset;
+            nextOffset += record.remaining();
+            writing = true;
+        }
+        try {
+            io.writeFully(channel, record, start);
+            io.force(channel, true);
+            synchronized (this) {
+                applyFence(context, operationId);
+                durableThrough = sequence;
+                appliedThrough = sequence;
+                return new FenceResult(FenceStatus.APPLIED_DURABLE,
+                        ledgers.get(context.ledgerId()).localGeneration);
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                failed = true;
+            }
+            throw failure;
+        } finally {
+            synchronized (this) {
+                writing = false;
+            }
+        }
+    }
+
+    private void applyFence(ProfileLedgerContext context, UUID operationId) throws IOException {
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (state == null || !state.context.equals(context) || state.fenced || state.inFlight != 0
+                || operations.containsKey(operationId) || fenceOperations.containsKey(operationId)) {
+            throw new IOException("Invalid durable fence order");
+        }
+        state.active = false;
+        state.fenced = true;
+        state.pendingFence = null;
+        state.localGeneration++;
+        fenceOperations.put(operationId, context);
+    }
+
+    private static UUID operationId(byte[] bytes) {
+        ByteBuffer input = ByteBuffer.wrap(bytes);
+        return new UUID(input.getLong(), input.getLong());
     }
 
     private Command command(ProtectedProfileStateStore.Transition transition) {
@@ -318,6 +464,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private Status apply(Command command) {
         UUID operationId = command.operationId();
+        if (fenceOperations.containsKey(operationId)) {
+            return Status.INCOMPATIBLE;
+        }
         AppliedOperation prior = operations.get(operationId);
         if (prior != null) {
             return prior.command().sameMeaning(command)
@@ -342,6 +491,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         } else {
             if (state == null || !state.context.equals(context(command.scope))
+                    || state.fenced
                     || command.scope.authorityGeneration() < state.install.authorityGeneration()
                     || command.scope.authorityGeneration() <= state.activationGeneration
                     || (command.scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
@@ -377,8 +527,23 @@ final class SegmentBookieControlLog implements AutoCloseable {
             SegmentFileIo.readFully(channel, bytes, offset);
             SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes,
                     SegmentControlFormat.Owner.BOOKIE, LOG_GENERATION, sequence);
-            Command command = decode(parsed);
-            apply(command);
+            if (parsed.type() == SegmentControlFormat.Type.FENCE) {
+                ByteBuffer body = parsed.body();
+                if (parsed.operationGeneration().value() != 1 || parsed.expectedGeneration() != 0
+                        || body.remaining() != ProfileLedgerContext.ENCODED_LENGTH) {
+                    throw new IOException("Invalid durable fence record");
+                }
+                byte[] contextBytes = new byte[ProfileLedgerContext.ENCODED_LENGTH];
+                body.get(contextBytes);
+                try {
+                    applyFence(ProfileLedgerContext.decode(contextBytes), parsed.operationId());
+                } catch (IllegalArgumentException failure) {
+                    throw new IOException("Invalid durable fence context", failure);
+                }
+            } else {
+                Command command = decode(parsed);
+                apply(command);
+            }
             durableThrough = sequence;
             appliedThrough = sequence;
             offset += length;
@@ -571,8 +736,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (writing) {
-            throw new IOException("Bookie control I/O is still in flight");
+        if (writing || activeAdmissions != 0) {
+            throw new IOException("Bookie control I/O or DATA admissions are still in flight");
         }
         closed = true;
         IOException first = null;

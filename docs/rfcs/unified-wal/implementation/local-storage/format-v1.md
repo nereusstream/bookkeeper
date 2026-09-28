@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL的隔离Arena局部状态机、Bookie INSTALL/ACTIVATE局部控制日志及显式DATA grant检查，尚无Bookie fence/grant/tombstone、selector、checkpoint发布或entry success authority。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL的隔离Arena局部状态机、Bookie INSTALL/ACTIVATE/FENCE局部控制日志及显式DATA grant检查，尚无Bookie recovery grant/tombstone、selector、checkpoint发布或entry success authority。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -71,11 +71,13 @@ Footer 从 totalLength-32 开始：`UWEND001` u64、sequence u64、totalLength u
 | 128 | opaque body，然后 zero padding |
 | totalLength-16 | `CTLE` u32 / CRC32C `[128,footer)` u32 / sequence u64 |
 
-Bookie type 1～8：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_GRANT、EXPLICIT_LAC、TOMBSTONE。Arena type 1～7：ALLOC、ALLOC_POOL、MOVE、FREE、CHECKPOINT_BEGIN、CHECKPOINT_COMMIT、DEVICE_STATE。此处是 framing 类型目录；隔离Arena日志只解释ALLOC/ALLOC_POOL，Bookie日志只解释INSTALL/ACTIVATE，其余type仍无语义apply。parser 验证期望 owner、log generation、连续 sequence、非零 operation identity 及 checksum，不将 decode 等同于命令成功。步骤8负责 checkpoint/rotation。
+Bookie type 1～8：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_GRANT、EXPLICIT_LAC、TOMBSTONE。Arena type 1～7：ALLOC、ALLOC_POOL、MOVE、FREE、CHECKPOINT_BEGIN、CHECKPOINT_COMMIT、DEVICE_STATE。此处是 framing 类型目录；隔离Arena日志只解释ALLOC/ALLOC_POOL，Bookie日志只解释INSTALL/ACTIVATE/FENCE，其余type仍无语义apply。parser 验证期望 owner、log generation、连续 sequence、非零 operation identity 及 checksum，不将 decode 等同于命令成功。步骤8负责 checkpoint/rotation。
 
 Bookie局部INSTALL把route、instance、descriptor、加密verifier与初始inactive状态原子绑定在一条记录中；ACTIVATE是后续独立记录。两种body均先按顺序放入operation u32（INSTALL=1、ACTIVATE_INITIAL=2、ACTIVATE_REPLACEMENT=3）、ledgerId u64、instance[16]、descriptor identity[36]、目标storage incarnation[16]、authority generation u64、public semantic payload identity[32]，再放目标Bookie UTF-8长度u16+bytes、authority domain UTF-8长度u16+bytes。INSTALL另附canonical descriptor长度u16+bytes及49字节sealed verifier：version=1 u8、AES-GCM nonce[12]、ciphertext[20]、tag[16]。控制header的operation UUID绑定重试，operation generation等于authority generation；expected generation当前固定0，具体条件在顺序apply时判断。sealed字段AAD绑定storage incarnation、Arena UUID、BookieId和60字节ledger context；AES密钥由调用方从目录外提供，丢失/错误密钥拒绝重开。字段CRC只检测意外损坏，不能替代控制文件的访问保护或外部committed authority。
 
-Bookie日志写完整batch并一次`force(true)`后才按sequence应用；未apply时INSTALL不开放normal写，已apply INSTALL仍inactive，只有匹配ACTIVATE后局部准入查询才为真。重开先验证完整framing与连续序号，再恢复同步并完整重放；错误密钥、损坏/不完整尾部拒绝可写打开。不支持尾部猜测截断、checkpoint/rotation、真实MetadataStore direct read、生产listener或fence与在途DATA的顺序；局部准入查询也不是逐entry local success。
+Bookie日志写完整batch并一次`force(true)`后才按sequence应用；未apply时INSTALL不开放normal写，已apply INSTALL仍inactive，只有匹配ACTIVATE后局部准入查询才为真。重开先验证完整framing与连续序号，再恢复同步并完整重放；错误密钥、损坏/不完整尾部拒绝可写打开。不支持尾部猜测截断、checkpoint/rotation、真实MetadataStore direct read、生产listener或fence与真实DATA I/O的顺序；局部准入查询也不是逐entry local success。
+
+Bookie局部FENCE记录的body固定为60字节ledger context；header使用wire操作UUID、operation generation=1、expected generation=0。先由匹配context和20字节verifier的受控请求在Bookie状态锁下关闭新normal准入；已取得的有限DATA准入票据必须保持到其物理I/O终结，未终结时返回`WAITING_PRECUT`且不写FENCE。此前已durable的ACTIVATE仍须先按原序apply，切断准入后的ACTIVATE不得再追加。票据全部终结后才对单条FENCE写入并`force(true)`，再应用monotonic fenced状态并回复durable；慢force期间不重开准入，force不确定则当前log fail-closed。完整FENCE记录重开时同步后重放，重复操作从持久状态解析。此票据尚未接入真实DATA driver；实际Add local result、response loss与底层I/O ownership的联合验收仍待步骤6，不以受控票据测试代替。
 
 当前ALLOC/ALLOC_POOL body为40字节：file index u32、owner shard u32、owner shard generation u64、allocation ID u64、绝对文件offset u64、whole block数u32、保留零u32。allocation ID为正数，同一Arena内不能重复授给另一范围。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant可查询；查询不证明pool中的DATA位置已用或未用，也不授权普通Add。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；容量满额停止，尚不支持FREE、复用和rotation。
 
