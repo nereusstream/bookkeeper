@@ -2665,6 +2665,16 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void abruptExitAfterNormalDataForceReopensAsPhysicalCandidate() throws Exception {
+        assertAbruptNormalCandidate("normal-after-force", 0, "LOCAL_DURABLE");
+    }
+
+    @Test
+    public void abruptExitBeforeNormalDataBarrierNeedsRestartSync() throws Exception {
+        assertAbruptNormalCandidate("normal-before-force", 86, "BEFORE_DATA_FORCE");
+    }
+
+    @Test
     public void abruptRestartAppendsBeyondOldGrantWithoutPromotingOldDuplicate() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
@@ -2713,6 +2723,29 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private void assertAbruptNormalCandidate(String phase, int expectedExit, String marker) throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        runAbruptWriter(phase, config.directory(), expectedExit, marker);
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            SegmentFileIo sync = new SegmentFileIo();
+            SegmentDataRecovery.PhysicalStreamCandidate candidate =
+                    SegmentDataRecovery.recoverLocallyReadableStreamCandidate(config, identity, arena, bookie,
+                            sync, 0, new Generation(1), 1, 1, 1);
+            assertEquals(1, candidate.through());
+            assertEquals(1, candidate.entries().size());
+            assertEquals(1, sync.forces);
+            assertEquals(1, SegmentPointRead.readLocallyGated(config, identity, arena, bookie,
+                    candidate.entries().get(0)).record().entryId());
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.MATCHED_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredNormalCandidate(config, identity, arena, bookie,
+                            bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(),
+                            entryBytes(context(), 1, -1, 8, (byte) 0), new SegmentFileIo(), 1, 1));
+        }
+    }
+
     private void runAbruptWriter(String phase, Path directory, int expectedExit, String marker) throws Exception {
         Path output = temporary.getRoot().toPath().resolve("abrupt-" + phase + ".log");
         Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
@@ -2732,6 +2765,7 @@ public class SegmentBookieControlLogTest {
     /** Child process for the real process-boundary tests; never returns after the chosen cut. */
     public static void main(String[] args) throws Exception {
         if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0])
+                && !"normal-after-force".equals(args[0]) && !"normal-before-force".equals(args[0])
                 && !"append-after-restart".equals(args[0]))) {
             throw new IllegalArgumentException("Expected abrupt writer phase and directory");
         }
@@ -2756,6 +2790,47 @@ public class SegmentBookieControlLogTest {
                     entry.release();
                 }
                 System.out.println("APPENDED_PHYSICALLY");
+                System.out.flush();
+                Runtime.getRuntime().halt(0);
+            }
+        }
+        if (args[0].startsWith("normal-")) {
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                grant(arena, 1);
+                bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+                if ("normal-before-force".equals(args[0])) {
+                    files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                        System.out.println("BEFORE_DATA_FORCE");
+                        System.out.flush();
+                        Runtime.getRuntime().halt(86);
+                    });
+                }
+                SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+                SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+                SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                        new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                        new SegmentHotDirectory(owner, config, identity, 2));
+                CountDownLatch completed = new CountDownLatch(1);
+                AtomicReference<SegmentDataPhysicalDriver.NormalStatus> status = new AtomicReference<>();
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+                if (!driver.submitNormal(bookie, batch(config, 1, 1, 4096),
+                        List.of(bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                        (entries, cause) -> {
+                            status.set(entries.get(0).status());
+                            failure.set(cause);
+                            completed.countDown();
+                        })) {
+                    throw new IllegalStateException("Normal DATA was not accepted");
+                }
+                owner.start();
+                if (!completed.await(10, TimeUnit.SECONDS) || failure.get() != null
+                        || status.get() != SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE) {
+                    throw new IllegalStateException("Normal DATA did not reach local durable result", failure.get());
+                }
+                System.out.println("LOCAL_DURABLE");
                 System.out.flush();
                 Runtime.getRuntime().halt(0);
             }

@@ -577,6 +577,8 @@ checkpoint不持久化individual reader、future、buffer reference或pin histor
 
 受控只读normal重复检查复用同一物理候选扫描，先取得普通Bookie准入票据并在阻塞同步/点读期间保持占用，完成前复核normal资格，最终仅返回匹配、冲突、过期或未就绪的物理候选结果。真实normal DATA隔离本地结果后的关闭重开、同步失败释放及同步中tombstone撤权已有定向测试；候选比较不证明current selector或旧I/O错误结论，不形成最终Add冲突、durable duplicate或ACK权威。
 
+普通Add另在本地结果后和DATA barrier前分别以子进程`Runtime.halt`，父进程重开双控制日志并完成恢复同步、受本地route约束的点读及物理候选比较。该回归验证进程终止窗口，第二次掉电、服务级可写restart和幂等成功仍未验证。
+
 隔离子进程回归现分别在recovery DATA本地持久结果后、以及完整写入但DATA force前执行`Runtime.halt`。父进程重新打开Bookie/Arena控制日志，扫描并同步目标DATA，再点读并比对物理候选。这验证进程终止后的控制重放、文件锁释放与恢复同步入口；`Runtime.halt`不代表掉电，物理比对也不解除旧I/O错误未知或形成durable duplicate/ACK权威。
 
 追加式重开另有两次真实进程终止回归：首个进程得到隔离本地结果后退出，第二个进程恢复同步旧DATA、在新的已apply授权块写入另一物理stream后退出；父进程能分别恢复并点读两个stream，旧recovery重复请求面对同shard多stream仍返回`NOT_READY`。第二次`Runtime.halt`仍不是掉电，且新物理写入没有local result权限。

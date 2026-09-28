@@ -177,6 +177,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 受控normal重试也可持普通Bookie准入票据，在真实normal DATA得到隔离本地结果并重开双控制日志后，同步并比较唯一物理候选；相同payload/累计length与不同payload分别只返回匹配或冲突**候选**。同步失败释放票据，同步期间tombstone撤权返回`STALE_ADMISSION`。该入口不向DATA driver恢复热定位，不把任一候选提升为最终Add结果；完整selector和旧I/O结果证明仍缺失。
 
+普通Add另有真实子进程回归：分别在本地结果之后和DATA barrier之前`Runtime.halt`，父进程重开双控制日志，对目标stream完成恢复同步，再持Bookie读票据点读和普通写票据比较候选。这验证普通路径跨进程恢复的物理证据，不模拟掉电，也不返回重启后的durable duplicate结果。
+
 隔离recovery DATA新增真实子进程边界测试：本地持久结果后或完整写入但barrier前直接终止进程，父进程重放双控制日志、执行DATA恢复同步并点读候选。它验证进程中断与只读恢复入口，不模拟掉电，也不将物理比对提升为durable duplicate或生产ACK。
 
 另一个两次`Runtime.halt`回归验证进程重启后的物理追加：新进程同步旧DATA并跳过旧授权块零尾，在新grant下写另一stream；再次终止后父进程分别点读两条物理stream，旧recovery重复请求仍因同shard多stream保持`NOT_READY`。此回归不完成服务级可写重启或第二次掉电验证。
