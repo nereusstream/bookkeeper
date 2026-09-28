@@ -44,6 +44,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 `SegmentDataPhysicalDriver`已把上述局部原语接成隔离的真实文件路径：原owner先占热候选容量、核对Arena grant并预留DATA坐标，再将write/force交给有界I/O服务；完成事件回原owner，只有连续前缀释放后才发布候选并回调。物理失败会将所有尚未完成的回调报错，保留已占坐标，不释放后批候选。该回调不产生逐entry local result或Bookie ACK；重启前缀起点、Bookie权限与selector仍待实现。
 
+该驱动也已在`SegmentExecutionGroup`的现有owner/I/O服务上验证排空：已受理的真实DATA force挂起时，group关闭返回未终结且DATA文件拒绝关闭；force完成、原owner回调可点读候选后，group才排空退出。此为隔离执行组的局部生命周期证据，仍未接入Bookie服务启动与停止。
+
 步骤6的重复慢路径局部原语：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`先复制至多1 MiB应用数据加36字节BK头的请求entry，再在候选位置上执行真实文件点读，比较同一ledger instance/entryId的应用payload bytes和累计ledger length。合法LAC及相应CRC差异不造成冲突，payload或累计length变化返回冲突，坏输入CRC、不同instance或entryId拒绝。调用方必须在有界I/O线程执行点读，独立完成Bookie route/auth/grant及完成时的权限复核；当前没有接入请求准入、并发pending重试或逐entry结果，`SegmentHotDirectory.reserve`仍在占用坐标前拒绝重复写入，故尚无可对外返回成功的幂等Add。
 
 步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读，但清单不进入运行时热目录，不证明batch已进入连续持久前缀或当前Bookie selector；当前Arena也不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
@@ -123,6 +125,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 2026-09-28 [重启物理清单回执](physical-inventory-receipt.json)：macOS隔离定向测试26项通过，0失败/错误/跳过，Spotless/Checkstyle通过。两个已force的真实DATA batch在writer退出、Arena控制日志重开后，经全目录校验与一次恢复`force(false)`得到两个物理位置，并再次点读11/12；清单容量1和注入同步失败均不返回结果。单独的持久搬迁副本不进入普通清单。此处没有持久前缀起点、Bookie selector/权限或热目录恢复发布，不能返回幂等成功或宣称完整restart。
 
 2026-09-28 [DATA物理驱动回执](data-physical-driver-receipt.json)：macOS隔离定向测试25项通过，0失败/错误/跳过，Spotless/Checkstyle通过。两个已授权batch经原owner预留、真实FileChannel write/force和连续前缀发布后均得到可点读候选；注入首批force失败时，两个未决回调均报错，候选不发布且坐标保留。该回调不是逐entry结果，未接入Bookie权限或生产ACK。
+
+2026-09-28 [执行组排空回执](data-driver-drain-receipt.json)：macOS隔离定向测试32项中27执行通过、5项Linux专属测试跳过，0失败/错误；Spotless/Checkstyle通过。真实DATA force在隔离group关闭时保持在途，文件拒绝提前关闭；释放force后候选可点读，owner/I/O服务完成排空。尚未验证Bookie服务生命周期或掉电恢复。
 
 ## 未覆盖范围
 

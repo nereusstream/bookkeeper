@@ -353,6 +353,69 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void executionGroupDrainWaitsForRealPhysicalDriverForceAndCompletion() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("driver-drain"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf entry = entry(new byte[16], 1);
+        SegmentBatchFormat.FrozenBatch batch;
+        try {
+            batch = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+        } finally {
+            entry.release();
+        }
+        SegmentExecutionGroup.Settings settings = new SegmentExecutionGroup.Settings(
+                1, 2, 1, 1, 4096, 8191, Duration.ofSeconds(5));
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> published = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 1)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config, settings);
+            try {
+                SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, group.owner(0), group.io(),
+                        files, authority, new SegmentPhysicalPrefix(group.owner(0), 0, new Generation(1), 1, 1),
+                        new SegmentHotDirectory(group.owner(0), config, 1));
+                assertTrue(driver.submit(batch, (locations, cause) -> {
+                    group.owner(0).requireOwner();
+                    published.set(locations);
+                    failure.set(cause);
+                    done.countDown();
+                }));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertFalse(group.shutdown(Duration.ofMillis(20)));
+                assertThrows(IOException.class, files::close);
+                releaseForce.countDown();
+                assertTrue(done.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(1, published.get().size());
+                assertEquals(1, SegmentPointRead.read(config, identity(), authority, published.get().get(0))
+                        .record().entryId());
+            } finally {
+                releaseForce.countDown();
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
     public void writerAndIndependentParserMatchFixedVectors() throws Exception {
         for (boolean relocation : new boolean[] {false, true}) {
             ByteBuf entry = entry("abc".getBytes(StandardCharsets.UTF_8));

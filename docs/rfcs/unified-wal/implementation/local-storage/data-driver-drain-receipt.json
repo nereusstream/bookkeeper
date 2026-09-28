@@ -1,0 +1,19 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_DATA_DRIVER_GROUP_DRAIN_ONLY",
+  "sourceBaseCommit": "13af650ab8bcba31d29dac7a5f61b9d67b929423",
+  "sourceSha256": {
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "37d76a284cb0c7a718f8706b7108291ec8e27a539d4d4fd74f3187d72f61416d"
+  },
+  "fixture": "one real DATA batch through the isolated execution group's owner and DATA I/O service; force held while shutdown is attempted, then released for original-owner completion",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-IPTfBj5p",
+  "inputSha256": "b6a062a41e461be770fe71ed38580e47e9f706a5847ab0aa467447e326d96a3c",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentExecutionGroupTest",
+  "mavenLogSha256": "52d1c3b0274c76bdddede875caecd893c06af4842a9f7659c26eee1190141695",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 20, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "5557d754bacbb4bde5c45163d8b6d3acd7022f6b0c1b7f82e4f6314a52e9ce93"},
+    "SegmentExecutionGroupTest": {"tests": 12, "failures": 0, "errors": 0, "skipped": 5, "xmlSha256": "01d1e19e6873e85d061e3c8101816fdf9732e39b80e3d38e35df9ca97860c7e1"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Isolated execution group drain and file close refusal only; no Bookie lifecycle integration, per-entry result, restart prefix, power-loss or production ACK authority."
+}

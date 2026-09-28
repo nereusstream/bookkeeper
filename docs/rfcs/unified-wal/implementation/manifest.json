@@ -190,6 +190,7 @@
     "arenaControlLockReceipt": "docs/rfcs/unified-wal/implementation/local-storage/arena-control-lock-receipt.json",
     "dataFileLockReceipt": "docs/rfcs/unified-wal/implementation/local-storage/data-file-lock-receipt.json",
     "dataPhysicalDriverReceipt": "docs/rfcs/unified-wal/implementation/local-storage/data-physical-driver-receipt.json",
+    "dataDriverDrainReceipt": "docs/rfcs/unified-wal/implementation/local-storage/data-driver-drain-receipt.json",
     "arenaDataGrantReceipt": "docs/rfcs/unified-wal/implementation/local-storage/arena-data-grant-receipt.json",
     "dataScanReceipt": "docs/rfcs/unified-wal/implementation/local-storage/data-scan-receipt.json",
     "physicalPrefixReceipt": "docs/rfcs/unified-wal/implementation/local-storage/physical-prefix-receipt.json",
