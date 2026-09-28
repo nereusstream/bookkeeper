@@ -57,11 +57,11 @@ scripts/unified-wal/check-wave0-profile-control-scope.sh
 
 2026-09-28新增独立的Classic前置安全修复：[master-key日志回执](classic-master-key-log-receipt.json)绑定`LedgerDescriptorImpl.checkAccess()`与真实日志事件捕获测试。错误master key仍返回原`UnauthorizedAccessException`，日志保留ledger ID而不再包含请求或缓存的master-key字节数组；1项测试先红后绿，`bookkeeper-server`的Spotless/Checkstyle通过。这不改变本目录历史Wave 0 scope guard或旧receipt的源码绑定，也不代表生产Profile control的完整secret-leak/TLS/AuthZ矩阵已通过。
 
-同日后续隔离实现增加`TLSContextFactory.forProfileServer()`：复用现有key/trust加载，固定immediate TLS1.3和必需客户端证书；真实双端握手及Classic默认模式对照的2项定向测试通过。它不改变本目录已冻结reference回执，尚未成为Bookie listener，也未提供X509 principal映射、精确AuthZ或生产authority。
+同日后续隔离实现增加`TLSContextFactory.forProfileServer()`：复用现有key/trust加载，固定immediate TLS1.3和必需客户端证书；真实双端握手、握手后叶子证书canonical issuer/subject提取及Classic默认模式对照的2项定向测试通过。它不改变本目录已冻结reference回执，尚未成为Bookie listener，也未接通`ProfileTransportContext`、精确AuthZ或生产authority。
 
 ## Remaining OPEN/BLOCK
 
-- real listener、Profile专用provider配置接线、X509 extraction与trust rotation仍OPEN；
+- real listener、Profile专用provider配置接线、X509身份与控制端点接线及trust rotation仍OPEN；
 - concrete allowlist/backend path、store adapter和timeout/retry policy仍OPEN；
 - physical protected-state owner、crash framing、group commit、at-rest protection与secure deletion仍BLOCK；
 - production secret-leak/TLS/auth negative matrix和Spike A A24仍未通过；仅上述Classic mismatch日志泄漏已修复；

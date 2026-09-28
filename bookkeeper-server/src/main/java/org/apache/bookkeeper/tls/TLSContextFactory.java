@@ -37,14 +37,20 @@ import java.security.NoSuchProviderException;
 import java.security.Provider;
 import java.security.Security;
 import java.security.UnrecoverableKeyException;
+import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.TrustManagerFactory;
+import javax.security.auth.x500.X500Principal;
 import lombok.CustomLog;
+import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
+import org.apache.bookkeeper.common.profile.control.ProfileTransportContext;
 import org.apache.bookkeeper.conf.AbstractConfiguration;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
@@ -163,6 +169,28 @@ public class TLSContextFactory implements SecurityHandlerFactory {
     /** Profile uses the existing key and trust material with immediate TLS 1.3 and mandatory client certificates. */
     public static TLSContextFactory forProfileServer() {
         return new TLSContextFactory(true);
+    }
+
+    /** Extract verified leaf identity; the listener must establish endpoint and immediate-TLS facts itself. */
+    public ProfilePrincipal authenticatedProfilePrincipal(SslHandler handler, String trustDomain)
+            throws SSLPeerUnverifiedException, SecurityException {
+        if (!profileServer || handler == null || !handler.handshakeFuture().isSuccess()
+                || handler.engine().getUseClientMode() || !handler.engine().getNeedClientAuth()
+                || !ProfileTransportContext.REQUIRED_TLS_PROTOCOL.equals(handler.engine().getSession().getProtocol())) {
+            throw new SecurityException("Profile mutual TLS handshake is not established");
+        }
+        Certificate[] local = handler.engine().getSession().getLocalCertificates();
+        Certificate[] peers = handler.engine().getSession().getPeerCertificates();
+        if (local == null || local.length == 0 || peers.length == 0
+                || !(peers[0] instanceof X509Certificate leaf)) {
+            throw new SecurityException("Profile TLS certificate identity is missing");
+        }
+        ProfilePrincipal principal = new ProfilePrincipal(
+                ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                trustDomain,
+                leaf.getIssuerX500Principal().getName(X500Principal.CANONICAL),
+                leaf.getSubjectX500Principal().getName(X500Principal.CANONICAL));
+        return principal;
     }
 
     private String getPasswordFromFile(String path) throws IOException {

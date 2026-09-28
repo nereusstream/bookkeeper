@@ -243,7 +243,7 @@ DATA durable → hot locator → local result
 
 前置的[Classic master-key错误日志泄漏](profile-control/classic-master-key-log-receipt.json)已用真实日志事件红绿回归修复。隔离Profile明文接收切片现可在完整body到达前校验固定header并申请连接/Bookie DATA或保留CONTROL额度，计入同次read中已进pipeline的字节、半包与交付后尚未释放的frame；控制额度不被DATA连接占用，错误subtype、容量不足、非法HELLO body及断连释放已定向验证。完整HELLO在交付前复用`ProfileHello.decodeClient`，小额解析副本单独计费。复现命令：`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileFrameCodecTest,ProfileHelloStatusTest,ProfileWireCorpusTest,ProfileReceiveDecoderTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`，本次common 13项、server 4项均通过。
 
-现有`TLSContextFactory.forProfileServer()`单独复用Bookie证书/信任库配置，固定`startTls(false)`、TLS1.3与`ClientAuth.REQUIRE`，Classic默认工厂行为不变。`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileTlsContextFactoryTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`的2项定向测试验证真实双端握手、应用数据非明文、缺信任材料拒绝及Classic对照。该模式尚未接入Bookie listener，HELLO身份/能力处理、operation分发和真实TLS/socket内存计费仍未完成；匿名/越权拒绝和完整secret-leak矩阵未完成，步骤11仍未闭合。
+现有`TLSContextFactory.forProfileServer()`单独复用Bookie证书/信任库配置，固定`startTls(false)`、TLS1.3与`ClientAuth.REQUIRE`，Classic默认工厂行为不变。握手成功后可从已验证的叶子证书提取`trust-domain/issuer/subject`身份；这个方法不声称能从任意`SslHandler`证明listener的首字节TLS顺序。`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileTlsContextFactoryTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`的2项定向测试验证真实双端握手、证书身份提取、应用数据非明文、缺信任材料拒绝及Classic对照。该模式尚未接入Bookie listener，身份事实与HELLO能力/operation处理、真实TLS/socket内存计费仍未接通；匿名/越权拒绝和完整secret-leak矩阵未完成，步骤11仍未闭合。
 
 #### 12. 实现真实MetadataStore adapter、安装激活与registration
 

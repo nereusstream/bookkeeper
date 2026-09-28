@@ -35,6 +35,8 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import javax.security.auth.x500.X500Principal;
+import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.junit.Test;
 
@@ -79,6 +81,7 @@ public class ProfileTlsContextFactoryTest {
         assertArrayEquals(new String[] { "TLSv1.3" }, negotiatedProtocols(handler));
 
         EmbeddedChannel server = new EmbeddedChannel(handler);
+        assertThrows(SecurityException.class, () -> profile.authenticatedProfilePrincipal(handler, "test-domain"));
         server.writeOutbound(Unpooled.copiedBuffer("secret", StandardCharsets.UTF_8));
         assertNull(server.readOutbound());
 
@@ -98,6 +101,13 @@ public class ProfileTlsContextFactoryTest {
         }
         assertTrue(handler.handshakeFuture().isSuccess());
         assertTrue(clientHandler.handshakeFuture().isSuccess());
+        ProfilePrincipal principal = profile.authenticatedProfilePrincipal(handler, "test-domain");
+        assertEquals(ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                principal.mappingMode());
+        assertEquals("test-domain", principal.trustDomain());
+        assertEquals(((java.security.cert.X509Certificate) handler.engine().getSession().getPeerCertificates()[0])
+                .getSubjectX500Principal().getName(X500Principal.CANONICAL),
+                principal.subjectCanonical());
         transfer(server, client);
         ByteBuf decrypted = client.readInbound();
         assertEquals("secret", decrypted.toString(StandardCharsets.UTF_8));
@@ -122,6 +132,8 @@ public class ProfileTlsContextFactoryTest {
         SslHandler handler = classic.newTLSHandler();
         assertFalse(handler.engine().getNeedClientAuth());
         assertArrayEquals(new String[] { "TLSv1.2" }, negotiatedProtocols(handler));
+        assertThrows(SecurityException.class,
+                () -> classic.authenticatedProfilePrincipal(handler, "test-domain"));
 
         EmbeddedChannel channel = new EmbeddedChannel(handler);
         assertTrue(channel.writeOutbound(Unpooled.copiedBuffer("classic", StandardCharsets.UTF_8)));
