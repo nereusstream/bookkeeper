@@ -24,11 +24,17 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,6 +43,9 @@ import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileWireValidationException;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.tls.SecurityHandlerFactory;
+import org.apache.bookkeeper.tls.TLSContextFactory;
 import org.junit.Test;
 
 public class ProfileReceiveDecoderTest {
@@ -47,6 +56,17 @@ public class ProfileReceiveDecoderTest {
     private static byte[] hello() {
         return ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.HELLO, 1,
                 new ProfileHello.Client(List.of()).encode()));
+    }
+
+    private static String certificate(String name) throws Exception {
+        return Paths.get(ProfileReceiveDecoderTest.class.getClassLoader().getResource(name).toURI()).toString();
+    }
+
+    private static void transfer(EmbeddedChannel source, EmbeddedChannel target) {
+        io.netty.buffer.ByteBuf message;
+        while ((message = source.readOutbound()) != null) {
+            target.writeInbound(message);
+        }
     }
 
     @Test
@@ -200,5 +220,56 @@ public class ProfileReceiveDecoderTest {
         controlHello.close();
         control.finish();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    @Test
+    public void receivesHelloAndDataOnlyAfterRealMutualTlsHandshake() throws Exception {
+        ServerConfiguration conf = new ServerConfiguration();
+        conf.setTLSKeyStoreType("PEM");
+        conf.setTLSKeyStore(certificate("server-key.pem"));
+        conf.setTLSCertificatePath(certificate("server-cert.pem"));
+        conf.setTLSTrustStoreType("PEM");
+        conf.setTLSTrustStore(certificate("client-cert.pem"));
+        TLSContextFactory profile = TLSContextFactory.forProfileServer();
+        profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
+        SslHandler serverTls = profile.newTLSHandler();
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget,
+                ProfileReceiveDecoder.ConnectionPurpose.DATA, 8_192, 64);
+        EmbeddedChannel server = new EmbeddedChannel(serverTls, decoder);
+
+        SslContext clientContext = SslContextBuilder.forClient()
+                .keyManager(new File(certificate("client-cert.pem")), new File(certificate("client-key.pem")))
+                .trustManager(new File(certificate("server-cert.pem")))
+                .protocols("TLSv1.3").build();
+        SslHandler clientTls = clientContext.newHandler(UnpooledByteBufAllocator.DEFAULT,
+                "apache.bookkeeper.org", 0);
+        EmbeddedChannel client = new EmbeddedChannel(clientTls);
+        for (int attempt = 0; attempt < 100 && (!serverTls.handshakeFuture().isDone()
+                || !clientTls.handshakeFuture().isDone()); attempt++) {
+            transfer(client, server);
+            transfer(server, client);
+            client.runPendingTasks();
+            server.runPendingTasks();
+        }
+        assertTrue(serverTls.handshakeFuture().isSuccess());
+        assertTrue(clientTls.handshakeFuture().isSuccess());
+
+        client.writeOutbound(Unpooled.wrappedBuffer(hello()));
+        transfer(client, server);
+        ProfileInboundFrame greeting = server.readInbound();
+        assertEquals(ProfileOperation.HELLO, greeting.header().operation());
+        greeting.close();
+        decoder.markEstablished();
+
+        client.writeOutbound(Unpooled.wrappedBuffer(frame(ProfileOperation.ADD_NORMAL, 16)));
+        transfer(client, server);
+        ProfileInboundFrame add = server.readInbound();
+        assertEquals(ProfileOperation.ADD_NORMAL, add.header().operation());
+        assertEquals(16, add.body().readableBytes());
+        add.close();
+        client.finishAndReleaseAll();
+        server.finishAndReleaseAll();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
     }
 }
