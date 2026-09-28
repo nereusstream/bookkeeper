@@ -281,6 +281,51 @@ public class SegmentOwnerLoopTest {
     }
 
     @Test
+    public void placementCheckFailureStillDrainsSubmittedIoAndQueuedData() throws Exception {
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(1, 1, 0, 2, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 2);
+        RuntimeException cause = new IllegalStateException("placement check failed");
+        CountDownLatch checked = new CountDownLatch(1);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        CountDownLatch rejected = new CountDownLatch(1);
+        try {
+            assertTrue(owner.control(() -> owner.setPlacementCheck(() -> {
+                checked.countDown();
+                throw cause;
+            })));
+            assertTrue(owner.submit(0, command(ticket -> io.submit(ticket, () -> {
+                entered.countDown();
+                await(release);
+            }, failure -> {
+                assertNull(failure);
+                completed.countDown();
+            }), unexpected())));
+            assertTrue(owner.submit(0, command(ticket -> {
+                throw new AssertionError("Queued DATA ran after placement failure");
+            }, failure -> {
+                assertSame(cause, failure);
+                rejected.countDown();
+            })));
+            owner.start();
+            await(entered);
+            await(checked);
+            assertSame(cause, owner.failure());
+            assertFalse(owner.submit(0, command(ticket -> {}, unexpected())));
+            await(rejected);
+            release.countDown();
+            await(completed);
+        } finally {
+            release.countDown();
+            io.shutdown();
+            assertTrue(io.awaitTermination(WAIT));
+            stop(owner);
+        }
+        assertEquals(0, owner.pending());
+    }
+
+    @Test
     public void parkedOwnerWakesAndRoutingDoesNotDependOnWorkerCount() throws Exception {
         SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 3, 2, 1, 1);
         AtomicReference<Thread> ownerThread = new AtomicReference<>();

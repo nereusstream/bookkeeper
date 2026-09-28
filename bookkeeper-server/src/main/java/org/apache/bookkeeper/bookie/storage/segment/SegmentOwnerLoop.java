@@ -287,7 +287,13 @@ final class SegmentOwnerLoop {
             // Clear external interrupts instead of turning PARK into a busy loop. Shutdown is explicit.
             Thread.interrupted();
             if (placementCheck != null) {
-                placementCheck.run();
+                try {
+                    placementCheck.run();
+                } catch (Throwable cause) {
+                    // Keep the owner alive to deliver already reserved I/O and completion obligations.
+                    placementCheck = null;
+                    recordFailure(cause);
+                }
             }
             boolean work = pool != null && pool.drainReturns();
             Ticket completed = controlCompletions.poll();

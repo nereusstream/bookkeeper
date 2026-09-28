@@ -118,7 +118,7 @@ I/O层先选择一种明确后端，完整写入并处理短写，再执行对�
 2. 在现有`cpu-affinity`模块扩展拓扑读取、静态placement及只绑定自身线程的显式API，验证实际mask、部分启动失败清理与线程继承。不调用原`acquireCore`自动抢核/下线sibling策略，不改变Classic旧行为。
 3. owner绑定验证后才初始化、首次触碰自有对齐池；先SYSTEM和OWNER_TOUCH，再接可选PREFERRED。buffer始终回原池，归还容量有界且预留；每个NUMA节点不能各复制一份全局预算。CPU/worker数变化不改变持久shard/stream身份。
 
-**完成条件：** OFF与绑定模式使用同一存储逻辑；核不足、非连续cpuset、socket/SMT拓扑、native不可用、线程继承mask、部分启动失败及跨节点归还都有测试；无丢失唤醒，completion队列满载仍可推进。PREFER降级和REQUIRE失败遵守原合同，NUMA受允许memory-node集合约束，不能把设置preference当作页必然本地化。
+**完成条件：** OFF与绑定模式使用同一存储逻辑；核不足、非连续cpuset、socket/SMT拓扑、native不可用、线程继承mask、部分启动失败及跨节点归还都有测试；无丢失唤醒，completion队列满载仍可推进。PREFER降级和REQUIRE失败遵守原合同；隔离owner运行期placement check抛错时停收并排空已受理I/O及排队ticket已有定向回归，NUMA受允许memory-node集合约束，不能把设置preference当作页必然本地化。
 
 BOUNDED_SPIN最后加入并单独测量，不作为步骤5～7开工条件。亲和性从线程/池构建时就有正确接入点；未测得收益时保持OFF/SYSTEM/PARK。
 
