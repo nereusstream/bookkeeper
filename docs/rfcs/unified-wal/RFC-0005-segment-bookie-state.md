@@ -448,7 +448,7 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 ### 10.1 第一批可测的最小存储路径
 
-状态：**PLANNED / NOT EXECUTED**。保留§5.2三层持久化owner，首批采用固定shard、常驻平台线程owner及shared DATA block；§10.2—10.5的执行映射随该切片落地，默认affinity OFF、PARK；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
+状态：**整体PLANNED / 未闭合**。隔离固定owner/物理DATA切片及Profile固定头前置校验、明文接收预算组件已有定向测试；尚无Bookie权限化普通Add、真实TLS listener或完整接收总账。保留§5.2三层持久化owner，首批采用固定shard、常驻平台线程owner及shared DATA block；§10.2—10.5的执行映射随该切片落地，默认affinity OFF、PARK；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
 
 ```text
 client obtains bounded credits before assigning the logical entry where possible

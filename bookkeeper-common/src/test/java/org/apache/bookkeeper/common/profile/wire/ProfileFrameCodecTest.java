@@ -65,6 +65,25 @@ public class ProfileFrameCodecTest {
     }
 
     @Test
+    public void inspectsDeclaredBodyBeforeItArrives() {
+        byte[] frame = ProfileFrameCodec.encode(ProfileFrame.request(
+                ProfileOperation.ADD_NORMAL, 9, new byte[1024]));
+        byte[] fixedHeader = java.util.Arrays.copyOf(frame, 36);
+        ProfileFrameCodec.InspectedHeader inspected = ProfileFrameCodec.inspectHeader(
+                fixedHeader, ProfileFrameCodec.DecodePhase.ESTABLISHED);
+        assertEquals(frame.length, inspected.frameBytes());
+        assertEquals(1024, inspected.header().bodyLength());
+        assertEquals(ProfileOperation.ADD_NORMAL, inspected.header().operation());
+        assertReason(ProfileWireValidationException.Reason.TRUNCATED_BODY,
+                () -> ProfileFrameCodec.decode(fixedHeader, ProfileFrameCodec.DecodePhase.ESTABLISHED));
+        assertReason(ProfileWireValidationException.Reason.HELLO_NOT_FIRST,
+                () -> ProfileFrameCodec.inspectHeader(fixedHeader, ProfileFrameCodec.DecodePhase.PRE_HELLO));
+        assertReason(ProfileWireValidationException.Reason.UNKNOWN_SUBTYPE,
+                () -> ProfileFrameCodec.inspectHeader(mutateU16(fixedHeader, 14, 0xffff),
+                        ProfileFrameCodec.DecodePhase.ESTABLISHED));
+    }
+
+    @Test
     public void rejectsStrictHeaderMutationsBeforeBodyAllocation() {
         byte[] valid = ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.HELLO, 1, new byte[0]));
         assertRejectedBeforeAllocation(mutateU32(valid, 4, 0), ProfileWireValidationException.Reason.BAD_MAGIC);

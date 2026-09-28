@@ -36,6 +36,21 @@ public final class ProfileFrameCodec {
         ESTABLISHED
     }
 
+    /** Fixed-header result for receivers that must reserve body capacity before accepting it. */
+    public record InspectedHeader(int outerLength, ProfileFrameHeader header) {
+        public InspectedHeader {
+            Objects.requireNonNull(header, "header");
+            if (outerLength < ProfileFrameHeader.ENCODED_LENGTH || outerLength > ABSOLUTE_FRAME_MAX
+                    || outerLength != ProfileFrameHeader.ENCODED_LENGTH + header.bodyLength()) {
+                throw new IllegalArgumentException("Invalid inspected frame length");
+            }
+        }
+
+        public int frameBytes() {
+            return OUTER_LENGTH_PREFIX + outerLength;
+        }
+    }
+
     private ProfileFrameCodec() {}
 
     public static byte[] encode(ProfileFrame frame) {
@@ -72,6 +87,34 @@ public final class ProfileFrameCodec {
         }
         Objects.requireNonNull(phase, "phase");
         Objects.requireNonNull(bodyAllocator, "bodyAllocator");
+        InspectedHeader inspected = inspectHeader(bytes, phase);
+        int bodyLength = inspected.header().bodyLength();
+        ProfileOperation operation = inspected.header().operation();
+        long expectedInputLength = inspected.frameBytes();
+        if (bytes.length < expectedInputLength) {
+            throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.TRUNCATED_BODY);
+        }
+        if (bytes.length > expectedInputLength) {
+            throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.TRAILING_BYTES);
+        }
+        if (operation.isReservedDisabled() && !inspected.header().isResponse() && bodyLength != 0) {
+            throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.RESERVED_OPERATION_BODY);
+        }
+
+        byte[] body = bodyAllocator.apply(bodyLength);
+        if (body == null || body.length != bodyLength) {
+            throw new IllegalStateException("body allocator returned wrong length");
+        }
+        System.arraycopy(bytes, OUTER_LENGTH_PREFIX + ProfileFrameHeader.ENCODED_LENGTH, body, 0, bodyLength);
+        return new ProfileFrame(inspected.header(), body);
+    }
+
+    /** Validate the outer length and fixed header without waiting for, or allocating, the declared body. */
+    public static InspectedHeader inspectHeader(byte[] bytes, DecodePhase phase) {
+        if (bytes == null) {
+            throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.NULL_INPUT);
+        }
+        Objects.requireNonNull(phase, "phase");
         if (bytes.length < OUTER_LENGTH_PREFIX) {
             throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.TRUNCATED_OUTER_LENGTH);
         }
@@ -132,26 +175,9 @@ public final class ProfileFrameCodec {
             throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.HELLO_NOT_FIRST);
         }
         validateFrameLimit(outerLength, operation, phase == DecodePhase.PRE_HELLO);
-        long expectedInputLength = (long) OUTER_LENGTH_PREFIX + outerLength;
-        if (bytes.length < expectedInputLength) {
-            throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.TRUNCATED_BODY);
-        }
-        if (bytes.length > expectedInputLength) {
-            throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.TRAILING_BYTES);
-        }
-        boolean response = (flags & ProfileFrameHeader.RESPONSE) != 0;
-        if (operation.isReservedDisabled() && !response && bodyLength != 0) {
-            throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.RESERVED_OPERATION_BODY);
-        }
-
-        byte[] body = bodyAllocator.apply(bodyLength);
-        if (body == null || body.length != bodyLength) {
-            throw new IllegalStateException("body allocator returned wrong length");
-        }
-        buffer.get(body);
         ProfileFrameHeader header = new ProfileFrameHeader(
                 major, minor, headerLength, operation, flags, requestId, bodyLength, reserved);
-        return new ProfileFrame(header, body);
+        return new InspectedHeader(outerLength, header);
     }
 
     private static void validateFrameLimit(int outerLength, ProfileOperation operation, boolean preHello) {

@@ -770,7 +770,7 @@ Profile client/admin必须保留完整三元组；legacy callback只能安全投
 
 ### 11.6 Reference codec与数据路径adapter
 
-`ProfileFrameCodec.decode()`、`ProfileFrame`构造/`body()`及`ProfileOperationCodec.AddNormal`解码/构造/`entryPayload()`会分配并复制body或payload。静态调用链说明多次payload量级复制，尚无压测结论。不可变`byte[]` reference codec继续作为字节合同、corpus和oracle；未来transport adapter使用受控`ByteBuf`视图原位解析固定header/context，并通过相同valid/invalid corpus验证等价拒绝，不原样串联整包clone接口进入热路径。
+`ProfileFrameCodec.decode()`、`ProfileFrame`构造/`body()`及`ProfileOperationCodec.AddNormal`解码/构造/`entryPayload()`会分配并复制body或payload。静态调用链说明多次payload量级复制，尚无压测结论。不可变`byte[]` reference codec继续作为字节合同、corpus和oracle；当前隔离明文接收组件先复用固定header校验并交付有界`ByteBuf` body视图，operation/context原位解析与同一valid/invalid corpus等价拒绝仍待接入，不原样串联整包clone接口进入热路径。
 
 派生`slice()`共享父buffer内存且不自动增加引用计数；异步跨组件持有必须明确retain/所有权转移及唯一release责任，不能提前释放父buffer。依据[Netty引用计数文档](https://netty.io/wiki/reference-counted-objects.html)。header、长度、subtype和上限检查仍早于大分配/排队。集中复制到shard对齐批量buffer可以接受；复制、取消、拒绝、断连、I/O失败及重试的生命周期按RFC-0005 §10.1和Spike B B18验证，不要求不切实际的全程零复制。
 
@@ -795,6 +795,8 @@ body额度可逻辑预留，不按声明长度立即分配整块内存。连接�
 **控制通路也须可达。** 首批在现有Profile listener/pool内保留少量有界的独立控制连接，客户端按连接用途隔离DATA发送，必要fence/tombstone不排在已暂停DATA连接的未完成body后。复用相同TLS/HELLO、认证授权及控制执行资源，不新增listener、wire字段/协商、每ledger连接或普通Add往返。每条连接仍绑定§12身份；连接用途只负责调度，不授予控制权限。
 
 控制连接数量及TLS/接收额度计入Bookie同一总量，保留的控制份额不能被DATA耗尽，也不能作为绕过预算的无限通道。实际header/subtype、operation与授权仍校验；DATA不能冒充控制请求占用保留通路，不能只凭自称控制类型跳过检查。B18覆盖多连接半包、暂停后pipeline残留、额度交接/失败释放，以及DATA暂停时合法控制请求仍能接收并推进；A26消费身份/operation拒绝边界。
+
+实现进度（2026-09-28）：`ProfileFrameCodec.inspectHeader`复用reference固定头/长度/phase/subtype校验，使明文接收适配器在body到达前取得合法声明长度；`ProfileReceiveDecoder`在Netty入口按同次入站ByteBuf、固定连接份额及已交付但未释放的完整frame向共享DATA/保留CONTROL账本计费，容量不足直接关闭并释放，CONTROL连接不接受DATA subtype。定向测试覆盖半包、pipeline已到字节、DATA压力下控制份额、断连和交付后释放；reference corpus仍通过。这只是未注册的明文组件，TLS/socket实际buffer、mTLS身份、HELLO授权、存储交接与真实listener均未接通，不作为B18或步骤11完整接收预算证据。
 
 ## 12. Capability negotiation
 

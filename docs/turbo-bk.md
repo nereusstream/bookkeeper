@@ -20,7 +20,7 @@
 7. 下一步先固定基线，并行推进CLIENT-1/2独立Classic维护、实验格式/I/O及固定owner/安全binding/NUMA池，再完成Bookie控制日志、per-Arena控制日志、DATA写入、点读与restart闭环。客户端维护不阻塞本地文件原型，但须在客户端接入前完成；隔离存储与实际启用路径的模型验证并行。
 8. 首批集群闭合普通Add/点读/restart、基础点恢复和已fenced-close ledger的普通逻辑删除。强访问撤销、strong completion/loss reset及高级Range延期；strong reset后续也先限于整个ledger fenced+CLOSED，不让增强token阻塞活跃ledger的正常replacement。
 
-当前实施规划基于`e8b162076fd8cfa84a11351a82caac8c5ac1f939`（2026-09-22 08:29:33 UTC，北京时间16:29:33），按“基础与执行模型→单机可恢复存储→索引与回收→协议与集群→完整验收与灰度”推进，详见§10及[16步实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)。固定owner、安全binding、NUMA池随线程与缓冲池落地，默认OFF/SYSTEM/PARK，B18分离pin、属地池和有界spin收益。测试、故障注入和测量贯穿各模块；现有持久化、恢复、接收预算和控制可达合同保持。本次仅整理实施顺序，无新增源码修复、运行/性能证据或状态提升。
+当前实施规划基于`e8b162076fd8cfa84a11351a82caac8c5ac1f939`（2026-09-22 08:29:33 UTC，北京时间16:29:33），按“基础与执行模型→单机可恢复存储→索引与回收→协议与集群→完整验收与灰度”推进，详见§10及[16步实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)。固定owner、安全binding、NUMA池随线程与缓冲池落地，默认OFF/SYSTEM/PARK，B18分离pin、属地池和有界spin收益。测试、故障注入和测量贯穿各模块；现有持久化、恢复、接收预算和控制可达合同保持。2026-09-22的规划更新仅整理实施顺序；后续实际源码、验证与未闭合范围以§10及实施清单的当前状态为准。
 
 本文已冻结Round 7 reference/test manifest，但不把未经真实old decoder/stock binary验证的candidate宣称为stable wire/on-disk compatibility contract，下一原型按RFC-0005选择Bookie级独立控制日志；其stable format、阈值和真实证据仍由Spike接受。
 
@@ -284,7 +284,7 @@ Cluster Lifecycle
 
 ## 10. 实施顺序
 
-以下施工顺序已开始实施，从当前reference implementation走到首个可保留数据的生产候选。步骤1隔离配置与构建入口已交付，2项参数边界测试通过；步骤2的[CLIENT-1/2](rfcs/unified-wal/implementation/client-maintenance/README.md)已完成红绿回归（当前85项通过），步骤3实验格式与真实FileChannel I/O已通过14项定向测试，步骤4已交付固定owner/PARK、DATA/控制独立completion与有界I/O份额、显式绑定、拓扑/placement及group启动与SYSTEM/OWNER_TOUCH池；低频运行期CPU/cgroup检查及PREFER/REQUIRE本地处置已接入隔离group。步骤5仅有隔离Arena ALLOC/ALLOC_POOL控制日志、单在途控制驱动、DATA准入及I/O服务满额时控制force后原owner apply的定向路径、显式DATA整段grant检查和停写后的只读framing扫描；步骤6已有DATA坐标预留、真实write/force、原owner volatile连续物理前缀和有界物理热候选接通的隔离驱动，以及真实点读的重复payload比较局部原语；步骤7已有核对grant和身份的对齐单record点读、停写后文件同步、有界重启物理清单及单stream序号候选检查局部实现。Bookie控制、请求级幂等、restart前缀、pool used/unused恢复、权限化热定位、selector/pin和逐entry结果仍未接通；Bookie生命周期重启/PREFERRED及步骤5～7完整合同与后续步骤尚未完成。当前结果见[本地存储状态](rfcs/unified-wal/implementation/local-storage/README.md)，不提升Gate。完整依赖、实施内容与完成条件由[现有实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)维护；步骤号只用于排序，不新增RFC、Maven模块或工作项体系。UW-1～UW-7继续表示职责分类，例如UW-1集群删除依赖UW-6基础fenced-close，不能按UW编号施工。
+以下施工顺序已开始实施，从当前reference implementation走到首个可保留数据的生产候选。步骤1隔离配置与构建入口已交付，2项参数边界测试通过；步骤2的[CLIENT-1/2](rfcs/unified-wal/implementation/client-maintenance/README.md)已完成红绿回归（当前85项通过），步骤3实验格式与真实FileChannel I/O已通过14项定向测试，步骤4已交付固定owner/PARK、DATA/控制独立completion与有界I/O份额、显式绑定、拓扑/placement及group启动与SYSTEM/OWNER_TOUCH池；低频运行期CPU/cgroup检查及PREFER/REQUIRE本地处置已接入隔离group。步骤5仅有隔离Arena ALLOC/ALLOC_POOL控制日志、单在途控制驱动、DATA准入及I/O服务满额时控制force后原owner apply的定向路径、显式DATA整段grant检查和停写后的只读framing扫描；步骤6已有DATA坐标预留、真实write/force、原owner volatile连续物理前缀和有界物理热候选接通的隔离驱动，以及真实点读的重复payload比较局部原语；步骤7已有核对grant和身份的对齐单record点读、停写后文件同步、有界重启物理清单、单stream序号候选检查及核对存储scope的新owner物理热目录重建局部实现。步骤11已有固定头前置校验和明文接收额度隔离组件，但无TLS listener。Bookie控制、请求级幂等、restart前缀、pool used/unused恢复、权限化热定位、selector/pin和逐entry结果仍未接通；Bookie生命周期重启/PREFERRED及步骤5～16完整合同尚未完成。当前结果见[本地存储状态](rfcs/unified-wal/implementation/local-storage/README.md)和[实施清单](rfcs/unified-wal/implementation/README.md)，不提升Gate。完整依赖、实施内容与完成条件由[现有实施清单](rfcs/unified-wal/implementation/README.md#实施顺序)维护；步骤号只用于排序，不新增RFC、Maven模块或工作项体系。UW-1～UW-7继续表示职责分类，例如UW-1集群删除依赖UW-6基础fenced-close，不能按UW编号施工。
 
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
