@@ -133,7 +133,7 @@ cluster READY/standard membership先提交、local activation后消费；route/i
 
 ### 5.2 下一原型的真实持久化拓扑
 
-状态：**Planned / Not Executed**。在new BookieId/new storage scope内实现：
+状态：**局部隔离实现 / 整体未完成**。`INSTALL`与`ACTIVATE`的Bookie控制文件切片已有真实FileChannel写入、force、顺序apply及完整重放；它只接受调用方提供的typed committed authority，不接真实MetadataStore、mTLS授权、Bookie服务或DATA成功路径。fence/grant/tombstone、checkpoint/rotation与完整启动仍未实施。在new BookieId/new storage scope内的目标拓扑为：
 
 ```text
 Bookie-level protected control log + A/B checkpoint
