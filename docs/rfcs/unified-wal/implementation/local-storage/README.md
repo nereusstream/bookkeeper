@@ -14,18 +14,24 @@
 
 步骤4的第一部分：`SegmentOwnerLoop` 用固定平台线程承载静态 shard 子集，ledger→shard 只依赖固定逻辑 shard 数，worker 数不进入持久身份。每个已准入批次预留一个 completion 槽，控制队列独立有界；循环每轮处理完成、控制和各 shard 的一个输入。PARK 遵守最老 batch deadline，后来的 deadline 不能推迟它。`SegmentIoExecutor` 在启动线程预创建固定数量服务线程，用有界队列执行阻塞 I/O，并将结果送回原 owner；提交后 handler 异常、停止准入或等待超时不提前释放在途义务。
 
-该循环尚未接入实际 append/allocator 状态机，尚无 group 启动、CPU绑定集成或NUMA池。容量由构造参数显式给定；多 owner 集成时必须从同一总预算分配，不能给每个 owner 复制全局额度。
+该循环尚未接入实际 append/allocator 状态机，现已通过下述group启动接入绑定与SYSTEM/OWNER_TOUCH对齐池。容量由构造参数显式给定并从同一总量拆分，不能给每个owner复制全局额度。
 
-步骤4的显式绑定API：现有 `cpu-affinity` 模块新增 `CpuBinding`，只作用于调用平台线程，不调用旧 `acquireCore`，不改 root/CPU online/sibling/文件锁策略。动态 JNI mask 支持稀疏编号（上限65536），设置后读取实际mask核对；绑定失败回滚，关闭只允许原线程执行，恢复不完整明确报错。拒绝空mask、越界、超出初始mask和虚拟线程；提供运行期mask复查。该API尚未接入owner启动，实验配置仍只接受OFF。
+步骤4的显式绑定API：现有 `cpu-affinity` 模块新增 `CpuBinding`，只作用于调用平台线程，不调用旧 `acquireCore`，不改 root/CPU online/sibling/文件锁策略。动态 JNI mask 支持稀疏编号（上限65536），设置后读取实际mask核对；绑定失败回滚，关闭只允许原线程执行，恢复不完整明确报错。拒绝空mask、越界、超出初始mask和虚拟线程；提供运行期mask复查。该API已接入隔离group启动；配置接受OFF/PREFER/REQUIRE启动模式，默认OFF。运行期拓扑变化处理仍未完成，不能按完整§10.5模式合同启用生产服务。
 
 步骤4的拓扑与静态placement：`CpuTopologySnapshot` 在缩窄应用线程mask前只读捕获初始mask、online CPU、cgroup v2有效CPU/memory-node集合及可见祖先最小quota，读取package/core/SMT sibling/NUMA信息。不跨socket合并同号core，不一致/缺失信息标未知；隐藏祖先明确不可观测。DATA设备节点只消费调用者已确认的sysfs `numa_node` 路径，未提供或-1保持UNKNOWN，不自动猜测复合设备归属。
 
-`ExecutionPlacementPlan` 按固定逻辑shard映射worker，每个append worker选一个不同物理核的CPU，并排除其整个SMT sibling组给服务线程留余量。显式配置冲突拒绝；quota未知/不足、核不足或物理拓扑未知不生成绑定计划。内存节点不在允许集合时不给pool节点偏好；该计划不设置NUMA策略，也不证明物理页属地。OFF映射不要求native拓扑，CPU/worker变化不改变逻辑shard数。绑定、group启动与pool接通仍是步骤4剩余工作。
+`ExecutionPlacementPlan` 按固定逻辑shard映射worker，每个append worker选一个不同物理核的CPU，并排除其整个SMT sibling组给服务线程留余量。显式配置冲突拒绝；quota未知/不足、核不足或物理拓扑未知不生成绑定计划。内存节点不在允许集合时不给pool节点偏好；该计划不设置NUMA策略，也不证明物理页属地。OFF映射不要求native拓扑，CPU/worker变化不改变逻辑shard数。该计划已接入以下group启动；运行期重检查仍是步骤4剩余工作。
+
+步骤4的group启动与池：`SegmentExecutionGroup` 从未缩窄mask的启动线程创建固定owner/I/O线程，在线程入口绑定、分配池并报告ready，全部ready后才开放准入。初始化失败先停止准入、解除启动等待，再join所有已启动线程；pool和binding都在其原线程关闭。PREFER对拓扑/native不可用可退回OFF；绑定阶段失败只有在已验证清理成功且无其他初始化错误时才能重建OFF组，清理不确定不伪报降级成功。REQUIRE启动失败不返回可用group。
+
+`SegmentBufferPool` 用固定数量Netty unpooled direct backing buffer提供4096对齐view，支持SYSTEM和OWNER_TOUCH，均在owner上初始化；OWNER_TOUCH不宣称页必然本地。全局pending/control/buffer数量按owner分摊，direct容量预算包含每块alignment padding；这是请求容量上限，不是整个进程RSS。每个物理buffer预留归还槽，跨线程归还回原池并唤醒owner，不占DATA/control槽。lease携带原池实例、owner和generation，重复归还被拒绝。关闭等待已准入命令和所有live lease；超时返回未终结状态，不释放在途资源。owner排空后才停止I/O服务。
+
+当前startup模式和池尚未构成完整步骤4：运行期CPU/cpuset/memory-node/quota变化的低频检查、PREFER降级/REQUIRE停止准入编排、PREFERRED专有mapping及实际DATA批写接入仍待完成。
 
 ## 验证入口
 
 ```bash
-scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentOwnerLoopTest
+scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest
 mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 ```
 
@@ -62,6 +68,10 @@ mvn -o -pl cpu-affinity -am -Dtest=CpuTopologySnapshotTest,CpuBindingTest,CpuInf
   -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test
 ```
 
+group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-09-26 `unified-wal-local-0lK9Qwxl` 为26通过、1个Linux测试按平台跳过；Linux容器运行owner/group测试为12通过、1个非Linux测试按平台跳过，Spotless/Checkstyle通过。Linux fixture固定UID 65534、cpuset `0,2,4`、quota=3 CPU，验证REQUIRE绑定后才初始化池、main线程mask不变和部分初始化失败后全部线程退出且恢复无错误。macOS验证native不可用时PREFER fallback及REQUIRE拒绝。
+
+本次资源测量固定2个owner、1个I/O线程、5个pending按3/2分配、2个控制槽、3个buffer按2/1分配；每个buffer可用4096字节、direct请求容量8191字节，共24573字节，没有按owner或NUMA节点复制总预算。覆盖DATA满额时归还、池耗尽、重复归还、借出buffer阻止提前关闭和返回后继续drain。未测吞吐、页分布或NUMA收益。
+
 ## 未覆盖范围
 
-步骤4的绑定与owner启动集成、部分启动失败清理、PREFER/REQUIRE降级、运行期拓扑变化处理、NUMA池及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。
+步骤4的运行期拓扑变化处理、运行期PREFER/REQUIRE编排、PREFERRED页策略及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。

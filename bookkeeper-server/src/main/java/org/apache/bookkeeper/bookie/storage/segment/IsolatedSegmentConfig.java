@@ -42,8 +42,12 @@ public record IsolatedSegmentConfig(Path directory, int arenaCount, int logicalS
         }
         Math.multiplyExact(bytesPerFile, dataFiles);
         requireSupported(backend, "FILE_CHANNEL", "I/O backend");
-        requireSupported(affinity, "OFF", "affinity");
-        requireSupported(numaPolicy, "SYSTEM", "NUMA policy");
+        if (!java.util.Set.of("OFF", "PREFER", "REQUIRE").contains(affinity)) {
+            throw new IllegalArgumentException("Unsupported affinity: " + affinity);
+        }
+        if (!java.util.Set.of("SYSTEM", "OWNER_TOUCH").contains(numaPolicy)) {
+            throw new IllegalArgumentException("Unsupported NUMA policy: " + numaPolicy);
+        }
         requireSupported(waitStrategy, "PARK", "wait strategy");
     }
 

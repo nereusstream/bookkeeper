@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -36,13 +37,20 @@ final class SegmentIoExecutor {
     private final ThreadPoolExecutor executor;
 
     SegmentIoExecutor(int threads, int queueCapacity) {
+        this(threads, queueCapacity, defaultFactory());
+    }
+
+    private static ThreadFactory defaultFactory() {
+        AtomicInteger number = new AtomicInteger();
+        return task -> new Thread(task, "isolated-wal-io-" + number.getAndIncrement());
+    }
+
+    SegmentIoExecutor(int threads, int queueCapacity, ThreadFactory factory) {
         if (threads < 1 || queueCapacity < 1) {
             throw new IllegalArgumentException("Positive I/O bounds required");
         }
-        AtomicInteger number = new AtomicInteger();
         executor = new ThreadPoolExecutor(threads, threads, 0, TimeUnit.NANOSECONDS,
-                new ArrayBlockingQueue<>(queueCapacity), task ->
-                        new Thread(task, "isolated-wal-io-" + number.getAndIncrement()),
+                new ArrayBlockingQueue<>(queueCapacity), factory,
                 new ThreadPoolExecutor.AbortPolicy());
         // Start from the unbound startup thread, never lazily from a single-CPU append owner.
         try {

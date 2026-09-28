@@ -20,6 +20,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
@@ -92,9 +93,16 @@ final class SegmentOwnerLoop {
     private boolean accepting = true;
     private volatile Throwable failure;
     private int nextShard;
+    private SegmentBufferPool pool;
+
+    SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity) {
+        this(logicalShards, workerCount, workerId, capacity, controlCapacity,
+                task -> new Thread(task, "isolated-wal-owner-" + workerId));
+    }
 
     @SuppressWarnings("unchecked")
-    SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity) {
+    SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity,
+                     ThreadFactory factory) {
         if (logicalShards < 1 || logicalShards > 64 || workerCount < 1 || workerCount > logicalShards
                 || workerId < 0 || workerId >= workerCount || capacity < 1 || controlCapacity < 1) {
             throw new IllegalArgumentException("Invalid fixed owner bounds");
@@ -112,10 +120,27 @@ final class SegmentOwnerLoop {
         deadlines = new long[logicalShards];
         due = new Runnable[logicalShards];
         nextShard = workerId;
-        thread = new Thread(this::run, "isolated-wal-owner-" + workerId);
+        thread = factory.newThread(this::run);
     }
 
-    // Called from the deployment/startup thread; later placement must occur in the thread entrypoint.
+    void attachPool(SegmentBufferPool pool) {
+        requireOwner();
+        if (this.pool != null) {
+            throw new IllegalStateException("Pool already initialized");
+        }
+        this.pool = pool;
+    }
+
+    SegmentBufferPool pool() {
+        requireOwner();
+        return pool;
+    }
+
+    void wakeup() {
+        LockSupport.unpark(thread);
+    }
+
+    // Called from the deployment/startup thread; placement occurs in the supplied thread entrypoint.
     void start() {
         thread.start();
     }
@@ -222,7 +247,7 @@ final class SegmentOwnerLoop {
         for (;;) {
             // Clear external interrupts instead of turning PARK into a busy loop. Shutdown is explicit.
             Thread.interrupted();
-            boolean work = false;
+            boolean work = pool != null && pool.drainReturns();
             Ticket completed = completions.poll();
             if (completed != null) {
                 work = true;
@@ -295,7 +320,8 @@ final class SegmentOwnerLoop {
                 }
             }
             synchronized (gate) {
-                if (!accepting && pending == 0 && controls.isEmpty() && !hasDeadline()) {
+                if (!accepting && pending == 0 && controls.isEmpty() && !hasDeadline()
+                        && (pool == null || pool.outstanding() == 0)) {
                     return;
                 }
             }

@@ -48,7 +48,7 @@ public class IsolatedSegmentConfigTest {
     public void rejectsUnsupportedModesAndUnboundedOrOverflowingCapacity() {
         for (String[] modes : new String[][] {
             {"IO_URING", "OFF", "SYSTEM", "PARK"},
-            {"FILE_CHANNEL", "REQUIRE", "SYSTEM", "PARK"},
+            {"FILE_CHANNEL", "INVALID", "SYSTEM", "PARK"},
             {"FILE_CHANNEL", "OFF", "PREFERRED", "PARK"},
             {"FILE_CHANNEL", "OFF", "SYSTEM", "BOUNDED_SPIN"}
         }) {
