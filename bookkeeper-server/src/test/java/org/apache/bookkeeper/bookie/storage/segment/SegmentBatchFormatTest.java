@@ -33,6 +33,7 @@ import java.nio.ReadOnlyBufferException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -1245,6 +1246,55 @@ public class SegmentBatchFormatTest {
             try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
                     config, identity(), arena, new SegmentFileIo())) {
                 assertEquals(4096 + SegmentArenaControlLog.BLOCK_BYTES, reopened.nextOffset(0));
+            }
+        }
+    }
+
+    @Test
+    public void failedSameProcessRecoveryKeepsTheWriterLockAcrossProcesses() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals("LOCKED", probeWriterLock(config.directory()));
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), arena, new SegmentFileIo()));
+            assertEquals("LOCKED", probeWriterLock(config.directory()));
+            assertThrows(IOException.class, () -> SegmentDataRecovery.inspect(config, identity(), arena));
+            assertEquals("LOCKED", probeWriterLock(config.directory()));
+        }
+        assertEquals("ACQUIRED", probeWriterLock(config.directory()));
+    }
+
+    private String probeWriterLock(Path directory) throws Exception {
+        Path output = temporary.getRoot().toPath().resolve("lock-probe.log");
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), SegmentBatchFormatTest.class.getName(),
+                directory.toString())
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        boolean finished = child.waitFor(15, TimeUnit.SECONDS);
+        if (!finished) {
+            child.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
+        }
+        String result = Files.readString(output);
+        assertTrue(result, finished);
+        assertEquals(result, 0, child.exitValue());
+        return result;
+    }
+
+    /** Independent JVM probe for the process-wide writer exclusion. */
+    public static void main(String[] args) throws Exception {
+        if (args.length != 1) {
+            throw new IllegalArgumentException("Expected isolated DATA directory");
+        }
+        try (FileChannel channel = FileChannel.open(Path.of(args[0]).resolve("isolated.lock"),
+                StandardOpenOption.WRITE)) {
+            var lock = channel.tryLock();
+            if (lock == null) {
+                System.out.print("LOCKED");
+            } else {
+                try (lock) {
+                    System.out.print("ACQUIRED");
+                }
             }
         }
     }

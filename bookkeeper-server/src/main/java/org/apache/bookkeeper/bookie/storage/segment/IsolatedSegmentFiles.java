@@ -20,8 +20,6 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -66,8 +64,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final Object[] dataIoGates;
     private final long[] nextOffset;
     private final boolean[] failed;
-    private final FileChannel lockChannel;
-    private final FileLock lock;
+    private final SegmentDataFileLock writerLock;
     private final boolean appendOnlyRecovery;
     private final SegmentDataRecovery.PhysicalInventory startupInventory;
     private int pendingReservations;
@@ -76,12 +73,11 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     SegmentFileIo dataIo = new SegmentFileIo();
 
     private IsolatedSegmentFiles(IsolatedSegmentConfig config, SegmentFileHeader identity,
-                                 FileChannel lockChannel, FileLock lock, boolean appendOnlyRecovery,
+                                 SegmentDataFileLock writerLock, boolean appendOnlyRecovery,
                                  SegmentDataRecovery.PhysicalInventory startupInventory) {
         this.config = config;
         this.identity = identity;
-        this.lockChannel = lockChannel;
-        this.lock = lock;
+        this.writerLock = writerLock;
         this.appendOnlyRecovery = appendOnlyRecovery;
         this.startupInventory = startupInventory;
         nextOffset = new long[config.dataFiles()];
@@ -99,15 +95,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             throws IOException {
         // Never adopt, clean or truncate an existing directory, including symlinks to an existing scope.
         Files.createDirectory(config.directory());
-        FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
-                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+        SegmentDataFileLock guard = SegmentDataFileLock.create(config.directory());
         IsolatedSegmentFiles result = null;
         try {
-            FileLock lock = guard.tryLock();
-            if (lock == null) {
-                throw new IOException("Isolated directory is locked");
-            }
-            result = new IsolatedSegmentFiles(config, identity, guard, lock, false, null);
+            result = new IsolatedSegmentFiles(config, identity, guard, false, null);
             for (int i = 0; i < config.dataFiles(); i++) {
                 FileChannel channel = FileChannel.open(dataPath(config, i), StandardOpenOption.CREATE_NEW,
                         StandardOpenOption.READ, StandardOpenOption.WRITE);
@@ -127,7 +118,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             writeIdentity(config.directory().resolve("superblock-b"), identity.encode(config, -2), io);
             writeIdentity(config.directory().resolve("bookie-control"), identity.encode(config, -3), io);
             writeIdentity(config.directory().resolve("arena-control"), identity.encode(config, -4), io);
-            io.force(guard, true);
+            io.force(guard.channel(), true);
             syncDirectory(config.directory());
             syncDirectory(config.directory().getParent());
             return result;
@@ -174,28 +165,19 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         Objects.requireNonNull(recoveryIo, "recoveryIo");
         synchronized (authority) {
             authority.requireQuiescentRecovery(config, identity);
-            FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
-                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            SegmentDataFileLock guard = SegmentDataFileLock.open(config.directory());
             IsolatedSegmentFiles result = null;
             try {
-                FileLock lock;
-                try {
-                    lock = guard.tryLock();
-                } catch (OverlappingFileLockException overlapping) {
-                    throw new IOException("Isolated DATA writer is already active", overlapping);
-                }
-                if (lock == null) {
-                    throw new IOException("Isolated DATA writer is already active");
-                }
                 // Keep the same writer exclusion through validation, sync and the reopened writer lifetime.
                 SegmentDataRecovery.PhysicalInventory inventory = null;
                 if (maxEntries == 0) {
-                    SegmentDataRecovery.validateAndSyncWhileLocked(config, identity, authority, recoveryIo, lock);
+                    SegmentDataRecovery.validateAndSyncWhileLocked(config, identity, authority,
+                            recoveryIo, guard.lock());
                 } else {
                     inventory = SegmentDataRecovery.recoverPhysicalInventoryWhileLocked(config, identity,
-                            authority, recoveryIo, maxEntries, lock);
+                            authority, recoveryIo, maxEntries, guard.lock());
                 }
-                result = new IsolatedSegmentFiles(config, identity, guard, lock, true, inventory);
+                result = new IsolatedSegmentFiles(config, identity, guard, true, inventory);
                 for (int file = 0; file < config.dataFiles(); file++) {
                     FileChannel data = FileChannel.open(dataPath(config, file), StandardOpenOption.READ,
                             StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
@@ -392,16 +374,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             }
         }
         try {
-            lock.release();
-        } catch (IOException failure) {
-            if (first == null) {
-                first = failure;
-            } else {
-                first.addSuppressed(failure);
-            }
-        }
-        try {
-            lockChannel.close();
+            writerLock.close();
         } catch (IOException failure) {
             if (first == null) {
                 first = failure;

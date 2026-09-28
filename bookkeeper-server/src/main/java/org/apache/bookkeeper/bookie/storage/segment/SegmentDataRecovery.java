@@ -21,7 +21,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -54,49 +53,6 @@ final class SegmentDataRecovery {
         T apply(SelectedPhysicalLocation selected) throws IOException;
     }
 
-    private static final class QuiescedFiles implements AutoCloseable {
-        private final FileChannel guard;
-        private final FileLock lock;
-
-        private QuiescedFiles(FileChannel guard, FileLock lock) {
-            this.guard = guard;
-            this.lock = lock;
-        }
-
-        private static QuiescedFiles acquire(IsolatedSegmentConfig config) throws IOException {
-            FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
-                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-            try {
-                FileLock lock;
-                try {
-                    lock = guard.tryLock();
-                } catch (OverlappingFileLockException overlapping) {
-                    throw new IOException("DATA writer is active", overlapping);
-                }
-                if (lock == null) {
-                    throw new IOException("DATA writer is active");
-                }
-                return new QuiescedFiles(guard, lock);
-            } catch (IOException | RuntimeException | Error failure) {
-                try {
-                    guard.close();
-                } catch (IOException closeFailure) {
-                    failure.addSuppressed(closeFailure);
-                }
-                throw failure;
-            }
-        }
-
-        @Override
-        public void close() throws IOException {
-            try {
-                lock.release();
-            } finally {
-                guard.close();
-            }
-        }
-    }
-
     /** Executes the read or comparison under writer exclusion in the isolated no-MOVE/FREE scope. */
     static <T> Optional<T> withLocallyReadableSingleStreamLocation(
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog arena,
@@ -105,7 +61,7 @@ final class SegmentDataRecovery {
         if (!bookie.matchesScope(config, identity) || !arena.matchesScope(config, identity)) {
             throw new IOException("Recovered location authority belongs to another storage scope");
         }
-        try (QuiescedFiles files = QuiescedFiles.acquire(config)) {
+        try (SegmentDataFileLock files = SegmentDataFileLock.open(config.directory())) {
             int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
             SegmentArenaControlLog.SingleStream stream = arena.singleStreamForShard(shard).orElse(null);
             if (stream == null) {
@@ -300,7 +256,7 @@ final class SegmentDataRecovery {
                                                                   SegmentFileIo syncIo, int shard,
                                                                   Generation streamGeneration,
                                                                   long firstSequence, int maxBatches,
-                                                                  int maxEntries, QuiescedFiles files)
+                                                                  int maxEntries, SegmentDataFileLock files)
             throws IOException {
         if (syncIo == null || shard < 0 || shard >= config.logicalShards() || streamGeneration == null
                 || firstSequence < 0 || maxBatches < 1 || maxEntries < 1) {
@@ -312,7 +268,7 @@ final class SegmentDataRecovery {
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
         PhysicalInventory inventory = files == null
                 ? scan(config, identity, authority, syncIo, maxEntries, probe, bookie)
-                : scanWhileLocked(config, identity, authority, syncIo, maxEntries, probe, bookie, files.lock);
+                : scanWhileLocked(config, identity, authority, syncIo, maxEntries, probe, bookie, files.lock());
         if (bookie != null && !bookie.matchesScope(config, identity)) {
             throw new IOException("Bookie read route became unavailable during DATA recovery");
         }
@@ -324,15 +280,16 @@ final class SegmentDataRecovery {
                                           SegmentArenaControlLog authority, SegmentFileIo syncIo,
                                           int maxEntries, StreamProbe stream,
                                           SegmentBookieControlLog bookie) throws IOException {
-        try (QuiescedFiles files = QuiescedFiles.acquire(config)) {
-            return scanWhileLocked(config, identity, authority, syncIo, maxEntries, stream, bookie, files.lock);
+        try (SegmentDataFileLock files = SegmentDataFileLock.open(config.directory())) {
+            return scanWhileLocked(config, identity, authority, syncIo, maxEntries, stream, bookie, files.lock());
         }
     }
 
     private static PhysicalInventory scanWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                     SegmentArenaControlLog authority, SegmentFileIo syncIo,
                                                     int maxEntries, StreamProbe stream,
-                                                    SegmentBookieControlLog bookie, FileLock writerLock)
+                                                    SegmentBookieControlLog bookie,
+                                                    FileLock writerLock)
             throws IOException {
         if (!writerLock.isValid() || !authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
