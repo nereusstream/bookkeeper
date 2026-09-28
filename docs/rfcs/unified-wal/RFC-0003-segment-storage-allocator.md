@@ -575,6 +575,8 @@ checkpoint不持久化individual reader、future、buffer reference或pin histor
 
 实现状态：隔离`SegmentDataRecovery.validateAndSync`在目录锁下验证完整DATA文件的身份、framing与当前Arena grant，再执行文件`force(false)`；验证或同步失败不返回扫描结果。`recoverPhysicalInventory`在明确容量内，经全目录验证同步后返回普通DATA的物理位置，容量不足或同步失败不返回部分结果，搬迁副本不进入普通清单。`recoverPhysicalStreamCandidate`还可用调用方给定的shard/generation/起点，对已扫描batch按物理stream sequence拒绝缺口、重复和容量超限，并在文件同步后返回候选；传入起点没有持久authority证明。它尚未依据完整Bookie/current-selector控制关系选出必要DATA，也不重建可发布的持久stream前缀和locator；局部文件同步及位置清单不能作为本节完整恢复或ACK证据。
 
+当前`IsolatedSegmentFiles`没有可写重开入口。扫描零尾页无法区分未使用空间和已提交但结果不明的预留；仅凭最后完整batch位置回退写指针会冒复用未知坐标的风险。因此这一物理候选路径保持只读，直到空间使用authority、旧I/O终结及必要DATA依赖能在重启时判定。
+
 此路径只补正常中断留下的持久化确认，不能修补缺失/损坏prefix、ownership冲突、未解析写回错误或依赖不完整；这些仍沿原隔离/恢复规则处理，不以“再sync一次成功”解除。B2/B9/B16须执行两次故障：write完成但barrier前终止进程，重启处理重复请求，再模拟掉电；已允许成功的内容仍须存在。一次kill后可读检查不足，恢复barrier按文件报告次数/等待且不计正常Add增量。
 
 suffix 出现 sequence gap、必要 record 缺失或 checkpoint content identity 无法验证时 fail closed。不得用更大的物理 generation、mtime 或 data scan跨过 authority gap。

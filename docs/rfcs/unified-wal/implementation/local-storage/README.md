@@ -52,6 +52,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读；`SegmentDataRecovery.recoverPhysicalStreamCandidate`还能在调用方给定shard、generation和预期起点后，对扫描到的batch按sequence排序并拒绝缺口、重复和容量超限。它只返回同步后的物理候选，不证明传入起点来自持久authority，也不把清单发布到热目录或核对当前Bookie selector；当前Arena不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
 
+当前没有可写重开入口：扫描到的全零尾页不证明对应坐标从未预留或提交，不能把写指针简单退到最后一个完整batch后继续使用。可写恢复还需要完整控制关系判定必要DATA、持久起点/空间使用事实和旧I/O终结证据；已有物理清单及恢复同步只供只读候选检查。
+
 ## 验证入口
 
 ```bash
