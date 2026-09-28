@@ -616,6 +616,62 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void recoveredPhysicalStreamCandidateRejectsGapDuplicateAndWrongStart() throws Exception {
+        for (long secondSequence : new long[] {12, 13, 11}) {
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                    temporary.getRoot().toPath().resolve("stream-candidate-" + secondSequence),
+                    1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2,
+                    "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            ByteBuf firstEntry = entry(new byte[16], 11);
+            ByteBuf secondEntry = entry(new byte[16], secondSequence);
+            SegmentBatchFormat.FrozenBatch first;
+            SegmentBatchFormat.FrozenBatch second;
+            try {
+                first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                        0, 0, 5, new Generation(1), new Generation(1), 11, 4096),
+                        List.of(SegmentBatchFormat.entry(context(), firstEntry)));
+                second = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                        0, 0, 5, new Generation(1), new Generation(1), secondSequence, 8192),
+                        List.of(SegmentBatchFormat.entry(context(), secondEntry)));
+            } finally {
+                firstEntry.release();
+                secondEntry.release();
+            }
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                        0, 0, new Generation(1), 5, 4096, 1)));
+                files.writeAuthorized(first, authority);
+                files.writeAuthorized(second, authority);
+            }
+            try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                SegmentFileIo sync = new SegmentFileIo();
+                if (secondSequence == 12) {
+                    SegmentDataRecovery.PhysicalStreamCandidate candidate =
+                            SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity(), replay, sync,
+                                    0, new Generation(1), 11, 2, 2);
+                    assertEquals(12, candidate.through());
+                    assertEquals(2, candidate.scan().batches());
+                    assertEquals(2, candidate.entries().size());
+                    assertEquals(11, SegmentPointRead.read(config, identity(), replay, candidate.entries().get(0))
+                            .record().entryId());
+                    assertEquals(12, SegmentPointRead.read(config, identity(), replay, candidate.entries().get(1))
+                            .record().entryId());
+                    assertEquals(1, sync.forces);
+                    assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
+                            config, identity(), replay, new SegmentFileIo(), 0, new Generation(1), 10, 2, 2));
+                    assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
+                            config, identity(), replay, new SegmentFileIo(), 0, new Generation(1), 11, 1, 2));
+                } else {
+                    assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
+                            config, identity(), replay, sync, 0, new Generation(1), 11, 2, 2));
+                }
+            }
+        }
+    }
+
+    @Test
     public void dataWriteRequiresAnAppliedGrantForTheWholeBatchAndMatchingIdentity() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("granted"),
                 1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

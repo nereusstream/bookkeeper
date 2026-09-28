@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的真实DATA write/force接原owner volatile连续物理前缀/有界物理热候选驱动及真实点读的重复payload比较原语、步骤7的对齐单record点读/停写后文件同步及重启物理清单局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储回执。Bookie控制、请求级幂等、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
+实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的真实DATA write/force接原owner volatile连续物理前缀/有界物理热候选驱动及真实点读的重复payload比较原语、步骤7的对齐单record点读/停写后文件同步、重启物理清单及单stream序号候选检查局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储回执。Bookie控制、请求级幂等、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
@@ -573,7 +573,7 @@ checkpoint不持久化individual reader、future、buffer reference或pin histor
 
 对缺少独立有效持久证据的完整合法内容，以已验证范围确定需同步的Bookie/Arena权威控制文件及DATA文件，按既有依赖顺序批量执行文件级barrier；文件同步不等于可以将未验证范围一起认定为有效。新文件/目录项依旧遵守各自发布协议。已被有效证据覆盖的内容无需重写，不增加逐entry fsync或成功日志；index重建、readiness持久化或同步另一控制文件都不能替代目标DATA barrier。恢复后本地durable不推导原请求是否ACK、quorum LAC或最终ledger prefix，后者仍由RFC-0004取证/close决定。
 
-实现状态：隔离`SegmentDataRecovery.validateAndSync`在目录锁下验证完整DATA文件的身份、framing与当前Arena grant，再执行文件`force(false)`；验证或同步失败不返回扫描结果。`recoverPhysicalInventory`在明确容量内，经全目录验证同步后返回普通DATA的物理位置，容量不足或同步失败不返回部分结果，搬迁副本不进入普通清单。它尚未依据完整Bookie/current-selector控制关系选出必要DATA，也不重建stream前缀和可发布locator；局部文件同步及位置清单不能作为本节完整恢复或ACK证据。
+实现状态：隔离`SegmentDataRecovery.validateAndSync`在目录锁下验证完整DATA文件的身份、framing与当前Arena grant，再执行文件`force(false)`；验证或同步失败不返回扫描结果。`recoverPhysicalInventory`在明确容量内，经全目录验证同步后返回普通DATA的物理位置，容量不足或同步失败不返回部分结果，搬迁副本不进入普通清单。`recoverPhysicalStreamCandidate`还可用调用方给定的shard/generation/起点，对已扫描batch按物理stream sequence拒绝缺口、重复和容量超限，并在文件同步后返回候选；传入起点没有持久authority证明。它尚未依据完整Bookie/current-selector控制关系选出必要DATA，也不重建可发布的持久stream前缀和locator；局部文件同步及位置清单不能作为本节完整恢复或ACK证据。
 
 此路径只补正常中断留下的持久化确认，不能修补缺失/损坏prefix、ownership冲突、未解析写回错误或依赖不完整；这些仍沿原隔离/恢复规则处理，不以“再sync一次成功”解除。B2/B9/B16须执行两次故障：write完成但barrier前终止进程，重启处理重复请求，再模拟掉电；已允许成功的内容仍须存在。一次kill后可读检查不足，恢复barrier按文件报告次数/等待且不计正常Add增量。
 

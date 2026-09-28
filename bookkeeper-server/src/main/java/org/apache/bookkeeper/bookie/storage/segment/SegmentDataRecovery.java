@@ -25,12 +25,55 @@ import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
     record Scan(long batches, long records, long validatedBytes, long zeroPages) { }
+
+    /** A physical candidate only: the supplied start is not a persisted authority proof. */
+    record PhysicalStreamCandidate(Scan scan, long through, List<SegmentPointRead.Location> entries) {
+        PhysicalStreamCandidate {
+            entries = List.copyOf(entries);
+        }
+    }
+
+    private static final class StreamProbe {
+        private final int shard;
+        private final Generation generation;
+        private final int maxBatches;
+        private final List<SegmentBatchFormat.Address> batches = new ArrayList<>();
+
+        private StreamProbe(int shard, Generation generation, int maxBatches) {
+            this.shard = shard;
+            this.generation = generation;
+            this.maxBatches = maxBatches;
+        }
+
+        private void observe(SegmentBatchFormat.Address address) throws IOException {
+            if (address.shard() != shard) {
+                return;
+            }
+            if (!address.streamGeneration().equals(generation) || batches.size() == maxBatches) {
+                throw new IOException("Physical stream generation or recovery batch bound mismatch");
+            }
+            batches.add(address);
+        }
+
+        private long contiguousThrough(long firstSequence) throws IOException {
+            batches.sort(Comparator.comparingLong(SegmentBatchFormat.Address::sequence));
+            long expected = firstSequence;
+            for (SegmentBatchFormat.Address address : batches) {
+                if (address.sequence() != expected || expected == Long.MAX_VALUE) {
+                    throw new IOException("Physical stream has a sequence gap, duplicate or overflow");
+                }
+                expected++;
+            }
+            return expected - 1;
+        }
+    }
 
     static final class PhysicalInventory {
         private final Scan scan;
@@ -53,7 +96,7 @@ final class SegmentDataRecovery {
 
     static Scan inspect(IsolatedSegmentConfig config, SegmentFileHeader identity,
                         SegmentArenaControlLog authority) throws IOException {
-        return scan(config, identity, authority, null, 0).scan();
+        return scan(config, identity, authority, null, 0, null).scan();
     }
 
     /** A successful scan forces the checked DATA files; it does not establish Bookie or locator authority. */
@@ -62,7 +105,7 @@ final class SegmentDataRecovery {
         if (syncIo == null) {
             throw new IllegalArgumentException("DATA recovery sync requires an I/O backend");
         }
-        return scan(config, identity, authority, syncIo, 0).scan();
+        return scan(config, identity, authority, syncIo, 0, null).scan();
     }
 
     /** Physical locations only: caller still needs the recovered stream prefix and Bookie selector/permissions. */
@@ -72,12 +115,30 @@ final class SegmentDataRecovery {
         if (syncIo == null || maxEntries < 1) {
             throw new IllegalArgumentException("Bounded DATA recovery sync and inventory required");
         }
-        return scan(config, identity, authority, syncIo, maxEntries);
+        return scan(config, identity, authority, syncIo, maxEntries, null);
+    }
+
+    /** Requires an externally verified stream start before its candidate can be used for recovery. */
+    static PhysicalStreamCandidate recoverPhysicalStreamCandidate(IsolatedSegmentConfig config,
+                                                                  SegmentFileHeader identity,
+                                                                  SegmentArenaControlLog authority,
+                                                                  SegmentFileIo syncIo, int shard,
+                                                                  Generation streamGeneration,
+                                                                  long firstSequence, int maxBatches,
+                                                                  int maxEntries) throws IOException {
+        if (syncIo == null || shard < 0 || shard >= config.logicalShards() || streamGeneration == null
+                || firstSequence < 0 || maxBatches < 1 || maxEntries < 1) {
+            throw new IllegalArgumentException("Bounded physical stream recovery inputs required");
+        }
+        StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
+        PhysicalInventory inventory = scan(config, identity, authority, syncIo, maxEntries, probe);
+        return new PhysicalStreamCandidate(inventory.scan(), probe.contiguousThrough(firstSequence),
+                inventory.entries());
     }
 
     private static PhysicalInventory scan(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                           SegmentArenaControlLog authority, SegmentFileIo syncIo,
-                                          int maxEntries) throws IOException {
+                                          int maxEntries, StreamProbe stream) throws IOException {
         if (!authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
@@ -134,10 +195,14 @@ final class SegmentDataRecovery {
                             SegmentFileIo.readFully(data, content, offset);
                             SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
                                     config.bytesPerFile());
+                            if (stream != null) {
+                                stream.observe(address);
+                            }
                             if (maxEntries > 0) {
                                 List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
                                 for (int i = 0; i < parsed.records().size(); i++) {
-                                    if (parsed.records().get(i).origin() == SegmentBatchFormat.ENTRY_DATA) {
+                                    if (parsed.records().get(i).origin() == SegmentBatchFormat.ENTRY_DATA
+                                            && (stream == null || address.shard() == stream.shard)) {
                                         if (entries.size() == maxEntries) {
                                             throw new IOException("Physical recovery inventory capacity exhausted");
                                         }

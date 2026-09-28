@@ -169,7 +169,7 @@
     "planningCommit": "e75c67f3514d1627ea790d052e2c9226e593aa3c",
     "workspace": "/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper",
     "branch": "turbo-bk",
-    "state": "STEP_4_CONTROL_IO_RESERVE_STEP_5_ARENA_DRIVER_NONBLOCKING_GRANT_PARTIAL_STEP_6_DATA_PHYSICAL_DRIVER_HOT_CANDIDATE_DUPLICATE_COMPARE_PARTIAL_STEP_7_READ_SYNC_PHYSICAL_INVENTORY_PARTIAL",
+    "state": "STEP_4_CONTROL_IO_RESERVE_STEP_5_ARENA_DRIVER_NONBLOCKING_GRANT_PARTIAL_STEP_6_DATA_PHYSICAL_DRIVER_HOT_CANDIDATE_DUPLICATE_COMPARE_PARTIAL_STEP_7_READ_SYNC_PHYSICAL_STREAM_CANDIDATE_PARTIAL",
     "client2": "CLASSIC_RECYCLING_FIX_RED_GREEN_9_TESTS",
     "client2Receipt": "docs/rfcs/unified-wal/implementation/client-maintenance/client2-receipt.json",
     "client1": "CLASSIC_ACK_GATE_FIX_RED_GREEN_85_TESTS",
@@ -199,7 +199,8 @@
     "hotDirectoryReceipt": "docs/rfcs/unified-wal/implementation/local-storage/hot-directory-receipt.json",
     "duplicateCheckReceipt": "docs/rfcs/unified-wal/implementation/local-storage/duplicate-check-receipt.json",
     "physicalInventoryReceipt": "docs/rfcs/unified-wal/implementation/local-storage/physical-inventory-receipt.json",
-    "remainingSteps": "4 PARTIAL WITHOUT APPEND SERVICE INTEGRATION; 5 PARTIAL ARENA SINGLE-INFLIGHT DRIVER WITHOUT BOOKIE CONTROL OR LIFECYCLE INTEGRATION; 6 PARTIAL DATA PHYSICAL DRIVER AND DUPLICATE COMPARISON WITHOUT BOOKIE ELIGIBILITY PER-ENTRY RESULT OR REQUEST IDEMPOTENCY; 7 PARTIAL POINT READ FILE SYNC AND PHYSICAL INVENTORY WITHOUT PREFIX OR SELECTOR; 8-16 NOT_COMPLETED",
+    "physicalStreamCandidateReceipt": "docs/rfcs/unified-wal/implementation/local-storage/physical-stream-candidate-receipt.json",
+    "remainingSteps": "4 PARTIAL WITHOUT APPEND SERVICE INTEGRATION; 5 PARTIAL ARENA SINGLE-INFLIGHT DRIVER WITHOUT BOOKIE CONTROL OR LIFECYCLE INTEGRATION; 6 PARTIAL DATA PHYSICAL DRIVER AND DUPLICATE COMPARISON WITHOUT BOOKIE ELIGIBILITY PER-ENTRY RESULT OR REQUEST IDEMPOTENCY; 7 PARTIAL POINT READ FILE SYNC AND PHYSICAL STREAM CANDIDATE WITHOUT VERIFIED START OR SELECTOR; 8-16 NOT_COMPLETED",
     "productionIntegration": false,
     "authority": "NONE"
   },

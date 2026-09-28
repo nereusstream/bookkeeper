@@ -1,0 +1,19 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_PHYSICAL_STREAM_CANDIDATE_ONLY",
+  "sourceBaseCommit": "adbf9e2bc4fbca60726e4b512df4f500bcfd5e79",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentDataRecovery.java": "03df2291e4bb39e0126dcf13e79519741b0fa8cb953abf07196177aa0bcf03a9",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "0057e59db1543cd2dcc9af5ba04732d72875a6feebe952be0a3a49f5f97d6ca8"
+  },
+  "fixture": "real authorized DATA batches with physical sequences 11/12, 11/13 and duplicate 11, followed by writer exit, Arena log reopen, full DATA validation and force",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-rGMYGlo3",
+  "inputSha256": "1d75230973ef03913145ea307d17146ff53245872edab69913358f3bce389b2f",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest",
+  "mavenLogSha256": "6ff5ed53177c613adbae82d103ca76fc6622cc4f64c610fd54871d5116b48a8f",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 21, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "717a003b8af1e9e364dab68485420511b022818c186b8c098f73e42e80967fb5"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Caller supplies the stream start without durable proof. No Bookie/current-selector required-DATA selection, persisted stream prefix, hot locator publication, local Add result, power-loss or production ACK authority."
+}
