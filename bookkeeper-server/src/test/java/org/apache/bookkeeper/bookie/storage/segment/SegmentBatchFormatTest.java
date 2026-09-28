@@ -19,6 +19,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -32,9 +33,15 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
@@ -306,6 +313,194 @@ public class SegmentBatchFormatTest {
         }
         try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             assertThrows(IOException.class, () -> SegmentDataRecovery.inspect(config, identity(), log));
+        }
+    }
+
+    @Test
+    public void laterDurableBatchWaitsForTheEarlierPhysicalStreamPrefix() throws Exception {
+        runOutOfOrderPhysicalBatches(false);
+    }
+
+    @Test
+    public void laterDurableBatchCannotBypassAnEarlierUncertainForce() throws Exception {
+        runOutOfOrderPhysicalBatches(true);
+    }
+
+    private void runOutOfOrderPhysicalBatches(boolean failFirst) throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("prefix-" + failFirst),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf entry = entry(new byte[16]);
+        SegmentBatchFormat.FrozenBatch first;
+        SegmentBatchFormat.FrozenBatch later;
+        try {
+            first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 11, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+            later = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 12, 8192),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+        } finally {
+            entry.release();
+        }
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+        SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 11, 2);
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch laterCompleted = new CountDownLatch(1);
+        CountDownLatch firstCompleted = new CountDownLatch(1);
+        CountDownLatch bothReleased = new CountDownLatch(1);
+        List<Long> released = Collections.synchronizedList(new ArrayList<>());
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            if (failFirst) {
+                files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false);
+            }
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+            for (SegmentBatchFormat.FrozenBatch batch : List.of(first, later)) {
+                assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                    @Override
+                    public void run(SegmentOwnerLoop.Ticket ticket) {
+                        try {
+                            IsolatedSegmentFiles.Reservation reservation = prefix.reserve(batch, files, authority);
+                            io.submit(ticket, () -> {
+                                if (batch.address().sequence() == 11) {
+                                    firstStarted.countDown();
+                                    if (!releaseFirst.await(5, TimeUnit.SECONDS)) {
+                                        throw new IOException("Timed out waiting for earlier batch");
+                                    }
+                                }
+                                files.writeReserved(reservation);
+                            }, failure -> {
+                                if (failure != null) {
+                                    error.set(failure);
+                                }
+                                for (SegmentPhysicalPrefix.DurableBatch ready : prefix.completed(reservation,
+                                        failure)) {
+                                    released.add(ready.address().sequence());
+                                }
+                                if (batch.address().sequence() == 12) {
+                                    laterCompleted.countDown();
+                                } else {
+                                    firstCompleted.countDown();
+                                }
+                                if (released.size() == 2) {
+                                    bothReleased.countDown();
+                                }
+                            });
+                        } catch (IOException failure) {
+                            throw new AssertionError(failure);
+                        }
+                    }
+
+                    @Override
+                    public void failed(Throwable failure) {
+                        error.set(failure);
+                    }
+                }));
+            }
+            owner.start();
+            assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
+            assertTrue(laterCompleted.await(5, TimeUnit.SECONDS));
+            assertTrue(released.isEmpty());
+            assertEquals(12288, files.nextOffset(0));
+            CountDownLatch checkedGap = new CountDownLatch(1);
+            assertTrue(owner.control(() -> {
+                assertEquals(10, prefix.durableThrough());
+                assertEquals(2, prefix.pending());
+                checkedGap.countDown();
+            }));
+            assertTrue(checkedGap.await(5, TimeUnit.SECONDS));
+            releaseFirst.countDown();
+            assertTrue(firstCompleted.await(5, TimeUnit.SECONDS));
+            if (failFirst) {
+                assertTrue(released.isEmpty());
+            } else {
+                assertTrue(bothReleased.await(5, TimeUnit.SECONDS));
+                assertEquals(List.of(11L, 12L), released);
+            }
+            CountDownLatch checkedPrefix = new CountDownLatch(1);
+            assertTrue(owner.control(() -> {
+                assertEquals(failFirst ? 10 : 12, prefix.durableThrough());
+                assertEquals(failFirst ? 2 : 0, prefix.pending());
+                assertEquals(failFirst, prefix.failed());
+                checkedPrefix.countDown();
+            }));
+            assertTrue(checkedPrefix.await(5, TimeUnit.SECONDS));
+            assertEquals(failFirst, error.get() instanceof IOException);
+            for (SegmentBatchFormat.FrozenBatch batch : failFirst ? List.of(later) : List.of(first, later)) {
+                try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0))) {
+                    ByteBuffer bytes = ByteBuffer.allocate(batch.bytes().remaining());
+                    SegmentFileIo.readFully(data, bytes, batch.address().offset());
+                    assertEquals(3, SegmentBatchParser.parse(bytes, batch.address(), config.bytesPerFile())
+                            .records().get(0).entryId());
+                }
+            }
+        } finally {
+            releaseFirst.countDown();
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+    }
+
+    @Test
+    public void completionWithoutTheReservationForceCannotAdvanceThePhysicalPrefix() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("no-force"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 1, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf entry = entry(new byte[16]);
+        SegmentBatchFormat.FrozenBatch batch;
+        try {
+            batch = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+        } finally {
+            entry.release();
+        }
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+        SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 1);
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<Throwable> problem = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+            assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    try {
+                        IsolatedSegmentFiles.Reservation reservation = prefix.reserve(batch, files, authority);
+                        assertTrue(prefix.completed(reservation, null).isEmpty());
+                        assertEquals(0, prefix.durableThrough());
+                        assertTrue(prefix.failed());
+                    } catch (Throwable failure) {
+                        problem.set(failure);
+                    } finally {
+                        ticket.complete(done::countDown);
+                    }
+                }
+
+                @Override
+                public void failed(Throwable failure) {
+                    problem.set(failure);
+                }
+            }));
+            owner.start();
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertNull(problem.get());
+            assertEquals(8192, files.nextOffset(0));
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0))) {
+                ByteBuffer firstByte = ByteBuffer.allocate(1);
+                SegmentFileIo.readFully(data, firstByte, 4096);
+                assertEquals(0, firstByte.get(0));
+            }
+        } finally {
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
         }
     }
 

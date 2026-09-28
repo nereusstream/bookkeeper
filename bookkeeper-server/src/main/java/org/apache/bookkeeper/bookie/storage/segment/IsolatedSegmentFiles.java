@@ -29,6 +29,30 @@ import java.util.List;
 
 /** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
 final class IsolatedSegmentFiles implements AutoCloseable {
+    static final class Reservation {
+        private final IsolatedSegmentFiles owner;
+        private final SegmentBatchFormat.FrozenBatch batch;
+        private boolean submitted;
+        private volatile boolean durable;
+
+        private Reservation(IsolatedSegmentFiles owner, SegmentBatchFormat.FrozenBatch batch) {
+            this.owner = owner;
+            this.batch = batch;
+        }
+
+        SegmentBatchFormat.Address address() {
+            return batch.address();
+        }
+
+        int length() {
+            return batch.bytes().remaining();
+        }
+
+        boolean durable() {
+            return durable;
+        }
+    }
+
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
     private final List<FileChannel> data = new ArrayList<>();
@@ -36,6 +60,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final boolean[] failed;
     private final FileChannel lockChannel;
     private final FileLock lock;
+    private int pendingReservations;
     private boolean closed;
     SegmentFileIo dataIo = new SegmentFileIo();
 
@@ -110,10 +135,15 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     synchronized void write(SegmentBatchFormat.FrozenBatch batch) throws IOException {
+        writeReserved(reserve(batch));
+    }
+
+    synchronized Reservation reserve(SegmentBatchFormat.FrozenBatch batch) throws IOException {
         int file = batch.address().fileIndex();
         if (closed || file < 0 || file >= data.size() || failed[file]
                 || batch.address().shard() >= config.logicalShards()
-                || file != batch.address().shard() % config.dataFiles()) {
+                || file != batch.address().shard() % config.dataFiles()
+                || pendingReservations >= config.maxPendingEntries()) {
             throw new IOException("File is unavailable");
         }
         ByteBuffer bytes = batch.bytes();
@@ -124,18 +154,39 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
         // Reserve before submission. Failure never returns the coordinates for reuse.
         nextOffset[file] += bytes.remaining();
+        pendingReservations++;
+        return new Reservation(this, batch);
+    }
+
+    synchronized void writeReserved(Reservation reservation) throws IOException {
+        if (reservation.owner != this || reservation.submitted) {
+            throw new IllegalArgumentException("Reservation belongs to another writer or was already submitted");
+        }
+        reservation.submitted = true;
+        int file = reservation.address().fileIndex();
         try {
-            dataIo.writeFully(data.get(file), bytes, offset);
+            if (closed || failed[file]) {
+                throw new IOException("Reserved DATA file is unavailable");
+            }
+            dataIo.writeFully(data.get(file), reservation.batch.bytes(), reservation.address().offset());
             dataIo.force(data.get(file), false);
+            reservation.durable = true;
         } catch (IOException | RuntimeException | Error failure) {
             failed[file] = true;
             throw failure;
+        } finally {
+            pendingReservations--;
         }
     }
 
     /** Physical experiment path: require an applied, durable Arena grant for the entire frozen DATA batch. */
     synchronized void writeAuthorized(SegmentBatchFormat.FrozenBatch batch, SegmentArenaControlLog authority)
             throws IOException {
+        writeReserved(reserveAuthorized(batch, authority));
+    }
+
+    synchronized Reservation reserveAuthorized(SegmentBatchFormat.FrozenBatch batch,
+                                               SegmentArenaControlLog authority) throws IOException {
         SegmentBatchFormat.Address address = batch.address();
         if (!authority.matchesScope(config, identity)
                 || !authority.hasAppliedGrant(address.fileIndex(), address.offset(), batch.bytes().remaining(),
@@ -143,7 +194,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 address.generation().value())) {
             throw new IOException("DATA batch has no applied Arena allocation grant");
         }
-        write(batch);
+        return reserve(batch);
     }
 
     synchronized long nextOffset(int file) {

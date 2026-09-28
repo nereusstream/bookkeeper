@@ -1,0 +1,22 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_VOLATILE_PHYSICAL_PREFIX",
+  "sourceBaseCommit": "f9d8befe3b2be6394a7838b68583fe3a1b9a18e5",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentFiles.java": "4775a441a0f3e593fa7b2dc85340aaf693995e89c7276e50a151ae14308d3caa",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentPhysicalPrefix.java": "6b6e076e4c20c1b4f9160b0a7f11932d4af4e55a372c8fa2e38018e19d294b4d",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "bd677b6a2a600cdb64646a80b8ad8d63b9f675cd63800f4f65f3480a0f9dd6d4"
+  },
+  "fixture": "one Arena, one 4 MiB precreated DATA file, one physical stream at sequences 11 and 12 with two I/O workers and applied Arena grant; later batch is forced before the earlier batch; separate run injects force failure for sequence 11",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-3mdwfM65",
+  "inputSha256": "fb15e658e6548725e7eccc62d2dbc07722027f2fa0bd2592682acbac487db211",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentArenaControlLogTest,SegmentOwnerLoopTest",
+  "mavenLogSha256": "6c610cf615a0ef0289ce81a92a581c028d5635d8bd03b438a46a3d24b7f6bade",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 14, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "1b2cd7e8f7178a058dc11fb97d0edcdc100a17917e7898763993d849ae17845f"},
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "83636c76065b765da0f8da84155ef4f5bdf86fc5982f59f1c7b859125fd243a3"},
+    "SegmentOwnerLoopTest": {"tests": 6, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "8dbf70e080adcbbc268b3415e85ab0b5a26313f141234c7f44805ab2fd6f3770"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Isolated FileChannel write/force and owner-only volatile physical prefix only. First sequence is caller supplied, not recovered authority. No Bookie control, restart prefix reconstruction, hot locator, entry result, power-loss or production authority. Maven duration is not a performance measurement."
+}

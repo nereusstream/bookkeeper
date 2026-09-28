@@ -275,6 +275,8 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 首批选择**每个物理append stream的连续前缀恢复和成功发布**。bounded batch table记录乱序completion；只有从已验证起点开始连续的batch均取得durability，才推进内存中的physical durable-through并允许对应entry发布locator/local success。batch 11未durable而12先完成时，12保持等待，不能先ACK再在restart的11缺口截断后缀。该序号属于物理stream，不是ledger entryId或LAC，也不是Arena控制日志sequence；不同ledger可同批，`E>W`不要求本地entryId连续。
 
+实现状态：隔离文件路径已将坐标预留与实际write/force分开，owner上的有界tracker验证真实reservation的force结果并按stream sequence释放连续物理候选；11/12乱序与11同步失败的局部真实文件测试已覆盖。起点尚非持久恢复证据，Bookie权限、热定位、逐entry成功和restart前缀重建仍未接通，不能以该候选直接ACK。
+
 允许有界I/O queue depth大于1；物理前缀排序在各stream内，不新增跨shard全局sequencer，但共享文件的barrier成本/错误范围不因此隔离。batch边界、stream lineage与范围发现由§9的可恢复framing和完整allocator authority给出；physical durable-through按§12先验证候选，再凭独立有效证据或必要恢复同步重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut按stream扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。所谓“截断DATA后缀”仅指将已证明可丢弃的特定stream/generation未成功后缀排除出有效批次范围，不等于缩短共享文件；required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
 
 首个文件切片在一Arena内为固定append shard各设物理stream，共享预分配DATA文件；各自使用allocator授权的不重叠范围。实验manifest固定shard/stream/file映射、文件增长/rotation及最大文件数、活跃buffer上限，不为每ledger建文件。物理stream是恢复排序单位，不是独立设备或flush域：`fdatasync/fsync`作用于指定文件，不能同步一个应用定义的extent/shard而独立于同文件其他写入。先测共享文件的barrier数量、覆盖集合及等待；以后拆分文件须另给可比证据，本次不新增跨shard flush调度框架。[Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)

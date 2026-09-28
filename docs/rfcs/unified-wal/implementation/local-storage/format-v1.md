@@ -79,6 +79,8 @@ Bookie type 1～8：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_G
 
 `SegmentDataRecovery.inspect`只读扫描已停写的DATA文件：零页计数不推导unused；非零页必须形成CRC和身份完整、整段有当前grant的batch。完整但无grant的原始格式写入也拒绝。该扫描不提供连续物理前缀、可复用判定或DATA缺失持久证据时的恢复同步。
 
+运行时DATA提交先预留固定物理范围，再由I/O线程对同一冻结batch完整写入并force；同文件较高offset可以先返回，但`SegmentPhysicalPrefix`仅在每stream已有起点后的sequence连续、且各reservation的force确实返回时释放物理候选。该volatile tracker不是持久成功游标，不能由它单独恢复ACK、定位或跨重启的起点。
+
 ## 固定向量与验证边界
 
 `src/test/resources/unified-wal-segment` 中 `entry-v1.hex`、`copy-v1.hex` 各4096字节，`arena-alloc-v1.hex` 为160字节。向量由独立 Python struct/逐位 CRC32C 生成，Java writer 不参与生成；Java writer 输出逐字节对照，独立 parser 读取同一向量。旧ALLOC向量body仅为两个u64(5,1)，只验证framing；它不符合上述32字节语义body，不能经Arena控制日志执行。

@@ -36,6 +36,8 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser且拥有匹配的已apply Arena grant，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用；此检查没有同步不确定的DATA内容、推导连续stream前缀、恢复locator或开放写入。
 
+步骤6的物理前缀局部切片：`IsolatedSegmentFiles`已将有界DATA坐标预留与已预留批次的实际write/force分开。预留在I/O前占用固定文件范围；失败不退回坐标，并停止该文件新写。`SegmentPhysicalPrefix`只在原shard owner上接收同一stream generation的递增batch sequence；I/O completion必须对应已预留batch且其真实force返回，才可推进连续物理前缀。较晚batch先durable仍等待前批；前批同步不确定时不释放后批，不凭后批完整字节报告本地成功。当前tracker的起点由隔离调用者显式提供，未从持久checkpoint证明；它只返回物理可发布候选，不实现Bookie权限复查、热定位或逐entry result。
+
 ## 验证入口
 
 ```bash
@@ -88,6 +90,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 2026-09-28 [只读DATA扫描回执](data-scan-receipt.json)：同一局部测试扩展为18项通过，0失败/错误/跳过，Spotless/Checkstyle通过。停写后重开Arena控制日志，再以目录锁扫描DATA；完整已授权batch被验证，活跃writer、尾部非零脏页和完整但没有控制grant的原始batch被拒绝。全零页数不用于判定可复用空间。
 
+2026-09-28 [物理前缀回执](physical-prefix-receipt.json)：macOS隔离测试24项通过，0失败/错误/跳过，Spotless/Checkstyle通过。真实预创建文件中，先预留sequence 11/12、让12先write/force，确认11完成前不会释放12；注入11的force失败后，即使12的字节完整也不释放其物理候选。另验证没有对应reservation的真实force返回时，空错误回调不能推进前缀。该结果不授予逐entry成功、重启起点或掉电保证。
+
 ## 未覆盖范围
 
-步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制及Arena/DATA恢复闭环、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
+步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制及Arena/DATA恢复闭环、步骤6合批/热定位/逐entry结果/幂等、步骤7定位/pin/restart尚未实现。物理前缀的隔离局部实现不等于步骤6完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
