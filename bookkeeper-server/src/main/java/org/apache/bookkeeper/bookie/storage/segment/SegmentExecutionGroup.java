@@ -36,7 +36,7 @@ final class SegmentExecutionGroup {
     record Settings(int workers, int ioThreads, int controlSlots, int buffers, int bufferBytes,
                     long bufferBudgetBytes, Duration startupTimeout) {
         Settings {
-            if (workers < 1 || ioThreads < 1 || ioThreads > 64 || controlSlots < workers || buffers < workers
+            if (workers < 1 || ioThreads < 2 || ioThreads > 64 || controlSlots < workers || buffers < workers
                     || bufferBytes < 4096 || bufferBytes % 4096 != 0 || bufferBudgetBytes < 1
                     || startupTimeout.isNegative() || startupTimeout.isZero()) {
                 throw new IllegalArgumentException("Invalid execution or buffer limits");
@@ -163,7 +163,8 @@ final class SegmentExecutionGroup {
                         factory(true, worker));
             }
             // All application threads originate here, before any worker narrows its own mask.
-            io = new SegmentIoExecutor(settings.ioThreads(), config.maxPendingEntries(), factory(false, 0),
+            io = new SegmentIoExecutor(settings.ioThreads() - 1, config.maxPendingEntries(), 1,
+                    settings.controlSlots(), factory(false, 0),
                     startupTopology == null ? null : this::checkCurrentBinding);
             for (SegmentOwnerLoop owner : owners) {
                 owner.start();
@@ -327,6 +328,10 @@ final class SegmentExecutionGroup {
 
     boolean submit(int shard, SegmentOwnerLoop.Command command) {
         return accepting && owners[plan.workerForShard(shard)].submit(shard, command);
+    }
+
+    boolean submitControl(int shard, SegmentOwnerLoop.Command command) {
+        return accepting && owners[plan.workerForShard(shard)].submitControl(command);
     }
 
     SegmentOwnerLoop owner(int shard) {

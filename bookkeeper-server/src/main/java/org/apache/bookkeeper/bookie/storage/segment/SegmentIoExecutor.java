@@ -35,6 +35,7 @@ final class SegmentIoExecutor {
     }
 
     private final ThreadPoolExecutor executor;
+    private final ThreadPoolExecutor controlExecutor;
     private final Runnable beforeOperation;
 
     SegmentIoExecutor(int threads, int queueCapacity) {
@@ -51,28 +52,64 @@ final class SegmentIoExecutor {
     }
 
     SegmentIoExecutor(int threads, int queueCapacity, ThreadFactory factory, Runnable beforeOperation) {
-        if (threads < 1 || queueCapacity < 1) {
-            throw new IllegalArgumentException("Positive I/O bounds required");
+        this(threads, queueCapacity, 0, 0, factory, beforeOperation);
+    }
+
+    SegmentIoExecutor(int dataThreads, int dataQueueCapacity, int controlThreads, int controlQueueCapacity) {
+        this(dataThreads, dataQueueCapacity, controlThreads, controlQueueCapacity, defaultFactory(), null);
+    }
+
+    SegmentIoExecutor(int dataThreads, int dataQueueCapacity, int controlThreads, int controlQueueCapacity,
+                      ThreadFactory factory, Runnable beforeOperation) {
+        if (dataThreads < 1 || dataQueueCapacity < 1 || controlThreads < 0
+                || (controlThreads == 0 ? controlQueueCapacity != 0 : controlQueueCapacity < 1)) {
+            throw new IllegalArgumentException("Invalid I/O bounds");
         }
         this.beforeOperation = beforeOperation;
-        executor = new ThreadPoolExecutor(threads, threads, 0, TimeUnit.NANOSECONDS,
-                new ArrayBlockingQueue<>(queueCapacity), factory,
-                new ThreadPoolExecutor.AbortPolicy());
-        // Start from the unbound startup thread, never lazily from a single-CPU append owner.
+        executor = create(dataThreads, dataQueueCapacity, factory);
         try {
-            executor.prestartAllCoreThreads();
+            controlExecutor = controlThreads == 0 ? null : create(controlThreads, controlQueueCapacity, factory);
         } catch (RuntimeException | Error failure) {
             executor.shutdownNow();
             throw failure;
         }
     }
 
+    private static ThreadPoolExecutor create(int threads, int queueCapacity, ThreadFactory factory) {
+        if (threads < 1 || queueCapacity < 1) {
+            throw new IllegalArgumentException("Positive I/O bounds required");
+        }
+        ThreadPoolExecutor result = new ThreadPoolExecutor(threads, threads, 0, TimeUnit.NANOSECONDS,
+                new ArrayBlockingQueue<>(queueCapacity), factory,
+                new ThreadPoolExecutor.AbortPolicy());
+        // Start from the unbound startup thread, never lazily from a single-CPU append owner.
+        try {
+            result.prestartAllCoreThreads();
+        } catch (RuntimeException | Error failure) {
+            result.shutdownNow();
+            throw failure;
+        }
+        return result;
+    }
+
     void submit(SegmentOwnerLoop.Ticket ticket, Operation operation, Consumer<Throwable> completed) {
+        submit(executor, ticket, operation, completed);
+    }
+
+    void submitControl(SegmentOwnerLoop.Ticket ticket, Operation operation, Consumer<Throwable> completed) {
+        if (controlExecutor == null) {
+            throw new IllegalStateException("No reserved control I/O service");
+        }
+        submit(controlExecutor, ticket, operation, completed);
+    }
+
+    private void submit(ThreadPoolExecutor target, SegmentOwnerLoop.Ticket ticket, Operation operation,
+                        Consumer<Throwable> completed) {
         Objects.requireNonNull(operation, "operation");
         Objects.requireNonNull(completed, "completed");
         ticket.beginIo();
         try {
-            executor.execute(() -> {
+            target.execute(() -> {
                 Throwable failure = null;
                 try {
                     if (beforeOperation != null) {
@@ -93,9 +130,17 @@ final class SegmentIoExecutor {
     void shutdown() {
         // Do not interrupt submitted file I/O or pretend an unresolved write released its coordinates.
         executor.shutdown();
+        if (controlExecutor != null) {
+            controlExecutor.shutdown();
+        }
     }
 
     boolean awaitTermination(Duration timeout) throws InterruptedException {
-        return executor.awaitTermination(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        long end = System.nanoTime() + timeout.toNanos();
+        if (!executor.awaitTermination(timeout.toNanos(), TimeUnit.NANOSECONDS)) {
+            return false;
+        }
+        return controlExecutor == null || controlExecutor.awaitTermination(
+                Math.max(0, end - System.nanoTime()), TimeUnit.NANOSECONDS);
     }
 }

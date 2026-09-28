@@ -301,6 +301,11 @@ public class SegmentOwnerLoopTest {
                     done.countDown();
                 }));
                 await(done);
+                long end = System.nanoTime() + WAIT.toNanos();
+                while (owner.controlPending() != 0 && System.nanoTime() < end) {
+                    Thread.onSpinWait();
+                }
+                assertEquals(0, owner.controlPending());
             }
         } finally {
             stop(owner);

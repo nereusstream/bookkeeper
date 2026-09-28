@@ -33,7 +33,6 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
@@ -73,33 +72,55 @@ public class SegmentArenaControlLogTest {
     public void arenaControlForceAndApplyProgressWhileDataAdmissionIsFull() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
-        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
-        SegmentIoExecutor io = new SegmentIoExecutor(1, 1);
-        CountDownLatch dataDispatched = new CountDownLatch(1);
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+        CountDownLatch dataStarted = new CountDownLatch(1);
+        CountDownLatch dataQueued = new CountDownLatch(1);
+        CountDownLatch releaseData = new CountDownLatch(1);
         CountDownLatch controlStarted = new CountDownLatch(1);
         CountDownLatch releaseControl = new CountDownLatch(1);
         CountDownLatch controlDone = new CountDownLatch(1);
-        CountDownLatch dataDone = new CountDownLatch(1);
-        AtomicReference<SegmentOwnerLoop.Ticket> dataTicket = new AtomicReference<>();
+        CountDownLatch dataDone = new CountDownLatch(2);
         AtomicReference<SegmentArenaControlLog.DurableBatch> durable = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
-        AtomicBoolean dataPosted = new AtomicBoolean();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
                 SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
-            assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
-                @Override
-                public void run(SegmentOwnerLoop.Ticket ticket) {
-                    dataTicket.set(ticket);
-                    dataDispatched.countDown();
-                }
+            for (int i = 0; i < 2; i++) {
+                int request = i;
+                assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                    @Override
+                    public void run(SegmentOwnerLoop.Ticket ticket) {
+                        io.submit(ticket, () -> {
+                            if (request == 0) {
+                                dataStarted.countDown();
+                                if (!releaseData.await(5, TimeUnit.SECONDS)) {
+                                    throw new IOException("DATA I/O was not released");
+                                }
+                            }
+                        }, cause -> {
+                            owner.requireOwner();
+                            if (cause != null) {
+                                failure.set(cause);
+                            }
+                            dataDone.countDown();
+                        });
+                        if (request == 1) {
+                            dataQueued.countDown();
+                        }
+                    }
 
-                @Override
-                public void failed(Throwable cause) {
-                    failure.set(cause);
+                    @Override
+                    public void failed(Throwable cause) {
+                        failure.set(cause);
+                        dataDone.countDown();
+                    }
+                }));
+                if (i == 0) {
+                    owner.start();
+                    assertTrue(dataStarted.await(5, TimeUnit.SECONDS));
                 }
-            }));
-            owner.start();
-            assertTrue(dataDispatched.await(5, TimeUnit.SECONDS));
+            }
+            assertTrue(dataQueued.await(5, TimeUnit.SECONDS));
             assertFalse(owner.submit(0, new SegmentOwnerLoop.Command() {
                 @Override
                 public void run(SegmentOwnerLoop.Ticket ticket) {
@@ -114,7 +135,7 @@ public class SegmentArenaControlLogTest {
             assertTrue(owner.submitControl(new SegmentOwnerLoop.Command() {
                 @Override
                 public void run(SegmentOwnerLoop.Ticket ticket) {
-                    io.submit(ticket, () -> {
+                    io.submitControl(ticket, () -> {
                         controlStarted.countDown();
                         if (!releaseControl.await(5, TimeUnit.SECONDS)) {
                             throw new IOException("Control I/O was not released");
@@ -152,15 +173,11 @@ public class SegmentArenaControlLogTest {
             assertTrue(controlDone.await(5, TimeUnit.SECONDS));
             assertNull(failure.get());
             assertTrue(granted(log, 4096, 1, 1, 1));
-            dataPosted.set(true);
-            dataTicket.get().complete(dataDone::countDown);
+            releaseData.countDown();
             assertTrue(dataDone.await(5, TimeUnit.SECONDS));
         } finally {
             releaseControl.countDown();
-            SegmentOwnerLoop.Ticket held = dataTicket.get();
-            if (held != null && dataPosted.compareAndSet(false, true)) {
-                held.complete(() -> {});
-            }
+            releaseData.countDown();
             io.shutdown();
             assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
             owner.stopAdmission();

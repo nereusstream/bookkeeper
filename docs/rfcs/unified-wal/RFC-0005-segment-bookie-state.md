@@ -522,7 +522,7 @@ B18在已有资源测量中分列TLS/decoder retained bytes、未完成frame数�
 
 ### 10.2 固定owner与执行线程分工
 
-2026-09-28：[隔离实现](implementation/local-storage/README.md)已交付固定owner/PARK循环、DATA/控制独立预留的completion、有界阻塞I/O、显式绑定、拓扑/placement、group启动和SYSTEM/OWNER_TOUCH池；Arena控制在DATA满额时的真实force后原owner apply及绑定模式的低频资源复查/PREFER/REQUIRE本地处置已有定向验证。仍未接入append状态机、Bookie生命周期自动重启或PREFERRED页策略，无性能结论。目标映射明确分开：
+2026-09-28：[隔离实现](implementation/local-storage/README.md)已交付固定owner/PARK循环、DATA/控制独立预留的completion、从既有I/O线程总额划分的控制专用有界服务、显式绑定、拓扑/placement、group启动和SYSTEM/OWNER_TOUCH池；Arena控制在DATA工作线程及队列满额时的真实force后原owner apply及绑定模式的低频资源复查/PREFER/REQUIRE本地处置已有定向验证。仍未接入append状态机、Bookie生命周期自动重启或PREFERRED页策略，无性能结论。目标映射明确分开：
 
 ```text
 ledger instance -> logical WalShard -> fixed owner worker -> CPU / NUMA placement

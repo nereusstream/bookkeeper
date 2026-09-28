@@ -1,0 +1,31 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_CONTROL_IO_RESERVE_ONLY",
+  "sourceBaseCommit": "c3d8940e0c68c735467c6e91d28b79a130236a07",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentIoExecutor.java": "083e52ccdef4be8fb48c4e16d215a976d08521bf5f052467b06c4f3b40209f53",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroup.java": "1e592905ff6903927e087eefb85c5aa7321f4ebafeb1843245668c25f4fd7097",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLogTest.java": "74b7b577573ff243fdde3e00e6da86c9c72aa3523542ff3a8a78b313107ea500",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroupTest.java": "d0ff25229ff4ced13bbedbf59c0910a6eaa6333fd54776d95d2eabb5cb6e177f",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoopTest.java": "79e3f3da31e754f8a6e3dca486b2ad1d9c2e008278b43870a0016cdce5a5deeb"
+  },
+  "fixture": "one blocked DATA I/O worker and one full DATA I/O queue; one reserved control worker and queue force an Arena control batch and return apply to its owner; execution group routes control within a two-thread I/O budget",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-LZsAt79o",
+  "inputSha256": "63da77ddb3848427d3af112a2d24bfc6a97f4d7cd478f7d9155971cfc04def1c",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest",
+  "mavenLogSha256": "43018655d82bbbb6308b2db9719a000e82d0cea1b27624bf79eeeae0cceea70d",
+  "junit": {
+    "SegmentArenaControlLogTest": {"tests": 5, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "45f6a642e330f5bb54fa22ba912910b587fdc0377c0c984963fd40e3b6dbd7e9"},
+    "SegmentOwnerLoopTest": {"tests": 6, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "77edf75a6fb452a730931da197abc58288e2b296fce6c894707f2ca1d8d7dc33"},
+    "SegmentExecutionGroupTest": {"tests": 12, "failures": 0, "errors": 0, "skipped": 5, "xmlSha256": "c3959274f8bce2612187b4585372935d6bfbd3fc53af6852617338a72da0d1ac"}
+  },
+  "compatibilityRun": {
+    "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest",
+    "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-HFjukKPd",
+    "inputSha256": "5003a99922967caf903b33d35456be2a31f2a7af3a0ede4497251584b59d6b3b",
+    "mavenLogSha256": "d8339a8342935ba81e1603b10a93271414eadc13c37eb43388e4fea5a6bd12b2",
+    "SegmentBatchFormatTest": {"tests": 16, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "5b759b99879132b672da643abd6016da8fcdaa30fd823ce20d3ad9e82d9df235"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Five platform-conditioned execution-group tests were skipped on macOS. No actual Bookie lifecycle driver, Bookie control authority, ordinary Add result, power-loss, Linux placement validation or production authority. A blocked or failed control service still requires explicit backpressure and recovery."
+}

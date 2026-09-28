@@ -53,7 +53,7 @@ public class SegmentExecutionGroupTest {
     }
 
     private SegmentExecutionGroup.Settings settings() {
-        return new SegmentExecutionGroup.Settings(2, 1, 2, 3, 4096, 3 * 8191, WAIT);
+        return new SegmentExecutionGroup.Settings(2, 2, 2, 3, 4096, 3 * 8191, WAIT);
     }
 
     private static void await(CountDownLatch latch) {
@@ -100,7 +100,7 @@ public class SegmentExecutionGroupTest {
             assertEquals(2, initialized.size());
             assertEquals(3, count.get());
             assertEquals(3 * 8191, group.reservedBufferBytes());
-            assertEquals(3, group.actualMasks().size());
+            assertEquals(4, group.actualMasks().size());
             CountDownLatch checked = new CountDownLatch(2);
             for (int shard : new int[] {0, 1}) {
                 assertTrue(group.submit(shard, command(ticket -> {
@@ -128,6 +128,49 @@ public class SegmentExecutionGroupTest {
         }
         for (Thread thread : initialized) {
             assertFalse(thread.isAlive());
+        }
+    }
+
+    @Test
+    public void controlIoRunsWhenDataWorkerIsBlocked() throws Exception {
+        SegmentExecutionGroup group = SegmentExecutionGroup.start(config("OFF", "SYSTEM"), settings());
+        CountDownLatch dataStarted = new CountDownLatch(1);
+        CountDownLatch releaseData = new CountDownLatch(1);
+        CountDownLatch dataDone = new CountDownLatch(1);
+        CountDownLatch controlDone = new CountDownLatch(1);
+        AtomicReference<Thread> dataWorker = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        try {
+            assertTrue(group.submit(0, command(ticket -> group.io().submit(ticket, () -> {
+                dataWorker.set(Thread.currentThread());
+                dataStarted.countDown();
+                if (!releaseData.await(5, TimeUnit.SECONDS)) {
+                    throw new IOException("DATA I/O was not released");
+                }
+            }, cause -> {
+                if (cause != null) {
+                    failure.compareAndSet(null, cause);
+                }
+                dataDone.countDown();
+            }))));
+            await(dataStarted);
+            assertTrue(group.submitControl(0, command(ticket -> group.io().submitControl(ticket, () -> {
+                assertFalse(Thread.currentThread() == dataWorker.get());
+            }, cause -> {
+                group.owner(0).requireOwner();
+                if (cause != null) {
+                    failure.compareAndSet(null, cause);
+                }
+                controlDone.countDown();
+            }))));
+            await(controlDone);
+            assertNull(failure.get());
+            releaseData.countDown();
+            await(dataDone);
+            assertNull(failure.get());
+        } finally {
+            releaseData.countDown();
+            assertTrue(group.shutdown(WAIT));
         }
     }
 
@@ -369,7 +412,7 @@ public class SegmentExecutionGroupTest {
         SegmentExecutionGroup group = SegmentExecutionGroup.start(config("PREFER", "SYSTEM"), settings());
         try {
             assertNotNull(group.degradation());
-            assertEquals(3, group.actualMasks().size());
+            assertEquals(4, group.actualMasks().size());
             CountDownLatch finished = new CountDownLatch(1);
             assertTrue(group.submit(0, command(ticket -> ticket.complete(finished::countDown))));
             await(finished);
@@ -382,7 +425,7 @@ public class SegmentExecutionGroupTest {
     @Test
     public void bufferBudgetAlignmentAndPoolExhaustionAreObservable() throws Exception {
         assertThrows(IllegalArgumentException.class, () ->
-                new SegmentExecutionGroup.Settings(2, 1, 2, 3, 4096, 3 * 4096, WAIT));
+                new SegmentExecutionGroup.Settings(2, 2, 2, 3, 4096, 3 * 4096, WAIT));
         SegmentBufferPool pool = new SegmentBufferPool(0, 3, 1, 4096, 4096, false, () -> {});
         SegmentBufferPool.Lease first = pool.acquire();
         assertNull(pool.acquire());
