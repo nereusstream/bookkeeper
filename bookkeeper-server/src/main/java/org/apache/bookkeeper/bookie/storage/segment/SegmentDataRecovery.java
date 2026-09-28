@@ -87,10 +87,6 @@ final class SegmentDataRecovery {
             }
         }
 
-        private boolean valid() {
-            return lock.isValid();
-        }
-
         @Override
         public void close() throws IOException {
             try {
@@ -212,6 +208,16 @@ final class SegmentDataRecovery {
         return scan(config, identity, authority, syncIo, 0, null, null).scan();
     }
 
+    /** The caller retains the isolated writer lock while consuming the scan and opening DATA files. */
+    static Scan validateAndSyncWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                           SegmentArenaControlLog authority, SegmentFileIo syncIo,
+                                           FileLock writerLock) throws IOException {
+        if (syncIo == null || writerLock == null) {
+            throw new IllegalArgumentException("DATA recovery sync and writer lock required");
+        }
+        return scanWhileLocked(config, identity, authority, syncIo, 0, null, null, writerLock).scan();
+    }
+
     /** Physical locations only: caller still needs the recovered stream prefix and Bookie selector/permissions. */
     static PhysicalInventory recoverPhysicalInventory(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                        SegmentArenaControlLog authority, SegmentFileIo syncIo,
@@ -281,7 +287,7 @@ final class SegmentDataRecovery {
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
         PhysicalInventory inventory = files == null
                 ? scan(config, identity, authority, syncIo, maxEntries, probe, bookie)
-                : scanWhileLocked(config, identity, authority, syncIo, maxEntries, probe, bookie, files);
+                : scanWhileLocked(config, identity, authority, syncIo, maxEntries, probe, bookie, files.lock);
         if (bookie != null && !bookie.matchesScope(config, identity)) {
             throw new IOException("Bookie read route became unavailable during DATA recovery");
         }
@@ -294,16 +300,16 @@ final class SegmentDataRecovery {
                                           int maxEntries, StreamProbe stream,
                                           SegmentBookieControlLog bookie) throws IOException {
         try (QuiescedFiles files = QuiescedFiles.acquire(config)) {
-            return scanWhileLocked(config, identity, authority, syncIo, maxEntries, stream, bookie, files);
+            return scanWhileLocked(config, identity, authority, syncIo, maxEntries, stream, bookie, files.lock);
         }
     }
 
     private static PhysicalInventory scanWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                     SegmentArenaControlLog authority, SegmentFileIo syncIo,
                                                     int maxEntries, StreamProbe stream,
-                                                    SegmentBookieControlLog bookie, QuiescedFiles files)
+                                                    SegmentBookieControlLog bookie, FileLock writerLock)
             throws IOException {
-        if (!files.valid() || !authority.matchesScope(config, identity)) {
+        if (!writerLock.isValid() || !authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
         long batches = 0;

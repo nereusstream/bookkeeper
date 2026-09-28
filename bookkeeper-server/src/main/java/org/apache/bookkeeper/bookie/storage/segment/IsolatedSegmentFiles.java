@@ -153,7 +153,6 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         Objects.requireNonNull(recoveryIo, "recoveryIo");
         synchronized (authority) {
             authority.requireQuiescentRecovery(config, identity);
-            SegmentDataRecovery.validateAndSync(config, identity, authority, recoveryIo);
             FileChannel guard = FileChannel.open(config.directory().resolve("isolated.lock"),
                     StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
             IsolatedSegmentFiles result = null;
@@ -167,6 +166,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 if (lock == null) {
                     throw new IOException("Isolated DATA writer is already active");
                 }
+                // Keep the same writer exclusion through validation, sync and the reopened writer lifetime.
+                SegmentDataRecovery.validateAndSyncWhileLocked(config, identity, authority, recoveryIo, lock);
                 result = new IsolatedSegmentFiles(config, identity, guard, lock, true);
                 for (int file = 0; file < config.dataFiles(); file++) {
                     FileChannel data = FileChannel.open(dataPath(config, file), StandardOpenOption.READ,
