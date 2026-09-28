@@ -1,0 +1,172 @@
+{
+  "runId": "uw-runtime-87a619fdd8",
+  "sourceCommit": "4c5fc007a878fd697099def9eaa2f782bae038a7",
+  "sourceBinding": "sourceCommit plus exact changed source/test/native hashes; compiled classes used by Linux container also hashed",
+  "sourceSha256": {
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/CpuBinding.java": "5d6d2d8ceda49afb5890e3f20ab55c601487e5e31ec0cf5784fda440580e96f8",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/CpuTopologySnapshot.java": "4ce4e12f67d18a0263eea4ce2a8db4c440a43e85e27379be23709a2046ab8252",
+    "cpu-affinity/src/main/java/org/apache/bookkeeper/common/util/affinity/ExecutionPlacementPlan.java": "18e174958f5ee64a85350442146e6a855fbe5ec6bb41a49282f310e6063f81a7",
+    "cpu-affinity/src/main/affinity/cpp/affinity_jni.c": "91891230565595d6090c6a3f5a9b809740cca1521f4699ed5fead4cc498451cf",
+    "cpu-affinity/src/test/java/org/apache/bookkeeper/common/util/affinity/CpuBindingTest.java": "13171524ea19a931808ffcf4be8eda3625377f9a45ff662b316690fcb8cd49ef",
+    "cpu-affinity/src/test/java/org/apache/bookkeeper/common/util/affinity/CpuTopologySnapshotTest.java": "1207de66c3e11addf840003d573fb1b3302789dbaf142c4d167bb49dceb3e422",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroup.java": "7c5425c8ae4a3ebe4b848e007369f34dfcc1032e60654c3f10582c3d132a9de8",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoop.java": "75148c68d15734c9600326a4624e546ac22c9b5f1e3b20201f3db62257d7cc38",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentIoExecutor.java": "12e26417d934af37a68bb53ae1abe76670fa77ccb42f25c4c676dcadb505ffd9",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBufferPool.java": "1bd0b1c6c8dfde08c629c99fa89a355ed74a2d93372b983f6cefd4314a2dc3e4",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroupTest.java": "0443607db9fe96d43e383f194e0065b7805c97ffd26944fa9006792cb297e235",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoopTest.java": "5ff5a56253e288dd60cdeae00e71386fb0e54912e61fefb493fe590e3f322bcd",
+    "scripts/unified-wal/run-local-storage-tests.sh": "474b6b831244387857948afb90863e97125df6f61ab2d01590d5f6e1f415755a"
+  },
+  "macOS": {
+    "command": [
+      "mvn",
+      "-o",
+      "-P",
+      "!cargo-zigbuild",
+      "-pl",
+      "bookkeeper-server",
+      "-am",
+      "-Dtest=IsolatedSegmentConfigTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest",
+      "-Dsurefire.failIfNoSpecifiedTests=false",
+      "-DtestRetryCount=0",
+      "-Dsurefire.rerunFailingTestsCount=0",
+      "test"
+    ],
+    "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-gKE2EyTK",
+    "mavenLogSha256": "d2255e9b27e97ce5eb08618ba4023658a0d43261eb21f7b5d188eb57c73c3cc1",
+    "reports": {
+      "org.apache.bookkeeper.bookie.storage.segment.IsolatedSegmentConfigTest": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "b3e37b9ab2f582f75bb31eaec7d69c4de71d18ef4831dfe889ae4335906fae57"
+      },
+      "org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest": {
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "xmlSha256": "48dbf6404f04e66bb87b64b8d989ec245c332f26610b85bc1210893421061add"
+      },
+      "org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest": {
+        "tests": 11,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 5,
+        "xmlSha256": "89ba6adbfecd0dbc0ad3966d242de116ee47bebdef76c95990a16af8a1238d31"
+      }
+    },
+    "result": "14 passed, 5 Linux-only skipped, 0 failures/errors"
+  },
+  "cpuAffinity": {
+    "command": "mvn -o -P '!cargo-zigbuild' -pl cpu-affinity -am -Dtest=CpuBindingTest,CpuTopologySnapshotTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 -Dsurefire.rerunFailingTestsCount=0 test",
+    "reports": {
+      "org.apache.bookkeeper.common.util.affinity.CpuBindingTest": {
+        "tests": 10,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1,
+        "xmlSha256": "6a6736527a7d8adc69065f80bb61d70088fa243f9d269d4186cba9546d759f6e"
+      },
+      "org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest": {
+        "tests": 8,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1,
+        "xmlSha256": "e626c1e5f98395fbddacf939a52f84d5c0f101c92bd5ec97bb36e5008b075438"
+      }
+    },
+    "result": "16 passed, 2 Linux-only skipped, 0 failures/errors"
+  },
+  "linuxContainer": {
+    "dockerImage": "uw-runtime-validation:20260928",
+    "imageId": "sha256:3786bb5b9948fad47c85ef81187c3e3479ff5546ccee4ea8463418382cb41d7c",
+    "dockerfile": "FROM eclipse-temurin:21-jdk-jammy\nRUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*\n",
+    "runFlags": [
+      "--rm",
+      "--network none",
+      "--user 65534:65534",
+      "--cpuset-cpus 0,2,4",
+      "--cpus 3",
+      "--memory 512m",
+      "--tmpfs /work:rw,exec,mode=1777",
+      "--tmpfs /tmp:rw,exec,mode=1777"
+    ],
+    "mounts": "repository and Maven repository read-only at original absolute paths; runner inputs read-only at /input",
+    "classpath": "execution-startup-receipt.json linuxContainer.classpathInput prefixed with cpu-affinity/target/test-classes",
+    "classpathSha256": "130420bb498e9a51272b449d4ac0ed4c3b23ce25835a9967737c413038ba13e9",
+    "runner": "#!/usr/bin/env bash\nset -euo pipefail\nrepo=/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper\nmkdir -p /work/lib\nid -u\ncat /proc/self/status | grep -E 'Cpus_allowed_list|Mems_allowed_list'\ncat /sys/fs/cgroup/cpu.max\ngcc -std=gnu11 -shared -fPIC -Werror=implicit-function-declaration \\\n  -I\"$JAVA_HOME/include\" -I\"$JAVA_HOME/include/linux\" \\\n  -I\"$repo/cpu-affinity/target/nar/javah-include\" \\\n  \"$repo/cpu-affinity/src/main/affinity/cpp/affinity_jni.c\" -o /work/lib/libcpu-affinity.so\ncp_value=\"$(cat /input/classpath)\"\ncat > /work/RuntimeTests.java <<'JAVA'\nimport org.junit.runner.JUnitCore;\nimport org.junit.runner.Result;\nimport org.junit.runner.notification.RunListener;\nimport org.junit.runner.notification.Failure;\nimport org.junit.runner.Description;\npublic class RuntimeTests {\n  public static void main(String[] args) throws Exception {\n    JUnitCore core = new JUnitCore();\n    core.addListener(new RunListener() {\n      public void testStarted(Description d) { System.out.println(\"START \" + d.getClassName() + \".\" + d.getMethodName()); }\n      public void testAssumptionFailure(Failure f) { System.out.println(\"SKIP \" + f); }\n      public void testFailure(Failure f) { System.out.println(\"FAIL \" + f.getTrace()); }\n    });\n    Result r = core.run(\n      org.apache.bookkeeper.common.util.affinity.CpuBindingTest.class,\n      org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.class,\n      org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.class,\n      org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.class);\n    System.out.println(\"tests=\" + r.getRunCount() + \" failures=\" + r.getFailureCount()\n      + \" assumptions=\" + r.getAssumptionFailureCount());\n    if (!r.wasSuccessful()) System.exit(1);\n  }\n}\nJAVA\njavac -proc:none -cp \"$cp_value\" -d /work /work/RuntimeTests.java\njava -Duw.requireBinding=true -cp \"$cp_value\" RuntimeTests\n",
+    "outputSha256": "2681104a4153deb1fd169b3c295a2e94e77df47efa89b1aeec1d153714e7a5d3",
+    "output": "65534\nCpus_allowed_list:\t0,2,4\nMems_allowed_list:\t0\n300000 100000\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.invalidConfigurationDoesNotAttemptNativeMutation\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.preferredBindingCanReleaseToCurrentLegalSubsetOnly\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.kernelRestrictionFailsAndRollsBackBeforePublishingBinding\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.runtimeMaskLossAndWrongThreadCloseAreVisible\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.failedCloseCanBeRetriedButCannotClaimRestoration\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.sparseMaskIsVerifiedAndRestoredWithoutEscapingMutableState\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.linuxNativeBindingAndChildInheritanceRestoreOnSameThread\n2026-09-28T09:08:56.087995757Z main ERROR Could not determine local host name java.net.UnknownHostException: 90924cd52d8d: 90924cd52d8d: Temporary failure in name resolution\n\tat java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1936)\n\tat org.apache.logging.log4j.core.util.NetUtils.getLocalHostname(NetUtils.java:56)\n\tat org.apache.logging.log4j.core.LoggerContext.lambda$setConfiguration$0(LoggerContext.java:625)\n\tat java.base/java.util.concurrent.ConcurrentHashMap.computeIfAbsent(ConcurrentHashMap.java:1708)\n\tat org.apache.logging.log4j.core.LoggerContext.setConfiguration(LoggerContext.java:625)\n\tat org.apache.logging.log4j.core.LoggerContext.reconfigure(LoggerContext.java:713)\n\tat org.apache.logging.log4j.core.LoggerContext.reconfigure(LoggerContext.java:735)\n\tat org.apache.logging.log4j.core.LoggerContext.start(LoggerContext.java:260)\n\tat org.apache.logging.log4j.core.impl.Log4jContextFactory.getContext(Log4jContextFactory.java:258)\n\tat org.apache.logging.log4j.core.impl.Log4jContextFactory.getContext(Log4jContextFactory.java:46)\n\tat org.apache.logging.log4j.LogManager.getContext(LogManager.java:177)\n\tat io.github.merlimat.slog.impl.Log4j2Logger.<clinit>(Log4j2Logger.java:53)\n\tat io.github.merlimat.slog.impl.LoggerDiscovery.createLogger(LoggerDiscovery.java:55)\n\tat io.github.merlimat.slog.impl.LoggerDiscovery.createLogger(LoggerDiscovery.java:50)\n\tat io.github.merlimat.slog.Logger.get(Logger.java:75)\n\tat io.github.merlimat.slog.Logger.get(Logger.java:65)\n\tat org.apache.bookkeeper.common.util.affinity.impl.CpuAffinityImpl.<clinit>(CpuAffinityImpl.java:43)\n\tat org.apache.bookkeeper.common.util.affinity.CpuBinding$1.get(CpuBinding.java:49)\n\tat org.apache.bookkeeper.common.util.affinity.CpuBinding.currentThreadMask(CpuBinding.java:76)\n\tat org.apache.bookkeeper.common.util.affinity.CpuBindingTest.linuxNativeBindingAndChildInheritanceRestoreOnSameThread(CpuBindingTest.java:203)\n\tat java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\n\tat org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:59)\n\tat org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)\n\tat org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:56)\n\tat org.junit.internal.runners.statements.InvokeMethod.evaluate(InvokeMethod.java:17)\n\tat org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)\n\tat org.junit.runners.BlockJUnit4ClassRunner$1.evaluate(BlockJUnit4ClassRunner.java:100)\n\tat org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:366)\n\tat org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:103)\n\tat org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:63)\n\tat org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)\n\tat org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)\n\tat org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)\n\tat org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)\n\tat org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)\n\tat org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)\n\tat org.junit.runners.ParentRunner.run(ParentRunner.java:413)\n\tat org.junit.runners.Suite.runChild(Suite.java:128)\n\tat org.junit.runners.Suite.runChild(Suite.java:27)\n\tat org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)\n\tat org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)\n\tat org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)\n\tat org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)\n\tat org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)\n\tat org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)\n\tat org.junit.runners.ParentRunner.run(ParentRunner.java:413)\n\tat org.junit.runner.JUnitCore.run(JUnitCore.java:137)\n\tat org.junit.runner.JUnitCore.run(JUnitCore.java:115)\n\tat org.junit.runner.JUnitCore.run(JUnitCore.java:105)\n\tat org.junit.runner.JUnitCore.run(JUnitCore.java:94)\n\tat RuntimeTests.main(RuntimeTests.java:14)\nCaused by: java.net.UnknownHostException: 90924cd52d8d: Temporary failure in name resolution\n\tat java.base/java.net.Inet6AddressImpl.lookupAllHostAddr(Native Method)\n\tat java.base/java.net.Inet6AddressImpl.lookupAllHostAddr(Inet6AddressImpl.java:52)\n\tat java.base/java.net.InetAddress$PlatformResolver.lookupByName(InetAddress.java:1211)\n\tat java.base/java.net.InetAddress.getAddressesFromNameService(InetAddress.java:1828)\n\tat java.base/java.net.InetAddress$NameServiceAddresses.get(InetAddress.java:1139)\n\tat java.base/java.net.InetAddress.getAllByName0(InetAddress.java:1818)\n\tat java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1931)\n\t... 51 more\n\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.unavailableNativeFailsExplicitlyOnNonLinux\nSKIP unavailableNativeFailsExplicitlyOnNonLinux(org.apache.bookkeeper.common.util.affinity.CpuBindingTest): got: <true>, expected: is <false>\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.virtualThreadCannotBindItsTemporaryCarrier\nSTART org.apache.bookkeeper.common.util.affinity.CpuBindingTest.incompleteRollbackIsNotReportedAsSuccessfulFallback\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.visibleAncestorQuotaAndSocketSmtIdentityConstrainPlacement\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.refreshedLimitsRetainTheOriginalDeploymentMask\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.cgroupMountResolutionHonorsNamespaceRootAndEscapes\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.linuxSnapshotUsesActualNativeMaskAndVisibleCgroupFacts\ntopology eligible={0, 2, 4} memoryNodes={0} quota=OptionalDouble[3.0] limitations=[cgroup limits cover the visible mount hierarchy only; hidden ancestors are not observable, DATA device NUMA node UNKNOWN]\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.explicitServiceCoresAreReservedBeforeAppendAndCannotShareSiblings\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.unavailableQuotaOrConflictingTopologyNeverInventsCapacity\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.eligibilityAndMemoryPreferenceUseTheEffectiveAllowedSets\nSTART org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshotTest.sparseListsAndQuotaRejectMalformedOrAmbiguousInput\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.linuxPreferRelaxesTheOriginalWorkersWhenQuotaDrops\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.unavailableAffinityPrefersFallbackButRequireFailsBeforeOpening\nSKIP unavailableAffinityPrefersFallbackButRequireFailsBeforeOpening(org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest): got: <true>, expected: is <false>\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.linuxRequireStopsAdmissionButDrainsAnAcceptedTicketAfterQuotaLoss\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.linuxPreferStartupFallsBackOffWhenQuotaCannotSupportTheBoundPlan\nSKIP linuxPreferStartupFallsBackOffWhenQuotaCannotSupportTheBoundPlan(org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest): Requires the declared 2-CPU-quota fixture\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.linuxRequireDetectsAnOwnerMaskChangedAfterStartup\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.allOwnerPoolsAreReadyAndGlobalBudgetIsPartitionedOnce\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.fullDataAdmissionDoesNotConsumeBufferReturnCapacity\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.partialPoolInitializationFailureTerminatesAllStartedScopes\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.bufferBudgetAlignmentAndPoolExhaustionAreObservable\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.linuxRequireBindsBeforePoolInitializationAndKeepsStartupThreadUnchanged\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.crossThreadReturnWakesDrainingOwnerWithoutReleasingLiveBuffer\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.ioIsBoundedAndReturnsToOwnerWhileStopRetainsUnknownWork\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.failedOwnerRejectsQueuedCommandsAndReportsEachObligation\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.handlerFailureAfterSubmissionDoesNotReleaseOutstandingIo\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.oldestDeadlineFiresWithoutNewInputAndCannotBePostponed\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.parkedOwnerWakesAndRoutingDoesNotDependOnWorkerCount\nSTART org.apache.bookkeeper.bookie.storage.segment.SegmentOwnerLoopTest.roundRobinAndReservedCompletionsSurviveFullDataAdmission\ntests=35 failures=0 assumptions=3\n",
+    "result": "32 passed, 3 fixture/non-Linux skips, 0 failures"
+  },
+  "compiledJavaSha256": {
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentBufferPool$Lease.class": "742f273f57d2130a65757fb00bde280cbcd112ad155696efbc129794ac4c3aa7",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentBufferPool$Slot.class": "88dd15ceef2f0cc9debbffe6f059a6a1cc69bd9cf52f6f9e28c1ec7ad9eed11a",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentBufferPool.class": "f92bc7d63d5593675842f94a433ac20b08b57585c4e7672df9b92ba39055d650",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroup$BindingFailure.class": "4df8ab8e1923e136345f20e60d170eb78c0c851f523615cdc5a1a90b2c088913",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroup$PoolFactory.class": "8c5112cfc9850dbf355df75e13c7680a553aabc9821c555d492e82802104b3a1",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroup$Settings.class": "7e8e9dd3366f62ca94a20cc04da01593afe93a4692b2fbc572a41452d6927b61",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroup$ThreadState.class": "66ba787a6130bce2feb5f2624950c86589cc31f9f1d8604130473517b30cc90b",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroup.class": "4ff5185391813c098b3f293356df575446f9e70d9fe94dd5fdd301e7c968254f",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentIoExecutor$Operation.class": "c4c9be3d6199c642b9b1f794423107b83dd1c3fc1d4b91eceee7742765073c5d",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentIoExecutor.class": "8b1481c89172d56b04d930be3e550df6284c7643d64f1c6cabdb3f106551a377",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoop$Command.class": "f6410b0a1c133322ee36cfb013a544ac886326e2c8cdc2f6a62b811efbf53ebc",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoop$Ticket.class": "d3f24d7a216b4a8d6e152e522179831a0be0057aab68f6b479aaba65300f5d1d",
+    "bookkeeper-server/target/classes/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoop.class": "6cabd6dc2fc693232060fa743e64e872f6c1c7fce7a7e6b81a4055359c877d04",
+    "bookkeeper-server/target/test-classes/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroupTest$1.class": "b6eb2ac27b0c4ce8ab3f751a89c2671b2c7747518759294d1a1872fab0ec9706",
+    "bookkeeper-server/target/test-classes/org/apache/bookkeeper/bookie/storage/segment/SegmentExecutionGroupTest.class": "e8fc720d3622ea83adf2a0d22a726b14d3155739090806ea6e97979121f30283",
+    "bookkeeper-server/target/test-classes/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoopTest$1.class": "da6f39b11d8f663cd15440d3a9db9886392c17f9a4d9eaa2a3e3ba5c08fd39c4",
+    "bookkeeper-server/target/test-classes/org/apache/bookkeeper/bookie/storage/segment/SegmentOwnerLoopTest.class": "91e12944b35c2a43533b141b5744449198d5a72679c2f671973f9f2f21fa88af",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuBinding$1.class": "6a46f13b3dc99f59c0136ecfd14bd9a8c7ae823429ead8660fc8094473b3862f",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuBinding$Access.class": "d3452faabdc49e61c2122031642f5e039970f15a492d3758eb9eb41958cfd3b1",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuBinding.class": "46dbd51277463ce096511ef4a7c583e77591a6352e8d1684a2b7c743d427dcdc",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuTopologySnapshot$CgroupPaths.class": "cb726ffd050a6754ce7f9d6c8453573d8e1319e85f7067f9f68b4261d5de6c28",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuTopologySnapshot$Cpu.class": "f863d4537f74cfeaf5ae59c9dcc96c7a82f94bf64c87730b00c750183e231620",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/CpuTopologySnapshot.class": "b863dee56d41eeae6f884c46d34f1a09ac879fbecd81d5997a885cc0a661983e",
+    "cpu-affinity/target/classes/org/apache/bookkeeper/common/util/affinity/ExecutionPlacementPlan.class": "9880ea5863cec9068d533f73a400920adbc91e26486bc10b1092b56bb3d09be9",
+    "cpu-affinity/target/test-classes/org/apache/bookkeeper/common/util/affinity/CpuBindingTest$Kernel.class": "d1de99c24394d6a5ca35bdaca699a0733332bee3dab4bb2a3efb4807ee60f494",
+    "cpu-affinity/target/test-classes/org/apache/bookkeeper/common/util/affinity/CpuBindingTest.class": "fc4108c495aeb74f2f35995a0ab079f1f0e13d561d0393c3a0e343a1ac23bd53",
+    "cpu-affinity/target/test-classes/org/apache/bookkeeper/common/util/affinity/CpuTopologySnapshotTest.class": "42ddc4524ed5a0f80ad3bf3e8603986819a376222f75ad8d3008beeb320592be"
+  },
+  "style": {
+    "command": "mvn -o -pl cpu-affinity,bookkeeper-server -DskipTests spotless:check checkstyle:check",
+    "result": "PASS; 0 Checkstyle violations in both modules"
+  },
+  "measurements": {
+    "monitorPeriodSeconds": 1,
+    "owners": 2,
+    "ioThreads": 1,
+    "additionalPlacementMonitorThreadsWhenBound": 1,
+    "containerCpuset": "0,2,4",
+    "containerCpuQuota": 3,
+    "containerMemoryMiB": 512,
+    "note": "Thread counts and fixed capacities are configuration/test workload, not throughput or RSS measurements"
+  },
+  "evidenceBoundary": [
+    "Quota reduction injected as a CpuTopologySnapshot after real bound startup; not a live cgroup write",
+    "Actual owner mask drift and bound-thread refresh used Linux native JNI",
+    "No physical NUMA page distribution, storage ACK/restart, performance, or production lifecycle restart claim",
+    "Two-CPU quota is a real container startup limit; post-start quota drop remains injected snapshot evidence"
+  ],
+  "startupFallbackContainer": {
+    "imageId": "sha256:3786bb5b9948fad47c85ef81187c3e3479ff5546ccee4ea8463418382cb41d7c",
+    "runFlags": [
+      "--rm",
+      "--network none",
+      "--user 65534:65534",
+      "--cpuset-cpus 0,2,4",
+      "--cpus 2",
+      "--memory 512m",
+      "--tmpfs /work:rw,exec,mode=1777",
+      "--tmpfs /tmp:rw,exec,mode=1777"
+    ],
+    "mounts": "repository and Maven repository read-only at original absolute paths; runner inputs read-only at /input",
+    "classpath": "execution-startup-receipt.json linuxContainer.classpathInput prefixed with cpu-affinity/target/test-classes",
+    "runner": "#!/usr/bin/env bash\nset -euo pipefail\nrepo=/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper\nmkdir -p /work/lib\ncat /proc/self/status | grep Cpus_allowed_list\ncat /sys/fs/cgroup/cpu.max\ngcc -std=gnu11 -shared -fPIC -Werror=implicit-function-declaration \\\n  -I\"$JAVA_HOME/include\" -I\"$JAVA_HOME/include/linux\" \\\n  -I\"$repo/cpu-affinity/target/nar/javah-include\" \\\n  \"$repo/cpu-affinity/src/main/affinity/cpp/affinity_jni.c\" -o /work/lib/libcpu-affinity.so\ncat > /work/FallbackTests.java <<'JAVA'\nimport org.junit.runner.JUnitCore;\nimport org.junit.runner.Request;\nimport org.junit.runner.Result;\npublic class FallbackTests {\n  public static void main(String[] args) {\n    Result result = new JUnitCore().run(Request.method(\n      org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.class,\n      \"linuxPreferStartupFallsBackOffWhenQuotaCannotSupportTheBoundPlan\"));\n    result.getFailures().forEach(f -> System.out.println(f.getTrace()));\n    System.out.println(\"tests=\" + result.getRunCount() + \" failures=\" + result.getFailureCount()\n      + \" assumptions=\" + result.getAssumptionFailureCount());\n    if (!result.wasSuccessful() || result.getRunCount() != 1 || result.getAssumptionFailureCount() != 0) {\n      System.exit(1);\n    }\n  }\n}\nJAVA\ncp_value=\"$(cat /input/classpath)\"\njavac -proc:none -cp \"$cp_value\" -d /work /work/FallbackTests.java\njava -Duw.expectStartupFallback=true -cp \"$cp_value\" FallbackTests\n",
+    "outputSha256": "510eda032917b7f1b7b632d6986bf36c6cf8b3b6e800b770bc893d249c43be55",
+    "output": "Cpus_allowed_list:\t0,2,4\n200000 100000\n2026-09-28T09:09:10.004185972Z main ERROR Could not determine local host name java.net.UnknownHostException: af56eee2a6e3: af56eee2a6e3: Temporary failure in name resolution\n\tat java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1936)\n\tat org.apache.logging.log4j.core.util.NetUtils.getLocalHostname(NetUtils.java:56)\n\tat org.apache.logging.log4j.core.LoggerContext.lambda$setConfiguration$0(LoggerContext.java:625)\n\tat java.base/java.util.concurrent.ConcurrentHashMap.computeIfAbsent(ConcurrentHashMap.java:1708)\n\tat org.apache.logging.log4j.core.LoggerContext.setConfiguration(LoggerContext.java:625)\n\tat org.apache.logging.log4j.core.LoggerContext.reconfigure(LoggerContext.java:713)\n\tat org.apache.logging.log4j.core.LoggerContext.reconfigure(LoggerContext.java:735)\n\tat org.apache.logging.log4j.core.LoggerContext.start(LoggerContext.java:260)\n\tat org.apache.logging.log4j.core.impl.Log4jContextFactory.getContext(Log4jContextFactory.java:258)\n\tat org.apache.logging.log4j.core.impl.Log4jContextFactory.getContext(Log4jContextFactory.java:46)\n\tat org.apache.logging.log4j.LogManager.getContext(LogManager.java:177)\n\tat io.github.merlimat.slog.impl.Log4j2Logger.<clinit>(Log4j2Logger.java:53)\n\tat io.github.merlimat.slog.impl.LoggerDiscovery.createLogger(LoggerDiscovery.java:55)\n\tat io.github.merlimat.slog.impl.LoggerDiscovery.createLogger(LoggerDiscovery.java:50)\n\tat io.github.merlimat.slog.Logger.get(Logger.java:75)\n\tat io.github.merlimat.slog.Logger.get(Logger.java:65)\n\tat org.apache.bookkeeper.common.util.affinity.impl.CpuAffinityImpl.<clinit>(CpuAffinityImpl.java:43)\n\tat org.apache.bookkeeper.common.util.affinity.CpuBinding$1.get(CpuBinding.java:49)\n\tat org.apache.bookkeeper.common.util.affinity.CpuBinding.currentThreadMask(CpuBinding.java:76)\n\tat org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshot.capture(CpuTopologySnapshot.java:110)\n\tat org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroup.start(SegmentExecutionGroup.java:115)\n\tat org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroup.start(SegmentExecutionGroup.java:100)\n\tat org.apache.bookkeeper.bookie.storage.segment.SegmentExecutionGroupTest.linuxPreferStartupFallsBackOffWhenQuotaCannotSupportTheBoundPlan(SegmentExecutionGroupTest.java:369)\n\tat java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\n\tat org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:59)\n\tat org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)\n\tat org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:56)\n\tat org.junit.internal.runners.statements.InvokeMethod.evaluate(InvokeMethod.java:17)\n\tat org.junit.rules.ExternalResource$1.evaluate(ExternalResource.java:54)\n\tat org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)\n\tat org.junit.runners.BlockJUnit4ClassRunner$1.evaluate(BlockJUnit4ClassRunner.java:100)\n\tat org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:366)\n\tat org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:103)\n\tat org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:63)\n\tat org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)\n\tat org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)\n\tat org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)\n\tat org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)\n\tat org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)\n\tat org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)\n\tat org.junit.runners.ParentRunner.run(ParentRunner.java:413)\n\tat org.junit.runner.JUnitCore.run(JUnitCore.java:137)\n\tat org.junit.runner.JUnitCore.run(JUnitCore.java:115)\n\tat FallbackTests.main(FallbackTests.java:6)\nCaused by: java.net.UnknownHostException: af56eee2a6e3: Temporary failure in name resolution\n\tat java.base/java.net.Inet6AddressImpl.lookupAllHostAddr(Native Method)\n\tat java.base/java.net.Inet6AddressImpl.lookupAllHostAddr(Inet6AddressImpl.java:52)\n\tat java.base/java.net.InetAddress$PlatformResolver.lookupByName(InetAddress.java:1211)\n\tat java.base/java.net.InetAddress.getAddressesFromNameService(InetAddress.java:1828)\n\tat java.base/java.net.InetAddress$NameServiceAddresses.get(InetAddress.java:1139)\n\tat java.base/java.net.InetAddress.getAllByName0(InetAddress.java:1818)\n\tat java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1931)\n\t... 44 more\n\ntests=1 failures=0 assumptions=0\n",
+    "result": "1 passed, 0 failures/skips; initial PREFER plan rejects quota 2 and starts OFF without monitor"
+  }
+}

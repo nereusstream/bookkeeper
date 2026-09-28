@@ -107,7 +107,14 @@ public record CpuTopologySnapshot(BitSet deploymentMask, BitSet onlineCpus, BitS
 
     /** deviceNumaFile is an optional verified sysfs device numa_node path; null means UNKNOWN. */
     public static CpuTopologySnapshot capture(Path deviceNumaFile) throws IOException {
-        BitSet deployment = CpuBinding.currentThreadMask();
+        return refresh(CpuBinding.currentThreadMask(), deviceNumaFile);
+    }
+
+    /** Re-read resource limits without mistaking a bound worker's narrow mask for deployment capacity. */
+    public static CpuTopologySnapshot refresh(BitSet deployment, Path deviceNumaFile) throws IOException {
+        if (deployment == null || deployment.isEmpty() || deployment.length() > CpuBinding.MAX_CPUS) {
+            throw new IllegalArgumentException("Invalid initial deployment mask");
+        }
         CgroupPaths paths = null;
         List<String> limitations = new ArrayList<>();
         try {

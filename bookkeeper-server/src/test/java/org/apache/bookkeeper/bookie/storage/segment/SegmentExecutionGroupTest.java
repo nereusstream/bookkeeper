@@ -28,12 +28,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.List;
+import java.util.OptionalDouble;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import org.apache.bookkeeper.common.util.affinity.CpuBinding;
+import org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshot;
 import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
@@ -74,6 +77,12 @@ public class SegmentExecutionGroupTest {
                 throw new AssertionError(failure);
             }
         };
+    }
+
+    private static CpuTopologySnapshot lowerQuota(CpuTopologySnapshot source) {
+        return new CpuTopologySnapshot(source.deploymentMask(), source.onlineCpus(), source.effectiveCpus(),
+                source.memoryNodes(), OptionalDouble.of(1.0), source.cpus(), source.deviceNode(),
+                source.limitations());
     }
 
     @Test
@@ -230,18 +239,115 @@ public class SegmentExecutionGroupTest {
             assertEquals(2, poolMasks.size());
             assertTrue(poolMasks.stream().allMatch(mask -> mask.cardinality() == 1));
             List<java.util.BitSet> masks = group.actualMasks();
-            assertEquals(3, masks.size());
-            for (int i = 0; i < masks.size(); i++) {
-                assertFalse(masks.get(i).isEmpty());
-                for (int j = i + 1; j < masks.size(); j++) {
-                    assertFalse(masks.get(i).intersects(masks.get(j)));
-                }
+            assertEquals(4, masks.size());
+            for (java.util.BitSet mask : masks) {
+                assertFalse(mask.isEmpty());
             }
+            assertFalse(masks.get(0).intersects(masks.get(1)));
+            assertFalse(masks.get(0).intersects(masks.get(2)));
+            assertFalse(masks.get(1).intersects(masks.get(2)));
+            assertEquals(masks.get(2), masks.get(3));
             assertEquals(original, org.apache.bookkeeper.common.util.affinity.CpuBinding.currentThreadMask());
         } finally {
             assertTrue(group.shutdown(WAIT));
         }
         assertEquals(original, org.apache.bookkeeper.common.util.affinity.CpuBinding.currentThreadMask());
+    }
+
+    @Test
+    public void linuxPreferRelaxesTheOriginalWorkersWhenQuotaDrops() throws Exception {
+        Assume.assumeTrue(System.getProperty("os.name").equals("Linux"));
+        Assume.assumeTrue("Requires the declared 3-CPU container fixture", Boolean.getBoolean("uw.requireBinding"));
+        CpuTopologySnapshot baseline = CpuTopologySnapshot.capture(null);
+        SegmentExecutionGroup group = SegmentExecutionGroup.start(config("PREFER", "SYSTEM"), settings());
+        try {
+            assertNull(group.degradation());
+            group.observePlacement(lowerQuota(baseline));
+            assertNotNull(group.degradation());
+            List<java.util.BitSet> ownerMasks = new CopyOnWriteArrayList<>();
+            List<java.util.BitSet> ioMasks = new CopyOnWriteArrayList<>();
+            AtomicReference<Throwable> ioFailure = new AtomicReference<>();
+            CountDownLatch finished = new CountDownLatch(2);
+            for (int shard : new int[] {0, 1}) {
+                assertTrue(group.submit(shard, command(ticket -> {
+                    try {
+                        ownerMasks.add(CpuBinding.currentThreadMask());
+                        group.io().submit(ticket, () -> ioMasks.add(CpuBinding.currentThreadMask()), failure -> {
+                            if (failure != null) {
+                                ioFailure.compareAndSet(null, failure);
+                            }
+                            finished.countDown();
+                        });
+                    } catch (IOException failure) {
+                        ticket.fail(failure);
+                    }
+                })));
+            }
+            await(finished);
+            assertEquals(2, ownerMasks.size());
+            assertEquals(2, ioMasks.size());
+            assertTrue(ownerMasks.stream().allMatch(baseline.eligibleCpus()::equals));
+            assertTrue(ioMasks.stream().allMatch(baseline.eligibleCpus()::equals));
+            assertNull(ioFailure.get());
+            assertNull(group.runtimeFailure());
+        } finally {
+            assertTrue(group.shutdown(WAIT));
+        }
+    }
+
+    @Test
+    public void linuxRequireStopsAdmissionButDrainsAnAcceptedTicketAfterQuotaLoss() throws Exception {
+        Assume.assumeTrue(System.getProperty("os.name").equals("Linux"));
+        Assume.assumeTrue("Requires the declared 3-CPU container fixture", Boolean.getBoolean("uw.requireBinding"));
+        SegmentExecutionGroup group = SegmentExecutionGroup.start(config("REQUIRE", "SYSTEM"), settings());
+        AtomicReference<SegmentOwnerLoop.Ticket> accepted = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        try {
+            assertTrue(group.submit(0, command(ticket -> {
+                accepted.set(ticket);
+                started.countDown();
+            })));
+            await(started);
+            group.observePlacement(lowerQuota(CpuTopologySnapshot.capture(null)));
+            assertNotNull(group.runtimeFailure());
+            assertFalse(group.submit(0, command(ticket -> {})));
+            assertFalse(group.shutdown(Duration.ofMillis(20)));
+            accepted.get().complete(finished::countDown);
+            await(finished);
+        } finally {
+            assertTrue(group.shutdown(WAIT));
+        }
+    }
+
+    @Test
+    public void linuxRequireDetectsAnOwnerMaskChangedAfterStartup() throws Exception {
+        Assume.assumeTrue(System.getProperty("os.name").equals("Linux"));
+        Assume.assumeTrue("Requires the declared 3-CPU container fixture", Boolean.getBoolean("uw.requireBinding"));
+        java.util.BitSet eligible = CpuBinding.currentThreadMask();
+        int otherCpu = eligible.nextSetBit(eligible.nextSetBit(0) + 1);
+        SegmentExecutionGroup group = SegmentExecutionGroup.start(config("REQUIRE", "SYSTEM"), settings());
+        CountDownLatch changed = new CountDownLatch(1);
+        try {
+            assertTrue(group.submit(0, command(ticket -> {
+                try {
+                    org.apache.bookkeeper.common.util.affinity.impl.CpuAffinityImpl
+                            .setCurrentThreadMask(new int[] {otherCpu});
+                    ticket.complete(changed::countDown);
+                } catch (IOException failure) {
+                    throw new IllegalStateException(failure);
+                }
+            })));
+            await(changed);
+            long end = System.nanoTime() + WAIT.toNanos();
+            while (group.runtimeFailure() == null && System.nanoTime() < end) {
+                TimeUnit.MILLISECONDS.sleep(10);
+            }
+            assertNotNull(group.runtimeFailure());
+            assertFalse(group.submit(0, command(ticket -> {})));
+        } finally {
+            assertTrue(group.shutdown(WAIT));
+        }
     }
 
     @Test
@@ -254,6 +360,23 @@ public class SegmentExecutionGroupTest {
             assertTrue(preferred.shutdown(WAIT));
         }
         assertThrows(IOException.class, () -> SegmentExecutionGroup.start(config("REQUIRE", "SYSTEM"), settings()));
+    }
+
+    @Test
+    public void linuxPreferStartupFallsBackOffWhenQuotaCannotSupportTheBoundPlan() throws Exception {
+        Assume.assumeTrue(System.getProperty("os.name").equals("Linux"));
+        Assume.assumeTrue("Requires the declared 2-CPU-quota fixture", Boolean.getBoolean("uw.expectStartupFallback"));
+        SegmentExecutionGroup group = SegmentExecutionGroup.start(config("PREFER", "SYSTEM"), settings());
+        try {
+            assertNotNull(group.degradation());
+            assertEquals(3, group.actualMasks().size());
+            CountDownLatch finished = new CountDownLatch(1);
+            assertTrue(group.submit(0, command(ticket -> ticket.complete(finished::countDown))));
+            await(finished);
+            assertNull(group.runtimeFailure());
+        } finally {
+            assertTrue(group.shutdown(WAIT));
+        }
     }
 
     @Test

@@ -94,6 +94,7 @@ final class SegmentOwnerLoop {
     private volatile Throwable failure;
     private int nextShard;
     private SegmentBufferPool pool;
+    private Runnable placementCheck;
 
     SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity) {
         this(logicalShards, workerCount, workerId, capacity, controlCapacity,
@@ -129,6 +130,11 @@ final class SegmentOwnerLoop {
             throw new IllegalStateException("Pool already initialized");
         }
         this.pool = pool;
+    }
+
+    void setPlacementCheck(Runnable check) {
+        requireOwner();
+        placementCheck = Objects.requireNonNull(check, "check");
     }
 
     SegmentBufferPool pool() {
@@ -247,6 +253,9 @@ final class SegmentOwnerLoop {
         for (;;) {
             // Clear external interrupts instead of turning PARK into a busy loop. Shutdown is explicit.
             Thread.interrupted();
+            if (placementCheck != null) {
+                placementCheck.run();
+            }
             boolean work = pool != null && pool.drainReturns();
             Ticket completed = completions.poll();
             if (completed != null) {
@@ -327,6 +336,9 @@ final class SegmentOwnerLoop {
             }
             if (!work) {
                 // enqueue-before-park is safe: unpark retains a permit; inputs queued before start are polled first.
+                if (placementCheck != null) {
+                    delay = Math.min(delay, TimeUnit.SECONDS.toNanos(1));
+                }
                 if (delay == Long.MAX_VALUE) {
                     LockSupport.park(this);
                 } else {

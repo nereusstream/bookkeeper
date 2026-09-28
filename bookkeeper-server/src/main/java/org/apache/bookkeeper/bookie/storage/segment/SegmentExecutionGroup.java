@@ -26,6 +26,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import org.apache.bookkeeper.common.util.affinity.CpuBinding;
 import org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshot;
 import org.apache.bookkeeper.common.util.affinity.ExecutionPlacementPlan;
@@ -80,11 +81,20 @@ final class SegmentExecutionGroup {
     private final ExecutionPlacementPlan plan;
     private final PoolFactory pools;
     private final SegmentOwnerLoop[] owners;
+    private final CpuTopologySnapshot startupTopology;
     private final List<ThreadState> threads = new CopyOnWriteArrayList<>();
     private final CountDownLatch activate = new CountDownLatch(1);
+    private final ThreadLocal<ThreadState> currentState = new ThreadLocal<>();
+    private final ThreadLocal<CpuBinding> currentBinding = new ThreadLocal<>();
+    private final ThreadLocal<long[]> lastBindingCheck = ThreadLocal.withInitial(() -> new long[1]);
     private SegmentIoExecutor io;
+    private Thread monitor;
     private volatile boolean accepting;
-    private String degradation;
+    private volatile boolean monitorRunning;
+    private volatile BitSet currentEligible;
+    private volatile BitSet fallbackMask;
+    private volatile String degradation;
+    private volatile String runtimeFailure;
 
     static SegmentExecutionGroup start(IsolatedSegmentConfig config, Settings settings) throws IOException {
         return start(config, settings, POOLS);
@@ -96,12 +106,14 @@ final class SegmentExecutionGroup {
             throw new IllegalArgumentException("Workers exceed logical shards or global pending capacity");
         }
         ExecutionPlacementPlan plan;
+        CpuTopologySnapshot topology = null;
         String degradation = null;
         if (config.affinity().equals("OFF")) {
             plan = ExecutionPlacementPlan.off(config.logicalShards(), settings.workers());
         } else {
             try {
-                plan = ExecutionPlacementPlan.bound(CpuTopologySnapshot.capture(null), config.logicalShards(),
+                topology = CpuTopologySnapshot.capture(null);
+                plan = ExecutionPlacementPlan.bound(topology, config.logicalShards(),
                         settings.workers(), null, null, 1);
             } catch (IOException unavailable) {
                 if (config.affinity().equals("REQUIRE")) {
@@ -109,9 +121,10 @@ final class SegmentExecutionGroup {
                 }
                 degradation = unavailable.toString();
                 plan = ExecutionPlacementPlan.off(config.logicalShards(), settings.workers());
+                topology = null;
             }
         }
-        SegmentExecutionGroup group = new SegmentExecutionGroup(config, settings, plan, pools);
+        SegmentExecutionGroup group = new SegmentExecutionGroup(config, settings, plan, pools, topology);
         group.degradation = degradation;
         try {
             group.startThreads();
@@ -124,7 +137,7 @@ final class SegmentExecutionGroup {
                 throw failed;
             }
             SegmentExecutionGroup fallback = new SegmentExecutionGroup(config, settings,
-                    ExecutionPlacementPlan.off(config.logicalShards(), settings.workers()), pools);
+                    ExecutionPlacementPlan.off(config.logicalShards(), settings.workers()), pools, null);
             fallback.degradation = failed.toString();
             fallback.startThreads();
             return fallback;
@@ -132,11 +145,13 @@ final class SegmentExecutionGroup {
     }
 
     private SegmentExecutionGroup(IsolatedSegmentConfig config, Settings settings, ExecutionPlacementPlan plan,
-                                  PoolFactory pools) {
+                                  PoolFactory pools, CpuTopologySnapshot topology) {
         this.config = config;
         this.settings = settings;
         this.plan = plan;
         this.pools = pools;
+        startupTopology = topology;
+        currentEligible = topology == null ? null : topology.eligibleCpus();
         owners = new SegmentOwnerLoop[settings.workers()];
     }
 
@@ -148,9 +163,15 @@ final class SegmentExecutionGroup {
                         factory(true, worker));
             }
             // All application threads originate here, before any worker narrows its own mask.
-            io = new SegmentIoExecutor(settings.ioThreads(), config.maxPendingEntries(), factory(false, 0));
+            io = new SegmentIoExecutor(settings.ioThreads(), config.maxPendingEntries(), factory(false, 0),
+                    startupTopology == null ? null : this::checkCurrentBinding);
             for (SegmentOwnerLoop owner : owners) {
                 owner.start();
+            }
+            if (startupTopology != null) {
+                monitorRunning = true;
+                monitor = factory(false, 0, "placement-").newThread(this::monitorLoop);
+                monitor.start();
             }
             long end = System.nanoTime() + settings.startupTimeout().toNanos();
             for (ThreadState state : threads) {
@@ -169,6 +190,7 @@ final class SegmentExecutionGroup {
                     : new IOException("Execution startup failed", failure);
             boolean interrupted = Thread.interrupted() || failure instanceof InterruptedException;
             stopAdmission();
+            stopMonitor();
             if (io != null) {
                 io.shutdown();
             }
@@ -199,17 +221,27 @@ final class SegmentExecutionGroup {
     }
 
     private ThreadFactory factory(boolean append, int worker) {
+        return factory(append, worker, append ? "owner-" : "io-");
+    }
+
+    private ThreadFactory factory(boolean append, int worker, String role) {
         AtomicInteger sequence = new AtomicInteger();
         return body -> {
             int id = append ? worker : sequence.getAndIncrement();
-            ThreadState state = new ThreadState("isolated-wal-" + (append ? "owner-" : "io-") + id);
+            ThreadState state = new ThreadState("isolated-wal-" + role + id);
             Thread thread = new Thread(() -> {
                 CpuBinding binding = null;
                 SegmentBufferPool pool = null;
                 try {
                     try {
                         BitSet mask = append ? plan.workerMask(id) : plan.serviceMask();
-                        if (!mask.isEmpty()) {
+                        BitSet released = fallbackMask;
+                        if (released != null) {
+                            state.actualMask = CpuBinding.currentThreadMask();
+                            if (!state.actualMask.equals(released)) {
+                                throw new IOException("Replacement thread inherited a narrow mask after fallback");
+                            }
+                        } else if (!mask.isEmpty()) {
                             try {
                                 binding = CpuBinding.bindCurrentThread(mask);
                                 state.actualMask = binding.actualMask();
@@ -228,6 +260,9 @@ final class SegmentExecutionGroup {
                             pool = pools.create(id, share(settings.buffers(), id), settings.bufferBytes(),
                                     config.numaPolicy().equals("OWNER_TOUCH"), owners[id]::wakeup);
                             owners[id].attachPool(pool);
+                            if (binding != null) {
+                                owners[id].setPlacementCheck(this::checkCurrentBinding);
+                            }
                         }
                     } catch (Throwable failure) {
                         state.startupFailure = failure;
@@ -253,9 +288,16 @@ final class SegmentExecutionGroup {
                             io.shutdown();
                         }
                     }
+                    currentState.set(state);
+                    if (binding != null) {
+                        currentBinding.set(binding);
+                    }
                     // Even after failed initialization, ThreadPoolExecutor's Worker must run its shutdown path.
                     body.run();
                 } finally {
+                    currentBinding.remove();
+                    currentState.remove();
+                    lastBindingCheck.remove();
                     try {
                         if (pool != null) {
                             pool.close();
@@ -299,6 +341,10 @@ final class SegmentExecutionGroup {
         return degradation;
     }
 
+    String runtimeFailure() {
+        return runtimeFailure;
+    }
+
     List<BitSet> actualMasks() {
         return threads.stream().map(state -> (BitSet) state.actualMask.clone()).toList();
     }
@@ -331,6 +377,7 @@ final class SegmentExecutionGroup {
         }
         // Accepted owner commands may still submit I/O while draining, so shut services down last.
         io.shutdown();
+        stopMonitor();
         long remaining = end - System.nanoTime();
         if (remaining <= 0 || !joinThreads(Duration.ofNanos(remaining))) {
             return false;
@@ -366,6 +413,108 @@ final class SegmentExecutionGroup {
             if (state.cleanupFailure != null) {
                 failure.addSuppressed(state.cleanupFailure);
             }
+        }
+    }
+
+    private void monitorLoop() {
+        while (monitorRunning) {
+            try {
+                observePlacement(CpuTopologySnapshot.refresh(startupTopology.deploymentMask(), null));
+                checkCurrentBinding();
+            } catch (IOException | RuntimeException failure) {
+                placementFailure("Runtime topology check failed: " + failure);
+            }
+            if (monitorRunning) {
+                LockSupport.parkNanos(this, TimeUnit.SECONDS.toNanos(1));
+            }
+        }
+    }
+
+    void observePlacement(CpuTopologySnapshot now) {
+        BitSet eligible = now.eligibleCpus();
+        currentEligible = eligible;
+        if (eligible.isEmpty()) {
+            placementFailure("No currently eligible CPU remains");
+            return;
+        }
+        if (config.numaPolicy().equals("OWNER_TOUCH")
+                && !now.memoryNodes().equals(startupTopology.memoryNodes()) && degradation == null) {
+            degradation = "Effective memory nodes changed; existing buffers retain their original placement";
+        }
+        if (fallbackMask != null) {
+            fallbackMask = eligible;
+            return;
+        }
+        boolean masksValid = containsAll(eligible, plan.serviceMask());
+        for (int owner = 0; owner < owners.length; owner++) {
+            masksValid &= containsAll(eligible, plan.workerMask(owner));
+        }
+        boolean quotaValid = now.cpuQuota().isPresent()
+                && now.cpuQuota().getAsDouble() >= owners.length + 1;
+        if (!masksValid || !quotaValid) {
+            placementChange("CPU mask or quota no longer supports the startup placement");
+        }
+    }
+
+    private static boolean containsAll(BitSet available, BitSet required) {
+        BitSet missing = (BitSet) required.clone();
+        missing.andNot(available);
+        return missing.isEmpty();
+    }
+
+    private void checkCurrentBinding() {
+        CpuBinding binding = currentBinding.get();
+        if (binding == null) {
+            return;
+        }
+        ThreadState state = currentState.get();
+        BitSet release = fallbackMask;
+        if (release != null) {
+            try {
+                binding.closeTo(release);
+                state.actualMask = binding.restoredMask();
+                currentBinding.remove();
+            } catch (IOException | RuntimeException failure) {
+                placementFailure("Cannot release preferred binding on " + state.name + ": " + failure);
+            }
+            return;
+        }
+        long now = System.nanoTime();
+        long[] last = lastBindingCheck.get();
+        if (now - last[0] < TimeUnit.SECONDS.toNanos(1)) {
+            return;
+        }
+        last[0] = now;
+        try {
+            state.actualMask = binding.verifyCurrentMask();
+        } catch (IOException failure) {
+            placementChange("Actual mask changed on " + state.name + ": " + failure);
+            if (fallbackMask != null) {
+                checkCurrentBinding();
+            }
+        }
+    }
+
+    private void placementChange(String reason) {
+        if (config.affinity().equals("PREFER") && currentEligible != null && !currentEligible.isEmpty()) {
+            degradation = reason;
+            fallbackMask = (BitSet) currentEligible.clone();
+        } else {
+            placementFailure(reason);
+        }
+    }
+
+    private void placementFailure(String reason) {
+        if (runtimeFailure == null) {
+            runtimeFailure = reason;
+        }
+        stopAdmission();
+    }
+
+    private void stopMonitor() {
+        monitorRunning = false;
+        if (monitor != null) {
+            LockSupport.unpark(monitor);
         }
     }
 

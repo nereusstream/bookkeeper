@@ -154,6 +154,19 @@ public class CpuBindingTest {
     }
 
     @Test
+    public void preferredBindingCanReleaseToCurrentLegalSubsetOnly() throws Exception {
+        Kernel kernel = new Kernel();
+        CpuBinding binding = CpuBinding.bindCurrentThread(mask(63), kernel);
+        assertThrows(IllegalArgumentException.class, () -> binding.closeTo(mask(1)));
+        assertEquals(mask(63), kernel.current);
+        binding.closeTo(mask(2, 63));
+        assertEquals(mask(2, 63), kernel.current);
+        assertEquals(mask(2, 63), binding.restoredMask());
+        binding.close();
+        assertEquals(2, kernel.calls);
+    }
+
+    @Test
     public void virtualThreadCannotBindItsTemporaryCarrier() throws Exception {
         java.lang.reflect.Method start;
         try {

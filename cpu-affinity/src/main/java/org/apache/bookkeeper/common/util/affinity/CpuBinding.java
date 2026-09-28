@@ -138,9 +138,20 @@ public final class CpuBinding implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
+        closeTo(original);
+    }
+
+    /** Release a preferred binding to the currently legal subset of its original deployment mask. */
+    public void closeTo(BitSet allowed) throws IOException {
         requireOwner();
         if (!closed) {
-            restored = restore(access, original);
+            BitSet target = copyValid(allowed);
+            BitSet outside = (BitSet) target.clone();
+            outside.andNot(original);
+            if (!outside.isEmpty()) {
+                throw new IllegalArgumentException("Release mask exceeds the initial thread mask");
+            }
+            restored = restore(access, target);
             closed = true;
         }
     }

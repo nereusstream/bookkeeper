@@ -169,7 +169,7 @@
     "planningCommit": "e75c67f3514d1627ea790d052e2c9226e593aa3c",
     "workspace": "/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper",
     "branch": "turbo-bk",
-    "state": "STEP_4_STARTUP_OWNER_POOLS_TESTED_RUNTIME_PLACEMENT_PENDING",
+    "state": "STEP_4_RUNTIME_PLACEMENT_SCOPED_LIFECYCLE_PENDING",
     "client2": "CLASSIC_RECYCLING_FIX_RED_GREEN_9_TESTS",
     "client2Receipt": "docs/rfcs/unified-wal/implementation/client-maintenance/client2-receipt.json",
     "client1": "CLASSIC_ACK_GATE_FIX_RED_GREEN_85_TESTS",
@@ -181,6 +181,7 @@
     "cpuBindingReceipt": "docs/rfcs/unified-wal/implementation/local-storage/cpu-binding-receipt.json",
     "topologyPlacementReceipt": "docs/rfcs/unified-wal/implementation/local-storage/topology-placement-receipt.json",
     "executionStartupReceipt": "docs/rfcs/unified-wal/implementation/local-storage/execution-startup-receipt.json",
+    "runtimePlacementReceipt": "docs/rfcs/unified-wal/implementation/local-storage/runtime-placement-receipt.json",
     "remainingSteps": "4 PARTIAL; 5-16 NOT_COMPLETED",
     "productionIntegration": false,
     "authority": "NONE"

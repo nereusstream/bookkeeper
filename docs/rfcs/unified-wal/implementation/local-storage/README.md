@@ -16,7 +16,7 @@
 
 该循环尚未接入实际 append/allocator 状态机，现已通过下述group启动接入绑定与SYSTEM/OWNER_TOUCH对齐池。容量由构造参数显式给定并从同一总量拆分，不能给每个owner复制全局额度。
 
-步骤4的显式绑定API：现有 `cpu-affinity` 模块新增 `CpuBinding`，只作用于调用平台线程，不调用旧 `acquireCore`，不改 root/CPU online/sibling/文件锁策略。动态 JNI mask 支持稀疏编号（上限65536），设置后读取实际mask核对；绑定失败回滚，关闭只允许原线程执行，恢复不完整明确报错。拒绝空mask、越界、超出初始mask和虚拟线程；提供运行期mask复查。该API已接入隔离group启动；配置接受OFF/PREFER/REQUIRE启动模式，默认OFF。运行期拓扑变化处理仍未完成，不能按完整§10.5模式合同启用生产服务。
+步骤4的显式绑定API：现有 `cpu-affinity` 模块新增 `CpuBinding`，只作用于调用平台线程，不调用旧 `acquireCore`，不改 root/CPU online/sibling/文件锁策略。动态 JNI mask 支持稀疏编号（上限65536），设置后读取实际mask核对；绑定失败回滚，关闭只允许原线程执行，恢复不完整明确报错。拒绝空mask、越界、超出初始mask和虚拟线程；提供运行期mask复查。该API已接入隔离group启动；配置接受OFF/PREFER/REQUIRE启动模式，默认OFF。`closeTo`可在原线程将PREFER绑定释放到当前合法的初始mask子集，设置和读回不一致则明确失败。
 
 步骤4的拓扑与静态placement：`CpuTopologySnapshot` 在缩窄应用线程mask前只读捕获初始mask、online CPU、cgroup v2有效CPU/memory-node集合及可见祖先最小quota，读取package/core/SMT sibling/NUMA信息。不跨socket合并同号core，不一致/缺失信息标未知；隐藏祖先明确不可观测。DATA设备节点只消费调用者已确认的sysfs `numa_node` 路径，未提供或-1保持UNKNOWN，不自动猜测复合设备归属。
 
@@ -26,7 +26,9 @@
 
 `SegmentBufferPool` 用固定数量Netty unpooled direct backing buffer提供4096对齐view，支持SYSTEM和OWNER_TOUCH，均在owner上初始化；OWNER_TOUCH不宣称页必然本地。全局pending/control/buffer数量按owner分摊，direct容量预算包含每块alignment padding；这是请求容量上限，不是整个进程RSS。每个物理buffer预留归还槽，跨线程归还回原池并唤醒owner，不占DATA/control槽。lease携带原池实例、owner和generation，重复归还被拒绝。关闭等待已准入命令和所有live lease；超时返回未终结状态，不释放在途资源。owner排空后才停止I/O服务。
 
-当前startup模式和池尚未构成完整步骤4：运行期CPU/cpuset/memory-node/quota变化的低频检查、PREFER降级/REQUIRE停止准入编排、PREFERRED专有mapping及实际DATA批写接入仍待完成。
+步骤4的运行期检查：绑定模式额外启动一个服务mask上的低频监测线程，每秒以启动时保存的部署mask重读online CPU、cgroup有效CPU/memory-node和可见quota，不把单核owner当前mask当成部署额度。owner在循环中每秒复查自身实际mask，I/O服务线程在任务前限频复查；检查不在每次Add读取sysfs。PREFER遇到计划mask/quota失效时保留原shard/owner和已借buffer，原线程释放绑定到当前合法CPU集合并记录原因；空合法集合或释放失败停止新准入。空闲I/O线程在下一项任务前释放绑定；若服务线程替换时仍继承旧窄mask，拒绝把它当成成功降级并停止准入。REQUIRE发现计划或实际mask失效时停止新准入，已受理命令和buffer仍经原owner完成/归还；调用方须执行现有drain/shutdown并决定重启。memory-node变化只记录已有池属地可能下降，不迁移或提前释放buffer。当前没有接入Bookie生命周期的自动重启，因此完整§10.5服务退出编排仍未完成。
+
+PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚未完成；SYSTEM/OWNER_TOUCH/PARK保持默认，当前仍是隔离可丢弃实验实现。
 
 ## 验证入口
 
@@ -72,6 +74,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 本次资源测量固定2个owner、1个I/O线程、5个pending按3/2分配、2个控制槽、3个buffer按2/1分配；每个buffer可用4096字节、direct请求容量8191字节，共24573字节，没有按owner或NUMA节点复制总预算。覆盖DATA满额时归还、池耗尽、重复归还、借出buffer阻止提前关闭和返回后继续drain。未测吞吐、页分布或NUMA收益。
 
+2026-09-28 [运行期回执](runtime-placement-receipt.json)：macOS执行组/owner/配置19项中14通过、5项Linux专属测试跳过；CPU绑定/拓扑18项中16通过、2项Linux专属测试跳过。Linux非root容器固定cpuset `{0,2,4}`、quota=3 CPU、512 MiB，现场构建JNI并运行35项，32通过、3项不同fixture或非Linux测试跳过；另以quota=2 CPU执行PREFER启动退回OFF的1项测试通过。真实native路径验证绑定后重读部署额度、owner实际mask在运行中经native改动后REQUIRE停止准入；quota下降由构造的拓扑快照注入，验证PREFER在原线程释放绑定、REQUIRE保留既有ticket并等待完成，不冒充真实cgroup在线重配置。两个受影响模块的Spotless/Checkstyle通过。绑定计划额外占1个低频监测服务线程；池、pending和control预算未复制。未测延迟、吞吐或物理NUMA页属地。
+
 ## 未覆盖范围
 
-步骤4的运行期拓扑变化处理、运行期PREFER/REQUIRE编排、PREFERRED页策略及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。
+步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。

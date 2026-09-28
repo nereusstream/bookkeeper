@@ -35,9 +35,10 @@ final class SegmentIoExecutor {
     }
 
     private final ThreadPoolExecutor executor;
+    private final Runnable beforeOperation;
 
     SegmentIoExecutor(int threads, int queueCapacity) {
-        this(threads, queueCapacity, defaultFactory());
+        this(threads, queueCapacity, defaultFactory(), null);
     }
 
     private static ThreadFactory defaultFactory() {
@@ -46,9 +47,14 @@ final class SegmentIoExecutor {
     }
 
     SegmentIoExecutor(int threads, int queueCapacity, ThreadFactory factory) {
+        this(threads, queueCapacity, factory, null);
+    }
+
+    SegmentIoExecutor(int threads, int queueCapacity, ThreadFactory factory, Runnable beforeOperation) {
         if (threads < 1 || queueCapacity < 1) {
             throw new IllegalArgumentException("Positive I/O bounds required");
         }
+        this.beforeOperation = beforeOperation;
         executor = new ThreadPoolExecutor(threads, threads, 0, TimeUnit.NANOSECONDS,
                 new ArrayBlockingQueue<>(queueCapacity), factory,
                 new ThreadPoolExecutor.AbortPolicy());
@@ -69,6 +75,9 @@ final class SegmentIoExecutor {
             executor.execute(() -> {
                 Throwable failure = null;
                 try {
+                    if (beforeOperation != null) {
+                        beforeOperation.run();
+                    }
                     operation.run();
                 } catch (Throwable cause) {
                     failure = cause;

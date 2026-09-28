@@ -167,6 +167,21 @@ public class CpuTopologySnapshotTest {
     }
 
     @Test
+    public void refreshedLimitsRetainTheOriginalDeploymentMask() throws Exception {
+        fixture();
+        BitSet deployment = cpus("0,2,4,8,10,12");
+        write(cgroupLeaf.resolve("cpuset.cpus.effective"), "2,4,10,12");
+        write(cgroupLeaf.resolve("cpuset.mems.effective"), "1");
+        write(cgroupLeaf.resolve("cpu.max"), "200000 100000");
+        CpuTopologySnapshot refreshed = CpuTopologySnapshot.read(deployment, cpuRoot,
+                new CpuTopologySnapshot.CgroupPaths(cgroupRoot, cgroupLeaf), null, List.of());
+        assertEquals(deployment, refreshed.deploymentMask());
+        assertEquals(cpus("2,4,10,12"), refreshed.eligibleCpus());
+        assertEquals(cpus("1"), refreshed.memoryNodes());
+        assertEquals(2.0, refreshed.cpuQuota().orElseThrow(), 0);
+    }
+
+    @Test
     public void cgroupMountResolutionHonorsNamespaceRootAndEscapes() throws Exception {
         String mount = "31 20 0:26 /tenant /sys/fs/cgroup\\040test rw - cgroup2 cgroup rw\n";
         CpuTopologySnapshot.CgroupPaths paths = CpuTopologySnapshot.cgroupPaths("0::/tenant/service\n", mount);
@@ -190,6 +205,14 @@ public class CpuTopologySnapshotTest {
         BitSet outside = topology.eligibleCpus();
         outside.andNot(initial);
         assertTrue(outside.isEmpty());
+        assertEquals(initial, CpuBinding.currentThreadMask());
+        BitSet selected = new BitSet();
+        selected.set(initial.nextSetBit(0));
+        try (CpuBinding ignored = CpuBinding.bindCurrentThread(selected)) {
+            CpuTopologySnapshot refreshed = CpuTopologySnapshot.refresh(initial, null);
+            assertEquals(initial, refreshed.deploymentMask());
+            assertEquals(topology.eligibleCpus(), refreshed.eligibleCpus());
+        }
         assertEquals(initial, CpuBinding.currentThreadMask());
         String expected = System.getProperty("uw.expected.cpus");
         if (expected != null) {
