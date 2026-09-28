@@ -2556,22 +2556,37 @@ public class SegmentBookieControlLogTest {
         assertAbruptRecoveryCandidate("before-force", 86, "BEFORE_DATA_FORCE");
     }
 
+    @Test
+    public void abruptRestartAppendsBeyondOldGrantWithoutPromotingOldDuplicate() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        runAbruptWriter("after-force", config.directory(), 0, "LOCAL_DURABLE");
+        runAbruptWriter("append-after-restart", config.directory(), 0, "APPENDED_PHYSICALLY");
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            SegmentDataRecovery.PhysicalStreamCandidate oldStream =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity, arena,
+                            new SegmentFileIo(), 0, new Generation(1), 1, 1, 1);
+            SegmentDataRecovery.PhysicalStreamCandidate newStream =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity, arena,
+                            new SegmentFileIo(), 0, new Generation(2), 1, 1, 1);
+            assertEquals(2, SegmentPointRead.read(config, identity, arena,
+                    oldStream.entries().get(0)).record().entryId());
+            assertEquals(3, SegmentPointRead.read(config, identity, arena,
+                    newStream.entries().get(0)).record().entryId());
+            ProfileOperationCodec.AddRecovery same =
+                    recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0));
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.NOT_READY,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, arena, bookie,
+                            bookie.admitRecovery(same).orElseThrow(), new SegmentFileIo(), 2, 2));
+        }
+    }
+
     private void assertAbruptRecoveryCandidate(String phase, int expectedExit, String marker) throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
-        Path output = temporary.getRoot().toPath().resolve("abrupt-writer.log");
-        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-cp", System.getProperty("java.class.path"), SegmentBookieControlLogTest.class.getName(),
-                phase, config.directory().toString())
-                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-        boolean finished = child.waitFor(15, TimeUnit.SECONDS);
-        if (!finished) {
-            child.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
-        }
-        String log = Files.readString(output);
-        assertTrue(log, finished);
-        assertEquals(log, expectedExit, child.exitValue());
-        assertTrue(log, log.contains(marker));
+        runAbruptWriter(phase, config.directory(), expectedExit, marker);
         try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
                         1024 * 1024, key((byte) 8), VALIDATOR)) {
@@ -2590,15 +2605,53 @@ public class SegmentBookieControlLogTest {
         }
     }
 
-    /** Child process for the two real process-boundary tests; never returns after the chosen cut. */
+    private void runAbruptWriter(String phase, Path directory, int expectedExit, String marker) throws Exception {
+        Path output = temporary.getRoot().toPath().resolve("abrupt-" + phase + ".log");
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), SegmentBookieControlLogTest.class.getName(),
+                phase, directory.toString())
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        boolean finished = child.waitFor(15, TimeUnit.SECONDS);
+        if (!finished) {
+            child.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
+        }
+        String log = Files.readString(output);
+        assertTrue(log, finished);
+        assertEquals(log, expectedExit, child.exitValue());
+        assertTrue(log, log.contains(marker));
+    }
+
+    /** Child process for the real process-boundary tests; never returns after the chosen cut. */
     public static void main(String[] args) throws Exception {
-        if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0]))) {
+        if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0])
+                && !"append-after-restart".equals(args[0]))) {
             throw new IllegalArgumentException("Expected abrupt writer phase and directory");
         }
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(Path.of(args[1]), 1, 4, 1,
                 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)),
                 new UUID(0, 9), BookieId.parse("isolated:3181"));
+        if ("append-after-restart".equals(args[0])) {
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                    IsolatedSegmentFiles files = IsolatedSegmentFiles.openAppendOnly(
+                            config, identity, arena, new SegmentFileIo())) {
+                long offset = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC, new UUID(0, 6), new Generation(1), 0,
+                        0, 0, new Generation(2), 6, offset, 1, 1)));
+                ByteBuf entry = entry(context(), 3);
+                try {
+                    files.writeAuthorized(SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                            0, 0, 6, new Generation(1), new Generation(2), 1, offset),
+                            List.of(SegmentBatchFormat.entry(context(), entry))), arena);
+                } finally {
+                    entry.release();
+                }
+                System.out.println("APPENDED_PHYSICALLY");
+                System.out.flush();
+                Runtime.getRuntime().halt(0);
+            }
+        }
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,

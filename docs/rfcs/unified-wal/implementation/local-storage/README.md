@@ -81,6 +81,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 
 ## 当前验证
 
+2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：48项隔离真实文件测试通过，0失败/错误/跳过。新增回归连续启动两个Java子进程：首个在recovery DATA本地结果后`Runtime.halt`，第二个重开Arena并同步DATA，在全部旧授权块之后取得新grant、写入另一个stream后再次`Runtime.halt`；父进程重演控制日志、同步并点读两个stream，旧recovery重复请求因同shard多stream仍为`NOT_READY`。该验证不模拟掉电，也不授予服务级可写重启、旧I/O错误解析或生产ACK。
+
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentBatchFormatTest,SegmentBookieControlLogTest`：Arena控制、真实DATA格式/恢复及Bookie控制共83项定向测试通过，0失败/错误/跳过。此范围覆盖隔离物理append-only重开与既有owner/控制路径，不证明完整服务级可写restart或生产ACK。
 
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest`：隔离真实文件定向测试27项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。物理append-only重开按已apply授权水位跳过旧块零尾，在新grant后写入另一stream，重开点读仍保留两者；同步失败、活跃writer、未apply控制命令和未授权原始写入均被拒绝。此入口不返回local result，未验证服务级可写重启、旧I/O错误持久分类或掉电。
