@@ -285,8 +285,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         if (purpose == ConnectionPurpose.DATA && operation.isControl()) {
             throw new IOException("Control operation requires a control connection");
         }
-        if (purpose == ConnectionPurpose.CONTROL_PENDING || (purpose == ConnectionPurpose.UNCLASSIFIED
-                && operation.isReservedDisabled())) {
+        if (purpose == ConnectionPurpose.CONTROL_PENDING) {
             throw new IOException("Profile connection purpose is not established");
         }
     }

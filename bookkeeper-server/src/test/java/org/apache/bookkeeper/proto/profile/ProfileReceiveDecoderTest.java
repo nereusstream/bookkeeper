@@ -129,6 +129,31 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void forwardsDisabledZeroBodyFirstRequestOnDataLane() {
+        for (ProfileOperation operation : List.of(ProfileOperation.RANGE_READ,
+                ProfileOperation.BATCH_RECOVERY_ADD)) {
+            ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 512, 8, 8, 4);
+            ProfileReceiveDecoder decoder = decoder(budget, 900, 64);
+            EmbeddedChannel channel = new EmbeddedChannel(decoder);
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+            ProfileInboundFrame greeting = channel.readInbound();
+            greeting.close();
+            decoder.markEstablished();
+
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(frame(operation, 0))));
+            ProfileInboundFrame request = channel.readInbound();
+            assertEquals(operation, request.header().operation());
+            assertEquals(0, request.body().readableBytes());
+            assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+            request.close();
+            channel.finishAndReleaseAll();
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+        }
+    }
+
+    @Test
     public void controlCapacitySurvivesDataPressureAndRejectsDataSubtype() throws Exception {
         ProfileReceiveBudget budget = new ProfileReceiveBudget(4_000, 1_000, 500, 8, 8, 2);
         EmbeddedChannel first = new EmbeddedChannel(decoder(budget, 2_000, 64));
