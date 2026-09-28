@@ -239,9 +239,13 @@ DATA durable → hot locator → local result
 
 预算从socket/TLS/header/半包开始，固定header通过后先预留body额度，再向存储转移ownership；暂停前pipeline已持有的字节仍计账。控制连接使用总预算内有限保留份额，不排在暂停DATA连接的半包后，也不豁免认证。
 
+同一listener按首个非HELLO固定头选择候选用途，不增加wire字段。连接先占有独立、有界的未分类准入、TLS与接收份额，DATA须在大body前取得DATA额度；控制请求完成实际operation、context、credential及授权校验后才取得保留控制连接名额，后续用途固定。未分类池耗尽时新控制连接无法被预先识别，验收分别检查DATA背压下新控制连接可建立，以及未分类池耗尽时资源有界、已有控制连接继续推进。TLS、HELLO和首请求等待分别限时；跨分类的同次read残留字节继续按原归属计费，长期工作集换账必须原子检查。
+
 **完成条件：** 正常、截断、超长、错误subtype与reference corpus一致；多连接半包内存有界，关闭/取消/解析失败无泄漏；DATA暂停时控制仍可到达；普通Add无逐请求handshake或proof读取。测试可使用隔离listener，尚不发布stable wire承诺。
 
-前置的[Classic master-key错误日志泄漏](profile-control/classic-master-key-log-receipt.json)已用真实日志事件红绿回归修复。隔离Profile明文接收切片现可在完整body到达前校验固定header并申请连接/Bookie DATA或保留CONTROL额度，计入同次read中已进pipeline的字节、半包与交付后尚未释放的frame；控制额度不被DATA连接占用，错误subtype、容量不足、非法HELLO body及断连释放已定向验证。完整HELLO在交付前复用`ProfileHello.decodeClient`，小额解析副本单独计费。使用现有测试证书的`EmbeddedChannel`联测已让真实TLS1.3/mTLS握手后的HELLO与DATA帧经过该解码器，关闭后额度归零。复现命令：`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileFrameCodecTest,ProfileHelloStatusTest,ProfileWireCorpusTest,ProfileReceiveDecoderTest,ProfileTlsContextFactoryTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`，本次common 13项、server 7项均通过。
+前置的[Classic master-key错误日志泄漏](profile-control/classic-master-key-log-receipt.json)已用真实日志事件红绿回归修复。隔离Profile明文接收切片现可在完整body到达前校验固定header并申请连接/Bookie DATA或保留CONTROL额度，计入同次read中已进pipeline的字节、半包与交付后尚未释放的frame；控制额度不被DATA连接占用，错误subtype、容量不足、非法HELLO body及断连释放已定向验证。完整HELLO在交付前复用`ProfileHello.decodeClient`，小额解析副本单独计费。使用现有测试证书的`EmbeddedChannel`联测已让真实TLS1.3/mTLS握手后的HELLO与DATA帧经过该解码器，关闭后额度归零。复现命令：`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileFrameCodecTest,ProfileHelloStatusTest,ProfileWireCorpusTest,ProfileReceiveDecoderTest,ProfileTlsContextFactoryTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`，本次common 13项、server 9项均通过。
+
+接收器现已补充下游同步关闭后的同次read终止，以及`FENCE_LEDGER`固定100字节长度的额度申请前校验；对应定向测试通过。它仍由构造参数预选DATA/CONTROL，未分类准入、分类换账、真实控制操作授权和listener入口尚未接通，不能将上述保留容量测试算作B18控制可达性的完成证据。
 
 现有`TLSContextFactory.forProfileServer()`单独复用Bookie证书/信任库配置，固定`startTls(false)`、TLS1.3与`ClientAuth.REQUIRE`，Classic默认工厂行为不变。握手成功后可从已验证的叶子证书提取`trust-domain/issuer/subject`身份；这个方法不声称能从任意`SslHandler`证明listener的首字节TLS顺序。上述2项TLS定向测试验证真实双端握手、证书身份提取、应用数据非明文、缺信任材料拒绝及Classic对照。该模式尚未接入Bookie listener，身份事实与HELLO能力/operation处理、真实TLS/socket内存计费仍未接通；匿名/越权拒绝和完整secret-leak矩阵未完成，步骤11仍未闭合。
 

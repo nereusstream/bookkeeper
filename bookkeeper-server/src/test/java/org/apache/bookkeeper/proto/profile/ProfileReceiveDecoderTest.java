@@ -223,6 +223,52 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void stopsAtDownstreamCloseBeforePipelinedSecondFrame() {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024);
+        AtomicInteger delivered = new AtomicInteger();
+        EmbeddedChannel channel = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
+                ProfileReceiveDecoder.ConnectionPurpose.DATA, 6_000, 64), new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object message) {
+                try (ProfileInboundFrame received = (ProfileInboundFrame) message) {
+                    delivered.incrementAndGet();
+                    assertEquals(ProfileOperation.HELLO, received.header().operation());
+                    ctx.close();
+                }
+            }
+        });
+        byte[] greeting = hello();
+        byte[] add = frame(ProfileOperation.ADD_NORMAL, 64);
+        byte[] pipelined = Arrays.copyOf(greeting, greeting.length + add.length);
+        System.arraycopy(add, 0, pipelined, greeting.length, add.length);
+        io.netty.buffer.ByteBuf input = Unpooled.wrappedBuffer(pipelined);
+        assertFalse(channel.writeInbound(input));
+        assertEquals(1, delivered.get());
+        assertFalse(channel.isActive());
+        assertEquals(0, input.refCnt());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+    }
+
+    @Test
+    public void rejectsOversizedFenceBeforeChargingControlBody() {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 2_048);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget,
+                ProfileReceiveDecoder.ConnectionPurpose.CONTROL, 6_000, 64);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+        ProfileInboundFrame greeting = channel.readInbound();
+        greeting.close();
+        decoder.markEstablished();
+
+        byte[] oversized = frame(ProfileOperation.FENCE_LEDGER, 1_024);
+        assertThrows(IOException.class, () -> channel.writeInbound(
+                Unpooled.wrappedBuffer(Arrays.copyOf(oversized, 36))));
+        assertFalse(channel.isActive());
+        assertNull(channel.readInbound());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    @Test
     public void receivesHelloAndDataOnlyAfterRealMutualTlsHandshake() throws Exception {
         ServerConfiguration conf = new ServerConfiguration();
         conf.setTLSKeyStoreType("PEM");

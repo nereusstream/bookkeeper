@@ -796,9 +796,13 @@ body额度可逻辑预留，不按声明长度立即分配整块内存。连接�
 
 控制连接数量及TLS/接收额度计入Bookie同一总量，保留的控制份额不能被DATA耗尽，也不能作为绕过预算的无限通道。实际header/subtype、operation与授权仍校验；DATA不能冒充控制请求占用保留通路，不能只凭自称控制类型跳过检查。B18覆盖多连接半包、暂停后pipeline残留、额度交接/失败释放，以及DATA暂停时合法控制请求仍能接收并推进；A26消费身份/operation拒绝边界。
 
+同一listener不增加HELLO用途字段。连接先占有独立、有界的未分类准入、TLS及接收份额；TLS身份与HELLO通过后，首个非HELLO固定头选择候选DATA或CONTROL用途。DATA在收大body前转入DATA额度；控制请求须完整校验operation/context/credential及授权，才取得保留控制连接名额，之后连接用途固定。入站buffer中跨分类边界的剩余字节保持原计费归属直到释放，长期工作集转移须原子检查并换账。未分类名额耗尽时，新控制连接也无法被预先识别并保证进入；此时只保证资源有界和已有控制连接推进，不宣称新控制连接始终可达。TLS、HELLO及首请求等待各有独立有限期限，避免慢连接无限占位。
+
 实现进度（2026-09-28）：`ProfileFrameCodec.inspectHeader`复用reference固定头/长度/phase/subtype校验，使明文接收适配器在body到达前取得合法声明长度；`ProfileReceiveDecoder`在Netty入口按同次入站ByteBuf、固定连接份额及已交付但未释放的完整frame向共享DATA/保留CONTROL账本计费，容量不足直接关闭并释放，CONTROL连接不接受DATA subtype。完整首帧在交付前用`ProfileHello.decodeClient`校验body和零flags，解析副本亦计入瞬时额度。定向测试覆盖半包、pipeline已到字节、DATA压力下控制份额、非法HELLO、断连和交付后释放；reference corpus仍通过。这只是未注册的明文组件，TLS/socket实际buffer、mTLS身份、HELLO授权、存储交接与真实listener均未接通，不作为B18或步骤11完整接收预算证据。
 
 同日新增`TLSContextFactory.forProfileServer()`独立模式：复用现有key/trust加载与刷新，只在该模式固定immediate TLS1.3及必需客户端证书；成功握手后提取`TRUST_DOMAIN_ISSUER_PLUS_SUBJECT`叶子证书身份，握手前及Classic工厂拒绝该提取。双端握手、Classic START_TLS对照及解密后的HELLO/DATA帧经接收器的定向测试通过。独立Bookie端口、listener首字节TLS顺序证明、`ProfileTransportContext`与HELLO能力/operation接线及TLS/socket buffer总账仍未完成，因此不视为真实Profile网络接入或A24/B18通过。
+
+后续定向修复使下游同步关闭或移除接收器后，同次read的残留帧不再被继续解析；固定100字节的`FENCE_LEDGER`请求在申请body额度前拒绝其他声明长度。当前decoder仍由构造参数预选DATA/CONTROL，并未实现上述未分类准入、动态分类及真实控制授权。
 
 ## 12. Capability negotiation
 

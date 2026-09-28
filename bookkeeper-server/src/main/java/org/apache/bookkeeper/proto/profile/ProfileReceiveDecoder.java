@@ -73,6 +73,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private ProfileFrameHeader frameHeader;
     private int headerRead;
     private boolean helloDelivered;
+    private boolean terminated;
     private ProfileFrameCodec.DecodePhase phase = ProfileFrameCodec.DecodePhase.PRE_HELLO;
 
     ProfileReceiveDecoder(ProfileReceiveBudget budget, ConnectionPurpose purpose, int connectionLimit,
@@ -133,6 +134,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     private void decode(ChannelHandlerContext ctx, ByteBuf input) throws IOException {
         while (input.isReadable()) {
+            if (terminated || !ctx.channel().isActive()) {
+                return;
+            }
             if (frame == null) {
                 int copy = Math.min(input.readableBytes(), FIXED_HEADER_BYTES - headerRead);
                 input.readBytes(fixedHeader, headerRead, copy);
@@ -183,6 +187,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 helloDelivered = true;
             }
             ctx.fireChannelRead(completed);
+            if (terminated || !ctx.channel().isActive()) {
+                return;
+            }
         }
     }
 
@@ -192,6 +199,8 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 || (helloDelivered && phase == ProfileFrameCodec.DecodePhase.PRE_HELLO)
                 || (phase == ProfileFrameCodec.DecodePhase.ESTABLISHED
                 && operation == ProfileOperation.HELLO)
+                // The frozen fence request body is exactly 100 bytes; reject a larger claim before reserving it.
+                || (operation == ProfileOperation.FENCE_LEDGER && header.bodyLength() != 100)
                 || (operation.isReservedDisabled() && header.bodyLength() != 0)) {
             throw new IOException("Invalid Profile request header");
         }
@@ -238,6 +247,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        terminated = true;
         discardPartial();
         releaseBase();
         ctx.fireChannelInactive();
@@ -245,6 +255,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     @Override
     public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+        terminated = true;
         discardPartial();
         releaseBase();
         context = null;
