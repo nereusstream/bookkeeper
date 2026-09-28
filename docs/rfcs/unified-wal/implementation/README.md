@@ -18,7 +18,7 @@
 
 ## 下一阶段实施清单
 
-规划基线为`origin/turbo-bk@e8b162076fd8cfa84a11351a82caac8c5ac1f939`，2026-09-22核对本地HEAD及远端引用一致；该提交时间为2026-09-22 08:29:33 UTC（北京时间16:29:33）。16步顺序现已开始实施。步骤1隔离配置、参数边界测试和可追溯构建入口已交付，2项测试通过；[本地存储状态与回执](local-storage/README.md)记录真实覆盖。步骤2的[CLIENT-1/2独立Classic补丁](client-maintenance/README.md)均已完成确定性红绿回归（当前85项测试通过），与隔离存储authority分离；步骤3已交付实验格式、独立parser与真实FileChannel I/O（14项定向测试通过）；步骤4已交付固定owner/PARK、DATA/控制独立completion及有界I/O服务份额、显式绑定、拓扑/placement及group启动与SYSTEM/OWNER_TOUCH池，低频运行期CPU/cgroup检查及PREFER/REQUIRE本地处置已接入隔离group；步骤5～7已有Arena控制owner的定向真实文件路径、物理前缀/热候选、重复payload真实点读比较、点读/文件同步及重启物理清单局部切片。Bookie控制、请求级幂等、逐entry成功、完整restart、Bookie生命周期重启/PREFERRED及步骤5～16完整合同仍未完成。文件层验证不表示entry成功、restart、Spike或Gate通过。
+规划基线为`origin/turbo-bk@e8b162076fd8cfa84a11351a82caac8c5ac1f939`，2026-09-22核对本地HEAD及远端引用一致；该提交时间为2026-09-22 08:29:33 UTC（北京时间16:29:33）。16步顺序现已开始实施。步骤1隔离配置、参数边界测试和可追溯构建入口已交付，2项测试通过；[本地存储状态与回执](local-storage/README.md)记录真实覆盖。步骤2的[CLIENT-1/2独立Classic补丁](client-maintenance/README.md)均已完成确定性红绿回归（当前85项测试通过），与隔离存储authority分离；步骤3已交付实验格式、独立parser与真实FileChannel I/O（14项定向测试通过）；步骤4已交付固定owner/PARK、DATA/控制独立completion及有界I/O服务份额、显式绑定、拓扑/placement及group启动与SYSTEM/OWNER_TOUCH池，低频运行期CPU/cgroup检查及PREFER/REQUIRE本地处置已接入隔离group；步骤5～7已有单在途Arena控制驱动的定向真实文件路径、物理前缀/热候选、重复payload真实点读比较、点读/文件同步及重启物理清单局部切片。Bookie控制、请求级幂等、逐entry成功、完整restart、Bookie生命周期重启/PREFERRED及步骤5～16完整合同仍未完成。文件层验证不表示entry成功、restart、Spike或Gate通过。
 
 继续复用已有ProfileDescriptor、Profile control/auth、startup/readiness reference implementation及experimental wire codec/corpus。它们提供接口、字节合同和测试依据，不能替代真实文件持久化、网络或MetadataStore。固定owner、安全显式绑核、NUMA池与独立等待策略沿用RFC-0005 §10.2—10.5、RFC-0003 §6.2；默认仍为OFF/SYSTEM/PARK。
 
@@ -136,7 +136,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 先实现真实控制记录持久化、顺序apply、重复操作解析、启动身份检查及ALLOC/ALLOC_POOL。条件命令按已选合同“合批durable → 顺序判断并apply”，不增加推测状态或结果日志。初版可完整重放且暂不删除旧日志，但必须设置日志空间上限，满额停止接收；完整checkpoint/rotation在步骤8补齐。
 
-当前仅[隔离Arena局部切片](local-storage/README.md)实现上述ALLOC/ALLOC_POOL的文件持久化、顺序apply和完整历史重放；定向真实文件测试已在DATA准入及I/O服务满额时通过独立控制份额完成force与原owner apply。显式DATA文件写入路径已检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner、实际服务生命周期中的Arena控制驱动及pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
+当前仅[隔离Arena局部切片](local-storage/README.md)实现上述ALLOC/ALLOC_POOL的文件持久化、单在途驱动、顺序apply和完整历史重放；定向真实文件测试已在DATA准入及I/O服务满额时通过独立控制份额完成force与原owner apply。显式DATA文件写入路径已检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner、Arena驱动的实际服务生命周期接线及pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
 
 **完成条件：** 同批两个ALLOC竞争同一slot只有一个成功；durable未apply、apply中途崩溃和重复请求的结果一致；错误storage identity不开放写入；DATA只使用已持久化且成功apply的空间授权。本地fence/grant先用受控DATA事件验证顺序，在步骤6补真实I/O交错测试。
 

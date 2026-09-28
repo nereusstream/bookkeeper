@@ -69,6 +69,75 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void driverAppliesOneDurableBatchAndRejectsConcurrentBatch() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 2);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 2);
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<List<SegmentArenaControlLog.Result>> results = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+            SegmentArenaControlDriver driver = new SegmentArenaControlDriver(owner, io, log);
+            assertTrue(driver.submit(List.of(alloc(1, 4096)), (applied, cause) -> {
+                owner.requireOwner();
+                results.set(applied);
+                failure.set(cause);
+                done.countDown();
+            }));
+            assertFalse(driver.submit(List.of(alloc(2, 4096)), (applied, cause) -> {
+                throw new AssertionError("Concurrent control batch was admitted");
+            }));
+            owner.start();
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertNull(failure.get());
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, results.get().get(0).status());
+            assertTrue(granted(log, 4096, 1, 1, 1));
+        } finally {
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+        assertNull(owner.failure());
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+            assertTrue(granted(replay, 4096, 1, 1, 1));
+        }
+    }
+
+    @Test
+    public void driverReportsUncertainForceWithoutApplyingGrant() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024,
+                        new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false))) {
+            SegmentArenaControlDriver driver = new SegmentArenaControlDriver(owner, io, log);
+            assertTrue(driver.submit(List.of(alloc(1, 4096)), (applied, cause) -> {
+                owner.requireOwner();
+                assertNull(applied);
+                failure.set(cause);
+                done.countDown();
+            }));
+            owner.start();
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertTrue(failure.get() instanceof IOException);
+            assertFalse(granted(log, 4096, 1, 1, 1));
+        } finally {
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+        assertNull(owner.failure());
+    }
+
+    @Test
     public void arenaControlForceAndApplyProgressWhileDataAdmissionIsFull() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

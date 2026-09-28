@@ -30,7 +30,7 @@
 
 PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚未完成；SYSTEM/OWNER_TOUCH/PARK保持默认，当前仍是隔离可丢弃实验实现。
 
-步骤5的Arena局部切片：`SegmentArenaControlLog` 在已创建的隔离目录中验证所有必需文件身份，用独占文件锁打开`arena-control`，对`ALLOC`/`ALLOC_POOL`建立有界、仅追加的控制历史。调用方提交的batch先复制为不可变命令列表，完整写入后一次`force(true)`；只有随后按sequence逐条apply成功才产生空间授权。同批争用slot的后续命令为消耗sequence的确定性no-op。操作UUID和命令内容用于重复/不兼容解析；range绑定file、offset、allocation ID/generation、owner shard及其generation，同一allocation ID不重复授予另一范围。定向真实文件测试已将`appendDurably`放到控制专用I/O服务，将`applyDurable`放回原owner的独立控制completion；DATA准入和DATA I/O服务满额、停收准入及重开重放均不跳过已受理的控制义务。重开先验证完整记录/连续序号与身份，再同步并重放；不确定I/O使当前实例停止授予权限，无法安全分类的尾部拒绝可写恢复，不猜测截断。日志满额停止接收，尚无Bookie生命周期中的实际控制驱动或checkpoint/rotation。
+步骤5的Arena局部切片：`SegmentArenaControlLog` 在已创建的隔离目录中验证所有必需文件身份，用独占文件锁打开`arena-control`，对`ALLOC`/`ALLOC_POOL`建立有界、仅追加的控制历史。调用方提交的batch先复制为不可变命令列表，完整写入后一次`force(true)`；只有随后按sequence逐条apply成功才产生空间授权。同批争用slot的后续命令为消耗sequence的确定性no-op。操作UUID和命令内容用于重复/不兼容解析；range绑定file、offset、allocation ID/generation、owner shard及其generation，同一allocation ID不重复授予另一范围。`SegmentArenaControlDriver`一次只受理一个batch，在控制专用I/O服务执行`appendDurably`，再由原owner的独立控制completion执行`applyDurable`并返回结果；DATA准入和DATA I/O服务满额、停收准入及重开重放均不跳过已受理的控制义务。重开先验证完整记录/连续序号与身份，再同步并重放；不确定I/O使当前实例停止授予权限，无法安全分类的尾部拒绝可写恢复，不猜测截断。日志满额停止接收，隔离驱动尚未接入Bookie生命周期，checkpoint/rotation也未实现。
 
 `IsolatedSegmentFiles.writeAuthorized`已在实际FileChannel写入前核对同一目录/storage/Arena身份、冻结DATA batch的整段物理范围和上述grant身份；跨块batch要求同一pool授权，未apply或身份不符时不写入。它只约束这个显式调用路径；底层`write`保留给格式/I/O实验。`ALLOC_POOL`尚未实现DATA framing的used/unused恢复，也不支持FREE后的复用。Bookie控制语义、fence/grant、逐entry成功与完整启动恢复未接入，故步骤5未完成，不能据此开放Bookie写入。
 
@@ -95,6 +95,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 2026-09-28 [控制owner回执](arena-control-owner-receipt.json)：macOS隔离测试27项通过，0失败/错误/跳过，Spotless/Checkstyle通过。1个DATA任务占满其准入额度、I/O服务有空位时，1个Arena控制任务仍可保留独立completion，真实写入并force控制日志，再由原owner按序apply；控制额度满拒绝第二项，停收后等待在途控制和DATA终结，重开仍重放授权。共享I/O队列无控制专属余量，尚未接入Bookie服务生命周期、Bookie级控制owner或生产请求。
 
 2026-09-28 [控制I/O余量回执](control-io-reserve-receipt.json)：macOS隔离测试23项计数中18项执行通过、5项因平台条件跳过，0失败/错误；旧I/O构造路径的BatchFormat另16项通过，Spotless/Checkstyle通过。组内I/O线程总额分出1个控制服务及独立队列，DATA工作线程和队列同时占满时，Arena控制仍在另一线程真实写入并force，再回原owner apply；组启动、控制提交和排空路径通过定向测试。未接入实际Bookie服务驱动，不证明控制服务本身I/O故障后的可用性、生产ACK或掉电语义。
+
+2026-09-28 [Arena控制驱动回执](arena-control-driver-receipt.json)：macOS隔离真实文件测试7项通过，0失败/错误/跳过，Spotless/Checkstyle通过。驱动一次只接收一个batch；force成功后原owner apply并回传结果，force故障返回错误且不授予grant；重开可重放成功授权。尚未接入Bookie启动、停止、路由/权限或生产Add。
 
 2026-09-28 [DATA授权回执](arena-data-grant-receipt.json)：macOS隔离测试17项通过，0失败/错误/跳过，Spotless/Checkstyle通过。真实FileChannel路径用1 MiB payload生成跨两个1 MiB块的冻结batch；未apply、allocation ID/shard generation不符、另一隔离目录的grant均在写入前拒绝，同一pool授权后写入并由独立parser读回。Arena局部测试另覆盖单块grant不授权跨块范围及allocation ID重复争用。未测Bookie route/fence、重启DATA used/unused和逐entry结果。
 

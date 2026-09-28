@@ -1,0 +1,19 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_ARENA_CONTROL_DRIVER_ONLY",
+  "sourceBaseCommit": "28e6630a45a3ab47dabc8a7d3d135bc33935434a",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlDriver.java": "34b060f9d65c896991aa1b29e1cee4661906983128efc870bee953f168026138",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLogTest.java": "642e98bdf50d0fe5410359b81b996df0ab7f342001c7d2d0f697e35d49814e24"
+  },
+  "fixture": "one explicit Arena control driver, owner and reserved control I/O service, real isolated control file; one accepted batch and concurrent rejection before owner start; injected force failure remains without grant",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-8ZOm9hbK",
+  "inputSha256": "c2e46f468695e7d3b60b8b8a5e2400555ec65c8fd20ed8710e6ac432d21f502f",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest",
+  "mavenLogSha256": "bebc84865e7c53a28786aa3ed3a54b573a09bdb4bfa3e900f0dd7d16d1d24233",
+  "junit": {
+    "SegmentArenaControlLogTest": {"tests": 7, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "e971c743ed361dd2892520486088001be442802cb32946cc882f9b9027435c04"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Explicit isolated driver only; not owned by Bookie startup/shutdown or route authority, no Bookie control log, ordinary Add result, power-loss or production authority. One batch in flight; busy or full control admission returns backpressure."
+}
