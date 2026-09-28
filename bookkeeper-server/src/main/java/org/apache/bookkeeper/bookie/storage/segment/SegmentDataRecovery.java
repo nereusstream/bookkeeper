@@ -57,12 +57,16 @@ final class SegmentDataRecovery {
             this.maxBatches = maxBatches;
         }
 
+        private boolean matches(SegmentBatchFormat.Address address) {
+            return address.shard() == shard && address.streamGeneration().equals(generation);
+        }
+
         private void observe(SegmentBatchFormat.Address address) throws IOException {
-            if (address.shard() != shard) {
+            if (!matches(address)) {
                 return;
             }
-            if (!address.streamGeneration().equals(generation) || batches.size() == maxBatches) {
-                throw new IOException("Physical stream generation or recovery batch bound mismatch");
+            if (batches.size() == maxBatches) {
+                throw new IOException("Physical stream recovery batch bound exceeded");
             }
             batches.add(address);
         }
@@ -223,7 +227,7 @@ final class SegmentDataRecovery {
                                 List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
                                 for (int i = 0; i < parsed.records().size(); i++) {
                                     if (parsed.records().get(i).origin() == SegmentBatchFormat.ENTRY_DATA
-                                            && (stream == null || address.shard() == stream.shard)) {
+                                    && (stream == null || stream.matches(address))) {
                                         if (entries.size() == maxEntries) {
                                             throw new IOException("Physical recovery inventory capacity exhausted");
                                         }

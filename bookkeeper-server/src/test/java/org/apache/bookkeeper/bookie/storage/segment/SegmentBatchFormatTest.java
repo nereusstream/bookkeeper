@@ -807,6 +807,65 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void recoveredStreamCandidateKeepsOtherGenerationInSharedFile() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("mixed-stream-generations"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 2,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        long newerOffset = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        ByteBuf olderEntry = entry(new byte[8], 11);
+        ByteBuf newerEntry = entry(new byte[8], 50);
+        SegmentBatchFormat.FrozenBatch older;
+        SegmentBatchFormat.FrozenBatch newer;
+        try {
+            older = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 11, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), olderEntry)));
+            newer = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 6, new Generation(1), new Generation(2), 50, newerOffset),
+                    List.of(SegmentBatchFormat.entry(context(), newerEntry)));
+        } finally {
+            olderEntry.release();
+            newerEntry.release();
+        }
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            // The two applied grants are distinct; an unused tail of the older block is left intact.
+        }
+        try (SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            authority.submitBatch(List.of(
+                    new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                            new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1),
+                            5, 4096, 1, 11),
+                    new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                            new UUID(0, 6), new Generation(1), 0, 0, 0, new Generation(2),
+                            6, newerOffset, 1, 50)));
+        }
+        try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                StandardOpenOption.WRITE)) {
+            SegmentFileIo io = new SegmentFileIo();
+            io.writeFully(data, older.bytes(), 4096);
+            io.writeFully(data, newer.bytes(), newerOffset);
+            io.force(data, false);
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentDataRecovery.PhysicalStreamCandidate olderCandidate =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity(), replay,
+                            new SegmentFileIo(), 0, new Generation(1), 11, 1, 1);
+            assertEquals(11, olderCandidate.through());
+            assertEquals(11, olderCandidate.entries().get(0).entryId());
+            assertEquals(1, olderCandidate.entries().size());
+
+            SegmentDataRecovery.PhysicalStreamCandidate newerCandidate =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity(), replay,
+                            new SegmentFileIo(), 0, new Generation(2), 50, 1, 1);
+            assertEquals(50, newerCandidate.through());
+            assertEquals(50, newerCandidate.entries().get(0).entryId());
+            assertEquals(1, newerCandidate.entries().size());
+            assertEquals(2, newerCandidate.scan().batches());
+        }
+    }
+
+    @Test
     public void wrongLogicalShardIsRejectedBeforePhysicalWriteAndDuringRecovery() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(
                 temporary.getRoot().toPath().resolve("wrong-shard"), 1, 4, 1,

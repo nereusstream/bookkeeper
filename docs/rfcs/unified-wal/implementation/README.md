@@ -171,7 +171,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 **完成条件：** 写入→确认本地持久化→读取→终止进程→重启→再读与重复写入可重复运行；未知覆盖不误报NoSuchEntry，不同stream恢复不截短共享文件，旧generation残留不复活。开始验证两次故障：write完成但barrier未完成时退出，重启处理重复请求后再次掉电；单次进程终止后可读不足以证明持久化保证。
 
-当前[隔离点读及文件同步切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。停写后完整扫描的DATA文件可执行一次恢复`force(false)`；全目录校验同步后可在显式容量内取回普通record物理位置，并先以Arena已apply首序号核对调用方起点，再检查单stream候选的序号连续性，缺口、重复和容量不足不返回候选。运行时热候选可发布，恢复物理候选可在新owner的有界热目录核对存储scope后原子装入并点读；仍没有重建出的可发布末端前缀、selector/pin、Bookie必要范围选择与服务权限，步骤7未完成。
+当前[隔离点读及文件同步切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。停写后完整扫描的DATA文件可执行一次恢复`force(false)`；全目录校验同步后可在显式容量内取回普通record物理位置，并先以Arena已apply首序号核对调用方起点，再仅对匹配shard与generation的单stream batch/entry检查序号连续性；同文件其他generation仍校验但不混入候选，缺口、重复和容量不足不返回候选。运行时热候选可发布，恢复物理候选可在新owner的有界热目录核对存储scope后原子装入并点读；仍没有重建出的可发布末端前缀、selector/pin、Bookie必要范围选择与服务权限，步骤7未完成。
 
 扫描的零尾页不能作为未提交或可复用证明；当前隔离文件实现仅支持初建writer，重开只读检查不设置新的写指针。必要DATA选择、持久空间used/unused与末端前缀事实及旧I/O终结未闭合前，不开放可写重启。
 
