@@ -353,12 +353,23 @@ public class SegmentBatchFormatTest {
             assertEquals(1, scan.records());
             assertTrue(scan.validatedBytes() > SegmentArenaControlLog.BLOCK_BYTES);
             assertTrue(scan.zeroPages() > 0);
+            SegmentFileIo recoveryIo = new SegmentFileIo();
+            assertEquals(scan, SegmentDataRecovery.validateAndSync(config, identity(), replay, recoveryIo));
+            assertEquals(1, recoveryIo.forces);
+            SegmentFileIo failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            assertThrows(IOException.class,
+                    () -> SegmentDataRecovery.validateAndSync(config, identity(), replay, failedSync));
+            assertEquals(1, failedSync.forces);
             try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
                     StandardOpenOption.WRITE)) {
                 data.write(ByteBuffer.wrap(new byte[] {1}), config.bytesPerFile() - 4096);
                 data.force(false);
             }
             assertThrows(IOException.class, () -> SegmentDataRecovery.inspect(config, identity(), replay));
+            SegmentFileIo invalidIo = new SegmentFileIo();
+            assertThrows(IOException.class,
+                    () -> SegmentDataRecovery.validateAndSync(config, identity(), replay, invalidIo));
+            assertEquals(0, invalidIo.forces);
         }
     }
 
@@ -375,6 +386,10 @@ public class SegmentBatchFormatTest {
         }
         try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             assertThrows(IOException.class, () -> SegmentDataRecovery.inspect(config, identity(), log));
+            SegmentFileIo syncIo = new SegmentFileIo();
+            assertThrows(IOException.class,
+                    () -> SegmentDataRecovery.validateAndSync(config, identity(), log, syncIo));
+            assertEquals(0, syncIo.forces);
         }
     }
 

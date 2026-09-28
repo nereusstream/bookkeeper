@@ -1,0 +1,20 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_QUIESCED_DATA_FILE_SYNC",
+  "sourceBaseCommit": "b4d3421166b7dbec8d3c222623550a09b37bba47",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentDataRecovery.java": "8188c278a92fdcda4ba0f33b975bd4d20a8a104c96ba414ce18fcc6a637390cb",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "3cb00132b48213c8bc0cbcca4d12439a8d9ffc836cd1d725f347a124fe050fcf"
+  },
+  "fixture": "one Arena, one 4 MiB precreated DATA file; quiesced writer and replayed Arena grant; one complete granted batch followed by zero pages; injected force failure, ungranted complete DATA and nonzero dirty tail",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-J9qhRiRO",
+  "inputSha256": "357e2a395e278d1f318fe46ed87a91c18397a13598bd894dae2f6dff126cfb29",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentArenaControlLogTest",
+  "mavenLogSha256": "affbad1f15e94bf03eee87781d687cb27b54a441c56ee29a7cb17d53a3b856c8",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 15, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "c5ee11b2e5de13537dfabc2dc2a5a5b7d3cbea5a14ad1a8826b6e6d75edb39f6"},
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "8af72466f24debc01d33c998ba6546e16dfcc8f6caba268a1937bb89233b8665"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "One real file force after validation under the isolated directory lock, with injected failure handling. No complete current-selector/Bookie authority, required-DATA selection, physical prefix rebuild, locator publication, power-loss or production authority."
+}

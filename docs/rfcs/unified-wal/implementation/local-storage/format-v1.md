@@ -77,7 +77,7 @@ Bookie type 1～8：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_G
 
 隔离文件的`writeAuthorized`在真实DATA写入前核对同一目录和storage/Arena身份、冻结batch的完整物理范围、allocation ID/generation、shard及其stream generation与已apply的Arena grant；当前固定shard原型把stream generation作为owner shard generation。跨两个1 MiB块的batch必须拥有同一pool grant。原始`write`仍只供底层framing/I/O实验，不提供授权检查。该路径没有Bookie route/fence、DATA used/unused恢复或逐entry成功判定。
 
-`SegmentDataRecovery.inspect`只读扫描已停写的DATA文件：零页计数不推导unused；非零页必须形成CRC和身份完整、整段有当前grant的batch。完整但无grant的原始格式写入也拒绝。该扫描不提供连续物理前缀、可复用判定或DATA缺失持久证据时的恢复同步。
+`SegmentDataRecovery.inspect`只读扫描已停写的DATA文件：零页计数不推导unused；非零页必须形成CRC和身份完整、整段有当前grant的batch。完整但无grant的原始格式写入也拒绝。`validateAndSync`在同一目录锁与验证路径下，对完整检查的DATA文件执行一次`force(false)`后才返回；注入同步失败或无grant/脏页时不返回成功结果。这只补文件级同步，不提供连续物理前缀、可复用判定或Bookie级恢复权限。
 
 运行时DATA提交先预留固定物理范围，再由I/O线程对同一冻结batch完整写入并force；同文件较高offset可以先返回，但`SegmentPhysicalPrefix`仅在每stream已有起点后的sequence连续、且各reservation的force确实返回时释放物理候选。该volatile tracker不是持久成功游标，不能由它单独恢复ACK、定位或跨重启的起点。
 

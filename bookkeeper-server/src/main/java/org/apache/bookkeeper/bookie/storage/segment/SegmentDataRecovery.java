@@ -26,12 +26,26 @@ import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
-/** Read-only isolated DATA inspection; zero pages are observations, never proof of reusable space. */
+/** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
     record Scan(long batches, long records, long validatedBytes, long zeroPages) { }
 
     static Scan inspect(IsolatedSegmentConfig config, SegmentFileHeader identity,
                         SegmentArenaControlLog authority) throws IOException {
+        return scan(config, identity, authority, null);
+    }
+
+    /** A successful scan forces the checked DATA files; it does not establish Bookie or locator authority. */
+    static Scan validateAndSync(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                SegmentArenaControlLog authority, SegmentFileIo syncIo) throws IOException {
+        if (syncIo == null) {
+            throw new IllegalArgumentException("DATA recovery sync requires an I/O backend");
+        }
+        return scan(config, identity, authority, syncIo);
+    }
+
+    private static Scan scan(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                             SegmentArenaControlLog authority, SegmentFileIo syncIo) throws IOException {
         if (!authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
@@ -52,8 +66,11 @@ final class SegmentDataRecovery {
                 long validatedBytes = 0;
                 long zeroPages = 0;
                 for (int file = 0; file < config.dataFiles(); file++) {
-                    try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
-                            StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+                    try (FileChannel data = syncIo == null
+                            ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
+                                    StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                            : FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
+                                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                         if (data.size() != config.bytesPerFile()) {
                             throw new IOException("DATA file size mismatch");
                         }
@@ -88,6 +105,9 @@ final class SegmentDataRecovery {
                             records += parsed.records().size();
                             validatedBytes += length;
                             offset += length;
+                        }
+                        if (syncIo != null) {
+                            syncIo.force(data, false);
                         }
                     }
                 }

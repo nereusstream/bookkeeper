@@ -34,7 +34,7 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 `IsolatedSegmentFiles.writeAuthorized`已在实际FileChannel写入前核对同一目录/storage/Arena身份、冻结DATA batch的整段物理范围和上述grant身份；跨块batch要求同一pool授权，未apply或身份不符时不写入。它只约束这个显式调用路径；底层`write`保留给格式/I/O实验。`ALLOC_POOL`尚未实现DATA framing的used/unused恢复，也不支持FREE后的复用。Bookie控制语义、fence/grant、逐entry成功与完整启动恢复未接入，故步骤5未完成，不能据此开放Bookie写入。
 
-只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser且拥有匹配的已apply Arena grant，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用；此检查没有同步不确定的DATA内容、推导连续stream前缀、恢复locator或开放写入。
+只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser且拥有匹配的已apply Arena grant，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用。`validateAndSync`沿同一验证路径，在每个已检查文件返回前执行真实`force(false)`；验证或同步失败就不返回结果。当前会扫描并同步全部隔离DATA文件，尚未由Bookie/current-selector authority选出必要范围，也不推导连续stream前缀、恢复locator或开放写入。
 
 步骤6的物理前缀局部切片：`IsolatedSegmentFiles`已将有界DATA坐标预留与已预留批次的实际write/force分开。预留在I/O前占用固定文件范围；失败不退回坐标，并停止该文件新写。`SegmentPhysicalPrefix`只在原shard owner上接收同一stream generation的递增batch sequence；I/O completion必须对应已预留batch且其真实force返回，才可推进连续物理前缀。较晚batch先durable仍等待前批；前批同步不确定时不释放后批，不凭后批完整字节报告本地成功。当前tracker的起点由隔离调用者显式提供，未从持久checkpoint证明；它只返回物理可发布候选，不实现Bookie权限复查、热定位或逐entry result。
 
@@ -95,6 +95,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 2026-09-28 [物理前缀回执](physical-prefix-receipt.json)：macOS隔离测试24项通过，0失败/错误/跳过，Spotless/Checkstyle通过。真实预创建文件中，先预留sequence 11/12、让12先write/force，确认11完成前不会释放12；注入11的force失败后，即使12的字节完整也不释放其物理候选。另验证没有对应reservation的真实force返回时，空错误回调不能推进前缀。该结果不授予逐entry成功、重启起点或掉电保证。
 
 2026-09-28 [点读回执](point-read-receipt.json)：macOS隔离测试19项通过，0失败/错误/跳过，Spotless/Checkstyle通过。真实文件内270336字节的三record batch中，目标record header横跨两个对齐页；测试确认只读目标范围而非整批、grant前或DATA写入前拒绝、错误entry ID和无界长度拒绝、record字节篡改后CRC拒绝。关闭writer并以更低的新写入阈值重开Arena日志后，旧entry仍可点读。此结果不授予热locator发布、pin、完整restart或掉电保证。
+
+2026-09-28 [恢复同步回执](data-recovery-sync-receipt.json)：macOS隔离测试19项通过，0失败/错误/跳过，Spotless/Checkstyle通过。停写后重开Arena控制日志，完整已授权DATA经扫描后对该文件执行一次真实`force(false)`；注入force失败时不返回成功结果。无grant或尾部脏页在force之前拒绝。此为文件同步和失败边界证据，不证明已选出全部必要DATA、重建前缀、恢复entry权限或掉电后的耐久性。
 
 ## 未覆盖范围
 
