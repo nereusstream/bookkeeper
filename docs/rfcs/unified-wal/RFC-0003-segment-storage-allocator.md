@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的真实DATA write/force接原owner volatile连续物理前缀/有界物理热候选驱动、受控normal逐entry结果、在途同坐标重试等待及运行期已发布候选的owner/I/O重复点读慢路径、步骤7的对齐单record点读/停写后文件同步、重启物理清单、单stream序号候选检查及新owner有界物理热目录重建局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储状态与回执。Bookie受控控制日志及normal批次逐entry准入复核已有局部实现；完整请求级timeout/取消及幂等、完整allocator恢复、生产逐entry成功及restart仍未实现，本RFC的Gate未提升。
+实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply、stream首序号及DATA整段grant检查、步骤6的真实DATA write/force接原owner volatile连续物理前缀/有界物理热候选驱动、受控normal逐entry结果、在途同坐标重试等待及运行期已发布候选的owner/I/O重复点读慢路径、步骤7的对齐单record点读/停写后文件同步、重启物理清单、单stream序号候选检查及新owner有界物理热目录重建局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储状态与回执。Bookie受控控制日志及normal批次逐entry准入复核已有局部实现；完整请求级timeout/取消及幂等、完整allocator恢复、生产逐entry成功及restart仍未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
@@ -164,7 +164,7 @@ group commit中，必须有明确覆盖该`controlSequence`的durability complet
 
 `ArenaControlLog`首批选择一种执行模式：**条件命令合批持久化，再由per-Arena sequencer按控制序号顺序应用**。不同时维护另一套可回滚的推测状态，也不逐操作fsync。现有Classic Journal group force仅作batching参考，其callback不直接代表semantic transition已成功。
 
-实现状态：隔离文件原型已接通ALLOC/ALLOC_POOL的单batch持久化、按序条件apply、身份校验及有界全量重放；单在途Arena控制驱动与定向真实文件测试已由独立控制completion及I/O服务份额在DATA准入和I/O队列满时完成控制日志force、原owner顺序apply，显式`writeAuthorized`路径核对整段DATA batch grant。只读扫描可在停写后验证完整framing与grant，并在核对目录、持久文件配置与storage identity后把同步的单stream物理候选原子装入新owner的有界热目录；它不把零页宣布为unused，也不证明调用方给定的起点是restart的持久stream前缀。Bookie控制闭环、实际服务生命周期接线、pool used/unused恢复、FREE/MOVE与生产逐entry成功均未完成，不能作为本节完整allocator authority。
+实现状态：隔离文件原型已接通ALLOC/ALLOC_POOL的单batch持久化、按序条件apply、身份校验及有界全量重放；单在途Arena控制驱动与定向真实文件测试已由独立控制completion及I/O服务份额在DATA准入和I/O队列满时完成控制日志force、原owner顺序apply，显式`writeAuthorized`路径核对整段DATA batch grant。Arena分配命令现持久绑定每个shard/generation的首个物理sequence，冲突的后续分配按条件失败；物理前缀提交及重启候选扫描都核对该首序号。只读扫描可在停写后验证完整framing与grant，并在核对目录、持久文件配置与storage identity后把同步的单stream物理候选原子装入新owner的有界热目录；它不把零页宣布为unused，但尚不证明该起点后的末端durable-through或used/unused状态。Bookie控制闭环、实际服务生命周期接线、pool used/unused恢复、FREE/MOVE与生产逐entry成功均未完成，不能作为本节完整allocator authority。
 
 隔离Arena控制日志的文件write/force已移出其grant状态锁；受控慢force期间既有grant查询不会等待该I/O，新的条件batch仍被单在途门槛拒绝。DATA文件的范围预留也与同文件串行write/force分锁，慢force不再占预留状态锁；但尚未接入完整普通Add请求生命周期，不据此声称完整append链路无阻塞。
 
@@ -277,7 +277,7 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 首批选择**每个物理append stream的连续前缀恢复和成功发布**。bounded batch table记录乱序completion；只有从已验证起点开始连续的batch均取得durability，才推进内存中的physical durable-through并允许对应entry发布locator/local success。batch 11未durable而12先完成时，12保持等待，不能先ACK再在restart的11缺口截断后缀。该序号属于物理stream，不是ledger entryId或LAC，也不是Arena控制日志sequence；不同ledger可同批，`E>W`不要求本地entryId连续。
 
-实现状态：隔离物理驱动已将DATA坐标预留、真实write/force、owner连续前缀和有界热候选接成调用路径；热目录在DATA预留前占定位容量，只有连续结果才发布普通`ENTRY_DATA`候选，搬迁副本不进入普通候选。11/12乱序、首批force失败使两个未决回调报错且不发布候选、容量满额，以及同批两条entry共享一次force并各得可点读物理候选的局部真实文件测试已覆盖。起点尚非持久恢复证据；受控normal路径在候选发布后逐entry复核捕获的Bookie准入generation，在途同坐标normal重试可在原owner比较冻结内容并等待原物理结果，已发布运行期候选则经有界I/O服务点读比较重复payload。重启扫描候选仅是物理位置，不获得运行期durable标记；完整请求级timeout/取消、bytes预算、生产成功和restart前缀重建仍未接通，不能以该候选直接ACK。
+实现状态：隔离物理驱动已将DATA坐标预留、真实write/force、owner连续前缀和有界热候选接成调用路径；热目录在DATA预留前占定位容量，只有连续结果才发布普通`ENTRY_DATA`候选，搬迁副本不进入普通候选。11/12乱序、首批force失败使两个未决回调报错且不发布候选、容量满额，以及同批两条entry共享一次force并各得可点读物理候选的局部真实文件测试已覆盖。首序号已由Arena控制重放核对，末端连续durable前缀仍无恢复证明；受控normal路径在候选发布后逐entry复核捕获的Bookie准入generation，在途同坐标normal重试可在原owner比较冻结内容并等待原物理结果，已发布运行期候选则经有界I/O服务点读比较重复payload。重启扫描候选仅是物理位置，不获得运行期durable标记；完整请求级timeout/取消、bytes预算、生产成功和restart前缀重建仍未接通，不能以该候选直接ACK。
 
 允许有界I/O queue depth大于1；物理前缀排序在各stream内，不新增跨shard全局sequencer，但共享文件的barrier成本/错误范围不因此隔离。batch边界、stream lineage与范围发现由§9的可恢复framing和完整allocator authority给出；physical durable-through按§12先验证候选，再凭独立有效证据或必要恢复同步重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut按stream扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。所谓“截断DATA后缀”仅指将已证明可丢弃的特定stream/generation未成功后缀排除出有效批次范围，不等于缩短共享文件；required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
 
@@ -573,9 +573,9 @@ checkpoint不持久化individual reader、future、buffer reference或pin histor
 
 对缺少独立有效持久证据的完整合法内容，以已验证范围确定需同步的Bookie/Arena权威控制文件及DATA文件，按既有依赖顺序批量执行文件级barrier；文件同步不等于可以将未验证范围一起认定为有效。新文件/目录项依旧遵守各自发布协议。已被有效证据覆盖的内容无需重写，不增加逐entry fsync或成功日志；index重建、readiness持久化或同步另一控制文件都不能替代目标DATA barrier。恢复后本地durable不推导原请求是否ACK、quorum LAC或最终ledger prefix，后者仍由RFC-0004取证/close决定。
 
-实现状态：隔离`SegmentDataRecovery.validateAndSync`在目录锁下验证完整DATA文件的身份、framing与当前Arena grant，再执行文件`force(false)`；验证或同步失败不返回扫描结果。`recoverPhysicalInventory`在明确容量内，经全目录验证同步后返回普通DATA的物理位置，容量不足或同步失败不返回部分结果，搬迁副本不进入普通清单。`recoverPhysicalStreamCandidate`还可用调用方给定的shard/generation/起点，对已扫描batch按物理stream sequence拒绝缺口、重复和容量超限，并在文件同步后返回候选；传入起点没有持久authority证明。它尚未依据完整Bookie/current-selector控制关系选出必要DATA，也不重建可发布的持久stream前缀和locator；局部文件同步及位置清单不能作为本节完整恢复或ACK证据。
+实现状态：隔离`SegmentDataRecovery.validateAndSync`在目录锁下验证完整DATA文件的身份、framing与当前Arena grant，再执行文件`force(false)`；验证或同步失败不返回扫描结果。`recoverPhysicalInventory`在明确容量内，经全目录验证同步后返回普通DATA的物理位置，容量不足或同步失败不返回部分结果，搬迁副本不进入普通清单。`recoverPhysicalStreamCandidate`还可用调用方给定的shard/generation/起点，对已扫描batch按物理stream sequence拒绝缺口、重复和容量超限，并在文件同步后返回候选；传入起点须匹配Arena已apply的持久首序号。它尚未依据完整Bookie/current-selector控制关系选出必要DATA，也不重建可发布的末端stream前缀和locator；局部文件同步及位置清单不能作为本节完整恢复或ACK证据。
 
-当前`IsolatedSegmentFiles`没有可写重开入口。扫描零尾页无法区分未使用空间和已提交但结果不明的预留；仅凭最后完整batch位置回退写指针会冒复用未知坐标的风险。因此这一物理候选路径保持只读，直到空间使用authority、旧I/O终结及必要DATA依赖能在重启时判定。
+当前`IsolatedSegmentFiles`没有可写重开入口。Arena的持久首序号不包含空间used/unused或末端durable-through。扫描零尾页无法区分未使用空间和已提交但结果不明的预留；仅凭最后完整batch位置回退写指针会冒复用未知坐标的风险。因此这一物理候选路径保持只读，直到空间使用authority、旧I/O终结及必要DATA依赖能在重启时判定。
 
 此路径只补正常中断留下的持久化确认，不能修补缺失/损坏prefix、ownership冲突、未解析写回错误或依赖不完整；这些仍沿原隔离/恢复规则处理，不以“再sync一次成功”解除。B2/B9/B16须执行两次故障：write完成但barrier前终止进程，重启处理重复请求，再模拟掉电；已允许成功的内容仍须存在。一次kill后可读检查不足，恢复barrier按文件报告次数/等待且不计正常Add增量。
 
@@ -823,7 +823,7 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 - ArenaControlLog region sizing、segment rotation，以及§13.1前台/维护预算、限流/拒绝/恢复阈值与长期进展数据；
 - conditional transition/result的exact Java API、physical record grouping、control-sequence encoding与operation summary packing；
 - 线程角色及静态owner/placement边界按RFC-0005 §10.2—10.5；worker/shard比例、服务CPU余量、queue/waiter hard cap、batch/spin阈值与selector/pin具体同步原语由B18冻结；
-- §6 `ALLOC_POOL` owner/shard generation的exact packing、used/unused识别及真实I/O quiescence验证；
+- §6 `ALLOC_POOL` used/unused识别、返还/转交条件及真实I/O quiescence验证；
 - exact block/record bytes、checksum 和 torn-write detector；
 - direct I/O API、alignment、buffer ownership 与 kernel/filesystem 约束；
 - shared slab lifetime classification、`MOVE_COMMIT` exact packing/batching、selector packing/dedup retention、可选 `MOVE_PREPARE` 与 orphan candidate index；

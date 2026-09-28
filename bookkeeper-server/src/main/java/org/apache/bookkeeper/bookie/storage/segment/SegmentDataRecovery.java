@@ -133,6 +133,9 @@ final class SegmentDataRecovery {
                 || firstSequence < 0 || maxBatches < 1 || maxEntries < 1) {
             throw new IllegalArgumentException("Bounded physical stream recovery inputs required");
         }
+        if (authority.streamFirstSequence(shard, streamGeneration.value()).orElse(-1) != firstSequence) {
+            throw new IOException("Physical stream start is not backed by applied Arena control");
+        }
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
         PhysicalInventory inventory = scan(config, identity, authority, syncIo, maxEntries, probe);
         return new PhysicalStreamCandidate(config, identity, inventory.scan(), probe.contiguousThrough(firstSequence),

@@ -40,7 +40,9 @@ public class SegmentControlFormatTest {
 
     @Test
     public void controlVectorSurvivesRealFileRoundTrip() throws Exception {
-        ByteBuffer body = ByteBuffer.allocate(16).putLong(5).putLong(1).flip();
+        ByteBuffer body = new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                new UUID(1, 2), new Generation(1), 0, 0, 0, new Generation(1),
+                5, 4096, 1, 11).body();
         ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.ALLOC, new Generation(1), 0,
                 new UUID(1, 2), new Generation(1), 0, body);
         byte[] golden;

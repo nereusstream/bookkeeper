@@ -79,22 +79,22 @@ Bookie日志写完整batch并一次`force(true)`后才按sequence应用；未app
 
 Bookie局部FENCE记录的body固定为60字节ledger context；header使用wire操作UUID、operation generation=1、expected generation=0。先由匹配context和20字节verifier的受控请求在Bookie状态锁下关闭新normal准入；已取得的有限DATA准入票据必须保持到其物理I/O终结，未终结时返回`WAITING_PRECUT`且不写FENCE。此前已durable的ACTIVATE仍须先按原序apply，切断准入后的ACTIVATE不得再追加。票据全部终结后才对单条FENCE写入并`force(true)`，再应用monotonic fenced状态并回复durable；慢force期间不重开准入，force不确定则当前log fail-closed。完整FENCE记录重开时同步后重放，重复操作从持久状态解析。隔离DATA物理驱动可接收与每条普通record一一匹配的预准入票据，直到真实FileChannel I/O和原owner回调均终结才释放；较早批次失败时，后批即使已收到失败回调，仍须等自身I/O终结。Bookie控制owner驱动让FENCE的write/force在预留控制I/O执行，durable后回原owner apply；控制I/O拒收且尚未写入时退回物理后缀预留，保留本进程的准入切点供同操作重试。原物理实验入口不提供Bookie authority；实际Add local result、response loss与底层I/O ownership的联合验收仍待步骤6。
 
-当前ALLOC/ALLOC_POOL body为40字节：file index u32、owner shard u32、owner shard generation u64、allocation ID u64、绝对文件offset u64、whole block数u32、保留零u32。allocation ID为正数，同一Arena内不能重复授给另一范围。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant可查询；查询不证明pool中的DATA位置已用或未用，也不授权普通Add。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；容量满额停止，尚不支持FREE、复用和rotation。
+当前ALLOC/ALLOC_POOL body为48字节：file index u32、owner shard u32、owner shard generation u64、allocation ID u64、绝对文件offset u64、whole block数u32、保留零u32、stream首个物理sequence u64。allocation ID为正数，同一Arena内不能重复授给另一范围；同一shard/generation后续分配必须声明相同首序号，否则按条件失败且不授予空间。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant及stream起点可查询；查询不证明pool中的DATA位置已用或未用，也不授权普通Add。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；容量满额停止，尚不支持FREE、复用和rotation。此前40字节语义记录不被新解释器接纳；此文件格式仍为可丢弃实验，不承诺跨修订版本重开。
 
 隔离文件的`writeAuthorized`在真实DATA写入前核对同一目录和storage/Arena身份、冻结batch的完整物理范围、allocation ID/generation、shard及其stream generation与已apply的Arena grant；当前固定shard原型把stream generation作为owner shard generation。跨两个1 MiB块的batch必须拥有同一pool grant。原始`write`仍只供底层framing/I/O实验，不提供授权检查。该路径没有Bookie route/fence、DATA used/unused恢复或逐entry成功判定。
 
 `SegmentDataRecovery.inspect`只读扫描已停写的DATA文件：零页计数不推导unused；非零页必须形成CRC和身份完整、整段有当前grant的batch。完整但无grant的原始格式写入也拒绝。`validateAndSync`在同一目录锁与验证路径下，对完整检查的DATA文件执行一次`force(false)`后才返回；注入同步失败或无grant/脏页时不返回成功结果。`recoverPhysicalInventory`沿同一路径、在明确entry容量内，待全目录验证及同步均完成才返回普通`ENTRY_DATA`的物理位置；`RELOCATION_COPY`不进入普通清单，容量不足也不泄露部分清单。清单不发布到热目录，不提供连续物理前缀、当前selector、可复用判定或Bookie级恢复权限。
 
-运行时DATA提交先预留固定物理范围，再由I/O线程对同一冻结batch完整写入并force；同文件较高offset可以先返回，但`SegmentPhysicalPrefix`仅在每stream已有起点后的sequence连续、且各reservation的force确实返回时释放物理候选。该volatile tracker不是持久成功游标，不能由它单独恢复ACK、定位或跨重启的起点。
+运行时DATA提交先预留固定物理范围，再由I/O线程对同一冻结batch完整写入并force；同文件较高offset可以先返回，但`SegmentPhysicalPrefix`先核对已apply的Arena stream首序号，再仅按连续sequence和各reservation的真实force释放物理候选。恢复扫描也拒绝与重放的Arena首序号不一致的调用参数。这个起点绑定不等于恢复了末端durable-through；volatile tracker不是持久成功游标，不能由它单独恢复ACK、定位或可写重启。
 
-`SegmentHotDirectory`为冻结batch中的`ENTRY_DATA`先占有界热定位容量，再绑定实际DATA reservation；只有该reservation从上述连续物理前缀释放后才把解析位置转为普通物理候选。`RELOCATION_COPY`虽共享batch持久路径但不进入普通候选。重复逻辑坐标目前拒绝，尚无idempotency、权限化selector或RocksDB接管；候选不是entry成功凭据。
+`SegmentHotDirectory`为冻结batch中的`ENTRY_DATA`先占有界热定位容量，再绑定实际DATA reservation；只有该reservation从上述连续物理前缀释放后才把解析位置转为普通物理候选。`RELOCATION_COPY`虽共享batch持久路径但不进入普通候选。第二份同坐标物理DATA仍被拒绝；受控normal重复检查可在原owner等待同坐标在途批次，或对已发布候选执行点读比较。权限化selector和RocksDB接管仍缺失，候选不是entry成功凭据。
 
-同坐标比较的隔离慢路径可从上述候选点读已存entry，先按固定CRC32C布局校验新输入，再比较应用payload bytes及累计ledger length；piggyback LAC和随之变化的CRC不参与逻辑相等判断。不同context/entry坐标、坏CRC或不能点读均拒绝，不能推导已存DATA不存在。该比较必须由有界I/O线程调用；当前目录仍拒绝重复准入，未提供Bookie权限、pending合并或幂等成功。
+同坐标比较的隔离慢路径可从上述候选点读已存entry，先按固定CRC32C布局校验新输入，再比较应用payload bytes及累计ledger length；piggyback LAC和随之变化的CRC不参与逻辑相等判断。不同context/entry坐标、坏CRC或不能点读均拒绝，不能推导已存DATA不存在。已发布候选的点读比较由有界I/O线程执行；在途同坐标normal重试由原owner比较冻结内容并等待原物理结果。两条受控路径均需Bookie准入票据，尚无完整timeout/取消、跨入口bytes预算或可写重启幂等。
 
 隔离`SegmentPointRead`从已解析batch生成record位置，读取时先验证DATA文件身份、Arena grant和batch header，再按4096字节边界读取目标record header与内容；长度在分配前受格式上限和batch record区域约束，最终由独立parser核验record/BK CRC与locator身份。该原语不授予locator发布、read pin或DATA durability，调用方仍须先证明这些上层前提。当前Arena没有FREE/复用。
 
 ## 固定向量与验证边界
 
-`src/test/resources/unified-wal-segment` 中 `entry-v1.hex`、`copy-v1.hex` 各4096字节，`arena-alloc-v1.hex` 为160字节。向量由独立 Python struct/逐位 CRC32C 生成，Java writer 不参与生成；Java writer 输出逐字节对照，独立 parser 读取同一向量。旧ALLOC向量body仅为两个u64(5,1)，只验证framing；它不符合上述32字节语义body，不能经Arena控制日志执行。
+`src/test/resources/unified-wal-segment` 中 `entry-v1.hex`、`copy-v1.hex` 各4096字节，`arena-alloc-v1.hex` 为192字节，包含上述48字节语义body和首序号11。向量由独立 Python struct/逐位 CRC32C 生成，Java writer 不参与生成；Java writer 输出逐字节对照，独立 parser 读取同一向量。
 
 复现命令和源码绑定见[本地存储状态](README.md)。真实 FileChannel 测试包含短写、同步失败、零进展、部分初始化、固定容量满额停止、授权点读和共享文件不同 stream 损坏边界。它们不证明完整restart、完整allocator、quorum、Linux native I/O、掉电持久性或性能提升。

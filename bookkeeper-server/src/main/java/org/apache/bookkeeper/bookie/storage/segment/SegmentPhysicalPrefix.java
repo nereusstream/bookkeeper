@@ -59,6 +59,7 @@ final class SegmentPhysicalPrefix {
     private final SegmentOwnerLoop owner;
     private final int shard;
     private final Generation streamGeneration;
+    private final long firstSequence;
     private final int capacity;
     private final Map<Long, Pending> pending = new HashMap<>();
     private long nextSequence;
@@ -73,6 +74,7 @@ final class SegmentPhysicalPrefix {
         this.owner = owner;
         this.shard = shard;
         this.streamGeneration = streamGeneration;
+        this.firstSequence = firstSequence;
         this.nextSequence = firstSequence;
         this.durableThrough = firstSequence - 1;
         this.capacity = capacity;
@@ -85,7 +87,8 @@ final class SegmentPhysicalPrefix {
         SegmentBatchFormat.Address address = batch.address();
         if (failed || pending.size() >= capacity || nextSequence == Long.MAX_VALUE
                 || address.shard() != shard || !address.streamGeneration().equals(streamGeneration)
-                || address.sequence() != nextSequence) {
+                || address.sequence() != nextSequence
+                || authority.streamFirstSequence(shard, streamGeneration.value()).orElse(-1) != firstSequence) {
             throw new IOException("Physical stream cannot admit this batch");
         }
         IsolatedSegmentFiles.Reservation reservation = files.reserveAuthorized(batch, authority);

@@ -218,7 +218,7 @@ public class SegmentBatchFormatTest {
                 SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                     SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                    0, 0, new Generation(1), 5, 4096, 2)));
+                    0, 0, new Generation(1), 5, 4096, 2, 1)));
             SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, authority,
                     prefix, hot);
             SegmentFileHeader anotherIdentity = new SegmentFileHeader(
@@ -288,7 +288,7 @@ public class SegmentBatchFormatTest {
                 SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                     SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                    0, 0, new Generation(1), 5, 4096, 1)));
+                    0, 0, new Generation(1), 5, 4096, 1, 1)));
             SegmentExecutionGroup group = SegmentExecutionGroup.start(config, settings);
             try {
                 SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, group.owner(0), group.io(),
@@ -348,7 +348,7 @@ public class SegmentBatchFormatTest {
                 SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                     SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                    0, 0, new Generation(1), 5, 4096, 2)));
+                    0, 0, new Generation(1), 5, 4096, 2, 1)));
             files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false, () -> {
                 forcing.countDown();
                 try {
@@ -432,7 +432,7 @@ public class SegmentBatchFormatTest {
                 SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                     SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                    0, 0, new Generation(1), 5, 4096, 1)));
+                    0, 0, new Generation(1), 5, 4096, 1, 1)));
             files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
                 forcing.countDown();
                 try {
@@ -632,7 +632,7 @@ public class SegmentBatchFormatTest {
             assertEquals(4000, smallLocation.recordOffset() % 4096);
             assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), authority, smallLocation));
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
-                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1, 1)));
             assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), authority, smallLocation));
             files.writeAuthorized(frozen, authority);
             SegmentPointRead.Result read = SegmentPointRead.read(config, identity(), authority, smallLocation);
@@ -697,7 +697,7 @@ public class SegmentBatchFormatTest {
                     SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
                 authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                         SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                        0, 0, new Generation(1), 5, 4096, 1)));
+                        0, 0, new Generation(1), 5, 4096, 1, 11)));
                 files.writeAuthorized(first, authority);
                 files.writeAuthorized(second, authority);
             }
@@ -809,7 +809,7 @@ public class SegmentBatchFormatTest {
             assertThrows(IOException.class, () -> files.writeAuthorized(batch, log));
             SegmentArenaControlLog.Allocation pool = new SegmentArenaControlLog.Allocation(
                     SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                    0, 0, new Generation(1), 5, 4096, 2);
+                    0, 0, new Generation(1), 5, 4096, 2, 1);
             SegmentArenaControlLog.DurableBatch durable = log.appendDurably(List.of(pool));
             assertThrows(IOException.class, () -> files.writeAuthorized(batch, log));
             log.applyDurable(durable);
@@ -940,7 +940,7 @@ public class SegmentBatchFormatTest {
                 files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false);
             }
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
-                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1, 11)));
             for (SegmentBatchFormat.FrozenBatch batch : List.of(first, later)) {
                 assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
                     @Override
@@ -1132,7 +1132,7 @@ public class SegmentBatchFormatTest {
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
-                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1, 1)));
             assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
                 @Override
                 public void run(SegmentOwnerLoop.Ticket ticket) {
@@ -1190,9 +1190,13 @@ public class SegmentBatchFormatTest {
                 1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 1, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         ByteBuf entry = entry(new byte[16]);
         SegmentBatchFormat.FrozenBatch batch;
+        SegmentBatchFormat.FrozenBatch wrongStartBatch;
         try {
             batch = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
                     0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+            wrongStartBatch = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 0, 4096),
                     List.of(SegmentBatchFormat.entry(context(), entry)));
         } finally {
             entry.release();
@@ -1204,11 +1208,15 @@ public class SegmentBatchFormatTest {
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
-                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1, 1)));
             assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
                 @Override
                 public void run(SegmentOwnerLoop.Ticket ticket) {
                     try {
+                        SegmentPhysicalPrefix wrongStart = new SegmentPhysicalPrefix(owner, 0,
+                                new Generation(1), 0, 1);
+                        assertThrows(IOException.class, () -> wrongStart.reserve(wrongStartBatch, files, authority));
+                        assertEquals(4096, files.nextOffset(0));
                         IsolatedSegmentFiles.Reservation reservation = prefix.reserve(batch, files, authority);
                         assertTrue(prefix.completed(reservation, null).isEmpty());
                         assertEquals(0, prefix.durableThrough());

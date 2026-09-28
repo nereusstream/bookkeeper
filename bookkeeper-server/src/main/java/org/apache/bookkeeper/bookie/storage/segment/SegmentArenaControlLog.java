@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
@@ -42,7 +43,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     record Allocation(SegmentControlFormat.Type type, UUID operationId, Generation operationGeneration,
                       long expectedGeneration, int file, int ownerShard, Generation ownerGeneration,
-                      long allocationId, long offset, int blocks) {
+                      long allocationId, long offset, int blocks, long streamFirstSequence) {
         Allocation {
             if (type != SegmentControlFormat.Type.ALLOC && type != SegmentControlFormat.Type.ALLOC_POOL) {
                 throw new IllegalArgumentException("Only ALLOC and ALLOC_POOL are enabled");
@@ -51,14 +52,16 @@ final class SegmentArenaControlLog implements AutoCloseable {
             Objects.requireNonNull(operationGeneration, "operationGeneration");
             Objects.requireNonNull(ownerGeneration, "ownerGeneration");
             if (operationId.equals(new UUID(0, 0)) || expectedGeneration < 0 || allocationId <= 0 || blocks < 1
+                    || streamFirstSequence < 0 || streamFirstSequence == Long.MAX_VALUE
                     || (type == SegmentControlFormat.Type.ALLOC && blocks != 1)) {
                 throw new IllegalArgumentException("Invalid allocation command");
             }
         }
 
         ByteBuffer body() {
-            return ByteBuffer.allocate(40).putInt(file).putInt(ownerShard).putLong(ownerGeneration.value())
-                    .putLong(allocationId).putLong(offset).putInt(blocks).putInt(0).flip();
+            return ByteBuffer.allocate(48).putInt(file).putInt(ownerShard).putLong(ownerGeneration.value())
+                    .putLong(allocationId).putLong(offset).putInt(blocks).putInt(0)
+                    .putLong(streamFirstSequence).flip();
         }
     }
 
@@ -77,6 +80,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private record Slot(int file, long index) { }
 
+    private record Stream(int shard, long generation) { }
+
     private record Grant(Allocation command, long generation) { }
 
     private record AppliedOperation(Allocation command, Status status) { }
@@ -89,6 +94,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final FileLock lock;
     private final Map<Slot, Grant> allocations = new HashMap<>();
     private final Map<Long, Allocation> allocationIds = new HashMap<>();
+    private final Map<Stream, Long> streamStarts = new HashMap<>();
     private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
@@ -119,7 +125,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(io, "io");
-        if (maxLogBytes < FIRST_RECORD + 184) {
+        if (maxLogBytes < FIRST_RECORD + 192) {
             throw new IllegalArgumentException("Control log capacity cannot hold one record");
         }
         FileChannel channel = FileChannel.open(config.directory().resolve("arena-control"),
@@ -257,6 +263,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return true;
     }
 
+    synchronized OptionalLong streamFirstSequence(int shard, long generation) {
+        if (failed || closed) {
+            return OptionalLong.empty();
+        }
+        Long first = streamStarts.get(new Stream(shard, generation));
+        return first == null ? OptionalLong.empty() : OptionalLong.of(first);
+    }
+
     synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
         return !closed && !failed && config.equals(otherConfig) && identity.equals(otherIdentity);
     }
@@ -349,7 +363,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             throw new IOException("Unsupported Arena command in required control history");
         }
         ByteBuffer body = parsed.body();
-        if (body.remaining() != 40) {
+        if (body.remaining() != 48) {
             throw new IOException("Unsupported Arena allocation body");
         }
         int file = body.getInt();
@@ -361,10 +375,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (body.getInt() != 0) {
             throw new IOException("Unsupported Arena allocation extension");
         }
+        long streamFirstSequence = body.getLong();
         try {
             Allocation command = new Allocation(parsed.type(), parsed.operationId(),
                     parsed.operationGeneration(), parsed.expectedGeneration(), file, ownerShard,
-                    new Generation(ownerGeneration), allocationId, position, blocks);
+                    new Generation(ownerGeneration), allocationId, position, blocks, streamFirstSequence);
             validateRange(command);
             return command;
         } catch (IllegalArgumentException invalid) {
@@ -396,6 +411,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
             appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
             return Status.CONDITION_FAILED;
         }
+        Stream stream = new Stream(command.ownerShard(), command.ownerGeneration().value());
+        Long first = streamStarts.get(stream);
+        if (first != null && first != command.streamFirstSequence()) {
+            appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
+            return Status.CONDITION_FAILED;
+        }
         for (int block = 0; block < command.blocks(); block++) {
             if (allocations.containsKey(slot(command.file(), command.offset() + block * BLOCK_BYTES))) {
                 appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
@@ -407,6 +428,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             allocations.put(slot(command.file(), command.offset() + block * BLOCK_BYTES), grant);
         }
         allocationIds.put(command.allocationId(), command);
+        streamStarts.putIfAbsent(stream, command.streamFirstSequence());
         appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.APPLIED_DURABLE));
         return Status.APPLIED_DURABLE;
     }

@@ -60,7 +60,7 @@ public class SegmentArenaControlLogTest {
 
     private SegmentArenaControlLog.Allocation alloc(int operation, long offset) {
         return new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
-                new UUID(0, operation), new Generation(1), 0, 0, 1, new Generation(1), operation, offset, 1);
+                new UUID(0, operation), new Generation(1), 0, 0, 1, new Generation(1), operation, offset, 1, 1);
     }
 
     private boolean granted(SegmentArenaControlLog log, long offset, int shard, long ownerGeneration,
@@ -367,7 +367,7 @@ public class SegmentArenaControlLogTest {
                         alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES))).get(0).status());
                 SegmentArenaControlLog.Allocation reusedId = new SegmentArenaControlLog.Allocation(
                         SegmentControlFormat.Type.ALLOC, new UUID(0, 10), new Generation(1), 0,
-                        0, 1, new Generation(1), 1, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1);
+                        0, 1, new Generation(1), 1, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1);
                 assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
                         reopened.submitBatch(List.of(reusedId)).get(0).status());
             }
@@ -381,10 +381,11 @@ public class SegmentArenaControlLogTest {
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity)) {
             SegmentArenaControlLog.Allocation pool = new SegmentArenaControlLog.Allocation(
                     SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 3), new Generation(1), 0,
-                    0, 2, new Generation(1), 3, 4096, 2);
+                    0, 2, new Generation(1), 3, 4096, 2, 7);
             try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
                 log.appendDurably(List.of(pool));
                 assertFalse(granted(log, 4096, 2, 1, 3));
+                assertTrue(log.streamFirstSequence(2, 1).isEmpty());
                 assertFalse(granted(log, 4096, 1, 2, 3));
             }
             try (SegmentArenaControlLog reopened = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
@@ -392,9 +393,41 @@ public class SegmentArenaControlLogTest {
                 assertEquals(0, reopened.appliedThrough());
                 assertTrue(granted(reopened, 4096, 2, 1, 3));
                 assertTrue(granted(reopened, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 2, 1, 3));
+                assertEquals(7, reopened.streamFirstSequence(2, 1).orElseThrow());
                 assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
                         reopened.submitBatch(List.of(pool)).get(0).status());
+                long next = 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES;
+                SegmentArenaControlLog.Allocation wrongStart = new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC, new UUID(0, 4), new Generation(1), 0,
+                        0, 2, new Generation(1), 4, next, 1, 8);
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        reopened.submitBatch(List.of(wrongStart)).get(0).status());
+                assertFalse(granted(reopened, next, 2, 1, 4));
+                SegmentArenaControlLog.Allocation sameStart = new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC, new UUID(0, 5), new Generation(1), 0,
+                        0, 2, new Generation(1), 5, next, 1, 7);
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        reopened.submitBatch(List.of(sameStart)).get(0).status());
             }
+        }
+    }
+
+    @Test
+    public void earlierAllocationBodyCannotBeReopenedAsTheNewStreamContract() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity)) {
+            ByteBuffer earlierBody = ByteBuffer.allocate(40).putInt(0).putInt(1).putLong(1)
+                    .putLong(5).putLong(4096).putInt(1).putInt(0).flip();
+            ByteBuffer earlier = SegmentControlFormat.encode(SegmentControlFormat.Type.ALLOC,
+                    new Generation(1), 0, new UUID(0, 5), new Generation(1), 0, earlierBody);
+            try (FileChannel file = FileChannel.open(config.directory().resolve("arena-control"),
+                    StandardOpenOption.WRITE)) {
+                SegmentFileIo io = new SegmentFileIo();
+                io.writeFully(file, earlier, 4096);
+                io.force(file, true);
+            }
+            assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity, 1024 * 1024));
         }
     }
 
@@ -433,7 +466,7 @@ public class SegmentArenaControlLogTest {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity)) {
-            long oneRecordCapacity = 4096 + 184;
+            long oneRecordCapacity = 4096 + 192;
             try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, oneRecordCapacity)) {
                 assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
                         log.submitBatch(List.of(alloc(7, 4096))).get(0).status());

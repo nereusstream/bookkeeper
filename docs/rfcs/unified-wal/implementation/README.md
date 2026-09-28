@@ -136,7 +136,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 先实现真实控制记录持久化、顺序apply、重复操作解析、启动身份检查及ALLOC/ALLOC_POOL。条件命令按已选合同“合批durable → 顺序判断并apply”，不增加推测状态或结果日志。初版可完整重放且暂不删除旧日志，但必须设置日志空间上限，满额停止接收；完整checkpoint/rotation在步骤8补齐。
 
-当前[隔离本地切片](local-storage/README.md)实现Arena ALLOC/ALLOC_POOL的文件持久化、单在途驱动、顺序apply和完整历史重放；定向真实文件测试已在DATA准入及I/O服务满额时通过独立控制份额完成force与原owner apply。Bookie控制文件现有INSTALL/ACTIVATE的有界批量force、顺序apply和重开重放，INSTALL只建立inactive route，独立ACTIVATE后才开放局部normal准入查询；FENCE受控入口先关闭新准入；在已接线的隔离DATA路径中，票据待实际I/O与owner回调均终结后才释放，随后force并持久拒绝普通写。显式DATA文件写入路径检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner驱动已将INSTALL/ACTIVATE及FENCE的write/force交给预留控制I/O服务，durable后回原owner apply；真实请求级local result、实际服务生命周期和pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
+当前[隔离本地切片](local-storage/README.md)实现Arena ALLOC/ALLOC_POOL的文件持久化、stream首序号约束、单在途驱动、顺序apply和完整历史重放；定向真实文件测试已在DATA准入及I/O服务满额时通过独立控制份额完成force与原owner apply。Bookie控制文件现有INSTALL/ACTIVATE的有界批量force、顺序apply和重开重放，INSTALL只建立inactive route，独立ACTIVATE后才开放局部normal准入查询；FENCE受控入口先关闭新准入；在已接线的隔离DATA路径中，票据待实际I/O与owner回调均终结后才释放，随后force并持久拒绝普通写。显式DATA文件写入路径检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner驱动已将INSTALL/ACTIVATE及FENCE的write/force交给预留控制I/O服务，durable后回原owner apply；真实请求级local result、实际服务生命周期和pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
 
 控制日志force已移出授权状态锁，受控慢force不阻塞已apply grant查询；DATA文件write/force也移出范围预留状态锁，以同文件独立锁串行。普通Add、逐entry结果和完整DATA owner链路尚未闭合。
 
@@ -156,7 +156,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 **完成条件：** 对应durability未完成绝不成功；源/对齐buffer及pending有界，完成事件不被DATA队列满额挡住。覆盖同批一条被fence而另一条成功、batch 12先于11完成、DATA durable但定位尚未发布、请求超时后旧I/O继续完成；未解析I/O保护原坐标并暂停受影响stream/file，不以跳号或新stream绕过。此时local result只供隔离测试，不接管生产Bookie ACK。
 
-当前[隔离物理驱动与热候选切片](local-storage/README.md)已将DATA坐标预留、真实I/O write/force、原owner连续stream前缀及有界可点读候选接成一条调用路径；一个携带两条不同entry的冻结batch在隔离group中一次force后可点读两条，失败向未决回调报错且不发布候选，搬迁副本不进入普通候选。受控normal批次现于候选发布后、票据释放前按entry核对捕获的Bookie准入generation：仍有效者返回隔离`LOCAL_DURABLE`，过期者返回`STALE_ADMISSION`，物理失败返回`UNKNOWN`；不同ledger同批独立判定，失败entry的物理候选仍可保留。重复检查在原owner发现同坐标normal在途时，相同逻辑内容持有票据等待其物理结果，不同内容返回冲突；原批次失败使等待者得到`UNKNOWN`。已发布的运行期候选仍经有界I/O服务真实点读，完成时复核准入与候选；重启扫描候选只返回`NOT_READY`，不据此报告absence或durable成功。尚无提交后timeout/取消的完整生命周期、整体bytes预算、持久restart起点、完整read selector及生产ACK，步骤6未完成。
+当前[隔离物理驱动与热候选切片](local-storage/README.md)已将DATA坐标预留、真实I/O write/force、原owner连续stream前缀及有界可点读候选接成一条调用路径；一个携带两条不同entry的冻结batch在隔离group中一次force后可点读两条，失败向未决回调报错且不发布候选，搬迁副本不进入普通候选。受控normal批次现于候选发布后、票据释放前按entry核对捕获的Bookie准入generation：仍有效者返回隔离`LOCAL_DURABLE`，过期者返回`STALE_ADMISSION`，物理失败返回`UNKNOWN`；不同ledger同批独立判定，失败entry的物理候选仍可保留。重复检查在原owner发现同坐标normal在途时，相同逻辑内容持有票据等待其物理结果，不同内容返回冲突；原批次失败使等待者得到`UNKNOWN`。已发布的运行期候选仍经有界I/O服务真实点读，完成时复核准入与候选；重启扫描候选只返回`NOT_READY`，不据此报告absence或durable成功。尚无提交后timeout/取消的完整生命周期、整体bytes预算、可恢复末端前缀、完整read selector及生产ACK，步骤6未完成。
 
 #### 7. 实现点读与基础restart
 
@@ -171,9 +171,9 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 **完成条件：** 写入→确认本地持久化→读取→终止进程→重启→再读与重复写入可重复运行；未知覆盖不误报NoSuchEntry，不同stream恢复不截短共享文件，旧generation残留不复活。开始验证两次故障：write完成但barrier未完成时退出，重启处理重复请求后再次掉电；单次进程终止后可读不足以证明持久化保证。
 
-当前[隔离点读及文件同步切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。停写后完整扫描的DATA文件可执行一次恢复`force(false)`；全目录校验同步后可在显式容量内取回普通record物理位置，并以调用方给定起点检查单stream候选的序号连续性，缺口、重复和容量不足不返回候选。运行时热候选可发布，恢复物理候选可在新owner的有界热目录核对存储scope后原子装入并点读；没有持久起点证明、selector/pin、Bookie必要范围选择与服务权限，步骤7未完成。
+当前[隔离点读及文件同步切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。停写后完整扫描的DATA文件可执行一次恢复`force(false)`；全目录校验同步后可在显式容量内取回普通record物理位置，并先以Arena已apply首序号核对调用方起点，再检查单stream候选的序号连续性，缺口、重复和容量不足不返回候选。运行时热候选可发布，恢复物理候选可在新owner的有界热目录核对存储scope后原子装入并点读；仍没有重建出的可发布末端前缀、selector/pin、Bookie必要范围选择与服务权限，步骤7未完成。
 
-扫描的零尾页不能作为未提交或可复用证明；当前隔离文件实现仅支持初建writer，重开只读检查不设置新的写指针。必要DATA选择、持久空间使用事实和旧I/O终结未闭合前，不开放可写重启。
+扫描的零尾页不能作为未提交或可复用证明；当前隔离文件实现仅支持初建writer，重开只读检查不设置新的写指针。必要DATA选择、持久空间used/unused与末端前缀事实及旧I/O终结未闭合前，不开放可写重启。
 
 **第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
 

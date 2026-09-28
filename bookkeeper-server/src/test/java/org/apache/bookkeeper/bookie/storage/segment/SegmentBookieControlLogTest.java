@@ -227,7 +227,7 @@ public class SegmentBookieControlLogTest {
     private static void grant(SegmentArenaControlLog arena, int blocks) throws IOException {
         arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                 SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                0, 0, new Generation(1), 5, 4096, blocks)));
+                0, 0, new Generation(1), 5, 4096, blocks, 1)));
     }
 
     private static SegmentDataPhysicalDriver.DuplicateStatus checkPublishedDuplicate(
