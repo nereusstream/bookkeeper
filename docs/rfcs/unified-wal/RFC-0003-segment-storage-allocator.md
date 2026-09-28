@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的volatile连续物理前缀/有界物理热候选及真实点读的重复payload比较原语、步骤7的对齐单record点读/停写后文件同步及重启物理清单局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储回执。Bookie控制、请求级幂等、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
+实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的真实DATA write/force接原owner volatile连续物理前缀/有界物理热候选驱动及真实点读的重复payload比较原语、步骤7的对齐单record点读/停写后文件同步及重启物理清单局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储回执。Bookie控制、请求级幂等、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
