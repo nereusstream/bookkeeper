@@ -194,6 +194,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 2026-09-28 scope复核执行`scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest`：24项通过，0失败/错误/跳过。恢复候选装入新owner热目录前拒绝错误目录或storage identity；运行时物理驱动也拒绝与DATA文件不匹配的热目录。同一持久scope调整新写payload阈值后仍可装入旧候选。此为隔离路径的误接线防护，不证明Bookie selector或生产恢复权限。
 
+2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：50项通过，0失败/错误/跳过。normal DATA得到隔离本地结果并关闭重开后，持普通准入票据同步并点读相同/冲突物理候选；同步失败释放票据，tombstone在同步期间撤权使结果为`STALE_ADMISSION`。这只验证物理比较和票据生命周期，未证明current selector、旧I/O错误分类或durable duplicate成功。
+
 ## 未覆盖范围
 
 步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制剩余状态及Arena/DATA恢复闭环、步骤6完整合批准入/权限化热定位/生产逐entry结果/请求级幂等、步骤7可发布末端前缀、selector与pin/完整restart尚未实现。物理热候选及其只读重建、重复比较、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。

@@ -1379,6 +1379,114 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void recoveredNormalDuplicateRemainsPhysicalEvidenceAfterLocalResult() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<List<SegmentDataPhysicalDriver.NormalResult>> results = new AtomicReference<>();
+        AtomicReference<Throwable> dataFailure = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                assertTrue(driver.submitNormal(bookie, batch(config, 1, 1, 4096), List.of(
+                        bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()), (entries, failure) -> {
+                            results.set(entries);
+                            dataFailure.set(failure);
+                            completed.countDown();
+                        }));
+                owner.start();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                assertNull(dataFailure.get());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                        results.get().get(0).status());
+            } finally {
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            ByteBuffer same = entryBytes(context(), 1, -1, 8, (byte) 0);
+            ByteBuffer conflict = entryBytes(context(), 1, -1, 8, (byte) 9);
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.MATCHED_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredNormalCandidate(config, identity, arena, bookie,
+                            bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), same,
+                            new SegmentFileIo(), 1, 1));
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.CONFLICTING_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredNormalCandidate(config, identity, arena, bookie,
+                            bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), conflict,
+                            new SegmentFileIo(), 1, 1));
+            assertThrows(IOException.class, () -> SegmentDuplicateCheck.inspectRecoveredNormalCandidate(
+                    config, identity, arena, bookie,
+                    bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), same,
+                    new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false), 1, 1));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    bookie.submitFence(fence(3, (byte) 5)).status());
+        }
+    }
+
+    @Test
+    public void recoveredNormalCandidateLosesEligibilityWhenTombstonedDuringSync() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            files.writeAuthorized(batch(config, 1, 1, 4096), arena);
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo sync = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Normal recovery sync was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            ByteBuffer same = entryBytes(context(), 1, -1, 8, (byte) 0);
+            FutureTask<SegmentDuplicateCheck.PhysicalComparison> duplicate = new FutureTask<>(
+                    () -> SegmentDuplicateCheck.inspectRecoveredNormalCandidate(config, identity, arena, bookie,
+                            bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), same, sync, 1, 1));
+            Thread reader = new Thread(duplicate);
+            reader.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+                release.countDown();
+                assertEquals(SegmentDuplicateCheck.PhysicalComparison.STALE_ADMISSION,
+                        duplicate.get(5, TimeUnit.SECONDS));
+            } finally {
+                release.countDown();
+                reader.join(5000);
+            }
+        }
+    }
+
+    @Test
     public void recoveredBytesAfterOldForceErrorRemainOnlyPhysicalEvidence() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
