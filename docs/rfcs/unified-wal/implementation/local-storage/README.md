@@ -32,6 +32,8 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 步骤5的Arena局部切片：`SegmentArenaControlLog` 在已创建的隔离目录中验证所有必需文件身份，用独占文件锁打开`arena-control`，对`ALLOC`/`ALLOC_POOL`建立有界、仅追加的控制历史。调用方提交的batch先复制为不可变命令列表，完整写入后一次`force(true)`；只有随后按sequence逐条apply成功才产生空间授权。同批争用slot的后续命令为消耗sequence的确定性no-op。操作UUID和命令内容用于重复/不兼容解析；range绑定file、offset、allocation ID/generation、owner shard及其generation，同一allocation ID不重复授予另一范围。`SegmentArenaControlDriver`一次只受理一个batch，在控制专用I/O服务执行`appendDurably`，再由原owner的独立控制completion执行`applyDurable`并返回结果；DATA准入和DATA I/O服务满额、停收准入及重开重放均不跳过已受理的控制义务。重开先验证完整记录/连续序号与身份，再同步并重放；不确定I/O使当前实例停止授予权限，无法安全分类的尾部拒绝可写恢复，不猜测截断。日志满额停止接收，隔离驱动尚未接入Bookie生命周期，checkpoint/rotation也未实现。
 
+步骤5的Bookie控制日志前置：`ProtectedProfileCredential`现在可用外部提供的AES密钥及存储scope作为AAD，将20字节verifier封成定长AES-GCM字段；重启解封后仍由原包装在内存中作常量时间比较，普通Add不需要逐请求HMAC。错误密钥、scope或字段篡改均拒绝解封，包装自身仍不暴露明文byte accessor。当前尚无Bookie控制记录写入或密钥供应/轮换实现；密钥必须独立于隔离数据目录保存，缺失时不得开放该scope。
+
 Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执行文件write/force；已apply的grant查询在force等待期间仍可完成，关闭则拒绝在途I/O，直到结果终结后才允许关闭。`IsolatedSegmentFiles`也只在短状态锁内预留DATA范围、登记在途I/O和失败状态；同文件write/force在独立文件级锁中串行，另一个预留在慢force期间仍能推进，close拒绝关闭活跃I/O。DATA owner尚未接入完整请求与逐entry结果，不能据此宣称普通Add非阻塞闭环。
 
 `IsolatedSegmentFiles.writeAuthorized`已在实际FileChannel写入前核对同一目录/storage/Arena身份、冻结DATA batch的整段物理范围和上述grant身份；跨块batch要求同一pool授权，未apply或身份不符时不写入。它只约束这个显式调用路径；底层`write`保留给格式/I/O实验。`ALLOC_POOL`尚未实现DATA framing的used/unused恢复，也不支持FREE后的复用。Bookie控制语义、fence/grant、逐entry成功与完整启动恢复未接入，故步骤5未完成，不能据此开放Bookie写入。

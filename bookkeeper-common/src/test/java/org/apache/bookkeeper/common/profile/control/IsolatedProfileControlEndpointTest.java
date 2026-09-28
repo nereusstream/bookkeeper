@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.common.profile.DurabilityMode;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.PayloadFormat;
@@ -313,6 +314,8 @@ public class IsolatedProfileControlEndpointTest {
         ProtectedProfileCredential different = credential((byte) 0x6b);
         assertTrue(credential.matches(same));
         assertFalse(credential.matches(different));
+        assertTrue(credential.matchesWireVerifier(filled(20, (byte) 0x5a)));
+        assertFalse(credential.matchesWireVerifier(filled(20, (byte) 0x6b)));
         assertEquals("<redacted>", credential.toString());
         assertFalse(Arrays.stream(ProtectedProfileCredential.class.getMethods())
                 .map(Method::getReturnType)
@@ -320,6 +323,39 @@ public class IsolatedProfileControlEndpointTest {
         String requestText = install(scope(ProfileControlOperation.INSTALL)).toString();
         assertTrue(requestText.contains("<redacted>"));
         assertFalse(requestText.contains("5a5a5a5a"));
+    }
+
+    @Test
+    public void sealedCredentialReopensOnlyWithMatchingKeyAndStorageScope() {
+        ProtectedProfileCredential credential = credential((byte) 0x5a);
+        SecretKeySpec key = new SecretKeySpec(filled(32, (byte) 0x3c), "AES");
+        SecretKeySpec otherKey = new SecretKeySpec(filled(32, (byte) 0x4d), "AES");
+        byte[] binding = filled(76, (byte) 0x11);
+        ProtectedProfileCredential.SealedStorageValue sealed = credential.sealForStorage(key, binding);
+        byte[] encoded = sealed.toBytes();
+
+        assertEquals(ProtectedProfileCredential.SealedStorageValue.LENGTH, encoded.length);
+        assertTrue(credential.matches(ProtectedProfileCredential.openFromStorage(key, binding,
+                ProtectedProfileCredential.SealedStorageValue.fromBytes(encoded))));
+        assertThrows(IllegalArgumentException.class,
+                () -> ProtectedProfileCredential.openFromStorage(otherKey, binding, sealed));
+        binding[0] ^= 1;
+        assertThrows(IllegalArgumentException.class,
+                () -> ProtectedProfileCredential.openFromStorage(key, binding, sealed));
+        assertEquals("<redacted>", sealed.toString());
+
+        encoded[0] ^= 1;
+        assertTrue(credential.matches(ProtectedProfileCredential.openFromStorage(key,
+                filled(76, (byte) 0x11), sealed)));
+        assertThrows(IllegalArgumentException.class, () -> ProtectedProfileCredential.openFromStorage(key,
+                filled(76, (byte) 0x11), ProtectedProfileCredential.SealedStorageValue.fromBytes(encoded)));
+        encoded[0] ^= 1;
+        encoded[encoded.length - 1] ^= 1;
+        assertThrows(IllegalArgumentException.class, () -> ProtectedProfileCredential.openFromStorage(key,
+                filled(76, (byte) 0x11), ProtectedProfileCredential.SealedStorageValue.fromBytes(encoded)));
+        assertThrows(IllegalArgumentException.class,
+                () -> ProtectedProfileCredential.SealedStorageValue.fromBytes(new byte[31]));
+        assertThrows(IllegalArgumentException.class, () -> credential.sealForStorage(key, new byte[0]));
     }
 
     @Test
