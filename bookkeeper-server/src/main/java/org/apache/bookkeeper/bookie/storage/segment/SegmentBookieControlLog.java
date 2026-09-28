@@ -69,6 +69,26 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     record FenceResult(FenceStatus status, long localGeneration) { }
 
+    record FenceAttempt(FenceResult immediate, FenceWrite write) { }
+
+    static final class FenceWrite {
+        private final ProfileLedgerContext context;
+        private final UUID operationId;
+        private final ByteBuffer record;
+        private final long sequence;
+        private final long offset;
+        private boolean durable;
+
+        private FenceWrite(ProfileLedgerContext context, UUID operationId, ByteBuffer record,
+                           long sequence, long offset) {
+            this.context = context;
+            this.operationId = operationId;
+            this.record = record;
+            this.sequence = sequence;
+            this.offset = offset;
+        }
+    }
+
     /** Held through physical DATA termination, including an RPC timeout or an explicitly failed normal result. */
     static final class Admission {
         private final SegmentBookieControlLog owner;
@@ -172,6 +192,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private long durableThrough = -1;
     private long appliedThrough = -1;
     private DurableBatch pending;
+    private FenceWrite pendingFenceWrite;
     private boolean writing;
     private boolean failed;
     private boolean closed;
@@ -382,68 +403,107 @@ final class SegmentBookieControlLog implements AutoCloseable {
         activeAdmissions--;
     }
 
-    /** Closes the admission cut first; caller retries WAITING_PRECUT after prior DATA becomes physical-terminal. */
+    /** Closes the admission cut first; caller retries WAITING_PRECUT after prior DATA becomes terminal. */
     FenceResult submitFence(ProfileOperationCodec.FenceLedger request) throws IOException {
+        FenceAttempt attempt = prepareFence(request);
+        if (attempt.immediate() != null) {
+            return attempt.immediate();
+        }
+        writeFenceDurably(attempt.write());
+        return applyFenceDurable(attempt.write());
+    }
+
+    synchronized FenceAttempt prepareFence(ProfileOperationCodec.FenceLedger request) throws IOException {
         Objects.requireNonNull(request, "request");
         ProfileLedgerContext context = request.context();
         UUID operationId = operationId(request.operationId());
-        ByteBuffer record;
-        long sequence;
-        long start;
+        requireWritable();
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (state == null || !state.context.equals(context)
+                || !state.credential.matchesWireVerifier(request.credential())) {
+            return new FenceAttempt(new FenceResult(FenceStatus.REJECTED, 0), null);
+        }
+        ProfileLedgerContext prior = fenceOperations.get(operationId);
+        if (prior != null) {
+            return new FenceAttempt(new FenceResult(
+                    prior.equals(context) ? FenceStatus.ALREADY_DURABLE : FenceStatus.REJECTED,
+                    prior.equals(context) ? state.localGeneration : 0), null);
+        }
+        if (operations.containsKey(operationId)) {
+            return new FenceAttempt(new FenceResult(FenceStatus.REJECTED, 0), null);
+        }
+        if (state.fenced) {
+            return new FenceAttempt(new FenceResult(FenceStatus.ALREADY_DURABLE, state.localGeneration), null);
+        }
+        if (state.pendingFence != null && !state.pendingFence.equals(operationId)) {
+            return new FenceAttempt(new FenceResult(FenceStatus.WAITING_PRECUT, state.localGeneration), null);
+        }
+        state.pendingFence = operationId;
+        if (state.inFlight != 0 || writing || pending != null) {
+            return new FenceAttempt(new FenceResult(FenceStatus.WAITING_PRECUT, state.localGeneration), null);
+        }
+        long sequence = durableThrough + 1;
+        ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.FENCE, LOG_GENERATION,
+                sequence, operationId, LOG_GENERATION, 0, ByteBuffer.wrap(context.encode()));
+        if (record.remaining() > maxLogBytes - nextOffset) {
+            throw new IOException("Bookie control log capacity exhausted");
+        }
+        FenceWrite write = new FenceWrite(context, operationId, record, sequence, nextOffset);
+        nextOffset += record.remaining();
+        pendingFenceWrite = write;
+        writing = true;
+        return new FenceAttempt(null, write);
+    }
+
+    void writeFenceDurably(FenceWrite write) throws IOException {
         synchronized (this) {
             requireWritable();
-            LedgerState state = ledgers.get(context.ledgerId());
-            if (state == null || !state.context.equals(context)
-                    || !state.credential.matchesWireVerifier(request.credential())) {
-                return new FenceResult(FenceStatus.REJECTED, 0);
+            if (write != pendingFenceWrite || write.durable) {
+                throw new IllegalArgumentException("Invalid or already durable Bookie fence write");
             }
-            ProfileLedgerContext prior = fenceOperations.get(operationId);
-            if (prior != null) {
-                return new FenceResult(prior.equals(context) ? FenceStatus.ALREADY_DURABLE : FenceStatus.REJECTED,
-                        prior.equals(context) ? state.localGeneration : 0);
-            }
-            if (operations.containsKey(operationId)) {
-                return new FenceResult(FenceStatus.REJECTED, 0);
-            }
-            if (state.fenced) {
-                return new FenceResult(FenceStatus.ALREADY_DURABLE, state.localGeneration);
-            }
-            if (state.pendingFence != null && !state.pendingFence.equals(operationId)) {
-                return new FenceResult(FenceStatus.WAITING_PRECUT, state.localGeneration);
-            }
-            state.pendingFence = operationId;
-            if (state.inFlight != 0 || writing || pending != null) {
-                return new FenceResult(FenceStatus.WAITING_PRECUT, state.localGeneration);
-            }
-            sequence = durableThrough + 1;
-            record = SegmentControlFormat.encode(SegmentControlFormat.Type.FENCE, LOG_GENERATION,
-                    sequence, operationId, LOG_GENERATION, 0, ByteBuffer.wrap(context.encode()));
-            if (record.remaining() > maxLogBytes - nextOffset) {
-                throw new IOException("Bookie control log capacity exhausted");
-            }
-            start = nextOffset;
-            nextOffset += record.remaining();
-            writing = true;
         }
         try {
-            io.writeFully(channel, record, start);
+            io.writeFully(channel, write.record, write.offset);
             io.force(channel, true);
             synchronized (this) {
-                applyFence(context, operationId);
-                durableThrough = sequence;
-                appliedThrough = sequence;
-                return new FenceResult(FenceStatus.APPLIED_DURABLE,
-                        ledgers.get(context.ledgerId()).localGeneration);
+                write.durable = true;
+                durableThrough = write.sequence;
             }
         } catch (IOException | RuntimeException | Error failure) {
             synchronized (this) {
                 failed = true;
-            }
-            throw failure;
-        } finally {
-            synchronized (this) {
+                pendingFenceWrite = null;
                 writing = false;
             }
+            throw failure;
+        }
+    }
+
+    synchronized void abortFenceBeforeIo(FenceWrite write) {
+        if (write != pendingFenceWrite || write.durable || !writing) {
+            throw new IllegalArgumentException("Only an unwritten Bookie fence can be retried");
+        }
+        nextOffset = write.offset;
+        pendingFenceWrite = null;
+        writing = false;
+    }
+
+    synchronized FenceResult applyFenceDurable(FenceWrite write) throws IOException {
+        requireWritable();
+        if (write != pendingFenceWrite || !write.durable || write.sequence != appliedThrough + 1) {
+            throw new IllegalArgumentException("Only the next durable Bookie fence can be applied");
+        }
+        try {
+            applyFence(write.context, write.operationId);
+            appliedThrough = write.sequence;
+            return new FenceResult(FenceStatus.APPLIED_DURABLE,
+                    ledgers.get(write.context.ledgerId()).localGeneration);
+        } catch (IOException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        } finally {
+            pendingFenceWrite = null;
+            writing = false;
         }
     }
 

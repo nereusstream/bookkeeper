@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -624,6 +625,132 @@ public class SegmentBookieControlLogTest {
             } finally {
                 releaseSecond.countDown();
                 io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void bookieControlDriverKeepsOwnerResponsiveAcrossFenceWaitAndForce() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forceEntered = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        AtomicInteger forces = new AtomicInteger();
+        SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (forces.incrementAndGet() == 2) {
+                forceEntered.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Bookie fence force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+        });
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR, controlIo)) {
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 2);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            CountDownLatch batchDone = new CountDownLatch(1);
+            CountDownLatch waitingDone = new CountDownLatch(1);
+            CountDownLatch fenceDone = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AtomicReference<SegmentBookieControlLog.FenceResult> waiting = new AtomicReference<>();
+            AtomicReference<SegmentBookieControlLog.FenceResult> durable = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitBatch(List.of(install(1, (byte) 5), activate(2)), (results, cause) -> {
+                    owner.requireOwner();
+                    failure.set(cause);
+                    assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, results.get(0).status());
+                    assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, results.get(1).status());
+                    batchDone.countDown();
+                }));
+                owner.start();
+                assertTrue(batchDone.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertTrue(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                SegmentBookieControlLog.Admission prior = bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow();
+                assertTrue(driver.submitFence(fence(3, (byte) 5), (result, cause) -> {
+                    owner.requireOwner();
+                    waiting.set(result);
+                    failure.set(cause);
+                    waitingDone.countDown();
+                }));
+                assertTrue(waitingDone.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT, waiting.get().status());
+                CountDownLatch progressed = new CountDownLatch(1);
+                assertTrue(owner.control(progressed::countDown));
+                assertTrue(progressed.await(5, TimeUnit.SECONDS));
+                prior.physicalTerminal();
+                assertTrue(driver.submitFence(fence(3, (byte) 5), (result, cause) -> {
+                    owner.requireOwner();
+                    durable.set(result);
+                    failure.set(cause);
+                    fenceDone.countDown();
+                }));
+                assertTrue(forceEntered.await(5, TimeUnit.SECONDS));
+                assertFalse(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                CountDownLatch duringForce = new CountDownLatch(1);
+                assertTrue(owner.control(duringForce::countDown));
+                assertTrue(duringForce.await(5, TimeUnit.SECONDS));
+                assertThrows(IOException.class, bookie::close);
+                releaseForce.countDown();
+                assertTrue(fenceDone.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, durable.get().status());
+            } finally {
+                releaseForce.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+            assertEquals(2, forces.get());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertFalse(replay.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+    }
+
+    @Test
+    public void rejectedControlIoLeavesFenceCutRetryableWithoutSkippingSequence() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            io.shutdown();
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            CountDownLatch rejected = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitFence(fence(3, (byte) 5), (result, cause) -> {
+                    owner.requireOwner();
+                    failure.set(cause);
+                    rejected.countDown();
+                }));
+                owner.start();
+                assertTrue(rejected.await(5, TimeUnit.SECONDS));
+                assertTrue(failure.get() instanceof RejectedExecutionException);
+                assertFalse(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
                 owner.stopAdmission();
                 assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
