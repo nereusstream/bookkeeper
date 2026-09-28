@@ -237,6 +237,8 @@ DATA durable → hot locator → local result
 
 **完成条件：** 正常、截断、超长、错误subtype与reference corpus一致；多连接半包内存有界，关闭/取消/解析失败无泄漏；DATA暂停时控制仍可到达；普通Add无逐请求handshake或proof读取。测试可使用隔离listener，尚不发布stable wire承诺。
 
+前置的[Classic master-key错误日志泄漏](profile-control/classic-master-key-log-receipt.json)已用真实日志事件红绿回归修复；真实Profile listener、匿名/越权拒绝及完整secret-leak矩阵仍未完成步骤11。
+
 #### 12. 实现真实MetadataStore adapter、安装激活与registration
 
 依赖步骤5、11的接口，可与步骤11并行开发，真实集群联调等待本地存储验证。先选一种实际MetadataStore后端实现`ProfileControlStore`、`ProfileRegistrationStore`，不同时开发所有驱动。

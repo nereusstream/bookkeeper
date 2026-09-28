@@ -55,10 +55,12 @@ scripts/unified-wal/check-wave0-profile-control-scope.sh
 
 完整机器结果见[`test-results/summary.json`](test-results/summary.json)，immutable source object、精确边界与剩余BLOCK见[`receipt.json`](receipt.json)。最终验证有意不运行会处理整个现有test-resource tree的Maven full lifecycle或module-wide RAT；一次较早的targeted lifecycle test曾由`testResources`把已有资源树复制到`target`，未执行或解析compatibility harness/test/probe/artifact，也未用作最终证据。该事件和后续direct-plugin containment已在receipt中记录。
 
+2026-09-28新增独立的Classic前置安全修复：[master-key日志回执](classic-master-key-log-receipt.json)绑定`LedgerDescriptorImpl.checkAccess()`与真实日志事件捕获测试。错误master key仍返回原`UnauthorizedAccessException`，日志保留ledger ID而不再包含请求或缓存的master-key字节数组；1项测试先红后绿，`bookkeeper-server`的Spotless/Checkstyle通过。这不改变本目录历史Wave 0 scope guard或旧receipt的源码绑定，也不代表生产Profile control的完整secret-leak/TLS/AuthZ矩阵已通过。
+
 ## Remaining OPEN/BLOCK
 
 - real listener、TLS provider/config、X509 extraction与trust rotation仍OPEN；
 - concrete allowlist/backend path、store adapter和timeout/retry policy仍OPEN；
 - physical protected-state owner、crash framing、group commit、at-rest protection与secure deletion仍BLOCK；
-- production secret-leak/TLS/auth negative matrix和Spike A A24仍未通过；
+- production secret-leak/TLS/auth negative matrix和Spike A A24仍未通过；仅上述Classic mismatch日志泄漏已修复；
 - stable control wire、Profile wire compatibility matrix、G1、production integration与任何authority均未解锁。

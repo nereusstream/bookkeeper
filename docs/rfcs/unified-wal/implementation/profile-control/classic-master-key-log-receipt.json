@@ -1,0 +1,27 @@
+{
+  "state": "FOCUSED_CLASSIC_MASTER_KEY_LOG_REDACTION",
+  "sourceBaseCommit": "484d19a1d1697afaab00eefa54a1154220e113a5",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/LedgerDescriptorImpl.java": "2e4d6183c47f062ce2498cf2ea327fcc97d417da79f09014bc99d3fbdf03049f",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/LedgerDescriptorImplTest.java": "f691e65c2dacd493cf0a3649319b2dc01a6f3e88933b5e21b163cb5eb5d53ef3"
+  },
+  "runnerInputNote": "The local-storage runner's inputs.json does not enumerate Classic LedgerDescriptorImpl files; sourceSha256 and the red productionSourceSha256 above bind those exact files separately.",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh LedgerDescriptorImplTest",
+  "red": {
+    "productionSourceSha256": "d05993ba63c584c4e1814f04d4cc0fbdb879b49c51d33877af521b97c2259dc9",
+    "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-YMDwYZ0O",
+    "inputSha256": "5431cadb1aabf58d7353b3524a7eeba86f9931e9dc422d10455f325c86547dbd",
+    "mavenLogSha256": "4a1ac4dc1d16a9226c35cdd5ff988041af579214c8d808ea1786ce80fba350b2",
+    "junit": {"tests": 1, "failures": 1, "errors": 0, "skipped": 0, "xmlSha256": "1af33cc4ca46acf16f7a3d14859b508db21225334070c686b06432efe26d6231"},
+    "failure": "Captured error event contained the cached master-key byte array"
+  },
+  "green": {
+    "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-KiS6xGxV",
+    "inputSha256": "5431cadb1aabf58d7353b3524a7eeba86f9931e9dc422d10455f325c86547dbd",
+    "mavenLogSha256": "fb230be441cb0d8f1d6b15fec40db11b741baa417d3ddcafa6feb3d926541d6b",
+    "junit": {"tests": 1, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "4c5cd8dd272f1f03d5ac50fc5d8a358949629189655e7123353ade37b1a6608f"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "One Classic mismatch log path only; original unauthorized result preserved. No Profile listener, control-store persistence, anonymous rejection, complete secret-leak matrix or production Segment authority."
+}

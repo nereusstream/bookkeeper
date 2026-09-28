@@ -57,8 +57,6 @@ public class LedgerDescriptorImpl extends LedgerDescriptor {
     void checkAccess(byte[] masterKey) throws BookieException, IOException {
         if (!Arrays.equals(this.masterKey, masterKey)) {
             log.error().attr("ledgerId", this.ledgerId)
-                .attr("requestedMasterKey", Arrays.toString(masterKey))
-                .attr("cachedMasterKey", Arrays.toString(this.masterKey))
                 .log("Requested master key does not match the cached master key");
             throw BookieException.create(BookieException.Code.UnauthorizedAccessException);
         }
