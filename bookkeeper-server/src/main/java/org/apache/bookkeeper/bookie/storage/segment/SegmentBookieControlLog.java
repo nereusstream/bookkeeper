@@ -61,6 +61,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private static final Generation LOG_GENERATION = new Generation(1);
     private static final byte[] RECOVERY_GRANT_DOMAIN =
             "UW-RECOVERY-GRANT-V1".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] RECOVERY_CLOSE_DOMAIN =
+            "UW-RECOVERY-CLOSE-V1".getBytes(StandardCharsets.US_ASCII);
 
     enum Status {
         APPLIED_DURABLE, ALREADY_DURABLE, CONDITION_FAILED, INCOMPATIBLE
@@ -97,6 +99,28 @@ final class SegmentBookieControlLog implements AutoCloseable {
         public byte[] repairIntentId() {
             return repairIntentId.clone();
         }
+    }
+
+    record RecoveryGrantClose(ProtectedProfileStateStore.Transition transition, UUID grantOperationId,
+                              byte[] repairIntentId, long repairIntentGeneration, long grantGeneration) {
+        RecoveryGrantClose {
+            Objects.requireNonNull(transition, "transition");
+            Objects.requireNonNull(grantOperationId, "grantOperationId");
+            repairIntentId = repairIntentId.clone();
+            if (repairIntentId.length != 16 || isZero(repairIntentId)
+                    || repairIntentGeneration <= 0 || grantGeneration <= 0) {
+                throw new IllegalArgumentException("Invalid recovery close binding");
+            }
+        }
+
+        @Override
+        public byte[] repairIntentId() {
+            return repairIntentId.clone();
+        }
+    }
+
+    enum RecoveryCloseStatus {
+        APPLIED_DURABLE, ALREADY_DURABLE, WAITING_PRECUT, CONDITION_FAILED, INCOMPATIBLE
     }
 
     private record GrantBinding(byte[] intentId, long intentGeneration, long grantGeneration) {
@@ -205,10 +229,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
     static final class RecoveryAdmission {
         private final SegmentBookieControlLog owner;
         private final LedgerState state;
-        private final Command grant;
+        private final GrantState grant;
         private boolean terminal;
 
-        private RecoveryAdmission(SegmentBookieControlLog owner, LedgerState state, Command grant) {
+        private RecoveryAdmission(SegmentBookieControlLog owner, LedgerState state, GrantState grant) {
             this.owner = owner;
             this.state = state;
             this.grant = grant;
@@ -232,6 +256,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final ProtectedProfileCredential credential;
         private final ProtectedProfileCredential.SealedStorageValue sealed;
         private final GrantBinding grant;
+        private final UUID closedGrantId;
 
         private Command(SegmentControlFormat.Type type, ProfileControlScope scope, byte[] descriptor,
                         ProtectedProfileCredential credential,
@@ -242,6 +267,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.credential = credential == null ? null : credential.copy();
             this.sealed = sealed;
             this.grant = null;
+            this.closedGrantId = null;
         }
 
         private Command(ProfileControlScope scope, GrantBinding grant) {
@@ -251,6 +277,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.credential = null;
             this.sealed = null;
             this.grant = grant;
+            this.closedGrantId = null;
+        }
+
+        private Command(ProfileControlScope scope, GrantBinding grant, UUID closedGrantId) {
+            this.type = SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE;
+            this.scope = scope;
+            this.descriptor = null;
+            this.credential = null;
+            this.sealed = null;
+            this.grant = grant;
+            this.closedGrantId = closedGrantId;
         }
 
         private UUID operationId() {
@@ -262,11 +299,23 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return type == other.type && scope.equals(other.scope)
                     && Arrays.equals(descriptor, other.descriptor)
                     && (credential == null ? other.credential == null : credential.matches(other.credential))
-                    && (grant == null ? other.grant == null : grant.sameMeaning(other.grant));
+                    && (grant == null ? other.grant == null : grant.sameMeaning(other.grant))
+                    && Objects.equals(closedGrantId, other.closedGrantId);
         }
     }
 
     private record AppliedOperation(Command command, Status status) { }
+
+    private static final class GrantState {
+        private final Command command;
+        private int inFlight;
+        private UUID pendingClose;
+        private boolean committedReadable;
+
+        private GrantState(Command command) {
+            this.command = command;
+        }
+    }
 
     private static final class LedgerState {
         private final ProfileControlScope install;
@@ -280,7 +329,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private boolean pendingTombstone;
         private UUID pendingFence;
         private ExplicitLac explicitLac;
-        private final Map<UUID, Command> recoveryGrants = new HashMap<>();
+        private final Map<UUID, GrantState> recoveryGrants = new HashMap<>();
         private int inFlight;
 
         private LedgerState(Command command) {
@@ -397,6 +446,44 @@ final class SegmentBookieControlLog implements AutoCloseable {
     Result submitRecoveryGrant(RecoveryGrant grant) throws IOException {
         DurableBatch batch = appendCommands(List.of(command(grant)));
         return applyDurable(batch).get(0);
+    }
+
+    /** Cut admission before the durable close; retry after the pre-cut tickets become terminal. */
+    RecoveryCloseStatus submitRecoveryClose(RecoveryGrantClose close) throws IOException {
+        Command command = command(close);
+        synchronized (this) {
+            requireWritable();
+            AppliedOperation prior = operations.get(command.operationId());
+            if (prior != null) {
+                return prior.command().sameMeaning(command)
+                        ? closeStatus(prior.status() == Status.APPLIED_DURABLE
+                                ? Status.ALREADY_DURABLE : prior.status())
+                        : RecoveryCloseStatus.INCOMPATIBLE;
+            }
+            if (fenceOperations.containsKey(command.operationId())) {
+                return RecoveryCloseStatus.INCOMPATIBLE;
+            }
+            LedgerState state = ledgers.get(command.scope.ledgerId());
+            GrantState grant = state == null ? null : state.recoveryGrants.get(command.closedGrantId);
+            if (grant != null && !grant.committedReadable && matchesClose(command, grant.command)
+                    && (grant.pendingClose == null || grant.pendingClose.equals(command.operationId()))) {
+                grant.pendingClose = command.operationId();
+                if (grant.inFlight != 0 || writing || pending != null
+                        || pendingFenceWrite != null || pendingLacWrite != null) {
+                    return RecoveryCloseStatus.WAITING_PRECUT;
+                }
+            }
+        }
+        return closeStatus(applyDurable(appendCommands(List.of(command))).get(0).status());
+    }
+
+    private static RecoveryCloseStatus closeStatus(Status status) {
+        return switch (status) {
+            case APPLIED_DURABLE -> RecoveryCloseStatus.APPLIED_DURABLE;
+            case ALREADY_DURABLE -> RecoveryCloseStatus.ALREADY_DURABLE;
+            case CONDITION_FAILED -> RecoveryCloseStatus.CONDITION_FAILED;
+            case INCOMPATIBLE -> RecoveryCloseStatus.INCOMPATIBLE;
+        };
     }
 
     private DurableBatch appendCommands(List<Command> commands) throws IOException {
@@ -521,16 +608,18 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 || activeAdmissions == config.maxPendingEntries()) {
             return Optional.empty();
         }
-        for (Command grant : state.recoveryGrants.values()) {
-            ProfileExactRange range = grant.scope.exactRange();
-            if (Arrays.equals(grant.grant.intentId(), request.repairIntentId())
-                    && grant.grant.intentGeneration() == request.repairIntentGeneration()
-                    && grant.grant.grantGeneration() == request.grantGeneration()
+        for (GrantState grant : state.recoveryGrants.values()) {
+            ProfileExactRange range = grant.command.scope.exactRange();
+            if (grant.pendingClose == null && !grant.committedReadable
+                    && Arrays.equals(grant.command.grant.intentId(), request.repairIntentId())
+                    && grant.command.grant.intentGeneration() == request.repairIntentGeneration()
+                    && grant.command.grant.grantGeneration() == request.grantGeneration()
                     && range.firstEntryId() == request.rangeStart()
                     && range.lastEntryId() == request.rangeEnd()
                     && request.entryId() >= range.firstEntryId()
                     && request.entryId() <= range.lastEntryId()) {
                 activeAdmissions++;
+                grant.inFlight++;
                 return Optional.of(new RecoveryAdmission(this, state, grant));
             }
         }
@@ -544,7 +633,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         LedgerState state = admission.state;
         return !closed && !failed && ledgers.get(state.context.ledgerId()) == state
                 && !state.pendingTombstone && !tombstones.containsKey(state.context.ledgerId())
-                && state.recoveryGrants.get(admission.grant.operationId()) == admission.grant;
+                && admission.grant.pendingClose == null && !admission.grant.committedReadable
+                && state.recoveryGrants.get(admission.grant.command.operationId()) == admission.grant;
     }
 
     private synchronized void finishRecovery(RecoveryAdmission admission) {
@@ -552,7 +642,28 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IllegalArgumentException("Recovery admission already finished or belongs to another control log");
         }
         admission.terminal = true;
+        admission.grant.inFlight--;
         activeAdmissions--;
+    }
+
+    /** Local fact only; a read still needs its cluster selector and visibility authority. */
+    synchronized boolean locallyCommittedReadable(ProfileLedgerContext context, long entryId) {
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (closed || failed || state == null || !state.context.equals(context)
+                || state.pendingTombstone || tombstones.containsKey(context.ledgerId())) {
+            return false;
+        }
+        boolean coveredByClosedGrant = false;
+        for (GrantState grant : state.recoveryGrants.values()) {
+            ProfileExactRange range = grant.command.scope.exactRange();
+            if (entryId >= range.firstEntryId() && entryId <= range.lastEntryId()) {
+                if (!grant.committedReadable) {
+                    return false;
+                }
+                coveredByClosedGrant = true;
+            }
+        }
+        return coveredByClosedGrant;
     }
 
     /** Only the local route cut; transport read authorization and current-selector checks remain separate. */
@@ -939,6 +1050,23 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 grant.repairIntentGeneration(), grant.grantGeneration()));
     }
 
+    private Command command(RecoveryGrantClose close) {
+        ProfileControlScope scope = close.transition().request().scope();
+        CommittedProfileAuthority authority = close.transition().authority();
+        if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
+                || scope.exactRange() == null || !authority.scope().equals(scope)
+                || !authority.permits(scope.operation())
+                || authority.requiredEngine() != EngineProfile.SEGMENT_WAL_ENGINE
+                || !matchesTarget(scope) || close.grantGeneration() <= 0
+                || !Arrays.equals(scope.publicSemanticPayloadIdentity(),
+                        recoveryClosePayloadIdentity(scope, close.grantOperationId(),
+                                close.repairIntentId(), close.repairIntentGeneration(), close.grantGeneration()))) {
+            throw new IllegalArgumentException("Bookie recovery close authority or binding mismatch");
+        }
+        return new Command(scope, new GrantBinding(close.repairIntentId(),
+                close.repairIntentGeneration(), close.grantGeneration()), close.grantOperationId());
+    }
+
     private Status apply(Command command) {
         UUID operationId = command.operationId();
         LedgerState state = ledgers.get(command.scope.ledgerId());
@@ -997,7 +1125,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     || state.recoveryGrants.size() >= config.maxPendingEntries()) {
                 status = Status.CONDITION_FAILED;
             } else {
-                state.recoveryGrants.put(operationId, command);
+                state.recoveryGrants.put(operationId, new GrantState(command));
+                status = Status.APPLIED_DURABLE;
+            }
+        } else if (command.type == SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE) {
+            GrantState grant = state == null ? null : state.recoveryGrants.get(command.closedGrantId);
+            if (tombstones.containsKey(command.scope.ledgerId()) || state == null
+                    || !state.context.equals(context(command.scope)) || state.pendingTombstone
+                    || grant == null || grant.committedReadable || grant.inFlight != 0
+                    || (grant.pendingClose != null && !grant.pendingClose.equals(operationId))
+                    || !matchesClose(command, grant.command)) {
+                status = Status.CONDITION_FAILED;
+            } else {
+                grant.pendingClose = operationId;
+                grant.committedReadable = true;
                 status = Status.APPLIED_DURABLE;
             }
         } else {
@@ -1018,6 +1159,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         operations.put(operationId, new AppliedOperation(command, status));
         return status;
+    }
+
+    private static boolean matchesClose(Command close, Command grant) {
+        return grant.scope.ledgerId() == close.scope.ledgerId()
+                && Arrays.equals(grant.scope.ledgerInstanceId(), close.scope.ledgerInstanceId())
+                && grant.scope.descriptorIdentity().equals(close.scope.descriptorIdentity())
+                && grant.scope.targetBookie().equals(close.scope.targetBookie())
+                && Arrays.equals(grant.scope.targetStorageIncarnation(), close.scope.targetStorageIncarnation())
+                && grant.scope.authorityDomain().equals(close.scope.authorityDomain())
+                && grant.scope.exactRange().equals(close.scope.exactRange())
+                && grant.grant.sameMeaning(close.grant);
     }
 
     private void recover() throws IOException {
@@ -1107,7 +1259,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (parsed.type() != SegmentControlFormat.Type.INSTALL
                 && parsed.type() != SegmentControlFormat.Type.ACTIVATE
                 && parsed.type() != SegmentControlFormat.Type.TOMBSTONE
-                && parsed.type() != SegmentControlFormat.Type.RECOVERY_GRANT) {
+                && parsed.type() != SegmentControlFormat.Type.RECOVERY_GRANT
+                && parsed.type() != SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE) {
             throw new IOException("Unsupported Bookie control command");
         }
         try {
@@ -1149,6 +1302,25 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 }
                 return new Command(scope, new GrantBinding(intentId, intentGeneration, grantGeneration));
             }
+            if (parsed.type() == SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE) {
+                if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
+                        || scope.exactRange() == null || body.remaining() != 48) {
+                    throw new IOException("Invalid recovery close body");
+                }
+                UUID grantOperationId = new UUID(body.getLong(), body.getLong());
+                byte[] intentId = new byte[16];
+                body.get(intentId);
+                long intentGeneration = body.getLong();
+                long grantGeneration = body.getLong();
+                if (isZero(intentId) || intentGeneration <= 0 || grantGeneration <= 0
+                        || !Arrays.equals(scope.publicSemanticPayloadIdentity(),
+                                recoveryClosePayloadIdentity(scope, grantOperationId, intentId,
+                                        intentGeneration, grantGeneration))) {
+                    throw new IOException("Invalid recovery close binding");
+                }
+                return new Command(scope, new GrantBinding(intentId, intentGeneration, grantGeneration),
+                        grantOperationId);
+            }
             if (scope.operation() != ProfileControlOperation.INSTALL || body.remaining() < 2) {
                 throw new IOException("Invalid install body");
             }
@@ -1182,6 +1354,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return ByteBuffer.allocate(scope.remaining() + 32).put(scope).put(command.grant.intentId())
                     .putLong(command.grant.intentGeneration()).putLong(command.grant.grantGeneration()).flip();
         }
+        if (command.type == SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE) {
+            return ByteBuffer.allocate(scope.remaining() + 48).put(scope)
+                    .putLong(command.closedGrantId.getMostSignificantBits())
+                    .putLong(command.closedGrantId.getLeastSignificantBits()).put(command.grant.intentId())
+                    .putLong(command.grant.intentGeneration()).putLong(command.grant.grantGeneration()).flip();
+        }
         if (command.type != SegmentControlFormat.Type.INSTALL) {
             return scope;
         }
@@ -1200,6 +1378,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             case ACTIVATE_REPLACEMENT -> 3;
             case TOMBSTONE_OR_DELETE_APPLY -> 4;
             case RECOVERY_GRANT -> 5;
+            case RECOVERY_GRANT_CLOSE -> 6;
             default -> throw new IllegalArgumentException("Unsupported Bookie control scope");
         };
         int rangeBytes = scope.exactRange() == null ? 0 : 16;
@@ -1223,6 +1402,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             case 3 -> ProfileControlOperation.ACTIVATE_REPLACEMENT;
             case 4 -> ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY;
             case 5 -> ProfileControlOperation.RECOVERY_GRANT;
+            case 6 -> ProfileControlOperation.RECOVERY_GRANT_CLOSE;
             default -> throw new IOException("Unsupported Bookie control operation");
         };
         long ledgerId = body.getLong();
@@ -1235,7 +1415,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         body.get(payload);
         String target = readText(body, ProfileControlScope.MAX_TARGET_BOOKIE_BYTES);
         String domain = readText(body, ProfileControlScope.MAX_AUTHORITY_DOMAIN_BYTES);
-        ProfileExactRange range = type == ProfileControlOperation.RECOVERY_GRANT
+        ProfileExactRange range = type.rangeAllowed()
                 ? new ProfileExactRange(body.getLong(), body.getLong()) : null;
         byte[] id = ByteBuffer.allocate(16).putLong(operationId.getMostSignificantBits())
                 .putLong(operationId.getLeastSignificantBits()).array();
@@ -1261,14 +1441,36 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 || grantGeneration != scope.authorityGeneration()) {
             throw new IllegalArgumentException("Invalid recovery grant identity input");
         }
+        return recoveryBindingIdentity(RECOVERY_GRANT_DOMAIN, scope, null, intentId,
+                intentGeneration, grantGeneration);
+    }
+
+    static byte[] recoveryClosePayloadIdentity(ProfileControlScope scope, UUID grantOperationId,
+                                               byte[] intentId, long intentGeneration, long grantGeneration) {
+        if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE || scope.exactRange() == null
+                || grantOperationId == null || intentId.length != 16 || isZero(intentId)
+                || intentGeneration <= 0 || grantGeneration <= 0) {
+            throw new IllegalArgumentException("Invalid recovery close identity input");
+        }
+        return recoveryBindingIdentity(RECOVERY_CLOSE_DOMAIN, scope, grantOperationId, intentId,
+                intentGeneration, grantGeneration);
+    }
+
+    private static byte[] recoveryBindingIdentity(byte[] prefix, ProfileControlScope scope, UUID grantOperationId,
+                                                  byte[] intentId, long intentGeneration, long grantGeneration) {
         byte[] target = scope.targetBookie().getBytes(StandardCharsets.UTF_8);
         byte[] domain = scope.authorityDomain().getBytes(StandardCharsets.UTF_8);
-        ByteBuffer input = ByteBuffer.allocate(RECOVERY_GRANT_DOMAIN.length + ProfileLedgerContext.ENCODED_LENGTH
-                + 2 + target.length + 16 + 2 + domain.length + 16 + 8 + 8 + 16);
-        input.put(RECOVERY_GRANT_DOMAIN);
+        ByteBuffer input = ByteBuffer.allocate(prefix.length + ProfileLedgerContext.ENCODED_LENGTH
+                + 2 + target.length + 16 + 2 + domain.length + (grantOperationId == null ? 0 : 16)
+                + 16 + 8 + 8 + 16);
+        input.put(prefix);
         input.put(context(scope).encode()).putShort((short) target.length).put(target)
-                .put(scope.targetStorageIncarnation()).putShort((short) domain.length).put(domain)
-                .put(intentId).putLong(intentGeneration).putLong(grantGeneration)
+                .put(scope.targetStorageIncarnation()).putShort((short) domain.length).put(domain);
+        if (grantOperationId != null) {
+            input.putLong(grantOperationId.getMostSignificantBits())
+                    .putLong(grantOperationId.getLeastSignificantBits());
+        }
+        input.put(intentId).putLong(intentGeneration).putLong(grantGeneration)
                 .putLong(scope.exactRange().firstEntryId()).putLong(scope.exactRange().lastEntryId());
         try {
             return MessageDigest.getInstance("SHA-256").digest(input.array());

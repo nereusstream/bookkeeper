@@ -38,6 +38,7 @@ final class SegmentControlFormat {
         ROUTE(Owner.BOOKIE, 1), CREDENTIAL(Owner.BOOKIE, 2), INSTALL(Owner.BOOKIE, 3),
         ACTIVATE(Owner.BOOKIE, 4), FENCE(Owner.BOOKIE, 5), RECOVERY_GRANT(Owner.BOOKIE, 6),
         EXPLICIT_LAC(Owner.BOOKIE, 7), TOMBSTONE(Owner.BOOKIE, 8),
+        RECOVERY_GRANT_CLOSE(Owner.BOOKIE, 9),
         ALLOC(Owner.ARENA, 1), ALLOC_POOL(Owner.ARENA, 2), MOVE(Owner.ARENA, 3),
         FREE(Owner.ARENA, 4), CHECKPOINT_BEGIN(Owner.ARENA, 5), CHECKPOINT_COMMIT(Owner.ARENA, 6),
         DEVICE_STATE(Owner.ARENA, 7);

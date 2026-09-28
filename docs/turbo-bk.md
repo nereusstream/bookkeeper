@@ -220,7 +220,7 @@ Cluster Lifecycle
 - BookKeeper quorum：entry 是否达到 ACK quorum 的权威。
 - `ArenaControlLog`：以per-Arena deterministic conditional state machine承载空间 ownership、generation、reuse 与同 Arena relocation selection；只有覆盖transition自身sequence的durable result才授予cutover/free/reuse。checkpoint 中的 current selector、anti-ABA 和未退休状态必须等价于完整 move-chain oracle，derived locator 不能决定 move winner。
 - Data Arena：Segment payload 的权威。
-- RFC-0005 Segment Bookie state：逻辑 `LedgerRouteAuthority` 与 `BookieRegistrationAuthority` 决定install/normal admission/fence、bounded recovery grant/readable facts及assignment/incarnation readiness；normal、recovery与readable不是互斥flat role，隔离物理owner已采用RFC-0005 §5.2的Bookie级独立控制日志；grant仅有局部持久记录与准入切片，整体仍待真实集群与物理DATA验证。
+- RFC-0005 Segment Bookie state：逻辑 `LedgerRouteAuthority` 与 `BookieRegistrationAuthority` 决定install/normal admission/fence、bounded recovery grant/readable facts及assignment/incarnation readiness；normal、recovery与readable不是互斥flat role，隔离物理owner已采用RFC-0005 §5.2的Bookie级独立控制日志；grant/close已有局部持久记录、准入cut与重放切片，整体仍待真实集群与物理recovery DATA验证。
 - RocksDB、footer、cache：可丢弃并重建的派生加速结构。
 
 ## 8. 跨 RFC 安全不变量

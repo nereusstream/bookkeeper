@@ -172,6 +172,33 @@ public class SegmentBookieControlLogTest {
                 2, 4, entryId, filled(20, verifier), new byte[]{1});
     }
 
+    private static SegmentBookieControlLog.RecoveryGrantClose recoveryClose(int operationId, int grantOperationId,
+                                                                             int intentId, long intentGeneration,
+                                                                             long grantGeneration) {
+        ProfileControlScope base = scope(ProfileControlOperation.RECOVERY_GRANT_CLOSE,
+                operationId, Math.max(10, grantGeneration + 1));
+        ProfileExactRange range = new ProfileExactRange(2, 4);
+        ProfileControlScope unbound = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(),
+                base.ledgerInstanceId(), base.descriptorIdentity(), base.targetBookie(),
+                base.targetStorageIncarnation(), base.authorityDomain(), base.authorityGeneration(),
+                base.operationId(), base.publicSemanticPayloadIdentity(), range);
+        byte[] id = new byte[16];
+        id[15] = (byte) intentId;
+        UUID grantId = new UUID(0, grantOperationId);
+        ProfileControlScope exact = new ProfileControlScope(unbound.operation(), unbound.purpose(),
+                unbound.ledgerId(), unbound.ledgerInstanceId(), unbound.descriptorIdentity(),
+                unbound.targetBookie(), unbound.targetStorageIncarnation(), unbound.authorityDomain(),
+                unbound.authorityGeneration(), unbound.operationId(),
+                SegmentBookieControlLog.recoveryClosePayloadIdentity(unbound, grantId, id,
+                        intentGeneration, grantGeneration), range);
+        return new SegmentBookieControlLog.RecoveryGrantClose(
+                new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(exact),
+                        new CommittedProfileAuthority(exact,
+                                CommittedProfileAuthority.State.RECOVERY_CLOSE_AUTHORIZED,
+                                EngineProfile.SEGMENT_WAL_ENGINE, 4, true), null),
+                grantId, id, intentGeneration, grantGeneration);
+    }
+
     private static ProtectedProfileStateStore.Transition activate(long ledgerId, int operationId) {
         ProfileControlScope scope = scope(ledgerId, ProfileControlOperation.ACTIVATE_INITIAL, operationId, 2);
         return new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(scope),
@@ -348,6 +375,77 @@ public class SegmentBookieControlLogTest {
             assertFalse(replay.canCompleteRecovery(admission));
             admission.finish();
             assertFalse(replay.admitRecovery(recoveryAdd(3, 7, 9, 3, (byte) 6)).isPresent());
+        }
+    }
+
+    @Test
+    public void recoveryCloseWaitsForPrecutTicketAndReplaysCommittedReadableFact() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 6)));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9)).status());
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.CONDITION_FAILED,
+                    log.submitRecoveryClose(recoveryClose(5, 2, 3, 8, 9)));
+            SegmentBookieControlLog.RecoveryAdmission admission =
+                    log.admitRecovery(recoveryAdd(3, 7, 9, 3, (byte) 6)).orElseThrow();
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT,
+                    log.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+            assertFalse(log.admitRecovery(recoveryAdd(3, 7, 9, 4, (byte) 6)).isPresent());
+            assertFalse(log.canCompleteRecovery(admission));
+            assertFalse(log.locallyCommittedReadable(context(), 3));
+            admission.finish();
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    log.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                    log.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+            assertTrue(log.locallyCommittedReadable(context(), 3));
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 6)));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR)) {
+            assertTrue(replay.locallyCommittedReadable(context(), 2));
+            assertFalse(replay.admitRecovery(recoveryAdd(3, 7, 9, 3, (byte) 6)).isPresent());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    replay.submitRecoveryGrant(recoveryGrant(6, 4, 1, 11)).status());
+            assertFalse(replay.locallyCommittedReadable(context(), 2));
+            SegmentBookieControlLog.RecoveryAdmission second =
+                    replay.admitRecovery(recoveryAdd(4, 1, 11, 2, (byte) 6)).orElseThrow();
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT,
+                    replay.submitRecoveryClose(recoveryClose(7, 6, 4, 1, 11)));
+            assertFalse(replay.canCompleteRecovery(second));
+            second.finish();
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    replay.submitRecoveryClose(recoveryClose(7, 6, 4, 1, 11)));
+            assertTrue(replay.locallyCommittedReadable(context(), 2));
+            replay.submitBatch(List.of(tombstone(44, 4)));
+            assertFalse(replay.locallyCommittedReadable(context(), 2));
+        }
+    }
+
+    @Test
+    public void uncertainRecoveryCloseForceNeverReopensAdmissionInCurrentProcess() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, 3, false);
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR, io)) {
+            log.submitBatch(List.of(install(1, (byte) 6)));
+            log.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            assertThrows(IOException.class, () -> log.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+            assertFalse(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isPresent());
+            assertFalse(log.locallyCommittedReadable(context(), 2));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR)) {
+            assertTrue(replay.locallyCommittedReadable(context(), 2));
+            assertFalse(replay.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isPresent());
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                    replay.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
         }
     }
 
