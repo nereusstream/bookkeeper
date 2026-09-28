@@ -234,6 +234,52 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void dataWriteRequiresAnAppliedGrantForTheWholeBatchAndMatchingIdentity() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("granted"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf entry = entry(new byte[1024 * 1024]);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encode(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+            assertTrue(batch.bytes().remaining() > SegmentArenaControlLog.BLOCK_BYTES);
+            assertThrows(IOException.class, () -> files.writeAuthorized(batch, log));
+            SegmentArenaControlLog.Allocation pool = new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 2);
+            SegmentArenaControlLog.DurableBatch durable = log.appendDurably(List.of(pool));
+            assertThrows(IOException.class, () -> files.writeAuthorized(batch, log));
+            log.applyDurable(durable);
+            SegmentBatchFormat.Address wrongAllocation = new SegmentBatchFormat.Address(
+                    0, 0, 6, new Generation(1), new Generation(1), 1, 4096);
+            SegmentBatchFormat.Address wrongOwnerGeneration = new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(2), 1, 4096);
+            assertThrows(IOException.class, () -> files.writeAuthorized(SegmentBatchFormat.encode(config,
+                    wrongAllocation, List.of(SegmentBatchFormat.entry(context(), entry))), log));
+            assertThrows(IOException.class, () -> files.writeAuthorized(SegmentBatchFormat.encode(config,
+                    wrongOwnerGeneration, List.of(SegmentBatchFormat.entry(context(), entry))), log));
+            IsolatedSegmentConfig other = new IsolatedSegmentConfig(
+                    temporary.getRoot().toPath().resolve("other-granted"), 1, 4, 1,
+                    4L * 1024 * 1024, 4096, 1024 * 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            try (IsolatedSegmentFiles otherFiles = IsolatedSegmentFiles.create(other, identity())) {
+                assertThrows(IOException.class, () -> otherFiles.writeAuthorized(batch, log));
+                assertEquals(4096, otherFiles.nextOffset(0));
+            }
+            assertEquals(4096, files.nextOffset(0));
+            files.writeAuthorized(batch, log);
+            assertEquals(4096 + batch.bytes().remaining(), files.nextOffset(0));
+            try (FileChannel channel = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0))) {
+                ByteBuffer persisted = ByteBuffer.allocate(batch.bytes().remaining());
+                SegmentFileIo.readFully(channel, persisted, 4096);
+                assertEquals(3, SegmentBatchParser.parse(persisted, address(4096), config.bytesPerFile())
+                        .records().get(0).entryId());
+            }
+        } finally {
+            entry.release();
+        }
+    }
+
+    @Test
     public void writeSyncAndNoProgressFailuresRetainCoordinatesAndPoisonFile() throws Exception {
         for (SegmentFileIo faults : List.of(new SegmentFileIo(100, 2, -1, false),
                 new SegmentFileIo(100, -1, 1, false), new SegmentFileIo(100, -1, -1, true))) {

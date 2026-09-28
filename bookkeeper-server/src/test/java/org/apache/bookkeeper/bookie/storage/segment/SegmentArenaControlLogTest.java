@@ -54,7 +54,13 @@ public class SegmentArenaControlLogTest {
 
     private SegmentArenaControlLog.Allocation alloc(int operation, long offset) {
         return new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
-                new UUID(0, operation), new Generation(1), 0, 0, 1, new Generation(1), offset, 1);
+                new UUID(0, operation), new Generation(1), 0, 0, 1, new Generation(1), operation, offset, 1);
+    }
+
+    private boolean granted(SegmentArenaControlLog log, long offset, int shard, long ownerGeneration,
+                            long allocationId) {
+        return log.hasAppliedGrant(0, offset, SegmentArenaControlLog.BLOCK_BYTES, shard, ownerGeneration,
+                allocationId, 1);
     }
 
     @Test
@@ -70,25 +76,33 @@ public class SegmentArenaControlLogTest {
                 assertEquals(1, io.forces);
                 assertEquals(1, log.durableThrough());
                 assertEquals(-1, log.appliedThrough());
-                assertFalse(log.hasAppliedGrant(0, 4096, 1, 1, 1));
+                assertFalse(granted(log, 4096, 1, 1, 1));
                 List<SegmentArenaControlLog.Result> results = log.applyDurable(durable);
                 assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, results.get(0).status());
                 assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED, results.get(1).status());
                 assertEquals(0, results.get(0).appliedThrough());
                 assertEquals(1, results.get(1).appliedThrough());
-                assertTrue(log.hasAppliedGrant(0, 4096, 1, 1, 1));
-                assertFalse(log.hasAppliedGrant(0, 4096, 2, 1, 1));
-                assertFalse(log.hasAppliedGrant(0, 4096, 1, 2, 1));
-                assertFalse(log.hasAppliedGrant(0, 4097, 1, 1, 1));
+                assertTrue(granted(log, 4096, 1, 1, 1));
+                assertFalse(granted(log, 4096, 2, 1, 1));
+                assertFalse(granted(log, 4096, 1, 2, 1));
+                assertFalse(granted(log, 4097, 1, 1, 1));
+                assertFalse(granted(log, 4096, 1, 1, 2));
+                assertFalse(log.hasAppliedGrant(0, 4096, SegmentArenaControlLog.BLOCK_BYTES + 4096,
+                        1, 1, 1, 1));
             }
             try (SegmentArenaControlLog reopened = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
-                assertTrue(reopened.hasAppliedGrant(0, 4096, 1, 1, 1));
+                assertTrue(granted(reopened, 4096, 1, 1, 1));
                 List<SegmentArenaControlLog.Result> retried = reopened.submitBatch(List.of(alloc(1, 4096),
                         alloc(2, 4096)));
                 assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE, retried.get(0).status());
                 assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED, retried.get(1).status());
                 assertEquals(SegmentArenaControlLog.Status.INCOMPATIBLE, reopened.submitBatch(List.of(
                         alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES))).get(0).status());
+                SegmentArenaControlLog.Allocation reusedId = new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC, new UUID(0, 10), new Generation(1), 0,
+                        0, 1, new Generation(1), 1, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1);
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        reopened.submitBatch(List.of(reusedId)).get(0).status());
             }
         }
     }
@@ -100,17 +114,17 @@ public class SegmentArenaControlLogTest {
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity)) {
             SegmentArenaControlLog.Allocation pool = new SegmentArenaControlLog.Allocation(
                     SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 3), new Generation(1), 0,
-                    0, 2, new Generation(1), 4096, 2);
+                    0, 2, new Generation(1), 3, 4096, 2);
             try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
                 log.appendDurably(List.of(pool));
-                assertFalse(log.hasAppliedGrant(0, 4096, 2, 1, 1));
-                assertFalse(log.hasAppliedGrant(0, 4096, 1, 2, 1));
+                assertFalse(granted(log, 4096, 2, 1, 3));
+                assertFalse(granted(log, 4096, 1, 2, 3));
             }
             try (SegmentArenaControlLog reopened = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
                 assertEquals(0, reopened.durableThrough());
                 assertEquals(0, reopened.appliedThrough());
-                assertTrue(reopened.hasAppliedGrant(0, 4096, 2, 1, 1));
-                assertTrue(reopened.hasAppliedGrant(0, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 2, 1, 1));
+                assertTrue(granted(reopened, 4096, 2, 1, 3));
+                assertTrue(granted(reopened, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 2, 1, 3));
                 assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
                         reopened.submitBatch(List.of(pool)).get(0).status());
             }
@@ -125,11 +139,11 @@ public class SegmentArenaControlLogTest {
             try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024,
                     new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false))) {
                 assertThrows(IOException.class, () -> log.submitBatch(List.of(alloc(4, 4096))));
-                assertFalse(log.hasAppliedGrant(0, 4096, 1, 1, 1));
+                assertFalse(granted(log, 4096, 1, 1, 4));
                 assertThrows(IOException.class, () -> log.submitBatch(List.of(alloc(5, 4096))));
             }
             try (SegmentArenaControlLog reopened = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
-                assertTrue(reopened.hasAppliedGrant(0, 4096, 1, 1, 1));
+                assertTrue(granted(reopened, 4096, 1, 1, 4));
                 assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
                         reopened.submitBatch(List.of(alloc(4, 4096))).get(0).status());
             }
@@ -141,7 +155,7 @@ public class SegmentArenaControlLogTest {
             try (SegmentArenaControlLog log = SegmentArenaControlLog.open(torn, identity, 1024 * 1024,
                     new SegmentFileIo(3, 2, -1, false))) {
                 assertThrows(IOException.class, () -> log.submitBatch(List.of(alloc(6, 4096))));
-                assertFalse(log.hasAppliedGrant(0, 4096, 1, 1, 1));
+                assertFalse(granted(log, 4096, 1, 1, 6));
             }
             assertThrows(IOException.class, () -> SegmentArenaControlLog.open(torn, identity, 1024 * 1024));
         }
@@ -152,13 +166,13 @@ public class SegmentArenaControlLogTest {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity)) {
-            long oneRecordCapacity = 4096 + 176;
+            long oneRecordCapacity = 4096 + 184;
             try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, oneRecordCapacity)) {
                 assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
                         log.submitBatch(List.of(alloc(7, 4096))).get(0).status());
                 assertThrows(IOException.class, () -> log.submitBatch(List.of(
                         alloc(8, 4096 + SegmentArenaControlLog.BLOCK_BYTES))));
-                assertTrue(log.hasAppliedGrant(0, 4096, 1, 1, 1));
+                assertTrue(granted(log, 4096, 1, 1, 7));
             }
             byte[] before = Files.readAllBytes(config.directory().resolve("arena-control"));
             SegmentFileHeader wrong = new SegmentFileHeader(identity.incarnation(), new UUID(0, 10),
@@ -168,7 +182,7 @@ public class SegmentArenaControlLogTest {
                     java.util.Arrays.hashCode(Files.readAllBytes(config.directory().resolve("arena-control"))));
             try (SegmentArenaControlLog reopened = SegmentArenaControlLog.open(config, identity,
                     oneRecordCapacity)) {
-                assertTrue(reopened.hasAppliedGrant(0, 4096, 1, 1, 1));
+                assertTrue(granted(reopened, 4096, 1, 1, 7));
             }
             try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
                     StandardOpenOption.WRITE)) {

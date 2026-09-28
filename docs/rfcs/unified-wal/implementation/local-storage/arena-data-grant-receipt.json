@@ -1,0 +1,23 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_EXPLICIT_DATA_GRANT_ONLY",
+  "sourceBaseCommit": "4116b81386b9616f90344a96da6d98aa682c6281",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLog.java": "1a884225772d250a8e446dbc072c18775797e6fb6e3d19a3fe3e101a372fc916",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentFiles.java": "8b7fb0f54a774f36fad2df85d44a00e0b978b4f78438ccc170fa2d6b8f189f84",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLogTest.java": "4fd036f7eddcc154ab42f637876dcb2c0bbb5a273be96427298cd192993df5e5",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "a2d685d2199c92044e16cc302b286629fb6b485df95e7c90024ed884ce9f92ff"
+  },
+  "fixture": "one Arena, one 4 MiB DATA file, four logical shards, 4096-byte alignment, two-block ALLOC_POOL for one DATA batch with 1 MiB payload; OFF/SYSTEM/PARK",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-daBUg9zp",
+  "inputSha256": "e1250a8437820127fb270715b47738bfd0e5b15932c2d20513c9fd276e1adcd8",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentBatchFormatTest,SegmentControlFormatTest",
+  "mavenLogSha256": "02bad741f11f7ff27d0ae40e43e6d9a6687f911d9dca3d69fee4cf34e3b35c3e",
+  "junit": {
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "7b11bf052a9417f40af13e6e5c3d124f907d548cc08ef7656bf4f42b17277e7d"},
+    "SegmentBatchFormatTest": {"tests": 10, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "cbd29e06cc4cb5d8b6d439778e2eaf503561b52412a2cec9a0d6a394081b8d80"},
+    "SegmentControlFormatTest": {"tests": 3, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "390dc71aa14de4ae14ae4856d0d39348b2ebb5cc6905e766a0d35819a057de34"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Explicit isolated write path only; raw framing writer is still unguarded for lower-level tests. No Bookie route/fence, DATA used/unused recovery, entry result, FREE/MOVE, checkpoint/rotation, power-loss or production authority."
+}

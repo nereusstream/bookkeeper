@@ -164,7 +164,7 @@ group commit中，必须有明确覆盖该`controlSequence`的durability complet
 
 `ArenaControlLog`首批选择一种执行模式：**条件命令合批持久化，再由per-Arena sequencer按控制序号顺序应用**。不同时维护另一套可回滚的推测状态，也不逐操作fsync。现有Classic Journal group force仅作batching参考，其callback不直接代表semantic transition已成功。
 
-实现状态：隔离文件原型已接通ALLOC/ALLOC_POOL的单batch持久化、按序条件apply、身份校验及有界全量重放；还没有DATA消费、FREE/MOVE、Bookie控制闭环和pool used/unused证明，不能作为本节完整allocator authority。
+实现状态：隔离文件原型已接通ALLOC/ALLOC_POOL的单batch持久化、按序条件apply、身份校验及有界全量重放；显式`writeAuthorized`路径核对整段DATA batch grant。还没有Bookie控制闭环、pool used/unused恢复、FREE/MOVE或逐entry成功，因此不能作为本节完整allocator authority。
 
 ```text
 validate format / authority / bounded enqueue eligibility

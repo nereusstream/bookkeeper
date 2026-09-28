@@ -30,6 +30,7 @@ import java.util.List;
 /** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
 final class IsolatedSegmentFiles implements AutoCloseable {
     private final IsolatedSegmentConfig config;
+    private final SegmentFileHeader identity;
     private final List<FileChannel> data = new ArrayList<>();
     private final long[] nextOffset;
     private final boolean[] failed;
@@ -38,8 +39,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private boolean closed;
     SegmentFileIo dataIo = new SegmentFileIo();
 
-    private IsolatedSegmentFiles(IsolatedSegmentConfig config, FileChannel lockChannel, FileLock lock) {
+    private IsolatedSegmentFiles(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                 FileChannel lockChannel, FileLock lock) {
         this.config = config;
+        this.identity = identity;
         this.lockChannel = lockChannel;
         this.lock = lock;
         nextOffset = new long[config.dataFiles()];
@@ -63,7 +66,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             if (lock == null) {
                 throw new IOException("Isolated directory is locked");
             }
-            result = new IsolatedSegmentFiles(config, guard, lock);
+            result = new IsolatedSegmentFiles(config, identity, guard, lock);
             for (int i = 0; i < config.dataFiles(); i++) {
                 FileChannel channel = FileChannel.open(dataPath(config, i), StandardOpenOption.CREATE_NEW,
                         StandardOpenOption.READ, StandardOpenOption.WRITE);
@@ -128,6 +131,19 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             failed[file] = true;
             throw failure;
         }
+    }
+
+    /** Physical experiment path: require an applied, durable Arena grant for the entire frozen DATA batch. */
+    synchronized void writeAuthorized(SegmentBatchFormat.FrozenBatch batch, SegmentArenaControlLog authority)
+            throws IOException {
+        SegmentBatchFormat.Address address = batch.address();
+        if (!authority.matchesScope(config, identity)
+                || !authority.hasAppliedGrant(address.fileIndex(), address.offset(), batch.bytes().remaining(),
+                address.shard(), address.streamGeneration().value(), address.allocation(),
+                address.generation().value())) {
+            throw new IOException("DATA batch has no applied Arena allocation grant");
+        }
+        write(batch);
     }
 
     synchronized long nextOffset(int file) {
