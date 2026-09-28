@@ -44,6 +44,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             return batch.address();
         }
 
+        SegmentBatchFormat.FrozenBatch batch() {
+            return batch;
+        }
+
         int length() {
             return batch.bytes().remaining();
         }

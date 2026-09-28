@@ -407,22 +407,31 @@ public class SegmentBatchFormatTest {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(
                 temporary.getRoot().toPath().resolve("prefix-" + failFirst),
                 1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
-        ByteBuf entry = entry(new byte[16]);
+        ByteBuf firstEntry = entry(new byte[16], 11);
+        ByteBuf laterEntry = entry(new byte[16], 12);
+        ByteBuf thirdEntry = entry(new byte[16], 13);
         SegmentBatchFormat.FrozenBatch first;
         SegmentBatchFormat.FrozenBatch later;
+        SegmentBatchFormat.FrozenBatch third;
         try {
             first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
                     0, 0, 5, new Generation(1), new Generation(1), 11, 4096),
-                    List.of(SegmentBatchFormat.entry(context(), entry)));
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry)));
             later = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
                     0, 0, 5, new Generation(1), new Generation(1), 12, 8192),
-                    List.of(SegmentBatchFormat.entry(context(), entry)));
+                    List.of(SegmentBatchFormat.entry(context(), laterEntry)));
+            third = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 13, 12288),
+                    List.of(SegmentBatchFormat.entry(context(), thirdEntry)));
         } finally {
-            entry.release();
+            firstEntry.release();
+            laterEntry.release();
+            thirdEntry.release();
         }
         SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
         SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
         SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 11, 2);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 2);
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch releaseFirst = new CountDownLatch(1);
         CountDownLatch laterCompleted = new CountDownLatch(1);
@@ -430,6 +439,7 @@ public class SegmentBatchFormatTest {
         CountDownLatch bothReleased = new CountDownLatch(1);
         List<Long> released = Collections.synchronizedList(new ArrayList<>());
         AtomicReference<Throwable> error = new AtomicReference<>();
+        AtomicReference<SegmentPointRead.Location> laterLocation = new AtomicReference<>();
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             if (failFirst) {
@@ -442,7 +452,15 @@ public class SegmentBatchFormatTest {
                     @Override
                     public void run(SegmentOwnerLoop.Ticket ticket) {
                         try {
-                            IsolatedSegmentFiles.Reservation reservation = prefix.reserve(batch, files, authority);
+                            SegmentHotDirectory.Admission admission = hot.reserve(batch);
+                            IsolatedSegmentFiles.Reservation reservation;
+                            try {
+                                reservation = prefix.reserve(batch, files, authority);
+                            } catch (IOException failure) {
+                                hot.cancelBeforeSubmission(admission);
+                                throw failure;
+                            }
+                            hot.bind(admission, reservation);
                             io.submit(ticket, () -> {
                                 if (batch.address().sequence() == 11) {
                                     firstStarted.countDown();
@@ -457,6 +475,7 @@ public class SegmentBatchFormatTest {
                                 }
                                 for (SegmentPhysicalPrefix.DurableBatch ready : prefix.completed(reservation,
                                         failure)) {
+                                    hot.publish(ready);
                                     released.add(ready.address().sequence());
                                 }
                                 if (batch.address().sequence() == 12) {
@@ -488,6 +507,9 @@ public class SegmentBatchFormatTest {
             assertTrue(owner.control(() -> {
                 assertEquals(10, prefix.durableThrough());
                 assertEquals(2, prefix.pending());
+                assertEquals(2, hot.pendingBatches());
+                assertEquals(0, hot.candidateCount());
+                assertTrue(hot.candidate(context(), 12).isEmpty());
                 checkedGap.countDown();
             }));
             assertTrue(checkedGap.await(5, TimeUnit.SECONDS));
@@ -504,20 +526,102 @@ public class SegmentBatchFormatTest {
                 assertEquals(failFirst ? 10 : 12, prefix.durableThrough());
                 assertEquals(failFirst ? 2 : 0, prefix.pending());
                 assertEquals(failFirst, prefix.failed());
+                assertEquals(failFirst ? 2 : 0, hot.pendingBatches());
+                assertEquals(failFirst ? 0 : 2, hot.candidateCount());
+                if (!failFirst) {
+                    laterLocation.set(hot.candidate(context(), 12).orElseThrow());
+                } else {
+                    assertTrue(hot.candidate(context(), 12).isEmpty());
+                }
+                assertThrows(IOException.class, () -> hot.reserve(third));
                 checkedPrefix.countDown();
             }));
             assertTrue(checkedPrefix.await(5, TimeUnit.SECONDS));
             assertEquals(failFirst, error.get() instanceof IOException);
+            assertEquals(12288, files.nextOffset(0));
+            if (!failFirst) {
+                assertEquals(12, SegmentPointRead.read(config, identity(), authority, laterLocation.get())
+                        .record().entryId());
+            }
             for (SegmentBatchFormat.FrozenBatch batch : failFirst ? List.of(later) : List.of(first, later)) {
                 try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0))) {
                     ByteBuffer bytes = ByteBuffer.allocate(batch.bytes().remaining());
                     SegmentFileIo.readFully(data, bytes, batch.address().offset());
-                    assertEquals(3, SegmentBatchParser.parse(bytes, batch.address(), config.bytesPerFile())
+                    assertEquals(batch.address().sequence(), SegmentBatchParser.parse(bytes, batch.address(),
+                            config.bytesPerFile())
                             .records().get(0).entryId());
                 }
             }
         } finally {
             releaseFirst.countDown();
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+    }
+
+    @Test
+    public void durableRelocationCopyDoesNotPublishAnOrdinaryHotCandidate() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("copy-hot"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 1, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf entry = entry(new byte[16]);
+        SegmentBatchFormat.FrozenBatch copy;
+        try {
+            copy = SegmentBatchFormat.encode(config, address(4096), List.of(SegmentBatchFormat.relocation(
+                    context(), entry, new UUID(1, 2), new Generation(4))));
+        } finally {
+            entry.release();
+        }
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 1);
+        SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 1);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 1);
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> published = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+            assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    try {
+                        SegmentHotDirectory.Admission admission = hot.reserve(copy);
+                        IsolatedSegmentFiles.Reservation reservation = prefix.reserve(copy, files, authority);
+                        hot.bind(admission, reservation);
+                        io.submit(ticket, () -> files.writeReserved(reservation), failure -> {
+                            if (failure != null) {
+                                error.set(failure);
+                            } else {
+                                published.set(hot.publish(prefix.completed(reservation, null).get(0)));
+                            }
+                            done.countDown();
+                        });
+                    } catch (IOException failure) {
+                        error.set(failure);
+                        ticket.complete(done::countDown);
+                    }
+                }
+
+                @Override
+                public void failed(Throwable failure) {
+                    error.set(failure);
+                }
+            }));
+            owner.start();
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertNull(error.get());
+            assertTrue(published.get().isEmpty());
+            CountDownLatch checked = new CountDownLatch(1);
+            assertTrue(owner.control(() -> {
+                assertEquals(0, hot.candidateCount());
+                assertTrue(hot.candidate(context(), 3).isEmpty());
+                checked.countDown();
+            }));
+            assertTrue(checked.await(5, TimeUnit.SECONDS));
+        } finally {
             io.shutdown();
             assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
             owner.stopAdmission();

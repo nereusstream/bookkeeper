@@ -169,7 +169,7 @@
     "planningCommit": "e75c67f3514d1627ea790d052e2c9226e593aa3c",
     "workspace": "/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper",
     "branch": "turbo-bk",
-    "state": "STEP_7_POINT_READ_AND_RECOVERY_FILE_SYNC_PARTIAL_STEP_5_BOOKIE_CONTROL_PENDING",
+    "state": "STEP_6_HOT_CANDIDATE_AND_STEP_7_READ_SYNC_PARTIAL_STEP_5_BOOKIE_CONTROL_PENDING",
     "client2": "CLASSIC_RECYCLING_FIX_RED_GREEN_9_TESTS",
     "client2Receipt": "docs/rfcs/unified-wal/implementation/client-maintenance/client2-receipt.json",
     "client1": "CLASSIC_ACK_GATE_FIX_RED_GREEN_85_TESTS",
@@ -189,7 +189,8 @@
     "physicalPrefixReceipt": "docs/rfcs/unified-wal/implementation/local-storage/physical-prefix-receipt.json",
     "pointReadReceipt": "docs/rfcs/unified-wal/implementation/local-storage/point-read-receipt.json",
     "dataRecoverySyncReceipt": "docs/rfcs/unified-wal/implementation/local-storage/data-recovery-sync-receipt.json",
-    "remainingSteps": "4 PARTIAL; 5 PARTIAL ARENA CONTROL ONLY; 6 PARTIAL PHYSICAL PREFIX ONLY; 7 PARTIAL POINT READ AND FILE SYNC ONLY; 8-16 NOT_COMPLETED",
+    "hotDirectoryReceipt": "docs/rfcs/unified-wal/implementation/local-storage/hot-directory-receipt.json",
+    "remainingSteps": "4 PARTIAL; 5 PARTIAL ARENA CONTROL ONLY; 6 PARTIAL PHYSICAL PREFIX AND HOT CANDIDATES ONLY; 7 PARTIAL POINT READ AND FILE SYNC ONLY; 8-16 NOT_COMPLETED",
     "productionIntegration": false,
     "authority": "NONE"
   },

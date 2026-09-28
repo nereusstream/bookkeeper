@@ -1,0 +1,23 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_BOUNDED_PHYSICAL_HOT_CANDIDATES",
+  "sourceBaseCommit": "e96b658fcb3dd9d80179d8084af143d96f09886b",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentFiles.java": "d9e86b0ad33352be6d0ed50294a0e144a1642640dd73b39c7121b8185dcb52f1",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentPhysicalPrefix.java": "41a8f2f6fb9ab9ba1938a112903e2107b5f07b473511e12d693c39ed5ade37da",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentHotDirectory.java": "fa01967d6c56704c5eecf449ae4bd0bd2d7c2ba9043a2c0d40a97a9b8bc5cfad",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "78ab61a2115eb2991d674c31302a00bd2acfffb76537dc71c70c0e74fde46864"
+  },
+  "fixture": "one Arena, one 4 MiB precreated DATA file, two logical entries at physical sequence 11 and 12; two I/O workers complete 12 before 11, with a separate injected force failure for 11; hot capacity two; separate durable RELOCATION_COPY batch",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-71Ywmtly",
+  "inputSha256": "863d92e0e89a5b4b798d36160257e99a330ee0a4ac1880da79da7752079a88aa",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentArenaControlLogTest,SegmentOwnerLoopTest",
+  "mavenLogSha256": "b0bdd146eda3370f0c515c8658c51a78edcc02f2a244c5308dbf13e5816d3a75",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 16, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "1afc9b47bf24777bd24af41fd6b2b188206c3c36114cd043d7b20d64a5fc53e7"},
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "4c5905e590adf84c5fc44c1d6eaa7c1c8fe356f6b7a5921dff7b0f80f77989f4"},
+    "SegmentOwnerLoopTest": {"tests": 6, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "9914c0a3f4683976be515cdf4a077a41536ae487a674f80a809787f81ba68b87"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Owner-only physical candidate directory with explicit entry and pending bounds; duplicate logical entries currently reject rather than provide idempotency. No Bookie route/fence/tombstone eligibility, selector/pin, local entry result, restart locator rebuild, power-loss or production authority."
+}

@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的volatile连续物理前缀和步骤7的对齐单record点读/停写后文件同步局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储回执。Bookie控制、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
+实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的volatile连续物理前缀/有界物理热候选和步骤7的对齐单record点读/停写后文件同步局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储回执。Bookie控制、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
@@ -275,7 +275,7 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 首批选择**每个物理append stream的连续前缀恢复和成功发布**。bounded batch table记录乱序completion；只有从已验证起点开始连续的batch均取得durability，才推进内存中的physical durable-through并允许对应entry发布locator/local success。batch 11未durable而12先完成时，12保持等待，不能先ACK再在restart的11缺口截断后缀。该序号属于物理stream，不是ledger entryId或LAC，也不是Arena控制日志sequence；不同ledger可同批，`E>W`不要求本地entryId连续。
 
-实现状态：隔离文件路径已将坐标预留与实际write/force分开，owner上的有界tracker验证真实reservation的force结果并按stream sequence释放连续物理候选；11/12乱序与11同步失败的局部真实文件测试已覆盖。起点尚非持久恢复证据，Bookie权限、热定位、逐entry成功和restart前缀重建仍未接通，不能以该候选直接ACK。
+实现状态：隔离文件路径已将坐标预留与实际write/force分开，owner上的有界tracker验证真实reservation的force结果并按stream sequence释放连续物理候选；有界热目录在DATA预留前占定位容量，仅在该连续结果后发布普通`ENTRY_DATA`物理候选，搬迁副本不进入普通候选。11/12乱序、11同步失败和容量满额的局部真实文件测试已覆盖。起点尚非持久恢复证据，Bookie权限、逐entry成功和restart前缀重建仍未接通，不能以该候选直接ACK。
 
 允许有界I/O queue depth大于1；物理前缀排序在各stream内，不新增跨shard全局sequencer，但共享文件的barrier成本/错误范围不因此隔离。batch边界、stream lineage与范围发现由§9的可恢复framing和完整allocator authority给出；physical durable-through按§12先验证候选，再凭独立有效证据或必要恢复同步重建，不要求另写持久成功游标。restart从已验证checkpoint/覆盖cut按stream扫描活动后缀；已由control authority解释的FREE/retired范围不能被当作未知缺口。所谓“截断DATA后缀”仅指将已证明可丢弃的特定stream/generation未成功后缀排除出有效批次范围，不等于缩短共享文件；required数据损坏或边界无法判定时fail closed，不能仅凭CRC错误或内存watermark丢失猜测无ACK。
 

@@ -26,7 +26,25 @@ import org.apache.bookkeeper.common.profile.startup.Generation;
 
 /** Owner-thread physical prefix only; entry admission, locator publication and ACK remain separate. */
 final class SegmentPhysicalPrefix {
-    record DurableBatch(SegmentBatchFormat.Address address, int length) { }
+    static final class DurableBatch {
+        private final IsolatedSegmentFiles.Reservation reservation;
+
+        private DurableBatch(IsolatedSegmentFiles.Reservation reservation) {
+            this.reservation = reservation;
+        }
+
+        SegmentBatchFormat.Address address() {
+            return reservation.address();
+        }
+
+        int length() {
+            return reservation.length();
+        }
+
+        IsolatedSegmentFiles.Reservation reservation() {
+            return reservation;
+        }
+    }
 
     private static final class Pending {
         private final IsolatedSegmentFiles.Reservation reservation;
@@ -96,7 +114,7 @@ final class SegmentPhysicalPrefix {
             }
             pending.remove(durableThrough + 1);
             durableThrough++;
-            advanced.add(new DurableBatch(first.reservation.address(), first.reservation.length()));
+            advanced.add(new DurableBatch(first.reservation));
         }
         return List.copyOf(advanced);
     }

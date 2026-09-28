@@ -38,6 +38,8 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 步骤6的物理前缀局部切片：`IsolatedSegmentFiles`已将有界DATA坐标预留与已预留批次的实际write/force分开。预留在I/O前占用固定文件范围；失败不退回坐标，并停止该文件新写。`SegmentPhysicalPrefix`只在原shard owner上接收同一stream generation的递增batch sequence；I/O completion必须对应已预留batch且其真实force返回，才可推进连续物理前缀。较晚batch先durable仍等待前批；前批同步不确定时不释放后批，不凭后批完整字节报告本地成功。当前tracker的起点由隔离调用者显式提供，未从持久checkpoint证明；它只返回物理可发布候选，不实现Bookie权限复查、热定位或逐entry result。
 
+步骤6继续接入有界物理热候选：`SegmentHotDirectory`在原owner上从独立parser解析的冻结batch中提取普通`ENTRY_DATA`位置，在占用DATA坐标前预留固定locator与pending容量，再把预留绑定到同一真实文件reservation。只有`SegmentPhysicalPrefix`释放连续、已force的reservation后，才将这些位置从pending移入可点读候选；同批`RELOCATION_COPY`不进入普通候选。容量满额、重复逻辑坐标在写入前明确拒绝；当前不把重复拒绝冒充同坐标幂等，不能处理合法LAC封装变化。候选没有Bookie route/fence/tombstone/selector权限，也不等于local result；无RocksDB接管或淘汰时达到硬上限就背压新DATA。
+
 步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。它不创建或发布locator，不证明batch已进入连续持久前缀；当前Arena也不支持FREE/复用，故尚无selector复核与allocation pin合同。重开后点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
 
 ## 验证入口
@@ -98,6 +100,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 2026-09-28 [恢复同步回执](data-recovery-sync-receipt.json)：macOS隔离测试19项通过，0失败/错误/跳过，Spotless/Checkstyle通过。停写后重开Arena控制日志，完整已授权DATA经扫描后对该文件执行一次真实`force(false)`；注入force失败时不返回成功结果。无grant或尾部脏页在force之前拒绝。此为文件同步和失败边界证据，不证明已选出全部必要DATA、重建前缀、恢复entry权限或掉电后的耐久性。
 
+2026-09-28 [物理热候选回执](hot-directory-receipt.json)：macOS隔离测试26项通过，0失败/错误/跳过，Spotless/Checkstyle通过。真实DATA文件中12先写并force仍无候选，11完成后11/12一起发布、12可从候选点读；11的force失败则候选保持未发布。两个候选占满硬上限后，第三个batch在DATA坐标前被拒绝；单独的搬迁副本完成物理前缀却不发布普通候选。未验证Bookie权限、逐entry成功、幂等、重启索引重建或性能。
+
 ## 未覆盖范围
 
-步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制及Arena/DATA恢复闭环、步骤6合批/热定位/逐entry结果/幂等、步骤7热定位发布/selector与pin/完整restart尚未实现。物理前缀和点读的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
+步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制及Arena/DATA恢复闭环、步骤6合批/权限化热定位/逐entry结果/幂等、步骤7selector与pin/完整restart尚未实现。物理热候选、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
