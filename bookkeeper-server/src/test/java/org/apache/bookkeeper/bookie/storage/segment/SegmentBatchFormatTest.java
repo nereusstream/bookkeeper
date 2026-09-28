@@ -1165,21 +1165,44 @@ public class SegmentBatchFormatTest {
                     arena, failedSync));
             assertEquals(1, failedSync.forces);
             SegmentFileIo sync = new SegmentFileIo();
-            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
-                    config, identity(), arena, sync)) {
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity(), arena, sync, 1)) {
                 assertEquals(1, sync.forces);
                 assertEquals(nextBlock, reopened.nextOffset(0));
+                assertEquals(1, reopened.startupInventory().entries().size());
+                assertEquals(11, SegmentPointRead.read(config, identity(), arena,
+                        reopened.startupInventory().entries().get(0)).record().entryId());
                 assertThrows(IOException.class, () -> reopened.writeAuthorized(first, arena));
                 SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
                 SegmentIoExecutor io = new SegmentIoExecutor(1, 1);
+                owner.start();
                 try {
                     assertThrows(IllegalArgumentException.class, () -> new SegmentDataPhysicalDriver(
                             0, owner, io, reopened, arena,
                             new SegmentPhysicalPrefix(owner, 0, new Generation(2), 1, 1),
                             new SegmentHotDirectory(owner, config, identity(), 2)));
+                    CountDownLatch restored = new CountDownLatch(1);
+                    AtomicReference<Throwable> restoreFailure = new AtomicReference<>();
+                    assertTrue(owner.control(() -> {
+                        try {
+                            SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 2);
+                            hot.restorePhysicalInventory(reopened.startupInventory());
+                            assertEquals(1, hot.candidateCount());
+                            assertTrue(hot.liveDurableCandidate(context(), 11).isEmpty());
+                            assertThrows(IOException.class, () -> hot.reserve(first));
+                        } catch (Throwable failure) {
+                            restoreFailure.set(failure);
+                        } finally {
+                            restored.countDown();
+                        }
+                    }));
+                    assertTrue(restored.await(5, TimeUnit.SECONDS));
+                    assertNull(restoreFailure.get());
                 } finally {
                     io.shutdown();
                     assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                    owner.stopAdmission();
+                    assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
                 }
                 arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
                         SegmentControlFormat.Type.ALLOC, new UUID(0, 6), new Generation(1), 0,
@@ -1428,11 +1451,11 @@ public class SegmentBatchFormatTest {
         if (!failFirst) {
             try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
                 SegmentFileIo insufficient = new SegmentFileIo();
-                assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalInventory(
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithInventory(
                         config, identity(), replay, insufficient, 1));
                 assertEquals(0, insufficient.forces);
                 SegmentFileIo failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
-                assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalInventory(
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithInventory(
                         config, identity(), replay, failedSync, 2));
                 assertEquals(1, failedSync.forces);
                 SegmentFileIo sync = new SegmentFileIo();

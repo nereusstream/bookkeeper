@@ -585,7 +585,9 @@ checkpoint不持久化individual reader、future、buffer reference或pin histor
 
 追加式重开另有两次真实进程终止回归：首个进程得到隔离本地结果后退出，第二个进程恢复同步旧DATA、在新的已apply授权块写入另一物理stream后退出；父进程能分别恢复并点读两个stream，旧recovery重复请求面对同shard多stream仍返回`NOT_READY`。第二次`Runtime.halt`仍不是掉电，且新物理写入没有local result权限。
 
-当前`IsolatedSegmentFiles`已有隔离的**物理append-only重开**入口：Arena控制状态须无未apply/I/O中的命令，完整验证并同步旧DATA后取得独占writer锁，重新核对文件身份；下一物理位置取每文件全部已apply授权块的最高结束位置，不复用块内全零尾页。新写必须另获已apply Arena grant；重开句柄不能交给返回local result的DATA driver，也拒绝无授权原始写入。Arena的持久首序号与授权水位仍不包含空间used/unused或末端durable-through；旧I/O错误、完整Bookie/current-selector及必要DATA依赖没有恢复判定，故此入口不等于服务级可写重启或durable duplicate权威。
+当前`IsolatedSegmentFiles`已有隔离的**物理append-only重开**入口：Arena控制状态须无未apply/I/O中的命令，取得独占writer锁后，在同一次持锁期间完整验证、同步旧DATA并重新核对文件身份；下一物理位置取每文件全部已apply授权块的最高结束位置，不复用块内全零尾页。新写必须另获已apply Arena grant；重开句柄不能交给返回local result的DATA driver，也拒绝无授权原始写入。Arena的持久首序号与授权水位仍不包含空间used/unused或末端durable-through；旧I/O错误、完整Bookie/current-selector及必要DATA依赖没有恢复判定，故此入口不等于服务级可写重启或durable duplicate权威。
+
+可选的有界全目录清单在同一次writer锁内完成旧DATA验证和恢复同步，随重开句柄保留，并能在原owner经scope、容量、重复坐标及无在途提交检查后一次性装入物理热候选。它占住旧坐标，避免后续把这些已观测位置当作空位；候选仍不带local-durable结果资格，清单容量不足或同步失败不返回部分句柄。这没有完成每个stream的末端前缀、current selector或旧I/O错误分类。
 
 此路径只补正常中断留下的持久化确认，不能修补缺失/损坏prefix、ownership冲突、未解析写回错误或依赖不完整；这些仍沿原隔离/恢复规则处理，不以“再sync一次成功”解除。B2/B9/B16须执行两次故障：write完成但barrier前终止进程，重启处理重复请求，再模拟掉电；已允许成功的内容仍须存在。一次kill后可读检查不足，恢复barrier按文件报告次数/等待且不计正常Add增量。
 

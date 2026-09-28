@@ -169,15 +169,28 @@ final class SegmentDataRecovery {
     }
 
     static final class PhysicalInventory {
+        private final IsolatedSegmentConfig sourceConfig;
+        private final SegmentFileHeader sourceIdentity;
         private final Scan scan;
         private final List<SegmentPointRead.Location> entries;
         private final List<Long> grantedHighWatermarks;
 
-        private PhysicalInventory(Scan scan, List<SegmentPointRead.Location> entries,
+        private PhysicalInventory(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
+                                  Scan scan, List<SegmentPointRead.Location> entries,
                                   List<Long> grantedHighWatermarks) {
+            this.sourceConfig = sourceConfig;
+            this.sourceIdentity = sourceIdentity;
             this.scan = scan;
             this.entries = List.copyOf(entries);
             this.grantedHighWatermarks = List.copyOf(grantedHighWatermarks);
+        }
+
+        IsolatedSegmentConfig sourceConfig() {
+            return sourceConfig;
+        }
+
+        SegmentFileHeader sourceIdentity() {
+            return sourceIdentity;
         }
 
         Scan scan() {
@@ -226,6 +239,18 @@ final class SegmentDataRecovery {
             throw new IllegalArgumentException("Bounded DATA recovery sync and inventory required");
         }
         return scan(config, identity, authority, syncIo, maxEntries, null, null);
+    }
+
+    /** Complete, bounded inventory under the writer lock already owned by the restart caller. */
+    static PhysicalInventory recoverPhysicalInventoryWhileLocked(IsolatedSegmentConfig config,
+                                                                 SegmentFileHeader identity,
+                                                                 SegmentArenaControlLog authority,
+                                                                 SegmentFileIo syncIo, int maxEntries,
+                                                                 FileLock writerLock) throws IOException {
+        if (syncIo == null || maxEntries < 1 || writerLock == null) {
+            throw new IllegalArgumentException("Bounded DATA inventory, sync and writer lock required");
+        }
+        return scanWhileLocked(config, identity, authority, syncIo, maxEntries, null, null, writerLock);
     }
 
     /** Requires the persisted Arena stream start before returning a read-only physical candidate. */
@@ -395,8 +420,8 @@ final class SegmentDataRecovery {
         for (int file = 0; file < config.dataFiles(); file++) {
             grantedHighWatermarks.add(authority.grantedHighWatermark(file));
         }
-        return new PhysicalInventory(new Scan(batches, records, validatedBytes, zeroPages), entries,
-                grantedHighWatermarks);
+        return new PhysicalInventory(config, identity, new Scan(batches, records, validatedBytes, zeroPages),
+                entries, grantedHighWatermarks);
     }
 
     private static SegmentBatchFormat.Address address(ByteBuffer page, long offset) throws IOException {

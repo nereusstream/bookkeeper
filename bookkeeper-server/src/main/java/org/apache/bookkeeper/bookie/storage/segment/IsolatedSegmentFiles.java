@@ -69,18 +69,21 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final FileChannel lockChannel;
     private final FileLock lock;
     private final boolean appendOnlyRecovery;
+    private final SegmentDataRecovery.PhysicalInventory startupInventory;
     private int pendingReservations;
     private int activeIo;
     private boolean closed;
     SegmentFileIo dataIo = new SegmentFileIo();
 
     private IsolatedSegmentFiles(IsolatedSegmentConfig config, SegmentFileHeader identity,
-                                 FileChannel lockChannel, FileLock lock, boolean appendOnlyRecovery) {
+                                 FileChannel lockChannel, FileLock lock, boolean appendOnlyRecovery,
+                                 SegmentDataRecovery.PhysicalInventory startupInventory) {
         this.config = config;
         this.identity = identity;
         this.lockChannel = lockChannel;
         this.lock = lock;
         this.appendOnlyRecovery = appendOnlyRecovery;
+        this.startupInventory = startupInventory;
         nextOffset = new long[config.dataFiles()];
         dataIoGates = new Object[config.dataFiles()];
         java.util.Arrays.setAll(dataIoGates, ignored -> new Object());
@@ -104,7 +107,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             if (lock == null) {
                 throw new IOException("Isolated directory is locked");
             }
-            result = new IsolatedSegmentFiles(config, identity, guard, lock, false);
+            result = new IsolatedSegmentFiles(config, identity, guard, lock, false, null);
             for (int i = 0; i < config.dataFiles(); i++) {
                 FileChannel channel = FileChannel.open(dataPath(config, i), StandardOpenOption.CREATE_NEW,
                         StandardOpenOption.READ, StandardOpenOption.WRITE);
@@ -147,6 +150,24 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                SegmentArenaControlLog authority, SegmentFileIo recoveryIo)
             throws IOException {
+        return openAppendOnly(config, identity, authority, recoveryIo, 0);
+    }
+
+    /** Also retain every ordinary physical coordinate from the same locked startup scan. */
+    static IsolatedSegmentFiles openAppendOnlyWithInventory(IsolatedSegmentConfig config,
+                                                            SegmentFileHeader identity,
+                                                            SegmentArenaControlLog authority,
+                                                            SegmentFileIo recoveryIo, int maxEntries)
+            throws IOException {
+        if (maxEntries < 1) {
+            throw new IllegalArgumentException("Positive restart locator capacity required");
+        }
+        return openAppendOnly(config, identity, authority, recoveryIo, maxEntries);
+    }
+
+    private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                       SegmentArenaControlLog authority, SegmentFileIo recoveryIo,
+                                                       int maxEntries) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(authority, "authority");
@@ -167,8 +188,14 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                     throw new IOException("Isolated DATA writer is already active");
                 }
                 // Keep the same writer exclusion through validation, sync and the reopened writer lifetime.
-                SegmentDataRecovery.validateAndSyncWhileLocked(config, identity, authority, recoveryIo, lock);
-                result = new IsolatedSegmentFiles(config, identity, guard, lock, true);
+                SegmentDataRecovery.PhysicalInventory inventory = null;
+                if (maxEntries == 0) {
+                    SegmentDataRecovery.validateAndSyncWhileLocked(config, identity, authority, recoveryIo, lock);
+                } else {
+                    inventory = SegmentDataRecovery.recoverPhysicalInventoryWhileLocked(config, identity,
+                            authority, recoveryIo, maxEntries, lock);
+                }
+                result = new IsolatedSegmentFiles(config, identity, guard, lock, true, inventory);
                 for (int file = 0; file < config.dataFiles(); file++) {
                     FileChannel data = FileChannel.open(dataPath(config, file), StandardOpenOption.READ,
                             StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
@@ -317,6 +344,13 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     boolean supportsLocalResults() {
         return !appendOnlyRecovery;
+    }
+
+    synchronized SegmentDataRecovery.PhysicalInventory startupInventory() {
+        if (closed || startupInventory == null) {
+            throw new IllegalStateException("No retained DATA startup inventory");
+        }
+        return startupInventory;
     }
 
     synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {

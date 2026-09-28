@@ -68,6 +68,10 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 隔离文件层现可执行**仅用于物理追加**的重开：要求Arena控制状态没有未apply/I/O中的命令，先取得独占writer锁，在同一锁内完整验证、同步DATA并复核文件身份与大小，随后一直持锁至重开句柄关闭；每个文件的新指针设置在全部已apply授权块的最高结束位置。已授权块中的全零尾页、旧预留和失败坐标一律跳过，不按最后完整batch回退指针；后续仍须有新apply的Arena grant，重开句柄的原始无授权写入和会返回本地结果的DATA driver都拒绝。真实文件测试覆盖旧块零尾不复用、新stream在其后写入及双stream重开点读、活跃writer与恢复同步失败、未apply控制命令拒绝重开。此入口当前要求与Arena控制日志完全相同的隔离配置；非持久新写阈值的变更尚未接入该重开路径。该低层入口不解除旧DATA I/O错误，也不证明完整末端前缀、Bookie/current-selector或生产local success；完整服务级可写重启仍需要必要DATA选择、空间与旧I/O判定。
 
+需要保留旧坐标时，`openAppendOnlyWithInventory`在上述同一次writer锁内对完整DATA执行有界物理清单扫描与恢复同步，并将扫描结果绑定到重开句柄。原owner可用`SegmentHotDirectory.restorePhysicalInventory`先验证scope、容量、重复坐标及无在途提交，再一次性装入普通DATA物理候选；旧坐标因此保持占位，但仍标记为非local-durable。容量不足或同步失败不返回句柄/部分清单，失败时释放锁。此路径尚未恢复每个stream的末端前缀、selector或旧I/O错误类别，DATA driver继续拒绝在该重开句柄上返回local result。
+
+2026-09-29 分别执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest`和`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：27项与53项通过，均0失败/错误/跳过；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。新增文件级交接验证旧entry随受锁扫描进入启动清单、原owner占位、仍无local-durable资格；容量不足与同步失败后可重新取得writer锁。测试不证明完整服务启动、可写前缀、跨进程争锁时序或掉电保证。
+
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest`：80项隔离测试通过，0失败/错误/跳过；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。现有重开测试覆盖活跃writer拒绝、同步失败后再次重开、物理追加与重启点读；本次改动使扫描、恢复同步与新writer打开共享同一次排他锁持有，不把这些测试扩展为跨进程竞争或掉电验收。
 
 ## 验证入口
