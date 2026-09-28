@@ -60,11 +60,13 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
     private final List<FileChannel> data = new ArrayList<>();
+    private final Object[] dataIoGates;
     private final long[] nextOffset;
     private final boolean[] failed;
     private final FileChannel lockChannel;
     private final FileLock lock;
     private int pendingReservations;
+    private int activeIo;
     private boolean closed;
     SegmentFileIo dataIo = new SegmentFileIo();
 
@@ -75,6 +77,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         this.lockChannel = lockChannel;
         this.lock = lock;
         nextOffset = new long[config.dataFiles()];
+        dataIoGates = new Object[config.dataFiles()];
+        java.util.Arrays.setAll(dataIoGates, ignored -> new Object());
         failed = new boolean[config.dataFiles()];
         java.util.Arrays.fill(nextOffset, 4096);
     }
@@ -138,7 +142,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return config.directory().resolve("data-" + index);
     }
 
-    synchronized void write(SegmentBatchFormat.FrozenBatch batch) throws IOException {
+    void write(SegmentBatchFormat.FrozenBatch batch) throws IOException {
         writeReserved(reserve(batch));
     }
 
@@ -162,29 +166,48 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return new Reservation(this, batch);
     }
 
-    synchronized void writeReserved(Reservation reservation) throws IOException {
-        if (reservation.owner != this || reservation.submitted) {
-            throw new IllegalArgumentException("Reservation belongs to another writer or was already submitted");
-        }
-        reservation.submitted = true;
-        int file = reservation.address().fileIndex();
-        try {
+    void writeReserved(Reservation reservation) throws IOException {
+        int file;
+        synchronized (this) {
+            if (reservation.owner != this || reservation.submitted) {
+                throw new IllegalArgumentException("Reservation belongs to another writer or was already submitted");
+            }
+            reservation.submitted = true;
+            file = reservation.address().fileIndex();
             if (closed || failed[file]) {
+                pendingReservations--;
                 throw new IOException("Reserved DATA file is unavailable");
             }
-            dataIo.writeFully(data.get(file), reservation.batch.bytes(), reservation.address().offset());
-            dataIo.force(data.get(file), false);
-            reservation.durable = true;
-        } catch (IOException | RuntimeException | Error failure) {
-            failed[file] = true;
-            throw failure;
+            activeIo++;
+        }
+        try {
+            synchronized (dataIoGates[file]) {
+                try {
+                    synchronized (this) {
+                        if (failed[file]) {
+                            throw new IOException("Reserved DATA file is unavailable");
+                        }
+                    }
+                    dataIo.writeFully(data.get(file), reservation.batch.bytes(), reservation.address().offset());
+                    dataIo.force(data.get(file), false);
+                    reservation.durable = true;
+                } catch (IOException | RuntimeException | Error failure) {
+                    synchronized (this) {
+                        failed[file] = true;
+                    }
+                    throw failure;
+                }
+            }
         } finally {
-            pendingReservations--;
+            synchronized (this) {
+                activeIo--;
+                pendingReservations--;
+            }
         }
     }
 
     /** Physical experiment path: require an applied, durable Arena grant for the entire frozen DATA batch. */
-    synchronized void writeAuthorized(SegmentBatchFormat.FrozenBatch batch, SegmentArenaControlLog authority)
+    void writeAuthorized(SegmentBatchFormat.FrozenBatch batch, SegmentArenaControlLog authority)
             throws IOException {
         writeReserved(reserveAuthorized(batch, authority));
     }
@@ -222,6 +245,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     public synchronized void close() throws IOException {
         if (closed) {
             return;
+        }
+        if (activeIo != 0) {
+            throw new IOException("DATA I/O is still in flight");
         }
         closed = true;
         IOException first = null;

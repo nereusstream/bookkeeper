@@ -19,6 +19,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -40,7 +41,9 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -103,6 +106,83 @@ public class SegmentBatchFormatTest {
             return copy;
         } finally {
             encoded.release();
+        }
+    }
+
+    @Test
+    public void dataReservationAndCloseDecisionDoNotWaitForFileForce() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("data-lock"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf firstEntry = entry(new byte[16], 1);
+        ByteBuf secondEntry = entry(new byte[16], 2);
+        SegmentBatchFormat.FrozenBatch first;
+        SegmentBatchFormat.FrozenBatch second;
+        try {
+            first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry)));
+            second = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 2, 8192),
+                    List.of(SegmentBatchFormat.entry(context(), secondEntry)));
+        } finally {
+            firstEntry.release();
+            secondEntry.release();
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger forces = new AtomicInteger();
+        SegmentFileIo slow = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (forces.getAndIncrement() == 0) {
+                forcing.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+        });
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity())) {
+            files.dataIo = slow;
+            IsolatedSegmentFiles.Reservation firstReservation = files.reserve(first);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread writer = new Thread(() -> {
+                try {
+                    files.writeReserved(firstReservation);
+                } catch (Throwable cause) {
+                    failure.set(cause);
+                }
+            });
+            writer.start();
+            IsolatedSegmentFiles.Reservation secondReservation;
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                FutureTask<IsolatedSegmentFiles.Reservation> reserve = new FutureTask<>(() -> files.reserve(second));
+                new Thread(reserve).start();
+                secondReservation = reserve.get(1, TimeUnit.SECONDS);
+                assertEquals(8192, secondReservation.address().offset());
+                FutureTask<Throwable> close = new FutureTask<>(() -> {
+                    try {
+                        files.close();
+                        return null;
+                    } catch (Throwable cause) {
+                        return cause;
+                    }
+                });
+                new Thread(close).start();
+                assertTrue(close.get(1, TimeUnit.SECONDS) instanceof IOException);
+            } finally {
+                release.countDown();
+                writer.join(5000);
+            }
+            assertFalse(writer.isAlive());
+            assertNull(failure.get());
+            assertTrue(firstReservation.durable());
+            files.writeReserved(secondReservation);
+            assertTrue(secondReservation.durable());
+            assertEquals(12288, files.nextOffset(0));
         }
     }
 

@@ -1,0 +1,20 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_DATA_FILE_LOCK_SCOPE_ONLY",
+  "sourceBaseCommit": "0b7471634d2ae42a1e9eee6ad81c76fe138c25ca",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/IsolatedSegmentFiles.java": "9765d3804104b1b00146368bc78aefd208016ca4de29af35ca9346fccc12f245",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "64a1dccf8ba4363f2bd7ddbf0c6ca0c4c33cb6acd15aa1a60b4cd6d5aa66bd7b"
+  },
+  "fixture": "real fixed-capacity DATA file with first force held inside its file I/O gate; reserve a second batch while force is blocked, reject close while active, then release and force both batches",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-IcmzcRnx",
+  "inputSha256": "63562e2b32465d9dd355afd5ad1514b7ee8b3d33edc3e5149279aa3a50cb6d33",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentArenaControlLogTest",
+  "mavenLogSha256": "86088d72630b5eb217b09e78d1c9a9d31a0b331bc26c7eb2b6e67c0f098d7394",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 17, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "98254048a46651f19d2f971f58285cc4a437ac59b2b0c369f710c168fc96305d"},
+    "SegmentArenaControlLogTest": {"tests": 8, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "972876383e9cc3f942176a75611638fb923204f628c24faae2e24328439e5f6b"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Only the isolated DATA reservation/I/O lock boundary and active-I/O close refusal. No ordinary Add driver, Bookie authority, per-entry local result, power-loss or production authority."
+}

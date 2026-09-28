@@ -138,7 +138,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 当前仅[隔离Arena局部切片](local-storage/README.md)实现上述ALLOC/ALLOC_POOL的文件持久化、单在途驱动、顺序apply和完整历史重放；定向真实文件测试已在DATA准入及I/O服务满额时通过独立控制份额完成force与原owner apply。显式DATA文件写入路径已检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner、Arena驱动的实际服务生命周期接线及pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
 
-控制日志force已移出授权状态锁，受控慢force不阻塞已apply grant查询；DATA文件write/force仍会持有其预留对象锁，真实DATA owner非阻塞链路尚未闭合。
+控制日志force已移出授权状态锁，受控慢force不阻塞已apply grant查询；DATA文件write/force也移出范围预留状态锁，以同文件独立锁串行。普通Add、逐entry结果和完整DATA owner链路尚未闭合。
 
 **完成条件：** 同批两个ALLOC竞争同一slot只有一个成功；durable未apply、apply中途崩溃和重复请求的结果一致；错误storage identity不开放写入；DATA只使用已持久化且成功apply的空间授权。本地fence/grant先用受控DATA事件验证顺序，在步骤6补真实I/O交错测试。
 

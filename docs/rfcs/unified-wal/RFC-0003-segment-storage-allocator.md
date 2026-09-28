@@ -166,7 +166,7 @@ group commit中，必须有明确覆盖该`controlSequence`的durability complet
 
 实现状态：隔离文件原型已接通ALLOC/ALLOC_POOL的单batch持久化、按序条件apply、身份校验及有界全量重放；单在途Arena控制驱动与定向真实文件测试已由独立控制completion及I/O服务份额在DATA准入和I/O队列满时完成控制日志force、原owner顺序apply，显式`writeAuthorized`路径核对整段DATA batch grant。只读扫描可在停写后验证完整framing与grant，但不把零页宣布为unused，也不重建restart的连续stream前缀；运行时只有由调用方指定起点的volatile物理前缀候选。Bookie控制闭环、实际服务生命周期接线、pool used/unused恢复、FREE/MOVE与逐entry成功均未完成，不能作为本节完整allocator authority。
 
-隔离Arena控制日志的文件write/force已移出其grant状态锁；受控慢force期间既有grant查询不会等待该I/O，新的条件batch仍被单在途门槛拒绝。DATA文件自身的锁边界仍待接通非阻塞批写，不据此声称append owner已不会等待存储I/O。
+隔离Arena控制日志的文件write/force已移出其grant状态锁；受控慢force期间既有grant查询不会等待该I/O，新的条件batch仍被单在途门槛拒绝。DATA文件的范围预留也与同文件串行write/force分锁，慢force不再占预留状态锁；但尚未接入普通Add及逐entry结果，不据此声称完整append链路无阻塞。
 
 ```text
 validate format / authority / bounded enqueue eligibility
