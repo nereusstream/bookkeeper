@@ -44,6 +44,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 `SegmentDataPhysicalDriver`已把上述局部原语接成隔离的真实文件路径：原owner先占热候选容量、核对Arena grant并预留DATA坐标，再将write/force交给有界I/O服务；完成事件回原owner，只有连续前缀释放后才发布候选并回调。物理失败会将所有尚未完成的回调报错，保留已占坐标，不释放后批候选。该回调不产生逐entry local result或Bookie ACK；重启前缀起点、Bookie权限与selector仍待实现。
 
+同一冻结batch携带两个不同`ENTRY_DATA`时，隔离执行组路径以一次DATA force发布两个可点读物理候选。它只验证物理合批，尚未逐entry判定fence/权限、返回各自local result或计量生产性能。
+
 该驱动也已在`SegmentExecutionGroup`的现有owner/I/O服务上验证排空：已受理的真实DATA force挂起时，group关闭返回未终结且DATA文件拒绝关闭；force完成、原owner回调可点读候选后，group才排空退出。此为隔离执行组的局部生命周期证据，仍未接入Bookie服务启动与停止。
 
 步骤6的重复慢路径局部原语：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`先复制至多1 MiB应用数据加36字节BK头的请求entry，再在候选位置上执行真实文件点读，比较同一ledger instance/entryId的应用payload bytes和累计ledger length。合法LAC及相应CRC差异不造成冲突，payload或累计length变化返回冲突，坏输入CRC、不同instance或entryId拒绝。调用方必须在有界I/O线程执行点读，独立完成Bookie route/auth/grant及完成时的权限复核；当前没有接入请求准入、并发pending重试或逐entry结果，`SegmentHotDirectory.reserve`仍在占用坐标前拒绝重复写入，故尚无可对外返回成功的幂等Add。
@@ -129,6 +131,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 2026-09-28 [执行组排空回执](data-driver-drain-receipt.json)：macOS隔离定向测试32项中27执行通过、5项Linux专属测试跳过，0失败/错误；Spotless/Checkstyle通过。真实DATA force在隔离group关闭时保持在途，文件拒绝提前关闭；释放force后候选可点读，owner/I/O服务完成排空。尚未验证Bookie服务生命周期或掉电恢复。
 
 2026-09-28 [物理stream候选回执](physical-stream-candidate-receipt.json)：macOS隔离真实文件测试21项通过，0失败/错误/跳过，Spotless/Checkstyle通过。已授权batch在writer退出、控制日志重开及DATA同步后，以显式起点11得到连续候选至12并可点读；缺11之前的起点、序号11/13缺口、重复11和batch容量不足均拒绝。该起点仍由调用方提供，未证明持久前缀或Bookie权限。
+
+2026-09-28 [物理合批回执](physical-batch-receipt.json)：macOS隔离定向测试34项中29执行通过、5项Linux专属测试跳过，0失败/错误；Spotless/Checkstyle通过。同一冻结DATA batch的两条不同entry经隔离group的owner/I/O路径完成一次真实FileChannel force，连续物理前缀释放后返回两个可点读候选。未实现逐entry local result或Bookie ACK。
 
 ## 未覆盖范围
 

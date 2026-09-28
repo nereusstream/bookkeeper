@@ -259,6 +259,57 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void physicalDriverPublishesTwoReadableEntriesAfterOneBatchForce() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("driver-batch"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf firstEntry = entry(new byte[16], 1);
+        ByteBuf secondEntry = entry(new byte[16], 2);
+        SegmentBatchFormat.FrozenBatch batch;
+        try {
+            batch = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry),
+                            SegmentBatchFormat.entry(context(), secondEntry)));
+        } finally {
+            firstEntry.release();
+            secondEntry.release();
+        }
+        SegmentExecutionGroup.Settings settings = new SegmentExecutionGroup.Settings(
+                1, 2, 1, 1, 4096, 8191, Duration.ofSeconds(5));
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> published = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 1)));
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config, settings);
+            try {
+                SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, group.owner(0), group.io(),
+                        files, authority, new SegmentPhysicalPrefix(group.owner(0), 0, new Generation(1), 1, 1),
+                        new SegmentHotDirectory(group.owner(0), config, 2));
+                assertTrue(driver.submit(batch, (locations, cause) -> {
+                    group.owner(0).requireOwner();
+                    published.set(locations);
+                    failure.set(cause);
+                    done.countDown();
+                }));
+                assertTrue(done.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(1, files.dataIo.forces);
+                assertEquals(2, published.get().size());
+                assertEquals(1, SegmentPointRead.read(config, identity(), authority, published.get().get(0))
+                        .record().entryId());
+                assertEquals(2, SegmentPointRead.read(config, identity(), authority, published.get().get(1))
+                        .record().entryId());
+            } finally {
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
     public void physicalDriverForceFailureKeepsCoordinatesAndReportsNoCandidates() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("driver-fail"),
                 1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

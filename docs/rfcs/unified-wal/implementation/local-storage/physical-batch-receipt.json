@@ -1,0 +1,19 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_MULTI_ENTRY_PHYSICAL_BATCH_ONLY",
+  "sourceBaseCommit": "047cbfe49f1b58594dfe3cb2f780481a3eef6fa3",
+  "sourceSha256": {
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "75de4694cc4c4ce3c9cde9c27347530d4283392632fd860d6d47fec9891f9f7d"
+  },
+  "fixture": "two distinct BK entries in one frozen DATA batch, one applied Arena pool grant, isolated execution group owner and real FileChannel DATA force",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-f5Ut1GQs",
+  "inputSha256": "40d3699bfecd13ebbe21ae81c938383e311486b4529ac8839af5366b6ffcc2c4",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentExecutionGroupTest",
+  "mavenLogSha256": "ad8235f715fd66f0418d2e46f73b36cb6eba3bcdd929d2b6fd573bb0e6247425",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 22, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "cd858e6fc14e7676b6b3b7c77518e68669628c4cac570a501ebe0d4f049e2790"},
+    "SegmentExecutionGroupTest": {"tests": 12, "failures": 0, "errors": 0, "skipped": 5, "xmlSha256": "f58c5a0c1787882437fd22c7ac482f3047206b0db857a84d7ccfb0ce35f11655"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Two readable physical candidates share one batch force. No per-entry Bookie eligibility/local result, request idempotency, persisted restart prefix, power-loss or production ACK authority."
+}
