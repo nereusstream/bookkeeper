@@ -177,6 +177,10 @@ public class SegmentBookieControlLogTest {
         return new ProfileOperationCodec.FenceLedger(context(), id, filled(20, verifier));
     }
 
+    private static ProfileOperationCodec.WriteLac writeLac(long lac, byte verifier, byte body) {
+        return new ProfileOperationCodec.WriteLac(context(), lac, filled(20, verifier), new byte[] {body});
+    }
+
     private static SegmentBatchFormat.FrozenBatch batch(IsolatedSegmentConfig config, long entryId,
                                                         long sequence, long offset) throws Exception {
         ByteBuf entry = entry(context(), entryId);
@@ -291,6 +295,128 @@ public class SegmentBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
                     replay.submitBatch(List.of(install(3, (byte) 5))).get(0).status());
             assertTrue(replay.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+    }
+
+    @Test
+    public void explicitLacIsMonotonicDurableAndFencedWithTheInstalledInstance() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1)));
+            log.submitBatch(List.of(activate(2)));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1)));
+            assertEquals(9, log.explicitLac(context()).orElseThrow().lac());
+            byte[] returned = log.explicitLac(context()).orElseThrow().body();
+            returned[0] = 8;
+            assertEquals(1, log.explicitLac(context()).orElseThrow().body()[0]);
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1)));
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 2)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitExplicitLac(writeLac(8, (byte) 5, (byte) 1)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitExplicitLac(writeLac(10, (byte) 6, (byte) 3)));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitExplicitLac(writeLac(10, (byte) 5, (byte) 3)));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(10, replay.explicitLac(context()).orElseThrow().lac());
+            assertEquals(3, replay.explicitLac(context()).orElseThrow().body()[0]);
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitExplicitLac(writeLac(10, (byte) 5, (byte) 3)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    replay.submitFence(fence(3, (byte) 5)).status());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitExplicitLac(writeLac(10, (byte) 5, (byte) 3)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    replay.submitExplicitLac(writeLac(11, (byte) 5, (byte) 4)));
+            assertEquals(10, replay.explicitLac(context()).orElseThrow().lac());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    replay.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+            assertTrue(replay.explicitLac(context()).isEmpty());
+        }
+    }
+
+    @Test
+    public void uncertainExplicitLacForceIsNotAcknowledgedButReplaysWhenComplete() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog setup = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            setup.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+        }
+        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR,
+                new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false))) {
+            assertThrows(IOException.class, () -> log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1)));
+            assertTrue(log.explicitLac(context()).isEmpty());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(9, replay.explicitLac(context()).orElseThrow().lac());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1)));
+        }
+    }
+
+    @Test
+    public void pendingFenceWaitsForAnEarlierExplicitLacBarrier() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog setup = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            setup.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Explicit LAC force was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            AtomicReference<SegmentBookieControlLog.Status> status = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread writer = new Thread(() -> {
+                try {
+                    status.set(log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1)));
+                } catch (Throwable cause) {
+                    failure.set(cause);
+                }
+            });
+            writer.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                        log.submitFence(fence(3, (byte) 5)).status());
+                assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            } finally {
+                release.countDown();
+                writer.join(5000);
+            }
+            assertFalse(writer.isAlive());
+            assertNull(failure.get());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, status.get());
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    log.submitFence(fence(3, (byte) 5)).status());
+            assertEquals(9, log.explicitLac(context()).orElseThrow().lac());
         }
     }
 

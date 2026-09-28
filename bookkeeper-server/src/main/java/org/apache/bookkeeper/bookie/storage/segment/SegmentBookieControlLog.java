@@ -63,6 +63,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     record Result(Status status, UUID operationId, long sequence, long localGeneration) { }
 
+    record ExplicitLac(long lac, byte[] body) {
+        ExplicitLac {
+            body = body.clone();
+        }
+
+        @Override
+        public byte[] body() {
+            return body.clone();
+        }
+    }
+
     enum FenceStatus {
         APPLIED_DURABLE, ALREADY_DURABLE, WAITING_PRECUT, REJECTED
     }
@@ -184,6 +195,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private boolean fenced;
         private boolean pendingTombstone;
         private UUID pendingFence;
+        private ExplicitLac explicitLac;
         private int inFlight;
 
         private LedgerState(Command command) {
@@ -420,6 +432,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 && !state.pendingTombstone && !tombstones.containsKey(context.ledgerId());
     }
 
+    /** Local replayed value only; a Profile read still needs its own authorization and visibility boundary. */
+    synchronized Optional<ExplicitLac> explicitLac(ProfileLedgerContext context) {
+        if (!locallyReadableContext(context)) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(ledgers.get(context.ledgerId()).explicitLac);
+    }
+
     synchronized boolean canCompleteRead(ReadAdmission admission) {
         if (admission.owner != this || admission.terminal) {
             throw new IllegalArgumentException("Read result requires a live Bookie admission");
@@ -482,6 +502,90 @@ final class SegmentBookieControlLog implements AutoCloseable {
         admission.terminal = true;
         admission.state.inFlight--;
         activeAdmissions--;
+    }
+
+    /** A cold, authenticated LAC update uses the Bookie control barrier, never the normal DATA path. */
+    Status submitExplicitLac(ProfileOperationCodec.WriteLac request) throws IOException {
+        Objects.requireNonNull(request, "request");
+        ProfileLedgerContext context = request.context();
+        byte[] body = request.body();
+        byte[] verifier = request.credential();
+        if (body.length > 65536 - 128 - 16 - ProfileLedgerContext.ENCODED_LENGTH - 12) {
+            throw new IllegalArgumentException("Explicit LAC body exceeds the control record bound");
+        }
+        ByteBuffer record;
+        long sequence;
+        long offset;
+        long generation;
+        synchronized (this) {
+            requireWritable();
+            if (writing || pending != null) {
+                throw new IOException("Bookie control operation is unresolved");
+            }
+            LedgerState state = ledgers.get(context.ledgerId());
+            if (request.lac() < -1 || state == null || !state.context.equals(context)
+                    || !state.credential.matchesWireVerifier(verifier)
+                    || state.pendingTombstone || tombstones.containsKey(context.ledgerId())) {
+                return Status.CONDITION_FAILED;
+            }
+            ExplicitLac prior = state.explicitLac;
+            if (prior != null && request.lac() <= prior.lac()) {
+                if (request.lac() < prior.lac()) {
+                    return Status.CONDITION_FAILED;
+                }
+                return Arrays.equals(body, prior.body()) ? Status.ALREADY_DURABLE : Status.INCOMPATIBLE;
+            }
+            if (!state.active || state.fenced || state.pendingFence != null) {
+                return Status.CONDITION_FAILED;
+            }
+            sequence = durableThrough + 1;
+            generation = state.localGeneration;
+            ByteBuffer value = ByteBuffer.allocate(Math.addExact(ProfileLedgerContext.ENCODED_LENGTH + 12,
+                    body.length)).put(context.encode()).putLong(request.lac()).putInt(body.length).put(body).flip();
+            record = SegmentControlFormat.encode(SegmentControlFormat.Type.EXPLICIT_LAC, LOG_GENERATION,
+                    sequence, UUID.randomUUID(), new Generation(generation), 0, value);
+            if (record.remaining() > maxLogBytes - nextOffset) {
+                throw new IOException("Bookie control log capacity exhausted");
+            }
+            offset = nextOffset;
+            nextOffset += record.remaining();
+            writing = true;
+        }
+        try {
+            io.writeFully(channel, record, offset);
+            io.force(channel, true);
+            synchronized (this) {
+                durableThrough = sequence;
+                applyExplicitLac(context, request.lac(), body, generation);
+                appliedThrough = sequence;
+                return Status.APPLIED_DURABLE;
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                failed = true;
+            }
+            throw failure;
+        } finally {
+            synchronized (this) {
+                writing = false;
+            }
+        }
+    }
+
+    private void applyExplicitLac(ProfileLedgerContext context, long lac, byte[] body, long generation)
+            throws IOException {
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (state == null || !state.context.equals(context) || !state.active || state.fenced
+                || tombstones.containsKey(context.ledgerId()) || state.localGeneration != generation || lac < -1) {
+            throw new IOException("Invalid durable explicit LAC authority");
+        }
+        ExplicitLac prior = state.explicitLac;
+        if (prior != null && (lac < prior.lac() || (lac == prior.lac() && !Arrays.equals(body, prior.body())))) {
+            throw new IOException("Non-monotonic durable explicit LAC");
+        }
+        if (prior == null || lac > prior.lac()) {
+            state.explicitLac = new ExplicitLac(lac, body);
+        }
     }
 
     /** Closes the admission cut first; caller retries WAITING_PRECUT after prior DATA becomes terminal. */
@@ -741,6 +845,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 } catch (IllegalArgumentException failure) {
                     throw new IOException("Invalid durable fence context", failure);
                 }
+            } else if (parsed.type() == SegmentControlFormat.Type.EXPLICIT_LAC) {
+                replayExplicitLac(parsed);
             } else {
                 Command command = decode(parsed);
                 apply(command);
@@ -751,6 +857,29 @@ final class SegmentBookieControlLog implements AutoCloseable {
             sequence++;
         }
         nextOffset = size;
+    }
+
+    private void replayExplicitLac(SegmentControlParser.Command parsed) throws IOException {
+        ByteBuffer body = parsed.body();
+        if (parsed.expectedGeneration() != 0
+                || body.remaining() < ProfileLedgerContext.ENCODED_LENGTH + 12) {
+            throw new IOException("Invalid durable explicit LAC record");
+        }
+        byte[] contextBytes = new byte[ProfileLedgerContext.ENCODED_LENGTH];
+        body.get(contextBytes);
+        long lac = body.getLong();
+        int length = body.getInt();
+        if (length < 0 || length != body.remaining()) {
+            throw new IOException("Invalid durable explicit LAC body length");
+        }
+        byte[] value = new byte[length];
+        body.get(value);
+        try {
+            applyExplicitLac(ProfileLedgerContext.decode(contextBytes), lac, value,
+                    parsed.operationGeneration().value());
+        } catch (IllegalArgumentException failure) {
+            throw new IOException("Invalid durable explicit LAC context", failure);
+        }
     }
 
     private int recordLength(long offset, long size, long sequence) throws IOException {
