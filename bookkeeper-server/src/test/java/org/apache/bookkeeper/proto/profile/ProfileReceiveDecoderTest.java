@@ -30,9 +30,11 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrame;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileWireValidationException;
 import org.junit.Test;
@@ -42,6 +44,11 @@ public class ProfileReceiveDecoderTest {
         return ProfileFrameCodec.encode(ProfileFrame.request(operation, 1, new byte[bodyBytes]));
     }
 
+    private static byte[] hello() {
+        return ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.HELLO, 1,
+                new ProfileHello.Client(List.of()).encode()));
+    }
+
     @Test
     public void chargesBeforeBodyAndTransfersCreditUntilFrameRelease() {
         ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096);
@@ -49,7 +56,7 @@ public class ProfileReceiveDecoderTest {
                 ProfileReceiveDecoder.ConnectionPurpose.DATA, 8_192, 64);
         EmbeddedChannel channel = new EmbeddedChannel(decoder);
         assertEquals(64, budget.used(ProfileReceiveBudget.Lane.DATA));
-        byte[] hello = frame(ProfileOperation.HELLO, 0);
+        byte[] hello = hello();
         assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(hello, 0, 2))));
         assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(hello, 2, hello.length))));
         ProfileInboundFrame greeting = channel.readInbound();
@@ -81,7 +88,7 @@ public class ProfileReceiveDecoderTest {
         ProfileReceiveDecoder secondDecoder = new ProfileReceiveDecoder(budget,
                 ProfileReceiveDecoder.ConnectionPurpose.DATA, 2_000, 64);
         EmbeddedChannel second = new EmbeddedChannel(secondDecoder);
-        byte[] hello = frame(ProfileOperation.HELLO, 0);
+        byte[] hello = hello();
         first.writeInbound(Unpooled.wrappedBuffer(hello));
         ProfileInboundFrame firstHello = first.readInbound();
         firstHello.close();
@@ -123,7 +130,7 @@ public class ProfileReceiveDecoderTest {
         ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024);
         EmbeddedChannel partial = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
                 ProfileReceiveDecoder.ConnectionPurpose.DATA, 4_096, 64));
-        byte[] hello = frame(ProfileOperation.HELLO, 0);
+        byte[] hello = hello();
         assertFalse(partial.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(hello, 5))));
         partial.finish();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
@@ -139,6 +146,13 @@ public class ProfileReceiveDecoderTest {
         assertFalse(partialBody.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(add, 100))));
         assertEquals(64 + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
         partialBody.finish();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+
+        EmbeddedChannel invalidHello = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
+                ProfileReceiveDecoder.ConnectionPurpose.DATA, 4_096, 64));
+        assertThrows(ProfileWireValidationException.class,
+                () -> invalidHello.writeInbound(Unpooled.wrappedBuffer(frame(ProfileOperation.HELLO, 0))));
+        assertFalse(invalidHello.isActive());
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
 
         EmbeddedChannel invalid = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
@@ -168,7 +182,7 @@ public class ProfileReceiveDecoderTest {
                 }
             }
         });
-        byte[] hello = frame(ProfileOperation.HELLO, 0);
+        byte[] hello = hello();
         byte[] add = frame(ProfileOperation.ADD_NORMAL, 2_048);
         byte[] pipelined = Arrays.copyOf(hello, hello.length + add.length);
         System.arraycopy(add, 0, pipelined, hello.length, add.length);

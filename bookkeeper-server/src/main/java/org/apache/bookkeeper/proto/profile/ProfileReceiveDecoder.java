@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
+import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 
 /** Charged plaintext framing after TLS. The eventual listener must also account for TLS/socket buffers. */
@@ -163,6 +164,16 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 return;
             }
             ProfileFrameHeader header = frameHeader;
+            if (header.operation() == ProfileOperation.HELLO) {
+                HeldCredit helloCopy = charge(header.bodyLength());
+                try {
+                    byte[] body = new byte[header.bodyLength()];
+                    frame.getBytes(FIXED_HEADER_BYTES, body);
+                    ProfileHello.decodeClient(body);
+                } finally {
+                    helloCopy.close();
+                }
+            }
             ProfileInboundFrame completed = new ProfileInboundFrame(header, frame, frameCredit::close);
             frame = null;
             frameCredit = null;
@@ -177,7 +188,8 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     private void validatePurpose(ProfileFrameHeader header) throws IOException {
         ProfileOperation operation = header.operation();
-        if (header.isResponse() || (helloDelivered && phase == ProfileFrameCodec.DecodePhase.PRE_HELLO)
+        if (header.isResponse() || (operation == ProfileOperation.HELLO && header.flags() != 0)
+                || (helloDelivered && phase == ProfileFrameCodec.DecodePhase.PRE_HELLO)
                 || (phase == ProfileFrameCodec.DecodePhase.ESTABLISHED
                 && operation == ProfileOperation.HELLO)
                 || (operation.isReservedDisabled() && header.bodyLength() != 0)) {
