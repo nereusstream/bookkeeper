@@ -24,12 +24,25 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
-/** Real DATA I/O to contiguous physical candidates only; no entry result or Bookie ACK authority. */
+/** Real DATA I/O and isolated normal results; no production Bookie ACK authority. */
 final class SegmentDataPhysicalDriver {
     @FunctionalInterface
     interface Completion {
         void complete(List<SegmentPointRead.Location> candidates, Throwable failure);
+    }
+
+    enum NormalStatus {
+        LOCAL_DURABLE, STALE_ADMISSION, UNKNOWN
+    }
+
+    record NormalResult(ProfileLedgerContext context, long entryId, NormalStatus status,
+                        SegmentPointRead.Location candidate) { }
+
+    @FunctionalInterface
+    interface NormalCompletion {
+        void complete(List<NormalResult> results, Throwable failure);
     }
 
     private static final class Obligation {
@@ -108,14 +121,14 @@ final class SegmentDataPhysicalDriver {
      * Once claimed, this driver releases every ticket even when validation or owner admission fails.
      */
     boolean submitNormal(SegmentBookieControlLog bookie, SegmentBatchFormat.FrozenBatch batch,
-                         List<SegmentBookieControlLog.Admission> admissions, Completion completion)
+                         List<SegmentBookieControlLog.Admission> admissions, NormalCompletion completion)
             throws IOException {
         Objects.requireNonNull(bookie, "bookie");
         Objects.requireNonNull(batch, "batch");
         Objects.requireNonNull(completion, "completion");
         List<SegmentBookieControlLog.Admission> input = List.copyOf(admissions);
         bookie.claimForPhysical(input);
-        Obligation obligation = new Obligation(completion, input);
+        List<SegmentBatchParser.Record> records;
         try {
             if (!bookie.matchesScope(files)) {
                 throw new IOException("Bookie control log and DATA files have different storage scopes");
@@ -132,10 +145,29 @@ final class SegmentDataPhysicalDriver {
                     throw new IOException("Normal DATA admission does not match frozen record");
                 }
             }
+            records = parsed.records();
         } catch (IOException | RuntimeException | Error failure) {
-            obligation.abortBeforeOwner();
+            for (SegmentBookieControlLog.Admission admission : input) {
+                admission.driverTerminal();
+            }
             throw failure;
         }
+        Completion physical = (candidates, failure) -> {
+            if (failure == null && (candidates == null || candidates.size() != records.size())) {
+                throw new IllegalStateException("Normal DATA lacks one published candidate per entry");
+            }
+            List<NormalResult> results = new ArrayList<>(records.size());
+            for (int i = 0; i < records.size(); i++) {
+                SegmentBatchParser.Record record = records.get(i);
+                NormalStatus status = failure != null ? NormalStatus.UNKNOWN
+                        : bookie.canCompleteNormal(input.get(i)) ? NormalStatus.LOCAL_DURABLE
+                                : NormalStatus.STALE_ADMISSION;
+                results.add(new NormalResult(record.context(), record.entryId(), status,
+                        failure == null ? candidates.get(i) : null));
+            }
+            completion.complete(List.copyOf(results), failure);
+        };
+        Obligation obligation = new Obligation(physical, input);
         return submitPhysical(batch, obligation);
     }
 

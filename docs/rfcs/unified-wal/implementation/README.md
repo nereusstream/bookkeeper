@@ -156,7 +156,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 **完成条件：** 对应durability未完成绝不成功；源/对齐buffer及pending有界，完成事件不被DATA队列满额挡住。覆盖同批一条被fence而另一条成功、batch 12先于11完成、DATA durable但定位尚未发布、请求超时后旧I/O继续完成；未解析I/O保护原坐标并暂停受影响stream/file，不以跳号或新stream绕过。此时local result只供隔离测试，不接管生产Bookie ACK。
 
-当前[隔离物理驱动与热候选切片](local-storage/README.md)已将DATA坐标预留、真实I/O write/force、原owner连续stream前缀及有界可点读候选接成一条调用路径；一个携带两条不同entry的冻结batch在隔离group中一次force后可点读两条，失败向未决回调报错且不发布候选，搬迁副本不进入普通候选。真实点读的重复payload比较已验证LAC变化与冲突，但仍无已验证的restart起点、Bookie权限复查、请求级幂等及逐entry local result，步骤6未完成。
+当前[隔离物理驱动与热候选切片](local-storage/README.md)已将DATA坐标预留、真实I/O write/force、原owner连续stream前缀及有界可点读候选接成一条调用路径；一个携带两条不同entry的冻结batch在隔离group中一次force后可点读两条，失败向未决回调报错且不发布候选，搬迁副本不进入普通候选。受控normal批次现于候选发布后、票据释放前按entry核对捕获的Bookie准入generation：仍有效者返回隔离`LOCAL_DURABLE`，过期者返回`STALE_ADMISSION`，物理失败返回`UNKNOWN`；不同ledger同批独立判定，失败entry的物理候选仍可保留。真实点读的重复payload比较已验证LAC变化与冲突，但尚无请求级坐标占用/并发重试、持久restart起点、完整read selector及生产ACK，步骤6未完成。
 
 #### 7. 实现点读与基础restart
 

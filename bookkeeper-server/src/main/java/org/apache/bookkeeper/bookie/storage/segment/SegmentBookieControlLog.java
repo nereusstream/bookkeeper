@@ -390,6 +390,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
+    /** Check the captured normal admission before its physical driver releases the ticket. */
+    synchronized boolean canCompleteNormal(Admission admission) {
+        if (admission.owner != this || !admission.claimed || admission.terminal) {
+            throw new IllegalArgumentException("Normal result requires a live physical admission");
+        }
+        LedgerState state = admission.state;
+        // A pending fence is after this pre-cut admission; the durable fence waits for this ticket.
+        return !closed && !failed && ledgers.get(state.context.ledgerId()) == state
+                && state.active && !state.fenced && state.localGeneration == admission.generation;
+    }
+
     synchronized boolean matchesScope(IsolatedSegmentFiles files) {
         return !closed && files.matchesScope(config, identity);
     }
