@@ -242,7 +242,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    /** Isolated authorization ticket; physical recovery DATA and close ordering are not connected yet. */
+    /** Isolated recovery ticket retained through physical DATA, duplicate reads and close ordering. */
     static final class RecoveryAdmission {
         private final SegmentBookieControlLog owner;
         private final LedgerState state;

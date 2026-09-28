@@ -172,6 +172,15 @@ public class SegmentBookieControlLogTest {
                 2, 4, entryId, filled(20, verifier), new byte[]{1});
     }
 
+    private static ProfileOperationCodec.AddRecovery recoveryAddWithEntry(ByteBuffer entry) {
+        byte[] id = new byte[16];
+        id[15] = 3;
+        byte[] payload = new byte[entry.remaining()];
+        entry.slice().get(payload);
+        return new ProfileOperationCodec.AddRecovery(context(), id, 7, 9,
+                2, 4, 2, filled(20, (byte) 6), payload);
+    }
+
     private static SegmentBookieControlLog.RecoveryGrantClose recoveryClose(int operationId, int grantOperationId,
                                                                              int intentId, long intentGeneration,
                                                                              long grantGeneration) {
@@ -1320,6 +1329,152 @@ public class SegmentBookieControlLogTest {
                 assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
             }
             assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void recoveredRecoveryCandidateRequiresSyncAndSingleCurrentStream() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        ProfileOperationCodec.AddRecovery same = recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0));
+        ProfileOperationCodec.AddRecovery changedLac = recoveryAddWithEntry(entryBytes(context(), 2, 1, 8, (byte) 0));
+        ProfileOperationCodec.AddRecovery conflict = recoveryAddWithEntry(entryBytes(context(), 2, -1, 9, (byte) 0));
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            files.writeAuthorized(batch(config, 2, 1, 4096), arena);
+        }
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            assertThrows(IOException.class, () -> SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(
+                    config, identity, replayArena, replayBookie, replayBookie.admitRecovery(same).orElseThrow(),
+                    new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false), 1, 1));
+            SegmentFileIo sync = new SegmentFileIo();
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.MATCHED_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, replayArena,
+                            replayBookie, replayBookie.admitRecovery(same).orElseThrow(), sync, 1, 1));
+            assertEquals(1, sync.forces);
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.MATCHED_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, replayArena,
+                            replayBookie, replayBookie.admitRecovery(changedLac).orElseThrow(),
+                            new SegmentFileIo(), 1, 1));
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.CONFLICTING_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, replayArena,
+                            replayBookie, replayBookie.admitRecovery(conflict).orElseThrow(),
+                            new SegmentFileIo(), 1, 1));
+            replayArena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC, new UUID(0, 6), new Generation(1), 0,
+                    0, 0, new Generation(2), 6, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1)));
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.NOT_READY,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, replayArena,
+                            replayBookie, replayBookie.admitRecovery(same).orElseThrow(),
+                            new SegmentFileIo(), 1, 1));
+        }
+    }
+
+    @Test
+    public void recoveredBytesAfterOldForceErrorRemainOnlyPhysicalEvidence() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        ProfileOperationCodec.AddRecovery same = recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0));
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            assertThrows(IOException.class, () -> files.writeAuthorized(batch(config, 2, 1, 4096), arena));
+        }
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.MATCHED_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, replayArena,
+                            replayBookie, replayBookie.admitRecovery(same).orElseThrow(),
+                            new SegmentFileIo(), 1, 1));
+        }
+    }
+
+    @Test
+    public void recoveredRecoveryCandidateLosesEligibilityWhenGrantClosesDuringSync() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        ProfileOperationCodec.AddRecovery same = recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0));
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            files.writeAuthorized(batch(config, 2, 1, 4096), arena);
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo sync = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Recovery sync was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            FutureTask<SegmentDuplicateCheck.PhysicalComparison> duplicate = new FutureTask<>(
+                    () -> SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, replayArena,
+                            replayBookie, replayBookie.admitRecovery(same).orElseThrow(), sync, 1, 1));
+            Thread reader = new Thread(duplicate);
+            reader.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT,
+                        replayBookie.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+                release.countDown();
+                assertEquals(SegmentDuplicateCheck.PhysicalComparison.STALE_ADMISSION,
+                        duplicate.get(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        replayBookie.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+            } finally {
+                release.countDown();
+                reader.join(5000);
+            }
+        }
+    }
+
+    @Test
+    public void recoveredRecoveryCandidateRejectsAmbiguousPhysicalCoordinate() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        ProfileOperationCodec.AddRecovery same = recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0));
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            files.writeAuthorized(batch(config, 2, 1, 4096), arena);
+            files.writeAuthorized(batch(config, 2, 2, 8192), arena);
+        }
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.NOT_READY,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, replayArena,
+                            replayBookie, replayBookie.admitRecovery(same).orElseThrow(),
+                            new SegmentFileIo(), 2, 2));
         }
     }
 

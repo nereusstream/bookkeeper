@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -81,6 +82,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private record Slot(int file, long index) { }
 
     private record Stream(int shard, long generation) { }
+
+    record SingleStream(Generation generation, long firstSequence) { }
 
     private record Grant(Allocation command, long generation) { }
 
@@ -281,6 +284,23 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         Long first = streamStarts.get(new Stream(shard, generation));
         return first == null ? OptionalLong.empty() : OptionalLong.of(first);
+    }
+
+    /** The isolated allocator has no selector or reuse: multiple generations make read-only selection ambiguous. */
+    synchronized Optional<SingleStream> singleStreamForShard(int shard) {
+        if (failed || closed || shard < 0 || shard >= config.logicalShards()) {
+            return Optional.empty();
+        }
+        SingleStream selected = null;
+        for (Map.Entry<Stream, Long> entry : streamStarts.entrySet()) {
+            if (entry.getKey().shard() == shard) {
+                if (selected != null) {
+                    return Optional.empty();
+                }
+                selected = new SingleStream(new Generation(entry.getKey().generation()), entry.getValue());
+            }
+        }
+        return Optional.ofNullable(selected);
     }
 
     /** No FREE exists yet: every applied grant remains unavailable even when its DATA bytes are zero. */
