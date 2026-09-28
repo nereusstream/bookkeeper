@@ -1150,6 +1150,180 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void recoveryTicketBindsRealDataAndCloseWaitsForPhysicalTermination() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentBatchFormat.FrozenBatch batch = batch(config, 2, 1, 4096);
+        ByteBuffer entry = entryBytes(context(), 2, -1, 8, (byte) 0);
+        byte[] payload = new byte[entry.remaining()];
+        entry.get(payload);
+        byte[] intentId = new byte[16];
+        intentId[15] = 3;
+        ProfileOperationCodec.AddRecovery request = new ProfileOperationCodec.AddRecovery(context(),
+                intentId, 7, 9, 2, 4, 2, filled(20, (byte) 6), payload);
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<Throwable> dataFailure = new AtomicReference<>();
+        AtomicReference<List<SegmentDataPhysicalDriver.RecoveryResult>> results = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Recovery DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                assertThrows(IOException.class, () -> driver.submitRecovery(bookie,
+                        batch(config, 3, 1, 4096), List.of(bookie.admitRecovery(request).orElseThrow()),
+                        (unused, failure) -> { }));
+                ByteBuf changed = entry(context(), 2, -1, 8, (byte) 1);
+                try {
+                    SegmentBatchFormat.FrozenBatch wrongPayload = SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, 5, new Generation(1),
+                                    new Generation(1), 1, 4096),
+                            List.of(SegmentBatchFormat.entry(context(), changed)));
+                    assertThrows(IOException.class, () -> driver.submitRecovery(bookie, wrongPayload,
+                            List.of(bookie.admitRecovery(request).orElseThrow()), (unused, failure) -> { }));
+                } finally {
+                    changed.release();
+                }
+                SegmentBookieControlLog.RecoveryAdmission admitted = bookie.admitRecovery(request).orElseThrow();
+                assertTrue(driver.submitRecovery(bookie, batch, List.of(admitted), (entries, failure) -> {
+                            owner.requireOwner();
+                            results.set(entries);
+                            dataFailure.set(failure);
+                            completed.countDown();
+                        }));
+                owner.start();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertThrows(IllegalArgumentException.class, admitted::finish);
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT,
+                        bookie.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+                assertTrue(bookie.admitRecovery(request).isEmpty());
+                releaseForce.countDown();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                assertNull(dataFailure.get());
+                assertEquals(SegmentDataPhysicalDriver.RecoveryStatus.STALE_ADMISSION,
+                        results.get().get(0).status());
+                assertEquals(2, SegmentPointRead.read(config, identity, arena,
+                        results.get().get(0).candidate()).record().entryId());
+            } finally {
+                releaseForce.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    bookie.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+            assertTrue(bookie.locallyCommittedReadable(context(), 2));
+        }
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            SegmentDataRecovery.PhysicalStreamCandidate recovered =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity, replayArena,
+                            new SegmentFileIo(), 0, new Generation(1), 1, 1, 1);
+            assertEquals(1, recovered.entries().size());
+            assertEquals(2, recovered.entries().get(0).entryId());
+            assertTrue(replayBookie.locallyCommittedReadable(context(), 2));
+            assertTrue(replayBookie.admitRecovery(request).isEmpty());
+        }
+    }
+
+    @Test
+    public void recoveryDuplicateUsesDurablePayloadIdentityWithoutAnotherWrite() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        byte[] intentId = new byte[16];
+        intentId[15] = 3;
+        ByteBuffer firstEntry = entryBytes(context(), 2, -1, 8, (byte) 0);
+        byte[] firstPayload = new byte[firstEntry.remaining()];
+        firstEntry.get(firstPayload);
+        ByteBuffer conflictingEntry = entryBytes(context(), 2, -1, 8, (byte) 1);
+        byte[] conflictingPayload = new byte[conflictingEntry.remaining()];
+        conflictingEntry.get(conflictingPayload);
+        ProfileOperationCodec.AddRecovery first = new ProfileOperationCodec.AddRecovery(context(),
+                intentId, 7, 9, 2, 4, 2, filled(20, (byte) 6), firstPayload);
+        ProfileOperationCodec.AddRecovery conflicting = new ProfileOperationCodec.AddRecovery(context(),
+                intentId, 7, 9, 2, 4, 2, filled(20, (byte) 6), conflictingPayload);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                CountDownLatch written = new CountDownLatch(1);
+                AtomicReference<Throwable> writeFailure = new AtomicReference<>();
+                AtomicReference<SegmentDataPhysicalDriver.RecoveryStatus> writeStatus = new AtomicReference<>();
+                assertTrue(driver.submitRecovery(bookie, batch(config, 2, 1, 4096),
+                        List.of(bookie.admitRecovery(first).orElseThrow()), (entries, failure) -> {
+                            writeFailure.set(failure);
+                            writeStatus.set(entries.get(0).status());
+                            written.countDown();
+                        }));
+                owner.start();
+                assertTrue(written.await(5, TimeUnit.SECONDS));
+                assertNull(writeFailure.get());
+                assertEquals(SegmentDataPhysicalDriver.RecoveryStatus.LOCAL_DURABLE, writeStatus.get());
+
+                CountDownLatch sameDone = new CountDownLatch(1);
+                AtomicReference<SegmentDataPhysicalDriver.DuplicateStatus> same = new AtomicReference<>();
+                assertTrue(driver.checkPublishedRecoveryDuplicate(bookie,
+                        bookie.admitRecovery(first).orElseThrow(), (status, failure) -> {
+                            assertNull(failure);
+                            same.set(status);
+                            sameDone.countDown();
+                        }));
+                assertTrue(sameDone.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE, same.get());
+
+                CountDownLatch conflictDone = new CountDownLatch(1);
+                AtomicReference<SegmentDataPhysicalDriver.DuplicateStatus> conflict = new AtomicReference<>();
+                assertTrue(driver.checkPublishedRecoveryDuplicate(bookie,
+                        bookie.admitRecovery(conflicting).orElseThrow(), (status, failure) -> {
+                            assertNull(failure);
+                            conflict.set(status);
+                            conflictDone.countDown();
+                        }));
+                assertTrue(conflictDone.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.CONFLICT, conflict.get());
+            } finally {
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
     public void sameDurableBatchMakesIndependentNormalDecisionsAfterActivationChange() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

@@ -27,9 +27,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
-/** Real DATA I/O and isolated normal results; no production Bookie ACK authority. */
+/** Real DATA I/O and isolated local results; no production Bookie ACK authority. */
 final class SegmentDataPhysicalDriver {
     @FunctionalInterface
     interface Completion {
@@ -42,6 +43,18 @@ final class SegmentDataPhysicalDriver {
 
     record NormalResult(ProfileLedgerContext context, long entryId, NormalStatus status,
                         SegmentPointRead.Location candidate) { }
+
+    enum RecoveryStatus {
+        LOCAL_DURABLE, STALE_ADMISSION, UNKNOWN
+    }
+
+    record RecoveryResult(ProfileLedgerContext context, long entryId, RecoveryStatus status,
+                          SegmentPointRead.Location candidate) { }
+
+    @FunctionalInterface
+    interface RecoveryCompletion {
+        void complete(List<RecoveryResult> results, Throwable failure);
+    }
 
     @FunctionalInterface
     interface NormalCompletion {
@@ -122,6 +135,7 @@ final class SegmentDataPhysicalDriver {
     private static final class Obligation {
         private final Completion completion;
         private final List<SegmentBookieControlLog.Admission> admissions;
+        private final List<SegmentBookieControlLog.RecoveryAdmission> recoveryAdmissions;
         private final List<PendingNormal> normals;
         private boolean physicalTerminal;
         private boolean ownerTerminal;
@@ -133,8 +147,15 @@ final class SegmentDataPhysicalDriver {
 
         private Obligation(Completion completion, List<SegmentBookieControlLog.Admission> admissions,
                            List<PendingNormal> normals) {
+            this(completion, admissions, List.of(), normals);
+        }
+
+        private Obligation(Completion completion, List<SegmentBookieControlLog.Admission> admissions,
+                           List<SegmentBookieControlLog.RecoveryAdmission> recoveryAdmissions,
+                           List<PendingNormal> normals) {
             this.completion = completion;
             this.admissions = List.copyOf(admissions);
+            this.recoveryAdmissions = List.copyOf(recoveryAdmissions);
             this.normals = List.copyOf(normals);
         }
 
@@ -163,6 +184,9 @@ final class SegmentDataPhysicalDriver {
             if (physicalTerminal && ownerTerminal && !released) {
                 released = true;
                 for (SegmentBookieControlLog.Admission admission : admissions) {
+                    admission.driverTerminal();
+                }
+                for (SegmentBookieControlLog.RecoveryAdmission admission : recoveryAdmissions) {
                     admission.driverTerminal();
                 }
             }
@@ -263,6 +287,72 @@ final class SegmentDataPhysicalDriver {
         return submitPhysical(batch, obligation);
     }
 
+    /** Recovery uses the same DATA barrier while each ticket binds its exact wire entry. */
+    boolean submitRecovery(SegmentBookieControlLog bookie, SegmentBatchFormat.FrozenBatch batch,
+                           List<SegmentBookieControlLog.RecoveryAdmission> admissions,
+                           RecoveryCompletion completion) throws IOException {
+        Objects.requireNonNull(bookie, "bookie");
+        Objects.requireNonNull(batch, "batch");
+        Objects.requireNonNull(completion, "completion");
+        List<SegmentBookieControlLog.RecoveryAdmission> input = List.copyOf(admissions);
+        bookie.claimRecoveryForDriver(input);
+        List<SegmentBatchParser.Record> records;
+        List<PendingNormal> entries;
+        try {
+            if (!bookie.matchesScope(files)) {
+                throw new IOException("Bookie control log and DATA files have different storage scopes");
+            }
+            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(batch.bytes(), batch.address(),
+                    Long.MAX_VALUE);
+            if (parsed.records().size() != input.size()) {
+                throw new IOException("Recovery DATA admission count differs from frozen records");
+            }
+            List<PendingNormal> identities = new ArrayList<>(parsed.records().size());
+            for (int i = 0; i < input.size(); i++) {
+                SegmentBatchParser.Record record = parsed.records().get(i);
+                SegmentBookieControlLog.RecoveryAdmission admission = input.get(i);
+                if (record.origin() != SegmentBatchFormat.ENTRY_DATA
+                        || !record.context().equals(admission.context())
+                        || record.entryId() != admission.entryId()
+                        || !record.entry().equals(ByteBuffer.wrap(admission.entryPayload()))
+                        || SegmentOwnerLoop.shardFor(record.context().ledgerId(),
+                                files.config().logicalShards()) != batch.address().shard()) {
+                    throw new IOException("Recovery DATA admission does not match frozen record");
+                }
+                PendingNormal identity = new PendingNormal(record);
+                if (identity.identity.entryId() != admission.entryId()) {
+                    throw new IOException("Recovery BK entry ID differs from the frozen record");
+                }
+                identities.add(identity);
+            }
+            records = parsed.records();
+            entries = List.copyOf(identities);
+        } catch (IOException | RuntimeException | Error failure) {
+            for (SegmentBookieControlLog.RecoveryAdmission admission : input) {
+                admission.driverTerminal();
+            }
+            throw failure;
+        }
+        Completion physical = (candidates, failure) -> {
+            if (failure == null && (candidates == null || candidates.size() != records.size())) {
+                finishPendingNormals(entries, null, new IOException("Recovery DATA candidate count mismatch"));
+                throw new IllegalStateException("Recovery DATA lacks one published candidate per entry");
+            }
+            finishPendingNormals(entries, candidates, failure);
+            List<RecoveryResult> results = new ArrayList<>(records.size());
+            for (int i = 0; i < records.size(); i++) {
+                SegmentBatchParser.Record record = records.get(i);
+                RecoveryStatus status = failure != null ? RecoveryStatus.UNKNOWN
+                        : bookie.canCompleteRecovery(input.get(i)) ? RecoveryStatus.LOCAL_DURABLE
+                                : RecoveryStatus.STALE_ADMISSION;
+                results.add(new RecoveryResult(record.context(), record.entryId(), status,
+                        failure == null ? candidates.get(i) : null));
+            }
+            completion.complete(List.copyOf(results), failure);
+        };
+        return submitPhysical(batch, new Obligation(physical, List.of(), input, entries));
+    }
+
     /** Each entry has its own response waiter; abandoning one does not change batch ownership. */
     boolean submitNormal(SegmentBookieControlLog bookie, SegmentBatchFormat.FrozenBatch batch,
                          List<SegmentBookieControlLog.Admission> admissions, List<NormalRequest> requests)
@@ -328,13 +418,54 @@ final class SegmentDataPhysicalDriver {
             admission.driverTerminal();
             throw failure;
         }
+        return submitDuplicate(context, identity, copy, List.of(admission), List.of(),
+                () -> bookie.canCompleteNormal(admission), completion);
+    }
+
+    boolean checkPublishedRecoveryDuplicate(SegmentBookieControlLog bookie,
+                                            SegmentBookieControlLog.RecoveryAdmission admission,
+                                            DuplicateRequest request) throws IOException {
+        Objects.requireNonNull(request, "request");
+        return checkPublishedRecoveryDuplicate(bookie, admission, request::complete);
+    }
+
+    boolean checkPublishedRecoveryDuplicate(SegmentBookieControlLog bookie,
+                                            SegmentBookieControlLog.RecoveryAdmission admission,
+                                            DuplicateCompletion completion) throws IOException {
+        Objects.requireNonNull(bookie, "bookie");
+        Objects.requireNonNull(completion, "completion");
+        bookie.claimRecoveryForDriver(List.of(admission));
+        ProfileLedgerContext context = admission.context();
+        SegmentEntryIdentity identity;
+        ByteBuffer copy;
+        try {
+            if (!bookie.matchesScope(files)) {
+                throw new IOException("Bookie control log and DATA files have different storage scopes");
+            }
+            copy = ByteBuffer.wrap(admission.entryPayload());
+            identity = SegmentEntryIdentity.parse(context, copy);
+            if (identity.entryId() != admission.entryId()) {
+                throw new IOException("Recovery duplicate entry ID differs from its admission");
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            admission.driverTerminal();
+            throw failure;
+        }
+        return submitDuplicate(context, identity, copy, List.of(), List.of(admission),
+                () -> bookie.canCompleteRecovery(admission), completion);
+    }
+
+    private boolean submitDuplicate(ProfileLedgerContext context, SegmentEntryIdentity identity, ByteBuffer copy,
+                                    List<SegmentBookieControlLog.Admission> normalAdmissions,
+                                    List<SegmentBookieControlLog.RecoveryAdmission> recoveryAdmissions,
+                                    BooleanSupplier canComplete, DuplicateCompletion completion) {
         AtomicReference<DuplicateStatus> status = new AtomicReference<>(DuplicateStatus.NOT_READY);
         AtomicReference<SegmentPointRead.Location> selected = new AtomicReference<>();
         long entryId = identity.entryId();
         Obligation obligation = new Obligation((unused, failure) -> {
             DuplicateStatus result = failure == null ? status.get() : DuplicateStatus.UNKNOWN;
             if (result == DuplicateStatus.SAME_DURABLE || result == DuplicateStatus.CONFLICT) {
-                if (!bookie.canCompleteNormal(admission)) {
+                if (!canComplete.getAsBoolean()) {
                     result = DuplicateStatus.STALE_ADMISSION;
                 } else if (selected.get() != null
                         && !hot.liveDurableCandidate(context, entryId).filter(selected.get()::equals).isPresent()) {
@@ -342,7 +473,7 @@ final class SegmentDataPhysicalDriver {
                 }
             }
             completion.complete(result, failure);
-        }, List.of(admission));
+        }, normalAdmissions, recoveryAdmissions, List.of());
         boolean accepted;
         try {
             accepted = owner.submit(shard, new SegmentOwnerLoop.Command() {

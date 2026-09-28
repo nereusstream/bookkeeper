@@ -230,16 +230,38 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final SegmentBookieControlLog owner;
         private final LedgerState state;
         private final GrantState grant;
+        private final long entryId;
+        private final byte[] entryPayload;
         private boolean terminal;
+        private boolean claimed;
 
-        private RecoveryAdmission(SegmentBookieControlLog owner, LedgerState state, GrantState grant) {
+        private RecoveryAdmission(SegmentBookieControlLog owner, LedgerState state, GrantState grant,
+                                  ProfileOperationCodec.AddRecovery request) {
             this.owner = owner;
             this.state = state;
             this.grant = grant;
+            this.entryId = request.entryId();
+            this.entryPayload = request.entryPayload();
+        }
+
+        ProfileLedgerContext context() {
+            return state.context;
+        }
+
+        long entryId() {
+            return entryId;
+        }
+
+        byte[] entryPayload() {
+            return entryPayload.clone();
         }
 
         void finish() {
-            owner.finishRecovery(this);
+            owner.finishRecovery(this, false);
+        }
+
+        void driverTerminal() {
+            owner.finishRecovery(this, true);
         }
     }
 
@@ -620,7 +642,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     && request.entryId() <= range.lastEntryId()) {
                 activeAdmissions++;
                 grant.inFlight++;
-                return Optional.of(new RecoveryAdmission(this, state, grant));
+                return Optional.of(new RecoveryAdmission(this, state, grant, request));
             }
         }
         return Optional.empty();
@@ -637,13 +659,30 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 && state.recoveryGrants.get(admission.grant.command.operationId()) == admission.grant;
     }
 
-    private synchronized void finishRecovery(RecoveryAdmission admission) {
-        if (admission.owner != this || admission.terminal) {
+    private synchronized void finishRecovery(RecoveryAdmission admission, boolean fromDriver) {
+        if (admission.owner != this || admission.terminal || admission.claimed != fromDriver) {
             throw new IllegalArgumentException("Recovery admission already finished or belongs to another control log");
         }
         admission.terminal = true;
         admission.grant.inFlight--;
         activeAdmissions--;
+    }
+
+    synchronized void claimRecoveryForDriver(List<RecoveryAdmission> admissions) throws IOException {
+        requireWritable();
+        if (admissions.isEmpty()) {
+            throw new IllegalArgumentException("Driver requires recovery admission for every entry");
+        }
+        Map<RecoveryAdmission, Boolean> distinct = new IdentityHashMap<>();
+        for (RecoveryAdmission admission : admissions) {
+            if (admission == null || admission.owner != this || admission.terminal || admission.claimed
+                    || distinct.put(admission, true) != null) {
+                throw new IllegalArgumentException("Invalid or repeated Bookie recovery admission");
+            }
+        }
+        for (RecoveryAdmission admission : admissions) {
+            admission.claimed = true;
+        }
     }
 
     /** Local fact only; a read still needs its cluster selector and visibility authority. */
