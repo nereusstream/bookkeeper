@@ -794,7 +794,7 @@ body额度可逻辑预留，不按声明长度立即分配整块内存。连接�
 
 **控制通路也须可达。** 首批在现有Profile listener/pool内保留少量有界的独立控制连接，客户端按连接用途隔离DATA发送，必要fence/tombstone不排在已暂停DATA连接的未完成body后。复用相同TLS/HELLO、认证授权及控制执行资源，不新增listener、wire字段/协商、每ledger连接或普通Add往返。每条连接仍绑定§12身份；连接用途只负责调度，不授予控制权限。
 
-控制连接数量及TLS/接收额度计入Bookie同一总量，保留的控制份额不能被DATA耗尽，也不能作为绕过预算的无限通道。实际header/subtype、operation与授权仍校验；DATA不能冒充控制请求占用保留通路，不能只凭自称控制类型跳过检查。B18覆盖多连接半包、暂停后pipeline残留、额度交接/失败释放，以及DATA暂停时合法控制请求仍能接收并推进；A26消费身份/operation拒绝边界。
+控制连接数量及TLS/接收额度计入Bookie同一总量，保留的控制份额不能被DATA耗尽，也不能作为绕过预算的无限通道。实际header/subtype、operation与授权仍校验；DATA不能冒充控制请求占用保留通路，不能只凭自称控制类型跳过检查。`FENCE_LEDGER`虽属实验wire的DATA枚举，在连接用途隔离上按控制操作处理，已分类DATA的连接在固定头阶段拒绝该操作。B18覆盖多连接半包、暂停后pipeline残留、额度交接/失败释放，以及DATA暂停时合法控制请求仍能接收并推进；A26消费身份/operation拒绝边界。
 
 同一listener不增加HELLO用途字段。连接先占有独立、有界的未分类准入、TLS及接收份额；TLS身份与HELLO通过后，首个非HELLO固定头选择候选DATA或CONTROL用途。DATA在收大body前转入DATA额度；控制请求须完整校验operation/context/credential及授权，才取得保留控制连接名额，之后连接用途固定。入站buffer中跨分类边界的剩余字节保持原计费归属直到释放，长期工作集转移须原子检查并换账。未分类名额耗尽时，新控制连接也无法被预先识别并保证进入；此时只保证资源有界和已有控制连接推进，不宣称新控制连接始终可达。TLS、HELLO及首请求等待各有独立有限期限，避免慢连接无限占位。
 

@@ -289,11 +289,10 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             throw new IOException("Invalid Profile request header");
         }
         if (purpose == ConnectionPurpose.CONTROL
-                && operation != ProfileOperation.HELLO && operation != ProfileOperation.FENCE_LEDGER
-                && !operation.isControl()) {
+                && operation != ProfileOperation.HELLO && !isControlConnectionOperation(operation)) {
             throw new IOException("DATA operation cannot consume reserved control receive capacity");
         }
-        if (purpose == ConnectionPurpose.DATA && operation.isControl()) {
+        if (purpose == ConnectionPurpose.DATA && isControlConnectionOperation(operation)) {
             throw new IOException("Control operation requires a control connection");
         }
         if (purpose == ConnectionPurpose.CONTROL_PENDING) {
@@ -306,7 +305,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             return;
         }
         ProfileOperation operation = header.operation();
-        if (operation == ProfileOperation.FENCE_LEDGER || operation.isControl()) {
+        if (isControlConnectionOperation(operation)) {
             purpose = ConnectionPurpose.CONTROL_PENDING;
             return;
         }
@@ -315,6 +314,10 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         }
         lane = ProfileReceiveBudget.Lane.DATA;
         purpose = ConnectionPurpose.DATA;
+    }
+
+    private static boolean isControlConnectionOperation(ProfileOperation operation) {
+        return operation == ProfileOperation.FENCE_LEDGER || operation.isControl();
     }
 
     private HeldCredit charge(int bytes) throws IOException {

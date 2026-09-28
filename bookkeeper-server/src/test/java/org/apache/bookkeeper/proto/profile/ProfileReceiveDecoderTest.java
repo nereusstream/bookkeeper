@@ -200,6 +200,31 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void rejectsFenceOnDataConnectionBeforeReceivingBody() {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 512, 8, 8, 4);
+        ProfileReceiveDecoder decoder = decoder(budget, 2_000, 64);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+        ProfileInboundFrame greeting = channel.readInbound();
+        greeting.close();
+        decoder.markEstablished();
+
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(frame(ProfileOperation.ADD_NORMAL, 0))));
+        ProfileInboundFrame add = channel.readInbound();
+        add.close();
+        assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+
+        byte[] fence = frame(ProfileOperation.FENCE_LEDGER, 100);
+        assertThrows(IOException.class, () -> channel.writeInbound(
+                Unpooled.wrappedBuffer(Arrays.copyOf(fence, 36))));
+        assertFalse(channel.isActive());
+        assertNull(channel.readInbound());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+    }
+
+    @Test
     public void badHeaderAndPartialCloseReleaseAllReceiveCredit() {
         ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024, 512, 8, 8, 4);
         EmbeddedChannel partial = new EmbeddedChannel(decoder(budget, 4_096, 64));
