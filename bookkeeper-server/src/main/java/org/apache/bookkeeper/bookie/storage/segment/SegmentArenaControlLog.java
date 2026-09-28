@@ -94,6 +94,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private long durableThrough = -1;
     private long appliedThrough = -1;
     private DurableBatch pending;
+    private boolean writing;
     private boolean failed;
     private boolean closed;
 
@@ -156,29 +157,35 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     /** One physical force covers the whole batch; no result is applied before that force returns. */
-    synchronized DurableBatch appendDurably(List<Allocation> commands) throws IOException {
-        requireWritable();
+    DurableBatch appendDurably(List<Allocation> commands) throws IOException {
         List<Allocation> batch = List.copyOf(commands);
-        if (pending != null || batch.isEmpty() || batch.size() > config.maxPendingEntries()) {
-            throw new IllegalArgumentException("Invalid or unresolved control batch");
+        List<ByteBuffer> encoded;
+        long sequence;
+        long start;
+        synchronized (this) {
+            requireWritable();
+            if (writing || pending != null || batch.isEmpty() || batch.size() > config.maxPendingEntries()) {
+                throw new IllegalArgumentException("Invalid or unresolved control batch");
+            }
+            encoded = new ArrayList<>(batch.size());
+            long bytes = 0;
+            sequence = durableThrough + 1;
+            for (Allocation command : batch) {
+                validateRange(command);
+                ByteBuffer record = SegmentControlFormat.encode(command.type(), LOG_GENERATION, sequence++,
+                        command.operationId(), command.operationGeneration(), command.expectedGeneration(),
+                        command.body());
+                bytes = Math.addExact(bytes, record.remaining());
+                encoded.add(record);
+            }
+            if (bytes > maxLogBytes - nextOffset) {
+                throw new IOException("Arena control log capacity exhausted");
+            }
+            start = nextOffset;
+            // Reserve the physical suffix before the first write; failure never reuses its coordinates.
+            nextOffset += bytes;
+            writing = true;
         }
-        List<ByteBuffer> encoded = new ArrayList<>(batch.size());
-        long bytes = 0;
-        long sequence = durableThrough + 1;
-        for (Allocation command : batch) {
-            validateRange(command);
-            ByteBuffer record = SegmentControlFormat.encode(command.type(), LOG_GENERATION, sequence++,
-                    command.operationId(), command.operationGeneration(), command.expectedGeneration(),
-                    command.body());
-            bytes = Math.addExact(bytes, record.remaining());
-            encoded.add(record);
-        }
-        if (bytes > maxLogBytes - nextOffset) {
-            throw new IOException("Arena control log capacity exhausted");
-        }
-        long start = nextOffset;
-        // Reserve the physical suffix before the first write; failure never reuses its coordinates.
-        nextOffset += bytes;
         try {
             long position = start;
             for (ByteBuffer record : encoded) {
@@ -186,12 +193,20 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 position += record.remaining();
             }
             io.force(channel, true);
-            durableThrough = sequence - 1;
-            pending = new DurableBatch(durableThrough - batch.size() + 1, batch);
-            return pending;
+            synchronized (this) {
+                durableThrough = sequence - 1;
+                pending = new DurableBatch(durableThrough - batch.size() + 1, batch);
+                return pending;
+            }
         } catch (IOException | RuntimeException | Error failure) {
-            failed = true;
+            synchronized (this) {
+                failed = true;
+            }
             throw failure;
+        } finally {
+            synchronized (this) {
+                writing = false;
+            }
         }
     }
 
@@ -218,7 +233,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return List.copyOf(results);
     }
 
-    synchronized List<Result> submitBatch(List<Allocation> commands) throws IOException {
+    List<Result> submitBatch(List<Allocation> commands) throws IOException {
         return applyDurable(appendDurably(commands));
     }
 
@@ -410,6 +425,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
     public synchronized void close() throws IOException {
         if (closed) {
             return;
+        }
+        if (writing) {
+            throw new IOException("Arena control I/O is still in flight");
         }
         closed = true;
         IOException first = null;

@@ -32,6 +32,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -66,6 +67,75 @@ public class SegmentArenaControlLogTest {
                             long allocationId) {
         return log.hasAppliedGrant(0, offset, SegmentArenaControlLog.BLOCK_BYTES, shard, ownerGeneration,
                 allocationId, 1);
+    }
+
+    @Test
+    public void grantQueriesRemainAvailableWhileControlForceIsBlocked() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo delayed = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Control force was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024, delayed)) {
+            AtomicReference<SegmentArenaControlLog.DurableBatch> durable = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread writer = new Thread(() -> {
+                try {
+                    durable.set(log.appendDurably(List.of(alloc(1, 4096))));
+                } catch (Throwable cause) {
+                    failure.set(cause);
+                }
+            });
+            writer.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                FutureTask<Boolean> query = new FutureTask<>(() -> granted(log, 4096, 1, 1, 1));
+                new Thread(query).start();
+                assertFalse(query.get(1, TimeUnit.SECONDS));
+                FutureTask<Throwable> second = new FutureTask<>(() -> {
+                    try {
+                        log.appendDurably(List.of(alloc(2, 4096)));
+                        return null;
+                    } catch (Throwable cause) {
+                        return cause;
+                    }
+                });
+                new Thread(second).start();
+                assertTrue(second.get(1, TimeUnit.SECONDS) instanceof IllegalArgumentException);
+                FutureTask<Throwable> close = new FutureTask<>(() -> {
+                    try {
+                        log.close();
+                        return null;
+                    } catch (Throwable cause) {
+                        return cause;
+                    }
+                });
+                new Thread(close).start();
+                assertTrue(close.get(1, TimeUnit.SECONDS) instanceof IOException);
+                assertEquals(-1, log.durableThrough());
+            } finally {
+                release.countDown();
+                writer.join(5000);
+            }
+            assertFalse(writer.isAlive());
+            assertNull(failure.get());
+            assertEquals(0, log.durableThrough());
+            assertFalse(granted(log, 4096, 1, 1, 1));
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    log.applyDurable(durable.get()).get(0).status());
+            assertTrue(granted(log, 4096, 1, 1, 1));
+        }
     }
 
     @Test

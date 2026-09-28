@@ -1,0 +1,21 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_ARENA_CONTROL_LOCK_SCOPE_ONLY",
+  "sourceBaseCommit": "3886094a882f593b73b91f3e7715c5856eeaa35d",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLog.java": "7042d00bfd58bc7c32c5d3a4366ea597929e639f661fcee44884e6531c3ed912",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentFileIo.java": "f8d706513bf4931f263288f25f9fafbb1b62ddc3e76257c8f4e33dd864fca2d4",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLogTest.java": "23a963462e9055f02ad5adc4982e16f9002fca61371c0b4a9b54427d47fadc19"
+  },
+  "fixture": "real isolated Arena control file with a force held at the I/O boundary; concurrent applied-grant query, second-batch admission and close decision; release force then owner-independent apply",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-uSfzFwk1",
+  "inputSha256": "5d3e29a09d50506b84f28a0a543b9c3822f4806d66aa013495b29ce015867373",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentBatchFormatTest",
+  "mavenLogSha256": "d2449518e42649ec13480cfa912a5c36280994a759bcd28585d54e8a7b245be2",
+  "junit": {
+    "SegmentArenaControlLogTest": {"tests": 8, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "b683f51bcc5f2939fff0f99ff1ccc4e5bfc1d6571a4d8e083834b659f4df20ba"},
+    "SegmentBatchFormatTest": {"tests": 16, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "246163629a76309a10cc28f6e6ed64e464e3531705e39a1d264b6ebc4dc942e5"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Control-log state queries and close decision only; DATA file write/force still holds its reservation monitor. No Bookie authority, runtime lifecycle integration, ordinary Add result, power-loss or production authority."
+}
