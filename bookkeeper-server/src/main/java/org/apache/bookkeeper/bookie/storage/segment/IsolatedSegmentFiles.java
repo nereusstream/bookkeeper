@@ -206,6 +206,15 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
     }
 
+    /** Retire an operation that never reached DATA I/O; its coordinates remain consumed. */
+    synchronized void cancelBeforeSubmission(Reservation reservation) {
+        if (reservation.owner != this || reservation.submitted) {
+            throw new IllegalArgumentException("Reservation was already submitted or belongs to another writer");
+        }
+        reservation.submitted = true;
+        pendingReservations--;
+    }
+
     /** Physical experiment path: require an applied, durable Arena grant for the entire frozen DATA batch. */
     void writeAuthorized(SegmentBatchFormat.FrozenBatch batch, SegmentArenaControlLog authority)
             throws IOException {
@@ -258,8 +267,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (activeIo != 0) {
-            throw new IOException("DATA I/O is still in flight");
+        if (activeIo != 0 || pendingReservations != 0) {
+            throw new IOException("DATA reservation or I/O is still in flight");
         }
         closed = true;
         IOException first = null;

@@ -412,6 +412,7 @@ final class SegmentDataPhysicalDriver {
             accepted = owner.submit(shard, new SegmentOwnerLoop.Command() {
                 private boolean registered;
                 private boolean submitted;
+                private IsolatedSegmentFiles.Reservation reserved;
 
                 @Override
                 public void run(SegmentOwnerLoop.Ticket ticket) {
@@ -436,6 +437,7 @@ final class SegmentDataPhysicalDriver {
                         ticket.complete(() -> deliver(obligation, null, failure, null));
                         return;
                     }
+                    reserved = reservation;
                     pending.put(reservation, obligation);
                     registered = true;
                     hot.bind(admission, reservation);
@@ -449,6 +451,7 @@ final class SegmentDataPhysicalDriver {
                         }
                     }, failure -> {
                         if (!operationStarted.get()) {
+                            files.cancelBeforeSubmission(reservation);
                             obligation.physicalTerminal();
                         }
                         physicalFinished(reservation, failure);
@@ -460,6 +463,9 @@ final class SegmentDataPhysicalDriver {
                 public void failed(Throwable failure) {
                     owner.requireOwner();
                     if (!submitted) {
+                        if (reserved != null) {
+                            files.cancelBeforeSubmission(reserved);
+                        }
                         obligation.physicalTerminal();
                     }
                     Throwable callbackFailure = registered ? null : deliver(obligation, null, failure, null);

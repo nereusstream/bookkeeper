@@ -40,7 +40,7 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser、匹配的已apply Arena grant及每条record的固定ledger→logical shard映射，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用。`validateAndSync`沿同一验证路径，在每个已检查文件返回前执行真实`force(false)`；验证或同步失败就不返回结果。`recoverPhysicalInventory`还可在显式entry容量内，完成全目录验证与同步后返回普通`ENTRY_DATA`的物理位置，不返回`RELOCATION_COPY`；容量不足也不返回部分清单。上述诊断与全量清单扫描全部隔离DATA文件；单stream候选已按Arena授权块筛选物理范围，但尚未由Bookie/current-selector authority选出必要范围，也不推导连续stream前缀、可发布的恢复locator或开放写入。
 
-步骤6的物理前缀局部切片：`IsolatedSegmentFiles`已将有界DATA坐标预留与已预留批次的实际write/force分开。预留在I/O前占用固定文件范围；失败不退回坐标，并停止该文件新写。`SegmentPhysicalPrefix`只在原shard owner上接收同一stream generation的递增batch sequence；I/O completion必须对应已预留batch且其真实force返回，才可推进连续物理前缀。较晚batch先durable仍等待前批；前批同步不确定时不释放后批，不凭后批完整字节报告本地成功。当前tracker的起点由隔离调用者显式提供，但提交时必须等于Arena已apply并可重放的stream首序号；它没有跨重启的durable-through证明，只返回运行期物理可发布候选。
+步骤6的物理前缀局部切片：`IsolatedSegmentFiles`已将有界DATA坐标预留与已预留批次的实际write/force分开。预留在I/O前占用固定文件范围；失败不退回坐标，并停止该文件新写。DATA文件关闭现在同时拒绝正在执行的I/O和尚未终结的预留；I/O服务在执行前拒绝任务时，原owner终结预留计数但不回退坐标，物理前缀保持失败。`SegmentPhysicalPrefix`只在原shard owner上接收同一stream generation的递增batch sequence；I/O completion必须对应已预留batch且其真实force返回，才可推进连续物理前缀。较晚batch先durable仍等待前批；前批同步不确定时不释放后批，不凭后批完整字节报告本地成功。当前tracker的起点由隔离调用者显式提供，但提交时必须等于Arena已apply并可重放的stream首序号；它没有跨重启的durable-through证明，只返回运行期物理可发布候选。
 
 步骤6继续接入有界物理热候选：`SegmentHotDirectory`在原owner上从独立parser解析的冻结batch中核对每条record的固定shard，再提取普通`ENTRY_DATA`位置，在占用DATA坐标前预留固定locator与pending容量，再把预留绑定到同一真实文件reservation。只有`SegmentPhysicalPrefix`释放连续、已force的reservation后，才将这些位置从pending移入可点读候选；同批`RELOCATION_COPY`不进入普通候选。容量满额、重复逻辑坐标在写入前明确拒绝；目录准入仍不处理合法LAC封装变化，也不把拒绝冒充同坐标幂等。运行期force发布与重启扫描恢复的物理候选在目录中分别标记；后者可供点读验证；尽管Arena现记录stream首序号，仍缺少恢复的完整durable前缀及selector证明，不能用于幂等durable成功。候选自身没有Bookie route/fence/tombstone/selector权限，也不等于local result；无RocksDB接管或淘汰时达到硬上限就背压新DATA。
 
@@ -70,6 +70,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-29 执行`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=SegmentBatchFormatTest,SegmentBookieControlLogTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test -q`：隔离真实文件测试45项通过，0失败/错误/跳过；同模块`spotless:check checkstyle:check`通过。修复前的关闭反例确认仅剩未执行reservation时文件锁会被提前释放；修复后关闭拒绝该状态，I/O服务执行前拒绝任务时预留计数终结而物理坐标保留，后续预留不复用原范围。伪造“未force却完成”的既有测试在断言前缀失败后显式终结其测试用预留。尚无可写重开、旧I/O错误持久分类或掉电证据。
 
 2026-09-29 执行`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=SegmentBookieControlLogTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test -q`：20项通过，0失败/错误/跳过；同模块`spotless:check checkstyle:check`通过。同坐标重复请求在原DATA force期间停止等待，原写入及另一等待者仍完成；已发布候选的点读暂停期间停止等待，Bookie票据仍阻止fence越过读取，I/O与owner终结后fence才持久化。没有网络deadline/断连接线或生产ACK验证。
 

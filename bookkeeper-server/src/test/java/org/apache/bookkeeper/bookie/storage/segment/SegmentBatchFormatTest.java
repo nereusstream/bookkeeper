@@ -188,9 +188,67 @@ public class SegmentBatchFormatTest {
             assertFalse(writer.isAlive());
             assertNull(failure.get());
             assertTrue(firstReservation.durable());
+            assertThrows(IOException.class, files::close);
             files.writeReserved(secondReservation);
             assertTrue(secondReservation.durable());
             assertEquals(12288, files.nextOffset(0));
+        }
+    }
+
+    @Test
+    public void rejectedPhysicalIoRetiresReservationWithoutReusingItsCoordinates() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("rejected-data-io"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024 * 1024, 1, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf firstEntry = entry(new byte[8], 1);
+        ByteBuf secondEntry = entry(new byte[8], 2);
+        SegmentBatchFormat.FrozenBatch first;
+        SegmentBatchFormat.FrozenBatch second;
+        try {
+            first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry)));
+            second = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 2, 8192),
+                    List.of(SegmentBatchFormat.entry(context(), secondEntry)));
+        } finally {
+            firstEntry.release();
+            secondEntry.release();
+        }
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 1);
+        io.shutdown();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 2, 1)));
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 1),
+                    new SegmentHotDirectory(owner, config, identity(), 1));
+            CountDownLatch completed = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submit(first, (locations, cause) -> {
+                    failure.set(cause);
+                    completed.countDown();
+                }));
+                owner.start();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                assertTrue(failure.get() instanceof IOException);
+                assertEquals(8192, files.nextOffset(0));
+                assertThrows(IOException.class, () -> files.reserveAuthorized(first, arena));
+                IsolatedSegmentFiles.Reservation unused = files.reserveAuthorized(second, arena);
+                assertEquals(12288, files.nextOffset(0));
+                files.cancelBeforeSubmission(unused);
+                assertThrows(IllegalArgumentException.class, () -> files.cancelBeforeSubmission(unused));
+            } finally {
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+            files.close();
         }
     }
 
@@ -1371,6 +1429,7 @@ public class SegmentBatchFormatTest {
                         assertTrue(prefix.completed(reservation, null).isEmpty());
                         assertEquals(0, prefix.durableThrough());
                         assertTrue(prefix.failed());
+                        files.cancelBeforeSubmission(reservation);
                     } catch (Throwable failure) {
                         problem.set(failure);
                     } finally {
