@@ -1167,10 +1167,14 @@ public class SegmentBatchFormatTest {
             assertEquals(1, failedSync.forces);
             SegmentFileIo sync = new SegmentFileIo();
             try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
-                    config, identity(), arena, sync, 1)) {
+                    config, identity(), arena, sync, 1, 1)) {
                 assertEquals(1, sync.forces);
                 assertEquals(nextBlock, reopened.nextOffset(0));
                 assertEquals(1, reopened.startupInventory().entries().size());
+                SegmentDataRecovery.PhysicalStreamCandidate stream = reopened.startupInventory()
+                        .streamCandidate(arena, 0, new Generation(1));
+                assertEquals(11, stream.through());
+                assertEquals(1, stream.entries().size());
                 assertEquals(11, SegmentPointRead.read(config, identity(), arena,
                         reopened.startupInventory().entries().get(0)).record().entryId());
                 assertThrows(IOException.class, () -> reopened.writeAuthorized(first, arena));
@@ -1225,6 +1229,13 @@ public class SegmentBatchFormatTest {
                     oldStream.entries().get(0)).record().entryId());
             assertEquals(12, SegmentPointRead.read(config, identity(), arena,
                     newStream.entries().get(0)).record().entryId());
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity(), arena, new SegmentFileIo(), 2, 1));
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity(), arena, new SegmentFileIo(), 2, 2)) {
+                assertEquals(11, reopened.startupInventory().streamCandidate(arena, 0, new Generation(1)).through());
+                assertEquals(1, reopened.startupInventory().streamCandidate(arena, 0, new Generation(2)).through());
+            }
         }
     }
 
@@ -1243,10 +1254,53 @@ public class SegmentBatchFormatTest {
             assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
                     config, identity(), arena, new SegmentFileIo()));
             arena.applyDurable(pending);
-            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
-                    config, identity(), arena, new SegmentFileIo())) {
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity(), arena, new SegmentFileIo(), 1, 1)) {
                 assertEquals(4096 + SegmentArenaControlLog.BLOCK_BYTES, reopened.nextOffset(0));
+                SegmentDataRecovery.PhysicalStreamCandidate empty = reopened.startupInventory()
+                        .streamCandidate(arena, 0, new Generation(1));
+                assertEquals(0, empty.through());
+                assertTrue(empty.entries().isEmpty());
             }
+        }
+    }
+
+    @Test
+    public void startupInventoryDoesNotTreatALaterBatchAcrossAGapAsAStreamPrefix() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("startup-gap"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf firstEntry = entry(new byte[8], 11);
+        ByteBuf laterEntry = entry(new byte[8], 12);
+        SegmentBatchFormat.FrozenBatch first;
+        SegmentBatchFormat.FrozenBatch later;
+        try {
+            first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 11, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry)));
+            later = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 12, 8192),
+                    List.of(SegmentBatchFormat.entry(context(), laterEntry)));
+        } finally {
+            firstEntry.release();
+            laterEntry.release();
+        }
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0,
+                    new Generation(1), 5, 4096, 1, 11)));
+            files.cancelBeforeSubmission(files.reserveAuthorized(first, arena));
+            files.writeAuthorized(later, arena);
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                        config, identity(), arena, new SegmentFileIo(), 1, 1)) {
+            assertEquals(1, reopened.startupInventory().entries().size());
+            assertEquals(12, SegmentPointRead.read(config, identity(), arena,
+                    reopened.startupInventory().entries().get(0)).record().entryId());
+            assertThrows(IOException.class, () -> reopened.startupInventory()
+                    .streamCandidate(arena, 0, new Generation(1)));
         }
     }
 
@@ -1502,12 +1556,19 @@ public class SegmentBatchFormatTest {
             try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
                 SegmentFileIo insufficient = new SegmentFileIo();
                 assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithInventory(
-                        config, identity(), replay, insufficient, 1));
+                        config, identity(), replay, insufficient, 1, 1));
                 assertEquals(0, insufficient.forces);
                 SegmentFileIo failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
                 assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithInventory(
-                        config, identity(), replay, failedSync, 2));
+                        config, identity(), replay, failedSync, 2, 1));
                 assertEquals(1, failedSync.forces);
+                try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                        config, identity(), replay, new SegmentFileIo(), 2, 1)) {
+                    SegmentDataRecovery.PhysicalStreamCandidate stream = reopened.startupInventory()
+                            .streamCandidate(replay, 0, new Generation(1));
+                    assertEquals(12, stream.through());
+                    assertEquals(2, stream.entries().size());
+                }
                 SegmentFileIo sync = new SegmentFileIo();
                 SegmentDataRecovery.PhysicalInventory inventory = SegmentDataRecovery.recoverPhysicalInventory(
                         config, identity(), replay, sync, 2);

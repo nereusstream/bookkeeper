@@ -25,7 +25,9 @@ import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -124,21 +126,56 @@ final class SegmentDataRecovery {
         }
     }
 
+    private record StreamKey(int shard, Generation generation) { }
+
+    private record StreamPrefix(long firstSequence, long through, boolean contiguous) { }
+
+    private static final class StreamProgress {
+        private final long firstSequence;
+        private long nextSequence;
+        private boolean broken;
+
+        private StreamProgress(long firstSequence) {
+            this.firstSequence = firstSequence;
+            nextSequence = firstSequence;
+        }
+
+        private void observe(long sequence) {
+            if (broken) {
+                return;
+            }
+            if (nextSequence == Long.MAX_VALUE || sequence != nextSequence) {
+                broken = true;
+            } else {
+                nextSequence++;
+            }
+        }
+
+        private StreamPrefix snapshot() {
+            return new StreamPrefix(firstSequence, nextSequence - 1, !broken);
+        }
+    }
+
     static final class PhysicalInventory {
         private final IsolatedSegmentConfig sourceConfig;
         private final SegmentFileHeader sourceIdentity;
         private final Scan scan;
         private final List<SegmentPointRead.Location> entries;
         private final List<Long> grantedHighWatermarks;
+        private final Map<StreamKey, StreamPrefix> streamPrefixes;
+        private final boolean completeStreamPrefixes;
 
         private PhysicalInventory(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
                                   Scan scan, List<SegmentPointRead.Location> entries,
-                                  List<Long> grantedHighWatermarks) {
+                                  List<Long> grantedHighWatermarks,
+                                  Map<StreamKey, StreamPrefix> streamPrefixes, boolean completeStreamPrefixes) {
             this.sourceConfig = sourceConfig;
             this.sourceIdentity = sourceIdentity;
             this.scan = scan;
             this.entries = List.copyOf(entries);
             this.grantedHighWatermarks = List.copyOf(grantedHighWatermarks);
+            this.streamPrefixes = Map.copyOf(streamPrefixes);
+            this.completeStreamPrefixes = completeStreamPrefixes;
         }
 
         IsolatedSegmentConfig sourceConfig() {
@@ -161,11 +198,37 @@ final class SegmentDataRecovery {
             return grantedHighWatermarks;
         }
 
+        /** Same-scan physical stream evidence only; Bookie selection and local success remain separate. */
+        PhysicalStreamCandidate streamCandidate(SegmentArenaControlLog authority, int shard,
+                                                Generation generation) throws IOException {
+            if (!completeStreamPrefixes || shard < 0 || shard >= sourceConfig.logicalShards()
+                    || generation == null || !authority.matchesScope(sourceConfig, sourceIdentity)) {
+                throw new IOException("Startup stream evidence is unavailable for this storage scope");
+            }
+            long first = authority.streamFirstSequence(shard, generation.value()).orElse(-1);
+            if (first < 0) {
+                throw new IOException("Physical stream start is not backed by applied Arena control");
+            }
+            StreamPrefix prefix = streamPrefixes.get(new StreamKey(shard, generation));
+            if (prefix != null && (!prefix.contiguous() || prefix.firstSequence() != first)) {
+                throw new IOException("Physical stream has a sequence gap, duplicate or changed start");
+            }
+            List<SegmentPointRead.Location> selected = new ArrayList<>();
+            for (SegmentPointRead.Location location : entries) {
+                SegmentBatchFormat.Address address = location.address();
+                if (address.shard() == shard && address.streamGeneration().equals(generation)) {
+                    selected.add(location);
+                }
+            }
+            return new PhysicalStreamCandidate(sourceConfig, sourceIdentity, scan,
+                    prefix == null ? first - 1 : prefix.through(), selected, grantedHighWatermarks);
+        }
+
     }
 
     static Scan inspect(IsolatedSegmentConfig config, SegmentFileHeader identity,
                         SegmentArenaControlLog authority) throws IOException {
-        return scan(config, identity, authority, null, 0, null, null).scan();
+        return scan(config, identity, authority, null, 0, 0, null, null).scan();
     }
 
     /** A successful scan forces the checked DATA files; it does not establish Bookie or locator authority. */
@@ -174,7 +237,7 @@ final class SegmentDataRecovery {
         if (syncIo == null) {
             throw new IllegalArgumentException("DATA recovery sync requires an I/O backend");
         }
-        return scan(config, identity, authority, syncIo, 0, null, null).scan();
+        return scan(config, identity, authority, syncIo, 0, 0, null, null).scan();
     }
 
     /** The caller retains the isolated writer lock while consuming the scan and opening DATA files. */
@@ -184,7 +247,7 @@ final class SegmentDataRecovery {
         if (syncIo == null || writerLock == null) {
             throw new IllegalArgumentException("DATA recovery sync and writer lock required");
         }
-        return scanWhileLocked(config, identity, authority, syncIo, 0, null, null, writerLock).scan();
+        return scanWhileLocked(config, identity, authority, syncIo, 0, 0, null, null, writerLock).scan();
     }
 
     /** Physical locations only: caller still needs the recovered stream prefix and Bookie selector/permissions. */
@@ -194,19 +257,20 @@ final class SegmentDataRecovery {
         if (syncIo == null || maxEntries < 1) {
             throw new IllegalArgumentException("Bounded DATA recovery sync and inventory required");
         }
-        return scan(config, identity, authority, syncIo, maxEntries, null, null);
+        return scan(config, identity, authority, syncIo, maxEntries, 0, null, null);
     }
 
     /** Complete, bounded inventory under the writer lock already owned by the restart caller. */
     static PhysicalInventory recoverPhysicalInventoryWhileLocked(IsolatedSegmentConfig config,
                                                                  SegmentFileHeader identity,
                                                                  SegmentArenaControlLog authority,
-                                                                 SegmentFileIo syncIo, int maxEntries,
+                                                                 SegmentFileIo syncIo, int maxEntries, int maxStreams,
                                                                  FileLock writerLock) throws IOException {
-        if (syncIo == null || maxEntries < 1 || writerLock == null) {
+        if (syncIo == null || maxEntries < 1 || maxStreams < 1 || writerLock == null) {
             throw new IllegalArgumentException("Bounded DATA inventory, sync and writer lock required");
         }
-        return scanWhileLocked(config, identity, authority, syncIo, maxEntries, null, null, writerLock);
+        return scanWhileLocked(config, identity, authority, syncIo, maxEntries, maxStreams,
+                null, null, writerLock);
     }
 
     /** Requires the persisted Arena stream start before returning a read-only physical candidate. */
@@ -267,8 +331,8 @@ final class SegmentDataRecovery {
         }
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
         PhysicalInventory inventory = files == null
-                ? scan(config, identity, authority, syncIo, maxEntries, probe, bookie)
-                : scanWhileLocked(config, identity, authority, syncIo, maxEntries, probe, bookie, files.lock());
+                ? scan(config, identity, authority, syncIo, maxEntries, 0, probe, bookie)
+                : scanWhileLocked(config, identity, authority, syncIo, maxEntries, 0, probe, bookie, files.lock());
         if (bookie != null && !bookie.matchesScope(config, identity)) {
             throw new IOException("Bookie read route became unavailable during DATA recovery");
         }
@@ -278,16 +342,17 @@ final class SegmentDataRecovery {
 
     private static PhysicalInventory scan(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                           SegmentArenaControlLog authority, SegmentFileIo syncIo,
-                                          int maxEntries, StreamProbe stream,
+                                          int maxEntries, int maxStreams, StreamProbe stream,
                                           SegmentBookieControlLog bookie) throws IOException {
         try (SegmentDataFileLock files = SegmentDataFileLock.open(config.directory())) {
-            return scanWhileLocked(config, identity, authority, syncIo, maxEntries, stream, bookie, files.lock());
+            return scanWhileLocked(config, identity, authority, syncIo, maxEntries, maxStreams,
+                    stream, bookie, files.lock());
         }
     }
 
     private static PhysicalInventory scanWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                     SegmentArenaControlLog authority, SegmentFileIo syncIo,
-                                                    int maxEntries, StreamProbe stream,
+                                                    int maxEntries, int maxStreams, StreamProbe stream,
                                                     SegmentBookieControlLog bookie,
                                                     FileLock writerLock)
             throws IOException {
@@ -299,6 +364,7 @@ final class SegmentDataRecovery {
         long validatedBytes = 0;
         long zeroPages = 0;
         List<SegmentPointRead.Location> entries = new ArrayList<>();
+        Map<StreamKey, StreamProgress> streams = new HashMap<>();
         for (int file = 0; file < config.dataFiles(); file++) {
             try (FileChannel data = syncIo == null
                     ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
@@ -349,6 +415,23 @@ final class SegmentDataRecovery {
                     if (stream != null) {
                         stream.observe(address);
                     }
+                    if (maxStreams > 0) {
+                        StreamKey key = new StreamKey(address.shard(), address.streamGeneration());
+                        StreamProgress progress = streams.get(key);
+                        if (progress == null) {
+                            if (streams.size() == maxStreams) {
+                                throw new IOException("Physical recovery stream capacity exhausted");
+                            }
+                            long first = authority.streamFirstSequence(address.shard(),
+                                    address.streamGeneration().value()).orElse(-1);
+                            if (first < 0) {
+                                throw new IOException("Physical stream start has no applied Arena authority");
+                            }
+                            progress = new StreamProgress(first);
+                            streams.put(key, progress);
+                        }
+                        progress.observe(address.sequence());
+                    }
                     if (maxEntries > 0) {
                         List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
                         for (int i = 0; i < parsed.records().size(); i++) {
@@ -377,8 +460,10 @@ final class SegmentDataRecovery {
         for (int file = 0; file < config.dataFiles(); file++) {
             grantedHighWatermarks.add(authority.grantedHighWatermark(file));
         }
+        Map<StreamKey, StreamPrefix> prefixes = new HashMap<>();
+        streams.forEach((key, progress) -> prefixes.put(key, progress.snapshot()));
         return new PhysicalInventory(config, identity, new Scan(batches, records, validatedBytes, zeroPages),
-                entries, grantedHighWatermarks);
+                entries, grantedHighWatermarks, prefixes, maxStreams > 0);
     }
 
     private static SegmentBatchFormat.Address address(ByteBuffer page, long offset) throws IOException {

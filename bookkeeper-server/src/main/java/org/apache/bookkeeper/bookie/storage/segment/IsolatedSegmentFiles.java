@@ -141,24 +141,25 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                SegmentArenaControlLog authority, SegmentFileIo recoveryIo)
             throws IOException {
-        return openAppendOnly(config, identity, authority, recoveryIo, 0);
+        return openAppendOnly(config, identity, authority, recoveryIo, 0, 0);
     }
 
     /** Also retain every ordinary physical coordinate from the same locked startup scan. */
     static IsolatedSegmentFiles openAppendOnlyWithInventory(IsolatedSegmentConfig config,
                                                             SegmentFileHeader identity,
                                                             SegmentArenaControlLog authority,
-                                                            SegmentFileIo recoveryIo, int maxEntries)
+                                                            SegmentFileIo recoveryIo, int maxEntries,
+                                                            int maxStreams)
             throws IOException {
-        if (maxEntries < 1) {
-            throw new IllegalArgumentException("Positive restart locator capacity required");
+        if (maxEntries < 1 || maxStreams < 1) {
+            throw new IllegalArgumentException("Positive restart locator and stream capacities required");
         }
-        return openAppendOnly(config, identity, authority, recoveryIo, maxEntries);
+        return openAppendOnly(config, identity, authority, recoveryIo, maxEntries, maxStreams);
     }
 
     private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                        SegmentArenaControlLog authority, SegmentFileIo recoveryIo,
-                                                       int maxEntries) throws IOException {
+                                                       int maxEntries, int maxStreams) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(authority, "authority");
@@ -175,7 +176,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                             recoveryIo, guard.lock());
                 } else {
                     inventory = SegmentDataRecovery.recoverPhysicalInventoryWhileLocked(config, identity,
-                            authority, recoveryIo, maxEntries, guard.lock());
+                            authority, recoveryIo, maxEntries, maxStreams, guard.lock());
                 }
                 result = new IsolatedSegmentFiles(config, identity, guard, true, inventory);
                 for (int file = 0; file < config.dataFiles(); file++) {
