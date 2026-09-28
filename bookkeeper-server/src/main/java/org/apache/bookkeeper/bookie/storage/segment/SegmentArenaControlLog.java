@@ -271,6 +271,21 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return first == null ? OptionalLong.empty() : OptionalLong.of(first);
     }
 
+    /** No FREE exists yet: every applied grant remains unavailable even when its DATA bytes are zero. */
+    synchronized long grantedHighWatermark(int file) throws IOException {
+        requireWritable();
+        if (file < 0 || file >= config.dataFiles()) {
+            throw new IllegalArgumentException("Invalid DATA file");
+        }
+        long end = FIRST_RECORD;
+        for (Slot slot : allocations.keySet()) {
+            if (slot.file() == file) {
+                end = Math.max(end, FIRST_RECORD + (slot.index() + 1) * BLOCK_BYTES);
+            }
+        }
+        return end;
+    }
+
     synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
         return !closed && !failed && config.equals(otherConfig) && identity.equals(otherIdentity);
     }

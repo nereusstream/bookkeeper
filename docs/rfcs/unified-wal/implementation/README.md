@@ -136,7 +136,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 先实现真实控制记录持久化、顺序apply、重复操作解析、启动身份检查及ALLOC/ALLOC_POOL。条件命令按已选合同“合批durable → 顺序判断并apply”，不增加推测状态或结果日志。初版可完整重放且暂不删除旧日志，但必须设置日志空间上限，满额停止接收；完整checkpoint/rotation在步骤8补齐。
 
-当前[隔离本地切片](local-storage/README.md)实现Arena ALLOC/ALLOC_POOL的文件持久化、stream首序号约束、单在途驱动、顺序apply和完整历史重放；定向真实文件测试已在DATA准入及I/O服务满额时通过独立控制份额完成force与原owner apply。Bookie控制文件现有INSTALL/ACTIVATE的有界批量force、顺序apply和重开重放，INSTALL只建立inactive route，独立ACTIVATE后才开放局部normal准入查询；FENCE受控入口先关闭新准入；在已接线的隔离DATA路径中，票据待实际I/O与owner回调均终结后才释放，随后force并持久拒绝普通写。显式DATA文件写入路径检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner驱动已将INSTALL/ACTIVATE及FENCE的write/force交给预留控制I/O服务，durable后回原owner apply；真实请求级local result、实际服务生命周期和pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
+当前[隔离本地切片](local-storage/README.md)实现Arena ALLOC/ALLOC_POOL的文件持久化、stream首序号约束、单在途驱动、顺序apply和完整历史重放；重放状态可报告每文件成功授权block的最高结束位置，全零已授权block仍计入，但尚不能判定pool used/unused。定向真实文件测试已在DATA准入及I/O服务满额时通过独立控制份额完成force与原owner apply。Bookie控制文件现有INSTALL/ACTIVATE的有界批量force、顺序apply和重开重放，INSTALL只建立inactive route，独立ACTIVATE后才开放局部normal准入查询；FENCE受控入口先关闭新准入；在已接线的隔离DATA路径中，票据待实际I/O与owner回调均终结后才释放，随后force并持久拒绝普通写。显式DATA文件写入路径检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner驱动已将INSTALL/ACTIVATE及FENCE的write/force交给预留控制I/O服务，durable后回原owner apply；真实请求级local result、实际服务生命周期和pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
 
 控制日志force已移出授权状态锁，受控慢force不阻塞已apply grant查询；DATA文件write/force也移出范围预留状态锁，以同文件独立锁串行。普通Add、逐entry结果和完整DATA owner链路尚未闭合。
 

@@ -710,6 +710,8 @@ public class SegmentBatchFormatTest {
                     assertEquals(12, candidate.through());
                     assertEquals(2, candidate.scan().batches());
                     assertEquals(2, candidate.entries().size());
+                    assertEquals(List.of(4096 + SegmentArenaControlLog.BLOCK_BYTES),
+                            candidate.grantedHighWatermarks());
                     assertEquals(11, SegmentPointRead.read(config, identity(), replay, candidate.entries().get(0))
                             .record().entryId());
                     assertEquals(12, SegmentPointRead.read(config, identity(), replay, candidate.entries().get(1))
@@ -1101,6 +1103,8 @@ public class SegmentBatchFormatTest {
                         config, identity(), replay, sync, 2);
                 assertEquals(2, inventory.scan().batches());
                 assertEquals(2, inventory.entries().size());
+                assertEquals(List.of(4096 + SegmentArenaControlLog.BLOCK_BYTES),
+                        inventory.grantedHighWatermarks());
                 assertEquals(1, sync.forces);
                 assertEquals(11, SegmentPointRead.read(config, identity(), replay, inventory.entries().get(0))
                         .record().entryId());

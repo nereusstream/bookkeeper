@@ -386,6 +386,7 @@ public class SegmentArenaControlLogTest {
                 log.appendDurably(List.of(pool));
                 assertFalse(granted(log, 4096, 2, 1, 3));
                 assertTrue(log.streamFirstSequence(2, 1).isEmpty());
+                assertEquals(4096, log.grantedHighWatermark(0));
                 assertFalse(granted(log, 4096, 1, 2, 3));
             }
             try (SegmentArenaControlLog reopened = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
@@ -394,6 +395,8 @@ public class SegmentArenaControlLogTest {
                 assertTrue(granted(reopened, 4096, 2, 1, 3));
                 assertTrue(granted(reopened, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 2, 1, 3));
                 assertEquals(7, reopened.streamFirstSequence(2, 1).orElseThrow());
+                assertEquals(4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES,
+                        reopened.grantedHighWatermark(0));
                 assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
                         reopened.submitBatch(List.of(pool)).get(0).status());
                 long next = 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES;
@@ -403,11 +406,13 @@ public class SegmentArenaControlLogTest {
                 assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
                         reopened.submitBatch(List.of(wrongStart)).get(0).status());
                 assertFalse(granted(reopened, next, 2, 1, 4));
+                assertEquals(next, reopened.grantedHighWatermark(0));
                 SegmentArenaControlLog.Allocation sameStart = new SegmentArenaControlLog.Allocation(
                         SegmentControlFormat.Type.ALLOC, new UUID(0, 5), new Generation(1), 0,
                         0, 2, new Generation(1), 5, next, 1, 7);
                 assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
                         reopened.submitBatch(List.of(sameStart)).get(0).status());
+                assertEquals(next + SegmentArenaControlLog.BLOCK_BYTES, reopened.grantedHighWatermark(0));
             }
         }
     }

@@ -33,13 +33,15 @@ import org.apache.bookkeeper.common.profile.startup.Generation;
 final class SegmentDataRecovery {
     record Scan(long batches, long records, long validatedBytes, long zeroPages) { }
 
-    /** A physical candidate only: the supplied start is not a persisted authority proof. */
+    /** Synced physical evidence only; it does not grant Bookie selection, success or writable recovery. */
     record PhysicalStreamCandidate(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
-                                   Scan scan, long through, List<SegmentPointRead.Location> entries) {
+                                   Scan scan, long through, List<SegmentPointRead.Location> entries,
+                                   List<Long> grantedHighWatermarks) {
         PhysicalStreamCandidate {
             java.util.Objects.requireNonNull(sourceConfig, "sourceConfig");
             java.util.Objects.requireNonNull(sourceIdentity, "sourceIdentity");
             entries = List.copyOf(entries);
+            grantedHighWatermarks = List.copyOf(grantedHighWatermarks);
         }
     }
 
@@ -81,10 +83,13 @@ final class SegmentDataRecovery {
     static final class PhysicalInventory {
         private final Scan scan;
         private final List<SegmentPointRead.Location> entries;
+        private final List<Long> grantedHighWatermarks;
 
-        private PhysicalInventory(Scan scan, List<SegmentPointRead.Location> entries) {
+        private PhysicalInventory(Scan scan, List<SegmentPointRead.Location> entries,
+                                  List<Long> grantedHighWatermarks) {
             this.scan = scan;
             this.entries = List.copyOf(entries);
+            this.grantedHighWatermarks = List.copyOf(grantedHighWatermarks);
         }
 
         Scan scan() {
@@ -93,6 +98,10 @@ final class SegmentDataRecovery {
 
         List<SegmentPointRead.Location> entries() {
             return entries;
+        }
+
+        List<Long> grantedHighWatermarks() {
+            return grantedHighWatermarks;
         }
 
     }
@@ -121,7 +130,7 @@ final class SegmentDataRecovery {
         return scan(config, identity, authority, syncIo, maxEntries, null);
     }
 
-    /** Requires an externally verified stream start before its candidate can be used for recovery. */
+    /** Requires the persisted Arena stream start before returning a read-only physical candidate. */
     static PhysicalStreamCandidate recoverPhysicalStreamCandidate(IsolatedSegmentConfig config,
                                                                   SegmentFileHeader identity,
                                                                   SegmentArenaControlLog authority,
@@ -139,7 +148,7 @@ final class SegmentDataRecovery {
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
         PhysicalInventory inventory = scan(config, identity, authority, syncIo, maxEntries, probe);
         return new PhysicalStreamCandidate(config, identity, inventory.scan(), probe.contiguousThrough(firstSequence),
-                inventory.entries());
+                inventory.entries(), inventory.grantedHighWatermarks());
     }
 
     private static PhysicalInventory scan(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -226,7 +235,12 @@ final class SegmentDataRecovery {
                         }
                     }
                 }
-                return new PhysicalInventory(new Scan(batches, records, validatedBytes, zeroPages), entries);
+                List<Long> grantedHighWatermarks = new ArrayList<>(config.dataFiles());
+                for (int file = 0; file < config.dataFiles(); file++) {
+                    grantedHighWatermarks.add(authority.grantedHighWatermark(file));
+                }
+                return new PhysicalInventory(new Scan(batches, records, validatedBytes, zeroPages), entries,
+                        grantedHighWatermarks);
             }
         }
     }

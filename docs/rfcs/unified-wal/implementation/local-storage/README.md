@@ -30,7 +30,7 @@
 
 PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚未完成；SYSTEM/OWNER_TOUCH/PARK保持默认，当前仍是隔离可丢弃实验实现。
 
-步骤5的Arena局部切片：`SegmentArenaControlLog` 在已创建的隔离目录中验证所有必需文件身份，用独占文件锁打开`arena-control`，对`ALLOC`/`ALLOC_POOL`建立有界、仅追加的控制历史。调用方提交的batch先复制为不可变命令列表，完整写入后一次`force(true)`；只有随后按sequence逐条apply成功才产生空间授权。同批争用slot的后续命令为消耗sequence的确定性no-op。操作UUID和命令内容用于重复/不兼容解析；range绑定file、offset、allocation ID/generation、owner shard及其generation和该stream首个物理sequence；同一allocation ID不重复授予另一范围，同一shard/generation的后续分配不能改写首序号。`SegmentArenaControlDriver`一次只受理一个batch，在控制专用I/O服务执行`appendDurably`，再由原owner的独立控制completion执行`applyDurable`并返回结果；DATA准入和DATA I/O服务满额、停收准入及重开重放均不跳过已受理的控制义务。重开先验证完整记录/连续序号与身份，再同步并重放；不确定I/O使当前实例停止授予权限，无法安全分类的尾部拒绝可写恢复，不猜测截断。日志满额停止接收，隔离驱动尚未接入Bookie生命周期，checkpoint/rotation也未实现。
+步骤5的Arena局部切片：`SegmentArenaControlLog` 在已创建的隔离目录中验证所有必需文件身份，用独占文件锁打开`arena-control`，对`ALLOC`/`ALLOC_POOL`建立有界、仅追加的控制历史。调用方提交的batch先复制为不可变命令列表，完整写入后一次`force(true)`；只有随后按sequence逐条apply成功才产生空间授权。同批争用slot的后续命令为消耗sequence的确定性no-op。操作UUID和命令内容用于重复/不兼容解析；range绑定file、offset、allocation ID/generation、owner shard及其generation和该stream首个物理sequence；同一allocation ID不重复授予另一范围，同一shard/generation的后续分配不能改写首序号。重放后的每个DATA文件可查询已成功授权block的最高结束位置；未apply或条件失败命令不推进这一水位，全零的已授权block仍计入。它只是保守授权范围事实，不证明DATA used/unused或可写起点。`SegmentArenaControlDriver`一次只受理一个batch，在控制专用I/O服务执行`appendDurably`，再由原owner的独立控制completion执行`applyDurable`并返回结果；DATA准入和DATA I/O服务满额、停收准入及重开重放均不跳过已受理的控制义务。重开先验证完整记录/连续序号与身份，再同步并重放；不确定I/O使当前实例停止授予权限，无法安全分类的尾部拒绝可写恢复，不猜测截断。日志满额停止接收，隔离驱动尚未接入Bookie生命周期，checkpoint/rotation也未实现。
 
 步骤5的Bookie局部控制切片：`ProtectedProfileCredential`用外部提供的AES密钥及存储scope作为AAD，将20字节verifier封成定长AES-GCM字段；重启解封后仍由原包装在内存中作常量时间比较，普通Add不需要逐请求HMAC。错误密钥、scope或字段篡改均拒绝解封，包装自身仍不暴露明文byte accessor。`SegmentBookieControlLog`在独立`bookie-control`文件上验证存储身份并取得独占锁，把INSTALL的route/instance/descriptor/credential与initial inactive放在一条记录，ACTIVATE在另一条记录。它对有界batch先完整写入并一次force，再按sequence条件apply；同一操作重试、同一语义的新操作、冲突凭据可在重开后确定性解析。完整记录重开前先同步，损坏/不完整尾部与错误密钥拒绝可写打开。局部normal准入只有匹配context和verifier且ACTIVATE已apply才放行；此查询不代表DATA持久化或成功确认。FENCE受控入口先关闭新准入，已准入DATA票据需保持到物理I/O终结，终结前只返回等待；之后才将FENCE写入并force，重开可恢复fenced拒绝。预先取得的逐record票据已接入隔离DATA物理驱动，直到真实I/O与原owner回调均终结才释放；Bookie控制owner驱动让INSTALL/ACTIVATE与FENCE经独立控制I/O force，再由原owner apply；FENCE等待pre-cut票据时只返回可重试状态，不占住owner。当前没有密钥供应/轮换、真实MetadataStore和mTLS授权接线。密钥必须独立于隔离数据目录保存，缺失时不得开放该scope。
 
@@ -54,7 +54,7 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读；`SegmentDataRecovery.recoverPhysicalStreamCandidate`在调用方给定shard、generation和预期起点后，先核对重放的Arena首序号，再对扫描到的batch按sequence排序并拒绝缺口、重复和容量超限。`SegmentHotDirectory.restorePhysical`可在原owner上把同步后的候选原子装入有界热目录，核对候选的目录、持久文件配置及storage identity；容量不足、重复坐标、跨scope或仍有在途DATA时拒绝，不发布部分候选。新写入阈值等非持久准入设置可以变化。该路径已有持久首序号核对，但不证明完整恢复前缀或当前Bookie selector；当前Arena不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
 
-当前没有可写重开入口：扫描到的全零尾页不证明对应坐标从未预留或提交，不能把写指针简单退到最后一个完整batch后继续使用。可写恢复还需要完整控制关系判定必要DATA、空间used/unused与末端前缀事实及旧I/O终结证据；已有物理清单及恢复同步只供只读候选检查。
+当前没有可写重开入口：扫描到的全零尾页不证明对应坐标从未预留或提交，不能把写指针简单退到最后一个完整batch后继续使用。只读物理清单和stream候选现携带每文件已授权范围的最高结束位置；水位以内的零页不能据此当作可重用空间。这个水位不能解除旧DATA同步错误，也不证明末端前缀或水位以后的空间已经可以写入。可写恢复仍需要完整控制关系判定必要DATA、空间used/unused与末端前缀事实及旧I/O终结证据。
 
 ## 验证入口
 
@@ -68,6 +68,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-29 本次执行`scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentBatchFormatTest`：隔离真实文件定向测试31项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。未apply的两块pool尚不推进授权水位；重开重放后即使DATA仍为零，水位也包含两块，条件失败不推进，后续成功授权才推进。同步后的只读物理清单和stream候选报告这一水位。没有开放可写重启；已知旧I/O错误、完整末端前缀及掉电仍未验证。
 
 2026-09-29 本次执行`scripts/unified-wal/run-local-storage-tests.sh SegmentControlFormatTest,SegmentArenaControlLogTest,SegmentBatchFormatTest,SegmentBookieControlLogTest`：隔离真实文件及固定向量定向测试51项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。Arena控制记录持久首序号7在未apply重开后恢复，后续分配改写为8按条件失败；错误前缀起点在预留DATA坐标前拒绝，重启候选用已apply首序号11核对调用方输入。192字节独立控制向量覆盖48字节ALLOC语义body，旧40字节语义记录明确拒绝重开。仍未验证空间used/unused、跨重启末端前缀、可写重启或掉电。
 
