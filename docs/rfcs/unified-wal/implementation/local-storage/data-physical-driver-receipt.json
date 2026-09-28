@@ -1,0 +1,20 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_DATA_PHYSICAL_CANDIDATES_ONLY",
+  "sourceBaseCommit": "39ac2983e34ab7522383d8c4c00057959b68b450",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentDataPhysicalDriver.java": "b69f0ec504b206d04ea4e8fc82988f3d33e005a4df4e45e684eb258f86fd7e7d",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "a25771313a4e640a1ee0813238d828c6ee5acf291adb92c3e7f2c4693ac9a3e9"
+  },
+  "fixture": "two Arena-authorized batches, one shard owner, real precreated DATA file and bounded I/O; first force failure held until both physical ranges are reserved",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-HzSV6LoB",
+  "inputSha256": "41e81951fc37eac08b747fa1efe700248dde7a874e89440998940adac8b09e40",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentOwnerLoopTest",
+  "mavenLogSha256": "d9c0a2e3d2c9a65e8e045ac6edbb3777c77be8efdb2108cf4e0b29aa2004822d",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 19, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "a2667996336a6c23519972073a19dca5cc2896844618a05b64c84c5d5ed12d87"},
+    "SegmentOwnerLoopTest": {"tests": 6, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "40e342ebbee522480b0570b712c8b5f550eb68e505f11516f12f8274a612199a"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Physical candidates only. No persistent restart prefix, Bookie eligibility, per-entry local result, request idempotency, power-loss result, production Add or ACK authority."
+}

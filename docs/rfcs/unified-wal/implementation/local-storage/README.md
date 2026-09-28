@@ -42,6 +42,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 步骤6继续接入有界物理热候选：`SegmentHotDirectory`在原owner上从独立parser解析的冻结batch中提取普通`ENTRY_DATA`位置，在占用DATA坐标前预留固定locator与pending容量，再把预留绑定到同一真实文件reservation。只有`SegmentPhysicalPrefix`释放连续、已force的reservation后，才将这些位置从pending移入可点读候选；同批`RELOCATION_COPY`不进入普通候选。容量满额、重复逻辑坐标在写入前明确拒绝；目录准入仍不处理合法LAC封装变化，也不把拒绝冒充同坐标幂等。候选没有Bookie route/fence/tombstone/selector权限，也不等于local result；无RocksDB接管或淘汰时达到硬上限就背压新DATA。
 
+`SegmentDataPhysicalDriver`已把上述局部原语接成隔离的真实文件路径：原owner先占热候选容量、核对Arena grant并预留DATA坐标，再将write/force交给有界I/O服务；完成事件回原owner，只有连续前缀释放后才发布候选并回调。物理失败会将所有尚未完成的回调报错，保留已占坐标，不释放后批候选。该回调不产生逐entry local result或Bookie ACK；重启前缀起点、Bookie权限与selector仍待实现。
+
 步骤6的重复慢路径局部原语：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`先复制至多1 MiB应用数据加36字节BK头的请求entry，再在候选位置上执行真实文件点读，比较同一ledger instance/entryId的应用payload bytes和累计ledger length。合法LAC及相应CRC差异不造成冲突，payload或累计length变化返回冲突，坏输入CRC、不同instance或entryId拒绝。调用方必须在有界I/O线程执行点读，独立完成Bookie route/auth/grant及完成时的权限复核；当前没有接入请求准入、并发pending重试或逐entry结果，`SegmentHotDirectory.reserve`仍在占用坐标前拒绝重复写入，故尚无可对外返回成功的幂等Add。
 
 步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读，但清单不进入运行时热目录，不证明batch已进入连续持久前缀或当前Bookie selector；当前Arena也不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
@@ -119,6 +121,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 2026-09-28 [重复慢路径回执](duplicate-check-receipt.json)：macOS隔离定向测试26项通过，0失败/错误/跳过，Spotless/Checkstyle通过。已发布候选从真实DATA文件读取，与新打包的相同payload/累计length但不同LAC比较相同；不同payload或累计length比较冲突，坏CRC、不同instance及entryId拒绝。该原语未连接Bookie authority或请求生命周期，不能证明同坐标Add幂等成功。
 
 2026-09-28 [重启物理清单回执](physical-inventory-receipt.json)：macOS隔离定向测试26项通过，0失败/错误/跳过，Spotless/Checkstyle通过。两个已force的真实DATA batch在writer退出、Arena控制日志重开后，经全目录校验与一次恢复`force(false)`得到两个物理位置，并再次点读11/12；清单容量1和注入同步失败均不返回结果。单独的持久搬迁副本不进入普通清单。此处没有持久前缀起点、Bookie selector/权限或热目录恢复发布，不能返回幂等成功或宣称完整restart。
+
+2026-09-28 [DATA物理驱动回执](data-physical-driver-receipt.json)：macOS隔离定向测试25项通过，0失败/错误/跳过，Spotless/Checkstyle通过。两个已授权batch经原owner预留、真实FileChannel write/force和连续前缀发布后均得到可点读候选；注入首批force失败时，两个未决回调均报错，候选不发布且坐标保留。该回调不是逐entry结果，未接入Bookie权限或生产ACK。
 
 ## 未覆盖范围
 

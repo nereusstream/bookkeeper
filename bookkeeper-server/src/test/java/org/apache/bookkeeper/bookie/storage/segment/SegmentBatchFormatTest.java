@@ -187,6 +187,172 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void physicalDriverPublishesOnlyContiguousForcedCandidates() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("driver"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf firstEntry = entry(new byte[16], 1);
+        ByteBuf secondEntry = entry(new byte[16], 2);
+        SegmentBatchFormat.FrozenBatch first;
+        SegmentBatchFormat.FrozenBatch second;
+        try {
+            first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry)));
+            second = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 2, 8192),
+                    List.of(SegmentBatchFormat.entry(context(), secondEntry)));
+        } finally {
+            firstEntry.release();
+            secondEntry.release();
+        }
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+        SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 2);
+        CountDownLatch done = new CountDownLatch(2);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> firstReady = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> secondReady = new AtomicReference<>();
+        List<Long> published = Collections.synchronizedList(new ArrayList<>());
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 2)));
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, authority,
+                    prefix, hot);
+            assertTrue(driver.submit(first, (candidates, cause) -> {
+                owner.requireOwner();
+                if (cause != null) {
+                    failure.compareAndSet(null, cause);
+                }
+                firstReady.set(candidates);
+                published.add(1L);
+                done.countDown();
+            }));
+            assertTrue(driver.submit(second, (candidates, cause) -> {
+                owner.requireOwner();
+                if (cause != null) {
+                    failure.compareAndSet(null, cause);
+                }
+                secondReady.set(candidates);
+                published.add(2L);
+                done.countDown();
+            }));
+            owner.start();
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertNull(failure.get());
+            assertEquals(List.of(1L, 2L), published);
+            assertEquals(1, firstReady.get().size());
+            assertEquals(1, secondReady.get().size());
+            assertEquals(1, SegmentPointRead.read(config, identity(), authority, firstReady.get().get(0))
+                    .record().entryId());
+            assertEquals(2, SegmentPointRead.read(config, identity(), authority, secondReady.get().get(0))
+                    .record().entryId());
+        } finally {
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+        assertNull(owner.failure());
+    }
+
+    @Test
+    public void physicalDriverForceFailureKeepsCoordinatesAndReportsNoCandidates() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("driver-fail"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf firstEntry = entry(new byte[16], 1);
+        ByteBuf secondEntry = entry(new byte[16], 2);
+        SegmentBatchFormat.FrozenBatch first;
+        SegmentBatchFormat.FrozenBatch second;
+        try {
+            first = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(), firstEntry)));
+            second = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 2, 8192),
+                    List.of(SegmentBatchFormat.entry(context(), secondEntry)));
+        } finally {
+            firstEntry.release();
+            secondEntry.release();
+        }
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 2);
+        SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2);
+        SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, 2);
+        CountDownLatch done = new CountDownLatch(2);
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> firstCandidates = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> secondCandidates = new AtomicReference<>();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 2)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Failed force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, authority,
+                    prefix, hot);
+            assertTrue(driver.submit(first, (ready, cause) -> {
+                owner.requireOwner();
+                firstCandidates.set(ready);
+                firstFailure.set(cause);
+                done.countDown();
+            }));
+            assertTrue(driver.submit(second, (ready, cause) -> {
+                owner.requireOwner();
+                secondCandidates.set(ready);
+                secondFailure.set(cause);
+                done.countDown();
+            }));
+            owner.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (files.nextOffset(0) != 12288 && System.nanoTime() < end) {
+                    Thread.onSpinWait();
+                }
+                assertEquals(12288, files.nextOffset(0));
+            } finally {
+                releaseForce.countDown();
+            }
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertTrue(firstFailure.get() instanceof IOException);
+            assertTrue(secondFailure.get() instanceof IOException);
+            assertNull(firstCandidates.get());
+            assertNull(secondCandidates.get());
+            assertEquals(12288, files.nextOffset(0));
+            CountDownLatch checked = new CountDownLatch(1);
+            assertTrue(owner.control(() -> {
+                assertTrue(prefix.failed());
+                assertEquals(0, hot.candidateCount());
+                checked.countDown();
+            }));
+            assertTrue(checked.await(5, TimeUnit.SECONDS));
+        } finally {
+            releaseForce.countDown();
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+        assertNull(owner.failure());
+    }
+
+    @Test
     public void writerAndIndependentParserMatchFixedVectors() throws Exception {
         for (boolean relocation : new boolean[] {false, true}) {
             ByteBuf entry = entry("abc".getBytes(StandardCharsets.UTF_8));
