@@ -1440,9 +1440,14 @@ public class SegmentBookieControlLogTest {
                     config, identity, arena, bookie, new SegmentFileIo(), context(), 1, 1, 1, selected -> {
                         throw new IOException("Point read failed after selection");
                     }));
-            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
-                    config, identity, arena, new SegmentFileIo())) {
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity, arena, new SegmentFileIo(), 1, 1)) {
                 assertTrue(reopened.matchesScope(config, identity));
+                assertEquals(1, SegmentPointRead.readRestartedSingleStreamLocallyGated(
+                        reopened, arena, bookie, context(), 1).record().entryId());
+                try (IsolatedSegmentFiles.StartupInventoryLease lease = reopened.pinStartupInventory()) {
+                    assertThrows(IOException.class, reopened::close);
+                }
             }
             assertThrows(IOException.class, () -> SegmentPointRead.readRecoveredSingleStreamLocallyGated(
                     config, identity, arena, bookie, new SegmentFileIo(), context(), 2, 1, 1));
@@ -1452,6 +1457,15 @@ public class SegmentBookieControlLogTest {
                     new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false), 1, 1));
             assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
                     bookie.submitFence(fence(3, (byte) 5)).status());
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity, arena, new SegmentFileIo(), 1, 1)) {
+                assertEquals(1, SegmentPointRead.readRestartedSingleStreamLocallyGated(
+                        reopened, arena, bookie, context(), 1).record().entryId());
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedSingleStreamLocallyGated(
+                        reopened, arena, bookie, context(), 1));
+            }
         }
     }
 
@@ -2764,6 +2778,11 @@ public class SegmentBookieControlLogTest {
                             bookie.admitRecovery(same).orElseThrow(), new SegmentFileIo(), 2, 2));
             assertThrows(IOException.class, () -> SegmentPointRead.readRecoveredSingleStreamLocallyGated(
                     config, identity, arena, bookie, new SegmentFileIo(), context(), 2, 2, 2));
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity, arena, new SegmentFileIo(), 2, 2)) {
+                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedSingleStreamLocallyGated(
+                        reopened, arena, bookie, context(), 2));
+            }
         }
     }
 

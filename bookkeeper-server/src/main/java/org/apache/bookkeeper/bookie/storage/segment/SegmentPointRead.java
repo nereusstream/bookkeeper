@@ -146,6 +146,48 @@ final class SegmentPointRead {
         }
     }
 
+    /** Read a retained startup candidate while its reopened DATA writer keeps the recovery lock. */
+    static Result readRestartedSingleStreamLocallyGated(
+            IsolatedSegmentFiles files, SegmentArenaControlLog arena, SegmentBookieControlLog bookie,
+            ProfileLedgerContext context, long entryId) throws IOException {
+        try (IsolatedSegmentFiles.StartupInventoryLease lease = files.pinStartupInventory()) {
+            IsolatedSegmentConfig config = files.config();
+            SegmentFileHeader identity = files.identity();
+            if (!bookie.matchesScope(files)) {
+                throw new IOException("Bookie read route and DATA files have different storage scopes");
+            }
+            SegmentBookieControlLog.ReadAdmission admission = bookie.admitRead(context)
+                    .orElseThrow(() -> new IOException("Bookie read route is unavailable"));
+            try {
+                int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
+                SegmentArenaControlLog.SingleStream stream = arena.singleStreamForShard(shard)
+                        .orElseThrow(() -> new IOException("Recovered read stream is not unique"));
+                SegmentDataRecovery.PhysicalStreamCandidate candidate = lease.inventory()
+                        .streamCandidate(arena, shard, stream.generation());
+                Location selected = null;
+                for (Location location : candidate.entries()) {
+                    if (location.context().equals(context) && location.entryId() == entryId) {
+                        if (selected != null) {
+                            throw new IOException("Recovered read location is ambiguous");
+                        }
+                        selected = location;
+                    }
+                }
+                if (selected == null) {
+                    throw new IOException("Recovered read location is not ready");
+                }
+                Result result = read(config, identity, arena, selected);
+                if (!bookie.canCompleteRead(admission)
+                        || !arena.singleStreamForShard(shard).filter(stream::equals).isPresent()) {
+                    throw new IOException("Recovered read authority changed before completion");
+                }
+                return result;
+            } finally {
+                admission.finish();
+            }
+        }
+    }
+
     private static ByteBuffer readAligned(FileChannel data, long start, long end) throws IOException {
         if (end < start || end - start > SegmentBatchFormat.MAX_BATCH) {
             throw new IOException("Invalid aligned read span");

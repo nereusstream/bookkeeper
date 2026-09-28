@@ -30,6 +30,33 @@ import java.util.Objects;
 
 /** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
 final class IsolatedSegmentFiles implements AutoCloseable {
+    static final class StartupInventoryLease implements AutoCloseable {
+        private final IsolatedSegmentFiles owner;
+        private final SegmentDataRecovery.PhysicalInventory inventory;
+        private boolean closed;
+
+        private StartupInventoryLease(IsolatedSegmentFiles owner,
+                                      SegmentDataRecovery.PhysicalInventory inventory) {
+            this.owner = owner;
+            this.inventory = inventory;
+        }
+
+        synchronized SegmentDataRecovery.PhysicalInventory inventory() {
+            if (closed) {
+                throw new IllegalStateException("Startup inventory lease is closed");
+            }
+            return inventory;
+        }
+
+        @Override
+        public synchronized void close() {
+            if (!closed) {
+                closed = true;
+                owner.releaseStartupInventory();
+            }
+        }
+    }
+
     static final class Reservation {
         private final IsolatedSegmentFiles owner;
         private final SegmentBatchFormat.FrozenBatch batch;
@@ -336,6 +363,19 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return startupInventory;
     }
 
+    synchronized StartupInventoryLease pinStartupInventory() throws IOException {
+        if (closed || startupInventory == null || !writerLock.lock().isValid()
+                || activeIo >= config.maxPendingEntries()) {
+            throw new IOException("Startup DATA inventory is unavailable or read capacity exhausted");
+        }
+        activeIo++;
+        return new StartupInventoryLease(this, startupInventory);
+    }
+
+    private synchronized void releaseStartupInventory() {
+        activeIo--;
+    }
+
     synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
         return !closed && config.sameStorageScope(otherConfig) && identity.equals(otherIdentity);
     }
@@ -359,7 +399,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             return;
         }
         if (activeIo != 0 || pendingReservations != 0) {
-            throw new IOException("DATA reservation or I/O is still in flight");
+            throw new IOException("DATA reservation, I/O or startup read is still in flight");
         }
         closed = true;
         IOException first = null;
