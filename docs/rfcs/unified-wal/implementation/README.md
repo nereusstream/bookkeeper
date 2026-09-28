@@ -169,6 +169,8 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 **完成条件：** 写入→确认本地持久化→读取→终止进程→重启→再读与重复写入可重复运行；未知覆盖不误报NoSuchEntry，不同stream恢复不截短共享文件，旧generation残留不复活。开始验证两次故障：write完成但barrier未完成时退出，重启处理重复请求后再次掉电；单次进程终止后可读不足以证明持久化保证。
 
+当前[隔离点读切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，并按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。尚无热locator发布、selector/pin、完整restart前缀与恢复同步，步骤7未完成。
+
 **第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
 
 ### 第三阶段：索引、回收与长期运行

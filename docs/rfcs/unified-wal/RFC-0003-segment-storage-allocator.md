@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的volatile连续物理前缀局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；当前定向运行24项通过。Bookie控制、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
+实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的volatile连续物理前缀和步骤7的对齐单record点读局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；各切片的定向范围与结果见本地存储回执。Bookie控制、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
@@ -427,6 +427,8 @@ entryId
 MOVE成功后不原地改来源类型或写“提交位”；record保持不可变，是否生效从控制状态解析。这里的block完整性/torn-tail标识不代表relocation已提交。普通/恢复写入和搬迁共享物理完成，分别走§6.1的上层结果分支，不增加控制record、payload副本、fsync或密码学hash。
 
 首批必须能独立校验一个record，不扫描整个大batch。固定envelope/header完整性覆盖来源、move身份（适用时）、instance、allocation/generation、record length及必要存储坐标；内层BK CRC32C覆盖其自身metadata与应用payload。使用现有候选的record级校验方案，不以正确BK CRC替代外层身份校验，也不增加第三套逐entry密码学hash。整块checksum可用于扫描/恢复/诊断，不能成为单entry点读的唯一验证方法。仅匹配物理offset不足以防止ABA。
+
+实现状态：隔离`SegmentPointRead`已从完整解析的batch取得record位置，以当前Arena grant、DATA身份和batch header约束对齐单record读取，再独立验证record/BK CRC及locator身份；真实文件跨页header、错误定位、篡改和较低新写阈值重开的局部测试已覆盖。热locator发布、Bookie读取权限、selector/pin及完整restart仍未接入，本段不能作为生产点读保证。
 
 读取先按现有locator取得allocation/generation pin并复核selector与权限，再使用匹配且已验证的cache，或发起覆盖目标record的必要对齐I/O。locator的offset/length须检查非负、溢出、声明最大record及allocation边界后才分配大buffer；损坏length不能扩大成无界读取。外层固定header有界读取并验证后才信任其长度，record自身CRC/坐标仍需核对。对齐范围不能越过合法allocation，布局必须提供合法padding/读取路径，不能靠越界读取凑alignment。
 

@@ -1,0 +1,20 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_ISOLATED_POINT_READ",
+  "sourceBaseCommit": "ceedfcca6d",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentPointRead.java": "2ff4f446e86c8009a3c2399a4b2b06bd2c167869fa518280eaacd557bfca378a",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "5c947f9ca89a24ed25222cf0bdac72e37459923ab2439512e98b2697954706e5"
+  },
+  "fixture": "one Arena, one 4 MiB precreated DATA file, 270336-byte granted batch with three distinct BK entries; target record header starts at page offset 4000 and crosses a 4096-byte boundary; reopen Arena authority with new-write payload limit reduced from 1048576 to 8 bytes",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-doQilRZd",
+  "inputSha256": "e9191793b20bc860ea0f534b9359bbd5e94b2fbe21362e1de1f93584dee05c4b",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentArenaControlLogTest",
+  "mavenLogSha256": "e088e22b1cf7c441e32a77195dd5ddf9c136266e1f9ac4059148fcc4db0d76fe",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 15, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "cba2a8fdb9d7ff1b27a300b89e35a25d50c084ae1dd9a50902e50768c012a9da"},
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "7d845d5e6af0a279642cf49e116f5cb4b71afc11aec06c5e274259f459ee6f3b"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Point read consumes a caller-supplied parsed locator and validates only current Arena grant and DATA bytes. No hot locator publication, Bookie read authority, selector/pin, recovered physical prefix, power-loss or production authority. A reopened-process read is not a power-loss test."
+}

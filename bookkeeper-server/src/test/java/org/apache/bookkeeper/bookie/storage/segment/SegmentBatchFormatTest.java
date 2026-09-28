@@ -82,9 +82,13 @@ public class SegmentBatchFormatTest {
     }
 
     private ByteBuf entry(byte[] payload) throws Exception {
+        return entry(payload, 3);
+    }
+
+    private ByteBuf entry(byte[] payload, long entryId) throws Exception {
         DigestManager digest = DigestManager.instantiate(7, new byte[0], DigestType.CRC32C,
                 UnpooledByteBufAllocator.DEFAULT, false);
-        ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(3, 2, payload.length,
+        ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(entryId, 2, payload.length,
                 Unpooled.wrappedBuffer(payload), new byte[0], 0);
         try {
             ByteBuf copy = Unpooled.buffer(encoded.readableBytes());
@@ -237,6 +241,64 @@ public class SegmentBatchFormatTest {
             }
         } finally {
             entry.release();
+        }
+    }
+
+    @Test
+    public void grantedPointReadChecksTheRealRecordWithoutReadingTheWholeBatch() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("point-read"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf filler = entry(new byte[3676], 2);
+        ByteBuf small = entry(new byte[1024], 3);
+        ByteBuf large = entry(new byte[256 * 1024], 4);
+        SegmentPointRead.Location smallLocation;
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog authority = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentBatchFormat.FrozenBatch frozen = SegmentBatchFormat.encode(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), filler), SegmentBatchFormat.entry(context(), small),
+                            SegmentBatchFormat.entry(context(), large)));
+            assertEquals(270336, frozen.bytes().remaining());
+            smallLocation = SegmentPointRead.locations(
+                    SegmentBatchParser.parse(frozen.bytes(), address(4096), config.bytesPerFile())).get(1);
+            assertEquals(4000, smallLocation.recordOffset() % 4096);
+            assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), authority, smallLocation));
+            authority.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1)));
+            assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), authority, smallLocation));
+            files.writeAuthorized(frozen, authority);
+            SegmentPointRead.Result read = SegmentPointRead.read(config, identity(), authority, smallLocation);
+            byte[] expected = new byte[small.readableBytes()];
+            small.getBytes(small.readerIndex(), expected);
+            assertArrayEquals(expected, bytes(read.record().entry()));
+            assertTrue(read.bytesRead() < frozen.bytes().remaining());
+            assertEquals(3, read.record().entryId());
+            SegmentPointRead.Location wrongEntry = new SegmentPointRead.Location(smallLocation.address(),
+                    smallLocation.batchLength(), smallLocation.recordOffset(), smallLocation.recordLength(),
+                    smallLocation.context(), 4);
+            assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), authority, wrongEntry));
+            SegmentPointRead.Location unbounded = new SegmentPointRead.Location(smallLocation.address(),
+                    smallLocation.batchLength(), smallLocation.recordOffset(), Integer.MAX_VALUE,
+                    smallLocation.context(), 3);
+            assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), authority, unbounded));
+        } finally {
+            filler.release();
+            small.release();
+            large.release();
+        }
+        IsolatedSegmentConfig lowerAdmission = new IsolatedSegmentConfig(config.directory(), 1, 4, 1,
+                config.bytesPerFile(), 4096, 8, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(lowerAdmission, identity(), 1024 * 1024)) {
+            SegmentPointRead.Result afterReopen = SegmentPointRead.read(lowerAdmission, identity(), replay,
+                    smallLocation);
+            assertEquals(3, afterReopen.record().entryId());
+            assertEquals(1024 + 36, afterReopen.record().entry().remaining());
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.WRITE)) {
+                data.write(ByteBuffer.wrap(new byte[] {1}), smallLocation.recordOffset() + 160 + 36);
+                data.force(false);
+            }
+            assertThrows(IOException.class, () -> SegmentPointRead.read(lowerAdmission, identity(), replay,
+                    smallLocation));
         }
     }
 
