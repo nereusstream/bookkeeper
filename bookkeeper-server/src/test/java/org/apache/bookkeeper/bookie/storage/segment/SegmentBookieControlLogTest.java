@@ -55,6 +55,7 @@ import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
 import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -139,6 +140,36 @@ public class SegmentBookieControlLogTest {
 
     private static ProtectedProfileStateStore.Transition activate(int operationId) {
         return activate(44, operationId);
+    }
+
+    private static SegmentBookieControlLog.RecoveryGrant recoveryGrant(int operationId, int intentId,
+                                                                        long intentGeneration, long grantGeneration) {
+        ProfileControlScope base = scope(ProfileControlOperation.RECOVERY_GRANT, operationId, grantGeneration);
+        ProfileControlScope unbound = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(),
+                base.ledgerInstanceId(), base.descriptorIdentity(), base.targetBookie(),
+                base.targetStorageIncarnation(), base.authorityDomain(), base.authorityGeneration(),
+                base.operationId(), base.publicSemanticPayloadIdentity(), new ProfileExactRange(2, 4));
+        byte[] id = new byte[16];
+        id[15] = (byte) intentId;
+        ProfileControlScope exact = new ProfileControlScope(unbound.operation(), unbound.purpose(),
+                unbound.ledgerId(), unbound.ledgerInstanceId(), unbound.descriptorIdentity(),
+                unbound.targetBookie(), unbound.targetStorageIncarnation(), unbound.authorityDomain(),
+                unbound.authorityGeneration(), unbound.operationId(),
+                SegmentBookieControlLog.recoveryGrantPayloadIdentity(unbound, id, intentGeneration, grantGeneration),
+                unbound.exactRange());
+        return new SegmentBookieControlLog.RecoveryGrant(
+                new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(exact),
+                        new CommittedProfileAuthority(exact, CommittedProfileAuthority.State.RECOVERY_OPEN,
+                                EngineProfile.SEGMENT_WAL_ENGINE, 3, true), null),
+                id, intentGeneration, grantGeneration);
+    }
+
+    private static ProfileOperationCodec.AddRecovery recoveryAdd(int intentId, long intentGeneration,
+                                                                  long grantGeneration, long entryId, byte verifier) {
+        byte[] id = new byte[16];
+        id[15] = (byte) intentId;
+        return new ProfileOperationCodec.AddRecovery(context(), id, intentGeneration, grantGeneration,
+                2, 4, entryId, filled(20, verifier), new byte[]{1});
     }
 
     private static ProtectedProfileStateStore.Transition activate(long ledgerId, int operationId) {
@@ -265,6 +296,59 @@ public class SegmentBookieControlLogTest {
         assertTrue(completed.await(5, TimeUnit.SECONDS));
         assertNull(failure.get());
         return status.get();
+    }
+
+    @Test
+    public void recoveryGrantRequiresExactDurableBindingAndNeverActivatesNormalWrites() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 6)));
+            assertFalse(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isPresent());
+            SegmentBookieControlLog.RecoveryGrant exact = recoveryGrant(2, 3, 7, 9);
+            ProfileControlScope authorized = exact.transition().request().scope();
+            ProfileControlScope unbound = new ProfileControlScope(authorized.operation(), authorized.purpose(),
+                    authorized.ledgerId(), authorized.ledgerInstanceId(), authorized.descriptorIdentity(),
+                    authorized.targetBookie(), authorized.targetStorageIncarnation(), authorized.authorityDomain(),
+                    authorized.authorityGeneration(), authorized.operationId(), filled(32, (byte) 4),
+                    authorized.exactRange());
+            assertThrows(IllegalArgumentException.class, () -> log.submitRecoveryGrant(
+                    new SegmentBookieControlLog.RecoveryGrant(
+                            new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(unbound),
+                                    new CommittedProfileAuthority(unbound,
+                                            CommittedProfileAuthority.State.RECOVERY_OPEN,
+                                            EngineProfile.SEGMENT_WAL_ENGINE, 3, true), null),
+                            exact.repairIntentId(), 7, 9)));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitRecoveryGrant(exact).status());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 6)));
+            assertFalse(log.admitRecovery(recoveryAdd(4, 7, 9, 2, (byte) 6)).isPresent());
+            assertFalse(log.admitRecovery(recoveryAdd(3, 8, 9, 2, (byte) 6)).isPresent());
+            assertFalse(log.admitRecovery(recoveryAdd(3, 7, 10, 2, (byte) 6)).isPresent());
+            assertFalse(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 7)).isPresent());
+            assertFalse(log.admitRecovery(new ProfileOperationCodec.AddRecovery(context(), exact.repairIntentId(),
+                    7, 9, 3, 4, 3, filled(20, (byte) 6), new byte[]{1})).isPresent());
+            SegmentBookieControlLog.RecoveryAdmission admission =
+                    log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).orElseThrow();
+            assertTrue(log.canCompleteRecovery(admission));
+            admission.finish();
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9)).status());
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    log.submitRecoveryGrant(recoveryGrant(2, 3, 8, 9)).status());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR)) {
+            SegmentBookieControlLog.RecoveryAdmission admission =
+                    replay.admitRecovery(recoveryAdd(3, 7, 9, 4, (byte) 6)).orElseThrow();
+            assertTrue(replay.canCompleteRecovery(admission));
+            replay.submitBatch(List.of(tombstone(44, 4)));
+            assertFalse(replay.canCompleteRecovery(admission));
+            admission.finish();
+            assertFalse(replay.admitRecovery(recoveryAdd(3, 7, 9, 3, (byte) 6)).isPresent());
+        }
     }
 
     @Test

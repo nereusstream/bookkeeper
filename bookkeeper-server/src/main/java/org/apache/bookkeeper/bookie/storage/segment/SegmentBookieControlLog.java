@@ -28,6 +28,8 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -46,6 +48,7 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
 import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -56,6 +59,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 final class SegmentBookieControlLog implements AutoCloseable {
     private static final long FIRST_RECORD = 4096;
     private static final Generation LOG_GENERATION = new Generation(1);
+    private static final byte[] RECOVERY_GRANT_DOMAIN =
+            "UW-RECOVERY-GRANT-V1".getBytes(StandardCharsets.US_ASCII);
 
     enum Status {
         APPLIED_DURABLE, ALREADY_DURABLE, CONDITION_FAILED, INCOMPATIBLE
@@ -75,6 +80,31 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     record LacAttempt(Status immediate, LacWrite write) { }
+
+    /** Typed, cold-authorized input to the isolated local grant record. */
+    record RecoveryGrant(ProtectedProfileStateStore.Transition transition, byte[] repairIntentId,
+                         long repairIntentGeneration, long grantGeneration) {
+        RecoveryGrant {
+            Objects.requireNonNull(transition, "transition");
+            repairIntentId = repairIntentId.clone();
+            if (repairIntentId.length != 16 || isZero(repairIntentId)
+                    || repairIntentGeneration <= 0 || grantGeneration <= 0) {
+                throw new IllegalArgumentException("Invalid recovery grant binding");
+            }
+        }
+
+        @Override
+        public byte[] repairIntentId() {
+            return repairIntentId.clone();
+        }
+    }
+
+    private record GrantBinding(byte[] intentId, long intentGeneration, long grantGeneration) {
+        private boolean sameMeaning(GrantBinding other) {
+            return other != null && Arrays.equals(intentId, other.intentId)
+                    && intentGeneration == other.intentGeneration && grantGeneration == other.grantGeneration;
+        }
+    }
 
     static final class LacWrite {
         private final ProfileLedgerContext context;
@@ -171,6 +201,24 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
+    /** Isolated authorization ticket; physical recovery DATA and close ordering are not connected yet. */
+    static final class RecoveryAdmission {
+        private final SegmentBookieControlLog owner;
+        private final LedgerState state;
+        private final Command grant;
+        private boolean terminal;
+
+        private RecoveryAdmission(SegmentBookieControlLog owner, LedgerState state, Command grant) {
+            this.owner = owner;
+            this.state = state;
+            this.grant = grant;
+        }
+
+        void finish() {
+            owner.finishRecovery(this);
+        }
+    }
+
     record DurableBatch(long firstSequence, List<Command> commands) {
         DurableBatch {
             commands = List.copyOf(commands);
@@ -183,6 +231,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final byte[] descriptor;
         private final ProtectedProfileCredential credential;
         private final ProtectedProfileCredential.SealedStorageValue sealed;
+        private final GrantBinding grant;
 
         private Command(SegmentControlFormat.Type type, ProfileControlScope scope, byte[] descriptor,
                         ProtectedProfileCredential credential,
@@ -192,6 +241,16 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.descriptor = descriptor == null ? null : descriptor.clone();
             this.credential = credential == null ? null : credential.copy();
             this.sealed = sealed;
+            this.grant = null;
+        }
+
+        private Command(ProfileControlScope scope, GrantBinding grant) {
+            this.type = SegmentControlFormat.Type.RECOVERY_GRANT;
+            this.scope = scope;
+            this.descriptor = null;
+            this.credential = null;
+            this.sealed = null;
+            this.grant = grant;
         }
 
         private UUID operationId() {
@@ -202,7 +261,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private boolean sameMeaning(Command other) {
             return type == other.type && scope.equals(other.scope)
                     && Arrays.equals(descriptor, other.descriptor)
-                    && (credential == null ? other.credential == null : credential.matches(other.credential));
+                    && (credential == null ? other.credential == null : credential.matches(other.credential))
+                    && (grant == null ? other.grant == null : grant.sameMeaning(other.grant));
         }
     }
 
@@ -220,6 +280,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private boolean pendingTombstone;
         private UUID pendingFence;
         private ExplicitLac explicitLac;
+        private final Map<UUID, Command> recoveryGrants = new HashMap<>();
         private int inFlight;
 
         private LedgerState(Command command) {
@@ -329,12 +390,22 @@ final class SegmentBookieControlLog implements AutoCloseable {
         for (ProtectedProfileStateStore.Transition transition : input) {
             commands.add(command(transition));
         }
-        List<ByteBuffer> records = new ArrayList<>(input.size());
+        return appendCommands(commands);
+    }
+
+    /** The caller must have cold-read the live RepairIntent and exact committed grant authority. */
+    Result submitRecoveryGrant(RecoveryGrant grant) throws IOException {
+        DurableBatch batch = appendCommands(List.of(command(grant)));
+        return applyDurable(batch).get(0);
+    }
+
+    private DurableBatch appendCommands(List<Command> commands) throws IOException {
+        List<ByteBuffer> records = new ArrayList<>(commands.size());
         long first;
         long start;
         synchronized (this) {
             requireWritable();
-            if (writing || pending != null) {
+            if (writing || pending != null || pendingFenceWrite != null || pendingLacWrite != null) {
                 throw new IllegalArgumentException("Invalid or unresolved Bookie control batch");
             }
             for (Command command : commands) {
@@ -438,6 +509,50 @@ final class SegmentBookieControlLog implements AutoCloseable {
         state.inFlight++;
         activeAdmissions++;
         return Optional.of(new Admission(this, state));
+    }
+
+    synchronized Optional<RecoveryAdmission> admitRecovery(ProfileOperationCodec.AddRecovery request) {
+        Objects.requireNonNull(request, "request");
+        ProfileLedgerContext context = request.context();
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (closed || failed || state == null || !state.context.equals(context)
+                || state.pendingTombstone || tombstones.containsKey(context.ledgerId())
+                || !state.credential.matchesWireVerifier(request.credential())
+                || activeAdmissions == config.maxPendingEntries()) {
+            return Optional.empty();
+        }
+        for (Command grant : state.recoveryGrants.values()) {
+            ProfileExactRange range = grant.scope.exactRange();
+            if (Arrays.equals(grant.grant.intentId(), request.repairIntentId())
+                    && grant.grant.intentGeneration() == request.repairIntentGeneration()
+                    && grant.grant.grantGeneration() == request.grantGeneration()
+                    && range.firstEntryId() == request.rangeStart()
+                    && range.lastEntryId() == request.rangeEnd()
+                    && request.entryId() >= range.firstEntryId()
+                    && request.entryId() <= range.lastEntryId()) {
+                activeAdmissions++;
+                return Optional.of(new RecoveryAdmission(this, state, grant));
+            }
+        }
+        return Optional.empty();
+    }
+
+    synchronized boolean canCompleteRecovery(RecoveryAdmission admission) {
+        if (admission.owner != this || admission.terminal) {
+            throw new IllegalArgumentException("Recovery result requires a live Bookie admission");
+        }
+        LedgerState state = admission.state;
+        return !closed && !failed && ledgers.get(state.context.ledgerId()) == state
+                && !state.pendingTombstone && !tombstones.containsKey(state.context.ledgerId())
+                && state.recoveryGrants.get(admission.grant.operationId()) == admission.grant;
+    }
+
+    private synchronized void finishRecovery(RecoveryAdmission admission) {
+        if (admission.owner != this || admission.terminal) {
+            throw new IllegalArgumentException("Recovery admission already finished or belongs to another control log");
+        }
+        admission.terminal = true;
+        activeAdmissions--;
     }
 
     /** Only the local route cut; transport read authorization and current-selector checks remain separate. */
@@ -806,6 +921,24 @@ final class SegmentBookieControlLog implements AutoCloseable {
         throw new IllegalArgumentException("Bookie control operation is not implemented");
     }
 
+    private Command command(RecoveryGrant grant) {
+        ProtectedProfileStateStore.Transition transition = grant.transition();
+        ProfileControlScope scope = transition.request().scope();
+        CommittedProfileAuthority authority = transition.authority();
+        if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT
+                || scope.exactRange() == null || !authority.scope().equals(scope)
+                || !authority.permits(scope.operation())
+                || authority.requiredEngine() != EngineProfile.SEGMENT_WAL_ENGINE
+                || !matchesTarget(scope) || grant.grantGeneration() != scope.authorityGeneration()
+                || !Arrays.equals(scope.publicSemanticPayloadIdentity(),
+                        recoveryGrantPayloadIdentity(scope, grant.repairIntentId(),
+                                grant.repairIntentGeneration(), grant.grantGeneration()))) {
+            throw new IllegalArgumentException("Bookie recovery grant authority or binding mismatch");
+        }
+        return new Command(scope, new GrantBinding(grant.repairIntentId(),
+                grant.repairIntentGeneration(), grant.grantGeneration()));
+    }
+
     private Status apply(Command command) {
         UUID operationId = command.operationId();
         LedgerState state = ledgers.get(command.scope.ledgerId());
@@ -853,7 +986,18 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     state.active = false;
                     state.pendingFence = null;
                     state.localGeneration++;
+                    state.recoveryGrants.clear();
                 }
+                status = Status.APPLIED_DURABLE;
+            }
+        } else if (command.type == SegmentControlFormat.Type.RECOVERY_GRANT) {
+            if (tombstones.containsKey(command.scope.ledgerId()) || state == null
+                    || !state.context.equals(context(command.scope)) || state.pendingTombstone
+                    || command.scope.authorityGeneration() < state.install.authorityGeneration()
+                    || state.recoveryGrants.size() >= config.maxPendingEntries()) {
+                status = Status.CONDITION_FAILED;
+            } else {
+                state.recoveryGrants.put(operationId, command);
                 status = Status.APPLIED_DURABLE;
             }
         } else {
@@ -962,7 +1106,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private Command decode(SegmentControlParser.Command parsed) throws IOException {
         if (parsed.type() != SegmentControlFormat.Type.INSTALL
                 && parsed.type() != SegmentControlFormat.Type.ACTIVATE
-                && parsed.type() != SegmentControlFormat.Type.TOMBSTONE) {
+                && parsed.type() != SegmentControlFormat.Type.TOMBSTONE
+                && parsed.type() != SegmentControlFormat.Type.RECOVERY_GRANT) {
             throw new IOException("Unsupported Bookie control command");
         }
         try {
@@ -986,6 +1131,23 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     throw new IOException("Invalid tombstone body");
                 }
                 return new Command(parsed.type(), scope, null, null, null);
+            }
+            if (parsed.type() == SegmentControlFormat.Type.RECOVERY_GRANT) {
+                if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT
+                        || scope.exactRange() == null || body.remaining() != 32) {
+                    throw new IOException("Invalid recovery grant body");
+                }
+                byte[] intentId = new byte[16];
+                body.get(intentId);
+                long intentGeneration = body.getLong();
+                long grantGeneration = body.getLong();
+                if (isZero(intentId) || intentGeneration <= 0
+                        || grantGeneration != scope.authorityGeneration()
+                        || !Arrays.equals(scope.publicSemanticPayloadIdentity(),
+                                recoveryGrantPayloadIdentity(scope, intentId, intentGeneration, grantGeneration))) {
+                    throw new IOException("Invalid recovery grant binding");
+                }
+                return new Command(scope, new GrantBinding(intentId, intentGeneration, grantGeneration));
             }
             if (scope.operation() != ProfileControlOperation.INSTALL || body.remaining() < 2) {
                 throw new IOException("Invalid install body");
@@ -1016,6 +1178,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private ByteBuffer body(Command command) {
         ByteBuffer scope = encodeScope(command.scope);
+        if (command.type == SegmentControlFormat.Type.RECOVERY_GRANT) {
+            return ByteBuffer.allocate(scope.remaining() + 32).put(scope).put(command.grant.intentId())
+                    .putLong(command.grant.intentGeneration()).putLong(command.grant.grantGeneration()).flip();
+        }
         if (command.type != SegmentControlFormat.Type.INSTALL) {
             return scope;
         }
@@ -1033,13 +1199,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
             case ACTIVATE_INITIAL -> 2;
             case ACTIVATE_REPLACEMENT -> 3;
             case TOMBSTONE_OR_DELETE_APPLY -> 4;
+            case RECOVERY_GRANT -> 5;
             default -> throw new IllegalArgumentException("Unsupported Bookie control scope");
         };
-        return ByteBuffer.allocate(4 + 8 + 16 + 36 + 16 + 8 + 32 + 2 + target.length + 2 + domain.length)
+        int rangeBytes = scope.exactRange() == null ? 0 : 16;
+        ByteBuffer encoded = ByteBuffer.allocate(4 + 8 + 16 + 36 + 16 + 8 + 32
+                        + 2 + target.length + 2 + domain.length + rangeBytes)
                 .putInt(operation).putLong(scope.ledgerId()).put(scope.ledgerInstanceId())
                 .put(scope.descriptorIdentity().toBytes()).put(scope.targetStorageIncarnation())
                 .putLong(scope.authorityGeneration()).put(scope.publicSemanticPayloadIdentity())
-                .putShort((short) target.length).put(target).putShort((short) domain.length).put(domain).flip();
+                .putShort((short) target.length).put(target).putShort((short) domain.length).put(domain);
+        if (scope.exactRange() != null) {
+            encoded.putLong(scope.exactRange().firstEntryId()).putLong(scope.exactRange().lastEntryId());
+        }
+        return encoded.flip();
     }
 
     private static ProfileControlScope decodeScope(ByteBuffer body, UUID operationId) throws IOException {
@@ -1049,6 +1222,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             case 2 -> ProfileControlOperation.ACTIVATE_INITIAL;
             case 3 -> ProfileControlOperation.ACTIVATE_REPLACEMENT;
             case 4 -> ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY;
+            case 5 -> ProfileControlOperation.RECOVERY_GRANT;
             default -> throw new IOException("Unsupported Bookie control operation");
         };
         long ledgerId = body.getLong();
@@ -1061,11 +1235,46 @@ final class SegmentBookieControlLog implements AutoCloseable {
         body.get(payload);
         String target = readText(body, ProfileControlScope.MAX_TARGET_BOOKIE_BYTES);
         String domain = readText(body, ProfileControlScope.MAX_AUTHORITY_DOMAIN_BYTES);
+        ProfileExactRange range = type == ProfileControlOperation.RECOVERY_GRANT
+                ? new ProfileExactRange(body.getLong(), body.getLong()) : null;
         byte[] id = ByteBuffer.allocate(16).putLong(operationId.getMostSignificantBits())
                 .putLong(operationId.getLeastSignificantBits()).array();
         return new ProfileControlScope(type, type.purpose(), ledgerId, instance,
                 ProfileDescriptorIdentity.fromBytes(descriptor), target, storage,
-                domain, generation, id, payload, null);
+                domain, generation, id, payload, range);
+    }
+
+    private static boolean isZero(byte[] bytes) {
+        for (byte value : bytes) {
+            if (value != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Experimental domain-separated commitment to the exact local grant payload. */
+    static byte[] recoveryGrantPayloadIdentity(ProfileControlScope scope, byte[] intentId,
+                                               long intentGeneration, long grantGeneration) {
+        if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT || scope.exactRange() == null
+                || intentId.length != 16 || isZero(intentId) || intentGeneration <= 0
+                || grantGeneration != scope.authorityGeneration()) {
+            throw new IllegalArgumentException("Invalid recovery grant identity input");
+        }
+        byte[] target = scope.targetBookie().getBytes(StandardCharsets.UTF_8);
+        byte[] domain = scope.authorityDomain().getBytes(StandardCharsets.UTF_8);
+        ByteBuffer input = ByteBuffer.allocate(RECOVERY_GRANT_DOMAIN.length + ProfileLedgerContext.ENCODED_LENGTH
+                + 2 + target.length + 16 + 2 + domain.length + 16 + 8 + 8 + 16);
+        input.put(RECOVERY_GRANT_DOMAIN);
+        input.put(context(scope).encode()).putShort((short) target.length).put(target)
+                .put(scope.targetStorageIncarnation()).putShort((short) domain.length).put(domain)
+                .put(intentId).putLong(intentGeneration).putLong(grantGeneration)
+                .putLong(scope.exactRange().firstEntryId()).putLong(scope.exactRange().lastEntryId());
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(input.array());
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
     }
 
     private static String readText(ByteBuffer body, int maxBytes) throws IOException {
