@@ -71,11 +71,10 @@ public class ProfileReceiveDecoderTest {
 
     @Test
     public void chargesBeforeBodyAndTransfersCreditUntilFrameRelease() {
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096);
-        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 8_192, 64);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096, 1_024);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, 8_192, 64);
         EmbeddedChannel channel = new EmbeddedChannel(decoder);
-        assertEquals(64, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         byte[] hello = hello();
         assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(hello, 0, 2))));
         assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(hello, 2, hello.length))));
@@ -101,12 +100,10 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
-    public void controlCapacitySurvivesDataPressureAndRejectsDataSubtype() {
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_000, 1_000);
-        EmbeddedChannel first = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 2_000, 64));
-        ProfileReceiveDecoder secondDecoder = new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 2_000, 64);
+    public void controlCapacitySurvivesDataPressureAndRejectsDataSubtype() throws Exception {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_000, 1_000, 500);
+        EmbeddedChannel first = new EmbeddedChannel(new ProfileReceiveDecoder(budget, 2_000, 64));
+        ProfileReceiveDecoder secondDecoder = new ProfileReceiveDecoder(budget, 2_000, 64);
         EmbeddedChannel second = new EmbeddedChannel(secondDecoder);
         byte[] hello = hello();
         first.writeInbound(Unpooled.wrappedBuffer(hello));
@@ -119,13 +116,12 @@ public class ProfileReceiveDecoderTest {
         secondDecoder.markEstablished();
         byte[] add = frame(ProfileOperation.ADD_NORMAL, 1_500);
         first.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(add, 36)));
-        assertEquals(64 + 64 + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(64 + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
         assertThrows(IOException.class, () -> second.writeInbound(
                 Unpooled.wrappedBuffer(Arrays.copyOf(add, 36))));
         assertFalse(second.isActive());
 
-        ProfileReceiveDecoder controlDecoder = new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.CONTROL, 900, 64);
+        ProfileReceiveDecoder controlDecoder = new ProfileReceiveDecoder(budget, 900, 64);
         EmbeddedChannel control = new EmbeddedChannel(controlDecoder);
         control.writeInbound(Unpooled.wrappedBuffer(hello));
         ProfileInboundFrame controlHello = control.readInbound();
@@ -135,6 +131,9 @@ public class ProfileReceiveDecoderTest {
         control.writeInbound(Unpooled.wrappedBuffer(install));
         ProfileInboundFrame accepted = control.readInbound();
         assertEquals(ProfileOperation.INSTALL, accepted.header().operation());
+        assertThrows(IllegalStateException.class, () -> controlDecoder.markControlAuthorized(controlHello));
+        controlDecoder.markControlAuthorized(accepted);
+        assertEquals(64 + install.length, budget.used(ProfileReceiveBudget.Lane.CONTROL));
         accepted.close();
         assertThrows(IOException.class, () -> control.writeInbound(
                 Unpooled.wrappedBuffer(frame(ProfileOperation.ADD_NORMAL, 0))));
@@ -143,20 +142,19 @@ public class ProfileReceiveDecoderTest {
         first.finish();
         second.finish();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
     @Test
     public void badHeaderAndPartialCloseReleaseAllReceiveCredit() {
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024);
-        EmbeddedChannel partial = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 4_096, 64));
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024, 512);
+        EmbeddedChannel partial = new EmbeddedChannel(new ProfileReceiveDecoder(budget, 4_096, 64));
         byte[] hello = hello();
         assertFalse(partial.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(hello, 5))));
         partial.finish();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
 
-        ProfileReceiveDecoder bodyDecoder = new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 4_096, 64);
+        ProfileReceiveDecoder bodyDecoder = new ProfileReceiveDecoder(budget, 4_096, 64);
         EmbeddedChannel partialBody = new EmbeddedChannel(bodyDecoder);
         assertTrue(partialBody.writeInbound(Unpooled.wrappedBuffer(hello)));
         ProfileInboundFrame bodyHello = partialBody.readInbound();
@@ -168,15 +166,13 @@ public class ProfileReceiveDecoderTest {
         partialBody.finish();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
 
-        EmbeddedChannel invalidHello = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 4_096, 64));
+        EmbeddedChannel invalidHello = new EmbeddedChannel(new ProfileReceiveDecoder(budget, 4_096, 64));
         assertThrows(ProfileWireValidationException.class,
                 () -> invalidHello.writeInbound(Unpooled.wrappedBuffer(frame(ProfileOperation.HELLO, 0))));
         assertFalse(invalidHello.isActive());
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
 
-        EmbeddedChannel invalid = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 4_096, 64));
+        EmbeddedChannel invalid = new EmbeddedChannel(new ProfileReceiveDecoder(budget, 4_096, 64));
         byte[] bad = hello.clone();
         ByteBuffer.wrap(bad).putInt(0, ProfileFrameCodec.ABSOLUTE_FRAME_MAX + 1);
         assertThrows(ProfileWireValidationException.class,
@@ -188,9 +184,8 @@ public class ProfileReceiveDecoderTest {
 
     @Test
     public void countsPipelinedBodyAlreadyInsideOneReadBeforeAcceptingIt() {
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024);
-        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 4_000, 64);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 2_500);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, 4_000, 64);
         AtomicInteger hellos = new AtomicInteger();
         EmbeddedChannel data = new EmbeddedChannel(decoder, new ChannelInboundHandlerAdapter() {
             @Override
@@ -213,8 +208,7 @@ public class ProfileReceiveDecoderTest {
         assertFalse(data.isActive());
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
 
-        EmbeddedChannel control = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.CONTROL, 900, 64));
+        EmbeddedChannel control = new EmbeddedChannel(new ProfileReceiveDecoder(budget, 900, 64));
         assertTrue(control.writeInbound(Unpooled.wrappedBuffer(hello)));
         ProfileInboundFrame controlHello = control.readInbound();
         controlHello.close();
@@ -223,11 +217,103 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void classifiesPipelinedHelloAndDataWithoutMovingInboundCredit() {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 1_024);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, 3_000, 64);
+        ProfileInboundFrame[] retained = new ProfileInboundFrame[1];
+        EmbeddedChannel channel = new EmbeddedChannel(decoder, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object message) {
+                ProfileInboundFrame received = (ProfileInboundFrame) message;
+                if (received.header().operation() == ProfileOperation.HELLO) {
+                    decoder.markEstablished();
+                    received.close();
+                } else {
+                    retained[0] = received;
+                }
+            }
+        });
+        byte[] greeting = hello();
+        byte[] add = frame(ProfileOperation.ADD_NORMAL, 64);
+        byte[] pipelined = Arrays.copyOf(greeting, greeting.length + add.length);
+        System.arraycopy(add, 0, pipelined, greeting.length, add.length);
+        assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(pipelined)));
+        assertEquals(ProfileOperation.ADD_NORMAL, retained[0].header().operation());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(64 + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        retained[0].close();
+        assertThrows(IOException.class, () -> channel.writeInbound(
+                Unpooled.wrappedBuffer(frame(ProfileOperation.INSTALL, 0))));
+        assertFalse(channel.isActive());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+    }
+
+    @Test
+    public void authorizesControlCandidateInSameReadAndKeepsConnectionControl() {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 1_024);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, 3_000, 64);
+        AtomicInteger controls = new AtomicInteger();
+        ProfileInboundFrame[] retained = new ProfileInboundFrame[1];
+        EmbeddedChannel channel = new EmbeddedChannel(decoder, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object message) throws Exception {
+                ProfileInboundFrame received = (ProfileInboundFrame) message;
+                if (received.header().operation() == ProfileOperation.HELLO) {
+                    decoder.markEstablished();
+                    received.close();
+                } else if (controls.incrementAndGet() == 1) {
+                    // This test supplies the downstream authorization decision; the real handler is still pending.
+                    decoder.markControlAuthorized(received);
+                    received.close();
+                } else {
+                    retained[0] = received;
+                }
+            }
+        });
+        byte[] greeting = hello();
+        byte[] fence = frame(ProfileOperation.FENCE_LEDGER, 100);
+        byte[] pipelined = Arrays.copyOf(greeting, greeting.length + fence.length * 2);
+        System.arraycopy(fence, 0, pipelined, greeting.length, fence.length);
+        System.arraycopy(fence, 0, pipelined, greeting.length + fence.length, fence.length);
+        assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(pipelined)));
+        assertEquals(2, controls.get());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(64 + fence.length, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        assertThrows(IOException.class, () -> channel.writeInbound(
+                Unpooled.wrappedBuffer(frame(ProfileOperation.ADD_NORMAL, 0))));
+        assertFalse(channel.isActive());
+        assertEquals(fence.length, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        retained[0].close();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    @Test
+    public void failedControlTransferKeepsHeldFrameChargedToUnclassified() {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(1_000, 150, 500);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, 900, 64);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+        ProfileInboundFrame greeting = channel.readInbound();
+        greeting.close();
+        decoder.markEstablished();
+        byte[] fence = frame(ProfileOperation.FENCE_LEDGER, 100);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(fence)));
+        ProfileInboundFrame candidate = channel.readInbound();
+        assertThrows(IOException.class, () -> decoder.markControlAuthorized(candidate));
+        assertFalse(channel.isActive());
+        assertEquals(fence.length, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        candidate.close();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+    }
+
+    @Test
     public void stopsAtDownstreamCloseBeforePipelinedSecondFrame() {
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024, 512);
         AtomicInteger delivered = new AtomicInteger();
-        EmbeddedChannel channel = new EmbeddedChannel(new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 6_000, 64), new ChannelInboundHandlerAdapter() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProfileReceiveDecoder(budget, 6_000, 64),
+                new ChannelInboundHandlerAdapter() {
             @Override
             public void channelRead(ChannelHandlerContext ctx, Object message) {
                 try (ProfileInboundFrame received = (ProfileInboundFrame) message) {
@@ -251,9 +337,8 @@ public class ProfileReceiveDecoderTest {
 
     @Test
     public void rejectsOversizedFenceBeforeChargingControlBody() {
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 2_048);
-        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.CONTROL, 6_000, 64);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 2_048, 512);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, 6_000, 64);
         EmbeddedChannel channel = new EmbeddedChannel(decoder);
         assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
         ProfileInboundFrame greeting = channel.readInbound();
@@ -279,9 +364,8 @@ public class ProfileReceiveDecoderTest {
         TLSContextFactory profile = TLSContextFactory.forProfileServer();
         profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
         SslHandler serverTls = profile.newTLSHandler();
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096);
-        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget,
-                ProfileReceiveDecoder.ConnectionPurpose.DATA, 8_192, 64);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096, 1_024);
+        ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, 8_192, 64);
         EmbeddedChannel server = new EmbeddedChannel(serverTls, decoder);
 
         SslContext clientContext = SslContextBuilder.forClient()

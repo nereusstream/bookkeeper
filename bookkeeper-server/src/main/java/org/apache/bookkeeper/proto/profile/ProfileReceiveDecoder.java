@@ -32,7 +32,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 
 /** Charged plaintext framing after TLS. The eventual listener must also account for TLS/socket buffers. */
 final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
-    enum ConnectionPurpose { DATA, CONTROL }
+    private enum ConnectionPurpose { UNCLASSIFIED, DATA, CONTROL_PENDING, CONTROL }
 
     private final class HeldCredit implements AutoCloseable {
         private final int bytes;
@@ -60,8 +60,6 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private static final int FIXED_HEADER_BYTES = ProfileFrameCodec.OUTER_LENGTH_PREFIX
             + ProfileFrameHeader.ENCODED_LENGTH;
     private final ProfileReceiveBudget budget;
-    private final ProfileReceiveBudget.Lane lane;
-    private final ConnectionPurpose purpose;
     private final int connectionLimit;
     private final int connectionBaseBytes;
     private final AtomicLong connectionBytes = new AtomicLong();
@@ -69,19 +67,19 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private ChannelHandlerContext context;
     private HeldCredit baseCredit;
     private HeldCredit frameCredit;
+    private HeldCredit pendingControlCredit;
+    private ProfileInboundFrame pendingControlFrame;
     private ByteBuf frame;
     private ProfileFrameHeader frameHeader;
     private int headerRead;
     private boolean helloDelivered;
     private boolean terminated;
+    private ProfileReceiveBudget.Lane lane = ProfileReceiveBudget.Lane.UNCLASSIFIED;
+    private ConnectionPurpose purpose = ConnectionPurpose.UNCLASSIFIED;
     private ProfileFrameCodec.DecodePhase phase = ProfileFrameCodec.DecodePhase.PRE_HELLO;
 
-    ProfileReceiveDecoder(ProfileReceiveBudget budget, ConnectionPurpose purpose, int connectionLimit,
-                          int connectionBaseBytes) {
+    ProfileReceiveDecoder(ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes) {
         this.budget = Objects.requireNonNull(budget, "budget");
-        this.purpose = Objects.requireNonNull(purpose, "purpose");
-        lane = purpose == ConnectionPurpose.DATA ? ProfileReceiveBudget.Lane.DATA
-                : ProfileReceiveBudget.Lane.CONTROL;
         if (connectionBaseBytes < FIXED_HEADER_BYTES || connectionLimit <= connectionBaseBytes) {
             throw new IllegalArgumentException("Invalid fixed connection or receive limit");
         }
@@ -102,11 +100,36 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     /** Called only after the downstream HELLO handler accepts authentication and capabilities. */
     void markEstablished() {
-        if (context == null || !context.executor().inEventLoop() || !helloDelivered
+        if (terminated || context == null || !context.executor().inEventLoop() || !helloDelivered
                 || phase != ProfileFrameCodec.DecodePhase.PRE_HELLO) {
             throw new IllegalStateException("HELLO was not accepted on this connection");
         }
         phase = ProfileFrameCodec.DecodePhase.ESTABLISHED;
+    }
+
+    /** Called by the downstream operation handler after it validates and authorizes the first control request. */
+    void markControlAuthorized(ProfileInboundFrame validatedFrame) throws IOException {
+        if (terminated || context == null || !context.executor().inEventLoop()
+                || purpose != ConnectionPurpose.CONTROL_PENDING || pendingControlCredit == null
+                || pendingControlFrame != validatedFrame) {
+            throw new IllegalStateException("No validated control request on this connection");
+        }
+        final boolean transferred;
+        try {
+            transferred = budget.transfer(ProfileReceiveBudget.Lane.CONTROL,
+                    baseCredit.shared, pendingControlCredit.shared);
+        } catch (IllegalStateException failure) {
+            context.close();
+            throw failure;
+        }
+        if (!transferred) {
+            context.close();
+            throw new IOException("Bookie Profile control receive capacity exhausted");
+        }
+        pendingControlCredit = null;
+        pendingControlFrame = null;
+        lane = ProfileReceiveBudget.Lane.CONTROL;
+        purpose = ConnectionPurpose.CONTROL;
     }
 
     @Override
@@ -146,6 +169,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 }
                 ProfileFrameCodec.InspectedHeader inspected = ProfileFrameCodec.inspectHeader(fixedHeader, phase);
                 validatePurpose(inspected.header());
+                classify(inspected.header());
                 HeldCredit reserved = charge(inspected.frameBytes());
                 ByteBuf allocated = null;
                 try {
@@ -179,6 +203,10 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 }
             }
             ProfileInboundFrame completed = new ProfileInboundFrame(header, frame, frameCredit::close);
+            if (purpose == ConnectionPurpose.CONTROL_PENDING) {
+                pendingControlCredit = frameCredit;
+                pendingControlFrame = completed;
+            }
             frame = null;
             frameCredit = null;
             frameHeader = null;
@@ -212,6 +240,26 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         if (purpose == ConnectionPurpose.DATA && operation.isControl()) {
             throw new IOException("Control operation requires a control connection");
         }
+        if (purpose == ConnectionPurpose.CONTROL_PENDING || (purpose == ConnectionPurpose.UNCLASSIFIED
+                && operation.isReservedDisabled())) {
+            throw new IOException("Profile connection purpose is not established");
+        }
+    }
+
+    private void classify(ProfileFrameHeader header) throws IOException {
+        if (purpose != ConnectionPurpose.UNCLASSIFIED || header.operation() == ProfileOperation.HELLO) {
+            return;
+        }
+        ProfileOperation operation = header.operation();
+        if (operation == ProfileOperation.FENCE_LEDGER || operation.isControl()) {
+            purpose = ConnectionPurpose.CONTROL_PENDING;
+            return;
+        }
+        if (!budget.transfer(ProfileReceiveBudget.Lane.DATA, baseCredit.shared)) {
+            throw new IOException("Bookie Profile DATA receive capacity exhausted");
+        }
+        lane = ProfileReceiveBudget.Lane.DATA;
+        purpose = ConnectionPurpose.DATA;
     }
 
     private HeldCredit charge(int bytes) throws IOException {
@@ -248,6 +296,8 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         terminated = true;
+        pendingControlCredit = null;
+        pendingControlFrame = null;
         discardPartial();
         releaseBase();
         ctx.fireChannelInactive();
@@ -256,6 +306,8 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     @Override
     public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
         terminated = true;
+        pendingControlCredit = null;
+        pendingControlFrame = null;
         discardPartial();
         releaseBase();
         context = null;

@@ -17,12 +17,13 @@
  */
 package org.apache.bookkeeper.proto.profile;
 
-/** One bounded receive ledger shared by DATA and reserved CONTROL connections. */
+/** One bounded receive ledger shared by unclassified, DATA and reserved CONTROL connections. */
 final class ProfileReceiveBudget {
-    enum Lane { DATA, CONTROL }
+    enum Lane { UNCLASSIFIED, DATA, CONTROL }
 
     final class Credit implements AutoCloseable {
-        private final Lane lane;
+        private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
+        private Lane lane;
         private final int bytes;
         private boolean closed;
 
@@ -38,50 +39,70 @@ final class ProfileReceiveBudget {
                     throw new IllegalStateException("Receive credit returned twice");
                 }
                 closed = true;
-                if (lane == Lane.DATA) {
-                    dataBytes -= bytes;
-                } else {
-                    controlBytes -= bytes;
-                }
+                usedBytes[lane.ordinal()] -= bytes;
             }
         }
     }
 
-    private final long dataLimit;
-    private final long controlLimit;
-    private long dataBytes;
-    private long controlBytes;
+    private final long[] limits = new long[Lane.values().length];
+    private final long[] usedBytes = new long[Lane.values().length];
 
-    ProfileReceiveBudget(long totalBytes, long reservedControlBytes) {
-        if (totalBytes < 1 || reservedControlBytes < 1 || reservedControlBytes >= totalBytes) {
-            throw new IllegalArgumentException("Positive DATA and reserved CONTROL receive budgets required");
+    ProfileReceiveBudget(long totalBytes, long reservedControlBytes, long unclassifiedBytes) {
+        if (totalBytes < 3 || reservedControlBytes < 1 || reservedControlBytes >= totalBytes
+                || unclassifiedBytes < 1 || unclassifiedBytes >= totalBytes - reservedControlBytes) {
+            throw new IllegalArgumentException("Positive unclassified, DATA and CONTROL budgets required");
         }
-        dataLimit = totalBytes - reservedControlBytes;
-        controlLimit = reservedControlBytes;
+        limits[Lane.UNCLASSIFIED.ordinal()] = unclassifiedBytes;
+        limits[Lane.DATA.ordinal()] = totalBytes - reservedControlBytes - unclassifiedBytes;
+        limits[Lane.CONTROL.ordinal()] = reservedControlBytes;
     }
 
     synchronized Credit reserve(Lane lane, int bytes) {
         if (lane == null || bytes < 0) {
             throw new IllegalArgumentException("Invalid receive credit request");
         }
-        if (lane == Lane.DATA) {
-            if (bytes > dataLimit - dataBytes) {
-                return null;
-            }
-            dataBytes += bytes;
-        } else {
-            if (bytes > controlLimit - controlBytes) {
-                return null;
-            }
-            controlBytes += bytes;
+        int index = lane.ordinal();
+        if (bytes > limits[index] - usedBytes[index]) {
+            return null;
         }
+        usedBytes[index] += bytes;
         return new Credit(lane, bytes);
+    }
+
+    /** Move existing ownership without a release-and-reserve gap. A failed move leaves every credit unchanged. */
+    synchronized boolean transfer(Lane target, Credit... credits) {
+        if (target == null || credits.length == 0 || credits[0] == null) {
+            throw new IllegalArgumentException("Receive target and credits required");
+        }
+        Lane source = credits[0].lane;
+        long bytes = 0;
+        for (int i = 0; i < credits.length; i++) {
+            Credit credit = credits[i];
+            if (credit == null || credit.owner != this || credit.closed || credit.lane != source) {
+                throw new IllegalStateException("Invalid receive credit transfer");
+            }
+            for (int previous = 0; previous < i; previous++) {
+                if (credit == credits[previous]) {
+                    throw new IllegalStateException("Receive credit transferred twice");
+                }
+            }
+            bytes += credit.bytes;
+        }
+        if (source == target || bytes > limits[target.ordinal()] - usedBytes[target.ordinal()]) {
+            return false;
+        }
+        usedBytes[source.ordinal()] -= bytes;
+        usedBytes[target.ordinal()] += bytes;
+        for (Credit credit : credits) {
+            credit.lane = target;
+        }
+        return true;
     }
 
     synchronized long used(Lane lane) {
         if (lane == null) {
             throw new IllegalArgumentException("Receive lane required");
         }
-        return lane == Lane.DATA ? dataBytes : controlBytes;
+        return usedBytes[lane.ordinal()];
     }
 }
