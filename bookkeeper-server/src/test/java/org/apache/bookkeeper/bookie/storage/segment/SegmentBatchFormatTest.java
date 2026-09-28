@@ -596,6 +596,28 @@ public class SegmentBatchFormatTest {
             owner.stopAdmission();
             assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
         }
+        if (!failFirst) {
+            try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                SegmentFileIo insufficient = new SegmentFileIo();
+                assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalInventory(
+                        config, identity(), replay, insufficient, 1));
+                assertEquals(0, insufficient.forces);
+                SegmentFileIo failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalInventory(
+                        config, identity(), replay, failedSync, 2));
+                assertEquals(1, failedSync.forces);
+                SegmentFileIo sync = new SegmentFileIo();
+                SegmentDataRecovery.PhysicalInventory inventory = SegmentDataRecovery.recoverPhysicalInventory(
+                        config, identity(), replay, sync, 2);
+                assertEquals(2, inventory.scan().batches());
+                assertEquals(2, inventory.entries().size());
+                assertEquals(1, sync.forces);
+                assertEquals(11, SegmentPointRead.read(config, identity(), replay, inventory.entries().get(0))
+                        .record().entryId());
+                assertEquals(12, SegmentPointRead.read(config, identity(), replay, inventory.entries().get(1))
+                        .record().entryId());
+            }
+        }
     }
 
     @Test
@@ -663,6 +685,12 @@ public class SegmentBatchFormatTest {
             assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
             owner.stopAdmission();
             assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentDataRecovery.PhysicalInventory inventory = SegmentDataRecovery.recoverPhysicalInventory(
+                    config, identity(), replay, new SegmentFileIo(), 1);
+            assertEquals(1, inventory.scan().batches());
+            assertTrue(inventory.entries().isEmpty());
         }
     }
 

@@ -18,7 +18,7 @@
 
 ## 下一阶段实施清单
 
-规划基线为`origin/turbo-bk@e8b162076fd8cfa84a11351a82caac8c5ac1f939`，2026-09-22核对本地HEAD及远端引用一致；该提交时间为2026-09-22 08:29:33 UTC（北京时间16:29:33）。16步顺序现已开始实施。步骤1隔离配置、参数边界测试和可追溯构建入口已交付，2项测试通过；[本地存储状态与回执](local-storage/README.md)记录真实覆盖。步骤2的[CLIENT-1/2独立Classic补丁](client-maintenance/README.md)均已完成确定性红绿回归（当前85项测试通过），与隔离存储authority分离；步骤3已交付实验格式、独立parser与真实FileChannel I/O（14项定向测试通过）；步骤4已交付固定owner/PARK、有界I/O、显式绑定、拓扑/placement及group启动与SYSTEM/OWNER_TOUCH池，低频运行期CPU/cgroup检查及PREFER/REQUIRE本地处置已接入隔离group；步骤5～7已有Arena控制、物理前缀/热候选、重复payload真实点读比较及点读/文件同步局部切片。Bookie控制、请求级幂等、逐entry成功、完整restart、Bookie生命周期重启/PREFERRED及步骤5～16完整合同仍未完成。文件层验证不表示entry成功、restart、Spike或Gate通过。
+规划基线为`origin/turbo-bk@e8b162076fd8cfa84a11351a82caac8c5ac1f939`，2026-09-22核对本地HEAD及远端引用一致；该提交时间为2026-09-22 08:29:33 UTC（北京时间16:29:33）。16步顺序现已开始实施。步骤1隔离配置、参数边界测试和可追溯构建入口已交付，2项测试通过；[本地存储状态与回执](local-storage/README.md)记录真实覆盖。步骤2的[CLIENT-1/2独立Classic补丁](client-maintenance/README.md)均已完成确定性红绿回归（当前85项测试通过），与隔离存储authority分离；步骤3已交付实验格式、独立parser与真实FileChannel I/O（14项定向测试通过）；步骤4已交付固定owner/PARK、有界I/O、显式绑定、拓扑/placement及group启动与SYSTEM/OWNER_TOUCH池，低频运行期CPU/cgroup检查及PREFER/REQUIRE本地处置已接入隔离group；步骤5～7已有Arena控制、物理前缀/热候选、重复payload真实点读比较、点读/文件同步及重启物理清单局部切片。Bookie控制、请求级幂等、逐entry成功、完整restart、Bookie生命周期重启/PREFERRED及步骤5～16完整合同仍未完成。文件层验证不表示entry成功、restart、Spike或Gate通过。
 
 继续复用已有ProfileDescriptor、Profile control/auth、startup/readiness reference implementation及experimental wire codec/corpus。它们提供接口、字节合同和测试依据，不能替代真实文件持久化、网络或MetadataStore。固定owner、安全显式绑核、NUMA池与独立等待策略沿用RFC-0005 §10.2—10.5、RFC-0003 §6.2；默认仍为OFF/SYSTEM/PARK。
 
@@ -154,7 +154,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 **完成条件：** 对应durability未完成绝不成功；源/对齐buffer及pending有界，完成事件不被DATA队列满额挡住。覆盖同批一条被fence而另一条成功、batch 12先于11完成、DATA durable但定位尚未发布、请求超时后旧I/O继续完成；未解析I/O保护原坐标并暂停受影响stream/file，不以跳号或新stream绕过。此时local result只供隔离测试，不接管生产Bookie ACK。
 
-当前[隔离物理前缀与热候选切片](local-storage/README.md)已使DATA坐标预留与真实I/O分离，在原owner验证已同步批次的连续stream sequence，并把提前预留容量的普通record位置在前缀释放后转为有界可点读候选；搬迁副本不进入普通候选。仍无已验证的restart起点、Bookie权限复查、幂等及逐entry local result，步骤6未完成。
+当前[隔离物理前缀与热候选切片](local-storage/README.md)已使DATA坐标预留与真实I/O分离，在原owner验证已同步批次的连续stream sequence，并把提前预留容量的普通record位置在前缀释放后转为有界可点读候选；搬迁副本不进入普通候选。真实点读的重复payload比较已验证LAC变化与冲突，但仍无已验证的restart起点、Bookie权限复查、请求级幂等及逐entry local result，步骤6未完成。
 
 #### 7. 实现点读与基础restart
 
@@ -169,7 +169,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 **完成条件：** 写入→确认本地持久化→读取→终止进程→重启→再读与重复写入可重复运行；未知覆盖不误报NoSuchEntry，不同stream恢复不截短共享文件，旧generation残留不复活。开始验证两次故障：write完成但barrier未完成时退出，重启处理重复请求后再次掉电；单次进程终止后可读不足以证明持久化保证。
 
-当前[隔离点读及文件同步切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。停写后完整扫描的DATA文件可执行一次恢复`force(false)`，同步失败不返回结果。尚无热locator发布、selector/pin、完整restart前缀、Bookie必要范围选择与服务权限，步骤7未完成。
+当前[隔离点读及文件同步切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。停写后完整扫描的DATA文件可执行一次恢复`force(false)`；全目录校验同步后可在显式容量内取回普通record物理位置并重开点读，容量不足或同步失败不返回清单。运行时已有热候选发布，但没有重启前缀、恢复位置的热目录发布、selector/pin、Bookie必要范围选择与服务权限，步骤7未完成。
 
 **第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
 

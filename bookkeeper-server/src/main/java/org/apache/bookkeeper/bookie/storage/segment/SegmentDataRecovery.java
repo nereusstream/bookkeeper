@@ -24,15 +24,36 @@ import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
     record Scan(long batches, long records, long validatedBytes, long zeroPages) { }
 
+    static final class PhysicalInventory {
+        private final Scan scan;
+        private final List<SegmentPointRead.Location> entries;
+
+        private PhysicalInventory(Scan scan, List<SegmentPointRead.Location> entries) {
+            this.scan = scan;
+            this.entries = List.copyOf(entries);
+        }
+
+        Scan scan() {
+            return scan;
+        }
+
+        List<SegmentPointRead.Location> entries() {
+            return entries;
+        }
+
+    }
+
     static Scan inspect(IsolatedSegmentConfig config, SegmentFileHeader identity,
                         SegmentArenaControlLog authority) throws IOException {
-        return scan(config, identity, authority, null);
+        return scan(config, identity, authority, null, 0).scan();
     }
 
     /** A successful scan forces the checked DATA files; it does not establish Bookie or locator authority. */
@@ -41,11 +62,22 @@ final class SegmentDataRecovery {
         if (syncIo == null) {
             throw new IllegalArgumentException("DATA recovery sync requires an I/O backend");
         }
-        return scan(config, identity, authority, syncIo);
+        return scan(config, identity, authority, syncIo, 0).scan();
     }
 
-    private static Scan scan(IsolatedSegmentConfig config, SegmentFileHeader identity,
-                             SegmentArenaControlLog authority, SegmentFileIo syncIo) throws IOException {
+    /** Physical locations only: caller still needs the recovered stream prefix and Bookie selector/permissions. */
+    static PhysicalInventory recoverPhysicalInventory(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                       SegmentArenaControlLog authority, SegmentFileIo syncIo,
+                                                       int maxEntries) throws IOException {
+        if (syncIo == null || maxEntries < 1) {
+            throw new IllegalArgumentException("Bounded DATA recovery sync and inventory required");
+        }
+        return scan(config, identity, authority, syncIo, maxEntries);
+    }
+
+    private static PhysicalInventory scan(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                          SegmentArenaControlLog authority, SegmentFileIo syncIo,
+                                          int maxEntries) throws IOException {
         if (!authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
@@ -65,6 +97,7 @@ final class SegmentDataRecovery {
                 long records = 0;
                 long validatedBytes = 0;
                 long zeroPages = 0;
+                List<SegmentPointRead.Location> entries = new ArrayList<>();
                 for (int file = 0; file < config.dataFiles(); file++) {
                     try (FileChannel data = syncIo == null
                             ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
@@ -101,6 +134,17 @@ final class SegmentDataRecovery {
                             SegmentFileIo.readFully(data, content, offset);
                             SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
                                     config.bytesPerFile());
+                            if (maxEntries > 0) {
+                                List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+                                for (int i = 0; i < parsed.records().size(); i++) {
+                                    if (parsed.records().get(i).origin() == SegmentBatchFormat.ENTRY_DATA) {
+                                        if (entries.size() == maxEntries) {
+                                            throw new IOException("Physical recovery inventory capacity exhausted");
+                                        }
+                                        entries.add(locations.get(i));
+                                    }
+                                }
+                            }
                             batches++;
                             records += parsed.records().size();
                             validatedBytes += length;
@@ -111,7 +155,7 @@ final class SegmentDataRecovery {
                         }
                     }
                 }
-                return new Scan(batches, records, validatedBytes, zeroPages);
+                return new PhysicalInventory(new Scan(batches, records, validatedBytes, zeroPages), entries);
             }
         }
     }

@@ -1,0 +1,21 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_SYNCED_PHYSICAL_INVENTORY_ONLY",
+  "sourceBaseCommit": "d089ee9acb6bdd8024f2df30055c18b00b1c7302",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentDataRecovery.java": "7b721ed23fff0710010779b3b0c47c84897c8799d6d75dc6c809934d91d53d94",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "28d31dc486aaae93c40596eba87985664879088a621ff81949ca479bcd272312"
+  },
+  "fixture": "one Arena, one 4 MiB precreated DATA file; two real DATA batches 11/12, writer close, Arena log replay, bounded full-file inventory sync, then independent point reads; separate durable RELOCATION_COPY batch",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-LJXDS40L",
+  "inputSha256": "eb4536f678ef491303261f8af983df0473f377ebf18ee0eceb7b00791ba88de0",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentArenaControlLogTest,SegmentOwnerLoopTest",
+  "mavenLogSha256": "88bcdcbd9239b5c55a82d6c201d9d7f8914dddb644bf054d7b60e3c1301b0cb0",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 16, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "f086ea61854566503f28eff4ae5f2cc9ed060fa4d9ea389fff92b6ee01652ed0"},
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "289b16a86a29a54b8cd320a0e49804fb85cc6aead5d1ac4b852c4b5a94cefa2a"},
+    "SegmentOwnerLoopTest": {"tests": 6, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "3d8c4e6b1935b44c59c4990537f632e8a09f20363e82e2ade6da4a0e457f8fa0"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Only full quiesced file validation and recovery sync with bounded physical ENTRY_DATA inventory. No proven stream prefix, current Bookie selector or read authority, hot-directory publication, local result, durable ACK, power-loss or production authority."
+}

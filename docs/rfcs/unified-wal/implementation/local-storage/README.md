@@ -34,7 +34,7 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 `IsolatedSegmentFiles.writeAuthorized`已在实际FileChannel写入前核对同一目录/storage/Arena身份、冻结DATA batch的整段物理范围和上述grant身份；跨块batch要求同一pool授权，未apply或身份不符时不写入。它只约束这个显式调用路径；底层`write`保留给格式/I/O实验。`ALLOC_POOL`尚未实现DATA framing的used/unused恢复，也不支持FREE后的复用。Bookie控制语义、fence/grant、逐entry成功与完整启动恢复未接入，故步骤5未完成，不能据此开放Bookie写入。
 
-只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser且拥有匹配的已apply Arena grant，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用。`validateAndSync`沿同一验证路径，在每个已检查文件返回前执行真实`force(false)`；验证或同步失败就不返回结果。当前会扫描并同步全部隔离DATA文件，尚未由Bookie/current-selector authority选出必要范围，也不推导连续stream前缀、恢复locator或开放写入。
+只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser且拥有匹配的已apply Arena grant，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用。`validateAndSync`沿同一验证路径，在每个已检查文件返回前执行真实`force(false)`；验证或同步失败就不返回结果。`recoverPhysicalInventory`还可在显式entry容量内，完成全目录验证与同步后返回普通`ENTRY_DATA`的物理位置，不返回`RELOCATION_COPY`；容量不足也不返回部分清单。当前扫描全部隔离DATA文件，尚未由Bookie/current-selector authority选出必要范围，也不推导连续stream前缀、可发布的恢复locator或开放写入。
 
 步骤6的物理前缀局部切片：`IsolatedSegmentFiles`已将有界DATA坐标预留与已预留批次的实际write/force分开。预留在I/O前占用固定文件范围；失败不退回坐标，并停止该文件新写。`SegmentPhysicalPrefix`只在原shard owner上接收同一stream generation的递增batch sequence；I/O completion必须对应已预留batch且其真实force返回，才可推进连续物理前缀。较晚batch先durable仍等待前批；前批同步不确定时不释放后批，不凭后批完整字节报告本地成功。当前tracker的起点由隔离调用者显式提供，未从持久checkpoint证明；它只返回物理可发布候选，不实现Bookie权限复查、热定位或逐entry result。
 
@@ -42,7 +42,7 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 步骤6的重复慢路径局部原语：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`先复制至多1 MiB应用数据加36字节BK头的请求entry，再在候选位置上执行真实文件点读，比较同一ledger instance/entryId的应用payload bytes和累计ledger length。合法LAC及相应CRC差异不造成冲突，payload或累计length变化返回冲突，坏输入CRC、不同instance或entryId拒绝。调用方必须在有界I/O线程执行点读，独立完成Bookie route/auth/grant及完成时的权限复核；当前没有接入请求准入、并发pending重试或逐entry结果，`SegmentHotDirectory.reserve`仍在占用坐标前拒绝重复写入，故尚无可对外返回成功的幂等Add。
 
-步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。它不创建或发布locator，不证明batch已进入连续持久前缀；当前Arena也不支持FREE/复用，故尚无selector复核与allocation pin合同。重开后点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
+步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读，但清单不进入运行时热目录，不证明batch已进入连续持久前缀或当前Bookie selector；当前Arena也不支持FREE/复用，故尚无selector复核与allocation pin合同。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
 
 ## 验证入口
 
@@ -106,6 +106,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 2026-09-28 [重复慢路径回执](duplicate-check-receipt.json)：macOS隔离定向测试26项通过，0失败/错误/跳过，Spotless/Checkstyle通过。已发布候选从真实DATA文件读取，与新打包的相同payload/累计length但不同LAC比较相同；不同payload或累计length比较冲突，坏CRC、不同instance及entryId拒绝。该原语未连接Bookie authority或请求生命周期，不能证明同坐标Add幂等成功。
 
+2026-09-28 [重启物理清单回执](physical-inventory-receipt.json)：macOS隔离定向测试26项通过，0失败/错误/跳过，Spotless/Checkstyle通过。两个已force的真实DATA batch在writer退出、Arena控制日志重开后，经全目录校验与一次恢复`force(false)`得到两个物理位置，并再次点读11/12；清单容量1和注入同步失败均不返回结果。单独的持久搬迁副本不进入普通清单。此处没有持久前缀起点、Bookie selector/权限或热目录恢复发布，不能返回幂等成功或宣称完整restart。
+
 ## 未覆盖范围
 
-步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制及Arena/DATA恢复闭环、步骤6合批/权限化热定位/逐entry结果/请求级幂等、步骤7selector与pin/完整restart尚未实现。物理热候选、重复比较、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
+步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制及Arena/DATA恢复闭环、步骤6合批/权限化热定位/逐entry结果/请求级幂等、步骤7selector与pin/完整restart尚未实现。物理热候选、重复比较、重启物理清单、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
