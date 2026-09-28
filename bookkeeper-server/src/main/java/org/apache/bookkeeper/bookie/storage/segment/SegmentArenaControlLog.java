@@ -242,8 +242,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return true;
     }
 
-    boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
-        return config.equals(otherConfig) && identity.equals(otherIdentity);
+    synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
+        return !closed && !failed && config.equals(otherConfig) && identity.equals(otherIdentity);
     }
 
     synchronized long durableThrough() {
@@ -360,6 +360,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private void validateRange(Allocation command) {
         if (command.file() < 0 || command.file() >= config.dataFiles()
                 || command.ownerShard() < 0 || command.ownerShard() >= config.logicalShards()
+                || command.file() != command.ownerShard() % config.dataFiles()
                 || command.offset() < FIRST_RECORD || (command.offset() - FIRST_RECORD) % BLOCK_BYTES != 0
                 || command.offset() > config.bytesPerFile()
                 || command.blocks() > (config.bytesPerFile() - command.offset()) / BLOCK_BYTES

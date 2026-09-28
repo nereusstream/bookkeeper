@@ -136,7 +136,7 @@ Arena控制日志： ALLOC / ALLOC_POOL / generation / MOVE / FREE / checkpoint
 
 先实现真实控制记录持久化、顺序apply、重复操作解析、启动身份检查及ALLOC/ALLOC_POOL。条件命令按已选合同“合批durable → 顺序判断并apply”，不增加推测状态或结果日志。初版可完整重放且暂不删除旧日志，但必须设置日志空间上限，满额停止接收；完整checkpoint/rotation在步骤8补齐。
 
-当前仅[隔离Arena局部切片](local-storage/README.md)实现上述ALLOC/ALLOC_POOL的文件持久化、顺序apply和完整历史重放；显式DATA文件写入路径已检查整段grant。Bookie控制owner及pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
+当前仅[隔离Arena局部切片](local-storage/README.md)实现上述ALLOC/ALLOC_POOL的文件持久化、顺序apply和完整历史重放；显式DATA文件写入路径已检查整段grant，停写后的只读扫描验证framing与grant。Bookie控制owner及pool used/unused恢复尚未接通，步骤5完成条件仍未满足。
 
 **完成条件：** 同批两个ALLOC竞争同一slot只有一个成功；durable未apply、apply中途崩溃和重复请求的结果一致；错误storage identity不开放写入；DATA只使用已持久化且成功apply的空间授权。本地fence/grant先用受控DATA事件验证顺序，在步骤6补真实I/O交错测试。
 

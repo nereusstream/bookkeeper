@@ -274,8 +274,38 @@ public class SegmentBatchFormatTest {
                 assertEquals(3, SegmentBatchParser.parse(persisted, address(4096), config.bytesPerFile())
                         .records().get(0).entryId());
             }
+            assertThrows(IOException.class, () -> SegmentDataRecovery.inspect(config, identity(), log));
         } finally {
             entry.release();
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentDataRecovery.Scan scan = SegmentDataRecovery.inspect(config, identity(), replay);
+            assertEquals(1, scan.batches());
+            assertEquals(1, scan.records());
+            assertTrue(scan.validatedBytes() > SegmentArenaControlLog.BLOCK_BYTES);
+            assertTrue(scan.zeroPages() > 0);
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.WRITE)) {
+                data.write(ByteBuffer.wrap(new byte[] {1}), config.bytesPerFile() - 4096);
+                data.force(false);
+            }
+            assertThrows(IOException.class, () -> SegmentDataRecovery.inspect(config, identity(), replay));
+        }
+    }
+
+    @Test
+    public void completeRawDataBatchWithoutControlGrantIsNotRecoveryAuthority() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("raw-only"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf entry = entry(new byte[16]);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity())) {
+            files.write(SegmentBatchFormat.encode(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), entry))));
+        } finally {
+            entry.release();
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertThrows(IOException.class, () -> SegmentDataRecovery.inspect(config, identity(), log));
         }
     }
 

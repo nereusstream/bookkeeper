@@ -34,6 +34,8 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 `IsolatedSegmentFiles.writeAuthorized`已在实际FileChannel写入前核对同一目录/storage/Arena身份、冻结DATA batch的整段物理范围和上述grant身份；跨块batch要求同一pool授权，未apply或身份不符时不写入。它只约束这个显式调用路径；底层`write`保留给格式/I/O实验。`ALLOC_POOL`尚未实现DATA framing的used/unused恢复，也不支持FREE后的复用。Bookie控制语义、fence/grant、逐entry成功与完整启动恢复未接入，故步骤5未完成，不能据此开放Bookie写入。
 
+只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser且拥有匹配的已apply Arena grant，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用；此检查没有同步不确定的DATA内容、推导连续stream前缀、恢复locator或开放写入。
+
 ## 验证入口
 
 ```bash
@@ -83,6 +85,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 2026-09-28 [Arena控制回执](arena-control-receipt.json)：macOS隔离真实文件测试中，Arena控制4项、既有framing3项均通过，0失败/错误/跳过；`bookkeeper-server`的Spotless/Checkstyle通过。覆盖同批争用、durable未apply后重放、重复及不兼容命令、force失败的unknown恢复、partial tail拒绝、身份不符和容量上限。`ALLOC_POOL`只证明空间owner，不证明DATA used/unused、普通Add或掉电后的成功确认。
 
 2026-09-28 [DATA授权回执](arena-data-grant-receipt.json)：macOS隔离测试17项通过，0失败/错误/跳过，Spotless/Checkstyle通过。真实FileChannel路径用1 MiB payload生成跨两个1 MiB块的冻结batch；未apply、allocation ID/shard generation不符、另一隔离目录的grant均在写入前拒绝，同一pool授权后写入并由独立parser读回。Arena局部测试另覆盖单块grant不授权跨块范围及allocation ID重复争用。未测Bookie route/fence、重启DATA used/unused和逐entry结果。
+
+2026-09-28 [只读DATA扫描回执](data-scan-receipt.json)：同一局部测试扩展为18项通过，0失败/错误/跳过，Spotless/Checkstyle通过。停写后重开Arena控制日志，再以目录锁扫描DATA；完整已授权batch被验证，活跃writer、尾部非零脏页和完整但没有控制grant的原始batch被拒绝。全零页数不用于判定可复用空间。
 
 ## 未覆盖范围
 

@@ -1,0 +1,22 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_READ_ONLY_SCAN",
+  "sourceBaseCommit": "ef4532223351c8a41129a4c5b2986286ea4e64b9",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentDataRecovery.java": "c9d69c38a5b1b07cdd312809139066b0d77effeb752548bf013b6b34f41e9de8",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLog.java": "b673bf90c7adeee8603007b8deba7e76629b0a4057c9e4dbcbb1d809254c5893",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "5e06ff66e22c0e4816ac476f6dccced229adcd9c3ece0eb2a696ed93dd3c45f5"
+  },
+  "fixture": "one Arena, one 4 MiB precreated DATA file, four logical shards, 4096-byte pages; one granted cross-block DATA batch and a complete raw batch without a grant",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-QnzuZkl8",
+  "inputSha256": "57d0ace9a7a1febbcedc4db6344424ad4f02d2904bd6b5e9c87e59fc2080725b",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentBatchFormatTest,SegmentControlFormatTest",
+  "mavenLogSha256": "d9e498b966172c10457d6b7b72fb976f63eca19a9ffe0214e1b4e2a0cf635ea3",
+  "junit": {
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "4c8050cfef79450079a9d7f4ea105d1b804d5c8002e742ff6b05360214208968"},
+    "SegmentBatchFormatTest": {"tests": 11, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "407d028ff511c769119e672c792765d96711fd4b9d4322e6599b5bdd6569a55a"},
+    "SegmentControlFormatTest": {"tests": 3, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "1e3e0b379c6decb3faeaa9fe5d3d158fe549aba1ec7a5ada9b18b3b5e889e13e"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Read-only quiesced DATA inspection only. Zero pages are observations, not unused/reusable authority. No DATA recovery sync, contiguous physical stream prefix, locator rebuild, Bookie control, entry result, power-loss or production authority."
+}
