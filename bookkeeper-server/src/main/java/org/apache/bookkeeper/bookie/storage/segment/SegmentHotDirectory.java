@@ -139,6 +139,28 @@ final class SegmentHotDirectory {
         return admission.locations;
     }
 
+    /** Install only physical candidates from a quiesced, synced scan; no Bookie read or ACK authority. */
+    void restorePhysical(SegmentDataRecovery.PhysicalStreamCandidate stream) throws IOException {
+        owner.requireOwner();
+        if (!pendingBatches.isEmpty() || !pendingKeys.isEmpty() || !byPhysical.isEmpty()) {
+            throw new IOException("Physical recovery cannot overlap DATA submissions");
+        }
+        List<SegmentPointRead.Location> entries = stream.entries();
+        if (entries.size() > maxEntries - candidates.size()) {
+            throw new IOException("Hot locator capacity exhausted during physical recovery");
+        }
+        Set<Key> incoming = new HashSet<>();
+        for (SegmentPointRead.Location location : entries) {
+            Key key = new Key(location.context(), location.entryId());
+            if (!incoming.add(key) || candidates.containsKey(key)) {
+                throw new IOException("Duplicate logical entry in physical recovery candidates");
+            }
+        }
+        for (SegmentPointRead.Location location : entries) {
+            candidates.put(new Key(location.context(), location.entryId()), location);
+        }
+    }
+
     Optional<SegmentPointRead.Location> candidate(ProfileLedgerContext context, long entryId) {
         owner.requireOwner();
         return Optional.ofNullable(candidates.get(new Key(context, entryId)));

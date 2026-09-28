@@ -710,6 +710,44 @@ public class SegmentBatchFormatTest {
                     assertEquals(12, SegmentPointRead.read(config, identity(), replay, candidate.entries().get(1))
                             .record().entryId());
                     assertEquals(1, sync.forces);
+                    SegmentOwnerLoop recoveredOwner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+                    CountDownLatch restored = new CountDownLatch(1);
+                    AtomicReference<Throwable> restoreFailure = new AtomicReference<>();
+                    AtomicReference<List<SegmentPointRead.Location>> hotLocations = new AtomicReference<>();
+                    recoveredOwner.start();
+                    try {
+                        assertTrue(recoveredOwner.control(() -> {
+                            try {
+                                SegmentHotDirectory tooSmall = new SegmentHotDirectory(recoveredOwner, config, 1);
+                                assertThrows(IOException.class, () -> tooSmall.restorePhysical(candidate));
+                                assertEquals(0, tooSmall.candidateCount());
+                                SegmentHotDirectory inFlight = new SegmentHotDirectory(recoveredOwner, config, 2);
+                                inFlight.reserve(first);
+                                assertThrows(IOException.class, () -> inFlight.restorePhysical(candidate));
+                                assertEquals(0, inFlight.candidateCount());
+                                SegmentHotDirectory hot = new SegmentHotDirectory(recoveredOwner, config, 2);
+                                hot.restorePhysical(candidate);
+                                assertThrows(IOException.class, () -> hot.restorePhysical(candidate));
+                                assertEquals(2, hot.candidateCount());
+                                hotLocations.set(List.of(hot.candidate(context(), 11).orElseThrow(),
+                                        hot.candidate(context(), 12).orElseThrow()));
+                            } catch (Throwable failure) {
+                                restoreFailure.set(failure);
+                            } finally {
+                                restored.countDown();
+                            }
+                        }));
+                        assertTrue(restored.await(5, TimeUnit.SECONDS));
+                        assertNull(restoreFailure.get());
+                        assertEquals(11, SegmentPointRead.read(config, identity(), replay, hotLocations.get().get(0))
+                                .record().entryId());
+                        assertEquals(12, SegmentPointRead.read(config, identity(), replay, hotLocations.get().get(1))
+                                .record().entryId());
+                    } finally {
+                        recoveredOwner.stopAdmission();
+                        assertTrue(recoveredOwner.awaitTermination(Duration.ofSeconds(5)));
+                    }
+                    assertNull(recoveredOwner.failure());
                     assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
                             config, identity(), replay, new SegmentFileIo(), 0, new Generation(1), 10, 2, 2));
                     assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
