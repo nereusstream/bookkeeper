@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.Arrays;
@@ -2542,6 +2543,102 @@ public class SegmentBookieControlLogTest {
                 assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
             }
             assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void abruptExitAfterRecoveryDataForceReopensAsPhysicalCandidate() throws Exception {
+        assertAbruptRecoveryCandidate("after-force", 0, "LOCAL_DURABLE");
+    }
+
+    @Test
+    public void abruptExitBeforeRecoveryDataBarrierNeedsRestartSync() throws Exception {
+        assertAbruptRecoveryCandidate("before-force", 86, "BEFORE_DATA_FORCE");
+    }
+
+    private void assertAbruptRecoveryCandidate(String phase, int expectedExit, String marker) throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        Path output = temporary.getRoot().toPath().resolve("abrupt-writer.log");
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), SegmentBookieControlLogTest.class.getName(),
+                phase, config.directory().toString())
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        boolean finished = child.waitFor(15, TimeUnit.SECONDS);
+        if (!finished) {
+            child.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
+        }
+        String log = Files.readString(output);
+        assertTrue(log, finished);
+        assertEquals(log, expectedExit, child.exitValue());
+        assertTrue(log, log.contains(marker));
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            SegmentFileIo sync = new SegmentFileIo();
+            SegmentDataRecovery.PhysicalStreamCandidate candidate =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity, arena,
+                            sync, 0, new Generation(1), 1, 1, 1);
+            assertEquals(1, candidate.through());
+            assertEquals(1, candidate.entries().size());
+            assertEquals(1, sync.forces);
+            ProfileOperationCodec.AddRecovery same =
+                    recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0));
+            assertEquals(SegmentDuplicateCheck.PhysicalComparison.MATCHED_CANDIDATE,
+                    SegmentDuplicateCheck.inspectRecoveredRecoveryCandidate(config, identity, arena, bookie,
+                            bookie.admitRecovery(same).orElseThrow(), new SegmentFileIo(), 1, 1));
+        }
+    }
+
+    /** Child process for the two real process-boundary tests; never returns after the chosen cut. */
+    public static void main(String[] args) throws Exception {
+        if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0]))) {
+            throw new IllegalArgumentException("Expected abrupt writer phase and directory");
+        }
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(Path.of(args[1]), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)),
+                new UUID(0, 9), BookieId.parse("isolated:3181"));
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            if ("before-force".equals(args[0])) {
+                files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    System.out.println("BEFORE_DATA_FORCE");
+                    System.out.flush();
+                    Runtime.getRuntime().halt(86);
+                });
+            }
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            CountDownLatch completed = new CountDownLatch(1);
+            AtomicReference<SegmentDataPhysicalDriver.RecoveryStatus> status = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            ProfileOperationCodec.AddRecovery request =
+                    recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0));
+            if (!driver.submitRecovery(bookie, batch(config, 2, 1, 4096),
+                    List.of(bookie.admitRecovery(request).orElseThrow()), (entries, cause) -> {
+                        status.set(entries.get(0).status());
+                        failure.set(cause);
+                        completed.countDown();
+                    })) {
+                throw new IllegalStateException("Recovery DATA was not accepted");
+            }
+            owner.start();
+            if (!completed.await(10, TimeUnit.SECONDS) || failure.get() != null
+                    || status.get() != SegmentDataPhysicalDriver.RecoveryStatus.LOCAL_DURABLE) {
+                throw new IllegalStateException("Recovery DATA did not reach local durable result", failure.get());
+            }
+            System.out.println("LOCAL_DURABLE");
+            System.out.flush();
+            Runtime.getRuntime().halt(0);
         }
     }
 }

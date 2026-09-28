@@ -137,6 +137,8 @@ cluster READY/standard membership先提交、local activation后消费；route/i
 
 隔离本地 `RECOVERY_GRANT` 现接受调用方提供的 typed committed authority 与 RepairIntent ID/generation、grant generation；实验性 domain-separated SHA-256 public payload identity 绑定 exact context、target/storage incarnation、domain 和 entry range。Bookie 控制文件先 force 再 apply，重开后重放有界 grant；局部 `ADD_RECOVERY` 准入逐项匹配 intent、generation、range/entry、credential 和未删除 route，不要求 normal activation，也不开放 normal Add。同操作冲突确定性拒绝，tombstone 撤销 grant 及未完成票据的结果资格。隔离 `RECOVERY_GRANT_CLOSE` 通过独立的close-purpose payload identity绑定原grant operation、intent/generation、目标与范围；先关闭该grant新准入，已取得的受控票据终结前返回WAITING，随后force并apply关闭记录，重放恢复局部committed-readable控制事实。grant/close 的物理写入与 force 现由预留控制 I/O 服务执行，结果回原 owner 顺序 apply；close 在提交 I/O 前切断新准入，未开始 I/O 的拒绝仅撤销日志预留，force 不确定则在本进程 fail-closed。重开按完整记录解析；tombstone再次撤销该事实。重叠grant仍计入有界名额；同一entry只要落在任一活跃grant内，旧close事实便不对该entry给出局部可读资格。隔离物理驱动现要求每张recovery票据绑定wire请求的context、entryId和完整BK entry bytes，复用DATA force、连续前缀与热定位；close在物理/owner终结前等待，cut后的结果返回stale，重开扫描仍能验证DATA候选。同坐标相同逻辑payload可经点读比对解析运行期重试，不同payload返回冲突；裸的重启扫描候选不返回 durable duplicate success；当前无MOVE/FREE的单Arena只读恢复比对要求唯一stream和坐标、连续前缀、DATA恢复同步及重放的exact grant，真实点读后复核grant，只可返回物理候选比对结果；旧DATA I/O错误尚无持久分类，不能据此报告durable duplicate成功。真实live RepairIntent冷读、mTLS AuthZ、完整网络请求生命周期及selector/实际读可见性仍未接线，不能据此授予生产recovery写入或读权限。
 
+隔离子进程在recovery DATA本地持久结果后或DATA force前直接终止，重开后的Bookie/Arena控制重放和DATA恢复同步均能保留物理候选；这只验证进程边界下的本地恢复入口，不证明掉电、真实RepairIntent取证或生产ACK。
+
 ```text
 Bookie-level protected control log + A/B checkpoint
     route / credential / install / activation / fence / recovery grant /

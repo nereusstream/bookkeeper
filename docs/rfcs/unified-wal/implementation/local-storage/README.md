@@ -40,6 +40,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 只读重开后的受控recovery物理候选比对现限定于尚无MOVE/FREE的单Arena：从已apply Arena状态确定目标shard唯一stream及持久首序号，扫描连续物理前缀并同步DATA文件；目标坐标必须只有一个普通DATA定位。持有重放Bookie授予的exact recovery票据，真实点读比较应用payload和累计ledger length，完成时复核grant及stream身份，才返回`MATCHED_CANDIDATE`或`CONFLICTING_CANDIDATE`。旧进程DATA I/O错误尚无持久分类，因此这两者都不构成durable duplicate结果或新写准入。同步失败不返回结果；多个stream generation、重复物理坐标或未定位返回`NOT_READY`，close在同步期间切断准入则返回`STALE_ADMISSION`。该入口不开放writer，不证明原请求ACK、完整current-selector/必要DATA选择、真实RepairIntent冷读、网络授权或两次掉电后的恢复。
 
+真实子进程边界回归现让隔离recovery DATA经owner/I/O路径执行：一次在本地`LOCAL_DURABLE`结果后直接终止，另一次在完整写入后、DATA barrier前直接终止。父进程重新打开双控制日志、同步目标DATA文件并点读候选，两种情况下都只得到`MATCHED_CANDIDATE`物理比对。`Runtime.halt`不执行正常资源关闭，可验证进程锁释放与重放入口；它不是掉电模拟，不证明旧force失败分类、客户端ACK或可写restart。
+
 `IsolatedSegmentFiles.writeAuthorized`已在实际FileChannel写入前核对同一目录/storage/Arena身份、冻结DATA batch的整段物理范围和上述grant身份；跨块batch要求同一pool授权，未apply或身份不符时不写入。它只约束这个显式调用路径；底层`write`保留给格式/I/O实验。`ALLOC_POOL`尚未实现DATA framing的used/unused恢复，也不支持FREE后的复用。Bookie局部INSTALL/ACTIVATE/FENCE/TOMBSTONE已与隔离物理DATA路径串联，但完整请求级语义、生产逐entry成功与完整启动恢复尚未接入，故步骤5未完成，不能据此开放Bookie写入。
 
 只读`SegmentDataRecovery.inspect`要求DATA writer已退出并取得隔离目录锁，验证文件身份后逐页扫描；完整DATA batch必须通过独立parser、匹配的已apply Arena grant及每条record的固定ledger→logical shard映射，否则拒绝本次检查。统计的全零页只是字节观测，不能直接认定pool unused或可复用。`validateAndSync`沿同一验证路径，在每个已检查文件返回前执行真实`force(false)`；验证或同步失败就不返回结果。`recoverPhysicalInventory`还可在显式entry容量内，完成全目录验证与同步后返回普通`ENTRY_DATA`的物理位置，不返回`RELOCATION_COPY`；容量不足也不返回部分清单。上述诊断与全量清单扫描全部隔离DATA文件；单stream候选已按Arena授权块筛选物理范围，但尚未由Bookie/current-selector authority选出必要范围，也不推导连续stream前缀、可发布的恢复locator或开放写入。
@@ -78,6 +80,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：隔离Bookie控制真实文件定向测试47项通过，0失败/错误/跳过。两个独立Java子进程分别在recovery DATA本地持久结果后及DATA force前`Runtime.halt`；父进程重放双控制日志、执行DATA恢复同步并读回唯一候选，局部比对保持物理证据状态。未执行掉电、生产ACK或可写重启验证。
 
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：隔离Bookie控制真实文件定向测试45项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。只读重开后recovery物理候选比对覆盖同步失败、相同payload及LAC变化、累计length冲突、第二stream generation、重复坐标和同步中close切断结果资格；旧force失败后即使完整bytes经重启同步可比对，也仅返回物理候选事实。未执行进程强制终止、掉电或生产网络/ACK验证。
 
