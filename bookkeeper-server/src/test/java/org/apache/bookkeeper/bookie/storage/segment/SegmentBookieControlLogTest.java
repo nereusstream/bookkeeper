@@ -347,6 +347,52 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void fencedPhysicalCandidateRemainsLocallyReadableUntilTombstone() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentBatchFormat.FrozenBatch batch = batch(config, 1, 1, 4096);
+        SegmentPointRead.Location location = SegmentPointRead.locations(
+                SegmentBatchParser.parse(batch.bytes(), batch.address(), config.bytesPerFile())).get(0);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5)));
+            SegmentBookieControlLog.ReadAdmission inactiveRead = bookie.admitRead(context()).orElseThrow();
+            assertThrows(IOException.class, bookie::close);
+            inactiveRead.finish();
+            assertTrue(bookie.admitRead(new ProfileLedgerContext(44, filled(16, (byte) 8),
+                    DESCRIPTOR_IDENTITY.toBytes())).isEmpty());
+            files.writeAuthorized(batch, arena);
+            assertEquals(1, SegmentPointRead.readLocallyGated(config, identity, arena, bookie, location)
+                    .record().entryId());
+            bookie.submitBatch(List.of(activate(2)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    bookie.submitFence(fence(3, (byte) 5)).status());
+            assertEquals(1, SegmentPointRead.readLocallyGated(config, identity, arena, bookie, location)
+                    .record().entryId());
+        }
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(1, SegmentPointRead.readLocallyGated(config, identity, replayArena, replayBookie, location)
+                    .record().entryId());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    replayBookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+            assertThrows(IOException.class,
+                    () -> SegmentPointRead.readLocallyGated(config, identity, replayArena, replayBookie, location));
+            assertEquals(1, SegmentPointRead.read(config, identity, replayArena, location).record().entryId());
+        }
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertThrows(IOException.class, () -> SegmentPointRead.readLocallyGated(
+                    config, identity, replayArena, replayBookie, location));
+        }
+    }
+
+    @Test
     public void pendingTombstoneCutsNewAdmissionBeforeForceReturns() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
@@ -370,6 +416,7 @@ public class SegmentBookieControlLogTest {
                 SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
                         1024 * 1024, key((byte) 3), VALIDATOR, io)) {
             log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentBookieControlLog.ReadAdmission priorRead = log.admitRead(context()).orElseThrow();
             AtomicReference<List<SegmentBookieControlLog.Result>> result = new AtomicReference<>();
             AtomicReference<Throwable> failure = new AtomicReference<>();
             Thread worker = new Thread(() -> {
@@ -386,9 +433,12 @@ public class SegmentBookieControlLogTest {
                         () -> log.normalAdmission(context(), filled(20, (byte) 5)));
                 new Thread(query).start();
                 assertFalse(query.get(1, TimeUnit.SECONDS));
+                assertTrue(log.admitRead(context()).isEmpty());
+                assertFalse(log.canCompleteRead(priorRead));
             } finally {
                 release.countDown();
                 worker.join(5000);
+                priorRead.finish();
             }
             assertFalse(worker.isAlive());
             assertNull(failure.get());

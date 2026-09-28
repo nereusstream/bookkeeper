@@ -101,6 +101,26 @@ final class SegmentPointRead {
         }
     }
 
+    /** Isolated Bookie route gate around a physical candidate; caller still validates its current selector. */
+    static Result readLocallyGated(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                   SegmentArenaControlLog arena, SegmentBookieControlLog bookie,
+                                   Location location) throws IOException {
+        if (!bookie.matchesScope(config, identity)) {
+            throw new IOException("Bookie read route and DATA files have different storage scopes");
+        }
+        SegmentBookieControlLog.ReadAdmission admission = bookie.admitRead(location.context())
+                .orElseThrow(() -> new IOException("Bookie read route is unavailable"));
+        try {
+            Result result = read(config, identity, arena, location);
+            if (!bookie.canCompleteRead(admission)) {
+                throw new IOException("Bookie read route changed before completion");
+            }
+            return result;
+        } finally {
+            admission.finish();
+        }
+    }
+
     private static ByteBuffer readAligned(FileChannel data, long start, long end) throws IOException {
         if (end < start || end - start > SegmentBatchFormat.MAX_BATCH) {
             throw new IOException("Invalid aligned read span");

@@ -120,6 +120,22 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
+    /** Local route ticket for a point read; fence does not revoke an installed replica's read access. */
+    static final class ReadAdmission {
+        private final SegmentBookieControlLog owner;
+        private final LedgerState state;
+        private boolean terminal;
+
+        private ReadAdmission(SegmentBookieControlLog owner, LedgerState state) {
+            this.owner = owner;
+            this.state = state;
+        }
+
+        void finish() {
+            owner.finishRead(this);
+        }
+    }
+
     record DurableBatch(long firstSequence, List<Command> commands) {
         DurableBatch {
             commands = List.copyOf(commands);
@@ -387,6 +403,35 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return Optional.of(new Admission(this, state));
     }
 
+    /** Only the local route cut; transport read authorization and current-selector checks remain separate. */
+    synchronized Optional<ReadAdmission> admitRead(ProfileLedgerContext context) {
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (closed || failed || state == null || !state.context.equals(context)
+                || state.pendingTombstone || tombstones.containsKey(context.ledgerId())
+                || activeAdmissions == config.maxPendingEntries()) {
+            return Optional.empty();
+        }
+        activeAdmissions++;
+        return Optional.of(new ReadAdmission(this, state));
+    }
+
+    synchronized boolean canCompleteRead(ReadAdmission admission) {
+        if (admission.owner != this || admission.terminal) {
+            throw new IllegalArgumentException("Read result requires a live Bookie admission");
+        }
+        LedgerState state = admission.state;
+        return !closed && !failed && ledgers.get(state.context.ledgerId()) == state
+                && !state.pendingTombstone && !tombstones.containsKey(state.context.ledgerId());
+    }
+
+    private synchronized void finishRead(ReadAdmission admission) {
+        if (admission.owner != this || admission.terminal) {
+            throw new IllegalArgumentException("Read admission already finished or belongs to another control log");
+        }
+        admission.terminal = true;
+        activeAdmissions--;
+    }
+
     synchronized void claimForDriver(List<Admission> admissions) throws IOException {
         requireWritable();
         if (admissions.isEmpty()) {
@@ -419,6 +464,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     synchronized boolean matchesScope(IsolatedSegmentFiles files) {
         return !closed && files.matchesScope(config, identity);
+    }
+
+    synchronized boolean matchesScope(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity) {
+        return !closed && config.sameStorageScope(source) && identity.equals(sourceIdentity);
     }
 
     private synchronized void finishAdmission(Admission admission, boolean fromDriver) {
@@ -896,7 +945,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return;
         }
         if (writing || activeAdmissions != 0) {
-            throw new IOException("Bookie control I/O or DATA admissions are still in flight");
+            throw new IOException("Bookie control I/O or admissions are still in flight");
         }
         closed = true;
         IOException first = null;
