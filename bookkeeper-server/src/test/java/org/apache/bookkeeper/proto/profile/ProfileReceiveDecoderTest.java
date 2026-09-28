@@ -574,6 +574,95 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void laterPartialFrameDeadlineReclaimsDataAndControlCredit() throws Exception {
+        for (ProfileOperation operation : List.of(ProfileOperation.ADD_NORMAL, ProfileOperation.FENCE_LEDGER)) {
+            ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 2_048, 2_048, 1, 1, 1);
+            ProfileReceiveDecoder decoder = decoder(budget, 4_000, 64);
+            EmbeddedChannel channel = new EmbeddedChannel(decoder);
+            channel.freezeTime();
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+            ProfileInboundFrame greeting = channel.readInbound();
+            greeting.close();
+            decoder.markEstablished();
+            byte[] first = frame(operation, operation == ProfileOperation.FENCE_LEDGER ? 100 : 512);
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(first)));
+            ProfileInboundFrame accepted = channel.readInbound();
+            if (operation == ProfileOperation.FENCE_LEDGER) {
+                decoder.markControlAuthorized(accepted);
+            }
+            accepted.close();
+            ProfileReceiveBudget.Lane lane = operation == ProfileOperation.FENCE_LEDGER
+                    ? ProfileReceiveBudget.Lane.CONTROL : ProfileReceiveBudget.Lane.DATA;
+
+            channel.advanceTimeBy(31, TimeUnit.SECONDS);
+            channel.runScheduledPendingTasks();
+            assertTrue(channel.isActive());
+            byte[] later = frame(operation, operation == ProfileOperation.FENCE_LEDGER ? 100 : 512);
+            assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(later, 100))));
+            assertEquals(64 + later.length, budget.used(lane));
+            channel.advanceTimeBy(15, TimeUnit.SECONDS);
+            channel.runScheduledPendingTasks();
+            assertTrue(channel.isActive());
+            assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(later, 100, 101))));
+            channel.advanceTimeBy(16, TimeUnit.SECONDS);
+            channel.runScheduledPendingTasks();
+            assertFalse(channel.isActive());
+            assertEquals(0, budget.used(lane));
+            assertEquals(0, budget.usedConnections(lane));
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void completedLaterFrameCancelsItsReceiveDeadline() throws Exception {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 2_048, 2_048, 1, 1, 1);
+        ProfileReceiveDecoder decoder = decoder(budget, 4_000, 64);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder);
+        channel.freezeTime();
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+        ProfileInboundFrame greeting = channel.readInbound();
+        greeting.close();
+        decoder.markEstablished();
+        byte[] add = frame(ProfileOperation.ADD_NORMAL, 512);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(add)));
+        ProfileInboundFrame first = channel.readInbound();
+        first.close();
+
+        assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(add, 100))));
+        channel.advanceTimeBy(15, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(add, 100, add.length))));
+        ProfileInboundFrame second = channel.readInbound();
+        second.close();
+        channel.advanceTimeBy(16, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
+        assertTrue(channel.isActive());
+        channel.finishAndReleaseAll();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+    }
+
+    @Test
+    public void pendingControlAuthorizationRejectsPipelinedPartialHeader() throws Exception {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 2_048, 2_048, 1, 1, 1);
+        ProfileReceiveDecoder decoder = decoder(budget, 4_000, 64);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+        ProfileInboundFrame greeting = channel.readInbound();
+        greeting.close();
+        decoder.markEstablished();
+        byte[] fence = frame(ProfileOperation.FENCE_LEDGER, 100);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(fence)));
+        ProfileInboundFrame pending = channel.readInbound();
+        assertThrows(IOException.class, () -> channel.writeInbound(Unpooled.wrappedBuffer(
+                Arrays.copyOf(fence, 1))));
+        assertFalse(channel.isActive());
+        assertEquals(fence.length, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        pending.close();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
     public void receivesHelloAndDataOnlyAfterRealMutualTlsHandshake() throws Exception {
         ServerConfiguration conf = new ServerConfiguration();
         conf.setTLSKeyStoreType("PEM");

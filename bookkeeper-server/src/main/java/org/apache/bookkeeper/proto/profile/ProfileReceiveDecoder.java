@@ -80,6 +80,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private ProfileFrameHeader frameHeader;
     private int headerRead;
     private boolean helloDelivered;
+    private boolean firstRequestDelivered;
     private boolean terminated;
     private boolean tlsReady;
     private ProfileReceiveBudget.Lane lane = ProfileReceiveBudget.Lane.UNCLASSIFIED;
@@ -204,6 +205,13 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 return;
             }
             if (frame == null) {
+                if (firstRequestDelivered && purpose == ConnectionPurpose.CONTROL_PENDING) {
+                    throw new IOException("Profile control request is not authorized yet");
+                }
+                if (headerRead == 0 && firstRequestDelivered
+                        && (purpose == ConnectionPurpose.DATA || purpose == ConnectionPurpose.CONTROL)) {
+                    armDeadline(FIRST_REQUEST_TIMEOUT_MILLIS);
+                }
                 int copy = Math.min(input.readableBytes(), FIXED_HEADER_BYTES - headerRead);
                 input.readBytes(fixedHeader, headerRead, copy);
                 headerRead += copy;
@@ -256,8 +264,11 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             headerRead = 0;
             if (header.operation() == ProfileOperation.HELLO) {
                 helloDelivered = true;
-            } else if (purpose == ConnectionPurpose.DATA) {
-                cancelDeadline();
+            } else {
+                firstRequestDelivered = true;
+                if (purpose == ConnectionPurpose.DATA || purpose == ConnectionPurpose.CONTROL) {
+                    cancelDeadline();
+                }
             }
             ctx.fireChannelRead(completed);
             if (terminated || !ctx.channel().isActive()) {
