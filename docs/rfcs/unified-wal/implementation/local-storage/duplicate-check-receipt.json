@@ -1,0 +1,23 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_DUPLICATE_COMPARE_ONLY",
+  "sourceBaseCommit": "ce7783174f9beed514cff228c6e383396a89ec46",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchParser.java": "bbed53ccf5b0224452bac8dd3488429ad6da2eefb21dce212b38f0d34ed0d96b",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentDuplicateCheck.java": "4e9481af88ed9a5a77f299e94d0ee9a1fb1527dac88c31c78e460c0650f89c1b",
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentEntryIdentity.java": "a687b9b7d8227194b0d139a80c250a0ada3883f988c849a9ff8911308b3b51b8",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBatchFormatTest.java": "f161f88d57b7f86b26876265da946349b8565a18620eb430bc1e2b7eef9a7298"
+  },
+  "fixture": "one Arena, one 4 MiB precreated DATA file; force-verified physical sequence 11/12 and published entry 12 candidate; compare actual point read with separately CRC32C-packaged retry entries",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-VIkvzt0r",
+  "inputSha256": "73860f833b54f76641a6ae9624f9c4d9242523c393f342bb8fff28edf5bcf818",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentArenaControlLogTest,SegmentOwnerLoopTest",
+  "mavenLogSha256": "26fed26212e0b16aea25a093f67d720c0683cc5b3bb594d67a4ca1109948b707",
+  "junit": {
+    "SegmentBatchFormatTest": {"tests": 16, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "b190940437a982b035788e89b8e6c5aeea56966cab2eeb715e93571ea51c94af"},
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "324d66cad614fb7db77a928444ca0c8e016faab9fb09127f629ea443a51f2650"},
+    "SegmentOwnerLoopTest": {"tests": 6, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "b8fb9ae96a4ff52f1d426a7627f0ed757ca08e04526e5cae76d1b091cdde833c"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "Blocking duplicate comparison is an isolated slow-path primitive. No Bookie route/auth/fence, pending request coalescing, callback/result lifecycle, idempotent Add success, restart authority, power-loss or production authority."
+}

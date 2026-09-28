@@ -280,6 +280,8 @@ asynchronously:
 
 接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、合法LAC/digest变化、相同payload但累计length冲突、corrupt digest、乱序/holes/`E>W`、DATA与locator间crash、ACK后立即合法点读、index全删恢复、stale handle与delete race；补充同批L1 fence/L2成功、提交后timeout再到不同payload、batch 11 unknown/12已完成及隔离恢复。分别记录正常新写与重复/冲突慢路径的索引读、hash、分配和复制成本。
 
+2026-09-28局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。当前重复准入仍被隔离热目录拒绝；Bookie route/auth、并发pending合并、完成时权限复核与幂等结果尚未接入，上述合同和接受场景未完成。
+
 ## 7. Recovery Add
 
 Recovery Add使用RFC-0001 `ADD_RECOVERY=0x0202` executable body，携带ledger context、RepairIntent ID/generation、grant generation、range、entry与20-byte credential；它不预设一条独立持久 `RECOVERY_ADD` control record。它必须：

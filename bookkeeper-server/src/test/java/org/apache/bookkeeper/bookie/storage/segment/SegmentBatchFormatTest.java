@@ -86,9 +86,13 @@ public class SegmentBatchFormatTest {
     }
 
     private ByteBuf entry(byte[] payload, long entryId) throws Exception {
+        return entry(payload, entryId, 2, payload.length);
+    }
+
+    private ByteBuf entry(byte[] payload, long entryId, long lac, long ledgerLength) throws Exception {
         DigestManager digest = DigestManager.instantiate(7, new byte[0], DigestType.CRC32C,
                 UnpooledByteBufAllocator.DEFAULT, false);
-        ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(entryId, 2, payload.length,
+        ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(entryId, lac, ledgerLength,
                 Unpooled.wrappedBuffer(payload), new byte[0], 0);
         try {
             ByteBuf copy = Unpooled.buffer(encoded.readableBytes());
@@ -540,8 +544,41 @@ public class SegmentBatchFormatTest {
             assertEquals(failFirst, error.get() instanceof IOException);
             assertEquals(12288, files.nextOffset(0));
             if (!failFirst) {
-                assertEquals(12, SegmentPointRead.read(config, identity(), authority, laterLocation.get())
+                SegmentPointRead.Location location = laterLocation.get();
+                assertEquals(12, SegmentPointRead.read(config, identity(), authority, location)
                         .record().entryId());
+                ByteBuf same = entry(new byte[16], 12, 99, 16);
+                byte[] changedPayload = new byte[16];
+                changedPayload[0] = 1;
+                ByteBuf differentPayload = entry(changedPayload, 12, 99, 16);
+                ByteBuf differentLength = entry(new byte[16], 12, 99, 17);
+                ByteBuf corrupt = entry(new byte[16], 12, 99, 16);
+                ByteBuf wrongEntry = entry(new byte[16], 13, 99, 16);
+                try {
+                    corrupt.setInt(32, corrupt.getInt(32) ^ 1);
+                    byte[] otherInstance = context().ledgerInstanceId();
+                    otherInstance[0] ^= 1;
+                    ProfileLedgerContext otherContext = new ProfileLedgerContext(7, otherInstance,
+                            context().descriptorIdentity());
+                    assertTrue(SegmentDuplicateCheck.sameLogicalPayload(config, identity(), authority,
+                            location, context(), same.nioBuffer()));
+                    assertTrue(!SegmentDuplicateCheck.sameLogicalPayload(config, identity(), authority,
+                            location, context(), differentPayload.nioBuffer()));
+                    assertTrue(!SegmentDuplicateCheck.sameLogicalPayload(config, identity(), authority,
+                            location, context(), differentLength.nioBuffer()));
+                    assertThrows(IOException.class, () -> SegmentDuplicateCheck.sameLogicalPayload(config,
+                            identity(), authority, location, context(), corrupt.nioBuffer()));
+                    assertThrows(IOException.class, () -> SegmentDuplicateCheck.sameLogicalPayload(config,
+                            identity(), authority, location, context(), wrongEntry.nioBuffer()));
+                    assertThrows(IOException.class, () -> SegmentDuplicateCheck.sameLogicalPayload(config,
+                            identity(), authority, location, otherContext, same.nioBuffer()));
+                } finally {
+                    same.release();
+                    differentPayload.release();
+                    differentLength.release();
+                    corrupt.release();
+                    wrongEntry.release();
+                }
             }
             for (SegmentBatchFormat.FrozenBatch batch : failFirst ? List.of(later) : List.of(first, later)) {
                 try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0))) {

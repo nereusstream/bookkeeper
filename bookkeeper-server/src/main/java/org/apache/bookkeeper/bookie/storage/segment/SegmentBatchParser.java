@@ -137,16 +137,9 @@ final class SegmentBatchParser {
             throw new IOException("Invalid ledger context", e);
         }
         ByteBuffer entry = b.slice(160, length - 160).order(ByteOrder.BIG_ENDIAN);
-        long entryId = entry.getLong(8);
-        long lac = entry.getLong(16);
-        long ledgerLength = entry.getLong(24);
-        require(context.ledgerId() >= 0 && entry.getLong(0) == context.ledgerId() && entryId >= 0
-                && lac >= -1 && ledgerLength >= 0, "Invalid BK entry metadata");
-        CRC32C checksum = new CRC32C();
-        checksum.update(entry.slice(0, 32));
-        checksum.update(entry.slice(36, entry.remaining() - 36));
-        require((int) checksum.getValue() == entry.getInt(32), "BK entry CRC32C mismatch");
-        return new Record(context, entryId, lac, ledgerLength, origin, move, moveGeneration, recordOffset, entry);
+        SegmentEntryIdentity identity = SegmentEntryIdentity.parse(context, entry);
+        return new Record(context, identity.entryId(), identity.lac(), identity.ledgerLength(),
+                origin, move, moveGeneration, recordOffset, entry);
     }
 
     private static int crc(ByteBuffer b, int offset, int length) {
