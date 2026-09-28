@@ -155,22 +155,30 @@ final class SegmentHotDirectory {
 
     /** Install only physical candidates from a quiesced, synced scan; no Bookie read or ACK authority. */
     void restorePhysical(SegmentDataRecovery.PhysicalStreamCandidate stream) throws IOException {
+        restorePhysical(List.of(stream));
+    }
+
+    /** Validate the entire selected stream set before exposing any physical candidate to this owner. */
+    void restorePhysical(List<SegmentDataRecovery.PhysicalStreamCandidate> streams) throws IOException {
         owner.requireOwner();
-        if (!config.sameStorageScope(stream.sourceConfig()) || !identity.equals(stream.sourceIdentity())) {
-            throw new IOException("Physical recovery candidate belongs to another storage scope");
-        }
         if (!pendingBatches.isEmpty() || !pendingKeys.isEmpty() || !byPhysical.isEmpty()) {
             throw new IOException("Physical recovery cannot overlap DATA submissions");
         }
-        List<SegmentPointRead.Location> entries = stream.entries();
-        if (entries.size() > maxEntries - candidates.size()) {
-            throw new IOException("Hot locator capacity exhausted during physical recovery");
-        }
+        List<SegmentPointRead.Location> entries = new ArrayList<>();
         Set<Key> incoming = new HashSet<>();
-        for (SegmentPointRead.Location location : entries) {
-            Key key = new Key(location.context(), location.entryId());
-            if (!incoming.add(key) || candidates.containsKey(key)) {
-                throw new IOException("Duplicate logical entry in physical recovery candidates");
+        for (SegmentDataRecovery.PhysicalStreamCandidate stream : streams) {
+            if (!config.sameStorageScope(stream.sourceConfig()) || !identity.equals(stream.sourceIdentity())) {
+                throw new IOException("Physical recovery candidate belongs to another storage scope");
+            }
+            if (stream.entries().size() > maxEntries - candidates.size() - entries.size()) {
+                throw new IOException("Hot locator capacity exhausted during physical recovery");
+            }
+            for (SegmentPointRead.Location location : stream.entries()) {
+                Key key = new Key(location.context(), location.entryId());
+                if (!incoming.add(key) || candidates.containsKey(key)) {
+                    throw new IOException("Duplicate logical entry in physical recovery candidates");
+                }
+                entries.add(location);
             }
         }
         for (SegmentPointRead.Location location : entries) {

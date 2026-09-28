@@ -921,6 +921,42 @@ public class SegmentBatchFormatTest {
             assertEquals(1, newerCandidate.entries().size());
             assertEquals(1, newerCandidate.scan().batches());
 
+            SegmentOwnerLoop recoveredOwner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+            CountDownLatch restored = new CountDownLatch(1);
+            AtomicReference<Throwable> restoreFailure = new AtomicReference<>();
+            recoveredOwner.start();
+            try {
+                assertTrue(recoveredOwner.control(() -> {
+                    try {
+                        SegmentHotDirectory tooSmall = new SegmentHotDirectory(recoveredOwner, config,
+                                identity(), 1);
+                        assertThrows(IOException.class, () -> tooSmall.restorePhysical(
+                                List.of(olderCandidate, newerCandidate)));
+                        assertEquals(0, tooSmall.candidateCount());
+                        SegmentHotDirectory duplicate = new SegmentHotDirectory(recoveredOwner, config,
+                                identity(), 2);
+                        assertThrows(IOException.class, () -> duplicate.restorePhysical(
+                                List.of(olderCandidate, olderCandidate)));
+                        assertEquals(0, duplicate.candidateCount());
+                        SegmentHotDirectory hot = new SegmentHotDirectory(recoveredOwner, config, identity(), 2);
+                        hot.restorePhysical(List.of(olderCandidate, newerCandidate));
+                        assertEquals(2, hot.candidateCount());
+                        assertEquals(11, hot.candidate(context(), 11).orElseThrow().entryId());
+                        assertEquals(50, hot.candidate(context(), 50).orElseThrow().entryId());
+                    } catch (Throwable failure) {
+                        restoreFailure.set(failure);
+                    } finally {
+                        restored.countDown();
+                    }
+                }));
+                assertTrue(restored.await(5, TimeUnit.SECONDS));
+                assertNull(restoreFailure.get());
+            } finally {
+                recoveredOwner.stopAdmission();
+                assertTrue(recoveredOwner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(recoveredOwner.failure());
+
             try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
                     StandardOpenOption.READ, StandardOpenOption.WRITE)) {
                 ByteBuffer original = ByteBuffer.allocate(1);
