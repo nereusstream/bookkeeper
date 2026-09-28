@@ -595,6 +595,21 @@ public class SegmentBookieControlLogTest {
             }
             assertNull(owner.failure());
         }
+        try (SegmentArenaControlLog replayArena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog replayBookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertFalse(replayBookie.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
+                    replayBookie.submitFence(fence(3, (byte) 5)).status());
+            SegmentDataRecovery.PhysicalStreamCandidate recovered =
+                    SegmentDataRecovery.recoverPhysicalStreamCandidate(config, identity, replayArena,
+                            new SegmentFileIo(), 0, new Generation(1), 1, 1, 1);
+            assertEquals(1, recovered.through());
+            assertEquals(1, recovered.entries().size());
+            assertEquals(context(), recovered.entries().get(0).context());
+            assertEquals(1, SegmentPointRead.read(config, identity, replayArena, recovered.entries().get(0))
+                    .record().entryId());
+        }
     }
 
     @Test

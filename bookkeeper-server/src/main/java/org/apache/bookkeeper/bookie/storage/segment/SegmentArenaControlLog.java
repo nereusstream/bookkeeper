@@ -332,7 +332,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         validateIdentityFile(config.directory().resolve("superblock-a"), identity, -1, 4096);
         validateIdentityFile(config.directory().resolve("superblock-b"), identity, -2, 4096);
-        validateIdentityFile(config.directory().resolve("bookie-control"), identity, -3, 4096);
+        validateIdentityFile(config.directory().resolve("bookie-control"), identity, -3, -1);
         for (int file = 0; file < config.dataFiles(); file++) {
             validateIdentityFile(IsolatedSegmentFiles.dataPath(config, file), identity, file,
                     config.bytesPerFile());
@@ -345,7 +345,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
             throw new IOException("Isolated storage file cannot be a symlink: " + path);
         }
         try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
-            if (input.size() != expectedSize) {
+            if ((expectedSize < 0 && input.size() < 4096)
+                    || (expectedSize >= 0 && input.size() != expectedSize)) {
                 throw new IOException("Isolated storage file size mismatch: " + path);
             }
             ByteBuffer bytes = ByteBuffer.allocate(4096);
