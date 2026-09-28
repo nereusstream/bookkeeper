@@ -74,6 +74,30 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
+    record LacAttempt(Status immediate, LacWrite write) { }
+
+    static final class LacWrite {
+        private final ProfileLedgerContext context;
+        private final long lac;
+        private final byte[] body;
+        private final ByteBuffer record;
+        private final long sequence;
+        private final long offset;
+        private final long generation;
+        private boolean durable;
+
+        private LacWrite(ProfileLedgerContext context, long lac, byte[] body, ByteBuffer record,
+                         long sequence, long offset, long generation) {
+            this.context = context;
+            this.lac = lac;
+            this.body = body;
+            this.record = record;
+            this.sequence = sequence;
+            this.offset = offset;
+            this.generation = generation;
+        }
+    }
+
     enum FenceStatus {
         APPLIED_DURABLE, ALREADY_DURABLE, WAITING_PRECUT, REJECTED
     }
@@ -223,6 +247,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private long appliedThrough = -1;
     private DurableBatch pending;
     private FenceWrite pendingFenceWrite;
+    private LacWrite pendingLacWrite;
     private boolean writing;
     private boolean failed;
     private boolean closed;
@@ -506,6 +531,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     /** A cold, authenticated LAC update uses the Bookie control barrier, never the normal DATA path. */
     Status submitExplicitLac(ProfileOperationCodec.WriteLac request) throws IOException {
+        LacAttempt attempt = prepareExplicitLac(request);
+        if (attempt.immediate() != null) {
+            return attempt.immediate();
+        }
+        writeExplicitLacDurably(attempt.write());
+        return applyExplicitLacDurable(attempt.write());
+    }
+
+    synchronized LacAttempt prepareExplicitLac(ProfileOperationCodec.WriteLac request) throws IOException {
         Objects.requireNonNull(request, "request");
         ProfileLedgerContext context = request.context();
         byte[] body = request.body();
@@ -513,62 +547,91 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (body.length > 65536 - 128 - 16 - ProfileLedgerContext.ENCODED_LENGTH - 12) {
             throw new IllegalArgumentException("Explicit LAC body exceeds the control record bound");
         }
-        ByteBuffer record;
-        long sequence;
-        long offset;
-        long generation;
+        requireWritable();
+        if (writing || pending != null) {
+            throw new IOException("Bookie control operation is unresolved");
+        }
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (request.lac() < -1 || state == null || !state.context.equals(context)
+                || !state.credential.matchesWireVerifier(verifier)
+                || state.pendingTombstone || tombstones.containsKey(context.ledgerId())) {
+            return new LacAttempt(Status.CONDITION_FAILED, null);
+        }
+        ExplicitLac prior = state.explicitLac;
+        if (prior != null && request.lac() <= prior.lac()) {
+            if (request.lac() < prior.lac()) {
+                return new LacAttempt(Status.CONDITION_FAILED, null);
+            }
+            return new LacAttempt(Arrays.equals(body, prior.body()) ? Status.ALREADY_DURABLE : Status.INCOMPATIBLE,
+                    null);
+        }
+        if (!state.active || state.fenced || state.pendingFence != null) {
+            return new LacAttempt(Status.CONDITION_FAILED, null);
+        }
+        long sequence = durableThrough + 1;
+        long generation = state.localGeneration;
+        ByteBuffer value = ByteBuffer.allocate(Math.addExact(ProfileLedgerContext.ENCODED_LENGTH + 12,
+                body.length)).put(context.encode()).putLong(request.lac()).putInt(body.length).put(body).flip();
+        ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.EXPLICIT_LAC, LOG_GENERATION,
+                sequence, UUID.randomUUID(), new Generation(generation), 0, value);
+        if (record.remaining() > maxLogBytes - nextOffset) {
+            throw new IOException("Bookie control log capacity exhausted");
+        }
+        LacWrite write = new LacWrite(context, request.lac(), body, record, sequence, nextOffset, generation);
+        nextOffset += record.remaining();
+        pendingLacWrite = write;
+        writing = true;
+        return new LacAttempt(null, write);
+    }
+
+    void writeExplicitLacDurably(LacWrite write) throws IOException {
         synchronized (this) {
             requireWritable();
-            if (writing || pending != null) {
-                throw new IOException("Bookie control operation is unresolved");
+            if (write != pendingLacWrite || write.durable) {
+                throw new IllegalArgumentException("Invalid or already durable explicit LAC write");
             }
-            LedgerState state = ledgers.get(context.ledgerId());
-            if (request.lac() < -1 || state == null || !state.context.equals(context)
-                    || !state.credential.matchesWireVerifier(verifier)
-                    || state.pendingTombstone || tombstones.containsKey(context.ledgerId())) {
-                return Status.CONDITION_FAILED;
-            }
-            ExplicitLac prior = state.explicitLac;
-            if (prior != null && request.lac() <= prior.lac()) {
-                if (request.lac() < prior.lac()) {
-                    return Status.CONDITION_FAILED;
-                }
-                return Arrays.equals(body, prior.body()) ? Status.ALREADY_DURABLE : Status.INCOMPATIBLE;
-            }
-            if (!state.active || state.fenced || state.pendingFence != null) {
-                return Status.CONDITION_FAILED;
-            }
-            sequence = durableThrough + 1;
-            generation = state.localGeneration;
-            ByteBuffer value = ByteBuffer.allocate(Math.addExact(ProfileLedgerContext.ENCODED_LENGTH + 12,
-                    body.length)).put(context.encode()).putLong(request.lac()).putInt(body.length).put(body).flip();
-            record = SegmentControlFormat.encode(SegmentControlFormat.Type.EXPLICIT_LAC, LOG_GENERATION,
-                    sequence, UUID.randomUUID(), new Generation(generation), 0, value);
-            if (record.remaining() > maxLogBytes - nextOffset) {
-                throw new IOException("Bookie control log capacity exhausted");
-            }
-            offset = nextOffset;
-            nextOffset += record.remaining();
-            writing = true;
         }
         try {
-            io.writeFully(channel, record, offset);
+            io.writeFully(channel, write.record, write.offset);
             io.force(channel, true);
             synchronized (this) {
-                durableThrough = sequence;
-                applyExplicitLac(context, request.lac(), body, generation);
-                appliedThrough = sequence;
-                return Status.APPLIED_DURABLE;
+                write.durable = true;
+                durableThrough = write.sequence;
             }
         } catch (IOException | RuntimeException | Error failure) {
             synchronized (this) {
                 failed = true;
-            }
-            throw failure;
-        } finally {
-            synchronized (this) {
+                pendingLacWrite = null;
                 writing = false;
             }
+            throw failure;
+        }
+    }
+
+    synchronized void abortExplicitLacBeforeIo(LacWrite write) {
+        if (write != pendingLacWrite || write.durable || !writing) {
+            throw new IllegalArgumentException("Only an unwritten explicit LAC can be retried");
+        }
+        nextOffset = write.offset;
+        pendingLacWrite = null;
+        writing = false;
+    }
+
+    synchronized Status applyExplicitLacDurable(LacWrite write) throws IOException {
+        requireWritable();
+        if (write != pendingLacWrite || !write.durable || write.sequence != appliedThrough + 1) {
+            throw new IllegalArgumentException("Only the next durable explicit LAC can be applied");
+        }
+        try {
+            applyExplicitLac(write.context, write.lac, write.body, write.generation);
+            appliedThrough = write.sequence;
+            return Status.APPLIED_DURABLE;
+        } catch (IOException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        } finally {
+            pendingLacWrite = null;
+            writing = false;
         }
     }
 

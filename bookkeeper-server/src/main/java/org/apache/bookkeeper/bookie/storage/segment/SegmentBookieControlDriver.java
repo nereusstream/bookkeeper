@@ -36,6 +36,11 @@ final class SegmentBookieControlDriver {
         void complete(SegmentBookieControlLog.FenceResult result, Throwable failure);
     }
 
+    @FunctionalInterface
+    interface LacCompletion {
+        void complete(SegmentBookieControlLog.Status status, Throwable failure);
+    }
+
     private final SegmentOwnerLoop owner;
     private final SegmentIoExecutor io;
     private final SegmentBookieControlLog log;
@@ -174,6 +179,84 @@ final class SegmentBookieControlDriver {
         return accepted;
     }
 
+    boolean submitExplicitLac(ProfileOperationCodec.WriteLac request, LacCompletion completion) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(completion, "completion");
+        if (!busy.compareAndSet(false, true)) {
+            return false;
+        }
+        boolean accepted;
+        try {
+            accepted = owner.submitControl(new SegmentOwnerLoop.Command() {
+                private SegmentBookieControlLog.LacWrite prepared;
+                private final AtomicBoolean ioStarted = new AtomicBoolean();
+
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    SegmentBookieControlLog.LacAttempt attempt;
+                    try {
+                        attempt = log.prepareExplicitLac(request);
+                    } catch (Throwable failure) {
+                        ticket.complete(() -> deliver(completion, null, failure));
+                        return;
+                    }
+                    if (attempt.immediate() != null) {
+                        ticket.complete(() -> deliver(completion, attempt.immediate(), null));
+                        return;
+                    }
+                    prepared = attempt.write();
+                    try {
+                        io.submitControl(ticket, () -> {
+                            ioStarted.set(true);
+                            log.writeExplicitLacDurably(prepared);
+                        }, failure -> {
+                            owner.requireOwner();
+                            if (failure != null) {
+                                abortUnstarted(failure);
+                                deliver(completion, null, failure);
+                                return;
+                            }
+                            SegmentBookieControlLog.Status status;
+                            try {
+                                status = log.applyExplicitLacDurable(prepared);
+                            } catch (Throwable applyFailure) {
+                                deliver(completion, null, applyFailure);
+                                return;
+                            }
+                            deliver(completion, status, null);
+                        });
+                    } catch (Throwable failure) {
+                        abortUnstarted(failure);
+                        ticket.complete(() -> deliver(completion, null, failure));
+                    }
+                }
+
+                private void abortUnstarted(Throwable failure) {
+                    if (!ioStarted.get()) {
+                        try {
+                            log.abortExplicitLacBeforeIo(prepared);
+                        } catch (Throwable cleanupFailure) {
+                            failure.addSuppressed(cleanupFailure);
+                        }
+                    }
+                }
+
+                @Override
+                public void failed(Throwable cause) {
+                    owner.requireOwner();
+                    deliver(completion, null, cause);
+                }
+            });
+        } catch (RuntimeException | Error failure) {
+            busy.set(false);
+            throw failure;
+        }
+        if (!accepted) {
+            busy.set(false);
+        }
+        return accepted;
+    }
+
     private void deliver(BatchCompletion completion, List<SegmentBookieControlLog.Result> results, Throwable failure) {
         try {
             completion.complete(results, failure);
@@ -185,6 +268,14 @@ final class SegmentBookieControlDriver {
     private void deliver(FenceCompletion completion, SegmentBookieControlLog.FenceResult result, Throwable failure) {
         try {
             completion.complete(result, failure);
+        } finally {
+            busy.set(false);
+        }
+    }
+
+    private void deliver(LacCompletion completion, SegmentBookieControlLog.Status status, Throwable failure) {
+        try {
+            completion.complete(status, failure);
         } finally {
             busy.set(false);
         }

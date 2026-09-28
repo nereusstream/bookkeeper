@@ -1704,4 +1704,104 @@ public class SegmentBookieControlLogTest {
             assertNull(owner.failure());
         }
     }
+
+    @Test
+    public void explicitLacUsesReservedControlIoAndAppliesOnTheOwner() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog setup = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            setup.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Explicit LAC force was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR, controlIo)) {
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 2);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<SegmentBookieControlLog.Status> status = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1), (result, cause) -> {
+                    owner.requireOwner();
+                    status.set(result);
+                    failure.set(cause);
+                    done.countDown();
+                }));
+                owner.start();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertFalse(driver.submitExplicitLac(writeLac(10, (byte) 5, (byte) 2), (result, cause) -> { }));
+                CountDownLatch progressed = new CountDownLatch(1);
+                assertTrue(owner.control(progressed::countDown));
+                assertTrue(progressed.await(5, TimeUnit.SECONDS));
+                assertTrue(bookie.explicitLac(context()).isEmpty());
+                assertThrows(IOException.class, bookie::close);
+                release.countDown();
+                assertTrue(done.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, status.get());
+                assertEquals(9, bookie.explicitLac(context()).orElseThrow().lac());
+            } finally {
+                release.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(9, replay.explicitLac(context()).orElseThrow().lac());
+        }
+    }
+
+    @Test
+    public void rejectedControlIoLeavesExplicitLacRetryableWithoutSkippingSequence() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            io.shutdown();
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            CountDownLatch rejected = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1), (result, cause) -> {
+                    owner.requireOwner();
+                    failure.set(cause);
+                    rejected.countDown();
+                }));
+                owner.start();
+                assertTrue(rejected.await(5, TimeUnit.SECONDS));
+                assertTrue(failure.get() instanceof RejectedExecutionException);
+                assertTrue(bookie.explicitLac(context()).isEmpty());
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        bookie.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1)));
+            } finally {
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
 }
