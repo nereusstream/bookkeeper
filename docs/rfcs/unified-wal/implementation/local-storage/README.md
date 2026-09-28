@@ -36,7 +36,7 @@ PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚
 
 Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执行文件write/force；已apply的grant查询在force等待期间仍可完成，关闭则拒绝在途I/O，直到结果终结后才允许关闭。`IsolatedSegmentFiles`也只在短状态锁内预留DATA范围、登记在途I/O和失败状态；同文件write/force在独立文件级锁中串行，另一个预留在慢force期间仍能推进，close拒绝关闭活跃I/O。DATA owner尚未接入完整请求级生命周期；隔离逐entry结果不能据此宣称普通Add非阻塞闭环。
 
-隔离 `RECOVERY_GRANT` 使用实验性SHA-256 public payload identity绑定RepairIntent ID/generation、grant generation、目标和exact range；记录force后apply并重放，局部 `ADD_RECOVERY` 准入验证credential和完整tuple，tombstone撤销grant。受控close在原grant的在途票据终结前保持WAITING，并立刻切断新准入及旧票据结果资格；完整记录force后才发布局部committed-readable控制事实，重放后仍关闭该grant。未决force不在本进程伪造成功；重叠grant任一仍活跃时不报告该entry的局部可读事实。recovery票据现绑定wire entry bytes，经同一物理DATA force、连续前缀和热定位发布；受控同坐标重试通过真实点读比较逻辑payload，相同返回durable、冲突拒绝。慢force与close并发时，旧写完成但其局部结果为stale，close等物理与owner终结；重开扫描可找到完整DATA候选。真实RepairIntent冷读/mTLS授权、完整网络请求生命周期和实际读可见性仍未接线。
+隔离 `RECOVERY_GRANT` 使用实验性SHA-256 public payload identity绑定RepairIntent ID/generation、grant generation、目标和exact range；记录force后apply并重放，局部 `ADD_RECOVERY` 准入验证credential和完整tuple，tombstone撤销grant。grant现由原owner提交到预留控制I/O服务write/force，completion回owner apply，期间不提前开放准入。受控close在原grant的在途票据终结前保持WAITING，并立刻切断新准入及旧票据结果资格；票据终结后同样经预留控制I/O服务force、回owner apply，才发布局部committed-readable控制事实，重放后仍关闭该grant。执行前拒绝I/O时只撤销日志预留、保留准入cut，可不跳sequence重试；force失败保持本进程fail-closed，不伪造成功。重叠grant任一仍活跃时不报告该entry的局部可读事实。recovery票据现绑定wire entry bytes，经同一物理DATA force、连续前缀和热定位发布；受控同坐标重试通过真实点读比较逻辑payload，相同返回durable、冲突拒绝。慢force与close并发时，旧写完成但其局部结果为stale，close等物理与owner终结；重开扫描可找到完整DATA候选，但未证明当前有效位置和权限，不用于durable duplicate成功。真实RepairIntent冷读/mTLS授权、完整网络请求生命周期和实际读可见性仍未接线。
 
 `IsolatedSegmentFiles.writeAuthorized`已在实际FileChannel写入前核对同一目录/storage/Arena身份、冻结DATA batch的整段物理范围和上述grant身份；跨块batch要求同一pool授权，未apply或身份不符时不写入。它只约束这个显式调用路径；底层`write`保留给格式/I/O实验。`ALLOC_POOL`尚未实现DATA framing的used/unused恢复，也不支持FREE后的复用。Bookie局部INSTALL/ACTIVATE/FENCE/TOMBSTONE已与隔离物理DATA路径串联，但完整请求级语义、生产逐entry成功与完整启动恢复尚未接入，故步骤5未完成，不能据此开放Bookie写入。
 
@@ -76,6 +76,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：隔离Bookie控制真实文件定向测试41项通过，0失败/错误/跳过；`bookkeeper-server` Spotless/Checkstyle通过。grant/close的慢force由预留控制I/O执行时owner仍推进，grant仅在回owner apply后开放准入，close在pre-cut票据终结后force且仅在apply后发布局部控制事实；执行前I/O拒绝保留cut并可无跳号重试，异步force失败不重开准入。尚未验证进程崩溃窗口、完整启动、真实网络或生产ACK。
 
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：隔离Bookie控制真实文件定向测试32项通过，0失败/错误/跳过。explicit LAC的慢force经预留控制I/O执行时，原owner仍可处理控制事件，结果回owner后才可见；执行器在I/O开始前拒绝时，撤销预留且同一请求可无跳号重试。此结果仍不证明真实网络、control group commit或生产read/ACK。
 

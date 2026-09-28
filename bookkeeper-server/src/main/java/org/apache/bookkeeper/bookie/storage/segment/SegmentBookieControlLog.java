@@ -123,6 +123,23 @@ final class SegmentBookieControlLog implements AutoCloseable {
         APPLIED_DURABLE, ALREADY_DURABLE, WAITING_PRECUT, CONDITION_FAILED, INCOMPATIBLE
     }
 
+    record RecoveryCloseAttempt(RecoveryCloseStatus immediate, RecoveryCloseWrite write) { }
+
+    static final class RecoveryCloseWrite {
+        private final Command command;
+        private final ByteBuffer record;
+        private final long sequence;
+        private final long offset;
+        private boolean durable;
+
+        private RecoveryCloseWrite(Command command, ByteBuffer record, long sequence, long offset) {
+            this.command = command;
+            this.record = record;
+            this.sequence = sequence;
+            this.offset = offset;
+        }
+    }
+
     private record GrantBinding(byte[] intentId, long intentGeneration, long grantGeneration) {
         private boolean sameMeaning(GrantBinding other) {
             return other != null && Arrays.equals(intentId, other.intentId)
@@ -380,6 +397,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private DurableBatch pending;
     private FenceWrite pendingFenceWrite;
     private LacWrite pendingLacWrite;
+    private RecoveryCloseWrite pendingRecoveryCloseWrite;
     private boolean writing;
     private boolean failed;
     private boolean closed;
@@ -466,37 +484,112 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     /** The caller must have cold-read the live RepairIntent and exact committed grant authority. */
     Result submitRecoveryGrant(RecoveryGrant grant) throws IOException {
-        DurableBatch batch = appendCommands(List.of(command(grant)));
+        DurableBatch batch = appendRecoveryGrantDurably(grant);
         return applyDurable(batch).get(0);
+    }
+
+    DurableBatch appendRecoveryGrantDurably(RecoveryGrant grant) throws IOException {
+        return appendCommands(List.of(command(grant)));
     }
 
     /** Cut admission before the durable close; retry after the pre-cut tickets become terminal. */
     RecoveryCloseStatus submitRecoveryClose(RecoveryGrantClose close) throws IOException {
+        RecoveryCloseAttempt attempt = prepareRecoveryClose(close);
+        if (attempt.immediate() != null) {
+            return attempt.immediate();
+        }
+        writeRecoveryCloseDurably(attempt.write());
+        return applyRecoveryCloseDurable(attempt.write());
+    }
+
+    synchronized RecoveryCloseAttempt prepareRecoveryClose(RecoveryGrantClose close) throws IOException {
         Command command = command(close);
-        synchronized (this) {
-            requireWritable();
-            AppliedOperation prior = operations.get(command.operationId());
-            if (prior != null) {
-                return prior.command().sameMeaning(command)
-                        ? closeStatus(prior.status() == Status.APPLIED_DURABLE
-                                ? Status.ALREADY_DURABLE : prior.status())
-                        : RecoveryCloseStatus.INCOMPATIBLE;
-            }
-            if (fenceOperations.containsKey(command.operationId())) {
-                return RecoveryCloseStatus.INCOMPATIBLE;
-            }
-            LedgerState state = ledgers.get(command.scope.ledgerId());
-            GrantState grant = state == null ? null : state.recoveryGrants.get(command.closedGrantId);
-            if (grant != null && !grant.committedReadable && matchesClose(command, grant.command)
-                    && (grant.pendingClose == null || grant.pendingClose.equals(command.operationId()))) {
-                grant.pendingClose = command.operationId();
-                if (grant.inFlight != 0 || writing || pending != null
-                        || pendingFenceWrite != null || pendingLacWrite != null) {
-                    return RecoveryCloseStatus.WAITING_PRECUT;
-                }
+        requireWritable();
+        AppliedOperation prior = operations.get(command.operationId());
+        if (prior != null) {
+            return new RecoveryCloseAttempt(prior.command().sameMeaning(command)
+                    ? closeStatus(prior.status() == Status.APPLIED_DURABLE
+                            ? Status.ALREADY_DURABLE : prior.status())
+                    : RecoveryCloseStatus.INCOMPATIBLE, null);
+        }
+        if (fenceOperations.containsKey(command.operationId())) {
+            return new RecoveryCloseAttempt(RecoveryCloseStatus.INCOMPATIBLE, null);
+        }
+        LedgerState state = ledgers.get(command.scope.ledgerId());
+        GrantState grant = state == null ? null : state.recoveryGrants.get(command.closedGrantId);
+        if (grant != null && !grant.committedReadable && matchesClose(command, grant.command)
+                && (grant.pendingClose == null || grant.pendingClose.equals(command.operationId()))) {
+            grant.pendingClose = command.operationId();
+            if (grant.inFlight != 0) {
+                return new RecoveryCloseAttempt(RecoveryCloseStatus.WAITING_PRECUT, null);
             }
         }
-        return closeStatus(applyDurable(appendCommands(List.of(command))).get(0).status());
+        if (writing || pending != null || pendingFenceWrite != null || pendingLacWrite != null
+                || pendingRecoveryCloseWrite != null) {
+            return new RecoveryCloseAttempt(RecoveryCloseStatus.WAITING_PRECUT, null);
+        }
+        long sequence = durableThrough + 1;
+        ByteBuffer record = SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence,
+                command.operationId(), new Generation(command.scope.authorityGeneration()), 0, body(command));
+        if (record.remaining() > maxLogBytes - nextOffset) {
+            throw new IOException("Bookie control log capacity exhausted");
+        }
+        RecoveryCloseWrite write = new RecoveryCloseWrite(command, record, sequence, nextOffset);
+        nextOffset += record.remaining();
+        pendingRecoveryCloseWrite = write;
+        writing = true;
+        return new RecoveryCloseAttempt(null, write);
+    }
+
+    void writeRecoveryCloseDurably(RecoveryCloseWrite write) throws IOException {
+        synchronized (this) {
+            requireWritable();
+            if (write != pendingRecoveryCloseWrite || write.durable) {
+                throw new IllegalArgumentException("Invalid or already durable recovery close write");
+            }
+        }
+        try {
+            io.writeFully(channel, write.record, write.offset);
+            io.force(channel, true);
+            synchronized (this) {
+                write.durable = true;
+                durableThrough = write.sequence;
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                failed = true;
+                pendingRecoveryCloseWrite = null;
+                writing = false;
+            }
+            throw failure;
+        }
+    }
+
+    synchronized void abortRecoveryCloseBeforeIo(RecoveryCloseWrite write) {
+        if (write != pendingRecoveryCloseWrite || write.durable || !writing) {
+            throw new IllegalArgumentException("Only an unwritten recovery close can be retried");
+        }
+        nextOffset = write.offset;
+        pendingRecoveryCloseWrite = null;
+        writing = false;
+    }
+
+    synchronized RecoveryCloseStatus applyRecoveryCloseDurable(RecoveryCloseWrite write) throws IOException {
+        requireWritable();
+        if (write != pendingRecoveryCloseWrite || !write.durable || write.sequence != appliedThrough + 1) {
+            throw new IllegalArgumentException("Only the next durable recovery close can be applied");
+        }
+        try {
+            Status status = apply(write.command);
+            appliedThrough = write.sequence;
+            return closeStatus(status);
+        } catch (RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        } finally {
+            pendingRecoveryCloseWrite = null;
+            writing = false;
+        }
     }
 
     private static RecoveryCloseStatus closeStatus(Status status) {
@@ -514,7 +607,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         long start;
         synchronized (this) {
             requireWritable();
-            if (writing || pending != null || pendingFenceWrite != null || pendingLacWrite != null) {
+            if (writing || pending != null || pendingFenceWrite != null || pendingLacWrite != null
+                    || pendingRecoveryCloseWrite != null) {
                 throw new IllegalArgumentException("Invalid or unresolved Bookie control batch");
             }
             for (Command command : commands) {

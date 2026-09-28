@@ -2027,6 +2027,235 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void recoveryGrantUsesReservedControlIoBeforeOpeningLocalAdmission() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog setup = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            setup.submitBatch(List.of(install(1, (byte) 6)));
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Recovery grant force was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR, controlIo)) {
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 2);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<SegmentBookieControlLog.Status> status = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9), (results, cause) -> {
+                    owner.requireOwner();
+                    failure.set(cause);
+                    status.set(results == null ? null : results.get(0).status());
+                    done.countDown();
+                }));
+                owner.start();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertFalse(driver.submitRecoveryGrant(recoveryGrant(3, 4, 1, 10), (results, cause) -> { }));
+                CountDownLatch progressed = new CountDownLatch(1);
+                assertTrue(owner.control(progressed::countDown));
+                assertTrue(progressed.await(5, TimeUnit.SECONDS));
+                assertTrue(bookie.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isEmpty());
+                assertThrows(IOException.class, bookie::close);
+                release.countDown();
+                assertTrue(done.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, status.get());
+                SegmentBookieControlLog.RecoveryAdmission admitted =
+                        bookie.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).orElseThrow();
+                admitted.finish();
+            } finally {
+                release.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR)) {
+            SegmentBookieControlLog.RecoveryAdmission admitted =
+                    replay.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).orElseThrow();
+            admitted.finish();
+        }
+    }
+
+    @Test
+    public void recoveryCloseUsesReservedControlIoAfterPrecutTicketTerminates() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog setup = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            setup.submitBatch(List.of(install(1, (byte) 6)));
+            setup.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+        }
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Recovery close force was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR, controlIo)) {
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 2);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            SegmentBookieControlLog.RecoveryAdmission admitted =
+                    bookie.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).orElseThrow();
+            CountDownLatch waitingDone = new CountDownLatch(1);
+            CountDownLatch closeDone = new CountDownLatch(1);
+            AtomicReference<SegmentBookieControlLog.RecoveryCloseStatus> waiting = new AtomicReference<>();
+            AtomicReference<SegmentBookieControlLog.RecoveryCloseStatus> durable = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9), (status, cause) -> {
+                    owner.requireOwner();
+                    waiting.set(status);
+                    failure.set(cause);
+                    waitingDone.countDown();
+                }));
+                owner.start();
+                assertTrue(waitingDone.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT, waiting.get());
+                assertTrue(bookie.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isEmpty());
+                admitted.finish();
+                assertTrue(driver.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9), (status, cause) -> {
+                    owner.requireOwner();
+                    durable.set(status);
+                    failure.set(cause);
+                    closeDone.countDown();
+                }));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                CountDownLatch progressed = new CountDownLatch(1);
+                assertTrue(owner.control(progressed::countDown));
+                assertTrue(progressed.await(5, TimeUnit.SECONDS));
+                assertFalse(bookie.locallyCommittedReadable(context(), 2));
+                assertThrows(IOException.class, bookie::close);
+                release.countDown();
+                assertTrue(closeDone.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE, durable.get());
+                assertTrue(bookie.locallyCommittedReadable(context(), 2));
+            } finally {
+                release.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR)) {
+            assertTrue(replay.locallyCommittedReadable(context(), 2));
+            assertTrue(replay.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isEmpty());
+        }
+    }
+
+    @Test
+    public void rejectedRecoveryCloseIoKeepsCutAndRetriesWithoutSkippingSequence() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            io.shutdown();
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            CountDownLatch rejected = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9), (status, cause) -> {
+                    owner.requireOwner();
+                    failure.set(cause);
+                    rejected.countDown();
+                }));
+                owner.start();
+                assertTrue(rejected.await(5, TimeUnit.SECONDS));
+                assertTrue(failure.get() instanceof RejectedExecutionException);
+                assertTrue(bookie.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isEmpty());
+                assertFalse(bookie.locallyCommittedReadable(context(), 2));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        bookie.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+                assertTrue(bookie.locallyCommittedReadable(context(), 2));
+            } finally {
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void failedRecoveryCloseForceReportsFailureWithoutReopeningAdmission() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog setup = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR)) {
+            setup.submitBatch(List.of(install(1, (byte) 6)));
+            setup.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+        }
+        SegmentFileIo failingIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+        try (SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR, failingIo)) {
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            SegmentBookieControlDriver driver = new SegmentBookieControlDriver(owner, io, bookie);
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9), (status, cause) -> {
+                    owner.requireOwner();
+                    failure.set(cause);
+                    done.countDown();
+                }));
+                owner.start();
+                assertTrue(done.await(5, TimeUnit.SECONDS));
+                assertTrue(failure.get() instanceof IOException);
+                assertTrue(bookie.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 6)).isEmpty());
+                assertFalse(bookie.locallyCommittedReadable(context(), 2));
+                assertThrows(IOException.class,
+                        () -> bookie.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+            } finally {
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
     public void rejectedControlIoLeavesFenceCutRetryableWithoutSkippingSequence() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

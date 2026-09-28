@@ -17,6 +17,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,8 +33,18 @@ final class SegmentBookieControlDriver {
     }
 
     @FunctionalInterface
+    private interface DurableAppend {
+        SegmentBookieControlLog.DurableBatch append() throws IOException;
+    }
+
+    @FunctionalInterface
     interface FenceCompletion {
         void complete(SegmentBookieControlLog.FenceResult result, Throwable failure);
+    }
+
+    @FunctionalInterface
+    interface RecoveryCloseCompletion {
+        void complete(SegmentBookieControlLog.RecoveryCloseStatus status, Throwable failure);
     }
 
     @FunctionalInterface
@@ -54,6 +65,15 @@ final class SegmentBookieControlDriver {
 
     boolean submitBatch(List<ProtectedProfileStateStore.Transition> commands, BatchCompletion completion) {
         List<ProtectedProfileStateStore.Transition> batch = List.copyOf(commands);
+        return submitDurableBatch(() -> log.appendDurably(batch), completion);
+    }
+
+    boolean submitRecoveryGrant(SegmentBookieControlLog.RecoveryGrant grant, BatchCompletion completion) {
+        Objects.requireNonNull(grant, "grant");
+        return submitDurableBatch(() -> log.appendRecoveryGrantDurably(grant), completion);
+    }
+
+    private boolean submitDurableBatch(DurableAppend append, BatchCompletion completion) {
         Objects.requireNonNull(completion, "completion");
         if (!busy.compareAndSet(false, true)) {
             return false;
@@ -65,7 +85,7 @@ final class SegmentBookieControlDriver {
                 public void run(SegmentOwnerLoop.Ticket ticket) {
                     AtomicReference<SegmentBookieControlLog.DurableBatch> durable = new AtomicReference<>();
                     try {
-                        io.submitControl(ticket, () -> durable.set(log.appendDurably(batch)), cause -> {
+                        io.submitControl(ticket, () -> durable.set(append.append()), cause -> {
                             owner.requireOwner();
                             if (cause != null) {
                                 deliver(completion, null, cause);
@@ -179,6 +199,85 @@ final class SegmentBookieControlDriver {
         return accepted;
     }
 
+    boolean submitRecoveryClose(SegmentBookieControlLog.RecoveryGrantClose request,
+                                RecoveryCloseCompletion completion) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(completion, "completion");
+        if (!busy.compareAndSet(false, true)) {
+            return false;
+        }
+        boolean accepted;
+        try {
+            accepted = owner.submitControl(new SegmentOwnerLoop.Command() {
+                private SegmentBookieControlLog.RecoveryCloseWrite prepared;
+                private final AtomicBoolean ioStarted = new AtomicBoolean();
+
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    SegmentBookieControlLog.RecoveryCloseAttempt attempt;
+                    try {
+                        attempt = log.prepareRecoveryClose(request);
+                    } catch (Throwable failure) {
+                        ticket.complete(() -> deliver(completion, null, failure));
+                        return;
+                    }
+                    if (attempt.immediate() != null) {
+                        ticket.complete(() -> deliver(completion, attempt.immediate(), null));
+                        return;
+                    }
+                    prepared = attempt.write();
+                    try {
+                        io.submitControl(ticket, () -> {
+                            ioStarted.set(true);
+                            log.writeRecoveryCloseDurably(prepared);
+                        }, failure -> {
+                            owner.requireOwner();
+                            if (failure != null) {
+                                abortUnstarted(failure);
+                                deliver(completion, null, failure);
+                                return;
+                            }
+                            SegmentBookieControlLog.RecoveryCloseStatus status;
+                            try {
+                                status = log.applyRecoveryCloseDurable(prepared);
+                            } catch (Throwable applyFailure) {
+                                deliver(completion, null, applyFailure);
+                                return;
+                            }
+                            deliver(completion, status, null);
+                        });
+                    } catch (Throwable failure) {
+                        abortUnstarted(failure);
+                        ticket.complete(() -> deliver(completion, null, failure));
+                    }
+                }
+
+                private void abortUnstarted(Throwable failure) {
+                    if (!ioStarted.get()) {
+                        try {
+                            log.abortRecoveryCloseBeforeIo(prepared);
+                        } catch (Throwable cleanupFailure) {
+                            failure.addSuppressed(cleanupFailure);
+                        }
+                    }
+                }
+
+                @Override
+                public void failed(Throwable cause) {
+                    owner.requireOwner();
+                    deliver(completion, null, cause);
+                }
+            });
+        } catch (RuntimeException | Error failure) {
+            busy.set(false);
+            throw failure;
+        }
+        if (!accepted) {
+            busy.set(false);
+        }
+        return accepted;
+    }
+
     boolean submitExplicitLac(ProfileOperationCodec.WriteLac request, LacCompletion completion) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(completion, "completion");
@@ -268,6 +367,15 @@ final class SegmentBookieControlDriver {
     private void deliver(FenceCompletion completion, SegmentBookieControlLog.FenceResult result, Throwable failure) {
         try {
             completion.complete(result, failure);
+        } finally {
+            busy.set(false);
+        }
+    }
+
+    private void deliver(RecoveryCloseCompletion completion, SegmentBookieControlLog.RecoveryCloseStatus status,
+                         Throwable failure) {
+        try {
+            completion.complete(status, failure);
         } finally {
             busy.set(false);
         }
