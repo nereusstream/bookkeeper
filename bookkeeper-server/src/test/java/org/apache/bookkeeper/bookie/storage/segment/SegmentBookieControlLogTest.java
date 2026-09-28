@@ -393,6 +393,51 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void replayedTombstoneExcludesOnlyItsLocationFromBoundedStreamRecovery() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentBatchFormat.FrozenBatch batch = twoLedgerBatch(config);
+        List<SegmentPointRead.Location> physicalLocations = SegmentPointRead.locations(
+                SegmentBatchParser.parse(batch.bytes(), batch.address(), config.bytesPerFile()));
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    bookie.submitBatch(List.of(install(44, 1, (byte) 5))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    bookie.submitBatch(List.of(install(48, 2, (byte) 5))).get(0).status());
+            files.writeAuthorized(batch, arena);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    bookie.submitBatch(List.of(tombstone(44, 3))).get(0).status());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalStreamCandidate(
+                    config, identity, arena, new SegmentFileIo(), 0, new Generation(1), 1, 1, 1));
+            SegmentDataRecovery.PhysicalStreamCandidate recovered =
+                    SegmentDataRecovery.recoverLocallyReadableStreamCandidate(config, identity, arena,
+                            bookie, new SegmentFileIo(), 0, new Generation(1), 1, 1, 1);
+            assertEquals(2, recovered.scan().records());
+            assertEquals(1, recovered.through());
+            assertEquals(1, recovered.entries().size());
+            assertEquals(context(48), recovered.entries().get(0).context());
+            assertEquals(2, SegmentPointRead.readLocallyGated(config, identity, arena, bookie,
+                    recovered.entries().get(0)).record().entryId());
+            assertThrows(IOException.class, () -> SegmentPointRead.readLocallyGated(config, identity, arena,
+                    bookie, physicalLocations.get(0)));
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.WRITE)) {
+                data.write(ByteBuffer.wrap(new byte[] {1}), physicalLocations.get(0).recordOffset() + 160 + 36);
+            }
+            assertThrows(IOException.class, () -> SegmentDataRecovery.recoverLocallyReadableStreamCandidate(
+                    config, identity, arena, bookie, new SegmentFileIo(), 0, new Generation(1), 1, 1, 1));
+        }
+    }
+
+    @Test
     public void pendingTombstoneCutsNewAdmissionBeforeForceReturns() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

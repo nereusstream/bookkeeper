@@ -112,7 +112,7 @@ final class SegmentDataRecovery {
 
     static Scan inspect(IsolatedSegmentConfig config, SegmentFileHeader identity,
                         SegmentArenaControlLog authority) throws IOException {
-        return scan(config, identity, authority, null, 0, null).scan();
+        return scan(config, identity, authority, null, 0, null, null).scan();
     }
 
     /** A successful scan forces the checked DATA files; it does not establish Bookie or locator authority. */
@@ -121,7 +121,7 @@ final class SegmentDataRecovery {
         if (syncIo == null) {
             throw new IllegalArgumentException("DATA recovery sync requires an I/O backend");
         }
-        return scan(config, identity, authority, syncIo, 0, null).scan();
+        return scan(config, identity, authority, syncIo, 0, null, null).scan();
     }
 
     /** Physical locations only: caller still needs the recovered stream prefix and Bookie selector/permissions. */
@@ -131,13 +131,41 @@ final class SegmentDataRecovery {
         if (syncIo == null || maxEntries < 1) {
             throw new IllegalArgumentException("Bounded DATA recovery sync and inventory required");
         }
-        return scan(config, identity, authority, syncIo, maxEntries, null);
+        return scan(config, identity, authority, syncIo, maxEntries, null, null);
     }
 
     /** Requires the persisted Arena stream start before returning a read-only physical candidate. */
     static PhysicalStreamCandidate recoverPhysicalStreamCandidate(IsolatedSegmentConfig config,
                                                                   SegmentFileHeader identity,
                                                                   SegmentArenaControlLog authority,
+                                                                  SegmentFileIo syncIo, int shard,
+                                                                  Generation streamGeneration,
+                                                                  long firstSequence, int maxBatches,
+                                                                  int maxEntries) throws IOException {
+        return recoverStreamCandidate(config, identity, authority, null, syncIo, shard, streamGeneration,
+                firstSequence, maxBatches, maxEntries);
+    }
+
+    /** Excludes locally terminal routes from a synced candidate; it does not resolve the current selector. */
+    static PhysicalStreamCandidate recoverLocallyReadableStreamCandidate(IsolatedSegmentConfig config,
+                                                                          SegmentFileHeader identity,
+                                                                          SegmentArenaControlLog authority,
+                                                                          SegmentBookieControlLog bookie,
+                                                                          SegmentFileIo syncIo, int shard,
+                                                                          Generation streamGeneration,
+                                                                          long firstSequence, int maxBatches,
+                                                                          int maxEntries) throws IOException {
+        if (bookie == null || !bookie.matchesScope(config, identity)) {
+            throw new IOException("Bookie route and DATA files have different storage scopes");
+        }
+        return recoverStreamCandidate(config, identity, authority, bookie, syncIo, shard, streamGeneration,
+                firstSequence, maxBatches, maxEntries);
+    }
+
+    private static PhysicalStreamCandidate recoverStreamCandidate(IsolatedSegmentConfig config,
+                                                                  SegmentFileHeader identity,
+                                                                  SegmentArenaControlLog authority,
+                                                                  SegmentBookieControlLog bookie,
                                                                   SegmentFileIo syncIo, int shard,
                                                                   Generation streamGeneration,
                                                                   long firstSequence, int maxBatches,
@@ -150,14 +178,18 @@ final class SegmentDataRecovery {
             throw new IOException("Physical stream start is not backed by applied Arena control");
         }
         StreamProbe probe = new StreamProbe(shard, streamGeneration, maxBatches);
-        PhysicalInventory inventory = scan(config, identity, authority, syncIo, maxEntries, probe);
+        PhysicalInventory inventory = scan(config, identity, authority, syncIo, maxEntries, probe, bookie);
+        if (bookie != null && !bookie.matchesScope(config, identity)) {
+            throw new IOException("Bookie read route became unavailable during DATA recovery");
+        }
         return new PhysicalStreamCandidate(config, identity, inventory.scan(), probe.contiguousThrough(firstSequence),
                 inventory.entries(), inventory.grantedHighWatermarks());
     }
 
     private static PhysicalInventory scan(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                           SegmentArenaControlLog authority, SegmentFileIo syncIo,
-                                          int maxEntries, StreamProbe stream) throws IOException {
+                                          int maxEntries, StreamProbe stream,
+                                          SegmentBookieControlLog bookie) throws IOException {
         if (!authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
@@ -231,8 +263,10 @@ final class SegmentDataRecovery {
                             if (maxEntries > 0) {
                                 List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
                                 for (int i = 0; i < parsed.records().size(); i++) {
-                                    if (parsed.records().get(i).origin() == SegmentBatchFormat.ENTRY_DATA
-                                    && (stream == null || stream.matches(address))) {
+                                    SegmentBatchParser.Record record = parsed.records().get(i);
+                                    if (record.origin() == SegmentBatchFormat.ENTRY_DATA
+                                            && (stream == null || stream.matches(address))
+                                            && (bookie == null || bookie.locallyReadableContext(record.context()))) {
                                         if (entries.size() == maxEntries) {
                                             throw new IOException("Physical recovery inventory capacity exhausted");
                                         }

@@ -405,14 +405,19 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     /** Only the local route cut; transport read authorization and current-selector checks remain separate. */
     synchronized Optional<ReadAdmission> admitRead(ProfileLedgerContext context) {
-        LedgerState state = ledgers.get(context.ledgerId());
-        if (closed || failed || state == null || !state.context.equals(context)
-                || state.pendingTombstone || tombstones.containsKey(context.ledgerId())
-                || activeAdmissions == config.maxPendingEntries()) {
+        if (!locallyReadableContext(context) || activeAdmissions == config.maxPendingEntries()) {
             return Optional.empty();
         }
+        LedgerState state = ledgers.get(context.ledgerId());
         activeAdmissions++;
         return Optional.of(new ReadAdmission(this, state));
+    }
+
+    /** Local replayed route only; it does not select a physical location or grant network read authority. */
+    synchronized boolean locallyReadableContext(ProfileLedgerContext context) {
+        LedgerState state = ledgers.get(context.ledgerId());
+        return !closed && !failed && state != null && state.context.equals(context)
+                && !state.pendingTombstone && !tombstones.containsKey(context.ledgerId());
     }
 
     synchronized boolean canCompleteRead(ReadAdmission admission) {
@@ -467,7 +472,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     synchronized boolean matchesScope(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity) {
-        return !closed && config.sameStorageScope(source) && identity.equals(sourceIdentity);
+        return !closed && !failed && config.sameStorageScope(source) && identity.equals(sourceIdentity);
     }
 
     private synchronized void finishAdmission(Admission admission, boolean fromDriver) {

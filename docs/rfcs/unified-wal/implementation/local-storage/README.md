@@ -58,6 +58,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 隔离Bookie局部读取门槛现通过`ReadAdmission`绑定已安装的exact ledger instance与descriptor；它与normal写准入分离，inactive或fenced实例仍可取得读票据。`SegmentPointRead.readLocallyGated`在物理点读前取得票据，返回前复核Bookie route，最后释放；匹配实例的pending/durable tombstone使新读拒绝；若发生在旧票据的结果判定前，也使该结果失败，重放后仍拒绝，已force的物理字节仍可单独检查。关闭Bookie控制文件等待在途读票据。此入口没有接真实Profile read请求、网络读取权限或current-selector/pin，不把任意物理候选解释为合法对外读取。
 
+只读`recoverLocallyReadableStreamCandidate`完整校验目标stream的batch及每条record，并在返回候选前完成文件恢复同步；仅将Bookie重放后的本地状态中仍有exact读route且未被pending/durable tombstone切断的普通DATA位置计入有界候选；旧的未筛选物理入口保持原语义。同批两个ledger中一方被tombstone时，另一方可用一个locator名额恢复并通过本地读门槛；被终结记录即使不返回定位，其损坏仍使目标batch恢复失败。该筛选不是完整current-selector、网络授权或可写restart判定，控制状态并发变化仍由后续读取门槛复核。
+
 当前没有可写重开入口：扫描到的全零尾页不证明对应坐标从未预留或提交，不能把写指针简单退到最后一个完整batch后继续使用。只读物理清单和stream候选现携带每文件已授权范围的最高结束位置；水位以内的零页不能据此当作可重用空间。这个水位不能解除旧DATA同步错误，也不证明末端前缀或水位以后的空间已经可以写入。可写恢复仍需要完整控制关系判定必要DATA、空间used/unused与末端前缀事实及旧I/O终结证据。
 
 ## 验证入口
@@ -72,6 +74,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：隔离Bookie控制与真实文件定向测试27项通过，0失败/错误/跳过。重开后同batch双ledger仅保留未tombstone的本地读候选；被筛除record的损坏仍拒绝恢复。同轮`SegmentBatchFormatTest`的25项也通过，`bookkeeper-server` Spotless/Checkstyle通过。此为只读本地route筛选，不证明完整selector、对外读取授权、崩溃/掉电或可写restart。
 
 2026-09-29 运行`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=SegmentBatchFormatTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test -q`：格式、真实文件扫描与热目录相关25项测试通过，0失败/错误/跳过；同模块Spotless/Checkstyle通过。两个不同generation的stream各自扫描同步后作为一组装入时，容量不足或整组重复坐标均不留下先通过的候选，合法两项才一起可见。仍由调用方选定stream；此测试不证明必要DATA选择、selector/pin或可写restart。
 
