@@ -21,6 +21,25 @@ package org.apache.bookkeeper.proto.profile;
 final class ProfileReceiveBudget {
     enum Lane { UNCLASSIFIED, DATA, CONTROL }
 
+    final class ConnectionPermit implements AutoCloseable {
+        private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
+        private Lane lane = Lane.UNCLASSIFIED;
+        private boolean closed;
+
+        private ConnectionPermit() {
+        }
+
+        @Override
+        public void close() {
+            synchronized (ProfileReceiveBudget.this) {
+                if (!closed) {
+                    closed = true;
+                    usedConnections[lane.ordinal()]--;
+                }
+            }
+        }
+    }
+
     final class Credit implements AutoCloseable {
         private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
         private Lane lane;
@@ -46,15 +65,32 @@ final class ProfileReceiveBudget {
 
     private final long[] limits = new long[Lane.values().length];
     private final long[] usedBytes = new long[Lane.values().length];
+    private final int[] connectionLimits = new int[Lane.values().length];
+    private final int[] usedConnections = new int[Lane.values().length];
 
-    ProfileReceiveBudget(long totalBytes, long reservedControlBytes, long unclassifiedBytes) {
+    ProfileReceiveBudget(long totalBytes, long reservedControlBytes, long unclassifiedBytes,
+                         int maxUnclassifiedConnections, int maxDataConnections, int maxControlConnections) {
         if (totalBytes < 3 || reservedControlBytes < 1 || reservedControlBytes >= totalBytes
-                || unclassifiedBytes < 1 || unclassifiedBytes >= totalBytes - reservedControlBytes) {
-            throw new IllegalArgumentException("Positive unclassified, DATA and CONTROL budgets required");
+                || unclassifiedBytes < 1 || unclassifiedBytes >= totalBytes - reservedControlBytes
+                || maxUnclassifiedConnections < 1 || maxDataConnections < 1 || maxControlConnections < 1) {
+            throw new IllegalArgumentException("Positive unclassified, DATA and CONTROL budgets and slots required");
         }
         limits[Lane.UNCLASSIFIED.ordinal()] = unclassifiedBytes;
         limits[Lane.DATA.ordinal()] = totalBytes - reservedControlBytes - unclassifiedBytes;
         limits[Lane.CONTROL.ordinal()] = reservedControlBytes;
+        connectionLimits[Lane.UNCLASSIFIED.ordinal()] = maxUnclassifiedConnections;
+        connectionLimits[Lane.DATA.ordinal()] = maxDataConnections;
+        connectionLimits[Lane.CONTROL.ordinal()] = maxControlConnections;
+    }
+
+    /** Called before a TLS handler is created for the accepted channel. */
+    synchronized ConnectionPermit admitUnclassified() {
+        int index = Lane.UNCLASSIFIED.ordinal();
+        if (usedConnections[index] >= connectionLimits[index]) {
+            return null;
+        }
+        usedConnections[index]++;
+        return new ConnectionPermit();
     }
 
     synchronized Credit reserve(Lane lane, int bytes) {
@@ -70,11 +106,14 @@ final class ProfileReceiveBudget {
     }
 
     /** Move existing ownership without a release-and-reserve gap. A failed move leaves every credit unchanged. */
-    synchronized boolean transfer(Lane target, Credit... credits) {
-        if (target == null || credits.length == 0 || credits[0] == null) {
-            throw new IllegalArgumentException("Receive target and credits required");
+    synchronized boolean transfer(Lane target, ConnectionPermit connection, Credit... credits) {
+        if (target == null || connection == null || credits.length == 0 || credits[0] == null) {
+            throw new IllegalArgumentException("Receive target, connection and credits required");
         }
         Lane source = credits[0].lane;
+        if (connection.owner != this || connection.closed || connection.lane != source) {
+            throw new IllegalStateException("Invalid receive connection transfer");
+        }
         long bytes = 0;
         for (int i = 0; i < credits.length; i++) {
             Credit credit = credits[i];
@@ -88,11 +127,15 @@ final class ProfileReceiveBudget {
             }
             bytes += credit.bytes;
         }
-        if (source == target || bytes > limits[target.ordinal()] - usedBytes[target.ordinal()]) {
+        if (source == target || bytes > limits[target.ordinal()] - usedBytes[target.ordinal()]
+                || usedConnections[target.ordinal()] >= connectionLimits[target.ordinal()]) {
             return false;
         }
         usedBytes[source.ordinal()] -= bytes;
         usedBytes[target.ordinal()] += bytes;
+        usedConnections[source.ordinal()]--;
+        usedConnections[target.ordinal()]++;
+        connection.lane = target;
         for (Credit credit : credits) {
             credit.lane = target;
         }
@@ -104,5 +147,12 @@ final class ProfileReceiveBudget {
             throw new IllegalArgumentException("Receive lane required");
         }
         return usedBytes[lane.ordinal()];
+    }
+
+    synchronized int usedConnections(Lane lane) {
+        if (lane == null) {
+            throw new IllegalArgumentException("Receive lane required");
+        }
+        return usedConnections[lane.ordinal()];
     }
 }

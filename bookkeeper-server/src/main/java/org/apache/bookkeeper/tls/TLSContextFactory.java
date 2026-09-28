@@ -171,6 +171,14 @@ public class TLSContextFactory implements SecurityHandlerFactory {
         return new TLSContextFactory(true);
     }
 
+    /** Require the initialized immediate-mTLS server mode when installing a Profile endpoint. */
+    public SslHandler newProfileServerTLSHandler() throws SecurityException {
+        if (!profileServer || !isServerCtx) {
+            throw new SecurityException("Profile server TLS context is not initialized");
+        }
+        return newTLSHandler();
+    }
+
     /** Extract verified leaf identity; the listener must establish endpoint and immediate-TLS facts itself. */
     public ProfilePrincipal authenticatedProfilePrincipal(SslHandler handler, String trustDomain)
             throws SSLPeerUnverifiedException, SecurityException {

@@ -75,8 +75,9 @@ public class ProfileTlsContextFactoryTest {
     public void profileRequiresImmediateTls13AndClientCertificate() throws Exception {
         ServerConfiguration conf = configuration();
         TLSContextFactory profile = TLSContextFactory.forProfileServer();
+        assertThrows(SecurityException.class, profile::newProfileServerTLSHandler);
         profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
-        SslHandler handler = profile.newTLSHandler();
+        SslHandler handler = profile.newProfileServerTLSHandler();
         assertTrue(handler.engine().getNeedClientAuth());
         assertArrayEquals(new String[] { "TLSv1.3" }, negotiatedProtocols(handler));
 
@@ -129,6 +130,7 @@ public class ProfileTlsContextFactoryTest {
     public void classicFactoryKeepsConfiguredStartTlsBehavior() throws Exception {
         TLSContextFactory classic = new TLSContextFactory();
         classic.init(SecurityHandlerFactory.NodeType.Server, configuration(), UnpooledByteBufAllocator.DEFAULT);
+        assertThrows(SecurityException.class, classic::newProfileServerTLSHandler);
         SslHandler handler = classic.newTLSHandler();
         assertFalse(handler.engine().getNeedClientAuth());
         assertArrayEquals(new String[] { "TLSv1.2" }, negotiatedProtocols(handler));

@@ -20,9 +20,12 @@ package org.apache.bookkeeper.proto.profile;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.util.ReferenceCountUtil;
 import java.io.IOException;
 import java.util.Objects;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
@@ -59,7 +62,10 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     private static final int FIXED_HEADER_BYTES = ProfileFrameCodec.OUTER_LENGTH_PREFIX
             + ProfileFrameHeader.ENCODED_LENGTH;
+    private static final long HELLO_TIMEOUT_MILLIS = 10_000;
+    private static final long FIRST_REQUEST_TIMEOUT_MILLIS = 30_000;
     private final ProfileReceiveBudget budget;
+    private final ProfileReceiveBudget.ConnectionPermit connectionPermit;
     private final int connectionLimit;
     private final int connectionBaseBytes;
     private final AtomicLong connectionBytes = new AtomicLong();
@@ -69,17 +75,21 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private HeldCredit frameCredit;
     private HeldCredit pendingControlCredit;
     private ProfileInboundFrame pendingControlFrame;
+    private ScheduledFuture<?> stageDeadline;
     private ByteBuf frame;
     private ProfileFrameHeader frameHeader;
     private int headerRead;
     private boolean helloDelivered;
     private boolean terminated;
+    private boolean tlsReady;
     private ProfileReceiveBudget.Lane lane = ProfileReceiveBudget.Lane.UNCLASSIFIED;
     private ConnectionPurpose purpose = ConnectionPurpose.UNCLASSIFIED;
     private ProfileFrameCodec.DecodePhase phase = ProfileFrameCodec.DecodePhase.PRE_HELLO;
 
-    ProfileReceiveDecoder(ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes) {
+    ProfileReceiveDecoder(ProfileReceiveBudget budget, ProfileReceiveBudget.ConnectionPermit connectionPermit,
+                          int connectionLimit, int connectionBaseBytes) {
         this.budget = Objects.requireNonNull(budget, "budget");
+        this.connectionPermit = Objects.requireNonNull(connectionPermit, "connectionPermit");
         if (connectionBaseBytes < FIXED_HEADER_BYTES || connectionLimit <= connectionBaseBytes) {
             throw new IllegalArgumentException("Invalid fixed connection or receive limit");
         }
@@ -105,6 +115,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             throw new IllegalStateException("HELLO was not accepted on this connection");
         }
         phase = ProfileFrameCodec.DecodePhase.ESTABLISHED;
+        if (tlsReady) {
+            armDeadline(FIRST_REQUEST_TIMEOUT_MILLIS);
+        }
     }
 
     /** Called by the downstream operation handler after it validates and authorizes the first control request. */
@@ -117,7 +130,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         final boolean transferred;
         try {
             transferred = budget.transfer(ProfileReceiveBudget.Lane.CONTROL,
-                    baseCredit.shared, pendingControlCredit.shared);
+                    connectionPermit, baseCredit.shared, pendingControlCredit.shared);
         } catch (IllegalStateException failure) {
             context.close();
             throw failure;
@@ -130,6 +143,36 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         pendingControlFrame = null;
         lane = ProfileReceiveBudget.Lane.CONTROL;
         purpose = ConnectionPurpose.CONTROL;
+        cancelDeadline();
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
+        if (event instanceof SslHandshakeCompletionEvent handshake) {
+            if (!handshake.isSuccess()) {
+                ctx.close();
+                return;
+            }
+            tlsReady = true;
+            armDeadline(HELLO_TIMEOUT_MILLIS);
+        }
+        ctx.fireUserEventTriggered(event);
+    }
+
+    private void armDeadline(long delayMillis) {
+        cancelDeadline();
+        stageDeadline = context.executor().schedule(() -> {
+            if (!terminated) {
+                context.close();
+            }
+        }, delayMillis, TimeUnit.MILLISECONDS);
+    }
+
+    private void cancelDeadline() {
+        if (stageDeadline != null) {
+            stageDeadline.cancel(false);
+            stageDeadline = null;
+        }
     }
 
     @Override
@@ -213,6 +256,8 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             headerRead = 0;
             if (header.operation() == ProfileOperation.HELLO) {
                 helloDelivered = true;
+            } else if (purpose == ConnectionPurpose.DATA) {
+                cancelDeadline();
             }
             ctx.fireChannelRead(completed);
             if (terminated || !ctx.channel().isActive()) {
@@ -255,7 +300,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             purpose = ConnectionPurpose.CONTROL_PENDING;
             return;
         }
-        if (!budget.transfer(ProfileReceiveBudget.Lane.DATA, baseCredit.shared)) {
+        if (!budget.transfer(ProfileReceiveBudget.Lane.DATA, connectionPermit, baseCredit.shared)) {
             throw new IOException("Bookie Profile DATA receive capacity exhausted");
         }
         lane = ProfileReceiveBudget.Lane.DATA;
@@ -296,6 +341,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         terminated = true;
+        cancelDeadline();
         pendingControlCredit = null;
         pendingControlFrame = null;
         discardPartial();
@@ -306,6 +352,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     @Override
     public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
         terminated = true;
+        cancelDeadline();
         pendingControlCredit = null;
         pendingControlFrame = null;
         discardPartial();
@@ -318,5 +365,6 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             baseCredit.close();
             baseCredit = null;
         }
+        connectionPermit.close();
     }
 }
