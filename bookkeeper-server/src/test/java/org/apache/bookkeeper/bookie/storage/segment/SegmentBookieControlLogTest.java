@@ -680,6 +680,83 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void stoppedNormalWaiterDoesNotCancelSharedDataOrReleaseAdmission() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch secondCompleted = new CountDownLatch(1);
+        AtomicInteger firstCallbacks = new AtomicInteger();
+        AtomicReference<SegmentDataPhysicalDriver.NormalResult> secondResult = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            SegmentDataPhysicalDriver.NormalRequest first = new SegmentDataPhysicalDriver.NormalRequest(
+                    (result, failure) -> firstCallbacks.incrementAndGet());
+            SegmentDataPhysicalDriver.NormalRequest second = new SegmentDataPhysicalDriver.NormalRequest(
+                    (result, failure) -> {
+                        owner.requireOwner();
+                        secondResult.set(result);
+                        secondFailure.set(failure);
+                        secondCompleted.countDown();
+                    });
+            SegmentBookieControlLog.Admission firstAdmission = bookie.admitNormal(
+                    context(44), filled(20, (byte) 5)).orElseThrow();
+            SegmentBookieControlLog.Admission secondAdmission = bookie.admitNormal(
+                    context(48), filled(20, (byte) 5)).orElseThrow();
+            try {
+                assertTrue(driver.submitNormal(bookie, twoLedgerBatch(config), List.of(
+                        firstAdmission, secondAdmission),
+                        List.of(first, second)));
+                owner.start();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertTrue(first.stopWaiting());
+                assertFalse(first.stopWaiting());
+                assertTrue(bookie.canCompleteNormal(firstAdmission));
+                assertThrows(IOException.class, bookie::close);
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.CONFLICT,
+                        checkPublishedDuplicate(driver, bookie, entryBytes(context(), 1, 0, 8, (byte) 1)));
+                releaseForce.countDown();
+                assertTrue(secondCompleted.await(5, TimeUnit.SECONDS));
+                assertNull(secondFailure.get());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, secondResult.get().status());
+                assertEquals(0, firstCallbacks.get());
+                assertFalse(second.stopWaiting());
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE,
+                        checkPublishedDuplicate(driver, bookie, entryBytes(context(), 1, 0, 8, (byte) 0)));
+            } finally {
+                releaseForce.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
     public void pendingNormalDuplicateJoinsForceAndPublishedDuplicateUsesPointRead() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

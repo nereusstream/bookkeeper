@@ -48,6 +48,31 @@ final class SegmentDataPhysicalDriver {
         void complete(List<NormalResult> results, Throwable failure);
     }
 
+    @FunctionalInterface
+    interface NormalEntryCompletion {
+        void complete(NormalResult result, Throwable failure);
+    }
+
+    /** A caller may stop waiting without cancelling the submitted DATA or its Bookie admission. */
+    static final class NormalRequest {
+        private final AtomicReference<NormalEntryCompletion> response;
+
+        NormalRequest(NormalEntryCompletion completion) {
+            response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+        }
+
+        boolean stopWaiting() {
+            return response.getAndSet(null) != null;
+        }
+
+        private void complete(NormalResult result, Throwable failure) {
+            NormalEntryCompletion completion = response.getAndSet(null);
+            if (completion != null) {
+                completion.complete(result, failure);
+            }
+        }
+    }
+
     enum DuplicateStatus {
         SAME_DURABLE, CONFLICT, STALE_ADMISSION, NOT_READY, UNKNOWN
     }
@@ -216,6 +241,33 @@ final class SegmentDataPhysicalDriver {
         };
         Obligation obligation = new Obligation(physical, input, normals);
         return submitPhysical(batch, obligation);
+    }
+
+    /** Each entry has its own response waiter; abandoning one does not change batch ownership. */
+    boolean submitNormal(SegmentBookieControlLog bookie, SegmentBatchFormat.FrozenBatch batch,
+                         List<SegmentBookieControlLog.Admission> admissions, List<NormalRequest> requests)
+            throws IOException {
+        List<NormalRequest> waiters = List.copyOf(requests);
+        if (waiters.size() != admissions.size()) {
+            throw new IllegalArgumentException("Normal request count differs from admissions");
+        }
+        return submitNormal(bookie, batch, admissions, (results, failure) -> {
+            Throwable callbackFailure = null;
+            for (int i = 0; i < waiters.size(); i++) {
+                try {
+                    waiters.get(i).complete(results.get(i), failure);
+                } catch (Throwable error) {
+                    if (callbackFailure == null) {
+                        callbackFailure = error;
+                    } else if (callbackFailure != error) {
+                        callbackFailure.addSuppressed(error);
+                    }
+                }
+            }
+            if (callbackFailure != null) {
+                throw new IllegalStateException("Normal request callback failed", callbackFailure);
+            }
+        });
     }
 
     /**
