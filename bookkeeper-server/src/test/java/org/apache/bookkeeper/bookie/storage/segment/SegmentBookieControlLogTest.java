@@ -23,11 +23,15 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -51,10 +55,14 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
+import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.LedgerMetadataFormat.DigestType;
+import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.util.ByteBufList;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -125,6 +133,33 @@ public class SegmentBookieControlLogTest {
         byte[] id = new byte[16];
         id[15] = (byte) operationId;
         return new ProfileOperationCodec.FenceLedger(context(), id, filled(20, verifier));
+    }
+
+    private static SegmentBatchFormat.FrozenBatch batch(IsolatedSegmentConfig config, long entryId,
+                                                        long sequence, long offset) throws Exception {
+        DigestManager digest = DigestManager.instantiate(context().ledgerId(), new byte[0], DigestType.CRC32C,
+                UnpooledByteBufAllocator.DEFAULT, false);
+        ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(entryId, -1, 8,
+                Unpooled.wrappedBuffer(new byte[8]), new byte[0], 0);
+        ByteBuf entry = Unpooled.buffer(encoded.readableBytes());
+        try {
+            for (int i = 0; i < encoded.size(); i++) {
+                ByteBuf part = encoded.getBuffer(i);
+                entry.writeBytes(part, part.readerIndex(), part.readableBytes());
+            }
+            return SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(0, 0, 5,
+                    new Generation(1), new Generation(1), sequence, offset),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+        } finally {
+            entry.release();
+            encoded.release();
+        }
+    }
+
+    private static void grant(SegmentArenaControlLog arena, int blocks) throws IOException {
+        arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
+                0, 0, new Generation(1), 5, 4096, blocks)));
     }
 
     @Test
@@ -407,6 +442,193 @@ public class SegmentBookieControlLogTest {
             assertFalse(worker.isAlive());
             assertNull(failure.get());
             assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, result.get().status());
+        }
+    }
+
+    @Test
+    public void realDataForceAndOwnerCompletionPrecedeDurableFence() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentBatchFormat.FrozenBatch batch = batch(config, 1, 1, 4096);
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<Throwable> dataFailure = new AtomicReference<>();
+        AtomicReference<List<SegmentPointRead.Location>> candidates = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                SegmentBookieControlLog.Admission admitted = bookie.admitNormal(context(), filled(20, (byte) 5))
+                        .orElseThrow();
+                assertTrue(driver.submitNormal(bookie, batch, List.of(admitted), (locations, failure) -> {
+                    owner.requireOwner();
+                    candidates.set(locations);
+                    dataFailure.set(failure);
+                    completed.countDown();
+                }));
+                owner.start();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+                assertTrue(bookie.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+                assertThrows(IOException.class, bookie::close);
+                releaseForce.countDown();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                assertNull(dataFailure.get());
+                assertEquals(1, candidates.get().size());
+                assertEquals(1, SegmentPointRead.read(config, identity, arena, candidates.get().get(0))
+                        .record().entryId());
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
+                releaseForce.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void frozenNormalBatchRequiresOneDistinctTicketForEachRecord() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentBatchFormat.FrozenBatch batch = batch(config, 1, 1, 4096);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            try {
+                SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                        new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                        new SegmentHotDirectory(owner, config, identity, 2));
+                SegmentBookieControlLog.Admission repeated = bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow();
+                assertThrows(IllegalArgumentException.class, () -> driver.submitNormal(bookie, batch,
+                        List.of(repeated, repeated), (locations, failure) -> { }));
+                repeated.physicalTerminal();
+                SegmentBookieControlLog.Admission first = bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow();
+                SegmentBookieControlLog.Admission extra = bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow();
+                assertThrows(IOException.class, () -> driver.submitNormal(bookie, batch,
+                        List.of(first, extra), (locations, failure) -> { }));
+                assertEquals(4096, files.nextOffset(0));
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
+    public void failedPrefixDoesNotReleaseLaterTicketBeforeItsIoTerminates() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentBatchFormat.FrozenBatch first = batch(config, 1, 1, 4096);
+        SegmentBatchFormat.FrozenBatch second = batch(config, 2, 2, 8192);
+        CountDownLatch firstForce = new CountDownLatch(1);
+        CountDownLatch secondOperation = new CountDownLatch(1);
+        CountDownLatch releaseSecond = new CountDownLatch(1);
+        CountDownLatch callbacks = new CountDownLatch(2);
+        AtomicInteger operations = new AtomicInteger();
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 2);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false, () -> {
+                firstForce.countDown();
+                try {
+                    if (!secondOperation.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Second DATA operation did not start");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2, 0, 0,
+                    task -> new Thread(task, "isolated-bookie-data-io"), () -> {
+                        if (operations.incrementAndGet() == 2) {
+                            secondOperation.countDown();
+                            try {
+                                if (!releaseSecond.await(5, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException("Second DATA operation was not released");
+                                }
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(interrupted);
+                            }
+                        }
+                    });
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                assertTrue(driver.submitNormal(bookie, first, List.of(bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow()), (locations, failure) -> {
+                            firstFailure.set(failure);
+                            callbacks.countDown();
+                        }));
+                owner.start();
+                assertTrue(firstForce.await(5, TimeUnit.SECONDS));
+                assertTrue(driver.submitNormal(bookie, second, List.of(bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow()), (locations, failure) -> {
+                            secondFailure.set(failure);
+                            callbacks.countDown();
+                        }));
+                assertTrue(secondOperation.await(5, TimeUnit.SECONDS));
+                assertTrue(callbacks.await(5, TimeUnit.SECONDS));
+                assertTrue(firstFailure.get() instanceof IOException);
+                assertTrue(secondFailure.get() instanceof IOException);
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+                assertThrows(IOException.class, bookie::close);
+                releaseSecond.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
+                releaseSecond.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
         }
     }
 }

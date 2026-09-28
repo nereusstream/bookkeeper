@@ -23,12 +23,56 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Real DATA I/O to contiguous physical candidates only; no entry result or Bookie ACK authority. */
 final class SegmentDataPhysicalDriver {
     @FunctionalInterface
     interface Completion {
         void complete(List<SegmentPointRead.Location> candidates, Throwable failure);
+    }
+
+    private static final class Obligation {
+        private final Completion completion;
+        private final List<SegmentBookieControlLog.Admission> admissions;
+        private boolean physicalTerminal;
+        private boolean ownerTerminal;
+        private boolean released;
+
+        private Obligation(Completion completion, List<SegmentBookieControlLog.Admission> admissions) {
+            this.completion = completion;
+            this.admissions = List.copyOf(admissions);
+        }
+
+        synchronized void physicalTerminal() {
+            if (physicalTerminal) {
+                throw new IllegalStateException("Physical DATA already terminal");
+            }
+            physicalTerminal = true;
+            releaseIfTerminal();
+        }
+
+        synchronized void ownerTerminal() {
+            if (ownerTerminal) {
+                throw new IllegalStateException("DATA result already terminal");
+            }
+            ownerTerminal = true;
+            releaseIfTerminal();
+        }
+
+        void abortBeforeOwner() {
+            physicalTerminal();
+            ownerTerminal();
+        }
+
+        private void releaseIfTerminal() {
+            if (physicalTerminal && ownerTerminal && !released) {
+                released = true;
+                for (SegmentBookieControlLog.Admission admission : admissions) {
+                    admission.driverTerminal();
+                }
+            }
+        }
     }
 
     private final int shard;
@@ -38,7 +82,7 @@ final class SegmentDataPhysicalDriver {
     private final SegmentArenaControlLog authority;
     private final SegmentPhysicalPrefix prefix;
     private final SegmentHotDirectory hot;
-    private final Map<IsolatedSegmentFiles.Reservation, Completion> pending = new IdentityHashMap<>();
+    private final Map<IsolatedSegmentFiles.Reservation, Obligation> pending = new IdentityHashMap<>();
 
     SegmentDataPhysicalDriver(int shard, SegmentOwnerLoop owner, SegmentIoExecutor io,
                               IsolatedSegmentFiles files, SegmentArenaControlLog authority,
@@ -56,52 +100,120 @@ final class SegmentDataPhysicalDriver {
     }
 
     boolean submit(SegmentBatchFormat.FrozenBatch batch, Completion completion) {
+        return submitPhysical(batch, new Obligation(Objects.requireNonNull(completion, "completion"), List.of()));
+    }
+
+    /**
+     * The caller acquires one Bookie ticket per normal record before submitting the frozen batch.
+     * Once claimed, this driver releases every ticket even when validation or owner admission fails.
+     */
+    boolean submitNormal(SegmentBookieControlLog bookie, SegmentBatchFormat.FrozenBatch batch,
+                         List<SegmentBookieControlLog.Admission> admissions, Completion completion)
+            throws IOException {
+        Objects.requireNonNull(bookie, "bookie");
         Objects.requireNonNull(batch, "batch");
         Objects.requireNonNull(completion, "completion");
-        return owner.submit(shard, new SegmentOwnerLoop.Command() {
-            private boolean registered;
-
-            @Override
-            public void run(SegmentOwnerLoop.Ticket ticket) {
-                SegmentHotDirectory.Admission admission;
-                try {
-                    admission = hot.reserve(batch);
-                } catch (IOException failure) {
-                    ticket.complete(() -> completion.complete(null, failure));
-                    return;
-                }
-                IsolatedSegmentFiles.Reservation reservation;
-                try {
-                    reservation = prefix.reserve(batch, files, authority);
-                } catch (IOException failure) {
-                    hot.cancelBeforeSubmission(admission);
-                    ticket.complete(() -> completion.complete(null, failure));
-                    return;
-                }
-                pending.put(reservation, completion);
-                registered = true;
-                hot.bind(admission, reservation);
-                io.submit(ticket, () -> files.writeReserved(reservation),
-                        failure -> physicalFinished(reservation, failure));
+        List<SegmentBookieControlLog.Admission> input = List.copyOf(admissions);
+        bookie.claimForPhysical(input);
+        Obligation obligation = new Obligation(completion, input);
+        try {
+            if (!bookie.matchesScope(files)) {
+                throw new IOException("Bookie control log and DATA files have different storage scopes");
             }
+            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(batch.bytes(), batch.address(),
+                    Long.MAX_VALUE);
+            if (parsed.records().size() != input.size()) {
+                throw new IOException("Normal DATA admission count differs from frozen records");
+            }
+            for (int i = 0; i < input.size(); i++) {
+                SegmentBatchParser.Record record = parsed.records().get(i);
+                if (record.origin() != SegmentBatchFormat.ENTRY_DATA
+                        || !record.context().equals(input.get(i).context())) {
+                    throw new IOException("Normal DATA admission does not match frozen record");
+                }
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            obligation.abortBeforeOwner();
+            throw failure;
+        }
+        return submitPhysical(batch, obligation);
+    }
 
-            @Override
-            public void failed(Throwable failure) {
-                owner.requireOwner();
-                Throwable callbackFailure = registered ? null : deliver(completion, null, failure, null);
-                try {
-                    failPending(failure);
-                } catch (RuntimeException | Error pendingFailure) {
-                    if (callbackFailure != null) {
-                        pendingFailure.addSuppressed(callbackFailure);
+    private boolean submitPhysical(SegmentBatchFormat.FrozenBatch batch, Obligation obligation) {
+        Objects.requireNonNull(batch, "batch");
+        boolean accepted;
+        try {
+            accepted = owner.submit(shard, new SegmentOwnerLoop.Command() {
+                private boolean registered;
+                private boolean submitted;
+
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    SegmentHotDirectory.Admission admission;
+                    try {
+                        admission = hot.reserve(batch);
+                    } catch (IOException failure) {
+                        obligation.physicalTerminal();
+                        ticket.complete(() -> deliver(obligation, null, failure, null));
+                        return;
                     }
-                    throw pendingFailure;
+                    IsolatedSegmentFiles.Reservation reservation;
+                    try {
+                        reservation = prefix.reserve(batch, files, authority);
+                    } catch (IOException failure) {
+                        hot.cancelBeforeSubmission(admission);
+                        obligation.physicalTerminal();
+                        ticket.complete(() -> deliver(obligation, null, failure, null));
+                        return;
+                    }
+                    pending.put(reservation, obligation);
+                    registered = true;
+                    hot.bind(admission, reservation);
+                    AtomicBoolean operationStarted = new AtomicBoolean();
+                    io.submit(ticket, () -> {
+                        operationStarted.set(true);
+                        try {
+                            files.writeReserved(reservation);
+                        } finally {
+                            obligation.physicalTerminal();
+                        }
+                    }, failure -> {
+                        if (!operationStarted.get()) {
+                            obligation.physicalTerminal();
+                        }
+                        physicalFinished(reservation, failure);
+                    });
+                    submitted = true;
                 }
-                if (callbackFailure != null) {
-                    throw new IllegalStateException("Physical failure callback failed", callbackFailure);
+
+                @Override
+                public void failed(Throwable failure) {
+                    owner.requireOwner();
+                    if (!submitted) {
+                        obligation.physicalTerminal();
+                    }
+                    Throwable callbackFailure = registered ? null : deliver(obligation, null, failure, null);
+                    try {
+                        failPending(failure);
+                    } catch (RuntimeException | Error pendingFailure) {
+                        if (callbackFailure != null) {
+                            pendingFailure.addSuppressed(callbackFailure);
+                        }
+                        throw pendingFailure;
+                    }
+                    if (callbackFailure != null) {
+                        throw new IllegalStateException("Physical failure callback failed", callbackFailure);
+                    }
                 }
-            }
-        });
+            });
+        } catch (RuntimeException | Error failure) {
+            obligation.abortBeforeOwner();
+            throw failure;
+        }
+        if (!accepted) {
+            obligation.abortBeforeOwner();
+        }
+        return accepted;
     }
 
     private void physicalFinished(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {
@@ -118,16 +230,17 @@ final class SegmentDataPhysicalDriver {
             }
             List<Delivery> deliveries = new ArrayList<>(ready.size());
             for (SegmentPhysicalPrefix.DurableBatch batch : ready) {
-                List<SegmentPointRead.Location> locations = hot.publish(batch);
-                Completion completion = pending.remove(batch.reservation());
-                if (completion == null) {
+                Obligation obligation = pending.get(batch.reservation());
+                if (obligation == null) {
                     throw new IllegalStateException("Missing physical completion obligation");
                 }
-                deliveries.add(new Delivery(completion, locations));
+                List<SegmentPointRead.Location> locations = hot.publish(batch);
+                deliveries.add(new Delivery(batch.reservation(), obligation, locations));
             }
             Throwable callbackFailure = null;
             for (Delivery delivery : deliveries) {
-                callbackFailure = deliver(delivery.completion(), delivery.locations(), null, callbackFailure);
+                pending.remove(delivery.reservation());
+                callbackFailure = deliver(delivery.obligation(), delivery.locations(), null, callbackFailure);
             }
             if (callbackFailure != null) {
                 throw new IllegalStateException("Physical completion callback failed", callbackFailure);
@@ -142,29 +255,32 @@ final class SegmentDataPhysicalDriver {
         }
     }
 
-    private record Delivery(Completion completion, List<SegmentPointRead.Location> locations) { }
+    private record Delivery(IsolatedSegmentFiles.Reservation reservation, Obligation obligation,
+                            List<SegmentPointRead.Location> locations) { }
 
     private void failPending(Throwable failure) {
-        List<Completion> callbacks = List.copyOf(pending.values());
+        List<Obligation> callbacks = List.copyOf(pending.values());
         pending.clear();
         Throwable callbackFailure = null;
-        for (Completion completion : callbacks) {
-            callbackFailure = deliver(completion, null, failure, callbackFailure);
+        for (Obligation obligation : callbacks) {
+            callbackFailure = deliver(obligation, null, failure, callbackFailure);
         }
         if (callbackFailure != null) {
             throw new IllegalStateException("Physical failure callback failed", callbackFailure);
         }
     }
 
-    private static Throwable deliver(Completion completion, List<SegmentPointRead.Location> candidates,
+    private static Throwable deliver(Obligation obligation, List<SegmentPointRead.Location> candidates,
                                      Throwable failure, Throwable previous) {
         try {
-            completion.complete(candidates, failure);
+            obligation.completion.complete(candidates, failure);
         } catch (Throwable callbackFailure) {
             if (previous == null) {
                 return callbackFailure;
             }
             previous.addSuppressed(callbackFailure);
+        } finally {
+            obligation.ownerTerminal();
         }
         return previous;
     }

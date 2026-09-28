@@ -31,6 +31,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -74,6 +75,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final LedgerState state;
         private final long generation;
         private boolean terminal;
+        private boolean claimed;
 
         private Admission(SegmentBookieControlLog owner, LedgerState state) {
             this.owner = owner;
@@ -85,8 +87,16 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return generation;
         }
 
+        ProfileLedgerContext context() {
+            return state.context;
+        }
+
         void physicalTerminal() {
-            owner.finishAdmission(this);
+            owner.finishAdmission(this, false);
+        }
+
+        void driverTerminal() {
+            owner.finishAdmission(this, true);
         }
     }
 
@@ -342,8 +352,29 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return Optional.of(new Admission(this, state));
     }
 
-    private synchronized void finishAdmission(Admission admission) {
-        if (admission.owner != this || admission.terminal) {
+    synchronized void claimForPhysical(List<Admission> admissions) throws IOException {
+        requireWritable();
+        if (admissions.isEmpty()) {
+            throw new IllegalArgumentException("Physical DATA requires admission for every entry");
+        }
+        Map<Admission, Boolean> distinct = new IdentityHashMap<>();
+        for (Admission admission : admissions) {
+            if (admission == null || admission.owner != this || admission.terminal || admission.claimed
+                    || distinct.put(admission, true) != null) {
+                throw new IllegalArgumentException("Invalid or repeated Bookie DATA admission");
+            }
+        }
+        for (Admission admission : admissions) {
+            admission.claimed = true;
+        }
+    }
+
+    synchronized boolean matchesScope(IsolatedSegmentFiles files) {
+        return !closed && files.matchesScope(config, identity);
+    }
+
+    private synchronized void finishAdmission(Admission admission, boolean fromDriver) {
+        if (admission.owner != this || admission.terminal || admission.claimed != fromDriver) {
             throw new IllegalArgumentException("Admission already finished or belongs to another Bookie control log");
         }
         admission.terminal = true;
