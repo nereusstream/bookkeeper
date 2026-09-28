@@ -179,8 +179,10 @@ final class SegmentDataPhysicalDriver {
             for (int i = 0; i < input.size(); i++) {
                 SegmentBatchParser.Record record = parsed.records().get(i);
                 if (record.origin() != SegmentBatchFormat.ENTRY_DATA
-                        || !record.context().equals(input.get(i).context())) {
-                    throw new IOException("Normal DATA admission does not match frozen record");
+                        || !record.context().equals(input.get(i).context())
+                        || SegmentOwnerLoop.shardFor(record.context().ledgerId(),
+                                files.config().logicalShards()) != batch.address().shard()) {
+                    throw new IOException("Normal DATA admission or logical shard does not match frozen record");
                 }
             }
             records = parsed.records();

@@ -86,6 +86,10 @@ final class SegmentHotDirectory {
         Set<Key> withinBatch = new HashSet<>();
         for (int i = 0; i < parsed.records().size(); i++) {
             SegmentBatchParser.Record record = parsed.records().get(i);
+            if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                    != batch.address().shard()) {
+                throw new IOException("DATA record belongs to another logical shard");
+            }
             if (record.origin() != SegmentBatchFormat.ENTRY_DATA) {
                 continue;
             }

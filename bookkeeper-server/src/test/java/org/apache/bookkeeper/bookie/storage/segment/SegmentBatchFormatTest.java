@@ -70,13 +70,17 @@ public class SegmentBatchFormatTest {
     }
 
     private ProfileLedgerContext context() {
+        return context(8);
+    }
+
+    private ProfileLedgerContext context(long ledgerId) {
         byte[] instance = new byte[16];
         for (int i = 0; i < instance.length; i++) {
             instance[i] = (byte) (i + 1);
         }
         byte[] descriptor = new byte[36];
         java.util.Arrays.fill(descriptor, (byte) 3);
-        return new ProfileLedgerContext(7, instance, descriptor);
+        return new ProfileLedgerContext(ledgerId, instance, descriptor);
     }
 
     private SegmentFileHeader identity() {
@@ -93,7 +97,11 @@ public class SegmentBatchFormatTest {
     }
 
     private ByteBuf entry(byte[] payload, long entryId, long lac, long ledgerLength) throws Exception {
-        DigestManager digest = DigestManager.instantiate(7, new byte[0], DigestType.CRC32C,
+        return entry(payload, entryId, lac, ledgerLength, 8);
+    }
+
+    private ByteBuf entry(byte[] payload, long entryId, long lac, long ledgerLength, long ledgerId) throws Exception {
+        DigestManager digest = DigestManager.instantiate(ledgerId, new byte[0], DigestType.CRC32C,
                 UnpooledByteBufAllocator.DEFAULT, false);
         ByteBufList encoded = (ByteBufList) digest.computeDigestAndPackageForSending(entryId, lac, ledgerLength,
                 Unpooled.wrappedBuffer(payload), new byte[0], 0);
@@ -474,11 +482,11 @@ public class SegmentBatchFormatTest {
     @Test
     public void writerAndIndependentParserMatchFixedVectors() throws Exception {
         for (boolean relocation : new boolean[] {false, true}) {
-            ByteBuf entry = entry("abc".getBytes(StandardCharsets.UTF_8));
+            ByteBuf entry = entry("abc".getBytes(StandardCharsets.UTF_8), 3, 2, 3, 7);
             try {
                 SegmentBatchFormat.Data record = relocation
-                        ? SegmentBatchFormat.relocation(context(), entry, new UUID(1, 2), new Generation(4))
-                        : SegmentBatchFormat.entry(context(), entry);
+                        ? SegmentBatchFormat.relocation(context(7), entry, new UUID(1, 2), new Generation(4))
+                        : SegmentBatchFormat.entry(context(7), entry);
                 SegmentBatchFormat.FrozenBatch frozen = SegmentBatchFormat.encode(config(), address(4096),
                         List.of(record));
                 String name = relocation ? "copy-v1.hex" : "entry-v1.hex";
@@ -491,7 +499,7 @@ public class SegmentBatchFormatTest {
                 assertArrayEquals(golden, bytes(frozen.bytes()));
                 SegmentBatchParser.Record parsed = SegmentBatchParser.parse(ByteBuffer.wrap(golden), address(4096),
                         config().bytesPerFile()).records().get(0);
-                assertEquals(context(), parsed.context());
+                assertEquals(context(7), parsed.context());
                 assertEquals(relocation ? 2 : 1, parsed.origin());
                 assertEquals(relocation ? new UUID(1, 2) : new UUID(0, 0), parsed.moveId());
                 assertEquals(3, parsed.entryId());
@@ -799,6 +807,63 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void wrongLogicalShardIsRejectedBeforePhysicalWriteAndDuringRecovery() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("wrong-shard"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 2,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf entry = entry(new byte[8], 1, 0, 8, 7);
+        SegmentBatchFormat.FrozenBatch wrong;
+        try {
+            wrong = SegmentBatchFormat.encode(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(7), entry)));
+        } finally {
+            entry.release();
+        }
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC, new UUID(0, 5), new Generation(1), 0,
+                    0, 0, new Generation(1), 5, 4096, 1, 1)));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity(), 2));
+            CountDownLatch completed = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                assertTrue(driver.submit(wrong, (locations, cause) -> {
+                    failure.set(cause);
+                    completed.countDown();
+                }));
+                owner.start();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                assertTrue(failure.get() instanceof IOException);
+                assertEquals(4096, files.nextOffset(0));
+            } finally {
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+
+            // Raw framing I/O is deliberately not an admission path; its bytes must still fail read/recovery.
+            files.writeAuthorized(wrong, arena);
+            SegmentPointRead.Location location = SegmentPointRead.locations(SegmentBatchParser.parse(
+                    wrong.bytes(), wrong.address(), config.bytesPerFile())).get(0);
+            assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), arena, location));
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentFileIo sync = new SegmentFileIo();
+            assertThrows(IOException.class, () -> SegmentDataRecovery.validateAndSync(
+                    config, identity(), replay, sync));
+            assertEquals(0, sync.forces);
+        }
+    }
+
+    @Test
     public void dataWriteRequiresAnAppliedGrantForTheWholeBatchAndMatchingIdentity() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("granted"),
                 1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
@@ -1050,7 +1115,7 @@ public class SegmentBatchFormatTest {
                     corrupt.setInt(32, corrupt.getInt(32) ^ 1);
                     byte[] otherInstance = context().ledgerInstanceId();
                     otherInstance[0] ^= 1;
-                    ProfileLedgerContext otherContext = new ProfileLedgerContext(7, otherInstance,
+                    ProfileLedgerContext otherContext = new ProfileLedgerContext(context().ledgerId(), otherInstance,
                             context().descriptorIdentity());
                     assertTrue(SegmentDuplicateCheck.sameLogicalPayload(config, identity(), authority,
                             location, context(), same.nioBuffer()));

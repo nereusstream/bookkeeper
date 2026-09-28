@@ -50,6 +50,8 @@ final class SegmentPointRead {
         if (!authority.matchesScope(config, identity) || address.fileIndex() >= config.dataFiles()
                 || address.shard() >= config.logicalShards()
                 || address.fileIndex() != address.shard() % config.dataFiles()
+                || location.context() == null || location.context().ledgerId() < 0
+                || SegmentOwnerLoop.shardFor(location.context().ledgerId(), config.logicalShards()) != address.shard()
                 || location.batchLength() < 4096 || location.batchLength() > SegmentBatchFormat.MAX_BATCH
                 || location.batchLength() % 4096 != 0
                 || address.offset() > config.bytesPerFile() - location.batchLength()

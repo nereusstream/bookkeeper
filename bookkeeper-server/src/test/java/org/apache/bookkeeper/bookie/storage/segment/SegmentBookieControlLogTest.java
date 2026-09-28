@@ -212,12 +212,12 @@ public class SegmentBookieControlLogTest {
 
     private static SegmentBatchFormat.FrozenBatch twoLedgerBatch(IsolatedSegmentConfig config) throws Exception {
         ByteBuf first = entry(context(44), 1);
-        ByteBuf second = entry(context(45), 2);
+        ByteBuf second = entry(context(48), 2);
         try {
             return SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(0, 0, 5,
                     new Generation(1), new Generation(1), 1, 4096),
                     List.of(SegmentBatchFormat.entry(context(44), first),
-                            SegmentBatchFormat.entry(context(45), second)));
+                            SegmentBatchFormat.entry(context(48), second)));
         } finally {
             first.release();
             second.release();
@@ -612,7 +612,7 @@ public class SegmentBookieControlLogTest {
                         1024 * 1024, key((byte) 3), VALIDATOR)) {
             grant(arena, 1);
             bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
-                    install(45, 3, (byte) 5), activate(45, 4)));
+                    install(48, 3, (byte) 5), activate(48, 4)));
             files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
                 forcing.countDown();
                 try {
@@ -632,7 +632,7 @@ public class SegmentBookieControlLogTest {
             try {
                 assertTrue(driver.submitNormal(bookie, twoLedgerBatch(config), List.of(
                         bookie.admitNormal(context(44), filled(20, (byte) 5)).orElseThrow(),
-                        bookie.admitNormal(context(45), filled(20, (byte) 5)).orElseThrow()),
+                        bookie.admitNormal(context(48), filled(20, (byte) 5)).orElseThrow()),
                         (entries, failure) -> {
                             owner.requireOwner();
                             results.set(entries);
@@ -821,6 +821,43 @@ public class SegmentBookieControlLogTest {
                 assertEquals(4096, files.nextOffset(0));
                 assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
                         bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
+    public void normalBatchRejectsLedgerOnAnotherLogicalShardBeforePhysicalReservation() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        ByteBuf entry = entry(context(45), 1);
+        SegmentBatchFormat.FrozenBatch wrongShard;
+        try {
+            wrongShard = SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(45), entry)));
+        } finally {
+            entry.release();
+        }
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(45, 1, (byte) 5), activate(45, 2)));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            try {
+                SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                        new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                        new SegmentHotDirectory(owner, config, identity, 2));
+                assertThrows(IOException.class, () -> driver.submitNormal(bookie, wrongShard,
+                        List.of(bookie.admitNormal(context(45), filled(20, (byte) 5)).orElseThrow()),
+                        (results, failure) -> { }));
+                assertEquals(4096, files.nextOffset(0));
+                assertEquals(0, owner.pending());
             } finally {
                 io.shutdown();
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));

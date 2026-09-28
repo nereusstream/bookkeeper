@@ -210,6 +210,12 @@ final class SegmentDataRecovery {
                             SegmentFileIo.readFully(data, content, offset);
                             SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
                                     config.bytesPerFile());
+                            for (SegmentBatchParser.Record record : parsed.records()) {
+                                if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                                        != address.shard()) {
+                                    throw new IOException("DATA record belongs to another logical shard");
+                                }
+                            }
                             if (stream != null) {
                                 stream.observe(address);
                             }

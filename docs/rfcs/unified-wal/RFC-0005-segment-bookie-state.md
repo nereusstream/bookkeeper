@@ -528,7 +528,7 @@ B18在已有资源测量中分列TLS/decoder retained bytes、未完成frame数�
 ledger instance -> logical WalShard -> fixed owner worker -> CPU / NUMA placement
 ```
 
-WalShard保留现有路由/stream身份；owner是运行其状态机的常驻平台线程，CPU mask只是该线程的可运行位置。一个worker可承载一个或多个属地一致或明确兼容的shard，每个shard同一时刻只能由一个owner执行。首个切片可取1:1，比例不进入磁盘格式。例如8个shard分给4个worker，worker 0持0/4、1持1/5、2持2/6、3持3/7，属于启动计划，不改变8个逻辑shard。
+隔离文件原型固定`ledgerId % logicalShards`路由，normal准入、物理热候选、点读和重启扫描均拒绝错shard记录；这仍不构成Bookie权限化服务。WalShard保留现有路由/stream身份；owner是运行其状态机的常驻平台线程，CPU mask只是该线程的可运行位置。一个worker可承载一个或多个属地一致或明确兼容的shard，每个shard同一时刻只能由一个owner执行。首个切片可取1:1，比例不进入磁盘格式。例如8个shard分给4个worker，worker 0持0/4、1持1/5、2持2/6、3持3/7，属于启动计划，不改变8个逻辑shard。
 
 部署从16核变成8核时，不得按新CPU/worker数重新取模解释旧ledger/DATA。关闭旧执行者、按既有规则终结其I/O并完成恢复后，可在重启时调整shard→worker映射；既有stream、generation、allocator authority不因此改变。首批不做在线work stealing、热shard迁移或跨NUMA自动均衡，不为每ledger建线程，也不为每shard建立独占I/O/控制线程组。
 
