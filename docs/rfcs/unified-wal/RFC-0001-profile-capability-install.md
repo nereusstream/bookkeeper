@@ -798,6 +798,8 @@ body额度可逻辑预留，不按声明长度立即分配整块内存。连接�
 
 实现进度（2026-09-28）：`ProfileFrameCodec.inspectHeader`复用reference固定头/长度/phase/subtype校验，使明文接收适配器在body到达前取得合法声明长度；`ProfileReceiveDecoder`在Netty入口按同次入站ByteBuf、固定连接份额及已交付但未释放的完整frame向共享DATA/保留CONTROL账本计费，容量不足直接关闭并释放，CONTROL连接不接受DATA subtype。定向测试覆盖半包、pipeline已到字节、DATA压力下控制份额、断连和交付后释放；reference corpus仍通过。这只是未注册的明文组件，TLS/socket实际buffer、mTLS身份、HELLO授权、存储交接与真实listener均未接通，不作为B18或步骤11完整接收预算证据。
 
+同日新增`TLSContextFactory.forProfileServer()`独立模式：复用现有key/trust加载与刷新，只在该模式固定immediate TLS1.3及必需客户端证书；双端握手与Classic START_TLS对照的2项定向测试通过。尚未在Bookie上监听独立端口、提取X509 principal或把TLS/socket buffer接入上述总账，因此不视为真实Profile网络接入或A24/B18通过。
+
 ## 12. Capability negotiation
 
 HELLO是每个Profile connection的第一条application frame且最大4KiB。client body固定为：

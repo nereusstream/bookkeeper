@@ -241,7 +241,9 @@ DATA durable → hot locator → local result
 
 **完成条件：** 正常、截断、超长、错误subtype与reference corpus一致；多连接半包内存有界，关闭/取消/解析失败无泄漏；DATA暂停时控制仍可到达；普通Add无逐请求handshake或proof读取。测试可使用隔离listener，尚不发布stable wire承诺。
 
-前置的[Classic master-key错误日志泄漏](profile-control/classic-master-key-log-receipt.json)已用真实日志事件红绿回归修复。隔离Profile明文接收切片现可在完整body到达前校验固定header并申请连接/Bookie DATA或保留CONTROL额度，计入同次read中已进pipeline的字节、半包与交付后尚未释放的frame；控制额度不被DATA连接占用，错误subtype、容量不足及断连释放已定向验证。复现命令：`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileFrameCodecTest,ProfileWireCorpusTest,ProfileReceiveDecoderTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`，本次common 10项、server 4项均通过。该组件尚未接入immediate-TLS1.3/mTLS listener、HELLO身份/能力处理、operation分发或真实TLS/socket内存计费；匿名/越权拒绝和完整secret-leak矩阵未完成，步骤11仍未闭合。
+前置的[Classic master-key错误日志泄漏](profile-control/classic-master-key-log-receipt.json)已用真实日志事件红绿回归修复。隔离Profile明文接收切片现可在完整body到达前校验固定header并申请连接/Bookie DATA或保留CONTROL额度，计入同次read中已进pipeline的字节、半包与交付后尚未释放的frame；控制额度不被DATA连接占用，错误subtype、容量不足及断连释放已定向验证。复现命令：`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileFrameCodecTest,ProfileWireCorpusTest,ProfileReceiveDecoderTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`，本次common 10项、server 4项均通过。
+
+现有`TLSContextFactory.forProfileServer()`单独复用Bookie证书/信任库配置，固定`startTls(false)`、TLS1.3与`ClientAuth.REQUIRE`，Classic默认工厂行为不变。`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=ProfileTlsContextFactoryTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test`的2项定向测试验证真实双端握手、应用数据非明文、缺信任材料拒绝及Classic对照。该模式尚未接入Bookie listener，HELLO身份/能力处理、operation分发和真实TLS/socket内存计费仍未完成；匿名/越权拒绝和完整secret-leak矩阵未完成，步骤11仍未闭合。
 
 #### 12. 实现真实MetadataStore adapter、安装激活与registration
 

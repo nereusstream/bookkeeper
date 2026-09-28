@@ -139,6 +139,7 @@ public class TLSContextFactory implements SecurityHandlerFactory {
     }
 
     private static final String TLSCONTEXT_HANDLER_NAME = "tls";
+    private final boolean profileServer;
     private NodeType type;
     private String[] protocols;
     private String[] ciphers;
@@ -150,6 +151,19 @@ public class TLSContextFactory implements SecurityHandlerFactory {
     private long certRefreshTime;
     private volatile long certLastRefreshTime;
     private boolean isServerCtx;
+
+    public TLSContextFactory() {
+        this(false);
+    }
+
+    private TLSContextFactory(boolean profileServer) {
+        this.profileServer = profileServer;
+    }
+
+    /** Profile uses the existing key and trust material with immediate TLS 1.3 and mandatory client certificates. */
+    public static TLSContextFactory forProfileServer() {
+        return new TLSContextFactory(true);
+    }
 
     private String getPasswordFromFile(String path) throws IOException {
         byte[] pwd;
@@ -393,7 +407,7 @@ public class TLSContextFactory implements SecurityHandlerFactory {
 
         serverConf = (ServerConfiguration) config;
         provider = getTLSProvider(serverConf.getTLSProvider());
-        clientAuthentication = serverConf.getTLSClientAuthentication();
+        clientAuthentication = profileServer || serverConf.getTLSClientAuthentication();
 
         switch (KeyStoreType.valueOf(serverConf.getTLSKeyStoreType())) {
         case PEM:
@@ -420,7 +434,7 @@ public class TLSContextFactory implements SecurityHandlerFactory {
                                 .sessionCacheSize(0)
                                 .sessionTimeout(0)
                                 .sslProvider(provider)
-                                .startTls(true);
+                                .startTls(!profileServer);
 
             break;
         case JKS:
@@ -435,7 +449,7 @@ public class TLSContextFactory implements SecurityHandlerFactory {
                                 .sessionCacheSize(0)
                                 .sessionTimeout(0)
                                 .sslProvider(provider)
-                                .startTls(true);
+                                .startTls(!profileServer);
 
             break;
         default:
@@ -464,6 +478,10 @@ public class TLSContextFactory implements SecurityHandlerFactory {
             }
         }
 
+        if (profileServer) {
+            sslContextBuilder.protocols("TLSv1.3");
+        }
+
         sslContext = sslContextBuilder.build();
         certLastRefreshTime = System.currentTimeMillis();
     }
@@ -471,6 +489,9 @@ public class TLSContextFactory implements SecurityHandlerFactory {
     @Override
     public synchronized void init(NodeType type, AbstractConfiguration conf, ByteBufAllocator allocator)
             throws SecurityException {
+        if (profileServer && type != NodeType.Server) {
+            throw new SecurityException("Profile TLS context requires server mode");
+        }
         this.allocator = allocator;
         this.config = conf;
         this.type = type;
@@ -493,7 +514,9 @@ public class TLSContextFactory implements SecurityHandlerFactory {
                 throw new SecurityException(new IllegalArgumentException("Invalid NodeType"));
             }
 
-            if (enabledProtocols != null && !enabledProtocols.isEmpty()) {
+            if (profileServer) {
+                protocols = new String[] { "TLSv1.3" };
+            } else if (enabledProtocols != null && !enabledProtocols.isEmpty()) {
                 protocols = enabledProtocols.split(",");
             }
 
