@@ -266,7 +266,7 @@ asynchronously:
 - DATA durable-through与index persisted coverage cut按RFC-0003 §15分开；首批纯派生索引关闭WAL，以实际flush内容和匹配generation的durable checkpoint证明连续覆盖，未覆盖DATA重放。Put成功、查询可见或最后一个回调不能授权restart跳过扫描，也不能替代allocator/selector/tombstone authority。
 - fence/tombstone竞争沿captured admission order终结；已durable但未成功的数据不能仅凭callback丢失当作free。冲突隔离、orphan回收和极晚重试使用有界authority proof，不保存无界request history。
 
-物理batch table与逐entry pending各自维护完成事实。batch只共享写入、barrier和buffer生命周期，不提供跨entry/ledger事务原子性；完整物理结果不由RPC取消、断连、fence拒绝或回调失败决定。进入可恢复durable前缀后，每条entry分别按captured admission-generation、fence/tombstone、去重结果和定位条件发布成功。例如同批L1的Add被fence顺序明确终止而L2仍合法，batch的完整durable事实保留，L2可以成功，后续物理前缀不被L1的逻辑失败卡住；batch durable也不能替L1跳过权限检查。原Add不能成功不妨碍保留storage generation/selector有效的候选locator；它不授予read权限，读取仍走§8的独立检查。
+物理batch table与逐entry pending各自维护完成事实。batch只共享写入、barrier和buffer生命周期，不提供跨entry/ledger事务原子性；完整物理结果不由RPC取消、断连、fence拒绝或回调失败决定。进入可恢复durable前缀后，每条entry分别按captured admission-generation、fence/tombstone、去重结果和定位条件发布成功。当前选择drain pre-cut：同批L1/L2都已合法准入时，L1随后开始fence仍等待L1完成，不能仅凭pending fence撤销L1的成功资格；L2独立完成。若另行启用§5的显式终止pre-cut Add路径，同批L1被fence顺序明确终止而L2仍合法时，batch的完整durable事实仍保留，L2可以成功，后续物理前缀不被L1的逻辑失败卡住；batch durable也不能替L1跳过权限检查。原Add不能成功不妨碍保留storage generation/selector有效的候选locator；它不授予read权限，读取仍走§8的独立检查。
 
 已提交batch不能因取消某条请求而修改block、移除record或提前释放共享buffer。未提交且最终为空的合批容器不分配永久物理序号；在封包并进入提交流程时才按RFC-0003 §6.1分配。fence后未回成功的有效DATA仍可能是恢复候选，tombstone后的DATA按删除合同回收；两者不能仅因原callback失败便删除。沿用现有locator/index保存物理位置并消费权限/恢复上下文，不建立两套全量索引。
 
@@ -282,9 +282,9 @@ asynchronously:
 
 不可写范围必须覆盖该坐标原有和可能迟到的写入，不能通过换shard/stream重新接受冲突写；重启或恢复完成前不重新开放。隔离状态及解析依据消费已有storage generation、allocator/控制恢复事实，不新增逐entry成功回执日志。仅原调用超时而I/O仍可正常完成时，继续跟踪该物理结果，不将其误报为物理失败。
 
-接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、合法LAC/digest变化、相同payload但累计length冲突、corrupt digest、乱序/holes/`E>W`、DATA与locator间crash、ACK后立即合法点读、index全删恢复、stale handle与delete race；补充同批L1 fence/L2成功、提交后timeout再到不同payload、batch 11 unknown/12已完成及隔离恢复。分别记录正常新写与重复/冲突慢路径的索引读、hash、分配和复制成本。
+接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、合法LAC/digest变化、相同payload但累计length冲突、corrupt digest、乱序/holes/`E>W`、DATA与locator间crash、ACK后立即合法点读、index全删恢复、stale handle与delete race；补充同批L1/L2 pre-cut Add完成后L1 fence才durable、提交后timeout再到不同payload、batch 11 unknown/12已完成及隔离恢复。若启用显式终止pre-cut路径，另验同批L1失败/L2成功。分别记录正常新写与重复/冲突慢路径的索引读、hash、分配和复制成本。
 
-2026-09-29局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。受控normal批次现于物理候选发布后、票据释放前按entry复核准入generation；真实force期间只有L1 activation generation改变时，L1为`STALE_ADMISSION`、L2为`LOCAL_DURABLE`，两条物理候选均保留。在途同坐标normal重试由原owner比较冻结逻辑内容：相同内容等待原批次连续持久化及候选发布，冲突内容不发第二次物理写，失败等待者得到`UNKNOWN`；已发布运行期候选仍由有界I/O服务点读并复核Bookie准入与候选。仅由重启扫描恢复的物理候选返回`NOT_READY`，不能据此宣布absence或durable成功。normal与重复请求提交后停止响应等待已有隔离切片；网络deadline/断连接线、跨入口bytes预算、route/auth/selector、恢复可发布前缀及同批明确fence失败场景尚未接入，上述合同和接受场景未完成。
+2026-09-29局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。受控normal批次现于物理候选发布后、票据释放前按entry复核准入generation；真实force期间只有L1 activation generation改变时，L1为`STALE_ADMISSION`、L2为`LOCAL_DURABLE`，两条物理候选均保留。在途同坐标normal重试由原owner比较冻结逻辑内容：相同内容等待原批次连续持久化及候选发布，冲突内容不发第二次物理写，失败等待者得到`UNKNOWN`；已发布运行期候选仍由有界I/O服务点读并复核Bookie准入与候选。仅由重启扫描恢复的物理候选返回`NOT_READY`，不能据此宣布absence或durable成功。normal与重复请求提交后停止响应等待已有隔离切片；网络deadline/断连接线、跨入口bytes预算、route/auth/selector及恢复可发布前缀尚未接入；当前drain pre-cut的同批fence顺序已有隔离验证，显式终止pre-cut分支未启用，步骤6整体仍未完成。
 
 ## 7. Recovery Add
 
@@ -654,7 +654,7 @@ CPU列表语法/编号非法、重复占用关键核、映射矛盾等是配置�
 - RFC-0004 §7.3的未fenced来源先missing再收旧写、fence durable但pre-cut I/O未解析、重复/旧incarnation响应；复用Classic quorum算法并适配Profile，不能误close或新增逐entryfence fsync；
 - §8以LAC=99/entry 100验证confirmed、unconfirmed及恢复点读分层，Bookie不按local LAC截断，DATA completion不推导quorum LAC或增加逐Add LAC fsync；
 - A16/A26/B19核验P与累计应用length同前缀，LAC落后、fragment抬升、无新尾部/空ledger、边界读不可用及同P不同L的close重读均不得错误成功；
-- 同批L1 fence/L2合法、已提交timeout后同坐标不同payload、batch 11 unknown/12已完成、共享文件错误与恢复；逐entry结果不污染物理前缀，异常pending及buffer有界；
+- 同批L1/L2 pre-cut Add与L1 fence的drain顺序、已提交timeout后同坐标不同payload、batch 11 unknown/12已完成、共享文件错误与恢复；逐entry结果不污染物理前缀，异常pending及buffer有界；显式终止pre-cut路径仅在启用时验同批L1失败/L2成功；
 - 大batch中单entry独立envelope/CRC校验及必要对齐I/O、坏length、cache/pin竞态与慢客户端小slice持有；首批shared-only及后续dedicated池的资源/性能结论分别计量；
 - §10.1—10.5的ByteBuf、固定owner/shard、受保留容量保护的completion及真实durability通过B18/B19；B18用相同实现分离OFF/PARK、CPU pin、NUMA池和有界spin，对启用/可用路径验证实际mask/页分布、quota与降级、继承/唤醒竞争和语义不变。仅静态计划或无硬件run不能宣称收益；
 - 初始writer/只读/恢复打开分离，CRC32C布局/outer-inner坐标检查及unsupported digest在创建/安装拒绝；DATA不可改写、短写/barrier覆盖与physical prefix重建通过B2/B8/B9/B18/B19；
