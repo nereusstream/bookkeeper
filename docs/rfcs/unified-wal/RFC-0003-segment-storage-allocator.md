@@ -59,7 +59,7 @@ Footer / RocksDB / cache
 
 RocksDB、footer 或 data scan 不能自行宣布空间空闲。allocator authority 只能来自最新有效 checkpoint 与其后的 control log。
 
-实现进展（2026-09-26）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置与步骤3实验格式、独立parser、固定容量文件创建及真实FileChannel写入/同步，14项定向测试通过。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界。allocator、条件apply、entry成功、restart尚未实现，本RFC的Gate未提升。
+实现进展（2026-09-28）：[隔离本地存储](implementation/local-storage/README.md)已交付步骤1配置、步骤3实验格式/独立parser/固定容量文件与真实FileChannel同步、步骤5的Arena ALLOC/ALLOC_POOL持久后按序条件apply及DATA整段grant检查、步骤6的volatile连续物理前缀局部切片。[实验格式v1](implementation/local-storage/format-v1.md)记录DATA来源、控制framing、generation及校验边界；当前定向运行24项通过。Bookie控制、完整allocator恢复、逐entry成功及restart仍未实现，本RFC的Gate未提升。
 
 ## 4. 物理布局
 
@@ -164,7 +164,7 @@ group commit中，必须有明确覆盖该`controlSequence`的durability complet
 
 `ArenaControlLog`首批选择一种执行模式：**条件命令合批持久化，再由per-Arena sequencer按控制序号顺序应用**。不同时维护另一套可回滚的推测状态，也不逐操作fsync。现有Classic Journal group force仅作batching参考，其callback不直接代表semantic transition已成功。
 
-实现状态：隔离文件原型已接通ALLOC/ALLOC_POOL的单batch持久化、按序条件apply、身份校验及有界全量重放；显式`writeAuthorized`路径核对整段DATA batch grant。只读扫描可在停写后验证完整framing与grant，但不把零页宣布为unused，也不恢复连续stream前缀。Bookie控制闭环、pool used/unused恢复、FREE/MOVE与逐entry成功均未完成，不能作为本节完整allocator authority。
+实现状态：隔离文件原型已接通ALLOC/ALLOC_POOL的单batch持久化、按序条件apply、身份校验及有界全量重放；显式`writeAuthorized`路径核对整段DATA batch grant。只读扫描可在停写后验证完整framing与grant，但不把零页宣布为unused，也不重建restart的连续stream前缀；运行时只有由调用方指定起点的volatile物理前缀候选。Bookie控制闭环、pool used/unused恢复、FREE/MOVE与逐entry成功均未完成，不能作为本节完整allocator authority。
 
 ```text
 validate format / authority / bounded enqueue eligibility
