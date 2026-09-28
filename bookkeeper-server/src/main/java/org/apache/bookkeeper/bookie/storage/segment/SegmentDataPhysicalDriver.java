@@ -82,6 +82,26 @@ final class SegmentDataPhysicalDriver {
         void complete(DuplicateStatus status, Throwable failure);
     }
 
+    /** A duplicate caller may stop waiting while its comparison and Bookie ticket remain in flight. */
+    static final class DuplicateRequest {
+        private final AtomicReference<DuplicateCompletion> response;
+
+        DuplicateRequest(DuplicateCompletion completion) {
+            response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+        }
+
+        boolean stopWaiting() {
+            return response.getAndSet(null) != null;
+        }
+
+        private void complete(DuplicateStatus status, Throwable failure) {
+            DuplicateCompletion completion = response.getAndSet(null);
+            if (completion != null) {
+                completion.complete(status, failure);
+            }
+        }
+    }
+
     private record NormalKey(ProfileLedgerContext context, long entryId) { }
 
     private static final class PendingNormal {
@@ -274,6 +294,13 @@ final class SegmentDataPhysicalDriver {
      * Join a matching pending normal write or check a published one. No candidate is not proof of absence.
      * The caller first acquires one Bookie admission; this method owns it after a successful claim.
      */
+    boolean checkPublishedNormalDuplicate(SegmentBookieControlLog bookie,
+                                          SegmentBookieControlLog.Admission admission,
+                                          ByteBuffer incomingEntry, DuplicateRequest request) throws IOException {
+        Objects.requireNonNull(request, "request");
+        return checkPublishedNormalDuplicate(bookie, admission, incomingEntry, request::complete);
+    }
+
     boolean checkPublishedNormalDuplicate(SegmentBookieControlLog bookie,
                                           SegmentBookieControlLog.Admission admission,
                                           ByteBuffer incomingEntry, DuplicateCompletion completion)

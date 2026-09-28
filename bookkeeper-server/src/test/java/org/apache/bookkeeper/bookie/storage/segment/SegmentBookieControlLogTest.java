@@ -768,6 +768,7 @@ public class SegmentBookieControlLogTest {
         AtomicBoolean holdNextRead = new AtomicBoolean();
         AtomicReference<SegmentDataPhysicalDriver.NormalStatus> writeStatus = new AtomicReference<>();
         AtomicReference<Throwable> writeFailure = new AtomicReference<>();
+        AtomicInteger stoppedJoinCallbacks = new AtomicInteger();
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
@@ -823,6 +824,15 @@ public class SegmentBookieControlLogTest {
                             joinedFailure.set(failure);
                             joined.countDown();
                         }));
+                SegmentBookieControlLog.Admission stoppedJoinAdmission = bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow();
+                SegmentDataPhysicalDriver.DuplicateRequest stoppedJoin =
+                        new SegmentDataPhysicalDriver.DuplicateRequest(
+                                (result, failure) -> stoppedJoinCallbacks.incrementAndGet());
+                assertTrue(driver.checkPublishedNormalDuplicate(bookie, stoppedJoinAdmission,
+                        entryBytes(context(), 1, 0, 8, (byte) 0), stoppedJoin));
+                assertTrue(stoppedJoin.stopWaiting());
+                assertTrue(bookie.canCompleteNormal(stoppedJoinAdmission));
                 assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.CONFLICT,
                         checkPublishedDuplicate(driver, bookie, entryBytes(context(), 1, 0, 8, (byte) 1)));
                 assertEquals(1L, joined.getCount());
@@ -871,9 +881,89 @@ public class SegmentBookieControlLogTest {
                         entryBytes(context(), 1, 0, 8, (byte) 0), (result, failure) -> { }));
                 assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
                         bookie.submitFence(fence(3, (byte) 5)).status());
+                assertEquals(0, stoppedJoinCallbacks.get());
             } finally {
                 releaseForce.countDown();
                 releaseDuplicate.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void stoppedPublishedDuplicateWaiterKeepsPointReadAndFenceTicketUntilTerminal() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch written = new CountDownLatch(1);
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch releaseRead = new CountDownLatch(1);
+        AtomicBoolean holdRead = new AtomicBoolean();
+        AtomicInteger stoppedCallbacks = new AtomicInteger();
+        AtomicReference<Throwable> writeFailure = new AtomicReference<>();
+        AtomicReference<SegmentDataPhysicalDriver.NormalStatus> writeStatus = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 3, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2,
+                    task -> new Thread(task, "isolated-duplicate-cancel-io"), () -> {
+                        if (holdRead.compareAndSet(true, false)) {
+                            reading.countDown();
+                            try {
+                                if (!releaseRead.await(5, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException("Duplicate point-read was not released");
+                                }
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(interrupted);
+                            }
+                        }
+                    });
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                assertTrue(driver.submitNormal(bookie, batch(config, 1, 1, 4096), List.of(
+                        bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                        (results, failure) -> {
+                            writeFailure.set(failure);
+                            writeStatus.set(results.get(0).status());
+                            written.countDown();
+                        }));
+                owner.start();
+                assertTrue(written.await(5, TimeUnit.SECONDS));
+                assertNull(writeFailure.get());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, writeStatus.get());
+                holdRead.set(true);
+                SegmentBookieControlLog.Admission duplicateAdmission = bookie.admitNormal(
+                        context(), filled(20, (byte) 5)).orElseThrow();
+                SegmentDataPhysicalDriver.DuplicateRequest request =
+                        new SegmentDataPhysicalDriver.DuplicateRequest(
+                                (status, failure) -> stoppedCallbacks.incrementAndGet());
+                assertTrue(driver.checkPublishedNormalDuplicate(bookie, duplicateAdmission,
+                        entryBytes(context(), 1, 0, 8, (byte) 0), request));
+                assertTrue(reading.await(5, TimeUnit.SECONDS));
+                assertTrue(request.stopWaiting());
+                assertTrue(bookie.canCompleteNormal(duplicateAdmission));
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+                releaseRead.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+                assertEquals(0, stoppedCallbacks.get());
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
+                releaseRead.countDown();
                 io.shutdown();
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
                 owner.stopAdmission();

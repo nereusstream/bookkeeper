@@ -52,6 +52,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 步骤6的重复路径：`SegmentEntryIdentity`复用独立parser的BK CRC32C、context和坐标检查；`SegmentDuplicateCheck`比较真实候选中同一ledger instance/entryId的应用payload bytes和累计ledger length。受控`SegmentDataPhysicalDriver.checkPublishedNormalDuplicate`在捕获Bookie准入后，先复制并校验至多1 MiB应用数据加36字节BK头的输入。原owner若发现该坐标已有normal DATA在途，相同逻辑内容持有受owner准入数量约束的等待票据，直到原批次连续force并发布候选后才复核Bookie准入返回`SAME_DURABLE`；不同内容在占位期返回`CONFLICT`，不发第二次物理写。原批次失败时等待者返回`UNKNOWN`，已提交的物理坐标仍受不可写状态保护。若已有运行期force发布的候选，则由现有有界I/O服务点读，completion回原owner复核准入generation及候选位置，才返回`SAME_DURABLE`或`CONFLICT`。合法LAC及相应CRC差异不造成冲突，payload或累计length变化冲突，坏输入CRC在提交前拒绝；读失败返回`UNKNOWN`，未定位或仅由重启扫描恢复的候选返回`NOT_READY`，不推断absence。尚无跨入口统一bytes总账、网络deadline/断连接线与可写restart幂等；`SegmentHotDirectory.reserve`仍在物理写入前拒绝第二个同坐标DATA，因此本切片不构成对外完整幂等Add。
 
+受控重复请求现在也可传入独立`DuplicateRequest`：提交后`stopWaiting()`只原子撤销该调用的响应回调，不撤销原DATA的坐标或已启动的候选点读。等待原force的同内容重试继续占有有界owner ticket；已发布候选的慢点读继续持有Bookie票据和读取工作集，直到真实I/O与原owner完成。真实文件交错测试覆盖两条路径：前者停止等待后原force仍完成，后者停止等待期间fence保持`WAITING_PRECUT`，点读终结后才可持久化fence。网络deadline/断连接线与跨入口bytes总账仍未接通。
+
 步骤7的隔离点读局部切片：`SegmentPointRead`从独立parser已验证的batch提取record位置；读取时核对当前Arena grant、ledger固定shard、DATA文件身份、batch header与locator长度，再以4096字节对齐的有界范围读取目标record并验证外层身份和内层BK CRC32C。读取上限按格式固定，不随新写入payload阈值降低。重开后可从上述物理清单重新取得位置并点读；`SegmentDataRecovery.recoverPhysicalStreamCandidate`在调用方给定shard、generation和预期起点后，先核对重放的Arena首序号，再仅对匹配shard与stream generation的batch按sequence排序并拒绝缺口、重复和容量超限；同文件其他stream的块只保留文件身份检查及文件级恢复同步，不解析其framing；目标stream的非零页仍须通过batch/record校验和完整grant核对，缺口、重复或损坏均拒绝。隔离真实文件回归证明旧stream的损坏不阻断另一stream物理候选，而全量清单仍拒绝损坏文件；共享文件的同步错误依然使候选失败。`SegmentHotDirectory.restorePhysical`可在原owner上把同步后的候选原子装入有界热目录，核对候选的目录、持久文件配置及storage identity；容量不足、重复坐标、跨scope或仍有在途DATA时拒绝，不发布部分候选。新写入阈值等非持久准入设置可以变化。该路径已有持久首序号核对，但不证明完整恢复前缀或当前Bookie selector；当前Arena不支持FREE/复用，故尚无selector复核与allocation pin合同。隔离测试已覆盖真实normal DATA force和durable fence后关闭、重开Bookie/Arena控制日志、重放fence并从同步后的单stream物理候选点读；这只是正常关闭后的只读重开，不是崩溃/掉电或读取授权证据。重开点读只验证字节和grant，不能据此推导原请求ACK或完整restart恢复。
 
 当前没有可写重开入口：扫描到的全零尾页不证明对应坐标从未预留或提交，不能把写指针简单退到最后一个完整batch后继续使用。只读物理清单和stream候选现携带每文件已授权范围的最高结束位置；水位以内的零页不能据此当作可重用空间。这个水位不能解除旧DATA同步错误，也不证明末端前缀或水位以后的空间已经可以写入。可写恢复仍需要完整控制关系判定必要DATA、空间used/unused与末端前缀事实及旧I/O终结证据。
@@ -68,6 +70,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-09-29 执行`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=SegmentBookieControlLogTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test -q`：20项通过，0失败/错误/跳过；同模块`spotless:check checkstyle:check`通过。同坐标重复请求在原DATA force期间停止等待，原写入及另一等待者仍完成；已发布候选的点读暂停期间停止等待，Bookie票据仍阻止fence越过读取，I/O与owner终结后fence才持久化。没有网络deadline/断连接线或生产ACK验证。
 
 2026-09-29 执行`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -Dtest=SegmentBookieControlLogTest -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test -q`：19项通过，0失败/错误/跳过；同模块`spotless:check checkstyle:check`通过。真实DATA force挂起时停止一条已提交normal请求的响应等待，原Bookie票据仍有效，同坐标不同payload重试冲突；force完成后，同批另一请求得到`LOCAL_DURABLE`，已停止等待的请求无回调，相同payload重试命中已发布候选。此验证未接网络deadline/断连，也不证明可写重启或生产ACK。
 
