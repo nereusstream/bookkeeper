@@ -166,6 +166,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private long activationGeneration;
         private boolean active;
         private boolean fenced;
+        private boolean pendingTombstone;
         private UUID pendingFence;
         private int inFlight;
 
@@ -186,6 +187,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final FileChannel channel;
     private final FileLock lock;
     private final Map<Long, LedgerState> ledgers = new HashMap<>();
+    private final Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
     private final Map<UUID, AppliedOperation> operations = new HashMap<>();
     private final Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
     private long nextOffset = FIRST_RECORD;
@@ -303,6 +305,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
             start = nextOffset;
             nextOffset += bytes;
+            for (Command command : commands) {
+                if (command.type == SegmentControlFormat.Type.TOMBSTONE
+                        && !operations.containsKey(command.operationId())
+                        && !fenceOperations.containsKey(command.operationId())) {
+                    LedgerState state = ledgers.get(command.scope.ledgerId());
+                    if (state != null && state.context.equals(context(command.scope))
+                            && command.scope.authorityGeneration() >= state.install.authorityGeneration()) {
+                        state.pendingTombstone = true;
+                    }
+                }
+            }
             writing = true;
         }
         try {
@@ -359,6 +372,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     synchronized boolean normalAdmission(ProfileLedgerContext context, byte[] wireVerifier) {
         LedgerState state = ledgers.get(context.ledgerId());
         return !closed && !failed && state != null && state.active && !state.fenced
+                && !state.pendingTombstone && !tombstones.containsKey(context.ledgerId())
                 && state.pendingFence == null && state.context.equals(context)
                 && state.credential.matchesWireVerifier(wireVerifier);
     }
@@ -398,7 +412,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
         LedgerState state = admission.state;
         // A pending fence is after this pre-cut admission; the durable fence waits for this ticket.
         return !closed && !failed && ledgers.get(state.context.ledgerId()) == state
-                && state.active && !state.fenced && state.localGeneration == admission.generation;
+                && state.active && !state.fenced && !state.pendingTombstone
+                && !tombstones.containsKey(state.context.ledgerId())
+                && state.localGeneration == admission.generation;
     }
 
     synchronized boolean matchesScope(IsolatedSegmentFiles files) {
@@ -430,7 +446,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         UUID operationId = operationId(request.operationId());
         requireWritable();
         LedgerState state = ledgers.get(context.ledgerId());
-        if (state == null || !state.context.equals(context)
+        if (state == null || tombstones.containsKey(context.ledgerId()) || state.pendingTombstone
+                || !state.context.equals(context)
                 || !state.credential.matchesWireVerifier(request.credential())) {
             return new FenceAttempt(new FenceResult(FenceStatus.REJECTED, 0), null);
         }
@@ -520,7 +537,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private void applyFence(ProfileLedgerContext context, UUID operationId) throws IOException {
         LedgerState state = ledgers.get(context.ledgerId());
-        if (state == null || !state.context.equals(context) || state.fenced || state.inFlight != 0
+        if (state == null || tombstones.containsKey(context.ledgerId())
+                || !state.context.equals(context) || state.fenced || state.inFlight != 0
                 || operations.containsKey(operationId) || fenceOperations.containsKey(operationId)) {
             throw new IOException("Invalid durable fence order");
         }
@@ -561,11 +579,19 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 || scope.operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT) {
             return new Command(SegmentControlFormat.Type.ACTIVATE, scope, null, null, null);
         }
+        if (scope.operation() == ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY) {
+            return new Command(SegmentControlFormat.Type.TOMBSTONE, scope, null, null, null);
+        }
         throw new IllegalArgumentException("Bookie control operation is not implemented");
     }
 
     private Status apply(Command command) {
         UUID operationId = command.operationId();
+        LedgerState state = ledgers.get(command.scope.ledgerId());
+        if (command.type == SegmentControlFormat.Type.TOMBSTONE && state != null
+                && state.context.equals(context(command.scope))) {
+            state.pendingTombstone = false;
+        }
         if (fenceOperations.containsKey(operationId)) {
             return Status.INCOMPATIBLE;
         }
@@ -575,10 +601,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     ? prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status()
                     : Status.INCOMPATIBLE;
         }
-        LedgerState state = ledgers.get(command.scope.ledgerId());
         Status status;
         if (command.type == SegmentControlFormat.Type.INSTALL) {
-            if (state == null) {
+            if (tombstones.containsKey(command.scope.ledgerId())) {
+                status = Status.CONDITION_FAILED;
+            } else if (state == null) {
                 state = new LedgerState(command);
                 ledgers.put(command.scope.ledgerId(), state);
                 status = Status.APPLIED_DURABLE;
@@ -591,8 +618,26 @@ final class SegmentBookieControlLog implements AutoCloseable {
             } else {
                 status = Status.CONDITION_FAILED;
             }
+        } else if (command.type == SegmentControlFormat.Type.TOMBSTONE) {
+            ProfileLedgerContext target = context(command.scope);
+            ProfileLedgerContext terminal = tombstones.get(command.scope.ledgerId());
+            if (terminal != null) {
+                status = terminal.equals(target) ? Status.ALREADY_DURABLE : Status.CONDITION_FAILED;
+            } else if (state != null && (!state.context.equals(target)
+                    || command.scope.authorityGeneration() < state.install.authorityGeneration())) {
+                status = Status.CONDITION_FAILED;
+            } else {
+                tombstones.put(command.scope.ledgerId(), target);
+                if (state != null) {
+                    state.active = false;
+                    state.pendingFence = null;
+                    state.localGeneration++;
+                }
+                status = Status.APPLIED_DURABLE;
+            }
         } else {
-            if (state == null || !state.context.equals(context(command.scope))
+            if (tombstones.containsKey(command.scope.ledgerId())
+                    || state == null || !state.context.equals(context(command.scope))
                     || state.fenced
                     || command.scope.authorityGeneration() < state.install.authorityGeneration()
                     || command.scope.authorityGeneration() <= state.activationGeneration
@@ -670,7 +715,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private Command decode(SegmentControlParser.Command parsed) throws IOException {
         if (parsed.type() != SegmentControlFormat.Type.INSTALL
-                && parsed.type() != SegmentControlFormat.Type.ACTIVATE) {
+                && parsed.type() != SegmentControlFormat.Type.ACTIVATE
+                && parsed.type() != SegmentControlFormat.Type.TOMBSTONE) {
             throw new IOException("Unsupported Bookie control command");
         }
         try {
@@ -681,8 +727,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 throw new IOException("Bookie control scope or generation mismatch");
             }
             if (parsed.type() == SegmentControlFormat.Type.ACTIVATE) {
-                if (scope.operation() == ProfileControlOperation.INSTALL || body.hasRemaining()) {
+                if ((scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL
+                        && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT)
+                        || body.hasRemaining()) {
                     throw new IOException("Invalid activation body");
+                }
+                return new Command(parsed.type(), scope, null, null, null);
+            }
+            if (parsed.type() == SegmentControlFormat.Type.TOMBSTONE) {
+                if (scope.operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
+                        || body.hasRemaining()) {
+                    throw new IOException("Invalid tombstone body");
                 }
                 return new Command(parsed.type(), scope, null, null, null);
             }
@@ -715,7 +770,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private ByteBuffer body(Command command) {
         ByteBuffer scope = encodeScope(command.scope);
-        if (command.type == SegmentControlFormat.Type.ACTIVATE) {
+        if (command.type != SegmentControlFormat.Type.INSTALL) {
             return scope;
         }
         return ByteBuffer.allocate(scope.remaining() + 2 + command.descriptor.length
@@ -731,6 +786,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             case INSTALL -> 1;
             case ACTIVATE_INITIAL -> 2;
             case ACTIVATE_REPLACEMENT -> 3;
+            case TOMBSTONE_OR_DELETE_APPLY -> 4;
             default -> throw new IllegalArgumentException("Unsupported Bookie control scope");
         };
         return ByteBuffer.allocate(4 + 8 + 16 + 36 + 16 + 8 + 32 + 2 + target.length + 2 + domain.length)
@@ -746,6 +802,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             case 1 -> ProfileControlOperation.INSTALL;
             case 2 -> ProfileControlOperation.ACTIVATE_INITIAL;
             case 3 -> ProfileControlOperation.ACTIVATE_REPLACEMENT;
+            case 4 -> ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY;
             default -> throw new IOException("Unsupported Bookie control operation");
         };
         long ledgerId = body.getLong();

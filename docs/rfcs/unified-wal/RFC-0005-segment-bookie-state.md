@@ -133,7 +133,7 @@ cluster READY/standard membership先提交、local activation后消费；route/i
 
 ### 5.2 下一原型的真实持久化拓扑
 
-状态：**局部隔离实现 / 整体未完成**。`INSTALL`与`ACTIVATE`的Bookie控制文件切片已有真实FileChannel写入、force、顺序apply及完整重放；受控`FENCE`先切断新准入，等待已准入票据标记物理终结后再force，重放可恢复fenced状态；隔离测试还覆盖真实normal DATA force与durable fence后关闭、重开Bookie/Arena控制日志并点读同步候选，尚非崩溃恢复或完整read gate。它只接受调用方提供的typed committed authority或受控fence凭据，尚未接真实MetadataStore、mTLS授权、Bookie服务或生产DATA成功路径。票据已接入隔离真实DATA FileChannel驱动，待物理I/O和owner回调都终结后才释放；候选发布后、票据释放前按entry复核捕获的准入generation，可返回隔离本地结果。Bookie控制owner驱动已将INSTALL/ACTIVATE与FENCE写入和force放到预留控制I/O服务，durable后回原owner顺序apply。在途同坐标normal重试已有受控合并；normal与重复请求提交后停止响应等待已有隔离切片；网络deadline/断连接线与完整请求生命周期、recovery grant/tombstone、checkpoint/rotation及完整启动仍未实施。在new BookieId/new storage scope内的目标拓扑为：
+状态：**局部隔离实现 / 整体未完成**。`INSTALL`与`ACTIVATE`的Bookie控制文件切片已有真实FileChannel写入、force、顺序apply及完整重放；受控`FENCE`先切断新准入，等待已准入票据标记物理终结后再force，重放可恢复fenced状态；隔离测试还覆盖真实normal DATA force与durable fence后关闭、重开Bookie/Arena控制日志并点读同步候选，尚非崩溃恢复或完整read gate。受控`TOMBSTONE`也已接入该控制文件：匹配实例在force前关闭normal新准入和在途结果资格，durable后建立terminal route，重放仍拒绝迟到INSTALL/ACTIVATE；错误实例不撤销当前route，同批其他ledger的DATA结果独立判定。它只接受调用方提供的typed committed authority或受控fence凭据，尚未接真实MetadataStore、mTLS授权、Bookie服务或生产DATA成功路径。票据已接入隔离真实DATA FileChannel驱动，待物理I/O和owner回调都终结后才释放；候选发布后、票据释放前按entry复核捕获的准入generation，可返回隔离本地结果。Bookie控制owner驱动已将INSTALL/ACTIVATE与FENCE写入和force放到预留控制I/O服务，durable后回原owner顺序apply。在途同坐标normal重试已有受控合并；normal与重复请求提交后停止响应等待已有隔离切片；网络deadline/断连接线与完整请求生命周期、recovery grant、read gate、tombstone清理义务/delete-applied cursor、checkpoint/rotation及完整启动仍未实施。在new BookieId/new storage scope内的目标拓扑为：
 
 ```text
 Bookie-level protected control log + A/B checkpoint

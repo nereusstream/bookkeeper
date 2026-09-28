@@ -155,6 +155,22 @@ public class SegmentBookieControlLogTest {
                         EngineProfile.SEGMENT_WAL_ENGINE, 3, true), null);
     }
 
+    private static ProtectedProfileStateStore.Transition tombstone(long ledgerId, int operationId) {
+        return tombstone(ledgerId, operationId, (byte) 1);
+    }
+
+    private static ProtectedProfileStateStore.Transition tombstone(long ledgerId, int operationId, byte instance) {
+        ProfileControlScope base = scope(ledgerId, ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY,
+                operationId, 4);
+        ProfileControlScope scope = new ProfileControlScope(base.operation(), base.purpose(), ledgerId,
+                filled(16, instance), DESCRIPTOR_IDENTITY, base.targetBookie(), base.targetStorageIncarnation(),
+                base.authorityDomain(), base.authorityGeneration(), base.operationId(),
+                base.publicSemanticPayloadIdentity(), null);
+        return new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(scope),
+                new CommittedProfileAuthority(scope, CommittedProfileAuthority.State.DELETE_AUTHORIZED,
+                        EngineProfile.SEGMENT_WAL_ENGINE, 4, true), null);
+    }
+
     private static ProfileOperationCodec.FenceLedger fence(int operationId, byte verifier) {
         byte[] id = new byte[16];
         id[15] = (byte) operationId;
@@ -275,6 +291,124 @@ public class SegmentBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
                     replay.submitBatch(List.of(install(3, (byte) 5))).get(0).status());
             assertTrue(replay.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+    }
+
+    @Test
+    public void tombstoneBeforeInstallRemainsTerminalAcrossReplay() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(install(21, (byte) 5))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(activate(22))).get(0).status());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    replay.submitBatch(List.of(install(23, (byte) 5))).get(0).status());
+            assertFalse(replay.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+    }
+
+    @Test
+    public void wrongInstanceTombstoneDoesNotCutActiveRoute() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(tombstone(44, 20, (byte) 8))).get(0).status());
+            assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitBatch(List.of(tombstone(44, 21))).get(0).status());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(activate(22))).get(0).status());
+            assertEquals(SegmentBookieControlLog.FenceStatus.REJECTED,
+                    log.submitFence(fence(23, (byte) 5)).status());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertFalse(replay.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitBatch(List.of(tombstone(44, 21))).get(0).status());
+        }
+    }
+
+    @Test
+    public void pendingTombstoneCutsNewAdmissionBeforeForceReturns() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger forces = new AtomicInteger();
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (forces.incrementAndGet() == 2) {
+                forcing.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Tombstone force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+        });
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            AtomicReference<List<SegmentBookieControlLog.Result>> result = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread worker = new Thread(() -> {
+                try {
+                    result.set(log.submitBatch(List.of(tombstone(44, 20))));
+                } catch (Throwable cause) {
+                    failure.set(cause);
+                }
+            });
+            worker.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                FutureTask<Boolean> query = new FutureTask<>(
+                        () -> log.normalAdmission(context(), filled(20, (byte) 5)));
+                new Thread(query).start();
+                assertFalse(query.get(1, TimeUnit.SECONDS));
+            } finally {
+                release.countDown();
+                worker.join(5000);
+            }
+            assertFalse(worker.isAlive());
+            assertNull(failure.get());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.get().get(0).status());
+        }
+    }
+
+    @Test
+    public void uncertainTombstoneForceNeverReopensNormalAdmissionInCurrentProcess() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false);
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(tombstone(44, 20))));
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertTrue(log.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
         }
     }
 
@@ -676,6 +810,80 @@ public class SegmentBookieControlLogTest {
                 assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
             }
             assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void tombstoneMakesOnlyItsInFlightEntryStaleAfterSharedDataForce() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<List<SegmentDataPhysicalDriver.NormalResult>> results = new AtomicReference<>();
+        AtomicReference<Throwable> dataFailure = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 2, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(2, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                assertTrue(driver.submitNormal(bookie, twoLedgerBatch(config), List.of(
+                        bookie.admitNormal(context(44), filled(20, (byte) 5)).orElseThrow(),
+                        bookie.admitNormal(context(48), filled(20, (byte) 5)).orElseThrow()),
+                        (entries, failure) -> {
+                            owner.requireOwner();
+                            results.set(entries);
+                            dataFailure.set(failure);
+                            completed.countDown();
+                        }));
+                owner.start();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+                assertTrue(bookie.admitNormal(context(44), filled(20, (byte) 5)).isEmpty());
+                assertTrue(bookie.normalAdmission(context(48), filled(20, (byte) 5)));
+                releaseForce.countDown();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                assertNull(dataFailure.get());
+                assertEquals(2, results.get().size());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.STALE_ADMISSION, results.get().get(0).status());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, results.get().get(1).status());
+                assertEquals(1, SegmentPointRead.read(config, identity, arena, results.get().get(0).candidate())
+                        .record().entryId());
+                assertEquals(2, SegmentPointRead.read(config, identity, arena, results.get().get(1).candidate())
+                        .record().entryId());
+            } finally {
+                releaseForce.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertFalse(replay.normalAdmission(context(44), filled(20, (byte) 5)));
+            assertTrue(replay.normalAdmission(context(48), filled(20, (byte) 5)));
         }
     }
 
