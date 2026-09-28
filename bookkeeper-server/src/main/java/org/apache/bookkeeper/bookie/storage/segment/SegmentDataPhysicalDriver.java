@@ -20,6 +20,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,16 +57,40 @@ final class SegmentDataPhysicalDriver {
         void complete(DuplicateStatus status, Throwable failure);
     }
 
+    private record NormalKey(ProfileLedgerContext context, long entryId) { }
+
+    private static final class PendingNormal {
+        private final NormalKey key;
+        private final SegmentEntryIdentity identity;
+        private final List<WaitingDuplicate> waiters = new ArrayList<>();
+
+        private PendingNormal(SegmentBatchParser.Record record) throws IOException {
+            key = new NormalKey(record.context(), record.entryId());
+            identity = SegmentEntryIdentity.parse(record.context(), record.entry());
+        }
+    }
+
+    private record WaitingDuplicate(SegmentOwnerLoop.Ticket ticket, Obligation obligation,
+                                    AtomicReference<DuplicateStatus> status,
+                                    AtomicReference<SegmentPointRead.Location> selected) { }
+
     private static final class Obligation {
         private final Completion completion;
         private final List<SegmentBookieControlLog.Admission> admissions;
+        private final List<PendingNormal> normals;
         private boolean physicalTerminal;
         private boolean ownerTerminal;
         private boolean released;
 
         private Obligation(Completion completion, List<SegmentBookieControlLog.Admission> admissions) {
+            this(completion, admissions, List.of());
+        }
+
+        private Obligation(Completion completion, List<SegmentBookieControlLog.Admission> admissions,
+                           List<PendingNormal> normals) {
             this.completion = completion;
             this.admissions = List.copyOf(admissions);
+            this.normals = List.copyOf(normals);
         }
 
         synchronized void physicalTerminal() {
@@ -107,6 +132,7 @@ final class SegmentDataPhysicalDriver {
     private final SegmentPhysicalPrefix prefix;
     private final SegmentHotDirectory hot;
     private final Map<IsolatedSegmentFiles.Reservation, Obligation> pending = new IdentityHashMap<>();
+    private final Map<NormalKey, PendingNormal> pendingNormals = new HashMap<>();
 
     SegmentDataPhysicalDriver(int shard, SegmentOwnerLoop owner, SegmentIoExecutor io,
                               IsolatedSegmentFiles files, SegmentArenaControlLog authority,
@@ -140,6 +166,7 @@ final class SegmentDataPhysicalDriver {
         List<SegmentBookieControlLog.Admission> input = List.copyOf(admissions);
         bookie.claimForDriver(input);
         List<SegmentBatchParser.Record> records;
+        List<PendingNormal> normals;
         try {
             if (!bookie.matchesScope(files)) {
                 throw new IOException("Bookie control log and DATA files have different storage scopes");
@@ -157,6 +184,11 @@ final class SegmentDataPhysicalDriver {
                 }
             }
             records = parsed.records();
+            List<PendingNormal> identities = new ArrayList<>(records.size());
+            for (SegmentBatchParser.Record record : records) {
+                identities.add(new PendingNormal(record));
+            }
+            normals = List.copyOf(identities);
         } catch (IOException | RuntimeException | Error failure) {
             for (SegmentBookieControlLog.Admission admission : input) {
                 admission.driverTerminal();
@@ -165,8 +197,10 @@ final class SegmentDataPhysicalDriver {
         }
         Completion physical = (candidates, failure) -> {
             if (failure == null && (candidates == null || candidates.size() != records.size())) {
+                finishPendingNormals(normals, null, new IOException("Normal DATA candidate count mismatch"));
                 throw new IllegalStateException("Normal DATA lacks one published candidate per entry");
             }
+            finishPendingNormals(normals, candidates, failure);
             List<NormalResult> results = new ArrayList<>(records.size());
             for (int i = 0; i < records.size(); i++) {
                 SegmentBatchParser.Record record = records.get(i);
@@ -178,12 +212,12 @@ final class SegmentDataPhysicalDriver {
             }
             completion.complete(List.copyOf(results), failure);
         };
-        Obligation obligation = new Obligation(physical, input);
+        Obligation obligation = new Obligation(physical, input, normals);
         return submitPhysical(batch, obligation);
     }
 
     /**
-     * Slow path for a previously published live normal coordinate. No candidate is not proof of absence.
+     * Join a matching pending normal write or check a published one. No candidate is not proof of absence.
      * The caller first acquires one Bookie admission; this method owns it after a successful claim.
      */
     boolean checkPublishedNormalDuplicate(SegmentBookieControlLog bookie,
@@ -195,7 +229,7 @@ final class SegmentDataPhysicalDriver {
         Objects.requireNonNull(completion, "completion");
         bookie.claimForDriver(List.of(admission));
         ProfileLedgerContext context = admission.context();
-        long entryId;
+        SegmentEntryIdentity identity;
         ByteBuffer copy;
         try {
             if (!bookie.matchesScope(files)) {
@@ -208,19 +242,21 @@ final class SegmentDataPhysicalDriver {
             }
             copy = ByteBuffer.allocate(length);
             copy.put(incomingEntry.slice()).flip();
-            entryId = SegmentEntryIdentity.parse(context, copy).entryId();
+            identity = SegmentEntryIdentity.parse(context, copy);
         } catch (IOException | RuntimeException | Error failure) {
             admission.driverTerminal();
             throw failure;
         }
         AtomicReference<DuplicateStatus> status = new AtomicReference<>(DuplicateStatus.NOT_READY);
         AtomicReference<SegmentPointRead.Location> selected = new AtomicReference<>();
+        long entryId = identity.entryId();
         Obligation obligation = new Obligation((unused, failure) -> {
             DuplicateStatus result = failure == null ? status.get() : DuplicateStatus.UNKNOWN;
             if (result == DuplicateStatus.SAME_DURABLE || result == DuplicateStatus.CONFLICT) {
                 if (!bookie.canCompleteNormal(admission)) {
                     result = DuplicateStatus.STALE_ADMISSION;
-                } else if (!hot.liveDurableCandidate(context, entryId).filter(selected.get()::equals).isPresent()) {
+                } else if (selected.get() != null
+                        && !hot.liveDurableCandidate(context, entryId).filter(selected.get()::equals).isPresent()) {
                     result = DuplicateStatus.NOT_READY;
                 }
             }
@@ -236,6 +272,16 @@ final class SegmentDataPhysicalDriver {
                 public void run(SegmentOwnerLoop.Ticket ticket) {
                     SegmentPointRead.Location location = hot.liveDurableCandidate(context, entryId).orElse(null);
                     if (location == null) {
+                        PendingNormal pendingNormal = pendingNormals.get(new NormalKey(context, entryId));
+                        if (pendingNormal != null) {
+                            if (pendingNormal.identity.sameLogicalPayload(identity)) {
+                                pendingNormal.waiters.add(new WaitingDuplicate(ticket, obligation, status, selected));
+                                obligation.physicalTerminal();
+                                submitted = true;
+                                return;
+                            }
+                            status.set(DuplicateStatus.CONFLICT);
+                        }
                         obligation.physicalTerminal();
                         ticket.complete(() -> deliverDuplicate(obligation, null));
                         return;
@@ -288,10 +334,14 @@ final class SegmentDataPhysicalDriver {
 
                 @Override
                 public void run(SegmentOwnerLoop.Ticket ticket) {
-                    SegmentHotDirectory.Admission admission;
+                    SegmentHotDirectory.Admission admission = null;
                     try {
                         admission = hot.reserve(batch);
+                        registerPendingNormals(obligation);
                     } catch (IOException failure) {
+                        if (admission != null) {
+                            hot.cancelBeforeSubmission(admission);
+                        }
                         obligation.physicalTerminal();
                         ticket.complete(() -> deliver(obligation, null, failure, null));
                         return;
@@ -353,6 +403,37 @@ final class SegmentDataPhysicalDriver {
             obligation.abortBeforeOwner();
         }
         return accepted;
+    }
+
+    private void registerPendingNormals(Obligation obligation) throws IOException {
+        owner.requireOwner();
+        for (PendingNormal normal : obligation.normals) {
+            if (pendingNormals.containsKey(normal.key)) {
+                throw new IOException("Normal coordinate already pending");
+            }
+        }
+        for (PendingNormal normal : obligation.normals) {
+            pendingNormals.put(normal.key, normal);
+        }
+    }
+
+    private void finishPendingNormals(List<PendingNormal> normals, List<SegmentPointRead.Location> candidates,
+                                      Throwable failure) {
+        owner.requireOwner();
+        for (int i = 0; i < normals.size(); i++) {
+            PendingNormal normal = normals.get(i);
+            if (pendingNormals.remove(normal.key, normal)) {
+                for (WaitingDuplicate waiter : normal.waiters) {
+                    if (failure == null) {
+                        waiter.status.set(DuplicateStatus.SAME_DURABLE);
+                        waiter.selected.set(candidates.get(i));
+                    } else {
+                        waiter.status.set(DuplicateStatus.UNKNOWN);
+                    }
+                    waiter.ticket.complete(() -> deliverDuplicate(waiter.obligation, failure));
+                }
+            }
+        }
     }
 
     private void physicalFinished(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {

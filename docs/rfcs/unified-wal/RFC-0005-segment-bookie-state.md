@@ -133,7 +133,7 @@ cluster READY/standard membership先提交、local activation后消费；route/i
 
 ### 5.2 下一原型的真实持久化拓扑
 
-状态：**局部隔离实现 / 整体未完成**。`INSTALL`与`ACTIVATE`的Bookie控制文件切片已有真实FileChannel写入、force、顺序apply及完整重放；受控`FENCE`先切断新准入，等待已准入票据标记物理终结后再force，重放可恢复fenced状态。它只接受调用方提供的typed committed authority或受控fence凭据，尚未接真实MetadataStore、mTLS授权、Bookie服务或生产DATA成功路径。票据已接入隔离真实DATA FileChannel驱动，待物理I/O和owner回调都终结后才释放；候选发布后、票据释放前按entry复核捕获的准入generation，可返回隔离本地结果。Bookie控制owner驱动已将INSTALL/ACTIVATE与FENCE写入和force放到预留控制I/O服务，durable后回原owner顺序apply。请求级幂等/timeout生命周期、recovery grant/tombstone、checkpoint/rotation及完整启动仍未实施。在new BookieId/new storage scope内的目标拓扑为：
+状态：**局部隔离实现 / 整体未完成**。`INSTALL`与`ACTIVATE`的Bookie控制文件切片已有真实FileChannel写入、force、顺序apply及完整重放；受控`FENCE`先切断新准入，等待已准入票据标记物理终结后再force，重放可恢复fenced状态。它只接受调用方提供的typed committed authority或受控fence凭据，尚未接真实MetadataStore、mTLS授权、Bookie服务或生产DATA成功路径。票据已接入隔离真实DATA FileChannel驱动，待物理I/O和owner回调都终结后才释放；候选发布后、票据释放前按entry复核捕获的准入generation，可返回隔离本地结果。Bookie控制owner驱动已将INSTALL/ACTIVATE与FENCE写入和force放到预留控制I/O服务，durable后回原owner顺序apply。在途同坐标normal重试已有受控合并；完整请求级timeout/取消生命周期、recovery grant/tombstone、checkpoint/rotation及完整启动仍未实施。在new BookieId/new storage scope内的目标拓扑为：
 
 ```text
 Bookie-level protected control log + A/B checkpoint
@@ -280,7 +280,7 @@ asynchronously:
 
 接受场景必须包含相同/不同payload并发、normal/recovery交叉重试、合法LAC/digest变化、相同payload但累计length冲突、corrupt digest、乱序/holes/`E>W`、DATA与locator间crash、ACK后立即合法点读、index全删恢复、stale handle与delete race；补充同批L1 fence/L2成功、提交后timeout再到不同payload、batch 11 unknown/12已完成及隔离恢复。分别记录正常新写与重复/冲突慢路径的索引读、hash、分配和复制成本。
 
-2026-09-28局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。受控normal批次现于物理候选发布后、票据释放前按entry复核准入generation；真实force期间只有L1 activation generation改变时，L1为`STALE_ADMISSION`、L2为`LOCAL_DURABLE`，两条物理候选均保留。已发布运行期候选的重复慢路径接入原owner和有界I/O服务，点读后再复核Bookie准入与候选；在途及仅由重启扫描恢复的物理候选返回`NOT_READY`，不能据此宣布absence或durable成功。当前重复物理写入仍被隔离热目录拒绝；请求级并发pending合并、完整route/auth/selector、恢复可发布前缀及同批明确fence失败场景尚未接入，上述合同和接受场景未完成。
+2026-09-28局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。受控normal批次现于物理候选发布后、票据释放前按entry复核准入generation；真实force期间只有L1 activation generation改变时，L1为`STALE_ADMISSION`、L2为`LOCAL_DURABLE`，两条物理候选均保留。在途同坐标normal重试由原owner比较冻结逻辑内容：相同内容等待原批次连续持久化及候选发布，冲突内容不发第二次物理写，失败等待者得到`UNKNOWN`；已发布运行期候选仍由有界I/O服务点读并复核Bookie准入与候选。仅由重启扫描恢复的物理候选返回`NOT_READY`，不能据此宣布absence或durable成功。完整timeout/取消、跨入口bytes预算、route/auth/selector、恢复可发布前缀及同批明确fence失败场景尚未接入，上述合同和接受场景未完成。
 
 ## 7. Recovery Add
 
