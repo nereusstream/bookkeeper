@@ -1,0 +1,410 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.bookie.storage.segment;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import org.apache.bookkeeper.common.profile.startup.Generation;
+
+/** Isolated single-Arena allocation authority; no DATA, FREE, MOVE or production Bookie access. */
+final class SegmentArenaControlLog implements AutoCloseable {
+    static final long BLOCK_BYTES = 1024 * 1024;
+    private static final long FIRST_RECORD = 4096;
+    private static final Generation LOG_GENERATION = new Generation(1);
+
+    record Allocation(SegmentControlFormat.Type type, UUID operationId, Generation operationGeneration,
+                      long expectedGeneration, int file, int ownerShard, Generation ownerGeneration,
+                      long offset, int blocks) {
+        Allocation {
+            if (type != SegmentControlFormat.Type.ALLOC && type != SegmentControlFormat.Type.ALLOC_POOL) {
+                throw new IllegalArgumentException("Only ALLOC and ALLOC_POOL are enabled");
+            }
+            Objects.requireNonNull(operationId, "operationId");
+            Objects.requireNonNull(operationGeneration, "operationGeneration");
+            Objects.requireNonNull(ownerGeneration, "ownerGeneration");
+            if (operationId.equals(new UUID(0, 0)) || expectedGeneration < 0 || blocks < 1
+                    || (type == SegmentControlFormat.Type.ALLOC && blocks != 1)) {
+                throw new IllegalArgumentException("Invalid allocation command");
+            }
+        }
+
+        ByteBuffer body() {
+            return ByteBuffer.allocate(32).putInt(file).putInt(ownerShard).putLong(ownerGeneration.value())
+                    .putLong(offset).putInt(blocks).putInt(0).flip();
+        }
+    }
+
+    enum Status {
+        APPLIED_DURABLE, ALREADY_DURABLE, CONDITION_FAILED, INCOMPATIBLE
+    }
+
+    record Result(Status status, UUID operationId, long sequence, long generation,
+                  long durableThrough, long appliedThrough) { }
+
+    record DurableBatch(long firstSequence, List<Allocation> commands) {
+        DurableBatch {
+            commands = List.copyOf(commands);
+        }
+    }
+
+    private record Slot(int file, long index) { }
+
+    private record Grant(Allocation command, long generation) { }
+
+    private record AppliedOperation(Allocation command, Status status) { }
+
+    private final IsolatedSegmentConfig config;
+    private final long maxLogBytes;
+    private final SegmentFileIo io;
+    private final FileChannel channel;
+    private final FileLock lock;
+    private final Map<Slot, Grant> allocations = new HashMap<>();
+    private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
+    private long nextOffset = FIRST_RECORD;
+    private long durableThrough = -1;
+    private long appliedThrough = -1;
+    private DurableBatch pending;
+    private boolean failed;
+    private boolean closed;
+
+    private SegmentArenaControlLog(IsolatedSegmentConfig config, long maxLogBytes, SegmentFileIo io,
+                                   FileChannel channel, FileLock lock) {
+        this.config = config;
+        this.maxLogBytes = maxLogBytes;
+        this.io = io;
+        this.channel = channel;
+        this.lock = lock;
+    }
+
+    static SegmentArenaControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                       long maxLogBytes) throws IOException {
+        return open(config, identity, maxLogBytes, new SegmentFileIo());
+    }
+
+    static SegmentArenaControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                       long maxLogBytes, SegmentFileIo io) throws IOException {
+        Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(identity, "identity");
+        Objects.requireNonNull(io, "io");
+        if (maxLogBytes < FIRST_RECORD + 176) {
+            throw new IllegalArgumentException("Control log capacity cannot hold one record");
+        }
+        FileChannel channel = FileChannel.open(config.directory().resolve("arena-control"),
+                StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        FileLock lock = null;
+        try {
+            try {
+                lock = channel.tryLock();
+            } catch (OverlappingFileLockException overlapping) {
+                throw new IOException("Arena control log already has a writer", overlapping);
+            }
+            if (lock == null) {
+                throw new IOException("Arena control log already has a writer");
+            }
+            SegmentArenaControlLog result = new SegmentArenaControlLog(config, maxLogBytes, io, channel, lock);
+            result.validateStorageFiles(identity);
+            result.recover(identity);
+            return result;
+        } catch (IOException | RuntimeException | Error failure) {
+            if (lock != null) {
+                try {
+                    lock.release();
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+            }
+            try {
+                channel.close();
+            } catch (IOException cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        }
+    }
+
+    /** One physical force covers the whole batch; no result is applied before that force returns. */
+    synchronized DurableBatch appendDurably(List<Allocation> commands) throws IOException {
+        requireWritable();
+        List<Allocation> batch = List.copyOf(commands);
+        if (pending != null || batch.isEmpty() || batch.size() > config.maxPendingEntries()) {
+            throw new IllegalArgumentException("Invalid or unresolved control batch");
+        }
+        List<ByteBuffer> encoded = new ArrayList<>(batch.size());
+        long bytes = 0;
+        long sequence = durableThrough + 1;
+        for (Allocation command : batch) {
+            validateRange(command);
+            ByteBuffer record = SegmentControlFormat.encode(command.type(), LOG_GENERATION, sequence++,
+                    command.operationId(), command.operationGeneration(), command.expectedGeneration(),
+                    command.body());
+            bytes = Math.addExact(bytes, record.remaining());
+            encoded.add(record);
+        }
+        if (bytes > maxLogBytes - nextOffset) {
+            throw new IOException("Arena control log capacity exhausted");
+        }
+        long start = nextOffset;
+        // Reserve the physical suffix before the first write; failure never reuses its coordinates.
+        nextOffset += bytes;
+        try {
+            long position = start;
+            for (ByteBuffer record : encoded) {
+                io.writeFully(channel, record, position);
+                position += record.remaining();
+            }
+            io.force(channel, true);
+            durableThrough = sequence - 1;
+            pending = new DurableBatch(durableThrough - batch.size() + 1, batch);
+            return pending;
+        } catch (IOException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
+    }
+
+    synchronized List<Result> applyDurable(DurableBatch batch) throws IOException {
+        requireWritable();
+        if (pending != batch || batch.firstSequence() != appliedThrough + 1) {
+            throw new IllegalArgumentException("Only the next durable batch can be applied");
+        }
+        List<Result> results = new ArrayList<>(batch.commands().size());
+        try {
+            for (Allocation command : batch.commands()) {
+                long sequence = ++appliedThrough;
+                Status status = apply(command);
+                long generation = status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE
+                        ? command.expectedGeneration() + 1 : 0;
+                results.add(new Result(status, command.operationId(), sequence, generation,
+                        durableThrough, appliedThrough));
+            }
+        } catch (RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
+        pending = null;
+        return List.copyOf(results);
+    }
+
+    synchronized List<Result> submitBatch(List<Allocation> commands) throws IOException {
+        return applyDurable(appendDurably(commands));
+    }
+
+    synchronized boolean hasAppliedGrant(int file, long offset, int ownerShard, long ownerGeneration,
+                                         long allocationGeneration) {
+        if (failed || closed || file < 0 || file >= config.dataFiles() || offset < FIRST_RECORD
+                || (offset - FIRST_RECORD) % BLOCK_BYTES != 0) {
+            return false;
+        }
+        Grant grant = allocations.get(slot(file, offset));
+        return grant != null && grant.command().ownerShard() == ownerShard
+                && grant.command().ownerGeneration().value() == ownerGeneration
+                && grant.generation() == allocationGeneration;
+    }
+
+    synchronized long durableThrough() {
+        return durableThrough;
+    }
+
+    synchronized long appliedThrough() {
+        return appliedThrough;
+    }
+
+    private void recover(SegmentFileHeader identity) throws IOException {
+        long size = channel.size();
+        if (size < FIRST_RECORD || size > maxLogBytes) {
+            throw new IOException("Invalid Arena control log size");
+        }
+        ByteBuffer header = ByteBuffer.allocate(4096);
+        SegmentFileIo.readFully(channel, header, 0);
+        identity.validate(header, config, -4);
+        long sequence = 0;
+        for (long offset = FIRST_RECORD; offset < size;) {
+            int length = recordLength(offset, size, sequence++);
+            offset += length;
+        }
+        // Complete records can include a lost response. Establish durability before exposing replayed grants.
+        channel.force(true);
+        sequence = 0;
+        for (long offset = FIRST_RECORD; offset < size;) {
+            int length = recordLength(offset, size, sequence);
+            Allocation command = readAllocation(offset, length, sequence);
+            durableThrough = sequence;
+            appliedThrough = sequence;
+            apply(command);
+            offset += length;
+            sequence++;
+        }
+        nextOffset = size;
+    }
+
+    private void validateStorageFiles(SegmentFileHeader identity) throws IOException {
+        if (Files.isSymbolicLink(config.directory())) {
+            throw new IOException("Isolated storage directory cannot be a symlink");
+        }
+        validateIdentityFile(config.directory().resolve("superblock-a"), identity, -1, 4096);
+        validateIdentityFile(config.directory().resolve("superblock-b"), identity, -2, 4096);
+        validateIdentityFile(config.directory().resolve("bookie-control"), identity, -3, 4096);
+        for (int file = 0; file < config.dataFiles(); file++) {
+            validateIdentityFile(IsolatedSegmentFiles.dataPath(config, file), identity, file,
+                    config.bytesPerFile());
+        }
+    }
+
+    private void validateIdentityFile(Path path, SegmentFileHeader identity, int fileId, long expectedSize)
+            throws IOException {
+        if (Files.isSymbolicLink(path)) {
+            throw new IOException("Isolated storage file cannot be a symlink: " + path);
+        }
+        try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
+            if (input.size() != expectedSize) {
+                throw new IOException("Isolated storage file size mismatch: " + path);
+            }
+            ByteBuffer bytes = ByteBuffer.allocate(4096);
+            SegmentFileIo.readFully(input, bytes, 0);
+            identity.validate(bytes, config, fileId);
+        }
+    }
+
+    private int recordLength(long offset, long size, long sequence) throws IOException {
+        if (size - offset < 128) {
+            throw new IOException("Incomplete Arena control tail; writable recovery is unsafe");
+        }
+        ByteBuffer header = ByteBuffer.allocate(128);
+        SegmentFileIo.readFully(channel, header, offset);
+        int length = SegmentControlParser.recordLength(header, SegmentControlFormat.Owner.ARENA,
+                LOG_GENERATION, sequence);
+        if (length > size - offset) {
+            throw new IOException("Incomplete Arena control record; writable recovery is unsafe");
+        }
+        return length;
+    }
+
+    private Allocation readAllocation(long offset, int length, long sequence) throws IOException {
+        ByteBuffer bytes = ByteBuffer.allocate(length);
+        SegmentFileIo.readFully(channel, bytes, offset);
+        SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.ARENA,
+                LOG_GENERATION, sequence);
+        if (parsed.type() != SegmentControlFormat.Type.ALLOC
+                && parsed.type() != SegmentControlFormat.Type.ALLOC_POOL) {
+            throw new IOException("Unsupported Arena command in required control history");
+        }
+        ByteBuffer body = parsed.body();
+        if (body.remaining() != 32) {
+            throw new IOException("Unsupported Arena allocation body");
+        }
+        int file = body.getInt();
+        int ownerShard = body.getInt();
+        long ownerGeneration = body.getLong();
+        long position = body.getLong();
+        int blocks = body.getInt();
+        if (body.getInt() != 0) {
+            throw new IOException("Unsupported Arena allocation extension");
+        }
+        try {
+            Allocation command = new Allocation(parsed.type(), parsed.operationId(),
+                    parsed.operationGeneration(), parsed.expectedGeneration(), file, ownerShard,
+                    new Generation(ownerGeneration), position, blocks);
+            validateRange(command);
+            return command;
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid Arena allocation command", invalid);
+        }
+    }
+
+    private void validateRange(Allocation command) {
+        if (command.file() < 0 || command.file() >= config.dataFiles()
+                || command.ownerShard() < 0 || command.ownerShard() >= config.logicalShards()
+                || command.offset() < FIRST_RECORD || (command.offset() - FIRST_RECORD) % BLOCK_BYTES != 0
+                || command.offset() > config.bytesPerFile()
+                || command.blocks() > (config.bytesPerFile() - command.offset()) / BLOCK_BYTES
+                || command.expectedGeneration() != 0) {
+            throw new IllegalArgumentException("Invalid or unsupported Arena allocation range/generation");
+        }
+    }
+
+    private Status apply(Allocation command) {
+        AppliedOperation prior = appliedOperations.get(command.operationId());
+        if (prior != null) {
+            if (!prior.command().equals(command)) {
+                return Status.INCOMPATIBLE;
+            }
+            return prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status();
+        }
+        for (int block = 0; block < command.blocks(); block++) {
+            if (allocations.containsKey(slot(command.file(), command.offset() + block * BLOCK_BYTES))) {
+                appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
+                return Status.CONDITION_FAILED;
+            }
+        }
+        Grant grant = new Grant(command, command.expectedGeneration() + 1);
+        for (int block = 0; block < command.blocks(); block++) {
+            allocations.put(slot(command.file(), command.offset() + block * BLOCK_BYTES), grant);
+        }
+        appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.APPLIED_DURABLE));
+        return Status.APPLIED_DURABLE;
+    }
+
+    private Slot slot(int file, long offset) {
+        return new Slot(file, (offset - FIRST_RECORD) / BLOCK_BYTES);
+    }
+
+    private void requireWritable() throws IOException {
+        if (closed || failed) {
+            throw new IOException("Arena control log is closed or has uncertain I/O");
+        }
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        IOException first = null;
+        try {
+            lock.release();
+        } catch (IOException failure) {
+            first = failure;
+        }
+        try {
+            channel.close();
+        } catch (IOException failure) {
+            if (first == null) {
+                first = failure;
+            } else {
+                first.addSuppressed(failure);
+            }
+        }
+        if (first != null) {
+            throw first;
+        }
+    }
+}

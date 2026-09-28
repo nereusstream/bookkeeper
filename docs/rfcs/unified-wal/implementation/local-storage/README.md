@@ -10,7 +10,7 @@
 
 执行位置为 `/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper` 的 `turbo-bk`；规划输入提交为 `e75c67f3514d1627ea790d052e2c9226e593aa3c`，代码原基线为 `e8b162076fd8cfa84a11351a82caac8c5ac1f939`。完整执行目标见[执行正文](../execution-objective.md)。
 
-步骤3：已实现[实验格式v1](format-v1.md)、DATA/控制framing writer与独立parser、固定字节向量、全容量预创建文件及必要目录同步。真实FileChannel处理短写后force，失败保留坐标并停止受影响文件写入；容量满额停止。控制文件目前只有身份块，control parser只校验framing。尚无allocator授权、逐entry成功、selector或restart服务。
+步骤3：已实现[实验格式v1](format-v1.md)、DATA/控制framing writer与独立parser、固定字节向量、全容量预创建文件及必要目录同步。真实FileChannel处理短写后force，失败保留坐标并停止受影响文件写入；容量满额停止。文件创建时控制文件只有身份块；framing parser本身不授予allocator权限。逐entry成功、selector和restart服务仍未实现。
 
 步骤4的第一部分：`SegmentOwnerLoop` 用固定平台线程承载静态 shard 子集，ledger→shard 只依赖固定逻辑 shard 数，worker 数不进入持久身份。每个已准入批次预留一个 completion 槽，控制队列独立有界；循环每轮处理完成、控制和各 shard 的一个输入。PARK 遵守最老 batch deadline，后来的 deadline 不能推迟它。`SegmentIoExecutor` 在启动线程预创建固定数量服务线程，用有界队列执行阻塞 I/O，并将结果送回原 owner；提交后 handler 异常、停止准入或等待超时不提前释放在途义务。
 
@@ -30,10 +30,14 @@
 
 PREFERRED专有mapping、实际DATA批写接入及BOUNDED_SPIN收益对照也尚未完成；SYSTEM/OWNER_TOUCH/PARK保持默认，当前仍是隔离可丢弃实验实现。
 
+步骤5的Arena局部切片：`SegmentArenaControlLog` 在已创建的隔离目录中验证所有必需文件身份，用独占文件锁打开`arena-control`，对`ALLOC`/`ALLOC_POOL`建立有界、仅追加的控制历史。调用方提交的batch先复制为不可变命令列表，完整写入后一次`force(true)`；只有随后按sequence逐条apply成功才产生空间授权。同批争用slot的后续命令为消耗sequence的确定性no-op。操作UUID和命令内容用于重复/不兼容解析；range绑定file、offset、owner shard、shard generation和allocation generation。重开先验证完整记录/连续序号与身份，再同步并重放；不确定I/O使当前实例停止授予权限，无法安全分类的尾部拒绝可写恢复，不猜测截断。日志满额停止接收，尚无checkpoint/rotation。
+
+这只是空间owner的局部状态机：`ALLOC_POOL`尚未实现DATA framing的used/unused识别，也不支持FREE后的复用。Bookie控制语义、fence/grant、实际DATA授权检查、逐entry成功与完整启动恢复未接入，故步骤5未完成，不能据此开放Bookie写入。
+
 ## 验证入口
 
 ```bash
-scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest
+scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentArenaControlLogTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest
 mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 ```
 
@@ -76,6 +80,8 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 2026-09-28 [运行期回执](runtime-placement-receipt.json)：macOS执行组/owner/配置19项中14通过、5项Linux专属测试跳过；CPU绑定/拓扑18项中16通过、2项Linux专属测试跳过。Linux非root容器固定cpuset `{0,2,4}`、quota=3 CPU、512 MiB，现场构建JNI并运行35项，32通过、3项不同fixture或非Linux测试跳过；另以quota=2 CPU执行PREFER启动退回OFF的1项测试通过。真实native路径验证绑定后重读部署额度、owner实际mask在运行中经native改动后REQUIRE停止准入；quota下降由构造的拓扑快照注入，验证PREFER在原线程释放绑定、REQUIRE保留既有ticket并等待完成，不冒充真实cgroup在线重配置。两个受影响模块的Spotless/Checkstyle通过。绑定计划额外占1个低频监测服务线程；池、pending和control预算未复制。未测延迟、吞吐或物理NUMA页属地。
 
+2026-09-28 [Arena控制回执](arena-control-receipt.json)：macOS隔离真实文件测试中，Arena控制4项、既有framing3项均通过，0失败/错误/跳过；`bookkeeper-server`的Spotless/Checkstyle通过。覆盖同批争用、durable未apply后重放、重复及不兼容命令、force失败的unknown恢复、partial tail拒绝、身份不符和容量上限。`ALLOC_POOL`只证明空间owner，不证明DATA used/unused、普通Add或掉电后的成功确认。
+
 ## 未覆盖范围
 
-步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5条件控制日志/allocator、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。配置边界测试不授予任何持久化或生产authority。
+步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制及Arena与DATA的闭环、步骤6逐entry写入/幂等、步骤7定位/pin/restart尚未实现。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。

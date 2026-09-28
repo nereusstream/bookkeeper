@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；尚无 allocator、selector、checkpoint 发布或 entry success authority。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；仅有ALLOC/ALLOC_POOL的隔离Arena局部状态机，尚无Bookie控制、DATA接入、selector、checkpoint发布或entry success authority。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -71,10 +71,12 @@ Footer 从 totalLength-32 开始：`UWEND001` u64、sequence u64、totalLength u
 | 128 | opaque body，然后 zero padding |
 | totalLength-16 | `CTLE` u32 / CRC32C `[128,footer)` u32 / sequence u64 |
 
-Bookie type 1～8：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_GRANT、EXPLICIT_LAC、TOMBSTONE。Arena type 1～7：ALLOC、ALLOC_POOL、MOVE、FREE、CHECKPOINT_BEGIN、CHECKPOINT_COMMIT、DEVICE_STATE。此处是 framing 类型目录；尚无这些命令的语义 body 和 apply 实现。parser 验证期望 owner、log generation、连续 sequence、非零 operation identity 及 checksum，不将 decode 等同于命令成功。步骤5负责有界日志、durable 后顺序 predicate/apply；步骤8负责 checkpoint/rotation。
+Bookie type 1～8：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_GRANT、EXPLICIT_LAC、TOMBSTONE。Arena type 1～7：ALLOC、ALLOC_POOL、MOVE、FREE、CHECKPOINT_BEGIN、CHECKPOINT_COMMIT、DEVICE_STATE。此处是 framing 类型目录；目前仅隔离Arena控制日志解释ALLOC/ALLOC_POOL，其他type及Bookie控制仍无语义apply。parser 验证期望 owner、log generation、连续 sequence、非零 operation identity 及 checksum，不将 decode 等同于命令成功。步骤8负责 checkpoint/rotation。
+
+当前ALLOC/ALLOC_POOL body为32字节：file index u32、owner shard u32、owner shard generation u64、绝对文件offset u64、whole block数u32、保留零u32。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant可查询；查询不证明pool中的DATA位置已用或未用，也不授权普通Add。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；容量满额停止，尚不支持FREE、复用和rotation。
 
 ## 固定向量与验证边界
 
-`src/test/resources/unified-wal-segment` 中 `entry-v1.hex`、`copy-v1.hex` 各4096字节，`arena-alloc-v1.hex` 为160字节。向量由独立 Python struct/逐位 CRC32C 生成，Java writer 不参与生成；Java writer 输出逐字节对照，独立 parser 读取同一向量。ALLOC 向量 body 仅为两个 u64(5,1)，不代表语义 ALLOC 已执行。
+`src/test/resources/unified-wal-segment` 中 `entry-v1.hex`、`copy-v1.hex` 各4096字节，`arena-alloc-v1.hex` 为160字节。向量由独立 Python struct/逐位 CRC32C 生成，Java writer 不参与生成；Java writer 输出逐字节对照，独立 parser 读取同一向量。旧ALLOC向量body仅为两个u64(5,1)，只验证framing；它不符合上述32字节语义body，不能经Arena控制日志执行。
 
 复现命令和源码绑定见[本地存储状态](README.md)。真实 FileChannel 测试包含短写、同步失败、零进展、部分初始化、固定容量满额停止、只读单 record 和共享文件不同 stream 损坏边界。它们不证明 restart、allocator、quorum、Linux native I/O、掉电持久性或性能提升。

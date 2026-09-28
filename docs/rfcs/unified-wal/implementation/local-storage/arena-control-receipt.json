@@ -1,0 +1,20 @@
+{
+  "state": "EXPERIMENTAL_NON_PROMOTABLE_ARENA_ONLY",
+  "sourceBaseCommit": "901ecb797b05c652c57345f03a548c9f933d0f92",
+  "sourceSha256": {
+    "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLog.java": "75d8a061e9cf5dda08e3c8e4d95b44a5bd7207838cdb6aa691f093dc4a7909d0",
+    "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentArenaControlLogTest.java": "e08c499d3b82892ca1b2c74d8eff1b5733eb94ca15e1e36632dffa2e0c23eac1"
+  },
+  "config": "test fixture: one Arena, one 4 MiB DATA file, four logical shards, 4096-byte alignment, 1 MiB blocks, maxPendingEntries=16, FILE_CHANNEL/OFF/SYSTEM/PARK; control capacity 1 MiB and one-record limit 4272 bytes",
+  "runDirectory": "/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-nWXeQFa9",
+  "inputSha256": "dcf9adab77c6675af5970e36625dd3d82253059d0029c9a43e4beedb2ebc6d51",
+  "command": "scripts/unified-wal/run-local-storage-tests.sh SegmentArenaControlLogTest,SegmentControlFormatTest",
+  "mavenLogSha256": "037d5a6d62e13fbd755ea9a62a484c4d788ba3455b363ee3fce69e97da7a1dd5",
+  "junit": {
+    "SegmentArenaControlLogTest": {"tests": 4, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "ecfb8c98401ef1d69a8ebc59f082f69211fd6e07c5d62ef7696b2563ed725367"},
+    "SegmentControlFormatTest": {"tests": 3, "failures": 0, "errors": 0, "skipped": 0, "xmlSha256": "e1d10286470ec848126318b75a8b5ee223eaf3fa7b1b350d2389eb6f699d1d1e"}
+  },
+  "styleCommand": "mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check",
+  "styleResult": "PASS; zero Checkstyle violations",
+  "limits": "No Bookie control owner, DATA authorization/used-unused recovery, FREE/MOVE, checkpoint/rotation, crash-power-loss or production authority. Torn/uncertain tails fail closed rather than truncate."
+}
