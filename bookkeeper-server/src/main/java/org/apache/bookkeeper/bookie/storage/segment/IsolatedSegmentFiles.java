@@ -35,30 +35,41 @@ import org.apache.bookkeeper.common.profile.startup.Generation;
 final class IsolatedSegmentFiles implements AutoCloseable {
     private record Stream(int shard, long generation) { }
 
-    static final class StartupInventoryLease implements AutoCloseable {
+    static class DataReadLease implements AutoCloseable {
         private final IsolatedSegmentFiles owner;
-        private final SegmentDataRecovery.PhysicalInventory inventory;
         private boolean closed;
 
-        private StartupInventoryLease(IsolatedSegmentFiles owner,
-                                      SegmentDataRecovery.PhysicalInventory inventory) {
+        private DataReadLease(IsolatedSegmentFiles owner) {
             this.owner = owner;
-            this.inventory = inventory;
         }
 
-        synchronized SegmentDataRecovery.PhysicalInventory inventory() {
+        synchronized void requireOpen() {
             if (closed) {
-                throw new IllegalStateException("Startup inventory lease is closed");
+                throw new IllegalStateException("DATA read lease is closed");
             }
-            return inventory;
         }
 
         @Override
         public synchronized void close() {
             if (!closed) {
                 closed = true;
-                owner.releaseStartupInventory();
+                owner.releaseDataRead();
             }
+        }
+    }
+
+    static final class StartupInventoryLease extends DataReadLease {
+        private final SegmentDataRecovery.PhysicalInventory inventory;
+
+        private StartupInventoryLease(IsolatedSegmentFiles owner,
+                                      SegmentDataRecovery.PhysicalInventory inventory) {
+            super(owner);
+            this.inventory = inventory;
+        }
+
+        synchronized SegmentDataRecovery.PhysicalInventory inventory() {
+            requireOpen();
+            return inventory;
         }
     }
 
@@ -427,15 +438,26 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     synchronized StartupInventoryLease pinStartupInventory() throws IOException {
-        if (closed || startupInventory == null || !writerLock.lock().isValid()
-                || activeIo >= config.maxPendingEntries()) {
-            throw new IOException("Startup DATA inventory is unavailable or read capacity exhausted");
+        if (startupInventory == null) {
+            throw new IOException("Startup DATA inventory is unavailable");
         }
-        activeIo++;
+        reserveDataRead();
         return new StartupInventoryLease(this, startupInventory);
     }
 
-    private synchronized void releaseStartupInventory() {
+    synchronized DataReadLease pinDataRead() throws IOException {
+        reserveDataRead();
+        return new DataReadLease(this);
+    }
+
+    private void reserveDataRead() throws IOException {
+        if (closed || !writerLock.lock().isValid() || activeIo >= config.maxPendingEntries()) {
+            throw new IOException("DATA files are unavailable or read capacity exhausted");
+        }
+        activeIo++;
+    }
+
+    private synchronized void releaseDataRead() {
         activeIo--;
     }
 

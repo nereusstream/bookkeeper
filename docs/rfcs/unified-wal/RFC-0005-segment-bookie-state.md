@@ -511,6 +511,8 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 
 各阶段计费规则：
 
+2026-10-02 `SegmentPointRead.Reader`的隔离本地读请求使用现有owner/completion及I/O服务，Bookie读票据与有界DATA文件pin持续到实际I/O/owner结果终结；成功结果将固定池lease交给最后消费者，未关闭结果使shutdown等待，并对读/DATA形成有界背压。取消仅停止响应，撤权、读盘错误、owner故障及回调异常均释放其实际终结的资源；重开读取维持唯一连续stream/Arena cut校验，池不足以覆盖旧entry时不启用reader。原同步堆buffer检查路径保留；真实读授权、网络响应credit及完整读取/索引/Bookie总账尚未闭合。
+
 2026-10-02 隔离driver的已发布坐标重复比较已使用既有owner固定池的对齐scratch，normal/recovery源view不再重复复制；池不足在真实读盘前返回临时不可用，原坐标与DATA force不变。scratch和源保持至实际I/O与owner结果均终结，取消等待和读取错误均按原完成票据排空。通用物理点读、只读重启检查及无池手动入口仍保留堆buffer实验路径，网络/完整读取/索引bytes总账未完成，详见[本地存储状态](implementation/local-storage/README.md)。
 
 | 持有阶段/场景 | 计费、释放与进展规则 |

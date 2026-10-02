@@ -25,6 +25,9 @@ import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Isolated physical point read; the caller still owns locator publication and Bookie read authority. */
@@ -33,6 +36,286 @@ final class SegmentPointRead {
                     ProfileLedgerContext context, long entryId) { }
 
     record Result(SegmentBatchParser.Record record, long bytesRead) { }
+
+    enum ReadStatus {
+        FOUND, NOT_READY, TRANSIENT_UNAVAILABLE, STALE_ADMISSION, UNKNOWN
+    }
+
+    @FunctionalInterface
+    interface ReadCompletion {
+        void complete(ReadStatus status, LeasedResult result, Throwable failure);
+    }
+
+    /** The consumer owns the successful result until close, including every view borrowed from it. */
+    static final class LeasedResult implements AutoCloseable {
+        private final Result result;
+        private final SegmentBufferPool.Lease buffer;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private LeasedResult(Result result, SegmentBufferPool.Lease buffer) {
+            this.result = result;
+            this.buffer = buffer;
+        }
+
+        Result result() {
+            if (closed.get()) {
+                throw new IllegalStateException("Point-read result is closed");
+            }
+            return result;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                buffer.close();
+            }
+        }
+    }
+
+    /** Cancelling response delivery leaves the actual read, file pin and buffer obligation intact. */
+    static final class ReadRequest {
+        private final AtomicReference<ReadCompletion> response;
+
+        ReadRequest(ReadCompletion completion) {
+            response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+        }
+
+        boolean stopWaiting() {
+            return response.getAndSet(null) != null;
+        }
+
+        private void complete(ReadStatus status, LeasedResult result, Throwable failure) {
+            ReadCompletion completion = response.getAndSet(null);
+            if (completion == null) {
+                if (result != null) {
+                    result.close();
+                }
+                return;
+            }
+            try {
+                completion.complete(status, result, failure);
+            } catch (Throwable cause) {
+                if (result != null) {
+                    result.close();
+                }
+                throw cause;
+            }
+        }
+    }
+
+    /** Existing owner/I/O/pool service for live hot locations or the retained, validated restart inventory. */
+    static final class Reader {
+        private final SegmentOwnerLoop owner;
+        private final SegmentIoExecutor io;
+        private final IsolatedSegmentFiles files;
+        private final SegmentArenaControlLog arena;
+        private final SegmentBookieControlLog bookie;
+        private final SegmentHotDirectory hot;
+
+        static Reader live(SegmentOwnerLoop owner, SegmentIoExecutor io, IsolatedSegmentFiles files,
+                           SegmentArenaControlLog arena, SegmentBookieControlLog bookie, SegmentHotDirectory hot)
+                throws IOException {
+            return new Reader(owner, io, files, arena, bookie, Objects.requireNonNull(hot, "hot"));
+        }
+
+        static Reader restarted(SegmentOwnerLoop owner, SegmentIoExecutor io, IsolatedSegmentFiles files,
+                                SegmentArenaControlLog arena, SegmentBookieControlLog bookie) throws IOException {
+            return new Reader(owner, io, files, arena, bookie, null);
+        }
+
+        private Reader(SegmentOwnerLoop owner, SegmentIoExecutor io, IsolatedSegmentFiles files,
+                       SegmentArenaControlLog arena, SegmentBookieControlLog bookie, SegmentHotDirectory hot)
+                throws IOException {
+            owner.requireOwner();
+            if (owner.pool() == null || !bookie.matchesScope(files)
+                    || !arena.matchesScope(files.config(), files.identity())) {
+                throw new IllegalArgumentException("Point-read service requires matching scope and an owner pool");
+            }
+            if (hot != null) {
+                if (!files.supportsLocalResults() || !hot.matchesScope(files)) {
+                    throw new IllegalArgumentException("Live read service requires the live DATA hot directory");
+                }
+                hot.candidateCount(); // Also verifies that selection belongs to this owner thread.
+            } else {
+                SegmentDataRecovery.PhysicalInventory inventory = files.startupInventory();
+                inventory.requireCurrentArena(arena);
+                for (Location location : inventory.entries()) {
+                    if (scratchBytes(location) > owner.pool().bufferBytes()) {
+                        throw new IllegalArgumentException("Owner pool cannot read retained startup entries");
+                    }
+                }
+            }
+            this.owner = owner;
+            this.io = Objects.requireNonNull(io, "io");
+            this.files = files;
+            this.arena = arena;
+            this.bookie = bookie;
+            this.hot = hot;
+        }
+
+        boolean submit(ProfileLedgerContext context, long entryId, ReadRequest request) {
+            Objects.requireNonNull(context, "context");
+            Objects.requireNonNull(request, "request");
+            if (entryId < 0) {
+                throw new IllegalArgumentException("Point-read entry ID must be nonnegative");
+            }
+            int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), files.config().logicalShards());
+            return owner.submit(shard, new ReadCommand(context, entryId, request));
+        }
+
+        private final class ReadCommand implements SegmentOwnerLoop.Command {
+            private final ProfileLedgerContext context;
+            private final long entryId;
+            private final ReadRequest request;
+            private final AtomicBoolean started = new AtomicBoolean();
+            private SegmentBookieControlLog.ReadAdmission admission;
+            private IsolatedSegmentFiles.DataReadLease pin;
+            private SegmentBufferPool.Lease buffer;
+            private Location selected;
+            private Result result;
+            private boolean submitted;
+            private boolean physicalTerminal;
+            private boolean ownerTerminal;
+
+            private ReadCommand(ProfileLedgerContext context, long entryId, ReadRequest request) {
+                this.context = context;
+                this.entryId = entryId;
+                this.request = request;
+            }
+
+            @Override
+            public void run(SegmentOwnerLoop.Ticket ticket) {
+                ReadStatus status;
+                try {
+                    status = prepare();
+                } catch (IOException unavailable) {
+                    refuse(ticket, ReadStatus.NOT_READY, unavailable);
+                    return;
+                }
+                if (status != ReadStatus.FOUND) {
+                    refuse(ticket, status, null);
+                    return;
+                }
+                io.submit(ticket, () -> {
+                    started.set(true);
+                    try {
+                        result = readWithScratch(files.config(), files.identity(), arena, selected, buffer.bytes());
+                    } finally {
+                        physicalDone();
+                    }
+                }, failure -> {
+                    if (!started.get()) {
+                        physicalDone();
+                    }
+                    deliver(ReadStatus.FOUND, failure);
+                });
+                submitted = true;
+            }
+
+            private ReadStatus prepare() throws IOException {
+                admission = bookie.admitRead(context).orElse(null);
+                if (admission == null) {
+                    return ReadStatus.NOT_READY;
+                }
+                if (hot == null) {
+                    IsolatedSegmentFiles.StartupInventoryLease startup = files.pinStartupInventory();
+                    pin = startup;
+                    selected = startup.inventory().uniqueLocation(arena, context, entryId);
+                } else {
+                    selected = hot.liveDurableCandidate(context, entryId).orElse(null);
+                    if (selected == null) {
+                        return ReadStatus.NOT_READY;
+                    }
+                    pin = files.pinDataRead();
+                }
+                buffer = owner.pool().acquire(scratchBytes(selected));
+                return buffer == null ? ReadStatus.TRANSIENT_UNAVAILABLE : ReadStatus.FOUND;
+            }
+
+            private void refuse(SegmentOwnerLoop.Ticket ticket, ReadStatus status, Throwable failure) {
+                physicalDone();
+                submitted = true;
+                ticket.complete(() -> deliver(status, failure));
+            }
+
+            private void deliver(ReadStatus status, Throwable failure) {
+                try {
+                    if (failure == null && owner.failure() != null) {
+                        status = ReadStatus.UNKNOWN;
+                        failure = owner.failure();
+                    }
+                    if (status == ReadStatus.FOUND && failure == null) {
+                        if (!bookie.canCompleteRead(admission)) {
+                            status = ReadStatus.STALE_ADMISSION;
+                        } else if (hot != null && !hot.liveDurableCandidate(context, entryId)
+                                .filter(selected::equals).isPresent()) {
+                            status = ReadStatus.NOT_READY;
+                        } else if (pin instanceof IsolatedSegmentFiles.StartupInventoryLease startup) {
+                            startup.inventory().requireCurrentArena(arena);
+                        }
+                    }
+                    if (failure != null && status == ReadStatus.FOUND) {
+                        status = ReadStatus.UNKNOWN;
+                    }
+                    LeasedResult response = null;
+                    if (status == ReadStatus.FOUND) {
+                        response = new LeasedResult(result, buffer);
+                        buffer = null;
+                    }
+                    request.complete(status, response, failure);
+                } catch (IOException changed) {
+                    request.complete(ReadStatus.NOT_READY, null, changed);
+                } finally {
+                    ownerDone();
+                }
+            }
+
+            @Override
+            public void failed(Throwable failure) {
+                if (!submitted) {
+                    physicalDone();
+                }
+                try {
+                    request.complete(ReadStatus.UNKNOWN, null, failure);
+                } finally {
+                    ownerDone();
+                }
+            }
+
+            private synchronized void physicalDone() {
+                physicalTerminal = true;
+                releaseIfTerminal();
+            }
+
+            private synchronized void ownerDone() {
+                ownerTerminal = true;
+                releaseIfTerminal();
+            }
+
+            private void releaseIfTerminal() {
+                if (physicalTerminal && ownerTerminal) {
+                    try {
+                        if (buffer != null) {
+                            buffer.close();
+                            buffer = null;
+                        }
+                    } finally {
+                        try {
+                            if (pin != null) {
+                                pin.close();
+                                pin = null;
+                            }
+                        } finally {
+                            if (admission != null) {
+                                admission.finish();
+                                admission = null;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     static List<Location> locations(SegmentBatchParser.Batch batch) {
         List<Location> locations = new ArrayList<>(batch.records().size());

@@ -186,6 +186,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 尚未接RocksDB时，可在声明的小规模范围内使用有界定位结构，满额明确背压；不得用持续增长的内存Map得出长期性能结论。
 
+2026-10-02 本地点读已另接入既有owner/I/O/固定池：live读选择已发布候选，重开读选择启动清单的唯一连续stream位置，I/O排队前保持有界文件pin。回owner复核Bookie权限与候选/Arena cut；未知位置不报absence。成功结果持有池lease，消费者最后使用后关闭；慢消费会背压读/DATA并使shutdown等待，取消、撤权、读盘/owner/回调失败释放实际终结的资源。重开池不足以容纳保留旧entry时拒绝reader初始化，较低新写N不截断旧读能力。此为隔离本地读入口，仍无真实Profile读授权、响应credit接线、一般MOVE/FREE selector、旧I/O错误恢复或服务级可写restart，步骤7未完成。
+
 **完成条件：** 写入→确认本地持久化→读取→终止进程→重启→再读与重复写入可重复运行；未知覆盖不误报NoSuchEntry，不同stream恢复不截短共享文件，旧generation残留不复活。开始验证两次故障：write完成但barrier未完成时退出，重启处理重复请求后再次掉电；单次进程终止后可读不足以证明持久化保证。
 
 当前[隔离点读及文件同步切片](local-storage/README.md)已用真实文件核对Arena grant、batch/record身份及CRC，按对齐范围读取单条record；较低新写入阈值重开后旧entry仍可读。停写后完整扫描的DATA文件可执行一次恢复`force(false)`；全目录校验同步后可在显式容量内取回普通record物理位置，并先以Arena已apply首序号核对调用方起点，再仅对匹配shard与generation的单stream batch/entry检查序号连续性；同文件其他stream按Arena授权块跳过framing解析，但仍完成文件身份检查与文件级同步；目标stream损坏、缺口、重复和容量不足不返回候选。全量清单仍校验整个DATA文件；隔离回归证明旧stream结构损坏不阻断另一stream物理候选。运行时热候选可发布，调用方选定的多个恢复物理stream候选可在新owner的有界热目录整组核对scope、容量和重复坐标后原子装入并点读，失败不发布先通过的stream；隔离测试还覆盖normal DATA真实force与durable fence后关闭、重开双控制日志并从同步候选点读；局部点读现可持Bookie读票据核对安装实例，在fence后继续读取，并于tombstone前后复核本地route；只读stream恢复也可在完整校验目标batch后，以重放的Bookie本地route排除已tombstone实例的定位容量。当前无MOVE/FREE的单Arena受控recovery重试可在只读重开后要求单一stream、连续前缀、DATA恢复同步、唯一坐标和重放的exact grant，点读比较后复核权限，仅返回物理候选比对结果；旧DATA I/O错误尚无持久分类，不能把该结果提升为durable duplicate成功。文件层仅有物理append-only重开；完整current-selector/pin、全部必要DATA选择与服务权限尚未接通，步骤7未完成。

@@ -443,7 +443,7 @@ MOVE成功后不原地改来源类型或写“提交位”；record保持不可�
 
 首批必须能独立校验一个record，不扫描整个大batch。固定envelope/header完整性覆盖来源、move身份（适用时）、instance、allocation/generation、record length及必要存储坐标；内层BK CRC32C覆盖其自身metadata与应用payload。使用现有候选的record级校验方案，不以正确BK CRC替代外层身份校验，也不增加第三套逐entry密码学hash。整块checksum可用于扫描/恢复/诊断，不能成为单entry点读的唯一验证方法。仅匹配物理offset不足以防止ABA。
 
-实现状态：隔离`SegmentPointRead`已从完整解析的batch取得record位置，以当前Arena grant、DATA身份和batch header约束对齐单record读取，再独立验证record/BK CRC及locator身份；真实文件跨页header、错误定位、篡改和较低新写阈值重开的局部测试已覆盖。热locator发布、Bookie读取权限、selector/pin及完整restart仍未接入，本段不能作为生产点读保证。
+实现状态：隔离`SegmentPointRead`已从完整解析的batch取得record位置，以当前Arena grant、DATA身份和batch header约束对齐单record读取，再独立验证record/BK CRC及locator身份；真实文件跨页header、错误定位、篡改和较低新写阈值重开的局部测试已覆盖。2026-10-02的`Reader.live/restarted`复用原owner队列/completion、有界I/O及固定对齐池，分别从live hot或已验证启动清单选择位置；I/O排队前的有界文件pin阻止提前关闭writer锁，回owner后复核Bookie本地读票据及候选/Arena cut。成功record持有池lease到消费者关闭，取消和读盘/owner/回调失败归还实际终结的资源；未知位置不报告absence。重开前要求池可覆盖旧record实际跨度，较低新写N不遗忘旧entry。完整Profile读授权、一般MOVE/FREE selector/代际pin、响应credit接线、旧I/O错误解析和服务级可写restart仍未接入，本段不能作为生产点读保证。
 
 读取先按现有locator取得allocation/generation pin并复核selector与权限，再使用匹配且已验证的cache，或发起覆盖目标record的必要对齐I/O。locator的offset/length须检查非负、溢出、声明最大record及allocation边界后才分配大buffer；损坏length不能扩大成无界读取。外层固定header有界读取并验证后才信任其长度，record自身CRC/坐标仍需核对。对齐范围不能越过合法allocation，布局必须提供合法padding/读取路径，不能靠越界读取凑alignment。
 

@@ -302,6 +302,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤6/7的[driver重复点读](rfcs/unified-wal/implementation/local-storage/README.md)复用既有owner固定对齐池和已拥有的源view，不再分配大record副本或重复制输入；池不足在I/O前背压，取消与读取错误不提前归还源/scratch。通用物理点读、只读重启检查及无池手动入口仍为堆buffer实验路径，全读取/网络/索引预算和服务级可写restart尚未闭合，不提升Gate。
 
+2026-10-02 步骤7接入[owner/I/O本地点读](rfcs/unified-wal/implementation/local-storage/README.md)：live hot与多stream重开清单共用固定池读取，排队前保持文件pin，回owner复核Bookie资格及候选/Arena cut。结果由最后消费者关闭归还lease，慢消费背压读/DATA，取消/撤权/读盘/owner/回调失败按真实终结排空；重开池须覆盖保留旧entry，不能因降低新写N忽略旧读。真实网络读授权、响应credit、一般MOVE/FREE selector和可写服务restart仍未闭合，不提升Gate。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |
