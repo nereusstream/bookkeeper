@@ -26,6 +26,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -128,6 +129,8 @@ final class SegmentDataRecovery {
 
     private record StreamKey(int shard, Generation generation) { }
 
+    private record Coordinate(ProfileLedgerContext context, long entryId) { }
+
     private record StreamPrefix(long firstSequence, long through, boolean contiguous) { }
 
     private static final class StreamProgress {
@@ -164,11 +167,13 @@ final class SegmentDataRecovery {
         private final List<Long> grantedHighWatermarks;
         private final Map<StreamKey, StreamPrefix> streamPrefixes;
         private final boolean completeStreamPrefixes;
+        private final long arenaAppliedThrough;
 
         private PhysicalInventory(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
                                   Scan scan, List<SegmentPointRead.Location> entries,
                                   List<Long> grantedHighWatermarks,
-                                  Map<StreamKey, StreamPrefix> streamPrefixes, boolean completeStreamPrefixes) {
+                                  Map<StreamKey, StreamPrefix> streamPrefixes, boolean completeStreamPrefixes,
+                                  long arenaAppliedThrough) {
             this.sourceConfig = sourceConfig;
             this.sourceIdentity = sourceIdentity;
             this.scan = scan;
@@ -176,6 +181,7 @@ final class SegmentDataRecovery {
             this.grantedHighWatermarks = List.copyOf(grantedHighWatermarks);
             this.streamPrefixes = Map.copyOf(streamPrefixes);
             this.completeStreamPrefixes = completeStreamPrefixes;
+            this.arenaAppliedThrough = arenaAppliedThrough;
         }
 
         IsolatedSegmentConfig sourceConfig() {
@@ -196,6 +202,39 @@ final class SegmentDataRecovery {
 
         List<Long> grantedHighWatermarks() {
             return grantedHighWatermarks;
+        }
+
+        /** No MOVE/FREE: immutable applied grants plus a complete scan select a unique ordinary coordinate. */
+        SegmentPointRead.Location uniqueLocation(SegmentArenaControlLog authority,
+                                                 ProfileLedgerContext context, long entryId) throws IOException {
+            requireCurrentArena(authority);
+            SegmentPointRead.Location selected = null;
+            for (SegmentPointRead.Location location : entries) {
+                if (location.context().equals(context) && location.entryId() == entryId) {
+                    if (selected != null) {
+                        throw new IOException("Recovered read location is ambiguous");
+                    }
+                    selected = location;
+                }
+            }
+            if (selected == null) {
+                throw new IOException("Recovered read location is not ready");
+            }
+            SegmentBatchFormat.Address address = selected.address();
+            StreamPrefix prefix = streamPrefixes.get(new StreamKey(address.shard(), address.streamGeneration()));
+            long first = authority.streamFirstSequence(address.shard(), address.streamGeneration().value()).orElse(-1);
+            if (prefix == null || !prefix.contiguous() || first < 0 || prefix.firstSequence() != first
+                    || address.sequence() > prefix.through()) {
+                throw new IOException("Recovered read stream has no validated contiguous prefix");
+            }
+            return selected;
+        }
+
+        void requireCurrentArena(SegmentArenaControlLog authority) throws IOException {
+            if (!completeStreamPrefixes || !authority.matchesScope(sourceConfig, sourceIdentity)
+                    || authority.appliedThrough() != arenaAppliedThrough) {
+                throw new IOException("Startup inventory no longer covers current Arena authority");
+            }
         }
 
         /** Same-scan physical stream evidence only; Bookie selection and local success remain separate. */
@@ -271,6 +310,35 @@ final class SegmentDataRecovery {
         }
         return scanWhileLocked(config, identity, authority, syncIo, maxEntries, maxStreams,
                 null, null, writerLock);
+    }
+
+    /** Select all locally readable coordinates across streams; retain no durable-duplicate qualification. */
+    static PhysicalInventory recoverLocallyReadableInventoryWhileLocked(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
+            SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
+            FileLock writerLock) throws IOException {
+        if (syncIo == null || maxEntries < 1 || maxStreams < 1 || writerLock == null) {
+            throw new IllegalArgumentException("Bounded DATA inventory, sync and writer lock required");
+        }
+        long readCut = bookie.recoveryReadCut(config, identity);
+        long arenaCut = authority.appliedThrough();
+        PhysicalInventory inventory = scanWhileLocked(config, identity, authority, syncIo,
+                maxEntries, maxStreams, null, bookie, writerLock);
+        if (readCut != bookie.recoveryReadCut(config, identity) || arenaCut != authority.appliedThrough()) {
+            throw new IOException("Recovery control cut changed before locator publication");
+        }
+        for (StreamPrefix prefix : inventory.streamPrefixes.values()) {
+            if (!prefix.contiguous()) {
+                throw new IOException("Physical stream has a sequence gap, duplicate or overflow");
+            }
+        }
+        HashSet<Coordinate> coordinates = new HashSet<>();
+        for (SegmentPointRead.Location location : inventory.entries()) {
+            if (!coordinates.add(new Coordinate(location.context(), location.entryId()))) {
+                throw new IOException("Required DATA coordinate has multiple physical locations");
+            }
+        }
+        return inventory;
     }
 
     /** Requires the persisted Arena stream start before returning a read-only physical candidate. */
@@ -463,7 +531,7 @@ final class SegmentDataRecovery {
         Map<StreamKey, StreamPrefix> prefixes = new HashMap<>();
         streams.forEach((key, progress) -> prefixes.put(key, progress.snapshot()));
         return new PhysicalInventory(config, identity, new Scan(batches, records, validatedBytes, zeroPages),
-                entries, grantedHighWatermarks, prefixes, maxStreams > 0);
+                entries, grantedHighWatermarks, prefixes, maxStreams > 0, authority.appliedThrough());
     }
 
     private static SegmentBatchFormat.Address address(ByteBuffer page, long offset) throws IOException {

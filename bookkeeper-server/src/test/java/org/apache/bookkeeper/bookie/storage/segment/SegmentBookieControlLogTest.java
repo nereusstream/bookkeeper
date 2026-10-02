@@ -263,6 +263,18 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private static SegmentBatchFormat.FrozenBatch secondStreamBatch(IsolatedSegmentConfig config, long entryId,
+                                                                    long sequence) throws Exception {
+        ByteBuf entry = entry(context(), entryId);
+        try {
+            return SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(0, 0, 6,
+                    new Generation(1), new Generation(2), sequence, 4096 + SegmentArenaControlLog.BLOCK_BYTES),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+        } finally {
+            entry.release();
+        }
+    }
+
     private static SegmentEntryInputs.Input sourceInput(SegmentExecutionGroup group,
                                                         ProfileLedgerContext context, long entryId) throws Exception {
         ByteBuf encoded = entry(context, entryId);
@@ -3146,7 +3158,7 @@ public class SegmentBookieControlLogTest {
             try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
                     config, identity, arena, new SegmentFileIo(), 1, 1)) {
                 assertTrue(reopened.matchesScope(config, identity));
-                assertEquals(1, SegmentPointRead.readRestartedSingleStreamLocallyGated(
+                assertEquals(1, SegmentPointRead.readRestartedLocallyGated(
                         reopened, arena, bookie, context(), 1).record().entryId());
                 try (IsolatedSegmentFiles.StartupInventoryLease lease = reopened.pinStartupInventory()) {
                     assertThrows(IOException.class, reopened::close);
@@ -3162,11 +3174,11 @@ public class SegmentBookieControlLogTest {
                     bookie.submitFence(fence(3, (byte) 5)).status());
             try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
                     config, identity, arena, new SegmentFileIo(), 1, 1)) {
-                assertEquals(1, SegmentPointRead.readRestartedSingleStreamLocallyGated(
+                assertEquals(1, SegmentPointRead.readRestartedLocallyGated(
                         reopened, arena, bookie, context(), 1).record().entryId());
                 assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
                         bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
-                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedSingleStreamLocallyGated(
+                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedLocallyGated(
                         reopened, arena, bookie, context(), 1));
             }
         }
@@ -4494,10 +4506,159 @@ public class SegmentBookieControlLogTest {
                             bookie.admitRecovery(same).orElseThrow(), new SegmentFileIo(), 2, 2));
             assertThrows(IOException.class, () -> SegmentPointRead.readRecoveredSingleStreamLocallyGated(
                     config, identity, arena, bookie, new SegmentFileIo(), context(), 2, 2, 2));
-            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
-                    config, identity, arena, new SegmentFileIo(), 2, 2)) {
-                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedSingleStreamLocallyGated(
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithLocallyReadableInventory(
+                    config, identity, arena, bookie, new SegmentFileIo(), 2, 2)) {
+                assertEquals(2, SegmentPointRead.readRestartedLocallyGated(
+                        reopened, arena, bookie, context(), 2).record().entryId());
+                assertEquals(3, SegmentPointRead.readRestartedLocallyGated(
+                        reopened, arena, bookie, context(), 3).record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void restartReadInventorySelectsRoutesAcrossStreamsAndInvalidatesAtNewGrant() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 6), new Generation(1), 0,
+                    0, 0, new Generation(2), 6, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1)));
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2),
+                    install(48, 3, (byte) 5), activate(48, 4)));
+            files.writeAuthorized(twoLedgerBatch(config), arena);
+            files.writeAuthorized(secondStreamBatch(config, 3, 1), arena);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    bookie.submitBatch(List.of(tombstone(48, 20))).get(0).status());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity, arena, new SegmentFileIo(), 2, 2));
+            SegmentFileIo sync = new SegmentFileIo();
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithLocallyReadableInventory(
+                    config, identity, arena, bookie, sync, 2, 2)) {
+                assertEquals(3, reopened.startupInventory().scan().records());
+                assertEquals(2, reopened.startupInventory().entries().size());
+                assertEquals(1, SegmentPointRead.readRestartedLocallyGated(
+                        reopened, arena, bookie, context(), 1).record().entryId());
+                assertEquals(3, SegmentPointRead.readRestartedLocallyGated(
+                        reopened, arena, bookie, context(), 3).record().entryId());
+                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedLocallyGated(
+                        reopened, arena, bookie, context(48), 2));
+                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedLocallyGated(
                         reopened, arena, bookie, context(), 2));
+                assertFalse(reopened.supportsLocalResults());
+                assertEquals(1, sync.forces);
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 7), new Generation(1), 0,
+                        0, 0, new Generation(3), 7, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES, 1, 1)));
+                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedLocallyGated(
+                        reopened, arena, bookie, context(), 1));
+            }
+        }
+    }
+
+    @Test
+    public void restartReadInventoryRejectsAmbiguousOrNoncontiguousRequiredData() throws Exception {
+        for (boolean duplicate : List.of(false, true)) {
+            IsolatedSegmentConfig base = config();
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                    base.directory().resolveSibling(duplicate ? "duplicate" : "gap"), base.arenaCount(),
+                    base.logicalShards(), base.dataFiles(), base.bytesPerFile(), base.alignment(),
+                    base.maxPayloadBytes(), base.maxPendingEntries(), "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            SegmentFileHeader identity = identity();
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                grant(arena, 1);
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 6), new Generation(1), 0,
+                        0, 0, new Generation(2), 6, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1)));
+                bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+                files.writeAuthorized(batch(config, 1, 1, 4096), arena);
+                files.writeAuthorized(secondStreamBatch(config, duplicate ? 1 : 2, duplicate ? 1 : 2), arena);
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithLocallyReadableInventory(
+                        config, identity, arena, bookie, new SegmentFileIo(), 2, 2));
+                try (IsolatedSegmentFiles raw = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                        config, identity, arena, new SegmentFileIo(), 2, 2)) {
+                    assertThrows(IOException.class, () -> SegmentPointRead.readRestartedLocallyGated(
+                            raw, arena, bookie, context(), duplicate ? 1 : 2));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void restartReadInventoryRejectsChangingBookieCutAndSyncFailure() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            files.writeAuthorized(batch(config, 1, 1, 4096), arena);
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            SegmentBookieControlLog.Admission held = bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow();
+            SegmentFileIo blocked = new SegmentFileIo();
+            try {
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithLocallyReadableInventory(
+                        config, identity, arena, bookie, blocked, 1, 1));
+                assertEquals(0, blocked.forces);
+            } finally {
+                held.physicalTerminal();
+            }
+            SegmentFileIo failed = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithLocallyReadableInventory(
+                    config, identity, arena, bookie, failed, 1, 1));
+            assertEquals(1, failed.forces);
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            SegmentFileIo revoked = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            FutureTask<Void> opening = new FutureTask<>(() -> {
+                try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithLocallyReadableInventory(
+                        config, identity, arena, bookie, revoked, 1, 1)) {
+                    return null;
+                }
+            });
+            Thread reader = new Thread(opening);
+            reader.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+                release.countDown();
+                assertTrue(assertThrows(ExecutionException.class,
+                        () -> opening.get(5, TimeUnit.SECONDS)).getCause() instanceof IOException);
+            } finally {
+                release.countDown();
+                reader.join(5000);
+            }
+            assertFalse(reader.isAlive());
+            assertEquals(1, revoked.forces);
+            try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithLocallyReadableInventory(
+                    config, identity, arena, bookie, new SegmentFileIo(), 1, 1)) {
+                assertEquals(0, reopened.startupInventory().entries().size());
+                assertThrows(IOException.class, () -> SegmentPointRead.readRestartedLocallyGated(
+                        reopened, arena, bookie, context(), 1));
             }
         }
     }

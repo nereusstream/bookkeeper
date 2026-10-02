@@ -286,6 +286,8 @@ asynchronously:
 
 2026-09-29局部实现边界：[隔离重复比较](implementation/local-storage/README.md)已复用独立CRC32C解析及真实DATA候选点读，验证同payload/累计length但不同LAC相同、payload或累计length变化冲突、坏CRC拒绝。受控normal批次现于物理候选发布后、票据释放前按entry复核准入generation；真实force期间只有L1 activation generation改变时，L1为`STALE_ADMISSION`、L2为`LOCAL_DURABLE`，两条物理候选均保留。在途同坐标normal重试由原owner比较冻结逻辑内容：相同内容等待原批次连续持久化及候选发布，冲突内容不发第二次物理写，失败等待者得到`UNKNOWN`；已发布运行期候选仍由有界I/O服务点读并复核Bookie准入与候选。仅由重启扫描恢复的物理候选返回`NOT_READY`，不能据此宣布absence或durable成功。normal与重复请求提交后停止响应等待已有隔离切片；网络deadline/断连接线、跨入口bytes预算、route/auth/selector及恢复可发布前缀尚未接入；当前drain pre-cut的同批fence顺序已有隔离验证，显式终止pre-cut分支未启用，步骤6整体仍未完成。
 
+2026-10-02 启动全目录清单可在DATA writer持续排他下，以已重放Bookie本地route/tombstone筛除不可读实例的定位，并检查前后控制cut稳定、无未决控制/entry义务、各已观测stream连续及当前坐标唯一。重开读取不再要求shard只有一个stream，持读取pin和当前Bookie读票据点读唯一旧位置，完成前重验route及Arena applied cut；后续grant会使旧清单失效。同步中tombstone变化、坐标歧义、stream缺口及同步失败不返回交接结果。定位仍为非local-durable候选，未解析旧I/O错误不能据此返回durable duplicate，尚无动态写入定位、一般MOVE/FREE selector或完整Profile读取/服务级restart。
+
 ## 7. Recovery Add
 
 Recovery Add使用RFC-0001 `ADD_RECOVERY=0x0202` executable body，携带ledger context、RepairIntent ID/generation、grant generation、range、entry与20-byte credential；它不预设一条独立持久 `RECOVERY_ADD` control record。它必须：

@@ -879,6 +879,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return !closed && !failed && config.sameStorageScope(source) && identity.equals(sourceIdentity);
     }
 
+    /** Capture or recheck a replayed local read cut without holding the Bookie monitor during DATA I/O. */
+    synchronized long recoveryReadCut(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity)
+            throws IOException {
+        if (!matchesScope(source, sourceIdentity) || writing || pending != null || activeAdmissions != 0) {
+            throw new IOException("Bookie recovery read cut has unresolved control or entry obligations");
+        }
+        return appliedThrough;
+    }
+
     private synchronized void finishAdmission(Admission admission, boolean fromDriver) {
         if (admission.owner != this || admission.terminal || admission.claimed != fromDriver) {
             throw new IllegalArgumentException("Admission already finished or belongs to another Bookie control log");

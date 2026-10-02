@@ -180,7 +180,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                                SegmentArenaControlLog authority, SegmentFileIo recoveryIo)
             throws IOException {
-        return openAppendOnly(config, identity, authority, recoveryIo, 0, 0);
+        return openAppendOnly(config, identity, authority, null, recoveryIo, 0, 0);
     }
 
     /** Also retain every ordinary physical coordinate from the same locked startup scan. */
@@ -193,11 +193,24 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         if (maxEntries < 1 || maxStreams < 1) {
             throw new IllegalArgumentException("Positive restart locator and stream capacities required");
         }
-        return openAppendOnly(config, identity, authority, recoveryIo, maxEntries, maxStreams);
+        return openAppendOnly(config, identity, authority, null, recoveryIo, maxEntries, maxStreams);
+    }
+
+    /** A bounded no-MOVE/FREE startup read selection from replayed Bookie routes and all physical streams. */
+    static IsolatedSegmentFiles openAppendOnlyWithLocallyReadableInventory(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
+            SegmentBookieControlLog bookie, SegmentFileIo recoveryIo, int maxEntries, int maxStreams)
+            throws IOException {
+        Objects.requireNonNull(bookie, "bookie");
+        if (maxEntries < 1 || maxStreams < 1) {
+            throw new IllegalArgumentException("Positive restart locator and stream capacities required");
+        }
+        return openAppendOnly(config, identity, authority, bookie, recoveryIo, maxEntries, maxStreams);
     }
 
     private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
-                                                       SegmentArenaControlLog authority, SegmentFileIo recoveryIo,
+                                                       SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                       SegmentFileIo recoveryIo,
                                                        int maxEntries, int maxStreams) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
@@ -213,9 +226,12 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 if (maxEntries == 0) {
                     SegmentDataRecovery.validateAndSyncWhileLocked(config, identity, authority,
                             recoveryIo, guard.lock());
-                } else {
+                } else if (bookie == null) {
                     inventory = SegmentDataRecovery.recoverPhysicalInventoryWhileLocked(config, identity,
                             authority, recoveryIo, maxEntries, maxStreams, guard.lock());
+                } else {
+                    inventory = SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(config, identity,
+                            authority, bookie, recoveryIo, maxEntries, maxStreams, guard.lock());
                 }
                 result = new IsolatedSegmentFiles(config, identity, guard, true, inventory);
                 for (int file = 0; file < config.dataFiles(); file++) {

@@ -147,7 +147,7 @@ final class SegmentPointRead {
     }
 
     /** Read a retained startup candidate while its reopened DATA writer keeps the recovery lock. */
-    static Result readRestartedSingleStreamLocallyGated(
+    static Result readRestartedLocallyGated(
             IsolatedSegmentFiles files, SegmentArenaControlLog arena, SegmentBookieControlLog bookie,
             ProfileLedgerContext context, long entryId) throws IOException {
         try (IsolatedSegmentFiles.StartupInventoryLease lease = files.pinStartupInventory()) {
@@ -159,26 +159,10 @@ final class SegmentPointRead {
             SegmentBookieControlLog.ReadAdmission admission = bookie.admitRead(context)
                     .orElseThrow(() -> new IOException("Bookie read route is unavailable"));
             try {
-                int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
-                SegmentArenaControlLog.SingleStream stream = arena.singleStreamForShard(shard)
-                        .orElseThrow(() -> new IOException("Recovered read stream is not unique"));
-                SegmentDataRecovery.PhysicalStreamCandidate candidate = lease.inventory()
-                        .streamCandidate(arena, shard, stream.generation());
-                Location selected = null;
-                for (Location location : candidate.entries()) {
-                    if (location.context().equals(context) && location.entryId() == entryId) {
-                        if (selected != null) {
-                            throw new IOException("Recovered read location is ambiguous");
-                        }
-                        selected = location;
-                    }
-                }
-                if (selected == null) {
-                    throw new IOException("Recovered read location is not ready");
-                }
+                Location selected = lease.inventory().uniqueLocation(arena, context, entryId);
                 Result result = read(config, identity, arena, selected);
-                if (!bookie.canCompleteRead(admission)
-                        || !arena.singleStreamForShard(shard).filter(stream::equals).isPresent()) {
+                lease.inventory().requireCurrentArena(arena);
+                if (!bookie.canCompleteRead(admission)) {
                     throw new IOException("Recovered read authority changed before completion");
                 }
                 return result;

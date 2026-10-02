@@ -296,6 +296,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤6接通[异步按需pool refill](rfcs/unified-wal/implementation/local-storage/README.md)：有限shard请求由Arena控制owner合并control force、顺序apply，再以原DATA ticket继续封包并重验grant。池内普通Add无额外控制force，等待资源及回通知都有既有上限；空间耗尽不force空日志、不占DATA序号，control/owner故障及shutdown排空已有实际文件验证。相关集131项执行通过、5项Linux亲和性用例在macOS跳过；修正2 MiB批次中组合两个合法最大entry的封包边界，最后1项定向复验及Spotless/Checkstyle通过。低水位预取、空间恢复总账、尾部回收与完整生产/网络接线仍未完成，不提升Gate。
 
+2026-10-02 步骤7接通[Bookie本地route筛选的多stream重开读取](rfcs/unified-wal/implementation/local-storage/README.md)：同锁扫描与恢复同步后，稳定控制cut、连续stream及唯一坐标共同约束启动定位；tombstone记录仍校验但不占可读定位容量。保持读取pin、Bookie读票据和Arena cut复核，未知/歧义不报不存在，后续grant使旧清单失效。两次进程终止后的多stream旧entry可由同一重开清单点读；旧I/O错误判定、一般selector、动态写入定位及服务级可写restart仍未完成，不提升Gate。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |
