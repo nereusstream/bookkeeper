@@ -210,6 +210,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 2026-10-02 Arena `DEVICE_STATE`已实现单调DATA文件隔离子集。实际绑定的DATA路径在I/O前共享预留每文件通知ticket及逻辑日志容量，保留普通控制槽；预留不足在占用DATA坐标前背压，控制配置不足则拒绝绑定。已知write/force失败立即停止该文件新写、点读及重复成功；控制忙时原通知等待当前批次，停收后仍排空，不重新申请完成槽。记录按序apply，原grant保留，重放与后续sync不解除隔离；普通成功没有新增控制日志/fsync。实际控制I/O或owner故障、落盘前退出仍未闭合跨重启判定，未见记录不能证明旧错误不存在，clear/reset及服务级可写restart未启用。步骤5～7仍为局部实现。
 
+2026-10-02 写入会话切片在首次ALLOC/DATA前由隔离writer显式`startSession`，复用Arena `DEVICE_STATE` OPEN/CLOSE与单调epoch，启动时预留正常关闭记录容量。关闭DATA准入、排空实际I/O和关闭descriptor后，仍持有目录锁并检查控制/故障通知无未决，再记录CLOSE；实际DATA错误、执行前取消、关闭失败或无CLOSE的进程退出保持不可写。真实子进程回归覆盖DATA force失败、没有隔离记录就退出；重放在DATA恢复sync前拒绝重开，后次sync不改变结果。正常CLOSE可重放并开下一物理writer epoch，不复用旧授权尾部，不新增正常Add force。legacy已分配目录不能补认历史正常关闭；append-only仍无local-result authority，自动生命周期接线、未正常关闭会话恢复解析及可写restart仍未完成。
+
 **第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
 
 ### 第三阶段：索引、回收与长期运行

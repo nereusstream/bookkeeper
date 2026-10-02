@@ -295,6 +295,8 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 2026-10-02 隔离实现已解释Arena `DEVICE_STATE`的单调DATA文件隔离子集。实际DATA write/force失败立即关闭该共享文件的新DATA、点读和重复成功资格。绑定实际Arena控制driver的合批路径在I/O前为同文件在途批次共享预留通知ticket与160-byte逻辑日志容量；至少保留一个普通控制名额，预留不足在DATA坐标占用前背压。控制忙时每文件只保留一条已预留通知，原批次终结后顺序执行，停收不撤销原ticket；正常成功只归还预留，不增加控制日志或fsync。记录不删除原allocation/stream所有权；其后的ALLOC条件失败，较早ALLOC不受易失故障时机影响。完整记录重放及恢复同步后仍拒绝DATA物理重开，不由后一次sync清除。该容量不是实际文件系统空间预分配；owner故障、实际控制I/O失败及落盘前退出仍未闭合跨重启判定。没有记录不证明没有旧错误，append-only重开仍无local-result authority，未启用clear/reset或旧错误解析，详见[实验格式](implementation/local-storage/format-v1.md)。
 
+2026-10-02 写入会话切片复用Arena `DEVICE_STATE` action 2/3记录单调epoch的OPEN/CLOSE。隔离writer在首次ALLOC/DATA前显式`startSession`，OPEN force并apply前不开放该writer；先预留160-byte逻辑CLOSE容量，普通控制记录不能消耗。文件关闭先拒绝新DATA并检查实际I/O/预留已终结，关闭DATA descriptor后仍持有目录锁，再验证Arena控制/故障通知已排空、无运行时或持久文件错误并记录CLOSE。DATA失败、执行前取消或关闭失败不补写成功CLOSE；OPEN未匹配CLOSE的重放在DATA恢复同步前拒绝物理重开，也不会因后次sync成功解除。首个epoch拒绝接管已有legacy allocation。仅正常关闭的会话可继续物理重开并在写入前开新epoch，旧授权块仍全部跳过；append-only仍无local-result authority。该边界已验证真实进程在DATA force失败、隔离记录落盘前退出；未正常关闭会话的恢复解析/解除、自动服务生命周期及可写restart仍未完成，未提升Gate。
+
 涉及既有成功数据的compaction同样须保证new DATA在恢复可发现边界内，才允许`MOVE_COMMIT`、selector切换或释放旧位置。以后若要跨缺口独立发布，须先接受独立块发现/恢复算法；本次不并行建设第二套模式。分别报告write wait、durability wait、physical-prefix wait和locator wait，不将同stream排队归为NVMe延迟。
 
 ### 6.2 对齐缓冲池的NUMA属地

@@ -5729,6 +5729,33 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    @Test
+    public void unclosedSessionRefusesRestartAfterAbruptDataFailureWithoutQuarantineRecord() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("session-abrupt-force-failure"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        runAbruptWriter("session-force-error", config.directory(), 86, "DATA_FORCE_FAILED");
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(1, replay.dataSessionEpoch());
+            assertTrue(replay.hasUnclosedDataSession());
+            assertFalse(replay.hasDurableQuarantine(0));
+            assertFalse(replay.dataFileAvailable(0));
+            assertTrue(replay.hasAppliedGrant(0, 4096, 4096, 0, 1, 5, 1));
+            SegmentFileIo syncIo = new SegmentFileIo();
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), replay, syncIo));
+            assertEquals(0, syncIo.forces);
+            try (java.nio.channels.FileChannel data = java.nio.channels.FileChannel.open(
+                    IsolatedSegmentFiles.dataPath(config, 0), java.nio.file.StandardOpenOption.WRITE)) {
+                data.force(false);
+            }
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                    config, identity(), replay, syncIo, 1, 1));
+            assertEquals(0, syncIo.forces);
+            assertEquals(config.bytesPerFile(), Files.size(IsolatedSegmentFiles.dataPath(config, 0)));
+        }
+    }
+
     private void runAbruptWriter(String phase, Path directory, int expectedExit, String marker) throws Exception {
         Path output = temporary.getRoot().toPath().resolve("abrupt-" + phase + ".log");
         Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
@@ -5749,13 +5776,29 @@ public class SegmentBookieControlLogTest {
     public static void main(String[] args) throws Exception {
         if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0])
                 && !"normal-after-force".equals(args[0]) && !"normal-before-force".equals(args[0])
-                && !"append-after-restart".equals(args[0]))) {
+                && !"append-after-restart".equals(args[0]) && !"session-force-error".equals(args[0]))) {
             throw new IllegalArgumentException("Expected abrupt writer phase and directory");
         }
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(Path.of(args[1]), 1, 4, 1,
                 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)),
                 new UUID(0, 9), BookieId.parse("isolated:3181"));
+        if ("session-force-error".equals(args[0])) {
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+                files.startSession(arena);
+                grant(arena, 1);
+                files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                try {
+                    files.writeAuthorized(batch(config, 1, 1, 4096), arena);
+                    throw new AssertionError("Injected DATA force did not fail");
+                } catch (IOException expected) {
+                    System.out.println("DATA_FORCE_FAILED");
+                    System.out.flush();
+                    Runtime.getRuntime().halt(86);
+                }
+            }
+        }
         if ("append-after-restart".equals(args[0])) {
             try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
                     IsolatedSegmentFiles files = IsolatedSegmentFiles.openAppendOnly(

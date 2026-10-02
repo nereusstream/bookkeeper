@@ -70,6 +70,43 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void dataSessionPredicatesReplayAndCannotClosePastAQuarantine() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentArenaControlLog.DataSession begin = new SegmentArenaControlLog.DataSession(
+                new UUID(0, 1), new Generation(1), 0, true);
+        SegmentArenaControlLog.DataSession second = new SegmentArenaControlLog.DataSession(
+                new UUID(0, 4), new Generation(2), 1, true);
+        SegmentArenaControlLog.DataSession failedClose = new SegmentArenaControlLog.DataSession(
+                new UUID(0, 6), new Generation(2), 2, false);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+            assertEquals(List.of(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    SegmentArenaControlLog.Status.CONDITION_FAILED, SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    SegmentArenaControlLog.Status.APPLIED_DURABLE, SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    SegmentArenaControlLog.Status.CONDITION_FAILED), arena.submitBatch(List.of(begin,
+                    new SegmentArenaControlLog.DataSession(new UUID(0, 2), new Generation(2), 1, true),
+                    new SegmentArenaControlLog.DataSession(new UUID(0, 3), new Generation(1), 1, false), second,
+                    new SegmentArenaControlLog.FileQuarantine(new UUID(0, 5), new Generation(1), 0), failedClose))
+                    .stream().map(SegmentArenaControlLog.Result::status).toList());
+            assertEquals(2, arena.dataSessionEpoch());
+            assertTrue(arena.hasUnclosedDataSession());
+            assertTrue(arena.hasDurableQuarantine(0));
+            assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                    arena.submitBatch(List.of(second)).get(0).status());
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+            assertEquals(2, replay.dataSessionEpoch());
+            assertTrue(replay.hasUnclosedDataSession());
+            assertTrue(replay.hasDurableQuarantine(0));
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    replay.submitBatch(List.of(failedClose)).get(0).status());
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity, replay, new SegmentFileIo()));
+        }
+    }
+
+    @Test
     public void grantQueriesRemainAvailableWhileControlForceIsBlocked() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

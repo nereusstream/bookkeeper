@@ -119,6 +119,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private int pendingReservations;
     private int activeIo;
     private boolean closed;
+    private SegmentArenaControlLog sessionAuthority;
+    private boolean sessionReady;
     SegmentFileIo dataIo = new SegmentFileIo();
 
     private IsolatedSegmentFiles(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -286,7 +288,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     synchronized Reservation reserve(SegmentBatchFormat.FrozenBatch batch) throws IOException {
-        if (appendOnlyRecovery) {
+        if (appendOnlyRecovery || sessionAuthority != null) {
             throw new IOException("Restarted physical writer requires an applied Arena grant");
         }
         return reservePhysical(batch, false);
@@ -295,7 +297,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private Reservation reservePhysical(SegmentBatchFormat.FrozenBatch batch, boolean authorized) throws IOException {
         batch.requirePhysicalOwner();
         int file = batch.address().fileIndex();
-        if (closed || file < 0 || file >= data.size() || failed[file]
+        if (closed || sessionAuthority != null && !sessionReady || file < 0 || file >= data.size() || failed[file]
                 || batch.address().shard() >= config.logicalShards()
                 || file != batch.address().shard() % config.dataFiles()
                 || pendingReservations >= config.maxPendingEntries()) {
@@ -350,6 +352,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 } catch (IOException | RuntimeException | Error failure) {
                     synchronized (this) {
                         failed[file] = true;
+                        if (sessionAuthority != null) {
+                            sessionAuthority.blockDataFile(file);
+                        }
                     }
                     throw failure;
                 }
@@ -369,6 +374,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
         reservation.submitted = true;
         pendingReservations--;
+        if (sessionAuthority != null) {
+            failed[reservation.address().fileIndex()] = true;
+            sessionAuthority.blockDataFile(reservation.address().fileIndex());
+        }
     }
 
     /** Physical experiment path: require an applied, durable Arena grant for the entire frozen DATA batch. */
@@ -380,7 +389,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     synchronized Reservation reserveAuthorized(SegmentBatchFormat.FrozenBatch batch,
                                                SegmentArenaControlLog authority) throws IOException {
         SegmentBatchFormat.Address address = batch.address();
-        if (!authority.matchesScope(config, identity)
+        if (!authority.matchesScope(config, identity) || !authority.permitsDataWriter(this)
                 || !authority.dataFileAvailable(address.fileIndex())
                 || !authority.hasAppliedGrant(address.fileIndex(), address.offset(), batch.bytes().remaining(),
                 address.shard(), address.streamGeneration().value(), address.allocation(),
@@ -429,6 +438,18 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     boolean supportsLocalResults() {
         return !appendOnlyRecovery;
+    }
+
+    /** Optional isolated lifecycle, required before this writer's first allocation/DATA submission. */
+    synchronized void startSession(SegmentArenaControlLog authority) throws IOException {
+        Objects.requireNonNull(authority, "authority");
+        if (closed || sessionAuthority != null || activeIo != 0 || pendingReservations != 0
+                || !appendOnlyRecovery && java.util.Arrays.stream(nextOffset).anyMatch(offset -> offset != 4096)) {
+            throw new IOException("DATA writer cannot begin another session");
+        }
+        sessionAuthority = authority;
+        authority.beginDataSession(this);
+        sessionReady = true;
     }
 
     synchronized SegmentDataRecovery.PhysicalInventory startupInventory() {
@@ -492,6 +513,23 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         for (FileChannel channel : data) {
             try {
                 channel.close();
+            } catch (IOException failure) {
+                if (first == null) {
+                    first = failure;
+                } else {
+                    first.addSuppressed(failure);
+                }
+            }
+        }
+        if (sessionReady) {
+            boolean healthy = first == null;
+            for (boolean fileFailed : failed) {
+                healthy &= !fileFailed;
+            }
+            sessionReady = false;
+            try {
+                // Admission and DATA descriptors are closed, but directory exclusion is retained.
+                sessionAuthority.finishDataSession(this, healthy);
             } catch (IOException failure) {
                 if (first == null) {
                     first = failure;

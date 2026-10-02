@@ -119,6 +119,180 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void dataSessionReservesItsCleanCloseAndReopensWithANewEpoch() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("session-clean"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        long capacity = 4096 + 160 + 192 + 160;
+        SegmentFileIo controlIo = new SegmentFileIo();
+        ByteBuf entry = entry(new byte[] {1, 2, 3});
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), capacity, controlIo)) {
+            files.startSession(arena);
+            assertEquals(1, arena.dataSessionEpoch());
+            assertTrue(arena.hasUnclosedDataSession());
+            assertThrows(IOException.class, arena::close);
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1, 1)));
+            assertThrows(IOException.class, () -> arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+                    SegmentControlFormat.Type.ALLOC, new UUID(0, 6), new Generation(1), 0,
+                    0, 0, new Generation(1), 6, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1))));
+            SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encode(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), entry)));
+            assertThrows(IOException.class, () -> files.write(batch));
+            files.writeAuthorized(batch, arena);
+            assertEquals(1, files.dataIo.forces);
+            assertEquals(2, controlIo.forces);
+            files.close();
+            assertFalse(arena.hasUnclosedDataSession());
+            assertEquals(3, controlIo.forces);
+        } finally {
+            entry.release();
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                        config, identity(), replay, new SegmentFileIo(), 1, 1)) {
+            assertEquals(1, replay.dataSessionEpoch());
+            assertFalse(replay.hasUnclosedDataSession());
+            assertEquals(1, reopened.startupInventory().streamCandidate(replay, 0, new Generation(1)).through());
+            assertFalse(reopened.supportsLocalResults());
+            reopened.startSession(replay);
+            assertEquals(2, replay.dataSessionEpoch());
+            assertEquals(4096 + SegmentArenaControlLog.BLOCK_BYTES, reopened.nextOffset(0));
+            reopened.close();
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(2, replay.dataSessionEpoch());
+            assertFalse(replay.hasUnclosedDataSession());
+        }
+    }
+
+    @Test
+    public void dataSessionUnknownBeginAndCloseHaveDifferentRecoveryOutcomes() throws Exception {
+        for (boolean failBegin : new boolean[] {true, false}) {
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                    temporary.getRoot().toPath().resolve("session-unknown-" + failBegin), 1, 4, 1,
+                    4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, failBegin ? 1 : 2, false);
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024,
+                            controlIo)) {
+                if (failBegin) {
+                    assertThrows(IOException.class, () -> files.startSession(arena));
+                    assertThrows(IOException.class, () -> files.startSession(arena));
+                    files.close();
+                } else {
+                    files.startSession(arena);
+                    assertThrows(IOException.class, files::close);
+                    assertTrue(arena.hasUnclosedDataSession());
+                }
+            }
+            try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                assertEquals(1, replay.dataSessionEpoch());
+                assertEquals(failBegin, replay.hasUnclosedDataSession());
+                if (failBegin) {
+                    SegmentFileIo syncIo = new SegmentFileIo();
+                    assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                            config, identity(), replay, syncIo));
+                    assertEquals(0, syncIo.forces);
+                } else {
+                    try (IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnly(
+                            config, identity(), replay, new SegmentFileIo())) {
+                        assertFalse(reopened.supportsLocalResults());
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void dataSessionCloseWaitsForActualIoAndRetainsWriterExclusion() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("session-pending"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ByteBuf entry = entry(new byte[] {1});
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            files.startSession(arena);
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1, 1)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(interrupted);
+                }
+            });
+            FutureTask<Void> write = new FutureTask<>(() -> {
+                files.writeAuthorized(SegmentBatchFormat.encode(config, address(4096),
+                        List.of(SegmentBatchFormat.entry(context(), entry))), arena);
+                return null;
+            });
+            new Thread(write, "session-data-io").start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertThrows(IOException.class, files::close);
+                assertThrows(IOException.class, arena::close);
+                assertTrue(arena.hasUnclosedDataSession());
+                assertEquals("LOCKED", probeWriterLock(config.directory()));
+            } finally {
+                release.countDown();
+                write.get(5, TimeUnit.SECONDS);
+            }
+            files.close();
+            assertFalse(arena.hasUnclosedDataSession());
+            assertEquals("ACQUIRED", probeWriterLock(config.directory()));
+        } finally {
+            entry.release();
+        }
+    }
+
+    @Test
+    public void failedOrUnsubmittedDataSessionNeverProducesACleanClose() throws Exception {
+        for (boolean submit : new boolean[] {true, false}) {
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                    temporary.getRoot().toPath().resolve("session-data-failed-" + submit), 1, 4, 1,
+                    4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            ByteBuf entry = entry(new byte[] {1});
+            SegmentFileIo controlIo = new SegmentFileIo();
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024,
+                            controlIo)) {
+                files.startSession(arena);
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                        new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 1, 1)));
+                IsolatedSegmentFiles.Reservation reservation = files.reserveAuthorized(
+                        SegmentBatchFormat.encode(config, address(4096),
+                                List.of(SegmentBatchFormat.entry(context(), entry))), arena);
+                if (submit) {
+                    files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                    assertThrows(IOException.class, () -> files.writeReserved(reservation));
+                } else {
+                    files.cancelBeforeSubmission(reservation);
+                }
+                assertFalse(arena.dataFileAvailable(0));
+                assertFalse(arena.hasDurableQuarantine(0));
+                assertThrows(IOException.class, files::close);
+                assertTrue(arena.hasUnclosedDataSession());
+                assertEquals(2, controlIo.forces);
+            } finally {
+                entry.release();
+            }
+            try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                assertTrue(replay.hasUnclosedDataSession());
+                assertFalse(replay.hasDurableQuarantine(0));
+                assertTrue(replay.hasAppliedGrant(0, 4096, 4096, 0, 1, 5, 1));
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                        config, identity(), replay, new SegmentFileIo()));
+            }
+        }
+    }
+
+    @Test
     public void pooledEncodingClearsReusedPaddingAndRefusesUnavailableWorkingSet() throws Exception {
         IsolatedSegmentConfig config = config();
         byte[] payload = new byte[3000];

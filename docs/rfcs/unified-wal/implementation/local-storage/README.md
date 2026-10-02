@@ -116,6 +116,12 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 实际控制I/O失败、Arena owner故障及记录落盘前退出仍未闭合跨重启故障判定，没有自动重试或解除隔离。当前查询只报告已经durable并apply的隔离；完整但force未知/未apply的记录可重放恢复，未见记录不能证明没有旧错误。append-only重开仍无local-result authority，服务级可写restart及步骤5～7验收未完成。
 
+2026-10-02 写入会话切片在已有Arena `DEVICE_STATE`解释action 2/3的OPEN/CLOSE与单调epoch（[格式](format-v1.md)）。隔离writer显式调用`startSession`，在首次ALLOC/DATA前完成OPEN force及apply，且在OPEN前预留160-byte逻辑CLOSE容量；普通控制不能占用该预留。首个epoch拒绝接管已有allocation，不补认legacy正常关闭历史；启动失败的writer不接收DATA，也不能在同一对象重试启动。启用后的writer只接受已apply的Arena grant写入，没有正常Add额外控制记录或DATA force。
+
+关闭DATA writer先拒绝新DATA，并要求预留、实际I/O及点读lease排空；关闭DATA descriptor后仍持有同一目录锁，再检查Arena控制/故障通知已终结、没有运行时或持久文件错误，才提交CLOSE。CLOSE I/O终结及结果处理后释放目录锁，Arena日志拒绝仍被writer持有的会话。DATA write/force失败及消耗坐标后的执行前取消立即关闭文件gate，并拒绝生成健康CLOSE；关闭时资源仍清理且向调用方报告未正常关闭。Bookie服务调用顺序应为停止新准入并排空执行组、关闭DATA writer、最后关闭Bookie/Arena控制日志；当前已有资源入口，自动服务生命周期尚未接线。
+
+会话未匹配CLOSE的重放在DATA恢复sync前拒绝物理重开，即使故障隔离记录尚未生成，之后一次DATA sync成功也不解除。该状态不把原grant宣布为FREE，也不猜测未关闭原因；健康进程突然退出同样保持不可写，未正常关闭的恢复解析/解除尚未实现。完整但force未知的OPEN重放保持未关闭；完整但force未知的CLOSE可在控制恢复同步后解析为已关闭，而原关闭调用仍报告失败。正常关闭的epoch可完整DATA验证/同步后物理重开，旧授权范围全部跳过，下一次写入须再次启动新epoch；仍不授予append-only local-result、自动可写restart或生产ACK。未启用会话的legacy手动原型继续保留此前“无隔离记录不证明无旧错误”的边界。本切片提供启用路径的持久未关闭检测，没有完成通用故障原因分类、未知范围恢复或解除隔离。
+
 ## 验证入口
 
 ```bash
@@ -128,6 +134,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-10-02（写入会话）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：162项中157项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增6项回归验证正常CLOSE容量保护、健康DATA关闭后物理重开/下一epoch、OPEN与CLOSE force未知的不同重放结果、实际I/O未终结时的关闭拒绝与独立JVM目录锁、DATA失败与执行前取消不生成CLOSE、条件命令有序重放与隔离不被CLOSE清除。实际子进程在DATA force失败后直接halt、没有DEVICE_STATE文件隔离记录；新进程重放OPEN后在恢复DATA sync前拒绝重开，额外成功DATA sync不改变结果，原grant和文件大小保留。最终运行`unified-wal-local-0gGiOjR1`保留父提交`28c62d9ab9a1dae572f21fdd1334a951ecc876e8`和184项实际源码/构建输入哈希，历史receipt不改绑定。未验证真实掉电/介质失败、文件系统空间预分配、Linux NUMA、未正常关闭恢复解析/解除、自动服务生命周期与可写restart或生产ACK；该切片不将步骤5～7标完成。
 
 2026-10-02（故障通知预留）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：156项中151项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增3项回归验证通知与普通控制槽共存、同文件共享通知与日志容量、停收后持久化隔离，以及绑定容量不足和入队前资源拒绝；已有真实DATA force失败测试扩展控制忙、停收与记录force未知，重放均恢复正向隔离。normal/recovery refill的停收回归保留已接纳写入的原结果和资源释放；正常路径不额外写控制记录或force。首次扩大回归发现seal时才预留会在shutdown期间拒绝已接纳entry，预留已提前到DATA入队前；原force次数断言仅在实际DATA失败时增加一次隔离记录force，合批测试为暂停Arena所占的额外普通控制槽补足测试容量。最终运行`unified-wal-local-0zBPSGvA`保留父提交`45ecb32ee86c8269b898af9255ed8eef1a938b1c`和184项实际源码/构建输入哈希，历史receipt不改绑定。未验证实际文件系统空间预分配、记录落盘前退出或实际控制I/O/owner失败的可靠跨重启分类、解除隔离、服务级可写restart、Linux NUMA、掉电或生产ACK。
 

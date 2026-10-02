@@ -306,6 +306,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤5～7新增[DATA文件持久隔离子集](rfcs/unified-wal/implementation/local-storage/README.md)：实际绑定的DATA在I/O前共享预留每文件通知ticket与逻辑日志容量，普通控制仍保留槽位；不足先背压，不占DATA坐标。失败先切断文件准入，控制忙时通知等待原批次，停收后用原ticket排空，再持久化/apply已有DEVICE_STATE；旧grant保留，重放与后续sync不解除隔离。实际控制I/O或owner故障、落盘前退出仍未闭合跨重启判定；未见记录不授权旧错误清除，clear/reset及服务级可写restart未启用，不提升Gate。
 
+2026-10-02 步骤5～7继续新增[写入会话启动/关闭边界](rfcs/unified-wal/implementation/local-storage/README.md)：隔离writer显式在首次分配/写入前持久OPEN，预留CLOSE容量；停止DATA、排空I/O并关闭descriptor后仍持目录锁，检查控制与故障通知排空才记录CLOSE。DATA错误、消耗坐标后的执行前取消或无CLOSE退出保持不可写；真实进程在DATA force失败、隔离记录尚未生成就退出的回归，验证重放在恢复sync前拒绝重开，后次sync不解除。正常关闭后可开下一物理epoch；不补认legacy历史，也不直接获得local-result authority。自动服务生命周期、未正常关闭会话恢复解析及可写restart仍未完成，步骤5～7及总体Gate不标完成。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |

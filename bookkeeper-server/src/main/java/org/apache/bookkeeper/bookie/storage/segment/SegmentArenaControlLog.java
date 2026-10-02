@@ -43,7 +43,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private static final Generation LOG_GENERATION = new Generation(1);
     private static final int QUARANTINE_RECORD_BYTES = 128 + 16 + 16;
 
-    sealed interface Command permits Allocation, FileQuarantine {
+    sealed interface Command permits Allocation, FileQuarantine, DataSession {
         SegmentControlFormat.Type type();
         UUID operationId();
         Generation operationGeneration();
@@ -74,6 +74,32 @@ final class SegmentArenaControlLog implements AutoCloseable {
         @Override
         public ByteBuffer body() {
             return ByteBuffer.allocate(16).putInt(1).putInt(1).putInt(file).putInt(0).flip();
+        }
+    }
+
+    /** Arena-wide writer lifecycle; closing a session never clears a file quarantine. */
+    record DataSession(UUID operationId, Generation operationGeneration, long expectedGeneration,
+                       boolean open) implements Command {
+        DataSession {
+            Objects.requireNonNull(operationId, "operationId");
+            Objects.requireNonNull(operationGeneration, "operationGeneration");
+            if (operationId.equals(new UUID(0, 0)) || expectedGeneration < 0
+                    || operationGeneration.value() <= 0
+                    || (open ? expectedGeneration != operationGeneration.value() - 1
+                            : expectedGeneration != operationGeneration.value())) {
+                throw new IllegalArgumentException("Invalid DATA writer session");
+            }
+        }
+
+        @Override
+        public SegmentControlFormat.Type type() {
+            return SegmentControlFormat.Type.DEVICE_STATE;
+        }
+
+        @Override
+        public ByteBuffer body() {
+            return ByteBuffer.allocate(16).putInt(1).putInt(open ? 2 : 3)
+                    .putLong(operationGeneration.value()).flip();
         }
     }
 
@@ -146,6 +172,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final boolean[] dataBlocked;
     private final boolean[] durableQuarantine;
     private final boolean[] quarantineReserved;
+    private long sessionEpoch;
+    private boolean sessionOpen;
+    private boolean sessionCloseReserved;
+    private IsolatedSegmentFiles sessionOwner;
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
     private long appliedThrough = -1;
@@ -237,7 +267,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 bytes = Math.addExact(bytes, record.remaining());
                 encoded.add(record);
             }
-            long reserved = 0;
+            long reserved = sessionCloseReserved && batch.stream().noneMatch(command ->
+                    command instanceof DataSession session && !session.open()) ? QUARANTINE_RECORD_BYTES : 0;
             for (int file = 0; file < quarantineReserved.length; file++) {
                 final int target = file;
                 if (quarantineReserved[file] && batch.stream().noneMatch(command ->
@@ -304,6 +335,73 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return applyDurable(appendDurably(commands));
     }
 
+    /** Called before exposing a new writer, under its existing directory exclusion. */
+    void beginDataSession(IsolatedSegmentFiles writer) throws IOException {
+        DataSession command;
+        synchronized (this) {
+            requireQuiescentRecovery(writer.config(), writer.identity());
+            if (sessionOwner != null || sessionEpoch == Long.MAX_VALUE
+                    || (sessionEpoch == 0 && !allocations.isEmpty())) {
+                throw new IOException("DATA session cannot adopt an active or legacy allocated writer");
+            }
+            command = new DataSession(UUID.randomUUID(), new Generation(sessionEpoch + 1), sessionEpoch, true);
+            sessionOwner = writer;
+            sessionCloseReserved = true;
+        }
+        try {
+            List<Result> results = submitBatch(List.of(command));
+            if (results.get(0).status() != Status.APPLIED_DURABLE) {
+                throw new IOException("DATA writer session was not opened");
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                sessionOwner = null;
+                sessionCloseReserved = false;
+            }
+            throw failure;
+        }
+    }
+
+    /** The caller has closed its DATA admission and drained I/O before attempting this witness. */
+    void finishDataSession(IsolatedSegmentFiles writer, boolean healthy) throws IOException {
+        try {
+            DataSession command;
+            synchronized (this) {
+                if (sessionOwner != writer || !sessionOpen) {
+                    throw new IOException("DATA writer does not own an open session");
+                }
+                if (!healthy) {
+                    throw new IOException("Failed DATA session must remain unclosed");
+                }
+                requireQuiescentControl(writer.config(), writer.identity());
+                command = new DataSession(UUID.randomUUID(), new Generation(sessionEpoch), sessionEpoch, false);
+            }
+            List<Result> results = submitBatch(List.of(command));
+            if (results.get(0).status() != Status.APPLIED_DURABLE) {
+                throw new IOException("DATA writer session was not closed");
+            }
+        } finally {
+            synchronized (this) {
+                if (sessionOwner == writer) {
+                    sessionOwner = null;
+                    sessionCloseReserved = false;
+                }
+            }
+        }
+    }
+
+    synchronized long dataSessionEpoch() {
+        return sessionEpoch;
+    }
+
+    synchronized boolean hasUnclosedDataSession() {
+        return sessionOpen;
+    }
+
+    synchronized boolean permitsDataWriter(IsolatedSegmentFiles writer) {
+        return sessionEpoch == 0 && sessionOwner == null || sessionOpen && sessionOwner == writer;
+    }
+
     /** Immediate admission gate; it is not a durable failure witness until DEVICE_STATE is applied. */
     synchronized boolean blockDataFile(int file) {
         if (file < 0 || file >= dataBlocked.length) {
@@ -315,7 +413,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized boolean dataFileAvailable(int file) {
-        return !closed && !failed && file >= 0 && file < dataBlocked.length && !dataBlocked[file];
+        return !closed && !failed && file >= 0 && file < dataBlocked.length && !dataBlocked[file]
+                && (!sessionOpen || sessionOwner != null);
     }
 
     synchronized boolean hasDurableQuarantine(int file) {
@@ -334,7 +433,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (!dataFileAvailable(file) || quarantineReserved[file]) {
             return false;
         }
-        long reserved = QUARANTINE_RECORD_BYTES;
+        long reserved = QUARANTINE_RECORD_BYTES + (sessionCloseReserved ? QUARANTINE_RECORD_BYTES : 0);
         for (boolean held : quarantineReserved) {
             if (held) {
                 reserved += QUARANTINE_RECORD_BYTES;
@@ -496,6 +595,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized void requireQuiescentRecovery(IsolatedSegmentConfig otherConfig,
                                                SegmentFileHeader otherIdentity) throws IOException {
+        requireQuiescentControl(otherConfig, otherIdentity);
+        if (sessionOpen || sessionOwner != null) {
+            throw new IOException("Unclosed DATA writer session prevents physical reopen");
+        }
+    }
+
+    private void requireQuiescentControl(IsolatedSegmentConfig otherConfig,
+                                         SegmentFileHeader otherIdentity) throws IOException {
         if (!matchesScope(otherConfig, otherIdentity) || writing || pending != null) {
             throw new IOException("Arena authority is unavailable or has unresolved control I/O");
         }
@@ -597,9 +704,25 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 LOG_GENERATION, sequence);
         if (parsed.type() == SegmentControlFormat.Type.DEVICE_STATE) {
             ByteBuffer body = parsed.body();
-            if (body.remaining() != 16 || body.getInt() != 1 || body.getInt() != 1
-                    || parsed.expectedGeneration() != 0) {
+            if (body.remaining() != 16 || body.getInt() != 1) {
                 throw new IOException("Unsupported Arena DEVICE_STATE body");
+            }
+            int action = body.getInt();
+            if (action == 2 || action == 3) {
+                long epoch = body.getLong();
+                try {
+                    DataSession command = new DataSession(parsed.operationId(), parsed.operationGeneration(),
+                            parsed.expectedGeneration(), action == 2);
+                    if (epoch != command.operationGeneration().value()) {
+                        throw new IllegalArgumentException("DATA session epoch differs from its header");
+                    }
+                    return command;
+                } catch (IllegalArgumentException invalid) {
+                    throw new IOException("Invalid Arena DATA session", invalid);
+                }
+            }
+            if (action != 1 || parsed.expectedGeneration() != 0) {
+                throw new IOException("Unsupported Arena DEVICE_STATE action");
             }
             int file = body.getInt();
             if (body.getInt() != 0) {
@@ -657,7 +780,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private void validateCommand(Command command) {
         if (command instanceof Allocation allocation) {
             validateRange(allocation);
-        } else if (((FileQuarantine) command).file() >= config.dataFiles()) {
+        } else if (command instanceof FileQuarantine quarantine && quarantine.file() >= config.dataFiles()) {
             throw new IllegalArgumentException("Invalid quarantined DATA file");
         }
     }
@@ -675,6 +798,20 @@ final class SegmentArenaControlLog implements AutoCloseable {
             Status status = durableQuarantine[file] ? Status.ALREADY_DURABLE : Status.APPLIED_DURABLE;
             dataBlocked[file] = true;
             durableQuarantine[file] = true;
+            appliedOperations.put(command.operationId(), new AppliedOperation(command, status));
+            return status;
+        }
+        if (command instanceof DataSession session) {
+            boolean allowed = session.expectedGeneration() == sessionEpoch
+                    && (session.open() ? !sessionOpen && (sessionEpoch != 0 || allocations.isEmpty()) : sessionOpen);
+            for (boolean quarantined : durableQuarantine) {
+                allowed &= !quarantined;
+            }
+            Status status = allowed ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
+            if (allowed) {
+                sessionEpoch = session.operationGeneration().value();
+                sessionOpen = session.open();
+            }
             appliedOperations.put(command.operationId(), new AppliedOperation(command, status));
             return status;
         }
@@ -725,6 +862,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         if (writing) {
             throw new IOException("Arena control I/O is still in flight");
+        }
+        if (sessionOwner != null) {
+            throw new IOException("DATA writer still owns its session");
         }
         for (boolean reserved : quarantineReserved) {
             if (reserved) {
