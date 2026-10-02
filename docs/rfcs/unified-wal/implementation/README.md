@@ -175,6 +175,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 #### 7. 实现点读与基础restart
 
+2026-10-02 driver已发布候选的normal/recovery重复比较使用既有owner固定对齐池作record点读scratch，并直接读取其已拥有的输入view。池不足在读盘前临时背压，不消耗DATA坐标或force；源与scratch均等实际I/O及owner结果终结后归还。独立parser/CRC及权限/候选复核保留；通用点读、只读重启检查与无池手动入口仍为堆buffer实验路径，全读取/网络/索引bytes总账尚未闭合，步骤6/7不标完成。
+
 依赖步骤5、6。点读实现正确定位、allocation/generation pin、独立record校验和有界对齐读取，不为小entry强制读取整个DATA batch。restart顺序为：
 
 ```text

@@ -46,6 +46,35 @@ final class SegmentPointRead {
 
     static Result read(IsolatedSegmentConfig config, SegmentFileHeader identity,
                        SegmentArenaControlLog authority, Location location) throws IOException {
+        return read(config, identity, authority, location, null);
+    }
+
+    /** The returned record borrows scratch until the caller finishes using its lease. */
+    static Result readWithScratch(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                  SegmentArenaControlLog authority, Location location, ByteBuffer scratch)
+            throws IOException {
+        if (scratch.capacity() < scratchBytes(location)) {
+            throw new IOException("Point-read scratch capacity is insufficient");
+        }
+        return read(config, identity, authority, location, scratch);
+    }
+
+    static int scratchBytes(Location location) throws IOException {
+        if (location.recordOffset() < 0 || location.recordLength() < 196
+                || location.recordLength() > SegmentBatchFormat.RECORD_HEADER + 1024 * 1024 + 36
+                || location.recordOffset() > Long.MAX_VALUE - location.recordLength()) {
+            throw new IOException("Invalid point-read record span");
+        }
+        long bytes = alignUp(location.recordOffset() + location.recordLength()) - alignDown(location.recordOffset());
+        if (bytes > SegmentBatchFormat.MAX_BATCH) {
+            throw new IOException("Invalid aligned read span");
+        }
+        return Math.toIntExact(Math.max(4096, bytes));
+    }
+
+    private static Result read(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                               SegmentArenaControlLog authority, Location location, ByteBuffer scratch)
+            throws IOException {
         SegmentBatchFormat.Address address = location.address();
         if (!authority.matchesScope(config, identity) || address.fileIndex() >= config.dataFiles()
                 || address.shard() >= config.logicalShards()
@@ -65,11 +94,9 @@ final class SegmentPointRead {
             if (data.size() != config.bytesPerFile()) {
                 throw new IOException("DATA file size mismatch");
             }
-            ByteBuffer fileHeader = ByteBuffer.allocate(4096);
-            SegmentFileIo.readFully(data, fileHeader, 0);
+            ByteBuffer fileHeader = readAligned(data, 0, 4096, scratch);
             identity.validate(fileHeader, config, address.fileIndex());
-            ByteBuffer batchHeader = ByteBuffer.allocate(4096).order(ByteOrder.BIG_ENDIAN);
-            SegmentFileIo.readFully(data, batchHeader, address.offset());
+            ByteBuffer batchHeader = readAligned(data, address.offset(), address.offset() + 4096, scratch);
             int batchLength = SegmentBatchParser.batchLength(batchHeader, address, config.bytesPerFile());
             if (batchLength != location.batchLength()) {
                 throw new IOException("Locator batch length mismatch");
@@ -83,7 +110,7 @@ final class SegmentPointRead {
             }
             long headerStart = alignDown(recordStart);
             long headerEnd = alignUp(recordStart + SegmentBatchFormat.RECORD_HEADER);
-            ByteBuffer recordHeader = readAligned(data, headerStart, headerEnd);
+            ByteBuffer recordHeader = readAligned(data, headerStart, headerEnd, scratch);
             int headerOffset = Math.toIntExact(recordStart - headerStart);
             int recordLength = SegmentBatchParser.recordLength(recordHeader.slice(headerOffset,
                     SegmentBatchFormat.RECORD_HEADER));
@@ -91,13 +118,14 @@ final class SegmentPointRead {
                 throw new IOException("Locator record length mismatch");
             }
             long recordEnd = alignUp(recordStart + recordLength);
-            ByteBuffer content = readAligned(data, headerStart, recordEnd);
+            int headerBytes = recordHeader.remaining();
+            ByteBuffer content = readAligned(data, headerStart, recordEnd, scratch);
             SegmentBatchParser.Record record = SegmentBatchParser.parseRecord(
                     content.slice(headerOffset, recordLength), address, recordStart);
             if (!record.context().equals(location.context()) || record.entryId() != location.entryId()) {
                 throw new IOException("Locator ledger identity or entry ID mismatch");
             }
-            return new Result(record, 4096L + 4096 + recordHeader.remaining() + content.remaining());
+            return new Result(record, 4096L + 4096 + headerBytes + content.remaining());
         }
     }
 
@@ -172,11 +200,17 @@ final class SegmentPointRead {
         }
     }
 
-    private static ByteBuffer readAligned(FileChannel data, long start, long end) throws IOException {
+    private static ByteBuffer readAligned(FileChannel data, long start, long end, ByteBuffer scratch)
+            throws IOException {
         if (end < start || end - start > SegmentBatchFormat.MAX_BATCH) {
             throw new IOException("Invalid aligned read span");
         }
-        ByteBuffer content = ByteBuffer.allocate((int) (end - start));
+        int length = Math.toIntExact(end - start);
+        if (scratch != null && scratch.capacity() < length) {
+            throw new IOException("Point-read scratch capacity is insufficient");
+        }
+        ByteBuffer content = scratch == null ? ByteBuffer.allocate(length)
+                : scratch.duplicate().clear().limit(length).slice().order(ByteOrder.BIG_ENDIAN);
         SegmentFileIo.readFully(data, content, start);
         return content;
     }

@@ -164,6 +164,7 @@ final class SegmentDataPhysicalDriver {
         private final List<SegmentBookieControlLog.RecoveryAdmission> recoveryAdmissions;
         private final List<PendingNormal> normals;
         private SegmentBatchFormat.FrozenBatch batch;
+        private SegmentBufferPool.Lease readBuffer;
         private Runnable releaseSource;
         private boolean physicalTerminal;
         private boolean ownerTerminal;
@@ -224,8 +225,14 @@ final class SegmentDataPhysicalDriver {
                             batch.releaseFromDriver();
                         }
                     } finally {
-                        if (releaseSource != null) {
-                            releaseSource.run();
+                        try {
+                            if (readBuffer != null) {
+                                readBuffer.close();
+                            }
+                        } finally {
+                            if (releaseSource != null) {
+                                releaseSource.run();
+                            }
                         }
                     }
                 }
@@ -975,6 +982,7 @@ final class SegmentDataPhysicalDriver {
                         : status.get() == DuplicateStatus.SAME_DURABLE
                                 && hot.liveDurableCandidate(entry.context, entry.entryId)
                                         .filter(selected.get()::equals).isPresent() ? NormalStatus.LOCAL_DURABLE
+                                : status.get() == DuplicateStatus.NOT_READY ? NormalStatus.TRANSIENT_UNAVAILABLE
                                 : NormalStatus.UNKNOWN;
                 entry.respond(result, result == NormalStatus.LOCAL_DURABLE ? selected.get() : null, failure, false);
             }, entry.admission == null ? List.of() : List.of(entry.admission),
@@ -987,12 +995,27 @@ final class SegmentDataPhysicalDriver {
                 entry.releaseSource();
                 return;
             }
+            try {
+                entry.duplicate.readBuffer = owner.pool().acquire(SegmentPointRead.scratchBytes(location));
+            } catch (IOException failure) {
+                entry.duplicate.physicalTerminal();
+                entry.duplicateSubmitted = true;
+                entry.ticket.complete(() -> deliverDuplicate(entry.duplicate, failure));
+                return;
+            }
+            if (entry.duplicate.readBuffer == null) {
+                entry.duplicate.physicalTerminal();
+                entry.duplicateSubmitted = true;
+                entry.ticket.complete(() -> deliverDuplicate(entry.duplicate, null));
+                return;
+            }
             entry.duplicateView = entry.data.entry().nioBuffer().asReadOnlyBuffer();
             io.submit(entry.ticket, () -> {
                 entry.duplicateStarted.set(true);
                 try {
-                    boolean same = SegmentDuplicateCheck.sameLogicalPayload(files.config(), files.identity(), authority,
-                            location, entry.context, entry.duplicateView);
+                    boolean same = SegmentDuplicateCheck.sameLogicalPayloadOwned(files.config(), files.identity(),
+                            authority, location, entry.context, entry.duplicateView,
+                            entry.duplicate.readBuffer.bytes());
                     status.set(same ? DuplicateStatus.SAME_DURABLE : DuplicateStatus.CONFLICT);
                 } finally {
                     entry.duplicate.physicalTerminal();
@@ -1291,11 +1314,30 @@ final class SegmentDataPhysicalDriver {
                         return;
                     }
                     selected.set(location);
+                    if (owner.pool() != null) {
+                        try {
+                            obligation.readBuffer = owner.pool().acquire(SegmentPointRead.scratchBytes(location));
+                        } catch (IOException failure) {
+                            obligation.physicalTerminal();
+                            submitted = true;
+                            ticket.complete(() -> deliverDuplicate(obligation, failure));
+                            return;
+                        }
+                        if (obligation.readBuffer == null) {
+                            obligation.physicalTerminal();
+                            submitted = true;
+                            ticket.complete(() -> deliverDuplicate(obligation, null));
+                            return;
+                        }
+                    }
                     io.submit(ticket, () -> {
                         started.set(true);
                         try {
-                            boolean same = SegmentDuplicateCheck.sameLogicalPayload(files.config(),
-                                    files.identity(), authority, location, context, copy);
+                            boolean same = obligation.readBuffer == null
+                                    ? SegmentDuplicateCheck.sameLogicalPayload(files.config(), files.identity(),
+                                            authority, location, context, copy)
+                                    : SegmentDuplicateCheck.sameLogicalPayloadOwned(files.config(), files.identity(),
+                                            authority, location, context, copy, obligation.readBuffer.bytes());
                             status.set(same ? DuplicateStatus.SAME_DURABLE : DuplicateStatus.CONFLICT);
                         } finally {
                             obligation.physicalTerminal();

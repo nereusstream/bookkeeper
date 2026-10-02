@@ -95,16 +95,32 @@ final class SegmentDuplicateCheck {
     static boolean sameLogicalPayload(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                       SegmentArenaControlLog authority, SegmentPointRead.Location location,
                                       ProfileLedgerContext context, ByteBuffer incomingEntry) throws IOException {
+        return compare(config, identity, authority, location, context, copyEntry(incomingEntry), null);
+    }
+
+    /** Both buffers remain caller-owned until comparison finishes; no additional payload copy or read allocation. */
+    static boolean sameLogicalPayloadOwned(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                           SegmentArenaControlLog authority, SegmentPointRead.Location location,
+                                           ProfileLedgerContext context, ByteBuffer incomingEntry, ByteBuffer scratch)
+            throws IOException {
+        return compare(config, identity, authority, location, context, incomingEntry,
+                Objects.requireNonNull(scratch, "scratch"));
+    }
+
+    private static boolean compare(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                    SegmentArenaControlLog authority, SegmentPointRead.Location location,
+                                    ProfileLedgerContext context, ByteBuffer incomingEntry, ByteBuffer scratch)
+            throws IOException {
         if (!context.equals(location.context())) {
             throw new IOException("Duplicate check ledger context mismatch");
         }
-        // The caller may release or reuse its request buffer while the blocking read is in flight.
-        ByteBuffer copy = copyEntry(incomingEntry);
-        SegmentEntryIdentity incoming = SegmentEntryIdentity.parse(context, copy);
+        SegmentEntryIdentity incoming = SegmentEntryIdentity.parse(context, incomingEntry);
         if (incoming.entryId() != location.entryId()) {
             throw new IOException("Duplicate check entry coordinate mismatch");
         }
-        SegmentBatchParser.Record stored = SegmentPointRead.read(config, identity, authority, location).record();
+        SegmentBatchParser.Record stored = (scratch == null
+                ? SegmentPointRead.read(config, identity, authority, location)
+                : SegmentPointRead.readWithScratch(config, identity, authority, location, scratch)).record();
         if (stored.origin() != SegmentBatchFormat.ENTRY_DATA) {
             throw new IOException("Duplicate check requires ordinary DATA");
         }

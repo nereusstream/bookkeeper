@@ -1737,6 +1737,223 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void automaticPublishedDuplicatesShareThePoolAndRetryAfterBackpressure() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        List<SegmentDataPhysicalDriver.NormalResult> normals = new CopyOnWriteArrayList<>();
+        List<SegmentDataPhysicalDriver.RecoveryResult> recoveries = new CopyOnWriteArrayList<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<SegmentBufferPool.Lease> held = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 6), activate(2)));
+            bookie.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9));
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 4096, 12287, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 4),
+                    new SegmentHotDirectory(owner, config, identity, 4));
+            try {
+                SegmentDataPhysicalDriver.NormalBatcher batcher = normalBatcher(driver, owner, bookie,
+                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30)));
+                CountDownLatch written = new CountDownLatch(1);
+                assertTrue(batcher.submit(sourceInput(group, context(), 2),
+                        bookie.admitNormal(context(), filled(20, (byte) 6)).orElseThrow(),
+                        collectNormal(normals, failure, written)));
+                assertTrue(written.await(5, TimeUnit.SECONDS));
+                ownerBarrier(owner);
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, normals.get(0).status());
+                CountDownLatch acquired = new CountDownLatch(1);
+                assertTrue(owner.control(() -> {
+                    held.set(owner.pool().acquire());
+                    acquired.countDown();
+                }));
+                assertTrue(acquired.await(5, TimeUnit.SECONDS));
+                assertTrue(held.get() != null);
+                CountDownLatch refused = new CountDownLatch(2);
+                assertTrue(batcher.submit(sourceInput(group, context(), 2),
+                        bookie.admitNormal(context(), filled(20, (byte) 6)).orElseThrow(),
+                        collectNormal(normals, failure, refused)));
+                assertTrue(batcher.submitRecovery(bookie.admitRecovery(recoveryAddWithEntry(
+                        entryBytes(context(), 2, -1, 8, (byte) 0))).orElseThrow(),
+                        collectRecovery(recoveries, failure, refused)));
+                assertTrue(refused.await(5, TimeUnit.SECONDS));
+                ownerBarrier(owner);
+                assertNull(failure.get());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE, normals.get(1).status());
+                assertEquals(SegmentDataPhysicalDriver.RecoveryStatus.TRANSIENT_UNAVAILABLE,
+                        recoveries.get(0).status());
+                assertNull(normals.get(1).candidate());
+                assertNull(recoveries.get(0).candidate());
+                assertEquals(0, group.inputs().usedBytes());
+                assertEquals(8192, files.nextOffset(0));
+                assertEquals(1, files.dataIo.forces);
+                held.getAndSet(null).close();
+
+                AtomicReference<SegmentDataPhysicalDriver.DuplicateStatus> manualStatus = new AtomicReference<>();
+                CountDownLatch manual = new CountDownLatch(1);
+                assertTrue(driver.checkPublishedNormalDuplicate(bookie,
+                        bookie.admitNormal(context(), filled(20, (byte) 6)).orElseThrow(),
+                        entryBytes(context(), 2, 1, 8, (byte) 0),
+                        new SegmentDataPhysicalDriver.DuplicateRequest((status, cause) -> {
+                            manualStatus.set(status);
+                            if (cause != null) {
+                                failure.compareAndSet(null, cause);
+                            }
+                            manual.countDown();
+                        })));
+                assertTrue(manual.await(5, TimeUnit.SECONDS));
+                ownerBarrier(owner);
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE, manualStatus.get());
+
+                CountDownLatch same = new CountDownLatch(1);
+                assertTrue(batcher.submit(sourceInput(group, context(), 2, 1, 8, (byte) 0, 8),
+                        bookie.admitNormal(context(), filled(20, (byte) 6)).orElseThrow(),
+                        collectNormal(normals, failure, same)));
+                assertTrue(same.await(5, TimeUnit.SECONDS));
+                ownerBarrier(owner);
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, normals.get(2).status());
+                assertEquals(normals.get(0).candidate(), normals.get(2).candidate());
+                CountDownLatch conflict = new CountDownLatch(1);
+                assertTrue(batcher.submitRecovery(bookie.admitRecovery(recoveryAddWithEntry(
+                        entryBytes(context(), 2, 1, 8, (byte) 9))).orElseThrow(),
+                        collectRecovery(recoveries, failure, conflict)));
+                assertTrue(conflict.await(5, TimeUnit.SECONDS));
+                ownerBarrier(owner);
+                assertEquals(SegmentDataPhysicalDriver.RecoveryStatus.CONFLICT, recoveries.get(1).status());
+                assertNull(failure.get());
+                assertEquals(0, group.inputs().usedBytes());
+                assertEquals(8192, files.nextOffset(0));
+                assertEquals(1, files.dataIo.forces);
+            } finally {
+                if (held.get() != null) {
+                    held.getAndSet(null).close();
+                }
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void queuedPublishedReadRetainsSourceAndScratchThroughCancellationOrReadFailure() throws Exception {
+        for (boolean cancel : new boolean[] {true, false}) {
+            IsolatedSegmentConfig base = config();
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(base.directory().resolveSibling("read-" + cancel),
+                    1, 4, 1, base.bytesPerFile(), 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            SegmentFileHeader identity = identity();
+            CountDownLatch blocked = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            CountDownLatch compared = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            List<SegmentDataPhysicalDriver.NormalResult> results = new CopyOnWriteArrayList<>();
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                grant(arena, 1);
+                bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+                SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                        new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 4096, 12287, Duration.ofSeconds(5)));
+                SegmentOwnerLoop owner = group.owner(0);
+                SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                        new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 4),
+                        new SegmentHotDirectory(owner, config, identity, 4));
+                try {
+                    SegmentDataPhysicalDriver.NormalBatcher batcher = normalBatcher(driver, owner, bookie,
+                            new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30)));
+                    CountDownLatch written = new CountDownLatch(1);
+                    assertTrue(batcher.submit(sourceInput(group, context(), 1),
+                            bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(),
+                            collectNormal(results, failure, written)));
+                    assertTrue(written.await(5, TimeUnit.SECONDS));
+                    ownerBarrier(owner);
+                    assertNull(failure.get());
+                    assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, results.get(0).status());
+                    assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                        @Override
+                        public void run(SegmentOwnerLoop.Ticket ticket) {
+                            group.io().submit(ticket, () -> {
+                                blocked.countDown();
+                                await(release);
+                            }, cause -> failure.compareAndSet(null, cause));
+                        }
+
+                        @Override
+                        public void failed(Throwable cause) {
+                            failure.compareAndSet(null, cause);
+                        }
+                    }));
+                    assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                    SegmentEntryInputs.Input input = sourceInput(group, context(), 1);
+                    ByteBuf source = input.bytes();
+                    SegmentBookieControlLog.Admission admission = bookie.admitNormal(
+                            context(), filled(20, (byte) 5)).orElseThrow();
+                    SegmentDataPhysicalDriver.NormalRequest request = new SegmentDataPhysicalDriver.NormalRequest(
+                            (result, cause) -> {
+                                results.add(result);
+                                failure.set(cause);
+                                if (group.inputs().usedBytes() != 44 || source.refCnt() != 1
+                                        || owner.pool().outstanding() != 1) {
+                                    failure.set(new AssertionError("Read buffers released before owner result"));
+                                }
+                                compared.countDown();
+                            });
+                    assertTrue(batcher.submit(input, admission, request));
+                    ownerBarrier(owner);
+                    FutureTask<Integer> leases = new FutureTask<>(() -> owner.pool().outstanding());
+                    assertTrue(owner.control(leases::run));
+                    assertEquals(1, leases.get(5, TimeUnit.SECONDS).intValue());
+                    assertEquals(44, group.inputs().usedBytes());
+                    assertEquals(1, source.refCnt());
+                    if (cancel) {
+                        assertTrue(request.stopWaiting());
+                    } else {
+                        SegmentPointRead.Location location = results.get(0).candidate();
+                        try (FileChannel channel = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                                StandardOpenOption.WRITE)) {
+                            channel.write(ByteBuffer.wrap(new byte[] {1}),
+                                    location.recordOffset() + SegmentBatchFormat.RECORD_HEADER + 36);
+                            channel.force(false);
+                        }
+                    }
+                    assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                            bookie.submitFence(fence(3, (byte) 5)).status());
+                    assertFalse(group.shutdown(Duration.ofMillis(50)));
+                    assertEquals(44, group.inputs().usedBytes());
+                    assertEquals(1, source.refCnt());
+                    assertTrue(bookie.canCompleteNormal(admission));
+                    release.countDown();
+                    assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                    assertEquals(0, source.refCnt());
+                    assertEquals(0, group.inputs().usedBytes());
+                    assertEquals(1, files.dataIo.forces);
+                    assertEquals(8192, files.nextOffset(0));
+                    if (cancel) {
+                        assertEquals(1, compared.getCount());
+                        assertEquals(1, results.size());
+                        assertNull(failure.get());
+                    } else {
+                        assertEquals(0, compared.getCount());
+                        assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN, results.get(1).status());
+                        assertTrue(failure.get() instanceof IOException);
+                    }
+                    assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                            bookie.submitFence(fence(3, (byte) 5)).status());
+                } finally {
+                    release.countDown();
+                    assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                }
+                assertNull(owner.failure());
+            }
+        }
+    }
+
+    @Test
     public void automaticRecoveryBatchingNeedsNoNormalActivationAndComparesDuplicates() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

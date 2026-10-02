@@ -300,6 +300,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤6补齐[合法recovery Add的逐entry合批入口](rfcs/unified-wal/implementation/local-storage/README.md)：私有exact payload快照移交共享源额度，普通/recovery共用封包、pool refill与重复坐标状态，并分别复核准入generation及exact grant/close/tombstone。相同内容交叉重试共用DATA结果，冲突不新增force，recovery-only不授予normal activation；取消response、shutdown及I/O失败仍排空实际资源。wire到存储credit、全局bytes总账、旧I/O恢复与生产接线仍未完成，不提升Gate。
 
+2026-10-02 步骤6/7的[driver重复点读](rfcs/unified-wal/implementation/local-storage/README.md)复用既有owner固定对齐池和已拥有的源view，不再分配大record副本或重复制输入；池不足在I/O前背压，取消与读取错误不提前归还源/scratch。通用物理点读、只读重启检查及无池手动入口仍为堆buffer实验路径，全读取/网络/索引预算和服务级可写restart尚未闭合，不提升Gate。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |

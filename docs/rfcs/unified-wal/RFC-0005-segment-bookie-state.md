@@ -511,6 +511,8 @@ Bookie控制日志提前建立install/activation等条件，Arena控制日志提
 
 各阶段计费规则：
 
+2026-10-02 隔离driver的已发布坐标重复比较已使用既有owner固定池的对齐scratch，normal/recovery源view不再重复复制；池不足在真实读盘前返回临时不可用，原坐标与DATA force不变。scratch和源保持至实际I/O与owner结果均终结，取消等待和读取错误均按原完成票据排空。通用物理点读、只读重启检查及无池手动入口仍保留堆buffer实验路径，网络/完整读取/索引bytes总账未完成，详见[本地存储状态](implementation/local-storage/README.md)。
+
 | 持有阶段/场景 | 计费、释放与进展规则 |
 | --- | --- |
 | socket/TLS/header、未完成frame、已解码未准入 | 固定工作集和实际buffer均计入连接/Bookie总量；先验证header并预留额度再继续大body，暂停前pipeline字节不漏记。向存储移交owner/credit，close/timeout/解析失败释放实际不再使用的资源及未消费预留 |

@@ -913,6 +913,64 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void pooledPointReadReusesScratchAcrossPageBoundariesAndRejectsCorruption() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("read-scratch"),
+                1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        ByteBuf filler = entry(new byte[3676], 2);
+        ByteBuf small = entry(new byte[1024], 3);
+        ByteBuf maximum = entry(new byte[1024 * 1024], 4);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBufferPool pool = new SegmentBufferPool(0, 1, 1, SegmentBatchFormat.MAX_BATCH,
+                        4096, false, () -> { })) {
+            SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encode(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), filler), SegmentBatchFormat.entry(context(), small),
+                            SegmentBatchFormat.entry(context(), maximum)));
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, 4096, 2, 1)));
+            files.writeAuthorized(batch, arena);
+            List<SegmentPointRead.Location> locations = SegmentPointRead.locations(
+                    SegmentBatchParser.parse(batch.bytes(), address(4096), config.bytesPerFile()));
+            assertEquals(4000, locations.get(1).recordOffset() % 4096);
+            try (SegmentBufferPool.Lease scratch = pool.acquire()) {
+                assertTrue(scratch.bytes().isDirect());
+                assertEquals(0, scratch.bytes().alignmentOffset(0, 4096));
+                for (int i = 1; i <= 2; i++) {
+                    SegmentPointRead.Location location = locations.get(i);
+                    SegmentPointRead.Result heap = SegmentPointRead.read(config, identity(), arena, location);
+                    SegmentPointRead.Result pooled = SegmentPointRead.readWithScratch(
+                            config, identity(), arena, location, scratch.bytes());
+                    assertEquals(heap.bytesRead(), pooled.bytesRead());
+                    assertArrayEquals(bytes(heap.record().entry()), bytes(pooled.record().entry()));
+                    assertEquals(location.entryId(), pooled.record().entryId());
+                    assertTrue(SegmentDuplicateCheck.sameLogicalPayloadOwned(config, identity(), arena, location,
+                            context(), (i == 1 ? small : maximum).nioBuffer(), scratch.bytes()));
+                    int required = SegmentPointRead.scratchBytes(location);
+                    assertThrows(IOException.class, () -> SegmentPointRead.readWithScratch(config, identity(), arena,
+                            location, scratch.bytes().limit(required - 1).slice()));
+                }
+                SegmentPointRead.Location location = locations.get(2);
+                try (FileChannel channel = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                        StandardOpenOption.WRITE)) {
+                    channel.write(ByteBuffer.wrap(new byte[] {1}),
+                            location.recordOffset() + SegmentBatchFormat.RECORD_HEADER + 36);
+                    channel.force(false);
+                }
+                assertThrows(IOException.class, () -> SegmentPointRead.readWithScratch(
+                        config, identity(), arena, location, scratch.bytes()));
+                assertThrows(IOException.class, () -> SegmentDuplicateCheck.sameLogicalPayloadOwned(
+                        config, identity(), arena, location, context(), maximum.nioBuffer(), scratch.bytes()));
+            }
+            pool.drainReturns();
+            assertEquals(0, pool.outstanding());
+        } finally {
+            filler.release();
+            small.release();
+            maximum.release();
+        }
+    }
+
+    @Test
     public void recoveredStreamCandidateKeepsOtherGenerationInSharedFile() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(
                 temporary.getRoot().toPath().resolve("mixed-stream-generations"), 1, 4, 1,
