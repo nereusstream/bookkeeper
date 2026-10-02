@@ -71,6 +71,7 @@ final class SegmentBufferPool implements AutoCloseable {
     private final ArrayDeque<Slot> free;
     private final ArrayBlockingQueue<Slot> returns;
     private final long reservedBytes;
+    private final int bytesPerBuffer;
     private int outstanding;
     private boolean closed;
 
@@ -82,6 +83,7 @@ final class SegmentBufferPool implements AutoCloseable {
         }
         this.ownerId = ownerId;
         this.generation = generation;
+        this.bytesPerBuffer = bytesPerBuffer;
         this.wakeOwner = java.util.Objects.requireNonNull(wakeOwner, "wakeOwner");
         int allocationBytes = Math.addExact(bytesPerBuffer, alignment - 1);
         reservedBytes = Math.multiplyExact((long) count, allocationBytes);
@@ -115,11 +117,21 @@ final class SegmentBufferPool implements AutoCloseable {
     }
 
     Lease acquire() {
+        return acquire(1);
+    }
+
+    Lease acquire(int minimumBytes) {
         requireOwner();
         if (closed) {
             throw new IllegalStateException("Pool closed");
         }
+        if (minimumBytes < 1) {
+            throw new IllegalArgumentException("Positive buffer size required");
+        }
         drainReturns();
+        if (minimumBytes > bytesPerBuffer) {
+            return null;
+        }
         Slot slot = free.pollFirst();
         if (slot == null) {
             return null;

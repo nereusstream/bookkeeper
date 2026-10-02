@@ -137,6 +137,7 @@ final class SegmentDataPhysicalDriver {
         private final List<SegmentBookieControlLog.Admission> admissions;
         private final List<SegmentBookieControlLog.RecoveryAdmission> recoveryAdmissions;
         private final List<PendingNormal> normals;
+        private SegmentBatchFormat.FrozenBatch batch;
         private boolean physicalTerminal;
         private boolean ownerTerminal;
         private boolean released;
@@ -183,11 +184,17 @@ final class SegmentDataPhysicalDriver {
         private void releaseIfTerminal() {
             if (physicalTerminal && ownerTerminal && !released) {
                 released = true;
-                for (SegmentBookieControlLog.Admission admission : admissions) {
-                    admission.driverTerminal();
-                }
-                for (SegmentBookieControlLog.RecoveryAdmission admission : recoveryAdmissions) {
-                    admission.driverTerminal();
+                try {
+                    for (SegmentBookieControlLog.Admission admission : admissions) {
+                        admission.driverTerminal();
+                    }
+                    for (SegmentBookieControlLog.RecoveryAdmission admission : recoveryAdmissions) {
+                        admission.driverTerminal();
+                    }
+                } finally {
+                    if (batch != null) {
+                        batch.releaseFromDriver();
+                    }
                 }
             }
         }
@@ -222,12 +229,15 @@ final class SegmentDataPhysicalDriver {
     }
 
     boolean submit(SegmentBatchFormat.FrozenBatch batch, Completion completion) {
-        return submitPhysical(batch, new Obligation(Objects.requireNonNull(completion, "completion"), List.of()));
+        Objects.requireNonNull(completion, "completion");
+        batch.claimForDriver();
+        return submitPhysical(batch, new Obligation(completion, List.of()));
     }
 
     /**
      * The caller acquires one Bookie ticket per normal record before submitting the frozen batch.
-     * Once claimed, this driver releases every ticket even when validation or owner admission fails.
+     * Once claimed, this driver releases every ticket and pooled buffer even when validation or
+     * owner admission fails. Caller ownership of a pooled batch ends when this method claims it.
      */
     boolean submitNormal(SegmentBookieControlLog bookie, SegmentBatchFormat.FrozenBatch batch,
                          List<SegmentBookieControlLog.Admission> admissions, NormalCompletion completion)
@@ -236,7 +246,13 @@ final class SegmentDataPhysicalDriver {
         Objects.requireNonNull(batch, "batch");
         Objects.requireNonNull(completion, "completion");
         List<SegmentBookieControlLog.Admission> input = List.copyOf(admissions);
-        bookie.claimForDriver(input);
+        batch.claimForDriver();
+        try {
+            bookie.claimForDriver(input);
+        } catch (RuntimeException | Error failure) {
+            batch.releaseFromDriver();
+            throw failure;
+        }
         List<SegmentBatchParser.Record> records;
         List<PendingNormal> normals;
         try {
@@ -264,8 +280,12 @@ final class SegmentDataPhysicalDriver {
             }
             normals = List.copyOf(identities);
         } catch (IOException | RuntimeException | Error failure) {
-            for (SegmentBookieControlLog.Admission admission : input) {
-                admission.driverTerminal();
+            try {
+                for (SegmentBookieControlLog.Admission admission : input) {
+                    admission.driverTerminal();
+                }
+            } finally {
+                batch.releaseFromDriver();
             }
             throw failure;
         }
@@ -298,7 +318,13 @@ final class SegmentDataPhysicalDriver {
         Objects.requireNonNull(batch, "batch");
         Objects.requireNonNull(completion, "completion");
         List<SegmentBookieControlLog.RecoveryAdmission> input = List.copyOf(admissions);
-        bookie.claimRecoveryForDriver(input);
+        batch.claimForDriver();
+        try {
+            bookie.claimRecoveryForDriver(input);
+        } catch (RuntimeException | Error failure) {
+            batch.releaseFromDriver();
+            throw failure;
+        }
         List<SegmentBatchParser.Record> records;
         List<PendingNormal> entries;
         try {
@@ -331,8 +357,12 @@ final class SegmentDataPhysicalDriver {
             records = parsed.records();
             entries = List.copyOf(identities);
         } catch (IOException | RuntimeException | Error failure) {
-            for (SegmentBookieControlLog.RecoveryAdmission admission : input) {
-                admission.driverTerminal();
+            try {
+                for (SegmentBookieControlLog.RecoveryAdmission admission : input) {
+                    admission.driverTerminal();
+                }
+            } finally {
+                batch.releaseFromDriver();
             }
             throw failure;
         }
@@ -541,6 +571,7 @@ final class SegmentDataPhysicalDriver {
 
     private boolean submitPhysical(SegmentBatchFormat.FrozenBatch batch, Obligation obligation) {
         Objects.requireNonNull(batch, "batch");
+        obligation.batch = batch;
         boolean accepted;
         try {
             accepted = owner.submit(shard, new SegmentOwnerLoop.Command() {

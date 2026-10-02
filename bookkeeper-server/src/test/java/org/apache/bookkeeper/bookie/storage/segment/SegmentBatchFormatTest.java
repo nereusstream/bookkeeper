@@ -119,6 +119,53 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void pooledEncodingClearsReusedPaddingAndRefusesUnavailableWorkingSet() throws Exception {
+        IsolatedSegmentConfig config = config();
+        byte[] payload = new byte[3000];
+        java.util.Arrays.fill(payload, (byte) 0x5a);
+        ByteBuf large = entry(payload);
+        ByteBuf small = entry(new byte[] {7});
+        ByteBuf tooLarge = entry(new byte[4000]);
+        try (SegmentBufferPool pool = new SegmentBufferPool(0, 1, 1, 4096, 4096, false, () -> { })) {
+            SegmentBatchFormat.FrozenBatch first = SegmentBatchFormat.encodePooled(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), large)), pool);
+            try {
+                assertTrue(first.bytes().isDirect());
+                assertEquals(0, first.bytes().alignmentOffset(0, 4096));
+                assertEquals(SegmentBatchFormat.encode(config, address(4096),
+                        List.of(SegmentBatchFormat.entry(context(), large))).bytes(), first.bytes());
+                assertNull(SegmentBatchFormat.encodePooled(config, address(4096),
+                        List.of(SegmentBatchFormat.entry(context(), small)), pool));
+            } finally {
+                first.close();
+            }
+            assertThrows(IllegalStateException.class, first::bytes);
+            assertNull(SegmentBatchFormat.encodePooled(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), tooLarge)), pool));
+            try (SegmentBatchFormat.FrozenBatch reused = SegmentBatchFormat.encodePooled(config, address(4096),
+                    List.of(SegmentBatchFormat.entry(context(), small)), pool)) {
+                assertEquals(SegmentBatchFormat.encode(config, address(4096),
+                        List.of(SegmentBatchFormat.entry(context(), small))).bytes(), reused.bytes());
+                assertEquals(1, SegmentBatchParser.parse(reused.bytes(), address(4096), config.bytesPerFile())
+                        .records().size());
+                try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity())) {
+                    assertThrows(IllegalStateException.class, () -> files.reserve(reused));
+                    assertEquals(4096, files.nextOffset(0));
+                }
+            }
+            small.setByte(36, 8);
+            assertThrows(IllegalArgumentException.class, () -> SegmentBatchFormat.encodePooled(config,
+                    address(4096), List.of(SegmentBatchFormat.entry(context(), small)), pool));
+            pool.drainReturns();
+            assertEquals(0, pool.outstanding());
+        } finally {
+            large.release();
+            small.release();
+            tooLarge.release();
+        }
+    }
+
+    @Test
     public void dataReservationAndCloseDecisionDoNotWaitForFileForce() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("data-lock"),
                 1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

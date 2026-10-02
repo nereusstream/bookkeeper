@@ -71,21 +71,66 @@ final class SegmentBatchFormat {
         }
     }
 
-    static final class FrozenBatch {
+    static final class FrozenBatch implements AutoCloseable {
         private final Address address;
         private final ByteBuffer bytes;
+        private final SegmentBufferPool.Lease lease;
+        private boolean driverOwned;
+        private boolean released;
 
-        private FrozenBatch(Address address, ByteBuffer bytes) {
+        private FrozenBatch(Address address, ByteBuffer bytes, SegmentBufferPool.Lease lease) {
             this.address = address;
             this.bytes = bytes.asReadOnlyBuffer();
+            this.lease = lease;
         }
 
         Address address() {
             return address;
         }
 
-        ByteBuffer bytes() {
+        synchronized ByteBuffer bytes() {
+            if (released) {
+                throw new IllegalStateException("Frozen DATA buffer was released");
+            }
             return bytes.asReadOnlyBuffer();
+        }
+
+        int length() {
+            return bytes.remaining();
+        }
+
+        synchronized void claimForDriver() {
+            if (lease != null) {
+                if (driverOwned || released) {
+                    throw new IllegalStateException("Pooled DATA buffer is no longer caller-owned");
+                }
+                driverOwned = true;
+            }
+        }
+
+        synchronized void requirePhysicalOwner() {
+            if (lease != null && (!driverOwned || released)) {
+                throw new IllegalStateException("Pooled DATA must be owned by its physical driver");
+            }
+        }
+
+        synchronized void releaseFromDriver() {
+            if (lease != null) {
+                requirePhysicalOwner();
+                released = true;
+                lease.close();
+            }
+        }
+
+        @Override
+        public synchronized void close() {
+            if (lease != null && !released) {
+                if (driverOwned) {
+                    throw new IllegalStateException("Submitted DATA buffer belongs to its driver");
+                }
+                released = true;
+                lease.close();
+            }
         }
     }
 
@@ -106,6 +151,31 @@ final class SegmentBatchFormat {
     }
 
     static FrozenBatch encode(IsolatedSegmentConfig config, Address address, List<Data> records) {
+        int recordBytes = validate(config, address, records);
+        int length = alignedLength(recordBytes);
+        return encode(address, records, recordBytes,
+                ByteBuffer.allocate(length).order(ByteOrder.BIG_ENDIAN), null);
+    }
+
+    /** Acquires fixed owner storage before copying; null means no suitable submission working set. */
+    static FrozenBatch encodePooled(IsolatedSegmentConfig config, Address address, List<Data> records,
+                                    SegmentBufferPool pool) {
+        int recordBytes = validate(config, address, records);
+        int length = alignedLength(recordBytes);
+        SegmentBufferPool.Lease lease = pool.acquire(length);
+        if (lease == null) {
+            return null;
+        }
+        try {
+            ByteBuffer bytes = lease.bytes().slice(0, length).order(ByteOrder.BIG_ENDIAN);
+            return encode(address, records, recordBytes, bytes, lease);
+        } catch (RuntimeException | Error failure) {
+            lease.close();
+            throw failure;
+        }
+    }
+
+    private static int validate(IsolatedSegmentConfig config, Address address, List<Data> records) {
         if (address.fileIndex() >= config.dataFiles() || address.shard() >= config.logicalShards()
                 || address.fileIndex() != address.shard() % config.dataFiles()
                 || records.isEmpty() || records.size() > MAX_RECORDS) {
@@ -116,13 +186,23 @@ final class SegmentBatchFormat {
             validateEntry(record, maxPayload(config));
             recordBytes = Math.addExact(recordBytes, Math.addExact(RECORD_HEADER, record.entry().readableBytes()));
         }
-        int raw = Math.addExact(Math.addExact(HEADER, recordBytes), FOOTER);
-        int length = Math.multiplyExact(Math.floorDiv(Math.addExact(raw, 4095), 4096), 4096);
+        int length = alignedLength(recordBytes);
         if (length > MAX_BATCH || Math.addExact(address.offset(), length) > config.bytesPerFile()) {
             throw new IllegalArgumentException("Batch exceeds fixed file capacity");
         }
-        // Private storage is never exposed writable; caller input is copied before submission.
-        ByteBuffer bytes = ByteBuffer.allocate(length).order(ByteOrder.BIG_ENDIAN);
+        return recordBytes;
+    }
+
+    private static int alignedLength(int recordBytes) {
+        int raw = Math.addExact(Math.addExact(HEADER, recordBytes), FOOTER);
+        return Math.multiplyExact(Math.floorDiv(Math.addExact(raw, 4095), 4096), 4096);
+    }
+
+    private static FrozenBatch encode(Address address, List<Data> records, int recordBytes,
+                                      ByteBuffer bytes, SegmentBufferPool.Lease lease) {
+        int length = bytes.remaining();
+        // Only headers and padding need clearing on reuse; payload is copied exactly once.
+        zero(bytes, 84, 124);
         bytes.putLong(MAGIC).putInt(1).putInt(HEADER).putInt(address.fileIndex()).putInt(address.shard())
                 .putLong(address.allocation()).putLong(address.generation().value())
                 .putLong(address.shard()).putLong(address.streamGeneration().value())
@@ -141,6 +221,7 @@ final class SegmentBatchFormat {
                     .putLong(record.moveId().getLeastSignificantBits())
                     .putLong(record.moveGeneration()).putInt(address.fileIndex()).putInt(address.shard())
                     .putLong(address.streamGeneration().value()).putLong(address.sequence());
+            zero(bytes, start + 148, start + 156);
             bytes.putInt(start + 156, checksum(bytes, start, 156));
             bytes.position(start + RECORD_HEADER);
             ByteBuffer target = bytes.slice();
@@ -149,12 +230,19 @@ final class SegmentBatchFormat {
             bytes.position(start + RECORD_HEADER + entryLength);
         }
         int footer = length - FOOTER;
+        zero(bytes, bytes.position(), footer);
         bytes.position(footer);
         bytes.putLong(END_MAGIC).putLong(address.sequence()).putInt(length)
                 .putInt(checksum(bytes, HEADER, footer - HEADER)).putInt(bytes.getInt(124));
         bytes.putInt(checksum(bytes, footer, 28));
         bytes.clear();
-        return new FrozenBatch(address, bytes);
+        return new FrozenBatch(address, bytes, lease);
+    }
+
+    private static void zero(ByteBuffer bytes, int start, int end) {
+        for (int offset = start; offset < end; offset++) {
+            bytes.put(offset, (byte) 0);
+        }
     }
 
     private static void validateEntry(Data record, int maximum) {

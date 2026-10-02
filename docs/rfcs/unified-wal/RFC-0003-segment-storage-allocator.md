@@ -297,6 +297,8 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 ### 6.2 对齐缓冲池的NUMA属地
 
+2026-10-02 [隔离DATA提交](implementation/local-storage/README.md)已使用该固定owner池封包并执行真实write/force；完整对齐长度通过后先取得lease，再集中复制payload。driver接管后只有实际I/O和owner结果处理均终结才归还原池，取消响应等待或提前失败回调不释放仍在使用的buffer；池满或尺寸不足在复制/物理提交前返回资源不足。堆buffer格式实验入口仍保留，输入/读取/索引及网络bytes总账尚未闭合；不提升NUMA或资源Gate。
+
 状态：SYSTEM/OWNER_TOUCH隔离池已实现；PREFERRED和物理NUMA验证仍未完成。2026-09-26的[group启动与池](implementation/local-storage/README.md)已在owner绑定后分配/触碰对齐buffer，将同一全局数量和请求容量预算拆分给owner，预留原池归还容量并等待live lease后关闭。Netty/malloc页可能已被触碰，未测页分布，不声明硬属地或性能收益；未提升本节Gate。WalArena/DATA设备尽量与append owner、I/O服务资源及对齐DATA buffer pool同节点；NUMA只影响运行时placement，不新增Arena、控制日志、ProfileDescriptor字段或DATA身份。`ALLOC_POOL`的持久空间owner/generation与内存buffer pool的属地是不同事实；CPU/worker数量变化不重新解释ledger→shard或既有stream，重启调整worker映射遵守RFC-0005 §10.2。
 
 首批仍一个Arena，优先在同时具备足够CPU、允许内存节点及本地NVMe的NUMA节点验证；未知设备归属必须标UNKNOWN。PCI sysfs `numa_node = -1`不能当node 0，复合设备归属无法证明时也不伪造本地性，见[Linux PCI sysfs ABI](https://cdn.kernel.org/doc/html/latest/admin-guide/abi-testing.html)。后续多Arena只为已有Arena分别规划worker/池属地，不在线跨Arena迁移。

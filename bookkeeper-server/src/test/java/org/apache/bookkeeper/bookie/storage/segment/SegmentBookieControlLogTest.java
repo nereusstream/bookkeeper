@@ -262,6 +262,19 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private static SegmentBatchFormat.FrozenBatch pooledBatch(IsolatedSegmentConfig config, long entryId,
+                                                               long sequence, long offset,
+                                                               SegmentBufferPool pool) throws Exception {
+        ByteBuf entry = entry(context(), entryId);
+        try {
+            return SegmentBatchFormat.encodePooled(config, new SegmentBatchFormat.Address(0, 0, 5,
+                    new Generation(1), new Generation(1), sequence, offset),
+                    List.of(SegmentBatchFormat.entry(context(), entry)), pool);
+        } finally {
+            entry.release();
+        }
+    }
+
     private static ByteBuf entry(ProfileLedgerContext context, long entryId) throws Exception {
         return entry(context, entryId, -1, 8, (byte) 0);
     }
@@ -1160,6 +1173,200 @@ public class SegmentBookieControlLogTest {
             assertEquals(context(), recovered.entries().get(0).context());
             assertEquals(1, SegmentPointRead.read(config, identity, replayArena, recovered.entries().get(0))
                     .record().entryId());
+        }
+    }
+
+    @Test
+    public void pooledDataSurvivesStoppedWaiterUntilIoAndOwnerFinish() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch encoded = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<SegmentBatchFormat.FrozenBatch> frozen = new AtomicReference<>();
+        AtomicReference<SegmentDataPhysicalDriver.NormalResult> result = new AtomicReference<>();
+        AtomicInteger stoppedCallbacks = new AtomicInteger();
+        SegmentDataPhysicalDriver.NormalRequest stopped = new SegmentDataPhysicalDriver.NormalRequest(
+                (entry, cause) -> stoppedCallbacks.incrementAndGet());
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Pooled DATA force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            });
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 8191, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            try {
+                assertTrue(owner.control(() -> {
+                    try {
+                        ByteBuf first = entry(context(44), 1);
+                        ByteBuf second = entry(context(48), 2);
+                        try {
+                            frozen.set(SegmentBatchFormat.encodePooled(config, new SegmentBatchFormat.Address(
+                                    0, 0, 5, new Generation(1), new Generation(1), 1, 4096), List.of(
+                                            SegmentBatchFormat.entry(context(44), first),
+                                            SegmentBatchFormat.entry(context(48), second)), owner.pool()));
+                        } finally {
+                            first.release();
+                            second.release();
+                        }
+                        assertTrue(driver.submitNormal(bookie, frozen.get(), List.of(
+                                bookie.admitNormal(context(44), filled(20, (byte) 5)).orElseThrow(),
+                                bookie.admitNormal(context(48), filled(20, (byte) 5)).orElseThrow()), List.of(
+                                        stopped, new SegmentDataPhysicalDriver.NormalRequest((entry, cause) -> {
+                                            try {
+                                                assertNull(cause);
+                                                result.set(entry);
+                                                assertNull(pooledBatch(config, 3, 2, 8192, owner.pool()));
+                                            } catch (Throwable error) {
+                                                failure.compareAndSet(null, error);
+                                            } finally {
+                                                completed.countDown();
+                                            }
+                                        }))));
+                        assertThrows(IllegalStateException.class, frozen.get()::close);
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally {
+                        encoded.countDown();
+                    }
+                }));
+                assertTrue(encoded.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertTrue(stopped.stopWaiting());
+                CountDownLatch checked = new CountDownLatch(1);
+                assertTrue(owner.control(() -> {
+                    try {
+                        assertNull(pooledBatch(config, 3, 2, 8192, owner.pool()));
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally {
+                        checked.countDown();
+                    }
+                }));
+                assertTrue(checked.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                releaseForce.countDown();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                CountDownLatch reusable = new CountDownLatch(1);
+                AtomicReference<SegmentBatchFormat.FrozenBatch> next = new AtomicReference<>();
+                assertTrue(owner.control(() -> {
+                    try {
+                        next.set(pooledBatch(config, 3, 2, 8192, owner.pool()));
+                        assertTrue(next.get() != null);
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally {
+                        reusable.countDown();
+                    }
+                }));
+                assertTrue(reusable.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(0, stoppedCallbacks.get());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.get().status());
+                assertEquals(2, SegmentPointRead.read(config, identity, arena, result.get().candidate())
+                        .record().entryId());
+                assertThrows(IllegalStateException.class, frozen.get()::bytes);
+                group.stopAdmission();
+                assertFalse(driver.submitNormal(bookie, next.get(), List.of(
+                        bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                        (entries, cause) -> { }));
+                assertThrows(IllegalStateException.class, next.get()::bytes);
+            } finally {
+                releaseForce.countDown();
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void pooledValidationAndUnstartedIoRejectionReturnWorkingSet() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        CountDownLatch completed = new CountDownLatch(1);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4)));
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 8191, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
+                    new SegmentHotDirectory(owner, config, identity, 2));
+            group.io().shutdown();
+            try {
+                assertTrue(owner.control(() -> {
+                    try {
+                        SegmentBatchFormat.FrozenBatch invalid = pooledBatch(config, 1, 1, 4096, owner.pool());
+                        assertThrows(IOException.class, () -> driver.submitNormal(bookie, invalid, List.of(
+                                bookie.admitNormal(context(48), filled(20, (byte) 5)).orElseThrow()),
+                                (entries, cause) -> { }));
+                        assertThrows(IllegalStateException.class, invalid::bytes);
+                        SegmentBatchFormat.FrozenBatch valid = pooledBatch(config, 1, 1, 4096, owner.pool());
+                        assertTrue(driver.submitNormal(bookie, valid, List.of(
+                                bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                                (entries, cause) -> {
+                                    try {
+                                        assertTrue(cause instanceof IOException);
+                                        assertTrue(cause.getCause() instanceof RejectedExecutionException);
+                                        assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN,
+                                                entries.get(0).status());
+                                    } catch (Throwable error) {
+                                        failure.compareAndSet(null, error);
+                                    } finally {
+                                        completed.countDown();
+                                    }
+                                }));
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                        completed.countDown();
+                    }
+                }));
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                CountDownLatch returned = new CountDownLatch(1);
+                assertTrue(owner.control(() -> {
+                    try (SegmentBatchFormat.FrozenBatch retry = pooledBatch(config, 2, 2, 8192, owner.pool())) {
+                        assertTrue(retry != null);
+                    } catch (Throwable error) {
+                        failure.compareAndSet(null, error);
+                    } finally {
+                        returned.countDown();
+                    }
+                }));
+                assertTrue(returned.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(8192, files.nextOffset(0));
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(5, (byte) 5)).status());
+            } finally {
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+            assertNull(owner.failure());
         }
     }
 
@@ -2253,8 +2460,6 @@ public class SegmentBookieControlLogTest {
     public void failedPrefixDoesNotReleaseLaterTicketBeforeItsIoTerminates() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();
-        SegmentBatchFormat.FrozenBatch first = batch(config, 1, 1, 4096);
-        SegmentBatchFormat.FrozenBatch second = batch(config, 2, 2, 8192);
         CountDownLatch firstForce = new CountDownLatch(1);
         CountDownLatch secondOperation = new CountDownLatch(1);
         CountDownLatch releaseSecond = new CountDownLatch(1);
@@ -2267,10 +2472,13 @@ public class SegmentBookieControlLogTest {
         AtomicReference<Throwable> duplicateFailure = new AtomicReference<>();
         AtomicReference<List<SegmentDataPhysicalDriver.NormalResult>> firstResults = new AtomicReference<>();
         AtomicReference<List<SegmentDataPhysicalDriver.NormalResult>> secondResults = new AtomicReference<>();
-        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+        try (SegmentBufferPool pool = new SegmentBufferPool(0, 1, 2, 4096, 4096, false, () -> { });
+                IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
                         1024 * 1024, key((byte) 3), VALIDATOR)) {
+            SegmentBatchFormat.FrozenBatch first = pooledBatch(config, 1, 1, 4096, pool);
+            SegmentBatchFormat.FrozenBatch second = pooledBatch(config, 2, 2, 8192, pool);
             grant(arena, 2);
             bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
             files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false, () -> {
@@ -2333,12 +2541,24 @@ public class SegmentBookieControlLogTest {
                 assertTrue(secondFailure.get() instanceof IOException);
                 assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN, firstResults.get().get(0).status());
                 assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN, secondResults.get().get(0).status());
+                CountDownLatch ownerFinished = new CountDownLatch(1);
+                assertTrue(owner.control(ownerFinished::countDown));
+                assertTrue(ownerFinished.await(5, TimeUnit.SECONDS));
+                try (SegmentBufferPool.Lease reusable = pool.acquire()) {
+                    assertTrue(reusable != null);
+                    assertNull(pool.acquire());
+                }
                 assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
                         bookie.submitFence(fence(3, (byte) 5)).status());
                 assertThrows(IOException.class, bookie::close);
                 releaseSecond.countDown();
                 io.shutdown();
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                try (SegmentBufferPool.Lease reusableFirst = pool.acquire();
+                        SegmentBufferPool.Lease reusableSecond = pool.acquire()) {
+                    assertTrue(reusableFirst != null);
+                    assertTrue(reusableSecond != null);
+                }
                 assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
                         bookie.submitFence(fence(3, (byte) 5)).status());
             } finally {

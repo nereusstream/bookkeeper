@@ -52,6 +52,8 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 `SegmentDataPhysicalDriver`已把上述局部原语接成隔离的真实文件路径：原owner先占热候选容量、核对Arena grant并预留DATA坐标，再将write/force交给有界I/O服务；完成事件回原owner，只有连续前缀释放后才发布候选并回调。物理失败会将所有尚未完成的回调报错，保留已占坐标，不释放后批候选。受控normal入口在提交前核对冻结batch每条ENTRY_DATA与Bookie预准入票据的context及ledger的固定shard，失败或owner拒收时释放票据；已提交批次直到实际I/O与原owner回调均终结才释放，较早batch失败时不会因后批提前收到失败回调而越过fence切点。原物理实验入口仍只产出候选；normal入口在候选发布后、票据释放前逐entry检查捕获的准入generation，同批可分别返回`LOCAL_DURABLE`或`STALE_ADMISSION`，物理失败返回`UNKNOWN`且不产生成功。pending fence在已准入ticket之后，仍等待该ticket终结；单条逻辑失败不删除已force的物理候选。此结果仅为隔离本地判定，尚无网络deadline/断连接线、完整请求生命周期、完整read selector或Bookie ACK；跨重启的可发布前缀仍待重建。
 
+`SegmentBatchFormat.encodePooled`已接入现有owner对齐池：先验证entry大小/CRC及完整batch对齐长度，再立即申请足够的固定lease，池满或buffer过小返回资源不足；取得lease后只复制一次payload，重用时清零header保留字段及padding，字节格式不变。封包前后均不保留输入ByteBuf。调用者可关闭尚未提交的冻结batch；physical/normal/recovery driver认领后统一负责归还，验证失败或owner拒收立即释放，提交后等待真实I/O与owner结果处理均终结，停止响应等待或提前返回`UNKNOWN`不归还仍在使用的buffer。底层文件入口拒绝尚未交给driver的pooled batch，已归还batch不能再取bytes。隔离执行组真实文件测试覆盖从原owner池取得buffer到write/force及原池归还；堆buffer的`encode`仍供独立格式/I/O实验使用。此处仅闭合提交buffer的固定容量与生命周期，输入payload、重复点读、TLS/socket及hot/index工作集尚未接入统一bytes总账。
+
 同一冻结batch携带两个不同`ENTRY_DATA`时，隔离执行组路径以一次DATA force发布两个可点读物理候选；受控normal路径还验证两个ledger共享一次force但activation generation只让其中一条过期，另一条取得local result。同批两个有效pre-cut Admission在force暂停时，L1的pending fence拒绝新准入但等待已准入L1终结；L1/L2各自取得`LOCAL_DURABLE`，之后L1 fence才durable。提交后逐entry响应等待切片为每条record绑定独立`NormalRequest`；`stopWaiting()`原子撤销该请求的回调，不取消共享DATA、不释放Bookie票据或已占坐标。若回调已被领取则返回false，不承诺拦截已开始的回调。真实文件测试在force暂停时撤销L1响应等待：L1不同payload重试仍冲突，L2在force后得到`LOCAL_DURABLE`，L1相同payload重试命中已发布候选；I/O未终结时Bookie控制文件不能关闭。当前未实现显式终止pre-cut Add的路径，不能将activation/tombstone造成的逐entry失败称作fence失败；也未计量生产性能。
 
 该驱动也已在`SegmentExecutionGroup`的现有owner/I/O服务上验证排空：已受理的真实DATA force挂起时，group关闭返回未终结且DATA文件拒绝关闭；force完成、原owner回调可点读候选后，group才排空退出。此为隔离执行组的局部生命周期证据，仍未接入Bookie服务启动与停止。
@@ -92,6 +94,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-10-02 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：105项中100项执行通过，5项Linux亲和性用例因macOS平台跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。新增原owner池→冻结DATA→真实force验证停止一个waiter后共享buffer仍被持有、回调中仍不可复用、owner结果终结后可重新取得；验证拒绝与执行前I/O拒绝均归还buffer，已预留坐标仍不回退。较早batch失败的既有回归改用池buffer，后批虽已回调`UNKNOWN`仍直到实际I/O终结才归还。格式回归验证重用padding清零、池满/容量不足与未认领pooled batch拒绝。未验证输入/网络/索引总预算、Linux NUMA、掉电或生产ACK。
 
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`：54项隔离测试通过，0失败/错误/跳过；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。同批双ledger共享真实DATA force时，L1的pending fence拒绝新准入，但两条pre-cut Add都取得`LOCAL_DURABLE`；原owner完成屏障后L1 fence才durable。该验证不覆盖显式终止pre-cut分支、生产ACK或崩溃恢复。
 

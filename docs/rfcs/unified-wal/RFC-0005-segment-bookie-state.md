@@ -454,6 +454,8 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 ### 10.1 第一批可测的最小存储路径
 
+2026-10-02 局部提交工作集已接入现有owner对齐池：先校验大小、取得固定buffer后集中复制并冻结，DATA driver在真实I/O与owner结果终结后归还原池。真实文件回归覆盖停止响应等待、验证/准入/I/O拒绝及前批失败时后批仍在途；这些结果只证明pooled DATA buffer生命周期，输入payload、点读、TLS/socket及索引预算仍待统一接线，详见[本地存储状态](implementation/local-storage/README.md)。
+
 状态：**整体PLANNED / 未闭合**。隔离固定owner/物理DATA切片及Profile固定头前置校验、明文接收预算组件已有定向测试；尚无Bookie权限化普通Add、真实TLS listener或完整接收总账。保留§5.2三层持久化owner，首批采用固定shard、常驻平台线程owner及shared DATA block；§10.2—10.5的执行映射随该切片落地，默认affinity OFF、PARK；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
 
 ```text

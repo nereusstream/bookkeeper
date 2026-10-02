@@ -60,12 +60,14 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     static final class Reservation {
         private final IsolatedSegmentFiles owner;
         private final SegmentBatchFormat.FrozenBatch batch;
+        private final int length;
         private boolean submitted;
         private volatile boolean durable;
 
         private Reservation(IsolatedSegmentFiles owner, SegmentBatchFormat.FrozenBatch batch) {
             this.owner = owner;
             this.batch = batch;
+            this.length = batch.length();
         }
 
         SegmentBatchFormat.Address address() {
@@ -77,7 +79,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
 
         int length() {
-            return batch.bytes().remaining();
+            return length;
         }
 
         boolean durable() {
@@ -254,6 +256,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     private Reservation reservePhysical(SegmentBatchFormat.FrozenBatch batch) throws IOException {
+        batch.requirePhysicalOwner();
         int file = batch.address().fileIndex();
         if (closed || file < 0 || file >= data.size() || failed[file]
                 || batch.address().shard() >= config.logicalShards()
