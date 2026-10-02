@@ -25,11 +25,16 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import org.apache.bookkeeper.common.profile.startup.Generation;
 
 /** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
 final class IsolatedSegmentFiles implements AutoCloseable {
+    private record Stream(int shard, long generation) { }
+
     static final class StartupInventoryLease implements AutoCloseable {
         private final IsolatedSegmentFiles owner;
         private final SegmentDataRecovery.PhysicalInventory inventory;
@@ -92,6 +97,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final List<FileChannel> data = new ArrayList<>();
     private final Object[] dataIoGates;
     private final long[] nextOffset;
+    // Once an authorized stream starts, raw appends cannot consume another stream's pool.
+    private final long[] authorizedFloor;
+    // One cursor per applied stream, bounded by the fixed-capacity control log, never per DATA batch.
+    private final Map<Stream, Long> streamOffsets = new HashMap<>();
     private final boolean[] failed;
     private final SegmentDataFileLock writerLock;
     private final boolean appendOnlyRecovery;
@@ -110,6 +119,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         this.appendOnlyRecovery = appendOnlyRecovery;
         this.startupInventory = startupInventory;
         nextOffset = new long[config.dataFiles()];
+        authorizedFloor = new long[config.dataFiles()];
         dataIoGates = new Object[config.dataFiles()];
         java.util.Arrays.setAll(dataIoGates, ignored -> new Object());
         failed = new boolean[config.dataFiles()];
@@ -252,10 +262,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         if (appendOnlyRecovery) {
             throw new IOException("Restarted physical writer requires an applied Arena grant");
         }
-        return reservePhysical(batch);
+        return reservePhysical(batch, false);
     }
 
-    private Reservation reservePhysical(SegmentBatchFormat.FrozenBatch batch) throws IOException {
+    private Reservation reservePhysical(SegmentBatchFormat.FrozenBatch batch, boolean authorized) throws IOException {
         batch.requirePhysicalOwner();
         int file = batch.address().fileIndex();
         if (closed || file < 0 || file >= data.size() || failed[file]
@@ -266,12 +276,21 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
         ByteBuffer bytes = batch.bytes();
         long offset = batch.address().offset();
-        if (offset != nextOffset[file] || offset > config.bytesPerFile()
+        Stream stream = new Stream(batch.address().shard(), batch.address().streamGeneration().value());
+        long floor = authorizedFloor[file] == 0 ? nextOffset[file] : authorizedFloor[file];
+        long minimum = streamOffsets.getOrDefault(stream, floor);
+        if ((!authorized && (authorizedFloor[file] != 0 || offset != nextOffset[file]))
+                || (authorized && offset < minimum) || offset > config.bytesPerFile()
                 || bytes.remaining() > config.bytesPerFile() - offset) {
             throw new IOException("Range is not unused or fixed capacity exhausted");
         }
         // Reserve before submission. Failure never returns the coordinates for reuse.
-        nextOffset[file] += bytes.remaining();
+        long end = offset + bytes.remaining();
+        if (authorized) {
+            authorizedFloor[file] = floor;
+            streamOffsets.put(stream, end);
+        }
+        nextOffset[file] = Math.max(nextOffset[file], end);
         pendingReservations++;
         return new Reservation(this, batch);
     }
@@ -340,7 +359,23 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 address.generation().value())) {
             throw new IOException("DATA batch has no applied Arena allocation grant");
         }
-        return reservePhysical(batch);
+        return reservePhysical(batch, true);
+    }
+
+    /** Select a whole batch in one applied pool; skips remain consumed when the reservation advances the stream. */
+    synchronized SegmentBatchFormat.Address appendAddress(SegmentArenaControlLog authority, int shard,
+                                                          Generation stream, long sequence, int bytes)
+            throws IOException {
+        int file = shard % config.dataFiles();
+        if (closed || failed[file] || !authority.matchesScope(config, identity)) {
+            throw new IOException("DATA file or Arena authority is unavailable");
+        }
+        if (pendingReservations >= config.maxPendingEntries()) {
+            return null;
+        }
+        long floor = authorizedFloor[file] == 0 ? nextOffset[file] : authorizedFloor[file];
+        long minimum = streamOffsets.getOrDefault(new Stream(shard, stream.value()), floor);
+        return authority.appendAddress(file, minimum, bytes, shard, stream, sequence).orElse(null);
     }
 
     synchronized long nextOffset(int file) {

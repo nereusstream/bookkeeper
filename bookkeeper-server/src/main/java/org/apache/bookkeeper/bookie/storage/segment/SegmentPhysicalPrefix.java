@@ -107,9 +107,7 @@ final class SegmentPhysicalPrefix {
         if (pending.size() >= capacity) {
             return null;
         }
-        int file = shard % files.config().dataFiles();
-        return authority.appendAddress(file, files.nextOffset(file), bytes, shard, streamGeneration, nextSequence)
-                .orElse(null);
+        return files.appendAddress(authority, shard, streamGeneration, nextSequence, bytes);
     }
 
     List<DurableBatch> completed(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {

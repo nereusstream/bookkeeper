@@ -286,19 +286,26 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return first == null ? OptionalLong.empty() : OptionalLong.of(first);
     }
 
-    /** Current applied authority for a nonempty seal; this does not reserve or refill space. */
-    synchronized Optional<SegmentBatchFormat.Address> appendAddress(int file, long offset, int bytes,
+    /** Earliest whole-batch applied pool at/after this stream's cursor; does not reserve or refill space. */
+    synchronized Optional<SegmentBatchFormat.Address> appendAddress(int file, long minimum, int bytes,
                                                                    int shard, Generation stream, long sequence) {
-        if (!hasAppliedStreamAt(file, offset, shard, stream.value())) {
+        if (failed || closed || bytes <= 0) {
             return Optional.empty();
         }
-        Grant grant = allocations.get(new Slot(file, (offset - FIRST_RECORD) / BLOCK_BYTES));
-        if (!hasAppliedGrant(file, offset, bytes, shard, stream.value(),
-                grant.command().allocationId(), grant.generation())) {
-            return Optional.empty();
+        SegmentBatchFormat.Address selected = null;
+        for (Allocation command : allocationIds.values()) {
+            if (command.file() != file || command.ownerShard() != shard
+                    || !command.ownerGeneration().equals(stream)) {
+                continue;
+            }
+            long offset = Math.max(minimum, command.offset());
+            long end = command.offset() + command.blocks() * BLOCK_BYTES;
+            if (offset <= end - bytes && (selected == null || offset < selected.offset())) {
+                selected = new SegmentBatchFormat.Address(file, shard, command.allocationId(),
+                        new Generation(command.expectedGeneration() + 1), stream, sequence, offset);
+            }
         }
-        return Optional.of(new SegmentBatchFormat.Address(file, shard, grant.command().allocationId(),
-                new Generation(grant.generation()), stream, sequence, offset));
+        return Optional.ofNullable(selected);
     }
 
     /** The isolated allocator has no selector or reuse: multiple generations make read-only selection ambiguous. */
