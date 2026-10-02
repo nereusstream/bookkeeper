@@ -165,9 +165,11 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 2026-10-02 普通entry输入已由执行组共享bytes额度先预留完整容量再分配，传给owner前核对统一大小/CRC、context和shard。输入转换与物理I/O共用原owner/completion ticket，复制到固定对齐池后才释放源；取消等待不提前释放。池不足返回隔离`TRANSIENT_UNAVAILABLE`且不占物理坐标，owner拒收、验证失败及排队后owner故障释放已认领输入和Bookie票据。该显式入口仍由调用方提供batch集合和授权地址；其后的逐entry自动入口见下，接收/存储credit交接仍未完成。
 
 
-2026-10-02 固定driver/shard新增`NormalBatcher`逐entry入口，按framing bytes/count及最老单调deadline冻结非空batch，读取已apply grant/当前stream游标/下一序号，继续经原prefix/file入口重验与预留。沿用每条entry的完成ticket，不新增队列；shutdown封包已接纳输入，owner/回调故障仍排空资源。启用前校验固定源/池可容纳统一上限，合法大entry超过普通batch阈值时单独封包，1 MiB payload已跨同allocation两个block真实写入并点读。assembling/已冻结/已发布的同坐标重试分别比较、等待或点读；相同内容不新增DATA force，不同payload返回隔离`CONFLICT`。自动空间refill与grant尾部回收、网络credit/timeout交接、全读取/索引预算及服务级restart仍未完成，步骤6不标完成。
+2026-10-02 固定driver/shard新增`NormalBatcher`逐entry入口，按framing bytes/count及最老单调deadline冻结非空batch，读取已apply grant/当前stream游标/下一序号，继续经原prefix/file入口重验与预留。沿用每条entry的完成ticket，不新增队列；shutdown封包已接纳输入，owner/回调故障仍排空资源。启用前校验固定源/池可容纳统一上限，合法大entry超过普通batch阈值时单独封包，1 MiB payload已跨同allocation两个block真实写入并点读。assembling/已冻结/已发布的同坐标重试分别比较、等待或点读；相同内容不新增DATA force，不同payload返回隔离`CONFLICT`。按需refill进展见下；grant尾部回收、网络credit/timeout交接、全读取/索引预算及服务级restart仍未完成，步骤6不标完成。
 
-2026-10-02 pool接续使用文件层按shard/generation的单调游标，独立stream可按任意先后使用同文件各自的已apply pool；非空batch从最早能容纳整批的同stream grant选地址，短尾或其他owner范围跳过，不跨不同allocation拼包。预留后游标不回退，已跳过范围不复用；重开仍跳过全部旧授权块。运行期空间接续已接入自动合批，但异步ALLOC_POOL refill、used/unused恢复与尾部回收仍未完成。
+2026-10-02 pool接续使用文件层按shard/generation的单调游标，独立stream可按任意先后使用同文件各自的已apply pool；非空batch从最早能容纳整批的同stream grant选地址，短尾或其他owner范围跳过，不跨不同allocation拼包。预留后游标不回退，已跳过范围不复用；重开仍跳过全部旧授权块。运行期空间接续已接入自动合批，按需异步ALLOC_POOL refill进展见下，used/unused恢复与尾部回收仍未完成。
+
+2026-10-02 逐entry自动路径已接入实际Arena控制owner的有界按需ALLOC_POOL refill：dispatch前合并每shard一个pool请求，一次control force后顺序apply，原DATA ticket回原owner继续封包并重验grant。等待期间源/票据有界且不占DATA坐标，新坐标背压，同坐标重试可加入；全部容量不足不写空control batch、不force或占DATA序号，控制/owner失败与shutdown可排空。普通pool内Add不访问控制日志。预取策略、used/unused恢复、尾部回收、网络/全局bytes总账及完整服务restart尚未完成，步骤6仍不标完成。
 
 #### 7. 实现点读与基础restart
 

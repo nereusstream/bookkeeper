@@ -110,6 +110,17 @@ final class SegmentPhysicalPrefix {
         return files.appendAddress(authority, shard, streamGeneration, nextSequence, bytes);
     }
 
+    SegmentArenaControlLog.PoolRequest poolRequest(int blocks) {
+        owner.requireOwner();
+        return new SegmentArenaControlLog.PoolRequest(shard, streamGeneration, firstSequence, blocks);
+    }
+
+    boolean poolMissing(IsolatedSegmentFiles files, SegmentArenaControlLog authority, int bytes) throws IOException {
+        owner.requireOwner();
+        return pending.size() < capacity
+                && files.poolMissing(authority, shard, streamGeneration, nextSequence, bytes);
+    }
+
     List<DurableBatch> completed(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {
         owner.requireOwner();
         long sequence = reservation.address().sequence();

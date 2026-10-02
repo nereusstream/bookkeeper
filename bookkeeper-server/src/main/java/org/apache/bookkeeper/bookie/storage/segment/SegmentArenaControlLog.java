@@ -85,6 +85,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     record SingleStream(Generation generation, long firstSequence) { }
 
+    record PoolRequest(int shard, Generation stream, long firstSequence, int blocks) {
+        PoolRequest {
+            Objects.requireNonNull(stream, "stream");
+            if (shard < 0 || firstSequence < 0 || firstSequence == Long.MAX_VALUE || blocks < 1) {
+                throw new IllegalArgumentException("Invalid pool request");
+            }
+        }
+    }
+
     private record Grant(Allocation command, long generation) { }
 
     private record AppliedOperation(Allocation command, Status status) { }
@@ -284,6 +293,48 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         Long first = streamStarts.get(new Stream(shard, generation));
         return first == null ? OptionalLong.empty() : OptionalLong.of(first);
+    }
+
+    int maxPoolRequests() {
+        return Math.min(config.logicalShards(), config.maxPendingEntries());
+    }
+
+    void validatePoolRequest(PoolRequest request) {
+        if (request.shard() >= config.logicalShards()
+                || request.blocks() > (config.bytesPerFile() - FIRST_RECORD) / BLOCK_BYTES) {
+            throw new IllegalArgumentException("Pool request exceeds the fixed Arena configuration");
+        }
+    }
+
+    /** Plan fresh ranges only; these requests gain authority solely after durable ordered apply. */
+    synchronized List<Optional<Allocation>> planPools(List<PoolRequest> requests) throws IOException {
+        requireWritable();
+        if (writing || pending != null || requests.isEmpty() || requests.size() > maxPoolRequests()) {
+            throw new IOException("Arena cannot plan another pool batch");
+        }
+        long[] offsets = new long[config.dataFiles()];
+        for (int file = 0; file < offsets.length; file++) {
+            offsets[file] = grantedHighWatermark(file);
+        }
+        long id = allocationIds.keySet().stream().mapToLong(Long::longValue).max().orElse(0);
+        List<Optional<Allocation>> planned = new ArrayList<>(requests.size());
+        for (PoolRequest request : requests) {
+            validatePoolRequest(request);
+            int file = request.shard() % config.dataFiles();
+            if (request.blocks() > (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES) {
+                planned.add(Optional.empty());
+                continue;
+            }
+            if (id == Long.MAX_VALUE) {
+                throw new IOException("Arena allocation identity exhausted");
+            }
+            Allocation allocation = new Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                    UUID.randomUUID(), new Generation(1), 0, file, request.shard(), request.stream(),
+                    ++id, offsets[file], request.blocks(), request.firstSequence());
+            planned.add(Optional.of(allocation));
+            offsets[file] += request.blocks() * BLOCK_BYTES;
+        }
+        return List.copyOf(planned);
     }
 
     /** Earliest whole-batch applied pool at/after this stream's cursor; does not reserve or refill space. */

@@ -62,6 +62,45 @@ public class SegmentOwnerLoopTest {
         };
     }
 
+    @Test
+    public void resumeRetainsDataCapacityAcrossShutdownAndContinuationFailure() throws Exception {
+        for (boolean fail : new boolean[] {false, true}) {
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(1, 1, 0, 1, 1);
+            AtomicReference<SegmentOwnerLoop.Ticket> waiting = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            CountDownLatch ready = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(1);
+            assertTrue(owner.submit(0, command(ticket -> {
+                waiting.set(ticket);
+                ready.countDown();
+            }, cause -> {
+                failure.set(cause);
+                done.countDown();
+            })));
+            owner.start();
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            assertFalse(owner.submit(0, command(ticket -> ticket.complete(() -> { }), cause -> { })));
+            owner.stopAdmission();
+            assertFalse(owner.awaitTermination(Duration.ofMillis(20)));
+            waiting.get().resume(() -> {
+                owner.requireOwner();
+                if (fail) {
+                    throw new IllegalStateException("Continuation failed");
+                }
+                waiting.get().complete(done::countDown);
+            });
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertTrue(owner.awaitTermination(WAIT));
+            if (fail) {
+                assertTrue(failure.get() instanceof IllegalStateException);
+                assertSame(failure.get(), owner.failure());
+            } else {
+                assertNull(failure.get());
+                assertNull(owner.failure());
+            }
+        }
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             assertTrue("Timed out waiting for deterministic boundary", latch.await(5, TimeUnit.SECONDS));

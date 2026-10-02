@@ -629,12 +629,33 @@ final class SegmentDataPhysicalDriver {
         return normalBatcher;
     }
 
+    /** Attach the actual Arena control owner for bounded asynchronous, demand-driven pool refill. */
+    NormalBatcher enableNormalBatching(SegmentBookieControlLog bookie, BatchLimits limits,
+                                       SegmentArenaControlDriver allocator, int poolBlocks) {
+        owner.requireOwner();
+        int largest = Math.max(limits.bytes(), SegmentBatchFormat.alignedLength(SegmentBatchFormat.RECORD_HEADER
+                + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(files.config())));
+        if (!Objects.requireNonNull(allocator, "allocator").owns(authority)
+                || poolBlocks < (largest + SegmentArenaControlLog.BLOCK_BYTES - 1)
+                        / SegmentArenaControlLog.BLOCK_BYTES) {
+            throw new IllegalArgumentException("Pool refill must cover a whole legal batch on this Arena");
+        }
+        authority.validatePoolRequest(prefix.poolRequest(poolBlocks));
+        NormalBatcher batcher = enableNormalBatching(bookie, limits);
+        batcher.allocator = allocator;
+        batcher.poolBlocks = poolBlocks;
+        return batcher;
+    }
+
     final class NormalBatcher {
         private final SegmentBookieControlLog bookie;
         private final BatchLimits limits;
         private final List<Entry> assembling = new ArrayList<>();
         private final Map<NormalKey, Entry> assemblingKeys = new HashMap<>();
         private int recordBytes;
+        private SegmentArenaControlDriver allocator;
+        private int poolBlocks;
+        private boolean awaitingPool;
 
         private NormalBatcher(SegmentBookieControlLog bookie, BatchLimits limits) {
             this.bookie = bookie;
@@ -802,12 +823,21 @@ final class SegmentDataPhysicalDriver {
                 }
                 return;
             }
+            if (awaitingPool) {
+                entry.refuse(NormalStatus.TRANSIENT_UNAVAILABLE, null);
+                return;
+            }
             int bytes = SegmentBatchFormat.RECORD_HEADER + entry.data.entry().readableBytes();
             if (!assembling.isEmpty()
-                    && SegmentBatchFormat.alignedLength(Math.addExact(recordBytes, bytes)) > limits.bytes()) {
+                    && (long) SegmentBatchFormat.HEADER + SegmentBatchFormat.FOOTER + recordBytes + bytes
+                            > limits.bytes()) {
                 seal();
                 if (owner.failure() != null) {
                     entry.refuse(NormalStatus.UNKNOWN, owner.failure());
+                    return;
+                }
+                if (awaitingPool) {
+                    entry.refuse(NormalStatus.TRANSIENT_UNAVAILABLE, null);
                     return;
                 }
             }
@@ -866,17 +896,19 @@ final class SegmentDataPhysicalDriver {
         }
 
         private void seal() {
+            seal(true);
+        }
+
+        private void seal(boolean mayRefill) {
             owner.requireOwner();
-            if (assembling.isEmpty()) {
+            if (assembling.isEmpty() || awaitingPool) {
                 return;
             }
             List<Entry> entries = List.copyOf(assembling);
             int length = SegmentBatchFormat.alignedLength(recordBytes);
-            assembling.clear();
-            assemblingKeys.clear();
-            recordBytes = 0;
             owner.cancelDeadline(shard);
             if (owner.failure() != null) {
+                clearAssembling();
                 refuseBatch(entries, NormalStatus.UNKNOWN, owner.failure());
                 return;
             }
@@ -886,9 +918,28 @@ final class SegmentDataPhysicalDriver {
             try {
                 SegmentBatchFormat.Address address = prefix.appendAddress(files, authority, length);
                 if (address == null) {
+                    if (mayRefill && allocator != null && prefix.poolMissing(files, authority, length)) {
+                        awaitingPool = true;
+                        if (allocator.requestPool(prefix.poolRequest(poolBlocks), (results, failure) ->
+                                leader.ticket.resume(() -> {
+                                    awaitingPool = false;
+                                    if (failure != null) {
+                                        List<Entry> waiting = List.copyOf(assembling);
+                                        clearAssembling();
+                                        refuseBatch(waiting, NormalStatus.UNKNOWN, failure);
+                                    } else {
+                                        seal(false);
+                                    }
+                                }))) {
+                            return;
+                        }
+                        awaitingPool = false;
+                    }
+                    clearAssembling();
                     refuseBatch(entries, NormalStatus.TRANSIENT_UNAVAILABLE, null);
                     return;
                 }
+                clearAssembling();
                 batch = SegmentBatchFormat.encodePooled(files.config(), address,
                         entries.stream().map(entry -> entry.data).toList(), owner.pool());
                 for (Entry entry : entries) {
@@ -906,6 +957,8 @@ final class SegmentDataPhysicalDriver {
                 leader.physical = new PhysicalCommand(batch, obligation);
                 leader.physical.run(leader.ticket);
             } catch (Throwable failure) {
+                awaitingPool = false;
+                clearAssembling();
                 if (leader.physical != null) {
                     leader.ticket.commandFailed(failure);
                 } else {
@@ -919,6 +972,12 @@ final class SegmentDataPhysicalDriver {
                     refuseBatch(entries, NormalStatus.UNKNOWN, failure);
                 }
             }
+        }
+
+        private void clearAssembling() {
+            assembling.clear();
+            assemblingKeys.clear();
+            recordBytes = 0;
         }
 
         private void refuseBatch(List<Entry> entries, NormalStatus status, Throwable failure) {

@@ -43,6 +43,7 @@ final class SegmentOwnerLoop {
         private final boolean control;
         private boolean posted;
         private boolean ioSubmitted;
+        private boolean continuation;
         private volatile Throwable commandFailure;
         private Runnable completion;
 
@@ -53,12 +54,22 @@ final class SegmentOwnerLoop {
 
         // May be called by an I/O thread. Even after admission closes, this slot remains reserved.
         void complete(Runnable action) {
+            post(action, false);
+        }
+
+        /** Resume an accepted, not-yet-submitted operation using its existing reserved completion slot. */
+        void resume(Runnable action) {
+            post(action, true);
+        }
+
+        private void post(Runnable action, boolean resume) {
             Objects.requireNonNull(action, "action");
             synchronized (gate) {
-                if (posted) {
+                if (posted || (resume && ioSubmitted)) {
                     throw new IllegalStateException("Completion already posted");
                 }
                 completion = action;
+                continuation = resume;
                 if (!(control ? controlCompletions : completions).offer(this)) {
                     throw new IllegalStateException("Reserved completion capacity violated");
                 }
@@ -419,6 +430,24 @@ final class SegmentOwnerLoop {
     }
 
     private void complete(Ticket ticket) {
+        Runnable continuation = null;
+        synchronized (gate) {
+            if (ticket.continuation && ticket.commandFailure == null) {
+                continuation = ticket.completion;
+                ticket.completion = null;
+                ticket.continuation = false;
+                ticket.posted = false;
+            }
+        }
+        if (continuation != null) {
+            try {
+                continuation.run();
+            } catch (Throwable cause) {
+                ticket.commandFailed(cause);
+            }
+            // The continuation must submit I/O, post a terminal result, or retain the same obligation.
+            return;
+        }
         try {
             if (ticket.commandFailure != null) {
                 ticket.command.failed(ticket.commandFailure);

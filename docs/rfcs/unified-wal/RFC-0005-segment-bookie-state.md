@@ -459,7 +459,9 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 同日`NormalBatcher`沿用固定owner/deadline/完成ticket进行逐entry合批，按framing bytes/count/最老deadline触发，非空封包才从已apply grant与原文件/prefix入口取得物理地址；资源拒绝不消耗序号，I/O unknown继续关闭该stream新写。启用前校验固定源/池覆盖统一entry上限；超过普通batch阈值的合法大entry独立封包。assembling相同坐标重试、已冻结等待者及已发布点读均复用已有比较/定位原语，保持逐票据generation和真实I/O终结边界。shutdown提前封包已接纳输入，owner故障排空未提交源，回调异常仍完成其余entry/ticket；这些是隔离存储进展，不证明真实接收接线、完整bytes预算或生产ACK。
 
-同日该逐entry路径已从当前stream的单调预留游标选取足够大的同owner已apply pool；其他stream使用高地址grant不会阻止本stream消费其低地址grant，短尾可跳到下一同stream pool且不留下额外物理序号。不同allocation不能拼包，预留后尾部/取消范围不复用，文件故障仍切断整个共享文件的写入。此不恢复旧I/O unknown，不改变Bookie票据或local result判定；异步refill、空间恢复总账与生产接线仍未完成。
+同日该逐entry路径已从当前stream的单调预留游标选取足够大的同owner已apply pool；其他stream使用高地址grant不会阻止本stream消费其低地址grant，短尾可跳到下一同stream pool且不留下额外物理序号。不同allocation不能拼包，预留后尾部/取消范围不复用，文件故障仍切断整个共享文件的写入。此不恢复旧I/O unknown，不改变Bookie票据或local result判定；按需异步refill进展见下，空间恢复总账与生产接线仍未完成。
+
+同日普通入口缺pool时可保留既有有界输入/Bookie票据，异步请求实际Arena控制driver；durable并顺序apply后，以同一DATA ticket的保留完成名额回原owner继续，池内已有足够授权空间的普通Add仍无control force；缺空间的批次才增加refill阶段。等待中的新坐标临时拒绝，同坐标重试沿用assembling比较/共享结果；control unknown或owner故障排空未提交源和票据，shutdown期间已准入的refill可继续至实际终结。恢复仍不把已分配零页、内存游标或refill callback当作durable duplicate/unused证明；生产权限/ACK及完整空间与网络总账尚未闭合。
 
 状态：**整体PLANNED / 未闭合**。隔离固定owner/物理DATA切片及Profile固定头前置校验、明文接收预算组件已有定向测试；尚无Bookie权限化普通Add、真实TLS listener或完整接收总账。保留§5.2三层持久化owner，首批采用固定shard、常驻平台线程owner及shared DATA block；§10.2—10.5的执行映射随该切片落地，默认affinity OFF、PARK；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
 

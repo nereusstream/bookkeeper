@@ -366,12 +366,21 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     synchronized SegmentBatchFormat.Address appendAddress(SegmentArenaControlLog authority, int shard,
                                                           Generation stream, long sequence, int bytes)
             throws IOException {
+        SegmentBatchFormat.Address address = appliedAppendAddress(authority, shard, stream, sequence, bytes);
+        return pendingReservations >= config.maxPendingEntries() ? null : address;
+    }
+
+    synchronized boolean poolMissing(SegmentArenaControlLog authority, int shard,
+                                     Generation stream, long sequence, int bytes) throws IOException {
+        return appliedAppendAddress(authority, shard, stream, sequence, bytes) == null;
+    }
+
+    private SegmentBatchFormat.Address appliedAppendAddress(SegmentArenaControlLog authority, int shard,
+                                                            Generation stream, long sequence, int bytes)
+            throws IOException {
         int file = shard % config.dataFiles();
         if (closed || failed[file] || !authority.matchesScope(config, identity)) {
             throw new IOException("DATA file or Arena authority is unavailable");
-        }
-        if (pendingReservations >= config.maxPendingEntries()) {
-            return null;
         }
         long floor = authorizedFloor[file] == 0 ? nextOffset[file] : authorizedFloor[file];
         long minimum = streamOffsets.getOrDefault(new Stream(shard, stream.value()), floor);

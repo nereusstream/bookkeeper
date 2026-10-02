@@ -290,9 +290,11 @@ Cluster Lifecycle
 
 2026-10-02 步骤6继续接入[普通entry源buffer](rfcs/unified-wal/implementation/local-storage/README.md)：执行组共享输入bytes额度，分配前预留完整容量；原owner复制到固定对齐池后归还源，转换和物理提交共用一个completion ticket。取消等待不提前释放；源/池不足有界拒绝，池不足不占物理序号/offset，资源恢复后可原坐标重试。相关测试105项执行通过、5项Linux亲和性用例在macOS跳过。此显式入口仍由调用者提供batch/授权地址；后续自动合批进展见下，Profile接收credit交接和完整总账尚未完成。
 
-2026-10-02 步骤6新增[逐entry自动合批](rfcs/unified-wal/implementation/local-storage/README.md)：固定owner按bytes/count/最老deadline封包，非空时从已apply grant选地址并重验预留；复用每条entry的完成ticket，shutdown封包已接纳输入。同坐标重试在assembling/冻结/已发布阶段分别比较、等待或点读；合法1 MiB payload已以固定池跨同allocation两个block独立封包。相关测试113项执行通过、5项Linux亲和性用例在macOS跳过，Spotless/Checkstyle通过。临时拒绝不占序号，unknown不绕过原stream；空间refill/尾部回收、网络交接与总预算仍未闭合，不提升Gate。
+2026-10-02 步骤6新增[逐entry自动合批](rfcs/unified-wal/implementation/local-storage/README.md)：固定owner按bytes/count/最老deadline封包，非空时从已apply grant选地址并重验预留；复用每条entry的完成ticket，shutdown封包已接纳输入。同坐标重试在assembling/冻结/已发布阶段分别比较、等待或点读；合法1 MiB payload已以固定池跨同allocation两个block独立封包。相关测试113项执行通过、5项Linux亲和性用例在macOS跳过，Spotless/Checkstyle通过。临时拒绝不占序号，unknown不绕过原stream；预取/尾部回收、网络交接与总预算仍未闭合，不提升Gate。
 
-2026-10-02 步骤6继续接通[独立stream的pool空间接续](rfcs/unified-wal/implementation/local-storage/README.md)：共享文件以各shard/generation的单调游标预留其已apply grant，独立owner的高/低地址pool不依赖全局尾指针先后；整批放不下时跳过短尾及其他owner范围，到下一同stream pool继续序号。相关集117项执行通过、5项Linux亲和性用例在macOS跳过；补强allocation边界后的1项定向复验及Spotless/Checkstyle通过。预留后不回退或复用跳过范围，重开仍跳过全部旧授权块。异步ALLOC_POOL refill、尾部回收及used/unused恢复仍待完成，不提升Gate。
+2026-10-02 步骤6继续接通[独立stream的pool空间接续](rfcs/unified-wal/implementation/local-storage/README.md)：共享文件以各shard/generation的单调游标预留其已apply grant，独立owner的高/低地址pool不依赖全局尾指针先后；整批放不下时跳过短尾及其他owner范围，到下一同stream pool继续序号。相关集117项执行通过、5项Linux亲和性用例在macOS跳过；补强allocation边界后的1项定向复验及Spotless/Checkstyle通过。预留后不回退或复用跳过范围，重开仍跳过全部旧授权块。按需refill进展见下，尾部回收及used/unused恢复仍待完成，不提升Gate。
+
+2026-10-02 步骤6接通[异步按需pool refill](rfcs/unified-wal/implementation/local-storage/README.md)：有限shard请求由Arena控制owner合并control force、顺序apply，再以原DATA ticket继续封包并重验grant。池内普通Add无额外控制force，等待资源及回通知都有既有上限；空间耗尽不force空日志、不占DATA序号，control/owner故障及shutdown排空已有实际文件验证。相关集131项执行通过、5项Linux亲和性用例在macOS跳过；修正2 MiB批次中组合两个合法最大entry的封包边界，最后1项定向复验及Spotless/Checkstyle通过。低水位预取、空间恢复总账、尾部回收与完整生产/网络接线仍未完成，不提升Gate。
 
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
