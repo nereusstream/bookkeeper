@@ -122,6 +122,12 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 会话未匹配CLOSE的重放在DATA恢复sync前拒绝物理重开，即使故障隔离记录尚未生成，之后一次DATA sync成功也不解除。该状态不把原grant宣布为FREE，也不猜测未关闭原因；健康进程突然退出同样保持不可写，未正常关闭的恢复解析/解除尚未实现。完整但force未知的OPEN重放保持未关闭；完整但force未知的CLOSE可在控制恢复同步后解析为已关闭，而原关闭调用仍报告失败。正常关闭的epoch可完整DATA验证/同步后物理重开，旧授权范围全部跳过，下一次写入须再次启动新epoch；仍不授予append-only local-result、自动可写restart或生产ACK。未启用会话的legacy手动原型继续保留此前“无隔离记录不证明无旧错误”的边界。本切片提供启用路径的持久未关闭检测，没有完成通用故障原因分类、未知范围恢复或解除隔离。
 
+2026-10-02 正常关闭的管理会话另已通过`openForLocalResults`接回现有DATA driver。该入口要求持久CLOSE及正epoch，每shard至多一个未退役stream；在同一目录排他锁内复用完整DATA验证/同步、所有观察stream连续性和唯一坐标检查、replayed Bookie route选择，再持久开启新writer会话。恢复sync失败不打开新epoch；Bookie控制cut在扫描/开会话期间改变则清理writer并拒绝结果。普通`openAppendOnly`及其物理/只读inventory入口仍保留原资格，不由一次完整扫描升级为local result。
+
+恢复driver必须在原owner上构造。bootstrap在同一Bookie cut及受保护writer下先核对未使用的prefix、persisted stream起点/generation和该shard的热定位容量，再装入候选并将连续through恢复到同次扫描结果，每shard仅装入一次。未分配过的shard保持空前缀，后续首次refill再确定stream起点；多个未退役generation拒绝猜选。恢复候选可用于原有normal/recovery重复比较，但新请求的Bookie准入/权限仍逐次复核。旧entry同内容返回隔离`LOCAL_DURABLE`、不同内容返回`CONFLICT`，两者均不增加DATA force或坐标；后续非空batch仍用同一stream generation及下一sequence，经原refill申请fresh pool，旧授权范围全部跳过。该无MOVE/FREE范围内，后来追加的ALLOC不会使旧恢复位置失效；普通旧inventory的exact applied cut检查保持不变，bootstrap没有据此开放一般selector。
+
+本切片已形成正常关闭进程后的本地写入—读取—重复写入—新写入—再次重开的文件闭环，尚无网络/MetadataStore/readiness/registration接线，不接管生产ACK。未正常关闭会话、legacy历史、多个未退役stream、一般MOVE/FREE selector、tail unused回收与空间可持续性仍未完成；不将该闭环扩展为步骤5～7整体验收或掉电证明。
+
 ## 验证入口
 
 ```bash
@@ -134,6 +140,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-10-02（正常关闭local-result restart）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：165项中160项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增3项真实文件回归使用独立JVM正常写入并排空/关闭会话，父进程两轮重放、必要DATA sync、原owner bootstrap、同内容重复/不同内容冲突及fresh pool新写；新写接续同stream sequence，旧位置可点读，重复不增加DATA force。错误generation、定位容量不足、重复bootstrap及Bookie cut变化不发布可用driver，DATA恢复sync失败不开放新epoch；legacy、多未退役stream和未关闭会话拒绝local-result入口。首次定向运行的测试夹具预算未计aligned over-allocation及Fence状态枚举不符已修正，原行为断言保留。最终运行`unified-wal-local-KlIzsX0V`保留父提交`07a3030f306750ba1a410ce415ac451a1f778460`和184项实际源码/构建输入哈希，历史receipt不改绑定。未验证真实掉电/介质错误、Linux NUMA、未正常关闭恢复解析、一般selector/回收、完整服务readiness/网络/MetadataStore或生产ACK。本次未运行TLC，不把Java文件回归替代Spike C模型检查，Block G安全Gate不提升。
 
 2026-10-02（写入会话）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：162项中157项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增6项回归验证正常CLOSE容量保护、健康DATA关闭后物理重开/下一epoch、OPEN与CLOSE force未知的不同重放结果、实际I/O未终结时的关闭拒绝与独立JVM目录锁、DATA失败与执行前取消不生成CLOSE、条件命令有序重放与隔离不被CLOSE清除。实际子进程在DATA force失败后直接halt、没有DEVICE_STATE文件隔离记录；新进程重放OPEN后在恢复DATA sync前拒绝重开，额外成功DATA sync不改变结果，原grant和文件大小保留。最终运行`unified-wal-local-0gGiOjR1`保留父提交`28c62d9ab9a1dae572f21fdd1334a951ecc876e8`和184项实际源码/构建输入哈希，历史receipt不改绑定。未验证真实掉电/介质失败、文件系统空间预分配、Linux NUMA、未正常关闭恢复解析/解除、自动服务生命周期与可写restart或生产ACK；该切片不将步骤5～7标完成。
 

@@ -80,6 +80,31 @@ final class SegmentPhysicalPrefix {
         this.capacity = capacity;
     }
 
+    /** Validate a clean-session bootstrap before either this prefix or its hot directory is changed. */
+    long restartThrough(SegmentOwnerLoop expectedOwner, int expectedShard,
+                         SegmentDataRecovery.PhysicalInventory inventory,
+                         SegmentArenaControlLog authority) throws IOException {
+        owner.requireOwner();
+        if (owner != expectedOwner || shard != expectedShard || failed || !pending.isEmpty()
+                || nextSequence != firstSequence || durableThrough != firstSequence - 1) {
+            throw new IOException("Physical prefix is not an untouched restart owner");
+        }
+        SegmentArenaControlLog.SingleStream stream = authority.restartStreamForShard(shard).orElse(null);
+        if (stream == null) {
+            return firstSequence - 1;
+        }
+        if (!stream.generation().equals(streamGeneration) || stream.firstSequence() != firstSequence) {
+            throw new IOException("Restart prefix differs from the persisted stream");
+        }
+        return inventory.streamCandidate(authority, shard, streamGeneration).through();
+    }
+
+    void restoreCleanThrough(long through) {
+        owner.requireOwner();
+        durableThrough = through;
+        nextSequence = through + 1;
+    }
+
     IsolatedSegmentFiles.Reservation reserve(SegmentBatchFormat.FrozenBatch batch,
                                              IsolatedSegmentFiles files,
                                              SegmentArenaControlLog authority) throws IOException {

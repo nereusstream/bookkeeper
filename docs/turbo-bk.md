@@ -308,6 +308,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤5～7继续新增[写入会话启动/关闭边界](rfcs/unified-wal/implementation/local-storage/README.md)：隔离writer显式在首次分配/写入前持久OPEN，预留CLOSE容量；停止DATA、排空I/O并关闭descriptor后仍持目录锁，检查控制与故障通知排空才记录CLOSE。DATA错误、消耗坐标后的执行前取消或无CLOSE退出保持不可写；真实进程在DATA force失败、隔离记录尚未生成就退出的回归，验证重放在恢复sync前拒绝重开，后次sync不解除。正常关闭后可开下一物理epoch；不补认legacy历史，也不直接获得local-result authority。自动服务生命周期、未正常关闭会话恢复解析及可写restart仍未完成，步骤5～7及总体Gate不标完成。
 
+2026-10-02 步骤5～7已接通[正常关闭会话的隔离local-result restart](rfcs/unified-wal/implementation/local-storage/README.md)：持久CLOSE、完整DATA验证/sync及Bookie route选择后，由原owner在稳定cut下恢复连续前缀与持久候选。旧entry重试/冲突和新entry同stream接续已在正常关闭的新JVM及两轮重开真实验证，旧授权块仍跳过，未用新stream绕过旧前缀。legacy、未关闭会话、多未退役stream、恢复sync失败或cut变化拒绝开放相同结果资格；plain物理扫描保持原边界。完整服务readiness/MetadataStore、未正常关闭恢复、一般selector与可持续空间回收仍未完成，当前Gate不提升。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |

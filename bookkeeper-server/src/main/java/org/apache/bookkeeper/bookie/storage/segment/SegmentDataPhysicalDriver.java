@@ -274,6 +274,23 @@ final class SegmentDataPhysicalDriver {
         if (!hot.matchesScope(files)) {
             throw new IllegalArgumentException("Physical driver and hot directory storage scopes differ");
         }
+        SegmentBookieControlLog restartBookie = files.restartBookie();
+        if (restartBookie != null) {
+            owner.requireOwner();
+            synchronized (restartBookie) {
+                synchronized (files) {
+                    try {
+                        SegmentDataRecovery.PhysicalInventory inventory = files.localResultInventory(authority, shard);
+                        long through = prefix.restartThrough(owner, shard, inventory, authority);
+                        hot.restoreCleanRestart(inventory, shard);
+                        prefix.restoreCleanThrough(through);
+                        files.restoredShard(shard);
+                    } catch (IOException failure) {
+                        throw new IllegalArgumentException("Clean restart DATA owner could not be restored", failure);
+                    }
+                }
+            }
+        }
     }
 
     boolean submit(SegmentBatchFormat.FrozenBatch batch, Completion completion) {

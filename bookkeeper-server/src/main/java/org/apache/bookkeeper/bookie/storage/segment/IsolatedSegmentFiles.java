@@ -121,6 +121,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private boolean closed;
     private SegmentArenaControlLog sessionAuthority;
     private boolean sessionReady;
+    private SegmentBookieControlLog restartBookie;
+    private long restartBookieCut;
+    private final boolean[] restoredShards;
     SegmentFileIo dataIo = new SegmentFileIo();
 
     private IsolatedSegmentFiles(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -136,6 +139,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         dataIoGates = new Object[config.dataFiles()];
         java.util.Arrays.setAll(dataIoGates, ignored -> new Object());
         failed = new boolean[config.dataFiles()];
+        restoredShards = new boolean[config.logicalShards()];
         java.util.Arrays.fill(nextOffset, 4096);
     }
 
@@ -219,6 +223,45 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             throw new IllegalArgumentException("Positive restart locator and stream capacities required");
         }
         return openAppendOnly(config, identity, authority, bookie, recoveryIo, maxEntries, maxStreams);
+    }
+
+    /** Clean-session, no-MOVE/FREE restart; owner bootstrap still precedes accepting any local-result request. */
+    static IsolatedSegmentFiles openForLocalResults(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                    SegmentFileIo recoveryIo, int maxEntries, int maxStreams)
+            throws IOException {
+        Objects.requireNonNull(bookie, "bookie");
+        if (maxEntries < 1 || maxStreams < 1) {
+            throw new IllegalArgumentException("Positive restart locator and stream capacities required");
+        }
+        synchronized (authority) {
+            authority.requireQuiescentRecovery(config, identity);
+            if (authority.dataSessionEpoch() == 0) {
+                throw new IOException("Local-result restart requires a closed managed DATA session");
+            }
+            for (int shard = 0; shard < config.logicalShards(); shard++) {
+                authority.restartStreamForShard(shard);
+            }
+            long cut = bookie.recoveryReadCut(config, identity);
+            IsolatedSegmentFiles result = openAppendOnly(config, identity, authority, bookie,
+                    recoveryIo, maxEntries, maxStreams);
+            try {
+                result.startSession(authority);
+                if (cut != bookie.recoveryReadCut(config, identity)) {
+                    throw new IOException("Bookie control cut changed during local-result restart");
+                }
+                result.restartBookie = bookie;
+                result.restartBookieCut = cut;
+                return result;
+            } catch (IOException | RuntimeException | Error failure) {
+                try {
+                    result.close();
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+                throw failure;
+            }
+        }
     }
 
     private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -437,7 +480,30 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     boolean supportsLocalResults() {
-        return !appendOnlyRecovery;
+        return !appendOnlyRecovery || restartBookie != null && sessionReady;
+    }
+
+    SegmentBookieControlLog restartBookie() {
+        return restartBookie;
+    }
+
+    synchronized SegmentDataRecovery.PhysicalInventory localResultInventory(
+            SegmentArenaControlLog authority, int shard) throws IOException {
+        if (closed || !sessionReady || restartBookie == null || authority != sessionAuthority
+                || !authority.permitsDataWriter(this) || shard < 0 || shard >= restoredShards.length
+                || restoredShards[shard] || restartBookieCut != restartBookie.recoveryReadCut(config, identity)) {
+            throw new IOException("Clean restart owner bootstrap is unavailable or already consumed");
+        }
+        for (int file = 0; file < config.dataFiles(); file++) {
+            if (!authority.dataFileAvailable(file)) {
+                throw new IOException("Clean restart DATA file became unavailable");
+            }
+        }
+        return startupInventory;
+    }
+
+    synchronized void restoredShard(int shard) {
+        restoredShards[shard] = true;
     }
 
     /** Optional isolated lifecycle, required before this writer's first allocation/DATA submission. */

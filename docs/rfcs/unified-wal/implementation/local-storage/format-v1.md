@@ -89,6 +89,8 @@ Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用
 
 实际绑定的DATA合批路径在I/O前为该记录共享预留每文件160字节逻辑控制日志容量（128-byte header、16-byte body、16-byte footer）及原owner通知完成槽。普通控制追加不能占用这份容量，未知结果不释放实际I/O资源；成功DATA不写故障记录，只在I/O/owner终结后归还预留。控制忙时每文件保留一条通知并按原序执行，停收仍使用原ticket排空；预留不足先背压，Arena关闭/物理重开拒绝未终结通知。这不预分配实际文件系统空间，也不证明记录落盘前退出、实际控制I/O或owner失败已可跨重启解析。
 
+正常关闭会话的`openForLocalResults`不增加新字节类型或逐entry成功日志。CLOSE及正session epoch只提供正常关闭依据；local result还要求同一排他锁内的完整DATA验证/恢复sync、Bookie route选择和稳定applied cut、每shard唯一未退役stream及原owner的有界前缀/定位bootstrap。连续through来自同次完整扫描，下一DATA batch接续原stream generation/sequence；writer session epoch独立递增，不是新stream或allocation generation。旧授权范围仍全部跳过，由既有ALLOC_POOL提供fresh范围。普通物理扫描/恢复候选保持原资格；legacy、未关闭会话、多未退役stream或任何验证/sync/cut失败不据此返回本地持久结果。范围限无MOVE/FREE且正常关闭的管理会话，不证明一般selector、未正常关闭恢复或生产ACK。
+
 隔离文件的`writeAuthorized`在真实DATA写入前核对同一目录和storage/Arena身份、文件可用状态、冻结batch的完整物理范围、allocation ID/generation、shard及其stream generation与已apply的Arena grant；当前固定shard原型把stream generation作为owner shard generation。跨两个1 MiB块的batch必须拥有同一pool grant。原始`write`仍只供底层framing/I/O实验，不提供授权检查。该路径没有DATA used/unused恢复；Bookie票据与逐entry local result由上层隔离driver提供，不证明生产ACK。
 
 `SegmentDataRecovery.inspect`只读扫描已停写的DATA文件：零页计数不推导unused；非零页必须形成CRC和身份完整、整段有当前grant的batch。完整但无grant的原始格式写入也拒绝。`validateAndSync`在同一目录锁与验证路径下，对完整检查的DATA文件执行一次`force(false)`后才返回；注入同步失败或无grant/脏页时不返回成功结果。`recoverPhysicalInventory`沿同一路径、在明确entry容量内，待全目录验证及同步均完成才返回普通`ENTRY_DATA`的物理位置；`RELOCATION_COPY`不进入普通清单，容量不足也不泄露部分清单。清单不发布到热目录，不提供连续物理前缀、当前selector、可复用判定或Bookie级恢复权限。

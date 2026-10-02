@@ -184,6 +184,20 @@ final class SegmentHotDirectory {
     }
 
     private void installRecovered(List<SegmentPointRead.Location> entries) throws IOException {
+        installRecovered(entries, false);
+    }
+
+    /** Called only by the clean-session DATA bootstrap, after its Bookie cut and stream checks. */
+    void restoreCleanRestart(SegmentDataRecovery.PhysicalInventory inventory, int shard) throws IOException {
+        owner.requireOwner();
+        if (!config.sameStorageScope(inventory.sourceConfig()) || !identity.equals(inventory.sourceIdentity())) {
+            throw new IOException("Clean restart inventory belongs to another storage scope");
+        }
+        installRecovered(inventory.entries().stream()
+                .filter(location -> location.address().shard() == shard).toList(), true);
+    }
+
+    private void installRecovered(List<SegmentPointRead.Location> entries, boolean localDurable) throws IOException {
         if (!pendingBatches.isEmpty() || !pendingKeys.isEmpty() || !byPhysical.isEmpty()) {
             throw new IOException("Physical recovery cannot overlap DATA submissions");
         }
@@ -198,7 +212,7 @@ final class SegmentHotDirectory {
             }
         }
         for (SegmentPointRead.Location location : entries) {
-            candidates.put(new Key(location.context(), location.entryId()), new Candidate(location, false));
+            candidates.put(new Key(location.context(), location.entryId()), new Candidate(location, localDurable));
         }
     }
 

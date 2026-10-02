@@ -426,6 +426,8 @@ restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/
 
 2026-10-02 Arena写入会话已由既有`DEVICE_STATE` action 2/3与单调epoch记录OPEN/CLOSE：隔离writer在首次分配/写入前显式启动，正常关闭在停止DATA、排空实际I/O并关闭descriptor之后、释放目录锁之前记录CLOSE；控制未终结、DATA错误或消耗坐标后的执行前取消均保留OPEN。未匹配CLOSE的重放在DATA恢复同步前保持不可写，不把缺少隔离记录解释为旧错误不存在。CLOSE容量在OPEN前逻辑预留，无逐entry日志或额外DATA force；CLOSE不清除文件隔离。legacy已分配目录不能补认首个会话，未启用的旧手动原型仍保留原证据边界。Bookie服务应先关闭准入并排空执行组，再关闭DATA writer，最后关闭控制日志；完整服务启动、未正常关闭恢复、Bookie/readiness/registration及可写restart仍未接线。
 
+2026-10-02 正常关闭的管理会话新增隔离local-result restart入口，完整DATA验证/同步及replayed Bookie route选择后，在原owner上按稳定Bookie cut恢复连续前缀和本地持久候选；后续normal/recovery请求仍分别捕获及复核Bookie准入，不由恢复候选单独授予ACK。bootstrap拒绝cut变化、错误stream generation、定位容量不足及同shard再次装入；校验失败不留下可用driver。真实正常关闭进程的旧entry重试/内容冲突、同stream下一序号及第二轮重开已验证。plain append-only扫描、legacy和未正常关闭会话不获得该资格；无MOVE/FREE、每shard唯一未退役stream是当前边界。Bookie readiness/registration、MetadataStore激活、未正常关闭恢复及一般服务restart仍未完成。
+
 ### 9.1 Wave 0 reference harness状态
 
 既有reference harness把recovery消费为typed semantic facts；历史测试不证明本轮Bookie控制日志、delete-applied/cursor与physical reclaim分离或物理replay子顺序。新验证归Spike B B4/B6/B16及Model D，历史receipt/source lock不重绑。

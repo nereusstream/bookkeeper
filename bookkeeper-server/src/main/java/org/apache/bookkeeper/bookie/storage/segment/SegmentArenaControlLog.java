@@ -574,6 +574,18 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return Optional.ofNullable(selected);
     }
 
+    /** Clean restart continues the same stream; it cannot choose among unretired generations. */
+    synchronized Optional<SingleStream> restartStreamForShard(int shard) throws IOException {
+        requireWritable();
+        if (shard < 0 || shard >= config.logicalShards()) {
+            throw new IllegalArgumentException("Invalid restart shard");
+        }
+        if (streamStarts.keySet().stream().filter(stream -> stream.shard() == shard).count() > 1) {
+            throw new IOException("Restart shard has multiple unretired stream generations");
+        }
+        return singleStreamForShard(shard);
+    }
+
     /** No FREE exists yet: every applied grant remains unavailable even when its DATA bytes are zero. */
     synchronized long grantedHighWatermark(int file) throws IOException {
         requireWritable();

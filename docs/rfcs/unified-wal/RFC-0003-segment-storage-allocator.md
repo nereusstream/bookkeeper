@@ -297,6 +297,8 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 2026-10-02 写入会话切片复用Arena `DEVICE_STATE` action 2/3记录单调epoch的OPEN/CLOSE。隔离writer在首次ALLOC/DATA前显式`startSession`，OPEN force并apply前不开放该writer；先预留160-byte逻辑CLOSE容量，普通控制记录不能消耗。文件关闭先拒绝新DATA并检查实际I/O/预留已终结，关闭DATA descriptor后仍持有目录锁，再验证Arena控制/故障通知已排空、无运行时或持久文件错误并记录CLOSE。DATA失败、执行前取消或关闭失败不补写成功CLOSE；OPEN未匹配CLOSE的重放在DATA恢复同步前拒绝物理重开，也不会因后次sync成功解除。首个epoch拒绝接管已有legacy allocation。仅正常关闭的会话可继续物理重开并在写入前开新epoch，旧授权块仍全部跳过；append-only仍无local-result authority。该边界已验证真实进程在DATA force失败、隔离记录落盘前退出；未正常关闭会话的恢复解析/解除、自动服务生命周期及可写restart仍未完成，未提升Gate。
 
+2026-10-02 正常关闭会话的隔离restart已新增`openForLocalResults`：要求已持久CLOSE及正epoch、每shard至多一个未退役stream，复用目录锁内的完整DATA扫描/同步和Bookie route选择，再开新writer会话。原owner bootstrap在稳定Bookie applied cut下先核对空前缀与持久stream起点/generation、恢复热定位容量，再原子装入该shard候选及连续through；每shard仅bootstrap一次。同内容旧entry可经原有点读比较与Bookie准入复核返回本地持久结果，冲突不增加DATA写；下一批接续同一stream序号，在fresh pool追加，旧授权范围仍全部跳过。实际新JVM正常写入/关闭、两轮重开/重复/新写的文件回归已通过；恢复sync失败或cut变化不发布owner，普通物理扫描仍不授予该资格。该路径限无MOVE/FREE、单stream/shard、正常关闭的管理会话；未正常关闭恢复、一般selector、尾部unused回收与完整服务restart/生产ACK仍未完成。
+
 涉及既有成功数据的compaction同样须保证new DATA在恢复可发现边界内，才允许`MOVE_COMMIT`、selector切换或释放旧位置。以后若要跨缺口独立发布，须先接受独立块发现/恢复算法；本次不并行建设第二套模式。分别报告write wait、durability wait、physical-prefix wait和locator wait，不将同stream排队归为NVMe延迟。
 
 ### 6.2 对齐缓冲池的NUMA属地

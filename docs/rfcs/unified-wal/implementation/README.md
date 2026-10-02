@@ -212,6 +212,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 2026-10-02 写入会话切片在首次ALLOC/DATA前由隔离writer显式`startSession`，复用Arena `DEVICE_STATE` OPEN/CLOSE与单调epoch，启动时预留正常关闭记录容量。关闭DATA准入、排空实际I/O和关闭descriptor后，仍持有目录锁并检查控制/故障通知无未决，再记录CLOSE；实际DATA错误、执行前取消、关闭失败或无CLOSE的进程退出保持不可写。真实子进程回归覆盖DATA force失败、没有隔离记录就退出；重放在DATA恢复sync前拒绝重开，后次sync不改变结果。正常CLOSE可重放并开下一物理writer epoch，不复用旧授权尾部，不新增正常Add force。legacy已分配目录不能补认历史正常关闭；append-only仍无local-result authority，自动生命周期接线、未正常关闭会话恢复解析及可写restart仍未完成。
 
+2026-10-02 正常关闭会话的隔离restart已接回既有DATA driver：新入口要求持久CLOSE及正epoch、每shard唯一未退役stream，完整扫描/恢复sync并按Bookie route选择后开新writer epoch。原owner bootstrap在稳定Bookie cut下恢复连续through及本地持久热候选，每shard一次；校验stream或容量失败不改前缀，cut变化不装入。旧entry同内容重试返回本地持久结果，冲突不增加DATA force；新entry经现有refill在fresh pool接续原stream下一序号，旧授权尾部仍跳过。新JVM正常写入/关闭、两轮重开/重复/新写已验证；plain物理扫描、legacy和未正常关闭会话仍无相同资格。网络/MetadataStore/readiness、未正常关闭恢复、一般selector及可持续空间回收仍未完成，步骤5～7不标整体完成。
+
 **第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
 
 ### 第三阶段：索引、回收与长期运行
