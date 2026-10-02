@@ -108,11 +108,13 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest`：80项隔离测试通过，0失败/错误/跳过；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。现有重开测试覆盖活跃writer拒绝、同步失败后再次重开、物理追加与重启点读；本次改动使扫描、恢复同步与新writer打开共享同一次排他锁持有，不把这些测试扩展为跨进程竞争或掉电验收。
 
-2026-10-02 `SegmentArenaControlLog`解释已有`DEVICE_STATE` framing的单调DATA文件隔离子集（16-byte body见[格式](format-v1.md)）。实际driver的write/force失败立即关闭该共享文件的新DATA、点读及重复成功资格；I/O执行前拒绝形成已消耗物理序号时也保留隔离。已经提交的I/O仍按实际终结归还源、池、Bookie票据，不因报错提前释放。绑定实际Arena控制driver的逐entry合批路径仅用原控制owner/I/O/completion尝试记录，不增加队列、自动重试或正常Add force；未绑定driver的手动原型只建立运行时拒绝，并在失败原因中报告缺少持久记录入口。
+2026-10-02 `SegmentArenaControlLog`解释已有`DEVICE_STATE` framing的单调DATA文件隔离子集（16-byte body见[格式](format-v1.md)）。实际driver的write/force失败立即关闭该共享文件的新DATA、点读及重复成功资格；I/O执行前拒绝形成已消耗物理序号时也保留隔离。已经提交的I/O按实际终结归还源、池、Bookie票据，不因报错提前释放。绑定实际Arena控制driver的路径在DATA任务入队前共享预留每文件通知ticket与160-byte逻辑日志容量；已接纳normal/recovery entry携带预留通过assembling、refill与物理I/O。成功DATA在实际I/O与owner结果均终结后归还通知，不写DEVICE_STATE或增加fsync。未绑定driver及较早已提交的手动原型仍只有运行时拒绝或一次记录尝试。
 
 运行时gate与持久状态分开：较早ALLOC仍按持久日志原序apply；DEVICE_STATE成功后拒绝该文件后续ALLOC/refill/append，但保留原grant/stream所有权事实，不产生FREE/unused资格。相同operation重试可解析，复用operation改文件不改变隔离目标。重放完整记录并完成控制同步后仍拒绝DATA物理重开，后一次DATA或控制sync成功不解除隔离；未知版本/action、文件、保留字段或长度拒绝解释，没有clear/reset操作。
 
-控制忙/停收或容量拒绝、记录写入/force失败、owner未apply及落盘前退出仍须分别处理。当前查询只报告已经durable并apply的隔离；完整但force未知/未apply的记录可在重放中恢复隔离，不能反向证明未见记录就没有旧错误。没有实现可靠跨崩溃故障分类或解除隔离，append-only重开仍无local-result authority，服务级可写restart及步骤5～7验收未完成。
+故障通知使用原Arena owner的控制完成槽，不单开线程。相同文件的在途批次共享一份预留，每文件至多一条待处理故障通知；控制忙时保留原ticket，原控制批次终结后顺序处理。notification名额受原控制总容量及独立计数约束，至少留下一个普通控制槽；实际绑定要求Arena owner至少两个控制槽。预留不足在DATA任务入队前返回false，释放已claim的输入/Bookie票据且不发送local result；地址/序号未消费，不能据此清除先前UNKNOWN。普通控制追加不能耗尽当前预留的隔离记录容量。该容量只是日志上限内的逻辑预留，不保证实际文件系统空间。停收不撤销通知，Arena关闭和物理重开拒绝仍存在的通知预留；正常通知归还不产生控制I/O。
+
+实际控制I/O失败、Arena owner故障及记录落盘前退出仍未闭合跨重启故障判定，没有自动重试或解除隔离。当前查询只报告已经durable并apply的隔离；完整但force未知/未apply的记录可重放恢复，未见记录不能证明没有旧错误。append-only重开仍无local-result authority，服务级可写restart及步骤5～7验收未完成。
 
 ## 验证入口
 
@@ -126,6 +128,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-10-02（故障通知预留）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：156项中151项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增3项回归验证通知与普通控制槽共存、同文件共享通知与日志容量、停收后持久化隔离，以及绑定容量不足和入队前资源拒绝；已有真实DATA force失败测试扩展控制忙、停收与记录force未知，重放均恢复正向隔离。normal/recovery refill的停收回归保留已接纳写入的原结果和资源释放；正常路径不额外写控制记录或force。首次扩大回归发现seal时才预留会在shutdown期间拒绝已接纳entry，预留已提前到DATA入队前；原force次数断言仅在实际DATA失败时增加一次隔离记录force，合批测试为暂停Arena所占的额外普通控制槽补足测试容量。最终运行`unified-wal-local-0zBPSGvA`保留父提交`45ecb32ee86c8269b898af9255ed8eef1a938b1c`和184项实际源码/构建输入哈希，历史receipt不改绑定。未验证实际文件系统空间预分配、记录落盘前退出或实际控制I/O/owner失败的可靠跨重启分类、解除隔离、服务级可写restart、Linux NUMA、掉电或生产ACK。
 
 2026-10-02（DATA文件隔离）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：153项中148项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。新增4项真实文件回归覆盖ALLOC/隔离混合顺序与共享force、旧grant保留、其他文件状态独立、运行时gate不改较早持久结果、durable未apply重放、非法DEVICE_STATE拒绝，以及DATA force失败后的实际Arena记录、控制忙拒绝和记录force未知三条路径。后续成功DATA同步不解除重放的隔离；控制拒绝没有持久记录时，物理append-only重开仍无local-result authority。原I/O拒绝测试改为检查文件隔离/游标不推进，重复取消断言保留在现有取消范围测试中。最终运行`unified-wal-local-kgH2SlwC`保留父提交`18ec40c51f69e49ab71290af98ddb338cab86df1`和184项实际源码/构建输入哈希；历史receipt不改绑定。未验证记录落盘前进程退出或控制拒绝的可靠跨重启故障分类、解除隔离、服务级可写restart、Linux NUMA、掉电或生产ACK。
 

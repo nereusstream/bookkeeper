@@ -41,6 +41,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     static final long BLOCK_BYTES = 1024 * 1024;
     private static final long FIRST_RECORD = 4096;
     private static final Generation LOG_GENERATION = new Generation(1);
+    private static final int QUARANTINE_RECORD_BYTES = 128 + 16 + 16;
 
     sealed interface Command permits Allocation, FileQuarantine {
         SegmentControlFormat.Type type();
@@ -144,6 +145,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
     private final boolean[] dataBlocked;
     private final boolean[] durableQuarantine;
+    private final boolean[] quarantineReserved;
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
     private long appliedThrough = -1;
@@ -163,6 +165,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         this.lock = lock;
         dataBlocked = new boolean[config.dataFiles()];
         durableQuarantine = new boolean[config.dataFiles()];
+        quarantineReserved = new boolean[config.dataFiles()];
     }
 
     static SegmentArenaControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -234,7 +237,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 bytes = Math.addExact(bytes, record.remaining());
                 encoded.add(record);
             }
-            if (bytes > maxLogBytes - nextOffset) {
+            long reserved = 0;
+            for (int file = 0; file < quarantineReserved.length; file++) {
+                final int target = file;
+                if (quarantineReserved[file] && batch.stream().noneMatch(command ->
+                        command instanceof FileQuarantine quarantine && quarantine.file() == target)) {
+                    reserved += QUARANTINE_RECORD_BYTES;
+                }
+            }
+            if (bytes > maxLogBytes - nextOffset - reserved) {
                 throw new IOException("Arena control log capacity exhausted");
             }
             start = nextOffset;
@@ -312,6 +323,35 @@ final class SegmentArenaControlLog implements AutoCloseable {
             throw new IllegalArgumentException("Invalid DATA file");
         }
         return durableQuarantine[file];
+    }
+
+    int dataFiles() {
+        return config.dataFiles();
+    }
+
+    /** Reserve before DATA I/O; normal control batches cannot consume these bytes. */
+    synchronized boolean reserveQuarantineRecord(int file) {
+        if (!dataFileAvailable(file) || quarantineReserved[file]) {
+            return false;
+        }
+        long reserved = QUARANTINE_RECORD_BYTES;
+        for (boolean held : quarantineReserved) {
+            if (held) {
+                reserved += QUARANTINE_RECORD_BYTES;
+            }
+        }
+        if (reserved > maxLogBytes - nextOffset) {
+            return false;
+        }
+        quarantineReserved[file] = true;
+        return true;
+    }
+
+    synchronized void releaseQuarantineRecord(int file) {
+        if (file < 0 || file >= quarantineReserved.length || !quarantineReserved[file]) {
+            throw new IllegalStateException("No DATA quarantine space reservation");
+        }
+        quarantineReserved[file] = false;
     }
 
     synchronized boolean hasAppliedGrant(int file, long offset, long bytes, int ownerShard,
@@ -462,6 +502,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
         for (boolean blocked : dataBlocked) {
             if (blocked) {
                 throw new IOException("Unresolved DATA file quarantine prevents writable physical reopen");
+            }
+        }
+        for (boolean reserved : quarantineReserved) {
+            if (reserved) {
+                throw new IOException("DATA failure notification is still in flight");
             }
         }
     }
@@ -680,6 +725,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         if (writing) {
             throw new IOException("Arena control I/O is still in flight");
+        }
+        for (boolean reserved : quarantineReserved) {
+            if (reserved) {
+                throw new IOException("DATA failure notification is still in flight");
+            }
         }
         closed = true;
         IOException first = null;

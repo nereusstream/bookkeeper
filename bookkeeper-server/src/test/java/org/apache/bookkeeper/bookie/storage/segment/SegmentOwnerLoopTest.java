@@ -63,6 +63,56 @@ public class SegmentOwnerLoopTest {
     }
 
     @Test
+    public void reservedNotificationKeepsOwnerAliveAndLeavesOrdinaryControlCapacity() throws Exception {
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(1, 1, 0, 1, 2);
+        AtomicReference<SegmentOwnerLoop.Ticket> regular = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        CountDownLatch ready = new CountDownLatch(1);
+        CountDownLatch regularDone = new CountDownLatch(1);
+        CountDownLatch notified = new CountDownLatch(1);
+        assertTrue(owner.submitControl(command(ticket -> {
+            regular.set(ticket);
+            ready.countDown();
+        }, failure::set)));
+        SegmentOwnerLoop.Ticket notification = owner.reserveControlNotification(command(ticket -> {
+            throw new AssertionError("A reserved notification must not dispatch before it is posted");
+        }, failure::set));
+        assertTrue(notification != null);
+        assertNull(owner.reserveControlNotification(command(ticket -> { }, failure::set)));
+        owner.start();
+        boolean resumed = false;
+        try {
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            regular.get().complete(regularDone::countDown);
+            assertTrue(regularDone.await(5, TimeUnit.SECONDS));
+            CountDownLatch drained = new CountDownLatch(1);
+            assertTrue(owner.submit(0, command(ticket -> ticket.complete(drained::countDown), failure::set)));
+            assertTrue(drained.await(5, TimeUnit.SECONDS));
+            CountDownLatch ordinary = new CountDownLatch(1);
+            assertTrue(owner.control(ordinary::countDown));
+            assertTrue(ordinary.await(5, TimeUnit.SECONDS));
+            owner.stopAdmission();
+            assertFalse(owner.awaitTermination(Duration.ofMillis(50)));
+            assertNull(owner.reserveControlNotification(command(ticket -> { }, failure::set)));
+            notification.resume(() -> {
+                owner.requireOwner();
+                notification.complete(notified::countDown);
+            });
+            resumed = true;
+            assertTrue(notified.await(5, TimeUnit.SECONDS));
+            assertTrue(owner.awaitTermination(WAIT));
+            assertNull(failure.get());
+            assertNull(owner.failure());
+        } finally {
+            if (!resumed) {
+                notification.complete(() -> { });
+            }
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(WAIT));
+        }
+    }
+
+    @Test
     public void resumeRetainsDataCapacityAcrossShutdownAndContinuationFailure() throws Exception {
         for (boolean fail : new boolean[] {false, true}) {
             SegmentOwnerLoop owner = new SegmentOwnerLoop(1, 1, 0, 1, 1);

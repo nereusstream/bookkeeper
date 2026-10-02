@@ -467,6 +467,59 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void sharedFailureReservationProtectsLogSpaceAndPersistsAfterAdmissionStops() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 2);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 2);
+        SegmentFileIo fileIo = new SegmentFileIo();
+        CountDownLatch refused = new CountDownLatch(1);
+        AtomicReference<Throwable> capacityFailure = new AtomicReference<>();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(
+                        config, identity, 4096 + 192 + 160, fileIo)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            SegmentArenaControlDriver driver = new SegmentArenaControlDriver(owner, io, log);
+            SegmentArenaControlDriver.FailureLease first = driver.reserveFailure(0);
+            SegmentArenaControlDriver.FailureLease second = driver.reserveFailure(0);
+            assertTrue(first != null && second != null);
+            assertThrows(IOException.class, log::close);
+            assertTrue(driver.submit(List.of(alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES)),
+                    (results, cause) -> {
+                        capacityFailure.set(cause);
+                        refused.countDown();
+                    }));
+            owner.start();
+            assertTrue(refused.await(5, TimeUnit.SECONDS));
+            assertTrue(capacityFailure.get() instanceof IOException);
+            owner.stopAdmission();
+            assertFalse(owner.awaitTermination(Duration.ofMillis(50)));
+            IOException firstFailure = new IOException("Known DATA failure");
+            first.failed(firstFailure);
+            second.failed(new IOException("Same shared file failure"));
+            first.close();
+            second.close();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            assertTrue(log.hasDurableQuarantine(0));
+            assertFalse(log.dataFileAvailable(0));
+            assertTrue(granted(log, 4096, 1, 1, 1));
+            assertEquals(1, log.appliedThrough());
+            assertEquals(2, fileIo.forces);
+            assertEquals(0, firstFailure.getSuppressed().length);
+        } finally {
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            owner.stopAdmission();
+            assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+        }
+        assertNull(owner.failure());
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 4096 + 192 + 160)) {
+            assertTrue(replay.hasDurableQuarantine(0));
+            assertFalse(replay.dataFileAvailable(0));
+        }
+    }
+
+    @Test
     public void quarantineAppliesInLogOrderAndPreservesOwnershipAcrossReplay() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("quarantine"),
                 1, 4, 2, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

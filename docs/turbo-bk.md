@@ -304,7 +304,7 @@ Cluster Lifecycle
 
 2026-10-02 步骤7接入[owner/I/O本地点读](rfcs/unified-wal/implementation/local-storage/README.md)：live hot与多stream重开清单共用固定池读取，排队前保持文件pin，回owner复核Bookie资格及候选/Arena cut。结果由最后消费者关闭归还lease，慢消费背压读/DATA，取消/撤权/读盘/owner/回调失败按真实终结排空；重开池须覆盖保留旧entry，不能因降低新写N忽略旧读。真实网络读授权、响应credit、一般MOVE/FREE selector和可写服务restart仍未闭合，不提升Gate。
 
-2026-10-02 步骤5～7新增[DATA文件持久隔离子集](rfcs/unified-wal/implementation/local-storage/README.md)：已知write/force失败先切断文件准入，再由实际Arena控制driver尝试写入已有DEVICE_STATE；记录按序apply，旧grant保留，重放和后续sync不能解除隔离。控制拒绝/记录失败/落盘前退出尚未闭合跨重启故障判定；未见记录不授权旧错误清除，未启用clear/reset或服务级可写restart，不提升Gate。
+2026-10-02 步骤5～7新增[DATA文件持久隔离子集](rfcs/unified-wal/implementation/local-storage/README.md)：实际绑定的DATA在I/O前共享预留每文件通知ticket与逻辑日志容量，普通控制仍保留槽位；不足先背压，不占DATA坐标。失败先切断文件准入，控制忙时通知等待原批次，停收后用原ticket排空，再持久化/apply已有DEVICE_STATE；旧grant保留，重放与后续sync不解除隔离。实际控制I/O或owner故障、落盘前退出仍未闭合跨重启判定；未见记录不授权旧错误清除，clear/reset及服务级可写restart未启用，不提升Gate。
 
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |

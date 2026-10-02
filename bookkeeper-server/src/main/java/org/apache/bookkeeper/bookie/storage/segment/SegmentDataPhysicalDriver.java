@@ -166,6 +166,7 @@ final class SegmentDataPhysicalDriver {
         private SegmentBatchFormat.FrozenBatch batch;
         private SegmentBufferPool.Lease readBuffer;
         private Runnable releaseSource;
+        private List<SegmentArenaControlDriver.FailureLease> failureLeases = List.of();
         private boolean physicalTerminal;
         private boolean ownerTerminal;
         private boolean released;
@@ -230,8 +231,14 @@ final class SegmentDataPhysicalDriver {
                                 readBuffer.close();
                             }
                         } finally {
-                            if (releaseSource != null) {
-                                releaseSource.run();
+                            try {
+                                if (releaseSource != null) {
+                                    releaseSource.run();
+                                }
+                            } finally {
+                                for (SegmentArenaControlDriver.FailureLease lease : failureLeases) {
+                                    lease.close();
+                                }
                             }
                         }
                     }
@@ -521,6 +528,14 @@ final class SegmentDataPhysicalDriver {
         InputCommand command = new InputCommand(bookie, address, sources, data, permissions, entryIds, waiters);
         boolean accepted;
         try {
+            SegmentArenaControlDriver allocator = normalBatcher == null ? null : normalBatcher.allocator;
+            if (allocator != null) {
+                command.failureLease = allocator.reserveFailure(address.fileIndex());
+                if (command.failureLease == null) {
+                    command.abortBeforeOwner();
+                    return false;
+                }
+            }
             accepted = owner.submit(shard, command);
         } catch (RuntimeException | Error failure) {
             command.abortBeforeOwner();
@@ -549,6 +564,7 @@ final class SegmentDataPhysicalDriver {
         private boolean sourcesReleased;
         private SegmentBatchFormat.FrozenBatch batch;
         private PhysicalCommand physical;
+        private SegmentArenaControlDriver.FailureLease failureLease;
 
         private InputCommand(SegmentBookieControlLog bookie, SegmentBatchFormat.Address address,
                              List<SegmentEntryInputs.Input> sources, List<SegmentBatchFormat.Data> data,
@@ -583,6 +599,10 @@ final class SegmentDataPhysicalDriver {
                 ticket.complete(() -> finishBeforePhysical(NormalStatus.UNKNOWN, failure));
                 return;
             }
+            if (failureLease != null) {
+                obligation.failureLeases = List.of(failureLease);
+                failureLease = null;
+            }
             physical = new PhysicalCommand(batch, obligation);
             physical.run(ticket);
         }
@@ -608,7 +628,11 @@ final class SegmentDataPhysicalDriver {
             try {
                 releaseSources();
             } finally {
-                finishAdmissions(admissions);
+                try {
+                    finishAdmissions(admissions);
+                } finally {
+                    releaseFailure();
+                }
             }
         }
 
@@ -626,8 +650,19 @@ final class SegmentDataPhysicalDriver {
                         batch.releaseFromDriver();
                     }
                 } finally {
-                    finishAdmissions(admissions);
+                    try {
+                        finishAdmissions(admissions);
+                    } finally {
+                        releaseFailure();
+                    }
                 }
+            }
+        }
+
+        private void releaseFailure() {
+            if (failureLease != null) {
+                failureLease.close();
+                failureLease = null;
             }
         }
     }
@@ -668,6 +703,7 @@ final class SegmentDataPhysicalDriver {
         int largest = Math.max(limits.bytes(), SegmentBatchFormat.alignedLength(SegmentBatchFormat.RECORD_HEADER
                 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(files.config())));
         if (!Objects.requireNonNull(allocator, "allocator").owns(authority)
+                || !allocator.supportsFailureReservations()
                 || poolBlocks < (largest + SegmentArenaControlLog.BLOCK_BYTES - 1)
                         / SegmentArenaControlLog.BLOCK_BYTES) {
             throw new IllegalArgumentException("Pool refill must cover a whole legal batch on this Arena");
@@ -781,6 +817,13 @@ final class SegmentDataPhysicalDriver {
         private boolean submitEntry(Entry entry) {
             boolean accepted;
             try {
+                if (allocator != null) {
+                    entry.failureLease = allocator.reserveFailure(shard % files.config().dataFiles());
+                    if (entry.failureLease == null) {
+                        entry.abort();
+                        return false;
+                    }
+                }
                 accepted = owner.submit(shard, entry);
             } catch (RuntimeException | Error failure) {
                 entry.abort();
@@ -812,6 +855,7 @@ final class SegmentDataPhysicalDriver {
             private boolean duplicateSubmitted;
             private boolean sourceReleased;
             private boolean settled;
+            private SegmentArenaControlDriver.FailureLease failureLease;
 
             private Entry(SegmentEntryInputs.Input input, SegmentBookieControlLog.Admission admission,
                           SegmentBookieControlLog.RecoveryAdmission recoveryAdmission, NormalRequest request,
@@ -914,10 +958,21 @@ final class SegmentDataPhysicalDriver {
             }
 
             private void finishAdmission() {
-                if (admission != null) {
-                    admission.driverTerminal();
-                } else {
-                    recoveryAdmission.driverTerminal();
+                try {
+                    if (admission != null) {
+                        admission.driverTerminal();
+                    } else {
+                        recoveryAdmission.driverTerminal();
+                    }
+                } finally {
+                    releaseFailure();
+                }
+            }
+
+            private void releaseFailure() {
+                if (failureLease != null) {
+                    failureLease.close();
+                    failureLease = null;
                 }
             }
         }
@@ -938,6 +993,7 @@ final class SegmentDataPhysicalDriver {
             if (assemblingEntry != null) {
                 if (assemblingEntry.identity.sameLogicalPayload(entry.identity)) {
                     assemblingEntry.duplicates.add(entry);
+                    entry.releaseFailure();
                     entry.releaseSource();
                 } else {
                     entry.refuse(NormalStatus.CONFLICT, null);
@@ -973,6 +1029,7 @@ final class SegmentDataPhysicalDriver {
         }
 
         private void duplicate(Entry entry, SegmentPointRead.Location location, PendingNormal existing) {
+            entry.releaseFailure();
             if (location == null && !existing.identity.sameLogicalPayload(entry.identity)) {
                 entry.refuse(NormalStatus.CONFLICT, null);
                 return;
@@ -1150,10 +1207,16 @@ final class SegmentDataPhysicalDriver {
                 finishPendingNormals(normals, candidates, failure);
                 completeBatch(entries, candidates, failure);
             };
-            return new Obligation(completion,
+            Obligation obligation = new Obligation(completion,
                     entries.stream().filter(entry -> entry.admission != null).map(entry -> entry.admission).toList(),
                     entries.stream().filter(entry -> entry.recoveryAdmission != null)
                             .map(entry -> entry.recoveryAdmission).toList(), normals);
+            obligation.failureLeases = entries.stream().map(entry -> entry.failureLease)
+                    .filter(Objects::nonNull).toList();
+            for (Entry entry : entries) {
+                entry.failureLease = null;
+            }
+            return obligation;
         }
 
         private void completeBatch(List<Entry> entries, List<SegmentPointRead.Location> candidates, Throwable failure) {
@@ -1382,6 +1445,15 @@ final class SegmentDataPhysicalDriver {
         obligation.batch = batch;
         boolean accepted;
         try {
+            SegmentArenaControlDriver allocator = normalBatcher == null ? null : normalBatcher.allocator;
+            if (allocator != null && obligation.failureLeases.isEmpty()) {
+                SegmentArenaControlDriver.FailureLease lease = allocator.reserveFailure(batch.address().fileIndex());
+                if (lease == null) {
+                    obligation.abortBeforeOwner();
+                    return false;
+                }
+                obligation.failureLeases = List.of(lease);
+            }
             accepted = owner.submit(shard, new PhysicalCommand(batch, obligation));
         } catch (RuntimeException | Error failure) {
             obligation.abortBeforeOwner();
@@ -1411,6 +1483,15 @@ final class SegmentDataPhysicalDriver {
         public void run(SegmentOwnerLoop.Ticket ticket) {
             SegmentHotDirectory.Admission admission = null;
             try {
+                SegmentArenaControlDriver allocator = normalBatcher == null ? null : normalBatcher.allocator;
+                if (allocator != null && obligation.failureLeases.isEmpty()) {
+                    SegmentArenaControlDriver.FailureLease lease =
+                            allocator.reserveFailure(batch.address().fileIndex());
+                    if (lease == null) {
+                        throw new IOException("No reserved DATA failure notification capacity");
+                    }
+                    obligation.failureLeases = List.of(lease);
+                }
                 admission = hot.reserve(batch);
                 registerPendingNormals(obligation);
             } catch (IOException failure) {
@@ -1440,12 +1521,15 @@ final class SegmentDataPhysicalDriver {
                 try {
                     files.writeReserved(reservation);
                 } catch (IOException | RuntimeException | Error failure) {
-                    recordPhysicalFailure(batch.address().fileIndex(), failure);
+                    recordPhysicalFailure(obligation, batch.address().fileIndex(), failure);
                     throw failure;
                 } finally {
                     obligation.physicalTerminal();
                 }
             }, failure -> {
+                if (failure != null) {
+                    recordPhysicalFailure(obligation, batch.address().fileIndex(), failure);
+                }
                 if (!operationStarted.get()) {
                     files.cancelBeforeSubmission(reservation);
                     obligation.physicalTerminal();
@@ -1513,9 +1597,7 @@ final class SegmentDataPhysicalDriver {
     private void physicalFinished(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {
         owner.requireOwner();
         int file = reservation.address().fileIndex();
-        if (ioFailure != null) {
-            recordPhysicalFailure(file, ioFailure);
-        } else if (!authority.dataFileAvailable(file)) {
+        if (ioFailure == null && !authority.dataFileAvailable(file)) {
             ioFailure = new IOException("DATA file has an unresolved failure");
         }
         if (owner.failure() != null) {
@@ -1558,7 +1640,13 @@ final class SegmentDataPhysicalDriver {
     private record Delivery(IsolatedSegmentFiles.Reservation reservation, Obligation obligation,
                             List<SegmentPointRead.Location> locations) { }
 
-    private void recordPhysicalFailure(int file, Throwable failure) {
+    private void recordPhysicalFailure(Obligation obligation, int file, Throwable failure) {
+        if (!obligation.failureLeases.isEmpty()) {
+            for (SegmentArenaControlDriver.FailureLease lease : obligation.failureLeases) {
+                lease.failed(failure);
+            }
+            return;
+        }
         if (!authority.blockDataFile(file)) {
             return;
         }

@@ -41,6 +41,7 @@ final class SegmentOwnerLoop {
     final class Ticket {
         private final Command command;
         private final boolean control;
+        private final boolean notification;
         private boolean posted;
         private boolean ioSubmitted;
         private boolean continuation;
@@ -48,8 +49,13 @@ final class SegmentOwnerLoop {
         private Runnable completion;
 
         private Ticket(Command command, boolean control) {
+            this(command, control, false);
+        }
+
+        private Ticket(Command command, boolean control, boolean notification) {
             this.command = command;
             this.control = control;
+            this.notification = notification;
         }
 
         // May be called by an I/O thread. Even after admission closes, this slot remains reserved.
@@ -120,6 +126,7 @@ final class SegmentOwnerLoop {
     private final Thread thread;
     private int pending;
     private int controlPending;
+    private int notificationPending;
     private boolean accepting = true;
     private volatile Throwable failure;
     private int nextShard;
@@ -250,6 +257,24 @@ final class SegmentOwnerLoop {
         }
         LockSupport.unpark(thread);
         return true;
+    }
+
+    /** A notification and an ordinary control must be able to coexist. */
+    boolean supportsControlNotification() {
+        return controlCapacity > 1;
+    }
+
+    /** Reserve a future notification, keeping one ordinary control slot available. */
+    Ticket reserveControlNotification(Command command) {
+        Objects.requireNonNull(command, "command");
+        synchronized (gate) {
+            if (!accepting || controlPending == controlCapacity || notificationPending == controlCapacity - 1) {
+                return null;
+            }
+            controlPending++;
+            notificationPending++;
+            return new Ticket(command, true, true);
+        }
     }
 
     /** Keep the oldest pending batch deadline; visiting another shard cannot postpone it. */
@@ -460,6 +485,9 @@ final class SegmentOwnerLoop {
             synchronized (gate) {
                 if (ticket.control) {
                     controlPending--;
+                    if (ticket.notification) {
+                        notificationPending--;
+                    }
                 } else {
                     pending--;
                 }

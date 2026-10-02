@@ -422,7 +422,7 @@ restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/
 11. ephemeral registration；
 12. 最后开启Profile write acceptance。
 
-2026-10-02 隔离DATA路径新增Arena `DEVICE_STATE`文件隔离记录：已知write/force失败先切断受影响共享文件的新DATA、点读及重复成功，再经已绑定的实际控制driver尝试持久化。原grant仍是所有权事实，不能因隔离而被当作FREE；已持久应用的隔离记录重放后仍阻止物理重开，后续sync成功不清除。控制提交拒绝/记录失败仅保留当前运行时拒绝依据，完整记录的未知force结果可由重放确认，但缺少记录不构成旧错误已解析的证据。未启用解除隔离、服务级可写restart、readiness或生产ACK；详细范围见[本地存储状态](implementation/local-storage/README.md)。
+2026-10-02 隔离DATA路径新增Arena `DEVICE_STATE`文件隔离记录：已知write/force失败先切断受影响共享文件的新DATA、点读及重复成功。实际绑定的合批路径在I/O前共享预留每文件故障通知的控制ticket和逻辑日志容量，至少保留一个普通控制槽；容量不足先背压，配置无法同时容纳通知与普通控制时拒绝绑定。控制忙时保留原通知，原批次终结后执行；停收等待这些已预留义务，Arena关闭也拒绝未终结通知。成功DATA等实际I/O与owner结果终结才归还通知；失败记录经原Arena owner持久化并apply，原grant仍是所有权事实，不产生FREE。重放及后续sync不能清除隔离。实际控制I/O或owner故障、记录落盘前退出仍未闭合；未知force的完整记录可重放确认，但缺少记录不构成旧错误已解析的证据。未启用解除隔离、服务级可写restart、readiness或生产ACK；详细范围见[本地存储状态](implementation/local-storage/README.md)。
 
 ### 9.1 Wave 0 reference harness状态
 

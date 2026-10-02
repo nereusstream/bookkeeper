@@ -18,6 +18,7 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -42,11 +43,155 @@ final class SegmentArenaControlDriver {
     private final Object poolGate = new Object();
     private final List<PoolSubmission> pools = new ArrayList<>();
     private boolean collecting;
+    private final FailureNotice[] notices;
+    private final ArrayDeque<FailureNotice> waitingFailures = new ArrayDeque<>();
 
     SegmentArenaControlDriver(SegmentOwnerLoop owner, SegmentIoExecutor io, SegmentArenaControlLog log) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.io = Objects.requireNonNull(io, "io");
         this.log = Objects.requireNonNull(log, "log");
+        notices = new FailureNotice[log.dataFiles()];
+    }
+
+    /** One shared reservation per file while DATA obligations are in flight. */
+    final class FailureLease implements AutoCloseable {
+        private final FailureNotice notice;
+        private boolean closed;
+
+        private FailureLease(FailureNotice notice) {
+            this.notice = notice;
+        }
+
+        void failed(Throwable cause) {
+            Objects.requireNonNull(cause, "cause");
+            synchronized (poolGate) {
+                if (notice.failure != null) {
+                    return;
+                }
+                if (closed) {
+                    throw new IllegalStateException("DATA failure reported after reservation release");
+                }
+                notice.failure = cause;
+                log.blockDataFile(notice.file);
+                notice.ticket.resume(() -> enqueueFailure(notice));
+            }
+        }
+
+        @Override
+        public void close() {
+            synchronized (poolGate) {
+                if (closed) {
+                    throw new IllegalStateException("DATA failure reservation already released");
+                }
+                closed = true;
+                if (--notice.users == 0 && notice.failure == null) {
+                    notices[notice.file] = null;
+                    log.releaseQuarantineRecord(notice.file);
+                    notice.ticket.complete(() -> { });
+                }
+            }
+        }
+    }
+
+    private final class FailureNotice implements SegmentOwnerLoop.Command {
+        private final int file;
+        private SegmentOwnerLoop.Ticket ticket;
+        private int users = 1;
+        private Throwable failure;
+        private boolean inFlight;
+
+        private FailureNotice(int file) {
+            this.file = file;
+        }
+
+        @Override
+        public void run(SegmentOwnerLoop.Ticket unused) {
+            throw new IllegalStateException("Failure notification starts through its reserved completion");
+        }
+
+        @Override
+        public void failed(Throwable cause) {
+            owner.requireOwner();
+            if (inFlight) {
+                deliver(this::finished, null, cause);
+            } else {
+                finished(null, cause);
+            }
+        }
+
+        private void finished(List<SegmentArenaControlLog.Result> results, Throwable cause) {
+            owner.requireOwner();
+            if (cause == null && (results == null || results.size() != 1
+                    || !log.hasDurableQuarantine(file))) {
+                cause = new IOException("DATA quarantine command was not applied");
+            }
+            synchronized (poolGate) {
+                notices[file] = null;
+                waitingFailures.remove(this);
+                log.releaseQuarantineRecord(file);
+            }
+            if (cause != null && cause != failure) {
+                failure.addSuppressed(cause);
+            }
+        }
+    }
+
+    FailureLease reserveFailure(int file) {
+        if (file < 0 || file >= notices.length) {
+            throw new IllegalArgumentException("Invalid DATA file");
+        }
+        synchronized (poolGate) {
+            if (!log.dataFileAvailable(file) || owner.failure() != null) {
+                return null;
+            }
+            FailureNotice notice = notices[file];
+            if (notice != null) {
+                notice.users++;
+                return new FailureLease(notice);
+            }
+            if (!log.reserveQuarantineRecord(file)) {
+                return null;
+            }
+            notice = new FailureNotice(file);
+            try {
+                notice.ticket = owner.reserveControlNotification(notice);
+            } catch (RuntimeException | Error cause) {
+                log.releaseQuarantineRecord(file);
+                throw cause;
+            }
+            if (notice.ticket == null) {
+                log.releaseQuarantineRecord(file);
+                return null;
+            }
+            notices[file] = notice;
+            return new FailureLease(notice);
+        }
+    }
+
+    private void enqueueFailure(FailureNotice notice) {
+        owner.requireOwner();
+        if (owner.failure() != null) {
+            notice.ticket.complete(() -> notice.finished(null, owner.failure()));
+            return;
+        }
+        synchronized (poolGate) {
+            if (busy.get()) {
+                waitingFailures.addLast(notice);
+                return;
+            }
+            busy.set(true);
+            notice.inFlight = true;
+        }
+        forceFailure(notice);
+    }
+
+    private void forceFailure(FailureNotice notice) {
+        if (owner.failure() != null) {
+            notice.ticket.complete(() -> deliver(notice::finished, null, owner.failure()));
+        } else {
+            forceAndApply(notice.ticket, List.of(new SegmentArenaControlLog.FileQuarantine(
+                    UUID.randomUUID(), new Generation(1), notice.file)), notice::finished);
+        }
     }
 
     boolean submit(List<SegmentArenaControlLog.Allocation> commands, Completion completion) {
@@ -65,35 +210,41 @@ final class SegmentArenaControlDriver {
                                     Completion completion) {
         List<SegmentArenaControlLog.Command> batch = List.copyOf(commands);
         Objects.requireNonNull(completion, "completion");
-        if (!busy.compareAndSet(false, true)) {
-            return false;
-        }
-        boolean accepted;
-        try {
-            accepted = owner.submitControl(new SegmentOwnerLoop.Command() {
-                @Override
-                public void run(SegmentOwnerLoop.Ticket ticket) {
-                    forceAndApply(ticket, batch, completion);
-                }
+        synchronized (poolGate) {
+            if (!busy.compareAndSet(false, true)) {
+                return false;
+            }
+            boolean accepted;
+            try {
+                accepted = owner.submitControl(new SegmentOwnerLoop.Command() {
+                    @Override
+                    public void run(SegmentOwnerLoop.Ticket ticket) {
+                        forceAndApply(ticket, batch, completion);
+                    }
 
-                @Override
-                public void failed(Throwable cause) {
-                    owner.requireOwner();
-                    deliver(completion, null, cause);
-                }
-            });
-        } catch (RuntimeException | Error failure) {
-            busy.set(false);
-            throw failure;
+                    @Override
+                    public void failed(Throwable cause) {
+                        owner.requireOwner();
+                        deliver(completion, null, cause);
+                    }
+                });
+            } catch (RuntimeException | Error failure) {
+                busy.set(false);
+                throw failure;
+            }
+            if (!accepted) {
+                busy.set(false);
+            }
+            return accepted;
         }
-        if (!accepted) {
-            busy.set(false);
-        }
-        return accepted;
     }
 
     boolean owns(SegmentArenaControlLog authority) {
         return log == authority;
+    }
+
+    boolean supportsFailureReservations() {
+        return owner.supportsControlNotification();
     }
 
     /** Merge at most one request per shard until the queued control batch starts; no retry queue. */
@@ -214,7 +365,15 @@ final class SegmentArenaControlDriver {
         try {
             completion.complete(results, failure);
         } finally {
-            busy.set(false);
+            synchronized (poolGate) {
+                busy.set(false);
+                FailureNotice next = waitingFailures.pollFirst();
+                if (next != null) {
+                    busy.set(true);
+                    next.inFlight = true;
+                    next.ticket.resume(() -> forceFailure(next));
+                }
+            }
         }
     }
 }
