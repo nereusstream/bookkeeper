@@ -624,6 +624,8 @@ CPU列表语法/编号非法、重复占用关键核、映射矛盾等是配置�
 
 实现归既有UW-3/UW-7和B18：先交付固定owner＋PARK＋安全binding/拓扑校验，再接入owner初始化及可选preferred-node池，最后做有界spin与部署干扰对照。三项小职责仅为`CpuTopologySnapshot`、`ExecutionPlacementPlan`及`cpu-affinity`显式绑定作用域，不新建调度框架、NUMA classifier或持久化控制层。固定owner及安全接入点随第一批线程/池构建完成；可选优化没有测出收益就保持OFF/SYSTEM/PARK，不阻止隔离原型开工，也不以开启affinity作为存储正确性前提。
 
+2026-10-02 本地隔离存储图已由`IsolatedSegmentStorage`统一接线：全shard原owner bootstrap及控制票据终结后才开放normal/recovery/点读与控制入口；使用既有Bookie准入、合批器、固定源/对齐池和有界热目录。停止入口与执行组准入后，等实际I/O、owner及已交付读结果buffer归还，再依次关闭DATA、Bookie与Arena控制日志。超时仍持原对象/锁，启动失败走同一清理路径，owner回调阻塞关闭在取得关闭锁前拒绝。交接异常只清理未被driver接管的票据，已接管票据继续由driver终结。该本地owner尚非EmbeddedServer启动钩子，不发布readiness/ephemeral registration，不完成真实网络/MetadataStore或未正常关闭恢复。
+
 ## 11. 安全不变量
 
 1. `normal local success => matching durable route/install/global READY/local NORMAL_ACTIVE + valid authorization + durable allocation + durable payload`。

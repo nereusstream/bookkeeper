@@ -338,6 +338,8 @@ DirectJournal是独立对照/优化支线，可并行或等主线取得基础数
 
 每个模块提交实际实现、对应测试、可重复测量及未覆盖范围说明；未执行范围保持NOT_EXECUTED。亲和性按相同worker/batch/I/O/TLS/E/W/A与维护负载分离A=OFF/SYSTEM/PARK、B=pin、C=NUMA池、D=有界spin，报告实际mask/页分布、CPU/entry、空闲成本、p99.9及quota干扰；无收益保持默认。CPU/NUMA不进入持久身份，不新增通用调度/测试平台，不重绑旧receipt。
 
+2026-10-02 步骤5～7继续接通[隔离存储资源图生命周期](rfcs/unified-wal/implementation/local-storage/README.md)：统一持有双控制日志、DATA、执行组及全shard合批器/点读，全部原owner bootstrap和控制槽归还后才开放本地请求。关闭按停收→排空I/O、owner和读结果buffer→锁内DATA健康CLOSE→双控制日志释放；超时保留原资源owner/目录锁，启动失败也按此顺序清理。总热定位与源/对齐buffer预算不随worker复制，普通与恢复准入仍独立。此为正常关闭的隔离存储图，不替代Bookie/readiness/registration、未正常关闭恢复、一般selector/回收或完整接收bytes预算；步骤5～7及总Gate仍未完成。
+
 ## 11. Gate 与证据合同
 
 每个正式性能 Gate 必须在运行前冻结：

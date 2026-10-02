@@ -128,6 +128,14 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 本切片已形成正常关闭进程后的本地写入—读取—重复写入—新写入—再次重开的文件闭环，尚无网络/MetadataStore/readiness/registration接线，不接管生产ACK。未正常关闭会话、legacy历史、多个未退役stream、一般MOVE/FREE selector、tail unused回收与空间可持续性仍未完成；不将该闭环扩展为步骤5～7整体验收或掉电证明。
 
+2026-10-02 `IsolatedSegmentStorage`另已接通隔离存储图的自动启动与关闭：先构造资源owner，`startNew`创建新目录并持久OPEN，`restart`复用正常关闭local-result入口；双控制日志、DATA、固定执行组、各shard合批器/读者都由该owner持有。所有shard在原owner完成bootstrap且控制槽归还后，才允许取得控制driver或提交普通写、恢复写及点读。热目录总条目上限按固定逻辑shard分区，不能为每个worker复制；启动时恢复清单能放入全局上限但超出某shard分区，同样整图拒绝开放。
+
+普通入口借用调用方ByteBuf，将可读字节复制到既有共享源budget，不接管或释放借用buffer；拒绝也不产生回调。恢复入口使用既有授权快照交接及合批器，未激活normal权限的恢复grant不会开启普通写。handoff前控制I/O失败时，外层可归还仍未被driver接管的Admission；handoff成功后的票据仍由原driver实际终结，不能提前撤销。
+
+关闭顺序固定为停止本组件/执行组准入（已取得的控制driver也随之停收）→等待原owner、I/O及消费方归还读结果buffer→关闭DATA descriptor并在目录排他锁内完成健康CLOSE→关闭Bookie/Arena控制日志。关闭不持请求gate等待，owner回调可立即得到停收拒绝；owner线程调用阻塞关闭会在获取关闭锁之前明确拒绝。`close(Duration)`的期限约束执行排空，不将未完成的FileChannel I/O当作已取消。排空返回false或中断时保留同一资源owner及锁，调用方释放读结果/等待实际任务终结后继续close；启动异常也调用此路径，仍未排空时保留owner并通过异常报告清理缺口。已终止线程的清理错误继续报告并尝试释放文件/控制资源，不伪造成功；不删除用户目录或遗留数据。
+
+这只是本地隔离存储图的启动/关闭与正常关闭restart，未接Bookie服务readiness/registration、真实网络或MetadataStore。未正常关闭会话恢复、MOVE/FREE selector及整体接收/索引bytes预算保持未完成，不提升生产ACK或Gate。
+
 ## 验证入口
 
 ```bash
@@ -140,6 +148,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-10-02（隔离资源图生命周期）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：172项中167项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增7项定向回归验证两worker/全shard启动、两轮正常关闭restart的旧entry重复/新写/点读、消费方读结果lease阻止排空且目录锁保留、在途owner回调与外部关闭重入、bootstrap失败清理、某shard恢复容量不足时整图停收、非法输入及失败handoff票据释放、独立recovery准入。最初两次编译发现恢复请求类型及未交接Admission释放API不符；随后一项CRC测试的异常类型依据既有校验合同修正，原拒绝/资源断言保留。最终运行`unified-wal-local-PS4ShZHq`保留父提交`963123541c16899551ce281e3a6c39e3a38b88ce`和185项实际源码/构建输入哈希，历史receipt不改绑定。读取结果的消费方buffer lease与I/O/owner期间的文件pin分属不同生命周期；本次证明关闭等待两者各自终结，不将两者合并。未验证真实掉电/介质故障、Linux NUMA、未正常关闭恢复、一般selector/回收、完整接收/索引bytes预算或Bookie/readiness/registration/生产ACK。本次未运行TLC，Block G及总体安全Gate不提升。
 
 2026-10-02（正常关闭local-result restart）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：165项中160项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增3项真实文件回归使用独立JVM正常写入并排空/关闭会话，父进程两轮重放、必要DATA sync、原owner bootstrap、同内容重复/不同内容冲突及fresh pool新写；新写接续同stream sequence，旧位置可点读，重复不增加DATA force。错误generation、定位容量不足、重复bootstrap及Bookie cut变化不发布可用driver，DATA恢复sync失败不开放新epoch；legacy、多未退役stream和未关闭会话拒绝local-result入口。首次定向运行的测试夹具预算未计aligned over-allocation及Fence状态枚举不符已修正，原行为断言保留。最终运行`unified-wal-local-KlIzsX0V`保留父提交`07a3030f306750ba1a410ce415ac451a1f778460`和184项实际源码/构建输入哈希，历史receipt不改绑定。未验证真实掉电/介质错误、Linux NUMA、未正常关闭恢复解析、一般selector/回收、完整服务readiness/网络/MetadataStore或生产ACK。本次未运行TLC，不把Java文件回归替代Spike C模型检查，Block G安全Gate不提升。
 
@@ -290,4 +300,4 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 ## 未覆盖范围
 
-步骤4的Bookie生命周期自动重启、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5 Bookie控制剩余状态及Arena/DATA恢复闭环、步骤6完整合批准入/权限化热定位/生产逐entry结果/请求级幂等、步骤7可发布末端前缀、selector与pin/完整restart尚未实现。物理热候选及其只读重建、重复比较、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
+步骤4的完整Bookie生命周期接入、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5完整启动/控制状态、步骤6真实网络请求生命周期/整体bytes预算及生产逐entry结果、步骤7未正常关闭会话恢复、一般MOVE/FREE selector与完整Bookie restart尚未实现。正常关闭的隔离存储图已有全shard启动、旧entry本地重复结果、新写/点读及按所有权排空关闭；此范围不提升为完整服务验收。物理热候选及其只读重建、重复比较、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。

@@ -377,6 +377,20 @@ final class SegmentExecutionGroup {
         }
     }
 
+    boolean accepting() {
+        return accepting;
+    }
+
+    /** A cleanup error can be reported after all threads stopped; resource owners must distinguish that case. */
+    boolean terminated() {
+        for (ThreadState state : threads) {
+            if (state.thread != null && state.thread.isAlive()) {
+                return false;
+            }
+        }
+        return monitor == null || !monitor.isAlive();
+    }
+
     boolean shutdown(Duration timeout) throws IOException, InterruptedException {
         if (timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("Positive shutdown timeout required");

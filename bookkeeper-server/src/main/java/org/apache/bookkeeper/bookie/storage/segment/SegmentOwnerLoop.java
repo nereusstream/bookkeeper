@@ -337,6 +337,17 @@ final class SegmentOwnerLoop {
         }
     }
 
+    boolean isOwnerThread() {
+        return Thread.currentThread() == thread;
+    }
+
+    /** Startup checks this only while the storage request gate is still closed. */
+    boolean hasPendingCommands() {
+        synchronized (gate) {
+            return pending != 0 || controlPending != 0;
+        }
+    }
+
     private void recordFailure(Throwable cause) {
         synchronized (gate) {
             if (failure == null) {

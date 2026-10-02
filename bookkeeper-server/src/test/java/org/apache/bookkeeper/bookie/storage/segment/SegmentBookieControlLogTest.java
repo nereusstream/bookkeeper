@@ -5729,6 +5729,342 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private IsolatedSegmentStorage storage(IsolatedSegmentConfig config, int workers, int controlSlots,
+                                           int hotEntries) {
+        int buffers = workers * 2;
+        return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
+                new SegmentExecutionGroup.Settings(workers, 2, controlSlots, buffers, 4096, 4096,
+                        buffers * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                new IsolatedSegmentStorage.Limits(1024 * 1024, hotEntries, 1,
+                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
+    }
+
+    private static void installStorage(IsolatedSegmentStorage storage,
+                                       ProtectedProfileStateStore.Transition... transitions) throws Exception {
+        CompletableFuture<List<SegmentBookieControlLog.Result>> ready = new CompletableFuture<>();
+        assertTrue(storage.controls().submitBatch(List.of(transitions), (results, cause) -> {
+            if (cause == null) {
+                ready.complete(results);
+            } else {
+                ready.completeExceptionally(cause);
+            }
+        }));
+        for (SegmentBookieControlLog.Result result : ready.get(5, TimeUnit.SECONDS)) {
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.status());
+        }
+    }
+
+    private static SegmentDataPhysicalDriver.NormalResult storageWrite(IsolatedSegmentStorage storage,
+            ProfileLedgerContext context, long entryId) throws Exception {
+        CompletableFuture<SegmentDataPhysicalDriver.NormalResult> reply = new CompletableFuture<>();
+        ByteBuf bytes = entry(context, entryId);
+        try {
+            assertTrue(storage.submitNormal(context, filled(20, (byte) 5), bytes,
+                    new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                        if (cause == null) {
+                            reply.complete(result);
+                        } else {
+                            reply.completeExceptionally(cause);
+                        }
+                    })));
+            assertEquals(1, bytes.refCnt());
+        } finally {
+            bytes.release();
+        }
+        SegmentDataPhysicalDriver.NormalResult result = reply.get(5, TimeUnit.SECONDS);
+        assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+        return result;
+    }
+
+    private static ReadReply storageRead(IsolatedSegmentStorage storage, ProfileLedgerContext context, long entryId)
+            throws Exception {
+        CompletableFuture<ReadReply> reply = new CompletableFuture<>();
+        assertTrue(storage.submitRead(context, entryId, new SegmentPointRead.ReadRequest(
+                (status, result, cause) -> reply.complete(new ReadReply(status, result, cause)))));
+        ReadReply result = reply.get(5, TimeUnit.SECONDS);
+        assertNull(result.failure());
+        assertEquals(SegmentPointRead.ReadStatus.FOUND, result.status());
+        return result;
+    }
+
+    @Test
+    public void storageGraphBootstrapsAllShardsAndRestartsLocalResults() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("bookie"),
+                1, 4, 1, 16L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
+            assertThrows(IllegalStateException.class, storage::controls);
+            assertFalse(storage.submitRead(context(), 1, new SegmentPointRead.ReadRequest(
+                    (status, result, cause) -> {
+                        throw new AssertionError("Storage was not started");
+                    })));
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4));
+            storageWrite(storage, context(44), 1);
+            storageWrite(storage, context(45), 1);
+        }
+        for (int cycle : new int[] {1, 2}) {
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
+                storage.restart();
+                for (long ledgerId : new long[] {44, 45}) {
+                    SegmentDataPhysicalDriver.NormalResult duplicate = storageWrite(storage, context(ledgerId), 1);
+                    assertEquals(1, duplicate.candidate().address().sequence());
+                    SegmentDataPhysicalDriver.NormalResult added = storageWrite(storage, context(ledgerId), cycle + 1);
+                    assertEquals(cycle + 1, added.candidate().address().sequence());
+                    ReadReply old = storageRead(storage, context(ledgerId), 1);
+                    try (SegmentPointRead.LeasedResult result = old.result()) {
+                        assertEquals(1, result.result().record().entryId());
+                    }
+                    ReadReply next = storageRead(storage, context(ledgerId), cycle + 1);
+                    try (SegmentPointRead.LeasedResult result = next.result()) {
+                        assertEquals(cycle + 1, result.result().record().entryId());
+                    }
+                }
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(3, arena.dataSessionEpoch());
+            assertFalse(arena.hasUnclosedDataSession());
+        }
+    }
+
+    @Test
+    public void storageGraphRetainsLocksUntilConsumerReturnsReadLease() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            storageWrite(storage, context(), 1);
+            SegmentBookieControlDriver controls = storage.controls();
+            ReadReply read = storageRead(storage, context(), 1);
+            try (SegmentPointRead.LeasedResult result = read.result()) {
+                assertFalse(storage.close(Duration.ofMillis(50)));
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                assertThrows(IllegalStateException.class, storage::controls);
+                assertFalse(controls.submitBatch(List.of(activateReplacement(44, 3)), (replies, cause) -> {
+                    throw new AssertionError("Stopped storage accepted a retained control driver request");
+                }));
+                ByteBuf bytes = entry(context(), 2);
+                try {
+                    assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                            new SegmentDataPhysicalDriver.NormalRequest((reply, cause) -> {
+                                throw new AssertionError("Stopped storage accepted an entry");
+                            })));
+                    assertEquals(1, bytes.refCnt());
+                } finally {
+                    bytes.release();
+                }
+                assertFalse(storage.submitRead(context(), 1, new SegmentPointRead.ReadRequest(
+                        (status, reply, cause) -> {
+                            throw new AssertionError("Stopped storage accepted a read");
+                        })));
+                assertEquals(1, result.result().record().entryId());
+            }
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+        }
+        try (SegmentDataFileLock guard = SegmentDataFileLock.open(config.directory());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertFalse(arena.hasUnclosedDataSession());
+        }
+    }
+
+    @Test
+    public void storageGraphDrainsOwnerCompletionWithoutBlockingCallbackReentry() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch completionEntered = new CountDownLatch(1);
+        CountDownLatch releaseCompletion = new CountDownLatch(1);
+        CompletableFuture<Void> completed = new CompletableFuture<>();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            ByteBuf bytes = entry(context(), 1);
+            try {
+                assertTrue(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            completionEntered.countDown();
+                            try {
+                                await(releaseCompletion);
+                                assertNull(cause);
+                                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+                                assertThrows(IllegalStateException.class, () -> storage.close(Duration.ofSeconds(1)));
+                                assertFalse(storage.submitRead(context(), 1, new SegmentPointRead.ReadRequest(
+                                        (status, reply, failure) -> {
+                                            throw new AssertionError("Drain accepted callback reentry");
+                                        })));
+                                completed.complete(null);
+                            } catch (Throwable failure) {
+                                completed.completeExceptionally(failure);
+                            }
+                        })));
+            } finally {
+                bytes.release();
+            }
+            assertTrue(completionEntered.await(5, TimeUnit.SECONDS));
+            assertFalse(storage.close(Duration.ofMillis(50)));
+            assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+            FutureTask<Boolean> drain = new FutureTask<>(() -> storage.close(Duration.ofSeconds(10)));
+            Thread closer = new Thread(drain, "isolated-storage-close-test");
+            closer.start();
+            try {
+                // The external drain must already be waiting for this callback before it reenters close.
+                long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (closer.getState() != Thread.State.TIMED_WAITING && closer.isAlive()
+                        && System.nanoTime() < end) {
+                    TimeUnit.MILLISECONDS.sleep(1);
+                }
+                assertEquals(Thread.State.TIMED_WAITING, closer.getState());
+                releaseCompletion.countDown();
+                completed.get(5, TimeUnit.SECONDS);
+                assertTrue(drain.get(5, TimeUnit.SECONDS));
+            } finally {
+                releaseCompletion.countDown();
+                closer.join(11000);
+                assertFalse(closer.isAlive());
+            }
+        } finally {
+            releaseCompletion.countDown();
+        }
+    }
+
+    @Test
+    public void storageGraphCleansFailedBootstrapAndEnforcesPartitionedHotCapacity() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage invalid = storage(config, 1, 1, 16)) {
+            assertThrows(IOException.class, invalid::startNew);
+            assertThrows(IllegalStateException.class, invalid::controls);
+            assertTrue(invalid.close(Duration.ofSeconds(5)));
+        }
+        try (SegmentDataFileLock guard = SegmentDataFileLock.open(config.directory());
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertFalse(arena.hasUnclosedDataSession());
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
+            storage.restart();
+            installStorage(storage, install(45, 1, (byte) 5), activate(45, 2));
+            storageWrite(storage, context(45), 1);
+            storageWrite(storage, context(45), 2);
+        }
+        // Four global slots become one per shard; two entries on shard 1 cannot fit its partition.
+        try (IsolatedSegmentStorage tooSmall = storage(config, 2, 6, 4)) {
+            assertThrows(IOException.class, tooSmall::restart);
+            assertThrows(IllegalStateException.class, tooSmall::controls);
+            assertTrue(tooSmall.close(Duration.ofSeconds(5)));
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
+            storage.restart();
+            ReadReply old = storageRead(storage, context(45), 2);
+            try (SegmentPointRead.LeasedResult result = old.result()) {
+                assertEquals(2, result.result().record().entryId());
+            }
+            storageWrite(storage, context(45), 3);
+        }
+    }
+
+    @Test
+    public void storageGraphRejectsInvalidInputsWithoutLeakingAdmission() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            ByteBuf bytes = entry(context(), 1);
+            try {
+                assertThrows(NullPointerException.class, () -> storage.submitNormal(
+                        context(), filled(20, (byte) 5), bytes, null));
+                assertThrows(NullPointerException.class, () -> storage.submitRecovery(
+                        recoveryAddWithEntry(ByteBuffer.wrap(new byte[48])), null));
+                bytes.setByte(bytes.writerIndex() - 1, 1);
+                assertThrows(IllegalArgumentException.class,
+                        () -> storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            throw new AssertionError("Invalid entry was accepted");
+                        })));
+                assertEquals(1, bytes.refCnt());
+            } finally {
+                bytes.release();
+            }
+            storageWrite(storage, context(), 1);
+        }
+    }
+
+    @Test
+    public void storageGraphSubmitsRecoveryWithIndependentAdmission() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 6));
+            CompletableFuture<List<SegmentBookieControlLog.Result>> grant = new CompletableFuture<>();
+            assertTrue(storage.controls().submitRecoveryGrant(recoveryGrant(2, 3, 7, 9), (results, cause) -> {
+                if (cause == null) {
+                    grant.complete(results);
+                } else {
+                    grant.completeExceptionally(cause);
+                }
+            }));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    grant.get(5, TimeUnit.SECONDS).get(0).status());
+            ByteBuf bytes = entry(context(), 2);
+            try {
+                assertFalse(storage.submitNormal(context(), filled(20, (byte) 6), bytes,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            throw new AssertionError("Recovery grant activated normal writing");
+                        })));
+                CompletableFuture<SegmentDataPhysicalDriver.RecoveryResult> completed = new CompletableFuture<>();
+                assertTrue(storage.submitRecovery(recoveryAddWithEntry(bytes.nioBuffer()),
+                        new SegmentDataPhysicalDriver.RecoveryRequest((result, cause) -> {
+                            if (cause == null) {
+                                completed.complete(result);
+                            } else {
+                                completed.completeExceptionally(cause);
+                            }
+                        })));
+                assertEquals(SegmentDataPhysicalDriver.RecoveryStatus.LOCAL_DURABLE,
+                        completed.get(5, TimeUnit.SECONDS).status());
+                ReadReply old = storageRead(storage, context(), 2);
+                try (SegmentPointRead.LeasedResult result = old.result()) {
+                    assertEquals(2, result.result().record().entryId());
+                }
+            } finally {
+                bytes.release();
+            }
+        }
+    }
+
+    @Test
+    public void failedControlIoBeforeDriverClaimReleasesOuterAdmission() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR,
+                        new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false))) {
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentBookieControlLog.Admission admission = bookie.admitNormal(
+                    context(), filled(20, (byte) 5)).orElseThrow();
+            assertThrows(IOException.class, () -> bookie.submitBatch(List.of(activateReplacement(44, 3))));
+            assertThrows(IOException.class, () -> bookie.claimForDriver(List.of(admission)));
+            admission.releaseUnclaimed();
+            bookie.close();
+        }
+        IsolatedSegmentConfig recoveryConfig = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("failed-recovery-handoff"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(recoveryConfig, identity());
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(recoveryConfig, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR,
+                        new SegmentFileIo(Integer.MAX_VALUE, -1, 3, false))) {
+            bookie.submitBatch(List.of(install(1, (byte) 6)));
+            bookie.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+            SegmentBookieControlLog.RecoveryAdmission admission = bookie.admitRecovery(
+                    recoveryAdd(3, 7, 9, 2, (byte) 6)).orElseThrow();
+            assertThrows(IOException.class, () -> bookie.submitBatch(List.of(activateReplacement(44, 3))));
+            assertThrows(IOException.class, () -> bookie.claimRecoveryForDriver(List.of(admission)));
+            admission.releaseUnclaimed();
+            bookie.close();
+        }
+    }
+
     @Test
     public void cleanRestartRestoresOwnerPrefixAndDuplicateAuthorityBeforeAppending() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(

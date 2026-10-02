@@ -221,6 +221,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
             owner.finishAdmission(this, false);
         }
 
+        /** An outer resource owner may clean up a failed handoff, but never revoke a driver's ticket. */
+        void releaseUnclaimed() {
+            synchronized (owner) {
+                if (!claimed && !terminal) {
+                    owner.finishAdmission(this, false);
+                }
+            }
+        }
+
         void driverTerminal() {
             owner.finishAdmission(this, true);
         }
@@ -282,6 +291,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
         void finish() {
             owner.finishRecovery(this, false);
+        }
+
+        void releaseUnclaimed() {
+            synchronized (owner) {
+                if (!claimed && !terminal) {
+                    owner.finishRecovery(this, false);
+                }
+            }
         }
 
         void driverTerminal() {

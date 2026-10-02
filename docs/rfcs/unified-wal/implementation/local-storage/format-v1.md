@@ -103,6 +103,8 @@ Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用
 
 隔离`SegmentPointRead`从已解析batch生成record位置，读取时先验证DATA文件身份、Arena grant和batch header，再按4096字节边界读取目标record header与内容；长度在分配前受格式上限和batch record区域约束，最终由独立parser核验record/BK CRC与locator身份。该原语不授予locator发布、read pin或DATA durability，调用方仍须先证明这些上层前提。当前Arena没有FREE/复用。
 
+隔离资源owner `IsolatedSegmentStorage`启动和关闭复用以上OPEN/CLOSE、恢复扫描及原owner bootstrap顺序，不增加新的持久字节类型。全部shard bootstrap完成后才开放本地请求；关闭先停收并等待实际I/O、owner及消费方buffer lease，随后在目录锁内关闭DATA/记录健康CLOSE，再关闭控制日志。超时不生成CLOSE或提前释放锁，启动失败按相同顺序清理；完整Bookie readiness、未正常关闭恢复和生产ACK仍未接通。
+
 ## 固定向量与验证边界
 
 `src/test/resources/unified-wal-segment` 中 `entry-v1.hex`、`copy-v1.hex` 各4096字节，`arena-alloc-v1.hex` 为192字节，包含上述48字节语义body和首序号11。向量由独立 Python struct/逐位 CRC32C 生成，Java writer 不参与生成；Java writer 输出逐字节对照，独立 parser 读取同一向量。既有DATA向量使用ledger7/shard0，仅是framing oracle，不是通过固定shard准入的服务记录；其历史字节和回执不因新增路由校验而改写。

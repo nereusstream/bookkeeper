@@ -406,6 +406,8 @@ dedicated空间只属于一个ledger，不能在同一专属block/range混入其
 
 dedicated extent 的优势是按 extent 列表快速 logical/free；但只有集群 delete authorization、本地 reader drain 和 durable generation bump 完成后才能物理复用。
 
+2026-10-02 隔离`IsolatedSegmentStorage`已统一持有上述本地资源图：新目录或正常关闭restart须全部固定shard的原owner bootstrap和控制票据终结后才开放请求，总热定位容量按shard拆分而非复制。关闭先停止入口/执行组准入，等待实际I/O、owner及消费方读结果buffer lease，再在writer目录锁内关闭DATA并完成健康CLOSE，随后关闭双控制日志；超时保留原资源owner/锁，启动失败亦用同一路径清理，不删除数据。未正常关闭会话、完整Bookie/readiness/registration、一般MOVE/FREE selector和完整bytes预算仍未闭合，本地资源图不提升Gate。
+
 ## 9. Block 与 locator 最小合同
 
 候选 block framing 必须能验证：
