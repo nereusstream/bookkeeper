@@ -306,6 +306,8 @@ Recovery-only authority 可以在 target 进入标准 ensemble 前存在。repai
 
 recovery authority 的集群来源、repair target、intent retention 与 delete discovery 由 RFC-0004 负责。Bookie local record 只消费该 authority，不复制 cluster schema。基础恢复复用Classic的write-set、fencing read、`W-A+1`聚合、顺序交付及write-back，按RFC-0004 §7.4适配Profile身份/grant/错误分类；recovery Add的写授权不替代读取来源的本地fence或absence证据。
 
+2026-10-02 隔离逐entry recovery入口已复用普通写的合批、固定源/对齐池、deadline、按需ALLOC_POOL refill及assembling/pending/published重复坐标处理。先以现有Bookie准入验证exact context/credential/RepairIntent/grant/range，driver接管其私有wire payload快照后，在DATA预留前验证CRC、BK entry ID和固定shard；源budget按完整array容量计费且不再复制快照。合法recovery输入可无normal activation，普通与恢复来源也可同批，但normal captured generation与recovery grant/close/tombstone资格分别决定逐entry隔离结果；交叉重试不会绕过各自权限或创建第二winner。grant close等待期间恢复结果仍沿既有本地gate判为过期，normal pre-cut fence仍等待原票据终结。取消响应等待不释放storage/grant义务。此路径尚未接真实集群RepairIntent、完整wire status、接收credit/整体bytes预算或服务级restart，不形成生产ACK。
+
 ## 8. Explicit LAC 与读操作
 
 Segment engine 必须为 explicit LAC 定义：

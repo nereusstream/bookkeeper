@@ -306,6 +306,8 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 同日按需refill已在实际Arena控制owner上合并有界pool请求，计划新范围只参考已apply high-watermark；force返回后顺序条件apply，再通知原DATA owner重验授权，不由计划/写完成推断grant。dispatch前每shard最多一个请求，dispatch后及满额背压，不追加另一重试层。无空间时不写空控制batch或消耗DATA序号；其后的小entry仍可使用当前pool实际剩余范围。组合多个合法最大entry时，先比较完整framing所需bytes并封包旧batch，再计算受格式上限约束的对齐长度，避免将需分批的合法输入当作owner错误。运行期按需refill、pool内无逐entry控制force已在真实文件验证，但预取策略、返还/FREE、pool used/unused恢复与完整allocator authority仍未完成。
 
+2026-10-02 同一逐entry路径还可接纳已获Bookie exact grant的recovery输入：准入私有payload在driver claim后直接移交共享源预算并按完整array容量计费，直到封包复制或重复比较实际用完才归还。normal/recovery共用非空封包、stream序号、固定对齐池、ALLOC_POOL按需refill及物理write/force，不新增队列或提交票据；同坐标交叉重试共享待决结果，冲突不新增物理winner。取消response不结束DATA/grant义务，控制失败或DATA unknown按已有失败前缀处理。该入口仅覆盖快照移交后的存储持有阶段，完整wire/TLS/socket bytes credit交接仍未闭合。
+
 状态：SYSTEM/OWNER_TOUCH隔离池已实现；PREFERRED和物理NUMA验证仍未完成。2026-09-26的[group启动与池](implementation/local-storage/README.md)已在owner绑定后分配/触碰对齐buffer，将同一全局数量和请求容量预算拆分给owner，预留原池归还容量并等待live lease后关闭。Netty/malloc页可能已被触碰，未测页分布，不声明硬属地或性能收益；未提升本节Gate。WalArena/DATA设备尽量与append owner、I/O服务资源及对齐DATA buffer pool同节点；NUMA只影响运行时placement，不新增Arena、控制日志、ProfileDescriptor字段或DATA身份。`ALLOC_POOL`的持久空间owner/generation与内存buffer pool的属地是不同事实；CPU/worker数量变化不重新解释ledger→shard或既有stream，重启调整worker映射遵守RFC-0005 §10.2。
 
 首批仍一个Arena，优先在同时具备足够CPU、允许内存节点及本地NVMe的NUMA节点验证；未知设备归属必须标UNKNOWN。PCI sysfs `numa_node = -1`不能当node 0，复合设备归属无法证明时也不伪造本地性，见[Linux PCI sysfs ABI](https://cdn.kernel.org/doc/html/latest/admin-guide/abi-testing.html)。后续多Arena只为已有Arena分别规划worker/池属地，不在线跨Arena迁移。

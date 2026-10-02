@@ -298,6 +298,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤7接通[Bookie本地route筛选的多stream重开读取](rfcs/unified-wal/implementation/local-storage/README.md)：同锁扫描与恢复同步后，稳定控制cut、连续stream及唯一坐标共同约束启动定位；tombstone记录仍校验但不占可读定位容量。保持读取pin、Bookie读票据和Arena cut复核，未知/歧义不报不存在，后续grant使旧清单失效。两次进程终止后的多stream旧entry可由同一重开清单点读；旧I/O错误判定、一般selector、动态写入定位及服务级可写restart仍未完成，不提升Gate。
 
+2026-10-02 步骤6补齐[合法recovery Add的逐entry合批入口](rfcs/unified-wal/implementation/local-storage/README.md)：私有exact payload快照移交共享源额度，普通/recovery共用封包、pool refill与重复坐标状态，并分别复核准入generation及exact grant/close/tombstone。相同内容交叉重试共用DATA结果，冲突不新增force，recovery-only不授予normal activation；取消response、shutdown及I/O失败仍排空实际资源。wire到存储credit、全局bytes总账、旧I/O恢复与生产接线仍未完成，不提升Gate。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |

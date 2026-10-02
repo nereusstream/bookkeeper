@@ -248,7 +248,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final LedgerState state;
         private final GrantState grant;
         private final long entryId;
-        private final byte[] entryPayload;
+        private byte[] entryPayload;
         private boolean terminal;
         private boolean claimed;
 
@@ -270,7 +270,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         byte[] entryPayload() {
+            if (entryPayload == null) {
+                throw new IllegalStateException("Recovery payload ownership has ended or moved to its driver");
+            }
             return entryPayload.clone();
+        }
+
+        byte[] takeEntryPayloadForDriver() {
+            return owner.takeRecoveryPayload(this);
         }
 
         void finish() {
@@ -758,8 +765,18 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IllegalArgumentException("Recovery admission already finished or belongs to another control log");
         }
         admission.terminal = true;
+        admission.entryPayload = null;
         admission.grant.inFlight--;
         activeAdmissions--;
+    }
+
+    private synchronized byte[] takeRecoveryPayload(RecoveryAdmission admission) {
+        if (admission.owner != this || admission.terminal || !admission.claimed || admission.entryPayload == null) {
+            throw new IllegalArgumentException("Recovery payload requires exclusive live driver ownership");
+        }
+        byte[] bytes = admission.entryPayload;
+        admission.entryPayload = null;
+        return bytes;
     }
 
     synchronized void claimRecoveryForDriver(List<RecoveryAdmission> admissions) throws IOException {

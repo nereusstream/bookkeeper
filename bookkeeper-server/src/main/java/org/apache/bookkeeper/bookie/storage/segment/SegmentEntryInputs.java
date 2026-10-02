@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Objects;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
-/** Group-wide source bytes, reserved before exact-capacity allocation; separate from the owner DATA pool. */
+/** Group-wide full-capacity source bytes for normal allocations or adopted private recovery snapshots. */
 final class SegmentEntryInputs {
     final class Input implements AutoCloseable {
         private final ProfileLedgerContext context;
@@ -108,14 +108,9 @@ final class SegmentEntryInputs {
     }
 
     synchronized Input acquire(ProfileLedgerContext context, int bytes) {
-        Objects.requireNonNull(context, "context");
-        if (bytes < SegmentBatchFormat.ENTRY_OVERHEAD || bytes > maxEntryBytes) {
-            throw new IllegalArgumentException("Entry input exceeds the configured size bound");
-        }
-        if (!accepting || bytes > limit - usedBytes) {
+        if (!reserve(context, bytes)) {
             return null;
         }
-        usedBytes += bytes;
         try {
             // No borrowed slice or pooled parent whose actual retained capacity exceeds this charge.
             return new Input(context, Unpooled.buffer(bytes, bytes));
@@ -123,6 +118,31 @@ final class SegmentEntryInputs {
             usedBytes -= bytes;
             throw failure;
         }
+    }
+
+    /** Adopt the private recovery snapshot after its admission transfers ownership; never copy its array. */
+    synchronized Input adoptRecovery(ProfileLedgerContext context, byte[] bytes) {
+        if (!reserve(context, bytes.length)) {
+            return null;
+        }
+        try {
+            return new Input(context, Unpooled.wrappedBuffer(bytes));
+        } catch (RuntimeException | Error failure) {
+            usedBytes -= bytes.length;
+            throw failure;
+        }
+    }
+
+    private boolean reserve(ProfileLedgerContext context, int bytes) {
+        Objects.requireNonNull(context, "context");
+        if (bytes < SegmentBatchFormat.ENTRY_OVERHEAD || bytes > maxEntryBytes) {
+            throw new IllegalArgumentException("Entry input exceeds the configured size bound");
+        }
+        if (!accepting || bytes > limit - usedBytes) {
+            return false;
+        }
+        usedBytes += bytes;
+        return true;
     }
 
     synchronized void claim(List<Input> inputs) {

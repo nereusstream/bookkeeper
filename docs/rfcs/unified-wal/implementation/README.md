@@ -171,6 +171,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 2026-10-02 逐entry自动路径已接入实际Arena控制owner的有界按需ALLOC_POOL refill：dispatch前合并每shard一个pool请求，一次control force后顺序apply，原DATA ticket回原owner继续封包并重验grant。等待期间源/票据有界且不占DATA坐标，新坐标背压，同坐标重试可加入；全部容量不足不写空control batch、不force或占DATA序号，控制/owner失败与shutdown可排空。普通pool内Add不访问控制日志。预取策略、used/unused恢复、尾部回收、网络/全局bytes总账及完整服务restart尚未完成，步骤6仍不标完成。
 
+2026-10-02 逐entry路径另已接入合法recovery Add，复用同一合批、deadline、固定池、按需refill和重复坐标状态。私有exact wire payload快照在driver claim后移交同一源bytes额度，不另复制一份大输入；格式、CRC、BK entry ID及固定shard在预留前重验。普通/recovery可同批，各自权限及grant close/tombstone在完成前独立复核；交叉重试相同内容共享物理结果，冲突不新增写入。恢复写无须normal activation，取消响应及shutdown不提前归还在途资源。wire解析/准入快照到存储的完整credit交接、全局bytes总账、旧I/O错误恢复与服务级restart仍未完成，步骤6不标完成。
+
 #### 7. 实现点读与基础restart
 
 依赖步骤5、6。点读实现正确定位、allocation/generation pin、独立record校验和有界对齐读取，不为小entry强制读取整个DATA batch。restart顺序为：

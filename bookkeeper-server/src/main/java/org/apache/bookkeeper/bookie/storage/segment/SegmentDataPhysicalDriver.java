@@ -46,7 +46,7 @@ final class SegmentDataPhysicalDriver {
                         SegmentPointRead.Location candidate) { }
 
     enum RecoveryStatus {
-        LOCAL_DURABLE, STALE_ADMISSION, UNKNOWN
+        LOCAL_DURABLE, STALE_ADMISSION, TRANSIENT_UNAVAILABLE, CONFLICT, UNKNOWN
     }
 
     record RecoveryResult(ProfileLedgerContext context, long entryId, RecoveryStatus status,
@@ -81,6 +81,31 @@ final class SegmentDataPhysicalDriver {
 
         private void complete(NormalResult result, Throwable failure) {
             NormalEntryCompletion completion = response.getAndSet(null);
+            if (completion != null) {
+                completion.complete(result, failure);
+            }
+        }
+    }
+
+    @FunctionalInterface
+    interface RecoveryEntryCompletion {
+        void complete(RecoveryResult result, Throwable failure);
+    }
+
+    /** Response cancellation never cancels a recovery DATA or grant obligation. */
+    static final class RecoveryRequest {
+        private final AtomicReference<RecoveryEntryCompletion> response;
+
+        RecoveryRequest(RecoveryEntryCompletion completion) {
+            response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+        }
+
+        boolean stopWaiting() {
+            return response.getAndSet(null) != null;
+        }
+
+        private void complete(RecoveryResult result, Throwable failure) {
+            RecoveryEntryCompletion completion = response.getAndSet(null);
             if (completion != null) {
                 completion.complete(result, failure);
             }
@@ -612,7 +637,7 @@ final class SegmentDataPhysicalDriver {
         }
     }
 
-    /** One assembling batch and oldest deadline per fixed driver/shard; no per-ledger permanent buffers. */
+    /** One normal/recovery assembling batch and oldest deadline per fixed driver/shard. */
     NormalBatcher enableNormalBatching(SegmentBookieControlLog bookie, BatchLimits limits) {
         owner.requireOwner();
         Objects.requireNonNull(limits, "limits");
@@ -683,7 +708,7 @@ final class SegmentDataPhysicalDriver {
                 }
                 SegmentBatchFormat.validateEntry(data, SegmentBatchFormat.maxPayload(files.config()));
                 SegmentEntryIdentity identity = SegmentEntryIdentity.parse(data.context(), data.entry().nioBuffer());
-                entry = new Entry(input, admission, request, arrived, data, identity);
+                entry = new Entry(input, admission, null, request, null, arrived, data, identity);
             } catch (IOException | RuntimeException | Error failure) {
                 try {
                     admission.driverTerminal();
@@ -692,6 +717,61 @@ final class SegmentDataPhysicalDriver {
                 }
                 throw failure;
             }
+            return submitEntry(entry);
+        }
+
+        /** Consume the exact admitted wire snapshot into the existing group-wide source budget. */
+        boolean submitRecovery(SegmentBookieControlLog.RecoveryAdmission admission, RecoveryRequest request)
+                throws IOException {
+            Objects.requireNonNull(request, "request");
+            long arrived = System.nanoTime();
+            bookie.claimRecoveryForDriver(List.of(admission));
+            SegmentEntryInputs.Input input = null;
+            boolean claimed = false;
+            Entry entry;
+            try {
+                byte[] payload = admission.takeEntryPayloadForDriver();
+                if (payload.length < SegmentBatchFormat.ENTRY_OVERHEAD
+                        || payload.length > SegmentBatchFormat.ENTRY_OVERHEAD
+                                + SegmentBatchFormat.maxPayload(files.config())) {
+                    throw new IOException("Recovery input exceeds the unified entry bound");
+                }
+                input = owner.inputs().adoptRecovery(admission.context(), payload);
+                if (input == null) {
+                    admission.driverTerminal();
+                    return false;
+                }
+                owner.inputs().claim(List.of(input));
+                claimed = true;
+                SegmentBatchFormat.Data data = input.data();
+                if (!bookie.matchesScope(files) || SegmentOwnerLoop.shardFor(data.context().ledgerId(),
+                        files.config().logicalShards()) != shard) {
+                    throw new IOException("Recovery entry input differs from its driver or Bookie admission");
+                }
+                SegmentBatchFormat.validateEntry(data, SegmentBatchFormat.maxPayload(files.config()));
+                SegmentEntryIdentity identity = SegmentEntryIdentity.parse(data.context(), data.entry().nioBuffer());
+                if (identity.entryId() != admission.entryId()) {
+                    throw new IOException("Recovery BK entry ID differs from its admission");
+                }
+                entry = new Entry(input, null, admission, null, request, arrived, data, identity);
+            } catch (IOException | RuntimeException | Error failure) {
+                try {
+                    if (input != null) {
+                        if (claimed) {
+                            input.releaseFromDriver();
+                        } else {
+                            input.close();
+                        }
+                    }
+                } finally {
+                    admission.driverTerminal();
+                }
+                throw failure;
+            }
+            return submitEntry(entry);
+        }
+
+        private boolean submitEntry(Entry entry) {
             boolean accepted;
             try {
                 accepted = owner.submit(shard, entry);
@@ -708,7 +788,9 @@ final class SegmentDataPhysicalDriver {
         private final class Entry implements SegmentOwnerLoop.Command {
             private final SegmentEntryInputs.Input input;
             private final SegmentBookieControlLog.Admission admission;
+            private final SegmentBookieControlLog.RecoveryAdmission recoveryAdmission;
             private final NormalRequest request;
+            private final RecoveryRequest recoveryRequest;
             private final long arrived;
             private final ProfileLedgerContext context;
             private final long entryId;
@@ -725,11 +807,14 @@ final class SegmentDataPhysicalDriver {
             private boolean settled;
 
             private Entry(SegmentEntryInputs.Input input, SegmentBookieControlLog.Admission admission,
-                          NormalRequest request, long arrived, SegmentBatchFormat.Data data,
+                          SegmentBookieControlLog.RecoveryAdmission recoveryAdmission, NormalRequest request,
+                          RecoveryRequest recoveryRequest, long arrived, SegmentBatchFormat.Data data,
                           SegmentEntryIdentity identity) {
                 this.input = input;
                 this.admission = admission;
+                this.recoveryAdmission = recoveryAdmission;
                 this.request = request;
+                this.recoveryRequest = recoveryRequest;
                 this.arrived = arrived;
                 this.data = data;
                 this.identity = identity;
@@ -773,18 +858,30 @@ final class SegmentDataPhysicalDriver {
                 try {
                     releaseSource();
                 } finally {
-                    admission.driverTerminal();
+                    finishAdmission();
                 }
             }
 
             private void respond(NormalStatus status, SegmentPointRead.Location candidate, Throwable failure,
                                  boolean releaseAdmission) {
                 if (settled) {
-                    throw new IllegalStateException("Normal entry result already terminal");
+                    throw new IllegalStateException("Entry result already terminal");
                 }
                 settled = true;
                 try {
-                    request.complete(new NormalResult(context, entryId, status, candidate), failure);
+                    if (request != null) {
+                        request.complete(new NormalResult(context, entryId, status, candidate), failure);
+                    } else {
+                        RecoveryStatus recoveryStatus = switch (status) {
+                            case LOCAL_DURABLE -> RecoveryStatus.LOCAL_DURABLE;
+                            case STALE_ADMISSION -> RecoveryStatus.STALE_ADMISSION;
+                            case TRANSIENT_UNAVAILABLE -> RecoveryStatus.TRANSIENT_UNAVAILABLE;
+                            case CONFLICT -> RecoveryStatus.CONFLICT;
+                            case UNKNOWN -> RecoveryStatus.UNKNOWN;
+                        };
+                        recoveryRequest.complete(new RecoveryResult(context, entryId, recoveryStatus, candidate),
+                                failure);
+                    }
                 } finally {
                     try {
                         if (duplicate == null) {
@@ -792,7 +889,7 @@ final class SegmentDataPhysicalDriver {
                         }
                     } finally {
                         if (releaseAdmission) {
-                            admission.driverTerminal();
+                            finishAdmission();
                         }
                     }
                 }
@@ -800,8 +897,21 @@ final class SegmentDataPhysicalDriver {
 
             private void refuse(NormalStatus status, Throwable failure) {
                 releaseSource();
-                ticket.complete(() -> respond(status == NormalStatus.CONFLICT && !bookie.canCompleteNormal(admission)
+                ticket.complete(() -> respond(status == NormalStatus.CONFLICT && !eligible()
                         ? NormalStatus.STALE_ADMISSION : status, null, failure, true));
+            }
+
+            private boolean eligible() {
+                return admission != null ? bookie.canCompleteNormal(admission)
+                        : bookie.canCompleteRecovery(recoveryAdmission);
+            }
+
+            private void finishAdmission() {
+                if (admission != null) {
+                    admission.driverTerminal();
+                } else {
+                    recoveryAdmission.driverTerminal();
+                }
             }
         }
 
@@ -860,14 +970,15 @@ final class SegmentDataPhysicalDriver {
             AtomicReference<SegmentPointRead.Location> selected = new AtomicReference<>(location);
             entry.duplicate = new Obligation((unused, failure) -> {
                 NormalStatus result = failure != null ? NormalStatus.UNKNOWN
-                        : !bookie.canCompleteNormal(entry.admission) ? NormalStatus.STALE_ADMISSION
+                        : !entry.eligible() ? NormalStatus.STALE_ADMISSION
                         : status.get() == DuplicateStatus.CONFLICT ? NormalStatus.CONFLICT
                         : status.get() == DuplicateStatus.SAME_DURABLE
                                 && hot.liveDurableCandidate(entry.context, entry.entryId)
                                         .filter(selected.get()::equals).isPresent() ? NormalStatus.LOCAL_DURABLE
                                 : NormalStatus.UNKNOWN;
                 entry.respond(result, result == NormalStatus.LOCAL_DURABLE ? selected.get() : null, failure, false);
-            }, List.of(entry.admission));
+            }, entry.admission == null ? List.of() : List.of(entry.admission),
+                    entry.recoveryAdmission == null ? List.of() : List.of(entry.recoveryAdmission), List.of());
             entry.duplicate.releaseSource = entry::releaseSource;
             if (location == null) {
                 existing.waiters.add(new WaitingDuplicate(entry.ticket, entry.duplicate, status, selected));
@@ -951,9 +1062,7 @@ final class SegmentDataPhysicalDriver {
                 }
                 batch.claimForDriver();
                 claimed = true;
-                Obligation obligation = prepareNormal(bookie, batch,
-                        entries.stream().map(entry -> entry.admission).toList(),
-                        (results, failure) -> completeBatch(entries, results, failure));
+                Obligation obligation = prepareBatch(entries, batch);
                 leader.physical = new PhysicalCommand(batch, obligation);
                 leader.physical.run(leader.ticket);
             } catch (Throwable failure) {
@@ -989,13 +1098,45 @@ final class SegmentDataPhysicalDriver {
             }
         }
 
-        private void completeBatch(List<Entry> entries, List<NormalResult> results, Throwable failure) {
+        private Obligation prepareBatch(List<Entry> entries, SegmentBatchFormat.FrozenBatch batch) throws IOException {
+            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(batch.bytes(), batch.address(), Long.MAX_VALUE);
+            if (!bookie.matchesScope(files) || parsed.records().size() != entries.size()) {
+                throw new IOException("Batched DATA differs from its Bookie input");
+            }
+            List<PendingNormal> identities = new ArrayList<>(entries.size());
+            for (int i = 0; i < entries.size(); i++) {
+                Entry entry = entries.get(i);
+                SegmentBatchParser.Record record = parsed.records().get(i);
+                if (record.origin() != SegmentBatchFormat.ENTRY_DATA || !record.context().equals(entry.context)
+                        || record.entryId() != entry.entryId || batch.address().shard() != shard) {
+                    throw new IOException("Batched DATA record differs from its admitted input");
+                }
+                identities.add(new PendingNormal(record));
+            }
+            List<PendingNormal> normals = List.copyOf(identities);
+            Completion completion = (candidates, failure) -> {
+                if (failure == null && (candidates == null || candidates.size() != entries.size())) {
+                    finishPendingNormals(normals, null, new IOException("Batched DATA candidate count mismatch"));
+                    throw new IllegalStateException("Batched DATA lacks one published candidate per entry");
+                }
+                finishPendingNormals(normals, candidates, failure);
+                completeBatch(entries, candidates, failure);
+            };
+            return new Obligation(completion,
+                    entries.stream().filter(entry -> entry.admission != null).map(entry -> entry.admission).toList(),
+                    entries.stream().filter(entry -> entry.recoveryAdmission != null)
+                            .map(entry -> entry.recoveryAdmission).toList(), normals);
+        }
+
+        private void completeBatch(List<Entry> entries, List<SegmentPointRead.Location> candidates, Throwable failure) {
             Throwable callbackFailure = null;
             for (int i = 0; i < entries.size(); i++) {
                 Entry entry = entries.get(i);
-                NormalResult result = results.get(i);
+                SegmentPointRead.Location candidate = failure == null ? candidates.get(i) : null;
+                NormalStatus result = failure != null ? NormalStatus.UNKNOWN
+                        : entry.eligible() ? NormalStatus.LOCAL_DURABLE : NormalStatus.STALE_ADMISSION;
                 try {
-                    entry.respond(result.status(), result.candidate(), failure, false);
+                    entry.respond(result, candidate, failure, false);
                 } catch (Throwable error) {
                     callbackFailure = appendFailure(callbackFailure, error);
                 }
@@ -1004,10 +1145,10 @@ final class SegmentDataPhysicalDriver {
                 }
                 for (Entry joined : entry.duplicates) {
                     try {
-                        NormalStatus status = failure != null || result.candidate() == null ? NormalStatus.UNKNOWN
-                                : bookie.canCompleteNormal(joined.admission) ? NormalStatus.LOCAL_DURABLE
+                        NormalStatus status = failure != null || candidate == null ? NormalStatus.UNKNOWN
+                                : joined.eligible() ? NormalStatus.LOCAL_DURABLE
                                         : NormalStatus.STALE_ADMISSION;
-                        joined.respond(status, result.candidate(), failure, true);
+                        joined.respond(status, candidate, failure, true);
                     } catch (Throwable error) {
                         callbackFailure = appendFailure(callbackFailure, error);
                     } finally {
@@ -1016,7 +1157,7 @@ final class SegmentDataPhysicalDriver {
                 }
             }
             if (callbackFailure != null) {
-                throw new IllegalStateException("Batched normal callback failed", callbackFailure);
+                throw new IllegalStateException("Batched entry callback failed", callbackFailure);
             }
         }
 
