@@ -1,6 +1,6 @@
 目标：按已经确认并写入现有文档的 Unified WAL 16 步施工顺序，在本会话持续实施、验证并同步文档，逐步达到首个可保留数据生产候选的可审查交付。先实施步骤1～4，紧接步骤5～7形成真实写入—点读—重启恢复闭环，再按依赖推进8～10索引/回收/长期运行、11～15网络/MetadataStore/客户端/恢复/删除/rejoin，以及16综合验收与运维交付。不要只给建议或再次整理计划，也不要在完成一个小模块后自行停止整个目标。
 
-运行方式：本会话固定使用 gpt-6-astra，reasoning effort 为 high。全程只有一个 agent，禁止 spawn_agent、子agent、explorer/worker、内部并行agent、委派给其他会话或通过另一CLI启动第二个编码agent。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 保留为所有步骤的规划检查入口；本会话承担实施。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
+运行方式：按用户当前约束，本会话固定使用 gpt-6.1-sol，reasoning effort 为 xhigh（覆盖早期 gpt-6-astra/high 设置）。全程只有一个 agent，禁止 spawn_agent、子agent、explorer/worker、内部并行agent、委派给其他会话或通过另一CLI启动第二个编码agent。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 保留为所有步骤的规划检查入口；本会话承担实施。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
 
 源码与文档交接：
 - 项目是 nereusstream/bookkeeper，保存的项目名 turbo-bk，源工作区 /Users/liusinan/apps/ideaproject/nereusstream/bookkeeper。不要误用 /Users/liusinan/apps/ideaproject/GITHUB/bookkeeper。
@@ -24,7 +24,7 @@
 11. 当前首批仍为隔离、可丢弃实验，不能接管真实生产ACK或动生产数据目录。实施授权不等于实际生产部署授权；需要真实环境、凭据或canary部署时，先完成可本地完成的实现、验证与具体可审查交付，再明确实际缺口。缺少Linux NUMA硬件、掉电环境或正式性能环境时如实记录NOT_EXECUTED，不伪造PASS，也不能因为单项环境缺失停止其他可独立推进的工作。
 12. 实际启用A/C、必要D及组合模型与实现同步验证，有限模型PASS不代替fsync/TLS/内存证据。raw old-decoder/stock-binary当前延期状态与冻结反例保留，在发布对应stable面前按合同恢复验证；不永久DEFERRED却宣称兼容。所有historical sourceCommit、designInputsAtSourceCommit、receipt和旧结果目录保持原绑定，新验证有独立source/config/run身份。
 
-执行记录：完整启动正文曾因目标工具的4000字符限制被拒绝（正文4111字符），因此目标工具使用引用正文的精简目标；应用迁移后工具返回无目标；随后依用户明确指令在迁移后的会话01a0c86a-7130-73b2-b68f-45d726cac59b恢复持续active目标（无token预算），没有将旧目标标记完成。原始未修改正文保留在交接备份 unified-wal-before-local-handoff-g_j26t8t，SHA-256为4e51eb6d300aec56aabf938d85f4c43bb4b26478e59d1f4ce99df4fed1a3de0d。本文件只更新已被用户覆盖的工作区和提交约束。
+执行记录：完整启动正文曾因目标工具的4000字符限制被拒绝（正文4111字符），因此目标工具使用引用正文的精简目标；应用迁移后工具返回无目标；随后依用户明确指令在迁移后的会话01a0c86a-7130-73b2-b68f-45d726cac59b恢复持续active目标（无token预算），没有将旧目标标记完成。原始未修改正文保留在交接备份 unified-wal-before-local-handoff-g_j26t8t，SHA-256为4e51eb6d300aec56aabf938d85f4c43bb4b26478e59d1f4ce99df4fed1a3de0d。本文件同步已被用户覆盖的工作区、提交与单agent模型约束。
 
 持续交付与检查：
 - 每个模块留下实际源码、必要测试、可复现命令、测量记录、实际完成状态及未覆盖范围。按最小闭环顺序集成，避免只堆线程/控制/索引框架。

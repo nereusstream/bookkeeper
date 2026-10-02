@@ -21,9 +21,11 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import io.netty.buffer.ByteBuf;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -35,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.util.affinity.CpuBinding;
 import org.apache.bookkeeper.common.util.affinity.CpuTopologySnapshot;
 import org.junit.Assume;
@@ -53,7 +56,7 @@ public class SegmentExecutionGroupTest {
     }
 
     private SegmentExecutionGroup.Settings settings() {
-        return new SegmentExecutionGroup.Settings(2, 2, 2, 3, 4096, 3 * 8191, WAIT);
+        return new SegmentExecutionGroup.Settings(2, 2, 2, 3, 4096, 4096, 3 * 8191 + 4096, WAIT);
     }
 
     private static void await(CountDownLatch latch) {
@@ -423,9 +426,50 @@ public class SegmentExecutionGroupTest {
     }
 
     @Test
+    public void entryInputsShareOneBudgetAndRetainWholeAllocationCharge() throws Exception {
+        SegmentExecutionGroup group = SegmentExecutionGroup.start(config("OFF", "SYSTEM"), settings());
+        try {
+            assertSame(group.inputs(), group.owner(0).inputs());
+            assertSame(group.inputs(), group.owner(1).inputs());
+            byte[] instance = new byte[16];
+            byte[] descriptor = new byte[36];
+            instance[0] = 1;
+            descriptor[0] = 1;
+            ProfileLedgerContext context = new ProfileLedgerContext(0, instance, descriptor);
+            SegmentEntryInputs.Input input = group.inputs().acquire(context, 2048);
+            ByteBuf original = input.bytes();
+            assertEquals(2048, group.inputs().usedBytes());
+            assertNull(group.inputs().acquire(context, 2049));
+            assertThrows(IllegalArgumentException.class, () -> group.inputs().claim(List.of(input)));
+            original.writerIndex(original.capacity());
+            ByteBuf tiny = original.retainedSlice(0, 1);
+            assertThrows(IllegalArgumentException.class, () -> group.inputs().claim(List.of(input)));
+            assertThrows(IllegalStateException.class, input::close);
+            assertEquals(2048, group.inputs().usedBytes());
+            tiny.release();
+            group.inputs().claim(List.of(input));
+            assertThrows(IllegalStateException.class, input::close);
+            assertThrows(IllegalStateException.class, input::bytes);
+            input.releaseFromDriver();
+            assertEquals(0, original.refCnt());
+            assertEquals(0, group.inputs().usedBytes());
+            assertThrows(IllegalArgumentException.class, () -> group.inputs().acquire(context, 0));
+            assertThrows(IllegalArgumentException.class, () -> group.inputs().acquire(context,
+                    SegmentBatchFormat.maxPayload(config("OFF", "SYSTEM")) + SegmentBatchFormat.ENTRY_OVERHEAD + 1));
+            try (SegmentEntryInputs.Input full = group.inputs().acquire(context, 4096)) {
+                assertNotNull(full);
+                assertNull(group.inputs().acquire(context, 36));
+            }
+            assertEquals(0, group.inputs().usedBytes());
+        } finally {
+            assertTrue(group.shutdown(WAIT));
+        }
+    }
+
+    @Test
     public void bufferBudgetAlignmentAndPoolExhaustionAreObservable() throws Exception {
         assertThrows(IllegalArgumentException.class, () ->
-                new SegmentExecutionGroup.Settings(2, 2, 2, 3, 4096, 3 * 4096, WAIT));
+                new SegmentExecutionGroup.Settings(2, 2, 2, 3, 4096, 4096, 3 * 4096, WAIT));
         SegmentBufferPool pool = new SegmentBufferPool(0, 3, 1, 4096, 4096, false, () -> {});
         SegmentBufferPool.Lease first = pool.acquire();
         assertNull(pool.acquire());

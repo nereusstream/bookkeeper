@@ -288,6 +288,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤6新增[固定对齐池的DATA提交切片](rfcs/unified-wal/implementation/local-storage/README.md)：先取得足够的owner池buffer再复制冻结，driver持有到真实I/O与owner结果处理均终结；取消响应等待和提前`UNKNOWN`回调不提前复用。相关测试100项执行通过、5项Linux亲和性用例在macOS跳过；输入/TLS/socket/读取/索引总预算和完整步骤5～7仍未闭合，不提升Gate。
 
+2026-10-02 步骤6继续接入[普通entry源buffer](rfcs/unified-wal/implementation/local-storage/README.md)：执行组共享输入bytes额度，分配前预留完整容量；原owner复制到固定对齐池后归还源，转换和物理提交共用一个completion ticket。取消等待不提前释放；源/池不足有界拒绝，池不足不占物理序号/offset，资源恢复后可原坐标重试。相关测试105项执行通过、5项Linux亲和性用例在macOS跳过。现仍由调用者提供batch/授权地址；自动合批、大记录、Profile接收credit交接和完整总账尚未完成。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |

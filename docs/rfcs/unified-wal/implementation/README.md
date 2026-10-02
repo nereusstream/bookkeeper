@@ -160,7 +160,9 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 当前[隔离物理驱动与热候选切片](local-storage/README.md)已将DATA坐标预留、真实I/O write/force、原owner连续stream前缀及有界可点读候选接成一条调用路径；未终结的文件预留阻止DATA文件关闭，I/O服务在执行前拒绝时仅终结预留计数而不回退坐标；一个携带两条不同entry的冻结batch在隔离group中一次force后可点读两条，失败向未决回调报错且不发布候选，搬迁副本不进入普通候选。受控normal批次先核对每条ledger的固定shard，候选发布后、票据释放前再按entry核对捕获的Bookie准入generation：仍有效者返回隔离`LOCAL_DURABLE`，过期者返回`STALE_ADMISSION`，物理失败返回`UNKNOWN`；不同ledger同批独立判定，失败entry的物理候选仍可保留。重复检查在原owner发现同坐标normal在途时，相同逻辑内容持有票据等待其物理结果，不同内容返回冲突；原批次失败使等待者得到`UNKNOWN`。已发布的运行期候选仍经有界I/O服务真实点读，完成时复核准入与候选；重启扫描先拒绝错shard记录；其候选只返回`NOT_READY`，不据此报告absence或durable成功。normal与重复请求提交后停止响应等待已有隔离真实文件切片，但尚无网络deadline/断连接线及完整请求生命周期、整体bytes预算、可恢复末端前缀、完整read selector及生产ACK，步骤6未完成。
 
-2026-10-02 提交buffer切片已将现有owner对齐池用于真实DATA：`encodePooled`先验证完整大小再取得固定lease，池满或尺寸不足立即背压；payload集中复制后冻结，driver持有至真实I/O与owner结果处理均终结。停止响应等待、前批失败导致后批提前返回`UNKNOWN`均不提前复用buffer；验证失败、owner拒收和未启动I/O的拒绝会归还原池。该切片不覆盖输入payload、TLS/socket、重复点读及索引工作集总预算，步骤6仍未完成。
+2026-10-02 提交buffer切片已将现有owner对齐池用于真实DATA：`encodePooled`先验证完整大小再取得固定lease，池满或尺寸不足立即背压；payload集中复制后冻结，driver持有至真实I/O与owner结果处理均终结。停止响应等待、前批失败导致后批提前返回`UNKNOWN`均不提前复用buffer；验证失败、owner拒收和未启动I/O的拒绝会归还原池。封包切片自身不覆盖接收输入；同日的新输入入口见下，TLS/socket、重复点读及索引工作集总预算仍未闭合，步骤6仍未完成。
+
+2026-10-02 普通entry输入已由执行组共享bytes额度先预留完整容量再分配，传给owner前核对统一大小/CRC、context和shard。输入转换与物理I/O共用原owner/completion ticket，复制到固定对齐池后才释放源；取消等待不提前释放。池不足返回隔离`TRANSIENT_UNAVAILABLE`且不占物理坐标，owner拒收、验证失败及排队后owner故障释放已认领输入和Bookie票据。该入口仍由调用方提供batch集合和授权地址，自动bytes/count/deadline合批、预算内大记录路径及接收/存储credit交接仍未完成。
 
 #### 7. 实现点读与基础restart
 

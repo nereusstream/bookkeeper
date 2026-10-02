@@ -101,6 +101,7 @@ final class SegmentOwnerLoop {
     private volatile Throwable failure;
     private int nextShard;
     private SegmentBufferPool pool;
+    private volatile SegmentEntryInputs inputs;
     private Runnable placementCheck;
 
     SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity) {
@@ -139,6 +140,21 @@ final class SegmentOwnerLoop {
             throw new IllegalStateException("Pool already initialized");
         }
         this.pool = pool;
+    }
+
+    void attachInputs(SegmentEntryInputs inputs) {
+        requireOwner();
+        if (this.inputs != null) {
+            throw new IllegalStateException("Entry input budget already initialized");
+        }
+        this.inputs = Objects.requireNonNull(inputs, "inputs");
+    }
+
+    SegmentEntryInputs inputs() {
+        if (inputs == null) {
+            throw new IllegalStateException("Entry submission requires an execution-group source budget");
+        }
+        return inputs;
     }
 
     void setPlacementCheck(Runnable check) {

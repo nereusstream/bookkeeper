@@ -34,17 +34,18 @@ import org.apache.bookkeeper.common.util.affinity.ExecutionPlacementPlan;
 /** Cold startup/drain orchestration for the isolated owner and I/O threads. No storage readiness authority. */
 final class SegmentExecutionGroup {
     record Settings(int workers, int ioThreads, int controlSlots, int buffers, int bufferBytes,
-                    long bufferBudgetBytes, Duration startupTimeout) {
+                    long inputBudgetBytes, long bufferBudgetBytes, Duration startupTimeout) {
         Settings {
             if (workers < 1 || ioThreads < 2 || ioThreads > 64 || controlSlots < workers || buffers < workers
-                    || bufferBytes < 4096 || bufferBytes % 4096 != 0 || bufferBudgetBytes < 1
+                    || bufferBytes < 4096 || bufferBytes % 4096 != 0 || inputBudgetBytes < 1 || bufferBudgetBytes < 1
                     || startupTimeout.isNegative() || startupTimeout.isZero()) {
                 throw new IllegalArgumentException("Invalid execution or buffer limits");
             }
             startupTimeout.toNanos();
             long bytes = Math.multiplyExact((long) buffers, Math.addExact(bufferBytes, 4095));
-            if (bytes > bufferBudgetBytes) {
-                throw new IllegalArgumentException("Aligned buffer allocation exceeds the global buffer budget");
+            if (Math.addExact(bytes, inputBudgetBytes) > bufferBudgetBytes) {
+                throw new IllegalArgumentException(
+                        "Source and aligned buffer allocations exceed the DATA buffer budget");
             }
         }
     }
@@ -77,6 +78,7 @@ final class SegmentExecutionGroup {
     }
 
     private final IsolatedSegmentConfig config;
+    private final SegmentEntryInputs inputs;
     private final Settings settings;
     private final ExecutionPlacementPlan plan;
     private final PoolFactory pools;
@@ -148,6 +150,8 @@ final class SegmentExecutionGroup {
                                   PoolFactory pools, CpuTopologySnapshot topology) {
         this.config = config;
         this.settings = settings;
+        inputs = new SegmentEntryInputs(settings.inputBudgetBytes(),
+                SegmentBatchFormat.maxPayload(config) + SegmentBatchFormat.ENTRY_OVERHEAD);
         this.plan = plan;
         this.pools = pools;
         startupTopology = topology;
@@ -261,6 +265,7 @@ final class SegmentExecutionGroup {
                             pool = pools.create(id, share(settings.buffers(), id), settings.bufferBytes(),
                                     config.numaPolicy().equals("OWNER_TOUCH"), owners[id]::wakeup);
                             owners[id].attachPool(pool);
+                            owners[id].attachInputs(inputs);
                             if (binding != null) {
                                 owners[id].setPlacementCheck(this::checkCurrentBinding);
                             }
@@ -354,12 +359,17 @@ final class SegmentExecutionGroup {
         return threads.stream().map(state -> (BitSet) state.actualMask.clone()).toList();
     }
 
+    SegmentEntryInputs inputs() {
+        return inputs;
+    }
+
     long reservedBufferBytes() {
         return Math.multiplyExact((long) settings.buffers(), settings.bufferBytes() + 4095L);
     }
 
     void stopAdmission() {
         accepting = false;
+        inputs.stopAdmission();
         for (SegmentOwnerLoop owner : owners) {
             if (owner != null) {
                 owner.stopAdmission();
@@ -391,6 +401,9 @@ final class SegmentExecutionGroup {
         addCleanupFailures(cleanup);
         if (cleanup.getSuppressed().length != 0) {
             throw cleanup;
+        }
+        if (inputs.usedBytes() != 0) {
+            throw new IOException("Unreleased caller-owned entry inputs remain after execution drain");
         }
         return true;
     }

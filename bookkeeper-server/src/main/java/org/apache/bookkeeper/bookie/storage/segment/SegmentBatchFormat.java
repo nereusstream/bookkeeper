@@ -175,7 +175,7 @@ final class SegmentBatchFormat {
         }
     }
 
-    private static int validate(IsolatedSegmentConfig config, Address address, List<Data> records) {
+    static int validate(IsolatedSegmentConfig config, Address address, List<Data> records) {
         if (address.fileIndex() >= config.dataFiles() || address.shard() >= config.logicalShards()
                 || address.fileIndex() != address.shard() % config.dataFiles()
                 || records.isEmpty() || records.size() > MAX_RECORDS) {

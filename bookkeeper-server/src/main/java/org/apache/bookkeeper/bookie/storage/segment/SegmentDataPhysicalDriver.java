@@ -38,7 +38,7 @@ final class SegmentDataPhysicalDriver {
     }
 
     enum NormalStatus {
-        LOCAL_DURABLE, STALE_ADMISSION, UNKNOWN
+        LOCAL_DURABLE, STALE_ADMISSION, TRANSIENT_UNAVAILABLE, UNKNOWN
     }
 
     record NormalResult(ProfileLedgerContext context, long entryId, NormalStatus status,
@@ -249,46 +249,52 @@ final class SegmentDataPhysicalDriver {
         batch.claimForDriver();
         try {
             bookie.claimForDriver(input);
-        } catch (RuntimeException | Error failure) {
+        } catch (IOException | RuntimeException | Error failure) {
             batch.releaseFromDriver();
             throw failure;
         }
-        List<SegmentBatchParser.Record> records;
-        List<PendingNormal> normals;
+        Obligation obligation;
         try {
-            if (!bookie.matchesScope(files)) {
-                throw new IOException("Bookie control log and DATA files have different storage scopes");
-            }
-            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(batch.bytes(), batch.address(),
-                    Long.MAX_VALUE);
-            if (parsed.records().size() != input.size()) {
-                throw new IOException("Normal DATA admission count differs from frozen records");
-            }
-            for (int i = 0; i < input.size(); i++) {
-                SegmentBatchParser.Record record = parsed.records().get(i);
-                if (record.origin() != SegmentBatchFormat.ENTRY_DATA
-                        || !record.context().equals(input.get(i).context())
-                        || SegmentOwnerLoop.shardFor(record.context().ledgerId(),
-                                files.config().logicalShards()) != batch.address().shard()) {
-                    throw new IOException("Normal DATA admission or logical shard does not match frozen record");
-                }
-            }
-            records = parsed.records();
-            List<PendingNormal> identities = new ArrayList<>(records.size());
-            for (SegmentBatchParser.Record record : records) {
-                identities.add(new PendingNormal(record));
-            }
-            normals = List.copyOf(identities);
+            obligation = prepareNormal(bookie, batch, input, completion);
         } catch (IOException | RuntimeException | Error failure) {
             try {
-                for (SegmentBookieControlLog.Admission admission : input) {
-                    admission.driverTerminal();
-                }
+                finishAdmissions(input);
             } finally {
                 batch.releaseFromDriver();
             }
             throw failure;
         }
+        return submitPhysical(batch, obligation);
+    }
+
+    private Obligation prepareNormal(SegmentBookieControlLog bookie, SegmentBatchFormat.FrozenBatch batch,
+                                     List<SegmentBookieControlLog.Admission> input, NormalCompletion completion)
+            throws IOException {
+        List<SegmentBatchParser.Record> records;
+        List<PendingNormal> normals;
+        if (!bookie.matchesScope(files)) {
+            throw new IOException("Bookie control log and DATA files have different storage scopes");
+        }
+        SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(batch.bytes(), batch.address(),
+                Long.MAX_VALUE);
+        if (parsed.records().size() != input.size()) {
+            throw new IOException("Normal DATA admission count differs from frozen records");
+        }
+        for (int i = 0; i < input.size(); i++) {
+            SegmentBatchParser.Record record = parsed.records().get(i);
+            if (record.origin() != SegmentBatchFormat.ENTRY_DATA
+                    || !record.context().equals(input.get(i).context())
+                    || SegmentOwnerLoop.shardFor(record.context().ledgerId(),
+                            files.config().logicalShards()) != batch.address().shard()) {
+                throw new IOException("Normal DATA admission or logical shard does not match frozen record");
+            }
+        }
+        records = parsed.records();
+        List<PendingNormal> identities = new ArrayList<>(records.size());
+        for (SegmentBatchParser.Record record : records) {
+            identities.add(new PendingNormal(record));
+        }
+        normals = List.copyOf(identities);
         Completion physical = (candidates, failure) -> {
             if (failure == null && (candidates == null || candidates.size() != records.size())) {
                 finishPendingNormals(normals, null, new IOException("Normal DATA candidate count mismatch"));
@@ -306,8 +312,13 @@ final class SegmentDataPhysicalDriver {
             }
             completion.complete(List.copyOf(results), failure);
         };
-        Obligation obligation = new Obligation(physical, input, normals);
-        return submitPhysical(batch, obligation);
+        return new Obligation(physical, input, normals);
+    }
+
+    private static void finishAdmissions(List<SegmentBookieControlLog.Admission> admissions) {
+        for (SegmentBookieControlLog.Admission admission : admissions) {
+            admission.driverTerminal();
+        }
     }
 
     /** Recovery uses the same DATA barrier while each ticket binds its exact wire entry. */
@@ -321,7 +332,7 @@ final class SegmentDataPhysicalDriver {
         batch.claimForDriver();
         try {
             bookie.claimRecoveryForDriver(input);
-        } catch (RuntimeException | Error failure) {
+        } catch (IOException | RuntimeException | Error failure) {
             batch.releaseFromDriver();
             throw failure;
         }
@@ -394,23 +405,190 @@ final class SegmentDataPhysicalDriver {
         if (waiters.size() != admissions.size()) {
             throw new IllegalArgumentException("Normal request count differs from admissions");
         }
-        return submitNormal(bookie, batch, admissions, (results, failure) -> {
-            Throwable callbackFailure = null;
-            for (int i = 0; i < waiters.size(); i++) {
-                try {
-                    waiters.get(i).complete(results.get(i), failure);
-                } catch (Throwable error) {
-                    if (callbackFailure == null) {
-                        callbackFailure = error;
-                    } else if (callbackFailure != error) {
-                        callbackFailure.addSuppressed(error);
-                    }
+        return submitNormal(bookie, batch, admissions,
+                (results, failure) -> completeNormalRequests(waiters, results, failure));
+    }
+
+    private static void completeNormalRequests(List<NormalRequest> waiters, List<NormalResult> results,
+                                              Throwable failure) {
+        Throwable callbackFailure = null;
+        for (int i = 0; i < waiters.size(); i++) {
+            try {
+                waiters.get(i).complete(results.get(i), failure);
+            } catch (Throwable error) {
+                if (callbackFailure == null) {
+                    callbackFailure = error;
+                } else if (callbackFailure != error) {
+                    callbackFailure.addSuppressed(error);
                 }
             }
-            if (callbackFailure != null) {
-                throw new IllegalStateException("Normal request callback failed", callbackFailure);
+        }
+        if (callbackFailure != null) {
+            throw new IllegalStateException("Normal request callback failed", callbackFailure);
+        }
+    }
+
+    /**
+     * Takes exact-capacity source inputs from this owner's execution group and one pre-cut Bookie ticket
+     * per entry. After the atomic source claim, validation failure or owner refusal releases the sources;
+     * after the Bookie claim it releases those tickets too. Caller views must not be used after transfer.
+     * Conversion and physical submission share one owner/completion ticket; no second DATA queue admission.
+     */
+    boolean submitNormalInputs(SegmentBookieControlLog bookie, SegmentBatchFormat.Address address,
+                               List<SegmentEntryInputs.Input> inputs,
+                               List<SegmentBookieControlLog.Admission> admissions, List<NormalRequest> requests)
+            throws IOException {
+        Objects.requireNonNull(bookie, "bookie");
+        Objects.requireNonNull(address, "address");
+        List<SegmentEntryInputs.Input> sources = List.copyOf(inputs);
+        List<SegmentBookieControlLog.Admission> permissions = List.copyOf(admissions);
+        List<NormalRequest> waiters = List.copyOf(requests);
+        if (sources.isEmpty() || sources.size() != permissions.size() || sources.size() != waiters.size()) {
+            throw new IllegalArgumentException("Normal source, admission and request counts differ");
+        }
+        owner.inputs().claim(sources);
+        try {
+            bookie.claimForDriver(permissions);
+        } catch (IOException | RuntimeException | Error failure) {
+            releaseInputs(sources);
+            throw failure;
+        }
+        List<SegmentBatchFormat.Data> data;
+        List<Long> entryIds;
+        try {
+            data = sources.stream().map(SegmentEntryInputs.Input::data).toList();
+            if (!bookie.matchesScope(files) || address.shard() != shard) {
+                throw new IOException("Normal input and physical driver storage scopes or shards differ");
             }
-        });
+            SegmentBatchFormat.validate(files.config(), address, data);
+            for (int i = 0; i < data.size(); i++) {
+                if (!data.get(i).context().equals(permissions.get(i).context())
+                        || SegmentOwnerLoop.shardFor(data.get(i).context().ledgerId(),
+                                files.config().logicalShards()) != shard) {
+                    throw new IOException("Normal source does not match its Bookie admission or shard");
+                }
+            }
+            entryIds = data.stream().map(record -> record.entry().getLong(record.entry().readerIndex() + 8)).toList();
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                finishAdmissions(permissions);
+            } finally {
+                releaseInputs(sources);
+            }
+            throw failure;
+        }
+        InputCommand command = new InputCommand(bookie, address, sources, data, permissions, entryIds, waiters);
+        boolean accepted;
+        try {
+            accepted = owner.submit(shard, command);
+        } catch (RuntimeException | Error failure) {
+            command.abortBeforeOwner();
+            throw failure;
+        }
+        if (!accepted) {
+            command.abortBeforeOwner();
+        }
+        return accepted;
+    }
+
+    private static void releaseInputs(List<SegmentEntryInputs.Input> inputs) {
+        for (SegmentEntryInputs.Input input : inputs) {
+            input.releaseFromDriver();
+        }
+    }
+
+    private final class InputCommand implements SegmentOwnerLoop.Command {
+        private final SegmentBookieControlLog bookie;
+        private final SegmentBatchFormat.Address address;
+        private final List<SegmentEntryInputs.Input> sources;
+        private final List<SegmentBatchFormat.Data> data;
+        private final List<SegmentBookieControlLog.Admission> admissions;
+        private final List<Long> entryIds;
+        private final List<NormalRequest> requests;
+        private boolean sourcesReleased;
+        private SegmentBatchFormat.FrozenBatch batch;
+        private PhysicalCommand physical;
+
+        private InputCommand(SegmentBookieControlLog bookie, SegmentBatchFormat.Address address,
+                             List<SegmentEntryInputs.Input> sources, List<SegmentBatchFormat.Data> data,
+                             List<SegmentBookieControlLog.Admission> admissions, List<Long> entryIds,
+                             List<NormalRequest> requests) {
+            this.bookie = bookie;
+            this.address = address;
+            this.sources = sources;
+            this.data = data;
+            this.admissions = admissions;
+            this.entryIds = entryIds;
+            this.requests = requests;
+        }
+
+        @Override
+        public void run(SegmentOwnerLoop.Ticket ticket) {
+            try {
+                batch = SegmentBatchFormat.encodePooled(files.config(), address, data, owner.pool());
+            } finally {
+                releaseSources();
+            }
+            if (batch == null) {
+                ticket.complete(() -> finishBeforePhysical(NormalStatus.TRANSIENT_UNAVAILABLE, null));
+                return;
+            }
+            batch.claimForDriver();
+            Obligation obligation;
+            try {
+                obligation = prepareNormal(bookie, batch, admissions,
+                        (results, failure) -> completeNormalRequests(requests, results, failure));
+            } catch (IOException failure) {
+                ticket.complete(() -> finishBeforePhysical(NormalStatus.UNKNOWN, failure));
+                return;
+            }
+            physical = new PhysicalCommand(batch, obligation);
+            physical.run(ticket);
+        }
+
+        @Override
+        public void failed(Throwable failure) {
+            owner.requireOwner();
+            if (physical != null) {
+                physical.failed(failure);
+            } else {
+                finishBeforePhysical(NormalStatus.UNKNOWN, failure);
+            }
+        }
+
+        private void releaseSources() {
+            if (!sourcesReleased) {
+                releaseInputs(sources);
+                sourcesReleased = true;
+            }
+        }
+
+        private void abortBeforeOwner() {
+            try {
+                releaseSources();
+            } finally {
+                finishAdmissions(admissions);
+            }
+        }
+
+        private void finishBeforePhysical(NormalStatus status, Throwable failure) {
+            try {
+                List<NormalResult> results = new ArrayList<>(admissions.size());
+                for (int i = 0; i < admissions.size(); i++) {
+                    results.add(new NormalResult(admissions.get(i).context(), entryIds.get(i), status, null));
+                }
+                completeNormalRequests(requests, results, failure);
+            } finally {
+                try {
+                    releaseSources();
+                    if (batch != null) {
+                        batch.releaseFromDriver();
+                    }
+                } finally {
+                    finishAdmissions(admissions);
+                }
+            }
+        }
     }
 
     /**
@@ -574,79 +752,7 @@ final class SegmentDataPhysicalDriver {
         obligation.batch = batch;
         boolean accepted;
         try {
-            accepted = owner.submit(shard, new SegmentOwnerLoop.Command() {
-                private boolean registered;
-                private boolean submitted;
-                private IsolatedSegmentFiles.Reservation reserved;
-
-                @Override
-                public void run(SegmentOwnerLoop.Ticket ticket) {
-                    SegmentHotDirectory.Admission admission = null;
-                    try {
-                        admission = hot.reserve(batch);
-                        registerPendingNormals(obligation);
-                    } catch (IOException failure) {
-                        if (admission != null) {
-                            hot.cancelBeforeSubmission(admission);
-                        }
-                        obligation.physicalTerminal();
-                        ticket.complete(() -> deliver(obligation, null, failure, null));
-                        return;
-                    }
-                    IsolatedSegmentFiles.Reservation reservation;
-                    try {
-                        reservation = prefix.reserve(batch, files, authority);
-                    } catch (IOException failure) {
-                        hot.cancelBeforeSubmission(admission);
-                        obligation.physicalTerminal();
-                        ticket.complete(() -> deliver(obligation, null, failure, null));
-                        return;
-                    }
-                    reserved = reservation;
-                    pending.put(reservation, obligation);
-                    registered = true;
-                    hot.bind(admission, reservation);
-                    AtomicBoolean operationStarted = new AtomicBoolean();
-                    io.submit(ticket, () -> {
-                        operationStarted.set(true);
-                        try {
-                            files.writeReserved(reservation);
-                        } finally {
-                            obligation.physicalTerminal();
-                        }
-                    }, failure -> {
-                        if (!operationStarted.get()) {
-                            files.cancelBeforeSubmission(reservation);
-                            obligation.physicalTerminal();
-                        }
-                        physicalFinished(reservation, failure);
-                    });
-                    submitted = true;
-                }
-
-                @Override
-                public void failed(Throwable failure) {
-                    owner.requireOwner();
-                    if (!submitted) {
-                        if (reserved != null) {
-                            files.cancelBeforeSubmission(reserved);
-                        }
-                        obligation.physicalTerminal();
-                    }
-                    Throwable callbackFailure = registered ? null : deliver(obligation, null, failure, null);
-                    try {
-                        failPending(failure);
-                    } catch (RuntimeException | Error pendingFailure) {
-                        if (callbackFailure != null) {
-                            pendingFailure.addSuppressed(callbackFailure);
-                        }
-                        throw pendingFailure;
-                    }
-                    if (callbackFailure != null) {
-                        throw new IllegalStateException("Physical failure callback failed", callbackFailure);
-                    }
-                }
-            });
+            accepted = owner.submit(shard, new PhysicalCommand(batch, obligation));
         } catch (RuntimeException | Error failure) {
             obligation.abortBeforeOwner();
             throw failure;
@@ -655,6 +761,89 @@ final class SegmentDataPhysicalDriver {
             obligation.abortBeforeOwner();
         }
         return accepted;
+    }
+
+    private final class PhysicalCommand implements SegmentOwnerLoop.Command {
+        private final SegmentBatchFormat.FrozenBatch batch;
+        private final Obligation obligation;
+
+        private PhysicalCommand(SegmentBatchFormat.FrozenBatch batch, Obligation obligation) {
+            this.batch = batch;
+            this.obligation = obligation;
+            obligation.batch = batch;
+        }
+
+        private boolean registered;
+        private boolean submitted;
+        private IsolatedSegmentFiles.Reservation reserved;
+
+        @Override
+        public void run(SegmentOwnerLoop.Ticket ticket) {
+            SegmentHotDirectory.Admission admission = null;
+            try {
+                admission = hot.reserve(batch);
+                registerPendingNormals(obligation);
+            } catch (IOException failure) {
+                if (admission != null) {
+                    hot.cancelBeforeSubmission(admission);
+                }
+                obligation.physicalTerminal();
+                ticket.complete(() -> deliver(obligation, null, failure, null));
+                return;
+            }
+            IsolatedSegmentFiles.Reservation reservation;
+            try {
+                reservation = prefix.reserve(batch, files, authority);
+            } catch (IOException failure) {
+                hot.cancelBeforeSubmission(admission);
+                obligation.physicalTerminal();
+                ticket.complete(() -> deliver(obligation, null, failure, null));
+                return;
+            }
+            reserved = reservation;
+            pending.put(reservation, obligation);
+            registered = true;
+            hot.bind(admission, reservation);
+            AtomicBoolean operationStarted = new AtomicBoolean();
+            io.submit(ticket, () -> {
+                operationStarted.set(true);
+                try {
+                    files.writeReserved(reservation);
+                } finally {
+                    obligation.physicalTerminal();
+                }
+            }, failure -> {
+                if (!operationStarted.get()) {
+                    files.cancelBeforeSubmission(reservation);
+                    obligation.physicalTerminal();
+                }
+                physicalFinished(reservation, failure);
+            });
+            submitted = true;
+        }
+
+        @Override
+        public void failed(Throwable failure) {
+            owner.requireOwner();
+            if (!submitted) {
+                if (reserved != null) {
+                    files.cancelBeforeSubmission(reserved);
+                }
+                obligation.physicalTerminal();
+            }
+            Throwable callbackFailure = registered ? null : deliver(obligation, null, failure, null);
+            try {
+                failPending(failure);
+            } catch (RuntimeException | Error pendingFailure) {
+                if (callbackFailure != null) {
+                    pendingFailure.addSuppressed(callbackFailure);
+                }
+                throw pendingFailure;
+            }
+            if (callbackFailure != null) {
+                throw new IllegalStateException("Physical failure callback failed", callbackFailure);
+            }
+        }
     }
 
     private void registerPendingNormals(Obligation obligation) throws IOException {

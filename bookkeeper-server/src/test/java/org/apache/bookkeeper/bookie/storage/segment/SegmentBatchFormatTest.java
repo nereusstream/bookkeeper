@@ -394,7 +394,7 @@ public class SegmentBatchFormatTest {
             secondEntry.release();
         }
         SegmentExecutionGroup.Settings settings = new SegmentExecutionGroup.Settings(
-                1, 2, 1, 1, 4096, 8191, Duration.ofSeconds(5));
+                1, 2, 1, 1, 4096, 4096, 12287, Duration.ofSeconds(5));
         CountDownLatch done = new CountDownLatch(1);
         AtomicReference<Throwable> failure = new AtomicReference<>();
         AtomicReference<List<SegmentPointRead.Location>> published = new AtomicReference<>();
@@ -536,7 +536,7 @@ public class SegmentBatchFormatTest {
             entry.release();
         }
         SegmentExecutionGroup.Settings settings = new SegmentExecutionGroup.Settings(
-                1, 2, 1, 1, 4096, 8191, Duration.ofSeconds(5));
+                1, 2, 1, 1, 4096, 4096, 12287, Duration.ofSeconds(5));
         CountDownLatch forcing = new CountDownLatch(1);
         CountDownLatch releaseForce = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(1);
