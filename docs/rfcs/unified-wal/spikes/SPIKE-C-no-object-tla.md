@@ -65,6 +65,8 @@ Block G模型与Block H隔离、可丢弃的存储性能切片可并行；实际
 
 下文列出各能力的状态/动作全集，延期动作按上述scope禁用，不成为首批配置的隐含前提。必须测试禁用拒绝和边界：活跃ledger不生成strong token、基础close不reset、普通logical成功不宣称强撤权。未reset时以首次ACK或上次有效proof的loss window计预算，不把repair成功当作续期。future reset配置仍保留完整反例结构；run后不得把失败功能改成disabled来声称通过。
 
+2026-10-03 [Model C待验证源码](../implementation/models/README.md)开始实现管理会话、文件barrier、连续物理前缀与错误隔离切片。当前UNPARSED / NOT_EXECUTED：TLC工具未取得，没有SANY解析、complete exploration或counterexample结果。正向scope、负向候选规则、抽象与真实路径映射由该页说明；完整A/C/D及组合Gate保持未完成，不改变本规范的验收要求。
+
 ## 3. 运行前锁定 manifest
 
 ```text

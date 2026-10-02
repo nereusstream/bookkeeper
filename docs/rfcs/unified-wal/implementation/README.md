@@ -216,6 +216,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 2026-10-02 隔离存储图已由`IsolatedSegmentStorage`统一持有DATA、双控制日志、执行组、各shard合批器及点读入口。调用方先构造资源owner，再启动新目录或正常关闭会话的restart；只有全部原owner bootstrap及控制票据终结后才开放请求。总热定位容量按逻辑shard拆分，源/对齐buffer仍复用执行组全局预算。关闭先停止入口和执行组准入，等待实际I/O、owner完成及消费方归还读结果buffer，再关闭DATA并记录健康CLOSE，最后关闭Bookie/Arena控制日志。超时保留同一owner及目录锁供继续排空；启动失败也走同一路径清理，不删除目录。普通/recovery交接失败只归还未被driver接管的票据，不撤销已接管义务。该入口没有接Bookie listener/readiness/registration，未正常关闭恢复、一般selector/回收及完整bytes预算仍未完成。
 
+2026-10-03 [Spike C模型源码](models/README.md)开始补管理会话/控制与DATA barrier/连续前缀/旧错误隔离切片，包含两个stream、共享/独立文件及负向候选规则。TLC工具下载失败，当前UNPARSED / NOT_EXECUTED，runner仅经Python语法检查；不能称Model C或Block G通过。未正常关闭的OPEN会话与隔离记录落盘前退出的故障历史仍需可独立验证的解析依据，现有Java隔离行为未改变。
+
 **第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
 
 ### 第三阶段：索引、回收与长期运行
