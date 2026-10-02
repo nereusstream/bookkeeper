@@ -97,6 +97,21 @@ final class SegmentPhysicalPrefix {
         return reservation;
     }
 
+    /** Select only at a nonempty seal; reserve still rechecks the complete authority and advances state. */
+    SegmentBatchFormat.Address appendAddress(IsolatedSegmentFiles files, SegmentArenaControlLog authority,
+                                             int bytes) throws IOException {
+        owner.requireOwner();
+        if (failed || nextSequence == Long.MAX_VALUE) {
+            throw new IOException("Physical stream has an unresolved failure or exhausted sequence");
+        }
+        if (pending.size() >= capacity) {
+            return null;
+        }
+        int file = shard % files.config().dataFiles();
+        return authority.appendAddress(file, files.nextOffset(file), bytes, shard, streamGeneration, nextSequence)
+                .orElse(null);
+    }
+
     List<DurableBatch> completed(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {
         owner.requireOwner();
         long sequence = reservation.address().sequence();

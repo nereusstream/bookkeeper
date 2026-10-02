@@ -140,6 +140,10 @@ final class SegmentEntryInputs {
         }
     }
 
+    long capacityBytes() {
+        return limit;
+    }
+
     synchronized long usedBytes() {
         return usedBytes;
     }

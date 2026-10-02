@@ -454,7 +454,10 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 ### 10.1 第一批可测的最小存储路径
 
-2026-10-02 局部提交工作集已接入现有owner对齐池：先校验大小、取得固定buffer后集中复制并冻结，DATA driver在真实I/O与owner结果终结后归还原池。真实文件回归覆盖停止响应等待、验证/准入/I/O拒绝及前批失败时后批仍在途；同日的普通entry输入由执行组共享源额度预留后再分配，owner复制到对齐池后才归还；输入转换与物理驱动共用原owner/completion ticket，池不足返回隔离`TRANSIENT_UNAVAILABLE`且不占物理坐标。该入口仍由调用者提供batch集合/授权地址，尚无自动合批、大记录工作集或接收credit交接；recovery/duplicate输入、点读、TLS/socket及索引预算仍待统一接线，详见[本地存储状态](implementation/local-storage/README.md)。
+2026-10-02 局部提交工作集已接入现有owner对齐池：先校验大小、取得固定buffer后集中复制并冻结，DATA driver在真实I/O与owner结果终结后归还原池。真实文件回归覆盖停止响应等待、验证/准入/I/O拒绝及前批失败时后批仍在途；同日的普通entry输入由执行组共享源额度预留后再分配，owner复制到对齐池后才归还；输入转换与物理驱动共用原owner/completion ticket，池不足返回隔离`TRANSIENT_UNAVAILABLE`且不占物理坐标。显式入口仍由调用者提供batch集合/授权地址；下述自动入口另接入普通重试的源生命周期，recovery输入、点读、TLS/socket及索引预算与接收credit仍待统一接线，详见[本地存储状态](implementation/local-storage/README.md)。
+
+
+同日`NormalBatcher`沿用固定owner/deadline/完成ticket进行逐entry合批，按framing bytes/count/最老deadline触发，非空封包才从已apply grant与原文件/prefix入口取得物理地址；资源拒绝不消耗序号，I/O unknown继续关闭该stream新写。启用前校验固定源/池覆盖统一entry上限；超过普通batch阈值的合法大entry独立封包。assembling相同坐标重试、已冻结等待者及已发布点读均复用已有比较/定位原语，保持逐票据generation和真实I/O终结边界。shutdown提前封包已接纳输入，owner故障排空未提交源，回调异常仍完成其余entry/ticket；这些是隔离存储进展，不证明真实接收接线、完整bytes预算或生产ACK。
 
 状态：**整体PLANNED / 未闭合**。隔离固定owner/物理DATA切片及Profile固定头前置校验、明文接收预算组件已有定向测试；尚无Bookie权限化普通Add、真实TLS listener或完整接收总账。保留§5.2三层持久化owner，首批采用固定shard、常驻平台线程owner及shared DATA block；§10.2—10.5的执行映射随该切片落地，默认affinity OFF、PARK；dedicated hot extent按RFC-0003 §8有条件延期。普通Add执行路径：
 

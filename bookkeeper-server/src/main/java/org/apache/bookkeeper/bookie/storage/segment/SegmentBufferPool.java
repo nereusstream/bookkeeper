@@ -120,6 +120,10 @@ final class SegmentBufferPool implements AutoCloseable {
         return acquire(1);
     }
 
+    int bufferBytes() {
+        return bytesPerBuffer;
+    }
+
     Lease acquire(int minimumBytes) {
         requireOwner();
         if (closed) {

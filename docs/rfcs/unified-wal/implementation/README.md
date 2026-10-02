@@ -162,7 +162,10 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 2026-10-02 提交buffer切片已将现有owner对齐池用于真实DATA：`encodePooled`先验证完整大小再取得固定lease，池满或尺寸不足立即背压；payload集中复制后冻结，driver持有至真实I/O与owner结果处理均终结。停止响应等待、前批失败导致后批提前返回`UNKNOWN`均不提前复用buffer；验证失败、owner拒收和未启动I/O的拒绝会归还原池。封包切片自身不覆盖接收输入；同日的新输入入口见下，TLS/socket、重复点读及索引工作集总预算仍未闭合，步骤6仍未完成。
 
-2026-10-02 普通entry输入已由执行组共享bytes额度先预留完整容量再分配，传给owner前核对统一大小/CRC、context和shard。输入转换与物理I/O共用原owner/completion ticket，复制到固定对齐池后才释放源；取消等待不提前释放。池不足返回隔离`TRANSIENT_UNAVAILABLE`且不占物理坐标，owner拒收、验证失败及排队后owner故障释放已认领输入和Bookie票据。该入口仍由调用方提供batch集合和授权地址，自动bytes/count/deadline合批、预算内大记录路径及接收/存储credit交接仍未完成。
+2026-10-02 普通entry输入已由执行组共享bytes额度先预留完整容量再分配，传给owner前核对统一大小/CRC、context和shard。输入转换与物理I/O共用原owner/completion ticket，复制到固定对齐池后才释放源；取消等待不提前释放。池不足返回隔离`TRANSIENT_UNAVAILABLE`且不占物理坐标，owner拒收、验证失败及排队后owner故障释放已认领输入和Bookie票据。该显式入口仍由调用方提供batch集合和授权地址；其后的逐entry自动入口见下，接收/存储credit交接仍未完成。
+
+
+2026-10-02 固定driver/shard新增`NormalBatcher`逐entry入口，按framing bytes/count及最老单调deadline冻结非空batch，读取已apply grant/当前offset/下一序号，继续经原prefix/file入口重验与预留。沿用每条entry的完成ticket，不新增队列；shutdown封包已接纳输入，owner/回调故障仍排空资源。启用前校验固定源/池可容纳统一上限，合法大entry超过普通batch阈值时单独封包，1 MiB payload已跨同allocation两个block真实写入并点读。assembling/已冻结/已发布的同坐标重试分别比较、等待或点读；相同内容不新增DATA force，不同payload返回隔离`CONFLICT`。自动空间refill与grant尾部、网络credit/timeout交接、全读取/索引预算及服务级restart仍未完成，步骤6不标完成。
 
 #### 7. 实现点读与基础restart
 

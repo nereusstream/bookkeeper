@@ -193,7 +193,7 @@ final class SegmentBatchFormat {
         return recordBytes;
     }
 
-    private static int alignedLength(int recordBytes) {
+    static int alignedLength(int recordBytes) {
         int raw = Math.addExact(Math.addExact(HEADER, recordBytes), FOOTER);
         return Math.multiplyExact(Math.floorDiv(Math.addExact(raw, 4095), 4096), 4096);
     }
@@ -245,7 +245,7 @@ final class SegmentBatchFormat {
         }
     }
 
-    private static void validateEntry(Data record, int maximum) {
+    static void validateEntry(Data record, int maximum) {
         ByteBuf entry = record.entry();
         int length = entry.readableBytes();
         if (length < ENTRY_OVERHEAD || length - ENTRY_OVERHEAD > maximum

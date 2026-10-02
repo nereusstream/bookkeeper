@@ -80,6 +80,18 @@ final class SegmentOwnerLoop {
         void fail(Throwable cause) {
             complete(() -> command.failed(cause));
         }
+
+        /** A deadline may start work using an already dispatched ticket; retain the same I/O failure boundary. */
+        void commandFailed(Throwable cause) {
+            requireOwner();
+            recordFailure(cause);
+            synchronized (gate) {
+                commandFailure = cause;
+                if (!posted && !ioSubmitted) {
+                    fail(cause);
+                }
+            }
+        }
     }
 
     private final Object gate = new Object();
@@ -354,7 +366,7 @@ final class SegmentOwnerLoop {
             for (int shard = workerId; shard < logicalShards; shard += workerCount) {
                 if (due[shard] != null) {
                     long remaining = deadlines[shard] - System.nanoTime();
-                    if (remaining <= 0) {
+                    if (remaining <= 0 || draining()) {
                         Runnable action = due[shard];
                         due[shard] = null;
                         work = true;
@@ -396,13 +408,13 @@ final class SegmentOwnerLoop {
                 ticket.command.run(ticket);
             }
         } catch (Throwable cause) {
-            recordFailure(cause);
-            synchronized (gate) {
-                ticket.commandFailure = cause;
-                if (!ticket.posted && !ticket.ioSubmitted) {
-                    ticket.fail(cause);
-                }
-            }
+            ticket.commandFailed(cause);
+        }
+    }
+
+    private boolean draining() {
+        synchronized (gate) {
+            return !accepting;
         }
     }
 

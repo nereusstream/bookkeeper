@@ -297,7 +297,10 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 ### 6.2 对齐缓冲池的NUMA属地
 
-2026-10-02 [隔离DATA提交](implementation/local-storage/README.md)已使用该固定owner池封包并执行真实write/force；完整对齐长度通过后先取得lease，再集中复制payload。driver接管后只有实际I/O和owner结果处理均终结才归还原池，取消响应等待或提前失败回调不释放仍在使用的buffer；池满或尺寸不足在复制/物理提交前返回资源不足。同日新增普通entry输入：整个执行组共享源额度，先计完整容量再分配固定大小的独立buffer，owner一次复制到对齐池后才归还源；源与目标共存时均计费，转换与物理驱动共用原完成ticket。池不足不占物理坐标，仍由调用方提供batch及授权地址，自动合批与预算内大记录路径尚未完成。堆buffer格式实验入口仍保留，读取/索引及网络bytes总账尚未闭合；不提升NUMA或资源Gate。
+2026-10-02 [隔离DATA提交](implementation/local-storage/README.md)已使用该固定owner池封包并执行真实write/force；完整对齐长度通过后先取得lease，再集中复制payload。driver接管后只有实际I/O和owner结果处理均终结才归还原池，取消响应等待或提前失败回调不释放仍在使用的buffer；池满或尺寸不足在复制/物理提交前返回资源不足。同日新增普通entry输入：整个执行组共享源额度，先计完整容量再分配固定大小的独立buffer，owner一次复制到对齐池后才归还源；源与目标共存时均计费，转换与物理驱动共用原完成ticket。池不足不占物理坐标，显式输入入口仍由调用方提供batch及授权地址，后续自动合批与大记录进展见下。堆buffer格式实验入口仍保留，读取/索引及网络bytes总账尚未闭合；不提升NUMA或资源Gate。
+
+
+同日`NormalBatcher`逐entry入口复用该池与owner deadline，非空batch按bytes/count/最老deadline封包后才选当前已apply grant与下一物理地址，原预留入口仍重验完整范围；临时工作集拒绝不推进序号。固定源/池须能覆盖统一entry上限，超过普通batch阈值的合法大entry单独封包；1 MiB payload已有跨同allocation两个block的真实write/force和点读验证。没有新增临时大buffer或refill/尾部回收策略，完整allocator/恢复总账仍未闭合。
 
 状态：SYSTEM/OWNER_TOUCH隔离池已实现；PREFERRED和物理NUMA验证仍未完成。2026-09-26的[group启动与池](implementation/local-storage/README.md)已在owner绑定后分配/触碰对齐buffer，将同一全局数量和请求容量预算拆分给owner，预留原池归还容量并等待live lease后关闭。Netty/malloc页可能已被触碰，未测页分布，不声明硬属地或性能收益；未提升本节Gate。WalArena/DATA设备尽量与append owner、I/O服务资源及对齐DATA buffer pool同节点；NUMA只影响运行时placement，不新增Arena、控制日志、ProfileDescriptor字段或DATA身份。`ALLOC_POOL`的持久空间owner/generation与内存buffer pool的属地是不同事实；CPU/worker数量变化不重新解释ledger→shard或既有stream，重启调整worker映射遵守RFC-0005 §10.2。
 
