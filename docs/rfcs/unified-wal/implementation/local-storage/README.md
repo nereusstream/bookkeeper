@@ -108,6 +108,12 @@ Arena控制日志在短状态锁内预留序号与物理后缀，释放锁后执
 
 2026-09-29 执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest`：80项隔离测试通过，0失败/错误/跳过；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。现有重开测试覆盖活跃writer拒绝、同步失败后再次重开、物理追加与重启点读；本次改动使扫描、恢复同步与新writer打开共享同一次排他锁持有，不把这些测试扩展为跨进程竞争或掉电验收。
 
+2026-10-02 `SegmentArenaControlLog`解释已有`DEVICE_STATE` framing的单调DATA文件隔离子集（16-byte body见[格式](format-v1.md)）。实际driver的write/force失败立即关闭该共享文件的新DATA、点读及重复成功资格；I/O执行前拒绝形成已消耗物理序号时也保留隔离。已经提交的I/O仍按实际终结归还源、池、Bookie票据，不因报错提前释放。绑定实际Arena控制driver的逐entry合批路径仅用原控制owner/I/O/completion尝试记录，不增加队列、自动重试或正常Add force；未绑定driver的手动原型只建立运行时拒绝，并在失败原因中报告缺少持久记录入口。
+
+运行时gate与持久状态分开：较早ALLOC仍按持久日志原序apply；DEVICE_STATE成功后拒绝该文件后续ALLOC/refill/append，但保留原grant/stream所有权事实，不产生FREE/unused资格。相同operation重试可解析，复用operation改文件不改变隔离目标。重放完整记录并完成控制同步后仍拒绝DATA物理重开，后一次DATA或控制sync成功不解除隔离；未知版本/action、文件、保留字段或长度拒绝解释，没有clear/reset操作。
+
+控制忙/停收或容量拒绝、记录写入/force失败、owner未apply及落盘前退出仍须分别处理。当前查询只报告已经durable并apply的隔离；完整但force未知/未apply的记录可在重放中恢复隔离，不能反向证明未见记录就没有旧错误。没有实现可靠跨崩溃故障分类或解除隔离，append-only重开仍无local-result authority，服务级可写restart及步骤5～7验收未完成。
+
 ## 验证入口
 
 ```bash
@@ -120,6 +126,8 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 首次探索性离线构建缺少datasketches/Vert.x依赖；未禁用上述profile的尝试因本机缺少cargo-zigbuild失败。这些是构建失败，不是测试PASS或故障注入结果。
 
 ## 当前验证
+
+2026-10-02（DATA文件隔离）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：153项中148项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。新增4项真实文件回归覆盖ALLOC/隔离混合顺序与共享force、旧grant保留、其他文件状态独立、运行时gate不改较早持久结果、durable未apply重放、非法DEVICE_STATE拒绝，以及DATA force失败后的实际Arena记录、控制忙拒绝和记录force未知三条路径。后续成功DATA同步不解除重放的隔离；控制拒绝没有持久记录时，物理append-only重开仍无local-result authority。原I/O拒绝测试改为检查文件隔离/游标不推进，重复取消断言保留在现有取消范围测试中。最终运行`unified-wal-local-kgH2SlwC`保留父提交`18ec40c51f69e49ab71290af98ddb338cab86df1`和184项实际源码/构建输入哈希；历史receipt不改绑定。未验证记录落盘前进程退出或控制拒绝的可靠跨重启故障分类、解除隔离、服务级可写restart、Linux NUMA、掉电或生产ACK。
 
 2026-10-02（异步按需refill）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：136项中131项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。新回归验证两个独立DATA owner的refill请求共用一次control force，force前没有applied stream或DATA写；应用后各自原ticket继续，池内后续写入不增加control force，同坐标等待者共享结果，新坐标等待期间背压。真实文件还覆盖最大合法entry耗尽pool后的无空间拒绝不占序号或force、小entry仍可使用剩余空间，以及shutdown、control force失败和DATA owner故障后的源/Bookie票据排空。owner ticket专项验证等待时保留原DATA容量，停收后仍可回原owner继续或在continuation失败后终结。同时修正2 MiB普通batch阈值下组合两个合法1 MiB entry时的封包边界：先按完整framing所需bytes封包旧batch，再调用有上限的对齐编码；缺pool时新entry背压，refill完成后重试及shutdown各自取得连续结果。全相关集目录为`unified-wal-local-jOj7o0Ss`；最后仅折行测试代码后，该大entry边界的1项定向复验在`unified-wal-local-alA888jK`通过，Spotless/Checkstyle通过，保留各自源码SHA-256、命令、退出码与JUnit报告；历史receipt不改绑定。该验证不证明低水位预取、控制checkpoint/空间used/unused恢复、FREE/尾部回收、完整全局bytes预算、网络接线、Linux NUMA、掉电、生产ACK或服务级可写restart，步骤5～7仍未闭合。
 

@@ -228,6 +228,9 @@ final class SegmentPointRead {
                     }
                     pin = files.pinDataRead();
                 }
+                if (!arena.dataFileAvailable(selected.address().fileIndex())) {
+                    return ReadStatus.NOT_READY;
+                }
                 buffer = owner.pool().acquire(scratchBytes(selected));
                 return buffer == null ? ReadStatus.TRANSIENT_UNAVAILABLE : ReadStatus.FOUND;
             }
@@ -245,7 +248,9 @@ final class SegmentPointRead {
                         failure = owner.failure();
                     }
                     if (status == ReadStatus.FOUND && failure == null) {
-                        if (!bookie.canCompleteRead(admission)) {
+                        if (!arena.dataFileAvailable(selected.address().fileIndex())) {
+                            status = ReadStatus.NOT_READY;
+                        } else if (!bookie.canCompleteRead(admission)) {
                             status = ReadStatus.STALE_ADMISSION;
                         } else if (hot != null && !hot.liveDurableCandidate(context, entryId)
                                 .filter(selected::equals).isPresent()) {
@@ -359,7 +364,8 @@ final class SegmentPointRead {
                                SegmentArenaControlLog authority, Location location, ByteBuffer scratch)
             throws IOException {
         SegmentBatchFormat.Address address = location.address();
-        if (!authority.matchesScope(config, identity) || address.fileIndex() >= config.dataFiles()
+        if (!authority.matchesScope(config, identity) || !authority.dataFileAvailable(address.fileIndex())
+                || address.fileIndex() >= config.dataFiles()
                 || address.shard() >= config.logicalShards()
                 || address.fileIndex() != address.shard() % config.dataFiles()
                 || location.context() == null || location.context().ledgerId() < 0
@@ -407,6 +413,9 @@ final class SegmentPointRead {
                     content.slice(headerOffset, recordLength), address, recordStart);
             if (!record.context().equals(location.context()) || record.entryId() != location.entryId()) {
                 throw new IOException("Locator ledger identity or entry ID mismatch");
+            }
+            if (!authority.dataFileAvailable(address.fileIndex())) {
+                throw new IOException("DATA file became unavailable before read completion");
             }
             return new Result(record, 4096L + 4096 + headerBytes + content.remaining());
         }

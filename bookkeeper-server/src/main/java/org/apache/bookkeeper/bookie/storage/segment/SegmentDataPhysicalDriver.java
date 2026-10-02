@@ -923,6 +923,10 @@ final class SegmentDataPhysicalDriver {
         }
 
         private void append(Entry entry) {
+            if (!authority.dataFileAvailable(shard % files.config().dataFiles())) {
+                entry.refuse(NormalStatus.UNKNOWN, new IOException("DATA file has an unresolved failure"));
+                return;
+            }
             NormalKey key = new NormalKey(entry.context, entry.entryId);
             SegmentPointRead.Location location = hot.liveDurableCandidate(entry.context, entry.entryId).orElse(null);
             PendingNormal existing = pendingNormals.get(key);
@@ -977,6 +981,7 @@ final class SegmentDataPhysicalDriver {
             AtomicReference<SegmentPointRead.Location> selected = new AtomicReference<>(location);
             entry.duplicate = new Obligation((unused, failure) -> {
                 NormalStatus result = failure != null ? NormalStatus.UNKNOWN
+                        : !authority.dataFileAvailable(shard % files.config().dataFiles()) ? NormalStatus.UNKNOWN
                         : !entry.eligible() ? NormalStatus.STALE_ADMISSION
                         : status.get() == DuplicateStatus.CONFLICT ? NormalStatus.CONFLICT
                         : status.get() == DuplicateStatus.SAME_DURABLE
@@ -1280,7 +1285,9 @@ final class SegmentDataPhysicalDriver {
         Obligation obligation = new Obligation((unused, failure) -> {
             DuplicateStatus result = failure == null ? status.get() : DuplicateStatus.UNKNOWN;
             if (result == DuplicateStatus.SAME_DURABLE || result == DuplicateStatus.CONFLICT) {
-                if (!canComplete.getAsBoolean()) {
+                if (!authority.dataFileAvailable(shard % files.config().dataFiles())) {
+                    result = DuplicateStatus.NOT_READY;
+                } else if (!canComplete.getAsBoolean()) {
                     result = DuplicateStatus.STALE_ADMISSION;
                 } else if (selected.get() != null
                         && !hot.liveDurableCandidate(context, entryId).filter(selected.get()::equals).isPresent()) {
@@ -1432,6 +1439,9 @@ final class SegmentDataPhysicalDriver {
                 operationStarted.set(true);
                 try {
                     files.writeReserved(reservation);
+                } catch (IOException | RuntimeException | Error failure) {
+                    recordPhysicalFailure(batch.address().fileIndex(), failure);
+                    throw failure;
                 } finally {
                     obligation.physicalTerminal();
                 }
@@ -1502,6 +1512,12 @@ final class SegmentDataPhysicalDriver {
 
     private void physicalFinished(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {
         owner.requireOwner();
+        int file = reservation.address().fileIndex();
+        if (ioFailure != null) {
+            recordPhysicalFailure(file, ioFailure);
+        } else if (!authority.dataFileAvailable(file)) {
+            ioFailure = new IOException("DATA file has an unresolved failure");
+        }
         if (owner.failure() != null) {
             failPending(owner.failure());
             return;
@@ -1542,6 +1558,30 @@ final class SegmentDataPhysicalDriver {
     private record Delivery(IsolatedSegmentFiles.Reservation reservation, Obligation obligation,
                             List<SegmentPointRead.Location> locations) { }
 
+    private void recordPhysicalFailure(int file, Throwable failure) {
+        if (!authority.blockDataFile(file)) {
+            return;
+        }
+        SegmentArenaControlDriver allocator = normalBatcher == null ? null : normalBatcher.allocator;
+        if (allocator == null) {
+            failure.addSuppressed(new IOException("No Arena control driver for durable DATA quarantine"));
+            return;
+        }
+        try {
+            if (!allocator.submitQuarantine(file, (results, cause) -> {
+                if (cause != null && cause != failure) {
+                    failure.addSuppressed(cause);
+                }
+            })) {
+                failure.addSuppressed(new IOException("Arena control driver refused DATA quarantine"));
+            }
+        } catch (RuntimeException | Error cause) {
+            if (cause != failure) {
+                failure.addSuppressed(cause);
+            }
+        }
+    }
+
     private void failPending(Throwable failure) {
         List<Obligation> callbacks = List.copyOf(pending.values());
         pending.clear();
@@ -1554,15 +1594,21 @@ final class SegmentDataPhysicalDriver {
         }
     }
 
-    private static void deliverDuplicate(Obligation obligation, Throwable failure) {
+    private void deliverDuplicate(Obligation obligation, Throwable failure) {
         Throwable callbackFailure = deliver(obligation, null, failure, null);
         if (callbackFailure != null) {
             throw new IllegalStateException("Duplicate completion callback failed", callbackFailure);
         }
     }
 
-    private static Throwable deliver(Obligation obligation, List<SegmentPointRead.Location> candidates,
-                                     Throwable failure, Throwable previous) {
+    private Throwable deliver(Obligation obligation, List<SegmentPointRead.Location> candidates,
+                               Throwable failure, Throwable previous) {
+        if (failure == null && candidates != null
+                && candidates.stream().anyMatch(candidate ->
+                        !authority.dataFileAvailable(candidate.address().fileIndex()))) {
+            candidates = null;
+            failure = new IOException("DATA file has an unresolved failure");
+        }
         try {
             obligation.completion.complete(candidates, failure);
         } catch (Throwable callbackFailure) {

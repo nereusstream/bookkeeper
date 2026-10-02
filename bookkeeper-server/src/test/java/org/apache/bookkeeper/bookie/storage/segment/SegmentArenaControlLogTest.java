@@ -467,6 +467,112 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void quarantineAppliesInLogOrderAndPreservesOwnershipAcrossReplay() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("quarantine"),
+                1, 4, 2, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        SegmentFileHeader identity = identity();
+        SegmentArenaControlLog.Allocation first = new SegmentArenaControlLog.Allocation(
+                SegmentControlFormat.Type.ALLOC, new UUID(0, 1), new Generation(1), 0,
+                0, 0, new Generation(1), 1, 4096, 1, 1);
+        SegmentArenaControlLog.FileQuarantine quarantine = new SegmentArenaControlLog.FileQuarantine(
+                new UUID(0, 2), new Generation(1), 0);
+        SegmentArenaControlLog.Allocation after = new SegmentArenaControlLog.Allocation(
+                SegmentControlFormat.Type.ALLOC, new UUID(0, 3), new Generation(1), 0,
+                0, 0, new Generation(1), 3, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1);
+        SegmentArenaControlLog.Allocation other = new SegmentArenaControlLog.Allocation(
+                SegmentControlFormat.Type.ALLOC, new UUID(0, 4), new Generation(1), 0,
+                1, 1, new Generation(1), 4, 4096, 1, 1);
+        SegmentFileIo io = new SegmentFileIo();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024, io)) {
+            io.forces = 0;
+            SegmentArenaControlLog.DurableBatch batch = log.appendDurably(List.of(first, quarantine, after, other));
+            assertEquals(1, io.forces);
+            assertTrue(log.dataFileAvailable(0));
+            assertFalse(log.hasDurableQuarantine(0));
+            assertFalse(log.hasAppliedGrant(0, 4096, 4096, 0, 1, 1, 1));
+            assertEquals(List.of(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    SegmentArenaControlLog.Status.APPLIED_DURABLE, SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    SegmentArenaControlLog.Status.APPLIED_DURABLE),
+                    log.applyDurable(batch).stream().map(SegmentArenaControlLog.Result::status).toList());
+            assertTrue(log.hasAppliedGrant(0, 4096, 4096, 0, 1, 1, 1));
+            assertFalse(log.hasAppliedGrant(0, after.offset(), 4096, 0, 1, 3, 1));
+            assertFalse(log.dataFileAvailable(0));
+            assertTrue(log.dataFileAvailable(1));
+            assertTrue(log.hasAppliedGrant(1, 4096, 4096, 1, 1, 4, 1));
+            assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(quarantine)).get(0).status());
+            assertEquals(SegmentArenaControlLog.Status.INCOMPATIBLE, log.submitBatch(List.of(
+                    new SegmentArenaControlLog.FileQuarantine(new UUID(0, 2), new Generation(1), 1)))
+                    .get(0).status());
+            assertTrue(log.dataFileAvailable(1));
+            assertTrue(log.planPools(List.of(new SegmentArenaControlLog.PoolRequest(
+                    0, new Generation(1), 1, 1))).get(0).isEmpty());
+            assertTrue(log.appendAddress(0, 4096, 4096, 0, new Generation(1), 1).isEmpty());
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+            assertTrue(replay.hasDurableQuarantine(0));
+            assertFalse(replay.dataFileAvailable(0));
+            assertTrue(replay.dataFileAvailable(1));
+            assertTrue(replay.hasAppliedGrant(0, 4096, 4096, 0, 1, 1, 1));
+            assertTrue(replay.hasAppliedGrant(1, 4096, 4096, 1, 1, 4, 1));
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity, replay, new SegmentFileIo()));
+        }
+    }
+
+    @Test
+    public void runtimeQuarantineDoesNotChangeEarlierDurableAllocationResult() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity)) {
+            try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+                SegmentArenaControlLog.DurableBatch first = log.appendDurably(List.of(alloc(1, 4096)));
+                assertTrue(log.blockDataFile(0));
+                assertFalse(log.blockDataFile(0));
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, log.applyDurable(first).get(0).status());
+                assertTrue(granted(log, 4096, 1, 1, 1));
+                assertFalse(log.dataFileAvailable(0));
+                log.appendDurably(List.of(new SegmentArenaControlLog.FileQuarantine(
+                        new UUID(0, 2), new Generation(1), 0)));
+                assertFalse(log.hasDurableQuarantine(0));
+            }
+            try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+                assertTrue(granted(replay, 4096, 1, 1, 1));
+                assertTrue(replay.hasDurableQuarantine(0));
+                assertFalse(replay.dataFileAvailable(0));
+            }
+        }
+    }
+
+    @Test
+    public void unsupportedQuarantineActionsAndExtensionsRejectReplay() throws Exception {
+        int[][] bodies = {{2, 1, 0, 0}, {1, 2, 0, 0}, {1, 1, -1, 0}, {1, 1, 1, 0}, {1, 1, 0, 1},
+                {1, 1, 0}, {1, 1, 0, 0, 0}};
+        for (int i = 0; i < bodies.length; i++) {
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                    temporary.getRoot().toPath().resolve("invalid-quarantine-" + i),
+                    1, 4, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            SegmentFileHeader identity = identity();
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity)) {
+                ByteBuffer body = ByteBuffer.allocate(4 * bodies[i].length);
+                for (int value : bodies[i]) {
+                    body.putInt(value);
+                }
+                ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.DEVICE_STATE,
+                        new Generation(1), 0, new UUID(0, 7), new Generation(1), 0, body.flip());
+                try (FileChannel channel = FileChannel.open(config.directory().resolve("arena-control"),
+                        StandardOpenOption.WRITE)) {
+                    SegmentFileIo io = new SegmentFileIo();
+                    io.writeFully(channel, record, 4096);
+                    io.force(channel, true);
+                }
+                assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity, 1024 * 1024));
+            }
+        }
+    }
+
+    @Test
     public void wrongIdentityAndFullLogRejectWithoutChangingPreviousGrant() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

@@ -42,9 +42,43 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private static final long FIRST_RECORD = 4096;
     private static final Generation LOG_GENERATION = new Generation(1);
 
+    sealed interface Command permits Allocation, FileQuarantine {
+        SegmentControlFormat.Type type();
+        UUID operationId();
+        Generation operationGeneration();
+        long expectedGeneration();
+        ByteBuffer body();
+    }
+
+    /** Monotone file quarantine; no clear/reset operation is enabled. */
+    record FileQuarantine(UUID operationId, Generation operationGeneration, int file) implements Command {
+        FileQuarantine {
+            Objects.requireNonNull(operationId, "operationId");
+            Objects.requireNonNull(operationGeneration, "operationGeneration");
+            if (operationId.equals(new UUID(0, 0)) || file < 0) {
+                throw new IllegalArgumentException("Invalid DATA file quarantine");
+            }
+        }
+
+        @Override
+        public SegmentControlFormat.Type type() {
+            return SegmentControlFormat.Type.DEVICE_STATE;
+        }
+
+        @Override
+        public long expectedGeneration() {
+            return 0;
+        }
+
+        @Override
+        public ByteBuffer body() {
+            return ByteBuffer.allocate(16).putInt(1).putInt(1).putInt(file).putInt(0).flip();
+        }
+    }
+
     record Allocation(SegmentControlFormat.Type type, UUID operationId, Generation operationGeneration,
                       long expectedGeneration, int file, int ownerShard, Generation ownerGeneration,
-                      long allocationId, long offset, int blocks, long streamFirstSequence) {
+                      long allocationId, long offset, int blocks, long streamFirstSequence) implements Command {
         Allocation {
             if (type != SegmentControlFormat.Type.ALLOC && type != SegmentControlFormat.Type.ALLOC_POOL) {
                 throw new IllegalArgumentException("Only ALLOC and ALLOC_POOL are enabled");
@@ -59,7 +93,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
         }
 
-        ByteBuffer body() {
+        public ByteBuffer body() {
             return ByteBuffer.allocate(48).putInt(file).putInt(ownerShard).putLong(ownerGeneration.value())
                     .putLong(allocationId).putLong(offset).putInt(blocks).putInt(0)
                     .putLong(streamFirstSequence).flip();
@@ -73,7 +107,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     record Result(Status status, UUID operationId, long sequence, long generation,
                   long durableThrough, long appliedThrough) { }
 
-    record DurableBatch(long firstSequence, List<Allocation> commands) {
+    record DurableBatch(long firstSequence, List<Command> commands) {
         DurableBatch {
             commands = List.copyOf(commands);
         }
@@ -96,7 +130,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private record Grant(Allocation command, long generation) { }
 
-    private record AppliedOperation(Allocation command, Status status) { }
+    private record AppliedOperation(Command command, Status status) { }
 
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
@@ -108,6 +142,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final Map<Long, Allocation> allocationIds = new HashMap<>();
     private final Map<Stream, Long> streamStarts = new HashMap<>();
     private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
+    private final boolean[] dataBlocked;
+    private final boolean[] durableQuarantine;
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
     private long appliedThrough = -1;
@@ -125,6 +161,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         this.io = io;
         this.channel = channel;
         this.lock = lock;
+        dataBlocked = new boolean[config.dataFiles()];
+        durableQuarantine = new boolean[config.dataFiles()];
     }
 
     static SegmentArenaControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -175,8 +213,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     /** One physical force covers the whole batch; no result is applied before that force returns. */
-    DurableBatch appendDurably(List<Allocation> commands) throws IOException {
-        List<Allocation> batch = List.copyOf(commands);
+    DurableBatch appendDurably(List<? extends Command> commands) throws IOException {
+        List<Command> batch = List.copyOf(commands);
         List<ByteBuffer> encoded;
         long sequence;
         long start;
@@ -188,8 +226,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
             encoded = new ArrayList<>(batch.size());
             long bytes = 0;
             sequence = durableThrough + 1;
-            for (Allocation command : batch) {
-                validateRange(command);
+            for (Command command : batch) {
+                validateCommand(command);
                 ByteBuffer record = SegmentControlFormat.encode(command.type(), LOG_GENERATION, sequence++,
                         command.operationId(), command.operationGeneration(), command.expectedGeneration(),
                         command.body());
@@ -235,7 +273,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         List<Result> results = new ArrayList<>(batch.commands().size());
         try {
-            for (Allocation command : batch.commands()) {
+            for (Command command : batch.commands()) {
                 long sequence = ++appliedThrough;
                 Status status = apply(command);
                 long generation = status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE
@@ -251,8 +289,29 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return List.copyOf(results);
     }
 
-    List<Result> submitBatch(List<Allocation> commands) throws IOException {
+    List<Result> submitBatch(List<? extends Command> commands) throws IOException {
         return applyDurable(appendDurably(commands));
+    }
+
+    /** Immediate admission gate; it is not a durable failure witness until DEVICE_STATE is applied. */
+    synchronized boolean blockDataFile(int file) {
+        if (file < 0 || file >= dataBlocked.length) {
+            throw new IllegalArgumentException("Invalid DATA file");
+        }
+        boolean firstFailure = !dataBlocked[file];
+        dataBlocked[file] = true;
+        return firstFailure;
+    }
+
+    synchronized boolean dataFileAvailable(int file) {
+        return !closed && !failed && file >= 0 && file < dataBlocked.length && !dataBlocked[file];
+    }
+
+    synchronized boolean hasDurableQuarantine(int file) {
+        if (file < 0 || file >= durableQuarantine.length) {
+            throw new IllegalArgumentException("Invalid DATA file");
+        }
+        return durableQuarantine[file];
     }
 
     synchronized boolean hasAppliedGrant(int file, long offset, long bytes, int ownerShard,
@@ -321,7 +380,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         for (PoolRequest request : requests) {
             validatePoolRequest(request);
             int file = request.shard() % config.dataFiles();
-            if (request.blocks() > (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES) {
+            if (dataBlocked[file] || request.blocks() > (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES) {
                 planned.add(Optional.empty());
                 continue;
             }
@@ -340,7 +399,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     /** Earliest whole-batch applied pool at/after this stream's cursor; does not reserve or refill space. */
     synchronized Optional<SegmentBatchFormat.Address> appendAddress(int file, long minimum, int bytes,
                                                                    int shard, Generation stream, long sequence) {
-        if (failed || closed || bytes <= 0) {
+        if (!dataFileAvailable(file) || bytes <= 0) {
             return Optional.empty();
         }
         SegmentBatchFormat.Address selected = null;
@@ -400,6 +459,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (!matchesScope(otherConfig, otherIdentity) || writing || pending != null) {
             throw new IOException("Arena authority is unavailable or has unresolved control I/O");
         }
+        for (boolean blocked : dataBlocked) {
+            if (blocked) {
+                throw new IOException("Unresolved DATA file quarantine prevents writable physical reopen");
+            }
+        }
     }
 
     synchronized long durableThrough() {
@@ -428,7 +492,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         sequence = 0;
         for (long offset = FIRST_RECORD; offset < size;) {
             int length = recordLength(offset, size, sequence);
-            Allocation command = readAllocation(offset, length, sequence);
+            Command command = readCommand(offset, length, sequence);
             durableThrough = sequence;
             appliedThrough = sequence;
             apply(command);
@@ -481,11 +545,29 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return length;
     }
 
-    private Allocation readAllocation(long offset, int length, long sequence) throws IOException {
+    private Command readCommand(long offset, int length, long sequence) throws IOException {
         ByteBuffer bytes = ByteBuffer.allocate(length);
         SegmentFileIo.readFully(channel, bytes, offset);
         SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.ARENA,
                 LOG_GENERATION, sequence);
+        if (parsed.type() == SegmentControlFormat.Type.DEVICE_STATE) {
+            ByteBuffer body = parsed.body();
+            if (body.remaining() != 16 || body.getInt() != 1 || body.getInt() != 1
+                    || parsed.expectedGeneration() != 0) {
+                throw new IOException("Unsupported Arena DEVICE_STATE body");
+            }
+            int file = body.getInt();
+            if (body.getInt() != 0) {
+                throw new IOException("Unsupported Arena DEVICE_STATE extension");
+            }
+            try {
+                FileQuarantine command = new FileQuarantine(parsed.operationId(), parsed.operationGeneration(), file);
+                validateCommand(command);
+                return command;
+            } catch (IllegalArgumentException invalid) {
+                throw new IOException("Invalid DATA file quarantine", invalid);
+            }
+        }
         if (parsed.type() != SegmentControlFormat.Type.ALLOC
                 && parsed.type() != SegmentControlFormat.Type.ALLOC_POOL) {
             throw new IOException("Unsupported Arena command in required control history");
@@ -527,7 +609,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    private Status apply(Allocation command) {
+    private void validateCommand(Command command) {
+        if (command instanceof Allocation allocation) {
+            validateRange(allocation);
+        } else if (((FileQuarantine) command).file() >= config.dataFiles()) {
+            throw new IllegalArgumentException("Invalid quarantined DATA file");
+        }
+    }
+
+    private Status apply(Command command) {
         AppliedOperation prior = appliedOperations.get(command.operationId());
         if (prior != null) {
             if (!prior.command().equals(command)) {
@@ -535,7 +625,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
             return prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status();
         }
-        if (allocationIds.containsKey(command.allocationId())) {
+        if (command instanceof FileQuarantine quarantine) {
+            int file = quarantine.file();
+            Status status = durableQuarantine[file] ? Status.ALREADY_DURABLE : Status.APPLIED_DURABLE;
+            dataBlocked[file] = true;
+            durableQuarantine[file] = true;
+            appliedOperations.put(command.operationId(), new AppliedOperation(command, status));
+            return status;
+        }
+        return applyAllocation((Allocation) command);
+    }
+
+    private Status applyAllocation(Allocation command) {
+        if (durableQuarantine[command.file()] || allocationIds.containsKey(command.allocationId())) {
             appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
             return Status.CONDITION_FAILED;
         }

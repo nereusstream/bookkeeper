@@ -381,6 +381,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                SegmentArenaControlLog authority) throws IOException {
         SegmentBatchFormat.Address address = batch.address();
         if (!authority.matchesScope(config, identity)
+                || !authority.dataFileAvailable(address.fileIndex())
                 || !authority.hasAppliedGrant(address.fileIndex(), address.offset(), batch.bytes().remaining(),
                 address.shard(), address.streamGeneration().value(), address.allocation(),
                 address.generation().value())) {

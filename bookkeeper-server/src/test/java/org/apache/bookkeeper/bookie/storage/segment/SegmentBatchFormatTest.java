@@ -286,10 +286,11 @@ public class SegmentBatchFormatTest {
                 assertTrue(failure.get() instanceof IOException);
                 assertEquals(8192, files.nextOffset(0));
                 assertThrows(IOException.class, () -> files.reserveAuthorized(first, arena));
-                IsolatedSegmentFiles.Reservation unused = files.reserveAuthorized(second, arena);
-                assertEquals(12288, files.nextOffset(0));
-                files.cancelBeforeSubmission(unused);
-                assertThrows(IllegalArgumentException.class, () -> files.cancelBeforeSubmission(unused));
+                assertFalse(arena.dataFileAvailable(0));
+                assertFalse(arena.hasDurableQuarantine(0)); // This manual prototype has no control driver.
+                assertTrue(arena.hasAppliedGrant(0, 4096, 8192, 0, 1, 5, 1));
+                assertThrows(IOException.class, () -> files.reserveAuthorized(second, arena));
+                assertEquals(8192, files.nextOffset(0));
             } finally {
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
                 owner.stopAdmission();
@@ -1940,6 +1941,7 @@ public class SegmentBatchFormatTest {
             IsolatedSegmentFiles.Reservation cancelled = files.reserveAuthorized(later, arena);
             assertThrows(IOException.class, () -> files.close());
             files.cancelBeforeSubmission(cancelled);
+            assertThrows(IllegalArgumentException.class, () -> files.cancelBeforeSubmission(cancelled));
             assertThrows(IOException.class, () -> files.reserveAuthorized(later, arena));
             SegmentBatchFormat.FrozenBatch skipped = SegmentBatchFormat.encode(config, address(8192),
                     List.of(SegmentBatchFormat.entry(context(), entry)));

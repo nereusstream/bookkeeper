@@ -293,6 +293,8 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 `fdatasync()`错误可能报告此前写回失败；再次sync返回成功不是对先前全部DATA安全的证明。按上述存储错误恢复流程解析受影响范围，不以最后一次返回值清除unknown/失败状态。该保守策略由本原型选择，实际错误范围仍需故障实验核验；不为此引入逐entry成功日志或正常路径额外fsync。[Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html)
 
+2026-10-02 隔离实现已解释Arena `DEVICE_STATE`的单调DATA文件隔离子集。实际DATA write/force失败时立即关闭该共享文件的新DATA、点读和重复成功资格；绑定实际Arena控制driver的合批路径用现有控制执行/I/O/完成资源尝试持久记录，再按日志顺序apply。记录不删除原allocation/stream所有权；其后的ALLOC按条件失败，早于记录的ALLOC结果不受易失故障到达时机影响。完整记录在重放及恢复同步后仍拒绝DATA物理重开，不由后一次sync清除。控制忙/停收、记录写入或同步失败及落盘前退出仍未形成完整跨重启故障判定；没有记录不证明没有旧错误，append-only重开仍无local-result authority。未启用clear/reset或旧错误解析，不增加正常entry成功日志/fsync，详见[实验格式](implementation/local-storage/format-v1.md)。
+
 涉及既有成功数据的compaction同样须保证new DATA在恢复可发现边界内，才允许`MOVE_COMMIT`、selector切换或释放旧位置。以后若要跨缺口独立发布，须先接受独立块发现/恢复算法；本次不并行建设第二套模式。分别报告write wait、durability wait、physical-prefix wait和locator wait，不将同stream排队归为NVMe延迟。
 
 ### 6.2 对齐缓冲池的NUMA属地

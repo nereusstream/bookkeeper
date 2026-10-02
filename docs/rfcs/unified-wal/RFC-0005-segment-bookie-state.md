@@ -422,6 +422,8 @@ restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/
 11. ephemeral registration；
 12. 最后开启Profile write acceptance。
 
+2026-10-02 隔离DATA路径新增Arena `DEVICE_STATE`文件隔离记录：已知write/force失败先切断受影响共享文件的新DATA、点读及重复成功，再经已绑定的实际控制driver尝试持久化。原grant仍是所有权事实，不能因隔离而被当作FREE；已持久应用的隔离记录重放后仍阻止物理重开，后续sync成功不清除。控制提交拒绝/记录失败仅保留当前运行时拒绝依据，完整记录的未知force结果可由重放确认，但缺少记录不构成旧错误已解析的证据。未启用解除隔离、服务级可写restart、readiness或生产ACK；详细范围见[本地存储状态](implementation/local-storage/README.md)。
+
 ### 9.1 Wave 0 reference harness状态
 
 既有reference harness把recovery消费为typed semantic facts；历史测试不证明本轮Bookie控制日志、delete-applied/cursor与physical reclaim分离或物理replay子顺序。新验证归Spike B B4/B6/B16及Model D，历史receipt/source lock不重绑。

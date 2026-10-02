@@ -22,8 +22,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.common.profile.startup.Generation;
 
 /** One in-flight Arena control batch, forced off-owner and applied on its owner. */
 final class SegmentArenaControlDriver {
@@ -48,7 +50,20 @@ final class SegmentArenaControlDriver {
     }
 
     boolean submit(List<SegmentArenaControlLog.Allocation> commands, Completion completion) {
-        List<SegmentArenaControlLog.Allocation> batch = List.copyOf(commands);
+        return submitCommands(commands, completion);
+    }
+
+    /** Block immediately; refusal or failure does not establish a durable quarantine witness. */
+    boolean submitQuarantine(int file, Completion completion) {
+        Objects.requireNonNull(completion, "completion");
+        log.blockDataFile(file);
+        return submitCommands(List.of(new SegmentArenaControlLog.FileQuarantine(
+                UUID.randomUUID(), new Generation(1), file)), completion);
+    }
+
+    private boolean submitCommands(List<? extends SegmentArenaControlLog.Command> commands,
+                                    Completion completion) {
+        List<SegmentArenaControlLog.Command> batch = List.copyOf(commands);
         Objects.requireNonNull(completion, "completion");
         if (!busy.compareAndSet(false, true)) {
             return false;
@@ -176,7 +191,7 @@ final class SegmentArenaControlDriver {
     }
 
     private void forceAndApply(SegmentOwnerLoop.Ticket ticket,
-                               List<SegmentArenaControlLog.Allocation> batch, Completion completion) {
+                               List<? extends SegmentArenaControlLog.Command> batch, Completion completion) {
         AtomicReference<SegmentArenaControlLog.DurableBatch> durable = new AtomicReference<>();
         io.submitControl(ticket, () -> durable.set(log.appendDurably(batch)), cause -> {
             owner.requireOwner();
