@@ -340,7 +340,7 @@ DirectJournal是独立对照/优化支线，可并行或等主线取得基础数
 
 2026-10-02 步骤5～7继续接通[隔离存储资源图生命周期](rfcs/unified-wal/implementation/local-storage/README.md)：统一持有双控制日志、DATA、执行组及全shard合批器/点读，全部原owner bootstrap和控制槽归还后才开放本地请求。关闭按停收→排空I/O、owner和读结果buffer→锁内DATA健康CLOSE→双控制日志释放；超时保留原资源owner/目录锁，启动失败也按此顺序清理。总热定位与源/对齐buffer预算不随worker复制，普通与恢复准入仍独立。此为正常关闭的隔离存储图，不替代Bookie/readiness/registration、未正常关闭恢复、一般selector/回收或完整接收bytes预算；步骤5～7及总Gate仍未完成。
 
-2026-10-03 [Spike C模型源码](rfcs/unified-wal/implementation/models/README.md)开始补管理会话、控制/DATA barrier、连续前缀及旧错误隔离边界，附有限正向矩阵和三个待否证的候选规则。工具获取失败，当前UNPARSED / NOT_EXECUTED，无模型PASS、已验证反例或Block G提升；未正常关闭恢复仍未完成，Java现有隔离行为保持。
+2026-10-03 [Spike C有限模型切片](rfcs/unified-wal/implementation/models/README.md)已实际验证：管理会话、控制/DATA barrier、连续前缀和旧错误隔离的两个正向配置完整探索PASS，三个负向候选规则均得到指定性质反例。回执`unified-wal-model-jqvpwfsw`保留source/config/tool身份、完整trace和统计；这是局部模型进展，不提升完整Model C、组合模型或Block G。未正常关闭会话的故障解析仍未完成，Java现有隔离行为保持。
 
 ## 11. Gate 与证据合同
 

@@ -149,7 +149,7 @@ mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check
 
 ## 当前验证
 
-2026-10-03 开始提交[Model C管理会话/恢复同步源码](../models/README.md)，当前UNPARSED / NOT_EXECUTED。未取得TLC 1.7.4有效工具jar，尚无SANY/TLC结果或已验证反例；Python runner语法和文档相对路径仅是静态检查。候选规则的模型oracle将保留旧进程故障历史，测试后次sync是否错误解除隔离；它不是生产新增的持久见证。未正常关闭恢复所需证据/合同仍待确认，已有OPEN/CLOSE、故障隔离与隔离存储图实现未改变，本轮不重跑Java测试或提升Gate。
+2026-10-03 [Model C管理会话/恢复同步切片](../models/README.md)已用checksum匹配的TLC 1.7.4实际验证：两个正向配置完整探索PASS，三个负向配置得到指定性质反例。回执`unified-wal-model-jqvpwfsw`保留输入哈希、checker输出、覆盖统计及完整trace。OPEN候选规则的oracle保留旧进程故障历史，在故障隔离记录未落盘时揭示后次sync不能自动解除隔离；它不是生产新增的持久见证。故障解析证据/合同仍待确认；已有OPEN/CLOSE、故障隔离与隔离存储图实现未改变，本轮未重跑Java测试或提升完整Model C/Block G/生产Gate。
 
 2026-10-02（隔离资源图生命周期）执行`scripts/unified-wal/run-local-storage-tests.sh SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentArenaControlLogTest,SegmentExecutionGroupTest,SegmentOwnerLoopTest`：172项中167项执行通过，5项Linux亲和性用例在macOS跳过，0失败/错误；`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check`通过。新增7项定向回归验证两worker/全shard启动、两轮正常关闭restart的旧entry重复/新写/点读、消费方读结果lease阻止排空且目录锁保留、在途owner回调与外部关闭重入、bootstrap失败清理、某shard恢复容量不足时整图停收、非法输入及失败handoff票据释放、独立recovery准入。最初两次编译发现恢复请求类型及未交接Admission释放API不符；随后一项CRC测试的异常类型依据既有校验合同修正，原拒绝/资源断言保留。最终运行`unified-wal-local-PS4ShZHq`保留父提交`963123541c16899551ce281e3a6c39e3a38b88ce`和185项实际源码/构建输入哈希，历史receipt不改绑定。读取结果的消费方buffer lease与I/O/owner期间的文件pin分属不同生命周期；本次证明关闭等待两者各自终结，不将两者合并。未验证真实掉电/介质故障、Linux NUMA、未正常关闭恢复、一般selector/回收、完整接收/索引bytes预算或Bookie/readiness/registration/生产ACK。本次未运行TLC，Block G及总体安全Gate不提升。
 

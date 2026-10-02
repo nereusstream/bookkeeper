@@ -108,14 +108,15 @@ def main():
         stats = re.findall(r"([\d,]+) states generated, ([\d,]+) distinct states found, "
                            r"([\d,]+) states left on queue", text)
         counts = [int(v.replace(",", "")) for v in stats[-1]] if stats else [None, None, None]
-        diameter = re.search(r"The depth of the complete state graph search is (\d+)", text)
+        depth = re.search(r"The depth of the complete state graph search is (\d+)", text)
         rss = re.search(r"(\d+)\s+maximum resident set size", text)
         linux_rss = re.search(r"Maximum resident set size \(kbytes\): (\d+)", text)
         results[name] = {"status": status, "complete": complete, "exitCode": code,
                          "expectedInvariant": expected, "command": command,
                          "violatedInvariant": violation[1] if violation else None,
                          "generatedStates": counts[0], "distinctStates": counts[1], "queueDepth": counts[2],
-                         "diameter": int(diameter[1]) if diameter else None,
+                         "searchDepth": int(depth[1]) if depth else None,
+                         "diameter": int(depth[1]) if complete and depth else None,
                          "elapsedSeconds": time.monotonic() - start,
                          "peakRssBytes": int(rss[1]) if rss else (int(linux_rss[1]) * 1024 if linux_rss else None)}
         (run / "coverage-summary.json").write_text(json.dumps(results, indent=2) + "\n")
