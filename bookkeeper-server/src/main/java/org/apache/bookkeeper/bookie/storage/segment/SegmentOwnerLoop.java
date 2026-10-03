@@ -45,6 +45,7 @@ final class SegmentOwnerLoop {
         private boolean posted;
         private boolean ioSubmitted;
         private boolean continuation;
+        private boolean ioContinuation;
         private volatile Throwable commandFailure;
         private Runnable completion;
 
@@ -60,22 +61,28 @@ final class SegmentOwnerLoop {
 
         // May be called by an I/O thread. Even after admission closes, this slot remains reserved.
         void complete(Runnable action) {
-            post(action, false);
+            post(action, false, false);
         }
 
         /** Resume an accepted, not-yet-submitted operation using its existing reserved completion slot. */
         void resume(Runnable action) {
-            post(action, true);
+            post(action, true, false);
         }
 
-        private void post(Runnable action, boolean resume) {
+        /** Only the I/O service may call this, after the previous operation has actually terminated. */
+        void resumeAfterIo(Runnable action) {
+            post(action, true, true);
+        }
+
+        private void post(Runnable action, boolean resume, boolean afterIo) {
             Objects.requireNonNull(action, "action");
             synchronized (gate) {
-                if (posted || (resume && ioSubmitted)) {
+                if (posted || (resume && ioSubmitted != afterIo)) {
                     throw new IllegalStateException("Completion already posted");
                 }
                 completion = action;
                 continuation = resume;
+                ioContinuation = afterIo;
                 if (!(control ? controlCompletions : completions).offer(this)) {
                     throw new IllegalStateException("Reserved completion capacity violated");
                 }
@@ -491,6 +498,10 @@ final class SegmentOwnerLoop {
         synchronized (gate) {
             if (ticket.continuation && ticket.commandFailure == null) {
                 continuation = ticket.completion;
+                if (ticket.ioContinuation) {
+                    ticket.ioSubmitted = false;
+                    ticket.ioContinuation = false;
+                }
                 ticket.completion = null;
                 ticket.continuation = false;
                 ticket.posted = false;

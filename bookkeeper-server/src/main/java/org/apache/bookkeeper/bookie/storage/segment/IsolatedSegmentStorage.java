@@ -34,11 +34,15 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 
 /** Owns the isolated local storage graph. This is not Bookie registration or production ACK readiness. */
 final class IsolatedSegmentStorage implements AutoCloseable {
-    record Limits(long controlLogBytes, int hotEntries, int poolBlocks,
+    record Limits(long controlLogBytes, int hotEntries, int indexedEntries, int poolBlocks,
                   SegmentDataPhysicalDriver.BatchLimits batches) {
+        Limits(long controlLogBytes, int hotEntries, int poolBlocks, SegmentDataPhysicalDriver.BatchLimits batches) {
+            this(controlLogBytes, hotEntries, hotEntries, poolBlocks, batches);
+        }
+
         Limits {
             Objects.requireNonNull(batches, "batches");
-            if (controlLogBytes < 4096 + 320 || hotEntries < 1 || poolBlocks < 1) {
+            if (controlLogBytes < 4096 + 320 || hotEntries < 1 || indexedEntries < hotEntries || poolBlocks < 1) {
                 throw new IllegalArgumentException("Invalid isolated storage bounds");
             }
         }
@@ -103,10 +107,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 }
                 arena = SegmentArenaControlLog.open(config, identity, limits.controlLogBytes());
                 bookie = SegmentBookieControlLog.open(config, identity, limits.controlLogBytes(), key, validator);
-                index = SegmentDerivedIndex.open(config, identity, limits.hotEntries());
+                index = SegmentDerivedIndex.open(config, identity, limits.indexedEntries());
                 if (existing) {
                     files = IsolatedSegmentFiles.openForLocalResults(config, identity, arena, bookie,
-                            new SegmentFileIo(), limits.hotEntries(), config.logicalShards(), index);
+                            new SegmentFileIo(), limits.indexedEntries(), config.logicalShards(), index);
                 } else {
                     files.startSession(arena);
                 }
@@ -143,13 +147,15 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                         new SegmentArenaControlLog.SingleStream(new Generation(1), 1));
                 int capacity = limits.hotEntries() / config.logicalShards()
                         + (selected < limits.hotEntries() % config.logicalShards() ? 1 : 0);
-                SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity, capacity);
+                int coordinates = limits.indexedEntries() / config.logicalShards()
+                        + (selected < limits.indexedEntries() % config.logicalShards() ? 1 : 0);
+                SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity, capacity, coordinates);
+                hot.attachIndex(selected, index, execution.io());
                 SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(selected, owner, execution.io(),
                         files, arena, new SegmentPhysicalPrefix(owner, selected, stream.generation(),
                                 stream.firstSequence(), config.maxPendingEntries()), hot);
                 writes[selected] = driver.enableNormalBatching(
                         bookie, limits.batches(), allocator, limits.poolBlocks());
-                hot.attachIndex(selected, index, execution.io());
                 reads[selected] = SegmentPointRead.Reader.live(owner, execution.io(), files, arena, bookie, hot);
                 return null;
             });

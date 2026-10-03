@@ -198,7 +198,7 @@ control容量≥10656字节（8192 header、416双commit预留、2048普通控�
 | 88～148 / 148 | ledger context[60] / entryId u64 |
 | 156 | CRC32C[0,156) |
 
-fresh Get校验generation、key/context一致、CRC和记录范围，仅返回物理定位；调用者仍须执行Bookie权限、DATA record及当前selector/pin检查。普通/恢复ENTRY_DATA已在热发布后，通过已有owner DATA票据/共享DATA I/O异步调用不flush的WriteBatch；同坐标不同定位拒绝覆盖，不在append owner同步访问DB。每shard最多一个在途索引批次，最多256个定位引用，热记录在完成后仍保留；无积压时pump不扫描热表。后台失败关闭新DATA准入，实际I/O与原owner完成槽位终结后才归还工作集；关闭不提前释放native锁。hot-first/fresh DB fallback、热淘汰及MOVE/delete排序尚未接线。
+fresh Get校验generation、key/context一致、CRC和记录范围，仅返回物理定位；调用者仍须执行Bookie权限、DATA record及当前selector/pin检查。普通/恢复ENTRY_DATA已在热发布后，通过已有owner DATA票据/共享DATA I/O异步调用不flush的WriteBatch；同坐标不同定位拒绝覆盖，不在append owner同步访问DB。每shard最多一个在途索引批次，最多256个定位引用；实际query-visible后原owner才移除匹配热记录，失败继续保留。无积压时pump不扫描热表。点读及普通/恢复重复写先hot，miss后在原DATA I/O执行fresh Get，再复用同一票据进行DATA读取和独立校验；Get不使用旧snapshot或negative-cache。文件pin从Get前保持到实际I/O/owner终结，捕获的不可变定位不因hot淘汰而失效，仍检查当前单stream前缀、Arena grant、Bookie权限及ENTRY_DATA来源。有限坐标占用集合没有定位/payload，保留已接受/unknown坐标；derived missing不能授权同坐标重写。热条目和索引/完整恢复条目采用独立容量，按固定shard拆分；无MOVE/FREE时坐标容量到限明确背压。后台失败关闭新DATA准入，实际I/O与原owner完成槽位终结后才归还工作集；关闭不提前释放native锁。一般MOVE/delete排序及完整native/disk预算尚未闭合，持久字节格式不变。
 
 固定`index-coverage-a/b`为目录中的独立4096-byte页；单CF真实flush后才写完整inactive页、force、同步目录并重读验证。page位置：
 

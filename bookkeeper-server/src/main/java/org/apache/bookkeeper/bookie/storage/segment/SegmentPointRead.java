@@ -173,7 +173,6 @@ final class SegmentPointRead {
             private SegmentBufferPool.Lease buffer;
             private Location selected;
             private Result result;
-            private boolean submitted;
             private boolean physicalTerminal;
             private boolean ownerTerminal;
 
@@ -185,9 +184,46 @@ final class SegmentPointRead {
 
             @Override
             public void run(SegmentOwnerLoop.Ticket ticket) {
+                try {
+                    admission = bookie.admitRead(context).orElse(null);
+                    if (admission == null) {
+                        refuse(ticket, ReadStatus.NOT_READY, null);
+                        return;
+                    }
+                    if (hot == null) {
+                        IsolatedSegmentFiles.StartupInventoryLease startup = files.pinStartupInventory();
+                        pin = startup;
+                        selected = startup.inventory().uniqueLocation(arena, context, entryId);
+                    } else {
+                        pin = files.pinDataRead();
+                        selected = hot.liveDurableCandidate(context, entryId).orElse(null);
+                        if (selected == null) {
+                            hot.freshGet(ticket, context, entryId, (location, failure) -> {
+                                selected = location;
+                                if (failure != null) {
+                                    refuse(ticket, ReadStatus.UNKNOWN, failure);
+                                } else {
+                                    readSelected(ticket);
+                                }
+                            });
+                            return;
+                        }
+                    }
+                } catch (IOException unavailable) {
+                    refuse(ticket, ReadStatus.NOT_READY, unavailable);
+                    return;
+                }
+                readSelected(ticket);
+            }
+
+            private void readSelected(SegmentOwnerLoop.Ticket ticket) {
+                if (owner.failure() != null) {
+                    refuse(ticket, ReadStatus.UNKNOWN, owner.failure());
+                    return;
+                }
                 ReadStatus status;
                 try {
-                    status = prepare();
+                    status = prepareBuffer();
                 } catch (IOException unavailable) {
                     refuse(ticket, ReadStatus.NOT_READY, unavailable);
                     return;
@@ -200,6 +236,9 @@ final class SegmentPointRead {
                     started.set(true);
                     try {
                         result = readWithScratch(files.config(), files.identity(), arena, selected, buffer.bytes());
+                        if (hot != null && result.record().origin() != SegmentBatchFormat.ENTRY_DATA) {
+                            throw new IOException("A derived point read cannot select an uncommitted relocation copy");
+                        }
                     } finally {
                         physicalDone();
                     }
@@ -209,24 +248,11 @@ final class SegmentPointRead {
                     }
                     deliver(ReadStatus.FOUND, failure);
                 });
-                submitted = true;
             }
 
-            private ReadStatus prepare() throws IOException {
-                admission = bookie.admitRead(context).orElse(null);
-                if (admission == null) {
+            private ReadStatus prepareBuffer() throws IOException {
+                if (selected == null) {
                     return ReadStatus.NOT_READY;
-                }
-                if (hot == null) {
-                    IsolatedSegmentFiles.StartupInventoryLease startup = files.pinStartupInventory();
-                    pin = startup;
-                    selected = startup.inventory().uniqueLocation(arena, context, entryId);
-                } else {
-                    selected = hot.liveDurableCandidate(context, entryId).orElse(null);
-                    if (selected == null) {
-                        return ReadStatus.NOT_READY;
-                    }
-                    pin = files.pinDataRead();
                 }
                 if (!arena.dataFileAvailable(selected.address().fileIndex())) {
                     return ReadStatus.NOT_READY;
@@ -237,7 +263,6 @@ final class SegmentPointRead {
 
             private void refuse(SegmentOwnerLoop.Ticket ticket, ReadStatus status, Throwable failure) {
                 physicalDone();
-                submitted = true;
                 ticket.complete(() -> deliver(status, failure));
             }
 
@@ -252,8 +277,7 @@ final class SegmentPointRead {
                             status = ReadStatus.NOT_READY;
                         } else if (!bookie.canCompleteRead(admission)) {
                             status = ReadStatus.STALE_ADMISSION;
-                        } else if (hot != null && !hot.liveDurableCandidate(context, entryId)
-                                .filter(selected::equals).isPresent()) {
+                        } else if (hot != null && !hot.isCurrentDurable(selected)) {
                             status = ReadStatus.NOT_READY;
                         } else if (pin instanceof IsolatedSegmentFiles.StartupInventoryLease startup) {
                             startup.inventory().requireCurrentArena(arena);
@@ -277,9 +301,8 @@ final class SegmentPointRead {
 
             @Override
             public void failed(Throwable failure) {
-                if (!submitted) {
-                    physicalDone();
-                }
+                // Ticket failure dispatch waits for actual I/O termination, including a Get continuation.
+                physicalDone();
                 try {
                     request.complete(ReadStatus.UNKNOWN, null, failure);
                 } finally {

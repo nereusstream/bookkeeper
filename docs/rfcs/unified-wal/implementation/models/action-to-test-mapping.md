@@ -84,3 +84,13 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 | `IndexFailure` | `asynchronousIndexConflictRetainsHotReadAndRefusesNewDataBeforeReservation`；真实冲突派生行使后台拒绝覆盖，热读仍成功，新DATA不预留/force |
 
 `asynchronousDerivedIndexDrainRetainsNativeLockUntilRealIoTerminates`另验证关闭超时保留实际native排他，实际I/O及原owner票据终结后才排空；模型未证明native句柄或关闭顺序。共享DATA I/O停顿可能延迟点读/已接受DATA，控制预留独立；不从该有限投影推出完整系统的进展或生产authority。
+
+当前接管回执`unified-wal-model-2qh8pivn`仍使10个Next动作coverage全部非零，`CompleteIndex`在query-visible后淘汰hot，`Submit`复用hot额度但保留累计坐标占用。
+
+| 变化/实际风险 | 当前真实测试 |
+|---|---|
+| `CompleteIndex`接管及在途定位 | `indexHandoffKeepsCapturedReadAndDrainsCancelledFreshGet`；`indexHandoffKeepsCapturedDuplicateAndChecksFreshNormalAndRecoveryDuplicates` |
+| 坐标占用、hot/恢复容量独立 | `storageGraphWritesBeyondHotCapacityAndRebuildsAllCoordinatesIncludingHoles`；单shard超过hot容量、乱序填洞及删库全重建 |
+| 模型未展开的同票据多段I/O | `ioContinuationKeepsOneTicketAcrossDrainFailureAndSecondIoRejection`；真实两个I/O阶段、owner异常/拒绝及恰好一次终结 |
+
+模型新增Put前淘汰反例，不替代真实Get/CRC/权限/pin、native锁或关闭流程；运行时query-visible仍不推进持久覆盖。

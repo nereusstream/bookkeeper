@@ -27,13 +27,15 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Bounded owner-only physical candidates; Bookie permission, selector and entry success remain separate. */
 final class SegmentHotDirectory {
     private record Key(ProfileLedgerContext context, long entryId) { }
 
-    private record Candidate(SegmentPointRead.Location location, boolean liveDurable, boolean indexed) { }
+    private record Candidate(SegmentPointRead.Location location, boolean liveDurable) { }
 
     static final class Admission {
         private final SegmentBatchFormat.FrozenBatch batch;
@@ -53,6 +55,9 @@ final class SegmentHotDirectory {
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
     private final int maxEntries;
+    private final int maxCoordinates;
+    // Occupancy survives locator eviction and unresolved DATA. It stores no locator or payload.
+    private final Set<Key> occupied = new HashSet<>();
     private final Map<Key, Candidate> candidates = new HashMap<>();
     private final Map<Key, Admission> pendingKeys = new HashMap<>();
     private final Map<SegmentBatchFormat.FrozenBatch, Admission> pendingBatches = new IdentityHashMap<>();
@@ -62,16 +67,31 @@ final class SegmentHotDirectory {
     private boolean indexInFlight;
     private int unindexed;
     private Throwable indexFailure;
+    private SegmentPhysicalPrefix prefix;
 
     SegmentHotDirectory(SegmentOwnerLoop owner, IsolatedSegmentConfig config, SegmentFileHeader identity,
                         int maxEntries) {
-        if (maxEntries < 1) {
+        this(owner, config, identity, maxEntries, maxEntries);
+    }
+
+    SegmentHotDirectory(SegmentOwnerLoop owner, IsolatedSegmentConfig config, SegmentFileHeader identity,
+                        int maxEntries, int maxCoordinates) {
+        if (maxEntries < 1 || maxCoordinates < maxEntries) {
             throw new IllegalArgumentException("Positive hot locator capacity required");
         }
         this.owner = owner;
         this.config = Objects.requireNonNull(config, "config");
         this.identity = Objects.requireNonNull(identity, "identity");
         this.maxEntries = maxEntries;
+        this.maxCoordinates = maxCoordinates;
+    }
+
+    /** Bound by the DATA driver before its first submission, including an externally constructed driver. */
+    void bindPrefix(SegmentPhysicalPrefix physicalPrefix) {
+        if (prefix != null) {
+            throw new IllegalStateException("Hot directory already belongs to a DATA prefix");
+        }
+        prefix = Objects.requireNonNull(physicalPrefix, "physicalPrefix");
     }
 
     boolean matchesScope(IsolatedSegmentFiles files) {
@@ -91,7 +111,42 @@ final class SegmentHotDirectory {
     boolean canAcceptEntries(int entries) {
         owner.requireOwner();
         return indexFailure == null && entries >= 0
-                && entries <= maxEntries - candidates.size() - pendingKeys.size();
+                && entries <= maxEntries - candidates.size() - pendingKeys.size()
+                && entries <= maxCoordinates - occupied.size();
+    }
+
+    boolean occupied(ProfileLedgerContext context, long entryId) {
+        owner.requireOwner();
+        return occupied.contains(new Key(context, entryId));
+    }
+
+    /** Query-visible index rows remain physical hints and must still pass prefix, grant and Bookie checks. */
+    void freshGet(SegmentOwnerLoop.Ticket ticket, ProfileLedgerContext context, long entryId,
+                  BiConsumer<SegmentPointRead.Location, Throwable> completed) {
+        owner.requireOwner();
+        if (index == null) {
+            ticket.resume(() -> completed.accept(null, null));
+            return;
+        }
+        AtomicReference<SegmentPointRead.Location> selected = new AtomicReference<>();
+        indexIo.submitContinuing(ticket, () -> selected.set(index.get(context, entryId).orElse(null)), failure -> {
+            SegmentPointRead.Location location = selected.get();
+            if (failure == null && location != null && !isCurrentDurable(location)) {
+                failure = new IOException("Derived location has no occupied coordinate or current durable prefix");
+            }
+            completed.accept(failure == null ? location : null, failure);
+        });
+    }
+
+    boolean isCurrentDurable(SegmentPointRead.Location location) {
+        owner.requireOwner();
+        if (location == null) {
+            return false;
+        }
+        Candidate candidate = candidates.get(new Key(location.context(), location.entryId()));
+        return candidate != null && candidate.liveDurable() && candidate.location().equals(location)
+                || index != null && prefix != null && occupied(location.context(), location.entryId())
+                        && prefix.containsDurable(location);
     }
 
     private void indexNextBatch(int shard) {
@@ -101,7 +156,7 @@ final class SegmentHotDirectory {
         }
         List<SegmentPointRead.Location> locations = new ArrayList<>();
         for (Candidate candidate : candidates.values()) {
-            if (candidate.liveDurable() && !candidate.indexed()) {
+            if (candidate.liveDurable()) {
                 locations.add(candidate.location());
                 if (locations.size() == 256) {
                     break;
@@ -120,8 +175,8 @@ final class SegmentHotDirectory {
                         for (SegmentPointRead.Location location : batch) {
                             Key key = new Key(location.context(), location.entryId());
                             Candidate current = candidates.get(key);
-                            if (current != null && !current.indexed() && current.location().equals(location)) {
-                                candidates.put(key, new Candidate(location, current.liveDurable(), true));
+                            if (current != null && current.location().equals(location)) {
+                                candidates.remove(key);
                                 unindexed--;
                             }
                         }
@@ -170,19 +225,21 @@ final class SegmentHotDirectory {
                 continue;
             }
             Key key = new Key(record.context(), record.entryId());
-            if (!withinBatch.add(key) || candidates.containsKey(key) || pendingKeys.containsKey(key)) {
+            if (!withinBatch.add(key) || occupied.contains(key)) {
                 throw new IOException("Duplicate logical entry requires unresolved idempotency decision");
             }
             keys.add(key);
             locations.add(parsedLocations.get(i));
         }
-        if (keys.size() > maxEntries - candidates.size() - pendingKeys.size()) {
+        if (keys.size() > maxEntries - candidates.size() - pendingKeys.size()
+                || keys.size() > maxCoordinates - occupied.size()) {
             throw new IOException("Hot locator capacity exhausted before DATA submission");
         }
         Admission admission = new Admission(batch, List.copyOf(keys), List.copyOf(locations));
         pendingBatches.put(batch, admission);
         for (Key key : keys) {
             pendingKeys.put(key, admission);
+            occupied.add(key);
         }
         return admission;
     }
@@ -205,6 +262,7 @@ final class SegmentHotDirectory {
         pendingBatches.remove(admission.batch);
         for (Key key : admission.keys) {
             pendingKeys.remove(key);
+            occupied.remove(key);
         }
     }
 
@@ -222,7 +280,7 @@ final class SegmentHotDirectory {
         for (int i = 0; i < admission.keys.size(); i++) {
             Key key = admission.keys.get(i);
             pendingKeys.remove(key);
-            candidates.put(key, new Candidate(admission.locations.get(i), true, false));
+            candidates.put(key, new Candidate(admission.locations.get(i), true));
             unindexed++;
         }
         byPhysical.remove(ready.reservation());
@@ -270,29 +328,44 @@ final class SegmentHotDirectory {
         if (!config.sameStorageScope(inventory.sourceConfig()) || !identity.equals(inventory.sourceIdentity())) {
             throw new IOException("Clean restart inventory belongs to another storage scope");
         }
-        installRecovered(inventory.entries().stream()
-                .filter(location -> location.address().shard() == shard).toList(), true);
+        List<SegmentPointRead.Location> entries = inventory.entries().stream()
+                .filter(location -> location.address().shard() == shard).toList();
+        if (index == null) {
+            installRecovered(entries, true);
+        } else {
+            // The storage graph completed the real native rebuild before opening this clean DATA session.
+            validateRecovered(entries, false);
+            for (SegmentPointRead.Location location : entries) {
+                occupied.add(new Key(location.context(), location.entryId()));
+            }
+        }
     }
 
     private void installRecovered(List<SegmentPointRead.Location> entries, boolean localDurable) throws IOException {
+        validateRecovered(entries, true);
+        for (SegmentPointRead.Location location : entries) {
+            Key key = new Key(location.context(), location.entryId());
+            occupied.add(key);
+            candidates.put(key, new Candidate(location, localDurable));
+            if (localDurable) {
+                unindexed++;
+            }
+        }
+    }
+
+    private void validateRecovered(List<SegmentPointRead.Location> entries, boolean installHot) throws IOException {
         if (!pendingBatches.isEmpty() || !pendingKeys.isEmpty() || !byPhysical.isEmpty()) {
             throw new IOException("Physical recovery cannot overlap DATA submissions");
         }
-        if (entries.size() > maxEntries - candidates.size()) {
+        if (entries.size() > maxCoordinates - occupied.size()
+                || installHot && entries.size() > maxEntries - candidates.size()) {
             throw new IOException("Hot locator capacity exhausted during physical recovery");
         }
         Set<Key> incoming = new HashSet<>();
         for (SegmentPointRead.Location location : entries) {
             Key key = new Key(location.context(), location.entryId());
-            if (!incoming.add(key) || candidates.containsKey(key)) {
+            if (!incoming.add(key) || occupied.contains(key)) {
                 throw new IOException("Duplicate logical entry in physical recovery candidates");
-            }
-        }
-        for (SegmentPointRead.Location location : entries) {
-            candidates.put(new Key(location.context(), location.entryId()),
-                    new Candidate(location, localDurable, false));
-            if (localDurable) {
-                unindexed++;
             }
         }
     }

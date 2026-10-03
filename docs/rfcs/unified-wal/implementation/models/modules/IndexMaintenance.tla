@@ -12,9 +12,9 @@
    See the License for the specific language governing permissions and
    limitations under the License. *)
 EXTENDS Naturals, FiniteSets
-CONSTANTS Entries, HotEntries, OwnerSlots, UseControlForIndex
+CONSTANTS Entries, HotEntries, OwnerSlots, UseControlForIndex, EarlyHotEviction
 ASSUME /\ Entries >= 2 /\ HotEntries >= 1 /\ OwnerSlots >= 2
-       /\ UseControlForIndex \in BOOLEAN
+       /\ UseControlForIndex \in BOOLEAN /\ EarlyHotEviction \in BOOLEAN
 Keys == 1..Entries
 VARIABLES admitted, dataPending, hot, durable, successes, rows, job, stage, failed, stalls, fenced
 vars == <<admitted, dataPending, hot, durable, successes, rows, job, stage, failed, stalls, fenced>>
@@ -23,7 +23,7 @@ Init == /\ admitted = {} /\ dataPending = {} /\ hot = {} /\ durable = {}
         /\ failed = FALSE /\ stalls = 0 /\ fenced = FALSE
 IndexBusy == stage # "idle"
 DataTickets == Cardinality(dataPending) + IF IndexBusy /\ ~UseControlForIndex THEN 1 ELSE 0
-Submit == /\ ~failed /\ Cardinality(admitted) < HotEntries /\ DataTickets < OwnerSlots
+Submit == /\ ~failed /\ Cardinality(dataPending \cup hot) < HotEntries /\ DataTickets < OwnerSlots
           /\ \E entry \in Keys \ admitted :
                /\ admitted' = admitted \cup {entry} /\ dataPending' = dataPending \cup {entry}
           /\ UNCHANGED <<hot, durable, successes, rows, job, stage, failed, stalls, fenced>>
@@ -35,7 +35,8 @@ ForceData == /\ stage \notin {"putting", "stalled"} /\ dataPending # {}
              /\ UNCHANGED <<admitted, rows, job, stage, failed, stalls, fenced>>
 StartIndex == /\ stage = "idle" /\ ~failed /\ hot \ rows # {} /\ DataTickets < OwnerSlots
               /\ job' = hot \ rows /\ stage' = "queued"
-              /\ UNCHANGED <<admitted, dataPending, hot, durable, successes, rows, failed, stalls, fenced>>
+              /\ hot' = IF EarlyHotEviction THEN hot \ (hot \ rows) ELSE hot
+              /\ UNCHANGED <<admitted, dataPending, durable, successes, rows, failed, stalls, fenced>>
 StartPut == /\ stage = "queued" /\ stage' = "putting"
             /\ UNCHANGED <<admitted, dataPending, hot, durable, successes, rows, job, failed, stalls, fenced>>
 Stall == /\ stage = "putting" /\ stalls = 0 /\ stage' = "stalled" /\ stalls' = 1
@@ -45,7 +46,8 @@ Resume == /\ stage = "stalled" /\ stage' = "putting"
 Put == /\ stage = "putting" /\ rows' = rows \cup job /\ stage' = "visible"
        /\ UNCHANGED <<admitted, dataPending, hot, durable, successes, job, failed, stalls, fenced>>
 CompleteIndex == /\ stage = "visible" /\ job' = {} /\ stage' = "idle"
-                 /\ UNCHANGED <<admitted, dataPending, hot, durable, successes, rows, failed, stalls, fenced>>
+                 /\ hot' = hot \ job
+                 /\ UNCHANGED <<admitted, dataPending, durable, successes, rows, failed, stalls, fenced>>
 IndexFailure == /\ stage \in {"queued", "putting"} /\ failed' = TRUE /\ job' = {} /\ stage' = "idle"
                 /\ UNCHANGED <<admitted, dataPending, hot, durable, successes, rows, stalls, fenced>>
 (* This control target has no unresolved pre-cut DATA; the reserved lane must remain available. *)
@@ -53,11 +55,12 @@ Fence == /\ ~fenced /\ (~IndexBusy \/ ~UseControlForIndex) /\ fenced' = TRUE
          /\ UNCHANGED <<admitted, dataPending, hot, durable, successes, rows, job, stage, failed, stalls>>
 TypeOK == /\ admitted \subseteq Keys /\ dataPending \subseteq admitted
           /\ hot \subseteq admitted /\ durable \subseteq admitted /\ successes \subseteq admitted
-          /\ rows \subseteq Keys /\ job \subseteq hot
+          /\ rows \subseteq Keys /\ job \subseteq admitted
           /\ stage \in {"idle", "queued", "putting", "stalled", "visible"}
           /\ failed \in BOOLEAN /\ fenced \in BOOLEAN /\ stalls \in 0..1
-BacklogBudget == Cardinality(admitted) <= HotEntries /\ DataTickets <= OwnerSlots
-LocalSuccessKeepsHotAuthority == successes \subseteq hot /\ successes \subseteq durable
+BacklogBudget == Cardinality(dataPending \cup hot) <= HotEntries /\ DataTickets <= OwnerSlots
+LocalSuccessKeepsLocatorAuthority == successes \subseteq (hot \cup rows) /\ successes \subseteq durable
+OccupiedCoordinatesSurviveEviction == durable \subseteq admitted /\ Cardinality(admitted) <= Entries
 IndexRowsCameFromDurableData == rows \subseteq durable
 FenceCanUseReservedLane == ~fenced => ENABLED Fence
 Next == Submit \/ ForceData \/ StartIndex \/ StartPut \/ Stall \/ Resume \/ Put \/ CompleteIndex \/ IndexFailure \/ Fence

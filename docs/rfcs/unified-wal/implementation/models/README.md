@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留投影的八个正向配置已完成有限状态探索，十个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留投影的八个正向配置已完成有限状态探索，十一个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible及控制预留，不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -18,8 +18,9 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
-| `c-index-maintenance` | 3个entry、2个hot容量、2个DATA票据、1次索引暂停；保留热结果及独立控制额度 |
+| `c-index-maintenance` | 3个坐标占用容量、2个hot容量、2个DATA票据、1次索引暂停；query-visible之后淘汰hot，保留定位与控制额度 |
 | `ce-index-control-credit` | 故意让索引占控制credit；必须违反`FenceCanUseReservedLane` |
+| `ce-index-early-eviction` | 故意在Put前淘汰hot；必须违反`LocalSuccessKeepsLocatorAuthority` |
 | `c-derived-coverage` | 2个已选定DATA entry、最多3 index代、1次故障；先退休旧coverage、完整flush再force发布 |
 | `ce-derived-before-flush` | 故意在完整Put后、flush前发布；必须违反`CoverageWasPersisted` |
 | `c-managed-shared` | 2 stream × 2 batch、共享1个DATA文件、最多2 epoch/2次进程退出/2次掉电；当前合同的正向检查 |
@@ -155,3 +156,17 @@ Bookie新增`RetirePrefix`常量和`retiredThrough`；只有已发布image覆盖
 参数固定3个entry、2个hot容量/2个DATA票据、最多1次暂停。DATA barrier与热发布合并为已由独立DATA切片/真实Java检查的动作；共享执行顺序、native原子性、真实权限和控制force为假设。本模型不证明byte总账、JNI/设备、跨ledger pre-cut排空、hot淘汰/fresh lookup、在线覆盖、MOVE/delete或liveness。初始回执`unified-wal-model-sciqsu_x`的新cfg未配置有限terminal状态策略，checker在后台失败且fence完成、没有新准入的终态报deadlock，结果为INCONCLUSIVE；最终与既有有限切片一致设置`CHECK_DEADLOCK FALSE`，不改变安全性质或常量，不宣称死锁自由/最终进展。
 
 真实Put暂停、后台冲突、预算拒绝、native锁与关闭排空由[存储回归](../local-storage/README.md#异步派生定位追加切片)独立验证。完整Model A/C/D与组合、真实掉电、Block G、步骤8及生产authority仍未完成。
+
+### Query-visible接管与坐标占用
+
+2026-10-03回执`unified-wal-model-2qh8pivn`绑定父提交`2e5978ab836109574f23cbf429859571928b67e9`，冻结43个实际输入（7 module、19 cfg、runner、16 Java），保留父提交处3份合同哈希；58个回执文件checksum核对通过。全部19配置为8个完整正向PASS、11个指定反例，既有历史回执及工具参数不变。
+
+| 当前配置 | generated / distinct / queue | depth / 完整diameter | elapsed / peak RSS | 结论 |
+|---|---|---|---|---|
+| c-index-maintenance | 2,131 / 858 / 0 | 18 / 18 | 0.898 s / 127,451,136 bytes | PASS |
+| ce-index-control-credit | 29 / 21 / 12 | 4 / 不适用 | 0.838 s / 109,887,488 bytes | EXPECTED_COUNTEREXAMPLE: FenceCanUseReservedLane |
+| ce-index-early-eviction | 35 / 21 / 12 | 4 / 不适用 | 0.826 s / 109,920,256 bytes | EXPECTED_COUNTEREXAMPLE: LocalSuccessKeepsLocatorAuthority |
+
+正向10个Next动作coverage均非零。`Submit`按未完成DATA与hot积压收费，完整坐标上限为3；`CompleteIndex`在实际query-visible之后移除hot但保留admitted坐标，允许hot容量复用。`LocalSuccessKeepsLocatorAuthority`检查已成功entry始终有hot或可查询row，`OccupiedCoordinatesSurviveEviction`检查已durable坐标不会因淘汰丢失。两个负向最短轨迹均为`Submit → ForceData → StartIndex`，分别否证索引占控制credit与提前淘汰。它们不是Java功能开关。
+
+没有展开fresh Get顺序、捕获定位/read pin、native句柄、真实票据续接或关闭流程；以上由[独立存储回归](../local-storage/README.md#query-visible-热定位接管切片)验证。DATA barrier/发布、单CF查询可见性为输入假设，有限配置继续`CHECK_DEADLOCK FALSE`；不证明liveness、全部byte/native/disk预算、在线coverage或MOVE/FREE，也不提升完整A/C/D/组合、步骤8或生产Gate。

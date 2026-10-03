@@ -93,18 +93,23 @@ final class SegmentIoExecutor {
     }
 
     void submit(SegmentOwnerLoop.Ticket ticket, Operation operation, Consumer<Throwable> completed) {
-        submit(executor, ticket, operation, completed);
+        submit(executor, ticket, operation, completed, false);
+    }
+
+    /** A fresh index Get can return to the owner and reuse its ticket for the subsequent DATA read. */
+    void submitContinuing(SegmentOwnerLoop.Ticket ticket, Operation operation, Consumer<Throwable> completed) {
+        submit(executor, ticket, operation, completed, true);
     }
 
     void submitControl(SegmentOwnerLoop.Ticket ticket, Operation operation, Consumer<Throwable> completed) {
         if (controlExecutor == null) {
             throw new IllegalStateException("No reserved control I/O service");
         }
-        submit(controlExecutor, ticket, operation, completed);
+        submit(controlExecutor, ticket, operation, completed, false);
     }
 
     private void submit(ThreadPoolExecutor target, SegmentOwnerLoop.Ticket ticket, Operation operation,
-                        Consumer<Throwable> completed) {
+                        Consumer<Throwable> completed, boolean continuing) {
         Objects.requireNonNull(operation, "operation");
         Objects.requireNonNull(completed, "completed");
         ticket.beginIo();
@@ -120,10 +125,18 @@ final class SegmentIoExecutor {
                     failure = cause;
                 }
                 Throwable result = failure;
-                ticket.complete(() -> completed.accept(result));
+                returnToOwner(ticket, () -> completed.accept(result), continuing);
             });
         } catch (RejectedExecutionException rejected) {
-            ticket.complete(() -> completed.accept(rejected));
+            returnToOwner(ticket, () -> completed.accept(rejected), continuing);
+        }
+    }
+
+    private static void returnToOwner(SegmentOwnerLoop.Ticket ticket, Runnable action, boolean continuing) {
+        if (continuing) {
+            ticket.resumeAfterIo(action);
+        } else {
+            ticket.complete(action);
         }
     }
 

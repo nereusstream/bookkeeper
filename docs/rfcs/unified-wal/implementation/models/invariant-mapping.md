@@ -74,3 +74,12 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `FenceCanUseReservedLane` | 维护不占控制票据或控制I/O，已排空pre-cut目标的fence仍可启用 | 检查可启用性，不证明fairness/实际force/liveness；一般pre-cut等待仍允许 |
 
 正向完整探索482个distinct states，负向索引占控制credit得到指定性质反例。真实暂停和失败的独立Java回归验证当前I/O/owner接线；hot淘汰及在线覆盖仍未接入。
+
+当前接管回执`unified-wal-model-2qh8pivn`在上述历史维护投影基础上完整探索858 distinct states：
+
+| 当前性质 | 当前合同与实现 | 证据边界 |
+|---|---|---|
+| `LocalSuccessKeepsLocatorAuthority` | query-visible owner接管前保留hot，之后仍有当前DB定位；过早淘汰负向实际违反 | 不证明真实Get/selector/pin，Java独立校验 |
+| `OccupiedCoordinatesSurviveEviction` | hot淘汰只释放定位容量，已接纳/unknown坐标仍由有限occupancy保留 | 3坐标、2hot/2ticket；完整恢复容量独立，不证明长期/native总账 |
+
+`BacklogBudget`现在检查pending DATA与hot合计而非历史累计admitted；`IndexRowsCameFromDurableData`与`FenceCanUseReservedLane`保留。正向、两个指定负向及真实文件回归独立记录，在线coverage与完整模型仍未完成。

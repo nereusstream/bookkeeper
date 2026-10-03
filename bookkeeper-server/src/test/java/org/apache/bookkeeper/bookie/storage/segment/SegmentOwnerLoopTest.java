@@ -160,6 +160,76 @@ public class SegmentOwnerLoopTest {
         }
     }
 
+    @Test
+    public void ioContinuationKeepsOneTicketAcrossDrainFailureAndSecondIoRejection() throws Exception {
+        for (int mode = 0; mode < 3; mode++) {
+            final int selected = mode;
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(1, 1, 0, 1, 1);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1);
+            CountDownLatch firstStarted = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<Throwable> result = new AtomicReference<>();
+            AtomicInteger terminals = new AtomicInteger();
+            assertTrue(owner.submit(0, command(ticket -> io.submitContinuing(ticket, () -> {
+                firstStarted.countDown();
+                await(release);
+                if (selected == 2) {
+                    io.shutdown();
+                }
+            }, failure -> {
+                owner.requireOwner();
+                assertNull(failure);
+                assertFalse(owner.submit(0, command(unused -> { }, unexpected())));
+                owner.stopAdmission();
+                if (selected == 1) {
+                    throw new IllegalStateException("Get owner continuation failed");
+                }
+                io.submit(ticket, () -> { }, secondFailure -> {
+                    result.set(secondFailure);
+                    terminals.incrementAndGet();
+                    done.countDown();
+                });
+            }), failure -> {
+                result.set(failure);
+                terminals.incrementAndGet();
+                done.countDown();
+            })));
+            owner.start();
+            try {
+                assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
+                CountDownLatch control = new CountDownLatch(1);
+                assertTrue(owner.control(control::countDown));
+                assertTrue(control.await(5, TimeUnit.SECONDS));
+                if (selected == 0) {
+                    owner.stopAdmission();
+                }
+                assertFalse(owner.awaitTermination(Duration.ofMillis(20)));
+                assertEquals(0, terminals.get());
+                release.countDown();
+                assertTrue(done.await(5, TimeUnit.SECONDS));
+                assertTrue(owner.awaitTermination(WAIT));
+                assertEquals(1, terminals.get());
+                if (selected == 0) {
+                    assertNull(result.get());
+                    assertNull(owner.failure());
+                } else if (selected == 1) {
+                    assertTrue(result.get() instanceof IllegalStateException);
+                    assertSame(result.get(), owner.failure());
+                } else {
+                    assertTrue(result.get() instanceof RejectedExecutionException);
+                    assertNull(owner.failure());
+                }
+            } finally {
+                release.countDown();
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(WAIT));
+                io.shutdown();
+                assertTrue(io.awaitTermination(WAIT));
+            }
+        }
+    }
+
     private static Consumer<Throwable> unexpected() {
         return cause -> {
             throw new AssertionError(cause);

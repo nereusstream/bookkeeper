@@ -21,6 +21,7 @@ import time
 MATRIX = {
     "c-index-maintenance": None,
     "ce-index-control-credit": "FenceCanUseReservedLane",
+    "ce-index-early-eviction": "LocalSuccessKeepsLocatorAuthority",
     "c-derived-coverage": None,
     "ce-derived-before-flush": "CoverageWasPersisted",
     "c-managed-shared": None,
@@ -66,7 +67,7 @@ def main():
                   "SegmentArenaControlLog.java", "SegmentBookieControlLog.java",
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
                   "SegmentControlRotation.java", "SegmentDataFileLock.java", "SegmentDerivedIndex.java",
-                  "SegmentDataRecovery.java", "SegmentOwnerLoop.java", "SegmentIoExecutor.java"])
+                  "SegmentDataRecovery.java", "SegmentOwnerLoop.java", "SegmentIoExecutor.java", "SegmentPointRead.java"])
     design_paths = ["docs/rfcs/unified-wal/RFC-0003-segment-storage-allocator.md",
                     "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md",
                     "docs/rfcs/unified-wal/spikes/SPIKE-C-no-object-tla.md"]
@@ -84,7 +85,7 @@ def main():
         "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
-        "deferred": ["full Model A", "Model D", "A+C", "C+D", "MOVE/FREE", "online index/hot handoff/full coverage recovery",
+        "deferred": ["full Model A", "Model D", "A+C", "C+D", "MOVE/FREE", "fresh Get/read pin model and full online coverage recovery",
                      "full online control rotation", "partial/corrupt framing", "quorum", "liveness"],
     }
     (run / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

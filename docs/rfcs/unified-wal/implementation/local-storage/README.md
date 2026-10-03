@@ -380,3 +380,15 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 模型回执`unified-wal-model-tn4d2l9o`冻结41个实际输入（7个module、18个cfg、runner、15个Java）及父提交处3份合同哈希，18配置为8个完整正向PASS、10个指定反例。新增维护投影完整探索482 distinct states，10个Next动作均非零；索引占用控制credit的候选规则实际违反`FenceCanUseReservedLane`。仅检查有限安全性与控制动作可启用性，未验证最终进展/死锁自由；假设DATA barrier/hot发布已经成立，见[模型说明](../models/README.md#索引维护与控制预留投影)。历史运行不改绑定。
 
 尚未实现query-visible后hot淘汰/fresh Get读取及重复写接管、在线flush/coverage、扫描跳过、MOVE/delete更新次序、全局native/磁盘预算与长期可持续吞吐。当前Put完成不会释放热容量，因此满热表后仍保持背压；共享DATA I/O暂停也可能延迟点读或已接受DATA，append owner与控制lane保持独立。真实掉电、完整A/C/D及组合、步骤8总验收与生产authority仍未完成。
+
+### Query-visible 热定位接管切片
+
+2026-10-03，真实WriteBatch建立query-visible后，原owner才移除同一定位的hot记录并释放热容量；失败仍保留hot。点读及普通/恢复重复写先hot，miss后通过既有DATA I/O执行fresh Get，随后在同一DATA票据上借原池校验DATA；不保留旧snapshot/negative-cache、不新增队列/线程或控制credit。Get前取得文件pin，正常/恢复或read Admission、输入和pin保持到实际最后I/O与owner终结；捕获的不可变定位不要求hot仍存在，终结复核当前单stream连续前缀、allocation grant、Bookie权限及ENTRY_DATA来源。
+
+`Limits.indexedEntries`独立于`hotEntries`，旧构造保留两者相等的容量选择，均按固定shard拆分。新增有上限的坐标占用集合只保留context/entryId，不复制locator/payload；接纳后及I/O unknown期间保留，未提交取消才撤销，完整正常restart扫描恢复该集合。已占坐标的derived missing返回not-ready/暂时不可用，Get错误返回unknown，不能据此覆盖旧DATA；未占坐标允许乱序填洞且新写不新增DB读。正常restart先按完整恢复容量重建实际DB，再恢复有限坐标而非把全部定位塞回小hot表。当前无FREE，坐标容量到限仍背压，不能据此称为长期可持续存储或完整native/RSS/磁盘总账。
+
+回执`unified-wal-local-eIFmOEQ7`绑定父提交`2e5978ab836109574f23cbf429859571928b67e9`及201个实际源码/测试/向量输入：相关7类222项，217通过、5项Linux亲和在macOS跳过，0失败/错误；`spotless:check checkstyle:check`通过。新增4个回归覆盖容量仅1的DATA票据在真实Get续接、停止准入、owner续接异常与第二段I/O拒绝时保持恰好一次终结；Put接管时已捕获的真实读/重复比较继续成功；fresh Get后的普通、旧API及恢复重复比较不新增DATA force；实际Get不可用不重写坐标；取消fresh Get时关闭等待实际I/O/pin；同shard数据量超过hot容量、乱序填洞、删掉全部DB后两轮restart/读取/重复/追加。初次夹具使用了错误I/O服务和恢复凭据，修正后本回执完整通过；没有弱化断言。
+
+模型回执`unified-wal-model-2qh8pivn`冻结43个实际输入（7 module、19 cfg、runner、16 Java），保留父提交处3份合同哈希，58个回执文件checksum已核对；19配置为8个完整正向PASS与11个指定反例。当前维护投影完整探索858 distinct states，检查query-visible之前保留hot、之后释放hot且坐标占用不丢失；新增过早淘汰规则实际违反`LocalSuccessKeepsLocatorAuthority`，控制credit反例仍有效。模型不证明fresh Get/read pin/票据续接或liveness，以上由独立真实Java回归验证，见[模型说明](../models/README.md#query-visible接管与坐标占用)。历史回执不改绑定。
+
+在线flush/coverage、coverage缩短DATA扫描、MOVE/delete次序、完整全局native/磁盘预算、未正常关闭会话恢复、完整A/C/D及组合、真实掉电与生产authority仍未完成；步骤8保持部分实现。当前始终全量扫描，运行时query-visible不推导持久覆盖。

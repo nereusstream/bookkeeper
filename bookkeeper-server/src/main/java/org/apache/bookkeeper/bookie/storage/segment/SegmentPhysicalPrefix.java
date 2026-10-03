@@ -176,6 +176,14 @@ final class SegmentPhysicalPrefix {
         return durableThrough;
     }
 
+    /** Current single-stream proof; MOVE/FREE selector authority is not implemented by this prefix. */
+    boolean containsDurable(SegmentPointRead.Location location) {
+        owner.requireOwner();
+        SegmentBatchFormat.Address address = location.address();
+        return address.shard() == shard && address.streamGeneration().equals(streamGeneration)
+                && address.sequence() >= firstSequence && address.sequence() <= durableThrough;
+    }
+
     int pending() {
         owner.requireOwner();
         return pending.size();

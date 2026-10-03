@@ -165,6 +165,7 @@ final class SegmentDataPhysicalDriver {
         private final List<PendingNormal> normals;
         private SegmentBatchFormat.FrozenBatch batch;
         private SegmentBufferPool.Lease readBuffer;
+        private IsolatedSegmentFiles.DataReadLease readPin;
         private Runnable releaseSource;
         private List<SegmentArenaControlDriver.FailureLease> failureLeases = List.of();
         private boolean physicalTerminal;
@@ -195,6 +196,12 @@ final class SegmentDataPhysicalDriver {
             }
             physicalTerminal = true;
             releaseIfTerminal();
+        }
+
+        synchronized void physicalTerminalIfNeeded() {
+            if (!physicalTerminal) {
+                physicalTerminal();
+            }
         }
 
         synchronized void ownerTerminal() {
@@ -232,12 +239,18 @@ final class SegmentDataPhysicalDriver {
                             }
                         } finally {
                             try {
-                                if (releaseSource != null) {
-                                    releaseSource.run();
+                                if (readPin != null) {
+                                    readPin.close();
                                 }
                             } finally {
-                                for (SegmentArenaControlDriver.FailureLease lease : failureLeases) {
-                                    lease.close();
+                                try {
+                                    if (releaseSource != null) {
+                                        releaseSource.run();
+                                    }
+                                } finally {
+                                    for (SegmentArenaControlDriver.FailureLease lease : failureLeases) {
+                                        lease.close();
+                                    }
                                 }
                             }
                         }
@@ -274,6 +287,7 @@ final class SegmentDataPhysicalDriver {
         if (!hot.matchesScope(files)) {
             throw new IllegalArgumentException("Physical driver and hot directory storage scopes differ");
         }
+        hot.bindPrefix(prefix);
         SegmentBookieControlLog restartBookie = files.restartBookie();
         if (restartBookie != null) {
             owner.requireOwner();
@@ -869,10 +883,10 @@ final class SegmentDataPhysicalDriver {
             private PhysicalCommand physical;
             private Obligation duplicate;
             private final AtomicBoolean duplicateStarted = new AtomicBoolean();
-            private boolean duplicateSubmitted;
             private boolean sourceReleased;
             private boolean settled;
             private SegmentArenaControlDriver.FailureLease failureLease;
+            private IsolatedSegmentFiles.DataReadLease lookupPin;
 
             private Entry(SegmentEntryInputs.Input input, SegmentBookieControlLog.Admission admission,
                           SegmentBookieControlLog.RecoveryAdmission recoveryAdmission, NormalRequest request,
@@ -902,9 +916,7 @@ final class SegmentDataPhysicalDriver {
                 if (physical != null) {
                     physical.failed(failure);
                 } else if (duplicate != null) {
-                    if (!duplicateSubmitted && !duplicateStarted.get()) {
-                        duplicate.physicalTerminal();
-                    }
+                    duplicate.physicalTerminalIfNeeded();
                     deliverDuplicate(duplicate, failure);
                 } else {
                     respond(NormalStatus.UNKNOWN, null, failure, true);
@@ -917,6 +929,10 @@ final class SegmentDataPhysicalDriver {
                     identity = null;
                     duplicateView = null;
                     data = null;
+                    if (lookupPin != null) {
+                        lookupPin.close();
+                        lookupPin = null;
+                    }
                     input.releaseFromDriver();
                     sourceReleased = true;
                 }
@@ -1017,6 +1033,25 @@ final class SegmentDataPhysicalDriver {
                 }
                 return;
             }
+            if (hot.occupied(entry.context, entry.entryId)) {
+                try {
+                    entry.lookupPin = files.pinDataRead();
+                } catch (IOException failure) {
+                    entry.refuse(NormalStatus.UNKNOWN, failure);
+                    return;
+                }
+                hot.freshGet(entry.ticket, entry.context, entry.entryId, (indexed, failure) -> {
+                    if (failure != null || owner.failure() != null) {
+                        entry.refuse(NormalStatus.UNKNOWN, failure != null ? failure : owner.failure());
+                    } else if (indexed == null) {
+                        // Missing derived state cannot authorize overwriting an already accepted coordinate.
+                        entry.refuse(NormalStatus.TRANSIENT_UNAVAILABLE, null);
+                    } else {
+                        duplicate(entry, indexed, null);
+                    }
+                });
+                return;
+            }
             if (!hot.canAcceptEntries(assembling.size() + 1)) {
                 entry.refuse(NormalStatus.TRANSIENT_UNAVAILABLE, null);
                 return;
@@ -1063,8 +1098,7 @@ final class SegmentDataPhysicalDriver {
                         : !entry.eligible() ? NormalStatus.STALE_ADMISSION
                         : status.get() == DuplicateStatus.CONFLICT ? NormalStatus.CONFLICT
                         : status.get() == DuplicateStatus.SAME_DURABLE
-                                && hot.liveDurableCandidate(entry.context, entry.entryId)
-                                        .filter(selected.get()::equals).isPresent() ? NormalStatus.LOCAL_DURABLE
+                                && hot.isCurrentDurable(selected.get()) ? NormalStatus.LOCAL_DURABLE
                                 : status.get() == DuplicateStatus.NOT_READY ? NormalStatus.TRANSIENT_UNAVAILABLE
                                 : NormalStatus.UNKNOWN;
                 entry.respond(result, result == NormalStatus.LOCAL_DURABLE ? selected.get() : null, failure, false);
@@ -1074,21 +1108,20 @@ final class SegmentDataPhysicalDriver {
             if (location == null) {
                 existing.waiters.add(new WaitingDuplicate(entry.ticket, entry.duplicate, status, selected));
                 entry.duplicate.physicalTerminal();
-                entry.duplicateSubmitted = true;
                 entry.releaseSource();
                 return;
             }
             try {
+                entry.duplicate.readPin = entry.lookupPin != null ? entry.lookupPin : files.pinDataRead();
+                entry.lookupPin = null;
                 entry.duplicate.readBuffer = owner.pool().acquire(SegmentPointRead.scratchBytes(location));
             } catch (IOException failure) {
                 entry.duplicate.physicalTerminal();
-                entry.duplicateSubmitted = true;
                 entry.ticket.complete(() -> deliverDuplicate(entry.duplicate, failure));
                 return;
             }
             if (entry.duplicate.readBuffer == null) {
                 entry.duplicate.physicalTerminal();
-                entry.duplicateSubmitted = true;
                 entry.ticket.complete(() -> deliverDuplicate(entry.duplicate, null));
                 return;
             }
@@ -1109,7 +1142,6 @@ final class SegmentDataPhysicalDriver {
                 }
                 deliverDuplicate(entry.duplicate, failure);
             });
-            entry.duplicateSubmitted = true;
         }
 
         private void seal() {
@@ -1373,8 +1405,7 @@ final class SegmentDataPhysicalDriver {
                     result = DuplicateStatus.NOT_READY;
                 } else if (!canComplete.getAsBoolean()) {
                     result = DuplicateStatus.STALE_ADMISSION;
-                } else if (selected.get() != null
-                        && !hot.liveDurableCandidate(context, entryId).filter(selected.get()::equals).isPresent()) {
+                } else if (selected.get() != null && !hot.isCurrentDurable(selected.get())) {
                     result = DuplicateStatus.NOT_READY;
                 }
             }
@@ -1384,7 +1415,6 @@ final class SegmentDataPhysicalDriver {
         try {
             accepted = owner.submit(shard, new SegmentOwnerLoop.Command() {
                 private final AtomicBoolean started = new AtomicBoolean();
-                private boolean submitted;
 
                 @Override
                 public void run(SegmentOwnerLoop.Ticket ticket) {
@@ -1395,31 +1425,57 @@ final class SegmentDataPhysicalDriver {
                             if (pendingNormal.identity.sameLogicalPayload(identity)) {
                                 pendingNormal.waiters.add(new WaitingDuplicate(ticket, obligation, status, selected));
                                 obligation.physicalTerminal();
-                                submitted = true;
                                 return;
                             }
                             status.set(DuplicateStatus.CONFLICT);
+                            obligation.physicalTerminal();
+                            ticket.complete(() -> deliverDuplicate(obligation, null));
+                            return;
+                        }
+                        if (hot.occupied(context, entryId)) {
+                            try {
+                                obligation.readPin = files.pinDataRead();
+                            } catch (IOException failure) {
+                                obligation.physicalTerminal();
+                                ticket.complete(() -> deliverDuplicate(obligation, failure));
+                                return;
+                            }
+                            hot.freshGet(ticket, context, entryId, (indexed, failure) -> {
+                                if (failure != null || indexed == null || owner.failure() != null) {
+                                    obligation.physicalTerminal();
+                                    ticket.complete(() -> deliverDuplicate(obligation,
+                                            failure != null ? failure : owner.failure()));
+                                } else {
+                                    compare(ticket, indexed);
+                                }
+                            });
+                            return;
                         }
                         obligation.physicalTerminal();
                         ticket.complete(() -> deliverDuplicate(obligation, null));
                         return;
                     }
+                    compare(ticket, location);
+                }
+
+                private void compare(SegmentOwnerLoop.Ticket ticket, SegmentPointRead.Location location) {
                     selected.set(location);
-                    if (owner.pool() != null) {
-                        try {
+                    try {
+                        if (obligation.readPin == null) {
+                            obligation.readPin = files.pinDataRead();
+                        }
+                        if (owner.pool() != null) {
                             obligation.readBuffer = owner.pool().acquire(SegmentPointRead.scratchBytes(location));
-                        } catch (IOException failure) {
-                            obligation.physicalTerminal();
-                            submitted = true;
-                            ticket.complete(() -> deliverDuplicate(obligation, failure));
-                            return;
+                            if (obligation.readBuffer == null) {
+                                obligation.physicalTerminal();
+                                ticket.complete(() -> deliverDuplicate(obligation, null));
+                                return;
+                            }
                         }
-                        if (obligation.readBuffer == null) {
-                            obligation.physicalTerminal();
-                            submitted = true;
-                            ticket.complete(() -> deliverDuplicate(obligation, null));
-                            return;
-                        }
+                    } catch (IOException failure) {
+                        obligation.physicalTerminal();
+                        ticket.complete(() -> deliverDuplicate(obligation, failure));
+                        return;
                     }
                     io.submit(ticket, () -> {
                         started.set(true);
@@ -1439,15 +1495,12 @@ final class SegmentDataPhysicalDriver {
                         }
                         deliverDuplicate(obligation, failure);
                     });
-                    submitted = true;
                 }
 
                 @Override
                 public void failed(Throwable failure) {
                     owner.requireOwner();
-                    if (!submitted && !started.get()) {
-                        obligation.physicalTerminal();
-                    }
+                    obligation.physicalTerminalIfNeeded();
                     deliverDuplicate(obligation, failure);
                 }
             });
