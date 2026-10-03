@@ -19,6 +19,10 @@ import time
 
 
 MATRIX = {
+    "c-relocation-completion": None,
+    "ce-relocation-early-facts": "CopyFactsHaveBarrierAndPrefix",
+    "ce-relocation-ordinary": "CopyDoesNotPublishOrdinary",
+    "ce-relocation-cancel": "BuffersWaitForBothTerminals",
     "c-terminal-index": None,
     "ce-terminal-index-late-put": "ReleasedCoordinatesHaveNoNativeRows",
     "ce-terminal-index-before-delete": "ReleasedCoordinatesHaveNoNativeRows",
@@ -108,7 +112,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "MOVE and full reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -121,7 +125,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "TerminalIndexCleanup.tla" if "terminal-index" in name else (
+                   "-metadir", str(states), "RelocationCompletion.tla" if "relocation" in name else (
+                       "TerminalIndexCleanup.tla" if "terminal-index" in name else (
                        "WholeAllocationReuse.tla" if "whole-reuse" in name else (
                        "WholeAllocationFree.tla" if "whole-free" in name else (
                        "AllocationOrder.tla" if "allocation" in name else (
@@ -131,7 +136,7 @@ def main():
                        "DerivedCoverage.tla" if "derived" in name else (
                        "ArenaRotation.tla" if "arena-rotation" in name else (
                        "BookieCheckpoint.tla" if "bookie-checkpoint" in name or "bookie-rotation" in name else (
-                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla"))))))))))]
+                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla")))))))))))]
         wrapper = ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
         output = run / "checker-output" / (name + ".log")
         start = time.monotonic()

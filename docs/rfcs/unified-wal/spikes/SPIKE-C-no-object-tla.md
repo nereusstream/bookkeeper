@@ -1112,3 +1112,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04，新增[终态索引清理投影](../implementation/models/README.md#终态索引清理投影)，检查实际旧Put/读义务后冻结终态cut，native删除先于坐标释放、晚到tombstone不扩大当前集合及取消不释放实际IO。有限正向244 distinct states完整探索，四种去掉保护的配置产生指定反例；总矩阵14正向/30指定反例。真实RocksDB WriteBatch/flush、所有原owner协调与小容量循环由[Java切片](../implementation/local-storage/README.md#运行期终态索引与坐标回收)拥有，模型不证明长期disk预算、MOVE或完整A+C/C+D，不解除Gate。
+
+
+2026-10-04，新增[relocation内部完成投影](../implementation/models/README.md#relocation-内部完成投影)：2个copy batch的实际barrier、原owner连续prefix、内部结果与pool两方终结。正向230 distinct states完整探索，force即返回事实、copy普通发布、取消即归还池产生指定反例；矩阵15正向/33指定反例。真实文件和原池由[Java切片](../implementation/local-storage/README.md#relocation-副本内部持久化完成)验证；MOVE/selector、FREE组合及完整A+C/C+D未完成，不解除Gate。

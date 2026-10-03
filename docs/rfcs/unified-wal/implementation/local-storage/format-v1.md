@@ -268,3 +268,6 @@ Arena DEVICE_STATE type=7 的健康 CLOSED v2 body 为 `24 + 24*N` bytes，外�
 
 
 运行期终态派生清理（2026-10-04）：native location key/value、index UUID、A/B coverage字节与固定向量不变。明确捕获的Bookie准确终态集合只用于当前有界维护：暂停全部原index owner与entry准入，实际native删除成功后原owner释放同一集合的坐标，再由现有runtime checkpoint验证更新计数/stream并flush/force发布。native query-visible删除不表示持久coverage，coverage失败不改写TOMBSTONE、FREE或DATA authority。随后出现的新tombstone在下一次处理，restart仍按Bookie后缀过滤；[实际实现与回执](README.md#运行期终态索引与坐标回收)不改变实验格式或发布兼容承诺。
+
+
+`submitRelocation` 的内部持久化结果复用既有 RELOCATION_COPY envelope 和 DATA 地址，不新增持久/wire 字段。私有构造结果绑定现有 move identity/generation、目标定位及完整 entry SHA-256；copy durable completion 不发布普通 hot/derived locator，不授予 ACK 或 MOVE authority。格式向量及来源区别不变，执行证据见[内部完成切片](README.md#relocation-副本内部持久化完成)。

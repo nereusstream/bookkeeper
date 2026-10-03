@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖及尾部恢复/分配顺序/整allocation FREE及健康CLOSED复用及终态索引清理投影的十四个正向配置已完成有限状态探索，三十个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖及尾部恢复/分配顺序/整allocation FREE及健康CLOSED复用及终态索引清理及 relocation 内部完成投影的十五个正向配置已完成有限状态探索，三十三个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -18,6 +18,10 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-relocation-completion` | 2个copy batch的实际IO、原owner结果、连续前缀与原池释放；copy不发布普通定位 |
+| `ce-relocation-early-facts` | 故意force即返回内部事实；必须违反`CopyFactsHaveBarrierAndPrefix` |
+| `ce-relocation-ordinary` | 故意将copy发布为普通定位；必须违反`CopyDoesNotPublishOrdinary` |
+| `ce-relocation-cancel` | 故意取消即释放池；必须违反`BuffersWaitForBothTerminals` |
 | `c-terminal-index` | 2个旧坐标/2行native、0/1旧Put/读/实际删除I/O、1个后继写，固定终态cut后真实删除与owner释放 |
 | `ce-terminal-index-late-put` | 故意忽略旧Put；必须违反`ReleasedCoordinatesHaveNoNativeRows` |
 | `ce-terminal-index-before-delete` | 故意先释放坐标；必须违反`ReleasedCoordinatesHaveNoNativeRows` |
@@ -295,3 +299,19 @@ DATA barrier、当前原owner连续前缀、身份/权限及framing仍作为其�
 2个旧key与2个native行，0/1实际旧Put与读义务、0/1删除I/O、最多1个新key，终态单调且准确。Prepare代表全部原owner已暂停/index追平并取得Bookie entry lease，captured集合从该cut固定；晚到终态不改变本次native/owner集合。native删除失败可只删subset但不释放坐标；coverage发布unknown发生在安全native删除及owner释放之后，可以在实际终结解冻后使用容量，不能把它当coverage成功。取消等待保留gate到实际删除终结；旧Put不能在新坐标释放后重新插入旧行。
 
 正例244 distinct states、queue 0、depth/diameter 13，Tombstone/FinishOldPut/FinishRead/Prepare/StartDelete/Delete/DeleteUnknown/Prune/Publish/PublicationUnknown/Finish/CancelWait/NewWrite均有coverage。输入framing、准确Bookie T、真实native WriteBatch与本地IO屏障为抽象；Publish沿用既有coverage合同，不展开其完整A/B状态图。该投影没有多worker部分refusal/失败时序、真实native批次内存/字节、restart/crash、metadata保留、SST/磁盘净回收、FREE/MOVE组合或liveness。真实六类新路径及1/4 worker小容量四轮复用由[Java切片](../local-storage/README.md#运行期终态索引与坐标回收)拥有，不等于长期运行验收或完整A+C/C+D。
+
+
+## relocation 内部完成投影
+
+2026-10-04，回执 `unified-wal-model-a3_49iho` 绑定父提交 `de6f78fdb1acb5965f549835eb281105619390cc`，冻结80个输入（14 modules、48 configs、runner、17 Java）及父提交处3份合同哈希，145个回执checksum逐项核验。15个完整正向PASS、33个指定反例；历史回执不重绑。新增配置如下：
+
+| 配置 | 结果 | generated / distinct | 剩余queue | 搜索深度 / 完整图直径 | elapsed秒 | peak RSS bytes |
+|---|---|---|---|---|---|---|
+| `c-relocation-completion` | PASS | 580 / 230 | 0 | 10 / 10 | 0.7362 | 112,902,144 |
+| `ce-relocation-early-facts` | EXPECTED_COUNTEREXAMPLE | 2 / 2 | 0 | 2 / — | 0.7095 | 102,580,224 |
+| `ce-relocation-ordinary` | EXPECTED_COUNTEREXAMPLE | 7 / 7 | 4 | 3 / — | 0.7326 | 107,855,872 |
+| `ce-relocation-cancel` | EXPECTED_COUNTEREXAMPLE | 6 / 6 | 4 | 2 / — | 0.7215 | 103,186,432 |
+
+固定2个已提交copy batch，实际IO、durable、owner接收、prefix与最终owner terminal分开。后批force不越过缺口；copy内部结果不授予普通定位。错误可让pending先收到失败，但其buffer仍等自身实际IO及原owner都终结。取消只停止等待，原资源与内部结果义务保留。
+
+正向230 distinct states，queue 0、depth/diameter 10；Force/ForceUnknown/Receive/OwnerTerminal/Release/CancelWait全部有coverage。framing、CRC、SHA-256、grant及copy来源为输入假设；字节/池真实路径由[五个Java测试](../local-storage/README.md#relocation-副本内部持久化完成)覆盖。投影没有MOVE/predecessor/selector、Bookie授权、orphan FREE、多个victim/源冻结、native覆盖、crash/restart或liveness，不证明完整A+C/C+D及步骤9验收。

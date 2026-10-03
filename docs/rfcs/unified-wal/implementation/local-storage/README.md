@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[运行期终态索引与坐标回收](#运行期终态索引与坐标回收)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围，MOVE/compaction与长期净容量仍未完成。
+2026-10-04 当前增量为[relocation 副本内部持久化完成](#relocation-副本内部持久化完成)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围，MOVE/compaction与长期净容量仍未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -508,3 +508,20 @@ native删除失败返回UNKNOWN，保留占用坐标，不伪造容量；已删�
 最终Java回执 `unified-wal-local-PNLDFRde` 绑定父提交 `c9463f2ed1fae6c611a325a2b8a702871190f8d6` 与204个实际源码/测试/向量输入：相关7类257项，252通过、5项Linux亲和在macOS跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。复现沿用前述7类 `run-local-storage-tests.sh` 命令。中间运行修正测试缺失import、行长与夹具关闭顺序；容量循环暴露既有测试助手错误假设每次入口必定接受，现按现有API在原五秒期限内重试入口false及结果TRANSIENT_UNAVAILABLE，保留caller buffer释放、异常、LOCAL_DURABLE及容量/恢复断言。未通过的中间运行不计作成功。
 
 有限模型见[终态索引清理投影](../models/README.md#终态索引清理投影)。这证明本轮固定小容量循环及相关失败边界；没有SST/控制历史净空间测量、长期负载、全局memory/临时磁盘预算、MOVE/部分存活compaction、多Arena、集群删除、掉电或生产权威。步骤9/10及整体目标仍未完成。
+
+
+### relocation 副本内部持久化完成
+
+2026-10-04，`SegmentDataPhysicalDriver.submitRelocation` 接通 copy-only frozen batch 的内部完成分支，复用同一 DATA 票据、原 owner、固定对齐池、文件 reservation、真实 write/force、连续 stream prefix 和资源终结。它是后续 MOVE 的副本持久化前置，尚无 storage 图的 compaction request、victim/source 冻结、MOVE 控制或 selector 切换。
+
+接管 frozen batch 后，独立 parser 校验完整 framing/CRC；要求所有记录为 RELOCATION_COPY、同一非零 move identity/generation、固定 logical shard 且坐标不重复。源大小仍受既有 batch/record 上限约束。输入不合法时归还已接管的 pooled batch，不取得物理地址或发布定位。有效输入最多保存256项定位及完整 BK entry（含 LAC/CRC）的 SHA-256，不保留已归还 buffer 的 entry view；该字节绑定不改变普通重复写的 logical payload/LAC 语义。
+
+实际 force 及原 owner 连续前缀完成后，`RelocationCompletion` 才得到私有构造的 `DurableRelocation`，绑定 source config/identity、move operation、generation、目标定位和 entry SHA-256。后批先 durable 不越过旧缺口；file quarantine/失败或无完整 prefix 不返回副本持久结果。copy 继续被既有 hot/index 路径排除，不占普通坐标、不授予 LOCAL_DURABLE、不替代 Bookie 权限。后续 MOVE 必须另行保护并验证 expected predecessor、当前 grant/generation、payload 及最终 applied 条件；这份结果不是 selector/FREE authority。
+
+提交及资源拒绝仍走原 physical obligation，只有实际 I/O 和原 owner 两方终结才归还 batch/pool。内部 completion 不随调用方 future 取消丢失；短 close 超时保留原资源，实际完成后才能 drain。没有新线程、队列、buffer pool 或逐 entry 控制 force，实验 DATA/wire 格式未改变。
+
+五个新增真实路径验证：两 ledger copy 返回准确绑定与独立可读原始 record，但没有普通定位；随后同坐标 ENTRY_DATA 可正常提交，重放只选普通记录。copy-only/mixed origin、mixed move、duplicate coordinate 及错误 logical shard 校验拒绝无 I/O 且原池可复用。部分写及 force unknown 不返回持久结果；取消等待且实际 force 暂停时池不可复用、close 不完成；两个 DATA I/O worker 下后批及后续实际 I/O 已返回，前批尚未进入文件 I/O 时两个结果仍未发布，释放后依连续前缀完成。
+
+最终 Java 回执 `unified-wal-local-kjqKfSe1` 绑定父提交 `de6f78fdb1acb5965f549835eb281105619390cc` 与204个源码/测试/向量输入：相关7类262项，257通过、5项Linux亲和在macOS跳过，0失败/错误；Spotless/Checkstyle通过。先运行五个新增定向用例，再因共享物理驱动扩大至既有七类；复现沿用前述七类 `run-local-storage-tests.sh` 命令。两次编译修正测试 Command/helper 接线；初次乱序夹具误在同文件持锁 force 中暂停，已改用既有 I/O executor hook 暂停前批进入文件操作，通过后继实际 I/O 返回确认后批已完成。没有改变文件串行保证或为测试添加生产开关，未通过的中间运行不计作成功。
+
+有限模型见[relocation 内部完成投影](../models/README.md#relocation-内部完成投影)。本切片未启用 MOVE/selector、orphan 回收、部分存活 compaction、整图搬迁调度、OPEN 恢复、多 Arena、掉电或生产 authority，步骤9及整体目标继续未完成。

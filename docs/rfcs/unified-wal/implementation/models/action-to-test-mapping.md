@@ -180,3 +180,15 @@ metadata-only退役范围恢复、空range不虚增序号、rotation及native覆
 | `NewWrite` | `runtimeTerminalCleanupRecyclesEveryOriginalOwnersCoordinateAndPhysicalBlock`在1/4 worker、四坐标/四块下验证四轮清理/FREE/复用后保留四个第五代live entry及restart |
 
 模型不代替实际native、原worker通知或资源释放验证；没有新增进程退出/掉电实验。native生命周期故障与Put暂停仅在测试中通过反射取得实际资源，生产设计未增加mock层或测试开关。
+
+
+## relocation 内部持久化完成
+
+| 动作 | 实际路径与必要测试 |
+|---|---|
+| `Force/ForceUnknown` | `submitRelocation`复用真实write/force；`relocationWriteAndForceUnknownNeverReturnDurableCopyFacts`覆盖部分写/force unknown，不返回副本事实 |
+| `Receive` | 原owner连续prefix后才构造内部结果；`laterCopyForceCannotReturnFactsAcrossAnEarlierPhysicalHole`以两个实际DATA IO worker验证后批先完成仍等待缺口 |
+| `OwnerTerminal/Release/CancelWait` | 原physical obligation等待实际IO与owner两方才归还pool；`cancelledRelocationWaitKeepsActualForceAndOriginalPoolUntilTerminal`取消future、实际force暂停及短close保留资源 |
+| copy-only输入/内部结果 | `relocationDurabilityReturnsBoundCopyFactsWithoutOrdinaryPublication`验证绑定、原始copy可校验但无普通定位、后继普通同坐标写与恢复来源选择；`relocationValidationConsumesPooledBatchesWithoutIoOrCoordinatePublication`验证mixed origin/move、重复坐标及错误shard拒绝并归还池 |
+
+没有引入MOVE完成、普通Add成功或selector winner的模型断言。乱序测试暂停前批进入实际IO；同文件write/force串行保证保留，测试不通过暂停持锁force制造不可达交错。

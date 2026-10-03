@@ -19,16 +19,22 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Real DATA I/O and isolated local results; no production Bookie ACK authority. */
@@ -36,6 +42,51 @@ final class SegmentDataPhysicalDriver {
     @FunctionalInterface
     interface Completion {
         void complete(List<SegmentPointRead.Location> candidates, Throwable failure);
+    }
+
+    @FunctionalInterface
+    interface RelocationCompletion {
+        void complete(DurableRelocation copy, Throwable failure);
+    }
+
+    record RelocationCopy(SegmentPointRead.Location location, String entrySha256) { }
+
+    /** Actual copy durability only. MOVE must separately validate its predecessor, grants and selector. */
+    static final class DurableRelocation {
+        private final IsolatedSegmentConfig sourceConfig;
+        private final SegmentFileHeader sourceIdentity;
+        private final UUID operationId;
+        private final Generation operationGeneration;
+        private final List<RelocationCopy> copies;
+
+        private DurableRelocation(IsolatedSegmentFiles files, UUID operationId, Generation operationGeneration,
+                                   List<RelocationCopy> copies) {
+            sourceConfig = files.config();
+            sourceIdentity = files.identity();
+            this.operationId = operationId;
+            this.operationGeneration = operationGeneration;
+            this.copies = List.copyOf(copies);
+        }
+
+        IsolatedSegmentConfig sourceConfig() {
+            return sourceConfig;
+        }
+
+        SegmentFileHeader sourceIdentity() {
+            return sourceIdentity;
+        }
+
+        UUID operationId() {
+            return operationId;
+        }
+
+        Generation operationGeneration() {
+            return operationGeneration;
+        }
+
+        List<RelocationCopy> copies() {
+            return copies;
+        }
     }
 
     enum NormalStatus {
@@ -311,6 +362,61 @@ final class SegmentDataPhysicalDriver {
         Objects.requireNonNull(completion, "completion");
         batch.claimForDriver();
         return submitPhysical(batch, new Obligation(completion, List.of()));
+    }
+
+    /** Consume a copy-only frozen batch through the same DATA I/O, prefix and original-owner obligation. */
+    boolean submitRelocation(SegmentBatchFormat.FrozenBatch batch, RelocationCompletion completion)
+            throws IOException {
+        Objects.requireNonNull(batch, "batch");
+        Objects.requireNonNull(completion, "completion");
+        batch.claimForDriver();
+        List<RelocationCopy> copies;
+        UUID operation;
+        Generation generation;
+        try {
+            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(batch.bytes(), batch.address(),
+                    files.config().bytesPerFile());
+            SegmentBatchParser.Record first = parsed.records().get(0);
+            if (first.origin() != SegmentBatchFormat.RELOCATION_COPY) {
+                throw new IOException("Relocation submission requires copy-only records");
+            }
+            operation = first.moveId();
+            generation = new Generation(first.moveGeneration());
+            List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+            List<RelocationCopy> validated = new ArrayList<>(locations.size());
+            HashSet<NormalKey> coordinates = new HashSet<>();
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (int i = 0; i < parsed.records().size(); i++) {
+                SegmentBatchParser.Record record = parsed.records().get(i);
+                if (record.origin() != SegmentBatchFormat.RELOCATION_COPY || !operation.equals(record.moveId())
+                        || generation.value() != record.moveGeneration()
+                        || SegmentOwnerLoop.shardFor(record.context().ledgerId(), files.config().logicalShards())
+                            != shard || batch.address().shard() != shard
+                        || !coordinates.add(new NormalKey(record.context(), record.entryId()))) {
+                    throw new IOException("Relocation batch has mixed origin, operation, coordinate or logical shard");
+                }
+                digest.update(record.entry().duplicate());
+                validated.add(new RelocationCopy(locations.get(i), HexFormat.of().formatHex(digest.digest())));
+            }
+            copies = List.copyOf(validated);
+        } catch (IOException | RuntimeException | Error failure) {
+            batch.releaseFromDriver();
+            throw failure;
+        } catch (NoSuchAlgorithmException impossible) {
+            batch.releaseFromDriver();
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
+        Completion internal = (ordinary, failure) -> {
+            owner.requireOwner();
+            if (failure == null && (ordinary == null || !ordinary.isEmpty()
+                    || !authority.dataFileAvailable(batch.address().fileIndex())
+                    || copies.stream().anyMatch(copy -> !prefix.containsDurable(copy.location())))) {
+                failure = new IOException("Relocation copy has no complete current physical durability prefix");
+            }
+            completion.complete(failure == null ? new DurableRelocation(files, operation, generation, copies) : null,
+                    failure);
+        };
+        return submitPhysical(batch, new Obligation(internal, List.of()));
     }
 
     /**

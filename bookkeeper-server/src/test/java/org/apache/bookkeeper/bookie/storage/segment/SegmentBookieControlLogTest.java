@@ -9439,6 +9439,347 @@ public class SegmentBookieControlLogTest {
     }
 
 
+    private static SegmentBatchFormat.FrozenBatch pooledRelocationBatch(IsolatedSegmentConfig config,
+            SegmentOwnerLoop owner, long entryId, long sequence, long offset) throws Exception {
+        CompletableFuture<SegmentBatchFormat.FrozenBatch> encoded = new CompletableFuture<>();
+        assertTrue(owner.control(() -> {
+            ByteBuf input = null;
+            try {
+                input = entry(context(), entryId);
+                encoded.complete(SegmentBatchFormat.encodePooled(config, new SegmentBatchFormat.Address(0, 0, 5,
+                        new Generation(1), new Generation(1), sequence, offset),
+                        List.of(SegmentBatchFormat.relocation(context(), input, new UUID(6, 7), new Generation(1))),
+                        owner.pool()));
+            } catch (Throwable failure) {
+                encoded.completeExceptionally(failure);
+            } finally {
+                if (input != null) {
+                    input.release();
+                }
+            }
+        }));
+        return encoded.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void relocationDurabilityReturnsBoundCopyFactsWithoutOrdinaryPublication() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 44, 8235, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 4);
+            SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 4);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    prefix, hot);
+            try {
+                CompletableFuture<SegmentDataPhysicalDriver.DurableRelocation> reply = new CompletableFuture<>();
+                ByteBuf first = entry(context(), 1);
+                ByteBuf second = entry(context(48), 1);
+                String digest;
+                try {
+                    byte[] input = new byte[first.readableBytes()];
+                    first.getBytes(first.readerIndex(), input);
+                    digest = HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(input));
+                    SegmentBatchFormat.FrozenBatch copies = SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                            List.of(SegmentBatchFormat.relocation(context(), first, new UUID(6, 7), new Generation(1)),
+                                    SegmentBatchFormat.relocation(context(48), second,
+                                            new UUID(6, 7), new Generation(1))));
+                    assertTrue(driver.submitRelocation(copies, (copy, failure) -> {
+                        owner.requireOwner();
+                        if (failure == null) {
+                            reply.complete(copy);
+                        } else {
+                            reply.completeExceptionally(failure);
+                        }
+                    }));
+                } finally {
+                    first.release();
+                    second.release();
+                }
+                SegmentDataPhysicalDriver.DurableRelocation copy = reply.get(5, TimeUnit.SECONDS);
+                assertTrue(config.sameStorageScope(copy.sourceConfig()));
+                assertEquals(identity(), copy.sourceIdentity());
+                assertEquals(new UUID(6, 7), copy.operationId());
+                assertEquals(new Generation(1), copy.operationGeneration());
+                assertEquals(2, copy.copies().size());
+                assertEquals(digest, copy.copies().get(0).entrySha256());
+                assertThrows(UnsupportedOperationException.class, () -> copy.copies().clear());
+                for (SegmentDataPhysicalDriver.RelocationCopy record : copy.copies()) {
+                    SegmentBatchParser.Record actual = SegmentPointRead.read(config, identity(), arena,
+                            record.location()).record();
+                    assertEquals(SegmentBatchFormat.RELOCATION_COPY, actual.origin());
+                    assertEquals(copy.operationId(), actual.moveId());
+                }
+                FutureTask<Void> unpublished = new FutureTask<>(() -> {
+                    assertEquals(1, prefix.durableThrough());
+                    assertEquals(0, hot.candidateCount());
+                    assertTrue(hot.liveDurableCandidate(context(), 1).isEmpty());
+                    assertTrue(hot.liveDurableCandidate(context(48), 1).isEmpty());
+                    return null;
+                });
+                assertTrue(owner.control(unpublished::run));
+                unpublished.get(5, TimeUnit.SECONDS);
+                CompletableFuture<List<SegmentDataPhysicalDriver.NormalResult>> normal = new CompletableFuture<>();
+                assertTrue(driver.submitNormal(bookie, batch(config, 1, 2, 8192),
+                        List.of(bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                        (results, failure) -> {
+                            if (failure == null) {
+                                normal.complete(results);
+                            } else {
+                                normal.completeExceptionally(failure);
+                            }
+                        }));
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                        normal.get(5, TimeUnit.SECONDS).get(0).status());
+            } finally {
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentDataRecovery.PhysicalStreamCandidate recovered = SegmentDataRecovery.recoverPhysicalStreamCandidate(
+                    config, identity(), arena, new SegmentFileIo(), 0, new Generation(1), 1, 2, 4);
+            assertEquals(2, recovered.through());
+            assertEquals(1, recovered.entries().size());
+            assertEquals(2, recovered.entries().get(0).address().sequence());
+        }
+    }
+
+    @Test
+    public void relocationValidationConsumesPooledBatchesWithoutIoOrCoordinatePublication() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            grant(arena, 1);
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 44, 8235, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 4);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 4), hot);
+            try {
+                FutureTask<Void> rejected = new FutureTask<>(() -> {
+                    ByteBuf input = entry(context(), 1);
+                    ByteBuf otherShard = entry(context(45), 1);
+                    try {
+                        SegmentBatchFormat.Data copy = SegmentBatchFormat.relocation(context(), input,
+                                new UUID(6, 7), new Generation(1));
+                        for (List<SegmentBatchFormat.Data> records : List.of(
+                                List.of(SegmentBatchFormat.entry(context(), input)),
+                                List.of(copy, SegmentBatchFormat.entry(context(), input)),
+                                List.of(copy, SegmentBatchFormat.relocation(context(), input,
+                                        new UUID(6, 8), new Generation(1))), List.of(copy, copy),
+                                List.of(SegmentBatchFormat.relocation(context(45), otherShard,
+                                        new UUID(6, 7), new Generation(1))))) {
+                            SegmentBatchFormat.FrozenBatch invalid = SegmentBatchFormat.encodePooled(config,
+                                    new SegmentBatchFormat.Address(0, 0, 5, new Generation(1),
+                                            new Generation(1), 1, 4096), records, owner.pool());
+                            assertTrue(invalid != null);
+                            assertThrows(IOException.class, () -> driver.submitRelocation(invalid,
+                                    (result, failure) -> fail("Rejected copy must not reach completion")));
+                            owner.pool().drainReturns();
+                            assertEquals(0, owner.pool().outstanding());
+                        }
+                        assertEquals(0, hot.candidateCount());
+                        assertEquals(4096, files.nextOffset(0));
+                        assertEquals(0, files.dataIo.writes);
+                    } finally {
+                        input.release();
+                        otherShard.release();
+                    }
+                    return null;
+                });
+                assertTrue(owner.control(rejected::run));
+                rejected.get(5, TimeUnit.SECONDS);
+            } finally {
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
+    public void relocationWriteAndForceUnknownNeverReturnDurableCopyFacts() throws Exception {
+        for (boolean force : new boolean[] {false, true}) {
+            IsolatedSegmentConfig base = config();
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(base.directory().resolveSibling("copy-" + force),
+                    1, 4, 1, 8L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                grant(arena, 1);
+                files.dataIo = force ? new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false)
+                        : new SegmentFileIo(64, 2, -1, false);
+                SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                        new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 44, 8235, Duration.ofSeconds(5)));
+                SegmentOwnerLoop owner = group.owner(0);
+                SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 4);
+                SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 4);
+                SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                        prefix, hot);
+                try {
+                    CompletableFuture<Throwable> reply = new CompletableFuture<>();
+                    assertTrue(driver.submitRelocation(pooledRelocationBatch(config, owner, 1, 1, 4096),
+                            (copy, failure) -> {
+                                assertNull(copy);
+                                reply.complete(failure);
+                            }));
+                    assertTrue(reply.get(5, TimeUnit.SECONDS) instanceof IOException);
+                    FutureTask<Void> released = new FutureTask<>(() -> {
+                        owner.pool().drainReturns();
+                        assertEquals(0, owner.pool().outstanding());
+                        assertTrue(prefix.failed());
+                        assertEquals(0, hot.candidateCount());
+                        return null;
+                    });
+                    assertTrue(owner.control(released::run));
+                    released.get(5, TimeUnit.SECONDS);
+                } finally {
+                    assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void cancelledRelocationWaitKeepsActualForceAndOriginalPoolUntilTerminal() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger callbacks = new AtomicInteger();
+        AtomicReference<SegmentDataPhysicalDriver.DurableRelocation> actual = new AtomicReference<>();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            grant(arena, 1);
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                try {
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(failure);
+                }
+            });
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 44, 8235, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 4);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 4), hot);
+            CompletableFuture<SegmentDataPhysicalDriver.DurableRelocation> waiting = new CompletableFuture<>();
+            try {
+                assertTrue(driver.submitRelocation(pooledRelocationBatch(config, owner, 1, 1, 4096),
+                        (copy, failure) -> {
+                            assertNull(failure);
+                            actual.set(copy);
+                            callbacks.incrementAndGet();
+                            waiting.complete(copy);
+                        }));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertTrue(waiting.cancel(false));
+                FutureTask<Void> retained = new FutureTask<>(() -> {
+                    assertEquals(1, owner.pool().outstanding());
+                    assertNull(pooledBatch(config, 2, 2, 8192, owner.pool()));
+                    assertEquals(0, hot.candidateCount());
+                    return null;
+                });
+                assertTrue(owner.control(retained::run));
+                retained.get(5, TimeUnit.SECONDS);
+                assertFalse(group.shutdown(Duration.ofMillis(20)));
+                assertEquals(0, callbacks.get());
+                release.countDown();
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                assertEquals(1, callbacks.get());
+                assertTrue(actual.get() != null);
+                assertEquals(1, actual.get().copies().size());
+            } finally {
+                release.countDown();
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
+    public void laterCopyForceCannotReturnFactsAcrossAnEarlierPhysicalHole() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch firstIoPaused = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        AtomicInteger starts = new AtomicInteger();
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            grant(arena, 1);
+            SegmentIoExecutor copyIo = new SegmentIoExecutor(2, 16,
+                    task -> new Thread(task, "relocation-order-io"), () -> {
+                if (starts.incrementAndGet() == 1) {
+                    firstIoPaused.countDown();
+                    try {
+                        assertTrue(releaseFirst.await(5, TimeUnit.SECONDS));
+                    } catch (InterruptedException failure) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(failure);
+                    }
+                }
+            });
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 3, 1, 2, 4096, 44, 16426, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 4);
+            SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity(), 4);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, copyIo, files, arena,
+                    prefix, hot);
+            try {
+                CompletableFuture<SegmentDataPhysicalDriver.DurableRelocation> first = new CompletableFuture<>();
+                CompletableFuture<SegmentDataPhysicalDriver.DurableRelocation> second = new CompletableFuture<>();
+                assertTrue(driver.submitRelocation(pooledRelocationBatch(config, owner, 1, 1, 4096),
+                        (copy, failure) -> first.complete(copy)));
+                assertTrue(firstIoPaused.await(5, TimeUnit.SECONDS));
+                assertTrue(driver.submitRelocation(pooledRelocationBatch(config, owner, 2, 2, 8192),
+                        (copy, failure) -> second.complete(copy)));
+                CompletableFuture<Void> laterIoReturned = new CompletableFuture<>();
+                assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                    @Override
+                    public void run(SegmentOwnerLoop.Ticket ticket) {
+                        copyIo.submit(ticket, () -> { }, failure -> {
+                            if (failure == null) {
+                                laterIoReturned.complete(null);
+                            } else {
+                                laterIoReturned.completeExceptionally(failure);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void failed(Throwable failure) {
+                        laterIoReturned.completeExceptionally(failure);
+                    }
+                }));
+                laterIoReturned.get(5, TimeUnit.SECONDS);
+                assertFalse(first.isDone());
+                assertFalse(second.isDone());
+                FutureTask<Void> hole = new FutureTask<>(() -> {
+                    assertEquals(0, prefix.durableThrough());
+                    assertEquals(2, owner.pool().outstanding());
+                    assertEquals(0, hot.candidateCount());
+                    return null;
+                });
+                assertTrue(owner.control(hole::run));
+                hole.get(5, TimeUnit.SECONDS);
+                releaseFirst.countDown();
+                assertEquals(1, first.get(5, TimeUnit.SECONDS).copies().get(0).location().address().sequence());
+                assertEquals(2, second.get(5, TimeUnit.SECONDS).copies().get(0).location().address().sequence());
+            } finally {
+                releaseFirst.countDown();
+                copyIo.shutdown();
+                assertTrue(copyIo.awaitTermination(Duration.ofSeconds(5)));
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
     @Test
     public void coveredRecoveryRejectsSeedFromAnotherDataDirectoryBeforeSync() throws Exception {
         IsolatedSegmentConfig source = coverageRecoveryConfig("covered-source");

@@ -158,3 +158,14 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `CapacityBounded` | 固定coordinate/native行上限，释放后新写仍通过原预算；未推导完整memory/SST/临时磁盘预算 |
 
 有限snapshot/集合投影不包含所有原worker时序、control/coverage完整状态机或FREE/MOVE组合。发布失败可保持安全删除且恢复准入，但不能把UNKNOWN或模型PASS当持久覆盖/生产authority。
+
+
+## relocation 内部完成投影
+
+| 性质 | 实际合同及边界 |
+|---|---|
+| `CopyFactsHaveBarrierAndPrefix` | 实际DATA barrier及原owner完整连续prefix后才构造副本事实，不从单个force或最大sequence推断 |
+| `CopyDoesNotPublishOrdinary` | copy内部completion与普通Add/recovery结果分离，既有hot/index继续排除copy；MOVE是另需持久授权的阶段 |
+| `BuffersWaitForBothTerminals` | 实际IO及原owner结果均终结后归还原池；取消等待或pending先失败不提前释放 |
+
+副本字节输入及准确generation/grant假定由真实parser/allocator验证；该有限投影不决定MOVE/selector或FREE胜者，不推导完整内存/磁盘预算或恢复authority。
