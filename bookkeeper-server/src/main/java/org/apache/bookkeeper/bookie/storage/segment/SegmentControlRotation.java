@@ -26,11 +26,9 @@ import java.nio.file.StandardOpenOption;
 import java.util.UUID;
 import java.util.zip.CRC32C;
 
-/** Arena-only physical generation and its two independently recoverable applied roots. */
-final class SegmentArenaRotation {
+/** Owner-specific physical generation and its two independently recoverable applied roots. */
+final class SegmentControlRotation {
     static final long FIRST_RECORD = 8192;
-    private static final long HEADER_MAGIC = 0x5557415247303031L; // UWARG001
-    private static final long EXTENSION_MAGIC = 0x5557415250303031L; // UWARP001
 
     record Root(long generation, SegmentControlCheckpoint.Reference first, UUID firstId,
                 SegmentControlCheckpoint.Reference second, UUID secondId) {
@@ -41,7 +39,7 @@ final class SegmentArenaRotation {
                     || first.logOffset() > Long.MAX_VALUE - 208 || second.logOffset() != first.logOffset() + 208
                     || firstId.equals(new UUID(0, 0)) || secondId.equals(new UUID(0, 0))
                     || firstId.equals(secondId)) {
-                throw new IllegalArgumentException("Invalid Arena rotation roots");
+                throw new IllegalArgumentException("Invalid control rotation roots");
             }
         }
 
@@ -50,68 +48,71 @@ final class SegmentArenaRotation {
         }
     }
 
-    static Path path(IsolatedSegmentConfig config, long generation) {
-        return config.directory().resolve("arena-control-generation-" + (generation % 2 == 0 ? "a" : "b"));
+    static Path path(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, long generation) {
+        String prefix = owner == SegmentControlFormat.Owner.ARENA ? "arena" : "bookie";
+        return config.directory().resolve(prefix + "-control-generation-" + (generation % 2 == 0 ? "a" : "b"));
     }
 
-    static ByteBuffer header(Root root) {
-        ByteBuffer page = ByteBuffer.allocate(4096).putLong(HEADER_MAGIC).putInt(1).putInt(64)
+    static ByteBuffer header(SegmentControlFormat.Owner owner, Root root) {
+        ByteBuffer page = ByteBuffer.allocate(4096).putLong(headerMagic(owner)).putInt(1).putInt(64)
                 .put(root.second().encode());
-        extension(page, root);
+        extension(page, owner, root);
         checksum(page);
         return page.clear();
     }
 
-    static Root readHeader(FileChannel file) throws IOException {
+    static Root readHeader(FileChannel file, SegmentControlFormat.Owner owner) throws IOException {
         if (file.size() < FIRST_RECORD) {
-            throw new IOException("Incomplete Arena generation header");
+            throw new IOException("Incomplete control generation header");
         }
         ByteBuffer page = ByteBuffer.allocate(4096);
         SegmentFileIo.readFully(file, page, 4096);
         verifyChecksum(page);
-        Root root = parseExtension(page);
-        if (page.getLong(0) != HEADER_MAGIC || page.getInt(8) != 1 || page.getInt(12) != 64
+        Root root = parseExtension(page, owner);
+        if (page.getLong(0) != headerMagic(owner) || page.getInt(8) != 1 || page.getInt(12) != 64
                 || !root.second().equals(SegmentControlCheckpoint.decodeReference(page.slice(16, 64)))) {
-            throw new IOException("Invalid Arena generation header binding");
+            throw new IOException("Invalid control generation header binding");
         }
         return root;
     }
 
-    static Root publication(IsolatedSegmentConfig config, int slot) throws IOException {
+    static Root publication(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, int slot)
+            throws IOException {
         try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, slot),
                 StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             ByteBuffer page = ByteBuffer.allocate(4096);
-            SegmentFileIo.readFully(file, page, 4096);
+            SegmentFileIo.readFully(file, page, publicationOffset(owner));
             // The shared codec validates the envelope, selected reference and owner before this call.
             verifyChecksum(page);
-            return page.getLong(80) == 0 ? null : parseExtension(page);
+            return page.getLong(80) == 0 ? null : parseExtension(page, owner);
         }
     }
 
-    static void publish(IsolatedSegmentConfig config, SegmentControlCheckpoint.Reference reference,
+    static void publish(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner,
+                        SegmentControlCheckpoint.Reference reference,
                         Root root, SegmentFileIo io) throws IOException {
-        ByteBuffer page = ByteBuffer.allocate(4096).putLong(0x5557415342303031L).putInt(1).putInt(64)
+        ByteBuffer page = ByteBuffer.allocate(4096).putLong(publicationMagic(owner)).putInt(1).putInt(64)
                 .put(reference.encode());
-        extension(page, root);
+        extension(page, owner, root);
         checksum(page);
         try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, reference.slot()),
                 StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-            io.writeFully(file, page.clear(), 4096);
+            io.writeFully(file, page.clear(), publicationOffset(owner));
             io.force(file, true);
         }
-        if (!reference.equals(SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.ARENA,
-                reference.slot())) || !root.equals(publication(config, reference.slot()))) {
-            throw new IOException("Arena rotation publication verification failed");
+        if (!reference.equals(SegmentControlCheckpoint.publication(config, owner,
+                reference.slot())) || !root.equals(publication(config, owner, reference.slot()))) {
+            throw new IOException("Control rotation publication verification failed");
         }
     }
 
-    static Root parseExtension(ByteBuffer page) throws IOException {
-        if (page.getLong(80) != EXTENSION_MAGIC) {
-            throw new IOException("Unsupported Arena rotation extension");
+    static Root parseExtension(ByteBuffer page, SegmentControlFormat.Owner owner) throws IOException {
+        if (page.getLong(80) != extensionMagic(owner)) {
+            throw new IOException("Unsupported control rotation extension");
         }
         for (int index = 256; index < 4092; index++) {
             if (page.get(index) != 0) {
-                throw new IOException("Unsupported Arena rotation extension bytes");
+                throw new IOException("Unsupported control rotation extension bytes");
             }
         }
         try {
@@ -120,15 +121,31 @@ final class SegmentArenaRotation {
                     SegmentControlCheckpoint.decodeReference(page.slice(176, 64)),
                     new UUID(page.getLong(240), page.getLong(248)));
         } catch (IllegalArgumentException invalid) {
-            throw new IOException("Invalid Arena rotation extension", invalid);
+            throw new IOException("Invalid control rotation extension", invalid);
         }
     }
 
-    private static void extension(ByteBuffer page, Root root) {
-        page.position(80).putLong(EXTENSION_MAGIC).putLong(root.generation()).put(root.first().encode())
+    private static void extension(ByteBuffer page, SegmentControlFormat.Owner owner, Root root) {
+        page.position(80).putLong(extensionMagic(owner)).putLong(root.generation()).put(root.first().encode())
                 .putLong(root.firstId().getMostSignificantBits()).putLong(root.firstId().getLeastSignificantBits())
                 .put(root.second().encode()).putLong(root.secondId().getMostSignificantBits())
                 .putLong(root.secondId().getLeastSignificantBits());
+    }
+
+    private static long headerMagic(SegmentControlFormat.Owner owner) {
+        return owner == SegmentControlFormat.Owner.ARENA ? 0x5557415247303031L : 0x5557425247303031L;
+    }
+
+    private static long extensionMagic(SegmentControlFormat.Owner owner) {
+        return owner == SegmentControlFormat.Owner.ARENA ? 0x5557415250303031L : 0x5557425250303031L;
+    }
+
+    private static long publicationMagic(SegmentControlFormat.Owner owner) {
+        return owner == SegmentControlFormat.Owner.ARENA ? 0x5557415342303031L : 0x5557425342303031L;
+    }
+
+    private static long publicationOffset(SegmentControlFormat.Owner owner) {
+        return owner == SegmentControlFormat.Owner.ARENA ? 4096 : 8192;
     }
 
     private static void checksum(ByteBuffer page) {
@@ -141,10 +158,10 @@ final class SegmentArenaRotation {
         CRC32C crc = new CRC32C();
         crc.update(page.slice(0, 4092));
         if (page.getInt(4092) != (int) crc.getValue()) {
-            throw new IOException("Arena rotation CRC mismatch");
+            throw new IOException("Control rotation CRC mismatch");
         }
     }
 
-    private SegmentArenaRotation() {
+    private SegmentControlRotation() {
     }
 }

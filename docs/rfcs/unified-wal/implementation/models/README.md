@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布切片的五个正向配置已完成有限状态探索，七个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片的六个正向配置已完成有限状态探索，八个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照与后缀；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -30,6 +30,8 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 | `ce-checkpoint-early-publication` | 故意在控制commit持久前发布；必须违反`PublishedImageHasDurableCommit` |
 | `a-bookie-checkpoint` | 1 ledger、固定10条已认证控制记录、2次snapshot/2次process crash；恢复权限与完整applied历史一致 |
 | `ce-bookie-checkpoint-terminal` | 故意在image丢失fence/tombstone；必须违反`BookieTerminalPermissionsRemainDenied` |
+| `a-bookie-rotation` | 同一1 ledger/10记录/2snapshot/2crash，允许回收image覆盖的prefix；权限仍等于完整applied历史 |
+| `ce-bookie-rotation-terminal` | 丢失image terminal字段，回收范围中的恢复权限必须违反`RetiredBookieTerminalPermissionsRemainDenied` |
 
 负向配置是被否证的候选规则，不是生产功能开关，也不是实际Java源码变异。它们的EXPECTED_COUNTEREXAMPLE用于检查性质能否发现指定错误；不能计入正向PASS。完整trace保存模型oracle`faultSeen`：它在进程退出后仍记录先前I/O错误，而恢复进程只能读取控制与DATA镜像。该oracle不是实现新增的持久日志。恢复同步只建立当前bytes的durability，不自动证明先前错误已经解析。
 
@@ -102,3 +104,20 @@ checkpoint正向17个Next动作coverage均非零。第一个负向trace为`Appen
 | ce-arena-rotation-early-reclaim | 116 / 68 / 21 | 10 / 不适用 | 0.830 s / 112,115,712 bytes | EXPECTED_COUNTEREXAMPLE: SurvivingAuthority |
 
 正向15个Next动作coverage均非零。模型只有一次rotation、一次掉电与一次image或publication损坏，两个cut的普通authority相同；内部commit identity/相邻sequence、条件结果和字节CRC/SHA由真实Java验证。先force image、日志及目录，再force两根才允许reclaim与普通tail ACK。每个发布根都绑定两份image，模型允许通过任一有效根使用任一有效image；负向在仅force一份根后Reclaim，随后该根损坏使唯一authority消失，checker实际捕获指定反例，没有修改Java开关。投影不检查重复rotation、动态操作语义、文件锁、I/O unknown、坏framing、Bookie组合、状态预算压缩或liveness，不构成完整Model C/A+C与真实掉电证明。
+
+### Bookie回收prefix权限投影
+
+2026-10-03新回执`unified-wal-model-bu9e_n9l`绑定父提交`43bfd80b603b500843fba067ff8b847320ebf116`，冻结31个实际输入（5个module、14个cfg、runner、11个Java）及父提交处3份合同哈希；参数及官方tool checksum不变。全部14个配置实际得到6个完整正向PASS、8个指定性质反例，历史回执不重绑。
+
+| 配置 | generated / distinct / queue | depth / 完整diameter | elapsed / peak RSS | 结论 |
+|---|---|---|---|---|
+| a-bookie-rotation | 159,578 / 48,763 / 0 | 31 / 31 | 2.272 s / 293,011,456 bytes | PASS |
+| ce-bookie-rotation-terminal | 26,865 / 10,883 / 3,134 | 17 / 不适用 | 1.362 s / 208,044,032 bytes | EXPECTED_COUNTEREXAMPLE: RetiredBookieTerminalPermissionsRemainDenied |
+| a-bookie-checkpoint | 91,290 / 28,292 / 0 | 31 / 31 | 1.704 s / 286,670,848 bytes | PASS |
+| ce-bookie-checkpoint-terminal | 15,524 / 6,441 / 1,861 | 16 / 不适用 | 1.307 s / 203,128,832 bytes | EXPECTED_COUNTEREXAMPLE: BookieTerminalPermissionsRemainDenied |
+
+Bookie新增`RetirePrefix`常量和`retiredThrough`；只有已发布image覆盖的applied prefix才可退休，退休后恢复不允许全历史日志fallback。正向9个Next动作coverage均非零，`ReclaimPrefix`为6,864:10,725。已有checkpoint配置显式`RetirePrefix=FALSE`，distinct states与历史相同；增加禁用动作的评估改变generated统计，旧90,586/15,393统计仍由旧输入回执拥有。
+
+正向检查全部权限等于完整applied历史、terminal拒绝和退休cut仍被checkpoint覆盖。负向最短trace先重放7条控制记录取得fenced状态，以丢失terminal字段的image再次恢复出active状态，最后`ReclaimPrefix`令退休域性质生效并捕获反例；不能将该trace表述为先回收、再掉电的物理故障顺序。负向仍是候选序列化规则，不是Java变异或生产开关。
+
+此投影假设payload/commit/publication及双恢复根/目录barrier已经成立；共享物理协议由`ArenaRotation.tla`独立检查，Java分别验证两owner的identity/magic、原commit UUID、sealed credential、条件结果及mandatory suffix。两个有限模型未组合为A+C，也没有展开ticket生命周期、多ledger竞争、完整body密码学、重复rotation历史压缩、真实掉电或liveness。实际实现与回执见[本地Bookie rotation](../local-storage/README.md#bookie停写rotation与共享物理协议)，完整Model A/C/D、Block G及production authority仍未完成。

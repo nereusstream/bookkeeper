@@ -545,7 +545,7 @@ timeout 单独不是 orphan proof。`MOVE_COMMIT` 与 conditional free 在同一
 
 ## 11. Allocator checkpoint 与 rotation
 
-2026-10-03 Arena rotation增量：现有applied checkpoint可在停写后建立两个相邻cut，绑定两条原commit identity，强制同步新物理代及目录，完成两个恢复根后才回收旧prefix。固定sidecar锁覆盖整个切换，后续checkpoint保留physical generation绑定；单根/image损坏可回退，当前必要日志及完整suffix仍强制验证。准确字节合同见[实验格式](implementation/local-storage/format-v1.md#arena日志代与双恢复根)。Bookie rotation、在线维护、长期历史压缩及完整步骤8未完成。
+2026-10-03 Arena rotation增量：现有applied checkpoint可在停写后建立两个相邻cut，绑定两条原commit identity，强制同步新物理代及目录，完成两个恢复根后才回收旧prefix。固定sidecar锁覆盖整个切换，后续checkpoint保留physical generation绑定；单根/image损坏可回退，当前必要日志及完整suffix仍强制验证。准确字节合同见[实验格式](implementation/local-storage/format-v1.md#arena日志代与双恢复根)。Bookie已复用同一双根物理协议，使用独立身份、magic、sidecar锁及第三页；权限恢复合同见[RFC-0005 §5.2](RFC-0005-segment-bookie-state.md#52-下一原型的真实持久化拓扑)。在线维护、长期历史压缩及完整步骤8未完成。
 
 历史（`00edeb8f`版本）2026-10-03双owner实现增量：Arena codec已复用为`SegmentControlCheckpoint`，Arena仍拥有自己的第二页；Bookie拥有第三页，两者各写自己的完整页且不截断另一页。半写Bookie页不改变Arena有效发布判断，所有immutable身份页和旧控制字节仍必需。Bookie/真实DATA图新增回归及有限模型见[局部实现](implementation/local-storage/README.md)。prefix reclaim/rotation及完整步骤8仍未完成。
 

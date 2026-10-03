@@ -28,6 +28,8 @@ MATRIX = {
     "c-arena-rotation": None,
     "ce-arena-rotation-early-reclaim": "SurvivingAuthority",
     "a-bookie-checkpoint": None,
+    "a-bookie-rotation": None,
+    "ce-bookie-rotation-terminal": "RetiredBookieTerminalPermissionsRemainDenied",
     "ce-bookie-checkpoint-terminal": "BookieTerminalPermissionsRemainDenied",
     "ce-checkpoint-durable-cut": "SnapshotCutWasApplied",
     "ce-checkpoint-early-publication": "PublishedImageHasDurableCommit",
@@ -59,7 +61,7 @@ def main():
     inputs.extend(sources / name for name in ["IsolatedSegmentStorage.java", "IsolatedSegmentFiles.java",
                   "SegmentArenaControlLog.java", "SegmentBookieControlLog.java",
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
-                  "SegmentArenaRotation.java", "SegmentDataFileLock.java"])
+                  "SegmentControlRotation.java", "SegmentDataFileLock.java"])
     design_paths = ["docs/rfcs/unified-wal/RFC-0003-segment-storage-allocator.md",
                     "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md",
                     "docs/rfcs/unified-wal/spikes/SPIKE-C-no-object-tla.md"]
@@ -88,7 +90,7 @@ def main():
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
                    "-metadir", str(states), "ArenaRotation.tla" if "arena-rotation" in name else (
-                       "BookieCheckpoint.tla" if "bookie-checkpoint" in name else (
+                       "BookieCheckpoint.tla" if "bookie-checkpoint" in name or "bookie-rotation" in name else (
                        "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla"))]
         wrapper = ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
         output = run / "checker-output" / (name + ".log")

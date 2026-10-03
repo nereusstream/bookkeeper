@@ -81,19 +81,20 @@ public class SegmentArenaControlLogTest {
                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         SegmentControlCheckpoint.Reference second = new SegmentControlCheckpoint.Reference(2, 1, 0, 4304, 224,
                 "e89150ad58ef5c1b765c176c382ca122f91fca6f509144de7f379f800105125b");
-        SegmentArenaRotation.Root root = new SegmentArenaRotation.Root(2, first, new UUID(1, 2),
+        SegmentControlRotation.Root root = new SegmentControlRotation.Root(2, first, new UUID(1, 2),
                 second, new UUID(3, 4));
-        assertArrayEquals(checkpointVector("arena-rotation-header-v1.hex"), SegmentArenaRotation.header(root).array());
+        assertArrayEquals(checkpointVector("arena-rotation-header-v1.hex"),
+                SegmentControlRotation.header(SegmentControlFormat.Owner.ARENA, root).array());
         IsolatedSegmentConfig config = config();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
-            SegmentArenaRotation.publish(config, first, root, new SegmentFileIo());
+            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.ARENA, first, root, new SegmentFileIo());
             try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 0),
                     StandardOpenOption.READ)) {
                 ByteBuffer page = ByteBuffer.allocate(4096);
                 SegmentFileIo.readFully(file, page, 4096);
                 assertArrayEquals(checkpointVector("arena-rotation-publication-v1.hex"), page.array());
             }
-            assertEquals(root, SegmentArenaRotation.publication(config, 0));
+            assertEquals(root, SegmentControlRotation.publication(config, SegmentControlFormat.Owner.ARENA, 0));
         }
     }
 
@@ -117,15 +118,17 @@ public class SegmentArenaControlLogTest {
                         }
                     }
                     assertTrue("The ordinary journal budget must be exhausted before rotation", full);
-                    SegmentArenaRotation.Root root = log.rotate();
+                    SegmentControlRotation.Root root = log.rotate();
                     assertEquals(cycle + 2, root.generation());
-                    assertEquals(8192, Files.size(SegmentArenaRotation.path(config, root.generation())));
+                    assertEquals(8192, Files.size(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA,
+                            root.generation())));
                     assertEquals(8192, Files.size(config.directory().resolve("arena-control")));
                     assertTrue(granted(log, 4096, 1, 1, 1));
                     assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
                             log.submitBatch(List.of(alloc(2, 4096))).get(0).status());
                     if (cycle > 0) {
-                        assertFalse(Files.exists(SegmentArenaRotation.path(config, root.generation() - 1)));
+                        assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA,
+                                root.generation() - 1)));
                     }
                 }
             }
@@ -135,7 +138,7 @@ public class SegmentArenaControlLogTest {
     @Test
     public void rotatedFallbackRequiresOneImageAndEveryCurrentSuffixByte() throws Exception {
         IsolatedSegmentConfig config = config();
-        SegmentArenaRotation.Root root;
+        SegmentControlRotation.Root root;
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
             log.submitBatch(List.of(alloc(1, 4096)));
@@ -171,7 +174,8 @@ public class SegmentArenaControlLogTest {
         assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
         Files.write(a, aBytes);
         Files.write(b, bBytes);
-        Path current = SegmentArenaRotation.path(config, root.generation());
+        Path current = SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA,
+                            root.generation());
         byte[] journal = Files.readAllBytes(current);
         try (FileChannel file = FileChannel.open(current, StandardOpenOption.WRITE)) {
             file.truncate(journal.length - 1);
@@ -207,7 +211,7 @@ public class SegmentArenaControlLogTest {
                     }
                 }
             });
-            FutureTask<SegmentArenaRotation.Root> rotation = new FutureTask<>(() -> log.rotate(io));
+            FutureTask<SegmentControlRotation.Root> rotation = new FutureTask<>(() -> log.rotate(io));
             Thread thread = new Thread(rotation);
             thread.start();
             try {
@@ -266,7 +270,7 @@ public class SegmentArenaControlLogTest {
             log.submitBatch(List.of(alloc(1, 4096)));
             // Four successful image/publication forces precede the candidate's own force.
             assertThrows(IOException.class, () -> log.rotate(new SegmentFileIo(13, -1, 5, false)));
-            assertFalse(Files.exists(SegmentArenaRotation.path(config, 2)));
+            assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2)));
         }
         try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
             assertTrue(granted(log, 4096, 1, 1, 1));

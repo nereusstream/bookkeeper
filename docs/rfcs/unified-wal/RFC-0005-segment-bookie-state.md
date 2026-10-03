@@ -151,9 +151,11 @@ Data Arena
 
 Bookie级日志是跨Arena ledger权限的唯一持久化owner；不把相同route/fence/grant分别交给多个Arena决定。其conditional transition按bounded per-ledger顺序执行，物理append/fsync可跨ledger group commit；只记录控制事实，不重复记录DATA payload，不给normal Add增加控制日志fsync。实现前在Spike B manifest锁定record/batch边界、完整prefix、A/B checkpoint/rotation、credential protection及queue/waiter上限。
 
-2026-10-03 Bookie checkpoint局部实现：已冻结applied控制状态及真实字节cut，保留sealed INSTALL credential、operation条件结果、FENCE、最新LAC和recovery grant/close，以共享有界image codec及Bookie独立A/B第三页发布；CHECKPOINT_COMMIT须先durable/apply。完整验证/同步旧日志后，恢复匹配的image、检查条件结果并重放后缀；缺mandatory字节/密钥/identity仍拒绝。真实JVM边界、两个owner页面隔离、DATA图正常restart及有限权限模型已有回执，详见[局部实现](implementation/local-storage/README.md)。旧日志仍完整保留，rotation/长期幂等压缩/在线调度和完整Model A/Block G未完成。
+历史（`00edeb8f`版本）2026-10-03 Bookie checkpoint局部实现：已冻结applied控制状态及真实字节cut，保留sealed INSTALL credential、operation条件结果、FENCE、最新LAC和recovery grant/close，以共享有界image codec及Bookie独立A/B第三页发布；CHECKPOINT_COMMIT须先durable/apply。完整验证/同步旧日志后，恢复匹配的image、检查条件结果并重放后缀；缺mandatory字节/密钥/identity仍拒绝。真实JVM边界、两个owner页面隔离、DATA图正常restart及有限权限模型已有回执，详见[局部实现](implementation/local-storage/README.md)。旧日志仍完整保留，rotation/长期幂等压缩/在线调度和完整Model A/Block G未完成。
 
-2026-10-03 Arena增量已在健康CLOSE后显式rotation并回收自己的旧控制prefix，两个owner的DATA图经过两轮维护/restart仍可读、幂等及新追加；Bookie checkpoint页和完整旧Bookie日志保持原合同。Arena字节及恢复根由[RFC-0003 §11](RFC-0003-segment-storage-allocator.md#11-allocator-checkpoint-与-rotation)与[实验格式](implementation/local-storage/format-v1.md#arena日志代与双恢复根)拥有。此切片不完成Bookie rotation或在线维护。
+历史（`43bfd80b`版本）2026-10-03 Arena增量已在健康CLOSE后显式rotation并回收自己的旧控制prefix，两个owner的DATA图经过两轮维护/restart仍可读、幂等及新追加；Bookie checkpoint页和完整旧Bookie日志保持原合同。Arena字节及恢复根由[RFC-0003 §11](RFC-0003-segment-storage-allocator.md#11-allocator-checkpoint-与-rotation)与[实验格式](implementation/local-storage/format-v1.md#arena日志代与双恢复根)拥有。此切片不完成Bookie rotation或在线维护。
+
+2026-10-03 Bookie rotation增量：在无在途normal/read/recovery admission、控制I/O或未apply batch时，连续建立两个applied checkpoint，保留sealed credential、首次条件结果、fence/tombstone、最新LAC与grant/close；新物理文件及目录同步、两个恢复根force/验证后才回收旧prefix。固定Bookie sidecar锁及第三页独立于Arena；当前物理代及完整suffix仍必需，单image可回退，两image不可用则拒绝。真实短写/force失败、七个JVM退出阶段、三轮容量耗尽、慢I/O期间拒绝新票据、跨JVM锁和双owner DATA图两轮正常restart已有验证，见[本地实现](implementation/local-storage/README.md#bookie停写rotation与共享物理协议)及[字节合同](implementation/local-storage/format-v1.md#bookie日志代与双恢复根)。有限权限模型新增prefix回收投影，独立C模型检查双根/屏障；两者未组合为完整A+C。在线调度、长期幂等历史压缩、派生索引、真实掉电及完整Model A/Block G仍未完成。
 
 跨三层的执行顺序固定为：
 

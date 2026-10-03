@@ -5792,6 +5792,266 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void bookieRotationReclaimsOrdinaryBudgetAndRestoresSealedPermissionsAfterEachCycle() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            for (int cycle = 0; cycle < 3; cycle++) {
+                try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                        key((byte) 3), VALIDATOR)) {
+                    if (cycle == 0) {
+                        log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+                    }
+                    boolean full = false;
+                    for (int retry = 0; retry < 200; retry++) {
+                        try {
+                            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                                    log.submitBatch(List.of(install(1, (byte) 5))).get(0).status());
+                        } catch (IOException capacity) {
+                            full = true;
+                            break;
+                        }
+                    }
+                    assertTrue("Ordinary budget must be exhausted before rotation", full);
+                    SegmentControlRotation.Root root = log.rotate();
+                    assertEquals(cycle + 2, root.generation());
+                    assertEquals(8192, Files.size(SegmentControlRotation.path(
+                            config, SegmentControlFormat.Owner.BOOKIE, root.generation())));
+                    assertEquals(8192, Files.size(config.directory().resolve("bookie-control")));
+                    assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+                    if (cycle > 0) {
+                        assertFalse(Files.exists(SegmentControlRotation.path(
+                                config, SegmentControlFormat.Owner.BOOKIE, root.generation() - 1)));
+                    }
+                    log.submitExplicitLac(writeLac(cycle + 1, (byte) 5, (byte) cycle));
+                    log.checkpoint();
+                }
+            }
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                    key((byte) 3), VALIDATOR)) {
+                assertEquals(3, log.explicitLac(context()).orElseThrow().lac());
+                assertArrayEquals(new byte[] {2}, log.explicitLac(context()).orElseThrow().body());
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        log.submitFence(fence(3, (byte) 5)).status());
+            }
+        }
+    }
+
+    @Test
+    public void bookieRotationFallbackPreservesFenceAndRequiresTheCurrentJournal() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentControlRotation.Root root;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                        key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            log.submitFence(fence(3, (byte) 5));
+            root = log.rotate();
+            log.submitBatch(List.of(tombstone(44, 4)));
+        }
+        Path newest = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.BOOKIE, root.second().slot());
+        byte[] image = Files.readAllBytes(newest);
+        try (FileChannel file = FileChannel.open(newest, StandardOpenOption.WRITE)) {
+            file.write(ByteBuffer.wrap(new byte[] {0}), 4096);
+        }
+        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                key((byte) 3), VALIDATOR)) {
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertTrue(log.admitRead(context()).isEmpty());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(tombstone(44, 4))).get(0).status());
+        }
+        Files.write(newest, image);
+        Path current = SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE, root.generation());
+        byte[] journal = Files.readAllBytes(current);
+        try (FileChannel file = FileChannel.open(current, StandardOpenOption.WRITE)) {
+            file.truncate(journal.length - 1);
+        }
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(), 32768,
+                key((byte) 3), VALIDATOR));
+        Files.write(current, journal);
+        Files.delete(current);
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(), 32768,
+                key((byte) 3), VALIDATOR));
+    }
+
+    @Test
+    public void bookieRotationProcessExitKeepsAuthorityAtFileAndDualRootBarriers() throws Exception {
+        for (String phase : List.of("1", "3", "5", "6", "7", "8", "done")) {
+            IsolatedSegmentConfig config = checkpointConfig(temporary.newFolder("rotation-" + phase)
+                    .toPath().resolve("bookie"));
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                    SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                            key((byte) 3), VALIDATOR)) {
+                log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            }
+            assertEquals(phase, 23, bookieRotationProbe(config.directory(), phase));
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                    key((byte) 3), VALIDATOR)) {
+                assertEquals(!phase.equals("done"), log.normalAdmission(context(), filled(20, (byte) 5)));
+                assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                        log.submitBatch(List.of(install(1, (byte) 5))).get(0).status());
+                log.rotate();
+            }
+        }
+    }
+
+    @Test
+    public void bookieSidecarLockSurvivesOtherOwnerIdentityChecksAndFailedSameProcessOpen() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                        key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(), 32768,
+                    key((byte) 3), VALIDATOR));
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                assertEquals(23, bookieRotationProbe(config.directory(), "lock"));
+                log.rotate();
+                arena.rotate();
+                assertEquals(23, bookieRotationProbe(config.directory(), "lock"));
+            }
+        }
+        assertEquals(0, bookieRotationProbe(config.directory(), "lock"));
+    }
+
+    @Test
+    public void bookieRotationForceFailureIsNotSuccessAndPendingAdmissionsPreventMaintenance() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                        key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentBookieControlLog.ReadAdmission read = log.admitRead(context()).orElseThrow();
+            assertThrows(IOException.class, log::rotate);
+            read.finish();
+            assertThrows(IOException.class, () -> log.rotate(new SegmentFileIo(17, -1, 7, false)));
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                key((byte) 3), VALIDATOR)) {
+            assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+            log.rotate();
+        }
+    }
+
+    private int bookieRotationProbe(Path directory, String phase) throws Exception {
+        Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Xmx64m", "-XX:MaxDirectMemorySize=32m", "-cp",
+                System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+                BookieRotationCrashProbe.class.getName(), phase, directory.toString())
+                .redirectErrorStream(true).redirectOutput(directory.getParent().resolve("rotation-probe.log").toFile())
+                .start();
+        try {
+            assertTrue(phase, process.waitFor(15, TimeUnit.SECONDS));
+            return process.exitValue();
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    public static final class BookieRotationCrashProbe {
+        public static void main(String[] args) throws Exception {
+            AtomicInteger forces = new AtomicInteger();
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                if (Integer.toString(forces.incrementAndGet()).equals(args[0])) {
+                    Runtime.getRuntime().halt(23);
+                }
+            });
+            SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)),
+                    new UUID(0, 9), BookieId.parse("isolated:3181"));
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(checkpointConfig(Path.of(args[1])),
+                    identity, 32768, key((byte) 3), VALIDATOR)) {
+                if (args[0].equals("lock")) {
+                    return;
+                }
+                log.rotate(io);
+                log.submitFence(fence(3, (byte) 5));
+                Runtime.getRuntime().halt(23);
+            } catch (IOException failure) {
+                if (args[0].equals("lock")) {
+                    Runtime.getRuntime().halt(23);
+                }
+                throw failure;
+            }
+        }
+    }
+
+    @Test
+    public void slowBookieRotationRejectsNewTicketsWithoutBlockingPermissionQueries() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger forces = new AtomicInteger();
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (forces.incrementAndGet() == 5) {
+                forcing.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Rotation was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    throw new AssertionError(interrupted);
+                }
+            }
+        });
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 32768,
+                        key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9));
+            FutureTask<SegmentControlRotation.Root> rotate = new FutureTask<>(() -> log.rotate(io));
+            Thread thread = new Thread(rotate);
+            thread.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                FutureTask<Boolean> query = new FutureTask<>(() ->
+                        log.normalAdmission(context(), filled(20, (byte) 5)));
+                new Thread(query).start();
+                assertTrue(query.get(1, TimeUnit.SECONDS));
+                assertTrue(log.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+                assertTrue(log.admitRead(context()).isEmpty());
+                assertTrue(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 5)).isEmpty());
+                assertThrows(IOException.class, log::close);
+                assertThrows(IOException.class, () -> log.submitBatch(List.of(tombstone(44, 4))));
+            } finally {
+                release.countDown();
+                thread.join(5000);
+            }
+            assertEquals(2, rotate.get(1, TimeUnit.SECONDS).generation());
+            log.admitNormal(context(), filled(20, (byte) 5)).orElseThrow().releaseUnclaimed();
+            log.admitRead(context()).orElseThrow().finish();
+            log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 5)).orElseThrow().finish();
+        }
+    }
+
+    @Test
+    public void bookieRotationHeaderAndThirdPageMatchIndependentByteVectors() throws Exception {
+        SegmentControlCheckpoint.Reference first = new SegmentControlCheckpoint.Reference(1, 0, -1, 4096, 0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        SegmentControlCheckpoint.Reference second = new SegmentControlCheckpoint.Reference(2, 1, 0, 4304, 224,
+                "8c106e348d1e37e23543ec08cd8063541cf9a7066f780044cee38051511e3a18");
+        SegmentControlRotation.Root root = new SegmentControlRotation.Root(2, first, new UUID(1, 2),
+                second, new UUID(3, 4));
+        assertArrayEquals(checkpointVector("bookie-rotation-header-v1.hex"),
+                SegmentControlRotation.header(SegmentControlFormat.Owner.BOOKIE, root).array());
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, first, root,
+                    new SegmentFileIo());
+            try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 0),
+                    StandardOpenOption.READ)) {
+                ByteBuffer page = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(file, page, 8192);
+                assertArrayEquals(checkpointVector("bookie-rotation-publication-v1.hex"), page.array());
+            }
+            assertEquals(root, SegmentControlRotation.publication(config, SegmentControlFormat.Owner.BOOKIE, 0));
+        }
+    }
+
+    @Test
     public void bookieEmptyCheckpointMatchesIndependentByteVectors() throws Exception {
         IsolatedSegmentConfig config = config();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
@@ -5829,53 +6089,56 @@ public class SegmentBookieControlLogTest {
 
     @Test
     public void bookieCheckpointPreservesPermissionsOutcomesLacAndClosedRecoveryGrant() throws Exception {
-        IsolatedSegmentConfig config = config();
-        SegmentControlCheckpoint.Reference reference;
-        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
-                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
-                        1024 * 1024, key((byte) 3), VALIDATOR)) {
-            log.submitBatch(List.of(install(1, (byte) 5), activate(2),
-                    install(45, 6, (byte) 7), activate(45, 7), tombstone(46, 8)));
-            log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1));
-            log.submitExplicitLac(writeLac(10, (byte) 5, (byte) 2));
-            log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9));
-            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
-                    log.submitRecoveryClose(recoveryClose(4, 3, 3, 7, 9)));
-            log.submitFence(fence(5, (byte) 5));
-            log.checkpoint();
-            log.submitBatch(List.of(tombstone(45, 9), activate(10)));
-            reference = log.checkpoint();
-            byte[] image = Files.readAllBytes(SegmentControlCheckpoint.path(
-                    config, SegmentControlFormat.Owner.BOOKIE, reference.slot()));
-            assertFalse(HexFormat.of().formatHex(image).contains("05".repeat(20)));
-        }
-        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
-                1024 * 1024, key((byte) 4), VALIDATOR));
-        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
-                1024 * 1024, key((byte) 3), VALIDATOR)) {
-            assertEquals(reference, log.publishedCheckpoint().orElseThrow());
-            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
-            assertTrue(log.admitRead(context(45)).isEmpty());
-            log.admitRead(context()).orElseThrow().finish();
-            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
-                    log.submitBatch(List.of(install(1, (byte) 5))).get(0).status());
-            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
-                    log.submitBatch(List.of(install(1, (byte) 6))).get(0).status());
-            assertEquals(List.of(SegmentBookieControlLog.Status.CONDITION_FAILED,
-                    SegmentBookieControlLog.Status.CONDITION_FAILED),
-                    log.submitBatch(List.of(activate(10), install(46, 11, (byte) 5))).stream()
-                            .map(SegmentBookieControlLog.Result::status).toList());
-            assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
-                    log.submitFence(fence(5, (byte) 5)).status());
-            assertEquals(10, log.explicitLac(context()).orElseThrow().lac());
-            assertArrayEquals(new byte[] {2}, log.explicitLac(context()).orElseThrow().body());
-            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
-                    log.submitExplicitLac(writeLac(10, (byte) 5, (byte) 2)));
-            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
-                    log.submitRecoveryClose(recoveryClose(4, 3, 3, 7, 9)));
-            assertTrue(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 5)).isEmpty());
-            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
-                    log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9)).status());
+        for (boolean rotate : new boolean[] {false, true}) {
+            IsolatedSegmentConfig config = checkpointConfig(
+                    temporary.newFolder("permissions-" + rotate).toPath().resolve("bookie"));
+            SegmentControlCheckpoint.Reference reference;
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                    SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                log.submitBatch(List.of(install(1, (byte) 5), activate(2),
+                        install(45, 6, (byte) 7), activate(45, 7), tombstone(46, 8)));
+                log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1));
+                log.submitExplicitLac(writeLac(10, (byte) 5, (byte) 2));
+                log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        log.submitRecoveryClose(recoveryClose(4, 3, 3, 7, 9)));
+                log.submitFence(fence(5, (byte) 5));
+                log.checkpoint();
+                log.submitBatch(List.of(tombstone(45, 9), activate(10)));
+                reference = rotate ? log.rotate().second() : log.checkpoint();
+                byte[] image = Files.readAllBytes(SegmentControlCheckpoint.path(
+                        config, SegmentControlFormat.Owner.BOOKIE, reference.slot()));
+                assertFalse(HexFormat.of().formatHex(image).contains("05".repeat(20)));
+            }
+            assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
+                    1024 * 1024, key((byte) 4), VALIDATOR));
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                    1024 * 1024, key((byte) 3), VALIDATOR)) {
+                assertEquals(reference, log.publishedCheckpoint().orElseThrow());
+                assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+                assertTrue(log.admitRead(context(45)).isEmpty());
+                log.admitRead(context()).orElseThrow().finish();
+                assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                        log.submitBatch(List.of(install(1, (byte) 5))).get(0).status());
+                assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                        log.submitBatch(List.of(install(1, (byte) 6))).get(0).status());
+                assertEquals(List.of(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                        SegmentBookieControlLog.Status.CONDITION_FAILED),
+                        log.submitBatch(List.of(activate(10), install(46, 11, (byte) 5))).stream()
+                                .map(SegmentBookieControlLog.Result::status).toList());
+                assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
+                        log.submitFence(fence(5, (byte) 5)).status());
+                assertEquals(10, log.explicitLac(context()).orElseThrow().lac());
+                assertArrayEquals(new byte[] {2}, log.explicitLac(context()).orElseThrow().body());
+                assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                        log.submitExplicitLac(writeLac(10, (byte) 5, (byte) 2)));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                        log.submitRecoveryClose(recoveryClose(4, 3, 3, 7, 9)));
+                assertTrue(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 5)).isEmpty());
+                assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                        log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9)).status());
+            }
         }
     }
 
@@ -6109,7 +6372,7 @@ public class SegmentBookieControlLogTest {
                             1024 * 1024, key((byte) 3), VALIDATOR)) {
                 assertFalse(arena.hasUnclosedDataSession());
                 assertEquals(cycle + 1, arena.rotate().generation());
-                assertEquals(cycle, bookie.checkpoint().generation());
+                assertEquals(cycle + 1, bookie.rotate().generation());
             }
             try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
                 storage.restart();

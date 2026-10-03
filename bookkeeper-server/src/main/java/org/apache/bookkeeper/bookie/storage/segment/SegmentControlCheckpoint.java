@@ -179,8 +179,8 @@ final class SegmentControlCheckpoint {
             ByteBuffer page = ByteBuffer.allocate(4096);
             SegmentFileIo.readFully(file, page, publicationOffset(owner));
             Reference reference = parseEnvelope(page, publicationMagic(owner));
-            if (owner == SegmentControlFormat.Owner.ARENA && page.getLong(80) != 0) {
-                SegmentArenaRotation.parseExtension(page);
+            if (page.getLong(80) != 0) {
+                SegmentControlRotation.parseExtension(page, owner);
             } else {
                 zero(page, 80, 4092);
             }

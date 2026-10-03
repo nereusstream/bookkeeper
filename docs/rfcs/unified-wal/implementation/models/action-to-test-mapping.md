@@ -51,3 +51,12 @@ Arena rotation回执`unified-wal-model-t1waf2bm`正向15个Next动作均非零�
 | `Corrupt/CorruptRoot/Crash/Recover` | 单image/page回退、当前suffix损坏拒绝；模型Crash丢弃未同步内容，真实进程退出不证明掉电 |
 
 真实跨JVM排他和Bookie身份读取测试独立验证sidecar锁，不由上述模型动作推出。重复rotation与全部操作结果、坏header/CRC/序号及资源预算仍需真实路径；完整Model C/Bookie组合和liveness保持未完成。
+
+Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非零，前8个仍对应上述Bookie checkpoint路径，新增映射：
+
+| 动作 | 当前实现/真实测试 |
+|---|---|
+| `ReclaimPrefix` | `SegmentBookieControlLog.rotate()`；`bookieRotationReclaimsOrdinaryBudgetAndRestoresSealedPermissionsAfterEachCycle`与`bookieCheckpointPreservesPermissionsOutcomesLacAndClosedRecoveryGrant` |
+| `Freeze/Publish/Recover`（退休域） | `bookieRotationFallbackPreservesFenceAndRequiresTheCurrentJournal`、独立Bookie header/第三页向量、两个owner rotation后的DATA图restart |
+
+共享物理`WriteFile/ForceFile/ForceDirectory/WriteRoot/ForceRoot/Reclaim`仍由独立C模型检查；Bookie真实`bookieRotationProcessExitKeepsAuthorityAtFileAndDualRootBarriers`验证7个JVM退出阶段，sidecar及慢I/O票据门槛由独立测试覆盖。权限模型合并这些屏障为输入假设，不是两个模型的组合证明，也不把进程退出当成掉电。

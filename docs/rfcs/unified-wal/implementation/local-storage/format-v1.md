@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；完整selector、Bookie rotation、在线Arena维护、服务级可写restart与生产entry success authority仍未完成。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；完整selector、在线Bookie/Arena维护、服务级可写restart与生产entry success authority仍未完成。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -75,7 +75,7 @@ Bookie type 1～9：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_G
 
 Bookie局部INSTALL把route、instance、descriptor、加密verifier与初始inactive状态原子绑定在一条记录中；ACTIVATE是后续独立记录。两种body均先按顺序放入operation u32（INSTALL=1、ACTIVATE_INITIAL=2、ACTIVATE_REPLACEMENT=3）、ledgerId u64、instance[16]、descriptor identity[36]、目标storage incarnation[16]、authority generation u64、public semantic payload identity[32]，再放目标Bookie UTF-8长度u16+bytes、authority domain UTF-8长度u16+bytes。INSTALL另附canonical descriptor长度u16+bytes及49字节sealed verifier：version=1 u8、AES-GCM nonce[12]、ciphertext[20]、tag[16]。控制header的operation UUID绑定重试，operation generation等于authority generation；expected generation当前固定0，具体条件在顺序apply时判断。sealed字段AAD绑定storage incarnation、Arena UUID、BookieId和60字节ledger context；AES密钥由调用方从目录外提供，丢失/错误密钥拒绝重开。字段CRC只检测意外损坏，不能替代控制文件的访问保护或外部committed authority。
 
-Bookie日志写完整batch并一次`force(true)`后才按sequence应用；未apply时INSTALL不开放normal写，已apply INSTALL仍inactive，只有匹配ACTIVATE后局部准入查询才为真。重开先验证完整framing与连续序号，再恢复同步并完整重放；错误密钥、损坏/不完整尾部拒绝可写打开。不支持尾部猜测截断、Bookie rotation、真实MetadataStore direct read、生产listener或请求级local result；局部准入查询也不是逐entry local success。
+Bookie日志写完整batch并一次`force(true)`后才按sequence应用；未apply时INSTALL不开放normal写，已apply INSTALL仍inactive，只有匹配ACTIVATE后局部准入查询才为真。重开先验证当前必需日志的完整framing与连续序号，再恢复同步并重放；显式rotation后的根与后缀规则见下文。错误密钥、损坏/不完整尾部拒绝可写打开。不支持尾部猜测截断、真实MetadataStore direct read、生产listener或请求级local result；局部准入查询也不是逐entry local success。
 
 Bookie局部FENCE记录的body固定为60字节ledger context；header使用wire操作UUID、operation generation=1、expected generation=0。先由匹配context和20字节verifier的受控请求在Bookie状态锁下关闭新normal准入；已取得的有限DATA准入票据必须保持到其物理I/O终结，未终结时返回`WAITING_PRECUT`且不写FENCE。此前已durable的ACTIVATE仍须先按原序apply，切断准入后的ACTIVATE不得再追加。票据全部终结后才对单条FENCE写入并`force(true)`，再应用monotonic fenced状态并回复durable；慢force期间不重开准入，force不确定则当前log fail-closed。完整FENCE记录重开时同步后重放，重复操作从持久状态解析。隔离DATA物理驱动可接收与每条普通record一一匹配的预准入票据，直到真实FileChannel I/O和原owner回调均终结才释放；较早批次失败时，后批即使已收到失败回调，仍须等自身I/O终结。Bookie控制owner驱动让FENCE的write/force在预留控制I/O执行，durable后回原owner apply；控制I/O拒收且尚未写入时退回物理后缀预留，保留本进程的准入切点供同操作重试。原物理实验入口不提供Bookie authority；实际Add local result、response loss与底层I/O ownership的联合验收仍待步骤6。
 
@@ -156,9 +156,30 @@ Arena发布页仍使用`UWASB001`及原16～80 selected reference；首次rotati
 
 Bookie `BOOKIE_CHECKPOINT_COMMIT`使用owner=BOOKIE/code=10，body为64-byte reference，operation generation/expected generation分别是当前/前一checkpoint代。image force/目录同步/重读后，commit进入既有控制排他、write/force/apply顺序；durable且apply后才发布。自己的4096-byte `UWBSB001`页在superblock offset8192，完整时文件12288字节；Arena页仍在4096，两owner不截断或覆写另一owner的页。首次只发布Bookie时，中间Arena页保持零且不是有效Arena publication。只读取自己的完整、CRC正确页；Bookie页半写时，完整Arena页仍可使用。
 
-恢复完整验证、解封与同步旧Bookie日志，匹配自己的commit/page/image，重建已执行条件结果及最新LAC，随后重放cut后完整后缀；runtime资源和pending gates不从checkpoint重建为已提交事实。较新image不可用可以回退另一份；两份均不可用时完整日志恢复。缺失/损坏mandatory旧prefix/suffix、错误密钥或identity仍拒绝打开。原格式原型不识别新增Bookie mandatory type/第三页，会拒绝；仍未提供stable兼容承诺。当前不回收旧日志，也没有在线维护控制入口。
+未执行rotation时，恢复完整验证、解封与同步旧Bookie日志，匹配自己的commit/page/image，重建已执行条件结果及最新LAC，随后重放cut后完整后缀；runtime资源和pending gates不从checkpoint重建为已提交事实。较新image不可用可以回退另一份；两份均不可用时完整日志恢复。缺失/损坏mandatory旧prefix/suffix、错误密钥或identity仍拒绝打开。原格式原型不识别新增Bookie mandatory type/第三页，会拒绝；仍未提供stable兼容承诺。显式停写rotation按下节回收旧prefix；没有在线维护调度入口。
 
 独立Python struct/逐位CRC32C生成`bookie-empty-checkpoint-v1.hex`（4224 bytes）、`bookie-checkpoint-publication-v1.hex`（4096 bytes）和`bookie-checkpoint-commit-v1.hex`（208 bytes）；空cut=-1、generation=1、slot=A、commit UUID(1,2)。Java writer逐字节对照，独立parser校验同一字节；旧Arena/DATA固定向量保持原内容。
+
+## Bookie日志代与双恢复根
+
+`SegmentBookieControlLog.rotate()`复用上述相邻applied cut、两条原commit UUID、新文件/目录同步、两个根发布后才回收的顺序。`SegmentControlRotation`只共享两种owner的页编解码和文件名规则，权限条件仍由Bookie执行。Bookie在无在途normal/read/recovery admission、控制I/O或未apply batch时显式执行；期间拒绝新票据、其他控制提交及关闭，权限查询不等待慢I/O。固定`bookie-control.lock`覆盖整个切换，与Arena锁及DATA目录锁分别管理。
+
+| 结构 | Bookie字节/路径 |
+|---|---|
+| 两个交替物理文件 | `bookie-control-generation-a/b`，偶数代=A、奇数代=B |
+| 身份页 | fileId=-3，原storage/Arena/Bookie身份不变 |
+| 第二页header | offset4096，`UWBRG001`，其余字段与Arena header相同 |
+| rotation extension | offset80的magic=`UWBRP001`，原两份reference及commit UUID位置不变 |
+| superblock发布页 | offset8192、magic=`UWBSB001`，两owner只更新自己的4096-byte页 |
+| 新日志首记录 | offset8192，physical log generation使用新代，全局sequence接续 |
+
+快照及内存中保留规范log generation=1的首次命令/结果、FENCE/内部commit与最新LAC。只在物理写入/读取边界转换framing generation及其header CRC，sealed INSTALL body不改写、不重新加密；恢复仍用原storage binding与外部密钥解封。重放检查条件结果、checkpoint predecessor和完整当前suffix，不重新授予已fenced/tombstone权限或已关闭grant，也不把runtime pending gate持久化为成功事实。
+
+两根force/验证后，原`bookie-control`写mandatory marker并截为8192；它不再提供全日志fallback。最高有效publication选中的物理文件与完整suffix必须存在且通过验证/恢复同步；单份初始image可通过另一份恢复相同普通authority，后续checkpoint保留物理代绑定。两份image都无效时拒绝，不能回退空原日志。旧代或候选仅在fresh当前根及原commit identity证明其退休后删除，固定两条路径不无限增长。
+
+control容量≥10656字节（8192 header、416双commit预留、2048普通控制槽）时，普通写入保留416字节供rotation；更小旧配置保持有限日志并拒绝rotation。image仍各受2×control容量payload上限约束，首次条件结果及内部checkpoint历史不prune，状态满额停止。没有在线调度或长期历史压缩，不据物理日志回收宣称可长期运行。
+
+独立Python struct/逐位CRC32C生成`bookie-rotation-header-v1.hex`及`bookie-rotation-publication-v1.hex`，均4096 bytes，物理代2、相邻checkpoint代1/2、原commit UUID(1,2)/(3,4)。Java逐字节对照。真实文件测试覆盖sealed credential、fence/LAC/closed grant、三轮容量耗尽、7个JVM退出阶段、短写/force失败、跨JVM锁和双owner DATA正常restart；进程退出不等于真实掉电，也未验证旧binary混用写者。
 
 ## 固定向量与验证边界
 

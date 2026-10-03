@@ -21,8 +21,6 @@ import java.io.IOException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -411,8 +409,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final SegmentFileIo io;
     private final SecretKey key;
     private final ProfileDescriptorValidator descriptorValidator;
-    private final FileChannel channel;
-    private final FileLock lock;
+    private FileChannel channel;
+    private final FileChannel originalChannel;
+    private final SegmentDataFileLock writerLock;
+    private SegmentControlRotation.Root rotationRoot;
+    private Thread rotating;
+    private Generation physicalGeneration = LOG_GENERATION;
     private final Map<Long, LedgerState> ledgers = new HashMap<>();
     private final Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
     private final Map<UUID, AppliedOperation> operations = new HashMap<>();
@@ -440,7 +442,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private SegmentBookieControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                     long maxLogBytes, SegmentFileIo io, SecretKey key,
                                     ProfileDescriptorValidator descriptorValidator,
-                                    FileChannel channel, FileLock lock) {
+                                    FileChannel channel, SegmentDataFileLock writerLock) {
         this.config = config;
         this.identity = identity;
         this.maxLogBytes = maxLogBytes;
@@ -448,7 +450,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         this.key = key;
         this.descriptorValidator = descriptorValidator;
         this.channel = channel;
-        this.lock = lock;
+        this.originalChannel = channel;
+        this.writerLock = writerLock;
     }
 
     static SegmentBookieControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -469,33 +472,35 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (maxLogBytes < FIRST_RECORD + 2048) {
             throw new IllegalArgumentException("Bookie control capacity cannot hold an install");
         }
-        FileChannel channel = FileChannel.open(config.directory().resolve("bookie-control"),
-                StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-        FileLock lock = null;
+        SegmentDataFileLock writerLock = SegmentDataFileLock.openControl(
+                config.directory().resolve("bookie-control.lock"));
+        FileChannel original = null;
+        SegmentBookieControlLog result = null;
         try {
-            try {
-                lock = channel.tryLock();
-            } catch (OverlappingFileLockException overlapping) {
-                throw new IOException("Bookie control log already has a writer", overlapping);
-            }
-            if (lock == null) {
-                throw new IOException("Bookie control log already has a writer");
-            }
-            SegmentBookieControlLog result = new SegmentBookieControlLog(config, identity, maxLogBytes,
-                    io, key, descriptorValidator, channel, lock);
+            original = FileChannel.open(config.directory().resolve("bookie-control"),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            result = new SegmentBookieControlLog(config, identity, maxLogBytes, io, key, descriptorValidator,
+                    original, writerLock);
             result.validateStorageFiles();
             result.recover();
             return result;
         } catch (IOException | RuntimeException | Error failure) {
-            if (lock != null) {
+            if (result != null && result.channel != original) {
                 try {
-                    lock.release();
+                    result.channel.close();
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+            }
+            if (original != null) {
+                try {
+                    original.close();
                 } catch (IOException cleanup) {
                     failure.addSuppressed(cleanup);
                 }
             }
             try {
-                channel.close();
+                writerLock.close();
             } catch (IOException cleanup) {
                 failure.addSuppressed(cleanup);
             }
@@ -565,7 +570,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         long sequence = durableThrough + 1;
         ByteBuffer record = SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence,
                 command.operationId(), new Generation(command.scope.authorityGeneration()), 0, body(command));
-        if (record.remaining() > maxLogBytes - nextOffset) {
+        if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
             throw new IOException("Bookie control log capacity exhausted");
         }
         RecoveryCloseWrite write = new RecoveryCloseWrite(command, record, sequence, nextOffset);
@@ -583,7 +588,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         }
         try {
-            io.writeFully(channel, write.record, write.offset);
+            io.writeFully(channel, physicalRecord(write.record), write.offset);
             io.force(channel, true);
             synchronized (this) {
                 write.durable = true;
@@ -663,7 +668,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 bytes = Math.addExact(bytes, record.remaining());
                 records.add(record);
             }
-            if (bytes > maxLogBytes - nextOffset) {
+            if (bytes > maxLogBytes - nextOffset - rotationReserveBytes()) {
                 throw new IOException("Bookie control log capacity exhausted");
             }
             start = nextOffset;
@@ -685,7 +690,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             long position = start;
             for (ByteBuffer record : records) {
-                io.writeFully(channel, record, position);
+                io.writeFully(channel, physicalRecord(record), position);
                 position += record.remaining();
             }
             io.force(channel, true);
@@ -771,7 +776,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
             commitCheckpoint(reference);
             committed = true;
-            SegmentControlCheckpoint.publish(config, SegmentControlFormat.Owner.BOOKIE, reference, checkpointIo);
+            if (rotationRoot == null) {
+                SegmentControlCheckpoint.publish(config, SegmentControlFormat.Owner.BOOKIE, reference, checkpointIo);
+            } else {
+                SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, reference,
+                        rotationRoot, checkpointIo);
+            }
             if (!reference.equals(SegmentControlCheckpoint.publication(
                     config, SegmentControlFormat.Owner.BOOKIE, slot))) {
                 throw new IOException("Bookie checkpoint publication verification failed");
@@ -817,7 +827,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             record = SegmentControlFormat.encode(SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT,
                     LOG_GENERATION, sequence, operationId, new Generation(reference.generation()),
                     reference.generation() - 1, reference.encode());
-            if (record.remaining() > maxLogBytes - nextOffset) {
+            if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
                 throw new IOException("Bookie control log capacity exhausted");
             }
             offset = nextOffset;
@@ -825,7 +835,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             writing = true;
         }
         try {
-            io.writeFully(channel, record, offset);
+            io.writeFully(channel, physicalRecord(record), offset);
             io.force(channel, true);
             synchronized (this) {
                 applyCheckpoint(reference, operationId, sequence);
@@ -844,6 +854,136 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 writing = false;
             }
         }
+    }
+
+    /** Offline maintenance: two cuts differ only by the first checkpoint's own commit. */
+    SegmentControlRotation.Root rotate() throws IOException {
+        return rotate(new SegmentFileIo());
+    }
+
+    SegmentControlRotation.Root rotate(SegmentFileIo rotationIo) throws IOException {
+        Objects.requireNonNull(rotationIo, "rotationIo");
+        synchronized (this) {
+            requireWritable();
+            if (rotating != null || checkpointing || writing || pending != null || activeAdmissions != 0
+                    || pendingFenceWrite != null || pendingLacWrite != null || pendingRecoveryCloseWrite != null
+                    || checkpointGeneration > Long.MAX_VALUE - 2
+                    || physicalGeneration.value() == Long.MAX_VALUE || appliedThrough > Long.MAX_VALUE - 3
+                    || rotationReserveBytes() == 0
+                    || nextOffset > maxLogBytes - 416) {
+                throw new IOException("Bookie rotation requires a quiescent writer and two commit slots");
+            }
+            rotating = Thread.currentThread();
+        }
+        FileChannel candidate = null;
+        Path target = null;
+        boolean created = false;
+        boolean publicationAttempted = false;
+        try {
+            SegmentControlCheckpoint.Reference first = checkpoint(rotationIo);
+            SegmentControlCheckpoint.Reference second = checkpoint(rotationIo);
+            SegmentControlRotation.Root root = new SegmentControlRotation.Root(physicalGeneration.value() + 1,
+                    first, checkpointId(first), second, checkpointId(second));
+            target = SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE, root.generation());
+            if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                // Both fresh publications recover the current journal. Delete only a proven older/orphan file.
+                try (FileChannel orphan = FileChannel.open(target, StandardOpenOption.READ,
+                        LinkOption.NOFOLLOW_LINKS)) {
+                    ByteBuffer header = ByteBuffer.allocate(4096);
+                    SegmentFileIo.readFully(orphan, header, 0);
+                    identity.validate(header, config, -3);
+                    SegmentControlRotation.Root old = SegmentControlRotation.readHeader(orphan,
+                            SegmentControlFormat.Owner.BOOKIE);
+                    if (old.generation() == physicalGeneration.value()
+                            || old.generation() > root.generation() || !knownRotation(old)) {
+                        throw new IOException("Bookie rotation target has unproven authority");
+                    }
+                }
+                Files.delete(target);
+                IsolatedSegmentFiles.syncDirectory(config.directory());
+            }
+            candidate = FileChannel.open(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            created = true;
+            rotationIo.writeFully(candidate, identity.encode(config, -3), 0);
+            rotationIo.writeFully(candidate, SegmentControlRotation.header(SegmentControlFormat.Owner.BOOKIE, root),
+                    4096);
+            rotationIo.force(candidate, true);
+            IsolatedSegmentFiles.syncDirectory(config.directory());
+            if (!root.equals(SegmentControlRotation.readHeader(candidate, SegmentControlFormat.Owner.BOOKIE))) {
+                throw new IOException("Bookie rotation candidate verification failed");
+            }
+            publicationAttempted = true;
+            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, first, root, rotationIo);
+            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, second, root, rotationIo);
+            // The independent lock remains held. This marker prevents empty-log and old-decoder fallback.
+            rotationIo.writeFully(originalChannel,
+                    SegmentControlRotation.header(SegmentControlFormat.Owner.BOOKIE, root),
+                    4096);
+            originalChannel.truncate(SegmentControlRotation.FIRST_RECORD);
+            rotationIo.force(originalChannel, true);
+            FileChannel previous = channel;
+            long previousGeneration = physicalGeneration.value();
+            synchronized (this) {
+                channel = candidate;
+                candidate = null;
+                rotationRoot = root;
+                physicalGeneration = new Generation(root.generation());
+                nextOffset = SegmentControlRotation.FIRST_RECORD;
+                appliedOffset = nextOffset;
+            }
+            if (previous != originalChannel) {
+                previous.close();
+                Files.delete(SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
+                        previousGeneration));
+                IsolatedSegmentFiles.syncDirectory(config.directory());
+            }
+            return root;
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                failed = true;
+            }
+            if (created && !publicationAttempted) {
+                try {
+                    candidate.close();
+                    candidate = null;
+                    Files.delete(target);
+                    IsolatedSegmentFiles.syncDirectory(config.directory());
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+            }
+            throw failure;
+        } finally {
+            try {
+                if (candidate != null) {
+                    candidate.close();
+                }
+            } finally {
+                synchronized (this) {
+                    rotating = null;
+                }
+            }
+        }
+    }
+
+    private synchronized UUID checkpointId(SegmentControlCheckpoint.Reference reference) throws IOException {
+        for (Map.Entry<UUID, SegmentControlCheckpoint.Operation> entry : checkpointState.entrySet()) {
+            SegmentControlParser.Command parsed = parse(entry.getValue().record(), entry.getValue().sequence());
+            if (parsed.type() == SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT
+                    && reference.equals(decodeCheckpoint(parsed, entry.getValue().sequence()))) {
+                return entry.getKey();
+            }
+        }
+        throw new IOException("Bookie checkpoint commit is missing");
+    }
+
+    private boolean knownRotation(SegmentControlRotation.Root root) throws IOException {
+        return root.firstId().equals(checkpointId(root.first())) && root.secondId().equals(checkpointId(root.second()));
+    }
+
+    private long rotationReserveBytes() {
+        return rotating == null && maxLogBytes >= SegmentControlRotation.FIRST_RECORD + 416 + 2048 ? 416 : 0;
     }
 
     private ByteBuffer encode(Command command, long sequence) {
@@ -866,7 +1006,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     synchronized Optional<Admission> admitNormal(ProfileLedgerContext context, byte[] wireVerifier) {
-        if (!normalAdmission(context, wireVerifier) || activeAdmissions == config.maxPendingEntries()) {
+        if (rotating != null || !normalAdmission(context, wireVerifier)
+                || activeAdmissions == config.maxPendingEntries()) {
             return Optional.empty();
         }
         LedgerState state = ledgers.get(context.ledgerId());
@@ -879,7 +1020,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         Objects.requireNonNull(request, "request");
         ProfileLedgerContext context = request.context();
         LedgerState state = ledgers.get(context.ledgerId());
-        if (closed || failed || state == null || !state.context.equals(context)
+        if (closed || failed || rotating != null || state == null || !state.context.equals(context)
                 || state.pendingTombstone || tombstones.containsKey(context.ledgerId())
                 || !state.credential.matchesWireVerifier(request.credential())
                 || activeAdmissions == config.maxPendingEntries()) {
@@ -972,7 +1113,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     /** Only the local route cut; transport read authorization and current-selector checks remain separate. */
     synchronized Optional<ReadAdmission> admitRead(ProfileLedgerContext context) {
-        if (!locallyReadableContext(context) || activeAdmissions == config.maxPendingEntries()) {
+        if (rotating != null || !locallyReadableContext(context) || activeAdmissions == config.maxPendingEntries()) {
             return Optional.empty();
         }
         LedgerState state = ledgers.get(context.ledgerId());
@@ -1053,7 +1194,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     /** Capture or recheck a replayed local read cut without holding the Bookie monitor during DATA I/O. */
     synchronized long recoveryReadCut(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity)
             throws IOException {
-        if (!matchesScope(source, sourceIdentity) || writing || pending != null || activeAdmissions != 0) {
+        if (!matchesScope(source, sourceIdentity) || writing || pending != null || rotating != null
+                || activeAdmissions != 0) {
             throw new IOException("Bookie recovery read cut has unresolved control or entry obligations");
         }
         return appliedThrough;
@@ -1113,7 +1255,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 body.length)).put(context.encode()).putLong(request.lac()).putInt(body.length).put(body).flip();
         ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.EXPLICIT_LAC, LOG_GENERATION,
                 sequence, UUID.randomUUID(), new Generation(generation), 0, value);
-        if (record.remaining() > maxLogBytes - nextOffset) {
+        if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
             throw new IOException("Bookie control log capacity exhausted");
         }
         LacWrite write = new LacWrite(context, request.lac(), body, record, sequence, nextOffset, generation);
@@ -1131,7 +1273,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         }
         try {
-            io.writeFully(channel, write.record, write.offset);
+            io.writeFully(channel, physicalRecord(write.record), write.offset);
             io.force(channel, true);
             synchronized (this) {
                 write.durable = true;
@@ -1236,7 +1378,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         long sequence = durableThrough + 1;
         ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.FENCE, LOG_GENERATION,
                 sequence, operationId, LOG_GENERATION, 0, ByteBuffer.wrap(context.encode()));
-        if (record.remaining() > maxLogBytes - nextOffset) {
+        if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
             throw new IOException("Bookie control log capacity exhausted");
         }
         FenceWrite write = new FenceWrite(context, operationId, record, sequence, nextOffset);
@@ -1254,7 +1396,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         }
         try {
-            io.writeFully(channel, write.record, write.offset);
+            io.writeFully(channel, physicalRecord(write.record), write.offset);
             io.force(channel, true);
             synchronized (this) {
                 write.durable = true;
@@ -1491,7 +1633,161 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 && grant.grant.sameMeaning(close.grant);
     }
 
+    private void selectRotation() throws IOException {
+        for (int slot = 0; slot < 2; slot++) {
+            SegmentControlRotation.Root root;
+            try {
+                SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.BOOKIE, slot);
+                root = SegmentControlRotation.publication(config, SegmentControlFormat.Owner.BOOKIE, slot);
+            } catch (IOException invalidPublication) {
+                // An invalid page is optional. A selected generation's journal is never optional.
+                continue;
+            }
+            if (root != null && (rotationRoot == null || root.generation() > rotationRoot.generation())) {
+                rotationRoot = root;
+            } else if (root != null && rotationRoot.generation() == root.generation()
+                    && !root.equals(rotationRoot)) {
+                throw new IOException("Conflicting Bookie rotation roots");
+            }
+        }
+        if (rotationRoot != null) {
+            channel = FileChannel.open(SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
+                    rotationRoot.generation()),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            ByteBuffer header = ByteBuffer.allocate(4096);
+            SegmentFileIo.readFully(channel, header, 0);
+            identity.validate(header, config, -3);
+            if (!rotationRoot.equals(SegmentControlRotation.readHeader(channel, SegmentControlFormat.Owner.BOOKIE))) {
+                throw new IOException("Bookie rotation publication differs from its journal");
+            }
+            physicalGeneration = new Generation(rotationRoot.generation());
+        }
+    }
+
+    private void recoverRotated() throws IOException {
+        long size = channel.size();
+        if (size < SegmentControlRotation.FIRST_RECORD || size > maxLogBytes) {
+            throw new IOException("Invalid rotated Bookie control log size");
+        }
+        List<SegmentControlCheckpoint.Reference> candidates = new ArrayList<>();
+        candidates.add(rotationRoot.first());
+        candidates.add(rotationRoot.second());
+        SegmentControlCheckpoint.Reference[] publications = new SegmentControlCheckpoint.Reference[2];
+        for (int slot = 0; slot < 2; slot++) {
+            boolean valid = false;
+            try {
+                SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.publication(
+                        config, SegmentControlFormat.Owner.BOOKIE, slot);
+                if (rotationRoot.equals(SegmentControlRotation.publication(config,
+                        SegmentControlFormat.Owner.BOOKIE, slot))) {
+                    publications[slot] = reference;
+                    valid = true;
+                }
+            } catch (IOException invalidPublication) {
+                // Recovery still has to validate one complete publication and every current suffix record.
+            }
+            if (valid) {
+                SegmentControlCheckpoint.syncPublication(config, slot);
+            }
+        }
+        long sequence = rotationRoot.through() + 1;
+        long generation = rotationRoot.second().generation();
+        HashSet<UUID> operations = new HashSet<>();
+        for (long offset = SegmentControlRotation.FIRST_RECORD; offset < size;) {
+            int length = recordLength(offset, size, sequence);
+            SegmentControlParser.Command parsed = parse(readRecord(offset, length), sequence);
+            boolean first = parsed.type() != SegmentControlFormat.Type.EXPLICIT_LAC
+                    && operations.add(parsed.operationId());
+            if (parsed.type() == SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT) {
+                SegmentControlCheckpoint.Reference reference = decodeCheckpoint(parsed, sequence);
+                if (!first || parsed.expectedGeneration() != generation) {
+                    throw new IOException("Invalid rotated Bookie checkpoint order");
+                }
+                if (reference.through() < rotationRoot.through()
+                        || reference.logOffset() < SegmentControlRotation.FIRST_RECORD
+                        || reference.logOffset() > offset) {
+                    throw new IOException("Invalid rotated Bookie checkpoint cut");
+                }
+                recordLength(reference.logOffset(), size, reference.through() + 1);
+                generation = reference.generation();
+                if (reference.equals(publications[reference.slot()])) {
+                    candidates.add(reference);
+                }
+            } else if (parsed.type() == SegmentControlFormat.Type.FENCE) {
+                fenceContext(parsed);
+            } else if (parsed.type() == SegmentControlFormat.Type.EXPLICIT_LAC) {
+                decodeLac(parsed);
+            } else {
+                decode(parsed);
+            }
+            offset += length;
+            sequence++;
+        }
+        channel.force(true);
+        candidates.sort(Comparator.comparingLong(SegmentControlCheckpoint.Reference::generation).reversed());
+        boolean restored = false;
+        for (SegmentControlCheckpoint.Reference reference : candidates) {
+            try {
+                restoreSnapshot(reference);
+                if (reference.equals(rotationRoot.first()) || reference.equals(rotationRoot.second())) {
+                    if (reference.equals(rotationRoot.first())) {
+                        replayRootCommit(rotationRoot.firstId(), rotationRoot.first());
+                    }
+                    replayRootCommit(rotationRoot.secondId(), rotationRoot.second());
+                    appliedOffset = SegmentControlRotation.FIRST_RECORD;
+                }
+                restored = true;
+                break;
+            } catch (IOException | IllegalArgumentException invalidImage) {
+                resetRecoveredState();
+            }
+        }
+        if (!restored) {
+            throw new IOException("No recoverable Bookie checkpoint after prefix reclamation");
+        }
+        sequence = appliedThrough + 1;
+        for (long offset = appliedOffset; offset < size;) {
+            int length = recordLength(offset, size, sequence);
+            replay(readRecord(offset, length), sequence++, null);
+            offset += length;
+            appliedOffset = offset;
+        }
+        nextOffset = size;
+    }
+
+    private void replayRootCommit(UUID operationId, SegmentControlCheckpoint.Reference reference) throws IOException {
+        long sequence = appliedThrough + 1;
+        ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT,
+                LOG_GENERATION, sequence, operationId, new Generation(reference.generation()),
+                reference.generation() - 1, reference.encode());
+        replay(record, sequence, null);
+    }
+
+    private void restoreSnapshot(SegmentControlCheckpoint.Reference reference) throws IOException {
+        SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(
+                config, identity, SegmentControlFormat.Owner.BOOKIE, reference, maxLogBytes);
+        resetRecoveredState();
+        for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
+            replay(operation.record(), operation.sequence(), operation.status());
+        }
+        if (checkpointGeneration != reference.generation() - 1) {
+            throw new IOException("Bookie checkpoint does not retain its committed predecessor");
+        }
+        appliedThrough = snapshot.through();
+        durableThrough = snapshot.through();
+        appliedOffset = snapshot.logOffset();
+        publishedCheckpoint = reference;
+    }
+
     private void recover() throws IOException {
+        ByteBuffer originalIdentity = ByteBuffer.allocate(4096);
+        SegmentFileIo.readFully(originalChannel, originalIdentity, 0);
+        identity.validate(originalIdentity, config, -3);
+        selectRotation();
+        if (rotationRoot != null) {
+            recoverRotated();
+            return;
+        }
         long size = channel.size();
         if (size < FIRST_RECORD || size > maxLogBytes) {
             throw new IOException("Invalid Bookie control log size");
@@ -1589,7 +1885,23 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private ByteBuffer readRecord(long offset, int length) throws IOException {
         ByteBuffer bytes = ByteBuffer.allocate(length);
         SegmentFileIo.readFully(channel, bytes, offset);
-        return bytes;
+        if (physicalGeneration.equals(LOG_GENERATION)) {
+            return bytes;
+        }
+        SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.BOOKIE,
+                physicalGeneration, bytes.getLong(24));
+        return SegmentControlFormat.encode(parsed.type(), LOG_GENERATION, bytes.getLong(24), parsed.operationId(),
+                parsed.operationGeneration(), parsed.expectedGeneration(), parsed.body());
+    }
+
+    private ByteBuffer physicalRecord(ByteBuffer canonical) throws IOException {
+        if (physicalGeneration.equals(LOG_GENERATION)) {
+            return canonical;
+        }
+        SegmentControlParser.Command parsed = parse(canonical, canonical.getLong(24));
+        return SegmentControlFormat.encode(parsed.type(), physicalGeneration, canonical.getLong(24),
+                parsed.operationId(),
+                parsed.operationGeneration(), parsed.expectedGeneration(), parsed.body());
     }
 
     private static SegmentControlParser.Command parse(ByteBuffer bytes, long sequence) throws IOException {
@@ -1691,7 +2003,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         ByteBuffer header = ByteBuffer.allocate(128);
         SegmentFileIo.readFully(channel, header, offset);
         int length = SegmentControlParser.recordLength(header, SegmentControlFormat.Owner.BOOKIE,
-                LOG_GENERATION, sequence);
+                physicalGeneration, sequence);
         if (length > size - offset) {
             throw new IOException("Incomplete Bookie control record");
         }
@@ -1987,8 +2299,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private void requireWritable() throws IOException {
-        if (closed || failed) {
-            throw new IOException("Bookie control log is closed or has uncertain I/O");
+        if (closed || failed || (rotating != null && rotating != Thread.currentThread())) {
+            throw new IOException("Bookie control log is closed, rotating or has uncertain I/O");
         }
     }
 
@@ -1997,18 +2309,29 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (writing || checkpointing || activeAdmissions != 0) {
+        if (writing || checkpointing || rotating != null || activeAdmissions != 0) {
             throw new IOException("Bookie control I/O or admissions are still in flight");
         }
         closed = true;
         IOException first = null;
         try {
-            lock.release();
+            if (channel != originalChannel) {
+                channel.close();
+            }
         } catch (IOException failure) {
             first = failure;
         }
         try {
-            channel.close();
+            originalChannel.close();
+        } catch (IOException failure) {
+            if (first == null) {
+                first = failure;
+            } else {
+                first.addSuppressed(failure);
+            }
+        }
+        try {
+            writerLock.close();
         } catch (IOException failure) {
             if (first == null) {
                 first = failure;

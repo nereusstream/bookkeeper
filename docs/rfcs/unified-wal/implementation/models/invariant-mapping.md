@@ -43,3 +43,12 @@ Arena rotation回执`unified-wal-model-t1waf2bm`增加以下有限投影：
 | `SurvivingAuthority` | RFC-0003 §11；force新文件与目录、两份完整根后才回收旧prefix | 两root保存相同普通authority；不展开一般conditional state |
 | `AcknowledgedTailSurvives` | 切换后普通请求在新代force后成功，旧代不能替代current tail | 不证明实际fsync或坏framing分类 |
 | `RecoveryKeepsAcknowledgements` | 合法恢复根加当前必要tail保留全部既存确认 | 单次掉电/单image损坏；不是A+C组合 |
+
+Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
+
+| 性质 | 当前合同与实现 | 证据边界 |
+|---|---|---|
+| `BookieRetiredPrefixNeedsCheckpoint` | RFC-0005 §5.2；旧prefix回收后仍有已提交image覆盖退休cut | 双根/barrier由独立C切片作为假设，不是A+C组合 |
+| `RetiredBookieTerminalPermissionsRemainDenied` | 被回收权限历史中的fence/tombstone仍禁止normal/read恢复，close/LAC由完整权限相等性质检查 | 单ledger固定轨迹；指定负向在错误image恢复后进入退休域才触发 |
+
+当前权限投影9个动作完整探索48,763 distinct states；字节、密钥、锁、真实文件和票据门槛由独立Java测试验证，模型不授予生产authority。

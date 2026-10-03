@@ -330,7 +330,7 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 
 ### Arena停写rotation与旧控制prefix回收
 
-2026-10-03 Arena物理rotation已实现：停写后连续建立两个只差内部commit的applied checkpoint，绑定两条原commit identity，先force新日志代并同步目录，再force/验证两份恢复根，最后回收旧prefix。固定sidecar锁覆盖切换和另一owner身份检查；新代持续全局sequence，后续checkpoint保留日志代绑定。普通控制/故障预留保留416字节供rotation，两份image与全部首次条件结果仍受固定状态预算限制。真实重复填满/rotation、单页或image损坏回退、必需suffix损坏拒绝、短写/force失败、跨JVM排他、7个进程退出阶段及双owner DATA图两轮restart有回执`unified-wal-local-3Udoan9d`（195个源码输入、199项/194通过/5平台跳过）；有限模型`unified-wal-model-t1waf2bm`（29个实际输入、5个正向完整PASS、7个指定反例）新增双根/目录同步/旧prefix回收投影。Bookie旧日志仍全部必需；Bookie rotation、在线维护、长期幂等历史压缩、派生索引/MOVE/FREE、完整A/C及组合模型、真实掉电和生产Gate保持未完成。
+历史（`43bfd80b`版本）2026-10-03 Arena物理rotation已实现：停写后连续建立两个只差内部commit的applied checkpoint，绑定两条原commit identity，先force新日志代并同步目录，再force/验证两份恢复根，最后回收旧prefix。固定sidecar锁覆盖切换和另一owner身份检查；新代持续全局sequence，后续checkpoint保留日志代绑定。普通控制/故障预留保留416字节供rotation，两份image与全部首次条件结果仍受固定状态预算限制。真实重复填满/rotation、单页或image损坏回退、必需suffix损坏拒绝、短写/force失败、跨JVM排他、7个进程退出阶段及双owner DATA图两轮restart有回执`unified-wal-local-3Udoan9d`（195个源码输入、199项/194通过/5平台跳过）；有限模型`unified-wal-model-t1waf2bm`（29个实际输入、5个正向完整PASS、7个指定反例）新增双根/目录同步/旧prefix回收投影。Bookie旧日志仍全部必需；Bookie rotation、在线维护、长期幂等历史压缩、派生索引/MOVE/FREE、完整A/C及组合模型、真实掉电和生产Gate保持未完成。
 
 复现：`scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentArenaControlLogTest,SegmentBookieControlLogTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest`，以及`python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar`。输入父提交为`00edeb8f784ca240d9a3d040604f54ef5126a1bb`，Java及模型run冻结本次实际源码SHA-256，历史回执保持原绑定。新格式的固定向量与文件/根发布顺序见[字节合同](format-v1.md#arena日志代与双恢复根)。
 
@@ -339,3 +339,17 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 真实DATA图在健康CLOSE后显式维护，随后restart恢复旧entry幂等/点读并追加新entry；没有在运行中的storage图接入维护调度。image仍保留所有首次条件结果/内部checkpoint历史，不靠prune改变重试语义；达到状态预算仍停止，不能据三轮物理回收宣称长期可运行。没有解除未关闭OPEN或quarantine门槛。旧版本混用writer及真实掉电尚未验证，有限模型不代替文件系统屏障证据。
 
 本次`bookkeeper-server` Spotless/Checkstyle通过（run目录的`style-check.log`及exit-code=0）；175个变更文档相对链接与15个anchor检查通过，JSON/Python AST及`git diff --check`通过。上述仅为本次隔离切片证据。
+
+### Bookie停写rotation与共享物理协议
+
+2026-10-03 Bookie也已完成显式停写rotation：共享`SegmentControlRotation`的owner绑定页编解码及双恢复根顺序，各自保留独立控制状态、文件身份、sidecar锁和A/B发布页。新Bookie物理代继续全局sequence；sealed credential原body、首次条件结果、FENCE、tombstone、最新LAC与grant/close按规范记录恢复。普通控制保留416字节供两个commit，容量至少10656字节才启用；快照状态仍有固定payload上限，满额明确停止。
+
+最新Java回执`unified-wal-local-sKIZwMRg`覆盖7个相关测试类，197个源码/测试/固定向量输入SHA-256已核对：206项、201通过、5项Linux亲和测试在macOS跳过、0失败/错误，Maven exit-code=0。新增Bookie测试覆盖三轮普通容量耗尽/rotation/restart和后续checkpoint、原sealed credential及条件失败结果、fence/latest LAC/closed grant、单image回退和mandatory suffix/选中文件拒绝、7个真实JVM halt阶段、跨owner身份检查期间的跨JVM排他、短写/force失败和慢rotation期间票据/关闭拒绝。两个owner均rotation后的DATA图经过两次正常restart，旧entry仍可点读及解析本地重复结果，再追加新entry。独立Bookie header/第三页固定字节向量与既有Arena向量逐字节对照。
+
+最新模型回执`unified-wal-model-bu9e_n9l`冻结31个实际输入（5个module、14个cfg、runner、11个Java）及父提交处3份合同哈希，14个配置取得6个完整正向PASS和8个指定性质反例。Bookie回收权限投影探索159,578 generated/48,763 distinct states、queue=0、depth/diameter=31，9个Next动作coverage均非零；丢失terminal字段的候选规则在prefix回收后被指定性质否证。该投影假设双根/文件屏障已经成立，不是完整A+C或实际掉电证明。完整统计和边界见[模型记录](../models/README.md#bookie回收prefix权限投影)。
+
+复现命令同前节7类测试命令及model runner；两份最新run的父提交均为`43bfd80b603b500843fba067ff8b847320ebf116`，实际源码SHA-256匹配本轮实现，历史回执及父提交合同绑定保持不变。文件字节、独立owner magic及发布顺序见[Bookie格式](format-v1.md#bookie日志代与双恢复根)。Spotless/Checkstyle通过，结果保存在最新Java run的`style-check.log`/`style-exit-code`（0）。
+
+本轮只在健康CLOSE后显式维护，没有运行中storage图的自动调度；全部首次幂等结果及内部checkpoint历史仍保留，物理prefix回收不证明长期状态压缩或可持续运行。未关闭OPEN/quarantine合同不变。在线维护、派生索引、MOVE/FREE、多Arena、真实掉电、完整模型及生产authority保持未完成；旧版本混用writer未验证。
+
+本轮184个变更文档相对链接、24个anchor检查通过；JSON/Python AST、回执checksums、197个Java及31个模型当前输入哈希和3份父提交合同哈希核对通过，`git diff --check`无问题。
