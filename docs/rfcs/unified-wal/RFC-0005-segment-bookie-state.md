@@ -747,3 +747,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-04，[整allocation全死FREE](implementation/local-storage/README.md#整-allocation-全死-free-与退役前缀)已复用Bookie准确终态tombstone作为唯一删除权威；临时reclamation lease只关闭并排空entry admission，不持久复制另一份ledger生命周期。Arena保存已验证范围的generation/序号及必要Bookie applied cut，重放不重新访问合法退役字节。真实storage图与rotation后全量/覆盖恢复已验证；inactive、unknown或索引缺失不授权FREE。后续[健康整块复用](implementation/local-storage/README.md#整-allocation-复用与健康关闭末端)通过当前grant generation与CLOSED末端区分旧残留，重放仍使用同一Bookie终态权威。后续[运行期终态清理](implementation/local-storage/README.md#运行期终态索引与坐标回收)复用同一已applied终态的有限snapshot、entry drain与原owner，实际native删除后释放对应坐标并更新coverage；晚到tombstone留到下次。MOVE/compaction、长期净空间及集群删除仍未完成。 后续[relocation 内部完成](implementation/local-storage/README.md#relocation-副本内部持久化完成)仅返回实际副本持久化事实，不取得普通 Bookie 成功或替代 MOVE/selector 权限。
+
+
+2026-10-04 当前后续增量：[受保护的条件 MOVE 与当前位置](implementation/local-storage/README.md#受保护的条件-move-与当前位置)已复用现有全局entry/file排空与CONTROL service，接通实际copy字节验证、最多256行条件durable/apply、Arena selector、旧定位业务读/幂等与metadata-only控制重放。旧coverage不能跳过MOVE后的必要DATA，当前target缺失拒绝恢复；未退役历史allocation仍解析CRC。MOVE后源/orphan FREE、原owner native/coverage维护与部分存活compaction、A/B已复用后的C恢复、长期净容量及生产Gate仍未完成。当前六项真实/固定向量回归及16正向/36指定反例见该切片；此前receipt保持各自历史范围。

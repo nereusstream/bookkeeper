@@ -193,6 +193,9 @@ final class SegmentDerivedIndex implements AutoCloseable {
     synchronized Optional<RecoveryCoverage> recoveryCoverage(SegmentArenaControlLog arena,
                                                              SegmentBookieControlLog bookie) throws IOException {
         requireOpen();
+        if (arena.hasMoves()) {
+            return Optional.empty();
+        }
         try {
             Coverage selected = coverage().orElse(null);
             if (selected == null || !arena.matchesScope(config, identity)
@@ -414,6 +417,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
                 SegmentHotDirectory.IndexCut cut = selected[address.shard()];
                 SegmentDataRecovery.StreamCoverage stream = cut.stream();
                 if (++counts[address.shard()] > cut.entries()
+                        || !arena.resolveLocation(location).equals(location)
                         || !address.streamGeneration().equals(stream.generation())
                         || address.sequence() < stream.firstSequence() || address.sequence() > stream.through()
                         || !arena.dataFileAvailable(address.fileIndex())

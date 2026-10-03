@@ -1115,3 +1115,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04，新增[relocation内部完成投影](../implementation/models/README.md#relocation-内部完成投影)：2个copy batch的实际barrier、原owner连续prefix、内部结果与pool两方终结。正向230 distinct states完整探索，force即返回事实、copy普通发布、取消即归还池产生指定反例；矩阵15正向/33指定反例。真实文件和原池由[Java切片](../implementation/local-storage/README.md#relocation-副本内部持久化完成)验证；MOVE/selector、FREE组合及完整A+C/C+D未完成，不解除Gate。
+
+
+2026-10-04 当前后续增量：[受保护的条件 MOVE 与当前位置](../implementation/local-storage/README.md#受保护的条件-move-与当前位置)已复用现有全局entry/file排空与CONTROL service，接通实际copy字节验证、最多256行条件durable/apply、Arena selector、旧定位业务读/幂等与metadata-only控制重放。旧coverage不能跳过MOVE后的必要DATA，当前target缺失拒绝恢复；未退役历史allocation仍解析CRC。MOVE后源/orphan FREE、原owner native/coverage维护与部分存活compaction、A/B已复用后的C恢复、长期净容量及生产Gate仍未完成。当前六项真实/固定向量回归及16正向/36指定反例见该切片；此前receipt保持各自历史范围。

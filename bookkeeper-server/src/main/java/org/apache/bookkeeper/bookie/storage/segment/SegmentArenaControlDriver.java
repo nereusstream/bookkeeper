@@ -198,6 +198,10 @@ final class SegmentArenaControlDriver {
         return submitCommands(commands, completion);
     }
 
+    boolean submitMove(SegmentArenaMove command, Completion completion) {
+        return submitCommands(List.of(command), completion);
+    }
+
     boolean submitFree(SegmentArenaControlLog.Free command, Completion completion) {
         return submitCommands(List.of(command), completion);
     }
@@ -220,7 +224,7 @@ final class SegmentArenaControlDriver {
             }
             boolean accepted;
             try {
-                log.claimFrees(batch);
+                log.claimProtectedCommands(batch);
                 accepted = owner.submitControl(new SegmentOwnerLoop.Command() {
                     @Override
                     public void run(SegmentOwnerLoop.Ticket ticket) {
@@ -230,7 +234,7 @@ final class SegmentArenaControlDriver {
                     @Override
                     public void failed(Throwable cause) {
                         owner.requireOwner();
-                        log.finishFrees(batch);
+                        log.finishProtectedCommands(batch);
                         deliver(completion, null, cause);
                     }
                 });
@@ -238,12 +242,12 @@ final class SegmentArenaControlDriver {
                 busy.set(false);
                 throw new IllegalStateException("FREE runtime protection could not be claimed", failure);
             } catch (RuntimeException | Error failure) {
-                log.finishFrees(batch);
+                log.finishProtectedCommands(batch);
                 busy.set(false);
                 throw failure;
             }
             if (!accepted) {
-                log.finishFrees(batch);
+                log.finishProtectedCommands(batch);
                 busy.set(false);
             }
             return accepted;
@@ -358,7 +362,7 @@ final class SegmentArenaControlDriver {
         io.submitControl(ticket, () -> durable.set(log.appendDurably(batch)), cause -> {
             owner.requireOwner();
             if (cause != null) {
-                log.finishFrees(batch);
+                log.finishProtectedCommands(batch);
                 deliver(completion, null, cause);
                 return;
             }
@@ -366,11 +370,11 @@ final class SegmentArenaControlDriver {
             try {
                 results = log.applyDurable(durable.get());
             } catch (Throwable failure) {
-                log.finishFrees(batch);
+                log.finishProtectedCommands(batch);
                 deliver(completion, null, failure);
                 return;
             }
-            log.finishFrees(batch);
+            log.finishProtectedCommands(batch);
             deliver(completion, results, null);
         });
     }

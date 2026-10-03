@@ -71,6 +71,7 @@ final class SegmentHotDirectory {
     private int unindexed;
     private Throwable indexFailure;
     private SegmentPhysicalPrefix prefix;
+    private SegmentArenaControlLog arena;
 
     SegmentHotDirectory(SegmentOwnerLoop owner, IsolatedSegmentConfig config, SegmentFileHeader identity,
                         int maxEntries) {
@@ -90,11 +91,12 @@ final class SegmentHotDirectory {
     }
 
     /** Bound by the DATA driver before its first submission, including an externally constructed driver. */
-    void bindPrefix(SegmentPhysicalPrefix physicalPrefix) {
+    void bindPrefix(SegmentPhysicalPrefix physicalPrefix, SegmentArenaControlLog authority) {
         if (prefix != null) {
             throw new IllegalStateException("Hot directory already belongs to a DATA prefix");
         }
         prefix = Objects.requireNonNull(physicalPrefix, "physicalPrefix");
+        arena = Objects.requireNonNull(authority, "authority");
     }
 
     boolean matchesScope(IsolatedSegmentFiles files) {
@@ -162,12 +164,17 @@ final class SegmentHotDirectory {
                   BiConsumer<SegmentPointRead.Location, Throwable> completed) {
         owner.requireOwner();
         if (index == null) {
-            ticket.resume(() -> completed.accept(null, null));
+            ticket.resume(() -> completed.accept(arena == null ? null
+                    : arena.currentMoveLocation(context, entryId).filter(this::isCurrentDurable).orElse(null), null));
             return;
         }
         AtomicReference<SegmentPointRead.Location> selected = new AtomicReference<>();
         indexIo.submitContinuing(ticket, () -> selected.set(index.get(context, entryId).orElse(null)), failure -> {
             SegmentPointRead.Location location = selected.get();
+            if (failure == null && arena != null) {
+                location = location == null ? arena.currentMoveLocation(context, entryId).orElse(null)
+                        : arena.resolveLocation(location);
+            }
             if (failure == null && location != null && !isCurrentDurable(location)) {
                 failure = new IOException("Derived location has no occupied coordinate or current durable prefix");
             }
@@ -177,11 +184,13 @@ final class SegmentHotDirectory {
 
     boolean isCurrentDurable(SegmentPointRead.Location location) {
         owner.requireOwner();
-        if (location == null) {
+        if (location == null || arena != null && !arena.resolveLocation(location).equals(location)) {
             return false;
         }
         Candidate candidate = candidates.get(new Key(location.context(), location.entryId()));
-        return candidate != null && candidate.liveDurable() && candidate.location().equals(location)
+        return candidate != null && candidate.liveDurable()
+                        && (arena == null ? candidate.location() : arena.resolveLocation(candidate.location()))
+                                .equals(location) && (prefix == null || prefix.containsDurable(location))
                 || index != null && prefix != null && occupied(location.context(), location.entryId())
                         && prefix.containsDurable(location);
     }
@@ -418,7 +427,8 @@ final class SegmentHotDirectory {
         owner.requireOwner();
         Candidate candidate = candidates.get(new Key(context, entryId));
         return candidate != null && candidate.liveDurable()
-                ? Optional.of(candidate.location()) : Optional.empty();
+                ? Optional.of(arena == null ? candidate.location() : arena.resolveLocation(candidate.location()))
+                        .filter(this::isCurrentDurable) : Optional.empty();
     }
 
     int pendingBatches() {

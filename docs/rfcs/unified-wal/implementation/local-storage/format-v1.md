@@ -271,3 +271,12 @@ Arena DEVICE_STATE type=7 的健康 CLOSED v2 body 为 `24 + 24*N` bytes，外�
 
 
 `submitRelocation` 的内部持久化结果复用既有 RELOCATION_COPY envelope 和 DATA 地址，不新增持久/wire 字段。私有构造结果绑定现有 move identity/generation、目标定位及完整 entry SHA-256；copy durable completion 不发布普通 hot/derived locator，不授予 ACK 或 MOVE authority。格式向量及来源区别不变，执行证据见[内部完成切片](README.md#relocation-副本内部持久化完成)。
+
+
+## 条件 MOVE v1
+
+隔离 Arena type=MOVE（3），control framing不变；header expectedGeneration=0，operation UUID/generation绑定实际copy envelope。body包含version u32=1、rowCount u32（1..256）与required Bookie applied cut i64（>=-1），随后每行252 bytes：context60、entryId i64、源geometry64、目标geometry64、expected predecessor selector i64（初始-1）、source allocation control sequence i64、target allocation control sequence i64、完整entry SHA-256原始32 bytes。geometry为file/shard各u32，allocation/generation/streamGeneration/sequence/offset各i64，batchLength u32、recordOffset i64、recordLength u32。所有control引用必须早于本MOVE sequence；geometry满足固定shard、alignment、文件/batch/record范围。
+
+最大body为64528 bytes，完整control record为64672 bytes，低于65536上限。最多256个唯一context/entry坐标；多行条件整批成立后才应用。源与目标完整entry bytes一致，operation generation为copy身份；selector为赢家的绝对Arena控制sequence。它不编码另一份结果日志或Bookie权限，重放按既有durable→顺序apply。
+
+独立Python struct/逐位CRC32C生成的 `arena-move-v1.hex` 为416 bytes，sequence=3、UUID=0:601、operation generation7、Bookie cut1；唯一ledger44/entry1，源/目标allocation5/generation1/stream1、DATA sequence1→2、offset4096→8192、recordOffset4224→8320、recordLength204、前驱-1、allocation order0、digest00..1f。Java逐字节对照，另验证256行、257行拒绝、未知version、未来引用、错误record span与header generation；格式事实不授予新的runtime proof。执行范围见[当前MOVE切片](README.md#受保护的条件-move-与当前位置)。

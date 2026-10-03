@@ -479,3 +479,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-04，[整allocation全死FREE与退役前缀](rfcs/unified-wal/implementation/local-storage/README.md#整-allocation-全死-free-与退役前缀)已接通真实DATA/终态tombstone proof、准入/I/O/read pin排空、CONTROL durable及原owner条件apply、generation 1→2与metadata-only退休范围恢复。rotation后覆盖退役字节的全量/同代覆盖storage重启仍保留同文件活数据。后续[健康整块复用](rfcs/unified-wal/implementation/local-storage/README.md#整-allocation-复用与健康关闭末端)已由原refill选择匹配FREE generation并以实际CLOSED末端恢复当前prefix；同块两轮复用及共享活数据恢复通过。后续[运行期终态清理](rfcs/unified-wal/implementation/local-storage/README.md#运行期终态索引与坐标回收)已接通native删除、原owner预算释放及持久覆盖，1/4 worker固定容量四轮FREE/reuse验证。OPEN恢复、MOVE/compaction、长期净收益、多Arena及生产Gate仍未完成，步骤9保持PARTIAL。 后续[relocation 内部完成](rfcs/unified-wal/implementation/local-storage/README.md#relocation-副本内部持久化完成)已接通 copy-only DATA 实际持久化结果与原 owner 资源归还，尚不启用 MOVE/selector 或部分存活 compaction。
+
+
+2026-10-04 当前增量见[受保护的条件MOVE](rfcs/unified-wal/implementation/local-storage/README.md#受保护的条件-move-与当前位置)：实际copy验证、双坐标全批条件、durable后Arena selector、业务读取/幂等及全量/rotation恢复已接通；复用既有全局排空与CONTROL service。MOVE与源/orphan FREE、native维护/coverage、部分存活compaction和长期净容量仍未组合完成，步骤9/整体Gate保持未完成。当前模型矩阵16正向/36指定反例，局部证据不授予生产authority。

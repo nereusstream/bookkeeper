@@ -111,6 +111,7 @@ final class SegmentDuplicateCheck {
                                     SegmentArenaControlLog authority, SegmentPointRead.Location location,
                                     ProfileLedgerContext context, ByteBuffer incomingEntry, ByteBuffer scratch)
             throws IOException {
+        location = authority.resolveLocation(location);
         if (!context.equals(location.context())) {
             throw new IOException("Duplicate check ledger context mismatch");
         }
@@ -121,9 +122,7 @@ final class SegmentDuplicateCheck {
         SegmentBatchParser.Record stored = (scratch == null
                 ? SegmentPointRead.read(config, identity, authority, location)
                 : SegmentPointRead.readWithScratch(config, identity, authority, location, scratch)).record();
-        if (stored.origin() != SegmentBatchFormat.ENTRY_DATA) {
-            throw new IOException("Duplicate check requires ordinary DATA");
-        }
+        authority.validateSelectedRecord(location, stored);
         return SegmentEntryIdentity.parse(stored.context(), stored.entry()).sameLogicalPayload(incoming);
     }
 

@@ -192,3 +192,16 @@ metadata-only退役范围恢复、空range不虚增序号、rotation及native覆
 | copy-only输入/内部结果 | `relocationDurabilityReturnsBoundCopyFactsWithoutOrdinaryPublication`验证绑定、原始copy可校验但无普通定位、后继普通同坐标写与恢复来源选择；`relocationValidationConsumesPooledBatchesWithoutIoOrCoordinatePublication`验证mixed origin/move、重复坐标及错误shard拒绝并归还池 |
 
 没有引入MOVE完成、普通Add成功或selector winner的模型断言。乱序测试暂停前批进入实际IO；同文件write/force串行保证保留，测试不通过暂停持锁force制造不可达交错。
+
+
+## 条件 MOVE
+
+| 动作 | 实际路径与回归 |
+|---|---|
+| `Copy/Prepare` | 实际副本结果与 `SegmentArenaMove.prepare` 的源/目标独立点读；`moveProofRejectsHeldReadsWrongBytesAndFutureSelectorsWithoutLeakingProtection` 验证读保护、不同entry bytes、未来引用与scratch失败归还 |
+| `AppendControl/Force/Apply` | 既有 CONTROL I/O / Arena 顺序条件；`moveWaitsForApplyAndRedirectsOldHotReadsAndDuplicateChecks` 验证 durable未apply、decoded无新proof及当前目标点读/幂等 |
+| `Apply/CrashReplay` | `moveChainRejectsStalePredecessorAndReplaysSelectorsThroughRotation` 验证双坐标全批条件、loser、后继与旧重试、完整历史及rotation selector恢复、当前target缺失隔离；`moveControlForceUnknownDoesNotCutOverBeforeApplyButReplaysDurableFacts` 验证未知barrier与未关闭会话 |
+| `ReadStart/ReadFinish/Finish/CancelWait` | `cancelledMoveWaitRetainsProtectionThroughActualForceAndOwnerApply` 保持文件/Bookie gate到实际force与owner apply；已有业务read admission/file pin保持两方终结 |
+| wire bound | `moveFormatMatchesIndependentVectorAndBoundsAuthorityReferences` 独立416-byte向量、256/257行、未知版本/未来前驱/geometry/header拒绝 |
+
+真实原owner池/CONTROL service复用现有组件。以上不包括graph compaction、源FREE/reuse与native maintenance cut。

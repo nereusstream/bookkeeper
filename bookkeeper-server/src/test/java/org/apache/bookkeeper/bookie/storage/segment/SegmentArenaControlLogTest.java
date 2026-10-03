@@ -1292,4 +1292,54 @@ public class SegmentArenaControlLogTest {
                     oneRecordCapacity));
         }
     }
+
+    @Test
+    public void moveFormatMatchesIndependentVectorAndBoundsAuthorityReferences() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            byte[] vector = checkpointVector("arena-move-v1.hex");
+            SegmentArenaMove move = (SegmentArenaMove) arena.decodeCommand(ByteBuffer.wrap(vector), 3);
+            assertEquals(1, move.entries().size());
+            assertEquals(1, move.bookieCut());
+            assertEquals(-1, move.entries().get(0).source().expectedSelector());
+            assertEquals(8320, move.entries().get(0).target().recordOffset());
+            ByteBuffer encoded = SegmentControlFormat.encode(move.type(), new Generation(1), 3,
+                    move.operationId(), move.operationGeneration(), move.expectedGeneration(), move.body());
+            byte[] actual = new byte[encoded.remaining()];
+            encoded.get(actual);
+            assertArrayEquals(vector, actual);
+            for (int count : new int[] {256, 257}) {
+                ByteBuffer rows = ByteBuffer.allocate(16 + 252 * count).putInt(1).putInt(count).putLong(1);
+                byte[] row = new byte[252];
+                move.body().position(16).get(row);
+                for (int i = 0; i < count; i++) {
+                    ByteBuffer.wrap(row).putLong(60, i);
+                    rows.put(row);
+                }
+                ByteBuffer bounded = SegmentControlFormat.encode(move.type(), new Generation(1), 3,
+                        move.operationId(), move.operationGeneration(), 0, rows.flip());
+                if (count == 256) {
+                    assertEquals(256, ((SegmentArenaMove) arena.decodeCommand(bounded, 3)).entries().size());
+                } else {
+                    assertThrows(IOException.class, () -> arena.decodeCommand(bounded, 3));
+                }
+            }
+            for (int offset : new int[] {0, 212, 208}) {
+                ByteBuffer invalid = ByteBuffer.allocate(move.body().remaining()).put(move.body()).flip();
+                if (offset == 212) {
+                    invalid.putLong(offset, 3); // A predecessor cannot refer to this or a future control record.
+                } else {
+                    invalid.putInt(offset, offset == 0 ? 2 : Integer.MAX_VALUE);
+                }
+                ByteBuffer command = SegmentControlFormat.encode(move.type(), new Generation(1), 3,
+                        move.operationId(), move.operationGeneration(), 0, invalid);
+                assertThrows(IOException.class, () -> arena.decodeCommand(command, 3));
+            }
+            ByteBuffer wrongHeader = SegmentControlFormat.encode(move.type(), new Generation(1), 3,
+                    move.operationId(), move.operationGeneration(), 1, move.body());
+            assertThrows(IOException.class, () -> arena.decodeCommand(wrongHeader, 3));
+        }
+    }
+
 }

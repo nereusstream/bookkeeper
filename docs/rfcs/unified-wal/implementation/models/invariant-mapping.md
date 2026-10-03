@@ -169,3 +169,16 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `BuffersWaitForBothTerminals` | 实际IO及原owner结果均终结后归还原池；取消等待或pending先失败不提前释放 |
 
 副本字节输入及准确generation/grant假定由真实parser/allocator验证；该有限投影不决定MOVE/selector或FREE胜者，不推导完整内存/磁盘预算或恢复authority。
+
+
+## 条件 MOVE 与读取保护
+
+| 性质 | 实际合同与范围 |
+|---|---|
+| `SelectorHasBarrier` | Arena只对已force且按顺序到达的控制批次apply；copy durable本身不成为selector |
+| `SelectorMatchesReplay` | 双坐标全部前驱条件成立才切换，旧赢家重试不覆盖后继，checkpoint/日志重放同一apply |
+| `PendingMoveKeepsProtection` | runtime proof guard直到实际CONTROL I/O与原owner terminal才释放，cancel不提前归还 |
+| `ReadPinKeepsSelector` | 初版全局Bookie/file drain排空实际读，阻止新read跨MOVE切点；consumer独立buffer可继续持有 |
+| `CopyNeverSelects` | 未成功MOVE的copy仍是orphan物理事实，不发布普通坐标/ACK |
+
+控制 metadata-only 重放与DATA当前目标验证分开；full scan仍检查未退役历史allocation。MOVE/FREE/reuse/native coverage组合和每allocation在线cutover尚未启用。

@@ -5759,14 +5759,20 @@ public class SegmentBookieControlLogTest {
     private static void installStorage(IsolatedSegmentStorage storage,
                                        ProtectedProfileStateStore.Transition... transitions) throws Exception {
         CompletableFuture<List<SegmentBookieControlLog.Result>> ready = new CompletableFuture<>();
-        assertTrue(storage.controls().submitBatch(List.of(transitions), (results, cause) -> {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        // The callback can wake this caller before the prior driver's finally releases its busy gate.
+        while (!storage.controls().submitBatch(List.of(transitions), (results, cause) -> {
             if (cause == null) {
                 ready.complete(results);
             } else {
                 ready.completeExceptionally(cause);
             }
-        }));
-        for (SegmentBookieControlLog.Result result : ready.get(5, TimeUnit.SECONDS)) {
+        })) {
+            assertTrue("Control admission did not resume", System.nanoTime() < deadline);
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        for (SegmentBookieControlLog.Result result : ready.get(
+                Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
             assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.status());
         }
     }
@@ -9798,6 +9804,329 @@ public class SegmentBookieControlLogTest {
                             destination.arena, destination.bookie, sync, 32, 4, destination.guard.lock(), seed));
             assertTrue(wrongScope.getMessage().contains("scope"));
             assertEquals(0, sync.forces);
+        }
+    }
+
+
+    /** Real DATA and control I/O using the existing isolated owner and completion services. */
+    private final class MoveFixture implements AutoCloseable {
+        private final IsolatedSegmentConfig config;
+        private final IsolatedSegmentFiles files;
+        private final SegmentArenaControlLog arena;
+        private final SegmentBookieControlLog bookie;
+        private final SegmentExecutionGroup group;
+        private final SegmentOwnerLoop owner;
+        private final SegmentHotDirectory hot;
+        private final SegmentDataPhysicalDriver driver;
+        private final List<SegmentPointRead.Location> sources;
+        private boolean failedCloseExpected;
+
+        private MoveFixture(IsolatedSegmentConfig config, SegmentFileIo controlIo) throws Exception {
+            this.config = config;
+            files = IsolatedSegmentFiles.create(config, identity());
+            arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024, controlIo);
+            files.startSession(arena);
+            grant(arena, 1);
+            bookie = SegmentBookieControlLog.open(config, identity(), 1024 * 1024, key((byte) 3), VALIDATOR);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 4, 1, 1, 4096, 44, 8235, Duration.ofSeconds(5)));
+            owner = group.owner(0);
+            hot = new SegmentHotDirectory(owner, config, identity(), 4);
+            driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 8), hot);
+            ByteBuf first = entry(context(), 1);
+            ByteBuf second = entry(context(), 2);
+            CompletableFuture<List<SegmentDataPhysicalDriver.NormalResult>> written = new CompletableFuture<>();
+            try {
+                assertTrue(driver.submitNormal(bookie, SegmentBatchFormat.encode(config,
+                        new SegmentBatchFormat.Address(0, 0, 5, new Generation(1), new Generation(1), 1, 4096),
+                        List.of(SegmentBatchFormat.entry(context(), first),
+                                SegmentBatchFormat.entry(context(), second))),
+                        List.of(bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(),
+                                bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                        (results, failure) -> {
+                            if (failure == null) {
+                                written.complete(results);
+                            } else {
+                                written.completeExceptionally(failure);
+                            }
+                        }));
+            } finally {
+                first.release();
+                second.release();
+            }
+            List<SegmentDataPhysicalDriver.NormalResult> results = written.get(5, TimeUnit.SECONDS);
+            assertEquals(2, results.size());
+            for (SegmentDataPhysicalDriver.NormalResult result : results) {
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+            }
+            sources = results.stream().map(SegmentDataPhysicalDriver.NormalResult::candidate).toList();
+            ownerBarrier(owner);
+        }
+
+        private SegmentDataPhysicalDriver.DurableRelocation copy(int operation, long sequence, byte payload)
+                throws Exception {
+            ByteBuf first = entry(context(), 1, -1, 8, payload);
+            ByteBuf second = entry(context(), 2, -1, 8, payload);
+            CompletableFuture<SegmentDataPhysicalDriver.DurableRelocation> written = new CompletableFuture<>();
+            try {
+                assertTrue(driver.submitRelocation(SegmentBatchFormat.encode(config,
+                        new SegmentBatchFormat.Address(0, 0, 5, new Generation(1), new Generation(1),
+                                sequence, sequence * 4096),
+                        List.of(SegmentBatchFormat.relocation(context(), first,
+                                        new UUID(0, operation), new Generation(7)),
+                                SegmentBatchFormat.relocation(context(), second,
+                                        new UUID(0, operation), new Generation(7)))), (result, failure) -> {
+                            if (failure == null) {
+                                written.complete(result);
+                            } else {
+                                written.completeExceptionally(failure);
+                            }
+                        }));
+            } finally {
+                first.release();
+                second.release();
+            }
+            SegmentDataPhysicalDriver.DurableRelocation result = written.get(5, TimeUnit.SECONDS);
+            ownerBarrier(owner);
+            return result;
+        }
+
+        private SegmentArenaMove prepare(SegmentDataPhysicalDriver.DurableRelocation copy,
+                                         List<SegmentPointRead.Location> previous, long selector) throws IOException {
+            return SegmentArenaMove.prepare(arena, files, bookie, copy,
+                    previous.stream().map(location -> new SegmentArenaMove.Source(location, selector)).toList(),
+                    ByteBuffer.allocate(4096));
+        }
+
+        @Override
+        public void close() throws Exception {
+            assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            try {
+                if (failedCloseExpected) {
+                    assertThrows(IOException.class, files::close);
+                } else {
+                    files.close();
+                }
+            } finally {
+                bookie.close();
+                arena.close();
+            }
+        }
+    }
+
+    @Test
+    public void moveWaitsForApplyAndRedirectsOldHotReadsAndDuplicateChecks() throws Exception {
+        try (MoveFixture fixture = new MoveFixture(config(), new SegmentFileIo())) {
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(601, 2, (byte) 0);
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                long sequence = fixture.arena.appliedThrough() + 1;
+                ByteBuffer encoded = SegmentControlFormat.encode(move.type(), new Generation(1), sequence,
+                        move.operationId(), move.operationGeneration(), move.expectedGeneration(), move.body());
+                SegmentArenaMove decoded = (SegmentArenaMove) fixture.arena.decodeCommand(encoded, sequence);
+                assertEquals(move, decoded);
+                assertThrows(IOException.class, () -> fixture.arena.submitBatch(List.of(decoded)));
+                fixture.arena.claimProtectedCommands(List.of(move));
+                SegmentArenaControlLog.DurableBatch durable = fixture.arena.appendDurably(List.of(move));
+                try {
+                    assertEquals(fixture.sources.get(0), fixture.arena.resolveLocation(fixture.sources.get(0)));
+                    assertEquals(-1, fixture.arena.currentSelectorSequence(context(), 1));
+                    assertFalse(fixture.bookie.admitRead(context()).isPresent());
+                    assertThrows(IOException.class, fixture.files::pinDataRead);
+                    assertThrows(IllegalStateException.class, move::close);
+                    SegmentArenaControlLog.Result result = fixture.arena.applyDurable(durable).get(0);
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, result.status());
+                    assertEquals(7, result.generation());
+                    assertEquals(sequence, fixture.arena.currentSelectorSequence(context(), 1));
+                } finally {
+                    fixture.arena.finishProtectedCommands(List.of(move));
+                }
+                assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                        fixture.arena.submitBatch(List.of(decoded)).get(0).status());
+                for (int i = 0; i < 2; i++) {
+                    SegmentPointRead.Location target = copy.copies().get(i).location();
+                    assertEquals(target, fixture.arena.resolveLocation(fixture.sources.get(i)));
+                    assertEquals(copy.operationId(), SegmentPointRead.readLocallyGated(fixture.config, identity(),
+                            fixture.arena, fixture.bookie, fixture.sources.get(i)).record().moveId());
+                }
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE,
+                        checkPublishedDuplicate(fixture.driver, fixture.bookie,
+                                entryBytes(context(), 1, -1, 8, (byte) 0)));
+                ReadReply read = pointRead(pointReader(fixture.group, fixture.files, fixture.arena,
+                        fixture.bookie, fixture.hot), context(), 2);
+                assertEquals(SegmentPointRead.ReadStatus.FOUND, read.status());
+                assertNull(read.failure());
+                try (SegmentPointRead.LeasedResult result = read.result()) {
+                    assertEquals(copy.operationId(), result.result().record().moveId());
+                }
+            }
+        }
+    }
+
+    @Test
+    public void moveChainRejectsStalePredecessorAndReplaysSelectorsThroughRotation() throws Exception {
+        IsolatedSegmentConfig config = config();
+        List<SegmentPointRead.Location> original;
+        List<SegmentPointRead.Location> targets;
+        try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
+            original = fixture.sources;
+            SegmentDataPhysicalDriver.DurableRelocation first = fixture.copy(601, 2, (byte) 0);
+            SegmentArenaMove prior;
+            long selector;
+            try (SegmentArenaMove move = fixture.prepare(first, original, -1)) {
+                SegmentArenaControlLog.Result result = fixture.arena.submitBatch(List.of(move)).get(0);
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, result.status());
+                selector = result.sequence();
+                prior = move.replayFacts();
+            }
+            SegmentDataPhysicalDriver.DurableRelocation losing = fixture.copy(602, 3, (byte) 0);
+            try (SegmentArenaMove move = SegmentArenaMove.prepare(fixture.arena, fixture.files, fixture.bookie,
+                    losing, List.of(new SegmentArenaMove.Source(original.get(0), -1),
+                            new SegmentArenaMove.Source(first.copies().get(1).location(), selector)),
+                    ByteBuffer.allocate(4096))) {
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+                for (int i = 0; i < 2; i++) {
+                    assertEquals(first.copies().get(i).location(), fixture.arena.resolveLocation(original.get(i)));
+                }
+            }
+            SegmentDataPhysicalDriver.DurableRelocation next = fixture.copy(603, 4, (byte) 0);
+            try (SegmentArenaMove move = fixture.prepare(next,
+                    first.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList(),
+                    selector)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+            }
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    fixture.arena.submitBatch(List.of(prior)).get(0).status());
+            targets = next.copies().stream()
+                    .map(SegmentDataPhysicalDriver.RelocationCopy::location).toList();
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            for (int i = 0; i < 2; i++) {
+                assertEquals(targets.get(i), arena.resolveLocation(original.get(i)));
+                arena.validateSelectedRecord(targets.get(i), SegmentPointRead.read(config, identity(),
+                        arena, targets.get(i)).record());
+            }
+            SegmentDataRecovery.PhysicalInventory inventory = SegmentDataRecovery.recoverPhysicalInventory(
+                    config, identity(), arena, new SegmentFileIo(), 2);
+            assertEquals(targets, inventory.entries());
+            arena.rotate();
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(targets, SegmentDataRecovery.recoverPhysicalInventory(
+                    config, identity(), arena, new SegmentFileIo(), 2).entries());
+        }
+        try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0), StandardOpenOption.WRITE)) {
+            new SegmentFileIo().writeFully(data, ByteBuffer.allocate(4096), targets.get(0).address().offset());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(targets.get(0), arena.resolveLocation(original.get(0)));
+            assertThrows(IOException.class, () -> SegmentDataRecovery.recoverPhysicalInventory(
+                    config, identity(), arena, new SegmentFileIo(), 2));
+        }
+    }
+
+    @Test
+    public void moveProofRejectsHeldReadsWrongBytesAndFutureSelectorsWithoutLeakingProtection() throws Exception {
+        try (MoveFixture fixture = new MoveFixture(config(), new SegmentFileIo())) {
+            SegmentDataPhysicalDriver.DurableRelocation wrong = fixture.copy(601, 2, (byte) 9);
+            assertThrows(IOException.class, () -> fixture.prepare(wrong, fixture.sources, -1));
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(602, 3, (byte) 0);
+            try (IsolatedSegmentFiles.DataReadLease ignored = fixture.files.pinDataRead()) {
+                assertThrows(IOException.class, () -> fixture.prepare(copy, fixture.sources, -1));
+            }
+            SegmentBookieControlLog.ReadAdmission held = fixture.bookie.admitRead(context()).orElseThrow();
+            try {
+                assertThrows(IOException.class, () -> fixture.prepare(copy, fixture.sources, -1));
+            } finally {
+                held.finish();
+            }
+            assertThrows(IOException.class, () -> fixture.prepare(copy, fixture.sources, Long.MAX_VALUE));
+            assertThrows(IOException.class, () -> SegmentArenaMove.prepare(fixture.arena, fixture.files,
+                    fixture.bookie, copy, fixture.sources.stream()
+                            .map(location -> new SegmentArenaMove.Source(location, -1)).toList(),
+                    ByteBuffer.allocate(256)));
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+            }
+        }
+    }
+
+    @Test
+    public void moveControlForceUnknownDoesNotCutOverBeforeApplyButReplaysDurableFacts() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentPointRead.Location original;
+        SegmentPointRead.Location target;
+        // OPEN and ALLOC are the first two barriers; the MOVE barrier has an unknown result.
+        try (MoveFixture fixture = new MoveFixture(config,
+                new SegmentFileIo(Integer.MAX_VALUE, -1, 3, false))) {
+            original = fixture.sources.get(0);
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(601, 2, (byte) 0);
+            target = copy.copies().get(0).location();
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                assertThrows(IOException.class, () -> fixture.arena.submitBatch(List.of(move)));
+                assertEquals(original, fixture.arena.resolveLocation(original));
+                assertFalse(fixture.arena.dataFileAvailable(0));
+                fixture.failedCloseExpected = true;
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(target, arena.resolveLocation(original));
+            assertFalse(arena.dataFileAvailable(0)); // Unclosed writer still cannot provide service authority.
+        }
+    }
+
+
+    @Test
+    public void cancelledMoveWaitRetainsProtectionThroughActualForceAndOwnerApply() throws Exception {
+        CountDownLatch atForce = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger barriers = new AtomicInteger();
+        SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (barriers.incrementAndGet() == 3) {
+                atForce.countDown();
+                await(release);
+            }
+        });
+        try (MoveFixture fixture = new MoveFixture(config(), controlIo)) {
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(601, 2, (byte) 0);
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                SegmentArenaControlDriver control = new SegmentArenaControlDriver(
+                        fixture.owner, fixture.group.io(), fixture.arena);
+                CompletableFuture<SegmentArenaControlLog.Result> waiter = new CompletableFuture<>();
+                AtomicReference<SegmentArenaControlLog.Result> actual = new AtomicReference<>();
+                AtomicInteger callbacks = new AtomicInteger();
+                try {
+                    assertTrue(control.submitMove(move, (results, failure) -> {
+                        fixture.owner.requireOwner();
+                        assertNull(failure);
+                        callbacks.incrementAndGet();
+                        actual.set(results.get(0));
+                        waiter.complete(results.get(0));
+                    }));
+                    assertTrue(atForce.await(5, TimeUnit.SECONDS));
+                    assertTrue(waiter.cancel(false));
+                    assertThrows(IllegalStateException.class, move::close);
+                    assertThrows(IOException.class, fixture.files::pinDataRead);
+                    assertFalse(fixture.bookie.admitRead(context()).isPresent());
+                    assertFalse(fixture.group.shutdown(Duration.ofMillis(20)));
+                    assertNull(actual.get());
+                } finally {
+                    release.countDown();
+                }
+                assertTrue(fixture.group.shutdown(Duration.ofSeconds(5)));
+                assertEquals(1, callbacks.get());
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, actual.get().status());
+                assertEquals(copy.copies().get(0).location(), fixture.arena.resolveLocation(fixture.sources.get(0)));
+                try (IsolatedSegmentFiles.DataReadLease ignored = fixture.files.pinDataRead()) {
+                    assertTrue(fixture.arena.hasMoves());
+                }
+            }
+        } finally {
+            release.countDown();
         }
     }
 

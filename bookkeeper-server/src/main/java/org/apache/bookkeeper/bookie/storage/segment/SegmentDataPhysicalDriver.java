@@ -338,7 +338,7 @@ final class SegmentDataPhysicalDriver {
         if (!hot.matchesScope(files)) {
             throw new IllegalArgumentException("Physical driver and hot directory storage scopes differ");
         }
-        hot.bindPrefix(prefix);
+        hot.bindPrefix(prefix, authority);
         SegmentBookieControlLog restartBookie = files.restartBookie();
         if (restartBookie != null) {
             owner.requireOwner();

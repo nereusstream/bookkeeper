@@ -759,3 +759,6 @@ PASS 不授权 Segment 成为 ACK authority，不授权生产 canary，也不证
 
 
 2026-10-04，[整allocation全死FREE与退役前缀](../implementation/local-storage/README.md#整-allocation-全死-free-与退役前缀)接通真实DATA/准确终态tombstone proof、Bookie及文件准入排空、CONTROL durable/原owner apply、generation 1→2与metadata-only retirement recovery。共享仍有活record、旧writer/read lease、durable未apply及force unknown均有真实拒绝路径；rotation及全量/覆盖storage重启保留活数据。后续[健康整块复用](../implementation/local-storage/README.md#整-allocation-复用与健康关闭末端)在原refill复用准确FREE generation，CLOSED实际末端区分必要prefix与旧suffix，已验证同块两轮复用。后续[运行期终态派生清理](../implementation/local-storage/README.md#运行期终态索引与坐标回收)已接通actual native删除与原owner坐标释放，1/4 worker固定四块/四坐标循环通过。OPEN恢复、MOVE/compaction、净空间长期循环、多Arena及生产Gate仍待完成。 后续[relocation 内部完成](../implementation/local-storage/README.md#relocation-副本内部持久化完成)已复用真实 DATA I/O、连续前缀及原池终结，copy 不成为普通定位；MOVE/selector 和部分存活净回收仍未接通。
+
+
+2026-10-04 当前后续增量：[受保护的条件 MOVE 与当前位置](../implementation/local-storage/README.md#受保护的条件-move-与当前位置)已复用现有全局entry/file排空与CONTROL service，接通实际copy字节验证、最多256行条件durable/apply、Arena selector、旧定位业务读/幂等与metadata-only控制重放。旧coverage不能跳过MOVE后的必要DATA，当前target缺失拒绝恢复；未退役历史allocation仍解析CRC。MOVE后源/orphan FREE、原owner native/coverage维护与部分存活compaction、A/B已复用后的C恢复、长期净容量及生产Gate仍未完成。当前六项真实/固定向量回归及16正向/36指定反例见该切片；此前receipt保持各自历史范围。

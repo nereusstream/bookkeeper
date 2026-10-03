@@ -223,6 +223,9 @@ final class SegmentPointRead {
                 }
                 ReadStatus status;
                 try {
+                    if (selected != null) {
+                        selected = arena.resolveLocation(selected);
+                    }
                     status = prepareBuffer();
                 } catch (IOException unavailable) {
                     refuse(ticket, ReadStatus.NOT_READY, unavailable);
@@ -236,9 +239,7 @@ final class SegmentPointRead {
                     started.set(true);
                     try {
                         result = readWithScratch(files.config(), files.identity(), arena, selected, buffer.bytes());
-                        if (hot != null && result.record().origin() != SegmentBatchFormat.ENTRY_DATA) {
-                            throw new IOException("A derived point read cannot select an uncommitted relocation copy");
-                        }
+                        arena.validateSelectedRecord(selected, result.record());
                     } finally {
                         physicalDone();
                     }
@@ -454,7 +455,9 @@ final class SegmentPointRead {
         SegmentBookieControlLog.ReadAdmission admission = bookie.admitRead(location.context())
                 .orElseThrow(() -> new IOException("Bookie read route is unavailable"));
         try {
-            Result result = read(config, identity, arena, location);
+            Location selected = arena.resolveLocation(location);
+            Result result = read(config, identity, arena, selected);
+            arena.validateSelectedRecord(selected, result.record());
             if (!bookie.canCompleteRead(admission)) {
                 throw new IOException("Bookie read route changed before completion");
             }
@@ -464,7 +467,7 @@ final class SegmentPointRead {
         }
     }
 
-    /** Isolated read-only restart path while the Arena has no MOVE/FREE or multi-stream selector. */
+    /** Isolated read-only restart path for one completely recovered stream. */
     static Result readRecoveredSingleStreamLocallyGated(
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog arena,
             SegmentBookieControlLog bookie, SegmentFileIo syncIo, ProfileLedgerContext context,
@@ -475,6 +478,7 @@ final class SegmentPointRead {
             return SegmentDataRecovery.withLocallyReadableSingleStreamLocation(config, identity, arena, bookie,
                     syncIo, context, entryId, maxBatches, maxEntries, selected -> {
                         Result result = read(config, identity, arena, selected.location());
+                        arena.validateSelectedRecord(selected.location(), result.record());
                         if (!bookie.canCompleteRead(admission)) {
                             throw new IOException("Bookie read route changed before completion");
                         }
@@ -504,6 +508,7 @@ final class SegmentPointRead {
             try {
                 Location selected = lease.inventory().uniqueLocation(arena, context, entryId);
                 Result result = read(config, identity, arena, selected);
+                arena.validateSelectedRecord(selected, result.record());
                 lease.inventory().requireCurrentArena(arena);
                 if (!bookie.canCompleteRead(admission)) {
                     throw new IOException("Recovered read authority changed before completion");

@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[relocation 副本内部持久化完成](#relocation-副本内部持久化完成)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围，MOVE/compaction与长期净容量仍未完成。
+2026-10-04 当前增量为[受保护的条件 MOVE 与当前位置](#受保护的条件-move-与当前位置)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围；MOVE 与搬迁源 FREE/reuse、原owner native维护及部分存活compaction的组合、长期净容量仍未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -525,3 +525,20 @@ native删除失败返回UNKNOWN，保留占用坐标，不伪造容量；已删�
 最终 Java 回执 `unified-wal-local-kjqKfSe1` 绑定父提交 `de6f78fdb1acb5965f549835eb281105619390cc` 与204个源码/测试/向量输入：相关7类262项，257通过、5项Linux亲和在macOS跳过，0失败/错误；Spotless/Checkstyle通过。先运行五个新增定向用例，再因共享物理驱动扩大至既有七类；复现沿用前述七类 `run-local-storage-tests.sh` 命令。两次编译修正测试 Command/helper 接线；初次乱序夹具误在同文件持锁 force 中暂停，已改用既有 I/O executor hook 暂停前批进入文件操作，通过后继实际 I/O 返回确认后批已完成。没有改变文件串行保证或为测试添加生产开关，未通过的中间运行不计作成功。
 
 有限模型见[relocation 内部完成投影](../models/README.md#relocation-内部完成投影)。本切片未启用 MOVE/selector、orphan 回收、部分存活 compaction、整图搬迁调度、OPEN 恢复、多 Arena、掉电或生产 authority，步骤9及整体目标继续未完成。
+
+
+## 受保护的条件 MOVE 与当前位置
+
+2026-10-04，`SegmentArenaMove.prepare` 消费实际 `DurableRelocation`，复用 Bookie entry drain 与文件 reclamation guard。这个初始同 Arena 入口先排空所有旧 normal/recovery/read admission、reservation 和 DATA I/O，阻止新准入，再用有界 scratch 实际点读源与目标：源必须为普通 DATA 或曾成功 MOVE 的 copy；目标必须匹配实际 copy operation/generation，完整 BK entry SHA-256 必须相同。记录绑定坐标、前驱 selector sequence、源/目标完整几何与原成功 allocation 控制序号，以及必要 Bookie applied cut。OPEN ledger 不要求关闭，但维护 gate 是当前保守的全文件集排空，并非每 allocation 在线 pin cutover。
+
+MOVE 使用独立 CONTROL 票据和既有 I/O service；一个命令最多256行，一次持久化后在原 Arena owner 顺序判断。全部坐标的前驱与两端当前 allocation/grant/generation 都成立才同时应用，否则整命令条件失败。初始前驱为-1，后继引用上次成功 MOVE 的绝对控制 sequence；operation generation 仍绑定 copy identity，不代替 selector。durable 未 apply 不切换，当前赢家精确重试为 ALREADY_DURABLE；已被后继替换的旧操作不重新取得 authority。decoded 控制事实只能重放/查询已解析操作，不能作为新的运行期字节 proof。
+
+热定位与 fresh native Get 都经 Arena 当前 selector 解析；普通幂等比较和业务点读只接受当前普通 DATA 或匹配成功 MOVE identity/digest 的 copy。真实 read admission/file lease 保持到实际 I/O 和原 owner 两方终结，consumer buffer 保留其独立生命周期。raw 物理点读仍可验证未提交 copy，供格式及 proof 使用，不授予业务读取资格。COPY 内部完成仍不发布普通坐标或普通 Add 成功。
+
+Arena 控制日志、checkpoint 与 rotation metadata-only 重放同一有序命令，恢复 selector 不访问历史 DATA。随后 DATA 完整扫描排除旧普通定位和 loser/orphan copy、验证当前 target identity/digest，并拒绝缺失 target 或不足的 Bookie cut；未退役的历史 allocation 仍按既有 framing/CRC 扫描。MOVE coverage/native维护尚未接通：有 MOVE 时不使用旧 coverage seed，运行期 coverage 拒绝旧 selector 行；清洁冷重建以当前扫描定位为准。此处不宣称已能跳过历史 active DATA 或完成 A→B→C 且 A/B 复用后的恢复。
+
+六项新增回归包含五项真实文件/owner测试及一个独立固定字节向量测试：双坐标 durable/apply 与旧热定位点读/幂等；一个前驱失败时全批不部分应用、A→B→C、旧操作重试、全量与 rotation 恢复、target 缺失；持有读 lease/admission、错误 copy 字节、未来 selector 和不足 scratch 拒绝后保护归还；MOVE force unknown 不在旧进程切换，但完整控制事实可在恢复同步后重放且 OPEN 继续隔离；取消 waiter、实际 control force 暂停与短 shutdown 保持保护至实际 I/O/owner终结。
+
+最终 Java 回执 `unified-wal-local-cUmjet79` 绑定父提交 `f66b0a8ed5b31c1e84ee84a5d6f5fbfa7cfa6210` 和206个实际输入；相关七类268项，263通过、5项 Linux 亲和性在macOS跳过，零失败/错误。Spotless/Checkstyle通过。复现仍为既有七类 `scripts/unified-wal/run-local-storage-tests.sh` 命令。初次夹具在 OPEN writer 上 rotation、失败会话正常 close 被现有契约拒绝，已按健康关闭/明确错误修正；最后增加混合前驱原子性和 scratch 失败归还后扩大回归；既有容量循环暴露控制回调唤醒早于driver finally释放busy的测试助手假设，现按实际API在原五秒内重试入口false，保留全部applied结果/错误断言。修正后重新冻结最终回执；中间失败不计作通过。
+
+[条件 MOVE 有限投影](../models/README.md#条件-move-与读取保护投影)回执 `unified-wal-model-jfi2r8do` 冻结87个输入、157个checksum；矩阵16完整正向PASS、36指定反例。当前仍无 storage 图的 victim/source选择、合批 compaction request、搬迁后源/orphan FREE、原owner native维护与coverage切点、控制历史/SST净回收、多Arena、掉电或生产ACK；步骤9及总16步目标保持未完成。

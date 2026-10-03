@@ -37,15 +37,16 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
-/** Isolated single-Arena allocation authority; no MOVE or production Bookie access. */
+/** Isolated single-Arena allocation and MOVE authority; no production Bookie access. */
 final class SegmentArenaControlLog implements AutoCloseable {
     static final long BLOCK_BYTES = 1024 * 1024;
     private static final long FIRST_RECORD = 4096;
     private static final Generation LOG_GENERATION = new Generation(1);
     private static final int QUARANTINE_RECORD_BYTES = 128 + 16 + 16;
 
-    sealed interface Command permits Allocation, Free, FileQuarantine, DataSession, CheckpointCommit {
+    sealed interface Command permits Allocation, Free, FileQuarantine, DataSession, CheckpointCommit, SegmentArenaMove {
         SegmentControlFormat.Type type();
         UUID operationId();
         Generation operationGeneration();
@@ -333,6 +334,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private record AppliedOperation(Command command, Status status, long sequence) { }
 
+    private record EntryKey(ProfileLedgerContext context, long entryId) { }
+
+    private record SelectedMove(SegmentArenaMove move, SegmentArenaMove.Entry entry, long sequence) { }
+
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
     private final long maxLogBytes;
@@ -350,6 +355,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final Map<Long, AllocationTail> sealedTails = new HashMap<>();
     private final Map<Stream, Long> streamStarts = new HashMap<>();
     private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
+    private final Map<EntryKey, SelectedMove> selectedMoves = new HashMap<>();
     private final boolean[] dataBlocked;
     private final boolean[] durableQuarantine;
     private final boolean[] quarantineReserved;
@@ -451,6 +457,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 validateCommand(command);
                 if (command instanceof Free free) {
                     free.requireClaimed(this);
+                } else if (command instanceof SegmentArenaMove move) {
+                    move.requireClaimed(this);
                 }
                 if (command instanceof DataSession session && !session.tails().isEmpty()
                         && command != preparedClose) {
@@ -521,7 +529,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 appliedOffset += recordBytes(command);
                 long generation = status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE
                         ? command instanceof Allocation allocation ? allocation.generation()
-                                : command.expectedGeneration() + 1 : 0;
+                                : command instanceof SegmentArenaMove move ? move.operationGeneration().value()
+                                        : command.expectedGeneration() + 1 : 0;
                 results.add(new Result(status, command.operationId(), sequence, generation,
                         durableThrough, appliedThrough));
             }
@@ -534,32 +543,36 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     List<Result> submitBatch(List<? extends Command> commands) throws IOException {
-        claimFrees(commands);
+        claimProtectedCommands(commands);
         try {
             return applyDurable(appendDurably(commands));
         } finally {
-            finishFrees(commands);
+            finishProtectedCommands(commands);
         }
     }
 
-    void claimFrees(List<? extends Command> commands) throws IOException {
-        List<Free> claimed = new ArrayList<>();
+    void claimProtectedCommands(List<? extends Command> commands) throws IOException {
+        List<Command> claimed = new ArrayList<>();
         try {
             for (Command command : commands) {
                 if (command instanceof Free free && free.claim(this)) {
                     claimed.add(free);
+                } else if (command instanceof SegmentArenaMove move && move.claim(this)) {
+                    claimed.add(move);
                 }
             }
         } catch (IOException | RuntimeException | Error failure) {
-            finishFrees(claimed);
+            finishProtectedCommands(claimed);
             throw failure;
         }
     }
 
-    void finishFrees(List<? extends Command> commands) {
+    void finishProtectedCommands(List<? extends Command> commands) {
         for (Command command : commands) {
             if (command instanceof Free free) {
                 free.finish(this);
+            } else if (command instanceof SegmentArenaMove move) {
+                move.finish(this);
             }
         }
     }
@@ -567,6 +580,76 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private synchronized boolean resolvedFree(Free free) {
         AppliedOperation prior = appliedOperations.get(free.operationId());
         return prior != null && prior.command().equals(free);
+    }
+
+    synchronized boolean resolvedMove(SegmentArenaMove move) {
+        AppliedOperation prior = appliedOperations.get(move.operationId());
+        return prior != null && prior.command().equals(move);
+    }
+
+    synchronized void requireMovePreparation(IsolatedSegmentFiles files) throws IOException {
+        requireQuiescentControl(files.config(), files.identity());
+    }
+
+    synchronized SegmentPointRead.Location resolveLocation(SegmentPointRead.Location hint) {
+        SelectedMove selected = selectedMoves.get(new EntryKey(hint.context(), hint.entryId()));
+        return selected == null ? hint : selected.entry().target();
+    }
+
+    synchronized Optional<SegmentPointRead.Location> currentMoveLocation(ProfileLedgerContext context, long entryId) {
+        SelectedMove selected = selectedMoves.get(new EntryKey(context, entryId));
+        return selected == null ? Optional.empty() : Optional.of(selected.entry().target());
+    }
+
+    synchronized long currentSelectorSequence(ProfileLedgerContext context, long entryId) {
+        SelectedMove selected = selectedMoves.get(new EntryKey(context, entryId));
+        return selected == null ? -1 : selected.sequence();
+    }
+
+    synchronized boolean hasMoves() {
+        return !selectedMoves.isEmpty();
+    }
+
+    synchronized List<SegmentPointRead.Location> currentMoveLocations() {
+        return selectedMoves.values().stream().map(selected -> selected.entry().target()).toList();
+    }
+
+    synchronized long requiredMoveBookieCut() {
+        return selectedMoves.values().stream().mapToLong(selected -> selected.move().bookieCut()).max().orElse(-1);
+    }
+
+    synchronized boolean wasCommittedCopy(SegmentPointRead.Location location, SegmentBatchParser.Record record) {
+        AppliedOperation prior = appliedOperations.get(record.moveId());
+        return prior != null && prior.status() == Status.APPLIED_DURABLE
+                && prior.command() instanceof SegmentArenaMove move
+                && move.operationGeneration().value() == record.moveGeneration()
+                && move.entries().stream().anyMatch(entry -> entry.target().equals(location)
+                        && entry.entrySha256().equals(SegmentArenaMove.digest(record.entry())));
+    }
+
+    synchronized boolean isSelectedRecord(SegmentPointRead.Location location, SegmentBatchParser.Record record)
+            throws IOException {
+        SelectedMove selected = selectedMoves.get(new EntryKey(location.context(), location.entryId()));
+        if (selected == null) {
+            return record.origin() == SegmentBatchFormat.ENTRY_DATA;
+        }
+        if (!selected.entry().target().equals(location)) {
+            return false;
+        }
+        if (record.origin() != SegmentBatchFormat.RELOCATION_COPY
+                || !record.moveId().equals(selected.move().operationId())
+                || record.moveGeneration() != selected.move().operationGeneration().value()
+                || !selected.entry().entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
+            throw new IOException("Current MOVE target does not match its durable identity and digest");
+        }
+        return true;
+    }
+
+    void validateSelectedRecord(SegmentPointRead.Location location, SegmentBatchParser.Record record)
+            throws IOException {
+        if (!isSelectedRecord(location, record)) {
+            throw new IOException("Record is not the current ordinary or successfully moved coordinate");
+        }
     }
 
     /** Resolve the actual graph API retry from retained applied facts without rescanning retired bytes. */
@@ -1517,6 +1600,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         allocationIds.clear();
         streamStarts.clear();
         appliedOperations.clear();
+        selectedMoves.clear();
         Arrays.fill(dataBlocked, false);
         Arrays.fill(durableQuarantine, false);
         sessionEpoch = 0;
@@ -1586,6 +1670,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
     Command decodeCommand(ByteBuffer bytes, long sequence) throws IOException {
         SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.ARENA,
                 LOG_GENERATION, sequence);
+        if (parsed.type() == SegmentControlFormat.Type.MOVE) {
+            if (parsed.expectedGeneration() != 0) {
+                throw new IOException("MOVE header has an unsupported predecessor generation");
+            }
+            SegmentArenaMove move = SegmentArenaMove.decode(parsed.operationId(), parsed.operationGeneration(),
+                    parsed.body(), sequence);
+            try {
+                validateCommand(move);
+            } catch (IllegalArgumentException invalid) {
+                throw new IOException("Invalid MOVE geometry", invalid);
+            }
+            return move;
+        }
         if (parsed.type() == SegmentControlFormat.Type.CHECKPOINT_COMMIT) {
             SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.decodeReference(parsed.body());
             if (parsed.operationGeneration().value() != reference.generation()
@@ -1744,6 +1841,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
             validateRange(allocation);
         } else if (command instanceof Free free) {
             validateAllocationIdentity(free.facts().allocation());
+        } else if (command instanceof SegmentArenaMove move) {
+            for (SegmentArenaMove.Entry entry : move.entries()) {
+                validateMoveLocation(entry.source().location());
+                validateMoveLocation(entry.target());
+            }
         } else if (command instanceof FileQuarantine quarantine && quarantine.file() >= config.dataFiles()) {
             throw new IllegalArgumentException("Invalid quarantined DATA file");
         }
@@ -1760,6 +1862,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 if (!free.equals(retiredSlots.get(slot(target.file(), target.offset())))) {
                     return Status.CONDITION_FAILED;
                 }
+            }
+            if (prior.status() == Status.APPLIED_DURABLE && command instanceof SegmentArenaMove move
+                    && move.entries().stream().anyMatch(entry -> {
+                        SelectedMove selected = selectedMoves.get(new EntryKey(entry.target().context(),
+                                entry.target().entryId()));
+                        return selected == null || !selected.move().equals(move);
+                    })) {
+                return Status.CONDITION_FAILED;
             }
             return prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status();
         }
@@ -1810,7 +1920,59 @@ final class SegmentArenaControlLog implements AutoCloseable {
             appliedOperations.put(command.operationId(), new AppliedOperation(command, status, appliedThrough));
             return status;
         }
+        if (command instanceof SegmentArenaMove move) {
+            return applyMove(move);
+        }
         return command instanceof Free free ? applyFree(free) : applyAllocation((Allocation) command);
+    }
+
+    private void validateMoveLocation(SegmentPointRead.Location location) {
+        SegmentBatchFormat.Address address = location.address();
+        if (location.context().ledgerId() < 0 || location.entryId() < 0
+                || address.shard() >= config.logicalShards() || address.fileIndex() >= config.dataFiles()
+                || address.fileIndex() != address.shard() % config.dataFiles()
+                || SegmentOwnerLoop.shardFor(location.context().ledgerId(), config.logicalShards()) != address.shard()
+                || location.batchLength() < 4096 || location.batchLength() > SegmentBatchFormat.MAX_BATCH
+                || location.batchLength() % config.alignment() != 0
+                || address.offset() > config.bytesPerFile() - location.batchLength()
+                || location.recordOffset() < address.offset() + SegmentBatchFormat.HEADER
+                || location.recordOffset() > address.offset() + location.batchLength() - location.recordLength()) {
+            throw new IllegalArgumentException("Invalid MOVE physical geometry");
+        }
+        try {
+            SegmentPointRead.scratchBytes(location);
+        } catch (IOException invalid) {
+            throw new IllegalArgumentException("Invalid MOVE record span", invalid);
+        }
+    }
+
+    private boolean currentMoveGrant(SegmentPointRead.Location location, long order) {
+        SegmentBatchFormat.Address address = location.address();
+        return !durableQuarantine[address.fileIndex()] && appliedAllocationOrder(address) == order
+                && hasAppliedGrant(address.fileIndex(), address.offset(), location.batchLength(), address.shard(),
+                        address.streamGeneration().value(), address.allocation(), address.generation().value());
+    }
+
+    private Status applyMove(SegmentArenaMove move) {
+        boolean allowed = true;
+        for (SegmentArenaMove.Entry entry : move.entries()) {
+            SelectedMove previous = selectedMoves.get(new EntryKey(entry.target().context(), entry.target().entryId()));
+            allowed &= previous == null ? entry.source().expectedSelector() == -1
+                    : previous.sequence() == entry.source().expectedSelector()
+                            && previous.entry().target().equals(entry.source().location());
+            allowed &= currentMoveGrant(entry.source().location(), entry.sourceOrder())
+                    && currentMoveGrant(entry.target(), entry.targetOrder());
+        }
+        Status status = allowed ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
+        SegmentArenaMove retained = move.replayFacts();
+        if (allowed) {
+            for (SegmentArenaMove.Entry entry : retained.entries()) {
+                selectedMoves.put(new EntryKey(entry.target().context(), entry.target().entryId()),
+                        new SelectedMove(retained, entry, appliedThrough));
+            }
+        }
+        appliedOperations.put(move.operationId(), new AppliedOperation(retained, status, appliedThrough));
+        return status;
     }
 
     private Status applyFree(Free free) {

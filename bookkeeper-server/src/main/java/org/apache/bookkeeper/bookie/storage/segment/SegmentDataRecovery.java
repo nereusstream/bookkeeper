@@ -313,7 +313,7 @@ final class SegmentDataRecovery {
             return grantedHighWatermarks;
         }
 
-        /** No MOVE/FREE: immutable applied grants plus a complete scan select a unique ordinary coordinate. */
+        /** Applied control selectors plus a complete scan select a unique current coordinate. */
         SegmentPointRead.Location uniqueLocation(SegmentArenaControlLog authority,
                                                  ProfileLedgerContext context, long entryId) throws IOException {
             requireCurrentArena(authority);
@@ -573,6 +573,12 @@ final class SegmentDataRecovery {
         if (!writerLock.isValid() || !authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
+        if (bookie != null && bookie.indexAppliedCut(config, identity) < authority.requiredMoveBookieCut()) {
+            throw new IOException("MOVE has a missing required Bookie authority cut");
+        }
+        if (authority.hasMoves()) {
+            seed = null; // MOVE coverage publication is not yet wired to the original-owner maintenance cut.
+        }
         long batches = 0;
         long records = 0;
         long validatedBytes = 0;
@@ -581,6 +587,7 @@ final class SegmentDataRecovery {
         long coveredBatches = 0;
         long skippedBodyBytes = 0;
         List<SegmentPointRead.Location> entries = new ArrayList<>();
+        HashSet<SegmentPointRead.Location> foundMoves = new HashSet<>();
         Map<StreamKey, StreamProgress> streams = new HashMap<>();
         Map<StreamKey, StreamCoverage> covered = new HashMap<>();
         Map<SegmentBatchFormat.Address, Integer> expectedHeaders = new HashMap<>();
@@ -737,14 +744,20 @@ final class SegmentDataRecovery {
                             throw new IOException("DATA record belongs to another logical shard");
                         }
                     }
+                    List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+                    for (int i = 0; i < parsed.records().size(); i++) {
+                        if (authority.isSelectedRecord(locations.get(i), parsed.records().get(i))
+                                && parsed.records().get(i).origin() == SegmentBatchFormat.RELOCATION_COPY) {
+                            foundMoves.add(locations.get(i));
+                        }
+                    }
                     if (stream != null) {
                         stream.observe(address);
                     }
                     if (maxEntries > 0) {
-                        List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
                         for (int i = 0; i < parsed.records().size(); i++) {
                             SegmentBatchParser.Record record = parsed.records().get(i);
-                            if (record.origin() == SegmentBatchFormat.ENTRY_DATA
+                            if (authority.isSelectedRecord(locations.get(i), record)
                                     && (stream == null || stream.matches(address))
                                     && (bookie == null || bookie.locallyReadableContext(record.context()))) {
                                 if (entries.size() == maxEntries) {
@@ -772,6 +785,13 @@ final class SegmentDataRecovery {
         streams.forEach((key, progress) -> prefixes.put(key, progress.snapshot()));
         if (!expectedHeaders.isEmpty()) {
             throw new IOException("Covered locator has no matching physical DATA header");
+        }
+        for (SegmentPointRead.Location selected : authority.currentMoveLocations()) {
+            if ((stream == null || stream.matches(selected.address()))
+                    && (bookie == null || bookie.locallyReadableContext(selected.context()))
+                    && !foundMoves.contains(selected)) {
+                throw new IOException("Current MOVE target is missing from required DATA");
+            }
         }
         for (Map.Entry<StreamKey, StreamCoverage> entry : covered.entrySet()) {
             StreamPrefix prefix = prefixes.get(entry.getKey());
