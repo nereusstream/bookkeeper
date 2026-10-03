@@ -20,8 +20,6 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -188,8 +186,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final SegmentFileHeader identity;
     private final long maxLogBytes;
     private final SegmentFileIo io;
-    private final FileChannel channel;
-    private final FileLock lock;
+    private FileChannel channel;
+    private final FileChannel originalChannel;
+    private final SegmentDataFileLock writerLock;
+    private SegmentArenaRotation.Root rotationRoot;
+    private Thread rotating;
+    private Generation physicalGeneration = LOG_GENERATION;
     private final Map<Slot, Grant> allocations = new HashMap<>();
     private final Map<Long, Allocation> allocationIds = new HashMap<>();
     private final Map<Stream, Long> streamStarts = new HashMap<>();
@@ -215,13 +217,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private SegmentArenaControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                    long maxLogBytes, SegmentFileIo io,
-                                   FileChannel channel, FileLock lock) {
+                                   FileChannel channel, SegmentDataFileLock writerLock) {
         this.config = config;
         this.identity = identity;
         this.maxLogBytes = maxLogBytes;
         this.io = io;
         this.channel = channel;
-        this.lock = lock;
+        this.originalChannel = channel;
+        this.writerLock = writerLock;
         dataBlocked = new boolean[config.dataFiles()];
         durableQuarantine = new boolean[config.dataFiles()];
         quarantineReserved = new boolean[config.dataFiles()];
@@ -240,33 +243,34 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (maxLogBytes < FIRST_RECORD + 192) {
             throw new IllegalArgumentException("Control log capacity cannot hold one record");
         }
-        FileChannel channel = FileChannel.open(config.directory().resolve("arena-control"),
-                StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-        FileLock lock = null;
+        SegmentDataFileLock writerLock = SegmentDataFileLock.openControl(
+                config.directory().resolve("arena-control.lock"));
+        FileChannel original = null;
+        SegmentArenaControlLog result = null;
         try {
-            try {
-                lock = channel.tryLock();
-            } catch (OverlappingFileLockException overlapping) {
-                throw new IOException("Arena control log already has a writer", overlapping);
-            }
-            if (lock == null) {
-                throw new IOException("Arena control log already has a writer");
-            }
-            SegmentArenaControlLog result = new SegmentArenaControlLog(config, identity, maxLogBytes, io,
-                    channel, lock);
+            original = FileChannel.open(config.directory().resolve("arena-control"),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            result = new SegmentArenaControlLog(config, identity, maxLogBytes, io, original, writerLock);
             result.validateStorageFiles(identity);
             result.recover(identity);
             return result;
         } catch (IOException | RuntimeException | Error failure) {
-            if (lock != null) {
+            if (result != null && result.channel != original) {
                 try {
-                    lock.release();
+                    result.channel.close();
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+            }
+            if (original != null) {
+                try {
+                    original.close();
                 } catch (IOException cleanup) {
                     failure.addSuppressed(cleanup);
                 }
             }
             try {
-                channel.close();
+                writerLock.close();
             } catch (IOException cleanup) {
                 failure.addSuppressed(cleanup);
             }
@@ -281,7 +285,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         long sequence;
         long start;
         synchronized (this) {
-            requireWritable();
+            requireControlWritable();
             if (writing || pending != null || batch.isEmpty() || batch.size() > config.maxPendingEntries()) {
                 throw new IllegalArgumentException("Invalid or unresolved control batch");
             }
@@ -290,7 +294,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             sequence = durableThrough + 1;
             for (Command command : batch) {
                 validateCommand(command);
-                ByteBuffer record = SegmentControlFormat.encode(command.type(), LOG_GENERATION, sequence++,
+                ByteBuffer record = SegmentControlFormat.encode(command.type(), physicalGeneration, sequence++,
                         command.operationId(), command.operationGeneration(), command.expectedGeneration(),
                         command.body());
                 bytes = Math.addExact(bytes, record.remaining());
@@ -304,6 +308,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         command instanceof FileQuarantine quarantine && quarantine.file() == target)) {
                     reserved += QUARANTINE_RECORD_BYTES;
                 }
+            }
+            if (rotating == null) {
+                reserved += rotationReserveBytes();
             }
             if (bytes > maxLogBytes - nextOffset - reserved) {
                 throw new IOException("Arena control log capacity exhausted");
@@ -338,7 +345,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized List<Result> applyDurable(DurableBatch batch) throws IOException {
-        requireWritable();
+        requireControlWritable();
         if (pending != batch || batch.firstSequence() != appliedThrough + 1) {
             throw new IllegalArgumentException("Only the next durable batch can be applied");
         }
@@ -376,7 +383,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         long generation;
         int slot;
         synchronized (this) {
-            requireWritable();
+            requireControlWritable();
             if (checkpointing || checkpointGeneration == Long.MAX_VALUE) {
                 throw new IOException("Arena checkpoint is active or its generation is exhausted");
             }
@@ -409,7 +416,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 throw new IOException("Arena checkpoint was not committed");
             }
             committed = true;
-            SegmentControlCheckpoint.publish(config, SegmentControlFormat.Owner.ARENA, reference, checkpointIo);
+            if (rotationRoot == null) {
+                SegmentControlCheckpoint.publish(config, SegmentControlFormat.Owner.ARENA, reference, checkpointIo);
+            } else {
+                SegmentArenaRotation.publish(config, reference, rotationRoot, checkpointIo);
+            }
             if (!reference.equals(SegmentControlCheckpoint.publication(
                     config, SegmentControlFormat.Owner.ARENA, slot))) {
                 throw new IOException("Arena checkpoint publication verification failed");
@@ -434,6 +445,139 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized Optional<SegmentControlCheckpoint.Reference> publishedCheckpoint() {
         return Optional.ofNullable(publishedCheckpoint);
+    }
+
+    /** Offline maintenance: two cuts differ only by the first checkpoint's own commit. */
+    SegmentArenaRotation.Root rotate() throws IOException {
+        return rotate(new SegmentFileIo());
+    }
+
+    SegmentArenaRotation.Root rotate(SegmentFileIo rotationIo) throws IOException {
+        Objects.requireNonNull(rotationIo, "rotationIo");
+        synchronized (this) {
+            requireControlWritable();
+            if (rotating != null || checkpointing || writing || pending != null || sessionOwner != null
+                    || sessionCloseReserved || checkpointGeneration > Long.MAX_VALUE - 2
+                    || physicalGeneration.value() == Long.MAX_VALUE || appliedThrough > Long.MAX_VALUE - 3
+                    || rotationReserveBytes() == 0
+                    || nextOffset > maxLogBytes - 416) {
+                throw new IOException("Arena rotation requires a quiescent writer and two commit slots");
+            }
+            for (boolean reserved : quarantineReserved) {
+                if (reserved) {
+                    throw new IOException("Arena quarantine notification is still in flight");
+                }
+            }
+            rotating = Thread.currentThread();
+        }
+        FileChannel candidate = null;
+        Path target = null;
+        boolean created = false;
+        boolean publicationAttempted = false;
+        try {
+            SegmentControlCheckpoint.Reference first = checkpoint(rotationIo);
+            SegmentControlCheckpoint.Reference second = checkpoint(rotationIo);
+            SegmentArenaRotation.Root root = new SegmentArenaRotation.Root(physicalGeneration.value() + 1,
+                    first, checkpointId(first), second, checkpointId(second));
+            target = SegmentArenaRotation.path(config, root.generation());
+            if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                // Both fresh publications recover the current journal. Delete only a proven older/orphan file.
+                try (FileChannel orphan = FileChannel.open(target, StandardOpenOption.READ,
+                        LinkOption.NOFOLLOW_LINKS)) {
+                    ByteBuffer header = ByteBuffer.allocate(4096);
+                    SegmentFileIo.readFully(orphan, header, 0);
+                    identity.validate(header, config, -4);
+                    SegmentArenaRotation.Root old = SegmentArenaRotation.readHeader(orphan);
+                    if (old.generation() == physicalGeneration.value()
+                            || old.generation() > root.generation() || !knownRotation(old)) {
+                        throw new IOException("Arena rotation target has unproven authority");
+                    }
+                }
+                Files.delete(target);
+                IsolatedSegmentFiles.syncDirectory(config.directory());
+            }
+            candidate = FileChannel.open(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            created = true;
+            rotationIo.writeFully(candidate, identity.encode(config, -4), 0);
+            rotationIo.writeFully(candidate, SegmentArenaRotation.header(root), 4096);
+            rotationIo.force(candidate, true);
+            IsolatedSegmentFiles.syncDirectory(config.directory());
+            if (!root.equals(SegmentArenaRotation.readHeader(candidate))) {
+                throw new IOException("Arena rotation candidate verification failed");
+            }
+            publicationAttempted = true;
+            SegmentArenaRotation.publish(config, first, root, rotationIo);
+            SegmentArenaRotation.publish(config, second, root, rotationIo);
+            // The independent lock remains held. This marker prevents empty-log and old-decoder fallback.
+            rotationIo.writeFully(originalChannel, SegmentArenaRotation.header(root), 4096);
+            originalChannel.truncate(SegmentArenaRotation.FIRST_RECORD);
+            rotationIo.force(originalChannel, true);
+            FileChannel previous = channel;
+            long previousGeneration = physicalGeneration.value();
+            synchronized (this) {
+                channel = candidate;
+                candidate = null;
+                rotationRoot = root;
+                physicalGeneration = new Generation(root.generation());
+                nextOffset = SegmentArenaRotation.FIRST_RECORD;
+                appliedOffset = nextOffset;
+            }
+            if (previous != originalChannel) {
+                previous.close();
+                Files.delete(SegmentArenaRotation.path(config, previousGeneration));
+                IsolatedSegmentFiles.syncDirectory(config.directory());
+            }
+            return root;
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                failed = true;
+            }
+            if (created && !publicationAttempted) {
+                try {
+                    candidate.close();
+                    candidate = null;
+                    Files.delete(target);
+                    IsolatedSegmentFiles.syncDirectory(config.directory());
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+            }
+            throw failure;
+        } finally {
+            try {
+                if (candidate != null) {
+                    candidate.close();
+                }
+            } finally {
+                synchronized (this) {
+                    rotating = null;
+                }
+            }
+        }
+    }
+
+    private synchronized UUID checkpointId(SegmentControlCheckpoint.Reference reference) throws IOException {
+        for (AppliedOperation operation : appliedOperations.values()) {
+            if (operation.command() instanceof CheckpointCommit commit && commit.reference().equals(reference)
+                    && operation.status() == Status.APPLIED_DURABLE) {
+                return commit.operationId();
+            }
+        }
+        throw new IOException("Arena checkpoint commit is missing");
+    }
+
+    private boolean knownRotation(SegmentArenaRotation.Root root) {
+        AppliedOperation first = appliedOperations.get(root.firstId());
+        AppliedOperation second = appliedOperations.get(root.secondId());
+        return first != null && second != null && first.status() == Status.APPLIED_DURABLE
+                && second.status() == Status.APPLIED_DURABLE
+                && first.command().equals(new CheckpointCommit(root.firstId(), root.first()))
+                && second.command().equals(new CheckpointCommit(root.secondId(), root.second()));
+    }
+
+    private long rotationReserveBytes() {
+        return maxLogBytes >= SegmentArenaRotation.FIRST_RECORD + 416 + 192 ? 416 : 0;
     }
 
     private static int recordBytes(Command command) {
@@ -544,7 +688,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 reserved += QUARANTINE_RECORD_BYTES;
             }
         }
-        if (reserved > maxLogBytes - nextOffset) {
+        if (reserved + rotationReserveBytes() > maxLogBytes - nextOffset) {
             return false;
         }
         quarantineReserved[file] = true;
@@ -720,7 +864,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private void requireQuiescentControl(IsolatedSegmentConfig otherConfig,
                                          SegmentFileHeader otherIdentity) throws IOException {
-        if (!matchesScope(otherConfig, otherIdentity) || writing || pending != null) {
+        if (!matchesScope(otherConfig, otherIdentity) || writing || pending != null || rotating != null) {
             throw new IOException("Arena authority is unavailable or has unresolved control I/O");
         }
         for (boolean blocked : dataBlocked) {
@@ -743,7 +887,160 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return appliedThrough;
     }
 
+    private void selectRotation() throws IOException {
+        for (int slot = 0; slot < 2; slot++) {
+            SegmentArenaRotation.Root root;
+            try {
+                SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.ARENA, slot);
+                root = SegmentArenaRotation.publication(config, slot);
+            } catch (IOException invalidPublication) {
+                // An invalid page is optional. A selected generation's journal is never optional.
+                continue;
+            }
+            if (root != null && (rotationRoot == null || root.generation() > rotationRoot.generation())) {
+                rotationRoot = root;
+            } else if (root != null && rotationRoot.generation() == root.generation()
+                    && !root.equals(rotationRoot)) {
+                throw new IOException("Conflicting Arena rotation roots");
+            }
+        }
+        if (rotationRoot != null) {
+            channel = FileChannel.open(SegmentArenaRotation.path(config, rotationRoot.generation()),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            ByteBuffer header = ByteBuffer.allocate(4096);
+            SegmentFileIo.readFully(channel, header, 0);
+            identity.validate(header, config, -4);
+            if (!rotationRoot.equals(SegmentArenaRotation.readHeader(channel))) {
+                throw new IOException("Arena rotation publication differs from its journal");
+            }
+            physicalGeneration = new Generation(rotationRoot.generation());
+        }
+    }
+
+    private void recoverRotated() throws IOException {
+        long size = channel.size();
+        if (size < SegmentArenaRotation.FIRST_RECORD || size > maxLogBytes) {
+            throw new IOException("Invalid rotated Arena control log size");
+        }
+        List<SegmentControlCheckpoint.Reference> candidates = new ArrayList<>();
+        candidates.add(rotationRoot.first());
+        candidates.add(rotationRoot.second());
+        SegmentControlCheckpoint.Reference[] publications = new SegmentControlCheckpoint.Reference[2];
+        for (int slot = 0; slot < 2; slot++) {
+            boolean valid = false;
+            try {
+                SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.publication(
+                        config, SegmentControlFormat.Owner.ARENA, slot);
+                if (rotationRoot.equals(SegmentArenaRotation.publication(config, slot))) {
+                    publications[slot] = reference;
+                    valid = true;
+                }
+            } catch (IOException invalidPublication) {
+                // Recovery still has to validate one complete publication and every current suffix record.
+            }
+            if (valid) {
+                SegmentControlCheckpoint.syncPublication(config, slot);
+            }
+        }
+        long sequence = rotationRoot.through() + 1;
+        long generation = rotationRoot.second().generation();
+        HashSet<UUID> operations = new HashSet<>();
+        for (long offset = SegmentArenaRotation.FIRST_RECORD; offset < size;) {
+            int length = recordLength(offset, size, sequence);
+            Command command = readCommand(offset, length, sequence);
+            validateCommand(command);
+            if (operations.add(command.operationId()) && command instanceof CheckpointCommit commit
+                    && commit.expectedGeneration() == generation) {
+                SegmentControlCheckpoint.Reference reference = commit.reference();
+                if (reference.through() < rotationRoot.through()
+                        || reference.logOffset() < SegmentArenaRotation.FIRST_RECORD
+                        || reference.logOffset() > offset) {
+                    throw new IOException("Invalid rotated Arena checkpoint cut");
+                }
+                recordLength(reference.logOffset(), size, reference.through() + 1);
+                generation = reference.generation();
+                if (reference.equals(publications[reference.slot()])) {
+                    candidates.add(reference);
+                }
+            }
+            offset += length;
+            sequence++;
+        }
+        channel.force(true);
+        candidates.sort(Comparator.comparingLong(SegmentControlCheckpoint.Reference::generation).reversed());
+        boolean restored = false;
+        for (SegmentControlCheckpoint.Reference reference : candidates) {
+            try {
+                restoreSnapshot(reference);
+                if (reference.equals(rotationRoot.first()) || reference.equals(rotationRoot.second())) {
+                    if (reference.equals(rotationRoot.first())) {
+                        replayRootCommit(rotationRoot.firstId(), rotationRoot.first());
+                    }
+                    replayRootCommit(rotationRoot.secondId(), rotationRoot.second());
+                    appliedOffset = SegmentArenaRotation.FIRST_RECORD;
+                }
+                restored = true;
+                break;
+            } catch (IOException | IllegalArgumentException invalidImage) {
+                resetRecoveredState();
+            }
+        }
+        if (!restored) {
+            throw new IOException("No recoverable Arena checkpoint after prefix reclamation");
+        }
+        sequence = appliedThrough + 1;
+        for (long offset = appliedOffset; offset < size;) {
+            int length = recordLength(offset, size, sequence);
+            Command command = readCommand(offset, length, sequence);
+            durableThrough = sequence;
+            appliedThrough = sequence++;
+            apply(command);
+            offset += length;
+            appliedOffset = offset;
+        }
+        nextOffset = size;
+    }
+
+    private void replayRootCommit(UUID operationId, SegmentControlCheckpoint.Reference reference) throws IOException {
+        durableThrough = ++appliedThrough;
+        if (apply(new CheckpointCommit(operationId, reference)) != Status.APPLIED_DURABLE) {
+            throw new IOException("Arena rotation root commit cannot be replayed");
+        }
+    }
+
+    private void restoreSnapshot(SegmentControlCheckpoint.Reference reference) throws IOException {
+        SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(
+                config, identity, SegmentControlFormat.Owner.ARENA, reference, maxLogBytes);
+        resetRecoveredState();
+        for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
+            Command command = decodeCommand(operation.record(), operation.sequence());
+            validateCommand(command);
+            if (appliedOperations.containsKey(command.operationId())) {
+                throw new IOException("Repeated operation in Arena checkpoint");
+            }
+            appliedThrough = operation.sequence();
+            if (apply(command).ordinal() + 1 != operation.status()) {
+                throw new IOException("Arena checkpoint conditional result mismatch");
+            }
+        }
+        if (checkpointGeneration != reference.generation() - 1) {
+            throw new IOException("Arena checkpoint does not retain its committed predecessor");
+        }
+        appliedThrough = snapshot.through();
+        durableThrough = snapshot.through();
+        appliedOffset = snapshot.logOffset();
+        publishedCheckpoint = reference;
+    }
+
     private void recover(SegmentFileHeader identity) throws IOException {
+        ByteBuffer originalIdentity = ByteBuffer.allocate(4096);
+        SegmentFileIo.readFully(originalChannel, originalIdentity, 0);
+        identity.validate(originalIdentity, config, -4);
+        selectRotation();
+        if (rotationRoot != null) {
+            recoverRotated();
+            return;
+        }
         long size = channel.size();
         if (size < FIRST_RECORD || size > maxLogBytes) {
             throw new IOException("Invalid Arena control log size");
@@ -892,7 +1189,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         ByteBuffer header = ByteBuffer.allocate(128);
         SegmentFileIo.readFully(channel, header, offset);
         int length = SegmentControlParser.recordLength(header, SegmentControlFormat.Owner.ARENA,
-                LOG_GENERATION, sequence);
+                physicalGeneration, sequence);
         if (length > size - offset) {
             throw new IOException("Incomplete Arena control record; writable recovery is unsafe");
         }
@@ -902,7 +1199,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private Command readCommand(long offset, int length, long sequence) throws IOException {
         ByteBuffer bytes = ByteBuffer.allocate(length);
         SegmentFileIo.readFully(channel, bytes, offset);
-        return decodeCommand(bytes, sequence);
+        SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.ARENA,
+                physicalGeneration, sequence);
+        return decodeCommand(SegmentControlFormat.encode(parsed.type(), LOG_GENERATION, sequence,
+                parsed.operationId(), parsed.operationGeneration(), parsed.expectedGeneration(), parsed.body()),
+                sequence);
     }
 
     Command decodeCommand(ByteBuffer bytes, long sequence) throws IOException {
@@ -1078,6 +1379,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return new Slot(file, (offset - FIRST_RECORD) / BLOCK_BYTES);
     }
 
+    private void requireControlWritable() throws IOException {
+        requireWritable();
+        if (rotating != null && rotating != Thread.currentThread()) {
+            throw new IOException("Arena control rotation is in flight");
+        }
+    }
+
     private void requireWritable() throws IOException {
         if (closed || failed) {
             throw new IOException("Arena control log is closed or has uncertain I/O");
@@ -1089,7 +1397,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (writing || checkpointing) {
+        if (writing || checkpointing || rotating != null) {
             throw new IOException("Arena control I/O is still in flight");
         }
         if (sessionOwner != null) {
@@ -1103,12 +1411,23 @@ final class SegmentArenaControlLog implements AutoCloseable {
         closed = true;
         IOException first = null;
         try {
-            lock.release();
+            if (channel != originalChannel) {
+                channel.close();
+            }
         } catch (IOException failure) {
             first = failure;
         }
         try {
-            channel.close();
+            originalChannel.close();
+        } catch (IOException failure) {
+            if (first == null) {
+                first = failure;
+            } else {
+                first.addSuppressed(failure);
+            }
+        }
+        try {
+            writerLock.close();
         } catch (IOException failure) {
             if (first == null) {
                 first = failure;

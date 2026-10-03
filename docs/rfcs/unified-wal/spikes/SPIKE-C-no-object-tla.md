@@ -1081,3 +1081,5 @@ README.md
 PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Segment authority、Cluster Delete 或 general E/W/A fast recovery。
 
 2026-10-03 Bookie applied checkpoint已接入，保留sealed credential、权限/条件结果、最新LAC及recovery close；共享codec各自拥有A/B发布页，先durable/apply commit再发布，验证完整旧日志后恢复image与后缀。两个control owner的DATA正常restart、7项新增真实文件回归及有限权限模型有回执：`unified-wal-local-rECuQDLZ`（192项/187通过/5平台跳过）和`unified-wal-model-pz77hf26`（4个正向、6个指定反例）。全部旧控制日志仍必需；rotation/回收、在线维护、派生索引、完整Model A/A+C及生产Gate未完成。
+
+2026-10-03 Arena物理rotation已实现：停写后连续建立两个只差内部commit的applied checkpoint，绑定两条原commit identity，先force新日志代并同步目录，再force/验证两份恢复根，最后回收旧prefix。固定sidecar锁覆盖切换和另一owner身份检查；新代持续全局sequence，后续checkpoint保留日志代绑定。普通控制/故障预留保留416字节供rotation，两份image与全部首次条件结果仍受固定状态预算限制。真实重复填满/rotation、单页或image损坏回退、必需suffix损坏拒绝、短写/force失败、跨JVM排他、7个进程退出阶段及双owner DATA图两轮restart有回执`unified-wal-local-3Udoan9d`（195个源码输入、199项/194通过/5平台跳过）；有限模型`unified-wal-model-t1waf2bm`（29个实际输入、5个正向完整PASS、7个指定反例）新增双根/目录同步/旧prefix回收投影。Bookie旧日志仍全部必需；Bookie rotation、在线维护、长期幂等历史压缩、派生索引/MOVE/FREE、完整A/C及组合模型、真实掉电和生产Gate保持未完成。

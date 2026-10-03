@@ -27,7 +27,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.HashSet;
 import java.util.Set;
 
-/** Keeps one channel per in-process DATA lock scope; closing another channel can drop POSIX record locks. */
+/** Keeps one channel per in-process lock scope; closing another channel can drop POSIX record locks. */
 final class SegmentDataFileLock implements AutoCloseable {
     private static final Set<Path> ACTIVE = new HashSet<>();
 
@@ -52,25 +52,35 @@ final class SegmentDataFileLock implements AutoCloseable {
 
     private static SegmentDataFileLock acquire(Path directory, boolean create) throws IOException {
         Path scope = directory.toRealPath().resolve("isolated.lock");
+        return acquireFile(scope, create, false);
+    }
+
+    static SegmentDataFileLock openControl(Path path) throws IOException {
+        return acquireFile(path.getParent().toRealPath().resolve(path.getFileName()), false, true);
+    }
+
+    private static SegmentDataFileLock acquireFile(Path scope, boolean create, boolean control) throws IOException {
         synchronized (ACTIVE) {
             if (!ACTIVE.add(scope)) {
-                throw new IOException("Isolated DATA writer is already active");
+                throw new IOException("Isolated file scope already has a writer");
             }
         }
         FileChannel channel = null;
         try {
-            channel = create
-                    ? FileChannel.open(scope, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+            channel = control
+                    ? FileChannel.open(scope, StandardOpenOption.CREATE, StandardOpenOption.READ,
+                            StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                    : create ? FileChannel.open(scope, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
                     : FileChannel.open(scope, StandardOpenOption.READ, StandardOpenOption.WRITE,
                             LinkOption.NOFOLLOW_LINKS);
             FileLock lock;
             try {
                 lock = channel.tryLock();
             } catch (OverlappingFileLockException overlapping) {
-                throw new IOException("Isolated DATA writer is already active", overlapping);
+                throw new IOException("Isolated file scope already has a writer", overlapping);
             }
             if (lock == null) {
-                throw new IOException("Isolated DATA writer is already active");
+                throw new IOException("Isolated file scope already has a writer");
             }
             return new SegmentDataFileLock(scope, channel, lock);
         } catch (IOException | RuntimeException | Error failure) {

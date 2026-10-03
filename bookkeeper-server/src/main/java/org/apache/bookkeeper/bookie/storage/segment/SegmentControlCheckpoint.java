@@ -179,7 +179,11 @@ final class SegmentControlCheckpoint {
             ByteBuffer page = ByteBuffer.allocate(4096);
             SegmentFileIo.readFully(file, page, publicationOffset(owner));
             Reference reference = parseEnvelope(page, publicationMagic(owner));
-            zero(page, 80, 4092);
+            if (owner == SegmentControlFormat.Owner.ARENA && page.getLong(80) != 0) {
+                SegmentArenaRotation.parseExtension(page);
+            } else {
+                zero(page, 80, 4092);
+            }
             if (reference.slot() != slot) {
                 throw new IOException("Control checkpoint publication slot mismatch");
             }

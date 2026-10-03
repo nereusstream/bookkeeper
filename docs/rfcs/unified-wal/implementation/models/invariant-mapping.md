@@ -33,3 +33,13 @@ Bookie增量回执`unified-wal-model-pz77hf26`增加以下Model A局部投影；
 | `TypeOK`（BookieCheckpoint） | 1 ledger/10条固定记录/2snapshot/2crash，权限与cut类型 | 不证明文件或整个资源预算 |
 | `BookieAuthorityMatchesAppliedPrefix` | RFC-0005 §5.2/§9；applied image加完整后缀恢复同一权限、close事实、最新LAC和generation | 直接状态投影；Java按首次命令/结果重建由真实文件测试验证 |
 | `BookieTerminalPermissionsRemainDenied` | fence/tombstone不因snapshot丢失而恢复normal/read权限；旧activation/install identity重试不改变权限 | 单ledger固定轨迹；冷authority/credential/barrier输入已验证的假设，不是A+C或整体ACK证明 |
+
+
+Arena rotation回执`unified-wal-model-t1waf2bm`增加以下有限投影：
+
+| 性质 | 当前合同与实现 | 证据边界 |
+|---|---|---|
+| `TypeOK`（ArenaRotation） | 单次rotation/双root/单tail/单故障的阶段、集合和计数 | 不证明字节或资源总账 |
+| `SurvivingAuthority` | RFC-0003 §11；force新文件与目录、两份完整根后才回收旧prefix | 两root保存相同普通authority；不展开一般conditional state |
+| `AcknowledgedTailSurvives` | 切换后普通请求在新代force后成功，旧代不能替代current tail | 不证明实际fsync或坏framing分类 |
+| `RecoveryKeepsAcknowledgements` | 合法恢复根加当前必要tail保留全部既存确认 | 单次掉电/单image损坏；不是A+C组合 |

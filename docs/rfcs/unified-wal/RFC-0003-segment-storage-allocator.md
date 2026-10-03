@@ -545,11 +545,13 @@ timeout 单独不是 orphan proof。`MOVE_COMMIT` 与 conditional free 在同一
 
 ## 11. Allocator checkpoint 与 rotation
 
-2026-10-03双owner实现增量：Arena codec已复用为`SegmentControlCheckpoint`，Arena仍拥有自己的第二页；Bookie拥有第三页，两者各写自己的完整页且不截断另一页。半写Bookie页不改变Arena有效发布判断，所有immutable身份页和旧控制字节仍必需。Bookie/真实DATA图新增回归及有限模型见[局部实现](implementation/local-storage/README.md)。prefix reclaim/rotation及完整步骤8仍未完成。
+2026-10-03 Arena rotation增量：现有applied checkpoint可在停写后建立两个相邻cut，绑定两条原commit identity，强制同步新物理代及目录，完成两个恢复根后才回收旧prefix。固定sidecar锁覆盖整个切换，后续checkpoint保留physical generation绑定；单根/image损坏可回退，当前必要日志及完整suffix仍强制验证。准确字节合同见[实验格式](implementation/local-storage/format-v1.md#arena日志代与双恢复根)。Bookie rotation、在线维护、长期历史压缩及完整步骤8未完成。
+
+历史（`00edeb8f`版本）2026-10-03双owner实现增量：Arena codec已复用为`SegmentControlCheckpoint`，Arena仍拥有自己的第二页；Bookie拥有第三页，两者各写自己的完整页且不截断另一页。半写Bookie页不改变Arena有效发布判断，所有immutable身份页和旧控制字节仍必需。Bookie/真实DATA图新增回归及有限模型见[局部实现](implementation/local-storage/README.md)。prefix reclaim/rotation及完整步骤8仍未完成。
 
 数据或 derived-index checkpoint 可以丢失并重建；allocator authority 不能全部丢失。
 
-2026-10-03局部实现：隔离Arena已提供applied状态/字节cut快照、有界A/B image的force/验证、CHECKPOINT_COMMIT持久且顺序apply后的inactive发布页force，以及匹配commit/image的恢复后缀和旧image/全日志回退。真实文件、JVM halt边界、正常DATA重启及有限模型见[本地状态](implementation/local-storage/README.md)。当前完整旧日志仍保留并验证；没有prefix回收/rotation、Bookie checkpoint、MOVE/FREE selector或在线调度，不把以下完整协议称为已完成。
+历史（`6402c1c6`版本）2026-10-03局部实现：隔离Arena已提供applied状态/字节cut快照、有界A/B image的force/验证、CHECKPOINT_COMMIT持久且顺序apply后的inactive发布页force，以及匹配commit/image的恢复后缀和旧image/全日志回退。真实文件、JVM halt边界、正常DATA重启及有限模型见[本地状态](implementation/local-storage/README.md)。当前完整旧日志仍保留并验证；没有prefix回收/rotation、Bookie checkpoint、MOVE/FREE selector或在线调度，不把以下完整协议称为已完成。
 
 control-log 旧段的唯一合法回收顺序：
 

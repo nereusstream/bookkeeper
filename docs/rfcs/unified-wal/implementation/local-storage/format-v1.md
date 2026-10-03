@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；完整selector、rotation、服务级可写restart与生产entry success authority仍未完成。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；完整selector、Bookie rotation、在线Arena维护、服务级可写restart与生产entry success authority仍未完成。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -75,11 +75,11 @@ Bookie type 1～9：ROUTE、CREDENTIAL、INSTALL、ACTIVATE、FENCE、RECOVERY_G
 
 Bookie局部INSTALL把route、instance、descriptor、加密verifier与初始inactive状态原子绑定在一条记录中；ACTIVATE是后续独立记录。两种body均先按顺序放入operation u32（INSTALL=1、ACTIVATE_INITIAL=2、ACTIVATE_REPLACEMENT=3）、ledgerId u64、instance[16]、descriptor identity[36]、目标storage incarnation[16]、authority generation u64、public semantic payload identity[32]，再放目标Bookie UTF-8长度u16+bytes、authority domain UTF-8长度u16+bytes。INSTALL另附canonical descriptor长度u16+bytes及49字节sealed verifier：version=1 u8、AES-GCM nonce[12]、ciphertext[20]、tag[16]。控制header的operation UUID绑定重试，operation generation等于authority generation；expected generation当前固定0，具体条件在顺序apply时判断。sealed字段AAD绑定storage incarnation、Arena UUID、BookieId和60字节ledger context；AES密钥由调用方从目录外提供，丢失/错误密钥拒绝重开。字段CRC只检测意外损坏，不能替代控制文件的访问保护或外部committed authority。
 
-Bookie日志写完整batch并一次`force(true)`后才按sequence应用；未apply时INSTALL不开放normal写，已apply INSTALL仍inactive，只有匹配ACTIVATE后局部准入查询才为真。重开先验证完整framing与连续序号，再恢复同步并完整重放；错误密钥、损坏/不完整尾部拒绝可写打开。不支持尾部猜测截断、checkpoint/rotation、真实MetadataStore direct read、生产listener或请求级local result；局部准入查询也不是逐entry local success。
+Bookie日志写完整batch并一次`force(true)`后才按sequence应用；未apply时INSTALL不开放normal写，已apply INSTALL仍inactive，只有匹配ACTIVATE后局部准入查询才为真。重开先验证完整framing与连续序号，再恢复同步并完整重放；错误密钥、损坏/不完整尾部拒绝可写打开。不支持尾部猜测截断、Bookie rotation、真实MetadataStore direct read、生产listener或请求级local result；局部准入查询也不是逐entry local success。
 
 Bookie局部FENCE记录的body固定为60字节ledger context；header使用wire操作UUID、operation generation=1、expected generation=0。先由匹配context和20字节verifier的受控请求在Bookie状态锁下关闭新normal准入；已取得的有限DATA准入票据必须保持到其物理I/O终结，未终结时返回`WAITING_PRECUT`且不写FENCE。此前已durable的ACTIVATE仍须先按原序apply，切断准入后的ACTIVATE不得再追加。票据全部终结后才对单条FENCE写入并`force(true)`，再应用monotonic fenced状态并回复durable；慢force期间不重开准入，force不确定则当前log fail-closed。完整FENCE记录重开时同步后重放，重复操作从持久状态解析。隔离DATA物理驱动可接收与每条普通record一一匹配的预准入票据，直到真实FileChannel I/O和原owner回调均终结才释放；较早批次失败时，后批即使已收到失败回调，仍须等自身I/O终结。Bookie控制owner驱动让FENCE的write/force在预留控制I/O执行，durable后回原owner apply；控制I/O拒收且尚未写入时退回物理后缀预留，保留本进程的准入切点供同操作重试。原物理实验入口不提供Bookie authority；实际Add local result、response loss与底层I/O ownership的联合验收仍待步骤6。
 
-当前ALLOC/ALLOC_POOL body为48字节：file index u32、owner shard u32、owner shard generation u64、allocation ID u64、绝对文件offset u64、whole block数u32、保留零u32、stream首个物理sequence u64。allocation ID为正数，同一Arena内不能重复授给另一范围；同一shard/generation后续分配必须声明相同首序号，否则按条件失败且不授予空间。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant及stream起点可查询；每文件已授权block的最高结束位置可由重放状态计算，并随只读DATA恢复候选报告。零填充的已授权block仍包含在内；这个水位不证明pool中的DATA位置已用或未用，也不授权普通Add或可写重开。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；容量满额停止，尚不支持FREE、复用和rotation。此前40字节语义记录不被新解释器接纳；此文件格式仍为可丢弃实验，不承诺跨修订版本重开。
+当前ALLOC/ALLOC_POOL body为48字节：file index u32、owner shard u32、owner shard generation u64、allocation ID u64、绝对文件offset u64、whole block数u32、保留零u32、stream首个物理sequence u64。allocation ID为正数，同一Arena内不能重复授给另一范围；同一shard/generation后续分配必须声明相同首序号，否则按条件失败且不授予空间。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant及stream起点可查询；每文件已授权block的最高结束位置可由重放状态计算，并随只读DATA恢复候选报告。零填充的已授权block仍包含在内；这个水位不证明pool中的DATA位置已用或未用，也不授权普通Add或可写重开。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；未执行下述显式Arena rotation时容量满额停止；尚不支持FREE与复用。此前40字节语义记录不被新解释器接纳；此文件格式仍为可丢弃实验，不承诺跨修订版本重开。
 
 Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用version u32=1、action u32=1、DATA file index u32、reserved u32=0；expected generation固定0，operation UUID/generation绑定重试。writer会话使用version u32=1、action u32=2（OPEN）或3（CLOSE）、epoch u64；epoch必须为正且等于header的operation generation。OPEN的expected generation为epoch-1，CLOSE为epoch。未知版本/action、越界文件、非零reserved、epoch/header不符或其他长度拒绝重放，没有文件隔离clear/reset操作。
 
@@ -123,9 +123,32 @@ payload的每项为`firstSequence i64 + status u32 + recordBytes u32 + 原contro
 
 `CHECKPOINT_COMMIT`使用既有Arena type=6，body是上表16～80的64字节reference；operation generation为checkpoint generation，expected generation为其前一代。image完整写入、force、目录同步并重读验证后，commit才进入正常Arena顺序，durable且apply成功后才能写inactive发布页及force、验证。Arena A/B发布页位于原superblock offset4096，自己的页完整时文件至少8192字节；存在Bookie页时可到12288字节，原身份页仍保持不变；不完整第二页不能成为publication。旧隔离原型遇到新增mandatory CHECKPOINT_COMMIT/第二页会拒绝打开，未建立稳定格式兼容承诺。
 
-恢复先验证和同步仍完整保留的旧控制日志，匹配commit、publication及image，选择最高完整可验证的发布代；从状态表重建后重放through之后的完整后缀。image或发布页损坏时可选择另一份，都不可用则从完整日志恢复。身份页损坏、必需旧日志缺失/损坏仍拒绝，不将坏尾静默截断。完整可读publication在暴露恢复结果前force。当前未回收任何旧控制prefix，不声称compact长期历史或完成rotation/retention；完整rotation/retention及在线维护接线仍未实现。
+恢复先验证和同步仍完整保留的旧控制日志，匹配commit、publication及image，选择最高完整可验证的发布代；从状态表重建后重放through之后的完整后缀。image或发布页损坏时可选择另一份，都不可用则从完整日志恢复。身份页损坏、必需旧日志缺失/损坏仍拒绝，不将坏尾静默截断。完整可读publication在暴露恢复结果前force。未显式调用下述Arena rotation的目录继续要求全部旧日志；Bookie rotation、长期历史压缩及在线维护接线仍未实现。
 
 独立Python struct/逐位CRC32C生成的`arena-empty-checkpoint-v1.hex`（4224 bytes）、`arena-checkpoint-publication-v1.hex`（4096 bytes）、`arena-checkpoint-commit-v1.hex`（208 bytes）固定空cut=-1、generation=1、slot=A，commit使用UUID(1,2)。真实Java writer逐字节比较，独立parser读取同一向量；它们不改写既有DATA/ALLOC向量。
+
+## Arena日志代与双恢复根
+
+`SegmentArenaControlLog.rotate()`只在控制I/O/pending均终结、没有DATA writer owner或未终结隔离通知时执行。它独占控制提交，查询不持有慢I/O锁。`arena-control.lock`是固定sidecar排他scope，复用进程内开channel前拒绝重入及跨进程FileLock；日志及另一owner身份检查不打开该锁文件；这遵守[JDK FileLock平台限制](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html)建议的单channel锁scope。DATA仍使用原`isolated.lock`。旧格式binary的协同写者互斥未验证，不允许混用版本；这是可丢弃实验格式。
+
+先连续完成两个正常checkpoint：第一份普通applied cut为S，第二份cut为S+1，中间只有第一条内部CHECKPOINT_COMMIT；两条commit分别位于S+1/S+2，reference的offset相差208，checkpoint代相差1，slot相反。两份image因此保存相同普通authority，第二份另外包含第一条commit。新日志头保留两份完整reference及两个commit UUID，恢复第一份image时补演两条commit，恢复第二份时补演第二条。不得凭空重新生成UUID或重置逻辑序号。
+
+新物理代使用固定交替文件`arena-control-generation-a/b`（偶数代=A，奇数代=B）。身份页仍为fileId=-4，第二页4096-byte header magic=`UWARG001`、version=1、reference长度64、16～80为第二份reference；80～256为下表的rotation extension，256～4092全零、4092为CRC32C[0,4092)。新日志从8192起，framing的physical log generation使用新代，control sequence从S+3继续；image中的记录始终规范化为log generation=1。
+
+| offset | Arena发布页及日志头的rotation extension |
+|---|---|
+| 80 / 88 | magic `UWARP001` / physical log generation u64（≥2） |
+| 96～160 / 160～176 | 第一份64-byte reference / 原commit UUID |
+| 176～240 / 240～256 | 第二份64-byte reference / 原commit UUID |
+| 256～4092 | 全零 |
+
+Arena发布页仍使用`UWASB001`及原16～80 selected reference；首次rotation和后续普通checkpoint均保留同一physical generation extension，Bookie第三页不变。先写完整新文件、force、同步目录并验证header，才分别写/force/验证两个Arena发布页。两份都完整后，向原`arena-control`第二页写强制识别marker、截为8192并force；它不再是可重放日志。随后切换句柄并删除前一物理代、同步目录，才返回成功与恢复控制准入。旧段删除前，两份fresh image、commit及新日志根均已验证；中途失败不返回成功，当前实例停止控制写。
+
+启动选择最高完整publication的physical generation，核对对应文件身份/header，完整检查并同步当前必要suffix，再从最高合法image恢复。旧段已回收时不能回退到空原日志；两份image均不可用、选中日志缺失/损坏或suffix截断均拒绝。单份image或publication损坏可通过另一份恢复同一普通authority及当前后缀；后续普通checkpoint可替换两份初始image。未发布的候选和旧代只在两份fresh当前根完整后，凭持久化的两条commit身份证明退休，固定交替路径不会无限生成文件。
+
+容量≥8800字节时，普通控制及DATA failure预留保留额外416字节供两条rotation commit；更小旧配置仍按原有限日志运行并拒绝rotation。两份image各自保留最多2×control容量的操作状态，全部首次条件结果及内部checkpoint历史仍保留；达到状态预算明确停止。这证明物理prefix回收，不证明长期幂等历史压缩、自动维护、MOVE/FREE selector或长期存储有界运行。
+
+独立Python struct/逐位CRC32C的`arena-rotation-header-v1.hex`和`arena-rotation-publication-v1.hex`均4096 bytes，固定物理代2、空普通cut、第一commit UUID(1,2)、第二commit UUID(3,4)；Java writer逐字节对照。JVM halt覆盖image、新文件、双根及marker的force前边界，实际掉电/文件系统barrier可靠性仍未验证。
 
 ## Bookie checkpoint与双owner发布页
 

@@ -76,6 +76,268 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void rotationHeaderAndPublicationMatchIndependentByteVectors() throws Exception {
+        SegmentControlCheckpoint.Reference first = new SegmentControlCheckpoint.Reference(1, 0, -1, 4096, 0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        SegmentControlCheckpoint.Reference second = new SegmentControlCheckpoint.Reference(2, 1, 0, 4304, 224,
+                "e89150ad58ef5c1b765c176c382ca122f91fca6f509144de7f379f800105125b");
+        SegmentArenaRotation.Root root = new SegmentArenaRotation.Root(2, first, new UUID(1, 2),
+                second, new UUID(3, 4));
+        assertArrayEquals(checkpointVector("arena-rotation-header-v1.hex"), SegmentArenaRotation.header(root).array());
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            SegmentArenaRotation.publish(config, first, root, new SegmentFileIo());
+            try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 0),
+                    StandardOpenOption.READ)) {
+                ByteBuffer page = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(file, page, 4096);
+                assertArrayEquals(checkpointVector("arena-rotation-publication-v1.hex"), page.array());
+            }
+            assertEquals(root, SegmentArenaRotation.publication(config, 0));
+        }
+    }
+
+    @Test
+    public void rotationReclaimsFullJournalsAndPreservesConditionalResultsAcrossRepeatedRestarts() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            for (int cycle = 0; cycle < 3; cycle++) {
+                try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                    if (cycle == 0) {
+                        log.submitBatch(List.of(alloc(1, 4096), alloc(2, 4096)));
+                    }
+                    boolean full = false;
+                    for (int retry = 0; retry < 200; retry++) {
+                        try {
+                            assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                                    log.submitBatch(List.of(alloc(1, 4096))).get(0).status());
+                        } catch (IOException capacity) {
+                            full = true;
+                            break;
+                        }
+                    }
+                    assertTrue("The ordinary journal budget must be exhausted before rotation", full);
+                    SegmentArenaRotation.Root root = log.rotate();
+                    assertEquals(cycle + 2, root.generation());
+                    assertEquals(8192, Files.size(SegmentArenaRotation.path(config, root.generation())));
+                    assertEquals(8192, Files.size(config.directory().resolve("arena-control")));
+                    assertTrue(granted(log, 4096, 1, 1, 1));
+                    assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                            log.submitBatch(List.of(alloc(2, 4096))).get(0).status());
+                    if (cycle > 0) {
+                        assertFalse(Files.exists(SegmentArenaRotation.path(config, root.generation() - 1)));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void rotatedFallbackRequiresOneImageAndEveryCurrentSuffixByte() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentArenaRotation.Root root;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            root = log.rotate();
+            log.submitBatch(List.of(alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
+        }
+        Path newest = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, root.second().slot());
+        byte[] image = Files.readAllBytes(newest);
+        Path publication = SegmentControlCheckpoint.superblock(config, root.second().slot());
+        byte[] publicationBytes = Files.readAllBytes(publication);
+        corruptCheckpointByte(publication, 4096);
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertTrue(granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 2));
+        }
+        Files.write(publication, publicationBytes);
+        corruptCheckpointByte(newest, 4096);
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertTrue(granted(log, 4096, 1, 1, 1));
+            assertTrue(granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 2));
+            // Replace both base images; a later publication must retain the physical generation binding.
+            log.checkpoint();
+            log.checkpoint();
+        }
+        Path a = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, 0);
+        Path b = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, 1);
+        byte[] aBytes = Files.readAllBytes(a);
+        byte[] bBytes = Files.readAllBytes(b);
+        corruptCheckpointByte(b, 4096);
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertTrue(granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 2));
+        }
+        corruptCheckpointByte(a, 4096);
+        assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+        Files.write(a, aBytes);
+        Files.write(b, bBytes);
+        Path current = SegmentArenaRotation.path(config, root.generation());
+        byte[] journal = Files.readAllBytes(current);
+        try (FileChannel file = FileChannel.open(current, StandardOpenOption.WRITE)) {
+            file.truncate(journal.length - 1);
+        }
+        assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+        Files.write(current, journal);
+        corruptCheckpointByte(current, 8192);
+        assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+        Files.write(current, journal);
+        Files.delete(current);
+        assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+        assertTrue(image.length > 4224);
+    }
+
+    @Test
+    public void slowRotationKeepsQueriesResponsiveAndWriterExclusionAcrossProcesses() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            AtomicInteger forces = new AtomicInteger();
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                if (forces.incrementAndGet() == 5) {
+                    started.countDown();
+                    try {
+                        if (!release.await(5, TimeUnit.SECONDS)) {
+                            throw new AssertionError("Rotation was not released");
+                        }
+                    } catch (InterruptedException interrupted) {
+                        throw new AssertionError(interrupted);
+                    }
+                }
+            });
+            FutureTask<SegmentArenaRotation.Root> rotation = new FutureTask<>(() -> log.rotate(io));
+            Thread thread = new Thread(rotation);
+            thread.start();
+            try {
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                FutureTask<Boolean> query = new FutureTask<>(() -> granted(log, 4096, 1, 1, 1));
+                new Thread(query).start();
+                assertTrue(query.get(1, TimeUnit.SECONDS));
+                assertThrows(IOException.class, () -> log.submitBatch(List.of(alloc(2, 4096))));
+                assertThrows(IOException.class, log::close);
+                assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+                try (SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(), 32768,
+                        new javax.crypto.spec.SecretKeySpec(new byte[16], "AES"),
+                        new org.apache.bookkeeper.common.profile.ProfileDescriptorValidator(
+                                (id, version) -> false, (id, generation) -> false))) {
+                    assertEquals(23, rotationProbe(config.directory(), "lock"));
+                }
+            } finally {
+                release.countDown();
+                thread.join(5000);
+            }
+            assertEquals(2, rotation.get(1, TimeUnit.SECONDS).generation());
+            assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+            assertEquals(23, rotationProbe(config.directory(), "lock"));
+        }
+        assertEquals(0, rotationProbe(config.directory(), "lock"));
+    }
+
+    @Test
+    public void rotationProcessExitAtFileAndRootBarriersRetainsAuthority() throws Exception {
+        for (String stage : List.of("1", "3", "5", "6", "7", "8", "done")) {
+            IsolatedSegmentConfig config = checkpointConfig(temporary.newFolder("rotation-" + stage)
+                    .toPath().resolve("arena"));
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                log.submitBatch(List.of(alloc(1, 4096)));
+            }
+            assertEquals(stage, 23, rotationProbe(config.directory(), stage));
+            try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                assertTrue(stage, granted(log, 4096, 1, 1, 1));
+                if (stage.equals("done")) {
+                    assertTrue(granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 2));
+                }
+                assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                        log.submitBatch(List.of(alloc(1, 4096))).get(0).status());
+                // This also proves an interrupted candidate can be safely retired before the next rotation.
+                log.rotate();
+            }
+        }
+    }
+
+    @Test
+    public void failedUnpublishedCandidateIsRemovedWithoutDiscardingTheAppliedCut() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            // Four successful image/publication forces precede the candidate's own force.
+            assertThrows(IOException.class, () -> log.rotate(new SegmentFileIo(13, -1, 5, false)));
+            assertFalse(Files.exists(SegmentArenaRotation.path(config, 2)));
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertTrue(granted(log, 4096, 1, 1, 1));
+            SegmentArenaControlLog.DurableBatch pending = log.appendDurably(List.of(alloc(2, 4096)));
+            assertThrows(IOException.class, log::rotate);
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED, log.applyDurable(pending).get(0).status());
+            log.rotate();
+        }
+    }
+
+    @Test
+    public void rotationForceFailureDoesNotReturnSuccessAndCanRecover() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            assertThrows(IOException.class, () -> log.rotate(new SegmentFileIo(31, -1, 7, false)));
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(alloc(2, 4096))));
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertTrue(granted(log, 4096, 1, 1, 1));
+            log.rotate();
+        }
+    }
+
+    private int rotationProbe(Path directory, String stage) throws Exception {
+        Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Xmx64m", "-XX:MaxDirectMemorySize=32m", "-cp",
+                System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+                RotationCrashProbe.class.getName(), directory.toString(), stage)
+                .redirectErrorStream(true).redirectOutput(directory.getParent().resolve("rotation-probe.log").toFile())
+                .start();
+        try {
+            assertTrue(stage, process.waitFor(15, TimeUnit.SECONDS));
+            return process.exitValue();
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    public static class RotationCrashProbe {
+        public static void main(String[] args) throws Exception {
+            IsolatedSegmentConfig config = checkpointConfig(Path.of(args[0]));
+            AtomicInteger forces = new AtomicInteger();
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                if (Integer.toString(forces.incrementAndGet()).equals(args[1])) {
+                    Runtime.getRuntime().halt(23);
+                }
+            });
+            try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                if (args[1].equals("lock")) {
+                    return;
+                }
+                log.rotate(io);
+                log.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                        new UUID(0, 2), new Generation(1), 0, 0, 1, new Generation(1), 2,
+                        4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1)));
+                Runtime.getRuntime().halt(23);
+            } catch (IOException failure) {
+                if (args[1].equals("lock")) {
+                    Runtime.getRuntime().halt(23);
+                }
+                throw failure;
+            }
+        }
+    }
+
+    @Test
     public void emptyCheckpointAndCommitMatchIndependentFixedByteVectors() throws Exception {
         IsolatedSegmentConfig config = config();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());

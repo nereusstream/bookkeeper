@@ -6108,7 +6108,7 @@ public class SegmentBookieControlLogTest {
                     SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
                             1024 * 1024, key((byte) 3), VALIDATOR)) {
                 assertFalse(arena.hasUnclosedDataSession());
-                assertEquals(cycle, arena.checkpoint().generation());
+                assertEquals(cycle + 1, arena.rotate().generation());
                 assertEquals(cycle, bookie.checkpoint().generation());
             }
             try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
@@ -6124,7 +6124,7 @@ public class SegmentBookieControlLogTest {
             }
         }
         try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
-            assertEquals(2, arena.publishedCheckpoint().orElseThrow().generation());
+            assertEquals(4, arena.publishedCheckpoint().orElseThrow().generation());
             assertEquals(3, arena.dataSessionEpoch());
             assertFalse(arena.hasUnclosedDataSession());
         }

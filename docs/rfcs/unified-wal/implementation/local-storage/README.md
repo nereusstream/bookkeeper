@@ -327,3 +327,15 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 模型回执`unified-wal-model-pz77hf26`绑定24个实际输入，原Model C配置保持预期，新增Bookie固定权限轨迹28,292 distinct states正向PASS及丢失terminal gate的指定反例，合计4个正向、6个预期反例。范围见[Bookie模型](../models/README.md#bookie-checkpoint-权限恢复切片)。真实JVM退出不等于真实掉电；没有Linux NUMA或性能对照。
 
 两个owner仍完整保留旧控制日志，当前状态/幂等历史受固定日志容量限制；满额停止，未实现prefix reclaim/rotation、长期代际压缩、在线调度、派生索引、MOVE/FREE或服务级生产authority。Bookie显式checkpoint及关闭后的DATA图验证不授予完整步骤8/Model A/A+C/Block G；未正常关闭会话的故障解析合同仍待确认。
+
+### Arena停写rotation与旧控制prefix回收
+
+2026-10-03 Arena物理rotation已实现：停写后连续建立两个只差内部commit的applied checkpoint，绑定两条原commit identity，先force新日志代并同步目录，再force/验证两份恢复根，最后回收旧prefix。固定sidecar锁覆盖切换和另一owner身份检查；新代持续全局sequence，后续checkpoint保留日志代绑定。普通控制/故障预留保留416字节供rotation，两份image与全部首次条件结果仍受固定状态预算限制。真实重复填满/rotation、单页或image损坏回退、必需suffix损坏拒绝、短写/force失败、跨JVM排他、7个进程退出阶段及双owner DATA图两轮restart有回执`unified-wal-local-3Udoan9d`（195个源码输入、199项/194通过/5平台跳过）；有限模型`unified-wal-model-t1waf2bm`（29个实际输入、5个正向完整PASS、7个指定反例）新增双根/目录同步/旧prefix回收投影。Bookie旧日志仍全部必需；Bookie rotation、在线维护、长期幂等历史压缩、派生索引/MOVE/FREE、完整A/C及组合模型、真实掉电和生产Gate保持未完成。
+
+复现：`scripts/unified-wal/run-local-storage-tests.sh IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentArenaControlLogTest,SegmentBookieControlLogTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest`，以及`python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar`。输入父提交为`00edeb8f784ca240d9a3d040604f54ef5126a1bb`，Java及模型run冻结本次实际源码SHA-256，历史回执保持原绑定。新格式的固定向量与文件/根发布顺序见[字节合同](format-v1.md#arena日志代与双恢复根)。
+
+新增真实文件覆盖三轮普通控制容量耗尽后rotation及重开，首次条件失败与同UUID幂等结果不丢失；两份初始image被后续正常checkpoint替换后仍可恢复。单image或publication损坏可恢复当前后缀，两image均坏、当前文件缺失/坏header/坏record/不完整tail不静默回退。慢candidate force不阻塞grant查询，拒绝其他控制提交及提前关闭；同JVM二次获取失败、Bookie另开/关闭日志身份描述符、rotation前后均不释放独立JVM排他，原owner关闭后方能取得。部分传输和候选force失败不返回成功；未尝试发布的本次候选失败后清理，已尝试发布的文件由恢复解析。durable未apply仍拒绝rotation而不破坏原pending批次。
+
+真实DATA图在健康CLOSE后显式维护，随后restart恢复旧entry幂等/点读并追加新entry；没有在运行中的storage图接入维护调度。image仍保留所有首次条件结果/内部checkpoint历史，不靠prune改变重试语义；达到状态预算仍停止，不能据三轮物理回收宣称长期可运行。没有解除未关闭OPEN或quarantine门槛。旧版本混用writer及真实掉电尚未验证，有限模型不代替文件系统屏障证据。
+
+本次`bookkeeper-server` Spotless/Checkstyle通过（run目录的`style-check.log`及exit-code=0）；175个变更文档相对链接与15个anchor检查通过，JSON/Python AST及`git diff --check`通过。上述仅为本次隔离切片证据。

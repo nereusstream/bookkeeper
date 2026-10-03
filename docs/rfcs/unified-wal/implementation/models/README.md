@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布切片的四个正向配置已完成有限状态探索，六个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布切片的五个正向配置已完成有限状态探索，七个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照与后缀，不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照与后缀；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -23,6 +23,8 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 | `ce-data-before-barrier` | 故意允许完整write替代DATA barrier；必须违反`DataSuccessHasBarrier` |
 | `ce-control-before-sync` | 故意允许未同步可读控制记录直接apply；必须违反`ControlHasBarrier` |
 | `ce-open-replay-after-error` | 故意允许OPEN在校验/sync后直接取得恢复资格；必须违反`KnownErrorRemainsIsolated` |
+| `c-arena-rotation` | 1次物理rotation/1次掉电/1次image或publication损坏，双恢复根与新文件及目录barrier后回收，保留已确认tail |
+| `ce-arena-rotation-early-reclaim` | 故意允许仅一份恢复根后回收，随后该页损坏，必须违反`SurvivingAuthority` |
 | `c-checkpoint` | 3条控制命令（第2条条件失败）、2个slot、最多3代checkpoint/2次进程退出/1次掉电；完整控制日志保留 |
 | `ce-checkpoint-durable-cut` | 故意取durable cut替代applied cut；必须违反`SnapshotCutWasApplied` |
 | `ce-checkpoint-early-publication` | 故意在控制commit持久前发布；必须违反`PublishedImageHasDurableCommit` |
@@ -31,7 +33,7 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 负向配置是被否证的候选规则，不是生产功能开关，也不是实际Java源码变异。它们的EXPECTED_COUNTEREXAMPLE用于检查性质能否发现指定错误；不能计入正向PASS。完整trace保存模型oracle`faultSeen`：它在进程退出后仍记录先前I/O错误，而恢复进程只能读取控制与DATA镜像。该oracle不是实现新增的持久日志。恢复同步只建立当前bytes的durability，不自动证明先前错误已经解析。
 
-模型假设输入grant、storage identity、Bookie权限及framing已验证，旧进程退出已终结模型中的提交者；batch冻结后不可变、旧授权范围不覆盖/复用。durable bytes在掉电时保留，可读未同步bytes可丢失。有限模型不证明真实fsync、设备隔离、目录同步、CRC、字节预算或NUMA。未展开allocation条件命令全集、generation reuse、MOVE/FREE、控制前缀回收/rotation及index覆盖、损坏/部分framing、任意Bookie route变更/跨ledger竞争、quorum/客户端、删除和进展；它们仍须后续Model A/C/D及A+C/C+D配置验证。
+模型假设输入grant、storage identity、Bookie权限及framing已验证，旧进程退出已终结模型中的提交者；batch冻结后不可变、旧授权范围不覆盖/复用。durable bytes在掉电时保留，可读未同步bytes可丢失。有限模型不证明真实fsync、设备隔离、目录同步、CRC、字节预算或NUMA。未展开allocation条件命令全集、generation reuse、MOVE/FREE、完整在线rotation、长期历史压缩及index覆盖、损坏/部分framing、任意Bookie route变更/跨ledger竞争、quorum/客户端、删除和进展；它们仍须后续Model A/C/D及A+C/C+D配置验证。
 
 性质和真实实现/测试的映射分别见[invariant mapping](invariant-mapping.md)及[action mapping](action-to-test-mapping.md)。执行结果由本页后续验证记录及各独立run拥有，不能以此切片提升Block G或生产authority。
 
@@ -89,3 +91,14 @@ checkpoint正向17个Next动作coverage均非零。第一个负向trace为`Appen
 负向最短trace在7条可读控制记录经process crash、恢复sync/replay建立fenced状态后，`Freeze → Publish → Crash → RecoverySync → Recover`使image丢失terminal gate并恢复active，违反`BookieTerminalPermissionsRemainDenied`。该配置是被否证的候选序列化规则，未修改Java或生产开关。初次新增cfg因错误注释语法只得到INCONCLUSIVE，修正为TLC支持的注释后重新独立运行；未缩小常量或放松性质。
 
 此切片只验证固定单ledger权限投影、已apply cut及保留完整日志的后缀恢复；Publish合并了由C切片单独检查的barrier步骤，不是A+C组合证明。没有展开多ledger/多Arena竞争、在途ticket/pending gate、冷metadata与TLS、credential加解密、CRC/SHA、双owner发布页I/O、tail分类、prefix reclaim/rotation、完整Model A/C/D或真实掉电。对应真实文件回归与范围见[存储实现](../local-storage/README.md)；服务readiness、Block G及production authority保持不变。
+
+### Arena双根rotation切片
+
+新回执`unified-wal-model-t1waf2bm`绑定父提交`00edeb8f`，冻结29个实际模型/config/runner/Java源码SHA-256及父提交处RFC输入。旧`jqvpwfsw`、`thb7_nqa`、`pz77hf26`的输入与结论不变。矩阵12配置实际为5个正向完整PASS、7个指定性质反例。
+
+| 新配置 | generated / distinct / queue | depth / 完整diameter | elapsed / peak RSS | 结论 |
+|---|---|---|---|---|
+| c-arena-rotation | 332 / 161 / 0 | 19 / 19 | 0.850 s / 122,044,416 bytes | PASS |
+| ce-arena-rotation-early-reclaim | 116 / 68 / 21 | 10 / 不适用 | 0.830 s / 112,115,712 bytes | EXPECTED_COUNTEREXAMPLE: SurvivingAuthority |
+
+正向15个Next动作coverage均非零。模型只有一次rotation、一次掉电与一次image或publication损坏，两个cut的普通authority相同；内部commit identity/相邻sequence、条件结果和字节CRC/SHA由真实Java验证。先force image、日志及目录，再force两根才允许reclaim与普通tail ACK。每个发布根都绑定两份image，模型允许通过任一有效根使用任一有效image；负向在仅force一份根后Reclaim，随后该根损坏使唯一authority消失，checker实际捕获指定反例，没有修改Java开关。投影不检查重复rotation、动态操作语义、文件锁、I/O unknown、坏framing、Bookie组合、状态预算压缩或liveness，不构成完整Model C/A+C与真实掉电证明。

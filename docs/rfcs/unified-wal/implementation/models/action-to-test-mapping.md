@@ -38,3 +38,16 @@ Bookie增量回执`unified-wal-model-pz77hf26`正向8个Next动作均非零：
 | `Crash/RecoverySync/Recover` | `realBookieCheckpointProcessExitAtEachPublicationBarrierRetainsFence`及权限/幂等/LAC/close/image回退测试；既有DATA图扩展为两个控制owner checkpoint后正常restart |
 
 本投影没有power-loss动作或ticket lifecycle证明；真正的掉电、完整Model A及A+C仍须独立证据。
+
+
+Arena rotation回执`unified-wal-model-t1waf2bm`正向15个Next动作均非零：
+
+| 动作 | 当前实现/真实测试 |
+|---|---|
+| `WriteImages/ForceImages` | 连续两个applied checkpoint；固定字节向量与首次条件结果恢复 |
+| `WriteFile/ForceFile/ForceDirectory` | 新日志身份/header、force及真实目录同步；候选force失败清理 |
+| `WriteRoot/ForceRoot/Reclaim` | 两份页绑定同一物理代及两条原commit，之后marker/旧代退休；7个JVM halt阶段 |
+| `WriteTail/ForceTail/Acknowledge` | rotation后新代framing及正常控制force/apply；三轮容量耗尽/重开与DATA图restart |
+| `Corrupt/CorruptRoot/Crash/Recover` | 单image/page回退、当前suffix损坏拒绝；模型Crash丢弃未同步内容，真实进程退出不证明掉电 |
+
+真实跨JVM排他和Bookie身份读取测试独立验证sidecar锁，不由上述模型动作推出。重复rotation与全部操作结果、坏header/CRC/序号及资源预算仍需真实路径；完整Model C/Bookie组合和liveness保持未完成。

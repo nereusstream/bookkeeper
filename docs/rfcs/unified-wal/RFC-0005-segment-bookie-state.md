@@ -153,6 +153,8 @@ Bookie级日志是跨Arena ledger权限的唯一持久化owner；不把相同rou
 
 2026-10-03 Bookie checkpoint局部实现：已冻结applied控制状态及真实字节cut，保留sealed INSTALL credential、operation条件结果、FENCE、最新LAC和recovery grant/close，以共享有界image codec及Bookie独立A/B第三页发布；CHECKPOINT_COMMIT须先durable/apply。完整验证/同步旧日志后，恢复匹配的image、检查条件结果并重放后缀；缺mandatory字节/密钥/identity仍拒绝。真实JVM边界、两个owner页面隔离、DATA图正常restart及有限权限模型已有回执，详见[局部实现](implementation/local-storage/README.md)。旧日志仍完整保留，rotation/长期幂等压缩/在线调度和完整Model A/Block G未完成。
 
+2026-10-03 Arena增量已在健康CLOSE后显式rotation并回收自己的旧控制prefix，两个owner的DATA图经过两轮维护/restart仍可读、幂等及新追加；Bookie checkpoint页和完整旧Bookie日志保持原合同。Arena字节及恢复根由[RFC-0003 §11](RFC-0003-segment-storage-allocator.md#11-allocator-checkpoint-与-rotation)与[实验格式](implementation/local-storage/format-v1.md#arena日志代与双恢复根)拥有。此切片不完成Bookie rotation或在线维护。
+
 跨三层的执行顺序固定为：
 
 1. durable route/install后才授予该instance的Arena allocation；normal activation是后续独立权限；

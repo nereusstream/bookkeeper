@@ -25,6 +25,8 @@ MATRIX = {
     "ce-control-before-sync": "ControlHasBarrier",
     "ce-open-replay-after-error": "KnownErrorRemainsIsolated",
     "c-checkpoint": None,
+    "c-arena-rotation": None,
+    "ce-arena-rotation-early-reclaim": "SurvivingAuthority",
     "a-bookie-checkpoint": None,
     "ce-bookie-checkpoint-terminal": "BookieTerminalPermissionsRemainDenied",
     "ce-checkpoint-durable-cut": "SnapshotCutWasApplied",
@@ -56,7 +58,8 @@ def main():
     sources = root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment"
     inputs.extend(sources / name for name in ["IsolatedSegmentStorage.java", "IsolatedSegmentFiles.java",
                   "SegmentArenaControlLog.java", "SegmentBookieControlLog.java",
-                  "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java"])
+                  "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
+                  "SegmentArenaRotation.java", "SegmentDataFileLock.java"])
     design_paths = ["docs/rfcs/unified-wal/RFC-0003-segment-storage-allocator.md",
                     "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md",
                     "docs/rfcs/unified-wal/spikes/SPIKE-C-no-object-tla.md"]
@@ -75,7 +78,7 @@ def main():
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "A+C", "C+D", "MOVE/FREE", "index/coverage",
-                     "control prefix reclamation/rotation", "partial/corrupt framing", "quorum", "liveness"],
+                     "full online control rotation", "partial/corrupt framing", "quorum", "liveness"],
     }
     (run / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     results = {}
@@ -84,8 +87,9 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "BookieCheckpoint.tla" if "bookie-checkpoint" in name else (
-                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla")]
+                   "-metadir", str(states), "ArenaRotation.tla" if "arena-rotation" in name else (
+                       "BookieCheckpoint.tla" if "bookie-checkpoint" in name else (
+                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla"))]
         wrapper = ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
         output = run / "checker-output" / (name + ".log")
         start = time.monotonic()
