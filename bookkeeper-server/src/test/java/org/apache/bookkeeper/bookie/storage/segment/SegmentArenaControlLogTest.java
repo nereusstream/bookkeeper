@@ -99,6 +99,32 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void reusedAllocationAndClosedTailMatchIndependentBytesWithoutGrantingRuntimeAuthority() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            String[] vectors = {"arena-reused-allocation-v1.hex", "arena-reused-close-v2.hex"};
+            for (int i = 0; i < vectors.length; i++) {
+                byte[] vector = checkpointVector(vectors[i]);
+                SegmentArenaControlLog.Command decoded = log.decodeCommand(ByteBuffer.wrap(vector), 2 + i);
+                ByteBuffer encoded = SegmentControlFormat.encode(decoded.type(), new Generation(1), 2 + i,
+                        decoded.operationId(), decoded.operationGeneration(), decoded.expectedGeneration(),
+                        decoded.body());
+                byte[] actual = new byte[encoded.remaining()];
+                encoded.get(actual);
+                assertArrayEquals(vector, actual);
+                if (decoded instanceof SegmentArenaControlLog.Allocation allocation) {
+                    assertEquals(2, allocation.generation());
+                    assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                            log.submitBatch(List.of(allocation)).get(0).status());
+                } else {
+                    assertThrows(IOException.class, () -> log.submitBatch(List.of(decoded)));
+                }
+            }
+        }
+    }
+
+    @Test
     public void wholeAllocationFreeMatchesIndependentBytesAndCannotForgeARuntimeProof() throws Exception {
         byte[] vector = checkpointVector("arena-whole-free-v1.hex");
         IsolatedSegmentConfig config = config();

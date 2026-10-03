@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[整allocation全死FREE与退役前缀](#整-allocation-全死-free-与退役前缀)。下列早期切片保留各自历史范围和receipt；当前完成边界以最新日期切片为准，FREE不表示旧字节已经可复用。
+2026-10-04 当前增量为[整allocation复用与健康关闭末端](#整-allocation-复用与健康关闭末端)。下列早期切片保留各自历史范围和receipt；当前完成边界以最新切片为准。复用限健康管理会话及匹配整块范围，MOVE/compaction与长期净容量仍未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -454,6 +454,8 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 
 ### 整 allocation 全死 FREE 与退役前缀
 
+本段保留 `8fad048db7` 前置切片的实现范围与独立回执。当前旧字节复用见下一节；不改绑这些历史结果。
+
 2026-10-04，隔离存储图新增 `reclaimAllocation(operationId, allocationId, FreeRequest)`。一次维护请求复用原 worker 0 的 DATA 票据、属地对齐 buffer 和 DATA I/O；真实控制记录继续使用已有 Arena driver 的预留 CONTROL 票据/I/O，没有新线程、重试队列或逐 record 控制记录。普通/恢复写和新读在该请求期间暂停；Bookie 控制请求仍可推进，改变 proof cut 时本次维护拒绝并释放尚未提交的保护。
 
 先在 Bookie 上确认既有 entry admission 已终结并冻结新 normal/recovery/read admission，再关闭文件新 reservation/read lease，要求实际 DATA I/O、未提交 reservation 和读 pin 都为零。按完整 allocation 逐批读取并独立验证身份、header、全部 record 与 batch CRC、范围和 allocation 内连续序号。每个普通 record 必须匹配 Bookie 的准确终态 tombstone；inactive、fenced、未知 context、索引缺失和单个 ledger 删除都不是全死证明。RELOCATION_COPY 仍拒绝，MOVE/orphan 规则尚未启用。扫描始终复用已收费的固定 DATA buffer；不足以容纳实际批次时拒绝，不临时增加大 heap buffer。初始 generation 1 的全零未使用页结合完整 grant 和健康、排空的 writer 状态识别；该判断不扩展到复用残留。
@@ -470,3 +472,20 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 最终Java回执 `unified-wal-local-OkqZO5w9` 绑定父提交 `8ac860736695b9cedec43a25f2ecc586d03f0689` 与202个实际源码/测试/向量输入：相关7类245项，240通过、5项Linux亲和在macOS跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。新增8项包含7个真实文件/图测试及1个独立固定向量测试，原有验证未弱化。定向8项先通过，再因共享Bookie/Arena/恢复合同扩大至既有7类；复现命令仍为前述7类 `run-local-storage-tests.sh`。初次构建修正了现有pool/result accessor、测试helper异常签名/import，inactive夹具改为验证normal admission拒绝，并保留未知context和损坏DATA断言；最终Checkstyle修正行长/import顺序。交付前补齐storage图的实际operation重试/目标冲突回归；修正owner Command不抛checked异常的接线。最终回执覆盖全部变化，没有把这些未通过的中间run标成成功。
 
 模型回执 `unified-wal-model-k5u2v1c6` 冻结64个输入及父提交处3份合同哈希，106个checksum逐项核对；12个完整正向配置通过，23个指定反例成立。新增全死FREE正例217 generated / 68 distinct / queue 0、depth/diameter 9，另有4个敏感性反例；范围与动作映射见[模型](../models/README.md#整allocation-free-投影)。Java202输入和模型64输入已逐项对照当前文件，历史receipt/source/design绑定不变；模型不代替字节校验、真实I/O或掉电证据。
+
+
+### 整 allocation 复用与健康关闭末端
+
+2026-10-04，已有 `planPools` 与异步 demand refill 优先选择同文件、同 blocks 数的完整 retired extent，再使用 fresh 高水位空间。新 allocation id 保持唯一；generation 0→1 只用于初始空闲范围，复用必须准确匹配 FREE 已推进到的当前空闲 generation（例如 2），新 grant 使用 2 而不再加成 3。完整控制记录 durable 并成功顺序 apply 后才准许 DATA；同范围竞争、旧 generation/旧 id、未 apply grant 都不授予写权限。不拆分 retired extent，不截短共享文件，不逐次清零整块，不新增 I/O 线程或维护队列。
+
+当前 restart 仍仅支持健康 CLOSED 管理会话。因此旧残留范围采用控制日志中的 CLOSED v2 末端见证：关闭文件准入与描述符、实际 reservation/I/O/read lease 全部终结且无 DATA 错误后，保存每个当前 reused allocation 的 id、generation 和实际已写连续 prefix end。保留前一健康会话的末端以关闭未重新写入的旧 grant。无写入的新 grant 使用 allocation start。控制容量预留包含潜在新 reused grant 的末端；超出单控制记录有界容量时拒绝，不留下已授权而无法记录的扩大范围。decoder facts 不能提交伪造的 runtime CLOSED tail，未关闭实际 writer 的调用拒绝且保留原 session owner。
+
+恢复先重放完整条件控制状态与 retirement sequence ranges，再按当前 reused grant 的已应用 CLOSED 末端验证必要 DATA；末端以后的旧 header、旧 CRC 或任意残留都不解析为当前记录。必要 prefix 内的零页、错误身份、跨末端批次或坏 CRC 仍拒绝。恢复不靠旧 generation 比较推测空闲；OPEN 会话或缺末端仍 fail closed。有效 native coverage 继续检查当前批头/范围并跳过覆盖 body，未覆盖必要内容仍完整校验和同步。运行期再 FREE reused grant 在既有 Bookie/file gate 下使用已消费 reservation 末端或恢复末端证明当前 prefix，忽略逻辑退役 suffix 的语义而仍读取全 extent SHA-256；无新准入且旧实际 I/O 为零才产生事实。
+
+原 FREE 已被新 grant 覆盖后，重复其 operation 返回 CONDITION_FAILED/generation 0，保留原操作序号；不会把历史 generation 2 当作当前可回收状态。历史 FREE 仍保存用于 stream prefix 恢复，与当前 retired slots 分开。真实图验证同一 offset 4096 经 generation 1→FREE 2→写 2→FREE 3→写 3，最新普通写与 point read/restart 成功。共享文件测试保留旧合法尾 header 后再将其改成垃圾，当前 reused 数据和另一活 allocation 仍可通过完整及同 index UUID、2 个 covered batches 的恢复读取。另验证空 reused grant、当前必要 prefix 全零/CRC 损坏、部分写和 force 失败、独立 ALLOC/CLOSED 向量及未 apply/竞争/旧授权拒绝。
+
+最终 Java 回执 `unified-wal-local-UVqjliuk` 在父提交 `8fad048db711b9537ce84cd4dca740841882dac3` 冻结204个输入，七类251 tests / 246 PASS / 5 macOS Linux-affinity SKIP / 0 failure/error，Maven exit 0；前置 Spotless/Checkstyle 通过。六个新增测试分别对应上述独立风险。命令沿用上一节七个本地存储测试类与 Spotless/Checkstyle。有限 `WholeAllocationReuse` 投影结果见[模型](../models/README.md#健康-closed-整块复用投影)。此前首轮实际发现 CLOSED proof 拒绝时提前清除了 session owner，已将真实关闭验证移到 owner 释放前修复；同轮一个既有 checkpoint 准入断言失败，定向重跑与后续七类完整运行均通过，未修改或弱化该断言。中间结果不标 PASS。
+
+这是健康会话下的真实整块 FREE/reuse 增量。没有 OPEN 恢复新规则、MOVE/部分存活 compaction、runtime tombstone/native occupancy 清理、长期净回收、控制历史压缩、多 Arena、掉电或性能结论；步骤 9 与总目标均未完成。
+
+最终模型回执 `unified-wal-model-r5vaebxq`：69个输入及父提交处3份合同哈希，118个checksum已逐项核对；13个完整正向配置通过，26个指定性质反例。新增reuse正例23 generated / 20 distinct / queue 0 / depth-diameter 9。Java204与模型69个输入逐项匹配当前待提交文件，历史source/design/receipt绑定保持不变。中间 `ylS6jXjK`、`WG4m55RP`、`g8W0sGwn` 的必要失败定位/新增覆盖断言验证已完成，最终回执包含全部源码与测试变化；保留首轮失败定位回执 `ylS6jXjK`；两个被替代的完成run已清理，不作为最终结果。

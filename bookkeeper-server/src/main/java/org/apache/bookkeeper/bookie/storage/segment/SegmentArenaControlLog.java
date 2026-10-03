@@ -38,7 +38,7 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
-/** Isolated single-Arena allocation authority; no MOVE, reused DATA or production Bookie access. */
+/** Isolated single-Arena allocation authority; no MOVE or production Bookie access. */
 final class SegmentArenaControlLog implements AutoCloseable {
     static final long BLOCK_BYTES = 1024 * 1024;
     private static final long FIRST_RECORD = 4096;
@@ -102,12 +102,20 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     /** Arena-wide writer lifecycle; closing a session never clears a file quarantine. */
+    private record AllocationTail(long allocationId, long generation, long end) { }
+
     record DataSession(UUID operationId, Generation operationGeneration, long expectedGeneration,
-                       boolean open) implements Command {
+                       boolean open, List<AllocationTail> tails) implements Command {
+        DataSession(UUID operationId, Generation operationGeneration, long expectedGeneration, boolean open) {
+            this(operationId, operationGeneration, expectedGeneration, open, List.of());
+        }
+
         DataSession {
             Objects.requireNonNull(operationId, "operationId");
             Objects.requireNonNull(operationGeneration, "operationGeneration");
-            if (operationId.equals(new UUID(0, 0)) || expectedGeneration < 0
+            tails = List.copyOf(tails);
+            if (open && !tails.isEmpty() || tails.size() > (65536 - 144 - 24) / 24
+                    || operationId.equals(new UUID(0, 0)) || expectedGeneration < 0
                     || operationGeneration.value() <= 0
                     || (open ? expectedGeneration != operationGeneration.value() - 1
                             : expectedGeneration != operationGeneration.value())) {
@@ -122,8 +130,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
         @Override
         public ByteBuffer body() {
-            return ByteBuffer.allocate(16).putInt(1).putInt(open ? 2 : 3)
-                    .putLong(operationGeneration.value()).flip();
+            if (tails.isEmpty()) {
+                return ByteBuffer.allocate(16).putInt(1).putInt(open ? 2 : 3)
+                        .putLong(operationGeneration.value()).flip();
+            }
+            ByteBuffer body = ByteBuffer.allocate(24 + 24 * tails.size()).putInt(2).putInt(3)
+                    .putLong(operationGeneration.value()).putInt(tails.size()).putInt(0);
+            tails.forEach(tail -> body.putLong(tail.allocationId()).putLong(tail.generation()).putLong(tail.end()));
+            return body.flip();
         }
     }
 
@@ -148,6 +162,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
             return ByteBuffer.allocate(48).putInt(file).putInt(ownerShard).putLong(ownerGeneration.value())
                     .putLong(allocationId).putLong(offset).putInt(blocks).putInt(0)
                     .putLong(streamFirstSequence).flip();
+        }
+
+        long generation() {
+            return expectedGeneration == 0 ? 1 : expectedGeneration;
         }
     }
 
@@ -329,6 +347,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final Map<Long, Allocation> allocationIds = new HashMap<>();
     private final Map<Long, Free> retiredAllocations = new HashMap<>();
     private final Map<Slot, Free> retiredSlots = new HashMap<>();
+    private final Map<Long, AllocationTail> sealedTails = new HashMap<>();
     private final Map<Stream, Long> streamStarts = new HashMap<>();
     private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
     private final boolean[] dataBlocked;
@@ -338,6 +357,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private boolean sessionOpen;
     private boolean sessionCloseReserved;
     private IsolatedSegmentFiles sessionOwner;
+    private DataSession preparedClose;
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
     private long appliedThrough = -1;
@@ -432,6 +452,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 if (command instanceof Free free) {
                     free.requireClaimed(this);
                 }
+                if (command instanceof DataSession session && !session.tails().isEmpty()
+                        && command != preparedClose) {
+                    throw new IOException("Reused allocation tails require the actual healthy writer close");
+                }
                 ByteBuffer record = SegmentControlFormat.encode(command.type(), physicalGeneration, sequence++,
                         command.operationId(), command.operationGeneration(), command.expectedGeneration(),
                         command.body());
@@ -439,7 +463,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 encoded.add(record);
             }
             long reserved = sessionCloseReserved && batch.stream().noneMatch(command ->
-                    command instanceof DataSession session && !session.open()) ? QUARANTINE_RECORD_BYTES : 0;
+                    command instanceof DataSession session && !session.open())
+                    ? sessionCloseBytes(batch.stream().filter(command -> command instanceof Allocation allocation
+                            && allocation.expectedGeneration() > 0).count()) : 0;
             for (int file = 0; file < quarantineReserved.length; file++) {
                 final int target = file;
                 if (quarantineReserved[file] && batch.stream().noneMatch(command ->
@@ -494,7 +520,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 Status status = apply(command);
                 appliedOffset += recordBytes(command);
                 long generation = status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE
-                        ? command.expectedGeneration() + 1 : 0;
+                        ? command instanceof Allocation allocation ? allocation.generation()
+                                : command.expectedGeneration() + 1 : 0;
                 results.add(new Result(status, command.operationId(), sequence, generation,
                         durableThrough, appliedThrough));
             }
@@ -556,7 +583,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         } else {
             status = prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status();
             if (status == Status.ALREADY_DURABLE) {
-                generation = free.operationGeneration().value();
+                AllocationIdentity target = free.facts().allocation();
+                Free current = retiredSlots.get(slot(target.file(), target.offset()));
+                if (current == null || !current.equals(free)) {
+                    status = Status.CONDITION_FAILED;
+                } else {
+                    generation = free.operationGeneration().value();
+                }
             }
         }
         return new Result(status, operationId, prior.sequence(), generation, durableThrough, appliedThrough);
@@ -596,7 +629,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     throw new IOException("Whole-allocation FREE predecessor changed during verification");
                 }
             }
-            long previous = allocation.expectedGeneration() + 1;
+            long previous = allocation.generation();
             return new Free(operationId, new Generation(previous + 1), previous, facts, protection);
         } catch (IOException | RuntimeException | Error failure) {
             protection.close();
@@ -618,6 +651,40 @@ final class SegmentArenaControlLog implements AutoCloseable {
         Grant current = allocations.get(slot(file, offset));
         Free retired = retiredSlots.get(slot(file, offset));
         return current != null ? current.generation() : retired != null ? retired.operationGeneration().value() : 0;
+    }
+
+    synchronized List<Allocation> currentReusedAllocations() {
+        return allocationIds.values().stream().filter(allocation -> allocation.expectedGeneration() > 0
+                && !retiredAllocations.containsKey(allocation.allocationId()))
+                .sorted(Comparator.comparingLong(Allocation::allocationId)).toList();
+    }
+
+    synchronized long sealedAllocationEnd(long allocationId) throws IOException {
+        AllocationTail tail = sealedTails.get(allocationId);
+        if (tail == null) {
+            throw new IOException("Current reused allocation has no healthy CLOSED tail witness");
+        }
+        return tail.end();
+    }
+
+    record ReusedExtent(long usedEnd, long end) { }
+
+    synchronized Optional<ReusedExtent> reusedExtent(int file, long offset) throws IOException {
+        Grant grant = allocations.get(slot(file, offset));
+        if (grant == null || grant.command().expectedGeneration() == 0) {
+            return Optional.empty();
+        }
+        Allocation allocation = grant.command();
+        return Optional.of(new ReusedExtent(sealedAllocationEnd(allocation.allocationId()),
+                allocation.offset() + allocation.blocks() * BLOCK_BYTES));
+    }
+
+    private long sessionCloseBytes(long additional) throws IOException {
+        long count = currentReusedAllocations().size() + additional;
+        if (count > (65536 - 144 - 24) / 24) {
+            throw new IOException("Reused allocation CLOSED witness capacity exhausted");
+        }
+        return count == 0 ? QUARANTINE_RECORD_BYTES : 144 + 24 + 24 * count;
     }
 
     /** Freeze only applied facts. A later durable/unapplied batch belongs to the retained suffix. */
@@ -867,8 +934,18 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** The caller has closed its DATA admission and drained I/O before attempting this witness. */
     void finishDataSession(IsolatedSegmentFiles writer, boolean healthy) throws IOException {
+        if (healthy) {
+            writer.requireClosedSession(this);
+        }
         try {
             DataSession command;
+            List<AllocationTail> tails = new ArrayList<>();
+            if (healthy) {
+                for (Allocation allocation : currentReusedAllocations()) {
+                    tails.add(new AllocationTail(allocation.allocationId(), allocation.generation(),
+                            writer.closedAllocationEnd(allocation, this)));
+                }
+            }
             synchronized (this) {
                 if (sessionOwner != writer || !sessionOpen) {
                     throw new IOException("DATA writer does not own an open session");
@@ -877,7 +954,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     throw new IOException("Failed DATA session must remain unclosed");
                 }
                 requireQuiescentControl(writer.config(), writer.identity());
-                command = new DataSession(UUID.randomUUID(), new Generation(sessionEpoch), sessionEpoch, false);
+                command = new DataSession(UUID.randomUUID(), new Generation(sessionEpoch), sessionEpoch, false, tails);
+                preparedClose = command;
             }
             List<Result> results = submitBatch(List.of(command));
             if (results.get(0).status() != Status.APPLIED_DURABLE) {
@@ -888,6 +966,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 if (sessionOwner == writer) {
                     sessionOwner = null;
                     sessionCloseReserved = false;
+                    preparedClose = null;
                 }
             }
         }
@@ -1007,7 +1086,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    /** Plan fresh ranges only; these requests gain authority solely after durable ordered apply. */
+    /** Prefer whole retired extents, then fresh space; authority requires durable ordered apply. */
     synchronized List<Optional<Allocation>> planPools(List<PoolRequest> requests) throws IOException {
         requireWritable();
         if (writing || pending != null || requests.isEmpty() || requests.size() > maxPoolRequests()) {
@@ -1019,10 +1098,16 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         long id = allocationIds.keySet().stream().mapToLong(Long::longValue).max().orElse(0);
         List<Optional<Allocation>> planned = new ArrayList<>(requests.size());
+        HashSet<Long> selectedRetirements = new HashSet<>();
         for (PoolRequest request : requests) {
             validatePoolRequest(request);
             int file = request.shard() % config.dataFiles();
-            if (dataBlocked[file] || request.blocks() > (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES) {
+            Free reusable = retiredSlots.values().stream().distinct().filter(free ->
+                    free.facts().allocation().file() == file && free.facts().allocation().blocks() == request.blocks()
+                            && !selectedRetirements.contains(free.facts().allocation().allocationId()))
+                    .min(Comparator.comparingLong(free -> free.facts().allocation().offset())).orElse(null);
+            if (dataBlocked[file] || reusable == null
+                    && request.blocks() > (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES) {
                 planned.add(Optional.empty());
                 continue;
             }
@@ -1030,10 +1115,16 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 throw new IOException("Arena allocation identity exhausted");
             }
             Allocation allocation = new Allocation(SegmentControlFormat.Type.ALLOC_POOL,
-                    UUID.randomUUID(), new Generation(1), 0, file, request.shard(), request.stream(),
-                    ++id, offsets[file], request.blocks(), request.firstSequence());
+                    UUID.randomUUID(), new Generation(1), reusable == null ? 0 : reusable.operationGeneration().value(),
+                    file, request.shard(), request.stream(), ++id,
+                    reusable == null ? offsets[file] : reusable.facts().allocation().offset(),
+                    request.blocks(), request.firstSequence());
             planned.add(Optional.of(allocation));
-            offsets[file] += request.blocks() * BLOCK_BYTES;
+            if (reusable == null) {
+                offsets[file] += request.blocks() * BLOCK_BYTES;
+            } else {
+                selectedRetirements.add(reusable.facts().allocation().allocationId());
+            }
         }
         return List.copyOf(planned);
     }
@@ -1045,7 +1136,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 || command.file() != address.fileIndex()
                 || command.ownerShard() != address.shard()
                 || !command.ownerGeneration().equals(address.streamGeneration())
-                || command.expectedGeneration() + 1 != address.generation().value()) {
+                || command.generation() != address.generation().value()) {
             return -1;
         }
         AppliedOperation operation = appliedOperations.get(command.operationId());
@@ -1075,7 +1166,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             long end = command.offset() + command.blocks() * BLOCK_BYTES;
             if (offset <= end - bytes && order < selectedOrder) {
                 selected = new SegmentBatchFormat.Address(file, shard, command.allocationId(),
-                        new Generation(command.expectedGeneration() + 1), stream, sequence, offset);
+                        new Generation(command.generation()), stream, sequence, offset);
                 selectedOrder = order;
             }
         }
@@ -1421,6 +1512,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private void resetRecoveredState() {
         retiredAllocations.clear();
         retiredSlots.clear();
+        sealedTails.clear();
         allocations.clear();
         allocationIds.clear();
         streamStarts.clear();
@@ -1505,10 +1597,36 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         if (parsed.type() == SegmentControlFormat.Type.DEVICE_STATE) {
             ByteBuffer body = parsed.body();
-            if (body.remaining() != 16 || body.getInt() != 1) {
+            if (body.remaining() < 16) {
                 throw new IOException("Unsupported Arena DEVICE_STATE body");
             }
+            int version = body.getInt();
             int action = body.getInt();
+            if (version == 2 && action == 3 && body.remaining() >= 16) {
+                long epoch = body.getLong();
+                int count = body.getInt();
+                if (body.getInt() != 0 || count < 1 || count > (65536 - 144 - 24) / 24
+                        || body.remaining() != count * 24) {
+                    throw new IOException("Invalid reused allocation CLOSED tails");
+                }
+                List<AllocationTail> tails = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    tails.add(new AllocationTail(body.getLong(), body.getLong(), body.getLong()));
+                }
+                try {
+                    DataSession command = new DataSession(parsed.operationId(), parsed.operationGeneration(),
+                            parsed.expectedGeneration(), false, tails);
+                    if (epoch != command.operationGeneration().value()) {
+                        throw new IllegalArgumentException("DATA session epoch differs from its header");
+                    }
+                    return command;
+                } catch (IllegalArgumentException invalid) {
+                    throw new IOException("Invalid reused allocation CLOSED session", invalid);
+                }
+            }
+            if (version != 1 || body.remaining() != 8) {
+                throw new IOException("Unsupported Arena DEVICE_STATE body");
+            }
             if (action == 2 || action == 3) {
                 long epoch = body.getLong();
                 try {
@@ -1603,8 +1721,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private void validateRange(Allocation command) {
         validateAllocationIdentity(AllocationIdentity.of(command));
-        if (command.expectedGeneration() != 0) {
-            throw new IllegalArgumentException("Reused allocation framing is not enabled");
+        if (command.expectedGeneration() == 1) {
+            throw new IllegalArgumentException("Reuse requires an applied FREE generation");
         }
     }
 
@@ -1637,6 +1755,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (!prior.command().equals(command)) {
                 return Status.INCOMPATIBLE;
             }
+            if (prior.status() == Status.APPLIED_DURABLE && command instanceof Free free) {
+                AllocationIdentity target = free.facts().allocation();
+                if (!free.equals(retiredSlots.get(slot(target.file(), target.offset())))) {
+                    return Status.CONDITION_FAILED;
+                }
+            }
             return prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status();
         }
         if (command instanceof CheckpointCommit checkpoint) {
@@ -1663,10 +1787,25 @@ final class SegmentArenaControlLog implements AutoCloseable {
             for (boolean quarantined : durableQuarantine) {
                 allowed &= !quarantined;
             }
+            if (!session.open()) {
+                List<Allocation> reused = currentReusedAllocations();
+                allowed &= session.tails().size() == reused.size();
+                for (int i = 0; allowed && i < reused.size(); i++) {
+                    Allocation allocation = reused.get(i);
+                    AllocationTail tail = session.tails().get(i);
+                    allowed = tail.allocationId() == allocation.allocationId()
+                            && tail.generation() == allocation.generation() && tail.end() >= allocation.offset()
+                            && tail.end() <= allocation.offset() + allocation.blocks() * BLOCK_BYTES
+                            && tail.end() % config.alignment() == 0;
+                }
+            }
             Status status = allowed ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
             if (allowed) {
                 sessionEpoch = session.operationGeneration().value();
                 sessionOpen = session.open();
+                if (!session.open()) {
+                    session.tails().forEach(tail -> sealedTails.put(tail.allocationId(), tail));
+                }
             }
             appliedOperations.put(command.operationId(), new AppliedOperation(command, status, appliedThrough));
             return status;
@@ -1680,7 +1819,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         Allocation predecessor = allocationIds.get(target.allocationId());
         AppliedOperation original = predecessor == null ? null : appliedOperations.get(predecessor.operationId());
         boolean allowed = predecessor != null && AllocationIdentity.of(predecessor).equals(target)
-                && predecessor.expectedGeneration() + 1 == free.expectedGeneration()
+                && predecessor.generation() == free.expectedGeneration()
                 && !retiredAllocations.containsKey(target.allocationId()) && !durableQuarantine[target.file()]
                 && original != null && original.status() == Status.APPLIED_DURABLE
                 && original.sequence() == facts.allocationOrder();
@@ -1698,13 +1837,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 retiredSlots.put(slot, retained);
             }
             retiredAllocations.put(target.allocationId(), retained);
+            sealedTails.remove(target.allocationId());
         }
         appliedOperations.put(free.operationId(), new AppliedOperation(retained, status, appliedThrough));
         return status;
     }
 
     private Status applyAllocation(Allocation command) {
-        if (durableQuarantine[command.file()] || allocationIds.containsKey(command.allocationId())) {
+        if (durableQuarantine[command.file()] || allocationIds.containsKey(command.allocationId())
+                || command.expectedGeneration() > 0 && (!sessionOpen || sessionEpoch == 0)) {
             appliedOperations.put(command.operationId(),
                     new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
             return Status.CONDITION_FAILED;
@@ -1718,15 +1859,22 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         for (int block = 0; block < command.blocks(); block++) {
             Slot slot = slot(command.file(), command.offset() + block * BLOCK_BYTES);
-            if (allocations.containsKey(slot) || retiredSlots.containsKey(slot)) {
+            Free retired = retiredSlots.get(slot);
+            boolean matching = command.expectedGeneration() == 0 ? retired == null
+                    : retired != null && retired.operationGeneration().value() == command.expectedGeneration()
+                            && retired.facts().allocation().offset() == command.offset()
+                            && retired.facts().allocation().blocks() == command.blocks();
+            if (allocations.containsKey(slot) || !matching) {
                 appliedOperations.put(command.operationId(),
                         new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
                 return Status.CONDITION_FAILED;
             }
         }
-        Grant grant = new Grant(command, command.expectedGeneration() + 1);
+        Grant grant = new Grant(command, command.generation());
         for (int block = 0; block < command.blocks(); block++) {
-            allocations.put(slot(command.file(), command.offset() + block * BLOCK_BYTES), grant);
+            Slot slot = slot(command.file(), command.offset() + block * BLOCK_BYTES);
+            allocations.put(slot, grant);
+            retiredSlots.remove(slot);
         }
         allocationIds.put(command.allocationId(), command);
         streamStarts.putIfAbsent(stream, command.streamFirstSequence());

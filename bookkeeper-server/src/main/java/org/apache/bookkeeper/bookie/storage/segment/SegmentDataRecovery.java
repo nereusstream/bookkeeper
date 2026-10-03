@@ -43,7 +43,7 @@ final class SegmentDataRecovery {
     static SegmentArenaControlLog.FreeFacts proveDeadAllocation(IsolatedSegmentConfig config, FileChannel data,
                                                                SegmentArenaControlLog.Allocation allocation,
                                                                long allocationOrder, SegmentBookieControlLog bookie,
-                                                               long bookieCut, ByteBuffer workspace)
+                                                               long bookieCut, ByteBuffer workspace, long usedEnd)
             throws IOException {
         if (workspace.remaining() < 4096) {
             throw new IOException("Whole-allocation FREE requires its bounded DATA buffer");
@@ -58,10 +58,16 @@ final class SegmentDataRecovery {
         long through = -1;
         long records = 0;
         long end = allocation.offset() + allocation.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+        if (usedEnd < allocation.offset() || usedEnd > end || usedEnd % config.alignment() != 0) {
+            throw new IOException("Whole-allocation FREE has an invalid current DATA boundary");
+        }
         for (long offset = allocation.offset(); offset < end;) {
             ByteBuffer page = workspace.slice(0, 4096);
             SegmentFileIo.readFully(data, page, offset);
-            if (allZero(page)) {
+            if (offset >= usedEnd || allZero(page)) {
+                if (offset < usedEnd && allocation.expectedGeneration() > 0) {
+                    throw new IOException("Current reused DATA prefix contains an unwritten page");
+                }
                 digest.update(page);
                 offset += 4096;
                 continue;
@@ -69,12 +75,12 @@ final class SegmentDataRecovery {
             SegmentBatchFormat.Address address = address(page, offset);
             if (address.fileIndex() != allocation.file() || address.shard() != allocation.ownerShard()
                     || address.allocation() != allocation.allocationId()
-                    || address.generation().value() != allocation.expectedGeneration() + 1
+                    || address.generation().value() != allocation.generation()
                     || !address.streamGeneration().equals(allocation.ownerGeneration())) {
                 throw new IOException("Whole-allocation FREE encountered DATA with another allocation identity");
             }
             int length = SegmentBatchParser.batchLength(page.slice(0, 128), address, config.bytesPerFile());
-            if (length > workspace.remaining() || length > end - offset) {
+            if (length > workspace.remaining() || length > usedEnd - offset) {
                 throw new IOException("Whole-allocation FREE batch exceeds the bounded allocation extent");
             }
             ByteBuffer content = workspace.slice(0, length);
@@ -643,6 +649,11 @@ final class SegmentDataRecovery {
                         offset = retiredEnd;
                         continue;
                     }
+                    Optional<SegmentArenaControlLog.ReusedExtent> reused = authority.reusedExtent(file, offset);
+                    if (reused.isPresent() && offset >= reused.get().usedEnd()) {
+                        offset = reused.get().end();
+                        continue;
+                    }
                     if (stream != null && !authority.hasAppliedStreamAt(file, offset,
                             stream.shard, stream.generation.value())) {
                         offset += 4096;
@@ -652,6 +663,9 @@ final class SegmentDataRecovery {
                     SegmentFileIo.readFully(data, page, offset);
                     readBytes += page.remaining();
                     if (allZero(page)) {
+                        if (reused.isPresent()) {
+                            throw new IOException("Healthy CLOSED reused DATA prefix contains an unwritten page");
+                        }
                         if (seed != null) {
                             page = ByteBuffer.allocate(4096);
                             SegmentFileIo.readFully(data, page, offset);
@@ -671,6 +685,9 @@ final class SegmentDataRecovery {
                     }
                     int length = SegmentBatchParser.batchLength(page.slice(0, 128), address,
                             config.bytesPerFile());
+                    if (reused.isPresent() && length > reused.get().usedEnd() - offset) {
+                        throw new IOException("Current reused DATA exceeds its healthy CLOSED tail");
+                    }
                     if (!authority.hasAppliedGrant(file, offset, length, address.shard(),
                             address.streamGeneration().value(), address.allocation(),
                             address.generation().value())) {

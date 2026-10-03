@@ -19,6 +19,10 @@ import time
 
 
 MATRIX = {
+    "c-whole-reuse": None,
+    "ce-whole-reuse-before-free": "ReuseHasTerminalOldIoAndFree",
+    "ce-whole-reuse-before-io": "ClosedTailHasActualDurableIo",
+    "ce-whole-reuse-old-bytes": "OldBytesNeverBecomeCurrent",
     "c-whole-free": None,
     "ce-whole-free-partial-death": "EveryOccupantWasTerminal",
     "ce-whole-free-early-release": "SubmittedFreeRetainsProtection",
@@ -99,10 +103,10 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
-        "deferred": ["full Model A", "Model D", "full A+C", "C+D", "MOVE and reused DATA", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
+        "deferred": ["full Model A", "Model D", "full A+C", "C+D", "MOVE and full reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
                      "full online control rotation", "partial/corrupt framing", "quorum", "liveness"],
     }
     (run / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -112,7 +116,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "WholeAllocationFree.tla" if "whole-free" in name else (
+                   "-metadir", str(states), "WholeAllocationReuse.tla" if "whole-reuse" in name else (
+                       "WholeAllocationFree.tla" if "whole-free" in name else (
                        "AllocationOrder.tla" if "allocation" in name else (
                        "TailRecovery.tla" if "tail-recovery" in name else (
                        "RuntimeCoverage.tla" if "runtime-" in name else (
@@ -120,7 +125,7 @@ def main():
                        "DerivedCoverage.tla" if "derived" in name else (
                        "ArenaRotation.tla" if "arena-rotation" in name else (
                        "BookieCheckpoint.tla" if "bookie-checkpoint" in name or "bookie-rotation" in name else (
-                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla"))))))))]
+                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla")))))))))]
         wrapper = ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
         output = run / "checker-output" / (name + ".log")
         start = time.monotonic()

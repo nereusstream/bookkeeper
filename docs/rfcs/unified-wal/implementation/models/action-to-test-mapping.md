@@ -156,3 +156,14 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 | `CancelWait/EarlyClose` | stopWaiting只丢弃响应；真实提交期间close与重复claim不能解除保护。EarlyClose仅在敏感性配置启用，正向coverage不要求它可达 |
 
 metadata-only退役范围恢复、空range不虚增序号、rotation及native覆盖由真实Java路径验证，未被这个小模型展开。旧字节物理复用、MOVE/selector、runtime索引/coordinate回收、全预算、完整A+C/C+D及liveness仍未完成。
+
+
+## 健康 CLOSED 整块复用
+
+| 动作 | 实际路径与必要测试 |
+|---|---|
+| `FinishOld/Free/Reuse` | 已有reclamation gate与Arena条件apply、原allocator demand refill；`runtimeAllocatorReusesOnePhysicalBlockAcrossTwoTerminalFreeGenerations`、`reusedAllocationKeepsOldTailOutsideRequiredDataAcrossFullAndCoveredRestart` |
+| `StartWrite/Force/WriteUnknown` | 原DATA reservation/FileChannel write/force；`reusedPartialWriteAndForceFailureKeepOpenSessionUnrecoverable`保持OPEN及拒绝重启 |
+| `Close/Crash/Recover` | 真实writer关闭且I/O终结后保存CLOSED v2 tails；`unwrittenReusedGrantDoesNotReviveOldGenerationOrInventSequence`、`damagedRequiredReusedPrefixCannotBeClassifiedAsUnusedOldTail`及共享文件完整/同UUID覆盖恢复 |
+
+独立ALLOCreuse/CLOSEDv2向量通过 `reusedAllocationAndClosedTailMatchIndependentBytesWithoutGrantingRuntimeAuthority`；模型假设输入framing正确，不负责字节CRC、真实file force或外部decoded命令拒绝。模型crash是逻辑投影，没有新增JVM halt或掉电证据。

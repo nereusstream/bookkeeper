@@ -246,7 +246,7 @@ DATA durable → hot locator → local result
 
 #### 9. 实现本地tombstone、compaction与FREE/reuse
 
-2026-10-03 [分配控制顺序与低地址追加](local-storage/README.md#分配控制顺序与低地址追加)已消除必要的文件offset排序约束：写游标按原成功allocation控制sequence推进，进入后继grant不返回旧尾；restart跳过全部旧grant尾部而允许新的低地址grant。恢复按每allocation连续区间与原控制顺序验证stream，真正gap/duplicate仍拒绝。真实rotation、全量/覆盖辅助storage重启及有限分配顺序模型通过。该前置的历史回执不授予FREE。2026-10-04已接通[整allocation全死FREE与退役前缀](local-storage/README.md#整-allocation-全死-free-与退役前缀)：真实DATA/终态tombstone proof、先Bookie后文件准入冻结与旧I/O/read lease排空、条件durable apply/generation 1→2、原owner保护、控制rotation与全量/覆盖辅助恢复。旧字节复用、compaction/MOVE、runtime索引/coordinate清理及长期循环仍未完成，不标步骤9完成。
+2026-10-03 [分配控制顺序与低地址追加](local-storage/README.md#分配控制顺序与低地址追加)已消除必要的文件offset排序约束：写游标按原成功allocation控制sequence推进，进入后继grant不返回旧尾；restart跳过全部旧grant尾部而允许新的低地址grant。恢复按每allocation连续区间与原控制顺序验证stream，真正gap/duplicate仍拒绝。真实rotation、全量/覆盖辅助storage重启及有限分配顺序模型通过。该前置的历史回执不授予FREE。2026-10-04已接通[整allocation全死FREE与退役前缀](local-storage/README.md#整-allocation-全死-free-与退役前缀)：真实DATA/终态tombstone proof、先Bookie后文件准入冻结与旧I/O/read lease排空、条件durable apply/generation 1→2、原owner保护、控制rotation与全量/覆盖辅助恢复。随后已接通[健康会话整块复用](local-storage/README.md#整-allocation-复用与健康关闭末端)：现有refill使用准确FREE generation，健康CLOSED保存当前写入末端，恢复排除旧suffix而校验必要prefix；真实同块两轮FREE/写入与共享活数据恢复验证。compaction/MOVE、runtime索引/coordinate清理及长期循环仍未完成，不标步骤9完成。
 
 依赖步骤8，对应UW-4/UW-5。按本地tombstone禁止新访问→整块全死直接FREE/reuse→部分存活块compaction→多次搬迁/orphan/并发回收推进。搬迁复用DATA I/O，但使用独立内部完成分支：
 

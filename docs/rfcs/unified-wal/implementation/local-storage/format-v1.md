@@ -232,7 +232,7 @@ stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每sh
 
 ## 整allocation FREE body v1
 
-实验 Arena `type=4` 使用原控制 framing，总长272字节、body 128字节。这里只启用整 allocation 全死/初始未使用范围的 retirement；新 grant 复用旧字节仍禁用。header 的 expected generation 是当前旧 allocation generation，operation generation/result generation 为其 +1；首批实际转换为1→2。writer 必须持有实际 DATA proof 与新准入/I/O/pin 排空保护；独立 decoder 的 durable facts 不能直接作为新的 runtime proof 提交。
+实验 Arena `type=4` 使用原控制 framing，总长272字节、body 128字节。FREE body 布局保持不变；后续健康会话下的整块复用使用下述 ALLOC generation 与 CLOSED v2 末端规则。header 的 expected generation 是当前旧 allocation generation，operation generation/result generation 为其 +1；首批实际转换为1→2。writer 必须持有实际 DATA proof 与新准入/I/O/pin 排空保护；独立 decoder 的 durable facts 不能直接作为新的 runtime proof 提交。
 
 | Body offset | 字段 |
 |---|---|
@@ -246,3 +246,22 @@ stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每sh
 无 DATA 的初始全零范围使用 record count=0、first/through=-1；它不增加 stream 前缀。非空区间有界、连续，所有 record 都具有相同匹配 allocation 身份及准确终态 tombstone，且不含 RELOCATION_COPY。外层仍验证 header/body CRC32C、sequence、owner/type、operation id 与 generation。成功 apply 后原 grant 失效，保留 retirement 和 generation 2；同一 operation 的重试不重复 bump，generation 0 ALLOC 不得复占退役 slot。
 
 重放只按前序 applied grant、原 operation sequence、完整范围及 expected generation 判断，保留必要 Bookie cut；不重读已退役历史 DATA，也不通过重启时 pin=0 补认 proof。原 allocation 与 retirement facts 随既有 applied checkpoint/rotation 保留。固定独立向量 `arena-whole-free-v1.hex` 为272字节：file=0/shard=1、allocation=1、offset=4096、1 block、stream generation/start=1、原控制序号0、退役区间1..1/1 record、Bookie cut=0、digest=00..1f、FREE sequence=1、UUID=0:2。此向量验证编码/解码，不能单独授权 runtime 回收。
+
+
+## 整块复用 ALLOC 与 CLOSED v2
+
+ALLOC/ALLOC_POOL 仍使用上述48-byte body。初始 expected generation=0 创建 allocation generation 1；复用时 expected generation 必须等于完整 retired extent 的 FREE result generation（至少2），新 grant 使用该 generation。不存在通用 expected+1 的复用规则。id 唯一、同文件/整范围、准确 blocks 与当前 applied FREE 全部匹配才成功；任一 slot 已被 grant 占用则条件失败。旧 FREE 重试在 range 已复用后返回 CONDITION_FAILED/generation 0，历史事实仍保留以验证 stream。
+
+Arena DEVICE_STATE type=7 的健康 CLOSED v2 body 为 `24 + 24*N` bytes，外层 CRC/framing 不变。只有当前 reused allocations 存在时使用 v2；无此类 grant 时保留原 v1 16-byte OPEN/CLOSED。header operation/expected generation 均为当前 DATA session epoch。body 大端：
+
+| Offset | 字段 |
+|---|---|
+| 0 / 4 / 8 | version u32=2 / action u32=3 / session epoch u64 |
+| 16 / 20 | tail count u32=N / reserved u32=0 |
+| 24+24*i / 32+24*i / 40+24*i | allocation id u64 / current generation u64 / exclusive used end u64 |
+
+列表按 allocation id 递增，精确覆盖所有当前 reused grants，不能缺失、重复、增加或更换 generation。end 在 allocation start..end 内且4096对齐；无当前 DATA 时 end=start。运行期证据由实际健康关闭的 writer 在 I/O/reservation/read lease 全部终结后提供，外部 decoded command 不能直接提交该见证。控制预算为当前及本批潜在新增 reused grants 预留完整关闭记录，N 最大2723；容量不足则拒绝扩大授权。当前 OPEN 仍拒绝 restart，不用此末端为未关闭 writer 掩盖写入失败。
+
+恢复仅解析末端内当前必要 DATA，禁止零页、错误 grant/generation、跨末端批次及 CRC 损坏；跳过末端后的旧残留。再次 FREE 可在健康排空 gate 下使用运行期实际 reservation end/已恢复 CLOSED end，完整 extent hash 仍包含被逻辑排除的旧 suffix 原始字节；SHA 不是独立删除或定位 authority。
+
+独立 Python struct/逐位 CRC32C 向量 `arena-reused-allocation-v1.hex` 与 `arena-reused-close-v2.hex` 各192 bytes。前者 ALLOC_POOL sequence=2/UUID=0:3/operation generation=1/expected=2，file0/shard1/stream generation1/allocation2/offset4096/1 block/first sequence1；后者 CLOSED sequence=3/UUID=0:4/session epoch1，唯一 tail allocation2/generation2/end8192。Java独立读取并逐字节对照，向量本身不授予 runtime grant 或健康关闭权威。

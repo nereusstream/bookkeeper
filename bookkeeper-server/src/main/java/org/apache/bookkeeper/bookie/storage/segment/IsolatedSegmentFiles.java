@@ -95,7 +95,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 throws IOException {
             long cut = bookieLease.cut();
             SegmentArenaControlLog.FreeFacts proof = SegmentDataRecovery.proveDeadAllocation(
-                    owner.config, owner.data.get(file), allocation, allocationOrder, bookie, cut, workspace);
+                    owner.config, owner.data.get(file), allocation, allocationOrder, bookie, cut, workspace,
+                    owner.allocationEnd(allocation, authority));
             if (bookie.recoveryReadCut(owner.config, owner.identity) != cut) {
                 throw new IOException("Bookie authority changed during whole-allocation verification");
             }
@@ -194,6 +195,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final long[] authorizedFloor;
     // One cursor per applied stream, bounded by the fixed-capacity control log, never per DATA batch.
     private final Map<Stream, AppendCursor> streamOffsets = new HashMap<>();
+    // One reservation boundary per allocation, bounded by existing DATA/control capacity.
+    private final Map<Long, Long> allocationEnds = new HashMap<>();
     private long restoredAllocationThrough = -1;
     private final boolean[] failed;
     private final SegmentDataFileLock writerLock;
@@ -475,6 +478,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         if (authorized) {
             authorizedFloor[file] = floor;
             streamOffsets.put(stream, new AppendCursor(allocationOrder, end));
+            allocationEnds.merge(batch.address().allocation(), end, Math::max);
         }
         nextOffset[file] = Math.max(nextOffset[file], end);
         pendingReservations++;
@@ -592,6 +596,40 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     synchronized long nextOffset(int file) {
         return nextOffset[file];
+    }
+
+    private synchronized long allocationEnd(SegmentArenaControlLog.Allocation allocation,
+                                            SegmentArenaControlLog authority) throws IOException {
+        if (allocation.expectedGeneration() == 0) {
+            return allocation.offset() + allocation.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+        }
+        Long end = allocationEnds.get(allocation.allocationId());
+        if (end != null) {
+            return end;
+        }
+        SegmentBatchFormat.Address start = new SegmentBatchFormat.Address(allocation.file(), allocation.ownerShard(),
+                allocation.allocationId(), new Generation(allocation.generation()), allocation.ownerGeneration(),
+                allocation.streamFirstSequence(), allocation.offset());
+        return authority.appliedAllocationOrder(start) <= restoredAllocationThrough
+                ? authority.sealedAllocationEnd(allocation.allocationId()) : allocation.offset();
+    }
+
+    synchronized long closedAllocationEnd(SegmentArenaControlLog.Allocation allocation,
+                                           SegmentArenaControlLog authority) throws IOException {
+        requireClosedSession(authority);
+        return allocationEnd(allocation, authority);
+    }
+
+    synchronized void requireClosedSession(SegmentArenaControlLog authority) throws IOException {
+        if (!closed || activeIo != 0 || pendingReservations != 0 || reclamation != null
+                || authority != sessionAuthority || !writerLock.lock().isValid()) {
+            throw new IOException("CLOSED tails require actual writer shutdown and I/O termination");
+        }
+        for (boolean fileFailed : failed) {
+            if (fileFailed) {
+                throw new IOException("Failed writer cannot attest reused allocation tails");
+            }
+        }
     }
 
     IsolatedSegmentConfig config() {

@@ -135,3 +135,14 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `FreeAuthorityHasBarrier` | 当前前序grant/expected generation在durable完整命令后顺序apply才撤销/bump；checkpoint/rotation保留必要identity/序号事实 |
 
 模型假设完整grant/准确终态与真实DATA验证，不代替Java格式/CRC或文件同步。未建模物理reuse、多个FREE/victim竞争、MOVE、完整权限组合、memory预算或liveness；正例68状态不是步骤9整体或生产权威证明。
+
+
+## 健康 CLOSED 整块复用投影
+
+| 性质 | 实施合同及实际边界 |
+|---|---|
+| `ReuseHasTerminalOldIoAndFree` | 先前FREE必须实际排空旧I/O/pin并durable apply；新ALLOC精确匹配整个retired extent/当前FREE generation |
+| `ClosedTailHasActualDurableIo` | 实际关闭writer、reservation/I/O/read lease全部终结且无错误才保存CLOSED末端；取消请求或可见计数不代替真实终结 |
+| `OldBytesNeverBecomeCurrent` | 当前reused grant与已应用健康CLOSED末端定义必要prefix；旧suffix不解析，prefix损坏或缺末端仍隔离 |
+
+单extent一次reuse的有限结果不涵盖OPEN恢复、真实parser/native索引、多个FREE/MOVE、内存/磁盘预算或liveness。Java两轮generation复用是单独真实路径证据。

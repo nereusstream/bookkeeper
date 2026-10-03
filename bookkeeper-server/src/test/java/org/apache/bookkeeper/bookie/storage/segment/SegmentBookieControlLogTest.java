@@ -8374,6 +8374,251 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void reusedAllocationKeepsOldTailOutsideRequiredDataAcrossFullAndCoveredRestart() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("reused-closed-tail");
+        long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        byte[] oldTail = new byte[4096];
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4), install(52, 5, (byte) 5), activate(52, 6)));
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096), reclaimableAllocation(102, upper)));
+            files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44), arena);
+            files.writeAuthorized(reclamationBatch(config, 101, 8192, 2, 44), arena);
+            files.writeAuthorized(reclamationBatch(config, 102, upper, 3, 52), arena);
+            try (FileChannel file = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0))) {
+                SegmentFileIo.readFully(file, ByteBuffer.wrap(oldTail), 8192);
+            }
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                arena.submitBatch(List.of(free));
+                SegmentArenaControlLog.Allocation reused = arena.planPools(List.of(
+                        new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+                assertEquals(4096, reused.offset());
+                assertEquals(2, reused.expectedGeneration());
+                assertFalse(arena.hasAppliedGrant(0, 4096, 4096, 0, 1, reused.allocationId(), 2));
+                SegmentArenaControlLog.DurableBatch durable = arena.appendDurably(List.of(reused));
+                assertFalse(arena.hasAppliedGrant(0, 4096, 4096, 0, 1, reused.allocationId(), 2));
+                assertEquals(2, arena.applyDurable(durable).get(0).generation());
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        arena.submitBatch(List.of(free)).get(0).status());
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        arena.resolvedFreeResult(free.operationId(), 101).status());
+                assertThrows(IOException.class, () -> files.writeAuthorized(
+                        reclamationBatch(config, 101, 4096, 4, 44), arena));
+                SegmentArenaControlLog.Allocation competing = new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 401), new Generation(1), 2,
+                        0, 0, new Generation(1), 104, 4096, 1, 1);
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        arena.submitBatch(List.of(competing)).get(0).status());
+                ByteBuf input = entry(context(48), 4);
+                try {
+                    files.writeAuthorized(SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, reused.allocationId(), new Generation(2),
+                                    new Generation(1), 4, 4096),
+                            List.of(SegmentBatchFormat.entry(context(48), input))), arena);
+                } finally {
+                    input.release();
+                }
+                try (FileChannel file = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0))) {
+                    ByteBuffer remaining = ByteBuffer.allocate(4096);
+                    SegmentFileIo.readFully(file, remaining, 8192);
+                    assertArrayEquals(oldTail, remaining.array());
+                }
+                assertThrows(IOException.class, () -> arena.finishDataSession(files, true));
+            }
+            files.close();
+            assertFalse(arena.hasUnclosedDataSession());
+            arena.rotate();
+        }
+        try (FileChannel file = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0), StandardOpenOption.WRITE)) {
+            Arrays.fill(oldTail, (byte) 0x7f);
+            new SegmentFileIo().writeFully(file, ByteBuffer.wrap(oldTail), 8192);
+            file.force(true);
+        }
+        for (int restart = 0; restart < 2; restart++) {
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+                storage.restart();
+                for (long ledger : new long[] {48, 52}) {
+                    long entryId = ledger == 48 ? 4 : 3;
+                    storageWrite(storage, context(ledger), entryId);
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(ledger), entryId).result()) {
+                        assertEquals(entryId, read.result().record().entryId());
+                    }
+                }
+                assertEquals(2, checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage().entries());
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+            UUID generation = index.coverage().orElseThrow().indexGeneration();
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(
+                    config, identity(), arena, bookie, new SegmentFileIo(), 32, 4, index)) {
+                assertTrue(files.startupInventory().usesIndexCoverage());
+                assertEquals(2, files.startupInventory().scan().coveredBatches());
+                assertEquals(generation, index.coverage().orElseThrow().indexGeneration());
+            }
+        }
+    }
+
+    @Test
+    public void runtimeAllocatorReusesOnePhysicalBlockAcrossTwoTerminalFreeGenerations() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("runtime-reuse-generations");
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4), install(52, 5, (byte) 5), activate(52, 6));
+            for (int cycle = 0; cycle < 3; cycle++) {
+                long ledger = 44 + 4L * cycle;
+                SegmentBatchFormat.Address address = storageWrite(storage, context(ledger), cycle + 1)
+                        .candidate().address();
+                assertEquals(4096, address.offset());
+                assertEquals(cycle + 1, address.generation().value());
+                if (cycle < 2) {
+                    installStorage(storage, tombstone(ledger, 20 + cycle));
+                    CompletableFuture<IsolatedSegmentStorage.FreeResult> reply = new CompletableFuture<>();
+                    assertTrue(storage.reclaimAllocation(new UUID(0, 501 + cycle), address.allocation(),
+                            new IsolatedSegmentStorage.FreeRequest((result, cause) -> {
+                                if (cause == null) {
+                                    reply.complete(result);
+                                } else {
+                                    reply.completeExceptionally(cause);
+                                }
+                            })));
+                    assertEquals(IsolatedSegmentStorage.FreeStatus.APPLIED_DURABLE,
+                            reply.get(5, TimeUnit.SECONDS).status());
+                }
+            }
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(52), 3).result()) {
+                assertEquals(3, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void unwrittenReusedGrantDoesNotReviveOldGenerationOrInventSequence() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("unwritten-reused-grant");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2)));
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44), arena);
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                arena.submitBatch(List.of(free));
+            }
+            SegmentArenaControlLog.Allocation reused = arena.planPools(List.of(
+                    new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+            arena.submitBatch(List.of(reused));
+            files.close();
+            assertEquals(4096, arena.sealedAllocationEnd(reused.allocationId()));
+            arena.rotate();
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            installStorage(storage, install(48, 21, (byte) 5), activate(48, 22));
+            assertEquals(2, storageWrite(storage, context(48), 2).candidate().address().sequence());
+        }
+    }
+
+    @Test
+    public void damagedRequiredReusedPrefixCannotBeClassifiedAsUnusedOldTail() throws Exception {
+        for (boolean zero : new boolean[] {true, false}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("damaged-reused-" + zero);
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                files.startSession(arena);
+                bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2)));
+                arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+                try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                        files, bookie, ByteBuffer.allocate(4096))) {
+                    arena.submitBatch(List.of(free));
+                }
+                SegmentArenaControlLog.Allocation reused = arena.planPools(List.of(
+                        new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+                arena.submitBatch(List.of(reused));
+                ByteBuf input = entry(context(), 1);
+                try {
+                    files.writeAuthorized(SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, reused.allocationId(), new Generation(2),
+                                    new Generation(1), 1, 4096),
+                            List.of(SegmentBatchFormat.entry(context(), input))), arena);
+                } finally {
+                    input.release();
+                }
+                files.close();
+            }
+            try (FileChannel file = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                ByteBuffer damage = ByteBuffer.allocate(4096);
+                if (!zero) {
+                    SegmentFileIo.readFully(file, damage, 4096);
+                    damage.put(200, (byte) (damage.get(200) ^ 1));
+                }
+                new SegmentFileIo().writeFully(file, damage, 4096);
+                file.force(true);
+            }
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+                assertThrows(IOException.class, storage::restart);
+            }
+        }
+    }
+
+    @Test
+    public void reusedPartialWriteAndForceFailureKeepOpenSessionUnrecoverable() throws Exception {
+        for (boolean partial : new boolean[] {true, false}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("failed-reused-" + partial);
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                files.startSession(arena);
+                arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+                try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                        files, bookie, ByteBuffer.allocate(4096))) {
+                    arena.submitBatch(List.of(free));
+                }
+                SegmentArenaControlLog.Allocation reused = arena.planPools(List.of(
+                        new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+                arena.submitBatch(List.of(reused));
+                files.dataIo = partial ? new SegmentFileIo(128, 2, -1, false)
+                        : new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                ByteBuf input = entry(context(), 1);
+                try {
+                    SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, reused.allocationId(), new Generation(2),
+                                    new Generation(1), 1, 4096), List.of(SegmentBatchFormat.entry(context(), input)));
+                    assertThrows(IOException.class, () -> files.writeAuthorized(batch, arena));
+                } finally {
+                    input.release();
+                }
+                assertThrows(IOException.class, files::close);
+                assertTrue(arena.hasUnclosedDataSession());
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                assertTrue(arena.hasUnclosedDataSession());
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                        config, identity(), arena, new SegmentFileIo()));
+            }
+        }
+    }
+
+    @Test
     public void wholeDeadAllocationFreePreservesLiveSharedFileDataAcrossFullAndCoveredRestart() throws Exception {
         IsolatedSegmentConfig config = coverageRecoveryConfig("whole-allocation-free");
         long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;

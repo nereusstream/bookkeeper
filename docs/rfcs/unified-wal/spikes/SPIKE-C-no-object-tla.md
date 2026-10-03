@@ -1106,3 +1106,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04，新增整allocation全死FREE有限投影，验证全部occupant终态、在途控制保护、旧I/O真实终结及durability先于generation authority；四个去掉保护的配置分别产生指定反例。实际格式/CRC、Bookie proof与字节访问仍由[Java切片](../implementation/local-storage/README.md#整-allocation-全死-free-与退役前缀)验证；模型不覆盖物理reuse、MOVE、完整A+C/C+D、预算或liveness，不解除既有Gate。
+
+
+2026-10-04，新增[健康CLOSED整块复用投影](../implementation/models/README.md#健康-closed-整块复用投影)：原FREE/实际旧I/O终结后授予当前generation，CLOSED以实际完成且durable的prefix区分旧suffix。有限正向完整通过，提前reuse、提前CLOSE和旧残留复活三个配置各产生指定反例。真实bytes/CRC、多个generation循环、实际预算与文件/控制rotation仍由Java或后续验证拥有；总矩阵13个正向、26个指定反例，不宣称完整A+C/C+D或步骤9完成。
