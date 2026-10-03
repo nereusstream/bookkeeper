@@ -37,6 +37,86 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     private record AppendCursor(long allocationOrder, long offset) { }
 
+    /** A conservative whole-file-set gate: one proof, no new reservations or read leases until owner resolution. */
+    static final class ReclamationGuard implements AutoCloseable {
+        private final IsolatedSegmentFiles owner;
+        private final SegmentArenaControlLog authority;
+        private final int file;
+        private final SegmentBookieControlLog.ReclamationLease bookieLease;
+        private boolean claimed;
+        private boolean finished;
+
+        private ReclamationGuard(IsolatedSegmentFiles owner, SegmentArenaControlLog authority, int file,
+                                  SegmentBookieControlLog.ReclamationLease bookieLease) {
+            this.owner = owner;
+            this.authority = authority;
+            this.file = file;
+            this.bookieLease = bookieLease;
+        }
+
+        void claim(SegmentArenaControlLog log) throws IOException {
+            synchronized (owner) {
+                if (log != authority || finished || claimed || owner.reclamation != this) {
+                    throw new IOException("FREE protection is unavailable or already submitted");
+                }
+                claimed = true;
+            }
+        }
+
+        boolean claimedBy(SegmentArenaControlLog log) {
+            synchronized (owner) {
+                return log == authority && claimed && !finished && owner.reclamation == this;
+            }
+        }
+
+        void finish(boolean uncertain) {
+            boolean release;
+            synchronized (owner) {
+                release = markFinished(uncertain);
+            }
+            if (release) {
+                bookieLease.close();
+            }
+        }
+
+        private boolean markFinished(boolean uncertain) {
+            if (finished) {
+                return false;
+            }
+            owner.failed[file] |= uncertain;
+            finished = true;
+            owner.reclamation = null;
+            return true;
+        }
+
+        SegmentArenaControlLog.FreeFacts verify(SegmentArenaControlLog.Allocation allocation,
+                                                long allocationOrder, SegmentBookieControlLog bookie,
+                                                ByteBuffer workspace)
+                throws IOException {
+            long cut = bookieLease.cut();
+            SegmentArenaControlLog.FreeFacts proof = SegmentDataRecovery.proveDeadAllocation(
+                    owner.config, owner.data.get(file), allocation, allocationOrder, bookie, cut, workspace);
+            if (bookie.recoveryReadCut(owner.config, owner.identity) != cut) {
+                throw new IOException("Bookie authority changed during whole-allocation verification");
+            }
+            return proof;
+        }
+
+        @Override
+        public void close() {
+            boolean release;
+            synchronized (owner) {
+                if (claimed && !finished) {
+                    throw new IllegalStateException("FREE control I/O or original-owner resolution is still pending");
+                }
+                release = markFinished(false);
+            }
+            if (release) {
+                bookieLease.close();
+            }
+        }
+    }
+
     static class DataReadLease implements AutoCloseable {
         private final IsolatedSegmentFiles owner;
         private boolean closed;
@@ -121,6 +201,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final SegmentDataRecovery.PhysicalInventory startupInventory;
     private int pendingReservations;
     private int activeIo;
+    private ReclamationGuard reclamation;
     private boolean closed;
     private SegmentArenaControlLog sessionAuthority;
     private boolean sessionReady;
@@ -369,7 +450,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                         long allocationOrder) throws IOException {
         batch.requirePhysicalOwner();
         int file = batch.address().fileIndex();
-        if (closed || sessionAuthority != null && !sessionReady || file < 0 || file >= data.size() || failed[file]
+        if (closed || reclamation != null || sessionAuthority != null && !sessionReady
+                || file < 0 || file >= data.size() || failed[file]
                 || batch.address().shard() >= config.logicalShards()
                 || file != batch.address().shard() % config.dataFiles()
                 || pendingReservations >= config.maxPendingEntries()) {
@@ -463,6 +545,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     synchronized Reservation reserveAuthorized(SegmentBatchFormat.FrozenBatch batch,
                                                SegmentArenaControlLog authority) throws IOException {
+        if (reclamation != null) {
+            throw new IOException("DATA admission is closed by whole-allocation verification");
+        }
         SegmentBatchFormat.Address address = batch.address();
         if (!authority.matchesScope(config, identity) || !authority.permitsDataWriter(this)
                 || !authority.dataFileAvailable(address.fileIndex())
@@ -491,6 +576,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                             Generation stream, long sequence, int bytes)
             throws IOException {
         int file = shard % config.dataFiles();
+        if (reclamation != null) {
+            throw new IOException("DATA admission is closed by whole-allocation verification");
+        }
         if (closed || failed[file] || !authority.matchesScope(config, identity)) {
             throw new IOException("DATA file or Arena authority is unavailable");
         }
@@ -524,7 +612,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     synchronized SegmentDataRecovery.PhysicalInventory localResultInventory(
             SegmentArenaControlLog authority, int shard) throws IOException {
-        if (closed || !sessionReady || restartBookie == null || authority != sessionAuthority
+        if (closed || reclamation != null || !sessionReady || restartBookie == null || authority != sessionAuthority
                 || !authority.permitsDataWriter(this) || shard < 0 || shard >= restoredShards.length
                 || restoredShards[shard] || restartBookieCut != restartBookie.recoveryReadCut(config, identity)) {
             throw new IOException("Clean restart owner bootstrap is unavailable or already consumed");
@@ -544,7 +632,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     /** Optional isolated lifecycle, required before this writer's first allocation/DATA submission. */
     synchronized void startSession(SegmentArenaControlLog authority) throws IOException {
         Objects.requireNonNull(authority, "authority");
-        if (closed || sessionAuthority != null || activeIo != 0 || pendingReservations != 0
+        if (closed || reclamation != null || sessionAuthority != null || activeIo != 0 || pendingReservations != 0
                 || !appendOnlyRecovery && java.util.Arrays.stream(nextOffset).anyMatch(offset -> offset != 4096)) {
             throw new IOException("DATA writer cannot begin another session");
         }
@@ -574,10 +662,22 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     private void reserveDataRead() throws IOException {
-        if (closed || !writerLock.lock().isValid() || activeIo >= config.maxPendingEntries()) {
+        if (closed || reclamation != null || !writerLock.lock().isValid() || activeIo >= config.maxPendingEntries()) {
             throw new IOException("DATA files are unavailable or read capacity exhausted");
         }
         activeIo++;
+    }
+
+    synchronized ReclamationGuard protectReclamation(SegmentArenaControlLog authority, int file,
+                                                      SegmentBookieControlLog.ReclamationLease bookieLease)
+            throws IOException {
+        if (closed || reclamation != null || activeIo != 0 || pendingReservations != 0
+                || !writerLock.lock().isValid() || file < 0 || file >= data.size() || failed[file]
+                || sessionAuthority != null && (!sessionReady || sessionAuthority != authority)) {
+            throw new IOException("Whole-allocation verification has unresolved DATA I/O, reservations or read pins");
+        }
+        reclamation = new ReclamationGuard(this, authority, file, bookieLease);
+        return reclamation;
     }
 
     private synchronized void releaseDataRead() {
@@ -606,7 +706,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (activeIo != 0 || pendingReservations != 0) {
+        if (activeIo != 0 || pendingReservations != 0 || reclamation != null) {
             throw new IOException("DATA reservation, I/O or startup read is still in flight");
         }
         closed = true;

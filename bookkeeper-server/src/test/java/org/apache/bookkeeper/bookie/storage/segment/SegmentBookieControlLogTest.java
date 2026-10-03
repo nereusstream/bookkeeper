@@ -36,6 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
@@ -50,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.common.profile.DurabilityMode;
@@ -8346,6 +8348,379 @@ public class SegmentBookieControlLogTest {
         }
         try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
             assertEquals(published.indexGeneration(), index.coverage().orElseThrow().indexGeneration());
+        }
+    }
+
+    private static SegmentArenaControlLog.Allocation reclaimableAllocation(long id, long offset) {
+        return new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                new UUID(0, id), new Generation(1), 0, 0, 0, new Generation(1), id, offset, 1, 1);
+    }
+
+    private static SegmentBatchFormat.FrozenBatch reclamationBatch(IsolatedSegmentConfig config,
+            long allocation, long offset, long sequence, long... ledgers) throws Exception {
+        List<ByteBuf> inputs = new ArrayList<>();
+        try {
+            List<SegmentBatchFormat.Data> records = new ArrayList<>();
+            for (long ledger : ledgers) {
+                ByteBuf bytes = entry(context(ledger), sequence);
+                inputs.add(bytes);
+                records.add(SegmentBatchFormat.entry(context(ledger), bytes));
+            }
+            return SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(0, 0, allocation,
+                    new Generation(1), new Generation(1), sequence, offset), records);
+        } finally {
+            inputs.forEach(ByteBuf::release);
+        }
+    }
+
+    @Test
+    public void wholeDeadAllocationFreePreservesLiveSharedFileDataAcrossFullAndCoveredRestart() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("whole-allocation-free");
+        long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4), install(52, 5, (byte) 5), activate(52, 6)));
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096), reclaimableAllocation(102, upper)));
+            files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44, 48), arena);
+            files.writeAuthorized(reclamationBatch(config, 102, upper, 2, 52), arena);
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            IOException live = assertThrows(IOException.class, () -> arena.prepareFree(
+                    new UUID(0, 301), 101, files, bookie, ByteBuffer.allocate(4096)));
+            assertTrue(live.getMessage(), live.getMessage().contains("exact terminal tombstone"));
+            assertTrue(arena.hasAppliedGrant(0, 4096, 4096, 0, 1, 101, 1));
+            bookie.submitBatch(List.of(tombstone(48, 21)));
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 302), 101,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                assertEquals(2, free.facts().records());
+                assertEquals(1, free.facts().firstSequence());
+                assertEquals(1, free.facts().through());
+                assertThrows(IOException.class, files::pinDataRead);
+                assertThrows(IOException.class, files::close);
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        arena.submitBatch(List.of(free)).get(0).status());
+                assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                        arena.submitBatch(List.of(free)).get(0).status());
+            }
+            assertEquals(2, arena.allocationGeneration(0, 4096));
+            assertFalse(arena.hasAppliedGrant(0, 4096, 4096, 0, 1, 101, 1));
+            assertEquals(upper + SegmentArenaControlLog.BLOCK_BYTES, arena.grantedHighWatermark(0));
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    arena.submitBatch(List.of(reclaimableAllocation(103, 4096))).get(0).status());
+            files.close();
+            arena.rotate();
+        }
+        // A legal retirement must make these bytes irrelevant, including after checkpoint/rotation replay.
+        try (FileChannel file = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0), StandardOpenOption.WRITE)) {
+            ByteBuffer garbage = ByteBuffer.allocate(4096);
+            Arrays.fill(garbage.array(), (byte) 0x7f);
+            new SegmentFileIo().writeFully(file, garbage, 4096);
+            file.force(true);
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(52), 2).result()) {
+                assertEquals(2, read.result().record().entryId());
+            }
+            storageWrite(storage, context(52), 2);
+            storageWrite(storage, context(52), 3);
+            assertEquals(2, checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage().entries());
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            for (long entryId : new long[] {2, 3}) {
+                storageWrite(storage, context(52), entryId);
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(52), entryId).result()) {
+                    assertEquals(entryId, read.result().record().entryId());
+                }
+            }
+        }
+    }
+
+    @Test
+    public void wholeAllocationFreeRequiresActualWriterAndReadQuiescence() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("free-quiescence");
+        CountDownLatch atForce = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4)));
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            try (IsolatedSegmentFiles.DataReadLease read = files.pinDataRead()) {
+                assertThrows(IOException.class, () -> arena.prepareFree(new UUID(0, 301), 101,
+                        files, bookie, ByteBuffer.allocate(4096)));
+            }
+            SegmentBookieControlLog.Admission admission = bookie.admitNormal(
+                    context(), filled(20, (byte) 5)).orElseThrow();
+            assertThrows(IOException.class, () -> arena.prepareFree(new UUID(0, 302), 101,
+                    files, bookie, ByteBuffer.allocate(4096)));
+            IsolatedSegmentFiles.Reservation pending = files.reserveAuthorized(
+                    reclamationBatch(config, 101, 4096, 1, 44), arena);
+            assertThrows(IOException.class, () -> arena.prepareFree(new UUID(0, 302), 101,
+                    files, bookie, ByteBuffer.allocate(4096)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                atForce.countDown();
+                await(release);
+            });
+            FutureTask<Void> write = new FutureTask<>(() -> {
+                files.writeReserved(pending);
+                return null;
+            });
+            new Thread(write, "free-old-data-io").start();
+            try {
+                assertTrue(atForce.await(5, TimeUnit.SECONDS));
+                assertThrows(IOException.class, () -> arena.prepareFree(new UUID(0, 303), 101,
+                        files, bookie, ByteBuffer.allocate(4096)));
+            } finally {
+                release.countDown();
+            }
+            write.get(5, TimeUnit.SECONDS);
+            admission.physicalTerminal();
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 304), 101,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                assertThrows(IOException.class, files::pinDataRead);
+                assertTrue(bookie.admitNormal(context(48), filled(20, (byte) 5)).isEmpty());
+                assertTrue(bookie.admitRead(context(48)).isEmpty());
+                assertThrows(IOException.class, bookie::close);
+                assertThrows(IOException.class, () -> files.reserveAuthorized(
+                        reclamationBatch(config, 101, 8192, 2, 44), arena));
+            }
+            try (IsolatedSegmentFiles.DataReadLease read = files.pinDataRead()) {
+                assertEquals(1, arena.allocationGeneration(0, 4096));
+                bookie.admitNormal(context(48), filled(20, (byte) 5)).orElseThrow().physicalTerminal();
+            }
+            files.close();
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    public void submittedFreeKeepsProtectionUntilControlIoAndOriginalOwnerFinish() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("free-owner");
+        AtomicBoolean armed = new AtomicBoolean();
+        CountDownLatch atForce = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch ownerBlocked = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
+        SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (armed.get()) {
+                atForce.countDown();
+                await(release);
+            }
+        });
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024, controlIo);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44), arena);
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 2, 1, 4096, 4096,
+                            4096L + 4095 + 4096, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentArenaControlDriver allocator = new SegmentArenaControlDriver(owner, group.io(), arena);
+            CompletableFuture<SegmentArenaControlLog.Result> reply = new CompletableFuture<>();
+            SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                    files, bookie, ByteBuffer.allocate(4096));
+            try {
+                armed.set(true);
+                long previousDurable = arena.durableThrough();
+                assertTrue(allocator.submitFree(free, (results, cause) -> {
+                    owner.requireOwner();
+                    if (cause == null) {
+                        reply.complete(results.get(0));
+                    } else {
+                        reply.completeExceptionally(cause);
+                    }
+                }));
+                assertTrue(atForce.await(5, TimeUnit.SECONDS));
+                assertTrue(owner.control(() -> {
+                    ownerBlocked.countDown();
+                    await(releaseOwner);
+                }));
+                assertTrue(ownerBlocked.await(5, TimeUnit.SECONDS));
+                assertThrows(IllegalStateException.class, free::close);
+                assertThrows(IOException.class, () -> arena.submitBatch(List.of(free)));
+                assertThrows(IOException.class, files::pinDataRead);
+                assertFalse(group.shutdown(Duration.ofMillis(50)));
+                assertFalse(reply.isDone());
+                release.countDown();
+                long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (arena.durableThrough() == previousDurable && System.nanoTime() < end) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertTrue(arena.durableThrough() > previousDurable);
+                assertEquals(1, arena.allocationGeneration(0, 4096));
+                assertThrows(IOException.class, files::pinDataRead);
+                assertFalse(reply.isDone());
+                releaseOwner.countDown();
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        reply.get(5, TimeUnit.SECONDS).status());
+                try (IsolatedSegmentFiles.DataReadLease read = files.pinDataRead()) {
+                    assertEquals(2, arena.allocationGeneration(0, 4096));
+                }
+            } finally {
+                release.countDown();
+                releaseOwner.countDown();
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                free.close();
+            }
+            files.close();
+        }
+    }
+
+    @Test
+    public void runtimeWholeAllocationFreeUsesExistingStorageGraphAndRestoresRetiredPrefix() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("free-runtime-graph");
+        long allocation;
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            allocation = storageWrite(storage, context(), 1).candidate().address().allocation();
+            installStorage(storage, tombstone(44, 20));
+            CompletableFuture<IsolatedSegmentStorage.FreeResult> reply = new CompletableFuture<>();
+            assertTrue(storage.reclaimAllocation(new UUID(0, 301), allocation,
+                    new IsolatedSegmentStorage.FreeRequest((result, cause) -> {
+                        if (cause == null) {
+                            reply.complete(result);
+                        } else {
+                            reply.completeExceptionally(cause);
+                        }
+                    })));
+            assertEquals(IsolatedSegmentStorage.FreeStatus.APPLIED_DURABLE,
+                    reply.get(5, TimeUnit.SECONDS).status());
+            for (long target : new long[] {allocation, allocation + 1}) {
+                CompletableFuture<IsolatedSegmentStorage.FreeResult> retry = new CompletableFuture<>();
+                assertTrue(storage.reclaimAllocation(new UUID(0, 301), target,
+                        new IsolatedSegmentStorage.FreeRequest((result, cause) -> {
+                            if (cause == null) {
+                                retry.complete(result);
+                            } else {
+                                retry.completeExceptionally(cause);
+                            }
+                        })));
+                SegmentArenaControlLog.Result result = retry.get(5, TimeUnit.SECONDS).control();
+                assertEquals(target == allocation ? SegmentArenaControlLog.Status.ALREADY_DURABLE
+                        : SegmentArenaControlLog.Status.INCOMPATIBLE, result.status());
+                assertEquals(reply.get().control().sequence(), result.sequence());
+                assertEquals(target == allocation ? 2 : 0, result.generation());
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(2, arena.retiredAllocations().get(0).operationGeneration().value());
+            assertEquals(allocation, arena.retiredAllocations().get(0).facts().allocation().allocationId());
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            installStorage(storage, install(48, 21, (byte) 5), activate(48, 22));
+            storageWrite(storage, context(48), 2);
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(48), 2).result()) {
+                assertEquals(2, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void wholeAllocationFreeRejectsInactiveRecordsAndUnverifiableDeadData() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("free-proof-refusal");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            bookie.submitBatch(List.of(install(1, (byte) 5)));
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44, 48), arena);
+            assertTrue(bookie.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+            assertFalse(bookie.locallyReadableContext(context(48)));
+            assertThrows(IOException.class, () -> arena.prepareFree(new UUID(0, 301), 101,
+                    files, bookie, ByteBuffer.allocate(4096)));
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            assertThrows(IOException.class, () -> arena.prepareFree(new UUID(0, 302), 101,
+                    files, bookie, ByteBuffer.allocate(4096)));
+            bookie.submitBatch(List.of(tombstone(48, 21)));
+            try (FileChannel file = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.WRITE)) {
+                file.write(ByteBuffer.wrap(new byte[] {1}), 4096 + 128 + 12);
+                file.force(true);
+            }
+            assertThrows(IOException.class, () -> arena.prepareFree(new UUID(0, 303), 101,
+                    files, bookie, ByteBuffer.allocate(4096)));
+            assertTrue(arena.retiredAllocations().isEmpty());
+            assertEquals(1, arena.allocationGeneration(0, 4096));
+            files.close();
+        }
+    }
+
+    @Test
+    public void wholeAllocationFreeForceUnknownCannotPublishHealthyCloseOrReopen() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("free-force-unknown");
+        AtomicBoolean armed = new AtomicBoolean();
+        SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (armed.get()) {
+                throw new IllegalStateException("FREE barrier outcome is unknown");
+            }
+        });
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024, controlIo);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44), arena);
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                armed.set(true);
+                assertThrows(IllegalStateException.class, () -> arena.submitBatch(List.of(free)));
+            }
+            assertFalse(arena.dataFileAvailable(0));
+            assertThrows(IOException.class, () -> files.reserveAuthorized(
+                    reclamationBatch(config, 101, 8192, 2, 44), arena));
+            assertThrows(IOException.class, files::close);
+            assertTrue(arena.hasUnclosedDataSession());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertTrue(arena.hasUnclosedDataSession());
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), arena, new SegmentFileIo()));
+        }
+    }
+
+    @Test
+    public void emptyAllocationFreeDoesNotInventAStreamSequence() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("free-empty-allocation");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                assertEquals(0, free.facts().records());
+                assertEquals(-1, free.facts().firstSequence());
+                assertEquals(-1, free.facts().through());
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        arena.submitBatch(List.of(free)).get(0).status());
+            }
+            files.close();
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            assertEquals(1, storageWrite(storage, context(), 1).candidate().address().sequence());
         }
     }
 

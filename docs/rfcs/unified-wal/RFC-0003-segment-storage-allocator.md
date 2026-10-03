@@ -882,3 +882,6 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 - same-scope Bookie/storage compatibility fence（当前BLOCK）、Arena/device exact superblock bytes、format/migration generation、minimum compatible reader/writer、device-manifest encoding，以及upgrade/reverse/wipe/rollback工具与策略；new BookieId/new scope fallback语义由RFC-0005锁定。
 
 这些问题关闭、Spike B/C 通过且 RFC Accepted 前，Segment WAL 保持 P0 Blocked。
+
+
+2026-10-04，隔离图已接通整allocation全死FREE。先冻结并排空Bookie entry admission，再关闭新文件reservation/read lease；有界真实DATA解析要求全部普通record匹配准确终态tombstone。实际控制force后原owner按前序grant/expected generation判断，成功撤销原grant并bump 1→2，保留退役序号区间及必要Bookie cut供metadata-only重放。旧I/O/原owner未终结和未知force不会释放保护或发布健康CLOSE，fresh generation 0不复占退役slot。真实共享活record拒绝、writer/read quiescence、durable未apply、unknown、rotation与全量/覆盖restart已由当前切片验证。旧字节复用、MOVE/compaction、runtime派生清理及长期净回收仍待实现；见[实现与证据](implementation/local-storage/README.md#整-allocation-全死-free-与退役前缀)。

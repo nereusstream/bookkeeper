@@ -744,3 +744,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 - performance Gate 的 exact thresholds。
 
 这些问题关闭、相关 Spike/Model 通过前，本 RFC 不得标为 Implementation Ready。
+
+
+2026-10-04，[整allocation全死FREE](implementation/local-storage/README.md#整-allocation-全死-free-与退役前缀)已复用Bookie准确终态tombstone作为唯一删除权威；临时reclamation lease只关闭并排空entry admission，不持久复制另一份ledger生命周期。Arena保存已验证范围的generation/序号及必要Bookie applied cut，重放不重新访问合法退役字节。真实storage图与rotation后全量/覆盖恢复已验证；inactive、unknown或索引缺失不授权FREE。复用残留、runtime派生坐标清理、MOVE/compaction及集群删除仍未完成。

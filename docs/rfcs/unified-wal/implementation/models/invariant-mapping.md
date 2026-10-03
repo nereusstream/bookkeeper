@@ -123,3 +123,15 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `RestartDoesNotRestoreOldTail` | writer锁下冻结已重放Arena applied cut，排除全部旧grant尾部；新控制grant不被全文件高水位误拒绝 | 仅现有正常/physical restart准入范围；不修复未关闭会话 |
 
 恢复`StreamProgress`按实际allocation原控制顺序拼接一个连续区间，仍拒绝区间内/区间间gap与重复；这一真实解析路径由Java验证，当前有限模型没有区间拼接或媒体损坏状态。现有TailRecovery模型的有序3位置投影不替代该证据。
+
+
+## 整allocation FREE投影
+
+| 性质 | 实施合同及实际边界 |
+|---|---|
+| `EveryOccupantWasTerminal` | 独立解析完整allocation的每个普通record，准确终态tombstone才证明dead；inactive/unknown/index miss及共享块部分删除不够 |
+| `SubmittedFreeRetainsProtection` | 具体命令持有Bookie/file准入gate，控制force与原owner apply未终结时不能close；runtime stopWaiting不释放原票据 |
+| `RebootCountsDoNotProveOldIoTerminal` | FILE实际reservation/write/read lease及Bookie entry admission都必须排空，未关闭OPEN仍拒绝；模型可见计数与实际I/O刻意分开 |
+| `FreeAuthorityHasBarrier` | 当前前序grant/expected generation在durable完整命令后顺序apply才撤销/bump；checkpoint/rotation保留必要identity/序号事实 |
+
+模型假设完整grant/准确终态与真实DATA验证，不代替Java格式/CRC或文件同步。未建模物理reuse、多个FREE/victim竞争、MOVE、完整权限组合、memory预算或liveness；正例68状态不是步骤9整体或生产权威证明。

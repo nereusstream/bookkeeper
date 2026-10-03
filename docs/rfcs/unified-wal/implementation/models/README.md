@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖及尾部恢复投影的十个正向配置已完成有限状态探索，十七个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖及尾部恢复/分配顺序/整allocation FREE投影的十二个正向配置已完成有限状态探索，二十三个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -18,6 +18,11 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-whole-free` | 2个共享occupant、1次旧I/O/reader pin、1次crash；实际终态与quiescence proof后持有gate至CONTROL durable/原owner apply |
+| `ce-whole-free-partial-death` | 故意漏检活record；必须违反`EveryOccupantWasTerminal` |
+| `ce-whole-free-early-release` | 故意提前close提交保护；必须违反`SubmittedFreeRetainsProtection` |
+| `ce-whole-free-reboot-pins` | 故意以重启计数替代旧实际I/O/未关闭会话判断；必须违反`RebootCountsDoNotProveOldIoTerminal` |
+| `ce-whole-free-before-force` | 故意在CONTROL barrier前bump；必须违反`FreeAuthorityHasBarrier` |
 | `c-tail-recovery` | 3个DATA位置、cut 0..3、匹配/缺失/后来改变的index内容、正常/有物理缺口及tombstone；覆盖内只查header、其他body检查后sync |
 | `ce-tail-recovery-invalid-index` | 故意用不匹配的index授权跳过；必须违反`SkippedBodyHasDurableMatchingIndex` |
 | `ce-tail-recovery-before-sync` | 故意在必要DATA sync前开放；必须违反`ReadyHasRequiredDataSync` |
@@ -229,3 +234,22 @@ DATA barrier、当前原owner连续前缀、身份/权限及framing仍作为其�
 固定3个成功applied grant、每grant 2个位置、最多1次restart，grant 2在共享文件中的地址低于grant 1。检查可进入后来grant、进入后继不返回旧尾，以及restart不重新使用任何已知旧grant尾部。TLC实际展开的`Grant`、`Consume`、`Restart` coverage均非零（21:73、240:480、40:76）；Reserve/Cancel两个包装动作共用Consume并以lastKind区分，未分别统计包装动作次数。Cancel只投影预留地址不返还，真实I/O未知/故障隔离由既有管理会话模型及Java负责。
 
 成功grant、原控制sequence/身份已持久且可重放为假设；不是control fsync/apply或checkpoint新的证明。没有建模实际offset bytes、CRC、扫描各allocation区间拼接、退休range、FREE/generation reuse、reader/writer I/O drain、全局预算或liveness。实际控制序号跨rotation、全量/覆盖辅助恢复和必要gap/duplicate拒绝由[Java真实文件回归](../local-storage/README.md#分配控制顺序与低地址追加)另证，不能据此宣布步骤9完成。
+
+
+## 整allocation FREE 投影
+
+2026-10-04，`unified-wal-model-k5u2v1c6`绑定父提交`8ac860736695b9cedec43a25f2ecc586d03f0689`，冻结64个输入（11 module、35 cfg、runner、17 Java）及父提交处3份合同哈希，106个receipt checksum已逐项核对。35配置为12个完整正向PASS和23个指定反例，旧回执不重绑。复现使用既有runner与官方TLC 1.7.4。
+
+| 配置 | 结果 | generated / distinct | queue | depth / diameter | elapsed s | peak RSS bytes |
+|---|---|---|---|---|---|---|
+| `c-whole-free` | PASS | 217 / 68 | 0 | 9 / 9 | 0.8047 | 111,804,416 |
+| `ce-whole-free-partial-death` | EveryOccupantWasTerminal | 207 / 72 | 22 | 5 / — | 0.9102 | 113,164,288 |
+| `ce-whole-free-early-release` | SubmittedFreeRetainsProtection | 170 / 56 | 12 | 6 / — | 0.8595 | 112,558,080 |
+| `ce-whole-free-reboot-pins` | RebootCountsDoNotProveOldIoTerminal | 254 / 92 | 16 | 9 / — | 0.9174 | 111,476,736 |
+| `ce-whole-free-before-force` | FreeAuthorityHasBarrier | 169 / 55 | 11 | 6 / — | 0.9054 | 111,771,648 |
+
+固定2个共享occupant、0/1实际旧I/O与reader pin、至多1次crash。单调准确终态、成功grant和DATA验证为输入合同；Prepare合并Bookie entry准入冻结与文件gate，复用同一真实CONTROL force/顺序apply抽象。可见I/O计数与实际旧I/O分开；正常crash后不凭可见0解除未关闭writer隔离。重复操作不再次bump，取消等待不释放维护义务，control unknown只在原owner解析后释放临时gate且保持不可写。
+
+正向Tombstone、StartIo/FinishIo、Pin/Unpin、Prepare、Submit、Force/ForceUnknown、Apply、OwnerResolve、CancelWait、Crash有非零coverage；Duplicate为stuttering幂等投影，EarlyClose在正向恒禁用，不宣称这两个动作的非零状态扩展。有限终态保留CHECK_DEADLOCK FALSE，不证明liveness。实际writer/read quiescence、barrier与延迟owner、固定body/CRC、checkpoint/rotation后跳过退役字节、空range及全量/覆盖storage恢复见[Java证据](../local-storage/README.md#整-allocation-全死-free-与退役前缀)。
+
+没有展开多个victim/并发FREE竞争、控制checkpoint状态图与Bookie完整轨迹组合、真实buffer/queue预算、DATA parser、retired prefix区间拼接、native索引删除、MOVE/selector或旧字节物理reuse；有限投影与Java局部验证不能宣布步骤9整体、完整A+C/C+D或生产Gate完成。

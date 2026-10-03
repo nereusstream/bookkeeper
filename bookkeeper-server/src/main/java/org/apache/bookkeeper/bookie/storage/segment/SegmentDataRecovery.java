@@ -23,10 +23,13 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -36,6 +39,69 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
+    /** Called only with the live writer's reclamation gate held; no index absence or caller-supplied liveness. */
+    static SegmentArenaControlLog.FreeFacts proveDeadAllocation(IsolatedSegmentConfig config, FileChannel data,
+                                                               SegmentArenaControlLog.Allocation allocation,
+                                                               long allocationOrder, SegmentBookieControlLog bookie,
+                                                               long bookieCut, ByteBuffer workspace)
+            throws IOException {
+        if (workspace.remaining() < 4096) {
+            throw new IOException("Whole-allocation FREE requires its bounded DATA buffer");
+        }
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+        long first = -1;
+        long through = -1;
+        long records = 0;
+        long end = allocation.offset() + allocation.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+        for (long offset = allocation.offset(); offset < end;) {
+            ByteBuffer page = workspace.slice(0, 4096);
+            SegmentFileIo.readFully(data, page, offset);
+            if (allZero(page)) {
+                digest.update(page);
+                offset += 4096;
+                continue;
+            }
+            SegmentBatchFormat.Address address = address(page, offset);
+            if (address.fileIndex() != allocation.file() || address.shard() != allocation.ownerShard()
+                    || address.allocation() != allocation.allocationId()
+                    || address.generation().value() != allocation.expectedGeneration() + 1
+                    || !address.streamGeneration().equals(allocation.ownerGeneration())) {
+                throw new IOException("Whole-allocation FREE encountered DATA with another allocation identity");
+            }
+            int length = SegmentBatchParser.batchLength(page.slice(0, 128), address, config.bytesPerFile());
+            if (length > workspace.remaining() || length > end - offset) {
+                throw new IOException("Whole-allocation FREE batch exceeds the bounded allocation extent");
+            }
+            ByteBuffer content = workspace.slice(0, length);
+            SegmentFileIo.readFully(data, content, offset);
+            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address, config.bytesPerFile());
+            for (SegmentBatchParser.Record record : parsed.records()) {
+                if (record.origin() != SegmentBatchFormat.ENTRY_DATA
+                        || SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                            != allocation.ownerShard()
+                        || !bookie.hasTerminalTombstone(record.context())) {
+                    throw new IOException("Whole-allocation FREE has a record without an exact terminal tombstone");
+                }
+            }
+            if (first < 0) {
+                first = address.sequence();
+            } else if (through == Long.MAX_VALUE || address.sequence() != through + 1) {
+                throw new IOException("Whole-allocation FREE has a physical sequence gap or duplicate");
+            }
+            through = address.sequence();
+            records = Math.addExact(records, parsed.records().size());
+            digest.update(content);
+            offset += length;
+        }
+        return new SegmentArenaControlLog.FreeFacts(SegmentArenaControlLog.AllocationIdentity.of(allocation),
+                allocationOrder, first, through, records, bookieCut, HexFormat.of().formatHex(digest.digest()));
+    }
+
     record Scan(long batches, long records, long validatedBytes, long zeroPages,
                 long readBytes, long coveredBatches, long skippedBodyBytes) { }
 
@@ -97,6 +163,7 @@ final class SegmentDataRecovery {
         private final Generation generation;
         private final int maxBatches;
         private final List<SegmentBatchFormat.Address> batches = new ArrayList<>();
+        private final List<long[]> retiredRanges = new ArrayList<>();
 
         private StreamProbe(int shard, Generation generation, int maxBatches) {
             this.shard = shard;
@@ -119,13 +186,15 @@ final class SegmentDataRecovery {
         }
 
         private long contiguousThrough(long firstSequence) throws IOException {
-            batches.sort(Comparator.comparingLong(SegmentBatchFormat.Address::sequence));
+            List<long[]> ranges = new ArrayList<>(retiredRanges);
+            batches.forEach(address -> ranges.add(new long[] {address.sequence(), address.sequence()}));
+            ranges.sort(Comparator.comparingLong(range -> range[0]));
             long expected = firstSequence;
-            for (SegmentBatchFormat.Address address : batches) {
-                if (address.sequence() != expected || expected == Long.MAX_VALUE) {
+            for (long[] range : ranges) {
+                if (range[0] != expected || range[1] == Long.MAX_VALUE) {
                     throw new IOException("Physical stream has a sequence gap, duplicate or overflow");
                 }
-                expected++;
+                expected = range[1] + 1;
             }
             return expected - 1;
         }
@@ -157,6 +226,12 @@ final class SegmentDataRecovery {
             } else {
                 range.nextSequence++;
             }
+        }
+
+        private void retire(long allocationOrder, long first, long through) {
+            SequenceRange range = new SequenceRange(first);
+            range.nextSequence = through + 1;
+            broken |= ranges.putIfAbsent(allocationOrder, range) != null;
         }
 
         private StreamPrefix snapshot() {
@@ -503,6 +578,28 @@ final class SegmentDataRecovery {
         Map<StreamKey, StreamProgress> streams = new HashMap<>();
         Map<StreamKey, StreamCoverage> covered = new HashMap<>();
         Map<SegmentBatchFormat.Address, Integer> expectedHeaders = new HashMap<>();
+        for (SegmentArenaControlLog.Free free : authority.retiredAllocations()) {
+            SegmentArenaControlLog.FreeFacts facts = free.facts();
+            if (bookie != null && bookie.indexAppliedCut(config, identity) < facts.bookieCut()) {
+                throw new IOException("Retired allocation has a missing required Bookie authority cut");
+            }
+            SegmentArenaControlLog.AllocationIdentity allocation = facts.allocation();
+            if (facts.records() == 0) {
+                continue;
+            }
+            if (stream != null && stream.shard == allocation.ownerShard()
+                    && stream.generation.equals(allocation.ownerGeneration())) {
+                stream.retiredRanges.add(new long[] {facts.firstSequence(), facts.through()});
+            }
+            if (maxStreams > 0) {
+                StreamKey key = new StreamKey(allocation.ownerShard(), allocation.ownerGeneration());
+                if (!streams.containsKey(key) && streams.size() == maxStreams) {
+                    throw new IOException("Retired stream recovery capacity exhausted");
+                }
+                streams.computeIfAbsent(key, ignored -> new StreamProgress(allocation.streamFirstSequence()))
+                        .retire(facts.allocationOrder(), facts.firstSequence(), facts.through());
+            }
+        }
         if (seed != null) {
             if (!config.sameStorageScope(seed.sourceConfig()) || !identity.equals(seed.sourceIdentity())) {
                 throw new IOException("Covered DATA recovery has another storage scope");
@@ -541,6 +638,11 @@ final class SegmentDataRecovery {
                     throw new IOException("Invalid recovery allocation high watermark");
                 }
                 for (long offset = 4096; offset < end;) {
+                    long retiredEnd = authority.retiredExtentEnd(file, offset);
+                    if (retiredEnd > offset) {
+                        offset = retiredEnd;
+                        continue;
+                    }
                     if (stream != null && !authority.hasAppliedStreamAt(file, offset,
                             stream.shard, stream.generation.value())) {
                         offset += 4096;

@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -37,14 +38,14 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
-/** Isolated single-Arena allocation authority; no DATA, FREE, MOVE or production Bookie access. */
+/** Isolated single-Arena allocation authority; no MOVE, reused DATA or production Bookie access. */
 final class SegmentArenaControlLog implements AutoCloseable {
     static final long BLOCK_BYTES = 1024 * 1024;
     private static final long FIRST_RECORD = 4096;
     private static final Generation LOG_GENERATION = new Generation(1);
     private static final int QUARANTINE_RECORD_BYTES = 128 + 16 + 16;
 
-    sealed interface Command permits Allocation, FileQuarantine, DataSession, CheckpointCommit {
+    sealed interface Command permits Allocation, Free, FileQuarantine, DataSession, CheckpointCommit {
         SegmentControlFormat.Type type();
         UUID operationId();
         Generation operationGeneration();
@@ -150,6 +151,138 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
+    record AllocationIdentity(int file, int ownerShard, Generation ownerGeneration, long allocationId,
+                              long offset, int blocks, long streamFirstSequence) {
+        static AllocationIdentity of(Allocation allocation) {
+            return new AllocationIdentity(allocation.file(), allocation.ownerShard(), allocation.ownerGeneration(),
+                    allocation.allocationId(), allocation.offset(), allocation.blocks(),
+                    allocation.streamFirstSequence());
+        }
+
+        ByteBuffer encode() {
+            return ByteBuffer.allocate(48).putInt(file).putInt(ownerShard).putLong(ownerGeneration.value())
+                    .putLong(allocationId).putLong(offset).putInt(blocks).putInt(0).putLong(streamFirstSequence).flip();
+        }
+    }
+
+    /** Bound facts established by actual DATA parsing and exact terminal Bookie tombstones under exclusion. */
+    record FreeFacts(AllocationIdentity allocation, long allocationOrder, long firstSequence, long through,
+                     long records, long bookieCut, String digest) {
+        FreeFacts {
+            Objects.requireNonNull(allocation, "allocation");
+            if (allocationOrder < 0 || records < 0 || bookieCut < -1
+                    || (records == 0 ? firstSequence != -1 || through != -1
+                            : firstSequence < allocation.streamFirstSequence() || through < firstSequence
+                                || through == Long.MAX_VALUE)
+                    || digest == null || digest.length() != 64 || HexFormat.of().parseHex(digest).length != 32) {
+                throw new IllegalArgumentException("Invalid whole-allocation FREE facts");
+            }
+        }
+    }
+
+    /** Only prepareFree creates a submit-capable command; replay consumes its durable facts, never old DATA. */
+    static final class Free implements Command, AutoCloseable {
+        private final UUID operationId;
+        private final Generation operationGeneration;
+        private final long expectedGeneration;
+        private final FreeFacts facts;
+        private final IsolatedSegmentFiles.ReclamationGuard protection;
+
+        private Free(UUID operationId, Generation operationGeneration, long expectedGeneration,
+                     FreeFacts facts, IsolatedSegmentFiles.ReclamationGuard protection) {
+            this.operationId = Objects.requireNonNull(operationId, "operationId");
+            this.operationGeneration = Objects.requireNonNull(operationGeneration, "operationGeneration");
+            this.expectedGeneration = expectedGeneration;
+            this.facts = Objects.requireNonNull(facts, "facts");
+            this.protection = protection;
+            if (operationId.equals(new UUID(0, 0)) || expectedGeneration < 1 || expectedGeneration == Long.MAX_VALUE
+                    || operationGeneration.value() != expectedGeneration + 1) {
+                throw new IllegalArgumentException("Invalid FREE generation");
+            }
+        }
+
+        @Override
+        public SegmentControlFormat.Type type() {
+            return SegmentControlFormat.Type.FREE;
+        }
+
+        @Override
+        public UUID operationId() {
+            return operationId;
+        }
+
+        @Override
+        public Generation operationGeneration() {
+            return operationGeneration;
+        }
+
+        @Override
+        public long expectedGeneration() {
+            return expectedGeneration;
+        }
+
+        FreeFacts facts() {
+            return facts;
+        }
+
+        private Free replayFacts() {
+            return new Free(operationId, operationGeneration, expectedGeneration, facts, null);
+        }
+
+        @Override
+        public ByteBuffer body() {
+            return ByteBuffer.allocate(128).putInt(1).putInt(0).put(facts.allocation().encode())
+                    .putLong(facts.allocationOrder()).putLong(facts.firstSequence()).putLong(facts.through())
+                    .putLong(facts.records()).putLong(facts.bookieCut())
+                    .put(HexFormat.of().parseHex(facts.digest())).flip();
+        }
+
+        boolean claim(SegmentArenaControlLog log) throws IOException {
+            if (log.resolvedFree(this)) {
+                return false;
+            }
+            if (protection == null) {
+                throw new IOException("Replayed FREE facts are not a new runtime proof");
+            }
+            protection.claim(log);
+            return true;
+        }
+
+        void requireClaimed(SegmentArenaControlLog log) throws IOException {
+            if (log.resolvedFree(this)) {
+                return;
+            }
+            if (protection == null || !protection.claimedBy(log)) {
+                throw new IOException("FREE has no protected runtime verification");
+            }
+        }
+
+        void finish(SegmentArenaControlLog log) {
+            if (protection != null) {
+                protection.finish(!log.dataFileAvailable(facts.allocation().file()));
+            }
+        }
+
+        @Override
+        public void close() {
+            if (protection != null) {
+                protection.close();
+            }
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Free free && operationId.equals(free.operationId)
+                    && operationGeneration.equals(free.operationGeneration)
+                    && expectedGeneration == free.expectedGeneration && facts.equals(free.facts);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(operationId, operationGeneration, expectedGeneration, facts);
+        }
+    }
+
     enum Status {
         APPLIED_DURABLE, ALREADY_DURABLE, CONDITION_FAILED, INCOMPATIBLE
     }
@@ -194,6 +327,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private Generation physicalGeneration = LOG_GENERATION;
     private final Map<Slot, Grant> allocations = new HashMap<>();
     private final Map<Long, Allocation> allocationIds = new HashMap<>();
+    private final Map<Long, Free> retiredAllocations = new HashMap<>();
+    private final Map<Slot, Free> retiredSlots = new HashMap<>();
     private final Map<Stream, Long> streamStarts = new HashMap<>();
     private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
     private final boolean[] dataBlocked;
@@ -294,6 +429,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
             sequence = durableThrough + 1;
             for (Command command : batch) {
                 validateCommand(command);
+                if (command instanceof Free free) {
+                    free.requireClaimed(this);
+                }
                 ByteBuffer record = SegmentControlFormat.encode(command.type(), physicalGeneration, sequence++,
                         command.operationId(), command.operationGeneration(), command.expectedGeneration(),
                         command.body());
@@ -369,7 +507,117 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     List<Result> submitBatch(List<? extends Command> commands) throws IOException {
-        return applyDurable(appendDurably(commands));
+        claimFrees(commands);
+        try {
+            return applyDurable(appendDurably(commands));
+        } finally {
+            finishFrees(commands);
+        }
+    }
+
+    void claimFrees(List<? extends Command> commands) throws IOException {
+        List<Free> claimed = new ArrayList<>();
+        try {
+            for (Command command : commands) {
+                if (command instanceof Free free && free.claim(this)) {
+                    claimed.add(free);
+                }
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            finishFrees(claimed);
+            throw failure;
+        }
+    }
+
+    void finishFrees(List<? extends Command> commands) {
+        for (Command command : commands) {
+            if (command instanceof Free free) {
+                free.finish(this);
+            }
+        }
+    }
+
+    private synchronized boolean resolvedFree(Free free) {
+        AppliedOperation prior = appliedOperations.get(free.operationId());
+        return prior != null && prior.command().equals(free);
+    }
+
+    /** Resolve the actual graph API retry from retained applied facts without rescanning retired bytes. */
+    synchronized Result resolvedFreeResult(UUID operationId, long allocationId) throws IOException {
+        requireControlWritable();
+        AppliedOperation prior = appliedOperations.get(operationId);
+        if (prior == null) {
+            return null;
+        }
+        Status status;
+        long generation = 0;
+        if (!(prior.command() instanceof Free free) || free.facts().allocation().allocationId() != allocationId) {
+            status = Status.INCOMPATIBLE;
+        } else {
+            status = prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status();
+            if (status == Status.ALREADY_DURABLE) {
+                generation = free.operationGeneration().value();
+            }
+        }
+        return new Result(status, operationId, prior.sequence(), generation, durableThrough, appliedThrough);
+    }
+
+    /** Blocking DATA proof; invoke on the existing bounded DATA I/O service, never an append owner. */
+    Free prepareFree(UUID operationId, long allocationId, IsolatedSegmentFiles files, SegmentBookieControlLog bookie,
+                     ByteBuffer workspace)
+            throws IOException {
+        if (!files.matchesScope(config, identity) || !bookie.matchesScope(config, identity)) {
+            throw new IOException("Whole-allocation FREE has another storage scope");
+        }
+        Allocation allocation;
+        long order;
+        synchronized (this) {
+            requireQuiescentControl(config, identity);
+            allocation = allocationIds.get(allocationId);
+            if (allocation == null || retiredAllocations.containsKey(allocationId)) {
+                throw new IOException("Whole-allocation FREE has no current applied allocation");
+            }
+            order = appliedOperations.get(allocation.operationId()).sequence();
+        }
+        SegmentBookieControlLog.ReclamationLease bookieLease = bookie.protectReclamation(config, identity);
+        IsolatedSegmentFiles.ReclamationGuard protection;
+        try {
+            protection = files.protectReclamation(this, allocation.file(), bookieLease);
+        } catch (IOException | RuntimeException | Error failure) {
+            bookieLease.close();
+            throw failure;
+        }
+        try {
+            FreeFacts facts = protection.verify(allocation, order, bookie, workspace);
+            synchronized (this) {
+                requireQuiescentControl(config, identity);
+                if (retiredAllocations.containsKey(allocationId)
+                        || !allocation.equals(allocationIds.get(allocationId))) {
+                    throw new IOException("Whole-allocation FREE predecessor changed during verification");
+                }
+            }
+            long previous = allocation.expectedGeneration() + 1;
+            return new Free(operationId, new Generation(previous + 1), previous, facts, protection);
+        } catch (IOException | RuntimeException | Error failure) {
+            protection.close();
+            throw failure;
+        }
+    }
+
+    synchronized List<Free> retiredAllocations() {
+        return List.copyOf(retiredAllocations.values());
+    }
+
+    synchronized long retiredExtentEnd(int file, long offset) {
+        Free free = retiredSlots.get(slot(file, offset));
+        return free == null ? -1 : free.facts().allocation().offset()
+                + free.facts().allocation().blocks() * BLOCK_BYTES;
+    }
+
+    synchronized long allocationGeneration(int file, long offset) {
+        Grant current = allocations.get(slot(file, offset));
+        Free retired = retiredSlots.get(slot(file, offset));
+        return current != null ? current.generation() : retired != null ? retired.operationGeneration().value() : 0;
     }
 
     /** Freeze only applied facts. A later durable/unapplied batch belongs to the retained suffix. */
@@ -793,7 +1041,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     /** Original successful control sequence, retained by checkpoint/rotation; never inferred from file offsets. */
     synchronized long appliedAllocationOrder(SegmentBatchFormat.Address address) {
         Allocation command = allocationIds.get(address.allocation());
-        if (failed || closed || command == null || command.file() != address.fileIndex()
+        if (failed || closed || command == null || retiredAllocations.containsKey(address.allocation())
+                || command.file() != address.fileIndex()
                 || command.ownerShard() != address.shard()
                 || !command.ownerGeneration().equals(address.streamGeneration())
                 || command.expectedGeneration() + 1 != address.generation().value()) {
@@ -813,7 +1062,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         SegmentBatchFormat.Address selected = null;
         long selectedOrder = Long.MAX_VALUE;
         for (Allocation command : allocationIds.values()) {
-            if (command.file() != file || command.ownerShard() != shard
+            if (retiredAllocations.containsKey(command.allocationId())
+                    || command.file() != file || command.ownerShard() != shard
                     || !command.ownerGeneration().equals(stream)) {
                 continue;
             }
@@ -861,7 +1111,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return singleStreamForShard(shard);
     }
 
-    /** No FREE exists yet: every applied grant remains unavailable even when its DATA bytes are zero. */
+    /** Fresh-only refill never treats a retired slot as generation zero; reuse framing remains disabled. */
     synchronized long grantedHighWatermark(int file) throws IOException {
         requireWritable();
         if (file < 0 || file >= config.dataFiles()) {
@@ -869,6 +1119,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         long end = FIRST_RECORD;
         for (Slot slot : allocations.keySet()) {
+            if (slot.file() == file) {
+                end = Math.max(end, FIRST_RECORD + (slot.index() + 1) * BLOCK_BYTES);
+            }
+        }
+        for (Slot slot : retiredSlots.keySet()) {
             if (slot.file() == file) {
                 end = Math.max(end, FIRST_RECORD + (slot.index() + 1) * BLOCK_BYTES);
             }
@@ -1164,6 +1419,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     private void resetRecoveredState() {
+        retiredAllocations.clear();
+        retiredSlots.clear();
         allocations.clear();
         allocationIds.clear();
         streamStarts.clear();
@@ -1280,6 +1537,34 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 throw new IOException("Invalid DATA file quarantine", invalid);
             }
         }
+        if (parsed.type() == SegmentControlFormat.Type.FREE) {
+            ByteBuffer body = parsed.body();
+            if (body.remaining() != 128 || body.getInt() != 1 || body.getInt() != 0) {
+                throw new IOException("Unsupported whole-allocation FREE body");
+            }
+            try {
+                AllocationIdentity target = new AllocationIdentity(body.getInt(), body.getInt(),
+                        new Generation(body.getLong()), body.getLong(), body.getLong(), body.getInt(),
+                        decodeFreeReservedAndFirst(body));
+                long order = body.getLong();
+                long first = body.getLong();
+                long through = body.getLong();
+                long records = body.getLong();
+                long bookieCut = body.getLong();
+                byte[] digest = new byte[32];
+                body.get(digest);
+                Free free = new Free(parsed.operationId(), parsed.operationGeneration(), parsed.expectedGeneration(),
+                        new FreeFacts(target, order, first, through, records, bookieCut,
+                                HexFormat.of().formatHex(digest)), null);
+                validateCommand(free);
+                if (order >= sequence) {
+                    throw new IllegalArgumentException("FREE predecessor is not an earlier allocation");
+                }
+                return free;
+            } catch (IllegalArgumentException invalid) {
+                throw new IOException("Invalid whole-allocation FREE command", invalid);
+            }
+        }
         if (parsed.type() != SegmentControlFormat.Type.ALLOC
                 && parsed.type() != SegmentControlFormat.Type.ALLOC_POOL) {
             throw new IOException("Unsupported Arena command in required control history");
@@ -1309,14 +1594,29 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
+    private static long decodeFreeReservedAndFirst(ByteBuffer body) {
+        if (body.getInt() != 0) {
+            throw new IllegalArgumentException("Unsupported FREE allocation extension");
+        }
+        return body.getLong();
+    }
+
     private void validateRange(Allocation command) {
+        validateAllocationIdentity(AllocationIdentity.of(command));
+        if (command.expectedGeneration() != 0) {
+            throw new IllegalArgumentException("Reused allocation framing is not enabled");
+        }
+    }
+
+    private void validateAllocationIdentity(AllocationIdentity command) {
         if (command.file() < 0 || command.file() >= config.dataFiles()
                 || command.ownerShard() < 0 || command.ownerShard() >= config.logicalShards()
                 || command.file() != command.ownerShard() % config.dataFiles()
+                || command.ownerGeneration() == null || command.allocationId() <= 0 || command.blocks() < 1
+                || command.streamFirstSequence() < 0 || command.streamFirstSequence() == Long.MAX_VALUE
                 || command.offset() < FIRST_RECORD || (command.offset() - FIRST_RECORD) % BLOCK_BYTES != 0
                 || command.offset() > config.bytesPerFile()
-                || command.blocks() > (config.bytesPerFile() - command.offset()) / BLOCK_BYTES
-                || command.expectedGeneration() != 0) {
+                || command.blocks() > (config.bytesPerFile() - command.offset()) / BLOCK_BYTES) {
             throw new IllegalArgumentException("Invalid or unsupported Arena allocation range/generation");
         }
     }
@@ -1324,6 +1624,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private void validateCommand(Command command) {
         if (command instanceof Allocation allocation) {
             validateRange(allocation);
+        } else if (command instanceof Free free) {
+            validateAllocationIdentity(free.facts().allocation());
         } else if (command instanceof FileQuarantine quarantine && quarantine.file() >= config.dataFiles()) {
             throw new IllegalArgumentException("Invalid quarantined DATA file");
         }
@@ -1369,7 +1671,36 @@ final class SegmentArenaControlLog implements AutoCloseable {
             appliedOperations.put(command.operationId(), new AppliedOperation(command, status, appliedThrough));
             return status;
         }
-        return applyAllocation((Allocation) command);
+        return command instanceof Free free ? applyFree(free) : applyAllocation((Allocation) command);
+    }
+
+    private Status applyFree(Free free) {
+        FreeFacts facts = free.facts();
+        AllocationIdentity target = facts.allocation();
+        Allocation predecessor = allocationIds.get(target.allocationId());
+        AppliedOperation original = predecessor == null ? null : appliedOperations.get(predecessor.operationId());
+        boolean allowed = predecessor != null && AllocationIdentity.of(predecessor).equals(target)
+                && predecessor.expectedGeneration() + 1 == free.expectedGeneration()
+                && !retiredAllocations.containsKey(target.allocationId()) && !durableQuarantine[target.file()]
+                && original != null && original.status() == Status.APPLIED_DURABLE
+                && original.sequence() == facts.allocationOrder();
+        for (int block = 0; allowed && block < target.blocks(); block++) {
+            Grant grant = allocations.get(slot(target.file(), target.offset() + block * BLOCK_BYTES));
+            allowed = grant != null && grant.command().equals(predecessor)
+                    && grant.generation() == free.expectedGeneration();
+        }
+        Status status = allowed ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
+        Free retained = free.replayFacts();
+        if (allowed) {
+            for (int block = 0; block < target.blocks(); block++) {
+                Slot slot = slot(target.file(), target.offset() + block * BLOCK_BYTES);
+                allocations.remove(slot);
+                retiredSlots.put(slot, retained);
+            }
+            retiredAllocations.put(target.allocationId(), retained);
+        }
+        appliedOperations.put(free.operationId(), new AppliedOperation(retained, status, appliedThrough));
+        return status;
     }
 
     private Status applyAllocation(Allocation command) {
@@ -1386,7 +1717,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
             return Status.CONDITION_FAILED;
         }
         for (int block = 0; block < command.blocks(); block++) {
-            if (allocations.containsKey(slot(command.file(), command.offset() + block * BLOCK_BYTES))) {
+            Slot slot = slot(command.file(), command.offset() + block * BLOCK_BYTES);
+            if (allocations.containsKey(slot) || retiredSlots.containsKey(slot)) {
                 appliedOperations.put(command.operationId(),
                         new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
                 return Status.CONDITION_FAILED;

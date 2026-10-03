@@ -140,3 +140,19 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 | `Restart` | `restartSkipsOldAllocationTailsButAcceptsANewLowerGrant`验证两轮物理restart，新低地址grant可写但旧grant尾不可返还；storage图另验证全量/同代覆盖重启、读、重复和新追加 |
 
 `allocationOrderedRecoveryStillRejectsCrossAllocationSequenceGapsAndDuplicates`使用真实有效DATA framing分别制造区间间gap和duplicate，不能借排序容忍无效前缀。每allocation连续区间、CRC/文件内容、scope及rotation原序号由Java另证；有限分配顺序投影不建模这些字节行为，也不证明FREE、旧I/O/pin排空或liveness。
+
+
+## 整allocation FREE
+
+`WholeAllocationFree`投影使用准确、单调的终态tombstone作为输入合同；普通DATA内容、CRC、allocation身份与Bookie cut不在模型中解析。真实实施映射：
+
+| 动作 | 实际路径与必要测试 |
+|---|---|
+| `Tombstone/Prepare` | Bookie `ReclamationLease`先排空/关闭entry admission，文件`ReclamationGuard`再拒绝新reservation/read lease；`wholeDeadAllocationFreePreservesLiveSharedFileDataAcrossFullAndCoveredRestart`、`wholeAllocationFreeRejectsInactiveRecordsAndUnverifiableDeadData` |
+| `StartIo/FinishIo/Pin/Unpin` | 实际DATA reservation/write/force与read lease计数；`wholeAllocationFreeRequiresActualWriterAndReadQuiescence`同时验证有旧entry admission时不妨碍旧写推进 |
+| `Submit/Force/Apply/OwnerResolve` | 现有Arena driver CONTROL I/O与原owner apply；`submittedFreeKeepsProtectionUntilControlIoAndOriginalOwnerFinish`暂停真实force及owner，验证durable未apply仍不开放；`runtimeWholeAllocationFreeUsesExistingStorageGraphAndRestoresRetiredPrefix`验证实际图 |
+| `ForceUnknown/Crash` | `wholeAllocationFreeForceUnknownCannotPublishHealthyCloseOrReopen`验证真实barrier异常、OPEN保留及restart拒绝；模型crash不是新的Java进程退出或掉电实验证据 |
+| `Duplicate` | 真实重复FREE结果相同、generation仍为2；独立向量`wholeAllocationFreeMatchesIndependentBytesAndCannotForgeARuntimeProof`禁止仅靠decoded事实构造新runtime proof |
+| `CancelWait/EarlyClose` | stopWaiting只丢弃响应；真实提交期间close与重复claim不能解除保护。EarlyClose仅在敏感性配置启用，正向coverage不要求它可达 |
+
+metadata-only退役范围恢复、空range不虚增序号、rotation及native覆盖由真实Java路径验证，未被这个小模型展开。旧字节物理复用、MOVE/selector、runtime索引/coordinate回收、全预算、完整A+C/C+D及liveness仍未完成。

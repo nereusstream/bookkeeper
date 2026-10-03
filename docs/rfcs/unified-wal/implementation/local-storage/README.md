@@ -6,6 +6,8 @@
 
 ## 当前实现
 
+2026-10-04 当前增量为[整allocation全死FREE与退役前缀](#整-allocation-全死-free-与退役前缀)。下列早期切片保留各自历史范围和receipt；当前完成边界以最新日期切片为准，FREE不表示旧字节已经可复用。
+
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
 执行位置为 `/Users/liusinan/apps/ideaproject/nereusstream/bookkeeper` 的 `turbo-bk`；规划输入提交为 `e75c67f3514d1627ea790d052e2c9226e593aa3c`，代码原基线为 `e8b162076fd8cfa84a11351a82caac8c5ac1f939`。完整执行目标见[执行正文](../execution-objective.md)。
@@ -448,3 +450,23 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 模型回执`unified-wal-model-p7nk5a81`绑定同一父提交，冻结57个实际输入（10 module、30 cfg、runner、16 Java）及父提交处3份合同哈希，91个回执checksum已逐项核对；11个完整正向PASS与19个指定反例。新增分配顺序投影完整探索302 distinct states，按文件偏移排序及返回旧尾两种候选取得指定反例，见[模型范围](../models/README.md#分配顺序与旧尾部隔离投影)。物理header范围拼接、CRC、原operation序号跨真实rotation及storage图由Java验证，模型不替代这些证据。
 
 这是实际FREE/reuse的必要前置，尚未启用FREE/generation bump或复用已写旧字节。整allocation当前存活证明、旧writer/pin/I/O排空、退休sequence范围与旧generation残留恢复判定仍需接入；不得靠整块清零替代合同，也不把后来分配的初始零范围称为已回收。MOVE/compaction、净回收/长期负载、多Arena、真实掉电及生产authority仍未完成，步骤9保持部分前置进展。
+
+
+### 整 allocation 全死 FREE 与退役前缀
+
+2026-10-04，隔离存储图新增 `reclaimAllocation(operationId, allocationId, FreeRequest)`。一次维护请求复用原 worker 0 的 DATA 票据、属地对齐 buffer 和 DATA I/O；真实控制记录继续使用已有 Arena driver 的预留 CONTROL 票据/I/O，没有新线程、重试队列或逐 record 控制记录。普通/恢复写和新读在该请求期间暂停；Bookie 控制请求仍可推进，改变 proof cut 时本次维护拒绝并释放尚未提交的保护。
+
+先在 Bookie 上确认既有 entry admission 已终结并冻结新 normal/recovery/read admission，再关闭文件新 reservation/read lease，要求实际 DATA I/O、未提交 reservation 和读 pin 都为零。按完整 allocation 逐批读取并独立验证身份、header、全部 record 与 batch CRC、范围和 allocation 内连续序号。每个普通 record 必须匹配 Bookie 的准确终态 tombstone；inactive、fenced、未知 context、索引缺失和单个 ledger 删除都不是全死证明。RELOCATION_COPY 仍拒绝，MOVE/orphan 规则尚未启用。扫描始终复用已收费的固定 DATA buffer；不足以容纳实际批次时拒绝，不临时增加大 heap buffer。初始 generation 1 的全零未使用页结合完整 grant 和健康、排空的 writer 状态识别；该判断不扩展到复用残留。
+
+成功 proof 绑定 allocation 的完整身份、原成功控制序号、旧 generation、实际 batch 序号区间、record count、Bookie applied cut 和整范围 SHA-256。保护随具体命令转交给原 owner，控制 batch 完整 durable 后才按前序 applied grant/expected generation 顺序判断 FREE。成功撤销整 allocation 的当前 grant，generation 1→2；重复命令返回同一结果，不再次 bump；storage 图相同 operation/目标直接由原owner查询已应用事实返回 ALREADY_DURABLE，不重读退役DATA、不再force，同 operation 指向另一 allocation 返回 INCOMPATIBLE。提交后 close 不能提前释放保护，控制 durable 但原 owner 尚未 apply 也不能开放访问。控制 write/force unknown 保持 writer 失败和未关闭 OPEN，后续 restart 仍拒绝，不借 pin=0 或一次成功 sync 放行。仅停止等待不取消实际维护或释放票据。
+
+控制 checkpoint/rotation 保留原 allocation 和 FREE 的绑定事实。冷恢复先重演控制关系，跳过合法退役范围，不读取它已允许退出的 DATA；有 Bookie authority 的恢复还核对必需的 applied cut。stream 前缀按原 allocation 顺序拼接存活 batch 和退役序号区间；空 allocation 的 -1/-1 区间不推进序号，实际 gap/duplicate/overflow 仍拒绝。generation 0 的 fresh refill 与手工 ALLOC 都拒绝退役 slot，原 grant 的尾部也不再被选中。没有清零、截短共享文件或把 FREE 当作 filesystem 余量增加。
+
+新增真实测试覆盖：共享 allocation 仍有一个活 ledger 时拒绝、inactive/未知 context 与损坏死数据拒绝、已有 entry admission 不影响旧写推进、真实旧 DATA force/未提交 reservation/read lease 排空、提交期间重复竞争与 close 拒绝、控制 durable 后原 owner 延迟 apply、force unknown/未关闭重启拒绝、空 allocation 不虚增序号、实际 storage 图 FREE，以及 rotation 后覆盖退役字节仍能完成全量/同代覆盖 restart、读取、重复与新追加。独立固定 FREE 字节向量与无 runtime proof 的提交拒绝另由 Arena 测试验证；格式见[FREE body](format-v1.md#整allocation-free-body-v1)。
+
+本切片只开放终态 tombstone/初始未使用 allocation 的整单元退役。旧字节重新分配与当前 generation framing、部分存活 compaction/MOVE、runtime tombstone 索引/coordinate 清理、有净空间收益的长期循环、多 Arena、完整模型组合和真实掉电/生产 Gate 尚未完成；实际复用容量不会因本切片被自动加入 fresh pool。步骤 9 仍为 PARTIAL。
+
+
+最终Java回执 `unified-wal-local-OkqZO5w9` 绑定父提交 `8ac860736695b9cedec43a25f2ecc586d03f0689` 与202个实际源码/测试/向量输入：相关7类245项，240通过、5项Linux亲和在macOS跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。新增8项包含7个真实文件/图测试及1个独立固定向量测试，原有验证未弱化。定向8项先通过，再因共享Bookie/Arena/恢复合同扩大至既有7类；复现命令仍为前述7类 `run-local-storage-tests.sh`。初次构建修正了现有pool/result accessor、测试helper异常签名/import，inactive夹具改为验证normal admission拒绝，并保留未知context和损坏DATA断言；最终Checkstyle修正行长/import顺序。交付前补齐storage图的实际operation重试/目标冲突回归；修正owner Command不抛checked异常的接线。最终回执覆盖全部变化，没有把这些未通过的中间run标成成功。
+
+模型回执 `unified-wal-model-k5u2v1c6` 冻结64个输入及父提交处3份合同哈希，106个checksum逐项核对；12个完整正向配置通过，23个指定反例成立。新增全死FREE正例217 generated / 68 distinct / queue 0、depth/diameter 9，另有4个敏感性反例；范围与动作映射见[模型](../models/README.md#整allocation-free-投影)。Java202输入和模型64输入已逐项对照当前文件，历史receipt/source/design绑定不变；模型不代替字节校验、真实I/O或掉电证据。

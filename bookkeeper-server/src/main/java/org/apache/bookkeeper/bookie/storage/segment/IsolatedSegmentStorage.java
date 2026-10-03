@@ -23,6 +23,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -63,6 +64,31 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
+    enum FreeStatus {
+        APPLIED_DURABLE, CONDITION_FAILED, TRANSIENT_UNAVAILABLE, UNKNOWN
+    }
+
+    record FreeResult(FreeStatus status, SegmentArenaControlLog.Result control) { }
+
+    static final class FreeRequest {
+        private final AtomicReference<BiConsumer<FreeResult, Throwable>> response;
+
+        FreeRequest(BiConsumer<FreeResult, Throwable> completion) {
+            response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+        }
+
+        boolean stopWaiting() {
+            return response.getAndSet(null) != null;
+        }
+
+        private void complete(FreeResult result, Throwable failure) {
+            BiConsumer<FreeResult, Throwable> completion = response.getAndSet(null);
+            if (completion != null) {
+                completion.accept(result, failure);
+            }
+        }
+    }
+
     record Limits(long controlLogBytes, int hotEntries, int indexedEntries, int poolBlocks,
                   SegmentDataPhysicalDriver.BatchLimits batches) {
         Limits(long controlLogBytes, int hotEntries, int poolBlocks, SegmentDataPhysicalDriver.BatchLimits batches) {
@@ -94,10 +120,12 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private SegmentDerivedIndex index;
     private volatile SegmentExecutionGroup execution;
     private SegmentBookieControlDriver controls;
+    private SegmentArenaControlDriver allocator;
     private boolean startAttempted;
     private boolean accepting;
     private boolean closed;
     private IndexCheckpoint indexCheckpoint;
+    private FreeOperation freeOperation;
 
     /** Construct the resource owner before startup so a failed start still has an explicit cleanup handle. */
     IsolatedSegmentStorage(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
@@ -169,7 +197,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     private void bootstrap() throws IOException, InterruptedException {
-        SegmentArenaControlDriver allocator = new SegmentArenaControlDriver(execution.owner(0), execution.io(), arena);
+        allocator = new SegmentArenaControlDriver(execution.owner(0), execution.io(), arena);
         long end = System.nanoTime() + executionSettings.startupTimeout().toNanos();
         for (int shard = 0; shard < config.logicalShards(); shard++) {
             final int selected = shard;
@@ -241,7 +269,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitNormal(ProfileLedgerContext context, byte[] credential, ByteBuf entry,
                          SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
         synchronized (gate) {
-            if (!accepting || !execution.accepting()) {
+            if (!accepting || !execution.accepting() || freeOperation != null) {
                 return false;
             }
             Objects.requireNonNull(context, "context");
@@ -282,7 +310,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                            SegmentDataPhysicalDriver.RecoveryRequest response)
             throws IOException {
         synchronized (gate) {
-            if (!accepting || !execution.accepting()) {
+            if (!accepting || !execution.accepting() || freeOperation != null) {
                 return false;
             }
             Objects.requireNonNull(request, "request");
@@ -303,7 +331,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
-            return accepting && execution.accepting()
+            return accepting && execution.accepting() && freeOperation == null
                     && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
                             .submit(context, entryId, request);
         }
@@ -318,7 +346,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(publicationIo, "publicationIo");
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || indexCheckpoint != null) {
+            if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null) {
                 return false;
             }
             IndexCheckpoint checkpoint = new IndexCheckpoint(request, publicationIo);
@@ -329,6 +357,109 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 }
             }
             return true;
+        }
+    }
+
+    /** One bounded maintenance operation; DATA proof and CONTROL force use their existing separate services. */
+    boolean reclaimAllocation(UUID operationId, long allocationId, FreeRequest request) {
+        Objects.requireNonNull(operationId, "operationId");
+        Objects.requireNonNull(request, "request");
+        synchronized (gate) {
+            if (!accepting || !execution.accepting() || freeOperation != null || indexCheckpoint != null) {
+                return false;
+            }
+            FreeOperation operation = new FreeOperation(operationId, allocationId, request);
+            freeOperation = operation;
+            try {
+                if (execution.owner(0).submit(0, operation)) {
+                    return true;
+                }
+            } catch (RuntimeException | Error failure) {
+                freeOperation = null;
+                throw failure;
+            }
+            freeOperation = null;
+            return false;
+        }
+    }
+
+    private final class FreeOperation implements SegmentOwnerLoop.Command {
+        private final UUID operationId;
+        private final long allocationId;
+        private final FreeRequest request;
+        private SegmentOwnerLoop.Ticket ticket;
+        private SegmentBufferPool.Lease buffer;
+        private SegmentArenaControlLog.Free command;
+
+        private FreeOperation(UUID operationId, long allocationId, FreeRequest request) {
+            this.operationId = operationId;
+            this.allocationId = allocationId;
+            this.request = request;
+        }
+
+        @Override
+        public void run(SegmentOwnerLoop.Ticket admitted) {
+            ticket = admitted;
+            SegmentArenaControlLog.Result prior;
+            try {
+                prior = arena.resolvedFreeResult(operationId, allocationId);
+            } catch (IOException failure) {
+                ticket.complete(() -> finish(FreeStatus.UNKNOWN, null, failure));
+                return;
+            }
+            if (prior != null) {
+                ticket.complete(() -> finish(status(prior), prior, null));
+                return;
+            }
+            buffer = execution.owner(0).pool().acquire(4096);
+            if (buffer == null) {
+                ticket.complete(() -> finish(FreeStatus.TRANSIENT_UNAVAILABLE, null, null));
+                return;
+            }
+            execution.io().submitContinuing(ticket,
+                    () -> command = arena.prepareFree(operationId, allocationId, files, bookie, buffer.bytes()),
+                    cause -> {
+                        releaseBuffer();
+                        if (cause != null) {
+                            ticket.complete(() -> finish(FreeStatus.TRANSIENT_UNAVAILABLE, null, cause));
+                        } else if (!allocator.submitFree(command, (results, failure) -> {
+                            SegmentArenaControlLog.Result result = results == null ? null : results.get(0);
+                            FreeStatus outcome = failure != null ? FreeStatus.UNKNOWN : status(result);
+                            ticket.complete(() -> finish(outcome, result, failure));
+                        })) {
+                            command.close();
+                            ticket.complete(() -> finish(FreeStatus.TRANSIENT_UNAVAILABLE, null, null));
+                        }
+                    });
+        }
+
+        private FreeStatus status(SegmentArenaControlLog.Result result) {
+            return result.status() == SegmentArenaControlLog.Status.APPLIED_DURABLE
+                    || result.status() == SegmentArenaControlLog.Status.ALREADY_DURABLE
+                            ? FreeStatus.APPLIED_DURABLE : FreeStatus.CONDITION_FAILED;
+        }
+
+        private void releaseBuffer() {
+            if (buffer != null) {
+                buffer.close();
+                buffer = null;
+            }
+        }
+
+        private void finish(FreeStatus status, SegmentArenaControlLog.Result result, Throwable failure) {
+            synchronized (gate) {
+                freeOperation = null;
+            }
+            request.complete(new FreeResult(status, result), failure);
+        }
+
+        @Override
+        public void failed(Throwable cause) {
+            releaseBuffer();
+            if (command != null) {
+                command.close();
+            }
+            finish(FreeStatus.UNKNOWN, null, cause);
         }
     }
 

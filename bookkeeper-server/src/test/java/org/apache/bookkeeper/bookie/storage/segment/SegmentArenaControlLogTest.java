@@ -99,6 +99,30 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void wholeAllocationFreeMatchesIndependentBytesAndCannotForgeARuntimeProof() throws Exception {
+        byte[] vector = checkpointVector("arena-whole-free-v1.hex");
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentArenaControlLog.Free decoded = (SegmentArenaControlLog.Free) log.decodeCommand(
+                    ByteBuffer.wrap(vector), 1);
+            assertEquals(1, decoded.expectedGeneration());
+            assertEquals(2, decoded.operationGeneration().value());
+            assertEquals(0, decoded.facts().allocationOrder());
+            assertEquals(1, decoded.facts().records());
+            assertEquals(new SegmentArenaControlLog.AllocationIdentity(0, 1, new Generation(1), 1, 4096, 1, 1),
+                    decoded.facts().allocation());
+            ByteBuffer encoded = SegmentControlFormat.encode(decoded.type(), new Generation(1), 1,
+                    decoded.operationId(), decoded.operationGeneration(), decoded.expectedGeneration(), decoded.body());
+            byte[] actual = new byte[encoded.remaining()];
+            encoded.get(actual);
+            assertArrayEquals(vector, actual);
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(decoded)));
+            assertTrue(log.retiredAllocations().isEmpty());
+        }
+    }
+
+    @Test
     public void rotationReclaimsFullJournalsAndPreservesConditionalResultsAcrossRepeatedRestarts() throws Exception {
         IsolatedSegmentConfig config = config();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {

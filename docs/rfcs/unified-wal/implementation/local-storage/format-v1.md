@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；真实RocksDB冷重建/覆盖页见下文；一般MOVE/FREE selector覆盖恢复、在线Bookie/Arena维护、服务级readiness与未正常关闭restart与生产entry success authority仍未完成。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；真实RocksDB冷重建/覆盖页见下文；全死allocation FREE与退役前缀已接通，见下文；一般MOVE/复用selector覆盖恢复、在线Bookie/Arena维护、服务级readiness与未正常关闭restart与生产entry success authority仍未完成。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -228,3 +228,21 @@ stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每sh
 
 
 分配控制顺序与低地址追加（2026-10-03）：字节格式与固定向量不变。写入使用当前已apply的allocation operation原sequence作为grant顺序，stream cursor跨grant前进而不依赖文件offset递增；恢复每allocation只保留一个连续batch-sequence区间，再按原控制顺序拼接验证stream前缀。原sequence已由现有checkpoint operation状态保存，rotation不改绑定；低地址并不等于旧grant尾部可返回，仍不支持FREE或旧generation残留复用。实现与回执见[本地状态](README.md#分配控制顺序与低地址追加)。
+
+
+## 整allocation FREE body v1
+
+实验 Arena `type=4` 使用原控制 framing，总长272字节、body 128字节。这里只启用整 allocation 全死/初始未使用范围的 retirement；新 grant 复用旧字节仍禁用。header 的 expected generation 是当前旧 allocation generation，operation generation/result generation 为其 +1；首批实际转换为1→2。writer 必须持有实际 DATA proof 与新准入/I/O/pin 排空保护；独立 decoder 的 durable facts 不能直接作为新的 runtime proof 提交。
+
+| Body offset | 字段 |
+|---|---|
+| 0 / 4 | body version u32=1 / reserved u32=0 |
+| 8 / 12 / 16 | file u32 / owner shard u32 / stream generation u64 |
+| 24 / 32 / 40 / 44 | allocation id u64 / allocation start u64 / blocks u32 / reserved u32=0 |
+| 48 / 56 | stream first sequence u64 / original successful allocation control sequence u64 |
+| 64 / 72 / 80 | first retired batch sequence i64 / through i64 / parsed record count u64 |
+| 88 / 96 | required Bookie applied cut i64 / SHA-256 of the entire verified allocation, 32 bytes |
+
+无 DATA 的初始全零范围使用 record count=0、first/through=-1；它不增加 stream 前缀。非空区间有界、连续，所有 record 都具有相同匹配 allocation 身份及准确终态 tombstone，且不含 RELOCATION_COPY。外层仍验证 header/body CRC32C、sequence、owner/type、operation id 与 generation。成功 apply 后原 grant 失效，保留 retirement 和 generation 2；同一 operation 的重试不重复 bump，generation 0 ALLOC 不得复占退役 slot。
+
+重放只按前序 applied grant、原 operation sequence、完整范围及 expected generation 判断，保留必要 Bookie cut；不重读已退役历史 DATA，也不通过重启时 pin=0 补认 proof。原 allocation 与 retirement facts 随既有 applied checkpoint/rotation 保留。固定独立向量 `arena-whole-free-v1.hex` 为272字节：file=0/shard=1、allocation=1、offset=4096、1 block、stream generation/start=1、原控制序号0、退役区间1..1/1 record、Bookie cut=0、digest=00..1f、FREE sequence=1、UUID=0:2。此向量验证编码/解码，不能单独授权 runtime 回收。

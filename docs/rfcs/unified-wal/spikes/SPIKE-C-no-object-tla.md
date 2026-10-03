@@ -1103,3 +1103,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-03 [分配控制顺序与低地址追加](../implementation/local-storage/README.md#分配控制顺序与低地址追加)消除FREE/reuse必要的offset排序前置：游标按原成功allocation控制sequence推进，旧grant尾部不返还；恢复按每allocation连续序号区间拼接，跨grant gap/duplicate仍拒绝。Arena rotation及真实全量/同代覆盖storage重启已验证。Java`unified-wal-local-N16YauZh`为201输入、237项/232通过/5平台跳过；模型`unified-wal-model-p7nk5a81`为57输入、11个完整正向/19个指定反例，新投影302状态。实际FREE/bump、整块存活与旧I/O/pin排空、退休sequence/旧字节恢复、compaction、长期负载/多Arena和生产Gate仍未完成。
+
+
+2026-10-04，新增整allocation全死FREE有限投影，验证全部occupant终态、在途控制保护、旧I/O真实终结及durability先于generation authority；四个去掉保护的配置分别产生指定反例。实际格式/CRC、Bookie proof与字节访问仍由[Java切片](../implementation/local-storage/README.md#整-allocation-全死-free-与退役前缀)验证；模型不覆盖物理reuse、MOVE、完整A+C/C+D、预算或liveness，不解除既有Gate。

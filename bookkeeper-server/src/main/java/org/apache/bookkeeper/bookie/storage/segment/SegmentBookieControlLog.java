@@ -438,6 +438,31 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private boolean failed;
     private boolean closed;
     private int activeAdmissions;
+    private ReclamationLease reclamation;
+
+    /** Volatile entry admission exclusion only; durable tombstones remain the sole deletion authority. */
+    final class ReclamationLease implements AutoCloseable {
+        private final long cut;
+        private boolean released;
+
+        private ReclamationLease(long cut) {
+            this.cut = cut;
+        }
+
+        long cut() {
+            return cut;
+        }
+
+        @Override
+        public void close() {
+            synchronized (SegmentBookieControlLog.this) {
+                if (!released) {
+                    released = true;
+                    reclamation = null;
+                }
+            }
+        }
+    }
 
     private SegmentBookieControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                     long maxLogBytes, SegmentFileIo io, SecretKey key,
@@ -1006,7 +1031,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     synchronized Optional<Admission> admitNormal(ProfileLedgerContext context, byte[] wireVerifier) {
-        if (rotating != null || !normalAdmission(context, wireVerifier)
+        if (reclamation != null || rotating != null || !normalAdmission(context, wireVerifier)
                 || activeAdmissions == config.maxPendingEntries()) {
             return Optional.empty();
         }
@@ -1020,7 +1045,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         Objects.requireNonNull(request, "request");
         ProfileLedgerContext context = request.context();
         LedgerState state = ledgers.get(context.ledgerId());
-        if (closed || failed || rotating != null || state == null || !state.context.equals(context)
+        if (closed || failed || reclamation != null || rotating != null || state == null
+                || !state.context.equals(context)
                 || state.pendingTombstone || tombstones.containsKey(context.ledgerId())
                 || !state.credential.matchesWireVerifier(request.credential())
                 || activeAdmissions == config.maxPendingEntries()) {
@@ -1113,7 +1139,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     /** Only the local route cut; transport read authorization and current-selector checks remain separate. */
     synchronized Optional<ReadAdmission> admitRead(ProfileLedgerContext context) {
-        if (rotating != null || !locallyReadableContext(context) || activeAdmissions == config.maxPendingEntries()) {
+        if (reclamation != null || rotating != null || !locallyReadableContext(context)
+                || activeAdmissions == config.maxPendingEntries()) {
             return Optional.empty();
         }
         LedgerState state = ledgers.get(context.ledgerId());
@@ -1199,6 +1226,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IOException("Bookie recovery read cut has unresolved control or entry obligations");
         }
         return appliedThrough;
+    }
+
+    /** Inactive, fenced, absent or unreadable is not a deletion proof. Only this exact terminal context is dead. */
+    synchronized boolean hasTerminalTombstone(ProfileLedgerContext context) {
+        return !closed && !failed && context.equals(tombstones.get(context.ledgerId()));
+    }
+
+    synchronized ReclamationLease protectReclamation(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity)
+            throws IOException {
+        if (reclamation != null) {
+            throw new IOException("Another whole-allocation reclamation holds Bookie entry admission");
+        }
+        reclamation = new ReclamationLease(recoveryReadCut(source, sourceIdentity));
+        return reclamation;
     }
 
     /** Bind a derived checkpoint to applied authority; unlike recovery, this grants no quiescent read cut. */
@@ -2318,7 +2359,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (writing || checkpointing || rotating != null || activeAdmissions != 0) {
+        if (writing || checkpointing || rotating != null || activeAdmissions != 0 || reclamation != null) {
             throw new IOException("Bookie control I/O or admissions are still in flight");
         }
         closed = true;
