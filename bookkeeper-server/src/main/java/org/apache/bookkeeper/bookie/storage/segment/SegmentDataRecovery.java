@@ -604,9 +604,6 @@ final class SegmentDataRecovery {
         if (bookie != null && bookie.indexAppliedCut(config, identity) < authority.requiredMoveBookieCut()) {
             throw new IOException("MOVE has a missing required Bookie authority cut");
         }
-        if (authority.hasMoves()) {
-            seed = null; // MOVE coverage publication is not yet wired to the original-owner maintenance cut.
-        }
         long batches = 0;
         long records = 0;
         long validatedBytes = 0;
@@ -657,6 +654,12 @@ final class SegmentDataRecovery {
                     throw new IOException("Covered locators disagree on batch extent");
                 }
                 if (bookie.locallyReadableContext(location.context())) {
+                    if (authority.currentSelectorSequence(location.context(), location.entryId()) >= 0) {
+                        SegmentPointRead.Result verified = SegmentPointRead.read(config, identity, authority, location);
+                        authority.validateSelectedRecord(location, verified.record());
+                        readBytes += verified.bytesRead();
+                        foundMoves.add(location);
+                    }
                     entries.add(location);
                 }
             }

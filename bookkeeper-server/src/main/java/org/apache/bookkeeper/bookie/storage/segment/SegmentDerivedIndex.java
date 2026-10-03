@@ -29,6 +29,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -193,9 +194,6 @@ final class SegmentDerivedIndex implements AutoCloseable {
     synchronized Optional<RecoveryCoverage> recoveryCoverage(SegmentArenaControlLog arena,
                                                              SegmentBookieControlLog bookie) throws IOException {
         requireOpen();
-        if (arena.hasMoves()) {
-            return Optional.empty();
-        }
         try {
             Coverage selected = coverage().orElse(null);
             if (selected == null || !arena.matchesScope(config, identity)
@@ -221,6 +219,9 @@ final class SegmentDerivedIndex implements AutoCloseable {
                     SegmentBatchFormat.Address address = location.address();
                     SegmentDataRecovery.StreamCoverage stream = streams[address.shard()];
                     if (stream == null || !address.streamGeneration().equals(stream.generation())
+                            || !arena.resolveLocation(location).equals(location)
+                            || arena.currentSelectorSequence(location.context(), location.entryId())
+                                    > selected.arenaCut()
                             || address.sequence() < stream.firstSequence() || address.sequence() > stream.through()
                             || !arena.dataFileAvailable(address.fileIndex())
                             || !arena.hasAppliedGrant(address.fileIndex(), address.offset(), location.batchLength(),
@@ -231,6 +232,12 @@ final class SegmentDerivedIndex implements AutoCloseable {
                     entries.add(location);
                 }
                 cursor.status();
+            }
+            HashSet<SegmentPointRead.Location> indexed = new HashSet<>(entries);
+            for (SegmentPointRead.Location target : arena.currentMoveLocations()) {
+                if (bookie.locallyReadableContext(target.context()) && !indexed.contains(target)) {
+                    return Optional.empty();
+                }
             }
             return Optional.of(new RecoveryCoverage(config, identity, selected, entries));
         } catch (IOException | RocksDBException invalidOptionalCoverage) {
@@ -469,6 +476,57 @@ final class SegmentDerivedIndex implements AutoCloseable {
         } catch (RocksDBException failure) {
             failed = true;
             throw new IOException("Terminal derived index cleanup failed", failure);
+        } catch (IOException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
+    }
+
+    /** Original owners have drained old Puts and paused; current MOVE authority alone may replace a row. */
+    synchronized void refreshMovedLocations(SegmentArenaControlLog arena, IsolatedSegmentFiles files,
+                                            IsolatedSegmentFiles.ReclamationGuard protection,
+                                            ByteBuffer workspace) throws IOException {
+        requireOpen();
+        protection.requireHeld(files, arena);
+        arena.requireMovePreparation(files);
+        long cut = arena.appliedThrough();
+        pendingCoverage = null;
+        try (WriteBatch moved = new WriteBatch(); RocksIterator cursor = db.newIterator()) {
+            int count = 0;
+            int seen = 0;
+            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+                    cursor.next()) {
+                SegmentPointRead.Location old = decode(cursor.value());
+                if (++seen > maxEntries || !Arrays.equals(cursor.key(), key(old.context(), old.entryId()))) {
+                    throw new IOException("MOVE maintenance encountered an invalid bounded index row");
+                }
+                if (arena.currentSelectorSequence(old.context(), old.entryId()) < 0) {
+                    continue;
+                }
+                SegmentPointRead.Location target = arena.resolveLocation(old);
+                SegmentPointRead.Result verified = SegmentPointRead.readWithScratch(config, identity, arena,
+                        target, workspace);
+                arena.validateSelectedRecord(target, verified.record());
+                validate(target);
+                moved.put(cursor.key(), encodeLocation(indexGeneration, target));
+                if (++count == BATCH_ENTRIES) {
+                    db.write(writes, moved);
+                    moved.clear();
+                    count = 0;
+                }
+            }
+            cursor.status();
+            if (count != 0) {
+                db.write(writes, moved);
+            }
+            protection.requireHeld(files, arena);
+            arena.requireMovePreparation(files);
+            if (arena.appliedThrough() != cut) {
+                throw new IOException("Arena selector changed during native MOVE maintenance");
+            }
+        } catch (RocksDBException failure) {
+            failed = true;
+            throw new IOException("Native MOVE maintenance failed", failure);
         } catch (IOException | RuntimeException | Error failure) {
             failed = true;
             throw failure;

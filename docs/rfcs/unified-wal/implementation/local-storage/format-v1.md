@@ -289,3 +289,6 @@ Arena type=FREE/control header不变，body version u32=2、reserved u32=0，后
 v2证明依赖当前selector：迁走的普通源须匹配成功后继entry digest，并实际验证当前目标；当前活COPY禁止FREE，未选COPY为orphan，准确终态COPY可退役其selector。grant/generation与原ALLOC序号、held runtime gate仍必须成立；decoded v2与摘要不授予新的运行期proof。metadata-only重放不再读取已退役源，现有CLOSED尾部与退役stream范围校验继续适用。
 
 独立Python struct/逐位CRC32C生成 `arena-move-free-v2.hex`（280 bytes），沿用v1 sample sequence1、FREE operation generation2/expected1、allocation order0，在body offset96加入Arena cut0；digest字节仍00..1f。Java逐字节对照并拒绝cut=-1、当前/未来cut、decoded新提交，同时保留v1/128-byte断言。范围与回执见[当前回收切片](README.md#搬迁源与-orphan-的整块回收)。
+
+
+2026-10-04 [MOVE覆盖恢复增量](README.md#native-move-索引维护与覆盖恢复)复用原160字节native locator和独立A/B coverage页，不改变MOVE/FREE、DATA或coverage字节格式。当前selector行经真实target校验、原owner排空及native flush后可发布覆盖；恢复匹配覆盖仍验证当前必要副本，旧hint或缺失/坏target不产生权限。此前格式向量不重绑。

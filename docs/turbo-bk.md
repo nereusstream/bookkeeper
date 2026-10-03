@@ -485,3 +485,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-04 当前增量为[搬迁源与orphan整块回收](rfcs/unified-wal/implementation/local-storage/README.md#搬迁源与-orphan-的整块回收)：FREE v2持有selector cut与原保护，迁走源实际验证当前目标，orphan/终态COPY退役且旧grant不得复活。真实A/B均复用、无新checkpoint和rotation后的C恢复通过；在线native MOVE/coverage、部分存活合批compaction、长期净容量仍待完成，步骤9和总目标保持未完成。模型矩阵17正向/40指定反例不授予完整Gate。
+
+
+2026-10-04 当前后续：[Native MOVE索引维护与覆盖恢复](rfcs/unified-wal/implementation/local-storage/README.md#native-move-索引维护与覆盖恢复)已接通现有checkpoint的原owner旧Put排空/暂停、保护下实际target验证与native更新、flush及A/B coverage；覆盖恢复仍验证当前必要副本，陈旧hint及坏/缺失target不能回退旧权限。取消/短关闭、维护校验失败及发布失败重发已由真实路径验证；七类271通过、5平台跳过，有限矩阵18正向/44指定反例。storage图的合批victim compaction/净回收循环、逐allocation在线cutover、长期控制/SST空间、多Arena、OPEN错误恢复及掉电/生产ACK仍待完成；完整16步与Gate不提升。

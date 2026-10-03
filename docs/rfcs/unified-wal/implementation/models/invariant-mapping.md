@@ -194,3 +194,15 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `RestartKeepsControlSelector` | 有序MOVE/FREE/ALLOC元数据重放后只验证current DATA与健康CLOSED末端，不重新扫描已退役源来选择坐标 |
 
 准确Bookie T、真实目标点读/CRC/SHA和保护生命周期由Java/原模型拥有；完整native maintenance/coverage和liveness仍未展开。
+
+
+Native MOVE coverage 回执 `unified-wal-model-75i1oty1` 的新增性质：
+
+| 性质 | 当前实现及证据边界 |
+| --- | --- |
+| CapturedOwnersHadNoOldPut | 全部原 owner 在无旧 Put/候选/物理 reservation 时暂停；实际旧 Put stall/拒绝继承已有checkpoint回归，本投影无真实队列 |
+| MaintenanceKeepsProtection | Bookie/file gate 与 scratch 持续到实际I/O及全原owner终结；等待方取消只撤销回复 |
+| RecoveredLocatorUsesSelector | 陈旧 native locator 无法成为当前 coverage；无效覆盖改用完整DATA重建 |
+| CoveredReadyValidatesCurrentBytes | seed内当前可读MOVE target仍实际点读并检查operation/generation/CRC/SHA，坏或缺失副本拒绝恢复 |
+
+COPY/MOVE durability、grant与权限为输入假设；有限PASS不等于实际flush、字节验证、完整资源或掉电证明。

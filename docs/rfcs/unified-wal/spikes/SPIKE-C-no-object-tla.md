@@ -1121,3 +1121,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04 最新后续：[搬迁源与orphan整块回收](../implementation/local-storage/README.md#搬迁源与-orphan-的整块回收)已接通受保护当前后继字节验证、FREE v2 selector applied cut、源/orphan及准确T当前COPY退役与原整块generation复用；纯普通T v1字节不变。真实A→B→C、A/B均复用且无新增checkpoint、storage全量与rotation恢复保留C，坏/缺失C和陈旧proof拒绝。当前四项Java/固定向量及17正向/40指定反例保持局部范围；原owner在线native MOVE/coverage、合批victim compaction、长期净容量与生产Gate仍未完成，之前receipt不重绑。
+
+
+2026-10-04 最新增量：[Native MOVE coverage有限投影](../implementation/models/README.md#native-move-coverage-投影)已加入既有runner。99个输入、187个checksum；完整矩阵18正向PASS/44指定反例，新投影108个distinct状态、队列0、深度/直径15。普通COPY/MOVE/权限/CRC为输入假设；原worker旧Put排空、取消保留gate、当前selector与必要target验证获得有限反例检查。真实Java七类271通过/5平台跳过，见局部状态；完整A/C/D、组合与Block G保持未闭合。

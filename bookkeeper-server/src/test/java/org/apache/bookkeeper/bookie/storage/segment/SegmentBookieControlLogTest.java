@@ -20,6 +20,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -9818,10 +9819,15 @@ public class SegmentBookieControlLogTest {
         private final SegmentOwnerLoop owner;
         private final SegmentHotDirectory hot;
         private final SegmentDataPhysicalDriver driver;
+        private final SegmentDerivedIndex index;
         private final List<SegmentPointRead.Location> sources;
         private boolean failedCloseExpected;
 
         private MoveFixture(IsolatedSegmentConfig config, SegmentFileIo controlIo) throws Exception {
+            this(config, controlIo, false);
+        }
+
+        private MoveFixture(IsolatedSegmentConfig config, SegmentFileIo controlIo, boolean indexed) throws Exception {
             this.config = config;
             files = IsolatedSegmentFiles.create(config, identity());
             arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024, controlIo);
@@ -9833,6 +9839,16 @@ public class SegmentBookieControlLogTest {
                     new SegmentExecutionGroup.Settings(1, 4, 1, 1, 4096, 44, 8235, Duration.ofSeconds(5)));
             owner = group.owner(0);
             hot = new SegmentHotDirectory(owner, config, identity(), 4);
+            index = indexed ? SegmentDerivedIndex.open(config, identity(), 16) : null;
+            if (indexed) {
+                FutureTask<Void> attach = new FutureTask<>(() -> {
+                    hot.attachIndex(0, index, group.io());
+                    return null;
+                });
+                assertTrue(owner.control(attach));
+                attach.get(5, TimeUnit.SECONDS);
+                ownerBarrier(owner);
+            }
             driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
                     new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 8), hot);
             ByteBuf first = entry(context(), 1);
@@ -9905,9 +9921,48 @@ public class SegmentBookieControlLogTest {
                     ByteBuffer.allocate(4096));
         }
 
+        private SegmentDerivedIndex.Coverage checkpointMoves(boolean refresh) throws Exception {
+            SegmentHotDirectory.IndexCut cut = null;
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (cut == null && System.nanoTime() < end) {
+                FutureTask<SegmentHotDirectory.IndexCut> pause = new FutureTask<>(hot::pauseIndexForCheckpoint);
+                assertTrue(owner.control(pause));
+                cut = pause.get(5, TimeUnit.SECONDS);
+                ownerBarrier(owner);
+                if (cut == null) {
+                    Thread.sleep(1);
+                }
+            }
+            assertNotNull(cut);
+            try (SegmentBookieControlLog.ReclamationLease lease = bookie.protectReclamation(config, identity());
+                    IsolatedSegmentFiles.ReclamationGuard guard = files.protectReclamation(arena, 0, lease)) {
+                if (refresh) {
+                    index.refreshMovedLocations(arena, files, guard, ByteBuffer.allocate(4096));
+                }
+                List<SegmentHotDirectory.IndexCut> cuts = new ArrayList<>();
+                cuts.add(cut);
+                for (int shard = 1; shard < config.logicalShards(); shard++) {
+                    cuts.add(new SegmentHotDirectory.IndexCut(new SegmentDataRecovery.StreamCoverage(
+                            shard, new Generation(1), 1, 0), 0));
+                }
+                return index.checkpointRuntime(cuts, arena, bookie, new SegmentFileIo());
+            } finally {
+                FutureTask<Void> resume = new FutureTask<>(() -> {
+                    hot.resumeIndexAfterCheckpoint();
+                    return null;
+                });
+                assertTrue(owner.control(resume));
+                resume.get(5, TimeUnit.SECONDS);
+                ownerBarrier(owner);
+            }
+        }
+
         @Override
         public void close() throws Exception {
             assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            if (index != null) {
+                index.close();
+            }
             try {
                 if (failedCloseExpected) {
                     assertThrows(IOException.class, files::close);
@@ -9917,6 +9972,187 @@ public class SegmentBookieControlLogTest {
             } finally {
                 bookie.close();
                 arena.close();
+            }
+        }
+    }
+
+    @Test
+    public void nativeMoveMaintenanceReplacesDrainedRowsAndCoveredRestartVerifiesCurrentBytes() throws Exception {
+        for (boolean zeroTarget : new boolean[] {false, true}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("native-move-coverage-" + zeroTarget);
+            SegmentDerivedIndex.Coverage movedCoverage;
+            List<SegmentPointRead.Location> targets;
+            try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo(), true)) {
+                SegmentDerivedIndex.Coverage old = fixture.checkpointMoves(false);
+                SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(801, 2, (byte) 0);
+                try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                            fixture.arena.submitBatch(List.of(move)).get(0).status());
+                }
+                targets = copy.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList();
+                assertEquals(fixture.sources.get(0), fixture.index.get(context(), 1).orElseThrow());
+                assertTrue(fixture.index.recoveryCoverage(fixture.arena, fixture.bookie).isEmpty());
+                movedCoverage = fixture.checkpointMoves(true);
+                assertEquals(old.indexGeneration(), movedCoverage.indexGeneration());
+                assertEquals(old.publication() + 1, movedCoverage.publication());
+                assertEquals(2, movedCoverage.streams().get(0).through());
+                assertEquals(targets.get(0), fixture.index.get(context(), 1).orElseThrow());
+                assertEquals(targets.get(1), fixture.index.get(context(), 2).orElseThrow());
+                assertTrue(fixture.index.recoveryCoverage(fixture.arena, fixture.bookie).isPresent());
+                assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE,
+                        checkPublishedDuplicate(fixture.driver, fixture.bookie,
+                                entryBytes(context(), 1, -1, 8, (byte) 0)));
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR);
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+                try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(
+                        config, identity(), arena, bookie, new SegmentFileIo(), 16, 4, index)) {
+                    assertTrue(files.startupInventory().usesIndexCoverage());
+                    assertEquals(2, files.startupInventory().scan().coveredBatches());
+                    assertEquals(2, files.startupInventory().entries().size());
+                    assertEquals(movedCoverage.indexGeneration(), index.coverage().orElseThrow().indexGeneration());
+                    assertEquals(targets.get(0), index.get(context(), 1).orElseThrow());
+                }
+            }
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                ByteBuffer bytes = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(data, bytes, 8192);
+                if (zeroTarget) {
+                    bytes = ByteBuffer.allocate(4096);
+                } else {
+                    bytes.put(328, (byte) (bytes.get(328) ^ 1));
+                }
+                new SegmentFileIo().writeFully(data, bytes, 8192);
+                data.force(true);
+            }
+            try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4, 16, 3)) {
+                assertThrows(IOException.class, storage::restart);
+            }
+        }
+    }
+
+    @Test
+    public void failedNativeMoveValidationKeepsSelectorAndRequiresFullRecovery() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("failed-native-move-validation");
+        SegmentPointRead.Location target;
+        try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo(), true)) {
+            fixture.checkpointMoves(false);
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(804, 2, (byte) 0);
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+            }
+            target = copy.copies().get(0).location();
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                ByteBuffer original = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(data, original, 8192);
+                byte[] bad = original.array().clone();
+                bad[328] ^= 1;
+                new SegmentFileIo().writeFully(data, ByteBuffer.wrap(bad), 8192);
+                assertThrows(IOException.class, () -> fixture.checkpointMoves(true));
+                assertThrows(IOException.class, () -> fixture.index.get(context(), 1));
+                assertEquals(target, fixture.arena.currentMoveLocation(context(), 1).orElseThrow());
+                fixture.bookie.admitRead(context()).orElseThrow().finish();
+                new SegmentFileIo().writeFully(data, original, 8192);
+                data.force(true);
+            }
+            fixture.index.close();
+            try (SegmentDerivedIndex reopened = SegmentDerivedIndex.open(config, identity(), 16)) {
+                assertEquals(fixture.sources.get(0), reopened.get(context(), 1).orElseThrow());
+                assertTrue(reopened.recoveryCoverage(fixture.arena, fixture.bookie).isEmpty());
+            }
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4, 16, 3)) {
+            storage.restart();
+            assertEquals(target, storageWrite(storage, context(), 1).candidate());
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(804, read.result().record().moveId().getLeastSignificantBits());
+            }
+        }
+    }
+
+    @Test
+    public void graphMoveIndexPublicationFailureRetainsCurrentReadsAndCanRepublish() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("graph-move-publication-failure");
+        try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(802, 2, (byte) 0);
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+            }
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 4, 6, 4, 16, 3)) {
+            storage.restart();
+            CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> failed = new CompletableFuture<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            assertTrue(storage.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest((result, cause) -> {
+                failure.set(cause);
+                failed.complete(result);
+            }), new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false)));
+            assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.UNKNOWN,
+                    failed.get(5, TimeUnit.SECONDS).status());
+            assertNotNull(failure.get());
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(802, read.result().record().moveId().getLeastSignificantBits());
+            }
+            assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED,
+                    checkpointAfterBackpressure(storage, new SegmentFileIo()).status());
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                    storageWrite(storage, context(), 1).status());
+        }
+    }
+
+    @Test
+    public void cancelledGraphMoveCheckpointHoldsProtectionUntilActualPublicationAndOwnerDrain() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("cancelled-move-index-" + workers);
+            try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
+                SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(803, 2, (byte) 0);
+                try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                            fixture.arena.submitBatch(List.of(move)).get(0).status());
+                }
+            }
+            CountDownLatch forced = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            AtomicInteger replies = new AtomicInteger();
+            IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 16, 3);
+            try {
+                storage.restart();
+                IsolatedSegmentStorage.IndexCheckpointRequest request =
+                        new IsolatedSegmentStorage.IndexCheckpointRequest((result, cause) -> replies.incrementAndGet());
+                assertTrue(storage.checkpointIndex(request,
+                        new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                            forced.countDown();
+                            await(release);
+                        })));
+                assertTrue(forced.await(5, TimeUnit.SECONDS));
+                ByteBuf bytes = entry(context(), 3);
+                try {
+                    assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                            new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> { })));
+                } finally {
+                    bytes.release();
+                }
+                assertTrue(request.stopWaiting());
+                assertFalse(storage.close(Duration.ofMillis(50)));
+                assertThrows(IOException.class, () -> SegmentDerivedIndex.open(config, identity(), 16));
+                release.countDown();
+                assertTrue(storage.close(Duration.ofSeconds(5)));
+                assertEquals(0, replies.get());
+            } finally {
+                release.countDown();
+                storage.close();
+            }
+            try (IsolatedSegmentStorage restarted = storage(config, workers, 6, 4, 16, 3)) {
+                restarted.restart();
+                try (SegmentPointRead.LeasedResult read = storageRead(restarted, context(), 1).result()) {
+                    assertEquals(803, read.result().record().moveId().getLeastSignificantBits());
+                }
             }
         }
     }

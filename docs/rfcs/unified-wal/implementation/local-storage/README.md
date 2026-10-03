@@ -557,3 +557,18 @@ Arena 控制日志、checkpoint 与 rotation metadata-only 重放同一有序命
 最终Java回执 `unified-wal-local-8oAxXZok` 绑定父提交 `e83194428e8955180f4a35991b98c72d608fb622` 与207个源码/测试/向量输入：既有七类272项，267通过、5项Linux亲和性在macOS跳过，零失败/错误；Spotless/Checkstyle通过。复现沿用既有七类run-local-storage-tests.sh命令。初次编译修正FREE decoder局部变量名；终态测试误用强制FOUND助手，现直接验证NOT_READY及无结果/错误；保留全部有效断言。未通过中间run不计作通过。
 
 [有限组合投影](../models/README.md#movefreereuse-组合投影) `unified-wal-model-eggymj0z` 冻结93个输入、172个checksum；17完整正向PASS、40指定反例。当前仍无storage图的victim选择/合批搬迁请求、原owner在线native MOVE与coverage维护、部分存活allocation净回收循环、控制历史/SST净容量、多Arena、OPEN错误恢复、掉电或生产ACK。MOVE后覆盖seed继续关闭，采用完整DATA验证；不将这个真实A/B复用切片提升为完整步骤9或长期运行验收。
+
+
+## Native MOVE 索引维护与覆盖恢复
+
+2026-10-04，现有 `IsolatedSegmentStorage.checkpointIndex` 与终态清理请求已消费当前 MOVE selector。所有原 worker 先等旧 Put、候选定位及物理 reservation 终结，再暂停各自索引；复用既有 DATA ticket/I/O 和原 owner 对齐池，取得 Bookie entry/control 排空保护及全文件 reservation/read-pin gate。COPY 不另行发布普通定位，已持久且成功 apply 的 Arena MOVE 仍是唯一 locator authority。
+
+维护在原索引暂停期间按真实 DB 行遍历，最多256行一个 native WriteBatch；对存在 MOVE 的坐标实际点读当前 target，检查 record identity、CRC、COPY operation/generation 与完整 entry SHA，再用当前 selector 替换旧 native hint。普通 append 的禁止替换语义保持不变。全部原 owner 的占用坐标与物理连续 cut 仍参与完整校验；随后真实 flush、内容摘要及既有 A/B coverage force 才产生 PERSISTED。联合终态清理先删除准确 T 行，再更新其余 MOVE 行并回原 owner 释放 T 坐标。
+
+保护一直保留到实际 native/发布 I/O 与全部原 owner 终结。等待方取消仅撤销回复；pool/refill 或旧 read/entry obligation 未排空时明确拒绝当前维护，不提前关闭文件。native 校验或写入失败保留 Arena selector、不伪造 coverage，并使该 native handle 失败关闭；发布页失败报告 UNKNOWN，已查询可见的正确 locator 仍可读，后续可重新发布。该保守 cut 暂停 Bookie 新 entry 准入，不代表已实现逐 allocation 的在线 compaction cutover。
+
+匹配当前 selector、grant、stream、控制 cut 与实际 DB 摘要的 MOVE coverage 现可成为 restart seed；旧 native 地址、缺少当前可读 MOVE 行或晚于覆盖 cut 的 selector 都退回完整 DATA 验证。覆盖内仍验证物理批头/连续性；每个当前可读 MOVE target 另作实际点读并校验 identity/digest，必要 DATA 同步完成后才开放。Scan.readBytes 包含这些 target 点读的实际读取量。覆盖不允许缺失或坏当前副本退回旧普通定位，也不使 orphan copy 获得权限；覆盖页/索引不可用时原完整扫描与重建保持不变。
+
+新增四项真实回归验证旧行更新/同代发布、陈旧 coverage 拒绝、有效覆盖恢复、坏 CRC/零化当前 target、维护校验失败后完整恢复、页 force 失败后继续读及重发、1/4 worker 下暂停发布中的取消/短关闭与实际排空。最终 Java 回执 `unified-wal-local-BxAQvOwF` 冻结父提交 `e8589da6ab61a98f0cc1ef4e28700eeb1647ffe4` 及207个实际源码/测试/向量输入：相关七类276项，271通过、5项 Linux 亲和性在macOS跳过，零失败/错误；Spotless/Checkstyle通过。初次测试缺少 assertNotNull 导入导致编译失败，修正后分别完成三项/单项定向及最终七类回归，中间失败不计作通过。复现沿用既有七类 `scripts/unified-wal/run-local-storage-tests.sh` 命令。
+
+[Native MOVE coverage 有限投影](../models/README.md#native-move-coverage-投影)回执 `unified-wal-model-75i1oty1` 冻结99个输入、187个 checksum：18完整正向PASS、44指定反例。当前仍无 storage 图的 victim/source 选择与合批 relocation→MOVE 请求、部分存活 allocation 的实际净回收循环、逐 allocation 在线 cutover、控制历史/SST净容量、多Arena、OPEN错误恢复、掉电或生产ACK；步骤8/9及总16步目标保持未完成。此前历史切片的未覆盖项和 receipt 保留各自当时范围，以本节为这次增量的当前依据。

@@ -348,3 +348,20 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 固定A/B/C，B/C为两份copy候选、A/B可FREE并最多各复用一次；MOVE预期A→B→C，copy facts本身不选择目标。CONTROL append、force与apply分开；FREE记录proof cut，允许一次其他control变化检验陈旧proof拒绝。目标与前驱必须仍有原grant generation，源/orphanFREE不能释放current selector，restart选择控制元数据，不从旧generation字节复活原坐标。copy/barrier及准确grant/hash proof、排空旧read与I/O为其他模型/Java验证的输入假设。
 
 正向Copy/PrepareMove/PrepareFree/PrepareReuse/AdvanceControl/AppendControl/Force/ApplyMove/ApplyFree/ApplyReuse/Restart均有coverage；没有state constraint、symmetry或liveness检查。初次组合运行完整通过但未显式展开复用目标generation predicate，随后补齐旧copy不能重新进入reused generation的条件/不变量并重跑，最终只引用新run。终态Bookie准确T/selector删除、真实字节CRC/SHA与DATA/CLOSED范围、native索引/票据由[真实回收切片](../local-storage/README.md#搬迁源与-orphan-的整块回收)拥有；该投影不证明完整checkpoint图、native coverage、字节总账、多victim批次、完整A+C/C+D、掉电或进展。
+
+
+## Native MOVE coverage 投影
+
+2026-10-04，`NativeMoveCoverage.tla` 对原 owner 旧 Put 排空、受保护 native MOVE 更新、flush/coverage 发布、取消及覆盖恢复作有限组合投影。一个坐标/三个候选位置，最多一次 crash；普通 DATA、COPY durability、grant、Bookie 权限、已成功 apply 的 MOVE 和目标 CRC/SHA 判定是输入假设。恢复先检查实际 native 内容与当前 selector 是否匹配，不匹配则全量重建；匹配覆盖仍须校验当前目标字节。native 失败保留 selector，等待方取消不结束维护。`CHECK_DEADLOCK FALSE` 只检查安全性质，不宣称最终进展。
+
+运行 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar` 的最终回执 `unified-wal-model-75i1oty1` 绑定父提交 `e8589da6ab61a98f0cc1ef4e28700eeb1647ffe4`：17个TLA模块、62个cfg、runner及19个Java实际输入，共99项/187个checksum。完整矩阵18正向PASS、44指定反例；新投影如下：
+
+| 配置 | 结果 | generated/distinct | 队列 | 深度/直径 | 秒 | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- | --- |
+| c-move-index | PASS | 188/108 | 0 | 15/15 | 0.855 | 110034944 |
+| ce-move-index-old-put | CapturedOwnersHadNoOldPut | 7/7 | 4 | 3/— | 0.837 | 108855296 |
+| ce-move-index-cancel | MaintenanceKeepsProtection | 24/19 | 7 | 5/— | 0.844 | 107675648 |
+| ce-move-index-stale-row | RecoveredLocatorUsesSelector | 17/13 | 5 | 4/— | 0.791 | 108101632 |
+| ce-move-index-missing-bytes | CoveredReadyValidatesCurrentBytes | 117/78 | 18 | 10/— | 0.840 | 111460352 |
+
+负向配置分别去掉旧 Put 排空、在取消时释放 gate、信任陈旧 native 行、跳过当前 target 验证，均产生指定 invariant 反例。模型不展开真实字节、RocksDB/JNI 原子性、256行批次、多个原 worker 的 ticket/lease 协调、实际 I/O/force/目录窗口、native 部分失败、FREE/reuse 的完整组合、全资源总账、真实进程退出或掉电；旧 Put 防止普通 append 替换的 Java 检查仍保留，反例只验证捕获 cut 的排空前提。真实维护/覆盖回归见[本地状态](../local-storage/README.md#native-move-索引维护与覆盖恢复)，完整A/C/D与组合、Block G、步骤8/9和生产Gate不提升。先前各回执不重绑。

@@ -69,6 +69,14 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             }
         }
 
+        void requireHeld(IsolatedSegmentFiles files, SegmentArenaControlLog log) throws IOException {
+            synchronized (owner) {
+                if (owner != files || authority != log || finished || claimed || owner.reclamation != this) {
+                    throw new IOException("Index maintenance has no held DATA and Bookie protection");
+                }
+            }
+        }
+
         void finish(boolean uncertain) {
             boolean release;
             synchronized (owner) {

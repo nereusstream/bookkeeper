@@ -218,3 +218,16 @@ metadata-only退役范围恢复、空range不虚增序号、rotation及native覆
 | framing | `moveAwareFreeFormatBindsEarlierSelectorCutAndKeepsV1Bytes`验证280-byte独立v2 oracle、错误cut与decoded新proof拒绝、v1字节保留 |
 
 不包含在线MOVE native Put/coverage协调或graph compaction request。
+
+
+Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射：
+
+| 动作 | 实现及真实验证 |
+| --- | --- |
+| Move | 前置真实 COPY/MOVE 切片；本投影假设已 durable/apply 的 selector |
+| OldPut/Prepare/NativeUpdate/Flush/ForcePage | 原 worker checkpoint 暂停及真实 RocksDB更新/flush/页force；nativeMoveMaintenanceReplacesDrainedRowsAndCoveredRestartVerifiesCurrentBytes |
+| NativeFailure/Finish | failedNativeMoveValidationKeepsSelectorAndRequiresFullRecovery；graphMoveIndexPublicationFailureRetainsCurrentReadsAndCanRepublish |
+| Cancel | cancelledGraphMoveCheckpointHoldsProtectionUntilActualPublicationAndOwnerDrain，1/4 worker、短关闭与实际排空 |
+| Crash/CorruptTarget/Recover | 首项真实正常关闭、覆盖恢复与坏CRC/零化target；模型crash不代表新执行了JVM halt或掉电 |
+
+实际读取量包含覆盖 target 的点读；多worker/runtime票据协调仍由Java回归负责，不从这一个坐标投影推出完整MOVE/FREE组合或进展。

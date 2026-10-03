@@ -491,6 +491,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private Throwable failure;
         private SegmentDerivedIndex.Coverage coverage;
         private SegmentBookieControlLog.ReclamationLease cleanupLease;
+        private IsolatedSegmentFiles.ReclamationGuard moveProtection;
+        private SegmentBufferPool.Lease moveBuffer;
+        private boolean nativeStarted;
         private boolean coordinatesStarted;
         private int coordinatesDone;
 
@@ -536,11 +539,33 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             Worker writer = workers[0];
             ioStarted = true;
-            if (cleanup) {
-                writer.ticket.resume(() -> execution.io().submitContinuing(writer.ticket, () -> {
-                    cleanupLease = bookie.protectTerminalCleanup(config, identity);
-                    index.retireTerminalEntries(cleanupLease);
-                }, this::terminalRowsRetired));
+            if (cleanup || arena.hasMoves()) {
+                writer.ticket.resume(() -> {
+                    if (arena.hasMoves()) {
+                        moveBuffer = execution.owner(0).pool().acquire(execution.owner(0).pool().bufferBytes());
+                        if (moveBuffer == null) {
+                            unavailable(null);
+                            finishWorkers();
+                            return;
+                        }
+                    }
+                    execution.io().submitContinuing(writer.ticket, () -> {
+                        cleanupLease = cleanup ? bookie.protectTerminalCleanup(config, identity)
+                                : bookie.protectReclamation(config, identity);
+                        if (moveBuffer != null) {
+                            arena.requireMovePreparation(files);
+                            moveProtection = files.protectReclamation(arena, 0, cleanupLease);
+                        }
+                        if (cleanup) {
+                            nativeStarted = true;
+                            index.retireTerminalEntries(cleanupLease);
+                        }
+                        if (moveProtection != null) {
+                            nativeStarted = true;
+                            index.refreshMovedLocations(arena, files, moveProtection, moveBuffer.bytes());
+                        }
+                    }, this::terminalRowsRetired);
+                });
             } else {
                 publish();
             }
@@ -548,7 +573,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
         private synchronized void terminalRowsRetired(Throwable cause) {
             if (cause != null) {
-                if (cleanupLease == null && cause instanceof IOException) {
+                if (!nativeStarted && cause instanceof IOException) {
                     unavailable(null);
                     failure = cause;
                 } else {
@@ -557,8 +582,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             if (status != IndexCheckpointStatus.PERSISTED) {
                 finishWorkers();
-            } else {
+            } else if (cleanup) {
                 retireCoordinates();
+            } else {
+                publish();
             }
         }
 
@@ -642,6 +669,14 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return;
             }
             responded = true;
+            if (moveProtection != null) {
+                moveProtection.close();
+                moveProtection = null;
+            }
+            if (moveBuffer != null) {
+                moveBuffer.close();
+                moveBuffer = null;
+            }
             if (cleanupLease != null) {
                 cleanupLease.close();
                 cleanupLease = null;
