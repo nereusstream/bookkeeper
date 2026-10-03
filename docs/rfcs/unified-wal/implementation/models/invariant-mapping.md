@@ -52,3 +52,13 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `RetiredBookieTerminalPermissionsRemainDenied` | 被回收权限历史中的fence/tombstone仍禁止normal/read恢复，close/LAC由完整权限相等性质检查 | 单ledger固定轨迹；指定负向在错误image恢复后进入退休域才触发 |
 
 当前权限投影9个动作完整探索48,763 distinct states；字节、密钥、锁、真实文件和票据门槛由独立Java测试验证，模型不授予生产authority。
+
+
+派生索引覆盖回执`unified-wal-model-p_83_s8r`增加以下有限投影：
+
+| 性质 | 当前合同与实现 | 证据边界 |
+|---|---|---|
+| `CoverageWasPersisted` | RFC-0003 §15；同一index generation的完整实际内容flush后，才force持久coverage | 固定2个已选定DATA entry；CF原子性、flush和发布屏障为输入假设，不证明JNI或设备 |
+| `RecoveredCoverageHasLocations` | 恢复检查当前index generation和完整实际定位；新重建代使旧coverage失效 | 已选定DATA/route作为输入；不证明在线handoff、扫描跳过或完整恢复协议 |
+
+正向完整探索53个distinct states，指定负向缺少flush即违反`CoverageWasPersisted`。实际RocksDB读取、内容摘要、generation绑定、字节向量及索引全丢失重建另由Java验证，不从此投影推出完整Model A/C或生产authority。

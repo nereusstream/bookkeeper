@@ -37,6 +37,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 final class SegmentDataRecovery {
     record Scan(long batches, long records, long validatedBytes, long zeroPages) { }
 
+    record StreamCoverage(int shard, Generation generation, long firstSequence, long through) { }
+
     /** Synced physical evidence only; it does not grant Bookie selection, success or writable recovery. */
     record PhysicalStreamCandidate(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
                                    Scan scan, long through, List<SegmentPointRead.Location> entries,
@@ -235,6 +237,26 @@ final class SegmentDataRecovery {
                     || authority.appliedThrough() != arenaAppliedThrough) {
                 throw new IOException("Startup inventory no longer covers current Arena authority");
             }
+        }
+
+        /** Complete same-scan ranges for a derived index; this does not grant DATA or allocator authority. */
+        List<StreamCoverage> indexStreams(SegmentArenaControlLog authority) throws IOException {
+            requireCurrentArena(authority);
+            List<StreamCoverage> result = new ArrayList<>();
+            HashSet<Integer> shards = new HashSet<>();
+            for (Map.Entry<StreamKey, StreamPrefix> entry : streamPrefixes.entrySet()) {
+                StreamKey key = entry.getKey();
+                StreamPrefix prefix = entry.getValue();
+                if (!prefix.contiguous() || !shards.add(key.shard())
+                        || authority.streamFirstSequence(key.shard(), key.generation().value()).orElse(-1)
+                                != prefix.firstSequence()) {
+                    throw new IOException("Derived coverage needs one complete current stream per shard");
+                }
+                result.add(new StreamCoverage(key.shard(), key.generation(),
+                        prefix.firstSequence(), prefix.through()));
+            }
+            result.sort(java.util.Comparator.comparingInt(StreamCoverage::shard));
+            return List.copyOf(result);
         }
 
         /** Same-scan physical stream evidence only; Bookie selection and local success remain separate. */

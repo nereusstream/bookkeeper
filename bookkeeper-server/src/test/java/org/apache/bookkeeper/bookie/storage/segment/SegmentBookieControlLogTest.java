@@ -7041,4 +7041,338 @@ public class SegmentBookieControlLogTest {
             Runtime.getRuntime().halt(0);
         }
     }
+
+    private void createIndexData(IsolatedSegmentConfig config) throws Exception {
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(
+                        config, identity(), 1024 * 1024, key((byte) 3), VALIDATOR)) {
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4)));
+            files.startSession(arena);
+            for (int shard = 0; shard < 2; shard++) {
+                long offset = 4096L + shard * 1024 * 1024;
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                        new UUID(0, 5 + shard), new Generation(1), 0, 0, shard, new Generation(1),
+                        5 + shard, offset, 1, 11 + shard)));
+                ByteBuf normal = Unpooled.wrappedBuffer(entryBytes(context(44 + shard), 1, -1, 8, (byte) 0));
+                ByteBuf copy = Unpooled.wrappedBuffer(entryBytes(context(44 + shard), 2, -1, 8, (byte) 0));
+                try {
+                    List<SegmentBatchFormat.Data> records = shard == 0
+                            ? List.of(SegmentBatchFormat.entry(context(44), normal),
+                                    SegmentBatchFormat.relocation(context(44), copy, new UUID(3, 4), new Generation(1)))
+                            : List.of(SegmentBatchFormat.entry(context(45), normal));
+                    files.writeAuthorized(SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                            0, shard, 5 + shard, new Generation(1), new Generation(1), 11 + shard, offset),
+                            records), arena);
+                } finally {
+                    normal.release();
+                    copy.release();
+                }
+            }
+            files.close();
+        }
+    }
+
+    private static final class IndexFixture implements AutoCloseable {
+        private SegmentDataFileLock guard;
+        private SegmentArenaControlLog arena;
+        private SegmentBookieControlLog bookie;
+        private SegmentDataRecovery.PhysicalInventory inventory;
+
+        private IndexFixture(IsolatedSegmentConfig config, SegmentFileHeader identity) throws IOException {
+            try {
+                guard = SegmentDataFileLock.open(config.directory());
+                arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                bookie = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR);
+                inventory = SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(config, identity,
+                        arena, bookie, new SegmentFileIo(), 16, 4, guard.lock());
+            } catch (IOException failure) {
+                try {
+                    close();
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+                throw failure;
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            IOException first = null;
+            for (AutoCloseable resource : new AutoCloseable[] {bookie, arena, guard}) {
+                if (resource != null) {
+                    try {
+                        resource.close();
+                    } catch (Exception failure) {
+                        IOException cause = failure instanceof IOException io ? io : new IOException(failure);
+                        if (first == null) {
+                            first = cause;
+                        } else {
+                            first.addSuppressed(cause);
+                        }
+                    }
+                }
+            }
+            if (first != null) {
+                throw first;
+            }
+        }
+    }
+
+    @Test
+    public void derivedIndexPutIsQueryableButCoverageRequiresActualFlushAndPublication() throws Exception {
+        IsolatedSegmentConfig config = config();
+        createIndexData(config);
+        SegmentDerivedIndex.Coverage coverage;
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            assertTrue(index.coverage().isEmpty());
+            index.replace(source.inventory, source.arena, source.bookie);
+            assertEquals(source.inventory.entries().get(0), index.get(context(), 1).orElseThrow());
+            assertTrue(index.get(context(), 2).isEmpty()); // Uncommitted relocation never becomes ordinary DATA.
+            assertTrue(index.coverage().isEmpty());
+            coverage = index.checkpoint(new SegmentFileIo(13, -1, -1, false));
+            assertEquals(2, coverage.entries());
+            assertEquals(List.of(new SegmentDataRecovery.StreamCoverage(0, new Generation(1), 11, 11),
+                    new SegmentDataRecovery.StreamCoverage(1, new Generation(1), 12, 12)), coverage.streams());
+            assertEquals(source.arena.appliedThrough(), coverage.arenaCut());
+            assertEquals(source.bookie.recoveryReadCut(config, identity()), coverage.bookieCut());
+            assertEquals(coverage, index.coverage().orElseThrow());
+            assertEquals(1, SegmentPointRead.read(config, identity(), source.arena,
+                    index.get(context(45), 1).orElseThrow()).record().entryId());
+        }
+        try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            assertEquals(coverage, index.coverage().orElseThrow());
+            assertTrue(index.get(context(45), 1).isPresent());
+        }
+    }
+
+    @Test
+    public void derivedIndexReplacementRetiresOldCoverageBeforeDestructiveEdits() throws Exception {
+        IsolatedSegmentConfig config = config();
+        createIndexData(config);
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            SegmentDerivedIndex.Coverage first = index.rebuild(source.inventory, source.arena, source.bookie);
+            index.replace(source.inventory, source.arena, source.bookie);
+            assertTrue(index.coverage().isEmpty());
+            SegmentDerivedIndex.Coverage next = index.checkpoint(new SegmentFileIo());
+            assertFalse(first.indexGeneration().equals(next.indexGeneration()));
+            assertEquals(2, next.entries());
+        }
+    }
+
+    @Test
+    public void derivedIndexRejectsWrongScopeStaleScanAndNativeLockConflict() throws Exception {
+        IsolatedSegmentConfig config = config();
+        createIndexData(config);
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            index.rebuild(source.inventory, source.arena, source.bookie);
+            assertThrows(IOException.class, () -> SegmentDerivedIndex.open(config, identity(), 16));
+            assertTrue(index.coverage().isPresent());
+            source.arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                    new UUID(0, 19), new Generation(1), 0, 0, 0, new Generation(1),
+                    19, 4096 + 2L * 1024 * 1024, 1, 11)));
+            assertThrows(IOException.class, () -> index.replace(source.inventory, source.arena, source.bookie));
+            assertTrue(index.get(context(), 1).isPresent());
+        }
+        SegmentFileHeader foreign = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 8)),
+                identity().arenaId(), identity().bookieId());
+        assertThrows(IOException.class, () -> SegmentDerivedIndex.open(config, foreign, 16));
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 1)) {
+            assertThrows(IOException.class, () -> index.replace(source.inventory, source.arena, source.bookie));
+        }
+    }
+
+    @Test
+    public void derivedIndexCoverageChecksActualContentsAndSurvivingPublication() throws Exception {
+        IsolatedSegmentConfig config = config();
+        createIndexData(config);
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            index.rebuild(source.inventory, source.arena, source.bookie);
+            assertEquals(2, index.checkpoint(new SegmentFileIo()).publication());
+        }
+        byte[] later = Files.readAllBytes(SegmentDerivedIndex.publication(config, 1));
+        later[0] ^= 1;
+        Files.write(SegmentDerivedIndex.publication(config, 1), later);
+        try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            assertEquals(1, index.coverage().orElseThrow().publication());
+        }
+        try (org.rocksdb.Options options = new org.rocksdb.Options();
+                org.rocksdb.RocksDB db = org.rocksdb.RocksDB.open(options,
+                        SegmentDerivedIndex.directory(config).toString());
+                org.rocksdb.FlushOptions flush = new org.rocksdb.FlushOptions().setWaitForFlush(true)) {
+            db.delete(SegmentDerivedIndex.key(context(), 1));
+            db.flush(flush);
+        }
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            assertTrue(index.coverage().isEmpty());
+            assertTrue(index.get(context(), 1).isEmpty());
+            index.rebuild(source.inventory, source.arena, source.bookie);
+            assertTrue(index.get(context(), 1).isPresent());
+        }
+    }
+
+    @Test
+    public void deletedDerivedDatabaseRebuildsFromDataWithoutRevivingTombstones() throws Exception {
+        IsolatedSegmentConfig config = config();
+        createIndexData(config);
+        UUID old;
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            old = index.rebuild(source.inventory, source.arena, source.bookie).indexGeneration();
+            source.bookie.submitBatch(List.of(tombstone(44, 9)));
+        }
+        try (java.util.stream.Stream<Path> paths = Files.walk(SegmentDerivedIndex.directory(config))) {
+            for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                Files.delete(path);
+            }
+        }
+        try (IndexFixture source = new IndexFixture(config, identity());
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            assertTrue(index.coverage().isEmpty()); // Old pages cannot cover a newly created database.
+            SegmentDerivedIndex.Coverage rebuilt = index.rebuild(source.inventory, source.arena, source.bookie);
+            assertFalse(old.equals(rebuilt.indexGeneration()));
+            assertEquals(1, rebuilt.entries());
+            assertTrue(index.get(context(), 1).isEmpty());
+            assertTrue(index.get(context(45), 1).isPresent());
+            assertEquals(1, SegmentPointRead.read(config, identity(), source.arena,
+                    index.get(context(45), 1).orElseThrow()).record().entryId());
+        }
+    }
+
+    @Test
+    public void derivedCoverageWriteOrForceFailureNeverReportsCheckpointSuccess() throws Exception {
+        IsolatedSegmentConfig config = config();
+        createIndexData(config);
+        for (boolean partial : new boolean[] {true, false}) {
+            try (IndexFixture source = new IndexFixture(config, identity());
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+                index.replace(source.inventory, source.arena, source.bookie);
+                SegmentFileIo broken = new SegmentFileIo(13, partial ? 2 : -1, partial ? -1 : 1, false);
+                assertThrows(IOException.class, () -> index.checkpoint(broken));
+                assertThrows(IOException.class, () -> index.get(context(), 1));
+            }
+            try (IndexFixture source = new IndexFixture(config, identity());
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+                assertEquals(!partial, index.coverage().isPresent());
+                index.rebuild(source.inventory, source.arena, source.bookie);
+                assertTrue(index.get(context(), 1).isPresent());
+            }
+        }
+    }
+
+    @Test
+    public void realDerivedIndexProcessExitBeforeFlushAndAtCoveragePublicationRebuildsData() throws Exception {
+        for (String phase : List.of("put", "publication", "done")) {
+            IsolatedSegmentConfig config = checkpointConfig(temporary.newFolder("index-" + phase)
+                    .toPath().resolve("bookie"));
+            createIndexData(config);
+            try (IndexFixture source = new IndexFixture(config, identity());
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+                index.rebuild(source.inventory, source.arena, source.bookie);
+            }
+            Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-Xmx96m", "-XX:MaxDirectMemorySize=32m", "-cp",
+                    System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+                    DerivedIndexCrashProbe.class.getName(), phase, config.directory().toString())
+                    .redirectErrorStream(true).start();
+            if (!process.waitFor(15, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                throw new AssertionError("Derived index probe did not terminate");
+            }
+            assertEquals(new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8),
+                    23, process.exitValue());
+            try (IndexFixture source = new IndexFixture(config, identity());
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+                assertEquals(!phase.equals("put"), index.coverage().isPresent());
+                index.rebuild(source.inventory, source.arena, source.bookie);
+                assertEquals(2, index.coverage().orElseThrow().entries());
+                assertTrue(index.get(context(), 1).isPresent());
+            }
+        }
+    }
+
+    public static final class DerivedIndexCrashProbe {
+        public static void main(String[] args) throws Exception {
+            IsolatedSegmentConfig config = checkpointConfig(Path.of(args[1]));
+            SegmentFileHeader identity = new SegmentBookieControlLogTest().identity();
+            try (IndexFixture source = new IndexFixture(config, identity);
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity, 16)) {
+                index.replace(source.inventory, source.arena, source.bookie);
+                if (args[0].equals("put")) {
+                    Runtime.getRuntime().halt(23);
+                }
+                index.checkpoint(new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    if (args[0].equals("publication")) {
+                        Runtime.getRuntime().halt(23);
+                    }
+                }));
+                Runtime.getRuntime().halt(23);
+            }
+        }
+    }
+
+    @Test
+    public void derivedIndexKeyLocationAndCoverageMatchIndependentByteVectors() throws Exception {
+        ProfileLedgerContext context = new ProfileLedgerContext(44, filled(16, (byte) 1), filled(36, (byte) 3));
+        byte[] key = SegmentDerivedIndex.key(context, 1);
+        UUID generation = new UUID(1, 2);
+        SegmentPointRead.Location location = new SegmentPointRead.Location(new SegmentBatchFormat.Address(
+                0, 0, 5, new Generation(1), new Generation(1), 11, 4096), 4096, 4224, 204, context, 1);
+        byte[] value = SegmentDerivedIndex.encodeLocation(generation, location);
+        java.security.MessageDigest hash = java.security.MessageDigest.getInstance("SHA-256");
+        hash.update(key);
+        hash.update(value);
+        SegmentDerivedIndex.Coverage coverage = new SegmentDerivedIndex.Coverage(1, generation, 3, 1, 1,
+                List.of(new SegmentDataRecovery.StreamCoverage(0, new Generation(1), 11, 11)));
+        assertArrayEquals(checkpointVector("index-key-v1.hex"), key);
+        assertArrayEquals(checkpointVector("index-location-v1.hex"), value);
+        assertArrayEquals(checkpointVector("index-coverage-v1.hex"),
+                SegmentDerivedIndex.encodePublication(filled(32, (byte) 4), coverage, hash.digest()).array());
+    }
+
+    @Test
+    public void storageGraphRebuildsDeletedDerivedIndexBeforeCleanRestartRequests() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 16)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            storageWrite(storage, context(), 1);
+        }
+        try (java.util.stream.Stream<Path> paths = Files.walk(SegmentDerivedIndex.directory(config))) {
+            for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                Files.delete(path);
+            }
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 16)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult result = storageRead(storage, context(), 1).result()) {
+                assertEquals(1, result.result().record().entryId());
+            }
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                    storageWrite(storage, context(), 1).status());
+            storageWrite(storage, context(), 2);
+        }
+        try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            assertEquals(1, index.coverage().orElseThrow().entries());
+            assertTrue(index.get(context(), 1).isPresent());
+            assertTrue(index.get(context(), 2).isEmpty()); // Runtime handoff is still a separate integration step.
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 16)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult result = storageRead(storage, context(), 2).result()) {
+                assertEquals(2, result.result().record().entryId());
+            }
+        }
+        try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+            assertEquals(2, index.coverage().orElseThrow().entries());
+            assertTrue(index.get(context(), 2).isPresent());
+        }
+    }
 }

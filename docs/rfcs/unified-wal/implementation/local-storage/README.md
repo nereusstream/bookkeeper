@@ -353,3 +353,17 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 本轮只在健康CLOSE后显式维护，没有运行中storage图的自动调度；全部首次幂等结果及内部checkpoint历史仍保留，物理prefix回收不证明长期状态压缩或可持续运行。未关闭OPEN/quarantine合同不变。在线维护、派生索引、MOVE/FREE、多Arena、真实掉电、完整模型及生产authority保持未完成；旧版本混用writer未验证。
 
 本轮184个变更文档相对链接、24个anchor检查通过；JSON/Python AST、回执checksums、197个Java及31个模型当前输入哈希和3份父提交合同哈希核对通过，`git diff --check`无问题。
+
+### RocksDB冷重建与持久覆盖切片
+
+2026-10-03 已实现真实`SegmentDerivedIndex`，复用已有rocksdbjni 9.9.3，单CF关闭WAL、每批最多256定位；index UUID与删除旧namespace的同批flush先退休旧覆盖，完整DATA inventory载入后再执行真实SST flush，最后以FileChannel force/目录同步发布A/B coverage。页绑定storage/config身份、index UUID、Arena/Bookie cut、同次连续stream范围及全部实际key/value摘要；fresh Get只有物理locator资格。原`ldb.Batch.flush()`是db.write，不作为该持久性证据。
+
+`IsolatedSegmentStorage`在正常关闭后的restart、新DATA OPEN及owner暴露前完成全量DATA同步/route选择、DB重建和覆盖；启动失败及关闭按已有资源所有权关闭native句柄/缓存。新写和点读仍使用热表，没有新Add同步DB调用。完整删库、外部旧coverage残留及新generation不恢复tombstone；ENTRY_DATA可建定位，未提交relocation copy不入普通索引。没有用此覆盖跳过扫描；坏DB无法打开时报告错误，不自动删除未知目录。
+
+最新Java回执`unified-wal-local-oPEjR8PE`绑定201个源码/测试/向量输入，7个相关类215项、210通过、5项Linux亲和在macOS跳过、0失败/错误。新增9个真实回归覆盖query-visible与持久覆盖分开、重建代先使旧覆盖失效、native开库互斥/错identity/旧cut/容量拒绝、坏发布页回退/实际locator缺失、删库后tombstone过滤、短写/force失败、3个真实JVM halt阶段、3个独立字节向量，以及删库后storage图两轮正常restart/点读/重复/追加。Put后退出不要求未flush字节一定消失，只断言没有可用coverage并从DATA重建；完整未force页在恢复同步后可解析，不把失败调用记成功。
+
+最新模型回执`unified-wal-model-p_83_s8r`绑定36个实际输入（6个module、16个cfg、runner、13个Java）及父提交处3份合同哈希；16个配置为7个完整正向PASS、9个指定反例。新增2 entry/最多3 index代/1次故障的单CF覆盖投影：72 generated/53 distinct、queue=0、depth/diameter=16，8个Next动作均非零；未flush就发布的候选规则实际违反`CoverageWasPersisted`。模型假设已选定DATA/route与flush/WriteBatch语义，不证明JNI、SST/barrier、CRC、空间预算或完整A+C/D，见[模型记录](../models/README.md#派生索引覆盖投影)。
+
+复现仍用前节7类测试及model runner命令；最新两run父提交为`78100b5ad9c999651cdb4eb577b444c895f0d549`，实际输入SHA-256与本轮实现匹配，历史回执保持原绑定。另执行`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过；RocksDB native/API与字节合同见[实验格式](format-v1.md#rocksdb派生定位与覆盖页)。
+
+该交付是在线索引接管前的实际持久化/重建依赖。尚无异步runtime WriteBatch、热淘汰/fresh fallback、coverage缩短DATA扫描、MOVE/delete更新排序、stall期间DATA/fence隔离或完整全局native/磁盘账本；覆盖校验当前读取全部索引内容，未报告恢复性能提升。真实掉电、Linux NUMA、长期可持续存储、完整模型/步骤8及生产authority仍未完成。

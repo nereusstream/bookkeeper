@@ -155,7 +155,9 @@ Bookie级日志是跨Arena ledger权限的唯一持久化owner；不把相同rou
 
 历史（`43bfd80b`版本）2026-10-03 Arena增量已在健康CLOSE后显式rotation并回收自己的旧控制prefix，两个owner的DATA图经过两轮维护/restart仍可读、幂等及新追加；Bookie checkpoint页和完整旧Bookie日志保持原合同。Arena字节及恢复根由[RFC-0003 §11](RFC-0003-segment-storage-allocator.md#11-allocator-checkpoint-与-rotation)与[实验格式](implementation/local-storage/format-v1.md#arena日志代与双恢复根)拥有。此切片不完成Bookie rotation或在线维护。
 
-2026-10-03 Bookie rotation增量：在无在途normal/read/recovery admission、控制I/O或未apply batch时，连续建立两个applied checkpoint，保留sealed credential、首次条件结果、fence/tombstone、最新LAC与grant/close；新物理文件及目录同步、两个恢复根force/验证后才回收旧prefix。固定Bookie sidecar锁及第三页独立于Arena；当前物理代及完整suffix仍必需，单image可回退，两image不可用则拒绝。真实短写/force失败、七个JVM退出阶段、三轮容量耗尽、慢I/O期间拒绝新票据、跨JVM锁和双owner DATA图两轮正常restart已有验证，见[本地实现](implementation/local-storage/README.md#bookie停写rotation与共享物理协议)及[字节合同](implementation/local-storage/format-v1.md#bookie日志代与双恢复根)。有限权限模型新增prefix回收投影，独立C模型检查双根/屏障；两者未组合为完整A+C。在线调度、长期幂等历史压缩、派生索引、真实掉电及完整Model A/Block G仍未完成。
+2026-10-03 Bookie rotation增量：在无在途normal/read/recovery admission、控制I/O或未apply batch时，连续建立两个applied checkpoint，保留sealed credential、首次条件结果、fence/tombstone、最新LAC与grant/close；新物理文件及目录同步、两个恢复根force/验证后才回收旧prefix。固定Bookie sidecar锁及第三页独立于Arena；当前物理代及完整suffix仍必需，单image可回退，两image不可用则拒绝。真实短写/force失败、七个JVM退出阶段、三轮容量耗尽、慢I/O期间拒绝新票据、跨JVM锁和双owner DATA图两轮正常restart已有验证，见[本地实现](implementation/local-storage/README.md#bookie停写rotation与共享物理协议)及[字节合同](implementation/local-storage/format-v1.md#bookie日志代与双恢复根)。有限权限模型新增prefix回收投影，独立C模型检查双根/屏障；两者未组合为完整A+C。在线调度、长期幂等历史压缩、在线派生索引、真实掉电及完整Model A/Block G仍未完成。
+
+2026-10-03 隔离restart另在新DATA OPEN及owner暴露前，由已同步且Bookie本地route选择的inventory重建真实RocksDB派生定位；fenced仍可读、tombstone不入库，未提交relocation copy不提升。覆盖以实际flush和独立页force发布，保留两控制cut及index generation；它不替代权限日志或DATA sync，当前始终完整扫描，未接在线普通Add、selector/hot接管或生产readiness。详见[RFC-0003 §15](RFC-0003-segment-storage-allocator.md#15-derived-index)。
 
 跨三层的执行顺序固定为：
 

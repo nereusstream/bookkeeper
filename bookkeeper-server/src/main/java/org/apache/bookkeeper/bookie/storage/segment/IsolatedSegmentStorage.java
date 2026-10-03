@@ -57,6 +57,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private IsolatedSegmentFiles files;
     private SegmentArenaControlLog arena;
     private SegmentBookieControlLog bookie;
+    private SegmentDerivedIndex index;
     private volatile SegmentExecutionGroup execution;
     private SegmentBookieControlDriver controls;
     private boolean startAttempted;
@@ -102,9 +103,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 }
                 arena = SegmentArenaControlLog.open(config, identity, limits.controlLogBytes());
                 bookie = SegmentBookieControlLog.open(config, identity, limits.controlLogBytes(), key, validator);
+                index = SegmentDerivedIndex.open(config, identity, limits.hotEntries());
                 if (existing) {
                     files = IsolatedSegmentFiles.openForLocalResults(config, identity, arena, bookie,
-                            new SegmentFileIo(), limits.hotEntries(), config.logicalShards());
+                            new SegmentFileIo(), limits.hotEntries(), config.logicalShards(), index);
                 } else {
                     files.startSession(arena);
                 }
@@ -304,7 +306,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     first = failure;
                 }
             }
-            for (AutoCloseable resource : new AutoCloseable[] {files, bookie, arena}) {
+            for (AutoCloseable resource : new AutoCloseable[] {files, index, bookie, arena}) {
                 if (resource != null) {
                     try {
                         resource.close();

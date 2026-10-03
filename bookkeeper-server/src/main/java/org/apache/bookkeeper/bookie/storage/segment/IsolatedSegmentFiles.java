@@ -230,6 +230,13 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                     SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
                                                     SegmentFileIo recoveryIo, int maxEntries, int maxStreams)
             throws IOException {
+        return openForLocalResults(config, identity, authority, bookie, recoveryIo, maxEntries, maxStreams, null);
+    }
+
+    static IsolatedSegmentFiles openForLocalResults(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                    SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
+                                                    SegmentDerivedIndex index) throws IOException {
         Objects.requireNonNull(bookie, "bookie");
         if (maxEntries < 1 || maxStreams < 1) {
             throw new IllegalArgumentException("Positive restart locator and stream capacities required");
@@ -246,6 +253,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             IsolatedSegmentFiles result = openAppendOnly(config, identity, authority, bookie,
                     recoveryIo, maxEntries, maxStreams);
             try {
+                if (index != null) {
+                    index.rebuild(result.startupInventory, authority, bookie);
+                }
                 result.startSession(authority);
                 if (cut != bookie.recoveryReadCut(config, identity)) {
                     throw new IOException("Bookie control cut changed during local-result restart");

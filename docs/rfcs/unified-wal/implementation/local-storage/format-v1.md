@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；完整selector、在线Bookie/Arena维护、服务级可写restart与生产entry success authority仍未完成。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；真实RocksDB冷重建/覆盖页见下文；完整selector、在线索引/Bookie/Arena维护、服务级可写restart与生产entry success authority仍未完成。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -180,6 +180,42 @@ Bookie `BOOKIE_CHECKPOINT_COMMIT`使用owner=BOOKIE/code=10，body为64-byte ref
 control容量≥10656字节（8192 header、416双commit预留、2048普通控制槽）时，普通写入保留416字节供rotation；更小旧配置保持有限日志并拒绝rotation。image仍各受2×control容量payload上限约束，首次条件结果及内部checkpoint历史不prune，状态满额停止。没有在线调度或长期历史压缩，不据物理日志回收宣称可长期运行。
 
 独立Python struct/逐位CRC32C生成`bookie-rotation-header-v1.hex`及`bookie-rotation-publication-v1.hex`，均4096 bytes，物理代2、相邻checkpoint代1/2、原commit UUID(1,2)/(3,4)。Java逐字节对照。真实文件测试覆盖sealed credential、fence/LAC/closed grant、三轮容量耗尽、7个JVM退出阶段、短写/force失败、跨JVM锁和双owner DATA正常restart；进程退出不等于真实掉电，也未验证旧binary混用写者。
+
+## RocksDB派生定位与覆盖页
+
+隔离冷启动使用现有依赖`rocksdbjni=9.9.3`，不复用Classic `KeyValueStorageRocksDB.Batch.flush()`的命名来推断持久性：后者是write调用，本路径显式执行`RocksDB.flush(FlushOptions.setWaitForFlush(true))`。单column family、`disableWAL=true/sync=false/useFsync=true`，每次WriteBatch最多256个定位；write buffer=1 MiB×最多2、block cache=1 MiB、最多32 open files和2 background jobs。这些是本组件配置，不是进程RSS/全部Bookie资源或磁盘峰值证明。WAL关闭时Put可能在进程退出后丢失，依据[官方说明](https://github.com/facebook/rocksdb/wiki/Basic-Operations)；[锁定版本flush API](https://github.com/facebook/rocksdb/blob/v9.9.3/java/src/main/java/org/rocksdb/FlushOptions.java)等待flush完成。
+
+`derived-index`目录由RocksDB自己的排他锁保护。binding key为单byte 0；64-byte value依次为`UWIDB001`、version u32=1、locatorBytes u32=160、index UUID[16]、SHA-256[32]。scope SHA取本配置与identity的Bookie身份页（fileId=-3）完整4096 bytes；重建前通过同一CF WriteBatch更新随机index UUID并deleteRange定位namespace，再flush。破坏旧定位前已退休旧覆盖；关闭WAL的重新载入不改变Bookie/Arena权威日志。
+
+定位key共77 bytes：namespace u8=16、magic=`UWIDXK01`、原60-byte ledger context、entryId u64；它绑定ledger instance/descriptor。160-byte value：
+
+| Offset | 字段 |
+|---|---|
+| 0 / 8～24 | `UWIDXL01` / index UUID |
+| 24 / 28 / 32 | DATA file index u32 / shard u32 / allocation u64 |
+| 40 / 48 / 56 / 64 | allocation generation / stream generation / batch sequence / batch offset，均u64 |
+| 72 / 76 / 84 | batch length u32 / record offset u64 / record length u32 |
+| 88～148 / 148 | ledger context[60] / entryId u64 |
+| 156 | CRC32C[0,156) |
+
+fresh Get校验generation、key/context一致、CRC和记录范围，仅返回物理定位；调用者仍须执行Bookie权限、DATA record及当前selector/pin检查。运行时hot-first/fresh DB fallback、热记录淘汰及异步Add/MOVE/delete顺序尚未接线，当前普通Add不访问DB。
+
+固定`index-coverage-a/b`为目录中的独立4096-byte页；单CF真实flush后才写完整inactive页、force、同步目录并重读验证。page位置：
+
+| Offset | 字段 |
+|---|---|
+| 0 / 8 / 12 / 16 | `UWICOV01` / version u32=1 / stream count u32 / publication generation u64 |
+| 24～40 / 40～72 | index UUID / scope SHA-256 |
+| 72 / 80 / 88 | Arena applied cut i64 / Bookie recovery read cut i64 / locator count u64 |
+| 96～128 | 按key无符号排序的完整key+value字节SHA-256 |
+| 128之后 | 每stream 32 bytes：shard u32、reserved u32=0、stream generation u64、first/through u64 |
+| 最后一个stream后～4092 / 4092 | zero reserved / CRC32C[0,4092) |
+
+stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每shard只接受一个已授权连续stream。同次完整DATA校验/同步的范围来自重放的Arena起点，不由最大entryId或Put完成推导。恢复只选scope/UUID匹配、CRC正确且全部locator数量/内容摘要相符的最高页，再force页及同步目录；marker缺失、坏页、数据库重建代不匹配或内容缺失不提供覆盖。删除`derived-index`后新UUID使外部旧页失效，控制与DATA仍是重建来源。publication或force失败不返回成功；完整未force页仅在恢复同步后可解析，不改变原调用失败。
+
+`IsolatedSegmentStorage.restart()`在新writer session/owner开放前，全量校验同步并按Bookie本地route过滤DATA，重建DB和覆盖；新写仍使用既有热表。当前不使用coverage跳过任何DATA扫描，不删除或缩减DATA/控制authority。索引损坏无法打开时报告错误，完整删除索引后可重建；没有自动清理未知损坏目录或在线重建。
+
+独立Python struct/逐位CRC32C向量：`index-key-v1.hex`77 bytes、`index-location-v1.hex`160 bytes、`index-coverage-v1.hex`4096 bytes。固定index UUID(1,2)、scope SHA为32个0x04；仅为编码oracle，不是该scope的权限或实际文件authority。真实Get/flush、tombstone/copy排除、旧代退休、坏页/缺定位、native lock、短写/force失败、3个JVM halt阶段及删库后的storage图正常restart由局部回执拥有。
 
 ## 固定向量与验证边界
 

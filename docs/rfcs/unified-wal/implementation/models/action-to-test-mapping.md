@@ -60,3 +60,15 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 | `Freeze/Publish/Recover`（退休域） | `bookieRotationFallbackPreservesFenceAndRequiresTheCurrentJournal`、独立Bookie header/第三页向量、两个owner rotation后的DATA图restart |
 
 共享物理`WriteFile/ForceFile/ForceDirectory/WriteRoot/ForceRoot/Reclaim`仍由独立C模型检查；Bookie真实`bookieRotationProcessExitKeepsAuthorityAtFileAndDualRootBarriers`验证7个JVM退出阶段，sidecar及慢I/O票据门槛由独立测试覆盖。权限模型合并这些屏障为输入假设，不是两个模型的组合证明，也不把进程退出当成掉电。
+
+
+派生索引覆盖回执`unified-wal-model-p_83_s8r`正向8个Next动作均非零：
+
+| 动作 | 当前实现/真实测试 |
+|---|---|
+| `BeginRebuild/ForceReset` | `SegmentDerivedIndex.replace`先退休旧coverage再更新定位；`derivedIndexReplacementRetiresOldCoverageBeforeDestructiveEdits` |
+| `Write/Flush/Publish/ForcePublication` | `derivedIndexPutIsQueryableButCoverageRequiresActualFlushAndPublication`；`derivedIndexKeyLocationAndCoverageMatchIndependentByteVectors`及`derivedCoverageWriteOrForceFailureNeverReportsCheckpointSuccess` |
+| `Crash/Recover` | `realDerivedIndexProcessExitBeforeFlushAndAtCoveragePublicationRebuildsData`的Put后、发布force前及发布完成三个真实JVM halt阶段；模型故障丢弃未同步内容，真实进程退出不证明掉电 |
+| 新一轮`BeginRebuild` | `deletedDerivedDatabaseRebuildsFromDataWithoutRevivingTombstones`及`storageGraphRebuildsDeletedDerivedIndexBeforeCleanRestartRequests` |
+
+当前只接入冷启动完整DATA扫描之后、开放请求之前的重建。在线hot handoff、index stall背压、扫描跳过及完整A+C/D模型均未完成；独立模型与实际测试不互相代替证据。
