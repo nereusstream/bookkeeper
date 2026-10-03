@@ -140,6 +140,23 @@ final class SegmentHotDirectory {
         indexPaused = false;
     }
 
+    /** Called on the original owner only after native deletion has completed under a held Bookie snapshot. */
+    IndexCut retireTerminalCoordinates(SegmentBookieControlLog.ReclamationLease authority) throws IOException {
+        owner.requireOwner();
+        if (!indexPaused || prefix == null || indexInFlight || unindexed != 0 || !pendingBatches.isEmpty()
+                || !pendingKeys.isEmpty() || !candidates.isEmpty() || prefix.pending() != 0
+                || prefix.failed() || indexFailure != null) {
+            throw new IOException("Terminal coordinates still have physical or index obligations");
+        }
+        var keys = occupied.iterator();
+        while (keys.hasNext()) {
+            if (authority.terminalAtCut(keys.next().context())) {
+                keys.remove();
+            }
+        }
+        return new IndexCut(prefix.indexCoverage(), occupied.size());
+    }
+
     /** Query-visible index rows remain physical hints and must still pass prefix, grant and Bookie checks. */
     void freshGet(SegmentOwnerLoop.Ticket ticket, ProfileLedgerContext context, long entryId,
                   BiConsumer<SegmentPointRead.Location, Throwable> completed) {

@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[整allocation复用与健康关闭末端](#整-allocation-复用与健康关闭末端)。下列早期切片保留各自历史范围和receipt；当前完成边界以最新切片为准。复用限健康管理会话及匹配整块范围，MOVE/compaction与长期净容量仍未完成。
+2026-10-04 当前增量为[运行期终态索引与坐标回收](#运行期终态索引与坐标回收)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围，MOVE/compaction与长期净容量仍未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -476,6 +476,8 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 
 ### 整 allocation 复用与健康关闭末端
 
+本节保留 `c9463f2ed1` 的历史切片与输入回执；运行期终态派生清理的当前进展见下一节。
+
 2026-10-04，已有 `planPools` 与异步 demand refill 优先选择同文件、同 blocks 数的完整 retired extent，再使用 fresh 高水位空间。新 allocation id 保持唯一；generation 0→1 只用于初始空闲范围，复用必须准确匹配 FREE 已推进到的当前空闲 generation（例如 2），新 grant 使用 2 而不再加成 3。完整控制记录 durable 并成功顺序 apply 后才准许 DATA；同范围竞争、旧 generation/旧 id、未 apply grant 都不授予写权限。不拆分 retired extent，不截短共享文件，不逐次清零整块，不新增 I/O 线程或维护队列。
 
 当前 restart 仍仅支持健康 CLOSED 管理会话。因此旧残留范围采用控制日志中的 CLOSED v2 末端见证：关闭文件准入与描述符、实际 reservation/I/O/read lease 全部终结且无 DATA 错误后，保存每个当前 reused allocation 的 id、generation 和实际已写连续 prefix end。保留前一健康会话的末端以关闭未重新写入的旧 grant。无写入的新 grant 使用 allocation start。控制容量预留包含潜在新 reused grant 的末端；超出单控制记录有界容量时拒绝，不留下已授权而无法记录的扩大范围。decoder facts 不能提交伪造的 runtime CLOSED tail，未关闭实际 writer 的调用拒绝且保留原 session owner。
@@ -489,3 +491,20 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 这是健康会话下的真实整块 FREE/reuse 增量。没有 OPEN 恢复新规则、MOVE/部分存活 compaction、runtime tombstone/native occupancy 清理、长期净回收、控制历史压缩、多 Arena、掉电或性能结论；步骤 9 与总目标均未完成。
 
 最终模型回执 `unified-wal-model-r5vaebxq`：69个输入及父提交处3份合同哈希，118个checksum已逐项核对；13个完整正向配置通过，26个指定性质反例。新增reuse正例23 generated / 20 distinct / queue 0 / depth-diameter 9。Java204与模型69个输入逐项匹配当前待提交文件，历史source/design/receipt绑定保持不变。中间 `ylS6jXjK`、`WG4m55RP`、`g8W0sGwn` 的必要失败定位/新增覆盖断言验证已完成，最终回执包含全部源码与测试变化；保留首轮失败定位回执 `ylS6jXjK`；两个被替代的完成run已清理，不作为最终结果。
+
+
+### 运行期终态索引与坐标回收
+
+2026-10-04，隔离图新增 `reclaimTerminalEntries(IndexCheckpointRequest)`，复用既有 checkpoint 的固定原 worker 集、DATA 票据/I/O、native 单 CF 与持久 coverage 发布。普通 checkpoint 的行为保持原范围；本入口在每个原 owner 已将 DATA/prefix/hot 全部交给实际 query-visible native index 后暂停 Put。存在未终结的 Put、未发布批次或 owner 拒绝时，解冻已暂停的部分并返回 TRANSIENT_UNAVAILABLE，不删除行或释放坐标。没有清理线程、另一套调度队列或逐 entry 控制记录。
+
+现有 Bookie `ReclamationLease` 排空 normal/recovery/read admission 并关闭新 entry 准入；维护用的额外终态快照只引用捕获 cut 时已持久 applied 的准确 context tombstone，受现有控制日志容量限制，不持久复制另一份删除 authority。inactive、fenced、unknown/context 不匹配不能回收；期间新 tombstone 由下一次处理。本入口与 FREE/其它 checkpoint 互斥，Bookie 控制仍通过既有 CONTROL I/O 推进。无法取得 quiescent cut 时返回 TRANSIENT_UNAVAILABLE并保留原因。
+
+现有 DATA I/O 实际遍历 native location rows，验证 UUID/key/locator 编码与总行数上限，最多256个 key 的 WriteBatch删除捕获终态行。全部实际删除成功、回到原票据后，通知每个原 owner 删除同一固定终态集合的 occupied coordinates，保留 DATA/stream 连续前缀及其它 live 坐标；然后使用更新后的 owner cuts执行真实 flush、A/B coverage force及目录同步。整个过程保留暂停的 index 与 Bookie entry gate，到实际 I/O和所有原 owner票据终结后才释放。stopWaiting仅丢弃响应；close超时保留同一图和仍在途资源。
+
+native删除失败返回UNKNOWN，保留占用坐标，不伪造容量；已删除的终态行也不能复活。实际native失败遵循既有不可用/重启重建路径。若删除与owner释放已成功、coverage发布失败，则返回UNKNOWN，保持query-visible删除并解冻准入；后续live写仍可用已安全释放的坐标，restart依Bookie终态及DATA重建或合法持久覆盖，不把失败覆盖当成功。没有自动修复损坏native DB或新的OPEN恢复规则。
+
+六个新增实际路径验证：300个同context记录跨两个bounded native删除批次，inactive与unknown行保留，晚到tombstone留到下一次；既有normal/read admission阻止取得cut。1/4 worker下，四个shard共用四个坐标预算、四个已分配物理块，分别执行四轮全死清理/FREE/reuse后保留第五代四个live entry并restart读取；清理前新坐标明确背压。另确定性暂停真实native Put，验证先拒绝清理、实际Put结束后去掉旧行并恢复容量；取消等待及page force暂停时close不提前完成；native handle关闭使清理UNKNOWN且不释放坐标；page发布force失败后恢复新写与restart。native monitor/handle仅在测试中通过反射注入真实停顿/生命周期故障，没有mock后端或生产注入开关。
+
+最终Java回执 `unified-wal-local-PNLDFRde` 绑定父提交 `c9463f2ed1fae6c611a325a2b8a702871190f8d6` 与204个实际源码/测试/向量输入：相关7类257项，252通过、5项Linux亲和在macOS跳过，0失败/错误；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。复现沿用前述7类 `run-local-storage-tests.sh` 命令。中间运行修正测试缺失import、行长与夹具关闭顺序；容量循环暴露既有测试助手错误假设每次入口必定接受，现按现有API在原五秒期限内重试入口false及结果TRANSIENT_UNAVAILABLE，保留caller buffer释放、异常、LOCAL_DURABLE及容量/恢复断言。未通过的中间运行不计作成功。
+
+有限模型见[终态索引清理投影](../models/README.md#终态索引清理投影)。这证明本轮固定小容量循环及相关失败边界；没有SST/控制历史净空间测量、长期负载、全局memory/临时磁盘预算、MOVE/部分存活compaction、多Arena、集群删除、掉电或生产权威。步骤9/10及整体目标仍未完成。

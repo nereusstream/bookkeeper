@@ -23,6 +23,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -7948,18 +7949,23 @@ public class SegmentBookieControlLogTest {
     private static SegmentDataPhysicalDriver.NormalResult writeAfterIndexBackpressure(IsolatedSegmentStorage storage,
             ProfileLedgerContext context, long entryId) throws Exception {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        SegmentDataPhysicalDriver.NormalResult result;
+        SegmentDataPhysicalDriver.NormalResult result = null;
         do {
             CompletableFuture<SegmentDataPhysicalDriver.NormalResult> reply = new CompletableFuture<>();
             ByteBuf bytes = entry(context, entryId);
+            boolean accepted;
             try {
-                assertTrue(storage.submitNormal(context, filled(20, (byte) 5), bytes,
+                accepted = storage.submitNormal(context, filled(20, (byte) 5), bytes,
                         new SegmentDataPhysicalDriver.NormalRequest((value, cause) -> {
                             assertNull(cause);
                             reply.complete(value);
-                        })));
+                        }));
             } finally {
                 bytes.release();
+            }
+            if (!accepted) {
+                Thread.sleep(1);
+                continue;
             }
             result = reply.get(5, TimeUnit.SECONDS);
             if (result.status() == SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE) {
@@ -8370,6 +8376,322 @@ public class SegmentBookieControlLogTest {
                     new Generation(1), new Generation(1), sequence, offset), records);
         } finally {
             inputs.forEach(ByteBuf::release);
+        }
+    }
+
+    @Test
+    public void nativeTerminalCleanupUsesExactCapturedTombstonesAndBoundedDeleteBatches() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("native-terminal-cleanup");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 302)) {
+            files.startSession(arena);
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2), install(48, 3, (byte) 5)));
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            long offset = 4096;
+            for (int batch = 0; batch < 2; batch++) {
+                List<ByteBuf> inputs = new ArrayList<>();
+                try {
+                    List<SegmentBatchFormat.Data> entries = new ArrayList<>();
+                    for (int i = 1 + batch * 200; i <= Math.min(300, (batch + 1) * 200); i++) {
+                        ByteBuf input = entry(context(), i);
+                        inputs.add(input);
+                        entries.add(SegmentBatchFormat.entry(context(), input));
+                    }
+                    SegmentBatchFormat.FrozenBatch frozen = SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, 101, new Generation(1),
+                                    new Generation(1), batch + 1, offset), entries);
+                    files.writeAuthorized(frozen, arena);
+                    List<SegmentPointRead.Location> locations = SegmentPointRead.locations(
+                            SegmentBatchParser.parse(frozen.bytes(), frozen.address(), config.bytesPerFile()));
+                    index.append(locations);
+                    offset += frozen.bytes().remaining();
+                } finally {
+                    inputs.forEach(ByteBuf::release);
+                }
+            }
+            SegmentBatchFormat.FrozenBatch retained = reclamationBatch(config, 101, offset, 3, 48, 52);
+            files.writeAuthorized(retained, arena);
+            index.append(SegmentPointRead.locations(
+                    SegmentBatchParser.parse(retained.bytes(), retained.address(), config.bytesPerFile())));
+            assertTrue(bookie.locallyReadableContext(context(48)));
+            assertFalse(bookie.hasTerminalTombstone(context(48)));
+            SegmentBookieControlLog.Admission prior = bookie.admitNormal(context(), filled(20, (byte) 5))
+                    .orElseThrow();
+            SegmentBookieControlLog.ReadAdmission reader = bookie.admitRead(context(48)).orElseThrow();
+            bookie.submitBatch(List.of(tombstone(44, 20)));
+            assertThrows(IOException.class, () -> bookie.protectTerminalCleanup(config, identity()));
+            prior.physicalTerminal();
+            assertThrows(IOException.class, () -> bookie.protectTerminalCleanup(config, identity()));
+            reader.finish();
+            try (SegmentBookieControlLog.ReclamationLease cut = bookie.protectTerminalCleanup(config, identity())) {
+                bookie.submitBatch(List.of(tombstone(48, 21)));
+                assertFalse(cut.terminalAtCut(context(48)));
+                index.retireTerminalEntries(cut);
+                for (int entryId = 1; entryId <= 300; entryId++) {
+                    assertTrue(index.get(context(), entryId).isEmpty());
+                }
+                assertTrue(index.get(context(48), 3).isPresent());
+                assertTrue(index.get(context(52), 3).isPresent());
+                assertThrows(IOException.class, () -> bookie.protectTerminalCleanup(config, identity()));
+            }
+            try (SegmentBookieControlLog.ReclamationLease cut = bookie.protectTerminalCleanup(config, identity())) {
+                index.retireTerminalEntries(cut);
+                assertTrue(index.get(context(48), 3).isEmpty());
+                assertTrue(index.get(context(52), 3).isPresent());
+            }
+            files.close();
+        }
+    }
+
+    private static IsolatedSegmentStorage.IndexCheckpointResult cleanupAfterBackpressure(
+            IsolatedSegmentStorage storage) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        do {
+            CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> reply = new CompletableFuture<>();
+            assertTrue(storage.reclaimTerminalEntries(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                    (result, cause) -> reply.complete(result))));
+            IsolatedSegmentStorage.IndexCheckpointResult result = reply.get(5, TimeUnit.SECONDS);
+            if (result.status() != IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE) {
+                return result;
+            }
+            Thread.sleep(1);
+        } while (System.nanoTime() < end);
+        throw new AssertionError("Terminal cleanup did not obtain quiescent original owners");
+    }
+
+    private static void freeStorageAllocation(IsolatedSegmentStorage storage, long operation, long allocation)
+            throws Exception {
+        CompletableFuture<IsolatedSegmentStorage.FreeResult> reply = new CompletableFuture<>();
+        assertTrue(storage.reclaimAllocation(new UUID(0, operation), allocation,
+                new IsolatedSegmentStorage.FreeRequest((result, cause) -> {
+                    if (cause == null) {
+                        reply.complete(result);
+                    } else {
+                        reply.completeExceptionally(cause);
+                    }
+                })));
+        assertEquals(IsolatedSegmentStorage.FreeStatus.APPLIED_DURABLE, reply.get(5, TimeUnit.SECONDS).status());
+    }
+
+    @Test
+    public void runtimeTerminalCleanupRecyclesEveryOriginalOwnersCoordinateAndPhysicalBlock() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath()
+                    .resolve("terminal-capacity-" + workers), 1, 4, 1, 8L * 1024 * 1024,
+                    4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            try (IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 4, 3)) {
+                storage.startNew();
+                for (int cycle = 0; cycle < 5; cycle++) {
+                    List<ProtectedProfileStateStore.Transition> transitions = new ArrayList<>();
+                    for (int shard = 0; shard < 4; shard++) {
+                        long ledger = 44 + 4L * cycle + shard;
+                        transitions.add(install(ledger, 1000 + cycle * 100 + shard * 2, (byte) 5));
+                        transitions.add(activate(ledger, 1001 + cycle * 100 + shard * 2));
+                    }
+                    installStorage(storage, transitions.toArray(ProtectedProfileStateStore.Transition[]::new));
+                }
+                for (int cycle = 0; cycle < 5; cycle++) {
+                    long[] allocations = new long[4];
+                    for (int shard = 0; shard < 4; shard++) {
+                        SegmentBatchFormat.Address address = writeAfterIndexBackpressure(
+                                storage, context(44 + 4L * cycle + shard), 1).candidate().address();
+                        allocations[shard] = address.allocation();
+                        assertEquals(cycle + 1, address.generation().value());
+                        assertTrue(address.offset() < 4096 + 4 * SegmentArenaControlLog.BLOCK_BYTES);
+                    }
+                    if (cycle == 4) {
+                        assertEquals(4, checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage().entries());
+                        break;
+                    }
+                    for (int shard = 0; shard < 4; shard++) {
+                        installStorage(storage, tombstone(44 + 4L * cycle + shard, 2000 + cycle * 4 + shard));
+                    }
+                    CompletableFuture<SegmentDataPhysicalDriver.NormalResult> refused = new CompletableFuture<>();
+                    ByteBuf input = entry(context(48 + cycle * 4L), 1);
+                    try {
+                        assertTrue(storage.submitNormal(context(48 + cycle * 4L), filled(20, (byte) 5), input,
+                                new SegmentDataPhysicalDriver.NormalRequest(
+                                        (result, cause) -> refused.complete(result))));
+                    } finally {
+                        input.release();
+                    }
+                    assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                            refused.get(5, TimeUnit.SECONDS).status());
+                    IsolatedSegmentStorage.IndexCheckpointResult cleaned = cleanupAfterBackpressure(storage);
+                    assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED, cleaned.status());
+                    assertEquals(0, cleaned.coverage().entries());
+                    for (int shard = 0; shard < 4; shard++) {
+                        freeStorageAllocation(storage, 3000 + cycle * 4 + shard, allocations[shard]);
+                    }
+                }
+            }
+            try (IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 4, 3)) {
+                storage.restart();
+                for (int shard = 0; shard < 4; shard++) {
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(60 + shard), 1).result()) {
+                        assertEquals(1, read.result().record().entryId());
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void cancelledTerminalCleanupHoldsActualIoAndDefersLaterTombstones() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("cancelled-terminal-cleanup");
+        CountDownLatch atForce = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger replies = new AtomicInteger();
+        SegmentFileIo publication = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            atForce.countDown();
+            await(release);
+        });
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4));
+            storageWrite(storage, context(), 1);
+            storageWrite(storage, context(45), 1);
+            checkpointAfterBackpressure(storage, new SegmentFileIo());
+            installStorage(storage, tombstone(44, 20));
+            IsolatedSegmentStorage.IndexCheckpointRequest request = new IsolatedSegmentStorage.IndexCheckpointRequest(
+                    (result, cause) -> replies.incrementAndGet());
+            assertTrue(storage.reclaimTerminalEntries(request, publication));
+            try {
+                assertTrue(atForce.await(5, TimeUnit.SECONDS));
+                request.stopWaiting();
+                ByteBuf input = entry(context(45), 2);
+                try {
+                    assertFalse(storage.submitNormal(context(45), filled(20, (byte) 5), input,
+                            new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> fail())));
+                } finally {
+                    input.release();
+                }
+                installStorage(storage, tombstone(45, 21));
+                assertFalse(storage.close(Duration.ofMillis(20)));
+            } finally {
+                release.countDown();
+            }
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+            assertEquals(0, replies.get());
+        }
+        try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 4)) {
+            assertTrue(index.get(context(), 1).isEmpty());
+            assertTrue(index.get(context(45), 1).isPresent());
+            assertEquals(1, index.coverage().orElseThrow().entries());
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.restart();
+            assertEquals(0, checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage().entries());
+        }
+    }
+
+    @Test
+    public void terminalCleanupWaitsForActualLateNativePutBeforeReleasingCapacity() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("late-put-terminal-cleanup");
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4));
+            var field = IsolatedSegmentStorage.class.getDeclaredField("index");
+            field.setAccessible(true);
+            SegmentDerivedIndex nativeIndex = (SegmentDerivedIndex) field.get(storage);
+            synchronized (nativeIndex) {
+                // Actual Put waits for this monitor on DATA I/O after the local durable reply.
+                storageWrite(storage, context(), 1);
+                installStorage(storage, tombstone(44, 20));
+                CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> reply = new CompletableFuture<>();
+                assertTrue(storage.reclaimTerminalEntries(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                        (result, cause) -> reply.complete(result))));
+                assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE,
+                        reply.get(5, TimeUnit.SECONDS).status());
+            }
+            IsolatedSegmentStorage.IndexCheckpointResult cleaned = cleanupAfterBackpressure(storage);
+            assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED, cleaned.status());
+            assertEquals(0, cleaned.coverage().entries());
+            assertTrue(nativeIndex.get(context(), 1).isEmpty());
+            storageWrite(storage, context(48), 1);
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(48), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void nativeTerminalCleanupFailureDoesNotReleaseOccupiedCoordinates() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("failed-native-terminal-cleanup");
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4));
+            storageWrite(storage, context(), 1);
+            checkpointAfterBackpressure(storage, new SegmentFileIo());
+            installStorage(storage, tombstone(44, 20));
+            // Close the actual native handle to inject its lifecycle failure, without a mock backend.
+            var nativeIndex = IsolatedSegmentStorage.class.getDeclaredField("index");
+            nativeIndex.setAccessible(true);
+            ((SegmentDerivedIndex) nativeIndex.get(storage)).close();
+            CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> cleanup = new CompletableFuture<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            assertTrue(storage.reclaimTerminalEntries(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                    (result, cause) -> {
+                        failure.set(cause);
+                        cleanup.complete(result);
+                    })));
+            assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.UNKNOWN,
+                    cleanup.get(5, TimeUnit.SECONDS).status());
+            assertTrue(failure.get() instanceof IOException);
+            CompletableFuture<SegmentDataPhysicalDriver.NormalResult> refused = new CompletableFuture<>();
+            ByteBuf input = entry(context(48), 1);
+            try {
+                assertTrue(storage.submitNormal(context(48), filled(20, (byte) 5), input,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> refused.complete(result))));
+            } finally {
+                input.release();
+            }
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                    refused.get(5, TimeUnit.SECONDS).status());
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.restart();
+            storageWrite(storage, context(48), 1);
+        }
+    }
+
+    @Test
+    public void terminalCleanupPublicationFailureKeepsNativeDeletionAndRestoresAdmission() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("failed-terminal-publication");
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4));
+            storageWrite(storage, context(), 1);
+            checkpointAfterBackpressure(storage, new SegmentFileIo());
+            installStorage(storage, tombstone(44, 20));
+            CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> reply = new CompletableFuture<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            assertTrue(storage.reclaimTerminalEntries(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                    (result, cause) -> {
+                        failure.set(cause);
+                        reply.complete(result);
+                    }), new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false)));
+            assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.UNKNOWN,
+                    reply.get(5, TimeUnit.SECONDS).status());
+            assertTrue(failure.get() instanceof IOException);
+            storageWrite(storage, context(48), 1);
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 4, 3)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(48), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+            assertEquals(1, checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage().entries());
         }
     }
 

@@ -265,3 +265,6 @@ Arena DEVICE_STATE type=7 的健康 CLOSED v2 body 为 `24 + 24*N` bytes，外�
 恢复仅解析末端内当前必要 DATA，禁止零页、错误 grant/generation、跨末端批次及 CRC 损坏；跳过末端后的旧残留。再次 FREE 可在健康排空 gate 下使用运行期实际 reservation end/已恢复 CLOSED end，完整 extent hash 仍包含被逻辑排除的旧 suffix 原始字节；SHA 不是独立删除或定位 authority。
 
 独立 Python struct/逐位 CRC32C 向量 `arena-reused-allocation-v1.hex` 与 `arena-reused-close-v2.hex` 各192 bytes。前者 ALLOC_POOL sequence=2/UUID=0:3/operation generation=1/expected=2，file0/shard1/stream generation1/allocation2/offset4096/1 block/first sequence1；后者 CLOSED sequence=3/UUID=0:4/session epoch1，唯一 tail allocation2/generation2/end8192。Java独立读取并逐字节对照，向量本身不授予 runtime grant 或健康关闭权威。
+
+
+运行期终态派生清理（2026-10-04）：native location key/value、index UUID、A/B coverage字节与固定向量不变。明确捕获的Bookie准确终态集合只用于当前有界维护：暂停全部原index owner与entry准入，实际native删除成功后原owner释放同一集合的坐标，再由现有runtime checkpoint验证更新计数/stream并flush/force发布。native query-visible删除不表示持久coverage，coverage失败不改写TOMBSTONE、FREE或DATA authority。随后出现的新tombstone在下一次处理，restart仍按Bookie后缀过滤；[实际实现与回执](README.md#运行期终态索引与坐标回收)不改变实验格式或发布兼容承诺。

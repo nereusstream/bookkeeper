@@ -1109,3 +1109,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04，新增[健康CLOSED整块复用投影](../implementation/models/README.md#健康-closed-整块复用投影)：原FREE/实际旧I/O终结后授予当前generation，CLOSED以实际完成且durable的prefix区分旧suffix。有限正向完整通过，提前reuse、提前CLOSE和旧残留复活三个配置各产生指定反例。真实bytes/CRC、多个generation循环、实际预算与文件/控制rotation仍由Java或后续验证拥有；总矩阵13个正向、26个指定反例，不宣称完整A+C/C+D或步骤9完成。
+
+
+2026-10-04，新增[终态索引清理投影](../implementation/models/README.md#终态索引清理投影)，检查实际旧Put/读义务后冻结终态cut，native删除先于坐标释放、晚到tombstone不扩大当前集合及取消不释放实际IO。有限正向244 distinct states完整探索，四种去掉保护的配置产生指定反例；总矩阵14正向/30指定反例。真实RocksDB WriteBatch/flush、所有原owner协调与小容量循环由[Java切片](../implementation/local-storage/README.md#运行期终态索引与坐标回收)拥有，模型不证明长期disk预算、MOVE或完整A+C/C+D，不解除Gate。

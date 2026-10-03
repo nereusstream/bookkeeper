@@ -343,13 +343,26 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     /** One bounded graph request; DATA refusal may report TRANSIENT_UNAVAILABLE on the calling thread. */
     boolean checkpointIndex(IndexCheckpointRequest request, SegmentFileIo publicationIo) {
+        return maintainIndex(request, publicationIo, false);
+    }
+
+    boolean reclaimTerminalEntries(IndexCheckpointRequest request) {
+        return reclaimTerminalEntries(request, new SegmentFileIo());
+    }
+
+    /** Native row removal, original-owner coordinate release and durable coverage share the existing checkpoint. */
+    boolean reclaimTerminalEntries(IndexCheckpointRequest request, SegmentFileIo publicationIo) {
+        return maintainIndex(request, publicationIo, true);
+    }
+
+    private boolean maintainIndex(IndexCheckpointRequest request, SegmentFileIo publicationIo, boolean cleanup) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(publicationIo, "publicationIo");
         synchronized (gate) {
             if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null) {
                 return false;
             }
-            IndexCheckpoint checkpoint = new IndexCheckpoint(request, publicationIo);
+            IndexCheckpoint checkpoint = new IndexCheckpoint(request, publicationIo, cleanup);
             indexCheckpoint = checkpoint;
             for (IndexCheckpoint.Worker worker : checkpoint.workers) {
                 if (!execution.owner(worker.id).submit(worker.id, worker)) {
@@ -467,6 +480,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private final class IndexCheckpoint {
         private final IndexCheckpointRequest request;
         private final SegmentFileIo publicationIo;
+        private final boolean cleanup;
         private final Worker[] workers;
         private int ready;
         private int finished;
@@ -476,10 +490,14 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private IndexCheckpointStatus status = IndexCheckpointStatus.PERSISTED;
         private Throwable failure;
         private SegmentDerivedIndex.Coverage coverage;
+        private SegmentBookieControlLog.ReclamationLease cleanupLease;
+        private boolean coordinatesStarted;
+        private int coordinatesDone;
 
-        private IndexCheckpoint(IndexCheckpointRequest request, SegmentFileIo publicationIo) {
+        private IndexCheckpoint(IndexCheckpointRequest request, SegmentFileIo publicationIo, boolean cleanup) {
             this.request = request;
             this.publicationIo = publicationIo;
+            this.cleanup = cleanup;
             workers = new Worker[executionSettings.workers()];
             for (int worker = 0; worker < workers.length; worker++) {
                 workers[worker] = new Worker(worker);
@@ -516,12 +534,75 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 finishWorkers();
                 return;
             }
+            Worker writer = workers[0];
+            ioStarted = true;
+            if (cleanup) {
+                writer.ticket.resume(() -> execution.io().submitContinuing(writer.ticket, () -> {
+                    cleanupLease = bookie.protectTerminalCleanup(config, identity);
+                    index.retireTerminalEntries(cleanupLease);
+                }, this::terminalRowsRetired));
+            } else {
+                publish();
+            }
+        }
+
+        private synchronized void terminalRowsRetired(Throwable cause) {
+            if (cause != null) {
+                if (cleanupLease == null && cause instanceof IOException) {
+                    unavailable(null);
+                    failure = cause;
+                } else {
+                    unavailable(cause);
+                }
+            }
+            if (status != IndexCheckpointStatus.PERSISTED) {
+                finishWorkers();
+            } else {
+                retireCoordinates();
+            }
+        }
+
+        private synchronized void retireCoordinates() {
+            coordinatesStarted = true;
+            for (Worker worker : workers) {
+                if (worker.terminal) {
+                    coordinatesRetired(worker);
+                } else {
+                    worker.ticket.resume(() -> {
+                        try {
+                            for (int i = 0; i < worker.cuts.size(); i++) {
+                                int shard = worker.cuts.get(i).stream().shard();
+                                worker.cuts.set(i, hotDirectories[shard].retireTerminalCoordinates(cleanupLease));
+                            }
+                        } catch (IOException failure) {
+                            unavailable(failure);
+                        }
+                        coordinatesRetired(worker);
+                    });
+                }
+            }
+        }
+
+        private synchronized void coordinatesRetired(Worker worker) {
+            if (worker.coordinatesReady) {
+                throw new IllegalStateException("Terminal cleanup owner already retired its coordinates");
+            }
+            worker.coordinatesReady = true;
+            if (++coordinatesDone == workers.length) {
+                if (status == IndexCheckpointStatus.PERSISTED) {
+                    publish();
+                } else {
+                    finishWorkers();
+                }
+            }
+        }
+
+        private synchronized void publish() {
             List<SegmentHotDirectory.IndexCut> cuts = new ArrayList<>();
             for (Worker original : workers) {
                 cuts.addAll(original.cuts);
             }
             Worker writer = workers[0];
-            ioStarted = true;
             writer.ticket.resume(() -> execution.io().submitContinuing(writer.ticket,
                     () -> coverage = index.checkpointRuntime(cuts, arena, bookie, publicationIo), cause -> {
                         if (cause != null) {
@@ -561,6 +642,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return;
             }
             responded = true;
+            if (cleanupLease != null) {
+                cleanupLease.close();
+                cleanupLease = null;
+            }
             synchronized (gate) {
                 if (indexCheckpoint == this) {
                     indexCheckpoint = null;
@@ -576,6 +661,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             private SegmentOwnerLoop.Ticket ticket;
             private boolean ready;
             private boolean terminal;
+            private boolean coordinatesReady;
 
             private Worker(int id) {
                 this.id = id;
@@ -612,6 +698,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     }
                     if (!ready) {
                         prepared(this);
+                    } else if (coordinatesStarted && coordinatesDone != workers.length) {
+                        if (!coordinatesReady) {
+                            coordinatesRetired(this);
+                        }
                     } else if (IndexCheckpoint.this.ready == workers.length && (!ioStarted || id == 0)) {
                         finishWorkers();
                     }

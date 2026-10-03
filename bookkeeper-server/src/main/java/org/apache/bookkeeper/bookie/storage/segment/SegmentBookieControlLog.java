@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.EngineProfile;
@@ -443,14 +444,30 @@ final class SegmentBookieControlLog implements AutoCloseable {
     /** Volatile entry admission exclusion only; durable tombstones remain the sole deletion authority. */
     final class ReclamationLease implements AutoCloseable {
         private final long cut;
+        private final Set<ProfileLedgerContext> terminalContexts;
         private boolean released;
 
         private ReclamationLease(long cut) {
+            this(cut, null);
+        }
+
+        private ReclamationLease(long cut, Set<ProfileLedgerContext> terminalContexts) {
             this.cut = cut;
+            this.terminalContexts = terminalContexts;
         }
 
         long cut() {
             return cut;
+        }
+
+        /** Volatile snapshot of already durable terminal facts, never another deletion authority. */
+        boolean terminalAtCut(ProfileLedgerContext context) throws IOException {
+            synchronized (SegmentBookieControlLog.this) {
+                if (released || reclamation != this || closed || failed || terminalContexts == null) {
+                    throw new IOException("Terminal cleanup has no held Bookie authority snapshot");
+                }
+                return terminalContexts.contains(context) && context.equals(tombstones.get(context.ledgerId()));
+            }
         }
 
         @Override
@@ -1239,6 +1256,16 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IOException("Another whole-allocation reclamation holds Bookie entry admission");
         }
         reclamation = new ReclamationLease(recoveryReadCut(source, sourceIdentity));
+        return reclamation;
+    }
+
+    synchronized ReclamationLease protectTerminalCleanup(IsolatedSegmentConfig source,
+                                                          SegmentFileHeader sourceIdentity) throws IOException {
+        if (reclamation != null) {
+            throw new IOException("Another reclamation holds Bookie entry admission");
+        }
+        long cut = recoveryReadCut(source, sourceIdentity);
+        reclamation = new ReclamationLease(cut, Set.copyOf(tombstones.values()));
         return reclamation;
     }
 

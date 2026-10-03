@@ -167,3 +167,16 @@ metadata-only退役范围恢复、空range不虚增序号、rotation及native覆
 | `Close/Crash/Recover` | 真实writer关闭且I/O终结后保存CLOSED v2 tails；`unwrittenReusedGrantDoesNotReviveOldGenerationOrInventSequence`、`damagedRequiredReusedPrefixCannotBeClassifiedAsUnusedOldTail`及共享文件完整/同UUID覆盖恢复 |
 
 独立ALLOCreuse/CLOSEDv2向量通过 `reusedAllocationAndClosedTailMatchIndependentBytesWithoutGrantingRuntimeAuthority`；模型假设输入framing正确，不负责字节CRC、真实file force或外部decoded命令拒绝。模型crash是逻辑投影，没有新增JVM halt或掉电证据。
+
+
+## 终态索引与坐标清理
+
+| 动作 | 实际路径与必要测试 |
+|---|---|
+| `Tombstone/FinishOldPut/FinishRead/Prepare` | Bookie准确context snapshot与entry quiescence、各原hot/index pause；`nativeTerminalCleanupUsesExactCapturedTombstonesAndBoundedDeleteBatches`、`terminalCleanupWaitsForActualLateNativePutBeforeReleasingCapacity` |
+| `StartDelete/Delete/DeleteUnknown/Prune` | 原DATA I/O native iterator/256-key WriteBatch，成功后原owner occupied删除；`nativeTerminalCleanupFailureDoesNotReleaseOccupiedCoordinates`保留坐标，真实后继写仍背压 |
+| `Publish/PublicationUnknown/Finish` | 原runtime checkpoint的flush/A/B force与全原worker终结；`terminalCleanupPublicationFailureKeepsNativeDeletionAndRestoresAdmission` |
+| `CancelWait` | request.stopWaiting只丢响应、实际I/O/lease保留；`cancelledTerminalCleanupHoldsActualIoAndDefersLaterTombstones`暂停实际page force，close短超时不完成，晚到T由下一次/恢复处理 |
+| `NewWrite` | `runtimeTerminalCleanupRecyclesEveryOriginalOwnersCoordinateAndPhysicalBlock`在1/4 worker、四坐标/四块下验证四轮清理/FREE/复用后保留四个第五代live entry及restart |
+
+模型不代替实际native、原worker通知或资源释放验证；没有新增进程退出/掉电实验。native生命周期故障与Put暂停仅在测试中通过反射取得实际资源，生产设计未增加mock层或测试开关。

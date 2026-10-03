@@ -146,3 +146,15 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `OldBytesNeverBecomeCurrent` | 当前reused grant与已应用健康CLOSED末端定义必要prefix；旧suffix不解析，prefix损坏或缺末端仍隔离 |
 
 单extent一次reuse的有限结果不涵盖OPEN恢复、真实parser/native索引、多个FREE/MOVE、内存/磁盘预算或liveness。Java两轮generation复用是单独真实路径证据。
+
+
+## 终态索引清理投影
+
+| 性质 | 实际合同及边界 |
+|---|---|
+| `OnlyCapturedTerminalCoordinatesRetire` | native/owner只使用持有的同一准确终态snapshot，inactive/unknown和晚到T不扩大集合 |
+| `ReleasedCoordinatesHaveNoNativeRows` | 全部旧Put/index义务终结后，实际native删除成功才允许原owner释放占用；native失败不释放 |
+| `MaintenanceGateHeldThroughActualDelete` | Bookie entry lease与原index pause跨实际IO及owner终结，取消等待不放弃后台义务 |
+| `CapacityBounded` | 固定coordinate/native行上限，释放后新写仍通过原预算；未推导完整memory/SST/临时磁盘预算 |
+
+有限snapshot/集合投影不包含所有原worker时序、control/coverage完整状态机或FREE/MOVE组合。发布失败可保持安全删除且恢复准入，但不能把UNKNOWN或模型PASS当持久覆盖/生产authority。

@@ -436,6 +436,41 @@ final class SegmentDerivedIndex implements AutoCloseable {
         return checkpoint(io, false);
     }
 
+    /** Bounded native deletion while every original index owner and Bookie entry admission is paused. */
+    synchronized void retireTerminalEntries(SegmentBookieControlLog.ReclamationLease authority) throws IOException {
+        requireOpen();
+        pendingCoverage = null;
+        try (WriteBatch retired = new WriteBatch(); RocksIterator cursor = db.newIterator()) {
+            int count = 0;
+            int seen = 0;
+            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+                    cursor.next()) {
+                SegmentPointRead.Location location = decode(cursor.value());
+                if (++seen > maxEntries || !Arrays.equals(cursor.key(), key(location.context(), location.entryId()))) {
+                    throw new IOException("Terminal cleanup encountered an invalid bounded index row");
+                }
+                if (authority.terminalAtCut(location.context())) {
+                    retired.delete(cursor.key());
+                    if (++count == BATCH_ENTRIES) {
+                        db.write(writes, retired);
+                        retired.clear();
+                        count = 0;
+                    }
+                }
+            }
+            cursor.status();
+            if (count != 0) {
+                db.write(writes, retired);
+            }
+        } catch (RocksDBException failure) {
+            failed = true;
+            throw new IOException("Terminal derived index cleanup failed", failure);
+        } catch (IOException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
+    }
+
     /** Query-visible append only. The caller keeps hot ownership; this never advances durable coverage. */
     synchronized void append(List<SegmentPointRead.Location> locations) throws IOException {
         requireOpen();
