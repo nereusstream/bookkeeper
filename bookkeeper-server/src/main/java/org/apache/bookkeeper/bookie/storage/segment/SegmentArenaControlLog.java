@@ -790,23 +790,43 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return List.copyOf(planned);
     }
 
-    /** Earliest whole-batch applied pool at/after this stream's cursor; does not reserve or refill space. */
-    synchronized Optional<SegmentBatchFormat.Address> appendAddress(int file, long minimum, int bytes,
+    /** Original successful control sequence, retained by checkpoint/rotation; never inferred from file offsets. */
+    synchronized long appliedAllocationOrder(SegmentBatchFormat.Address address) {
+        Allocation command = allocationIds.get(address.allocation());
+        if (failed || closed || command == null || command.file() != address.fileIndex()
+                || command.ownerShard() != address.shard()
+                || !command.ownerGeneration().equals(address.streamGeneration())
+                || command.expectedGeneration() + 1 != address.generation().value()) {
+            return -1;
+        }
+        AppliedOperation operation = appliedOperations.get(command.operationId());
+        return operation == null || operation.status() != Status.APPLIED_DURABLE ? -1 : operation.sequence();
+    }
+
+    /** Earliest whole-batch applied pool in control order; does not reserve or refill space. */
+    synchronized Optional<SegmentBatchFormat.Address> appendAddress(int file, long minimumOrder,
+                                                                   long minimumOffset, long rawFloor, int bytes,
                                                                    int shard, Generation stream, long sequence) {
         if (!dataFileAvailable(file) || bytes <= 0) {
             return Optional.empty();
         }
         SegmentBatchFormat.Address selected = null;
+        long selectedOrder = Long.MAX_VALUE;
         for (Allocation command : allocationIds.values()) {
             if (command.file() != file || command.ownerShard() != shard
                     || !command.ownerGeneration().equals(stream)) {
                 continue;
             }
-            long offset = Math.max(minimum, command.offset());
+            long order = appliedOperations.get(command.operationId()).sequence();
+            if (order < minimumOrder) {
+                continue;
+            }
+            long offset = Math.max(command.offset(), order == minimumOrder ? minimumOffset : rawFloor);
             long end = command.offset() + command.blocks() * BLOCK_BYTES;
-            if (offset <= end - bytes && (selected == null || offset < selected.offset())) {
+            if (offset <= end - bytes && order < selectedOrder) {
                 selected = new SegmentBatchFormat.Address(file, shard, command.allocationId(),
                         new Generation(command.expectedGeneration() + 1), stream, sequence, offset);
+                selectedOrder = order;
             }
         }
         return Optional.ofNullable(selected);

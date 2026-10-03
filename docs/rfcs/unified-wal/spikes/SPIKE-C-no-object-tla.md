@@ -1100,3 +1100,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 2026-10-03 [持久覆盖辅助的正常恢复切片](../implementation/local-storage/README.md#持久覆盖辅助的正常恢复切片)已验证实际index内容与当前scope/控制/stream/grant；覆盖内校验固定批头和连续性，未覆盖授权tail完整解析及DATA恢复sync，无效覆盖全扫描。有效覆盖保持index代，只补写tail并按Bookie后缀删除不可读行；头缺失/物理缺口/必要CRC或sync失败不开放，旧定位不豁免点读校验。Java回执`unified-wal-local-hqPDoMPC`为201输入、231项/226通过/5平台跳过；模型`unified-wal-model-h1roqnsp`为53输入、10个完整正向/17个指定反例，新恢复投影280状态。一般MOVE/FREE、完整全局native/disk预算、在线控制维护、长期负载/多Arena、未正常关闭恢复、真实掉电及完整模型和生产Gate未完成。
 
 2026-10-03 [运行期索引的真实进程退出边界](../implementation/local-storage/README.md#运行期索引的真实进程退出边界)新增实际memtable、覆盖页force前、PERSISTED owner回调内和正常CLOSE后4个JVM退出点；未关闭会话即使物理重建后仍拒绝，正常CLOSE后可用同代coverage恢复并读/重试/追加。Java回执`unified-wal-local-Gs6OWJ9U`绑定父提交`3b1b6cfd`与201输入，Bookie全类140项通过、0失败/错误/跳过。现有53个模型输入哈希未变，本轮未重复运行TLC；未关闭会话恢复、真实掉电、一般MOVE/FREE、长期负载/多Arena及生产Gate仍未完成。
+
+
+2026-10-03 [分配控制顺序与低地址追加](../implementation/local-storage/README.md#分配控制顺序与低地址追加)消除FREE/reuse必要的offset排序前置：游标按原成功allocation控制sequence推进，旧grant尾部不返还；恢复按每allocation连续序号区间拼接，跨grant gap/duplicate仍拒绝。Arena rotation及真实全量/同代覆盖storage重启已验证。Java`unified-wal-local-N16YauZh`为201输入、237项/232通过/5平台跳过；模型`unified-wal-model-p7nk5a81`为57输入、11个完整正向/19个指定反例，新投影302状态。实际FREE/bump、整块存活与旧I/O/pin排空、退休sequence/旧字节恢复、compaction、长期负载/多Arena和生产Gate仍未完成。

@@ -159,6 +159,8 @@ Bookie级日志是跨Arena ledger权限的唯一持久化owner；不把相同rou
 
 2026-10-03 隔离restart另在新DATA OPEN及owner暴露前，由已同步且Bookie本地route选择的inventory重建真实RocksDB派生定位；fenced仍可读、tombstone不入库，未提交relocation copy不提升。覆盖以实际flush和独立页force发布，保留两控制cut及index generation；它不替代权限日志或DATA sync。正常关闭restart已按当前完整Bookie/Arena后缀验证真实覆盖：覆盖内仍验证批头/连续性，未覆盖授权tail完整解析及同步；无效覆盖全扫描。当前tombstone过滤覆盖行和新tail，不因旧index恢复权限。普通/恢复ENTRY_DATA现在在热定位与local result后，复用DATA票据和I/O服务异步追加派生定位；后台Put不推进持久覆盖，失败不撤销已成立的热结果，控制I/O仍独立预留。query-visible后热淘汰及hot-first/fresh Get的点读、普通/恢复重复比较已接线；相同票据跨Get/DATA阶段保留输入、Bookie准入及文件pin，终结时复核当前单stream前缀、grant和权限。有限坐标占用预算避免派生missing授权覆盖旧DATA，完整恢复容量独立于hot容量。运行期派生检查点已从所有原worker冻结当前连续DATA前缀/坐标cut并暂停Put，在真实flush后force覆盖页；此时Bookie applied cut只记录派生元数据，不要求所有新DATA停写，也不能代替严格recovery/read cut或授予权限。一般MOVE/FREE selector覆盖恢复、完整在线维护与生产readiness未完成。详见[RFC-0003 §15](RFC-0003-segment-storage-allocator.md#15-derived-index)。
 
+2026-10-03，实际DATA游标已改按原成功allocation控制sequence/offset推进，后继grant可位于较低文件地址，进入后继后旧尾不可返回；restart已知grant全部跳过。恢复按每allocation连续区间及原控制顺序验证stream，并保持必要CRC/grant/DATA sync，checkpoint/rotation保留原operation序号。真实全量/覆盖辅助storage图与gap/duplicate回归通过，见[分配顺序证据](implementation/local-storage/README.md#分配控制顺序与低地址追加)。这是FREE/reuse必要前置，尚未授予generation bump、旧字节复用或整块回收authority。
+
 2026-10-03 真实运行期storage图新增active memtable未flush、覆盖页force前、PERSISTED owner回调内及正常CLOSE后4个JVM退出点。无CLOSE的物理扫描/派生重建不解除Arena隔离，local-result restart及点读仍拒绝；正常CLOSE对照使用同代coverage并恢复真实读/重试/追加。全类140项通过，详见[进程边界证据](implementation/local-storage/README.md#运行期索引的真实进程退出边界)。只证明所列进程故障边界，不证明掉电或未关闭会话恢复。
 
 跨三层的执行顺序固定为：

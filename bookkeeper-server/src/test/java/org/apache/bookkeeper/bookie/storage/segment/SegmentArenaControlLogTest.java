@@ -1146,7 +1146,7 @@ public class SegmentArenaControlLogTest {
             assertTrue(log.dataFileAvailable(1));
             assertTrue(log.planPools(List.of(new SegmentArenaControlLog.PoolRequest(
                     0, new Generation(1), 1, 1))).get(0).isEmpty());
-            assertTrue(log.appendAddress(0, 4096, 4096, 0, new Generation(1), 1).isEmpty());
+            assertTrue(log.appendAddress(0, 0, 4096, 4096, 4096, 0, new Generation(1), 1).isEmpty());
         }
         try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
             assertTrue(replay.hasDurableQuarantine(0));

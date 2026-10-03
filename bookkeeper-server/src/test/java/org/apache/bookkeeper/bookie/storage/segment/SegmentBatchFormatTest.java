@@ -2091,6 +2091,131 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void laterAppliedAllocationCanAppendBelowTheSameStreamsPreviousFileOffset() throws Exception {
+        IsolatedSegmentConfig config = config();
+        long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        ByteBuf first = entry(new byte[8], 1, 0, 8, 8);
+        ByteBuf second = entry(new byte[8], 2, 0, 8, 8);
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                    new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, upper, 1, 1)));
+            SegmentBatchFormat.Address high = new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 1, upper);
+            files.writeAuthorized(SegmentBatchFormat.encode(config, high,
+                    List.of(SegmentBatchFormat.entry(context(8), first))), arena);
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                    new UUID(0, 6), new Generation(1), 0, 0, 0, new Generation(1), 6, 4096, 1, 1)));
+            SegmentBatchFormat.Address low = new SegmentBatchFormat.Address(
+                    0, 0, 6, new Generation(1), new Generation(1), 2, 4096);
+            files.writeAuthorized(SegmentBatchFormat.encode(config, low,
+                    List.of(SegmentBatchFormat.entry(context(8), second))), arena);
+            assertEquals(new SegmentBatchFormat.Address(0, 0, 6, new Generation(1), new Generation(1), 3, 8192),
+                    files.appendAddress(arena, 0, new Generation(1), 3, 4096));
+            SegmentBatchFormat.Address oldTail = new SegmentBatchFormat.Address(
+                    0, 0, 5, new Generation(1), new Generation(1), 3, upper + 4096);
+            assertThrows(IOException.class, () -> files.reserveAuthorized(SegmentBatchFormat.encode(config,
+                    oldTail, List.of(SegmentBatchFormat.entry(context(8), second))), arena));
+            assertEquals(upper + 4096, files.nextOffset(0));
+            assertEquals(2, files.dataIo.forces);
+        } finally {
+            first.release();
+            second.release();
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                IsolatedSegmentFiles reopened = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                        config, identity(), replay, new SegmentFileIo(), 2, 1)) {
+            SegmentDataRecovery.PhysicalInventory inventory = reopened.startupInventory();
+            assertEquals(2, inventory.streamCandidate(replay, 0, new Generation(1)).through());
+            assertEquals(2, inventory.entries().size());
+            for (SegmentPointRead.Location location : inventory.entries()) {
+                assertEquals(location.entryId(),
+                        SegmentPointRead.read(config, identity(), replay, location).record().entryId());
+            }
+            assertNull(reopened.appendAddress(replay, 0, new Generation(1), 3, 4096));
+        }
+    }
+
+    @Test
+    public void restartSkipsOldAllocationTailsButAcceptsANewLowerGrant() throws Exception {
+        IsolatedSegmentConfig config = config();
+        long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        ByteBuf first = entry(new byte[8], 1, 0, 8, 8);
+        ByteBuf second = entry(new byte[8], 2, 0, 8, 8);
+        try {
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, upper, 1, 1)));
+                files.writeAuthorized(SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                        0, 0, 5, new Generation(1), new Generation(1), 1, upper),
+                        List.of(SegmentBatchFormat.entry(context(8), first))), arena);
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    IsolatedSegmentFiles files = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                            config, identity(), arena, new SegmentFileIo(), 2, 1)) {
+                assertNull(files.appendAddress(arena, 0, new Generation(1), 2, 4096));
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, 6), new Generation(1), 0, 0, 0, new Generation(1), 6, 4096, 1, 1)));
+                SegmentBatchFormat.Address low = new SegmentBatchFormat.Address(
+                        0, 0, 6, new Generation(1), new Generation(1), 2, 4096);
+                assertEquals(low, files.appendAddress(arena, 0, new Generation(1), 2, 4096));
+                SegmentBatchFormat.FrozenBatch lowerBatch = SegmentBatchFormat.encode(config, low,
+                        List.of(SegmentBatchFormat.entry(context(8), second)));
+                files.writeAuthorized(lowerBatch, arena);
+                assertEquals(2, SegmentPointRead.read(config, identity(), arena, SegmentPointRead.locations(
+                        SegmentBatchParser.parse(lowerBatch.bytes(), low,
+                                config.bytesPerFile())).get(0)).record().entryId());
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    IsolatedSegmentFiles files = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                            config, identity(), arena, new SegmentFileIo(), 2, 1)) {
+                assertEquals(2, files.startupInventory().streamCandidate(arena, 0, new Generation(1)).through());
+                assertNull(files.appendAddress(arena, 0, new Generation(1), 3, 4096));
+            }
+        } finally {
+            first.release();
+            second.release();
+        }
+    }
+
+    @Test
+    public void allocationOrderedRecoveryStillRejectsCrossAllocationSequenceGapsAndDuplicates() throws Exception {
+        for (long badSequence : new long[] {1, 3}) {
+            IsolatedSegmentConfig config = IsolatedSegmentConfig.defaults(temporary.newFolder("bad-range-"
+                    + badSequence).toPath().resolve("arena"));
+            long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+            ByteBuf first = entry(new byte[8], 1, 0, 8, 8);
+            ByteBuf second = entry(new byte[8], 2, 0, 8, 8);
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, 5), new Generation(1), 0, 0, 0, new Generation(1), 5, upper, 1, 1),
+                        new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                                new UUID(0, 6), new Generation(1), 0, 0, 0, new Generation(1), 6, 4096, 1, 1)));
+                files.writeAuthorized(SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                        0, 0, 5, new Generation(1), new Generation(1), 1, upper),
+                        List.of(SegmentBatchFormat.entry(context(8), first))), arena);
+                files.writeAuthorized(SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                        0, 0, 6, new Generation(1), new Generation(1), badSequence, 4096),
+                        List.of(SegmentBatchFormat.entry(context(8), second))), arena);
+            } finally {
+                first.release();
+                second.release();
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                IOException failure = assertThrows(IOException.class, () -> {
+                    try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openAppendOnlyWithInventory(
+                            config, identity(), arena, new SegmentFileIo(), 2, 1)) {
+                        files.startupInventory().streamCandidate(arena, 0, new Generation(1));
+                    }
+                });
+                assertTrue(failure.getMessage(), failure.getMessage().contains("sequence gap"));
+            }
+        }
+    }
+
+    @Test
     public void authorizedStreamSkipsAndCancelledReservationsCannotBeReused() throws Exception {
         IsolatedSegmentConfig config = config();
         long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;

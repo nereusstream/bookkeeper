@@ -19,6 +19,9 @@ import time
 
 
 MATRIX = {
+    "c-allocation-order": None,
+    "ce-allocation-file-order": "NewerAllocationIsNotBlockedByFileOffset",
+    "ce-allocation-old-tail": "OldAllocationsCannotBeReentered",
     "c-tail-recovery": None,
     "ce-tail-recovery-invalid-index": "SkippedBodyHasDurableMatchingIndex",
     "ce-tail-recovery-before-sync": "ReadyHasRequiredDataSync",
@@ -90,7 +93,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "A+C", "C+D", "MOVE/FREE", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -103,13 +106,14 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "TailRecovery.tla" if "tail-recovery" in name else (
+                   "-metadir", str(states), "AllocationOrder.tla" if "allocation" in name else (
+                       "TailRecovery.tla" if "tail-recovery" in name else (
                        "RuntimeCoverage.tla" if "runtime-" in name else (
                        "IndexMaintenance.tla" if "index-" in name else (
                        "DerivedCoverage.tla" if "derived" in name else (
                        "ArenaRotation.tla" if "arena-rotation" in name else (
                        "BookieCheckpoint.tla" if "bookie-checkpoint" in name or "bookie-rotation" in name else (
-                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla"))))))]
+                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla")))))))]
         wrapper = ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
         output = run / "checker-output" / (name + ".log")
         start = time.monotonic()

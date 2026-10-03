@@ -8296,6 +8296,60 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void allocationControlOrderSurvivesRotationAndBothFullAndCoveredStorageRestart() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("allocation-control-order");
+        long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            for (int i = 0; i < 2; i++) {
+                long offset = i == 0 ? upper : 4096;
+                long id = 5 + i;
+                arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, id), new Generation(1), 0, 0, 0, new Generation(1), id, offset, 1, 1)));
+                ByteBuf bytes = entry(context(), i + 1);
+                try {
+                    files.writeAuthorized(SegmentBatchFormat.encode(config, new SegmentBatchFormat.Address(
+                            0, 0, id, new Generation(1), new Generation(1), i + 1, offset),
+                            List.of(SegmentBatchFormat.entry(context(), bytes))), arena);
+                } finally {
+                    bytes.release();
+                }
+            }
+            files.close();
+            arena.rotate();
+        }
+        SegmentDerivedIndex.Coverage published;
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            for (long entryId : new long[] {1, 2}) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(entryId, read.result().record().entryId());
+                }
+                storageWrite(storage, context(), entryId);
+            }
+            writeAfterIndexBackpressure(storage, 3);
+            published = checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage();
+            assertEquals(3, published.entries());
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            for (long entryId : new long[] {1, 2, 3}) {
+                storageWrite(storage, context(), entryId);
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(entryId, read.result().record().entryId());
+                }
+            }
+        }
+        try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+            assertEquals(published.indexGeneration(), index.coverage().orElseThrow().indexGeneration());
+        }
+    }
+
+    @Test
     public void coveredRestartReusesNativeGenerationAndValidatesOnlyUncoveredBodies() throws Exception {
         IsolatedSegmentConfig config = coverageRecoveryConfig("covered-restart");
         CoveredTail source = createCoveredTail(config);

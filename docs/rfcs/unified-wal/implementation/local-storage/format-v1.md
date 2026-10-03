@@ -225,3 +225,6 @@ stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每sh
 
 
 正常恢复使用的coverage证据携带源配置/身份，仅为内存proof，不在上述page加入机器路径。`Scan`统计实际成功扫描的读取bytes、完整校验bytes、covered batch数及跳过body bytes；不把固定头检查或恢复force省略，也不据这些计数声称设备I/O/性能结论。当前仍限正常关闭、单Arena/no-MOVE/FREE；字段编码和固定向量不变。
+
+
+分配控制顺序与低地址追加（2026-10-03）：字节格式与固定向量不变。写入使用当前已apply的allocation operation原sequence作为grant顺序，stream cursor跨grant前进而不依赖文件offset递增；恢复每allocation只保留一个连续batch-sequence区间，再按原控制顺序拼接验证stream前缀。原sequence已由现有checkpoint operation状态保存，rotation不改绑定；低地址并不等于旧grant尾部可返回，仍不支持FREE或旧generation残留复用。实现与回执见[本地状态](README.md#分配控制顺序与低地址追加)。

@@ -30,6 +30,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
@@ -138,27 +139,45 @@ final class SegmentDataRecovery {
 
     private static final class StreamProgress {
         private final long firstSequence;
-        private long nextSequence;
+        // At most one range per applied allocation, bounded by the fixed DATA/control capacity, not per record.
+        private final Map<Long, SequenceRange> ranges = new TreeMap<>();
         private boolean broken;
 
         private StreamProgress(long firstSequence) {
             this.firstSequence = firstSequence;
-            nextSequence = firstSequence;
         }
 
-        private void observe(long sequence) {
+        private void observe(long allocationOrder, long sequence) {
             if (broken) {
                 return;
             }
-            if (nextSequence == Long.MAX_VALUE || sequence != nextSequence) {
+            SequenceRange range = ranges.computeIfAbsent(allocationOrder, ignored -> new SequenceRange(sequence));
+            if (range.nextSequence == Long.MAX_VALUE || sequence != range.nextSequence) {
                 broken = true;
             } else {
-                nextSequence++;
+                range.nextSequence++;
             }
         }
 
         private StreamPrefix snapshot() {
-            return new StreamPrefix(firstSequence, nextSequence - 1, !broken);
+            long next = firstSequence;
+            for (SequenceRange range : ranges.values()) {
+                if (broken || range.firstSequence != next) {
+                    return new StreamPrefix(firstSequence, next - 1, false);
+                }
+                next = range.nextSequence;
+            }
+            return new StreamPrefix(firstSequence, next - 1, !broken);
+        }
+
+        private static final class SequenceRange {
+            private final long firstSequence;
+            private long nextSequence;
+
+            private SequenceRange(long firstSequence) {
+                this.firstSequence = firstSequence;
+                nextSequence = firstSequence;
+            }
         }
     }
 
@@ -570,7 +589,11 @@ final class SegmentDataRecovery {
                             progress = new StreamProgress(first);
                             streams.put(key, progress);
                         }
-                        progress.observe(address.sequence());
+                        long order = authority.appliedAllocationOrder(address);
+                        if (order < 0) {
+                            throw new IOException("Physical allocation has no applied control order");
+                        }
+                        progress.observe(order, address.sequence());
                     }
                     StreamCoverage cut = covered.get(new StreamKey(address.shard(), address.streamGeneration()));
                     if (cut != null && address.sequence() >= cut.firstSequence()

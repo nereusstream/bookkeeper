@@ -127,3 +127,16 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 | `Expose` | `updateFromRecovery`保留index代、批量补tail/清除不可读行、flush/发布后startSession与原owner bootstrap；storage图真实重启/读取/重复/追加 |
 
 `coveredRestartReplaysTombstoneSuffixWithoutRevivingIndexedRows`另检查控制后缀过滤旧native行与新tail；`coveredRecoveryRejectsSeedFromAnotherDataDirectoryBeforeSync`从两个真实独立目录取得证据，并在错误目录sync前拒绝。source目录绑定及真实native写入不在有限模型中；不由该投影推出任意权限/selector、实际掉电或liveness。
+
+
+## 分配顺序与低地址追加
+
+`AllocationOrder.tla`实际展开的Grant/Consume/Restart均有非零coverage；Reserve与Cancel共用Consume，lastKind区分但没有独立包装动作计数。
+
+| 动作 | 当前代码与真实回归 |
+|---|---|
+| `Grant` | `SegmentArenaControlLog`原成功operation顺序；`allocationControlOrderSurvivesRotationAndBothFullAndCoveredStorageRestart`完成实际Arena rotation后重启 |
+| `Reserve` / `Cancel`（Consume） | `IsolatedSegmentFiles.reservePhysical`与`appendAddress`的控制序号/offset游标；`laterAppliedAllocationCanAppendBelowTheSameStreamsPreviousFileOffset`验证高→低及旧grant拒绝；`authorizedStreamSkipsAndCancelledReservationsCannotBeReused`保留取消不归还及raw前缀保护 |
+| `Restart` | `restartSkipsOldAllocationTailsButAcceptsANewLowerGrant`验证两轮物理restart，新低地址grant可写但旧grant尾不可返还；storage图另验证全量/同代覆盖重启、读、重复和新追加 |
+
+`allocationOrderedRecoveryStillRejectsCrossAllocationSequenceGapsAndDuplicates`使用真实有效DATA framing分别制造区间间gap和duplicate，不能借排序容忍无效前缀。每allocation连续区间、CRC/文件内容、scope及rotation原序号由Java另证；有限分配顺序投影不建模这些字节行为，也不证明FREE、旧I/O/pin排空或liveness。

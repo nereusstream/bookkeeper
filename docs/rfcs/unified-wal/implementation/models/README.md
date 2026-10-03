@@ -214,3 +214,18 @@ DATA barrier、当前原owner连续前缀、身份/权限及framing仍作为其�
 控制重放/身份/grant/合法header与各未跳过body的CRC验证是输入假设；db集合表示已验证的实际持久内容，匹配用集合相等替代Java完整key/value摘要。模型不检查CRC/SHA碰撞、真实RocksDB/文件系统、读取bytes、source目录绑定、native增量WriteBatch、多个stream或真实掉电，以上由独立Java回归或待执行Gate拥有。实际Java仍检查固定头与有界物理连续前缀、匹配的index batch位置及当前Bookie后缀，不把跳过body当payload成功；必要sync失败不能开放。
 
 本切片没有解除未正常关闭会话隔离，没有一般MOVE/FREE、回收后current selector、跨Arena/ledger竞争、完整A+C/C+D或liveness。对应实现与真实5项恢复回归见[本地存储](../local-storage/README.md#持久覆盖辅助的正常恢复切片)，步骤8与production authority仍未完成。
+
+
+## 分配顺序与旧尾部隔离投影
+
+2026-10-03，`unified-wal-model-p7nk5a81`绑定父提交`c371c40d8d4a871e39d2ff8cc987da611cb88632`，冻结57个实际输入（10 module、30 cfg、runner、16 Java）及父提交处3份合同哈希；91个回执checksum逐项核对。30个配置为11个完整正向PASS和19个指定性质反例，旧回执不改绑定。复现沿用`python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar`。
+
+| 配置 | 结果 | generated / distinct | queue | depth / diameter | elapsed s | peak RSS bytes |
+|---|---|---|---|---|---|---|
+| `c-allocation-order` | PASS | 630 / 302 | 0 | 11 / 11 | 0.8197 | 110,772,224 |
+| `ce-allocation-file-order` | EXPECTED_COUNTEREXAMPLE: NewerAllocationIsNotBlockedByFileOffset | 10 / 10 | 5 | 4 / — | 0.7609 | 105,431,040 |
+| `ce-allocation-old-tail` | EXPECTED_COUNTEREXAMPLE: OldAllocationsCannotBeReentered | 17 / 11 | 6 | 4 / — | 0.8056 | 105,496,576 |
+
+固定3个成功applied grant、每grant 2个位置、最多1次restart，grant 2在共享文件中的地址低于grant 1。检查可进入后来grant、进入后继不返回旧尾，以及restart不重新使用任何已知旧grant尾部。TLC实际展开的`Grant`、`Consume`、`Restart` coverage均非零（21:73、240:480、40:76）；Reserve/Cancel两个包装动作共用Consume并以lastKind区分，未分别统计包装动作次数。Cancel只投影预留地址不返还，真实I/O未知/故障隔离由既有管理会话模型及Java负责。
+
+成功grant、原控制sequence/身份已持久且可重放为假设；不是control fsync/apply或checkpoint新的证明。没有建模实际offset bytes、CRC、扫描各allocation区间拼接、退休range、FREE/generation reuse、reader/writer I/O drain、全局预算或liveness。实际控制序号跨rotation、全量/覆盖辅助恢复和必要gap/duplicate拒绝由[Java真实文件回归](../local-storage/README.md#分配控制顺序与低地址追加)另证，不能据此宣布步骤9完成。

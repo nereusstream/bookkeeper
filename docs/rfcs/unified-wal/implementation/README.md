@@ -246,6 +246,8 @@ DATA durable → hot locator → local result
 
 #### 9. 实现本地tombstone、compaction与FREE/reuse
 
+2026-10-03 [分配控制顺序与低地址追加](local-storage/README.md#分配控制顺序与低地址追加)已消除必要的文件offset排序约束：写游标按原成功allocation控制sequence推进，进入后继grant不返回旧尾；restart跳过全部旧grant尾部而允许新的低地址grant。恢复按每allocation连续区间与原控制顺序验证stream，真正gap/duplicate仍拒绝。真实rotation、全量/覆盖辅助storage重启及有限分配顺序模型通过。FREE/generation bump、整块存活证明、旧I/O/pin排空和复用旧字节判定尚未启用，不标步骤9完成。
+
 依赖步骤8，对应UW-4/UW-5。按本地tombstone禁止新访问→整块全死直接FREE/reuse→部分存活块compaction→多次搬迁/orphan/并发回收推进。搬迁复用DATA I/O，但使用独立内部完成分支：
 
 ```text

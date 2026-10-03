@@ -435,3 +435,16 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 定向两项及全类回归均通过；最终回执`unified-wal-local-Gs6OWJ9U`绑定父提交`3b1b6cfdb77194fe5a75abd0f746815a58b9266b`和201个实际源码/测试/向量输入，`SegmentBookieControlLogTest`共140项、140通过、0失败/错误/跳过。复现：`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。初次夹具误用已存在的新建目录；随后误将未关闭会话的物理候选当作可授权点读，均已纠正，实际隔离断言保留。既有模型回执`unified-wal-model-h1roqnsp`的53个输入与当前文件逐项哈希一致，本轮未改变实现/模型、未重复执行TLC，也未把Java全类范围扩展为全模块验收。
 
 这补充上述运行期覆盖与正常恢复的进程故障证据。未覆盖真实掉电、所有文件系统故障窗口或完整发布协议；未正常关闭恢复语义仍待合同确认，一般MOVE/FREE、完整预算、在线控制维护、长期负载、多Arena及完整模型仍未完成，步骤8保持部分进展。
+
+
+### 分配控制顺序与低地址追加
+
+2026-10-03，为整块FREE/reuse消除必要的文件偏移约束，隔离DATA游标改为每stream的`(原成功allocation控制sequence, 当前offset)`。Arena从现有applied operation保存的原序号选择最早可容纳整批的合法grant；当前grant内只向前，进入较后grant便永久跳过旧grant尾部。后来成功分配的低地址grant可以接受，不因上一批位于较高文件地址而被拒绝；raw前缀保护、取消预留不归还、failed I/O隔离与整批grant核验保持。restart冻结已重放Arena applied cut，所有旧grant尾部继续跳过，新grant按控制序号而不是全文件高水位判定。文件high-watermark仍用于容量规划与范围校验，不充当stream排序权威。
+
+完整stream inventory恢复仍独立验证每条必要header/body和grant，但以每个已成功allocation为单位保留一个连续序号区间，按原控制顺序检查区间之间及区间内部连续性。范围数量受实际applied allocation/DATA与控制容量约束，不建立每batch排序表；书签不是用户entryId。全量和覆盖辅助两条恢复都使用该规则，物理低地址先扫描到较后sequence不会误报缺口；真正缺口、重复或同allocation内乱序仍拒绝。原allocation序号由既有checkpoint/rotation operation状态保存，不新增持久字段或改字节向量，也不将控制日志durable最大序号当作已应用顺序。
+
+修复前真实反例`unified-wal-local-i6d1I1ZK`在高地址写入后向后来成功分配的低地址写入，因旧游标抛出`Range is not unused or fixed capacity exhausted`；该反例输入及结果保留。最终Java回执`unified-wal-local-N16YauZh`绑定父提交`c371c40d8d4a871e39d2ff8cc987da611cb88632`及201个实际源码/测试/向量输入：相关7类237项，232通过、5项Linux亲和在macOS跳过，0失败/错误；Spotless/Checkstyle通过。新增4项覆盖同stream高→低追加及拒绝返回旧grant、两轮physical restart跳过旧尾且接受新低地址grant、跨allocation真实gap/duplicate拒绝，以及Arena实际rotation后storage图的全量/同代覆盖重启、读取、重复与新DATA追加。复现沿用上节7类命令。
+
+模型回执`unified-wal-model-p7nk5a81`绑定同一父提交，冻结57个实际输入（10 module、30 cfg、runner、16 Java）及父提交处3份合同哈希，91个回执checksum已逐项核对；11个完整正向PASS与19个指定反例。新增分配顺序投影完整探索302 distinct states，按文件偏移排序及返回旧尾两种候选取得指定反例，见[模型范围](../models/README.md#分配顺序与旧尾部隔离投影)。物理header范围拼接、CRC、原operation序号跨真实rotation及storage图由Java验证，模型不替代这些证据。
+
+这是实际FREE/reuse的必要前置，尚未启用FREE/generation bump或复用已写旧字节。整allocation当前存活证明、旧writer/pin/I/O排空、退休sequence范围与旧generation残留恢复判定仍需接入；不得靠整块清零替代合同，也不把后来分配的初始零范围称为已回收。MOVE/compaction、净回收/长期负载、多Arena、真实掉电及生产authority仍未完成，步骤9保持部分前置进展。
