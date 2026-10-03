@@ -224,7 +224,7 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 #### 8. 完善checkpoint/rotation、派生索引与完整重建
 
-2026-10-03：[Bookie/Arena checkpoint局部实现](local-storage/README.md)已冻结applied状态及字节边界，复用有界image codec、各自的durable CHECKPOINT_COMMIT和独立A/B发布页，恢复匹配代并重放完整后缀。权限/幂等、发布故障、真实JVM退出、DATA重启和有限模型均有回执。两owner现均提供停写后的双恢复根物理rotation与旧prefix回收，独立锁、身份和发布页不混合；完整当前suffix仍必需。真实RocksDB冷重建、flush后覆盖页及删库后的重建已接入隔离正常restart。异步定位WriteBatch已复用既有owner/DATA I/O接入普通与恢复ENTRY_DATA；每shard最多一个在途批次，后台失败保留热结果并背压新DATA，控制预留仍独立。当前已在query-visible owner completion后淘汰hot，hot miss后fresh Get与真实DATA读/重复比较复用同一票据；占用坐标预算及全量恢复容量独立于hot容量。运行期覆盖检查点已按所有原worker冻结cut、暂停Put、真实flush及A/B force发布；同代publication持续递增，部分DATA额度拒绝先解冻后返回，取消保留实际I/O/owner终结。在线控制维护、长期历史压缩、完整在线覆盖恢复和coverage跳过扫描未完成，步骤8保持部分进展。
+2026-10-03：[Bookie/Arena checkpoint局部实现](local-storage/README.md)已冻结applied状态及字节边界，复用有界image codec、各自的durable CHECKPOINT_COMMIT和独立A/B发布页，恢复匹配代并重放完整后缀。权限/幂等、发布故障、真实JVM退出、DATA重启和有限模型均有回执。两owner现均提供停写后的双恢复根物理rotation与旧prefix回收，独立锁、身份和发布页不混合；完整当前suffix仍必需。真实RocksDB冷重建、flush后覆盖页及删库后的重建已接入隔离正常restart。异步定位WriteBatch已复用既有owner/DATA I/O接入普通与恢复ENTRY_DATA；每shard最多一个在途批次，后台失败保留热结果并背压新DATA，控制预留仍独立。当前已在query-visible owner completion后淘汰hot，hot miss后fresh Get与真实DATA读/重复比较复用同一票据；占用坐标预算及全量恢复容量独立于hot容量。运行期覆盖检查点已按所有原worker冻结cut、暂停Put、真实flush及A/B force发布；同代publication持续递增，部分DATA额度拒绝先解冻后返回，取消保留实际I/O/owner终结。正常关闭restart已验证实际覆盖与当前控制/stream/grant，覆盖内仅校验固定批头/连续性，未覆盖授权tail完整解析及同步；无效覆盖仍全扫描，有效覆盖复用index代并补写tail/过滤tombstone。在线控制维护、长期历史压缩、一般MOVE/FREE覆盖恢复及真实掉电未完成，步骤8保持部分进展。
 
 依赖步骤5～7，先控制checkpoint，再派生索引，分开提交。先完成Bookie/Arena checkpoint的applied cut、A/B发布、fallback依赖及旧控制日志回收；不能把日志fsync最大序号当作已apply位置。
 

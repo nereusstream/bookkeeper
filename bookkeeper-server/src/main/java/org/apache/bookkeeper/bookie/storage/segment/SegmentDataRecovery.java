@@ -35,7 +35,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
-    record Scan(long batches, long records, long validatedBytes, long zeroPages) { }
+    record Scan(long batches, long records, long validatedBytes, long zeroPages,
+                long readBytes, long coveredBatches, long skippedBodyBytes) { }
 
     record StreamCoverage(int shard, Generation generation, long firstSequence, long through) { }
 
@@ -170,12 +171,13 @@ final class SegmentDataRecovery {
         private final Map<StreamKey, StreamPrefix> streamPrefixes;
         private final boolean completeStreamPrefixes;
         private final long arenaAppliedThrough;
+        private final boolean usesIndexCoverage;
 
         private PhysicalInventory(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
                                   Scan scan, List<SegmentPointRead.Location> entries,
                                   List<Long> grantedHighWatermarks,
                                   Map<StreamKey, StreamPrefix> streamPrefixes, boolean completeStreamPrefixes,
-                                  long arenaAppliedThrough) {
+                                  long arenaAppliedThrough, boolean usesIndexCoverage) {
             this.sourceConfig = sourceConfig;
             this.sourceIdentity = sourceIdentity;
             this.scan = scan;
@@ -184,6 +186,7 @@ final class SegmentDataRecovery {
             this.streamPrefixes = Map.copyOf(streamPrefixes);
             this.completeStreamPrefixes = completeStreamPrefixes;
             this.arenaAppliedThrough = arenaAppliedThrough;
+            this.usesIndexCoverage = usesIndexCoverage;
         }
 
         IsolatedSegmentConfig sourceConfig() {
@@ -196,6 +199,10 @@ final class SegmentDataRecovery {
 
         Scan scan() {
             return scan;
+        }
+
+        boolean usesIndexCoverage() {
+            return usesIndexCoverage;
         }
 
         List<SegmentPointRead.Location> entries() {
@@ -339,13 +346,21 @@ final class SegmentDataRecovery {
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
             SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
             FileLock writerLock) throws IOException {
+        return recoverLocallyReadableInventoryWhileLocked(config, identity, authority, bookie,
+                syncIo, maxEntries, maxStreams, writerLock, null);
+    }
+
+    static PhysicalInventory recoverLocallyReadableInventoryWhileLocked(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
+            SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
+            FileLock writerLock, SegmentDerivedIndex.RecoveryCoverage seed) throws IOException {
         if (syncIo == null || maxEntries < 1 || maxStreams < 1 || writerLock == null) {
             throw new IllegalArgumentException("Bounded DATA inventory, sync and writer lock required");
         }
         long readCut = bookie.recoveryReadCut(config, identity);
         long arenaCut = authority.appliedThrough();
         PhysicalInventory inventory = scanWhileLocked(config, identity, authority, syncIo,
-                maxEntries, maxStreams, null, bookie, writerLock);
+                maxEntries, maxStreams, null, bookie, writerLock, seed);
         if (readCut != bookie.recoveryReadCut(config, identity) || arenaCut != authority.appliedThrough()) {
             throw new IOException("Recovery control cut changed before locator publication");
         }
@@ -446,6 +461,15 @@ final class SegmentDataRecovery {
                                                     SegmentBookieControlLog bookie,
                                                     FileLock writerLock)
             throws IOException {
+        return scanWhileLocked(config, identity, authority, syncIo, maxEntries, maxStreams,
+                stream, bookie, writerLock, null);
+    }
+
+    private static PhysicalInventory scanWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog authority, SegmentFileIo syncIo,
+                                                    int maxEntries, int maxStreams, StreamProbe stream,
+                                                    SegmentBookieControlLog bookie, FileLock writerLock,
+                                                    SegmentDerivedIndex.RecoveryCoverage seed) throws IOException {
         if (!writerLock.isValid() || !authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
@@ -453,8 +477,33 @@ final class SegmentDataRecovery {
         long records = 0;
         long validatedBytes = 0;
         long zeroPages = 0;
+        long readBytes = 0;
+        long coveredBatches = 0;
+        long skippedBodyBytes = 0;
         List<SegmentPointRead.Location> entries = new ArrayList<>();
         Map<StreamKey, StreamProgress> streams = new HashMap<>();
+        Map<StreamKey, StreamCoverage> covered = new HashMap<>();
+        Map<SegmentBatchFormat.Address, Integer> expectedHeaders = new HashMap<>();
+        if (seed != null) {
+            if (!config.sameStorageScope(seed.sourceConfig()) || !identity.equals(seed.sourceIdentity())) {
+                throw new IOException("Covered DATA recovery has another storage scope");
+            }
+            if (seed.entries().size() > maxEntries || seed.coverage().streams().size() > maxStreams) {
+                throw new IOException("Covered DATA recovery exceeds declared capacity");
+            }
+            for (StreamCoverage cut : seed.coverage().streams()) {
+                covered.put(new StreamKey(cut.shard(), cut.generation()), cut);
+            }
+            for (SegmentPointRead.Location location : seed.entries()) {
+                Integer old = expectedHeaders.put(location.address(), location.batchLength());
+                if (old != null && old != location.batchLength()) {
+                    throw new IOException("Covered locators disagree on batch extent");
+                }
+                if (bookie.locallyReadableContext(location.context())) {
+                    entries.add(location);
+                }
+            }
+        }
         for (int file = 0; file < config.dataFiles(); file++) {
             try (FileChannel data = syncIo == null
                     ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
@@ -467,15 +516,29 @@ final class SegmentDataRecovery {
                 ByteBuffer header = ByteBuffer.allocate(4096);
                 SegmentFileIo.readFully(data, header, 0);
                 identity.validate(header, config, file);
-                for (long offset = 4096; offset < config.bytesPerFile();) {
+                readBytes += 4096;
+                long end = seed == null ? config.bytesPerFile() : authority.grantedHighWatermark(file);
+                if (end < 4096 || end > config.bytesPerFile() || end % 4096 != 0) {
+                    throw new IOException("Invalid recovery allocation high watermark");
+                }
+                for (long offset = 4096; offset < end;) {
                     if (stream != null && !authority.hasAppliedStreamAt(file, offset,
                             stream.shard, stream.generation.value())) {
                         offset += 4096;
                         continue;
                     }
-                    ByteBuffer page = ByteBuffer.allocate(4096);
+                    ByteBuffer page = ByteBuffer.allocate(seed == null ? 4096 : SegmentBatchFormat.HEADER);
                     SegmentFileIo.readFully(data, page, offset);
+                    readBytes += page.remaining();
                     if (allZero(page)) {
+                        if (seed != null) {
+                            page = ByteBuffer.allocate(4096);
+                            SegmentFileIo.readFully(data, page, offset);
+                            readBytes += 4096;
+                            if (!allZero(page)) {
+                                throw new IOException("Zero DATA header has nonzero required body");
+                            }
+                        }
                         zeroPages++;
                         offset += 4096;
                         continue;
@@ -491,19 +554,6 @@ final class SegmentDataRecovery {
                             address.streamGeneration().value(), address.allocation(),
                             address.generation().value())) {
                         throw new IOException("DATA batch has no matching applied grant");
-                    }
-                    ByteBuffer content = ByteBuffer.allocate(length);
-                    SegmentFileIo.readFully(data, content, offset);
-                    SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
-                            config.bytesPerFile());
-                    for (SegmentBatchParser.Record record : parsed.records()) {
-                        if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
-                                != address.shard()) {
-                            throw new IOException("DATA record belongs to another logical shard");
-                        }
-                    }
-                    if (stream != null) {
-                        stream.observe(address);
                     }
                     if (maxStreams > 0) {
                         StreamKey key = new StreamKey(address.shard(), address.streamGeneration());
@@ -521,6 +571,32 @@ final class SegmentDataRecovery {
                             streams.put(key, progress);
                         }
                         progress.observe(address.sequence());
+                    }
+                    StreamCoverage cut = covered.get(new StreamKey(address.shard(), address.streamGeneration()));
+                    if (cut != null && address.sequence() >= cut.firstSequence()
+                            && address.sequence() <= cut.through()) {
+                        Integer expected = expectedHeaders.remove(address);
+                        if (expected != null && expected != length) {
+                            throw new IOException("Covered DATA header disagrees with indexed batch length");
+                        }
+                        coveredBatches++;
+                        skippedBodyBytes += length - SegmentBatchFormat.HEADER;
+                        offset += length;
+                        continue;
+                    }
+                    ByteBuffer content = ByteBuffer.allocate(length);
+                    SegmentFileIo.readFully(data, content, offset);
+                    readBytes += length;
+                    SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
+                            config.bytesPerFile());
+                    for (SegmentBatchParser.Record record : parsed.records()) {
+                        if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                                != address.shard()) {
+                            throw new IOException("DATA record belongs to another logical shard");
+                        }
+                    }
+                    if (stream != null) {
+                        stream.observe(address);
                     }
                     if (maxEntries > 0) {
                         List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
@@ -552,8 +628,20 @@ final class SegmentDataRecovery {
         }
         Map<StreamKey, StreamPrefix> prefixes = new HashMap<>();
         streams.forEach((key, progress) -> prefixes.put(key, progress.snapshot()));
-        return new PhysicalInventory(config, identity, new Scan(batches, records, validatedBytes, zeroPages),
-                entries, grantedHighWatermarks, prefixes, maxStreams > 0, authority.appliedThrough());
+        if (!expectedHeaders.isEmpty()) {
+            throw new IOException("Covered locator has no matching physical DATA header");
+        }
+        for (Map.Entry<StreamKey, StreamCoverage> entry : covered.entrySet()) {
+            StreamPrefix prefix = prefixes.get(entry.getKey());
+            StreamCoverage cut = entry.getValue();
+            if (cut.through() >= cut.firstSequence()
+                    && (prefix == null || !prefix.contiguous() || prefix.through() < cut.through())) {
+                throw new IOException("Covered physical stream is missing or has a sequence gap");
+            }
+        }
+        return new PhysicalInventory(config, identity,
+                new Scan(batches, records, validatedBytes, zeroPages, readBytes, coveredBatches, skippedBodyBytes),
+                entries, grantedHighWatermarks, prefixes, maxStreams > 0, authority.appliedThrough(), seed != null);
     }
 
     private static SegmentBatchFormat.Address address(ByteBuffer page, long offset) throws IOException {

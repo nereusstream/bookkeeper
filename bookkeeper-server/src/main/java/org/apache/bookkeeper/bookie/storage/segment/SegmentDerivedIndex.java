@@ -65,6 +65,13 @@ final class SegmentDerivedIndex implements AutoCloseable {
         }
     }
 
+    record RecoveryCoverage(IsolatedSegmentConfig sourceConfig, SegmentFileHeader sourceIdentity,
+                            Coverage coverage, List<SegmentPointRead.Location> entries) {
+        RecoveryCoverage {
+            entries = List.copyOf(entries);
+        }
+    }
+
     private record Contents(long entries, byte[] digest) { }
     private record Published(Coverage coverage, byte[] digest) { }
 
@@ -182,6 +189,53 @@ final class SegmentDerivedIndex implements AutoCloseable {
         }
     }
 
+    /** Optional startup seed; DATA headers/tail and current Bookie permissions still require verification. */
+    synchronized Optional<RecoveryCoverage> recoveryCoverage(SegmentArenaControlLog arena,
+                                                             SegmentBookieControlLog bookie) throws IOException {
+        requireOpen();
+        try {
+            Coverage selected = coverage().orElse(null);
+            if (selected == null || !arena.matchesScope(config, identity)
+                    || selected.arenaCut() > arena.appliedThrough()
+                    || selected.bookieCut() > bookie.recoveryReadCut(config, identity)) {
+                return Optional.empty();
+            }
+            SegmentDataRecovery.StreamCoverage[] streams =
+                    new SegmentDataRecovery.StreamCoverage[config.logicalShards()];
+            for (SegmentDataRecovery.StreamCoverage stream : selected.streams()) {
+                SegmentArenaControlLog.SingleStream current = arena.restartStreamForShard(stream.shard()).orElse(null);
+                if (current == null || !current.generation().equals(stream.generation())
+                        || current.firstSequence() != stream.firstSequence()) {
+                    return Optional.empty();
+                }
+                streams[stream.shard()] = stream;
+            }
+            List<SegmentPointRead.Location> entries = new ArrayList<>();
+            try (RocksIterator cursor = db.newIterator()) {
+                for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+                        cursor.next()) {
+                    SegmentPointRead.Location location = decode(cursor.value());
+                    SegmentBatchFormat.Address address = location.address();
+                    SegmentDataRecovery.StreamCoverage stream = streams[address.shard()];
+                    if (stream == null || !address.streamGeneration().equals(stream.generation())
+                            || address.sequence() < stream.firstSequence() || address.sequence() > stream.through()
+                            || !arena.dataFileAvailable(address.fileIndex())
+                            || !arena.hasAppliedGrant(address.fileIndex(), address.offset(), location.batchLength(),
+                                    address.shard(), address.streamGeneration().value(), address.allocation(),
+                                    address.generation().value())) {
+                        return Optional.empty();
+                    }
+                    entries.add(location);
+                }
+                cursor.status();
+            }
+            return Optional.of(new RecoveryCoverage(config, identity, selected, entries));
+        } catch (IOException | RocksDBException invalidOptionalCoverage) {
+            // Discard only the optional proof; the caller must perform the complete mandatory DATA recovery.
+            return Optional.empty();
+        }
+    }
+
     /** Replace from the complete synced, route-selected DATA scan. No coverage is advanced by WriteBatch. */
     synchronized void replace(SegmentDataRecovery.PhysicalInventory inventory, SegmentArenaControlLog arena,
                               SegmentBookieControlLog bookie) throws IOException {
@@ -244,6 +298,74 @@ final class SegmentDerivedIndex implements AutoCloseable {
                                   SegmentBookieControlLog bookie) throws IOException {
         replace(inventory, arena, bookie);
         return checkpoint(new SegmentFileIo());
+    }
+
+    /** Keep the verified index generation; add validated tail rows and retire locally unreadable rows. */
+    synchronized Coverage updateFromRecovery(SegmentDataRecovery.PhysicalInventory inventory,
+                                             SegmentArenaControlLog arena, SegmentBookieControlLog bookie)
+            throws IOException {
+        requireOpen();
+        if (!inventory.usesIndexCoverage() || !config.sameStorageScope(inventory.sourceConfig())
+                || !identity.equals(inventory.sourceIdentity()) || inventory.entries().size() > maxEntries) {
+            throw new IOException("Incremental recovery needs a verified bounded index inventory");
+        }
+        inventory.requireCurrentArena(arena);
+        long arenaCut = arena.appliedThrough();
+        long bookieCut = bookie.recoveryReadCut(config, identity);
+        pendingCoverage = null;
+        try {
+            try (WriteBatch retired = new WriteBatch(); RocksIterator cursor = db.newIterator()) {
+                int count = 0;
+                for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+                        cursor.next()) {
+                    SegmentPointRead.Location location = decode(cursor.value());
+                    if (!bookie.locallyReadableContext(location.context())) {
+                        retired.delete(cursor.key());
+                        if (++count == BATCH_ENTRIES) {
+                            db.write(writes, retired);
+                            retired.clear();
+                            count = 0;
+                        }
+                    }
+                }
+                cursor.status();
+                if (count != 0) {
+                    db.write(writes, retired);
+                }
+            }
+            List<SegmentPointRead.Location> missing = new ArrayList<>(BATCH_ENTRIES);
+            for (SegmentPointRead.Location location : inventory.entries()) {
+                if (!bookie.locallyReadableContext(location.context())) {
+                    throw new IOException("Recovered coordinate is no longer readable");
+                }
+                SegmentPointRead.Location existing = get(location.context(), location.entryId()).orElse(null);
+                if (existing == null) {
+                    missing.add(location);
+                    if (missing.size() == BATCH_ENTRIES) {
+                        append(missing);
+                        missing.clear();
+                    }
+                } else if (!existing.equals(location)) {
+                    throw new IOException("Recovered DATA conflicts with the covered coordinate");
+                }
+            }
+            if (!missing.isEmpty()) {
+                append(missing);
+            }
+            inventory.requireCurrentArena(arena);
+            if (arenaCut != arena.appliedThrough() || bookieCut != bookie.recoveryReadCut(config, identity)) {
+                throw new IOException("Control cut changed during incremental derived recovery");
+            }
+            pendingCoverage = new Coverage(0, indexGeneration, arenaCut, bookieCut,
+                    inventory.entries().size(), inventory.indexStreams(arena));
+            return checkpoint(new SegmentFileIo());
+        } catch (RocksDBException failure) {
+            failed = true;
+            throw new IOException("Incremental derived recovery failed", failure);
+        } catch (IOException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
     }
 
     /** All original owners paused maintenance after fully indexing their captured DATA prefixes. */

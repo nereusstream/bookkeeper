@@ -96,3 +96,17 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `PublicationClockAdvances` | `nextPublication`取scope/CRC/UUID有效页的最大序号，即使旧内容已不匹配；同代重试递增 | 无坏CRC/部分字节；crash不承诺未持久页时钟，真实force失败另测 |
 
 正向完整探索3,102 distinct states，三个候选规则均违反指定性质。覆盖仅说明被冻结且实际flush内容的派生定位范围，不替代Bookie权限、DATA或恢复同步；当前restart仍全量扫描。
+
+
+## 持久覆盖辅助的尾部恢复
+
+`unified-wal-model-h1roqnsp`正向完整探索280 distinct states，保留如下性质：
+
+| 性质 | 当前实际路径 | 证据边界 |
+|---|---|---|
+| `SkippedBodyHasDurableMatchingIndex` | `SegmentDerivedIndex.recoveryCoverage`验证真实contents/page/scope/UUID/current cut/stream/grant；无效proof全扫描 | 集合相等代表内容摘要；真实CRC/身份/目录绑定由Java验证 |
+| `ReadyHasRequiredDataSync` | `scanWhileLocked`保留DATA恢复force，返回inventory及native恢复/新session之前不能失败 | 模型sync为动作；真实失败注入另测 |
+| `ReadyHasContiguousPhysicalPrefix` | 无论covered与否都读取独立parser验证的固定头，确认stream物理顺序和覆盖内必要头 | 单stream 3位置；Java另检查多stream/grant/index batch位置 |
+| `ReadyRetainsExactlyReadableCoordinates` | 覆盖定位与完整tail合并、唯一坐标检查；当前Bookie tombstone过滤，native仅补tail/清除不可读行 | 无MOVE/FREE；不授予payload成功或确定absence，点读仍校验record |
+
+三个指定负向分别针对无效proof授权、跳过sync及忽略物理缺口。有限模型没有RocksDB增量写入、native预算、真实body CRC/目录锁或任意selector；旧cold/运行期覆盖证明继续独立拥有原证据。

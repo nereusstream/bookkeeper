@@ -407,3 +407,20 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 模型回执`unified-wal-model-47t1o26s`冻结48个实际输入（8 module、23 cfg、runner、16 Java），绑定父提交处3份合同哈希，70个回执checksum已核对；9个完整正向PASS与14个指定反例。新增正向完整探索3,102 distinct states，11个Next动作均非零；flush前发布、旧内容失效时重置序号、发布时扩大冻结cut分别触发指定性质反例。初次clock oracle限制了错误动作而未发现反例，已修正并保留历史失败，见[模型范围](../models/README.md#运行期覆盖发布切片)。模型不证明真实native/文件系统、多worker协调或票据生命周期。
 
 当前restart仍完整扫描并重建DB，不使用覆盖缩短DATA扫描；MOVE/delete次序、在线控制维护、完整native/磁盘预算、长期负载、未正常关闭会话恢复、当前在线页的实际JVM退出/真实掉电及完整A/C/D组合仍未完成。步骤8保持部分实现，无生产authority。
+
+
+### 持久覆盖辅助的正常恢复切片
+
+2026-10-03，正常关闭的单Arena/no-MOVE/FREE restart已接入真实持久index coverage。持原目录writer锁，先验证覆盖页scope/CRC/index UUID及实际DB行数量/内容摘要，核对当前完整重放的两控制cut、单stream generation/起点及每个locator的当前grant。证据携带源配置/身份，不能跨DATA目录复用。缺页、坏页、内容不匹配或已删除DB时仍走原全量DATA恢复/新index代重建；无法打开的未知损坏DB仍报告错误，不自动删除目录。
+
+有效覆盖内仍读取独立parser校验的128-byte batch header并复核物理位置、grant和序号连续性，跳过其body反序列化。覆盖外的当前已授权tail完整读取并校验batch/record CRC、身份、origin与唯一坐标；零header不能掩盖非零body，覆盖内必要头缺失/序号缺口同样阻止启动。此路径枚举到Arena已apply allocation高水位，未授权空间不成为恢复候选；失效覆盖的全量路径保持原全文件校验。所有必要DATA文件仍执行恢复force，coverage不替代DATA barrier。
+
+恢复清单使用当前Bookie route/tombstone过滤覆盖行及tail。有效覆盖复用原native index generation，仅以最多256项批次补写新tail定位、删除当前已不可读行；实际flush/覆盖页force后，再建立新writer session、恢复原owner坐标占用与连续前缀。后续点读/普通重复写继续独立record/权限/grant校验；body跳过仅用于重建，不授予payload成功或absence。已覆盖body后来损坏可在点读被发现，不能借旧定位覆盖同坐标。全部证据仍只用于正常关闭会话，未正常关闭隔离不变。
+
+回执`unified-wal-local-hqPDoMPC`绑定父提交`094a5c709629ba6cb15a2fdbe11b66972a231f7f`及201个实际源码/测试/向量输入：相关7类231项，226通过、5项Linux亲和在macOS跳过，0失败/错误；`spotless:check checkstyle:check`通过。新增5项覆盖有效cut后两条真实durable tail（含此前无DATA的第二shard）、同代增量发布与完整storage图重启/读取/重复/追加、坏页/实际DB内容改变/删库三类全扫描fallback、恢复force失败、必要tail损坏/覆盖头缺失/覆盖body点读CRC、tombstone后缀清理，以及另一目录证据在sync前拒绝。夹具误用了要求旧Arena cut不变的只读入口，已改用独立record校验，并保留storage图成功路径；没有把该cut拒绝当成预期CRC失败。
+
+该固定夹具实际检查1个covered batch跳过3,968 body bytes、2个tail batch完整校验8,192 bytes，并执行1个DATA文件恢复force。`Scan`增加成功扫描的`readBytes`、`coveredBatches`和`skippedBodyBytes`，读取字节包含重复的头读取，不代表介质I/O次数或性能提升；本次没有执行延迟/吞吐前后对照。
+
+模型回执`unified-wal-model-h1roqnsp`冻结53个实际输入（9 module、27 cfg、runner、16 Java），绑定父提交处3份合同哈希，82个回执checksum已核对；10个完整正向PASS、17个指定反例。新增恢复投影完整探索280 distinct states，5个Next动作均非零；无效索引授权跳过、sync前开放、忽略缺口分别触发指定性质反例，见[模型范围](../models/README.md#持久覆盖与尾部恢复投影)。真实CRC/文件系统/多stream与控制后缀由Java另测，模型不代替这些证据。
+
+一般MOVE/FREE selector/重建、完整native/磁盘总账、在线控制维护、长期负载、多Arena、未正常关闭故障解析、当前在线页实际JVM退出/真实掉电及完整A/C/D组合仍未完成；步骤8保持部分实现，无生产authority。

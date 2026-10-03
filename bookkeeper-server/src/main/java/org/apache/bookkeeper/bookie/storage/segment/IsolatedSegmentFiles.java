@@ -251,10 +251,14 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             }
             long cut = bookie.recoveryReadCut(config, identity);
             IsolatedSegmentFiles result = openAppendOnly(config, identity, authority, bookie,
-                    recoveryIo, maxEntries, maxStreams);
+                    recoveryIo, maxEntries, maxStreams, index);
             try {
                 if (index != null) {
-                    index.rebuild(result.startupInventory, authority, bookie);
+                    if (result.startupInventory.usesIndexCoverage()) {
+                        index.updateFromRecovery(result.startupInventory, authority, bookie);
+                    } else {
+                        index.rebuild(result.startupInventory, authority, bookie);
+                    }
                 }
                 result.startSession(authority);
                 if (cut != bookie.recoveryReadCut(config, identity)) {
@@ -278,6 +282,13 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                        SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
                                                        SegmentFileIo recoveryIo,
                                                        int maxEntries, int maxStreams) throws IOException {
+        return openAppendOnly(config, identity, authority, bookie, recoveryIo, maxEntries, maxStreams, null);
+    }
+
+    private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                       SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                       SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
+                                                       SegmentDerivedIndex index) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(authority, "authority");
@@ -296,8 +307,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                     inventory = SegmentDataRecovery.recoverPhysicalInventoryWhileLocked(config, identity,
                             authority, recoveryIo, maxEntries, maxStreams, guard.lock());
                 } else {
+                    SegmentDerivedIndex.RecoveryCoverage seed = index == null ? null
+                            : index.recoveryCoverage(authority, bookie).orElse(null);
                     inventory = SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(config, identity,
-                            authority, bookie, recoveryIo, maxEntries, maxStreams, guard.lock());
+                            authority, bookie, recoveryIo, maxEntries, maxStreams, guard.lock(), seed);
                 }
                 result = new IsolatedSegmentFiles(config, identity, guard, true, inventory);
                 for (int file = 0; file < config.dataFiles(); file++) {

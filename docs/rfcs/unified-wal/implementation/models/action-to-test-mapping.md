@@ -112,3 +112,18 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 `runtimeIndexCheckpointPausedPublicationKeepsNewHotDataFenceAndCancellationDrain`检查冻结后新DATA不进入此次索引cut、原owner/独立控制I/O推进、请求取消不提前归还DATA票据/native锁。它显式配置2条DATA I/O及1条CONTROL I/O；仅1条DATA I/O时checkpoint占用会延迟新的DATA I/O，不据此声称无限进展。
 
 `runtimeIndexPublicationFailureDoesNotPoisonQueryableRowsOrReportSuccess`检查真实页force失败返回UNKNOWN且没有成功coverage，既有query-visible读/重复比较仍可用；同代有效未force页在后续publication clock中仍计数。模型不替代真实多worker协调、票据最后使用、CRC、权限或存储排空验证。
+
+
+## 持久覆盖恢复动作
+
+`TailRecovery.tla`正向5个Next动作coverage全部非零：
+
+| 动作 | 当前实现及真实验证 |
+|---|---|
+| `Start` | `recoveryCoverage`验证真实native摘要和page/当前authority；`coveredRestartInvalidPageContentsOrDeletedDbFallsBackToFullDataRebuild`覆盖坏页、内容后来变化及删库 |
+| `InspectHeader` | 独立batch header parser、连续性、index匹配位置及授权tail完整parse；`coveredRestartReusesNativeGenerationAndValidatesOnlyUncoveredBodies`验证1个覆盖/2个tail及多shard |
+| `Finish` | 稳定Bookie/Arena cut、全部必要头、连续prefix/唯一坐标；`coveredRestartRejectsBadRequiredTailAndCoveredReadsStillValidateRecords`覆盖尾部CRC、覆盖头缺失及覆盖body读CRC |
+| `ForceData` | 所有必要DATA文件force仍必需；同一有效cut回归注入真实force失败，确认未开始native/session恢复，再重试成功 |
+| `Expose` | `updateFromRecovery`保留index代、批量补tail/清除不可读行、flush/发布后startSession与原owner bootstrap；storage图真实重启/读取/重复/追加 |
+
+`coveredRestartReplaysTombstoneSuffixWithoutRevivingIndexedRows`另检查控制后缀过滤旧native行与新tail；`coveredRecoveryRejectsSeedFromAnotherDataDirectoryBeforeSync`从两个真实独立目录取得证据，并在错误目录sync前拒绝。source目录绑定及真实native写入不在有限模型中；不由该投影推出任意权限/selector、实际掉电或liveness。

@@ -8065,4 +8065,234 @@ public class SegmentBookieControlLogTest {
             }
         }
     }
+
+    private record CoveredTail(SegmentDerivedIndex.Coverage coverage,
+                               SegmentDataPhysicalDriver.NormalResult first,
+                               SegmentDataPhysicalDriver.NormalResult tail) { }
+
+    private IsolatedSegmentConfig coverageRecoveryConfig(String name) {
+        return new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve(name), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+    }
+
+    /** Stop admission while page publication is paused, leaving two real durable batches outside its native cut. */
+    private CoveredTail createCoveredTail(IsolatedSegmentConfig config) throws Exception {
+        CountDownLatch atPageForce = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo publication = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            atPageForce.countDown();
+            await(release);
+        });
+        IsolatedSegmentStorage storage = storage(config, 2, 6, 16, 32, 3);
+        try {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4));
+            SegmentDataPhysicalDriver.NormalResult first = storageWrite(storage, context(), 1);
+            CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> reply;
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            do {
+                reply = new CompletableFuture<>();
+                CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> current = reply;
+                assertTrue(storage.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                        (result, cause) -> {
+                            if (cause == null) {
+                                current.complete(result);
+                            } else {
+                                current.completeExceptionally(cause);
+                            }
+                        }), publication));
+                while (atPageForce.getCount() != 0 && !reply.isDone() && System.nanoTime() < end) {
+                    Thread.sleep(1);
+                }
+                if (atPageForce.getCount() == 0) {
+                    break;
+                }
+                assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE,
+                        reply.get(5, TimeUnit.SECONDS).status());
+            } while (System.nanoTime() < end);
+            assertTrue(atPageForce.await(5, TimeUnit.SECONDS));
+            SegmentDataPhysicalDriver.NormalResult tail = storageWrite(storage, context(), 2);
+            storageWrite(storage, context(45), 1);
+            assertFalse(storage.close(Duration.ofMillis(50)));
+            release.countDown();
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+            IsolatedSegmentStorage.IndexCheckpointResult persisted = reply.get(5, TimeUnit.SECONDS);
+            assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED, persisted.status());
+            return new CoveredTail(persisted.coverage(), first, tail);
+        } finally {
+            release.countDown();
+            storage.close();
+        }
+    }
+
+    @Test
+    public void coveredRestartReusesNativeGenerationAndValidatesOnlyUncoveredBodies() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("covered-restart");
+        CoveredTail source = createCoveredTail(config);
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+            assertEquals(source.coverage(), index.coverage().orElseThrow());
+            assertTrue(index.get(context(), 2).isEmpty());
+            SegmentFileIo failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openForLocalResults(
+                    config, identity(), arena, bookie, failedSync, 32, 4, index));
+            assertEquals(1, failedSync.forces);
+            assertEquals(source.coverage(), index.coverage().orElseThrow());
+            SegmentFileIo sync = new SegmentFileIo();
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(
+                    config, identity(), arena, bookie, sync, 32, 4, index)) {
+                SegmentDataRecovery.Scan scan = files.startupInventory().scan();
+                assertTrue(files.startupInventory().usesIndexCoverage());
+                assertEquals(1, scan.coveredBatches());
+                assertEquals(4096 - SegmentBatchFormat.HEADER, scan.skippedBodyBytes());
+                assertEquals(2, scan.batches());
+                assertEquals(2, scan.records());
+                assertEquals(8192, scan.validatedBytes());
+                assertEquals(1, sync.forces);
+                assertEquals(3, files.startupInventory().entries().size());
+                assertEquals(2, SegmentPointRead.read(config, identity(), arena,
+                        index.get(context(), 2).orElseThrow()).record().entryId());
+                assertEquals(45, SegmentPointRead.read(config, identity(), arena,
+                        index.get(context(45), 1).orElseThrow()).record().context().ledgerId());
+                SegmentDerivedIndex.Coverage recovered = index.coverage().orElseThrow();
+                assertEquals(source.coverage().indexGeneration(), recovered.indexGeneration());
+                assertEquals(source.coverage().publication() + 1, recovered.publication());
+                assertEquals(3, recovered.entries());
+                assertEquals(2, recovered.streams().size());
+            }
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16, 32)) {
+            storage.restart();
+            assertEquals(source.first().candidate(), storageWrite(storage, context(), 1).candidate());
+            storageWrite(storage, context(), 2);
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(45), 1).result()) {
+                assertEquals(45, read.result().record().context().ledgerId());
+            }
+            storageWrite(storage, context(), 3);
+        }
+    }
+
+    @Test
+    public void coveredRestartInvalidPageContentsOrDeletedDbFallsBackToFullDataRebuild() throws Exception {
+        for (String mode : new String[] {"bad-page", "new-native-contents", "deleted-db"}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig(mode);
+            CoveredTail source = createCoveredTail(config);
+            if (mode.equals("bad-page")) {
+                Files.write(SegmentDerivedIndex.publication(config, 0), new byte[4096]);
+            } else if (mode.equals("new-native-contents")) {
+                try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+                    index.append(List.of(source.tail().candidate()));
+                }
+            } else {
+                try (java.util.stream.Stream<Path> paths = Files.walk(SegmentDerivedIndex.directory(config))) {
+                    for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                        Files.delete(path);
+                    }
+                }
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR);
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32);
+                    IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(
+                            config, identity(), arena, bookie, new SegmentFileIo(), 32, 4, index)) {
+                assertFalse(files.startupInventory().usesIndexCoverage());
+                assertEquals(0, files.startupInventory().scan().coveredBatches());
+                assertEquals(3, files.startupInventory().scan().batches());
+                assertEquals(3, files.startupInventory().entries().size());
+                assertFalse(source.coverage().indexGeneration().equals(
+                        index.coverage().orElseThrow().indexGeneration()));
+                assertEquals(1, SegmentPointRead.read(config, identity(), arena,
+                        index.get(context(), 1).orElseThrow()).record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void coveredRestartRejectsBadRequiredTailAndCoveredReadsStillValidateRecords() throws Exception {
+        for (int damage : new int[] {0, 1, 2}) {
+            boolean damageCovered = damage != 0;
+            IsolatedSegmentConfig config = coverageRecoveryConfig("damage-" + damage);
+            CoveredTail source = createCoveredTail(config);
+            SegmentPointRead.Location damaged = (damageCovered ? source.first() : source.tail()).candidate();
+            try (FileChannel file = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                if (damage == 2) {
+                    new SegmentFileIo().writeFully(file, ByteBuffer.wrap(new byte[4096]), damaged.address().offset());
+                } else {
+                    new SegmentFileIo().writeFully(file, ByteBuffer.wrap(new byte[] {1}), damaged.recordOffset()
+                            + SegmentBatchFormat.RECORD_HEADER + SegmentBatchFormat.ENTRY_OVERHEAD);
+                }
+                file.force(false);
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR);
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+                if (damage != 1) {
+                    assertThrows(IOException.class, () -> IsolatedSegmentFiles.openForLocalResults(
+                            config, identity(), arena, bookie, new SegmentFileIo(), 32, 4, index));
+                } else {
+                    try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(
+                            config, identity(), arena, bookie, new SegmentFileIo(), 32, 4, index)) {
+                        assertEquals(1, files.startupInventory().scan().coveredBatches());
+                        IOException invalid = assertThrows(IOException.class, () -> SegmentPointRead.read(
+                                config, identity(), arena, index.get(context(), 1).orElseThrow()));
+                        assertTrue(invalid.getMessage().contains("CRC"));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void coveredRestartReplaysTombstoneSuffixWithoutRevivingIndexedRows() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("covered-tombstone");
+        CoveredTail source = createCoveredTail(config);
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
+            assertTrue(bookie.recoveryReadCut(config, identity()) > source.coverage().bookieCut());
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(
+                    config, identity(), arena, bookie, new SegmentFileIo(), 32, 4, index)) {
+                assertTrue(files.startupInventory().usesIndexCoverage());
+                assertEquals(1, files.startupInventory().entries().size());
+                assertTrue(index.get(context(), 1).isEmpty());
+                assertTrue(index.get(context(), 2).isEmpty());
+                assertEquals(1, index.coverage().orElseThrow().entries());
+                assertFalse(bookie.locallyReadableContext(context()));
+                assertEquals(45, SegmentPointRead.read(config, identity(), arena,
+                        index.get(context(45), 1).orElseThrow()).record().context().ledgerId());
+            }
+        }
+    }
+
+
+    @Test
+    public void coveredRecoveryRejectsSeedFromAnotherDataDirectoryBeforeSync() throws Exception {
+        IsolatedSegmentConfig source = coverageRecoveryConfig("covered-source");
+        IsolatedSegmentConfig target = coverageRecoveryConfig("covered-target");
+        createCoveredTail(source);
+        createCoveredTail(target);
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(source, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(source, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(source, identity(), 32);
+                IndexFixture destination = new IndexFixture(target, identity())) {
+            SegmentDerivedIndex.RecoveryCoverage seed = index.recoveryCoverage(arena, bookie).orElseThrow();
+            SegmentFileIo sync = new SegmentFileIo();
+            IOException wrongScope = assertThrows(IOException.class, () ->
+                    SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(target, identity(),
+                            destination.arena, destination.bookie, sync, 32, 4, destination.guard.lock(), seed));
+            assertTrue(wrongScope.getMessage().contains("scope"));
+            assertEquals(0, sync.forces);
+        }
+    }
+
 }
