@@ -729,3 +729,6 @@ README.md
 - INCONCLUSIVE：证据不全、fault 未命中、环境漂移或结果不可重放。
 
 PASS 不授权 Segment 成为 ACK authority，不授权生产 canary，也不证明 cluster delete。
+
+
+2026-10-03：[隔离Arena checkpoint实现与回执](../implementation/local-storage/README.md)已覆盖applied cut、A/B image、commit后发布、完整后缀与corruption fallback，附独立固定向量、4个真实JVM halt边界及正常DATA重启测试。全部旧控制日志仍必需且不回收；Bookie checkpoint、rotation/retention、在线维护、MOVE/FREE、index和本Spike完整Gate仍未完成。checkpoint的有限状态投影及指定规则反例见[模型状态](../implementation/models/README.md#arena-checkpoint-增量验证)，不能替代真实掉电或完整allocator证明。

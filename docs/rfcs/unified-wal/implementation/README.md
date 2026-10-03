@@ -224,6 +224,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 #### 8. 完善checkpoint/rotation、派生索引与完整重建
 
+2026-10-03：[Arena checkpoint局部实现](local-storage/README.md)已冻结applied状态及字节边界，持久/验证有界A/B image、CHECKPOINT_COMMIT后发布，恢复选择匹配的完整代并重放后缀。真实故障/子进程退出、正常DATA重启及有限模型均有回执。当前仍保留并校验全部旧控制日志；Bookie checkpoint、prefix回收/rotation、在线维护接线和派生索引未完成，步骤8保持部分进展。
+
 依赖步骤5～7，先控制checkpoint，再派生索引，分开提交。先完成Bookie/Arena checkpoint的applied cut、A/B发布、fallback依赖及旧控制日志回收；不能把日志fsync最大序号当作已apply位置。
 
 随后接入真实RocksDB派生索引：

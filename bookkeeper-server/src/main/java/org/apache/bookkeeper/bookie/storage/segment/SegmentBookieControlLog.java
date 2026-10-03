@@ -1707,8 +1707,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IOException("Isolated storage file cannot be a symlink");
         }
         try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
-            if ((expectedSize < 0 && input.size() < FIRST_RECORD)
-                    || (expectedSize >= 0 && input.size() != expectedSize)) {
+            boolean superblock = fileId == -1 || fileId == -2;
+            if ((superblock && (input.size() < FIRST_RECORD || input.size() > 8192))
+                    || (!superblock && expectedSize < 0 && input.size() < FIRST_RECORD)
+                    || (!superblock && expectedSize >= 0 && input.size() != expectedSize)) {
                 throw new IOException("Isolated storage file size mismatch");
             }
             ByteBuffer header = ByteBuffer.allocate(4096);

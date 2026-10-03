@@ -13,3 +13,14 @@
 | `LiveWriterHasOpenAuthority` | `IsolatedSegmentFiles.startSession`先持久OPEN并apply；`IsolatedSegmentStorage`全shard bootstrap后开放请求 | 模型只抽象Arena会话，不证明服务readiness/registration |
 
 原调用方是否收到结果、原请求quorum是否成功、最终ledger prefix及LAC均不由上述本地性质推出。模型中的`successes`是外部验收oracle，不新增逐entry ACK日志。
+
+
+Arena checkpoint增量回执`unified-wal-model-thb7_nqa`另检查以下性质；原7项管理会话性质在同次运行中仍由原配置检查。
+
+| 性质 | 当前合同与实现 | 证据边界 |
+| --- | --- | --- |
+| `TypeOK`（ArenaCheckpoint） | 固定3命令/2slot/3代/2crash/1power loss的cut、image与commit类型 | 不证明实际文件或资源总账 |
+| `SnapshotCutWasApplied` | RFC-0003 §11；冻结appliedThrough及其字节边界，不取未apply的durable上限 | 模型为命令计数，Java为sequence；不包含MOVE/FREE |
+| `PublishedImageHasDurableCommit` | payload force/验证后，CHECKPOINT_COMMIT持久并apply，再写inactive发布页 | 文件framing/SHA及barrier由真实测试负责 |
+| `RecoveredAuthorityMatchesFullHistory` | 验证提交/发布/image，重放从快照cut之后的完整后缀；两份不可用时全量重放 | 固定grant/no-op投影，完整旧日志仍必需；不允许prefix reclaim |
+| `RecoveredPublicationWasSynced` | 完整可读发布页在恢复暴露前force | 不把模型动作当设备掉电证据 |

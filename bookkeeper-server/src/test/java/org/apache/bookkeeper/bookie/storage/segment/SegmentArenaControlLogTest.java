@@ -17,6 +17,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -26,15 +27,20 @@ import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.net.BookieId;
@@ -51,7 +57,7 @@ public class SegmentArenaControlLogTest {
                 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
     }
 
-    private SegmentFileHeader identity() {
+    private static SegmentFileHeader identity() {
         byte[] incarnation = new byte[16];
         java.util.Arrays.fill(incarnation, (byte) 7);
         return new SegmentFileHeader(new StorageIncarnation(incarnation), new UUID(0, 9),
@@ -67,6 +73,280 @@ public class SegmentArenaControlLogTest {
                             long allocationId) {
         return log.hasAppliedGrant(0, offset, SegmentArenaControlLog.BLOCK_BYTES, shard, ownerGeneration,
                 allocationId, 1);
+    }
+
+    @Test
+    public void emptyCheckpointAndCommitMatchIndependentFixedByteVectors() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            SegmentArenaCheckpoint.Reference reference = log.checkpoint();
+            assertEquals(-1, reference.through());
+            assertArrayEquals(checkpointVector("arena-empty-checkpoint-v1.hex"),
+                    Files.readAllBytes(SegmentArenaCheckpoint.path(config, 0)));
+            try (FileChannel file = FileChannel.open(SegmentArenaCheckpoint.superblock(config, 0),
+                    StandardOpenOption.READ)) {
+                ByteBuffer page = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(file, page, 4096);
+                assertArrayEquals(checkpointVector("arena-checkpoint-publication-v1.hex"), page.array());
+            }
+            ByteBuffer encoded = SegmentControlFormat.encode(SegmentControlFormat.Type.CHECKPOINT_COMMIT,
+                    new Generation(1), 0, new UUID(1, 2), new Generation(1), 0, reference.encode());
+            byte[] bytes = new byte[encoded.remaining()];
+            encoded.get(bytes);
+            byte[] golden = checkpointVector("arena-checkpoint-commit-v1.hex");
+            assertArrayEquals(golden, bytes);
+            SegmentControlParser.Command parsed = SegmentControlParser.parse(ByteBuffer.wrap(golden),
+                    SegmentControlFormat.Owner.ARENA, new Generation(1), 0);
+            assertEquals(reference, SegmentArenaCheckpoint.decodeReference(parsed.body()));
+        }
+    }
+
+    private byte[] checkpointVector(String name) throws IOException {
+        try (var input = getClass().getResourceAsStream("/unified-wal-segment/" + name)) {
+            return HexFormat.of().parseHex(new String(input.readAllBytes(), StandardCharsets.US_ASCII)
+                    .lines().filter(line -> !line.startsWith("#")).collect(Collectors.joining()));
+        }
+    }
+
+    @Test
+    public void checkpointRestoresAppliedResultsAndSuffixAndFallsBackAfterCorruption() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentArenaCheckpoint.Reference first;
+        SegmentArenaCheckpoint.Reference second;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            log.submitBatch(List.of(alloc(1, 4096), alloc(2, 4096), alloc(1, 4096)));
+            first = log.checkpoint();
+            assertEquals(2, first.through());
+            assertEquals(4096 + 3 * 192, first.logOffset());
+            log.submitBatch(List.of(alloc(3, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
+            second = log.checkpoint();
+            assertEquals(2, second.generation());
+            assertEquals(1 - first.slot(), second.slot());
+            log.submitBatch(List.of(alloc(4, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES)));
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(second, log.publishedCheckpoint().orElseThrow());
+            assertTrue(granted(log, 4096, 1, 1, 1));
+            assertTrue(granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 3));
+            assertTrue(granted(log, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 4));
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(alloc(2, 4096))).get(0).status());
+            assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(alloc(1, 4096))).get(0).status());
+            assertEquals(SegmentArenaControlLog.Status.INCOMPATIBLE,
+                    log.submitBatch(List.of(alloc(1, 4096 + SegmentArenaControlLog.BLOCK_BYTES))).get(0).status());
+        }
+        corruptCheckpointByte(SegmentArenaCheckpoint.path(config, second.slot()), 4224);
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            assertTrue(granted(log, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 4));
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(alloc(2, 4096))).get(0).status());
+        }
+        corruptCheckpointByte(SegmentArenaCheckpoint.path(config, first.slot()), 4096);
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertTrue(log.publishedCheckpoint().isEmpty());
+            assertTrue(granted(log, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 4));
+            assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(alloc(1, 4096))).get(0).status());
+        }
+    }
+
+    @Test
+    public void checkpointCapturesAppliedCutWhileLaterBatchIsDurableAndDoesNotHoldTheGrantLock() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger barriers = new AtomicInteger();
+        SegmentFileIo delayed = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (barriers.incrementAndGet() == 1) {
+                forcing.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Checkpoint force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+        });
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            SegmentArenaControlLog.DurableBatch pending = log.appendDurably(
+                    List.of(alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
+            assertEquals(1, log.durableThrough());
+            assertEquals(0, log.appliedThrough());
+            FutureTask<SegmentArenaCheckpoint.Reference> task = new FutureTask<>(() -> log.checkpoint(delayed));
+            Thread worker = new Thread(task, "isolated-checkpoint");
+            worker.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                FutureTask<Boolean> query = new FutureTask<>(() -> granted(log, 4096, 1, 1, 1));
+                new Thread(query, "isolated-checkpoint-query").start();
+                assertTrue(query.get(1, TimeUnit.SECONDS));
+                assertThrows(IOException.class, log::close);
+                assertThrows(IOException.class, () -> log.checkpoint());
+                log.applyDurable(pending);
+            } finally {
+                release.countDown();
+                worker.join(5000);
+            }
+            assertEquals(0, task.get(1, TimeUnit.SECONDS).through());
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(0, log.publishedCheckpoint().orElseThrow().through());
+            assertTrue(granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 2));
+        }
+    }
+
+    @Test
+    public void checkpointFailuresNeverAcknowledgePublicationOrDiscardTheOldAuthority() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentArenaCheckpoint.Reference first;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            first = log.checkpoint();
+            assertThrows(IOException.class, () -> log.checkpoint(
+                    new SegmentFileIo(Integer.MAX_VALUE, 1, -1, false)));
+            assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            assertThrows(IOException.class, () -> log.checkpoint(
+                    new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false)));
+            assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            assertTrue(granted(log, 4096, 1, 1, 1));
+            // Payload is forced and the commit applied; publication write then fails before touching its page.
+            assertThrows(IOException.class, () -> log.checkpoint(
+                    new SegmentFileIo(Integer.MAX_VALUE, 5, -1, false)));
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(alloc(2, 4096))));
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            assertTrue(granted(log, 4096, 1, 1, 1));
+            assertEquals(3, log.checkpoint().generation());
+        }
+    }
+
+    @Test
+    public void checkpointPreservesUnclosedSessionAndDurableQuarantine() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            log.submitBatch(List.of(new SegmentArenaControlLog.DataSession(new UUID(0, 1),
+                    new Generation(1), 0, true), alloc(2, 4096),
+                    new SegmentArenaControlLog.FileQuarantine(new UUID(0, 3), new Generation(1), 0)));
+            log.checkpoint();
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertTrue(log.publishedCheckpoint().isPresent());
+            assertEquals(1, log.dataSessionEpoch());
+            assertTrue(log.hasUnclosedDataSession());
+            assertTrue(log.hasDurableQuarantine(0));
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), log, new SegmentFileIo()));
+        }
+    }
+
+    @Test
+    public void checkpointCannotHideMissingSuffixOrDamageToTheRequiredFullLog() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            log.checkpoint();
+            log.submitBatch(List.of(alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
+        }
+        Path path = config.directory().resolve("arena-control");
+        byte[] intact = Files.readAllBytes(path);
+        try (FileChannel file = FileChannel.open(path, StandardOpenOption.WRITE)) {
+            file.truncate(intact.length - 1);
+            file.force(true);
+        }
+        assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 1024 * 1024));
+        assertEquals(intact.length - 1, Files.size(path));
+        Files.write(path, intact);
+        corruptCheckpointByte(path, 4096);
+        assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 1024 * 1024));
+    }
+
+    @Test
+    public void checkpointRestartAfterAbruptExitAtEachPublicationBarrier() throws Exception {
+        for (String stage : List.of("payload", "commit", "publication", "done")) {
+            Path directory = temporary.newFolder(stage).toPath().resolve("arena");
+            IsolatedSegmentConfig config = checkpointConfig(directory);
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                    SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                log.submitBatch(List.of(alloc(1, 4096)));
+                log.checkpoint();
+            }
+            Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-Xmx64m", "-XX:MaxDirectMemorySize=32m", "-cp",
+                    System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+                    CheckpointCrashProbe.class.getName(), directory.toString(), stage)
+                    .redirectErrorStream(true)
+                    .redirectOutput(directory.getParent().resolve("probe.log").toFile()).start();
+            try {
+                assertTrue(stage, process.waitFor(15, TimeUnit.SECONDS));
+                assertEquals(stage, 23, process.exitValue());
+            } finally {
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                    process.waitFor(5, TimeUnit.SECONDS);
+                }
+            }
+            try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                assertTrue(stage, granted(log, 4096, 1, 1, 1));
+                assertTrue(stage, granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 2));
+                assertEquals(stage, stage.equals("publication") || stage.equals("done") ? 2 : 1,
+                        log.publishedCheckpoint().orElseThrow().generation());
+                assertEquals(stage, SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                        log.submitBatch(List.of(alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES))).get(0).status());
+            }
+        }
+    }
+
+    public static class CheckpointCrashProbe {
+        public static void main(String[] args) throws Exception {
+            IsolatedSegmentConfig config = checkpointConfig(Path.of(args[0]));
+            String stage = args[1];
+            AtomicInteger controlForces = new AtomicInteger();
+            SegmentFileIo control = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                if (controlForces.incrementAndGet() == 2 && stage.equals("commit")) {
+                    Runtime.getRuntime().halt(23);
+                }
+            });
+            AtomicInteger checkpointForces = new AtomicInteger();
+            SegmentFileIo checkpoint = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                int force = checkpointForces.incrementAndGet();
+                if ((force == 1 && stage.equals("payload")) || (force == 2 && stage.equals("publication"))) {
+                    Runtime.getRuntime().halt(23);
+                }
+            });
+            try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024, control)) {
+                log.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                        new UUID(0, 2), new Generation(1), 0, 0, 1, new Generation(1), 2,
+                        4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1)));
+                log.checkpoint(checkpoint);
+                Runtime.getRuntime().halt(23);
+            }
+        }
+    }
+
+    private static IsolatedSegmentConfig checkpointConfig(Path directory) {
+        return new IsolatedSegmentConfig(directory, 1, 4, 1, 4L * 1024 * 1024, 4096, 1024, 16,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+    }
+
+    private static void corruptCheckpointByte(Path path, long offset) throws IOException {
+        try (FileChannel file = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            ByteBuffer byteValue = ByteBuffer.allocate(1);
+            SegmentFileIo.readFully(file, byteValue, offset);
+            file.write(ByteBuffer.wrap(new byte[] {(byte) (byteValue.get(0) ^ 1)}), offset);
+            file.force(true);
+        }
     }
 
     @Test

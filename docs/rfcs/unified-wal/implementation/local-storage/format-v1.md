@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。完整selector、checkpoint发布、服务级可写restart与生产entry success authority仍未完成。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Arena applied checkpoint与A/B发布切片见下文；完整selector、Bookie checkpoint、rotation、服务级可写restart与生产entry success authority仍未完成。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -22,7 +22,7 @@
 | BookieId 之后～4092 | zero reserved |
 | 4092 | CRC32C `[0,4092)` |
 
-DATA fileId 从0递增；superblock A/B 为 -1/-2，Bookie/Arena control 为 -3/-4。该版本只识别初始 generation，尚不选择 checkpoint，也不将完整身份块解释为 startup ready。
+DATA fileId 从0递增；superblock A/B 为 -1/-2，Bookie/Arena control 为 -3/-4；Arena checkpoint A/B为-5/-6。身份页的generation仍为初始值，动态checkpoint引用位于独立发布页，不auto-restamp身份页，也不把完整身份块解释为startup ready。
 
 ## DATA batch
 
@@ -104,6 +104,28 @@ Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用
 隔离`SegmentPointRead`从已解析batch生成record位置，读取时先验证DATA文件身份、Arena grant和batch header，再按4096字节边界读取目标record header与内容；长度在分配前受格式上限和batch record区域约束，最终由独立parser核验record/BK CRC与locator身份。该原语不授予locator发布、read pin或DATA durability，调用方仍须先证明这些上层前提。当前Arena没有FREE/复用。
 
 隔离资源owner `IsolatedSegmentStorage`启动和关闭复用以上OPEN/CLOSE、恢复扫描及原owner bootstrap顺序，不增加新的持久字节类型。全部shard bootstrap完成后才开放本地请求；关闭先停收并等待实际I/O、owner及消费方buffer lease，随后在目录锁内关闭DATA/记录健康CLOSE，再关闭控制日志。超时不生成CLOSE或提前释放锁，启动失败按相同顺序清理；完整Bookie readiness、未正常关闭恢复和生产ACK仍未接通。
+
+## Arena checkpoint与发布页
+
+当前只持久化Arena已执行状态表：每个operation的首次命令、原sequence与条件结果，按sequence排序。重复请求不会重复存储，条件失败的no-op仍保留；由它重建当前allocation/stream/session/quarantine及幂等状态。through取连续applied sequence，空日志为-1，同时绑定该cut的真实log end offset。它不含DATA payload、ACK日志、pin/future/buffer历史，也没有FREE/MOVE selector。
+
+`arena-checkpoint-a/b`先写4096字节身份页，再写128字节metadata和payload。metadata包络及superblock第二页的4096字节发布包络如下：
+
+| Offset | 字段 |
+| --- | --- |
+| 0 / 8 / 12 | metadata为`UWACP001`、publication为`UWASB001`，各8 bytes / version u32=1 / referenceLength u32=64 |
+| 16 / 24 / 28 / 36 / 44 | checkpoint generation u64 / slot u32（0=A、1=B）/ applied through i64 / control log end offset u64 / payload bytes u32 |
+| 48～80 | payload SHA-256 32 bytes |
+| metadata 80 / 84～124 / 124 | unique operation count u32 / zero reserved / CRC32C `[0,124)` |
+| publication 80～4092 / 4092 | zero reserved / CRC32C `[0,4092)` |
+
+payload的每项为`firstSequence i64 + status u32 + recordBytes u32 + 原control framing record`。status=1/2/3/4依次为APPLIED_DURABLE/ALREADY_DURABLE/CONDITION_FAILED/INCOMPATIBLE。记录sequence严格递增，首项为0，cut为-1时必须为空；record长度先按144～65536及剩余文件界限核对，再读取并独立解析。重建还检查operation不重复及条件结果一致。整个payload绑定SHA-256，metadata/image文件长度必须精确；单次编码/读入一个有界record，payload总量不超过现有controlLogBytes两倍，另加4224字节身份/metadata。
+
+`CHECKPOINT_COMMIT`使用既有Arena type=6，body是上表16～80的64字节reference；operation generation为checkpoint generation，expected generation为其前一代。image完整写入、force、目录同步并重读验证后，commit才进入正常Arena顺序，durable且apply成功后才能写inactive发布页及force、验证。A/B发布页位于原superblock offset4096，完整文件8192字节，原身份页仍保持不变；不完整第二页不能成为publication。旧隔离原型遇到新增mandatory CHECKPOINT_COMMIT/第二页会拒绝打开，未建立稳定格式兼容承诺。
+
+恢复先验证和同步仍完整保留的旧控制日志，匹配commit、publication及image，选择最高完整可验证的发布代；从状态表重建后重放through之后的完整后缀。image或发布页损坏时可选择另一份，都不可用则从完整日志恢复。身份页损坏、必需旧日志缺失/损坏仍拒绝，不将坏尾静默截断。完整可读publication在暴露恢复结果前force。当前未回收任何旧控制prefix，不声称compact长期历史或完成rotation/retention；Bookie checkpoint和在线维护接线仍未实现。
+
+独立Python struct/逐位CRC32C生成的`arena-empty-checkpoint-v1.hex`（4224 bytes）、`arena-checkpoint-publication-v1.hex`（4096 bytes）、`arena-checkpoint-commit-v1.hex`（208 bytes）固定空cut=-1、generation=1、slot=A，commit使用UUID(1,2)。真实Java writer逐字节比较，独立parser读取同一向量；它们不改写既有DATA/ALLOC向量。
 
 ## 固定向量与验证边界
 

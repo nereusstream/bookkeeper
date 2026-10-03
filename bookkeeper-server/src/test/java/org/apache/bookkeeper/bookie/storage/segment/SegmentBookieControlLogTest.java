@@ -5788,6 +5788,39 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void arenaCheckpointPreservesTheRealStorageGraphReadDuplicateAndAppendAcrossRestart() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("checkpoint"),
+                1, 4, 1, 16L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            storageWrite(storage, context(44), 1);
+        }
+        for (int cycle : new int[] {1, 2}) {
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                assertFalse(arena.hasUnclosedDataSession());
+                assertEquals(cycle, arena.checkpoint().generation());
+            }
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
+                storage.restart();
+                SegmentDataPhysicalDriver.NormalResult duplicate = storageWrite(storage, context(44), 1);
+                assertEquals(1, duplicate.candidate().address().sequence());
+                ReadReply old = storageRead(storage, context(44), 1);
+                try (SegmentPointRead.LeasedResult result = old.result()) {
+                    assertEquals(1, result.result().record().entryId());
+                }
+                SegmentDataPhysicalDriver.NormalResult added = storageWrite(storage, context(44), cycle + 1);
+                assertEquals(cycle + 1, added.candidate().address().sequence());
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(2, arena.publishedCheckpoint().orElseThrow().generation());
+            assertEquals(3, arena.dataSessionEpoch());
+            assertFalse(arena.hasUnclosedDataSession());
+        }
+    }
+
+    @Test
     public void storageGraphBootstrapsAllShardsAndRestartsLocalResults() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("bookie"),
                 1, 4, 1, 16L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

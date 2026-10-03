@@ -13,3 +13,16 @@
 | `PowerLoss` | 模型丢弃未同步bytes的动作；真实掉电测试尚未执行，不用Java进程退出冒充 |
 
 这些映射指出现有验证入口，不宣称每个模型动作已经获得物理等价证明。模型未展开的损坏、部分framing、allocator全部条件命令、selector/回收、index及分布式边界保持未完成。已有Java验证来源为本地存储状态的独立历史回执；模型运行不会重绑它们。
+
+
+Arena checkpoint增量的17个Next动作在`unified-wal-model-thb7_nqa`正向配置中均非零，映射如下；模型仍是小型状态投影。
+
+| 动作 | 当前实现/真实测试 |
+| --- | --- |
+| `Append/ForceLog/Apply/Freeze` | Arena有界控制日志及applied状态；`checkpointCapturesAppliedCutWhileLaterBatchIsDurableAndDoesNotHoldTheGrantLock` |
+| `WriteImage/ForceImage/WriteCommit/ForceCommit/Publish/ForcePublication/Finish` | `SegmentArenaCheckpoint`及Arena CHECKPOINT_COMMIT；独立固定向量、`checkpointFailuresNeverAcknowledgePublicationOrDiscardTheOldAuthority` |
+| `Corrupt` | image无效的抽象；`checkpointRestoresAppliedResultsAndSuffixAndFallsBackAfterCorruption` |
+| `Crash/RecoverySync/Recover/Resume` | `checkpointRestartAfterAbruptExitAtEachPublicationBarrier`四个真实JVM halt边界；`arenaCheckpointPreservesTheRealStorageGraphReadDuplicateAndAppendAcrossRestart` |
+| `PowerLoss` | 丢弃未同步内容的模型动作；没有执行真实掉电 |
+
+`checkpointPreservesUnclosedSessionAndDurableQuarantine`另验证状态镜像不解除现有OPEN/隔离门槛；该真实合同不是固定grant模型的证明范围。缺失/损坏完整旧日志仍拒绝恢复，不能用checkpoint跳过其当前必需依赖。

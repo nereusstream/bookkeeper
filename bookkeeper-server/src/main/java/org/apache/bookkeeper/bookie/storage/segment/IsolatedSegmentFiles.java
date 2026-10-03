@@ -560,7 +560,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
     }
 
-    private static void syncDirectory(Path directory) throws IOException {
+    static void syncDirectory(Path directory) throws IOException {
         try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
             channel.force(true);
         }

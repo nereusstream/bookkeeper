@@ -342,6 +342,8 @@ DirectJournal是独立对照/优化支线，可并行或等主线取得基础数
 
 2026-10-03 [Spike C有限模型切片](rfcs/unified-wal/implementation/models/README.md)已实际验证：管理会话、控制/DATA barrier、连续前缀和旧错误隔离的两个正向配置完整探索PASS，三个负向候选规则均得到指定性质反例。回执`unified-wal-model-jqvpwfsw`保留source/config/tool身份、完整trace和统计；这是局部模型进展，不提升完整Model C、组合模型或Block G。未正常关闭会话的故障解析仍未完成，Java现有隔离行为保持。
 
+2026-10-03 Arena checkpoint已补applied状态/字节cut、有界A/B image、durable CHECKPOINT_COMMIT后发布、完整后缀与旧image/全日志回退。新增真实JVM四个发布边界及DATA重启验证；checkpoint有限模型179,279 distinct states正向PASS，两种错误规则取得指定反例。新回执为`unified-wal-local-rO6YbO7C`和`unified-wal-model-thb7_nqa`，历史回执保持原绑定。全部旧控制日志仍必需，Bookie checkpoint、在线维护、prefix回收/rotation、index/MOVE/FREE及完整Model C/Block G尚未完成。
+
 ## 11. Gate 与证据合同
 
 每个正式性能 Gate 必须在运行前冻结：

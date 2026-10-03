@@ -27,7 +27,10 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -43,12 +46,34 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private static final Generation LOG_GENERATION = new Generation(1);
     private static final int QUARANTINE_RECORD_BYTES = 128 + 16 + 16;
 
-    sealed interface Command permits Allocation, FileQuarantine, DataSession {
+    sealed interface Command permits Allocation, FileQuarantine, DataSession, CheckpointCommit {
         SegmentControlFormat.Type type();
         UUID operationId();
         Generation operationGeneration();
         long expectedGeneration();
         ByteBuffer body();
+    }
+
+    private record CheckpointCommit(UUID operationId, SegmentArenaCheckpoint.Reference reference) implements Command {
+        @Override
+        public SegmentControlFormat.Type type() {
+            return SegmentControlFormat.Type.CHECKPOINT_COMMIT;
+        }
+
+        @Override
+        public Generation operationGeneration() {
+            return new Generation(reference.generation());
+        }
+
+        @Override
+        public long expectedGeneration() {
+            return reference.generation() - 1;
+        }
+
+        @Override
+        public ByteBuffer body() {
+            return reference.encode();
+        }
     }
 
     /** Monotone file quarantine; no clear/reset operation is enabled. */
@@ -157,7 +182,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private record Grant(Allocation command, long generation) { }
 
-    private record AppliedOperation(Command command, Status status) { }
+    private record AppliedOperation(Command command, Status status, long sequence) { }
 
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
@@ -179,6 +204,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
     private long appliedThrough = -1;
+    private long appliedOffset = FIRST_RECORD;
+    private long checkpointGeneration;
+    private SegmentArenaCheckpoint.Reference publishedCheckpoint;
+    private boolean checkpointing;
     private DurableBatch pending;
     private boolean writing;
     private boolean failed;
@@ -318,6 +347,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             for (Command command : batch.commands()) {
                 long sequence = ++appliedThrough;
                 Status status = apply(command);
+                appliedOffset += recordBytes(command);
                 long generation = status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE
                         ? command.expectedGeneration() + 1 : 0;
                 results.add(new Result(status, command.operationId(), sequence, generation,
@@ -333,6 +363,74 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     List<Result> submitBatch(List<? extends Command> commands) throws IOException {
         return applyDurable(appendDurably(commands));
+    }
+
+    /** Freeze only applied facts. A later durable/unapplied batch belongs to the retained suffix. */
+    SegmentArenaCheckpoint.Reference checkpoint() throws IOException {
+        return checkpoint(new SegmentFileIo());
+    }
+
+    SegmentArenaCheckpoint.Reference checkpoint(SegmentFileIo checkpointIo) throws IOException {
+        Objects.requireNonNull(checkpointIo, "checkpointIo");
+        SegmentArenaCheckpoint.Snapshot snapshot;
+        long generation;
+        int slot;
+        synchronized (this) {
+            requireWritable();
+            if (checkpointing || checkpointGeneration == Long.MAX_VALUE) {
+                throw new IOException("Arena checkpoint is active or its generation is exhausted");
+            }
+            snapshot = new SegmentArenaCheckpoint.Snapshot(appliedThrough, appliedOffset,
+                    appliedOperations.values().stream().map(operation -> new SegmentArenaCheckpoint.Operation(
+                            operation.sequence(), operation.command(), operation.status())).toList());
+            generation = checkpointGeneration + 1;
+            slot = publishedCheckpoint == null ? 0 : 1 - publishedCheckpoint.slot();
+            checkpointing = true;
+        }
+        boolean committed = false;
+        try {
+            snapshot = new SegmentArenaCheckpoint.Snapshot(snapshot.through(), snapshot.logOffset(),
+                    snapshot.operations().stream().sorted(Comparator.comparingLong(
+                            SegmentArenaCheckpoint.Operation::sequence)).toList());
+            SegmentArenaCheckpoint.Reference reference = SegmentArenaCheckpoint.reference(
+                    generation, slot, snapshot, maxLogBytes);
+            SegmentArenaCheckpoint.write(config, identity, reference, snapshot, checkpointIo);
+            if (!snapshot.equals(SegmentArenaCheckpoint.read(config, identity, reference, maxLogBytes, this))) {
+                throw new IOException("Arena checkpoint verification differs from its frozen state");
+            }
+            Result result = submitBatch(List.of(new CheckpointCommit(UUID.randomUUID(), reference))).get(0);
+            if (result.status() != Status.APPLIED_DURABLE) {
+                throw new IOException("Arena checkpoint was not committed");
+            }
+            committed = true;
+            SegmentArenaCheckpoint.publish(config, reference, checkpointIo);
+            if (!reference.equals(SegmentArenaCheckpoint.publication(config, slot))) {
+                throw new IOException("Arena checkpoint publication verification failed");
+            }
+            synchronized (this) {
+                publishedCheckpoint = reference;
+            }
+            return reference;
+        } catch (IOException | RuntimeException | Error failure) {
+            if (committed) {
+                synchronized (this) {
+                    failed = true;
+                }
+            }
+            throw failure;
+        } finally {
+            synchronized (this) {
+                checkpointing = false;
+            }
+        }
+    }
+
+    synchronized Optional<SegmentArenaCheckpoint.Reference> publishedCheckpoint() {
+        return Optional.ofNullable(publishedCheckpoint);
+    }
+
+    private static int recordBytes(Command command) {
+        return (144 + command.body().remaining() + 7) & ~7;
     }
 
     /** Called before exposing a new writer, under its existing directory exclusion. */
@@ -647,23 +745,103 @@ final class SegmentArenaControlLog implements AutoCloseable {
         SegmentFileIo.readFully(channel, header, 0);
         identity.validate(header, config, -4);
         long sequence = 0;
+        long committedGeneration = 0;
+        HashSet<UUID> operations = new HashSet<>();
+        List<SegmentArenaCheckpoint.Reference> checkpoints = new ArrayList<>(2);
+        SegmentArenaCheckpoint.Reference[] publications = new SegmentArenaCheckpoint.Reference[2];
+        for (int slot = 0; slot < publications.length; slot++) {
+            try {
+                publications[slot] = SegmentArenaCheckpoint.publication(config, slot);
+            } catch (IOException incompletePublication) {
+                // The immutable identity page remains required; an incomplete publication uses another slot or log.
+            }
+        }
         for (long offset = FIRST_RECORD; offset < size;) {
-            int length = recordLength(offset, size, sequence++);
+            int length = recordLength(offset, size, sequence);
+            Command command = readCommand(offset, length, sequence);
+            if (operations.add(command.operationId()) && command instanceof CheckpointCommit checkpoint
+                    && checkpoint.expectedGeneration() == committedGeneration
+                    && checkpoint.reference().through() < sequence) {
+                SegmentArenaCheckpoint.Reference reference = checkpoint.reference();
+                // Its captured cut must end at a real boundary of this exact retained log.
+                recordLength(reference.logOffset(), size, reference.through() + 1);
+                if (reference.logOffset() > offset) {
+                    throw new IOException("Arena checkpoint depends on a later control suffix");
+                }
+                committedGeneration = reference.generation();
+                if (reference.equals(publications[reference.slot()])) {
+                    checkpoints.add(reference);
+                }
+            }
             offset += length;
+            sequence++;
         }
         // Complete records can include a lost response. Establish durability before exposing replayed grants.
         channel.force(true);
-        sequence = 0;
-        for (long offset = FIRST_RECORD; offset < size;) {
+        recoverCheckpoint(checkpoints);
+        sequence = appliedThrough + 1;
+        for (long offset = appliedOffset; offset < size;) {
             int length = recordLength(offset, size, sequence);
             Command command = readCommand(offset, length, sequence);
             durableThrough = sequence;
             appliedThrough = sequence;
             apply(command);
             offset += length;
+            appliedOffset = offset;
             sequence++;
         }
         nextOffset = size;
+    }
+
+    private void recoverCheckpoint(List<SegmentArenaCheckpoint.Reference> checkpoints) throws IOException {
+        for (int index = checkpoints.size() - 1; index >= 0; index--) {
+            SegmentArenaCheckpoint.Reference reference = checkpoints.get(index);
+            try {
+                if (!reference.equals(SegmentArenaCheckpoint.publication(config, reference.slot()))) {
+                    continue;
+                }
+                SegmentArenaCheckpoint.Snapshot snapshot = SegmentArenaCheckpoint.read(
+                        config, identity, reference, maxLogBytes, this);
+                resetRecoveredState();
+                for (SegmentArenaCheckpoint.Operation operation : snapshot.operations()) {
+                    if (appliedOperations.containsKey(operation.command().operationId())) {
+                        throw new IOException("Repeated operation in Arena checkpoint");
+                    }
+                    appliedThrough = operation.sequence();
+                    if (apply(operation.command()) != operation.status()) {
+                        throw new IOException("Arena checkpoint conditional result mismatch");
+                    }
+                }
+                appliedThrough = snapshot.through();
+                durableThrough = snapshot.through();
+                appliedOffset = snapshot.logOffset();
+                publishedCheckpoint = reference;
+            } catch (IOException | IllegalArgumentException invalidCheckpoint) {
+                resetRecoveredState();
+                continue;
+            }
+            // A complete but formerly unsynced publication must not be exposed before recovery sync.
+            SegmentArenaCheckpoint.syncPublication(config, reference.slot());
+            return;
+        }
+        // All original control bytes remain mandatory and were verified above; full replay is the final fallback.
+        resetRecoveredState();
+    }
+
+    private void resetRecoveredState() {
+        allocations.clear();
+        allocationIds.clear();
+        streamStarts.clear();
+        appliedOperations.clear();
+        Arrays.fill(dataBlocked, false);
+        Arrays.fill(durableQuarantine, false);
+        sessionEpoch = 0;
+        sessionOpen = false;
+        checkpointGeneration = 0;
+        publishedCheckpoint = null;
+        appliedThrough = -1;
+        durableThrough = -1;
+        appliedOffset = FIRST_RECORD;
     }
 
     private void validateStorageFiles(SegmentFileHeader identity) throws IOException {
@@ -685,8 +863,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
             throw new IOException("Isolated storage file cannot be a symlink: " + path);
         }
         try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
-            if ((expectedSize < 0 && input.size() < 4096)
-                    || (expectedSize >= 0 && input.size() != expectedSize)) {
+            boolean superblock = fileId == -1 || fileId == -2;
+            if ((superblock && (input.size() < 4096 || input.size() > 8192))
+                    || (!superblock && expectedSize < 0 && input.size() < 4096)
+                    || (!superblock && expectedSize >= 0 && input.size() != expectedSize)) {
                 throw new IOException("Isolated storage file size mismatch: " + path);
             }
             ByteBuffer bytes = ByteBuffer.allocate(4096);
@@ -712,8 +892,21 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private Command readCommand(long offset, int length, long sequence) throws IOException {
         ByteBuffer bytes = ByteBuffer.allocate(length);
         SegmentFileIo.readFully(channel, bytes, offset);
+        return decodeCommand(bytes, sequence);
+    }
+
+    Command decodeCommand(ByteBuffer bytes, long sequence) throws IOException {
         SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.ARENA,
                 LOG_GENERATION, sequence);
+        if (parsed.type() == SegmentControlFormat.Type.CHECKPOINT_COMMIT) {
+            SegmentArenaCheckpoint.Reference reference = SegmentArenaCheckpoint.decodeReference(parsed.body());
+            if (parsed.operationGeneration().value() != reference.generation()
+                    || parsed.expectedGeneration() != reference.generation() - 1
+                    || reference.payloadBytes() - maxLogBytes > maxLogBytes || reference.through() >= sequence) {
+                throw new IOException("Invalid Arena checkpoint commit binding");
+            }
+            return new CheckpointCommit(parsed.operationId(), reference);
+        }
         if (parsed.type() == SegmentControlFormat.Type.DEVICE_STATE) {
             ByteBuffer body = parsed.body();
             if (body.remaining() != 16 || body.getInt() != 1) {
@@ -805,12 +998,22 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
             return prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status();
         }
+        if (command instanceof CheckpointCommit checkpoint) {
+            boolean allowed = checkpoint.expectedGeneration() == checkpointGeneration
+                    && checkpoint.reference().through() < appliedThrough;
+            Status status = allowed ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
+            if (allowed) {
+                checkpointGeneration = checkpoint.reference().generation();
+            }
+            appliedOperations.put(command.operationId(), new AppliedOperation(command, status, appliedThrough));
+            return status;
+        }
         if (command instanceof FileQuarantine quarantine) {
             int file = quarantine.file();
             Status status = durableQuarantine[file] ? Status.ALREADY_DURABLE : Status.APPLIED_DURABLE;
             dataBlocked[file] = true;
             durableQuarantine[file] = true;
-            appliedOperations.put(command.operationId(), new AppliedOperation(command, status));
+            appliedOperations.put(command.operationId(), new AppliedOperation(command, status, appliedThrough));
             return status;
         }
         if (command instanceof DataSession session) {
@@ -824,7 +1027,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 sessionEpoch = session.operationGeneration().value();
                 sessionOpen = session.open();
             }
-            appliedOperations.put(command.operationId(), new AppliedOperation(command, status));
+            appliedOperations.put(command.operationId(), new AppliedOperation(command, status, appliedThrough));
             return status;
         }
         return applyAllocation((Allocation) command);
@@ -832,18 +1035,21 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private Status applyAllocation(Allocation command) {
         if (durableQuarantine[command.file()] || allocationIds.containsKey(command.allocationId())) {
-            appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
+            appliedOperations.put(command.operationId(),
+                    new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
             return Status.CONDITION_FAILED;
         }
         Stream stream = new Stream(command.ownerShard(), command.ownerGeneration().value());
         Long first = streamStarts.get(stream);
         if (first != null && first != command.streamFirstSequence()) {
-            appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
+            appliedOperations.put(command.operationId(),
+                    new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
             return Status.CONDITION_FAILED;
         }
         for (int block = 0; block < command.blocks(); block++) {
             if (allocations.containsKey(slot(command.file(), command.offset() + block * BLOCK_BYTES))) {
-                appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.CONDITION_FAILED));
+                appliedOperations.put(command.operationId(),
+                        new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
                 return Status.CONDITION_FAILED;
             }
         }
@@ -853,7 +1059,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         allocationIds.put(command.allocationId(), command);
         streamStarts.putIfAbsent(stream, command.streamFirstSequence());
-        appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.APPLIED_DURABLE));
+        appliedOperations.put(command.operationId(),
+                new AppliedOperation(command, Status.APPLIED_DURABLE, appliedThrough));
         return Status.APPLIED_DURABLE;
     }
 
@@ -872,7 +1079,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (writing) {
+        if (writing || checkpointing) {
             throw new IOException("Arena control I/O is still in flight");
         }
         if (sessionOwner != null) {

@@ -303,3 +303,16 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 ## 未覆盖范围
 
 步骤4的完整Bookie生命周期接入、空闲I/O线程即时释放、PREFERRED页策略及存储集成、步骤5完整启动/控制状态、步骤6真实网络请求生命周期/整体bytes预算及生产逐entry结果、步骤7未正常关闭会话恢复、一般MOVE/FREE selector与完整Bookie restart尚未实现。正常关闭的隔离存储图已有全shard启动、旧entry本地重复结果、新写/点读及按所有权排空关闭；此范围不提升为完整服务验收。物理热候选及其只读重建、重复比较、点读和文件同步的隔离局部实现不等于步骤6或7完成。性能、物理NUMA、掉电、真实网络/MetadataStore和Gate验证均NOT_EXECUTED。局部文件测试不授予生产authority。
+
+
+2026-10-03 步骤8的Arena checkpoint切片：`SegmentArenaCheckpoint`从appliedThrough/appliedOffset冻结当前已执行状态表，保存每个operation首次命令、sequence及结果；重复操作不重复存储，已应用条件失败和session/quarantine事实仍保留。payload按单条有界record写入，SHA-256绑定，文件force与目录同步后重读验证；随后以同一Arena控制顺序持久、apply CHECKPOINT_COMMIT，再向inactive superblock的第二页发布并force、重读验证。慢checkpoint I/O不持grant状态锁，另一次checkpoint和关闭在其义务终结前被拒绝。
+
+两份image各受现有controlLogBytes的两倍payload上限约束，superblock保留原始4096字节身份页，发布页最多再占4096字节。恢复先完整验证、同步仍必需的旧日志，再核对匹配的commit/发布/image，恢复已执行状态表并重放cut之后的后缀；较新image无效可选另一份，两份不可用则从完整日志恢复。未提交的新image不成为authority，损坏或缺失旧日志不因checkpoint被忽略。完整可读、尚未同步的发布页在暴露前恢复同步；OPEN和隔离状态不会被快照清除。Bookie身份读取配套接受第二页，由Arena负责checkpoint语义。格式见[实验格式](format-v1.md#arena-checkpoint与发布页)。
+
+此前本轮临时回执`unified-wal-local-3GkGGU5q`所在目录已不可用，旧记录不重绑；2026-10-03重新执行同一7类测试和样式检查，生成独立回执。
+
+最终真实文件回执`unified-wal-local-rO6YbO7C`覆盖全部7个隔离存储测试类：185项，180通过、5项Linux亲和在macOS跳过，无failure/error；189个源码/测试/固定向量输入按哈希绑定。新增验证含durable领先applied、慢force时查询/关闭/重复checkpoint、两份image损坏回退、提交/发布失败、OPEN/quarantine保留、必需日志缺失/损坏、4个真实子进程halt边界、独立固定字节向量，以及正常DATA关闭后两次checkpoint→restart→点读/重复写/追加。Spotless与相关Checkstyle随同回执验证。
+
+有限模型回执`unified-wal-model-thb7_nqa`新增checkpoint正向179,279 distinct states及两个指定性质反例；全部8个配置结果与范围见[模型状态](../models/README.md#arena-checkpoint-增量验证)。没有执行真实掉电、Linux亲和或性能对照。
+
+这是Arena控制模块的局部交付，checkpoint由隔离调用方显式执行，真实storage图测试在关闭后执行；尚未接在线维护调度、Bookie控制checkpoint、旧日志prefix回收/rotation、idempotency跨长期代际压缩、MOVE/FREE或派生索引。当前op状态仍受固定日志容量限制，满额停止；不得据此称长期有界运行或完整步骤8完成。既有immutable身份页损坏仍拒绝打开，新增A/B回退只针对发布页及checkpoint image。未正常关闭恢复的故障解析合同保持待确认。

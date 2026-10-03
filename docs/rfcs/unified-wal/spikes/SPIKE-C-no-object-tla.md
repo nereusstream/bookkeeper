@@ -67,6 +67,8 @@ Block G模型与Block H隔离、可丢弃的存储性能切片可并行；实际
 
 2026-10-03 [Model C有限切片](../implementation/models/README.md)已以官方TLC 1.7.4完成实际检查：管理会话、文件barrier、连续物理前缀与错误隔离的共享/分文件正向配置均完整探索PASS，三个负向候选规则均得到指定性质的反例。输入、统计及完整trace由`unified-wal-model-jqvpwfsw`拥有；抽象与真实路径映射由该页说明。该局部结果不覆盖完整Model C、A/D或组合Gate，不改变本规范的验收要求及未正常关闭会话的故障解析合同。
 
+2026-10-03 Arena checkpoint已补applied状态/字节cut、有界A/B image、durable CHECKPOINT_COMMIT后发布、完整后缀与旧image/全日志回退。新增真实JVM四个发布边界及DATA重启验证；checkpoint有限模型179,279 distinct states正向PASS，两种错误规则取得指定反例。新回执为`unified-wal-local-rO6YbO7C`和`unified-wal-model-thb7_nqa`，历史回执保持原绑定。全部旧控制日志仍必需，Bookie checkpoint、在线维护、prefix回收/rotation、index/MOVE/FREE及完整Model C/Block G尚未完成。
+
 ## 3. 运行前锁定 manifest
 
 ```text
