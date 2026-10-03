@@ -724,6 +724,8 @@ delete-applied/catch-up延迟另列，不以物理回收完成作为cursor条件
 
 2026-10-03 局部实现：`SegmentDerivedIndex`使用既有rocksdbjni 9.9.3、单CF和有界WriteBatch，以当前完整同步/route选择的DATA inventory重建定位。重建先同批更新index UUID并删除旧namespace、flush，使旧coverage失效；定位flush完成后才force/验证独立A/B覆盖页，绑定identity、index UUID、两控制cut、连续stream范围及实际contents摘要。普通Add先由既有热表提供定位和local result，再经原owner的DATA票据及已有DATA I/O服务异步写入DB，每shard最多一个、每批最多256定位，不使用控制预留。完整删库后的正常restart可重建。后台失败保留热结果并在新DATA预留前背压；实际Put query-visible后由原owner淘汰匹配热定位。点读与重复写hot miss后fresh Get，再由同一DATA票据读取校验；在途捕获定位不依赖热表继续存在。有限坐标占用预算保留同坐标保护，热容量与完整恢复容量分开。正常关闭restart已验证实际持久coverage与当前控制/stream/grant，覆盖内只校验固定batch头及连续性，未覆盖授权tail完整解析并恢复同步；无效覆盖仍全量重建。有效覆盖复用原index代、仅补写tail并按当前Bookie后缀删除不可读定位，coverage不替代DATA sync或点读校验。运行期检查点现以每原worker一份DATA票据冻结已追平的shard cut，暂停Put后验证真实native内容、flush并force既有A/B覆盖页；同代publication按有效页最大序号递增，不因旧内容不匹配重置。暂停后新DATA只留hot，不扩大本次cut；失败/取消保持实际I/O及原owner终结边界。一般MOVE/delete排序及selector覆盖恢复、完整在线维护或全局native/磁盘预算未完成，不构成本节整体验收。字节/API与真实回执见[实验格式](implementation/local-storage/format-v1.md#rocksdb派生定位与覆盖页)及[本地状态](implementation/local-storage/README.md#rocksdb冷重建与持久覆盖切片)。
 
+2026-10-03 真实运行期storage图新增active memtable未flush、覆盖页force前、PERSISTED owner回调内及正常CLOSE后4个JVM退出点。无CLOSE的物理扫描/派生重建不解除Arena隔离，local-result restart及点读仍拒绝；正常CLOSE对照使用同代coverage并恢复真实读/重试/追加。全类140项通过，详见[进程边界证据](implementation/local-storage/README.md#运行期索引的真实进程退出边界)。只证明所列进程故障边界，不证明掉电或未关闭会话恢复。
+
 RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 
 - 不参与 payload ACK authority；

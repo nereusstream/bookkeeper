@@ -406,7 +406,7 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 
 模型回执`unified-wal-model-47t1o26s`冻结48个实际输入（8 module、23 cfg、runner、16 Java），绑定父提交处3份合同哈希，70个回执checksum已核对；9个完整正向PASS与14个指定反例。新增正向完整探索3,102 distinct states，11个Next动作均非零；flush前发布、旧内容失效时重置序号、发布时扩大冻结cut分别触发指定性质反例。初次clock oracle限制了错误动作而未发现反例，已修正并保留历史失败，见[模型范围](../models/README.md#运行期覆盖发布切片)。模型不证明真实native/文件系统、多worker协调或票据生命周期。
 
-当前restart仍完整扫描并重建DB，不使用覆盖缩短DATA扫描；MOVE/delete次序、在线控制维护、完整native/磁盘预算、长期负载、未正常关闭会话恢复、当前在线页的实际JVM退出/真实掉电及完整A/C/D组合仍未完成。步骤8保持部分实现，无生产authority。
+历史（`094a5c70`版本）restart仍完整扫描并重建DB，不使用覆盖缩短DATA扫描；MOVE/delete次序、在线控制维护、完整native/磁盘预算、长期负载、未正常关闭会话恢复、当前在线页的实际JVM退出/真实掉电及完整A/C/D组合仍未完成。步骤8保持部分实现，无生产authority。
 
 
 ### 持久覆盖辅助的正常恢复切片
@@ -423,4 +423,15 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 
 模型回执`unified-wal-model-h1roqnsp`冻结53个实际输入（9 module、27 cfg、runner、16 Java），绑定父提交处3份合同哈希，82个回执checksum已核对；10个完整正向PASS、17个指定反例。新增恢复投影完整探索280 distinct states，5个Next动作均非零；无效索引授权跳过、sync前开放、忽略缺口分别触发指定性质反例，见[模型范围](../models/README.md#持久覆盖与尾部恢复投影)。真实CRC/文件系统/多stream与控制后缀由Java另测，模型不代替这些证据。
 
-一般MOVE/FREE selector/重建、完整native/磁盘总账、在线控制维护、长期负载、多Arena、未正常关闭故障解析、当前在线页实际JVM退出/真实掉电及完整A/C/D组合仍未完成；步骤8保持部分实现，无生产authority。
+一般MOVE/FREE selector/重建、完整native/磁盘总账、在线控制维护、长期负载、多Arena、未正常关闭故障解析、真实掉电及完整A/C/D组合仍未完成；在线页进程退出的新增证据见下节，步骤8保持部分实现，无生产authority。
+
+
+### 运行期索引的真实进程退出边界
+
+2026-10-03，新增2项真实JVM测试，子进程使用完整`IsolatedSegmentStorage`图、2个原worker及既有DATA/CONTROL I/O预算，先完成两条普通DATA和实际异步native Put。分别在4个点执行`Runtime.halt(23)`：实际query-visible行仍在active memtable且无coverage；覆盖页完整写入但尚未force；`PERSISTED`响应回调内部、尚未返回原owner票据终结finally；等待检查点响应及完整drain/持久CLOSE之后。memtable分支检查实际RocksDB计数，不以Put返回或睡眠推断未flush；只在测试中读取native句柄，没有新增生产API或故障框架。
+
+前三个退出均没有持久CLOSE：父进程的storage restart和低层local-result reopen均拒绝，后一入口在任何DATA恢复force前拒绝。单独的物理恢复扫描完整校验两条DATA并可重建派生定位/覆盖页，但受Arena隔离的点读和第二次storage restart仍拒绝，不能把重建当作会话修复。页force前退出时，完整页在本次进程退出后仍可读，父进程重新校验/同步后可选择；这不是旧进程的成功响应或掉电持久性证明。正常CLOSE对照则使用同代coverage恢复：两个covered batch只验证必要头、跳过7,936 body bytes，仍完成DATA恢复force；真实storage图随后读取、同坐标重试及新entry追加均成功。
+
+定向两项及全类回归均通过；最终回执`unified-wal-local-Gs6OWJ9U`绑定父提交`3b1b6cfdb77194fe5a75abd0f746815a58b9266b`和201个实际源码/测试/向量输入，`SegmentBookieControlLogTest`共140项、140通过、0失败/错误/跳过。复现：`scripts/unified-wal/run-local-storage-tests.sh SegmentBookieControlLogTest`；`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过。初次夹具误用已存在的新建目录；随后误将未关闭会话的物理候选当作可授权点读，均已纠正，实际隔离断言保留。既有模型回执`unified-wal-model-h1roqnsp`的53个输入与当前文件逐项哈希一致，本轮未改变实现/模型、未重复执行TLC，也未把Java全类范围扩展为全模块验收。
+
+这补充上述运行期覆盖与正常恢复的进程故障证据。未覆盖真实掉电、所有文件系统故障窗口或完整发布协议；未正常关闭恢复语义仍待合同确认，一般MOVE/FREE、完整预算、在线控制维护、长期负载、多Arena及完整模型仍未完成，步骤8保持部分进展。

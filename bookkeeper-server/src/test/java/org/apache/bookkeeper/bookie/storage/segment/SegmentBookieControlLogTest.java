@@ -7308,6 +7308,175 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    @Test
+    public void runtimeIndexProcessExitCannotPromoteUnclosedSessionEvenAfterPhysicalRebuild() throws Exception {
+        for (String phase : List.of("memtable", "before-page-force", "owner-callback")) {
+            IsolatedSegmentConfig config = checkpointConfig(temporary.newFolder("runtime-exit-" + phase)
+                    .toPath().resolve("bookie"));
+            runRuntimeIndexProbe(config, phase);
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+                IOException failure = assertThrows(IOException.class, storage::restart);
+                assertTrue(failure.getMessage(), failure.getMessage().contains("Unclosed DATA writer session"));
+            }
+            try (IndexFixture source = new IndexFixture(config, identity());
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+                assertTrue(source.arena.hasUnclosedDataSession());
+                assertEquals(!phase.equals("memtable"), index.coverage().isPresent());
+                assertEquals(2, source.inventory.scan().batches());
+                assertEquals(2, source.inventory.scan().records());
+                SegmentFileIo recovery = new SegmentFileIo();
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openForLocalResults(config, identity(),
+                        source.arena, source.bookie, recovery, 32, 4, index));
+                assertEquals(0, recovery.forces);
+                index.rebuild(source.inventory, source.arena, source.bookie);
+                assertEquals(2, index.coverage().orElseThrow().entries());
+                for (long entryId : new long[] {1, 2}) {
+                    SegmentPointRead.Location location = index.get(context(), entryId).orElseThrow();
+                    assertTrue(source.inventory.entries().contains(location));
+                    IOException failure = assertThrows(IOException.class,
+                            () -> SegmentPointRead.read(config, identity(), source.arena, location));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains("no current Arena grant"));
+                }
+                assertTrue(source.arena.hasUnclosedDataSession());
+            }
+            // Physical recovery/derived publication cannot repair the missing durable session CLOSE.
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+                IOException failure = assertThrows(IOException.class, storage::restart);
+                assertTrue(failure.getMessage(), failure.getMessage().contains("Unclosed DATA writer session"));
+            }
+        }
+    }
+
+    @Test
+    public void runtimeIndexProcessExitAfterCleanCloseReusesForcedCoverageInStorageGraph() throws Exception {
+        IsolatedSegmentConfig config = checkpointConfig(temporary.newFolder("runtime-exit-clean")
+                .toPath().resolve("bookie"));
+        runRuntimeIndexProbe(config, "clean-close");
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+            assertFalse(arena.hasUnclosedDataSession());
+            SegmentDerivedIndex.Coverage published = index.coverage().orElseThrow();
+            assertEquals(2, published.entries());
+            SegmentFileIo recovery = new SegmentFileIo();
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(config, identity(),
+                    arena, bookie, recovery, 32, 4, index)) {
+                assertTrue(files.startupInventory().usesIndexCoverage());
+                assertEquals(2, files.startupInventory().scan().coveredBatches());
+                assertEquals(0, files.startupInventory().scan().batches());
+                assertEquals(2L * (4096 - SegmentBatchFormat.HEADER),
+                        files.startupInventory().scan().skippedBodyBytes());
+                assertEquals(1, recovery.forces);
+                assertEquals(published.indexGeneration(), index.coverage().orElseThrow().indexGeneration());
+                assertEquals(published.publication() + 1, index.coverage().orElseThrow().publication());
+            }
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            for (long entryId : new long[] {1, 2}) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(entryId, read.result().record().entryId());
+                }
+                storageWrite(storage, context(), entryId);
+            }
+            writeAfterIndexBackpressure(storage, 3);
+        }
+    }
+
+    private void runRuntimeIndexProbe(IsolatedSegmentConfig config, String phase) throws Exception {
+        Path output = temporary.getRoot().toPath().resolve("runtime-index-exit-" + phase + ".log");
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Xmx96m", "-XX:MaxDirectMemorySize=32m", "-cp",
+                System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+                RuntimeIndexCrashProbe.class.getName(), phase, config.directory().toString())
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        boolean finished = child.waitFor(20, TimeUnit.SECONDS);
+        if (!finished) {
+            child.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
+        }
+        String log = Files.readString(output);
+        assertTrue(log, finished);
+        assertEquals(log, 23, child.exitValue());
+        assertTrue(log, log.contains("RUNTIME_INDEX_" + phase));
+    }
+
+    /** Actual owner/async native index graph; halt never runs cleanup at the selected process boundary. */
+    public static final class RuntimeIndexCrashProbe {
+        public static void main(String[] args) throws Exception {
+            if (args.length != 2 || !List.of("memtable", "before-page-force", "owner-callback", "clean-close")
+                    .contains(args[0])) {
+                throw new IllegalArgumentException("Expected runtime index phase and directory");
+            }
+            String phase = args[0];
+            SegmentBookieControlLogTest test = new SegmentBookieControlLogTest();
+            try (IsolatedSegmentStorage storage = test.storage(checkpointConfig(Path.of(args[1])), 2, 6, 4, 32, 3)) {
+                storage.startNew();
+                installStorage(storage, install(1, (byte) 5), activate(2));
+                writeAfterIndexBackpressure(storage, 1);
+                writeAfterIndexBackpressure(storage, 2);
+                // Inspect the actual native state without adding production APIs solely for testing.
+                java.lang.reflect.Field indexField = IsolatedSegmentStorage.class.getDeclaredField("index");
+                indexField.setAccessible(true);
+                SegmentDerivedIndex index = (SegmentDerivedIndex) indexField.get(storage);
+                long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (index.get(context(), 2).isEmpty() && System.nanoTime() < end) {
+                    Thread.sleep(1);
+                }
+                assertTrue(index.get(context(), 1).isPresent());
+                assertTrue(index.get(context(), 2).isPresent());
+                if (phase.equals("memtable")) {
+                    java.lang.reflect.Field dbField = SegmentDerivedIndex.class.getDeclaredField("db");
+                    dbField.setAccessible(true);
+                    synchronized (index) {
+                        org.rocksdb.RocksDB db = (org.rocksdb.RocksDB) dbField.get(index);
+                        assertTrue(db.getLongProperty("rocksdb.num-entries-active-mem-table") >= 2);
+                        assertTrue(index.coverage().isEmpty());
+                        halt(phase);
+                    }
+                }
+                SegmentFileIo publication = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    if (phase.equals("before-page-force")) {
+                        halt(phase);
+                    }
+                });
+                IsolatedSegmentStorage.IndexCheckpointResult published;
+                do {
+                    CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> reply = new CompletableFuture<>();
+                    assertTrue(storage.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                            (result, cause) -> {
+                                if (cause != null) {
+                                    reply.completeExceptionally(cause);
+                                } else {
+                                    if (phase.equals("owner-callback") && result.status()
+                                            == IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED) {
+                                        assertEquals(2, result.coverage().entries());
+                                        halt(phase);
+                                    }
+                                    reply.complete(result);
+                                }
+                            }), publication));
+                    published = reply.get(5, TimeUnit.SECONDS);
+                    if (published.status() == IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE) {
+                        Thread.sleep(1);
+                    }
+                } while (published.status() == IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE
+                        && System.nanoTime() < end);
+                assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED, published.status());
+                assertEquals(2, published.coverage().entries());
+                assertEquals("clean-close", phase);
+                assertTrue(storage.close(Duration.ofSeconds(5)));
+                halt(phase);
+            }
+        }
+
+        private static void halt(String phase) {
+            System.out.println("RUNTIME_INDEX_" + phase);
+            System.out.flush();
+            Runtime.getRuntime().halt(23);
+        }
+    }
+
     public static final class DerivedIndexCrashProbe {
         public static void main(String[] args) throws Exception {
             IsolatedSegmentConfig config = checkpointConfig(Path.of(args[1]));
