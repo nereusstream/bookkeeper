@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留投影的八个正向配置已完成有限状态探索，十一个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖投影的九个正向配置已完成有限状态探索，十四个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -18,6 +18,10 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-runtime-coverage` | 3个单stream DATA坐标、最多3 publication、1次crash；冻结cut后暂停Put，实际flush后发布 |
+| `ce-runtime-before-flush` | 故意在flush前发布；必须违反`RuntimeCoverageWasFlushed` |
+| `ce-runtime-clock-reset` | 故意由旧contents是否匹配重置publication序号；必须违反`PublicationClockAdvances` |
+| `ce-runtime-late-cut` | 故意以发布时的新DATA范围替换冻结cut；必须违反`RuntimeCoverageStopsAtCapturedData` |
 | `c-index-maintenance` | 3个坐标占用容量、2个hot容量、2个DATA票据、1次索引暂停；query-visible之后淘汰hot，保留定位与控制额度 |
 | `ce-index-control-credit` | 故意让索引占控制credit；必须违反`FenceCanUseReservedLane` |
 | `ce-index-early-eviction` | 故意在Put前淘汰hot；必须违反`LocalSuccessKeepsLocatorAuthority` |
@@ -40,7 +44,7 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 负向配置是被否证的候选规则，不是生产功能开关，也不是实际Java源码变异。它们的EXPECTED_COUNTEREXAMPLE用于检查性质能否发现指定错误；不能计入正向PASS。完整trace保存模型oracle`faultSeen`：它在进程退出后仍记录先前I/O错误，而恢复进程只能读取控制与DATA镜像。该oracle不是实现新增的持久日志。恢复同步只建立当前bytes的durability，不自动证明先前错误已经解析。
 
-模型假设输入grant、storage identity、Bookie权限及framing已验证，旧进程退出已终结模型中的提交者；batch冻结后不可变、旧授权范围不覆盖/复用。durable bytes在掉电时保留，可读未同步bytes可丢失。有限模型不证明真实fsync、设备隔离、目录同步、CRC、字节预算或NUMA。未展开allocation条件命令全集、generation reuse、MOVE/FREE、完整在线rotation、长期历史压缩及在线index覆盖、损坏/部分framing、任意Bookie route变更/跨ledger竞争、quorum/客户端、删除和进展；它们仍须后续Model A/C/D及A+C/C+D配置验证。
+模型假设输入grant、storage identity、Bookie权限及framing已验证，旧进程退出已终结模型中的提交者；batch冻结后不可变、旧授权范围不覆盖/复用。durable bytes在掉电时保留，可读未同步bytes可丢失。有限模型不证明真实fsync、设备隔离、目录同步、CRC、字节预算或NUMA。未展开allocation条件命令全集、generation reuse、MOVE/FREE、完整在线rotation、长期历史压缩及完整在线index覆盖恢复、worker冻结与额度协调、损坏/部分framing、任意Bookie route变更/跨ledger竞争、quorum/客户端、删除和进展；它们仍须后续Model A/C/D及A+C/C+D配置验证。
 
 性质和真实实现/测试的映射分别见[invariant mapping](invariant-mapping.md)及[action mapping](action-to-test-mapping.md)。执行结果由本页后续验证记录及各独立run拥有，不能以此切片提升Block G或生产authority。
 
@@ -170,3 +174,21 @@ Bookie新增`RetirePrefix`常量和`retiredThrough`；只有已发布image覆盖
 正向10个Next动作coverage均非零。`Submit`按未完成DATA与hot积压收费，完整坐标上限为3；`CompleteIndex`在实际query-visible之后移除hot但保留admitted坐标，允许hot容量复用。`LocalSuccessKeepsLocatorAuthority`检查已成功entry始终有hot或可查询row，`OccupiedCoordinatesSurviveEviction`检查已durable坐标不会因淘汰丢失。两个负向最短轨迹均为`Submit → ForceData → StartIndex`，分别否证索引占控制credit与提前淘汰。它们不是Java功能开关。
 
 没有展开fresh Get顺序、捕获定位/read pin、native句柄、真实票据续接或关闭流程；以上由[独立存储回归](../local-storage/README.md#query-visible-热定位接管切片)验证。DATA barrier/发布、单CF查询可见性为输入假设，有限配置继续`CHECK_DEADLOCK FALSE`；不证明liveness、全部byte/native/disk预算、在线coverage或MOVE/FREE，也不提升完整A/C/D/组合、步骤8或生产Gate。
+
+
+### 运行期覆盖发布切片
+
+2026-10-03 回执`unified-wal-model-47t1o26s`冻结48个实际输入（8 module、23 cfg、runner、16 Java）并绑定父提交`8ab07e437406aa921defb61466e7bb4e6080b944`处3份合同哈希，70个回执文件checksum已逐项核对。全部23配置为9个完整正向PASS与14个指定反例；旧回执不改绑定。
+
+| 新配置 | 结果 | generated / distinct | 剩余queue | 搜索深度 / 完整图直径 | elapsed秒 | peak RSS bytes |
+|---|---|---|---|---|---|---|
+| `c-runtime-coverage` | PASS | 7,150 / 3,102 | 0 | 22 / 22 | 0.9103 | 151,846,912 |
+| `ce-runtime-before-flush` | EXPECTED_COUNTEREXAMPLE | 100 / 64 | 32 | 6 / — | 0.8702 | 111,575,040 |
+| `ce-runtime-clock-reset` | EXPECTED_COUNTEREXAMPLE | 635 / 326 | 92 | 10 / — | 0.9058 | 127,631,360 |
+| `ce-runtime-late-cut` | EXPECTED_COUNTEREXAMPLE | 104 / 63 | 27 | 6 / — | 0.8413 | 112,934,912 |
+
+正向11个Next动作coverage均非零。模型分别保存已durable DATA、query-visible定位、flush后的内容、冻结cut、可读页与durable页；contents数量代表完整内容快照，stream范围用单stream每条DATA对应一定位的有限投影表达。Prepare要求定位已追平DATA并暂停Put，但允许新DATA继续前进；它们必须等Resume后再入库。最高页只有contents与当前DB匹配才可使用；publication时钟取有效同代页最大值，不以当前contents匹配为前提。crash恢复只保留durable页及flush内容，未持久页的时钟不会形成恢复承诺。
+
+初次回执`unified-wal-model-52pnos7o`未通过负向敏感性检查：clock oracle赋值缺少括号，被解释为限制动作的条件，错误地挡住候选规则，不能计为PASS。修正oracle后增加独立stream cut/contents字段与late-cut负向，取得当前新回执；未缩小常量或削弱性质。历史失败不重绑。
+
+DATA barrier、当前原owner连续前缀、身份/权限及framing仍作为其他切片已验证的输入；未建模多worker冻结/原票据协调、RocksDB真实flush/内容摘要、CRC、native锁、真实文件系统或掉电。Java另验证真实多worker/多stream cut、页发布暂停中的DATA/控制推进、取消排空、force失败及部分DATA额度拒绝。此模型不实现或证明coverage跳过DATA扫描、MOVE/FREE、完整A+C/C+D或liveness，步骤8与生产authority保持未完成。

@@ -83,3 +83,16 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `OccupiedCoordinatesSurviveEviction` | hot淘汰只释放定位容量，已接纳/unknown坐标仍由有限occupancy保留 | 3坐标、2hot/2ticket；完整恢复容量独立，不证明长期/native总账 |
 
 `BacklogBudget`现在检查pending DATA与hot合计而非历史累计admitted；`IndexRowsCameFromDurableData`与`FenceCanUseReservedLane`保留。正向、两个指定负向及真实文件回归独立记录，在线coverage与完整模型仍未完成。
+
+
+## 运行期覆盖发布
+
+`unified-wal-model-47t1o26s`新增有限投影及三个指定错误规则：
+
+| 性质 | 当前实现与合同 | 证据边界 |
+|---|---|---|
+| `RuntimeCoverageWasFlushed` | `SegmentDerivedIndex.checkpointRuntime`验证原owner cut和当前行，真实单CF flush后才force覆盖页 | 模型flush为独立动作，contents为有限计数；真实native/CRC另由Java验证 |
+| `RuntimeCoverageStopsAtCapturedData` | `pauseIndexForCheckpoint`冻结当前单stream连续前缀；暂停期间新DATA只保留hot，不扩大本次cut | 单stream每DATA一定位投影；不是一般MOVE/FREE或多worker证明 |
+| `PublicationClockAdvances` | `nextPublication`取scope/CRC/UUID有效页的最大序号，即使旧内容已不匹配；同代重试递增 | 无坏CRC/部分字节；crash不承诺未持久页时钟，真实force失败另测 |
+
+正向完整探索3,102 distinct states，三个候选规则均违反指定性质。覆盖仅说明被冻结且实际flush内容的派生定位范围，不替代Bookie权限、DATA或恢复同步；当前restart仍全量扫描。

@@ -94,3 +94,21 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 | 模型未展开的同票据多段I/O | `ioContinuationKeepsOneTicketAcrossDrainFailureAndSecondIoRejection`；真实两个I/O阶段、owner异常/拒绝及恰好一次终结 |
 
 模型新增Put前淘汰反例，不替代真实Get/CRC/权限/pin、native锁或关闭流程；运行时query-visible仍不推进持久覆盖。
+
+
+## 运行期覆盖动作
+
+`RuntimeCoverage.tla`正向11个Next动作coverage均非零，当前真实接线如下：
+
+| 模型动作 | 实际路径及验证 |
+|---|---|
+| `Add/Put` | DATA barrier/连续前缀/hot后异步WriteBatch，沿用既有真实文件回归 |
+| `Prepare` | `IsolatedSegmentStorage.checkpointIndex`每原worker一份DATA票据冻结其shard；`runtimeIndexCheckpointUsesAllOriginalWorkersAndMonotoneSameGenerationPublications`覆盖1/4 worker |
+| `Flush/Publish/ForcePublication` | `checkpointRuntime`校验全部owner cut/实际native行，复用真实flush及A/B页write/force/目录sync/重读；同代三次publication回归 |
+| `Resume/Abort` | 全原worker解冻后返回结果；`runtimeIndexPartialDataTicketRefusalResumesPreparedWorkersBeforeRetry`检查部分额度拒绝后可重试 |
+| `BackgroundFlush` | RocksDB可能自行flush的抽象，不独立建立新coverage；Java不控制其内部时序 |
+| `Crash/Recover` | flush/页持久性的有限投影；原冷覆盖JVM退出测试继续保留，当前在线页未新增实际JVM退出或掉电验证 |
+
+`runtimeIndexCheckpointPausedPublicationKeepsNewHotDataFenceAndCancellationDrain`检查冻结后新DATA不进入此次索引cut、原owner/独立控制I/O推进、请求取消不提前归还DATA票据/native锁。它显式配置2条DATA I/O及1条CONTROL I/O；仅1条DATA I/O时checkpoint占用会延迟新的DATA I/O，不据此声称无限进展。
+
+`runtimeIndexPublicationFailureDoesNotPoisonQueryableRowsOrReportSuccess`检查真实页force失败返回UNKNOWN且没有成功coverage，既有query-visible读/重复比较仍可用；同代有效未force页在后续publication clock中仍计数。模型不替代真实多worker协调、票据最后使用、CRC、权限或存储排空验证。

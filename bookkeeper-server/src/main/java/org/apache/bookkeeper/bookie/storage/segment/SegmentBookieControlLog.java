@@ -1201,6 +1201,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return appliedThrough;
     }
 
+    /** Bind a derived checkpoint to applied authority; unlike recovery, this grants no quiescent read cut. */
+    synchronized long indexAppliedCut(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity)
+            throws IOException {
+        if (!matchesScope(source, sourceIdentity)) {
+            throw new IOException("Derived checkpoint has no current Bookie storage identity");
+        }
+        return appliedThrough;
+    }
+
     private synchronized void finishAdmission(Admission admission, boolean fromDriver) {
         if (admission.owner != this || admission.terminal || admission.claimed != fromDriver) {
             throw new IllegalArgumentException("Admission already finished or belongs to another Bookie control log");

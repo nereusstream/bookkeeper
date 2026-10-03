@@ -246,6 +246,74 @@ final class SegmentDerivedIndex implements AutoCloseable {
         return checkpoint(new SegmentFileIo());
     }
 
+    /** All original owners paused maintenance after fully indexing their captured DATA prefixes. */
+    synchronized Coverage checkpointRuntime(List<SegmentHotDirectory.IndexCut> cuts,
+                                              SegmentArenaControlLog arena, SegmentBookieControlLog bookie,
+                                              SegmentFileIo io) throws IOException {
+        requireOpen();
+        if (cuts.size() != config.logicalShards() || !arena.matchesScope(config, identity)) {
+            throw new IOException("Runtime index checkpoint needs the complete original owner set");
+        }
+        SegmentHotDirectory.IndexCut[] selected = new SegmentHotDirectory.IndexCut[config.logicalShards()];
+        List<SegmentDataRecovery.StreamCoverage> streams = new ArrayList<>();
+        long expected = 0;
+        for (SegmentHotDirectory.IndexCut cut : cuts) {
+            SegmentDataRecovery.StreamCoverage stream = cut.stream();
+            int shard = stream.shard();
+            if (shard < 0 || shard >= selected.length || selected[shard] != null || cut.entries() < 0
+                    || stream.firstSequence() < 0 || stream.through() < stream.firstSequence() - 1) {
+                throw new IOException("Invalid runtime owner cut");
+            }
+            selected[shard] = cut;
+            expected += cut.entries();
+            long first = arena.streamFirstSequence(shard, stream.generation().value()).orElse(-1);
+            if (first < 0 && stream.through() == stream.firstSequence() - 1 && cut.entries() == 0) {
+                continue; // A shard with no ALLOC/DATA has no physical stream to cover.
+            }
+            if (first != stream.firstSequence()) {
+                throw new IOException("Runtime stream cut differs from applied Arena authority");
+            }
+            streams.add(stream);
+        }
+        if (expected > maxEntries) {
+            throw new IOException("Runtime index cut exceeds the declared coordinate budget");
+        }
+        streams.sort(Comparator.comparingInt(SegmentDataRecovery.StreamCoverage::shard));
+        long arenaCut = arena.appliedThrough();
+        long bookieCut = bookie.indexAppliedCut(config, identity);
+        int[] counts = new int[selected.length];
+        try (RocksIterator cursor = db.newIterator()) {
+            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0]; cursor.next()) {
+                SegmentPointRead.Location location = decode(cursor.value());
+                if (!Arrays.equals(cursor.key(), key(location.context(), location.entryId()))) {
+                    throw new IOException("Runtime index row differs from its key");
+                }
+                SegmentBatchFormat.Address address = location.address();
+                SegmentHotDirectory.IndexCut cut = selected[address.shard()];
+                SegmentDataRecovery.StreamCoverage stream = cut.stream();
+                if (++counts[address.shard()] > cut.entries()
+                        || !address.streamGeneration().equals(stream.generation())
+                        || address.sequence() < stream.firstSequence() || address.sequence() > stream.through()
+                        || !arena.dataFileAvailable(address.fileIndex())
+                        || !arena.hasAppliedGrant(address.fileIndex(), address.offset(), location.batchLength(),
+                                address.shard(), address.streamGeneration().value(), address.allocation(),
+                                address.generation().value())) {
+                    throw new IOException("Runtime index row is outside its complete DATA owner cut");
+                }
+            }
+            cursor.status();
+        } catch (RocksDBException failure) {
+            throw new IOException("Runtime index cut cannot be validated", failure);
+        }
+        for (int shard = 0; shard < counts.length; shard++) {
+            if (counts[shard] != selected[shard].entries()) {
+                throw new IOException("Runtime index misses an occupied coordinate");
+            }
+        }
+        pendingCoverage = new Coverage(0, indexGeneration, arenaCut, bookieCut, expected, streams);
+        return checkpoint(io, false);
+    }
+
     /** Query-visible append only. The caller keeps hot ownership; this never advances durable coverage. */
     synchronized void append(List<SegmentPointRead.Location> locations) throws IOException {
         requireOpen();
@@ -279,24 +347,30 @@ final class SegmentDerivedIndex implements AutoCloseable {
 
     /** Flush the single CF, then force a bounded independent coverage page. Never publish a memtable cut. */
     synchronized Coverage checkpoint(SegmentFileIo io) throws IOException {
+        return checkpoint(io, true);
+    }
+
+    private Coverage checkpoint(SegmentFileIo io, boolean failOnPublicationError) throws IOException {
         requireOpen();
         Objects.requireNonNull(io, "io");
         if (pendingCoverage == null) {
             throw new IOException("No complete derived rebuild is available for coverage");
         }
+        boolean publishing = false;
         try {
             db.flush(flush);
             Contents contents = contents();
             if (contents.entries() != pendingCoverage.entries()) {
                 throw new IOException("Derived index does not contain the complete selected inventory");
             }
-            long generation = coverage().map(value -> value.publication() + 1).orElse(1L);
+            long generation = nextPublication();
             if (generation < 1) {
                 throw new IOException("Index coverage publication generation exhausted");
             }
             Coverage published = new Coverage(generation, indexGeneration, pendingCoverage.arenaCut(),
                     pendingCoverage.bookieCut(), contents.entries(), pendingCoverage.streams());
             Path target = publication(config, (int) ((generation - 1) % 2));
+            publishing = true;
             try (FileChannel file = FileChannel.open(target, StandardOpenOption.CREATE, StandardOpenOption.READ,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 io.writeFully(file, encodePublication(scope, published, contents.digest()), 0);
@@ -313,9 +387,29 @@ final class SegmentDerivedIndex implements AutoCloseable {
             failed = true;
             throw new IOException("Derived index flush failed", failure);
         } catch (IOException | RuntimeException | Error failure) {
-            failed = true;
+            // A failed optional page write does not invalidate already query-visible native rows.
+            failed |= !publishing || failOnPublicationError;
+            pendingCoverage = null;
             throw failure;
         }
+    }
+
+    private long nextPublication() throws IOException {
+        long latest = 0;
+        for (int slot = 0; slot < 2; slot++) {
+            try {
+                Coverage current = readPublication(publication(config, slot)).coverage();
+                if (current.indexGeneration().equals(indexGeneration)) {
+                    latest = Math.max(latest, current.publication());
+                }
+            } catch (IOException | IllegalArgumentException invalid) {
+                // Optional invalid pages do not reset the clock of another valid same-generation page.
+            }
+        }
+        if (latest == Long.MAX_VALUE) {
+            throw new IOException("Index coverage publication generation exhausted");
+        }
+        return latest + 1;
     }
 
     synchronized Optional<Coverage> coverage() throws IOException {

@@ -20,12 +20,16 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import io.netty.buffer.ByteBuf;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BiConsumer;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -34,6 +38,31 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 
 /** Owns the isolated local storage graph. This is not Bookie registration or production ACK readiness. */
 final class IsolatedSegmentStorage implements AutoCloseable {
+    enum IndexCheckpointStatus {
+        PERSISTED, TRANSIENT_UNAVAILABLE, UNKNOWN
+    }
+
+    record IndexCheckpointResult(IndexCheckpointStatus status, SegmentDerivedIndex.Coverage coverage) { }
+
+    static final class IndexCheckpointRequest {
+        private final AtomicReference<BiConsumer<IndexCheckpointResult, Throwable>> response;
+
+        IndexCheckpointRequest(BiConsumer<IndexCheckpointResult, Throwable> completion) {
+            response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+        }
+
+        boolean stopWaiting() {
+            return response.getAndSet(null) != null;
+        }
+
+        private void complete(IndexCheckpointResult result, Throwable failure) {
+            BiConsumer<IndexCheckpointResult, Throwable> completion = response.getAndSet(null);
+            if (completion != null) {
+                completion.accept(result, failure);
+            }
+        }
+    }
+
     record Limits(long controlLogBytes, int hotEntries, int indexedEntries, int poolBlocks,
                   SegmentDataPhysicalDriver.BatchLimits batches) {
         Limits(long controlLogBytes, int hotEntries, int poolBlocks, SegmentDataPhysicalDriver.BatchLimits batches) {
@@ -58,6 +87,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private final Limits limits;
     private final SegmentDataPhysicalDriver.NormalBatcher[] writes;
     private final SegmentPointRead.Reader[] reads;
+    private final SegmentHotDirectory[] hotDirectories;
     private IsolatedSegmentFiles files;
     private SegmentArenaControlLog arena;
     private SegmentBookieControlLog bookie;
@@ -67,6 +97,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private boolean startAttempted;
     private boolean accepting;
     private boolean closed;
+    private IndexCheckpoint indexCheckpoint;
 
     /** Construct the resource owner before startup so a failed start still has an explicit cleanup handle. */
     IsolatedSegmentStorage(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
@@ -83,6 +114,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
         writes = new SegmentDataPhysicalDriver.NormalBatcher[config.logicalShards()];
         reads = new SegmentPointRead.Reader[config.logicalShards()];
+        hotDirectories = new SegmentHotDirectory[config.logicalShards()];
     }
 
     void startNew() throws IOException, InterruptedException {
@@ -150,6 +182,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 int coordinates = limits.indexedEntries() / config.logicalShards()
                         + (selected < limits.indexedEntries() % config.logicalShards() ? 1 : 0);
                 SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity, capacity, coordinates);
+                hotDirectories[selected] = hot;
                 hot.attachIndex(selected, index, execution.io());
                 SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(selected, owner, execution.io(),
                         files, arena, new SegmentPhysicalPrefix(owner, selected, stream.generation(),
@@ -273,6 +306,187 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             return accepting && execution.accepting()
                     && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
                             .submit(context, entryId, request);
+        }
+    }
+
+    boolean checkpointIndex(IndexCheckpointRequest request) {
+        return checkpointIndex(request, new SegmentFileIo());
+    }
+
+    /** One bounded graph request; DATA refusal may report TRANSIENT_UNAVAILABLE on the calling thread. */
+    boolean checkpointIndex(IndexCheckpointRequest request, SegmentFileIo publicationIo) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(publicationIo, "publicationIo");
+        synchronized (gate) {
+            if (!accepting || !execution.accepting() || indexCheckpoint != null) {
+                return false;
+            }
+            IndexCheckpoint checkpoint = new IndexCheckpoint(request, publicationIo);
+            indexCheckpoint = checkpoint;
+            for (IndexCheckpoint.Worker worker : checkpoint.workers) {
+                if (!execution.owner(worker.id).submit(worker.id, worker)) {
+                    checkpoint.refused(worker);
+                }
+            }
+            return true;
+        }
+    }
+
+    /** Fixed original worker set; no extra threads, queue, control slot or per-shard DATA ticket. */
+    private final class IndexCheckpoint {
+        private final IndexCheckpointRequest request;
+        private final SegmentFileIo publicationIo;
+        private final Worker[] workers;
+        private int ready;
+        private int finished;
+        private boolean finishing;
+        private boolean ioStarted;
+        private boolean responded;
+        private IndexCheckpointStatus status = IndexCheckpointStatus.PERSISTED;
+        private Throwable failure;
+        private SegmentDerivedIndex.Coverage coverage;
+
+        private IndexCheckpoint(IndexCheckpointRequest request, SegmentFileIo publicationIo) {
+            this.request = request;
+            this.publicationIo = publicationIo;
+            workers = new Worker[executionSettings.workers()];
+            for (int worker = 0; worker < workers.length; worker++) {
+                workers[worker] = new Worker(worker);
+            }
+        }
+
+        private synchronized void refused(Worker worker) {
+            worker.terminal = true;
+            finished++;
+            unavailable(null);
+            prepared(worker);
+        }
+
+        private synchronized void unavailable(Throwable cause) {
+            if (cause != null) {
+                status = IndexCheckpointStatus.UNKNOWN;
+                if (failure == null) {
+                    failure = cause;
+                }
+            } else if (status == IndexCheckpointStatus.PERSISTED) {
+                status = IndexCheckpointStatus.TRANSIENT_UNAVAILABLE;
+            }
+        }
+
+        private synchronized void prepared(Worker worker) {
+            if (worker.ready) {
+                throw new IllegalStateException("Checkpoint worker already prepared");
+            }
+            worker.ready = true;
+            if (++ready != workers.length) {
+                return;
+            }
+            if (status != IndexCheckpointStatus.PERSISTED) {
+                finishWorkers();
+                return;
+            }
+            List<SegmentHotDirectory.IndexCut> cuts = new ArrayList<>();
+            for (Worker original : workers) {
+                cuts.addAll(original.cuts);
+            }
+            Worker writer = workers[0];
+            ioStarted = true;
+            writer.ticket.resume(() -> execution.io().submitContinuing(writer.ticket,
+                    () -> coverage = index.checkpointRuntime(cuts, arena, bookie, publicationIo), cause -> {
+                        if (cause != null) {
+                            unavailable(cause);
+                        }
+                        finishWorkers();
+                    }));
+        }
+
+        private synchronized void finishWorkers() {
+            if (finishing) {
+                return;
+            }
+            finishing = true;
+            for (Worker worker : workers) {
+                if (!worker.terminal) {
+                    worker.ticket.resume(() -> {
+                        worker.resumeIndexes();
+                        worker.ticket.complete(() -> completed(worker));
+                    });
+                }
+            }
+            deliverIfFinished();
+        }
+
+        private synchronized void completed(Worker worker) {
+            if (worker.terminal) {
+                throw new IllegalStateException("Checkpoint worker already terminal");
+            }
+            worker.terminal = true;
+            finished++;
+            deliverIfFinished();
+        }
+
+        private void deliverIfFinished() {
+            if (finished != workers.length || responded) {
+                return;
+            }
+            responded = true;
+            synchronized (gate) {
+                if (indexCheckpoint == this) {
+                    indexCheckpoint = null;
+                }
+            }
+            request.complete(new IndexCheckpointResult(status,
+                    status == IndexCheckpointStatus.PERSISTED ? coverage : null), failure);
+        }
+
+        private final class Worker implements SegmentOwnerLoop.Command {
+            private final int id;
+            private final List<SegmentHotDirectory.IndexCut> cuts = new ArrayList<>();
+            private SegmentOwnerLoop.Ticket ticket;
+            private boolean ready;
+            private boolean terminal;
+
+            private Worker(int id) {
+                this.id = id;
+            }
+
+            @Override
+            public void run(SegmentOwnerLoop.Ticket accepted) {
+                ticket = accepted;
+                for (int shard = id; shard < hotDirectories.length; shard += workers.length) {
+                    SegmentHotDirectory.IndexCut cut = hotDirectories[shard].pauseIndexForCheckpoint();
+                    if (cut == null) {
+                        unavailable(null);
+                        break;
+                    }
+                    cuts.add(cut);
+                }
+                prepared(this);
+            }
+
+            private void resumeIndexes() {
+                for (SegmentHotDirectory.IndexCut cut : cuts) {
+                    hotDirectories[cut.stream().shard()].resumeIndexAfterCheckpoint();
+                }
+            }
+
+            @Override
+            public void failed(Throwable cause) {
+                resumeIndexes();
+                synchronized (IndexCheckpoint.this) {
+                    unavailable(cause);
+                    if (!terminal) {
+                        terminal = true;
+                        finished++;
+                    }
+                    if (!ready) {
+                        prepared(this);
+                    } else if (IndexCheckpoint.this.ready == workers.length && (!ioStarted || id == 0)) {
+                        finishWorkers();
+                    }
+                    deliverIfFinished();
+                }
+            }
         }
     }
 

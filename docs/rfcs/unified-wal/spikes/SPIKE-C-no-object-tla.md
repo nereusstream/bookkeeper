@@ -1092,3 +1092,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 2026-10-03 [异步派生定位追加切片](../implementation/local-storage/README.md#异步派生定位追加切片)已复用owner/DATA票据和既有DATA I/O：每shard一个在途、每批最多256定位，热结果先成立，Put不推进持久覆盖；索引暂停或失败不占控制credit，热容量/后台故障在新DATA预留前背压。Java回执`unified-wal-local-RBhd0IZf`为201输入、218项/213通过/5平台跳过；模型`unified-wal-model-tn4d2l9o`为41输入、8个完整正向/10个指定反例，新增482状态的控制预留安全性投影，不证明死锁自由。hot记录仍保留，fresh fallback/淘汰、在线覆盖、MOVE/delete排序、长期预算、完整模型与生产Gate仍未完成。
 
 2026-10-03 [Query-visible热定位接管切片](../implementation/local-storage/README.md#query-visible-热定位接管切片)已在实际Put后由原owner释放hot，点读及普通/恢复重复写hot miss后fresh Get、DATA校验复用同一票据，捕获定位与文件pin保护在途使用。有限坐标占用与完整恢复容量独立于hot容量，支持超过hot容量后的正常restart/删库重建及乱序填洞，不把derived missing授权为同坐标重写。Java回执`unified-wal-local-eIFmOEQ7`为201输入、222项/217通过/5平台跳过；模型`unified-wal-model-2qh8pivn`为43输入、8个完整正向/11个指定反例，接管投影858状态。在线coverage/扫描跳过、MOVE/delete、完整native/disk总账与长期负载、未正常关闭恢复、完整模型及生产Gate仍未完成。
+
+
+2026-10-03 [运行期索引覆盖检查点切片](../implementation/local-storage/README.md#运行期索引覆盖检查点切片)已复用每原worker一份DATA票据冻结已追平cut，暂停索引pump后校验实际native内容、真实flush及A/B页force；同代publication按有效页递增，新hot DATA不扩大该cut。部分DATA额度拒绝先解冻，取消/关闭等待实际I/O及原owner终结，页force失败不报告成功或破坏既有query-visible行。Java回执`unified-wal-local-EG93uRLJ`为201输入、226项/221通过/5平台跳过；模型`unified-wal-model-47t1o26s`为48输入、9个完整正向/14个指定反例，新覆盖投影3,102状态。当前仍全量扫描；coverage缩短扫描、MOVE/delete、在线控制维护、完整native/disk预算、长期负载、未正常关闭恢复、当前在线页真实进程退出/掉电及完整模型和生产Gate未完成。

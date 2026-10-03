@@ -392,3 +392,18 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 模型回执`unified-wal-model-2qh8pivn`冻结43个实际输入（7 module、19 cfg、runner、16 Java），保留父提交处3份合同哈希，58个回执文件checksum已核对；19配置为8个完整正向PASS与11个指定反例。当前维护投影完整探索858 distinct states，检查query-visible之前保留hot、之后释放hot且坐标占用不丢失；新增过早淘汰规则实际违反`LocalSuccessKeepsLocatorAuthority`，控制credit反例仍有效。模型不证明fresh Get/read pin/票据续接或liveness，以上由独立真实Java回归验证，见[模型说明](../models/README.md#query-visible接管与坐标占用)。历史回执不改绑定。
 
 在线flush/coverage、coverage缩短DATA扫描、MOVE/delete次序、完整全局native/磁盘预算、未正常关闭会话恢复、完整A/C/D及组合、真实掉电与生产authority仍未完成；步骤8保持部分实现。当前始终全量扫描，运行时query-visible不推导持久覆盖。
+
+
+### 运行期索引覆盖检查点切片
+
+2026-10-03，`IsolatedSegmentStorage.checkpointIndex`允许一个有界图级请求，每个原worker只占一份既有DATA票据，冻结其所属shard的连续物理前缀及坐标数量。只有当前热表、DATA prefix与异步Put全部追平才暂停各shard索引pump；未追平或部分DATA票据拒绝，先恢复已暂停的shard再返回`TRANSIENT_UNAVAILABLE`。暂停期间允许预算内的新DATA继续进入hot，但不能进入本次native内容/cut。无额外线程、队列或控制额度。
+
+同一既有DATA I/O任务验证全部owner cut、每条实际native key/value、Arena起点及当前grant、每shard坐标数量后，真实单CF flush并发布既有A/B页，force、目录sync及重读成功才返回`PERSISTED`。Bookie applied cut仅为派生覆盖元数据，不代替严格restart/read cut、权限日志或DATA同步。原worker全部恢复索引pump后返回结果；它只确认本次cut已持久，后续Put仍可能令整库摘要与该页不再匹配。publication clock取scope/CRC/index UUID有效的两页最大序号，不因旧contents不匹配而重置；页写入/force失败返回`UNKNOWN`，已有query-visible定位仍可读/比较，不把失败伪装为成功。native flush/内容检查故障仍拒绝继续使用该DB。
+
+请求停止等待不撤销已开始的检查点；DATA票据及native句柄一直保留到真实I/O和原owner解冻/终结。关闭超时保持原图与native锁供再次排空。共享DATA I/O暂停可能延迟新的DATA I/O；并发回归显式配置2条DATA I/O及1条CONTROL I/O，控制仍用独立预留。每worker只有一份DATA额度时，部分拒收可解冻并重试，不能借控制额度绕过DATA上限。
+
+最终Java回执`unified-wal-local-EG93uRLJ`绑定父提交`8ab07e437406aa921defb61466e7bb4e6080b944`及201个实际源码/测试/向量输入：相关7类226项，221通过、5项Linux亲和在macOS跳过，0失败/错误；`spotless:check checkstyle:check`通过。新增4项覆盖1/4原worker的真实多stream cut、同一index generation连续三次发布并重开、页force暂停时新hot DATA及durable fence、取消/关闭超时/native锁保留与全扫描重启、页force失败后查询/重复仍成功及publication递增、部分worker DATA额度拒绝后的解冻与重试。初次夹具使用了不足四个完整block的DATA文件和低于worker数的全局pending配置，修正显式测试配置；最终换行满足Checkstyle，没有弱化断言。
+
+模型回执`unified-wal-model-47t1o26s`冻结48个实际输入（8 module、23 cfg、runner、16 Java），绑定父提交处3份合同哈希，70个回执checksum已核对；9个完整正向PASS与14个指定反例。新增正向完整探索3,102 distinct states，11个Next动作均非零；flush前发布、旧内容失效时重置序号、发布时扩大冻结cut分别触发指定性质反例。初次clock oracle限制了错误动作而未发现反例，已修正并保留历史失败，见[模型范围](../models/README.md#运行期覆盖发布切片)。模型不证明真实native/文件系统、多worker协调或票据生命周期。
+
+当前restart仍完整扫描并重建DB，不使用覆盖缩短DATA扫描；MOVE/delete次序、在线控制维护、完整native/磁盘预算、长期负载、未正常关闭会话恢复、当前在线页的实际JVM退出/真实掉电及完整A/C/D组合仍未完成。步骤8保持部分实现，无生产authority。

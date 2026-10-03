@@ -184,6 +184,11 @@ final class SegmentPhysicalPrefix {
                 && address.sequence() >= firstSequence && address.sequence() <= durableThrough;
     }
 
+    SegmentDataRecovery.StreamCoverage indexCoverage() {
+        owner.requireOwner();
+        return new SegmentDataRecovery.StreamCoverage(shard, streamGeneration, firstSequence, durableThrough);
+    }
+
     int pending() {
         owner.requireOwner();
         return pending.size();

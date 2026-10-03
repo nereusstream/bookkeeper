@@ -5740,9 +5740,14 @@ public class SegmentBookieControlLogTest {
 
     private IsolatedSegmentStorage storage(IsolatedSegmentConfig config, int workers, int controlSlots,
                                            int hotEntries, int indexedEntries) {
+        return storage(config, workers, controlSlots, hotEntries, indexedEntries, 2);
+    }
+
+    private IsolatedSegmentStorage storage(IsolatedSegmentConfig config, int workers, int controlSlots,
+                                           int hotEntries, int indexedEntries, int ioThreads) {
         int buffers = workers * 2;
         return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
-                new SegmentExecutionGroup.Settings(workers, 2, controlSlots, buffers, 4096, 4096,
+                new SegmentExecutionGroup.Settings(workers, ioThreads, controlSlots, buffers, 4096, 4096,
                         buffers * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
                 new IsolatedSegmentStorage.Limits(1024 * 1024, hotEntries, indexedEntries, 1,
                         new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
@@ -7766,13 +7771,18 @@ public class SegmentBookieControlLogTest {
 
     private static SegmentDataPhysicalDriver.NormalResult writeAfterIndexBackpressure(IsolatedSegmentStorage storage,
                                                                                       long entryId) throws Exception {
+        return writeAfterIndexBackpressure(storage, context(), entryId);
+    }
+
+    private static SegmentDataPhysicalDriver.NormalResult writeAfterIndexBackpressure(IsolatedSegmentStorage storage,
+            ProfileLedgerContext context, long entryId) throws Exception {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         SegmentDataPhysicalDriver.NormalResult result;
         do {
             CompletableFuture<SegmentDataPhysicalDriver.NormalResult> reply = new CompletableFuture<>();
-            ByteBuf bytes = entry(context(), entryId);
+            ByteBuf bytes = entry(context, entryId);
             try {
-                assertTrue(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                assertTrue(storage.submitNormal(context, filled(20, (byte) 5), bytes,
                         new SegmentDataPhysicalDriver.NormalRequest((value, cause) -> {
                             assertNull(cause);
                             reply.complete(value);
@@ -7823,6 +7833,235 @@ public class SegmentBookieControlLogTest {
             storage.restart();
             try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 4).result()) {
                 assertEquals(4, read.result().record().entryId());
+            }
+        }
+    }
+
+    private static IsolatedSegmentStorage.IndexCheckpointResult checkpointAfterBackpressure(
+            IsolatedSegmentStorage storage, SegmentFileIo publicationIo) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        do {
+            CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> reply = new CompletableFuture<>();
+            assertTrue(storage.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest((result, cause) -> {
+                if (cause != null) {
+                    reply.completeExceptionally(cause);
+                } else {
+                    reply.complete(result);
+                }
+            }), publicationIo));
+            IsolatedSegmentStorage.IndexCheckpointResult result = reply.get(5, TimeUnit.SECONDS);
+            if (result.status() != IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE) {
+                return result;
+            }
+            Thread.sleep(1);
+        } while (System.nanoTime() < end);
+        throw new AssertionError("Index maintenance did not reach a complete checkpoint cut");
+    }
+
+    @Test
+    public void runtimeIndexCheckpointUsesAllOriginalWorkersAndMonotoneSameGenerationPublications() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                    temporary.getRoot().toPath().resolve("runtime-index-" + workers), 1, 4, 1,
+                    8L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            SegmentDerivedIndex.Coverage latest;
+            try (IsolatedSegmentStorage storage = storage(config, workers, 6, 16, 32, 3)) {
+                storage.startNew();
+                installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                        install(45, 3, (byte) 5), activate(45, 4),
+                        install(46, 5, (byte) 5), activate(46, 6),
+                        install(47, 7, (byte) 5), activate(47, 8));
+                for (long ledgerId = 44; ledgerId < 48; ledgerId++) {
+                    writeAfterIndexBackpressure(storage, context(ledgerId), 1);
+                }
+                IsolatedSegmentStorage.IndexCheckpointResult first = checkpointAfterBackpressure(
+                        storage, new SegmentFileIo());
+                assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED, first.status());
+                assertEquals(4, first.coverage().entries());
+                assertEquals(4, first.coverage().streams().size());
+                assertEquals(1, first.coverage().publication());
+                storageWrite(storage, context(), 2);
+                latest = checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage();
+                assertEquals(first.coverage().indexGeneration(), latest.indexGeneration());
+                assertEquals(2, latest.publication());
+                assertEquals(5, latest.entries());
+                assertEquals(3, checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage().publication());
+                try (SegmentPointRead.LeasedResult result = storageRead(storage, context(), 2).result()) {
+                    assertEquals(2, result.result().record().entryId());
+                }
+            }
+            try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+                SegmentDerivedIndex.Coverage recovered = index.coverage().orElseThrow();
+                assertEquals(3, recovered.publication());
+                assertEquals(latest.indexGeneration(), recovered.indexGeneration());
+                assertEquals(5, recovered.entries());
+            }
+        }
+    }
+
+    @Test
+    public void runtimeIndexCheckpointPausedPublicationKeepsNewHotDataFenceAndCancellationDrain() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch atPageForce = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger replies = new AtomicInteger();
+        SegmentFileIo publication = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            atPageForce.countDown();
+            await(release);
+        });
+        IsolatedSegmentStorage storage = storage(config, 2, 6, 16, 32, 3);
+        try {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4));
+            storageWrite(storage, context(), 1);
+            IsolatedSegmentStorage.IndexCheckpointRequest request;
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            do {
+                CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> response = new CompletableFuture<>();
+                request = new IsolatedSegmentStorage.IndexCheckpointRequest((result, cause) -> {
+                    if (result.status() != IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE) {
+                        replies.incrementAndGet();
+                    }
+                    response.complete(result);
+                });
+                assertTrue(storage.checkpointIndex(request, publication));
+                while (atPageForce.getCount() != 0 && !response.isDone() && System.nanoTime() < end) {
+                    Thread.sleep(1);
+                }
+                if (atPageForce.getCount() == 0) {
+                    break;
+                }
+                assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE,
+                        response.get(5, TimeUnit.SECONDS).status());
+            } while (System.nanoTime() < end);
+            assertTrue(atPageForce.await(5, TimeUnit.SECONDS));
+            assertFalse(storage.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                    (result, cause) -> { })));
+            storageWrite(storage, context(48), 1);
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(48), 1).result()) {
+                assertEquals(48, read.result().record().context().ledgerId());
+            }
+            CompletableFuture<SegmentBookieControlLog.FenceResult> fenced = new CompletableFuture<>();
+            assertTrue(storage.controls().submitFence(fence(5, (byte) 5), (result, cause) -> {
+                if (cause == null) {
+                    fenced.complete(result);
+                } else {
+                    fenced.completeExceptionally(cause);
+                }
+            }));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    fenced.get(5, TimeUnit.SECONDS).status());
+            assertTrue(request.stopWaiting());
+            assertFalse(storage.close(Duration.ofMillis(50)));
+            assertThrows(IOException.class, () -> SegmentDerivedIndex.open(config, identity(), 32));
+            release.countDown();
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+            assertEquals(0, replies.get());
+        } finally {
+            release.countDown();
+            storage.close();
+        }
+        try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 32)) {
+            SegmentDerivedIndex.Coverage coverage = index.coverage().orElseThrow();
+            assertEquals(1, coverage.entries());
+            assertEquals(1, coverage.streams().get(0).through());
+            assertTrue(index.get(context(48), 1).isEmpty());
+        }
+        try (IsolatedSegmentStorage restarted = storage(config, 2, 6, 16, 32)) {
+            restarted.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(restarted, context(48), 1).result()) {
+                assertEquals(48, read.result().record().context().ledgerId());
+            }
+        }
+    }
+
+    @Test
+    public void runtimeIndexPublicationFailureDoesNotPoisonQueryableRowsOrReportSuccess() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 16, 32)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            storageWrite(storage, context(), 1);
+            SegmentDerivedIndex.Coverage first = checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage();
+            storageWrite(storage, context(), 2);
+            SegmentFileIo failedPublication = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            IsolatedSegmentStorage.IndexCheckpointResult failed;
+            do {
+                CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> reply = new CompletableFuture<>();
+                assertTrue(storage.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                        (result, cause) -> {
+                    if (result.status() == IsolatedSegmentStorage.IndexCheckpointStatus.UNKNOWN) {
+                        assertTrue(cause instanceof IOException);
+                    } else {
+                        assertNull(cause);
+                    }
+                    reply.complete(result);
+                }), failedPublication));
+                failed = reply.get(5, TimeUnit.SECONDS);
+                if (failed.status() != IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE) {
+                    break;
+                }
+                Thread.sleep(1);
+            } while (System.nanoTime() < end);
+            assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.UNKNOWN, failed.status());
+            assertNull(failed.coverage());
+            for (long entryId : new long[] {1, 2}) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(entryId, read.result().record().entryId());
+                }
+                storageWrite(storage, context(), entryId);
+            }
+            SegmentDerivedIndex.Coverage retried = checkpointAfterBackpressure(storage, new SegmentFileIo()).coverage();
+            assertEquals(first.indexGeneration(), retried.indexGeneration());
+            assertEquals(3, retried.publication());
+            assertEquals(2, retried.entries());
+        }
+    }
+
+    @Test
+    public void runtimeIndexPartialDataTicketRefusalResumesPreparedWorkersBeforeRetry() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("runtime-index-ticket-refusal"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 4, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        CountDownLatch callbackHeld = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (IsolatedSegmentStorage storage = storage(config, 4, 6, 16, 32, 3)) {
+            storage.startNew();
+            installStorage(storage, install(45, 1, (byte) 5), activate(45, 2));
+            ByteBuf bytes = entry(context(45), 1);
+            try {
+                assertTrue(storage.submitNormal(context(45), filled(20, (byte) 5), bytes,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            assertNull(cause);
+                            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+                            callbackHeld.countDown();
+                            await(release);
+                        })));
+            } finally {
+                bytes.release();
+            }
+            try {
+                assertTrue(callbackHeld.await(5, TimeUnit.SECONDS));
+                CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult> refused = new CompletableFuture<>();
+                assertTrue(storage.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                        (result, cause) -> {
+                    assertNull(cause);
+                    refused.complete(result);
+                })));
+                assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.TRANSIENT_UNAVAILABLE,
+                        refused.get(5, TimeUnit.SECONDS).status());
+                release.countDown();
+                IsolatedSegmentStorage.IndexCheckpointResult retried = checkpointAfterBackpressure(
+                        storage, new SegmentFileIo());
+                assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED, retried.status());
+                assertEquals(1, retried.coverage().entries());
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(45), 1).result()) {
+                    assertEquals(45, read.result().record().context().ledgerId());
+                }
+            } finally {
+                release.countDown();
             }
         }
     }

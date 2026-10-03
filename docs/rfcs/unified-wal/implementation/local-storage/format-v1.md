@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；真实RocksDB冷重建/覆盖页见下文；完整selector、hot淘汰/在线覆盖/Bookie/Arena维护、服务级可写restart与生产entry success authority仍未完成。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；真实RocksDB冷重建/覆盖页见下文；完整selector、coverage缩短扫描/在线Bookie/Arena维护、服务级readiness与未正常关闭restart与生产entry success authority仍未完成。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -206,14 +206,14 @@ fresh Get校验generation、key/context一致、CRC和记录范围，仅返回�
 |---|---|
 | 0 / 8 / 12 / 16 | `UWICOV01` / version u32=1 / stream count u32 / publication generation u64 |
 | 24～40 / 40～72 | index UUID / scope SHA-256 |
-| 72 / 80 / 88 | Arena applied cut i64 / Bookie recovery read cut i64 / locator count u64 |
+| 72 / 80 / 88 | Arena applied cut i64 / Bookie applied cut i64 / locator count u64 |
 | 96～128 | 按key无符号排序的完整key+value字节SHA-256 |
 | 128之后 | 每stream 32 bytes：shard u32、reserved u32=0、stream generation u64、first/through u64 |
 | 最后一个stream后～4092 / 4092 | zero reserved / CRC32C[0,4092) |
 
-stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每shard只接受一个已授权连续stream。同次完整DATA校验/同步的范围来自重放的Arena起点，不由最大entryId或Put完成推导。恢复只选scope/UUID匹配、CRC正确且全部locator数量/内容摘要相符的最高页，再force页及同步目录；marker缺失、坏页、数据库重建代不匹配或内容缺失不提供覆盖。删除`derived-index`后新UUID使外部旧页失效，控制与DATA仍是重建来源。publication或force失败不返回成功；完整未force页仅在恢复同步后可解析，不改变原调用失败。
+stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每shard只接受一个已授权连续stream。冷重建范围来自同次完整DATA校验/同步及重放的Arena起点；运行期范围来自所有原owner已追平的连续物理前缀/坐标cut，并校验实际native行及Arena grant，不由最大entryId或Put完成推导。恢复只选scope/UUID匹配、CRC正确且全部locator数量/内容摘要相符的最高页，再force页及同步目录；marker缺失、坏页、数据库重建代不匹配或内容缺失不提供覆盖。删除`derived-index`后新UUID使外部旧页失效，控制与DATA仍是重建来源。publication或force失败不返回成功；完整未force页仅在恢复同步后可解析，不改变原调用失败。
 
-`IsolatedSegmentStorage.restart()`在新writer session/owner开放前，全量校验同步并按Bookie本地route过滤DATA，重建DB和覆盖；新写由既有热表先提供定位，再异步入库。runtime Put不更新coverage，不提供新的flush cut；旧页只有全部实际内容仍匹配时才可解析。当前不使用coverage跳过任何DATA扫描，不删除或缩减DATA/控制authority。索引损坏无法打开时报告错误，完整删除索引后可重建；没有自动清理未知损坏目录或在线重建。
+`IsolatedSegmentStorage.restart()`在新writer session/owner开放前，全量校验同步并按Bookie本地route过滤DATA，重建DB和覆盖；新写由既有热表先提供定位，再异步入库。runtime Put本身不更新coverage；独立有界检查点每原worker占一DATA票据冻结已追平cut，暂停所有索引pump后真实flush并发布页。新DATA可留hot，不能扩大本次cut；全部原worker解冻后终结。publication序号取两份scope/CRC/UUID有效页最大值加一，不因其旧内容已不匹配重置；新UUID仍从1开始。运行期页写入/force失败返回UNKNOWN且不使既有query-visible行失效，native flush/内容失败仍终止DB使用。旧页只有全部实际内容仍匹配时才可解析。字段字节布局与固定向量不变。当前不使用coverage跳过任何DATA扫描，不删除或缩减DATA/控制authority。索引损坏无法打开时报告错误，完整删除索引后可重建；没有自动清理未知损坏目录或在线重建。
 
 独立Python struct/逐位CRC32C向量：`index-key-v1.hex`77 bytes、`index-location-v1.hex`160 bytes、`index-coverage-v1.hex`4096 bytes。固定index UUID(1,2)、scope SHA为32个0x04；仅为编码oracle，不是该scope的权限或实际文件authority。真实Get/flush、tombstone/copy排除、旧代退休、坏页/缺定位、native lock、短写/force失败、3个JVM halt阶段及删库后的storage图正常restart由局部回执拥有。
 

@@ -37,6 +37,8 @@ final class SegmentHotDirectory {
 
     private record Candidate(SegmentPointRead.Location location, boolean liveDurable) { }
 
+    record IndexCut(SegmentDataRecovery.StreamCoverage stream, int entries) { }
+
     static final class Admission {
         private final SegmentBatchFormat.FrozenBatch batch;
         private final List<Key> keys;
@@ -65,6 +67,7 @@ final class SegmentHotDirectory {
     private SegmentDerivedIndex index;
     private SegmentIoExecutor indexIo;
     private boolean indexInFlight;
+    private boolean indexPaused;
     private int unindexed;
     private Throwable indexFailure;
     private SegmentPhysicalPrefix prefix;
@@ -120,6 +123,23 @@ final class SegmentHotDirectory {
         return occupied.contains(new Key(context, entryId));
     }
 
+    /** Pause only after every published locator and physical reservation has reached the native index. */
+    IndexCut pauseIndexForCheckpoint() {
+        owner.requireOwner();
+        if (indexPaused || index == null || prefix == null || indexFailure != null || owner.failure() != null
+                || indexInFlight || unindexed != 0 || !pendingBatches.isEmpty() || !candidates.isEmpty()
+                || prefix.pending() != 0 || prefix.failed()) {
+            return null;
+        }
+        indexPaused = true;
+        return new IndexCut(prefix.indexCoverage(), occupied.size());
+    }
+
+    void resumeIndexAfterCheckpoint() {
+        owner.requireOwner();
+        indexPaused = false;
+    }
+
     /** Query-visible index rows remain physical hints and must still pass prefix, grant and Bookie checks. */
     void freshGet(SegmentOwnerLoop.Ticket ticket, ProfileLedgerContext context, long entryId,
                   BiConsumer<SegmentPointRead.Location, Throwable> completed) {
@@ -151,7 +171,7 @@ final class SegmentHotDirectory {
 
     private void indexNextBatch(int shard) {
         owner.requireOwner();
-        if (unindexed == 0 || indexInFlight || indexFailure != null || owner.failure() != null) {
+        if (unindexed == 0 || indexInFlight || indexPaused || indexFailure != null || owner.failure() != null) {
             return;
         }
         List<SegmentPointRead.Location> locations = new ArrayList<>();
