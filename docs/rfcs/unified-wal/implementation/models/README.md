@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖投影的七个正向配置已完成有限状态探索，九个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留投影的八个正向配置已完成有限状态探索，十个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible及控制预留，不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -18,6 +18,8 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-index-maintenance` | 3个entry、2个hot容量、2个DATA票据、1次索引暂停；保留热结果及独立控制额度 |
+| `ce-index-control-credit` | 故意让索引占控制credit；必须违反`FenceCanUseReservedLane` |
 | `c-derived-coverage` | 2个已选定DATA entry、最多3 index代、1次故障；先退休旧coverage、完整flush再force发布 |
 | `ce-derived-before-flush` | 故意在完整Put后、flush前发布；必须违反`CoverageWasPersisted` |
 | `c-managed-shared` | 2 stream × 2 batch、共享1个DATA文件、最多2 epoch/2次进程退出/2次掉电；当前合同的正向检查 |
@@ -137,3 +139,19 @@ Bookie新增`RetirePrefix`常量和`retiredThrough`；只有已发布image覆盖
 正向8个Next动作coverage均非零。`BeginRebuild`在同一CF WriteBatch中更换index generation并删除旧定位，立即退休旧coverage；`ForceReset`持久化该批。`Write`只建立可查询定位，`Flush`建立完整持久内容，再由`Publish/ForcePublication`发布coverage。故障丢弃未同步内容，恢复只接受匹配当前index generation的覆盖；索引不可用时从同一份已选定DATA重新构建。负向最短轨迹为`BeginRebuild → ForceReset → Write → Write → Publish → ForcePublication`，缺少`Flush`，实际违反指定性质。
 
 有限参数只有2个entry、最多3个index generation、1次故障；DATA/route选择和framing有效、单CF WriteBatch原子性及flush持久屏障是输入假设。模型不证明真实JNI、目录/设备同步、CRC、控制并发、RELOCATION_COPY选择、在线hot handoff、index stall、扫描跳过或全局资源预算。真实RocksDB、独立字节向量和三个子进程退出阶段由[本地存储验证](../local-storage/README.md#rocksdb冷重建与持久覆盖切片)独立记录，进程退出不代表真实掉电。完整Model A/C/D及组合、Block G和production authority仍未完成。
+
+
+### 索引维护与控制预留投影
+
+2026-10-03回执`unified-wal-model-tn4d2l9o`绑定父提交`56c6d8c1fe5fe0c46dc0d5eb7603aa3c364c01d2`，冻结41个实际输入（7个module、18个cfg、runner、15个Java），保留父提交处3份合同哈希。全部18配置为8个完整正向PASS、10个指定反例；工具、参数及历史回执不变，55个回执文件checksum已核对。
+
+| 新配置 | generated / distinct / queue | depth / 完整diameter | elapsed / peak RSS | 结论 |
+|---|---|---|---|---|
+| c-index-maintenance | 1,125 / 482 / 0 | 15 / 15 | 0.818 s / 132,497,408 bytes | PASS |
+| ce-index-control-credit | 29 / 21 / 12 | 4 / 不适用 | 0.787 s / 107,790,336 bytes | EXPECTED_COUNTEREXAMPLE: FenceCanUseReservedLane |
+
+正向10个Next动作coverage均非零。模型区分hot准入、已durable DATA/热结果、维护排队、实际Put、query-visible后原owner终结及暂停/恢复/后台失败；保留hot而不淘汰，索引只能使用有界DATA票据。控制目标无未终结pre-cut DATA，必须始终可使用独立预留lane；负向最短轨迹`Submit → ForceData → StartIndex`将该credit交给索引，即违反`FenceCanUseReservedLane`，没有修改Java开关。
+
+参数固定3个entry、2个hot容量/2个DATA票据、最多1次暂停。DATA barrier与热发布合并为已由独立DATA切片/真实Java检查的动作；共享执行顺序、native原子性、真实权限和控制force为假设。本模型不证明byte总账、JNI/设备、跨ledger pre-cut排空、hot淘汰/fresh lookup、在线覆盖、MOVE/delete或liveness。初始回执`unified-wal-model-sciqsu_x`的新cfg未配置有限terminal状态策略，checker在后台失败且fence完成、没有新准入的终态报deadlock，结果为INCONCLUSIVE；最终与既有有限切片一致设置`CHECK_DEADLOCK FALSE`，不改变安全性质或常量，不宣称死锁自由/最终进展。
+
+真实Put暂停、后台冲突、预算拒绝、native锁与关闭排空由[存储回归](../local-storage/README.md#异步派生定位追加切片)独立验证。完整Model A/C/D与组合、真实掉电、Block G、步骤8及生产authority仍未完成。

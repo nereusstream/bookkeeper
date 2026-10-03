@@ -1017,6 +1017,10 @@ final class SegmentDataPhysicalDriver {
                 }
                 return;
             }
+            if (!hot.canAcceptEntries(assembling.size() + 1)) {
+                entry.refuse(NormalStatus.TRANSIENT_UNAVAILABLE, null);
+                return;
+            }
             if (awaitingPool) {
                 entry.refuse(NormalStatus.TRANSIENT_UNAVAILABLE, null);
                 return;

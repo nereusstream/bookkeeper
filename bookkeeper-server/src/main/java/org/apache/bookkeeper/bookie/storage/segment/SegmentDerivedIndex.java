@@ -246,6 +246,37 @@ final class SegmentDerivedIndex implements AutoCloseable {
         return checkpoint(new SegmentFileIo());
     }
 
+    /** Query-visible append only. The caller keeps hot ownership; this never advances durable coverage. */
+    synchronized void append(List<SegmentPointRead.Location> locations) throws IOException {
+        requireOpen();
+        if (locations.isEmpty() || locations.size() > BATCH_ENTRIES) {
+            throw new IllegalArgumentException("Derived append needs 1..256 locators");
+        }
+        for (SegmentPointRead.Location location : locations) {
+            validate(location);
+        }
+        try (WriteBatch batch = new WriteBatch()) {
+            for (SegmentPointRead.Location location : locations) {
+                byte[] key = key(location.context(), location.entryId());
+                byte[] value = encodeLocation(indexGeneration, location);
+                byte[] old = db.get(key);
+                if (old != null && !Arrays.equals(old, value)) {
+                    throw new IOException("Derived append would replace an existing coordinate");
+                }
+                batch.put(key, value);
+            }
+            // The old cold cut cannot describe subsequent runtime updates, even if they later auto-flush.
+            pendingCoverage = null;
+            db.write(writes, batch);
+        } catch (RocksDBException failure) {
+            failed = true;
+            throw new IOException("Derived index append failed", failure);
+        } catch (IOException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
+    }
+
     /** Flush the single CF, then force a bounded independent coverage page. Never publish a memtable cut. */
     synchronized Coverage checkpoint(SegmentFileIo io) throws IOException {
         requireOpen();

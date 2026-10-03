@@ -722,7 +722,7 @@ delete-applied/catch-up延迟另列，不以物理回收完成作为cursor条件
 
 ## 15. Derived index
 
-2026-10-03 局部实现：`SegmentDerivedIndex`使用既有rocksdbjni 9.9.3、单CF和有界WriteBatch，以当前完整同步/route选择的DATA inventory重建定位。重建先同批更新index UUID并删除旧namespace、flush，使旧coverage失效；定位flush完成后才force/验证独立A/B覆盖页，绑定identity、index UUID、两控制cut、连续stream范围及实际contents摘要。普通Add/点读仍使用既有热表，DB只在隔离冷启动/显式维护外部调用；完整删库后的正常restart可重建。没有接在线异步handoff、hot淘汰、MOVE/delete排序、coverage缩短扫描或全局native/磁盘预算，不构成本节整体验收。字节/API与真实回执见[实验格式](implementation/local-storage/format-v1.md#rocksdb派生定位与覆盖页)及[本地状态](implementation/local-storage/README.md#rocksdb冷重建与持久覆盖切片)。
+2026-10-03 局部实现：`SegmentDerivedIndex`使用既有rocksdbjni 9.9.3、单CF和有界WriteBatch，以当前完整同步/route选择的DATA inventory重建定位。重建先同批更新index UUID并删除旧namespace、flush，使旧coverage失效；定位flush完成后才force/验证独立A/B覆盖页，绑定identity、index UUID、两控制cut、连续stream范围及实际contents摘要。普通Add先由既有热表提供定位和local result，再经原owner的DATA票据及已有DATA I/O服务异步写入DB，每shard最多一个、每批最多256定位，不使用控制预留。完整删库后的正常restart可重建。后台失败保留热结果并在新DATA预留前背压；尚未接hot淘汰/fresh Get接管、在线覆盖、MOVE/delete排序、coverage缩短扫描或全局native/磁盘预算，不构成本节整体验收。字节/API与真实回执见[实验格式](implementation/local-storage/format-v1.md#rocksdb派生定位与覆盖页)及[本地状态](implementation/local-storage/README.md#rocksdb冷重建与持久覆盖切片)。
 
 RocksDB可保存entry locator、ledger directory和tail summary，但必须：
 

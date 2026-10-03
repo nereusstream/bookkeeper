@@ -33,7 +33,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 final class SegmentHotDirectory {
     private record Key(ProfileLedgerContext context, long entryId) { }
 
-    private record Candidate(SegmentPointRead.Location location, boolean liveDurable) { }
+    private record Candidate(SegmentPointRead.Location location, boolean liveDurable, boolean indexed) { }
 
     static final class Admission {
         private final SegmentBatchFormat.FrozenBatch batch;
@@ -57,6 +57,11 @@ final class SegmentHotDirectory {
     private final Map<Key, Admission> pendingKeys = new HashMap<>();
     private final Map<SegmentBatchFormat.FrozenBatch, Admission> pendingBatches = new IdentityHashMap<>();
     private final Map<IsolatedSegmentFiles.Reservation, Admission> byPhysical = new IdentityHashMap<>();
+    private SegmentDerivedIndex index;
+    private SegmentIoExecutor indexIo;
+    private boolean indexInFlight;
+    private int unindexed;
+    private Throwable indexFailure;
 
     SegmentHotDirectory(SegmentOwnerLoop owner, IsolatedSegmentConfig config, SegmentFileHeader identity,
                         int maxEntries) {
@@ -73,8 +78,79 @@ final class SegmentHotDirectory {
         return files.matchesScope(config, identity);
     }
 
+    void attachIndex(int shard, SegmentDerivedIndex derived, SegmentIoExecutor io) {
+        owner.requireOwner();
+        if (index != null) {
+            throw new IllegalStateException("Derived index already attached");
+        }
+        index = Objects.requireNonNull(derived, "derived");
+        indexIo = Objects.requireNonNull(io, "io");
+        owner.attachIndexMaintenance(shard, () -> indexNextBatch(shard));
+    }
+
+    boolean canAcceptEntries(int entries) {
+        owner.requireOwner();
+        return indexFailure == null && entries >= 0
+                && entries <= maxEntries - candidates.size() - pendingKeys.size();
+    }
+
+    private void indexNextBatch(int shard) {
+        owner.requireOwner();
+        if (unindexed == 0 || indexInFlight || indexFailure != null || owner.failure() != null) {
+            return;
+        }
+        List<SegmentPointRead.Location> locations = new ArrayList<>();
+        for (Candidate candidate : candidates.values()) {
+            if (candidate.liveDurable() && !candidate.indexed()) {
+                locations.add(candidate.location());
+                if (locations.size() == 256) {
+                    break;
+                }
+            }
+        }
+        if (locations.isEmpty()) {
+            return;
+        }
+        List<SegmentPointRead.Location> batch = List.copyOf(locations);
+        indexInFlight = owner.submit(shard, new SegmentOwnerLoop.Command() {
+            @Override
+            public void run(SegmentOwnerLoop.Ticket ticket) {
+                indexIo.submit(ticket, () -> index.append(batch), failure -> {
+                    if (failure == null) {
+                        for (SegmentPointRead.Location location : batch) {
+                            Key key = new Key(location.context(), location.entryId());
+                            Candidate current = candidates.get(key);
+                            if (current != null && !current.indexed() && current.location().equals(location)) {
+                                candidates.put(key, new Candidate(location, current.liveDurable(), true));
+                                unindexed--;
+                            }
+                        }
+                    } else {
+                        indexFailure = failure;
+                    }
+                    indexInFlight = false;
+                });
+            }
+
+            @Override
+            public void failed(Throwable failure) {
+                indexFailure = failure;
+                indexInFlight = false;
+            }
+        });
+    }
+
+    Throwable indexFailure() {
+        owner.requireOwner();
+        return indexFailure;
+    }
+
     Admission reserve(SegmentBatchFormat.FrozenBatch batch) throws IOException {
         owner.requireOwner();
+        if (indexFailure != null) {
+            throw new IOException("Derived index maintenance failed; retained hot entries remain readable",
+                    indexFailure);
+        }
         if (pendingBatches.size() >= config.maxPendingEntries() || pendingBatches.containsKey(batch)) {
             throw new IOException("Hot locator admission capacity exhausted or batch repeated");
         }
@@ -146,7 +222,8 @@ final class SegmentHotDirectory {
         for (int i = 0; i < admission.keys.size(); i++) {
             Key key = admission.keys.get(i);
             pendingKeys.remove(key);
-            candidates.put(key, new Candidate(admission.locations.get(i), true));
+            candidates.put(key, new Candidate(admission.locations.get(i), true, false));
+            unindexed++;
         }
         byPhysical.remove(ready.reservation());
         pendingBatches.remove(admission.batch);
@@ -212,7 +289,11 @@ final class SegmentHotDirectory {
             }
         }
         for (SegmentPointRead.Location location : entries) {
-            candidates.put(new Key(location.context(), location.entryId()), new Candidate(location, localDurable));
+            candidates.put(new Key(location.context(), location.entryId()),
+                    new Candidate(location, localDurable, false));
+            if (localDurable) {
+                unindexed++;
+            }
         }
     }
 

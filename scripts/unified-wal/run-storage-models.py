@@ -19,6 +19,8 @@ import time
 
 
 MATRIX = {
+    "c-index-maintenance": None,
+    "ce-index-control-credit": "FenceCanUseReservedLane",
     "c-derived-coverage": None,
     "ce-derived-before-flush": "CoverageWasPersisted",
     "c-managed-shared": None,
@@ -64,7 +66,7 @@ def main():
                   "SegmentArenaControlLog.java", "SegmentBookieControlLog.java",
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
                   "SegmentControlRotation.java", "SegmentDataFileLock.java", "SegmentDerivedIndex.java",
-                  "SegmentDataRecovery.java"])
+                  "SegmentDataRecovery.java", "SegmentOwnerLoop.java", "SegmentIoExecutor.java"])
     design_paths = ["docs/rfcs/unified-wal/RFC-0003-segment-storage-allocator.md",
                     "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md",
                     "docs/rfcs/unified-wal/spikes/SPIKE-C-no-object-tla.md"]
@@ -79,7 +81,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "A+C", "C+D", "MOVE/FREE", "online index/hot handoff/full coverage recovery",
@@ -92,10 +94,11 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "DerivedCoverage.tla" if "derived" in name else (
+                   "-metadir", str(states), "IndexMaintenance.tla" if "index-" in name else (
+                       "DerivedCoverage.tla" if "derived" in name else (
                        "ArenaRotation.tla" if "arena-rotation" in name else (
                        "BookieCheckpoint.tla" if "bookie-checkpoint" in name or "bookie-rotation" in name else (
-                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla")))]
+                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla"))))]
         wrapper = ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
         output = run / "checker-output" / (name + ".log")
         start = time.monotonic()

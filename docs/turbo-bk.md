@@ -460,3 +460,6 @@ Segment production candidate 的最低 Gate：
 2026-10-03 Bookie停写rotation已复用双恢复根协议，保留sealed credential、fence/tombstone、条件结果、最新LAC及grant/close；两个owner分别force新日志/目录与独立发布页后才回收旧prefix，当前必要suffix仍完整验证。最新[本地实现及验证](rfcs/unified-wal/implementation/local-storage/README.md#bookie停写rotation与共享物理协议)为`unified-wal-local-sKIZwMRg`（197输入、206项/201通过/5平台跳过）和`unified-wal-model-bu9e_n9l`（31输入、6个正向完整PASS/8个指定反例）。权限投影新增回收后terminal恢复性质，独立物理模型检查双根barrier，不构成A+C组合。在线维护、长期幂等历史压缩、派生索引/MOVE/FREE、真实掉电、完整模型及生产Gate仍未完成。
 
 2026-10-03 [真实RocksDB冷重建/覆盖切片](rfcs/unified-wal/implementation/local-storage/README.md#rocksdb冷重建与持久覆盖切片)已接入隔离正常restart：单CF、WAL关闭、重建代先退休旧覆盖，实际flush后才发布identity/cut/stream/content绑定的A/B页；全库删除后由同步且route选择的DATA重建，不复活tombstone或未提交copy。Java回执`unified-wal-local-oPEjR8PE`为201输入、215项/210通过/5平台跳过；模型`unified-wal-model-p_83_s8r`为36输入、7个完整正向/9个指定反例。新覆盖投影否证未flush发布，不构成完整模型或掉电证据。在线异步handoff/hot淘汰、coverage跳过扫描、MOVE/delete/stall排序、长期资源与生产Gate仍未完成。
+
+
+2026-10-03 [异步派生定位追加切片](rfcs/unified-wal/implementation/local-storage/README.md#异步派生定位追加切片)已复用owner/DATA票据和既有DATA I/O：每shard一个在途、每批最多256定位，热结果先成立，Put不推进持久覆盖；索引暂停或失败不占控制credit，热容量/后台故障在新DATA预留前背压。Java回执`unified-wal-local-RBhd0IZf`为201输入、218项/213通过/5平台跳过；模型`unified-wal-model-tn4d2l9o`为41输入、8个完整正向/10个指定反例，新增482状态的控制预留安全性投影，不证明死锁自由。hot记录仍保留，fresh fallback/淘汰、在线覆盖、MOVE/delete排序、长期预算、完整模型与生产Gate仍未完成。

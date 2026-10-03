@@ -62,3 +62,15 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `RecoveredCoverageHasLocations` | 恢复检查当前index generation和完整实际定位；新重建代使旧coverage失效 | 已选定DATA/route作为输入；不证明在线handoff、扫描跳过或完整恢复协议 |
 
 正向完整探索53个distinct states，指定负向缺少flush即违反`CoverageWasPersisted`。实际RocksDB读取、内容摘要、generation绑定、字节向量及索引全丢失重建另由Java验证，不从此投影推出完整Model A/C或生产authority。
+
+
+索引维护回执`unified-wal-model-tn4d2l9o`增加以下有限性质：
+
+| 性质 | 当前合同与实现 | 证据边界 |
+|---|---|---|
+| `BacklogBudget` | RFC-0003 §13/15；hot记录提前计费，每shard一个索引批次复用DATA票据 | 3 entry/2 hot/2 ticket；不证明全部byte/native/disk预算 |
+| `LocalSuccessKeepsHotAuthority` | 后台Put暂停或失败不撤销已durable DATA/热定位结果，不提前淘汰热记录 | DATA barrier/发布为输入假设，非完整A+C证明 |
+| `IndexRowsCameFromDurableData` | 只有live-durable热定位进入普通派生追加，query-visible不代表新的持久覆盖 | 本地定位投影；完整权限/selector由实际控制和读路径负责 |
+| `FenceCanUseReservedLane` | 维护不占控制票据或控制I/O，已排空pre-cut目标的fence仍可启用 | 检查可启用性，不证明fairness/实际force/liveness；一般pre-cut等待仍允许 |
+
+正向完整探索482个distinct states，负向索引占控制credit得到指定性质反例。真实暂停和失败的独立Java回归验证当前I/O/owner接线；hot淘汰及在线覆盖仍未接入。

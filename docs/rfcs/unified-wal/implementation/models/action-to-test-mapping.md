@@ -72,3 +72,15 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`正向9个Next动作均非�
 | 新一轮`BeginRebuild` | `deletedDerivedDatabaseRebuildsFromDataWithoutRevivingTombstones`及`storageGraphRebuildsDeletedDerivedIndexBeforeCleanRestartRequests` |
 
 当前只接入冷启动完整DATA扫描之后、开放请求之前的重建。在线hot handoff、index stall背压、扫描跳过及完整A+C/D模型均未完成；独立模型与实际测试不互相代替证据。
+
+
+索引维护回执`unified-wal-model-tn4d2l9o`正向10个Next动作均非零：
+
+| 动作 | 当前实现/真实测试 |
+|---|---|
+| `Submit/ForceData` | 既有有界组批/真实DATA force/连续前缀/热发布；新增热容量拒绝发生于DATA预留前 |
+| `StartIndex/StartPut/Put/CompleteIndex` | `SegmentHotDirectory`的固定owner pump与既有DATA ticket/I/O，`SegmentDerivedIndex.append`真实WriteBatch后回原owner终结 |
+| `Stall/Resume/Fence` | `asynchronousDerivedIndexStallKeepsHotSuccessAndReservedFenceProgress`；暂停真实索引job，使用同一DATA/控制I/O服务，先热成功再durable fence、预算拒绝及恢复已接受写 |
+| `IndexFailure` | `asynchronousIndexConflictRetainsHotReadAndRefusesNewDataBeforeReservation`；真实冲突派生行使后台拒绝覆盖，热读仍成功，新DATA不预留/force |
+
+`asynchronousDerivedIndexDrainRetainsNativeLockUntilRealIoTerminates`另验证关闭超时保留实际native排他，实际I/O及原owner票据终结后才排空；模型未证明native句柄或关闭顺序。共享DATA I/O停顿可能延迟点读/已接受DATA，控制预留独立；不从该有限投影推出完整系统的进展或生产authority。

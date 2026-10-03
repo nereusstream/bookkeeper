@@ -367,3 +367,16 @@ Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner�
 复现仍用前节7类测试及model runner命令；最新两run父提交为`78100b5ad9c999651cdb4eb577b444c895f0d549`，实际输入SHA-256与本轮实现匹配，历史回执保持原绑定。另执行`mvn -o -pl bookkeeper-server -DskipTests spotless:check checkstyle:check -q`通过；RocksDB native/API与字节合同见[实验格式](format-v1.md#rocksdb派生定位与覆盖页)。
 
 该交付是在线索引接管前的实际持久化/重建依赖。尚无异步runtime WriteBatch、热淘汰/fresh fallback、coverage缩短DATA扫描、MOVE/delete更新排序、stall期间DATA/fence隔离或完整全局native/磁盘账本；覆盖校验当前读取全部索引内容，未报告恢复性能提升。真实掉电、Linux NUMA、长期可持续存储、完整模型/步骤8及生产authority仍未完成。
+
+
+### 异步派生定位追加切片
+
+2026-10-03，隔离storage图已将普通/恢复ENTRY_DATA的热发布后更新接入真实`SegmentDerivedIndex.append`。每个shard的固定owner pump只从既有有界热表取未入库的live-durable定位，每批最多256个引用、每shard最多一个在途批次；复用DATA票据、完成槽位和共享DATA I/O，不新建线程/队列，不占控制credit或控制I/O。无积压时不扫描热表。前台local result不等DB Put；实际WriteBatch只建立query-visible定位，同坐标不同定位拒绝覆盖，runtime Put不会产生新flush/coverage cut。
+
+热记录及其预算仍保留，后台错误不撤销已经成立的DATA结果。新DATA在owner的组批/物理预留前检查热容量和索引故障，返回`TRANSIENT_UNAVAILABLE`，不消耗DATA sequence/offset或执行force；重复路径仍使用原热定位及真实DATA比对。索引job保留既有票据直到真实I/O和owner completion终结；storage关闭等待这些票据后才关闭native句柄。停止准入时尚未调度的定位仍由热表与DATA持有，restart仍完整重建，不以它们推导持久索引覆盖。
+
+回执`unified-wal-local-RBhd0IZf`绑定201个实际源码/测试/向量输入和父提交`56c6d8c1fe5fe0c46dc0d5eb7603aa3c364c01d2`，相关7类218项、213通过、5项Linux亲和在macOS跳过、0失败/错误；`spotless:check checkstyle:check`通过。新增3个真实回归检查Put暂停前已经成立的热结果、暂停期间预留控制I/O的durable fence、热容量耗尽时新写不预留DATA、暂停解除后已接受写和DB查询完成、关闭超时保留native锁，以及真实冲突派生行导致后台失败后热读仍成功/新写拒绝。原删库storage图验证已适配query-visible运行时追加，但仍禁止把它计入新的coverage。初次3个fixture因DATA关闭晚于Arena报错；修正真实关闭顺序后取得本回执，没有弱化assertion。
+
+模型回执`unified-wal-model-tn4d2l9o`冻结41个实际输入（7个module、18个cfg、runner、15个Java）及父提交处3份合同哈希，18配置为8个完整正向PASS、10个指定反例。新增维护投影完整探索482 distinct states，10个Next动作均非零；索引占用控制credit的候选规则实际违反`FenceCanUseReservedLane`。仅检查有限安全性与控制动作可启用性，未验证最终进展/死锁自由；假设DATA barrier/hot发布已经成立，见[模型说明](../models/README.md#索引维护与控制预留投影)。历史运行不改绑定。
+
+尚未实现query-visible后hot淘汰/fresh Get读取及重复写接管、在线flush/coverage、扫描跳过、MOVE/delete更新次序、全局native/磁盘预算与长期可持续吞吐。当前Put完成不会释放热容量，因此满热表后仍保持背压；共享DATA I/O暂停也可能延迟点读或已接受DATA，append owner与控制lane保持独立。真实掉电、完整A/C/D及组合、步骤8总验收与生产authority仍未完成。

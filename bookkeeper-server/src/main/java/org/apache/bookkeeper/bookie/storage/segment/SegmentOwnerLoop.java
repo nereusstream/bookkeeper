@@ -123,6 +123,7 @@ final class SegmentOwnerLoop {
     private final ArrayBlockingQueue<ControlTask> controls;
     private final long[] deadlines;
     private final Runnable[] due;
+    private final Runnable[] indexMaintenance;
     private final Thread thread;
     private int pending;
     private int controlPending;
@@ -160,6 +161,7 @@ final class SegmentOwnerLoop {
         controls = new ArrayBlockingQueue<>(controlCapacity);
         deadlines = new long[logicalShards];
         due = new Runnable[logicalShards];
+        indexMaintenance = new Runnable[logicalShards];
         nextShard = workerId;
         thread = factory.newThread(this::run);
     }
@@ -292,6 +294,16 @@ final class SegmentOwnerLoop {
         requireOwner();
         requireShard(shard);
         due[shard] = null;
+    }
+
+    /** A fixed shard's index pump uses existing DATA tickets; it cannot consume the control reservation. */
+    void attachIndexMaintenance(int shard, Runnable action) {
+        requireOwner();
+        requireShard(shard);
+        if (indexMaintenance[shard] != null) {
+            throw new IllegalStateException("Index maintenance already attached");
+        }
+        indexMaintenance[shard] = Objects.requireNonNull(action, "action");
     }
 
     void stopAdmission() {
@@ -431,6 +443,15 @@ final class SegmentOwnerLoop {
                 if (!accepting && pending == 0 && controlPending == 0 && controls.isEmpty() && !hasDeadline()
                         && (pool == null || pool.outstanding() == 0)) {
                     return;
+                }
+            }
+            for (int shard = workerId; shard < logicalShards; shard += workerCount) {
+                if (indexMaintenance[shard] != null) {
+                    try {
+                        indexMaintenance[shard].run();
+                    } catch (Throwable cause) {
+                        recordFailure(cause);
+                    }
                 }
             }
             if (!work) {

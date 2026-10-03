@@ -149,6 +149,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                                 stream.firstSequence(), config.maxPendingEntries()), hot);
                 writes[selected] = driver.enableNormalBatching(
                         bookie, limits.batches(), allocator, limits.poolBlocks());
+                hot.attachIndex(selected, index, execution.io());
                 reads[selected] = SegmentPointRead.Reader.live(owner, execution.io(), files, arena, bookie, hot);
                 return null;
             });
