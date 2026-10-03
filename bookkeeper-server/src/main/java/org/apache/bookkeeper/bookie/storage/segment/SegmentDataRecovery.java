@@ -40,7 +40,9 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
     /** Called only with the live writer's reclamation gate held; no index absence or caller-supplied liveness. */
-    static SegmentArenaControlLog.FreeFacts proveDeadAllocation(IsolatedSegmentConfig config, FileChannel data,
+    static SegmentArenaControlLog.FreeFacts proveDeadAllocation(IsolatedSegmentConfig config,
+                                                               SegmentFileHeader identity,
+                                                               SegmentArenaControlLog authority, FileChannel data,
                                                                SegmentArenaControlLog.Allocation allocation,
                                                                long allocationOrder, SegmentBookieControlLog bookie,
                                                                long bookieCut, ByteBuffer workspace, long usedEnd)
@@ -57,6 +59,8 @@ final class SegmentDataRecovery {
         long first = -1;
         long through = -1;
         long records = 0;
+        long arenaCut = authority.appliedThrough();
+        boolean usesSelector = false;
         long end = allocation.offset() + allocation.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
         if (usedEnd < allocation.offset() || usedEnd > end || usedEnd % config.alignment() != 0) {
             throw new IOException("Whole-allocation FREE has an invalid current DATA boundary");
@@ -86,12 +90,29 @@ final class SegmentDataRecovery {
             ByteBuffer content = workspace.slice(0, length);
             SegmentFileIo.readFully(data, content, offset);
             SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address, config.bytesPerFile());
-            for (SegmentBatchParser.Record record : parsed.records()) {
-                if (record.origin() != SegmentBatchFormat.ENTRY_DATA
-                        || SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
-                            != allocation.ownerShard()
-                        || !bookie.hasTerminalTombstone(record.context())) {
-                    throw new IOException("Whole-allocation FREE has a record without an exact terminal tombstone");
+            List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+            HashSet<SegmentPointRead.Location> successors = new HashSet<>();
+            for (int i = 0; i < parsed.records().size(); i++) {
+                SegmentBatchParser.Record record = parsed.records().get(i);
+                if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                        != allocation.ownerShard()) {
+                    throw new IOException("Whole-allocation FREE record belongs to another shard");
+                }
+                boolean terminal = bookie.hasTerminalTombstone(record.context());
+                usesSelector |= record.origin() == SegmentBatchFormat.RELOCATION_COPY;
+                if (!terminal) {
+                    Optional<SegmentPointRead.Location> successor = authority.retirementSuccessor(
+                            locations.get(i), record);
+                    if (successor.isPresent()) {
+                        successors.add(successor.get());
+                        usesSelector = true;
+                    } else if (record.origin() == SegmentBatchFormat.ENTRY_DATA
+                            || authority.currentMoveLocation(record.context(), record.entryId())
+                                    .filter(locations.get(i)::equals).isPresent()) {
+                        throw new IOException("Whole-allocation FREE has a live record"
+                                + " without an exact terminal tombstone"
+                                + " or applied successor");
+                    }
                 }
             }
             if (first < 0) {
@@ -102,10 +123,17 @@ final class SegmentDataRecovery {
             through = address.sequence();
             records = Math.addExact(records, parsed.records().size());
             digest.update(content);
+            // The victim parser borrows workspace. Hash its bytes before target reads reuse that same buffer.
+            for (SegmentPointRead.Location successor : successors) {
+                SegmentBatchParser.Record selected = SegmentPointRead.readWithScratch(config, identity, authority,
+                        successor, workspace).record();
+                authority.validateSelectedRecord(successor, selected);
+            }
             offset += length;
         }
         return new SegmentArenaControlLog.FreeFacts(SegmentArenaControlLog.AllocationIdentity.of(allocation),
-                allocationOrder, first, through, records, bookieCut, HexFormat.of().formatHex(digest.digest()));
+                allocationOrder, first, through, records, bookieCut, usesSelector ? arenaCut : -1,
+                HexFormat.of().formatHex(digest.digest()));
     }
 
     record Scan(long batches, long records, long validatedBytes, long zeroPages,

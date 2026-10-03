@@ -205,3 +205,16 @@ metadata-only退役范围恢复、空range不虚增序号、rotation及native覆
 | wire bound | `moveFormatMatchesIndependentVectorAndBoundsAuthorityReferences` 独立416-byte向量、256/257行、未知版本/未来前驱/geometry/header拒绝 |
 
 真实原owner池/CONTROL service复用现有组件。以上不包括graph compaction、源FREE/reuse与native maintenance cut。
+
+
+## MOVE/FREE/reuse
+
+| 动作 | 实际路径与测试 |
+|---|---|
+| `PrepareFree/ApplyFree` | protected整块parser校验T或当前MOVE后继、实际目标点读与v2 Arena cut；`movedSourcesFreeAndReuseWithoutNewCheckpointRecoverCurrentCopy`覆盖当前COPY拒绝、坏C阻止源退役与A/B整块FREE |
+| `PrepareReuse/ApplyReuse/Restart` | 既有allocator/free generation和CLOSED末端；同一真实测试将A/B以generation2写入其他坐标，再做无新checkpoint全量/rotation storage恢复与当前C缺失隔离 |
+| `AdvanceControl/ApplyFree/PrepareMove` | `orphanCopyFreeRevokesLateMoveAndStaleSelectorCutCannotRetireAllocation`验证陈旧proof整批条件失败、orphan FREE撤销grant、迟到MOVE拒绝，原普通坐标仍SAME_DURABLE |
+| 准确T/selector退役 | `terminalCurrentCopyFreeRetiresSelectorWithoutRestoringOldPermission`验证当前COPY有T后v2退役、普通T源v1保留、重启后的NOT_READY/无结果 |
+| framing | `moveAwareFreeFormatBindsEarlierSelectorCutAndKeepsV1Bytes`验证280-byte独立v2 oracle、错误cut与decoded新proof拒绝、v1字节保留 |
+
+不包含在线MOVE native Put/coverage协调或graph compaction request。

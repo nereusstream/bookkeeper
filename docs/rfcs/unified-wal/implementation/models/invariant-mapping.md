@@ -182,3 +182,15 @@ Bookie回收权限回执`unified-wal-model-bu9e_n9l`另检查：
 | `CopyNeverSelects` | 未成功MOVE的copy仍是orphan物理事实，不发布普通坐标/ACK |
 
 控制 metadata-only 重放与DATA当前目标验证分开；full scan仍检查未退役历史allocation。MOVE/FREE/reuse/native coverage组合和每allocation在线cutover尚未启用。
+
+
+## MOVE/FREE/reuse
+
+| 性质 | 实际合同与范围 |
+|---|---|
+| `SelectedAllocationRemainsLive` | 全victim proof排除活current target，FREE成功撤销grant；orphan目标FREE后迟到MOVE不可取得原grant |
+| `AppliedFreeHadExactSelectorCut` | v2 proof引用Arena applied cut，首次apply要求等于本FREE前序sequence；不以digest或索引缺失代替selector |
+| `SelectorNeverReentersReusedGeneration` | 原成功ALLOC序号/full generation与当前grant复核，旧COPY不进入新owner allocation |
+| `RestartKeepsControlSelector` | 有序MOVE/FREE/ALLOC元数据重放后只验证current DATA与健康CLOSED末端，不重新扫描已退役源来选择坐标 |
+
+准确Bookie T、真实目标点读/CRC/SHA和保护生命周期由Java/原模型拥有；完整native maintenance/coverage和liveness仍未展开。

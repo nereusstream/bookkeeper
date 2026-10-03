@@ -9867,13 +9867,18 @@ public class SegmentBookieControlLogTest {
 
         private SegmentDataPhysicalDriver.DurableRelocation copy(int operation, long sequence, byte payload)
                 throws Exception {
+            return copy(operation, sequence, payload, 5, sequence * 4096);
+        }
+
+        private SegmentDataPhysicalDriver.DurableRelocation copy(int operation, long sequence, byte payload,
+                                                                  long allocation, long offset) throws Exception {
             ByteBuf first = entry(context(), 1, -1, 8, payload);
             ByteBuf second = entry(context(), 2, -1, 8, payload);
             CompletableFuture<SegmentDataPhysicalDriver.DurableRelocation> written = new CompletableFuture<>();
             try {
                 assertTrue(driver.submitRelocation(SegmentBatchFormat.encode(config,
-                        new SegmentBatchFormat.Address(0, 0, 5, new Generation(1), new Generation(1),
-                                sequence, sequence * 4096),
+                        new SegmentBatchFormat.Address(0, 0, allocation, new Generation(1), new Generation(1),
+                                sequence, offset),
                         List.of(SegmentBatchFormat.relocation(context(), first,
                                         new UUID(0, operation), new Generation(7)),
                                 SegmentBatchFormat.relocation(context(), second,
@@ -10127,6 +10132,187 @@ public class SegmentBookieControlLogTest {
             }
         } finally {
             release.countDown();
+        }
+    }
+
+
+    @Test
+    public void movedSourcesFreeAndReuseWithoutNewCheckpointRecoverCurrentCopy() throws Exception {
+        IsolatedSegmentConfig config = config();
+        long middle = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        long last = middle + SegmentArenaControlLog.BLOCK_BYTES;
+        List<SegmentPointRead.Location> targets;
+        try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
+            fixture.arena.submitBatch(List.of(reclaimableAllocation(6, middle), reclaimableAllocation(7, last)));
+            SegmentDataPhysicalDriver.DurableRelocation first = fixture.copy(601, 2, (byte) 0, 6, middle);
+            long selector;
+            try (SegmentArenaMove move = fixture.prepare(first, fixture.sources, -1)) {
+                selector = fixture.arena.submitBatch(List.of(move)).get(0).sequence();
+            }
+            SegmentDataPhysicalDriver.DurableRelocation next = fixture.copy(602, 3, (byte) 0, 7, last);
+            try (SegmentArenaMove move = fixture.prepare(next,
+                    first.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList(),
+                    selector)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+            }
+            targets = next.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList();
+            assertThrows(IOException.class, () -> fixture.arena.prepareFree(new UUID(0, 701), 7,
+                    fixture.files, fixture.bookie, ByteBuffer.allocate(4096)));
+            try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                ByteBuffer original = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(data, original, last);
+                byte[] bad = original.array().clone();
+                bad[328] ^= 1;
+                new SegmentFileIo().writeFully(data, ByteBuffer.wrap(bad), last);
+                assertThrows(IOException.class, () -> fixture.arena.prepareFree(new UUID(0, 704), 5,
+                        fixture.files, fixture.bookie, ByteBuffer.allocate(4096)));
+                assertTrue(fixture.arena.hasAppliedGrant(0, 4096, 4096, 0, 1, 5, 1));
+                new SegmentFileIo().writeFully(data, original, last);
+            }
+            for (long source : new long[] {5, 6}) {
+                try (SegmentArenaControlLog.Free free = fixture.arena.prepareFree(new UUID(0, 700 + source), source,
+                        fixture.files, fixture.bookie, ByteBuffer.allocate(4096))) {
+                    assertEquals(136, free.body().remaining());
+                    assertEquals(fixture.arena.appliedThrough(), free.facts().arenaCut());
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                            fixture.arena.submitBatch(List.of(free)).get(0).status());
+                }
+            }
+            assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE,
+                    checkPublishedDuplicate(fixture.driver, fixture.bookie,
+                            entryBytes(context(), 1, -1, 8, (byte) 0)));
+            for (long entryId : new long[] {3, 4}) {
+                SegmentArenaControlLog.Allocation reused = fixture.arena.planPools(List.of(
+                        new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+                assertEquals(entryId == 3 ? 4096 : middle, reused.offset());
+                assertEquals(2, reused.generation());
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(reused)).get(0).status());
+                ByteBuf bytes = entry(context(), entryId);
+                CompletableFuture<List<SegmentDataPhysicalDriver.NormalResult>> written = new CompletableFuture<>();
+                try {
+                    assertTrue(fixture.driver.submitNormal(fixture.bookie, SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, reused.allocationId(), new Generation(2),
+                                    new Generation(1), entryId + 1, reused.offset()),
+                            List.of(SegmentBatchFormat.entry(context(), bytes))),
+                            List.of(fixture.bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                            (results, failure) -> {
+                                if (failure == null) {
+                                    written.complete(results);
+                                } else {
+                                    written.completeExceptionally(failure);
+                                }
+                            }));
+                } finally {
+                    bytes.release();
+                }
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                        written.get(5, TimeUnit.SECONDS).get(0).status());
+                ownerBarrier(fixture.owner);
+            }
+        }
+        // A/B now have new grants; bytes past B's healthy CLOSED end cannot resurrect the old copy.
+        try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0), StandardOpenOption.WRITE)) {
+            new SegmentFileIo().writeFully(data, ByteBuffer.wrap(filled(4096, (byte) 0x7f)), middle + 4096);
+            data.force(true);
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4, 16, 3)) {
+            storage.restart();
+            for (int i = 0; i < 2; i++) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), i + 1).result()) {
+                    assertEquals(602, read.result().record().moveId().getLeastSignificantBits());
+                }
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                        storageWrite(storage, context(), i + 1).status());
+            }
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                    storageWrite(storage, context(), 3).status());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(targets.get(0), arena.currentMoveLocation(context(), 1).orElseThrow());
+            arena.rotate();
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4, 16, 3)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(602, read.result().record().moveId().getLeastSignificantBits());
+            }
+        }
+        try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0), StandardOpenOption.WRITE)) {
+            new SegmentFileIo().writeFully(data, ByteBuffer.allocate(4096), last);
+            data.force(true);
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4, 16, 3)) {
+            assertThrows(IOException.class, storage::restart);
+        }
+    }
+
+    @Test
+    public void orphanCopyFreeRevokesLateMoveAndStaleSelectorCutCannotRetireAllocation() throws Exception {
+        try (MoveFixture fixture = new MoveFixture(config(), new SegmentFileIo())) {
+            long middle = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+            fixture.arena.submitBatch(List.of(reclaimableAllocation(6, middle)));
+            SegmentDataPhysicalDriver.DurableRelocation orphan = fixture.copy(601, 2, (byte) 0, 6, middle);
+            try (SegmentArenaControlLog.Free stale = fixture.arena.prepareFree(new UUID(0, 705), 6,
+                    fixture.files, fixture.bookie, ByteBuffer.allocate(4096))) {
+                fixture.arena.submitBatch(List.of(
+                        reclaimableAllocation(7, middle + SegmentArenaControlLog.BLOCK_BYTES)));
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        fixture.arena.submitBatch(List.of(stale)).get(0).status());
+                assertTrue(fixture.arena.hasAppliedGrant(0, middle, 4096, 0, 1, 6, 1));
+            }
+            try (SegmentArenaControlLog.Free free = fixture.arena.prepareFree(new UUID(0, 706), 6,
+                    fixture.files, fixture.bookie, ByteBuffer.allocate(4096))) {
+                assertEquals(136, free.body().remaining());
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(free)).get(0).status());
+            }
+            assertFalse(fixture.arena.hasAppliedGrant(0, middle, 4096, 0, 1, 6, 1));
+            assertThrows(IOException.class, () -> fixture.prepare(orphan, fixture.sources, -1));
+            assertTrue(fixture.arena.currentMoveLocation(context(), 1).isEmpty());
+            assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE,
+                    checkPublishedDuplicate(fixture.driver, fixture.bookie,
+                            entryBytes(context(), 1, -1, 8, (byte) 0)));
+        }
+    }
+
+
+    @Test
+    public void terminalCurrentCopyFreeRetiresSelectorWithoutRestoringOldPermission() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
+            long next = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+            fixture.arena.submitBatch(List.of(reclaimableAllocation(6, next)));
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(601, 2, (byte) 0, 6, next);
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+            }
+            assertThrows(IOException.class, () -> fixture.arena.prepareFree(new UUID(0, 705), 6,
+                    fixture.files, fixture.bookie, ByteBuffer.allocate(4096)));
+            fixture.bookie.submitBatch(List.of(tombstone(44, 20)));
+            for (long allocation : new long[] {6, 5}) {
+                try (SegmentArenaControlLog.Free free = fixture.arena.prepareFree(new UUID(0, 710 + allocation),
+                        allocation, fixture.files, fixture.bookie, ByteBuffer.allocate(4096))) {
+                    assertEquals(allocation == 6 ? 136 : 128, free.body().remaining());
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                            fixture.arena.submitBatch(List.of(free)).get(0).status());
+                }
+            }
+            assertTrue(fixture.arena.currentMoveLocation(context(), 1).isEmpty());
+            assertFalse(fixture.bookie.admitRead(context()).isPresent());
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4, 16, 3)) {
+            storage.restart();
+            CompletableFuture<ReadReply> reply = new CompletableFuture<>();
+            assertTrue(storage.submitRead(context(), 1, new SegmentPointRead.ReadRequest(
+                    (status, result, failure) -> reply.complete(new ReadReply(status, result, failure)))));
+            ReadReply result = reply.get(5, TimeUnit.SECONDS);
+            assertEquals(SegmentPointRead.ReadStatus.NOT_READY, result.status());
+            assertNull(result.result());
+            assertNull(result.failure());
         }
     }
 

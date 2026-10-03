@@ -280,3 +280,12 @@ Arena DEVICE_STATE type=7 的健康 CLOSED v2 body 为 `24 + 24*N` bytes，外�
 最大body为64528 bytes，完整control record为64672 bytes，低于65536上限。最多256个唯一context/entry坐标；多行条件整批成立后才应用。源与目标完整entry bytes一致，operation generation为copy身份；selector为赢家的绝对Arena控制sequence。它不编码另一份结果日志或Bookie权限，重放按既有durable→顺序apply。
 
 独立Python struct/逐位CRC32C生成的 `arena-move-v1.hex` 为416 bytes，sequence=3、UUID=0:601、operation generation7、Bookie cut1；唯一ledger44/entry1，源/目标allocation5/generation1/stream1、DATA sequence1→2、offset4096→8192、recordOffset4224→8320、recordLength204、前驱-1、allocation order0、digest00..1f。Java逐字节对照，另验证256行、257行拒绝、未知version、未来引用、错误record span与header generation；格式事实不授予新的runtime proof。执行范围见[当前MOVE切片](README.md#受保护的条件-move-与当前位置)。
+
+
+## MOVE-aware FREE v2
+
+Arena type=FREE/control header不变，body version u32=2、reserved u32=0，后续沿用v1 allocation identity48、allocation order/first sequence/through/record count/Bookie cut各i64，在原digest32之前增加Arena applied cut i64。body136 bytes、完整record280 bytes。Arena cut>=0且早于本control sequence；首次apply要求cut等于本sequence-1，操作精确重试仍先查询原结果及当前retired slot。纯准确终态普通DATA仍编码v1 body128 bytes，原oracle不变。
+
+v2证明依赖当前selector：迁走的普通源须匹配成功后继entry digest，并实际验证当前目标；当前活COPY禁止FREE，未选COPY为orphan，准确终态COPY可退役其selector。grant/generation与原ALLOC序号、held runtime gate仍必须成立；decoded v2与摘要不授予新的运行期proof。metadata-only重放不再读取已退役源，现有CLOSED尾部与退役stream范围校验继续适用。
+
+独立Python struct/逐位CRC32C生成 `arena-move-free-v2.hex`（280 bytes），沿用v1 sample sequence1、FREE operation generation2/expected1、allocation order0，在body offset96加入Arena cut0；digest字节仍00..1f。Java逐字节对照并拒绝cut=-1、当前/未来cut、decoded新提交，同时保留v1/128-byte断言。范围与回执见[当前回收切片](README.md#搬迁源与-orphan-的整块回收)。

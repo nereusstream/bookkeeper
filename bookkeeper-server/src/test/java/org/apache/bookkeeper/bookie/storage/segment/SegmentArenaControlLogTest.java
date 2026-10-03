@@ -1342,4 +1342,34 @@ public class SegmentArenaControlLogTest {
         }
     }
 
+
+    @Test
+    public void moveAwareFreeFormatBindsEarlierSelectorCutAndKeepsV1Bytes() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            byte[] vector = checkpointVector("arena-move-free-v2.hex");
+            SegmentArenaControlLog.Free free = (SegmentArenaControlLog.Free) arena.decodeCommand(
+                    ByteBuffer.wrap(vector), 1);
+            assertEquals(0, free.facts().arenaCut());
+            assertEquals(136, free.body().remaining());
+            ByteBuffer encoded = SegmentControlFormat.encode(free.type(), new Generation(1), 1,
+                    free.operationId(), free.operationGeneration(), free.expectedGeneration(), free.body());
+            byte[] bytes = new byte[encoded.remaining()];
+            encoded.get(bytes);
+            assertArrayEquals(vector, bytes);
+            assertThrows(IOException.class, () -> arena.submitBatch(List.of(free)));
+            for (long cut : new long[] {-1, 1, Long.MAX_VALUE}) {
+                ByteBuffer bad = free.body().putLong(96, cut);
+                ByteBuffer record = SegmentControlFormat.encode(free.type(), new Generation(1), 1,
+                        free.operationId(), free.operationGeneration(), free.expectedGeneration(), bad);
+                assertThrows(IOException.class, () -> arena.decodeCommand(record, 1));
+            }
+            SegmentArenaControlLog.Free legacy = (SegmentArenaControlLog.Free) arena.decodeCommand(
+                    ByteBuffer.wrap(checkpointVector("arena-whole-free-v1.hex")), 1);
+            assertEquals(-1, legacy.facts().arenaCut());
+            assertEquals(128, legacy.body().remaining());
+        }
+    }
+
 }

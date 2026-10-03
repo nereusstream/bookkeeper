@@ -482,3 +482,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-04 当前增量见[受保护的条件MOVE](rfcs/unified-wal/implementation/local-storage/README.md#受保护的条件-move-与当前位置)：实际copy验证、双坐标全批条件、durable后Arena selector、业务读取/幂等及全量/rotation恢复已接通；复用既有全局排空与CONTROL service。MOVE与源/orphan FREE、native维护/coverage、部分存活compaction和长期净容量仍未组合完成，步骤9/整体Gate保持未完成。当前模型矩阵16正向/36指定反例，局部证据不授予生产authority。
+
+
+2026-10-04 当前增量为[搬迁源与orphan整块回收](rfcs/unified-wal/implementation/local-storage/README.md#搬迁源与-orphan-的整块回收)：FREE v2持有selector cut与原保护，迁走源实际验证当前目标，orphan/终态COPY退役且旧grant不得复活。真实A/B均复用、无新checkpoint和rotation后的C恢复通过；在线native MOVE/coverage、部分存活合批compaction、长期净容量仍待完成，步骤9和总目标保持未完成。模型矩阵17正向/40指定反例不授予完整Gate。

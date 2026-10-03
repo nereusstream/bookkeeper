@@ -1,8 +1,8 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖及尾部恢复/分配顺序/整allocation FREE及健康CLOSED复用及终态索引清理及 relocation 内部完成与条件 MOVE 投影的十六个正向配置已完成有限状态探索，三十六个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖及尾部恢复/分配顺序/整allocation FREE及健康CLOSED复用及终态索引清理及 relocation 内部完成与条件 MOVE 和MOVE/FREE/reuse投影的十七个正向配置已完成有限状态探索，四十个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
 
-合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；不使用对象存储。
+合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
 ## 复现与输入绑定
 
@@ -331,3 +331,20 @@ DATA barrier、当前原owner连续前缀、身份/权限及framing仍作为其�
 固定双坐标与3个候选，前两个竞争初始前驱，第三个以首个成功selector为前驱；copy事实不切换selector。AppendControl、Force、Apply分开；guard排空旧read并持有到apply/实际owner结束，cancel只停止waiter；CrashReplay使用durable有序前缀，不访问copy payload。正向各动作均有coverage，有限模型不声称liveness。
 
 copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输入假设；Java另验证真实文件及原owner生命周期。投影不包含源/orphan FREE、generation reuse、native Put/coverage、全量checkpoint状态图、完整A+C/C+D、实际byte预算或掉电；不能代替步骤9验收。初次新模型动作名称与Sequences.Append冲突，四配置为INCONCLUSIVE；重命名动作后新建完整run，没有把语法错误算PASS。
+
+
+## MOVE/FREE/reuse 组合投影
+
+2026-10-04，`unified-wal-model-eggymj0z` 绑定父提交 `e83194428e8955180f4a35991b98c72d608fb622`，冻结93个输入（16 modules、57 configs、runner、19 Java）和父提交合同哈希；172个checksum逐项核验。矩阵17完整正向PASS、40指定反例；既有receipt绑定保持。
+
+| 配置 | 结果 | generated / distinct | queue | depth / diameter | elapsed秒 | peak RSS bytes |
+|---|---|---|---|---|---|---|
+| `c-movefree-reuse` | PASS | 3135 / 2398 | 0 | 33 / 33 | 0.9396 | 127942656 |
+| `ce-movefree-current` | EXPECTED_COUNTEREXAMPLE | 156 / 118 | 58 | 5 / — | 0.8426 | 112476160 |
+| `ce-movefree-late-target` | EXPECTED_COUNTEREXAMPLE | 441 / 368 | 95 | 10 / — | 0.9785 | 116834304 |
+| `ce-movefree-stale-cut` | EXPECTED_COUNTEREXAMPLE | 144 / 119 | 39 | 6 / — | 0.8294 | 112754688 |
+| `ce-movefree-old-bytes` | EXPECTED_COUNTEREXAMPLE | 1147 / 941 | 156 | 15 / — | 0.9469 | 122765312 |
+
+固定A/B/C，B/C为两份copy候选、A/B可FREE并最多各复用一次；MOVE预期A→B→C，copy facts本身不选择目标。CONTROL append、force与apply分开；FREE记录proof cut，允许一次其他control变化检验陈旧proof拒绝。目标与前驱必须仍有原grant generation，源/orphanFREE不能释放current selector，restart选择控制元数据，不从旧generation字节复活原坐标。copy/barrier及准确grant/hash proof、排空旧read与I/O为其他模型/Java验证的输入假设。
+
+正向Copy/PrepareMove/PrepareFree/PrepareReuse/AdvanceControl/AppendControl/Force/ApplyMove/ApplyFree/ApplyReuse/Restart均有coverage；没有state constraint、symmetry或liveness检查。初次组合运行完整通过但未显式展开复用目标generation predicate，随后补齐旧copy不能重新进入reused generation的条件/不变量并重跑，最终只引用新run。终态Bookie准确T/selector删除、真实字节CRC/SHA与DATA/CLOSED范围、native索引/票据由[真实回收切片](../local-storage/README.md#搬迁源与-orphan-的整块回收)拥有；该投影不证明完整checkpoint图、native coverage、字节总账、多victim批次、完整A+C/C+D、掉电或进展。

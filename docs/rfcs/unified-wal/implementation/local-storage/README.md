@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[受保护的条件 MOVE 与当前位置](#受保护的条件-move-与当前位置)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围；MOVE 与搬迁源 FREE/reuse、原owner native维护及部分存活compaction的组合、长期净容量仍未完成。
+2026-10-04 当前增量为[搬迁源与 orphan 的整块回收](#搬迁源与-orphan-的整块回收)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围；当前已接通受保护的 MOVE/FREE/reuse 与完整扫描恢复；原owner在线native维护/coverage和部分存活compaction、长期净容量仍未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -542,3 +542,18 @@ Arena 控制日志、checkpoint 与 rotation metadata-only 重放同一有序命
 最终 Java 回执 `unified-wal-local-cUmjet79` 绑定父提交 `f66b0a8ed5b31c1e84ee84a5d6f5fbfa7cfa6210` 和206个实际输入；相关七类268项，263通过、5项 Linux 亲和性在macOS跳过，零失败/错误。Spotless/Checkstyle通过。复现仍为既有七类 `scripts/unified-wal/run-local-storage-tests.sh` 命令。初次夹具在 OPEN writer 上 rotation、失败会话正常 close 被现有契约拒绝，已按健康关闭/明确错误修正；最后增加混合前驱原子性和 scratch 失败归还后扩大回归；既有容量循环暴露控制回调唤醒早于driver finally释放busy的测试助手假设，现按实际API在原五秒内重试入口false，保留全部applied结果/错误断言。修正后重新冻结最终回执；中间失败不计作通过。
 
 [条件 MOVE 有限投影](../models/README.md#条件-move-与读取保护投影)回执 `unified-wal-model-jfi2r8do` 冻结87个输入、157个checksum；矩阵16完整正向PASS、36指定反例。当前仍无 storage 图的 victim/source选择、合批 compaction request、搬迁后源/orphan FREE、原owner native维护与coverage切点、控制历史/SST净回收、多Arena、掉电或生产ACK；步骤9及总16步目标保持未完成。
+
+
+## 搬迁源与 orphan 的整块回收
+
+2026-10-04，既有 `prepareFree`/实际CONTROL/整块generation复用入口现在接受迁走的普通记录、未被当前selector选中的COPY，以及准确终态的当前COPY。普通活记录必须有另一个allocation中的成功MOVE后继，其完整entry digest与源一致；同一受保护维护中实际点读校验后继identity/digest，当前目标损坏则拒绝释放源。当前仍被选择的活COPY禁止FREE；COPY未被选择可以作为orphan清理，不能据此发布业务权限。全部victim framing/record CRC与全范围摘要仍验证，未知/未终态的普通record保持拒绝。
+
+纯准确终态普通DATA仍写原FREE v1/128-byte body，原固定向量不变。依赖MOVE或COPY退役的FREE v2/136-byte body加入Arena applied cut；proof完成后cut必须稳定，durable后的最终apply要求其等于该FREE前一绝对control sequence。其他控制命令插入可使该保守条件失败，不能继续使用旧proof。v2仍绑定原allocation/generation/成功ALLOC序号和Bookie cut，现有全局Bookie/file gate保持到实际I/O与owner终结；没有新扫描框架、队列或逐entry fsync。
+
+成功FREE撤销原grant、保留退役stream范围及generation；终态当前target的selector同时退役，但Bookie终态权限不会复活。控制日志与checkpoint/rotation按有序元数据重放MOVE/FREE/ALLOC；不重新读取已合法退役源，随后只验证当前grants/健康CLOSED末端及当前MOVE目标。orphan目标FREE后，旧copy结果不能通过原grant复核或取得新MOVE。旧generation或旧suffix不成为当前定位。
+
+四项新增验证：独立 `arena-move-free-v2.hex` 与v1保留、错误cut/新runtime proof拒绝；A→B→C的双坐标真实写入、坏C拒绝源FREE、A/B准确整块FREE并以generation2写入其他坐标、没有新增checkpoint的storage全量restart与幂等、rotation后再重启、旧suffix排除及C缺失隔离；orphan COPY回收、旧cut条件失败与迟到MOVE拒绝，源普通坐标保持SAME_DURABLE；终态当前COPY与原普通源退役、selector消失及storage重启后的NOT_READY。
+
+最终Java回执 `unified-wal-local-8oAxXZok` 绑定父提交 `e83194428e8955180f4a35991b98c72d608fb622` 与207个源码/测试/向量输入：既有七类272项，267通过、5项Linux亲和性在macOS跳过，零失败/错误；Spotless/Checkstyle通过。复现沿用既有七类run-local-storage-tests.sh命令。初次编译修正FREE decoder局部变量名；终态测试误用强制FOUND助手，现直接验证NOT_READY及无结果/错误；保留全部有效断言。未通过中间run不计作通过。
+
+[有限组合投影](../models/README.md#movefreereuse-组合投影) `unified-wal-model-eggymj0z` 冻结93个输入、172个checksum；17完整正向PASS、40指定反例。当前仍无storage图的victim选择/合批搬迁请求、原owner在线native MOVE与coverage维护、部分存活allocation净回收循环、控制历史/SST净容量、多Arena、OPEN错误恢复、掉电或生产ACK。MOVE后覆盖seed继续关闭，采用完整DATA验证；不将这个真实A/B复用切片提升为完整步骤9或长期运行验收。

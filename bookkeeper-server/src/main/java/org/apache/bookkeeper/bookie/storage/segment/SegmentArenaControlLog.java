@@ -184,12 +184,17 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    /** Bound facts established by actual DATA parsing and exact terminal Bookie tombstones under exclusion. */
+    /** Bound facts established by protected DATA parsing and terminal or successful successor authority. */
     record FreeFacts(AllocationIdentity allocation, long allocationOrder, long firstSequence, long through,
-                     long records, long bookieCut, String digest) {
+                     long records, long bookieCut, long arenaCut, String digest) {
+        FreeFacts(AllocationIdentity allocation, long allocationOrder, long firstSequence, long through,
+                  long records, long bookieCut, String digest) {
+            this(allocation, allocationOrder, firstSequence, through, records, bookieCut, -1, digest);
+        }
+
         FreeFacts {
             Objects.requireNonNull(allocation, "allocation");
-            if (allocationOrder < 0 || records < 0 || bookieCut < -1
+            if (allocationOrder < 0 || records < 0 || bookieCut < -1 || arenaCut < -1
                     || (records == 0 ? firstSequence != -1 || through != -1
                             : firstSequence < allocation.streamFirstSequence() || through < firstSequence
                                 || through == Long.MAX_VALUE)
@@ -250,10 +255,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
         @Override
         public ByteBuffer body() {
-            return ByteBuffer.allocate(128).putInt(1).putInt(0).put(facts.allocation().encode())
+            ByteBuffer body = ByteBuffer.allocate(facts.arenaCut() < 0 ? 128 : 136)
+                    .putInt(facts.arenaCut() < 0 ? 1 : 2).putInt(0).put(facts.allocation().encode())
                     .putLong(facts.allocationOrder()).putLong(facts.firstSequence()).putLong(facts.through())
-                    .putLong(facts.records()).putLong(facts.bookieCut())
-                    .put(HexFormat.of().parseHex(facts.digest())).flip();
+                    .putLong(facts.records()).putLong(facts.bookieCut());
+            if (facts.arenaCut() >= 0) {
+                body.putLong(facts.arenaCut());
+            }
+            return body.put(HexFormat.of().parseHex(facts.digest())).flip();
         }
 
         boolean claim(SegmentArenaControlLog log) throws IOException {
@@ -652,6 +661,25 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
+    /** Metadata decision only; the caller verifies a returned successor with its held DATA protection. */
+    synchronized Optional<SegmentPointRead.Location> retirementSuccessor(SegmentPointRead.Location source,
+                                                                         SegmentBatchParser.Record record)
+            throws IOException {
+        SelectedMove selected = selectedMoves.get(new EntryKey(source.context(), source.entryId()));
+        if (selected == null || selected.entry().target().equals(source)) {
+            return Optional.empty();
+        }
+        SegmentPointRead.Location target = selected.entry().target();
+        if (target.address().allocation() == source.address().allocation()) {
+            throw new IOException("A live MOVE target still occupies the victim allocation");
+        }
+        if (record.origin() == SegmentBatchFormat.ENTRY_DATA
+                && !selected.entry().entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
+            throw new IOException("MOVE predecessor bytes differ from the selected successor");
+        }
+        return Optional.of(target);
+    }
+
     /** Resolve the actual graph API retry from retained applied facts without rescanning retired bytes. */
     synchronized Result resolvedFreeResult(UUID operationId, long allocationId) throws IOException {
         requireControlWritable();
@@ -708,7 +736,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
             synchronized (this) {
                 requireQuiescentControl(config, identity);
                 if (retiredAllocations.containsKey(allocationId)
-                        || !allocation.equals(allocationIds.get(allocationId))) {
+                        || !allocation.equals(allocationIds.get(allocationId))
+                        || facts.arenaCut() >= 0 && facts.arenaCut() != appliedThrough) {
                     throw new IOException("Whole-allocation FREE predecessor changed during verification");
                 }
             }
@@ -1754,8 +1783,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         if (parsed.type() == SegmentControlFormat.Type.FREE) {
             ByteBuffer body = parsed.body();
-            if (body.remaining() != 128 || body.getInt() != 1 || body.getInt() != 0) {
+            int bodyBytes = body.remaining();
+            if (bodyBytes != 128 && bodyBytes != 136) {
                 throw new IOException("Unsupported whole-allocation FREE body");
+            }
+            int version = body.getInt();
+            if ((version != 1 || bodyBytes != 128) && (version != 2 || bodyBytes != 136) || body.getInt() != 0) {
+                throw new IOException("Unsupported whole-allocation FREE version");
             }
             try {
                 AllocationIdentity target = new AllocationIdentity(body.getInt(), body.getInt(),
@@ -1766,13 +1800,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 long through = body.getLong();
                 long records = body.getLong();
                 long bookieCut = body.getLong();
+                long arenaCut = version == 2 ? body.getLong() : -1;
                 byte[] digest = new byte[32];
                 body.get(digest);
                 Free free = new Free(parsed.operationId(), parsed.operationGeneration(), parsed.expectedGeneration(),
-                        new FreeFacts(target, order, first, through, records, bookieCut,
+                        new FreeFacts(target, order, first, through, records, bookieCut, arenaCut,
                                 HexFormat.of().formatHex(digest)), null);
                 validateCommand(free);
-                if (order >= sequence) {
+                if (order >= sequence || arenaCut >= sequence || version == 2 && arenaCut < 0) {
                     throw new IllegalArgumentException("FREE predecessor is not an earlier allocation");
                 }
                 return free;
@@ -1984,7 +2019,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 && predecessor.generation() == free.expectedGeneration()
                 && !retiredAllocations.containsKey(target.allocationId()) && !durableQuarantine[target.file()]
                 && original != null && original.status() == Status.APPLIED_DURABLE
-                && original.sequence() == facts.allocationOrder();
+                && original.sequence() == facts.allocationOrder()
+                && (facts.arenaCut() < 0 || facts.arenaCut() == appliedThrough - 1);
         for (int block = 0; allowed && block < target.blocks(); block++) {
             Grant grant = allocations.get(slot(target.file(), target.offset() + block * BLOCK_BYTES));
             allowed = grant != null && grant.command().equals(predecessor)
@@ -2000,6 +2036,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
             retiredAllocations.put(target.allocationId(), retained);
             sealedTails.remove(target.allocationId());
+            selectedMoves.values().removeIf(selected ->
+                    selected.entry().target().address().allocation() == target.allocationId());
         }
         appliedOperations.put(free.operationId(), new AppliedOperation(retained, status, appliedThrough));
         return status;

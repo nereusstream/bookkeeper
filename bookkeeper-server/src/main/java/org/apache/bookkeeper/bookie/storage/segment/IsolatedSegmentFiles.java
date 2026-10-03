@@ -95,7 +95,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 throws IOException {
             long cut = bookieLease.cut();
             SegmentArenaControlLog.FreeFacts proof = SegmentDataRecovery.proveDeadAllocation(
-                    owner.config, owner.data.get(file), allocation, allocationOrder, bookie, cut, workspace,
+                    owner.config, owner.identity, authority, owner.data.get(file), allocation,
+                    allocationOrder, bookie, cut, workspace,
                     owner.allocationEnd(allocation, authority));
             if (bookie.recoveryReadCut(owner.config, owner.identity) != cut) {
                 throw new IOException("Bookie authority changed during whole-allocation verification");
