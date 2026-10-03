@@ -732,3 +732,5 @@ PASS 不授权 Segment 成为 ACK authority，不授权生产 canary，也不证
 
 
 2026-10-03：[隔离Arena checkpoint实现与回执](../implementation/local-storage/README.md)已覆盖applied cut、A/B image、commit后发布、完整后缀与corruption fallback，附独立固定向量、4个真实JVM halt边界及正常DATA重启测试。全部旧控制日志仍必需且不回收；Bookie checkpoint、rotation/retention、在线维护、MOVE/FREE、index和本Spike完整Gate仍未完成。checkpoint的有限状态投影及指定规则反例见[模型状态](../implementation/models/README.md#arena-checkpoint-增量验证)，不能替代真实掉电或完整allocator证明。
+
+2026-10-03 Bookie applied checkpoint已接入，保留sealed credential、权限/条件结果、最新LAC及recovery close；共享codec各自拥有A/B发布页，先durable/apply commit再发布，验证完整旧日志后恢复image与后缀。两个control owner的DATA正常restart、7项新增真实文件回归及有限权限模型有回执：`unified-wal-local-rECuQDLZ`（192项/187通过/5平台跳过）和`unified-wal-model-pz77hf26`（4个正向、6个指定反例）。全部旧控制日志仍必需；rotation/回收、在线维护、派生索引、完整Model A/A+C及生产Gate未完成。

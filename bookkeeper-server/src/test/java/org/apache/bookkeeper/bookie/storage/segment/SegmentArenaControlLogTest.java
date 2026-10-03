@@ -80,11 +80,11 @@ public class SegmentArenaControlLogTest {
         IsolatedSegmentConfig config = config();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
-            SegmentArenaCheckpoint.Reference reference = log.checkpoint();
+            SegmentControlCheckpoint.Reference reference = log.checkpoint();
             assertEquals(-1, reference.through());
             assertArrayEquals(checkpointVector("arena-empty-checkpoint-v1.hex"),
-                    Files.readAllBytes(SegmentArenaCheckpoint.path(config, 0)));
-            try (FileChannel file = FileChannel.open(SegmentArenaCheckpoint.superblock(config, 0),
+                    Files.readAllBytes(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, 0)));
+            try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 0),
                     StandardOpenOption.READ)) {
                 ByteBuffer page = ByteBuffer.allocate(4096);
                 SegmentFileIo.readFully(file, page, 4096);
@@ -98,7 +98,7 @@ public class SegmentArenaControlLogTest {
             assertArrayEquals(golden, bytes);
             SegmentControlParser.Command parsed = SegmentControlParser.parse(ByteBuffer.wrap(golden),
                     SegmentControlFormat.Owner.ARENA, new Generation(1), 0);
-            assertEquals(reference, SegmentArenaCheckpoint.decodeReference(parsed.body()));
+            assertEquals(reference, SegmentControlCheckpoint.decodeReference(parsed.body()));
         }
     }
 
@@ -112,8 +112,8 @@ public class SegmentArenaControlLogTest {
     @Test
     public void checkpointRestoresAppliedResultsAndSuffixAndFallsBackAfterCorruption() throws Exception {
         IsolatedSegmentConfig config = config();
-        SegmentArenaCheckpoint.Reference first;
-        SegmentArenaCheckpoint.Reference second;
+        SegmentControlCheckpoint.Reference first;
+        SegmentControlCheckpoint.Reference second;
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             log.submitBatch(List.of(alloc(1, 4096), alloc(2, 4096), alloc(1, 4096)));
@@ -138,14 +138,16 @@ public class SegmentArenaControlLogTest {
             assertEquals(SegmentArenaControlLog.Status.INCOMPATIBLE,
                     log.submitBatch(List.of(alloc(1, 4096 + SegmentArenaControlLog.BLOCK_BYTES))).get(0).status());
         }
-        corruptCheckpointByte(SegmentArenaCheckpoint.path(config, second.slot()), 4224);
+        corruptCheckpointByte(
+                SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, second.slot()), 4224);
         try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             assertEquals(first, log.publishedCheckpoint().orElseThrow());
             assertTrue(granted(log, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 4));
             assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
                     log.submitBatch(List.of(alloc(2, 4096))).get(0).status());
         }
-        corruptCheckpointByte(SegmentArenaCheckpoint.path(config, first.slot()), 4096);
+        corruptCheckpointByte(
+                SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, first.slot()), 4096);
         try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             assertTrue(log.publishedCheckpoint().isEmpty());
             assertTrue(granted(log, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 4));
@@ -180,7 +182,7 @@ public class SegmentArenaControlLogTest {
                     List.of(alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
             assertEquals(1, log.durableThrough());
             assertEquals(0, log.appliedThrough());
-            FutureTask<SegmentArenaCheckpoint.Reference> task = new FutureTask<>(() -> log.checkpoint(delayed));
+            FutureTask<SegmentControlCheckpoint.Reference> task = new FutureTask<>(() -> log.checkpoint(delayed));
             Thread worker = new Thread(task, "isolated-checkpoint");
             worker.start();
             try {
@@ -206,7 +208,7 @@ public class SegmentArenaControlLogTest {
     @Test
     public void checkpointFailuresNeverAcknowledgePublicationOrDiscardTheOldAuthority() throws Exception {
         IsolatedSegmentConfig config = config();
-        SegmentArenaCheckpoint.Reference first;
+        SegmentControlCheckpoint.Reference first;
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             log.submitBatch(List.of(alloc(1, 4096)));

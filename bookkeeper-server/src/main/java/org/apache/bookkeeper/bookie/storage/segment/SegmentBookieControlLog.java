@@ -32,7 +32,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -415,9 +417,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
     private final Map<UUID, AppliedOperation> operations = new HashMap<>();
     private final Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
+    // First applied outcomes plus the latest LAC per ledger, bounded by the retained control log.
+    private final Map<UUID, SegmentControlCheckpoint.Operation> checkpointState = new HashMap<>();
+    private final Map<Long, SegmentControlCheckpoint.Operation> checkpointLacs = new HashMap<>();
+    private final HashSet<UUID> checkpointIds = new HashSet<>();
     private long nextOffset = FIRST_RECORD;
     private long durableThrough = -1;
     private long appliedThrough = -1;
+    private long appliedOffset = FIRST_RECORD;
+    private long checkpointGeneration;
+    private SegmentControlCheckpoint.Reference publishedCheckpoint;
+    private boolean checkpointing;
     private DurableBatch pending;
     private FenceWrite pendingFenceWrite;
     private LacWrite pendingLacWrite;
@@ -536,7 +546,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                             ? Status.ALREADY_DURABLE : prior.status())
                     : RecoveryCloseStatus.INCOMPATIBLE, null);
         }
-        if (fenceOperations.containsKey(command.operationId())) {
+        if (fenceOperations.containsKey(command.operationId()) || checkpointIds.contains(command.operationId())) {
             return new RecoveryCloseAttempt(RecoveryCloseStatus.INCOMPATIBLE, null);
         }
         LedgerState state = ledgers.get(command.scope.ledgerId());
@@ -606,6 +616,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             Status status = apply(write.command);
             appliedThrough = write.sequence;
+            retain(write.sequence, write.command.operationId(), status, write.record);
+            appliedOffset = write.offset + write.record.remaining();
             return closeStatus(status);
         } catch (RuntimeException | Error failure) {
             failed = true;
@@ -659,7 +671,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
             for (Command command : commands) {
                 if (command.type == SegmentControlFormat.Type.TOMBSTONE
                         && !operations.containsKey(command.operationId())
-                        && !fenceOperations.containsKey(command.operationId())) {
+                        && !fenceOperations.containsKey(command.operationId())
+                        && !checkpointIds.contains(command.operationId())) {
                     LedgerState state = ledgers.get(command.scope.ledgerId());
                     if (state != null && state.context.equals(context(command.scope))
                             && command.scope.authorityGeneration() >= state.install.authorityGeneration()) {
@@ -703,6 +716,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
             for (Command command : batch.commands()) {
                 long sequence = ++appliedThrough;
                 Status status = apply(command);
+                ByteBuffer record = encode(command, sequence);
+                retain(sequence, command.operationId(), status, record);
+                appliedOffset += record.remaining();
                 LedgerState state = ledgers.get(command.scope.ledgerId());
                 results.add(new Result(status, command.operationId(), sequence,
                         state == null ? 0 : state.localGeneration));
@@ -717,6 +733,127 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     List<Result> submitBatch(List<ProtectedProfileStateStore.Transition> transitions) throws IOException {
         return applyDurable(appendDurably(transitions));
+    }
+
+    SegmentControlCheckpoint.Reference checkpoint() throws IOException {
+        return checkpoint(new SegmentFileIo());
+    }
+
+    SegmentControlCheckpoint.Reference checkpoint(SegmentFileIo checkpointIo) throws IOException {
+        Objects.requireNonNull(checkpointIo, "checkpointIo");
+        SegmentControlCheckpoint.Snapshot snapshot;
+        long generation;
+        int slot;
+        synchronized (this) {
+            requireWritable();
+            if (checkpointing || checkpointGeneration == Long.MAX_VALUE) {
+                throw new IOException("Bookie checkpoint is active or its generation is exhausted");
+            }
+            List<SegmentControlCheckpoint.Operation> state = new ArrayList<>(checkpointState.values());
+            state.addAll(checkpointLacs.values());
+            snapshot = new SegmentControlCheckpoint.Snapshot(appliedThrough, appliedOffset, state);
+            generation = checkpointGeneration + 1;
+            slot = publishedCheckpoint == null ? 0 : 1 - publishedCheckpoint.slot();
+            checkpointing = true;
+        }
+        boolean committed = false;
+        try {
+            snapshot = new SegmentControlCheckpoint.Snapshot(snapshot.through(), snapshot.logOffset(),
+                    snapshot.operations().stream().sorted(Comparator.comparingLong(
+                            SegmentControlCheckpoint.Operation::sequence)).toList());
+            SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.reference(
+                    generation, slot, snapshot, maxLogBytes);
+            SegmentControlCheckpoint.write(config, identity, SegmentControlFormat.Owner.BOOKIE,
+                    reference, snapshot, checkpointIo);
+            if (!snapshot.equals(SegmentControlCheckpoint.read(config, identity, SegmentControlFormat.Owner.BOOKIE,
+                    reference, maxLogBytes))) {
+                throw new IOException("Bookie checkpoint differs from its frozen applied state");
+            }
+            commitCheckpoint(reference);
+            committed = true;
+            SegmentControlCheckpoint.publish(config, SegmentControlFormat.Owner.BOOKIE, reference, checkpointIo);
+            if (!reference.equals(SegmentControlCheckpoint.publication(
+                    config, SegmentControlFormat.Owner.BOOKIE, slot))) {
+                throw new IOException("Bookie checkpoint publication verification failed");
+            }
+            synchronized (this) {
+                publishedCheckpoint = reference;
+            }
+            return reference;
+        } catch (IOException | RuntimeException | Error failure) {
+            if (committed) {
+                synchronized (this) {
+                    failed = true;
+                }
+            }
+            throw failure;
+        } finally {
+            synchronized (this) {
+                checkpointing = false;
+            }
+        }
+    }
+
+    synchronized Optional<SegmentControlCheckpoint.Reference> publishedCheckpoint() {
+        return Optional.ofNullable(publishedCheckpoint);
+    }
+
+    private void commitCheckpoint(SegmentControlCheckpoint.Reference reference) throws IOException {
+        ByteBuffer record;
+        long sequence;
+        long offset;
+        UUID operationId = UUID.randomUUID();
+        synchronized (this) {
+            requireWritable();
+            if (writing || pending != null || pendingFenceWrite != null || pendingLacWrite != null
+                    || pendingRecoveryCloseWrite != null || durableThrough != appliedThrough) {
+                throw new IOException("Bookie control operation is unresolved at checkpoint commit");
+            }
+            if (operations.containsKey(operationId) || fenceOperations.containsKey(operationId)
+                    || checkpointIds.contains(operationId)) {
+                throw new IOException("Bookie checkpoint operation identity is already used");
+            }
+            sequence = durableThrough + 1;
+            record = SegmentControlFormat.encode(SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT,
+                    LOG_GENERATION, sequence, operationId, new Generation(reference.generation()),
+                    reference.generation() - 1, reference.encode());
+            if (record.remaining() > maxLogBytes - nextOffset) {
+                throw new IOException("Bookie control log capacity exhausted");
+            }
+            offset = nextOffset;
+            nextOffset += record.remaining();
+            writing = true;
+        }
+        try {
+            io.writeFully(channel, record, offset);
+            io.force(channel, true);
+            synchronized (this) {
+                applyCheckpoint(reference, operationId, sequence);
+                retain(sequence, operationId, Status.APPLIED_DURABLE, record);
+                durableThrough = sequence;
+                appliedThrough = sequence;
+                appliedOffset = offset + record.remaining();
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                failed = true;
+            }
+            throw failure;
+        } finally {
+            synchronized (this) {
+                writing = false;
+            }
+        }
+    }
+
+    private ByteBuffer encode(Command command, long sequence) {
+        return SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence, command.operationId(),
+                new Generation(command.scope.authorityGeneration()), 0, body(command));
+    }
+
+    private void retain(long sequence, UUID operationId, Status status, ByteBuffer record) {
+        checkpointState.putIfAbsent(operationId,
+                new SegmentControlCheckpoint.Operation(sequence, status.ordinal() + 1, record));
     }
 
     /** Diagnostic predicate only; a DATA request must hold an {@link Admission} through physical termination. */
@@ -1027,6 +1164,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             applyExplicitLac(write.context, write.lac, write.body, write.generation);
             appliedThrough = write.sequence;
+            checkpointLacs.put(write.context.ledgerId(),
+                    new SegmentControlCheckpoint.Operation(write.sequence, 1, write.record));
+            appliedOffset = write.offset + write.record.remaining();
             return Status.APPLIED_DURABLE;
         } catch (IOException | RuntimeException | Error failure) {
             failed = true;
@@ -1080,7 +1220,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     prior.equals(context) ? FenceStatus.ALREADY_DURABLE : FenceStatus.REJECTED,
                     prior.equals(context) ? state.localGeneration : 0), null);
         }
-        if (operations.containsKey(operationId)) {
+        if (operations.containsKey(operationId) || checkpointIds.contains(operationId)) {
             return new FenceAttempt(new FenceResult(FenceStatus.REJECTED, 0), null);
         }
         if (state.fenced) {
@@ -1147,6 +1287,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             applyFence(write.context, write.operationId);
             appliedThrough = write.sequence;
+            retain(write.sequence, write.operationId, Status.APPLIED_DURABLE, write.record);
+            appliedOffset = write.offset + write.record.remaining();
             return new FenceResult(FenceStatus.APPLIED_DURABLE,
                     ledgers.get(write.context.ledgerId()).localGeneration);
         } catch (IOException | RuntimeException | Error failure) {
@@ -1162,7 +1304,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         LedgerState state = ledgers.get(context.ledgerId());
         if (state == null || tombstones.containsKey(context.ledgerId())
                 || !state.context.equals(context) || state.fenced || state.inFlight != 0
-                || operations.containsKey(operationId) || fenceOperations.containsKey(operationId)) {
+                || operations.containsKey(operationId) || fenceOperations.containsKey(operationId)
+                || checkpointIds.contains(operationId)) {
             throw new IOException("Invalid durable fence order");
         }
         state.active = false;
@@ -1250,7 +1393,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 && state.context.equals(context(command.scope))) {
             state.pendingTombstone = false;
         }
-        if (fenceOperations.containsKey(operationId)) {
+        if (fenceOperations.containsKey(operationId) || checkpointIds.contains(operationId)) {
             return Status.INCOMPATIBLE;
         }
         AppliedOperation prior = operations.get(operationId);
@@ -1353,67 +1496,191 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (size < FIRST_RECORD || size > maxLogBytes) {
             throw new IOException("Invalid Bookie control log size");
         }
+        SegmentControlCheckpoint.Reference[] publications = new SegmentControlCheckpoint.Reference[2];
+        for (int slot = 0; slot < publications.length; slot++) {
+            try {
+                publications[slot] = SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.BOOKIE,
+                        slot);
+            } catch (IOException incompletePublication) {
+                // The immutable identity page remains mandatory; only this owner's publication can fall back.
+            }
+        }
+        List<SegmentControlCheckpoint.Reference> checkpoints = new ArrayList<>(2);
+        HashSet<UUID> ids = new HashSet<>();
+        long committedGeneration = 0;
         long sequence = 0;
         for (long offset = FIRST_RECORD; offset < size;) {
             int length = recordLength(offset, size, sequence);
+            ByteBuffer bytes = readRecord(offset, length);
+            SegmentControlParser.Command parsed = parse(bytes, sequence);
+            boolean first = parsed.type() != SegmentControlFormat.Type.EXPLICIT_LAC && ids.add(parsed.operationId());
+            if (parsed.type() == SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT) {
+                SegmentControlCheckpoint.Reference reference = decodeCheckpoint(parsed, sequence);
+                if (!first || reference.generation() != committedGeneration + 1 || reference.logOffset() > offset) {
+                    throw new IOException("Invalid Bookie checkpoint commit order");
+                }
+                recordLength(reference.logOffset(), size, reference.through() + 1);
+                committedGeneration = reference.generation();
+                if (reference.equals(publications[reference.slot()])) {
+                    checkpoints.add(reference);
+                }
+            } else if (parsed.type() == SegmentControlFormat.Type.FENCE) {
+                fenceContext(parsed);
+            } else if (parsed.type() == SegmentControlFormat.Type.EXPLICIT_LAC) {
+                decodeLac(parsed);
+            } else {
+                decode(parsed);
+            }
             offset += length;
             sequence++;
         }
         channel.force(true);
-        sequence = 0;
-        for (long offset = FIRST_RECORD; offset < size;) {
+        recoverCheckpoint(checkpoints);
+        sequence = appliedThrough + 1;
+        for (long offset = appliedOffset; offset < size;) {
             int length = recordLength(offset, size, sequence);
-            ByteBuffer bytes = ByteBuffer.allocate(length);
-            SegmentFileIo.readFully(channel, bytes, offset);
-            SegmentControlParser.Command parsed = SegmentControlParser.parse(bytes,
-                    SegmentControlFormat.Owner.BOOKIE, LOG_GENERATION, sequence);
-            if (parsed.type() == SegmentControlFormat.Type.FENCE) {
-                ByteBuffer body = parsed.body();
-                if (parsed.operationGeneration().value() != 1 || parsed.expectedGeneration() != 0
-                        || body.remaining() != ProfileLedgerContext.ENCODED_LENGTH) {
-                    throw new IOException("Invalid durable fence record");
-                }
-                byte[] contextBytes = new byte[ProfileLedgerContext.ENCODED_LENGTH];
-                body.get(contextBytes);
-                try {
-                    applyFence(ProfileLedgerContext.decode(contextBytes), parsed.operationId());
-                } catch (IllegalArgumentException failure) {
-                    throw new IOException("Invalid durable fence context", failure);
-                }
-            } else if (parsed.type() == SegmentControlFormat.Type.EXPLICIT_LAC) {
-                replayExplicitLac(parsed);
-            } else {
-                Command command = decode(parsed);
-                apply(command);
-            }
-            durableThrough = sequence;
-            appliedThrough = sequence;
+            replay(readRecord(offset, length), sequence, null);
             offset += length;
+            appliedOffset = offset;
             sequence++;
         }
         nextOffset = size;
     }
 
-    private void replayExplicitLac(SegmentControlParser.Command parsed) throws IOException {
+    private void recoverCheckpoint(List<SegmentControlCheckpoint.Reference> checkpoints) throws IOException {
+        for (int index = checkpoints.size() - 1; index >= 0; index--) {
+            SegmentControlCheckpoint.Reference reference = checkpoints.get(index);
+            try {
+                SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(config, identity,
+                        SegmentControlFormat.Owner.BOOKIE, reference, maxLogBytes);
+                resetRecoveredState();
+                for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
+                    replay(operation.record(), operation.sequence(), operation.status());
+                }
+                appliedThrough = snapshot.through();
+                durableThrough = snapshot.through();
+                appliedOffset = snapshot.logOffset();
+                publishedCheckpoint = reference;
+            } catch (IOException | IllegalArgumentException invalidCheckpoint) {
+                resetRecoveredState();
+                continue;
+            }
+            SegmentControlCheckpoint.syncPublication(config, reference.slot());
+            return;
+        }
+        resetRecoveredState();
+    }
+
+    private void resetRecoveredState() {
+        ledgers.clear();
+        tombstones.clear();
+        operations.clear();
+        fenceOperations.clear();
+        checkpointState.clear();
+        checkpointLacs.clear();
+        checkpointIds.clear();
+        checkpointGeneration = 0;
+        publishedCheckpoint = null;
+        appliedThrough = -1;
+        durableThrough = -1;
+        appliedOffset = FIRST_RECORD;
+    }
+
+    private ByteBuffer readRecord(long offset, int length) throws IOException {
+        ByteBuffer bytes = ByteBuffer.allocate(length);
+        SegmentFileIo.readFully(channel, bytes, offset);
+        return bytes;
+    }
+
+    private static SegmentControlParser.Command parse(ByteBuffer bytes, long sequence) throws IOException {
+        return SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.BOOKIE, LOG_GENERATION, sequence);
+    }
+
+    private void replay(ByteBuffer bytes, long sequence, Integer frozenStatus) throws IOException {
+        SegmentControlParser.Command parsed = parse(bytes, sequence);
+        if (frozenStatus != null && parsed.type() != SegmentControlFormat.Type.EXPLICIT_LAC
+                && checkpointState.containsKey(parsed.operationId())) {
+            throw new IOException("Repeated operation in Bookie checkpoint");
+        }
+        Status status = Status.APPLIED_DURABLE;
+        if (parsed.type() == SegmentControlFormat.Type.FENCE) {
+            applyFence(fenceContext(parsed), parsed.operationId());
+            retain(sequence, parsed.operationId(), status, bytes);
+        } else if (parsed.type() == SegmentControlFormat.Type.EXPLICIT_LAC) {
+            DurableLac lac = decodeLac(parsed);
+            applyExplicitLac(lac.context(), lac.lac(), lac.body(), parsed.operationGeneration().value());
+            checkpointLacs.put(lac.context().ledgerId(), new SegmentControlCheckpoint.Operation(sequence, 1, bytes));
+        } else if (parsed.type() == SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT) {
+            applyCheckpoint(decodeCheckpoint(parsed, sequence), parsed.operationId(), sequence);
+            retain(sequence, parsed.operationId(), status, bytes);
+        } else {
+            Command command = decode(parsed);
+            status = apply(command);
+            retain(sequence, parsed.operationId(), status, bytes);
+        }
+        if (frozenStatus != null && status.ordinal() + 1 != frozenStatus) {
+            throw new IOException("Bookie checkpoint result differs from its applied outcome");
+        }
+        appliedThrough = sequence;
+        durableThrough = sequence;
+    }
+
+    private void applyCheckpoint(SegmentControlCheckpoint.Reference reference, UUID operationId, long sequence)
+            throws IOException {
+        if (reference.generation() != checkpointGeneration + 1 || reference.through() >= sequence
+                || operations.containsKey(operationId) || fenceOperations.containsKey(operationId)
+                || !checkpointIds.add(operationId)) {
+            throw new IOException("Invalid durable Bookie checkpoint transition");
+        }
+        checkpointGeneration = reference.generation();
+    }
+
+    private SegmentControlCheckpoint.Reference decodeCheckpoint(SegmentControlParser.Command parsed, long sequence)
+            throws IOException {
+        SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.decodeReference(parsed.body());
+        if (parsed.operationGeneration().value() != reference.generation()
+                || parsed.expectedGeneration() != reference.generation() - 1 || reference.through() >= sequence
+                || reference.payloadBytes() - maxLogBytes > maxLogBytes) {
+            throw new IOException("Invalid Bookie checkpoint binding");
+        }
+        return reference;
+    }
+
+    private static ProfileLedgerContext fenceContext(SegmentControlParser.Command parsed) throws IOException {
         ByteBuffer body = parsed.body();
-        if (parsed.expectedGeneration() != 0
-                || body.remaining() < ProfileLedgerContext.ENCODED_LENGTH + 12) {
+        if (parsed.operationGeneration().value() != 1 || parsed.expectedGeneration() != 0
+                || body.remaining() != ProfileLedgerContext.ENCODED_LENGTH) {
+            throw new IOException("Invalid durable fence record");
+        }
+        byte[] bytes = new byte[ProfileLedgerContext.ENCODED_LENGTH];
+        body.get(bytes);
+        try {
+            return ProfileLedgerContext.decode(bytes);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid durable fence context", invalid);
+        }
+    }
+
+    private record DurableLac(ProfileLedgerContext context, long lac, byte[] body) { }
+
+    private static DurableLac decodeLac(SegmentControlParser.Command parsed) throws IOException {
+        ByteBuffer body = parsed.body();
+        if (parsed.expectedGeneration() != 0 || body.remaining() < ProfileLedgerContext.ENCODED_LENGTH + 12) {
             throw new IOException("Invalid durable explicit LAC record");
         }
-        byte[] contextBytes = new byte[ProfileLedgerContext.ENCODED_LENGTH];
-        body.get(contextBytes);
+        byte[] bytes = new byte[ProfileLedgerContext.ENCODED_LENGTH];
+        body.get(bytes);
         long lac = body.getLong();
         int length = body.getInt();
-        if (length < 0 || length != body.remaining()) {
+        if (length < 0 || length != body.remaining() || lac < -1) {
             throw new IOException("Invalid durable explicit LAC body length");
         }
         byte[] value = new byte[length];
         body.get(value);
         try {
-            applyExplicitLac(ProfileLedgerContext.decode(contextBytes), lac, value,
-                    parsed.operationGeneration().value());
-        } catch (IllegalArgumentException failure) {
-            throw new IOException("Invalid durable explicit LAC context", failure);
+            return new DurableLac(ProfileLedgerContext.decode(bytes), lac, value);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid durable explicit LAC context", invalid);
         }
     }
 
@@ -1708,7 +1975,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
             boolean superblock = fileId == -1 || fileId == -2;
-            if ((superblock && (input.size() < FIRST_RECORD || input.size() > 8192))
+            if ((superblock && (input.size() < FIRST_RECORD || input.size() > 12288))
                     || (!superblock && expectedSize < 0 && input.size() < FIRST_RECORD)
                     || (!superblock && expectedSize >= 0 && input.size() != expectedSize)) {
                 throw new IOException("Isolated storage file size mismatch");
@@ -1730,7 +1997,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (closed) {
             return;
         }
-        if (writing || activeAdmissions != 0) {
+        if (writing || checkpointing || activeAdmissions != 0) {
             throw new IOException("Bookie control I/O or admissions are still in flight");
         }
         closed = true;

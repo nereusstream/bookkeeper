@@ -20,9 +20,21 @@ Arena checkpoint增量的17个Next动作在`unified-wal-model-thb7_nqa`正向配
 | 动作 | 当前实现/真实测试 |
 | --- | --- |
 | `Append/ForceLog/Apply/Freeze` | Arena有界控制日志及applied状态；`checkpointCapturesAppliedCutWhileLaterBatchIsDurableAndDoesNotHoldTheGrantLock` |
-| `WriteImage/ForceImage/WriteCommit/ForceCommit/Publish/ForcePublication/Finish` | `SegmentArenaCheckpoint`及Arena CHECKPOINT_COMMIT；独立固定向量、`checkpointFailuresNeverAcknowledgePublicationOrDiscardTheOldAuthority` |
+| `WriteImage/ForceImage/WriteCommit/ForceCommit/Publish/ForcePublication/Finish` | `SegmentControlCheckpoint`及Arena CHECKPOINT_COMMIT；独立固定向量、`checkpointFailuresNeverAcknowledgePublicationOrDiscardTheOldAuthority` |
 | `Corrupt` | image无效的抽象；`checkpointRestoresAppliedResultsAndSuffixAndFallsBackAfterCorruption` |
 | `Crash/RecoverySync/Recover/Resume` | `checkpointRestartAfterAbruptExitAtEachPublicationBarrier`四个真实JVM halt边界；`arenaCheckpointPreservesTheRealStorageGraphReadDuplicateAndAppendAcrossRestart` |
 | `PowerLoss` | 丢弃未同步内容的模型动作；没有执行真实掉电 |
 
 `checkpointPreservesUnclosedSessionAndDurableQuarantine`另验证状态镜像不解除现有OPEN/隔离门槛；该真实合同不是固定grant模型的证明范围。缺失/损坏完整旧日志仍拒绝恢复，不能用checkpoint跳过其当前必需依赖。
+
+
+Bookie增量回执`unified-wal-model-pz77hf26`正向8个Next动作均非零：
+
+| 动作 | 当前实现/真实测试 |
+| --- | --- |
+| `Append/ForceLog/Apply` | 原Bookie控制排他、group durability及顺序apply；新增commit用同一写入排他/force义务 |
+| `Freeze` | `bookieCheckpointCapturesAppliedCutWhileTombstoneIsDurableButUnapplied`；只取applied状态及真实字节cut，慢force不持查询锁 |
+| `Publish` | 此A切片合并C barrier假设；真实`bookieCheckpointFailureDoesNotAcknowledgePublicationAndRecoverySyncsCompletePage`、固定向量和双owner页面隔离分别验证文件路径 |
+| `Crash/RecoverySync/Recover` | `realBookieCheckpointProcessExitAtEachPublicationBarrierRetainsFence`及权限/幂等/LAC/close/image回退测试；既有DATA图扩展为两个控制owner checkpoint后正常restart |
+
+本投影没有power-loss动作或ticket lifecycle证明；真正的掉电、完整Model A及A+C仍须独立证据。

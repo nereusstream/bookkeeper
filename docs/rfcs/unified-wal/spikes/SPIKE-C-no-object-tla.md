@@ -1079,3 +1079,5 @@ README.md
 - INCONCLUSIVE：至少一个最低 config 未 complete、工具错误或证据缺失。
 
 PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Segment authority、Cluster Delete 或 general E/W/A fast recovery。
+
+2026-10-03 Bookie applied checkpoint已接入，保留sealed credential、权限/条件结果、最新LAC及recovery close；共享codec各自拥有A/B发布页，先durable/apply commit再发布，验证完整旧日志后恢复image与后缀。两个control owner的DATA正常restart、7项新增真实文件回归及有限权限模型有回执：`unified-wal-local-rECuQDLZ`（192项/187通过/5平台跳过）和`unified-wal-model-pz77hf26`（4个正向、6个指定反例）。全部旧控制日志仍必需；rotation/回收、在线维护、派生索引、完整Model A/A+C及生产Gate未完成。

@@ -1,6 +1,6 @@
 # 实验文件格式 v1
 
-状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Arena applied checkpoint与A/B发布切片见下文；完整selector、Bookie checkpoint、rotation、服务级可写restart与生产entry success authority仍未完成。
+状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；完整selector、rotation、服务级可写restart与生产entry success authority仍未完成。
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
@@ -22,7 +22,7 @@
 | BookieId 之后～4092 | zero reserved |
 | 4092 | CRC32C `[0,4092)` |
 
-DATA fileId 从0递增；superblock A/B 为 -1/-2，Bookie/Arena control 为 -3/-4；Arena checkpoint A/B为-5/-6。身份页的generation仍为初始值，动态checkpoint引用位于独立发布页，不auto-restamp身份页，也不把完整身份块解释为startup ready。
+DATA fileId 从0递增；superblock A/B 为 -1/-2，Bookie/Arena control 为 -3/-4；Arena checkpoint A/B为-5/-6，Bookie checkpoint A/B为-7/-8。身份页的generation仍为初始值，动态checkpoint引用位于独立发布页，不auto-restamp身份页，也不把完整身份块解释为startup ready。
 
 ## DATA batch
 
@@ -121,11 +121,21 @@ Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用
 
 payload的每项为`firstSequence i64 + status u32 + recordBytes u32 + 原control framing record`。status=1/2/3/4依次为APPLIED_DURABLE/ALREADY_DURABLE/CONDITION_FAILED/INCOMPATIBLE。记录sequence严格递增，首项为0，cut为-1时必须为空；record长度先按144～65536及剩余文件界限核对，再读取并独立解析。重建还检查operation不重复及条件结果一致。整个payload绑定SHA-256，metadata/image文件长度必须精确；单次编码/读入一个有界record，payload总量不超过现有controlLogBytes两倍，另加4224字节身份/metadata。
 
-`CHECKPOINT_COMMIT`使用既有Arena type=6，body是上表16～80的64字节reference；operation generation为checkpoint generation，expected generation为其前一代。image完整写入、force、目录同步并重读验证后，commit才进入正常Arena顺序，durable且apply成功后才能写inactive发布页及force、验证。A/B发布页位于原superblock offset4096，完整文件8192字节，原身份页仍保持不变；不完整第二页不能成为publication。旧隔离原型遇到新增mandatory CHECKPOINT_COMMIT/第二页会拒绝打开，未建立稳定格式兼容承诺。
+`CHECKPOINT_COMMIT`使用既有Arena type=6，body是上表16～80的64字节reference；operation generation为checkpoint generation，expected generation为其前一代。image完整写入、force、目录同步并重读验证后，commit才进入正常Arena顺序，durable且apply成功后才能写inactive发布页及force、验证。Arena A/B发布页位于原superblock offset4096，自己的页完整时文件至少8192字节；存在Bookie页时可到12288字节，原身份页仍保持不变；不完整第二页不能成为publication。旧隔离原型遇到新增mandatory CHECKPOINT_COMMIT/第二页会拒绝打开，未建立稳定格式兼容承诺。
 
-恢复先验证和同步仍完整保留的旧控制日志，匹配commit、publication及image，选择最高完整可验证的发布代；从状态表重建后重放through之后的完整后缀。image或发布页损坏时可选择另一份，都不可用则从完整日志恢复。身份页损坏、必需旧日志缺失/损坏仍拒绝，不将坏尾静默截断。完整可读publication在暴露恢复结果前force。当前未回收任何旧控制prefix，不声称compact长期历史或完成rotation/retention；Bookie checkpoint和在线维护接线仍未实现。
+恢复先验证和同步仍完整保留的旧控制日志，匹配commit、publication及image，选择最高完整可验证的发布代；从状态表重建后重放through之后的完整后缀。image或发布页损坏时可选择另一份，都不可用则从完整日志恢复。身份页损坏、必需旧日志缺失/损坏仍拒绝，不将坏尾静默截断。完整可读publication在暴露恢复结果前force。当前未回收任何旧控制prefix，不声称compact长期历史或完成rotation/retention；完整rotation/retention及在线维护接线仍未实现。
 
 独立Python struct/逐位CRC32C生成的`arena-empty-checkpoint-v1.hex`（4224 bytes）、`arena-checkpoint-publication-v1.hex`（4096 bytes）、`arena-checkpoint-commit-v1.hex`（208 bytes）固定空cut=-1、generation=1、slot=A，commit使用UUID(1,2)。真实Java writer逐字节比较，独立parser读取同一向量；它们不改写既有DATA/ALLOC向量。
+
+## Bookie checkpoint与双owner发布页
+
+`SegmentControlCheckpoint`为两owner复用同一record/envelope编解码；Bookie条件状态仍由`SegmentBookieControlLog`执行。Bookie image `bookie-checkpoint-a/b`使用fileId=-7/-8、metadata magic=`UWBCP001`；包络字段/大小、SHA、status及CRC范围与上述Arena表相同。payload保存首次控制命令/结果、FENCE、checkpoint命令和每ledger最新EXPLICIT_LAC；按原sequence重建，不重复保存同operation重试或旧LAC。INSTALL继续携带原sealed storage value，以原身份绑定解封，不新增明文credential或DATA。
+
+Bookie `BOOKIE_CHECKPOINT_COMMIT`使用owner=BOOKIE/code=10，body为64-byte reference，operation generation/expected generation分别是当前/前一checkpoint代。image force/目录同步/重读后，commit进入既有控制排他、write/force/apply顺序；durable且apply后才发布。自己的4096-byte `UWBSB001`页在superblock offset8192，完整时文件12288字节；Arena页仍在4096，两owner不截断或覆写另一owner的页。首次只发布Bookie时，中间Arena页保持零且不是有效Arena publication。只读取自己的完整、CRC正确页；Bookie页半写时，完整Arena页仍可使用。
+
+恢复完整验证、解封与同步旧Bookie日志，匹配自己的commit/page/image，重建已执行条件结果及最新LAC，随后重放cut后完整后缀；runtime资源和pending gates不从checkpoint重建为已提交事实。较新image不可用可以回退另一份；两份均不可用时完整日志恢复。缺失/损坏mandatory旧prefix/suffix、错误密钥或identity仍拒绝打开。原格式原型不识别新增Bookie mandatory type/第三页，会拒绝；仍未提供stable兼容承诺。当前不回收旧日志，也没有在线维护控制入口。
+
+独立Python struct/逐位CRC32C生成`bookie-empty-checkpoint-v1.hex`（4224 bytes）、`bookie-checkpoint-publication-v1.hex`（4096 bytes）和`bookie-checkpoint-commit-v1.hex`（208 bytes）；空cut=-1、generation=1、slot=A、commit UUID(1,2)。Java writer逐字节对照，独立parser校验同一字节；旧Arena/DATA固定向量保持原内容。
 
 ## 固定向量与验证边界
 

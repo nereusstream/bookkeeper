@@ -17,6 +17,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -27,13 +28,16 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -5788,7 +5792,310 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
-    public void arenaCheckpointPreservesTheRealStorageGraphReadDuplicateAndAppendAcrossRestart() throws Exception {
+    public void bookieEmptyCheckpointMatchesIndependentByteVectors() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            SegmentControlCheckpoint.Reference reference = log.checkpoint();
+            assertArrayEquals(checkpointVector("bookie-empty-checkpoint-v1.hex"),
+                    Files.readAllBytes(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.BOOKIE, 0)));
+            try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 0),
+                    StandardOpenOption.READ)) {
+                ByteBuffer page = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(file, page, 8192);
+                assertArrayEquals(checkpointVector("bookie-checkpoint-publication-v1.hex"), page.array());
+            }
+            ByteBuffer encoded = SegmentControlFormat.encode(SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT,
+                    new Generation(1), 0, new UUID(1, 2), new Generation(1), 0, reference.encode());
+            byte[] bytes = new byte[encoded.remaining()];
+            encoded.get(bytes);
+            assertArrayEquals(checkpointVector("bookie-checkpoint-commit-v1.hex"), bytes);
+            SegmentControlParser.Command parsed = SegmentControlParser.parse(ByteBuffer.wrap(bytes),
+                    SegmentControlFormat.Owner.BOOKIE, new Generation(1), 0);
+            assertEquals(reference, SegmentControlCheckpoint.decodeReference(parsed.body()));
+        }
+    }
+
+    private static byte[] checkpointVector(String name) throws IOException {
+        try (InputStream input = SegmentBookieControlLogTest.class.getResourceAsStream(
+                "/unified-wal-segment/" + name)) {
+            assertTrue(input != null);
+            String text = new String(input.readAllBytes(), StandardCharsets.US_ASCII);
+            return HexFormat.of().parseHex(text.lines().filter(line -> !line.startsWith("#"))
+                    .reduce("", String::concat));
+        }
+    }
+
+    @Test
+    public void bookieCheckpointPreservesPermissionsOutcomesLacAndClosedRecoveryGrant() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentControlCheckpoint.Reference reference;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2),
+                    install(45, 6, (byte) 7), activate(45, 7), tombstone(46, 8)));
+            log.submitExplicitLac(writeLac(9, (byte) 5, (byte) 1));
+            log.submitExplicitLac(writeLac(10, (byte) 5, (byte) 2));
+            log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9));
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    log.submitRecoveryClose(recoveryClose(4, 3, 3, 7, 9)));
+            log.submitFence(fence(5, (byte) 5));
+            log.checkpoint();
+            log.submitBatch(List.of(tombstone(45, 9), activate(10)));
+            reference = log.checkpoint();
+            byte[] image = Files.readAllBytes(SegmentControlCheckpoint.path(
+                    config, SegmentControlFormat.Owner.BOOKIE, reference.slot()));
+            assertFalse(HexFormat.of().formatHex(image).contains("05".repeat(20)));
+        }
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 4), VALIDATOR));
+        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(reference, log.publishedCheckpoint().orElseThrow());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertTrue(log.admitRead(context(45)).isEmpty());
+            log.admitRead(context()).orElseThrow().finish();
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(install(1, (byte) 5))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    log.submitBatch(List.of(install(1, (byte) 6))).get(0).status());
+            assertEquals(List.of(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    SegmentBookieControlLog.Status.CONDITION_FAILED),
+                    log.submitBatch(List.of(activate(10), install(46, 11, (byte) 5))).stream()
+                            .map(SegmentBookieControlLog.Result::status).toList());
+            assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
+                    log.submitFence(fence(5, (byte) 5)).status());
+            assertEquals(10, log.explicitLac(context()).orElseThrow().lac());
+            assertArrayEquals(new byte[] {2}, log.explicitLac(context()).orElseThrow().body());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitExplicitLac(writeLac(10, (byte) 5, (byte) 2)));
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                    log.submitRecoveryClose(recoveryClose(4, 3, 3, 7, 9)));
+            assertTrue(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 5)).isEmpty());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9)).status());
+        }
+    }
+
+    @Test
+    public void bookieCheckpointCapturesAppliedCutWhileTombstoneIsDurableButUnapplied() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo delayed = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Checkpoint force was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentBookieControlLog.DurableBatch pending = log.appendDurably(List.of(tombstone(44, 3)));
+            assertEquals(2, pending.firstSequence());
+            FutureTask<SegmentControlCheckpoint.Reference> task = new FutureTask<>(() -> log.checkpoint(delayed));
+            Thread writer = new Thread(task);
+            writer.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                FutureTask<Boolean> query = new FutureTask<>(
+                        () -> log.normalAdmission(context(), filled(20, (byte) 5)));
+                new Thread(query).start();
+                assertFalse(query.get(1, TimeUnit.SECONDS));
+                assertThrows(IOException.class, log::close);
+                assertThrows(IOException.class, log::checkpoint);
+                log.applyDurable(pending);
+            } finally {
+                release.countDown();
+                writer.join(5000);
+            }
+            assertFalse(writer.isAlive());
+            assertEquals(1, task.get(1, TimeUnit.SECONDS).through());
+        }
+        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(1, log.publishedCheckpoint().orElseThrow().through());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertTrue(log.admitRead(context()).isEmpty());
+        }
+    }
+
+    @Test
+    public void bookieAndArenaPublicationsPreserveEachOtherAndTornBookiePageUsesItsOtherSlot() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentControlCheckpoint.Reference arenaReference;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            SegmentControlCheckpoint.Reference first = bookie.checkpoint();
+            arena.checkpoint();
+            assertEquals(first, SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.BOOKIE, 0));
+            arenaReference = arena.checkpoint();
+            bookie.checkpoint();
+            assertEquals(arenaReference,
+                    SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.ARENA, 1));
+        }
+        try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 1),
+                StandardOpenOption.WRITE)) {
+            file.truncate(12287);
+            file.force(true);
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(arenaReference, arena.publishedCheckpoint().orElseThrow());
+            assertEquals(1, bookie.publishedCheckpoint().orElseThrow().generation());
+            assertTrue(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(3, bookie.checkpoint().generation());
+            assertEquals(arenaReference,
+                    SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.ARENA, 1));
+        }
+    }
+
+    @Test
+    public void bookieCheckpointFailureDoesNotAcknowledgePublicationAndRecoverySyncsCompletePage() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentControlCheckpoint.Reference first;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            first = log.checkpoint();
+            assertThrows(IOException.class, () -> log.checkpoint(
+                    new SegmentFileIo(Integer.MAX_VALUE, 1, -1, false)));
+            assertThrows(IOException.class, () -> log.checkpoint(
+                    new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false)));
+            assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+            log.submitFence(fence(3, (byte) 5));
+            assertThrows(IOException.class, () -> log.checkpoint(
+                    new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false)));
+            assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(activate(4))));
+        }
+        try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(2, log.publishedCheckpoint().orElseThrow().generation());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(3, log.checkpoint().generation());
+        }
+    }
+
+    @Test
+    public void bookieCheckpointFallbackRequiresEveryRetainedControlByte() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            log.checkpoint();
+            log.submitFence(fence(3, (byte) 5));
+            log.checkpoint();
+            log.submitBatch(List.of(tombstone(44, 4)));
+        }
+        for (int slot : new int[] {1, 0}) {
+            Path image = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.BOOKIE, slot);
+            byte[] bytes = Files.readAllBytes(image);
+            bytes[4096] ^= 1;
+            Files.write(image, bytes);
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                    1024 * 1024, key((byte) 3), VALIDATOR)) {
+                assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+                assertTrue(log.admitRead(context()).isEmpty());
+                assertEquals(slot == 1, log.publishedCheckpoint().isPresent());
+            }
+        }
+        Path control = config.directory().resolve("bookie-control");
+        byte[] original = Files.readAllBytes(control);
+        Files.write(control, Arrays.copyOf(original, original.length - 1));
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR));
+        original[4096 + 128] ^= 1;
+        Files.write(control, original);
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR));
+    }
+
+    @Test
+    public void realBookieCheckpointProcessExitAtEachPublicationBarrierRetainsFence() throws Exception {
+        for (String phase : List.of("payload", "commit", "publication", "done")) {
+            IsolatedSegmentConfig config = checkpointConfig(temporary.getRoot().toPath().resolve(phase));
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                    SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+                log.checkpoint();
+            }
+            Path output = temporary.getRoot().toPath().resolve(phase + ".log");
+            Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-Xmx64m", "-XX:MaxDirectMemorySize=32m", "-cp", System.getProperty("java.class.path"),
+                    BookieCheckpointCrashProbe.class.getName(), phase, config.directory().toString())
+                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+            try {
+                assertTrue(child.waitFor(15, TimeUnit.SECONDS));
+                assertEquals(Files.readString(output), 23, child.exitValue());
+            } finally {
+                if (child.isAlive()) {
+                    child.destroyForcibly();
+                    assertTrue(child.waitFor(5, TimeUnit.SECONDS));
+                }
+            }
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                    1024 * 1024, key((byte) 3), VALIDATOR)) {
+                assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+                assertEquals(SegmentBookieControlLog.FenceStatus.ALREADY_DURABLE,
+                        log.submitFence(fence(3, (byte) 5)).status());
+                assertEquals(phase.equals("payload") || phase.equals("commit") ? 1 : 2,
+                        log.publishedCheckpoint().orElseThrow().generation());
+            }
+        }
+    }
+
+    private static IsolatedSegmentConfig checkpointConfig(Path directory) {
+        return new IsolatedSegmentConfig(directory, 1, 4, 1, 4L * 1024 * 1024,
+                4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+    }
+
+    public static final class BookieCheckpointCrashProbe {
+        public static void main(String[] args) throws Exception {
+            String phase = args[0];
+            AtomicInteger controlForces = new AtomicInteger();
+            AtomicInteger checkpointForces = new AtomicInteger();
+            SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                if (controlForces.incrementAndGet() == 2 && phase.equals("commit")) {
+                    Runtime.getRuntime().halt(23);
+                }
+            });
+            SegmentFileIo checkpointIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                int count = checkpointForces.incrementAndGet();
+                if ((count == 1 && phase.equals("payload")) || (count == 2 && phase.equals("publication"))) {
+                    Runtime.getRuntime().halt(23);
+                }
+            });
+            SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)),
+                    new UUID(0, 9), BookieId.parse("isolated:3181"));
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(
+                    checkpointConfig(Path.of(args[1])), identity,
+                    1024 * 1024, key((byte) 3), VALIDATOR, controlIo)) {
+                log.submitFence(fence(3, (byte) 5));
+                log.checkpoint(checkpointIo);
+                Runtime.getRuntime().halt(23);
+            }
+        }
+    }
+
+    @Test
+    public void bothControlCheckpointsPreserveTheStorageGraphReadDuplicateAndAppendAcrossRestart() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("checkpoint"),
                 1, 4, 1, 16L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
@@ -5797,9 +6104,12 @@ public class SegmentBookieControlLogTest {
             storageWrite(storage, context(44), 1);
         }
         for (int cycle : new int[] {1, 2}) {
-            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
                 assertFalse(arena.hasUnclosedDataSession());
                 assertEquals(cycle, arena.checkpoint().generation());
+                assertEquals(cycle, bookie.checkpoint().generation());
             }
             try (IsolatedSegmentStorage storage = storage(config, 2, 6, 16)) {
                 storage.restart();

@@ -315,4 +315,15 @@ group启动与池验证见[本次回执](execution-startup-receipt.json)：2026-
 
 有限模型回执`unified-wal-model-thb7_nqa`新增checkpoint正向179,279 distinct states及两个指定性质反例；全部8个配置结果与范围见[模型状态](../models/README.md#arena-checkpoint-增量验证)。没有执行真实掉电、Linux亲和或性能对照。
 
-这是Arena控制模块的局部交付，checkpoint由隔离调用方显式执行，真实storage图测试在关闭后执行；尚未接在线维护调度、Bookie控制checkpoint、旧日志prefix回收/rotation、idempotency跨长期代际压缩、MOVE/FREE或派生索引。当前op状态仍受固定日志容量限制，满额停止；不得据此称长期有界运行或完整步骤8完成。既有immutable身份页损坏仍拒绝打开，新增A/B回退只针对发布页及checkpoint image。未正常关闭恢复的故障解析合同保持待确认。
+上述6402c1c64e是Arena控制模块的局部交付，checkpoint由隔离调用方显式执行，真实storage图测试在关闭后执行；该次切片未接在线维护调度、Bookie控制checkpoint、旧日志prefix回收/rotation、idempotency跨长期代际压缩、MOVE/FREE或派生索引。当前op状态仍受固定日志容量限制，满额停止；不得据此称长期有界运行或完整步骤8完成。既有immutable身份页损坏仍拒绝打开，新增A/B回退只针对发布页及checkpoint image。未正常关闭恢复的故障解析合同保持待确认。
+
+
+2026-10-03 Bookie applied checkpoint增量：`SegmentControlCheckpoint`由前一Arena codec复用而来，统一有界record/SHA/framing及文件I/O，控制条件判断仍由各自owner负责。Bookie保存operation首次命令/条件结果、已执行FENCE和checkpoint命令，以及每ledger最新EXPLICIT_LAC；原INSTALL ciphertext直接保留，恢复用原storage binding与密钥解封，未写明文credential。runtime admission、pending fence/tombstone/close、in-flight counter和buffer不持久化；新image仅从已apply记录构建。Bookie CHECKPOINT_COMMIT共用原有控制写入排他、capacity、force与apply顺序，不给普通DATA增加控制记录。
+
+Bookie发布页位于每个superblock的offset8192，Arena仍在4096，两owner各写自己的4096-byte页且不截断另一页；immutable身份页不变。Bookie image为独立`bookie-checkpoint-a/b`。恢复先完整验证、解封及同步仍保留的全部Bookie控制记录，选择匹配commit/page/image、恢复已执行状态并检查条件结果，然后重放完整后缀；image坏时用另一份或完整日志。Bookie第三页不完整不会抹去有效Arena第二页。格式及固定向量见[实验格式](format-v1.md#bookie-checkpoint与双owner发布页)。
+
+最终回执`unified-wal-local-rECuQDLZ`绑定父提交`6402c1c64ecfa991ffff5576f88f285e00179148`及192个实际源码/测试/向量输入；7类192项，187通过、5项Linux亲和在macOS跳过，0 failure/error。新增7项覆盖sealed credential/错误key、route/fence/tombstone、最新LAC、已关闭recovery grant与操作重试，durable领先applied时的慢checkpoint、独立/截断发布页、payload/publication force失败、image回退及mandatory旧字节拒绝，4个真实子JVM halt边界和3份独立字节向量；既有DATA图用例扩展到两个control owner各两次checkpoint后restart/旧entry点读/重复/新写。Spotless及相关Checkstyle随同验证。
+
+模型回执`unified-wal-model-pz77hf26`绑定24个实际输入，原Model C配置保持预期，新增Bookie固定权限轨迹28,292 distinct states正向PASS及丢失terminal gate的指定反例，合计4个正向、6个预期反例。范围见[Bookie模型](../models/README.md#bookie-checkpoint-权限恢复切片)。真实JVM退出不等于真实掉电；没有Linux NUMA或性能对照。
+
+两个owner仍完整保留旧控制日志，当前状态/幂等历史受固定日志容量限制；满额停止，未实现prefix reclaim/rotation、长期代际压缩、在线调度、派生索引、MOVE/FREE或服务级生产authority。Bookie显式checkpoint及关闭后的DATA图验证不授予完整步骤8/Model A/A+C/Block G；未正常关闭会话的故障解析合同仍待确认。

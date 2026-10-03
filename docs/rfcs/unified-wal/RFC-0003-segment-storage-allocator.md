@@ -545,6 +545,8 @@ timeout 单独不是 orphan proof。`MOVE_COMMIT` 与 conditional free 在同一
 
 ## 11. Allocator checkpoint 与 rotation
 
+2026-10-03双owner实现增量：Arena codec已复用为`SegmentControlCheckpoint`，Arena仍拥有自己的第二页；Bookie拥有第三页，两者各写自己的完整页且不截断另一页。半写Bookie页不改变Arena有效发布判断，所有immutable身份页和旧控制字节仍必需。Bookie/真实DATA图新增回归及有限模型见[局部实现](implementation/local-storage/README.md)。prefix reclaim/rotation及完整步骤8仍未完成。
+
 数据或 derived-index checkpoint 可以丢失并重建；allocator authority 不能全部丢失。
 
 2026-10-03局部实现：隔离Arena已提供applied状态/字节cut快照、有界A/B image的force/验证、CHECKPOINT_COMMIT持久且顺序apply后的inactive发布页force，以及匹配commit/image的恢复后缀和旧image/全日志回退。真实文件、JVM halt边界、正常DATA重启及有限模型见[本地状态](implementation/local-storage/README.md)。当前完整旧日志仍保留并验证；没有prefix回收/rotation、Bookie checkpoint、MOVE/FREE selector或在线调度，不把以下完整协议称为已完成。
