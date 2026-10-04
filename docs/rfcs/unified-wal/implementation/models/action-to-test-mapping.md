@@ -361,3 +361,14 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | Unknown | `automaticSpaceMaintenanceCopyForceUnknownStopsGraphAndRetainsActualSources` 实际COPY force失败，cause可见、源未FREE/无MOVE、停止DATA/控制且拒绝restart |
 
 十个模型Next动作有非零执行coverage；实际目录持久化、所有资源终结与长期进展不是本模型的自证结论。
+
+## 内部 checkpoint 历史
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| Checkpoint / Rotate | 两控制 owner 的 `retainedCheckpointIds`、v2 snapshot 与成功物理轮转后的内存清理；`repeatedControlRotationKeepsFixedBusinessStateWithinCheckpointBudgetAcrossRestart` 真实旧生产红、新生产 96 次双 owner 轮转，预算与业务状态固定，image payload 不增长且读/幂等/T/续写与健康 restart 正确 |
+| MarkLegacy / Restore | codec 区分 image v1/v2，owner 恢复仍核对准确 predecessor；`legacyCheckpointImagesRemainReadableBeforeInternalHistoryIsCompacted` 验证完整 v1，固定业务及空状态两个测试均拒绝缺失内部历史的伪 v1 |
+| CorruptPredecessor / Restore | `compactedEmptyControlImagesSupportSequenceGapsAndRejectLegacyMisclassification` 验证非零首 sequence、内部 generation 间隔、最新 image 损坏后的另一 root 恢复；既有真实 suffix/commit/发布故障回归继续承担物理门槛 |
+| 独立格式向量 | Arena/Bookie 现有 empty checkpoint 测试分别逐字节比对新增 v2 与未变 v1；独立 Python struct/逐位 CRC32C，不用 writer 产出期望值 |
+
+模型的物理轮转、framing/hash 与业务条件作为输入；真实回归只证明本节固定状态范围，不关闭业务历史压缩或长期运行验收。

@@ -58,7 +58,11 @@ final class SegmentControlCheckpoint {
         }
     }
 
-    record Snapshot(long through, long logOffset, List<Operation> operations) {
+    record Snapshot(long through, long logOffset, List<Operation> operations, boolean compactedCheckpointHistory) {
+        Snapshot(long through, long logOffset, List<Operation> operations) {
+            this(through, logOffset, operations, false);
+        }
+
         Snapshot {
             operations = List.copyOf(operations);
         }
@@ -87,6 +91,7 @@ final class SegmentControlCheckpoint {
                 LinkOption.NOFOLLOW_LINKS)) {
             io.writeFully(file, identity.encode(config, fileId(owner, reference.slot())), 0);
             ByteBuffer header = envelope(128, imageMagic(owner), reference);
+            header.putInt(8, snapshot.compactedCheckpointHistory() ? 2 : 1);
             header.putInt(80, snapshot.operations().size());
             checksum(header);
             io.writeFully(file, header, 4096);
@@ -116,7 +121,7 @@ final class SegmentControlCheckpoint {
             identity.validate(identityBytes, config, fileId(owner, reference.slot()));
             ByteBuffer header = ByteBuffer.allocate(128);
             SegmentFileIo.readFully(file, header, 4096);
-            if (!reference.equals(parseEnvelope(header, imageMagic(owner)))) {
+            if (!reference.equals(parseEnvelope(header, imageMagic(owner), true))) {
                 throw new IOException("Control checkpoint content identity differs from its commit");
             }
             int count = header.getInt(80);
@@ -140,7 +145,7 @@ final class SegmentControlCheckpoint {
                 int status = prefix.getInt();
                 int length = prefix.getInt();
                 if (nextSequence <= sequence || nextSequence > reference.through()
-                        || (index == 0 && nextSequence != 0) || status < 1 || status > 4
+                        || (header.getInt(8) == 1 && index == 0 && nextSequence != 0) || status < 1 || status > 4
                         || length < 144 || length > 65536 || length > file.size() - offset - 16) {
                     throw new IOException("Invalid Control checkpoint operation");
                 }
@@ -155,7 +160,7 @@ final class SegmentControlCheckpoint {
             if (offset != file.size() || !reference.digest().equals(HexFormat.of().formatHex(digest.digest()))) {
                 throw new IOException("Control checkpoint payload digest mismatch");
             }
-            return new Snapshot(reference.through(), reference.logOffset(), operations);
+            return new Snapshot(reference.through(), reference.logOffset(), operations, header.getInt(8) == 2);
         }
     }
 
@@ -231,9 +236,15 @@ final class SegmentControlCheckpoint {
     }
 
     private static Reference parseEnvelope(ByteBuffer bytes, long magic) throws IOException {
+        return parseEnvelope(bytes, magic, false);
+    }
+
+    private static Reference parseEnvelope(ByteBuffer bytes, long magic, boolean allowCompactedHistory)
+            throws IOException {
         CRC32C crc = new CRC32C();
         crc.update(bytes.slice(0, bytes.limit() - 4));
-        if (bytes.getLong(0) != magic || bytes.getInt(8) != 1 || bytes.getInt(12) != 64
+        if (bytes.getLong(0) != magic || bytes.getInt(8) != 1 && !(allowCompactedHistory && bytes.getInt(8) == 2)
+                || bytes.getInt(12) != 64
                 || bytes.getInt(bytes.limit() - 4) != (int) crc.getValue()) {
             throw new IOException("Control checkpoint envelope or CRC mismatch");
         }

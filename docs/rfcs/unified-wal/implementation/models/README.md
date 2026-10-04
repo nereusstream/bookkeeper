@@ -572,3 +572,21 @@ fresh-fit与实际terminal/轮转结果为输入假设，不能推出真实CRC/�
 正向全部10个Next动作均有非零执行coverage。回执 `unified-wal-model-ez7490vu` 绑定父提交 `860aac1ea5b9b34af1d077edcda7f1aa409e6fcd`、155实际输入和310个checksum，28正向完整PASS、75指定反例；新增四个错误候选分别被指定性质否证。运行命令仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方1.7.4工具身份、单worker、固定seed/fp、无状态约束或对称化均保留。真实行为证据见[自动空间回收](../local-storage/README.md#数据空间压力的自动回收)。
 
 CHECK_DEADLOCK FALSE仅允许有限终态，不证明公平调度、全部park/unpark或长期liveness。该投影没有filesystem/SST工作集、完整partial收敛、多Arena、实际掉电或正式性能；B17、完整A/C/D及组合和生产Gate仍未完成，历史receipt/designInputs保持原绑定。
+
+## 内部 checkpoint 历史投影
+
+`InternalCheckpointHistory.tla` 固定 grant/credential/tombstone 业务结果、八个内部 checkpoint generation 和一个保留 image，检查当前物理 root 加最新两个内部 commit 的有界集合。Rotate 的双 root 持久化/回收协议已由独立切片承担；真实 framing/hash、commit 绑定、业务条件及实际预算在本投影中是输入，不冒充完整 Model A+C。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-internal-checkpoint-history | 847 / 453 / 0 | 14 / 14 | 0.813 s / 114,524,160 bytes | PASS |
+| ce-internal-checkpoint-history-unbounded | 65 / 45 / 20 | 7 / 不适用 | 0.853 s / 109,297,664 bytes | EXPECTED_COUNTEREXAMPLE: ImageHasBoundedInternalHistory |
+| ce-internal-checkpoint-history-root | 49 / 36 / 18 | 6 / 不适用 | 0.862 s / 109,215,744 bytes | EXPECTED_COUNTEREXAMPLE: SnapshotRetainsCurrentRootIdentities |
+| ce-internal-checkpoint-history-legacy | 78 / 55 / 28 | 7 / 不适用 | 0.792 s / 109,494,272 bytes | EXPECTED_COUNTEREXAMPLE: LegacyReadyHasCompleteCheckpointHistory |
+| ce-internal-checkpoint-history-business | 2 / 2 / 0 | 2 / 不适用 | 0.749 s / 101,711,872 bytes | EXPECTED_COUNTEREXAMPLE: SnapshotKeepsBusinessResults |
+
+五个正向 Next 动作均有非零执行 coverage：Checkpoint 29:171、Rotate 28:224、MarkLegacy 57:113、CorruptPredecessor 112:112、Restore 226:226（保留 coverage 原始双计数）。四个错误候选分别否证无界内部保留、遗漏当前 root、旧 v1 放行缺失历史与丢弃业务结果。恢复还检查准确 predecessor；非零首 sequence 及 generation 间隔不授予无 commit 或缺少必要 suffix 的恢复权威。
+
+最终回执 `unified-wal-model-_nzaxgir` 绑定父提交 `386478b6749250b737ea8dcc358d7e7414715b03`、161 实际输入与 325 个 checksum；29 个正向完整 PASS、79 个指定反例，108 配置全部符合预期。复现命令仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化保留。真实行为、旧 v1/新 v2 向量与恢复证据见[有界内部历史](../local-storage/README.md#内部-checkpoint-历史的有界保留)。
+
+CHECK_DEADLOCK FALSE 仅允许有限终态，没有 liveness、公平调度、物理 durability 或性能结论。业务/会话历史压缩、持续创建删除、filesystem 临时工作集、多 Arena、掉电、完整 A/C/D 与组合及生产 Gate 未由本投影闭合；历史 receipt/designInputs 继续保留原绑定。

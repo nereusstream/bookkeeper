@@ -325,3 +325,14 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | UnknownStopsDataAdmission / RestoredAdmissionHasActualCapacity | 实际未知失败保留cause、停止图，新pool需要实际同尺寸extent和预留；模型把真实whole-block事实作为输入，不证明物理回收 |
 
 有限终态没有liveness、公平调度或共享filesystem预算证明；完整A/C/D与组合、B17和生产Gate仍未关闭。
+
+## 内部 checkpoint 历史
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| ImageHasBoundedInternalHistory / SnapshotRetainsCurrentRootIdentities | 保留当前双 root 加最新两个成功内部 commit，image 内合计至多四项；成功物理回收后才清理 live 表，当前 suffix 不计为 image 项也不绕过 journal 预算 |
+| SnapshotKeepsBusinessResults | 仅省略过时内部成功 commit，原业务及失败条件照常保留；固定 grant/credential/T 的模型角色不能代替所有真实业务重放验证 |
+| LegacyReadyHasCompleteCheckpointHistory | v1 不采用内部 generation 跳跃恢复；v2 版本绑定 metadata CRC，旧 v1 字节与读取规则保留，未知版本仍拒绝 |
+| ReadyHasCheckpointPredecessor | v2 保留内部 commit 严格递增且小于目标代，正常重放条件结果，最终 generation 必须恰为目标 predecessor；真实 commit/image/reference 和完整必要 suffix 仍不可缺失 |
+
+有限模型不证明业务历史可无限创建删除、共享 filesystem 工作集、长期 liveness 或完整 A/C/D；B17、步骤 8/10 与生产 Gate 仍未关闭。

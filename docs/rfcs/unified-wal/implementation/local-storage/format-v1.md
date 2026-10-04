@@ -2,6 +2,8 @@
 
 状态：EXPERIMENTAL / DISCARDABLE；只用于隔离目录，不承诺 stable on-disk compatibility。实现位于 `bookie.storage.segment`，writer 与独立 parser 同时交付；已有ALLOC/ALLOC_POOL及单调DEVICE_STATE文件隔离的Arena局部状态机，Bookie INSTALL/ACTIVATE/FENCE、recovery grant/close、explicit LAC/tombstone局部控制日志和受控DATA grant/逐entry结果。现有Bookie/Arena applied checkpoint与A/B发布切片见下文；真实RocksDB冷重建/覆盖页见下文；全死allocation FREE与退役前缀已接通，见下文；一般MOVE/复用selector覆盖恢复、在线Bookie/Arena维护、服务级readiness与未正常关闭restart与生产entry success authority仍未完成。
 
+当前增量仅将控制 checkpoint image metadata 升为 v2，原 v1 格式记录与向量保留；现行内部历史保留和恢复规则见[image v2](#内部-checkpoint-历史压缩与-image-v2)。
+
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
 ## 目录和文件身份
@@ -107,7 +109,7 @@ Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用
 
 ## Arena checkpoint与发布页
 
-当前只持久化Arena已执行状态表：每个operation的首次命令、原sequence与条件结果，按sequence排序。重复请求不会重复存储，条件失败的no-op仍保留；由它重建当前allocation/stream/session/quarantine及幂等状态。through取连续applied sequence，空日志为-1，同时绑定该cut的真实log end offset。它不含DATA payload、ACK日志、pin/future/buffer历史，也没有FREE/MOVE selector。
+原v1 image持久化Arena已执行状态表（现行v2增量见[内部checkpoint历史压缩](#内部-checkpoint-历史压缩与-image-v2)）：每个operation的首次命令、原sequence与条件结果，按sequence排序。重复请求不会重复存储，条件失败的no-op仍保留；由它重建当前allocation/stream/session/quarantine及幂等状态。through取连续applied sequence，空日志为-1，同时绑定该cut的真实log end offset。它不含DATA payload、ACK日志、pin/future/buffer历史，也没有FREE/MOVE selector。
 
 `arena-checkpoint-a/b`先写4096字节身份页，再写128字节metadata和payload。metadata包络及superblock第二页的4096字节发布包络如下：
 
@@ -177,7 +179,7 @@ Bookie `BOOKIE_CHECKPOINT_COMMIT`使用owner=BOOKIE/code=10，body为64-byte ref
 
 两根force/验证后，原`bookie-control`写mandatory marker并截为8192；它不再提供全日志fallback。最高有效publication选中的物理文件与完整suffix必须存在且通过验证/恢复同步；单份初始image可通过另一份恢复相同普通authority，后续checkpoint保留物理代绑定。两份image都无效时拒绝，不能回退空原日志。旧代或候选仅在fresh当前根及原commit identity证明其退休后删除，固定两条路径不无限增长。
 
-control容量≥10656字节（8192 header、416双commit预留、2048普通控制槽）时，普通写入保留416字节供rotation；更小旧配置保持有限日志并拒绝rotation。image仍各受2×control容量payload上限约束，首次条件结果及内部checkpoint历史不prune，状态满额停止。没有在线调度或长期历史压缩，不据物理日志回收宣称可长期运行。
+control容量≥10656字节（8192 header、416双commit预留、2048普通控制槽）时，普通写入保留416字节供rotation；更小旧配置保持有限日志并拒绝rotation。image仍各受2×control容量payload上限约束，原v1首次条件结果及内部checkpoint历史不prune，状态满额停止；现行v2只压缩内部checkpoint历史，详见[后续增量](#内部-checkpoint-历史压缩与-image-v2)。没有在线调度或长期历史压缩，不据物理日志回收宣称可长期运行。
 
 独立Python struct/逐位CRC32C生成`bookie-rotation-header-v1.hex`及`bookie-rotation-publication-v1.hex`，均4096 bytes，物理代2、相邻checkpoint代1/2、原commit UUID(1,2)/(3,4)。Java逐字节对照。真实文件测试覆盖sealed credential、fence/LAC/closed grant、三轮容量耗尽、7个JVM退出阶段、短写/force失败、跨JVM锁和双owner DATA正常restart；进程退出不等于真实掉电，也未验证旧binary混用写者。
 
@@ -298,3 +300,16 @@ v2证明依赖当前selector：迁走的普通源须匹配成功后继entry dige
 
 
 2026-10-04 [多批compaction](README.md#同-arena-多批-compaction)不改持久/wire字段。一个新destination allocation内各COPY使用连续物理sequence和递增offset；首批root UUID，后批按 `COPY/<index>` 派生不同UUID，各自对应一次条件MOVE。整组FREE仍逐命令绑定自身前序selector cut；不增加另一份任务日志或成功位，独立向量继续适用。
+
+
+## 内部 checkpoint 历史压缩与 image v2
+
+2026-10-04，Bookie/Arena 新生成的 checkpoint image metadata 在offset8写 `version=2`；magic、64-byte reference、operation framing/status、payload SHA-256、metadata CRC和全部publication/control/rotation字节布局保持原值。旧v1 image继续读取，其首项sequence=0及完整checkpoint predecessor重演规则不变。版本2是明确的实验image扩展，不新增wire操作或长期兼容承诺；旧binary/完整旧decoder验证仍按既有Gate延期，不能混用写者。
+
+v2保留所有现有业务状态表记录与原sequence/首次条件结果，包括ALLOC/stream/session/quarantine、MOVE/FREE/anti-ABA及Bookie sealed INSTALL、FENCE/T、grant/close和最新LAC。只筛选成功的内部CHECKPOINT_COMMIT：保留当前物理恢复根的两个commit UUID/reference与最新两个成功predecessor，最多四项；失败的内部条件结果也不丢弃。新根完整发布、原日志marker/prefix处理及旧代回收/目录同步全部成功后，才清理同类已替代内存记录；常规checkpoint与在途suffix仍占原控制日志预算。
+
+因此v2 image的首项可以不为0，内部checkpoint generation可有间隔。只在版本2的已保存成功内部commit上，恢复核对原framing/reference、严格递增generation、generation小于正在恢复的reference及原结果，再恢复该commit的expected predecessor并正常apply；最后仍要求精确等于image generation减一。业务条件照原顺序重新检验，不据当前磁盘或pin补认成功；真实journal完整suffix仍禁止sequence gap。v1 image不允许该代际跳跃；未知version、缺失必需predecessor/commit、digest/身份/长度/结果错误仍回退或拒绝，不靠较大generation放行。
+
+新增独立Python struct/逐位CRC32C向量 `arena-empty-checkpoint-v2.hex` 与 `bookie-empty-checkpoint-v2.hex`（均4224 bytes）：只把对应v1空image的metadata version改为2并重算CRC。既有v1向量保持原文件/哈希，实际Java writer同时逐字节核对v2和显式legacy v1 codec；读者区分两者，原commit/publication向量保持匹配。恢复、固定状态96轮、空状态/legacy误分类和损坏回退证据见[本地增量](README.md#内部-checkpoint-历史的有界保留)。
+
+该扩展不压缩业务历史、T身份或DATA session/generation链；持续create/delete、反复MOVE/FREE/reuse、完整metadata内存/磁盘总账仍可能达到声明上限并拒绝。没有放宽2×control-state image预算或DATA/控制成功条件，不代表B17、长期负载、多Arena、掉电、旧binary或生产Gate通过。

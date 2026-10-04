@@ -431,8 +431,16 @@ public class SegmentArenaControlLogTest {
                 SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             SegmentControlCheckpoint.Reference reference = log.checkpoint();
             assertEquals(-1, reference.through());
+            assertArrayEquals(checkpointVector("arena-empty-checkpoint-v2.hex"),
+                    Files.readAllBytes(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, 0)));
+            assertTrue(SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    reference, 1024 * 1024).compactedCheckpointHistory());
+            SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA, reference,
+                    new SegmentControlCheckpoint.Snapshot(-1, 4096, List.of()), new SegmentFileIo());
             assertArrayEquals(checkpointVector("arena-empty-checkpoint-v1.hex"),
                     Files.readAllBytes(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, 0)));
+            assertFalse(SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    reference, 1024 * 1024).compactedCheckpointHistory());
             try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 0),
                     StandardOpenOption.READ)) {
                 ByteBuffer page = ByteBuffer.allocate(4096);

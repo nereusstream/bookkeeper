@@ -793,9 +793,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
             if (checkpointing || checkpointGeneration == Long.MAX_VALUE) {
                 throw new IOException("Bookie checkpoint is active or its generation is exhausted");
             }
-            List<SegmentControlCheckpoint.Operation> state = new ArrayList<>(checkpointState.values());
+            Set<UUID> retainedCheckpoints = retainedCheckpointIds();
+            List<SegmentControlCheckpoint.Operation> state = new ArrayList<>();
+            checkpointState.forEach((id, operation) -> {
+                if (!checkpointIds.contains(id) || retainedCheckpoints.contains(id)) {
+                    state.add(operation);
+                }
+            });
             state.addAll(checkpointLacs.values());
-            snapshot = new SegmentControlCheckpoint.Snapshot(appliedThrough, appliedOffset, state);
+            snapshot = new SegmentControlCheckpoint.Snapshot(appliedThrough, appliedOffset, state, true);
             generation = checkpointGeneration + 1;
             slot = publishedCheckpoint == null ? 0 : 1 - publishedCheckpoint.slot();
             checkpointing = true;
@@ -804,7 +810,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             snapshot = new SegmentControlCheckpoint.Snapshot(snapshot.through(), snapshot.logOffset(),
                     snapshot.operations().stream().sorted(Comparator.comparingLong(
-                            SegmentControlCheckpoint.Operation::sequence)).toList());
+                            SegmentControlCheckpoint.Operation::sequence)).toList(),
+                    snapshot.compactedCheckpointHistory());
             SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.reference(
                     generation, slot, snapshot, maxLogBytes);
             SegmentControlCheckpoint.write(config, identity, SegmentControlFormat.Owner.BOOKIE,
@@ -976,6 +983,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
                         previousGeneration));
                 IsolatedSegmentFiles.syncDirectory(config.directory());
             }
+            synchronized (this) {
+                Set<UUID> retained = retainedCheckpointIds();
+                checkpointState.keySet().removeIf(id -> checkpointIds.contains(id) && !retained.contains(id));
+                checkpointIds.retainAll(retained);
+            }
             return root;
         } catch (IOException | RuntimeException | Error failure) {
             synchronized (this) {
@@ -1003,6 +1015,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /** Retain the active physical roots and latest predecessors; business results remain unchanged. */
+    private Set<UUID> retainedCheckpointIds() {
+        Set<UUID> retained = new HashSet<>();
+        checkpointState.entrySet().stream().filter(entry -> checkpointIds.contains(entry.getKey()))
+                .sorted(Comparator.comparingLong((Map.Entry<UUID, SegmentControlCheckpoint.Operation> entry) ->
+                        entry.getValue().sequence()).reversed()).limit(2)
+                .forEach(entry -> retained.add(entry.getKey()));
+        if (rotationRoot != null) {
+            retained.add(rotationRoot.firstId());
+            retained.add(rotationRoot.secondId());
+        }
+        return retained;
     }
 
     private synchronized UUID checkpointId(SegmentControlCheckpoint.Reference reference) throws IOException {
@@ -1862,6 +1888,18 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 config, identity, SegmentControlFormat.Owner.BOOKIE, reference, maxLogBytes);
         resetRecoveredState();
         for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
+            if (snapshot.compactedCheckpointHistory()) {
+                SegmentControlParser.Command parsed = parse(operation.record(), operation.sequence());
+                if (parsed.type() == SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT) {
+                    SegmentControlCheckpoint.Reference predecessor = decodeCheckpoint(parsed, operation.sequence());
+                    if (operation.status() != Status.APPLIED_DURABLE.ordinal() + 1
+                            || predecessor.generation() <= checkpointGeneration
+                            || predecessor.generation() >= reference.generation()) {
+                        throw new IOException("Invalid compacted Bookie checkpoint predecessor");
+                    }
+                    checkpointGeneration = predecessor.generation() - 1;
+                }
+            }
             replay(operation.record(), operation.sequence(), operation.status());
         }
         if (checkpointGeneration != reference.generation() - 1) {

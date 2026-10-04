@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -928,13 +929,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (checkpointing || checkpointGeneration == Long.MAX_VALUE) {
                 throw new IOException("Arena checkpoint is active or its generation is exhausted");
             }
+            Set<UUID> retainedCheckpoints = retainedCheckpointIds();
             snapshot = new SegmentControlCheckpoint.Snapshot(appliedThrough, appliedOffset,
-                    appliedOperations.values().stream().map(operation -> new SegmentControlCheckpoint.Operation(
-                            operation.sequence(), operation.status().ordinal() + 1,
-                            SegmentControlFormat.encode(operation.command().type(), LOG_GENERATION,
-                                    operation.sequence(), operation.command().operationId(),
-                                    operation.command().operationGeneration(), operation.command().expectedGeneration(),
-                                    operation.command().body()))).toList());
+                    appliedOperations.values().stream().filter(operation ->
+                            !(operation.command() instanceof CheckpointCommit)
+                                    || operation.status() != Status.APPLIED_DURABLE
+                                    || retainedCheckpoints.contains(operation.command().operationId()))
+                            .map(operation -> new SegmentControlCheckpoint.Operation(
+                                    operation.sequence(), operation.status().ordinal() + 1,
+                                    SegmentControlFormat.encode(operation.command().type(), LOG_GENERATION,
+                                            operation.sequence(), operation.command().operationId(),
+                                            operation.command().operationGeneration(),
+                                            operation.command().expectedGeneration(),
+                                            operation.command().body()))).toList(), true);
             generation = checkpointGeneration + 1;
             slot = publishedCheckpoint == null ? 0 : 1 - publishedCheckpoint.slot();
             checkpointing = true;
@@ -943,7 +950,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         try {
             snapshot = new SegmentControlCheckpoint.Snapshot(snapshot.through(), snapshot.logOffset(),
                     snapshot.operations().stream().sorted(Comparator.comparingLong(
-                            SegmentControlCheckpoint.Operation::sequence)).toList());
+                            SegmentControlCheckpoint.Operation::sequence)).toList(),
+                    snapshot.compactedCheckpointHistory());
             SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.reference(
                     generation, slot, snapshot, maxLogBytes);
             SegmentControlCheckpoint.write(config, identity, SegmentControlFormat.Owner.ARENA,
@@ -1091,6 +1099,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         previousGeneration));
                 IsolatedSegmentFiles.syncDirectory(config.directory());
             }
+            synchronized (this) {
+                Set<UUID> retained = retainedCheckpointIds();
+                appliedOperations.entrySet().removeIf(entry -> entry.getValue().command() instanceof CheckpointCommit
+                        && entry.getValue().status() == Status.APPLIED_DURABLE && !retained.contains(entry.getKey()));
+            }
             return root;
         } catch (IOException | RuntimeException | Error failure) {
             synchronized (this) {
@@ -1118,6 +1131,20 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /** Retain the active physical roots and latest predecessors; business results remain unchanged. */
+    private Set<UUID> retainedCheckpointIds() {
+        Set<UUID> retained = new HashSet<>();
+        appliedOperations.values().stream().filter(operation -> operation.command() instanceof CheckpointCommit
+                && operation.status() == Status.APPLIED_DURABLE)
+                .sorted(Comparator.comparingLong(AppliedOperation::sequence).reversed()).limit(2)
+                .forEach(operation -> retained.add(operation.command().operationId()));
+        if (rotationRoot != null) {
+            retained.add(rotationRoot.firstId());
+            retained.add(rotationRoot.secondId());
+        }
+        return retained;
     }
 
     private synchronized UUID checkpointId(SegmentControlCheckpoint.Reference reference) throws IOException {
@@ -1699,6 +1726,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 throw new IOException("Repeated operation in Arena checkpoint");
             }
             appliedThrough = operation.sequence();
+            if (snapshot.compactedCheckpointHistory() && command instanceof CheckpointCommit commit
+                    && operation.status() == Status.APPLIED_DURABLE.ordinal() + 1) {
+                if (commit.operationGeneration().value() <= checkpointGeneration
+                        || commit.operationGeneration().value() >= reference.generation()) {
+                    throw new IOException("Invalid compacted Arena checkpoint predecessor");
+                }
+                checkpointGeneration = commit.expectedGeneration();
+            }
             if (apply(command).ordinal() + 1 != operation.status()) {
                 throw new IOException("Arena checkpoint conditional result mismatch");
             }

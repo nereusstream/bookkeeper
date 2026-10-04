@@ -763,3 +763,17 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 初次边界运行 `unified-wal-local-cfDCYQCO` 有1失败/3错误：跨worker barrier误用shard0、小entry可被COPY合批而非无净收益，以及错误断言仅检查外层消息且被失败close遮盖。夹具改为匹配shard、2000-byte payload使每COPY独占4096-byte batch、检查真实root cause和预期失败close，未弱化生产契约。失败不计PASS。最小五项通过后，最终七类回执 `unified-wal-local-9s7vU6na` 绑定上述父提交及208实际输入：311项中306通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。复现使用[运行期控制轮转](#运行期控制日志轮转)中的七类runner及style命令。
 
 [有限空间维护投影](../models/README.md#arena-空间压力维护投影)独立检查资源、控制优先级、冻结轮停止、已知拒绝保留需求与UNKNOWN停止。当前只有容量拒绝触发的同文件有限窗口维护：没有低水位/hysteresis、维护份额、共享filesystem/SST/control-checkpoint临时工作集总账、完整历史压缩、全部partial收敛、持续长期负载或多Arena证据；pool宽度碎片仍可能拒绝，FREE不增加filesystem余量。volatile outstanding诊断的热路径成本未测量，不宣称性能提升。一般OPEN错误恢复、掉电和完整A/C/D组合仍待验证；不关闭B17、步骤9/10或生产Gate，完整16步目标保持进行中。
+
+## 内部 checkpoint 历史的有界保留
+
+2026-10-04，修复业务状态固定时反复控制轮转仍耗尽 image 预算的结构性问题。原实现每次把全部内部 CHECKPOINT_COMMIT 再写进下一份 checkpoint。现行 Bookie/Arena image 只保留当前物理双 root 的 commit 身份及最新两个成功内部 commit，合计至多四项；原业务命令、首次条件结果、grant、credential、FENCE、tombstone、session 与失败条件仍按既有语义保留。成功轮转完成双 root、prefix、旧 journal 删除及必要目录同步后，才从进程内表移除过时内部成功 commit；当前 journal 后缀仍由原容量预算约束。普通 checkpoint 不提前清理 live 状态。
+
+[image v2](format-v1.md#内部-checkpoint-历史压缩与-image-v2)用 metadata 版本明确声明压缩语义，其他 control framing、reference、publication、rotation 及 DATA 字节不变。v2 可省略旧内部 generation，恢复仍检查每条保留记录、首次结果、严格递增的成功内部 generation 和目标 image 的准确 predecessor；必需 journal 后缀继续逐序号重放。v1 reader 保留原规则，不放行缺失内部历史的 v1。旧 v1 向量未改，独立生成两份 v2 空 image 向量。
+
+真实红回执 `unified-wal-local-p1ylR91a` 绑定父提交 `386478b6749250b737ea8dcc358d7e7414715b03`：208 输入中只有新增行为所在测试文件改变，207 个其余输入与父提交一致。真实固定业务状态、16384-byte control 预算的连续双 owner rotation 报 `Control checkpoint exceeds its control-state budget`，1 error，不能计 PASS。修复后同样预算下 96 次轮转，初始稳定轮与最后轮两 owner 的 image payload 大小相同；已有 DATA、原 INSTALL 首次结果、terminal T、旧 entry 幂等及新 entry 续写在健康 restart 后保持正确。
+
+另外两项真实存储回归验证：第一轮完整历史 image 改写为 v1 后可恢复；无业务状态的多轮 v2 支持非零首 sequence，缺失内部历史却标为 v1 的 image 均拒绝，最新单 image 损坏仍可从另一 root 恢复。固定业务状态中保留 sequence 0 时，缺失内部 generation 的伪 v1 也拒绝，不能只靠首 sequence 拒绝掩盖 generation 检查。原发布崩溃、进程退出、force 失败、suffix 与 DATA 恢复回归保留。
+
+最终七类 Java 回执 `unified-wal-local-LcPGoBvs` 绑定上述父提交与 210 实际输入：314 项中 309 通过、5 项 Linux 亲和性在 macOS 跳过，0 失败/错误；Spotless/Checkstyle 通过。复现命令沿用[运行期控制日志轮转](#运行期控制日志轮转)的七类 runner 和 style 检查。最终输入 hash 与当前工作区一致，历史 receipt 不改绑定。
+
+[有限内部历史投影](../models/README.md#内部-checkpoint-历史投影)检查内部项数量、当前 root 身份、业务结果保留、v1 完整历史及恢复 predecessor。当前只消除固定业务状态下 O(rotation) 的内部历史增长，不压缩业务 request-id/ALLOC/MOVE/FREE/session/tombstone 历史，不证明持续 create/write/read/delete 或共享 filesystem/SST/checkpoint 临时工作集有界。旧二进制/stable 格式、一般 OPEN 错误恢复、长期负载、多 Arena、掉电、正式性能和完整 A/C/D 组合仍待完成；步骤 8/10、B17 及生产 Gate 保持未完成，完整 16 步目标继续进行。

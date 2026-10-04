@@ -6488,6 +6488,183 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private void writeCheckpointAsLegacy(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner,
+                                                 SegmentControlCheckpoint.Reference reference) throws Exception {
+        SegmentControlCheckpoint.Snapshot compacted = SegmentControlCheckpoint.read(
+                config, identity(), owner, reference, 32768);
+        SegmentControlCheckpoint.write(config, identity(), owner, reference,
+                new SegmentControlCheckpoint.Snapshot(compacted.through(), compacted.logOffset(),
+                        compacted.operations()), new SegmentFileIo());
+    }
+
+    @Test
+    public void legacyCheckpointImagesRemainReadableBeforeInternalHistoryIsCompacted() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("legacy-checkpoint-history");
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, 1)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4), tombstone(48, 5));
+            storageWrite(storage, context(), 1);
+            ownerBarrier(storageOwner(storage, 0));
+            CompletableFuture<IsolatedSegmentStorage.ControlRotationResult> reply = new CompletableFuture<>();
+            assertTrue(storage.rotateControls(new IsolatedSegmentStorage.ControlRotationRequest((result, cause) -> {
+                if (cause == null) {
+                    reply.complete(result);
+                } else {
+                    reply.completeExceptionally(cause);
+                }
+            })));
+            IsolatedSegmentStorage.ControlRotationResult result = reply.get(5, TimeUnit.SECONDS);
+            assertEquals(IsolatedSegmentStorage.ControlRotationStatus.ROTATED, result.status());
+            ownerBarrier(storageOwner(storage, 0));
+            for (SegmentControlFormat.Owner owner : SegmentControlFormat.Owner.values()) {
+                SegmentControlRotation.Root root = owner == SegmentControlFormat.Owner.ARENA
+                        ? result.arenaRoot() : result.bookieRoot();
+                writeCheckpointAsLegacy(config, owner, root.first());
+                writeCheckpointAsLegacy(config, owner, root.second());
+            }
+        }
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, 1)) {
+            storage.restart();
+            assertEquals(1, storageWrite(storage, context(), 1).candidate().address().sequence());
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            assertTrue(bookie.admitNormal(context(48), filled(20, (byte) 5)).isEmpty());
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void compactedEmptyControlImagesSupportSequenceGapsAndRejectLegacyMisclassification() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("empty-checkpoint-history");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity())) {
+            SegmentControlRotation.Root arenaRoot = null;
+            SegmentControlRotation.Root bookieRoot = null;
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 32768);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            32768, key((byte) 3), VALIDATOR)) {
+                for (int cycle = 0; cycle < 8; cycle++) {
+                    arenaRoot = arena.rotate();
+                    bookieRoot = bookie.rotate();
+                }
+            }
+            for (SegmentControlFormat.Owner owner : SegmentControlFormat.Owner.values()) {
+                SegmentControlRotation.Root root = owner == SegmentControlFormat.Owner.ARENA ? arenaRoot : bookieRoot;
+                SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(
+                        config, identity(), owner, root.second(), 32768);
+                assertTrue(snapshot.compactedCheckpointHistory());
+                assertTrue(snapshot.operations().get(0).sequence() > 0);
+                Path first = SegmentControlCheckpoint.path(config, owner, root.first().slot());
+                Path second = SegmentControlCheckpoint.path(config, owner, root.second().slot());
+                byte[] firstBytes = Files.readAllBytes(first);
+                byte[] secondBytes = Files.readAllBytes(second);
+                writeCheckpointAsLegacy(config, owner, root.first());
+                writeCheckpointAsLegacy(config, owner, root.second());
+                if (owner == SegmentControlFormat.Owner.ARENA) {
+                    assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+                } else {
+                    assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
+                            32768, key((byte) 3), VALIDATOR));
+                }
+                Files.write(first, firstBytes);
+                Files.write(second, secondBytes);
+                // One image is insufficiently framed; the other must still restore the same empty authority.
+                Files.write(second, new byte[] {0}, StandardOpenOption.TRUNCATE_EXISTING);
+                if (owner == SegmentControlFormat.Owner.ARENA) {
+                    try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                        assertEquals(root.second().through() + 1, arena.appliedThrough());
+                        assertEquals(root.second().generation() + 1, arena.checkpoint().generation());
+                    }
+                } else {
+                    try (SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            32768, key((byte) 3), VALIDATOR)) {
+                        assertTrue(bookie.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+                        assertEquals(root.second().generation() + 1, bookie.checkpoint().generation());
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void repeatedControlRotationKeepsFixedBusinessStateWithinCheckpointBudgetAcrossRestart() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("bounded-checkpoint-history");
+        SegmentBatchFormat.Address first;
+        IsolatedSegmentStorage.ControlRotationResult stableRoots;
+        int bookieBytes = -1;
+        int arenaBytes = -1;
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, 1, 16384)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4), tombstone(48, 5));
+            first = storageWrite(storage, context(), 1).candidate().address();
+            SegmentOwnerLoop owner = storageOwner(storage, 0);
+            ownerBarrier(owner);
+            IsolatedSegmentStorage.ControlRotationResult rotated = null;
+            for (int cycle = 0; cycle < 96; cycle++) {
+                CompletableFuture<IsolatedSegmentStorage.ControlRotationResult> reply = new CompletableFuture<>();
+                assertTrue(storage.rotateControls(new IsolatedSegmentStorage.ControlRotationRequest((result, cause) -> {
+                    if (cause == null) {
+                        reply.complete(result);
+                    } else {
+                        reply.completeExceptionally(cause);
+                    }
+                })));
+                rotated = reply.get(5, TimeUnit.SECONDS);
+                assertEquals(IsolatedSegmentStorage.ControlRotationStatus.ROTATED, rotated.status());
+                ownerBarrier(owner);
+                if (cycle == 1) {
+                    bookieBytes = rotated.bookieRoot().second().payloadBytes();
+                    arenaBytes = rotated.arenaRoot().second().payloadBytes();
+                }
+            }
+            stableRoots = rotated;
+            assertEquals("Fixed Bookie business state must not accumulate internal checkpoint history",
+                    bookieBytes, rotated.bookieRoot().second().payloadBytes());
+            assertEquals("Fixed Arena business state must not accumulate internal checkpoint history",
+                    arenaBytes, rotated.arenaRoot().second().payloadBytes());
+            assertEquals(first.allocation(), storageWrite(storage, context(), 1).candidate().address().allocation());
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            assertTrue(bookie.admitNormal(context(48), filled(20, (byte) 5)).isEmpty());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    bookie.submitBatch(List.of(install(48, 3, (byte) 5))).get(0).status());
+            SegmentBatchFormat.Address second = storageWrite(storage, context(), 2).candidate().address();
+            assertEquals(first.allocation(), second.allocation());
+            assertEquals(2, second.sequence());
+        }
+        for (SegmentControlFormat.Owner owner : SegmentControlFormat.Owner.values()) {
+            SegmentControlRotation.Root root = owner == SegmentControlFormat.Owner.ARENA
+                    ? stableRoots.arenaRoot() : stableRoots.bookieRoot();
+            Path firstImage = SegmentControlCheckpoint.path(config, owner, root.first().slot());
+            Path secondImage = SegmentControlCheckpoint.path(config, owner, root.second().slot());
+            byte[] firstImageBytes = Files.readAllBytes(firstImage);
+            byte[] secondImageBytes = Files.readAllBytes(secondImage);
+            writeCheckpointAsLegacy(config, owner, root.first());
+            writeCheckpointAsLegacy(config, owner, root.second());
+            if (owner == SegmentControlFormat.Owner.ARENA) {
+                assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 16384));
+            } else {
+                assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
+                        16384, key((byte) 3), VALIDATOR));
+            }
+            Files.write(firstImage, firstImageBytes);
+            Files.write(secondImage, secondImageBytes);
+        }
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, 1, 16384)) {
+            storage.restart();
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            assertTrue(bookie.admitNormal(context(48), filled(20, (byte) 5)).isEmpty());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    bookie.submitBatch(List.of(install(48, 3, (byte) 5))).get(0).status());
+            assertEquals(first.allocation(), storageWrite(storage, context(), 1).candidate().address().allocation());
+            assertEquals(2, storageWrite(storage, context(), 2).candidate().address().sequence());
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+        }
+    }
+
     @Test
     public void automaticSpaceMaintenanceReclaimsSparseBlocksAndRestoresAdmissionBeforeAndAfterRestart()
             throws Exception {
@@ -7043,8 +7220,16 @@ public class SegmentBookieControlLogTest {
                 SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
                         1024 * 1024, key((byte) 3), VALIDATOR)) {
             SegmentControlCheckpoint.Reference reference = log.checkpoint();
+            assertArrayEquals(checkpointVector("bookie-empty-checkpoint-v2.hex"),
+                    Files.readAllBytes(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.BOOKIE, 0)));
+            assertTrue(SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.BOOKIE,
+                    reference, 1024 * 1024).compactedCheckpointHistory());
+            SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.BOOKIE, reference,
+                    new SegmentControlCheckpoint.Snapshot(-1, 4096, List.of()), new SegmentFileIo());
             assertArrayEquals(checkpointVector("bookie-empty-checkpoint-v1.hex"),
                     Files.readAllBytes(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.BOOKIE, 0)));
+            assertFalse(SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.BOOKIE,
+                    reference, 1024 * 1024).compactedCheckpointHistory());
             try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, 0),
                     StandardOpenOption.READ)) {
                 ByteBuffer page = ByteBuffer.allocate(4096);
