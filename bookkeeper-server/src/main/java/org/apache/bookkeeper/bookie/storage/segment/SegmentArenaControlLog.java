@@ -1151,6 +1151,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Called before exposing a new writer, under its existing directory exclusion. */
     void beginDataSession(IsolatedSegmentFiles writer) throws IOException {
+        writer.requireStartingSession(this);
         DataSession command;
         synchronized (this) {
             requireQuiescentRecovery(writer.config(), writer.identity());
@@ -1159,6 +1160,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 throw new IOException("DATA session cannot adopt an active or legacy allocated writer");
             }
             command = new DataSession(UUID.randomUUID(), new Generation(sessionEpoch + 1), sessionEpoch, true);
+            long required = recordBytes(command) + sessionCloseBytes(0) + rotationReserveBytes();
+            if (required > maxLogBytes - nextOffset) {
+                if (rotationReserveBytes() == 0 || required > maxLogBytes - SegmentControlRotation.FIRST_RECORD) {
+                    throw new IOException("Arena control log capacity exhausted");
+                }
+                // Recovery validated and synced DATA under this writer's lock; the session is still CLOSED.
+                // Do not rotate Bookie here: the retained inventory is bound to its recovery cut.
+                rotate();
+            }
             sessionOwner = writer;
             sessionCloseReserved = true;
         }

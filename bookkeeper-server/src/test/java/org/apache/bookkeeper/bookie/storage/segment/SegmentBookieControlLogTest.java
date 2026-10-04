@@ -5824,11 +5824,15 @@ public class SegmentBookieControlLogTest {
     }
 
     private IsolatedSegmentStorage rotatingStorage(IsolatedSegmentConfig config, int workers) {
+        return rotatingStorage(config, workers, 32768);
+    }
+
+    private IsolatedSegmentStorage rotatingStorage(IsolatedSegmentConfig config, int workers, long controlBytes) {
         int buffers = workers * 2;
         return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
                 new SegmentExecutionGroup.Settings(workers, 3, 8, buffers, 4096, 4096,
                         buffers * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
-                new IsolatedSegmentStorage.Limits(32768, 16, 32, 1, 1,
+                new IsolatedSegmentStorage.Limits(controlBytes, 16, 32, 1, 1,
                         new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
     }
 
@@ -5911,6 +5915,193 @@ public class SegmentBookieControlLogTest {
             }
         }
         assertTrue("Arena ordinary capacity must be exhausted", full);
+    }
+
+    private SegmentBatchFormat.Address fullClosedControlGraph(IsolatedSegmentConfig config, int workers)
+            throws Exception {
+        return fullClosedControlGraph(config, workers, 32768);
+    }
+
+    private SegmentBatchFormat.Address fullClosedControlGraph(IsolatedSegmentConfig config, int workers,
+                                                               long controlBytes) throws Exception {
+        SegmentBatchFormat.Address first;
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, workers, controlBytes)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            first = storageWrite(storage, context(), 1).candidate().address();
+            ownerBarrier(storageOwner(storage, 0));
+            try (IsolatedSegmentFiles.DataReadLease pin =
+                         ((IsolatedSegmentFiles) storageField(storage, "files")).pinDataRead()) {
+                exhaustGraphControlLogs(storage, first.allocation());
+                // Stop the actual owner pump while pinned, then drain once and attest a healthy CLOSE.
+                ((SegmentExecutionGroup) storageField(storage, "execution")).stopAdmission();
+            }
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), controlBytes)) {
+            assertFalse(arena.hasUnclosedDataSession());
+            assertEquals(1, arena.dataSessionEpoch());
+            assertTrue(controlBytes - Files.size(config.directory().resolve("arena-control")) < 736);
+            assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2)));
+        }
+        return first;
+    }
+
+    @Test
+    public void fullClosedControlLogsRestartBeforeNextOpenAndPreserveRecoveredData() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("full-closed-restart-" + workers);
+            SegmentBatchFormat.Address first = fullClosedControlGraph(config, workers);
+            byte[] bookieBefore = Files.readAllBytes(config.directory().resolve("bookie-control"));
+            try (IsolatedSegmentStorage storage = rotatingStorage(config, workers)) {
+                storage.restart();
+                SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+                assertEquals(2, arena.dataSessionEpoch());
+                assertTrue(arena.hasUnclosedDataSession());
+                assertTrue(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2)));
+                assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE, 2)));
+                assertArrayEquals(bookieBefore, Files.readAllBytes(config.directory().resolve("bookie-control")));
+                assertEquals(first, storageWrite(storage, context(), 1).candidate().address());
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                    assertEquals(1, read.result().record().entryId());
+                }
+                SegmentBatchFormat.Address second = storageWrite(storage, context(), 2).candidate().address();
+                assertEquals(2, second.sequence());
+                assertTrue("Cold restart must skip the old granted tail", first.allocation() != second.allocation());
+                ownerBarrier(storageOwner(storage, 0));
+            }
+            try (IsolatedSegmentStorage storage = rotatingStorage(config, workers)) {
+                storage.restart();
+                for (long entryId : new long[] {1, 2}) {
+                    assertEquals(entryId, storageWrite(storage, context(), entryId).candidate().address().sequence());
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                        assertEquals(entryId, read.result().record().entryId());
+                    }
+                }
+                assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 3)));
+            }
+        }
+    }
+
+    @Test
+    public void fullClosedControlStartupRequiresWriterExclusionAndSuccessfulRecoverySync() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("full-closed-restart-protection");
+        fullClosedControlGraph(config, 1);
+        SegmentFileIo controlIo = new SegmentFileIo();
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 32768, controlIo);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        32768, key((byte) 3), VALIDATOR)) {
+            SegmentFileIo recoveryIo = new SegmentFileIo();
+            try (SegmentDataFileLock held = SegmentDataFileLock.open(config.directory())) {
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openForLocalResults(
+                        config, identity(), arena, bookie, recoveryIo, 32, 4));
+                assertEquals(0, recoveryIo.forces);
+                assertEquals(0, controlIo.writes);
+            }
+            SegmentFileIo failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.openForLocalResults(
+                    config, identity(), arena, bookie, failedSync, 32, 4));
+            assertEquals(1, failedSync.forces);
+            assertEquals(0, controlIo.writes);
+            assertEquals(1, arena.dataSessionEpoch());
+            assertFalse(arena.hasUnclosedDataSession());
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            SegmentFileIo pausedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            FutureTask<IsolatedSegmentFiles> opening = new FutureTask<>(() -> IsolatedSegmentFiles.openForLocalResults(
+                    config, identity(), arena, bookie, pausedSync, 32, 4));
+            Thread opener = new Thread(opening, "cold-control-startup-test");
+            opener.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2)));
+                release.countDown();
+                try (IsolatedSegmentFiles files = opening.get(5, TimeUnit.SECONDS)) {
+                    assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                    assertTrue(files.supportsLocalResults());
+                    assertEquals(2, arena.dataSessionEpoch());
+                    assertTrue(arena.hasUnclosedDataSession());
+                    SegmentPointRead.Location location = files.localResultInventory(arena, 0).entries().get(0);
+                    assertEquals(1, SegmentPointRead.read(config, identity(), arena, location).record().entryId());
+                }
+            } finally {
+                release.countDown();
+                opener.join(5000);
+            }
+            assertFalse(opener.isAlive());
+            assertFalse(arena.hasUnclosedDataSession());
+        }
+        try (SegmentDataFileLock released = SegmentDataFileLock.open(config.directory())) {
+            assertTrue(released.lock().isValid());
+        }
+    }
+
+    @Test
+    public void fullClosedControlStartupRejectsCorruptDataAndRotationFailureWithoutOpen() throws Exception {
+        for (String fault : List.of("data", "force", "candidate", "open-force")) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("full-closed-restart-failure-" + fault);
+            SegmentBatchFormat.Address first = fullClosedControlGraph(config, 1);
+            if (fault.equals("data")) {
+                try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                        StandardOpenOption.WRITE)) {
+                    data.write(ByteBuffer.wrap(new byte[] {99}), first.offset() + 128);
+                    data.force(false);
+                }
+            } else if (fault.equals("candidate")) {
+                Files.write(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2), new byte[4096]);
+            }
+            SegmentFileIo controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1,
+                    fault.equals("force") ? 1 : fault.equals("open-force") ? 3 : -1, false);
+            SegmentFileIo recoveryIo = new SegmentFileIo();
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 32768, controlIo);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            32768, key((byte) 3), VALIDATOR)) {
+                assertThrows(IOException.class, () -> IsolatedSegmentFiles.openForLocalResults(
+                        config, identity(), arena, bookie, recoveryIo, 32, 4));
+                assertEquals(fault.equals("data") ? 0 : 1, recoveryIo.forces);
+                assertEquals(fault.equals("data") ? 0 : fault.equals("force") ? 1
+                        : fault.equals("open-force") ? 3 : 2, controlIo.forces);
+                assertEquals(1, arena.dataSessionEpoch());
+                assertFalse(arena.hasUnclosedDataSession());
+            }
+            try (SegmentDataFileLock released = SegmentDataFileLock.open(config.directory());
+                    SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                assertTrue(released.lock().isValid());
+                assertEquals(fault.equals("open-force") ? 2 : 1, replay.dataSessionEpoch());
+                assertEquals(fault.equals("open-force"), replay.hasUnclosedDataSession());
+            }
+            if (fault.equals("open-force")) {
+                try (IsolatedSegmentStorage storage = rotatingStorage(config, 1)) {
+                    IOException cause = assertThrows(IOException.class, storage::restart);
+                    assertTrue(cause.getMessage(), cause.getMessage().contains("Unclosed DATA writer session"));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void coldControlStartupDoesNotRotateWhenFreshJournalCannotReserveOpenAndClose() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("full-closed-restart-too-small");
+        fullClosedControlGraph(config, 1, 8800);
+        byte[] before = Files.readAllBytes(config.directory().resolve("arena-control"));
+        SegmentFileIo controlIo = new SegmentFileIo();
+        SegmentFileIo recoveryIo = new SegmentFileIo();
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 8800, controlIo);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        8800, key((byte) 3), VALIDATOR)) {
+            IOException cause = assertThrows(IOException.class, () -> IsolatedSegmentFiles.openForLocalResults(
+                    config, identity(), arena, bookie, recoveryIo, 32, 4));
+            assertTrue(cause.getMessage(), cause.getMessage().contains("control log capacity exhausted"));
+            assertEquals(1, recoveryIo.forces);
+            assertEquals(0, controlIo.writes);
+            assertEquals(1, arena.dataSessionEpoch());
+            assertFalse(arena.hasUnclosedDataSession());
+            assertArrayEquals(before, Files.readAllBytes(config.directory().resolve("arena-control")));
+            assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2)));
+        }
     }
 
     @Test
@@ -7096,6 +7287,8 @@ public class SegmentBookieControlLogTest {
             storage.restart();
             installStorage(storage, install(45, 1, (byte) 5), activate(45, 2));
             storageWrite(storage, context(45), 1);
+            // The local-result callback may precede return of the sole DATA failure-notification slot.
+            ownerBarrier(storageOwner(storage, 1));
             storageWrite(storage, context(45), 2);
         }
         // Four global slots become one per shard; two entries on shard 1 cannot fit its partition.

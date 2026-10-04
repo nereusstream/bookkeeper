@@ -540,3 +540,18 @@ Source死亡/selector/generation、CLOSED witness、真实内存、I/O terminal�
 正向全部8个Next动作有非零coverage。回执 `unified-wal-model-tqstjlab` 绑定父提交 `59d1c4cfe0cb4e03ee95e594fa81310301fdbb3a`、143个输入和283个checksum；26完整正向PASS、68指定反例。超大请求触发轮转、pressure下继续接受新entry、资源暂不可用便忘记需求三个候选分别被指定性质否证。[真实容量恢复](../local-storage/README.md#控制容量压力的自动轮转)另证真实journal字节、pin解除、同步quarantine拒绝的唤醒、原pool续写及错误可见性。
 
 fresh-fit与实际terminal/轮转结果为输入假设，不能推出真实CRC/目录force、所有线程/通知队列或filesystem预算正确。有限终态保留CHECK_DEADLOCK FALSE，不证明一般liveness、低水位调度或持续负载；历史receipt和父提交designInputs哈希不重绑，完整A/C/D及组合、B17和生产Gate未完成。
+
+## 冷启动控制容量投影
+
+`ColdControlStartup.tla` 展开一次冷启动，将真实CLOSED、同一writer排他、当前必要DATA有效性、恢复sync与OPEN/CLOSE/双root的fresh-fit作为有限输入。已有容量够时直接下一OPEN，不足且fresh-fit时只轮转Arena再OPEN，无法恢复时失败；真正成功的OPEN后才发布ready。Bookie cut和双root字节协议分别由真实恢复/既有ArenaRotation负责，本投影不是它们的完整组合或物理崩溃重演。
+
+| 配置 | generated / distinct / queue | depth / diameter | 时间 / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-cold-control-startup | 148 / 120 / 0 | 6 / 6 | 0.809 s / 107,757,568 bytes | PASS |
+| ce-cold-control-startup-guard | 83 / 61 / 35 | 2 / 不适用 | 0.795 s / 106,774,528 bytes | EXPECTED_COUNTEREXAMPLE: RotationHasValidatedProtectedClosedData |
+| ce-cold-control-startup-open | 135 / 107 / 20 | 4 / 不适用 | 0.792 s / 107,429,888 bytes | EXPECTED_COUNTEREXAMPLE: OpenHasRecoveredCapacity |
+| ce-cold-control-startup-failure | 97 / 69 / 35 | 3 / 不适用 | 0.711 s / 106,987,520 bytes | EXPECTED_COUNTEREXAMPLE: ReadyHasDurableOpenAndNoFailure |
+
+正向六个生产动作Recover/Capacity/Rotation/Open/Publish/Fail的coverage均非零；`PrematureRotation` 是只在敏感性配置启用的错误候选，正向为零。回执 `unified-wal-model-4g96l4uk` 绑定父提交 `b03b1125ea0c34dacbdd4bf1447aaa6ca7e0a442`、148个实际输入和295个checksum；27正向完整PASS、71指定反例。绕过恢复/保护、容量未恢复先OPEN和失败发布ready分别被指定性质否证。[真实冷启动路径](../local-storage/README.md#满控制日志的健康冷启动)独立提供满日志、锁、CRC/force、恢复数据、新grant和未知OPEN证据。
+
+此投影不模拟CRC、目录force、真实排他锁实现或全部reuse witness字节上限；这些均为输入边界，不因模型PASS就推广为全部持久化/并发正确。有限终态CHECK_DEADLOCK FALSE，liveness、掉电、filesystem工作集、完整A/C/D与组合、B17和生产Gate仍未完成；历史receipt/designInputs保持原绑定。

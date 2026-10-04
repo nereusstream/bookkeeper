@@ -303,3 +303,13 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | PauseWaitsForOwner / FailureIsObservableAndStopped | 实际I/O终结不提前解冻图；UNKNOWN原owner保存cause、停止准入，不因日志failed使pressure谓词为false就伪造恢复 |
 
 资源总账、字节/force、全notify路径与长期liveness仍由相应真实验证/完整模型承担，本有限投影不关闭B17或生产Gate。
+
+## 冷启动控制容量
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| RotationHasValidatedProtectedClosedData | 当前必要DATA检查/同步及同一writer排他先于Arena冷轮转，实际会话保持CLOSED；模型把锁与恢复结果作为输入，真实暂停/冲突/失败测试独立验证 |
+| OpenHasRecoveredCapacity / FreshJournalTooSmallNeverRotates | 旧日志不足才检查fresh-fit，包含下一CLOSE真实reuse witness及双root保留量；适配后轮转先于下一OPEN，不能恢复容量时不消费checkpoint |
+| ReadyHasDurableOpenAndNoFailure | sessionReady只在OPEN成功后设置，owner bootstrap后再开放图；checkpoint/候选/OPEN force失败不发布成功，真实未知OPEN继续拒绝恢复 |
+
+有限终态CHECK_DEADLOCK FALSE；byte/force、崩溃、完整控制并发、liveness及生产Gate不由本投影闭合。

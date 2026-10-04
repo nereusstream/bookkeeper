@@ -337,3 +337,14 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | fresh-fit拒绝分支 | `oversizedControlBatchDoesNotTriggerUnproductiveAutomaticRotation`：300项合法batch数量的真实字节超限、没有新journal、DATA继续成功；不是用非法batch数量替代容量验证 |
 
 模型只检查有限安全关系，不证明所有park/unpark或真实事件最终完成；这些真实回归仍保持局部、可复现的deadline与证据边界。
+
+## 冷启动控制容量
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| Recover | 既有CLOSED/控制门槛、同一DATA文件排他与真实扫描/sync；`fullClosedControlStartupRequiresWriterExclusionAndSuccessfulRecoverySync` 验证外部锁冲突、恢复失败零控制写入、force暂停至返回同一锁仍持有 |
+| Capacity/Rotation | `beginDataSession` 按实际OPEN+CLOSE/双root保留量选择一次既有Arena轮转，Bookie cut不动；`fullClosedControlLogsRestartBeforeNextOpenAndPreserveRecoveredData` 真实旧生产红/新生产绿，1/4 worker、点读/幂等/新grant及再次重启；`coldControlStartupDoesNotRotateWhenFreshJournalCannotReserveOpenAndClose` 验证fresh-fit失败无checkpoint/OPEN |
+| Open/Publish/Fail | 既有durable OPEN及原owner bootstrap；`fullClosedControlStartupRejectsCorruptDataAndRotationFailureWithoutOpen` 的真实DATA损坏、checkpoint force、无效候选、OPEN force失败分别停止startup，OPEN未知状态不伪造健康CLOSE |
+| PrematureRotation | 只为否证绕过恢复/保护的敏感性候选；正向禁用，不是新的生产入口 |
+
+本投影不包含双root字节协议或物理崩溃重演；这些旧验证与实际故障门槛保持独立，不宣称完整A+C或生产ready。

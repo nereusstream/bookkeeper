@@ -733,4 +733,18 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 
 最终 Java 回执 `unified-wal-local-Bk6PII5c` 绑定上述父提交与207个实际输入；相关七类303项，298通过、5项Linux亲和性在macOS跳过、0失败/错误，Spotless/Checkstyle通过。复现命令沿用[上一增量](#运行期控制日志轮转)的七类runner与必要style检查。共享owner pump和控制容量语义受影响，因此在最小新行为通过后扩大至既有七类，不重绑历史receipt。
 
-[控制容量有限投影](../models/README.md#控制容量恢复投影)检查fresh-fit、pressure准入、阻塞时保留需求、真实终结后才提交I/O及原owner恢复。当前仍以实际容量拒绝为触发，没有提前低水位/hysteresis、完整control/checkpoint临时文件工作集预留或一般维护调度。 正常CLOSE后控制日志仍满时，restart在新OPEN之前的容量维护路径尚未接通/验证；本节健康重启证据只覆盖运行期轮转成功后的状态。SST/共享filesystem、多Arena、持续create/write/read/delete、全部partial任务收敛、OPEN错误恢复、掉电和正式性能仍未完成；不关闭B17、步骤8/10或生产Gate，完整16步目标保持进行中。
+[控制容量有限投影](../models/README.md#控制容量恢复投影)检查fresh-fit、pressure准入、阻塞时保留需求、真实终结后才提交I/O及原owner恢复。当前仍以实际容量拒绝为触发，没有提前低水位/hysteresis、完整control/checkpoint临时文件工作集预留或一般维护调度。 本节回执的健康重启只覆盖运行期轮转成功后的状态；满CLOSED冷启动的后续实现与新证据见[下一节](#满控制日志的健康冷启动)。SST/共享filesystem、多Arena、持续create/write/read/delete、全部partial任务收敛、OPEN错误恢复、掉电和正式性能仍未完成；不关闭B17、步骤8/10或生产Gate，完整16步目标保持进行中。
+
+## 满控制日志的健康冷启动
+
+2026-10-04，补齐正常CLOSE后Arena journal仍满、运行期owner尚未启动时下一OPEN无法写入的路径。`IsolatedSegmentFiles.openForLocalResults` 仍先重放控制、检查真实CLOSED、取得DATA目录排他、校验当前必要DATA并完成恢复同步，再恢复派生索引。`startSession` 持有同一files monitor和真实writer lock；Arena核对该实际起始writer后，按下一OPEN、全部当前reuse尾部所需CLOSE和双root保留量判断容量。旧journal不足而新journal足够时，在sessionOwner尚未设置的真实CLOSED状态下复用离线Arena轮转；成功后才提交/force/apply OPEN及继续owner bootstrap。不增加线程、格式、重试队列或绕过quarantine/未关闭会话。
+
+冷启动不轮转Bookie，以保留恢复inventory绑定的Bookie cut；正常恢复新OPEN仍递增epoch，旧授权tail不能重新使用。runtime rotation保留OPEN/pool/cursor的既有行为另有回归。新journal连同保留量仍太小时，启动拒绝且不写checkpoint或OPEN；轮转失败不伪造sessionReady。OPEN本身force失败仍有未知结果：不会以失败清理写出健康CLOSE，当前文件重放若看到完整OPEN仍拒绝下一次本地重启。
+
+真实旧生产反例 `unified-wal-local-MXOxKQkF` 绑定父提交 `b03b1125ea0c34dacbdd4bf1447aaa6ca7e0a442`：207个输入中206个非测试输入均与父提交一致，真实full graph排空后CLOSED，下一OPEN报Arena容量耗尽，不能计PASS。新测试覆盖1/4 worker满双控制日志的健康restart、原数据点读/幂等、下一新grant写入、再次重启不做无收益轮转；还覆盖实际DATA lock冲突、恢复force暂停期间持续排他、恢复sync失败/CRC损坏先于轮转、checkpoint commit force失败、真实无效Arena候选及OPEN force未知结果，以及8800-byte journal无法承载新OPEN+CLOSE预留时零控制写入。
+
+最终Java回执 `unified-wal-local-Xz1hWP37` 绑定上述父提交与207个实际输入，七类307项中302通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。新故障与startup门槛先执行最小相关集，再因共享startup/session契约扩至既有七类；复现命令沿用[运行期增量](#运行期控制日志轮转)，没有绕过必要检查或修改历史receipt。
+
+首次七类回归 `unified-wal-local-eo0rurBY` 在既有 `storageGraphCleansFailedBootstrapAndEnforcesPartitionedHotCapacity` 的第二条写入准入断言失败。静态路径确认local-result回调之后才关闭failure lease、排队归还唯一notification ticket，因此回调唤醒测试不代表该额度已归还。夹具在第一条写入后等待既有owner barrier再提交第二条，保留清理/分区容量及所有结果断言，不改生产准入；失败回执不计PASS。
+
+[冷启动有限投影](../models/README.md#冷启动控制容量投影)独立检查恢复/锁/CLOSED先于轮转、容量先于OPEN、失败不发布ready；物理双root、字节CRC与目录force仍由既有真实路径/独立模型承担。没有执行掉电、共享filesystem/SST/control-checkpoint临时空间总账、持续长期负载、多Arena或完整A+C；B17、步骤8/10及生产Gate保持未完成，完整16步目标继续进行。

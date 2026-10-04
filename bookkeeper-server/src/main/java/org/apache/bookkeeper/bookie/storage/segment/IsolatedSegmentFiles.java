@@ -780,6 +780,19 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         sessionReady = true;
     }
 
+    /** Startup maintenance must retain the same DATA exclusion from validation through durable OPEN. */
+    void requireStartingSession(SegmentArenaControlLog authority) throws IOException {
+        if (!Thread.holdsLock(this) || closed || reclamation != null || activeIo != 0 || pendingReservations != 0
+                || sessionAuthority != authority || sessionReady || !writerLock.lock().isValid()) {
+            throw new IOException("DATA session startup requires the actual protected writer");
+        }
+        for (boolean fileFailed : failed) {
+            if (fileFailed) {
+                throw new IOException("Failed DATA writer cannot start another session");
+            }
+        }
+    }
+
     synchronized SegmentDataRecovery.PhysicalInventory startupInventory() {
         if (closed || startupInventory == null) {
             throw new IllegalStateException("No retained DATA startup inventory");
