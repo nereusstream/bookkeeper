@@ -5753,7 +5753,7 @@ public class SegmentBookieControlLogTest {
         return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
                 new SegmentExecutionGroup.Settings(workers, ioThreads, controlSlots, buffers, 4096, 4096,
                         buffers * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
-                new IsolatedSegmentStorage.Limits(1024 * 1024, hotEntries, indexedEntries, 1,
+                new IsolatedSegmentStorage.Limits(1024 * 1024, hotEntries, indexedEntries, 1, 1,
                         new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
     }
 
@@ -5780,8 +5780,19 @@ public class SegmentBookieControlLogTest {
 
     private static SegmentDataPhysicalDriver.NormalResult storageWrite(IsolatedSegmentStorage storage,
             ProfileLedgerContext context, long entryId) throws Exception {
+        SegmentDataPhysicalDriver.NormalResult result = storageWriteReply(storage, context, entryId);
+        assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+        return result;
+    }
+
+    private static SegmentDataPhysicalDriver.NormalResult storageWriteReply(IsolatedSegmentStorage storage,
+            ProfileLedgerContext context, long entryId) throws Exception {
+        return storageWriteReply(storage, context, entryId, entry(context, entryId));
+    }
+
+    private static SegmentDataPhysicalDriver.NormalResult storageWriteReply(IsolatedSegmentStorage storage,
+            ProfileLedgerContext context, long entryId, ByteBuf bytes) throws Exception {
         CompletableFuture<SegmentDataPhysicalDriver.NormalResult> reply = new CompletableFuture<>();
-        ByteBuf bytes = entry(context, entryId);
         try {
             assertTrue(storage.submitNormal(context, filled(20, (byte) 5), bytes,
                     new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
@@ -5795,9 +5806,139 @@ public class SegmentBookieControlLogTest {
         } finally {
             bytes.release();
         }
-        SegmentDataPhysicalDriver.NormalResult result = reply.get(5, TimeUnit.SECONDS);
-        assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
-        return result;
+        return reply.get(5, TimeUnit.SECONDS);
+    }
+
+    private IsolatedSegmentStorage maintenanceStorage(IsolatedSegmentConfig config, int maintenanceBlocks) {
+        return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
+                new SegmentExecutionGroup.Settings(1, 3, 6, 2, 65536, 65536,
+                        2 * (65536L + 4095) + 65536, Duration.ofSeconds(5)),
+                new IsolatedSegmentStorage.Limits(1024 * 1024, 4096, 4096, 1, maintenanceBlocks,
+                        new SegmentDataPhysicalDriver.BatchLimits(65536, 1, Duration.ofSeconds(30))));
+    }
+
+    private static SegmentOwnerLoop storageOwner(IsolatedSegmentStorage storage, int shard) throws Exception {
+        var field = IsolatedSegmentStorage.class.getDeclaredField("execution");
+        field.setAccessible(true);
+        return ((SegmentExecutionGroup) field.get(storage)).owner(shard);
+    }
+
+    @Test
+    public void declaredTwoBlockMaintenanceWorksetCompactsWhileSmallerBoundRefusesBeforeAlloc() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("reserve-two"),
+                1, 4, 1, 4096 + 5 * SegmentArenaControlLog.BLOCK_BYTES, 4096, 32768, 16,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentStorage storage = maintenanceStorage(config, 2)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4));
+            SegmentOwnerLoop owner = storageOwner(storage, 0);
+            for (int block = 0; block < 3; block++) {
+                for (int row = 0; row < 28; row++) {
+                    ProfileLedgerContext context = context(row < 10 ? 44 : 48);
+                    long entryId = block * 28 + row + 1;
+                    assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                            storageWriteReply(storage, context, entryId,
+                                    entry(context, entryId, -1, entryId * 32768, (byte) 7, 32768)).status());
+                    ownerBarrier(owner);
+                }
+            }
+            installStorage(storage, tombstone(48, 5));
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                    storageWriteReply(storage, context(), 85,
+                            entry(context(), 85, -1, 85 * 32768, (byte) 7, 32768)).status());
+        }
+        try (IsolatedSegmentStorage storage = maintenanceStorage(config, 1)) {
+            storage.restart();
+            IsolatedSegmentStorage.CompactionResult refused = compactShard(storage, 951, 0);
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.TRANSIENT_UNAVAILABLE, refused.status());
+            assertEquals(0, refused.destinationBytes());
+            assertEquals(0, refused.movedEntries());
+            assertEquals(0, refused.freedAllocations());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(4096 + 3 * SegmentArenaControlLog.BLOCK_BYTES, arena.grantedHighWatermark(0));
+            assertEquals(0, arena.currentMoveLocations().size());
+            assertTrue(arena.retiredAllocations().isEmpty());
+        }
+        try (IsolatedSegmentStorage storage = maintenanceStorage(config, 2)) {
+            storage.restart();
+            IsolatedSegmentStorage.CompactionResult reclaimed = compactShard(storage, 952, 0);
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, reclaimed.status());
+            assertEquals(30, reclaimed.movedEntries());
+            assertEquals(3, reclaimed.freedAllocations());
+            assertEquals(2 * SegmentArenaControlLog.BLOCK_BYTES, reclaimed.destinationBytes());
+            assertEquals(SegmentArenaControlLog.BLOCK_BYTES, reclaimed.netFreedBytes());
+            for (int block = 0; block < 3; block++) {
+                for (int row = 0; row < 10; row++) {
+                    long entryId = block * 28 + row + 1;
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                        assertEquals(SegmentBatchFormat.RELOCATION_COPY, read.result().record().origin());
+                    }
+                    assertEquals(reclaimed.destinationAllocation(), storageWriteReply(storage, context(), entryId,
+                            entry(context(), entryId, -1, entryId * 32768, (byte) 7, 32768)).candidate()
+                            .address().allocation());
+                }
+            }
+        }
+    }
+
+    @Test
+    public void foregroundRefillPreservesCompactionCapacityAndRestoresAdmissionAfterRestart() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("foreground-reserve-" + workers);
+            long destination;
+            try (IsolatedSegmentStorage storage = storage(config, workers, 6, 4096, 4096, 3)) {
+                storage.startNew();
+                installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                        install(48, 3, (byte) 5), activate(48, 4));
+                SegmentOwnerLoop owner = storageOwner(storage, 0);
+                // Only real ordinary writes allocate and fill these two sources; no fixture grants.
+                for (int block = 0; block < 2; block++) {
+                    storageWrite(storage, context(), block + 1);
+                    ownerBarrier(owner);
+                    for (int row = 1; row < 256; row++) {
+                        storageWrite(storage, context(48), block * 255 + row);
+                        ownerBarrier(owner);
+                    }
+                }
+                installStorage(storage, tombstone(48, 5));
+                SegmentDataPhysicalDriver.NormalResult refused = storageWriteReply(storage, context(), 3);
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE, refused.status());
+                assertNull(refused.candidate());
+                IsolatedSegmentStorage.CompactionResult reclaimed = compactShard(storage, 950, 0);
+                assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, reclaimed.status());
+                assertEquals(2, reclaimed.movedEntries());
+                assertEquals(2, reclaimed.freedAllocations());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, reclaimed.destinationBytes());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, reclaimed.netFreedBytes());
+                destination = reclaimed.destinationAllocation();
+                for (long entryId : new long[] {1, 2}) {
+                    assertEquals(destination, storageWrite(storage, context(), entryId).candidate()
+                            .address().allocation());
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                        assertEquals(SegmentBatchFormat.RELOCATION_COPY, read.result().record().origin());
+                    }
+                }
+            }
+            try (IsolatedSegmentStorage storage = storage(config, workers, 6, 4096, 4096, 3)) {
+                storage.restart();
+                SegmentPointRead.Location added = storageWrite(storage, context(), 3).candidate();
+                assertEquals(2, added.address().generation().value());
+                assertEquals(4096, added.address().offset());
+                assertEquals(514, added.address().sequence()); // Rejected refill did not consume 513; COPY did.
+                for (long entryId : new long[] {1, 2}) {
+                    assertEquals(destination, storageWrite(storage, context(), entryId).candidate()
+                            .address().allocation());
+                }
+                installStorage(storage, install(45, 6, (byte) 5), activate(45, 7));
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                        storageWriteReply(storage, context(45), 1).status());
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 3).result()) {
+                    assertEquals(3, read.result().record().entryId());
+                }
+            }
+        }
     }
 
     private static ReadReply storageRead(IsolatedSegmentStorage storage, ProfileLedgerContext context, long entryId)
@@ -8255,8 +8396,12 @@ public class SegmentBookieControlLogTest {
                                SegmentDataPhysicalDriver.NormalResult tail) { }
 
     private IsolatedSegmentConfig coverageRecoveryConfig(String name) {
+        return coverageRecoveryConfig(name, 4L * 1024 * 1024);
+    }
+
+    private IsolatedSegmentConfig coverageRecoveryConfig(String name, long bytesPerFile) {
         return new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve(name), 1, 4, 1,
-                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                bytesPerFile, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
     }
 
     /** Stop admission while page publication is paused, leaving two real durable batches outside its native cut. */
@@ -8312,7 +8457,7 @@ public class SegmentBookieControlLogTest {
 
     @Test
     public void allocationControlOrderSurvivesRotationAndBothFullAndCoveredStorageRestart() throws Exception {
-        IsolatedSegmentConfig config = coverageRecoveryConfig("allocation-control-order");
+        IsolatedSegmentConfig config = coverageRecoveryConfig("allocation-control-order", 5L * 1024 * 1024);
         long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
@@ -9302,7 +9447,7 @@ public class SegmentBookieControlLogTest {
 
     @Test
     public void coveredRestartReusesNativeGenerationAndValidatesOnlyUncoveredBodies() throws Exception {
-        IsolatedSegmentConfig config = coverageRecoveryConfig("covered-restart");
+        IsolatedSegmentConfig config = coverageRecoveryConfig("covered-restart", 5L * 1024 * 1024);
         CoveredTail source = createCoveredTail(config);
         try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
@@ -10198,7 +10343,7 @@ public class SegmentBookieControlLogTest {
         return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
                 new SegmentExecutionGroup.Settings(workers, 3, 6, buffers, bufferBytes, sourceBytes,
                         buffers * (bufferBytes + 4095L) + sourceBytes, Duration.ofSeconds(5)),
-                new IsolatedSegmentStorage.Limits(1024 * 1024, 4096, 4096, 1,
+                new IsolatedSegmentStorage.Limits(1024 * 1024, 4096, 4096, 1, 1,
                         new SegmentDataPhysicalDriver.BatchLimits(bufferBytes, 16, Duration.ofSeconds(30))));
     }
 
@@ -10391,7 +10536,7 @@ public class SegmentBookieControlLogTest {
         try (IsolatedSegmentStorage storage = new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
                 new SegmentExecutionGroup.Settings(1, 3, 6, 1, 4096, 1060,
                         4096 + 4095L + 1060, Duration.ofSeconds(5)),
-                new IsolatedSegmentStorage.Limits(1024 * 1024, 4096, 4096, 1,
+                new IsolatedSegmentStorage.Limits(1024 * 1024, 4096, 4096, 1, 1,
                         new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
             storage.restart();
             IsolatedSegmentStorage.CompactionResult refused = compactStorage(storage, 940, List.of(5L, 6L));
@@ -10889,13 +11034,18 @@ public class SegmentBookieControlLogTest {
         for (int workers : new int[] {1, 4}) {
             IsolatedSegmentConfig config = new IsolatedSegmentConfig(
                     temporary.getRoot().toPath().resolve("shard-compaction-refill-" + workers), 1, 4, 1,
-                    18L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                    19L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
             createFullCompactionWindow(config);
+            // Keep the original no-destination first window; the later window must restore both
+            // the foreground refill and its maintenance reserve before admitting a new pool.
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                arena.submitBatch(List.of(reclaimableAllocation(22, 4096 + 17 * SegmentArenaControlLog.BLOCK_BYTES)));
+            }
             try (IsolatedSegmentStorage storage = storage(config, workers, 6, 16, 128, 3)) {
                 storage.restart();
                 assertEquals(IsolatedSegmentStorage.CompactionStatus.TRANSIENT_UNAVAILABLE,
                         compactShard(storage, 943, 0).status());
-                assertEquals(1, compactShard(storage, 944, 0).freedAllocations());
+                assertEquals(2, compactShard(storage, 944, 0).freedAllocations());
                 // Real refill is newer than the active round's captured allocation cut.
                 SegmentBatchFormat.Address appended = storageWrite(storage, context(), 18).candidate().address();
                 assertEquals(2, appended.generation().value());

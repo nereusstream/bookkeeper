@@ -1309,13 +1309,28 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Prefer whole retired extents, then fresh space; authority requires durable ordered apply. */
     synchronized List<Optional<Allocation>> planPools(List<PoolRequest> requests) throws IOException {
+        return planPools(requests, 0);
+    }
+
+    /** Foreground pools leave capacity for one bounded maintenance destination in each fixed DATA file. */
+    synchronized List<Optional<Allocation>> planPools(List<PoolRequest> requests, int maintenanceBlocks)
+            throws IOException {
         requireWritable();
+        if (maintenanceBlocks < 0) {
+            throw new IllegalArgumentException("Negative maintenance reserve");
+        }
         if (writing || pending != null || requests.isEmpty() || requests.size() > maxPoolRequests()) {
             throw new IOException("Arena cannot plan another pool batch");
         }
         long[] offsets = new long[config.dataFiles()];
+        long[] available = new long[config.dataFiles()];
         for (int file = 0; file < offsets.length; file++) {
             offsets[file] = grantedHighWatermark(file);
+            available[file] = (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES;
+        }
+        // Each retired slot is one whole block, even when one FREE covers a multi-block extent.
+        for (Slot slot : retiredSlots.keySet()) {
+            available[slot.file()]++;
         }
         long id = allocationIds.keySet().stream().mapToLong(Long::longValue).max().orElse(0);
         List<Optional<Allocation>> planned = new ArrayList<>(requests.size());
@@ -1327,7 +1342,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     free.facts().allocation().file() == file && free.facts().allocation().blocks() == request.blocks()
                             && !selectedRetirements.contains(free.facts().allocation().allocationId()))
                     .min(Comparator.comparingLong(free -> free.facts().allocation().offset())).orElse(null);
-            if (dataBlocked[file] || reusable == null
+            if (dataBlocked[file] || available[file] - request.blocks() < maintenanceBlocks || reusable == null
                     && request.blocks() > (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES) {
                 planned.add(Optional.empty());
                 continue;
@@ -1341,6 +1356,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     reusable == null ? offsets[file] : reusable.facts().allocation().offset(),
                     request.blocks(), request.firstSequence());
             planned.add(Optional.of(allocation));
+            available[file] -= request.blocks();
             if (reusable == null) {
                 offsets[file] += request.blocks() * BLOCK_BYTES;
             } else {

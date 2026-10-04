@@ -304,3 +304,14 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | Native/ForceFree/Free | 原native/coverage和完整source proof，保留目的地排除FREE；实际source净FREE2 MiB、destinationBytes=0但ID为实际保留grant；未apply ALLOC不报告实际ID |
 
 模型只接受Java已证明的latest/currentCopy为输入；阶段计数不代替真实whole proof或持久化。
+
+
+## 维护容量预留
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| Plan/Apply | `planPools(requests, maintenanceBlocks)` 按固定文件汇总fresh/retired whole blocks，同批成功计划扣减；`mergedForegroundPoolsShareReservePerFileAndMaintenanceCanUseItAfterReplay` 验证两文件合批、控制apply、replay、前台拒绝及维护末块准入 |
+| StartMaintenance/VerifiedFree | `Limits.maintenanceBlocks` 是明确目的地工作集上限，compaction实际全aligned测量后在ALLOC前检查；`declaredTwoBlockMaintenanceWorksetCompactsWhileSmallerBoundRefusesBeforeAlloc` 验证声明1拒绝、2实际COPY/MOVE/native/FREE及净收益 |
+| Partial/Restart | `foregroundRefillPreservesCompactionCapacityAndRestoresAdmissionAfterRestart` 由普通路径填两个source，拒绝最后refill后维护恢复容量，1/4 worker及健康重启的gen2低地址写入不消耗拒绝的sequence；partial已用容量继续由真实grant占用 |
+
+FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/真实路径的独立义务；本投影不声明长期进展。

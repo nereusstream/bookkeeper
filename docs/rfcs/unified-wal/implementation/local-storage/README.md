@@ -684,3 +684,20 @@ COPY复用原owner双buffer与DATA driver，在tail后追加连续sequence；前
 [保留tail有限投影](../models/README.md#保留-compaction-tail-投影) `unified-wal-model-63bfz3qg` 绑定125个输入/241个checksum；完整矩阵23正向PASS/57指定反例。最新grant/当前COPY/实际prefix与字节证明为输入假设，模型仅检验容量范围、目的地排除FREE及全部新COPY/MOVE/native/FREE阶段。不代替真实字节、I/O、guard、掉电或完整资源验证。
 
 没有新增wire/持久任务格式、buffer池、调度/重试线程或每entry fsync。新operation由控制/DATA事实重新选组，不恢复旧任务UUID。缺少合格latest COPY tail、tail不足或当前文件quarantine仍拒绝；任意partial任务自动收敛、维护调度、跨窗口最优组合、长期control/SST/文件系统净预算、多Arena、OPEN错误恢复、实际掉电/性能和生产Gate未完成，步骤9/10及完整16步目标保持未完成。
+
+
+## 前台 refill 的维护容量预留
+
+2026-10-04，隔离资源图的 `Limits.maintenanceBlocks` 明确声明单个 compaction 的最大目的地 whole blocks，必须为正。图中仍只有一个 compaction；每个固定 DATA 文件保留同样数量的内部 blocks，启动配置必须容纳一个前台 pool 加该预留。该界限按实际并发维护工作集声明，不使用容量百分比。相关现有 fixture 声明1 block，新增实际大 entry 回归声明2 blocks；不是隐含的一块目的地限制。所有 aligned COPY 成本及严格正净收益仍先测量，超过声明目的地上限的计划在 ALLOC/COPY/MOVE/FREE 前返回 TRANSIENT_UNAVAILABLE，全死组不需要目的地。
+
+普通/recovery 共用 refill 通过既有 Arena control driver 执行预留检查：每文件可分配 whole blocks 是授权高水位之后的整块 fresh 范围加已 FREE 的 retired slots，每个 slot只计一次，不把不足一块的文件尾部或已有 grant 的空闲 tail 当新容量。同批多个 shard 共享这份剩余额度，每个成功计划扣减完整请求 blocks；容量不足返回空计划，既有 batcher 显式背压，不消耗 DATA sequence、伪造 unknown 或 quarantine。已获授权 pool 内的合法尾部仍可正常写入，维护直接规划目的地时可使用保留容量，但必须满足声明上限。预算从 durable/apply后的 grant/FREE重建，没有新增持久格式或第二份空间权威。
+
+三个真实回归：普通路径独立分配并写满两个source（没有手工fixture grant），最后一块保留时前台拒绝，实际COPY/MOVE/native/whole FREE后净恢复1 MiB；1/4 worker、读/幂等、健康重启、低地址generation2普通写入及再次跨shard拒绝均验证，拒绝不消耗sequence。两文件的合批规划逐文件扣减，控制force/apply与replay后前台仍拒绝，而维护仍能取得末块。另以真实84条32 KiB payload写入三个source，30条COPY需要2 blocks：声明1时零ALLOC/MOVE/FREE，声明2时搬迁30条、FREE3 blocks、实际净收益1 MiB，全部live读/幂等保持正确。
+
+红反例 `unified-wal-local-FlTMjm36` 在父提交 `10f7eccccf6284d6dcf352f05c600084da1b57fb` 的生产实现上记录应TRANSIENT_UNAVAILABLE却实际LOCAL_DURABLE，不计PASS。早期构造先耗尽坐标预算，另有回调早于owner终结及每块batch数估算错误；这些中间失败不是目标反例，测试声明预算、实际28批/block及owner终结同步已修正，生产预算未为测试放宽。扩大验证发现三个旧fixture未计前台预留：两项恢复测试增加一块明确容量；窗口回访测试仍先占满文件，使首16候选无目的地，后窗实际FREE两块后才允许带预留refill，保留原顺序/覆盖/游标断言。
+
+最终Java回执 unified-wal-local-12fcKAIF，207个输入，相关七类297项、292通过、5项Linux亲和性在macOS跳过、0失败/错误；Spotless/Checkstyle通过。定向先验证三项新行为与三项受影响fixture，再因allocator共享契约扩大范围。最终实际源码哈希核验，旧回执不重绑。
+
+[维护容量有限投影](../models/README.md#维护容量预留投影) `unified-wal-model-dzggb6ip` 检验逐文件容量、合批扣减、声明目的地上限及按已有grant重建restart预算；它不证明实际 extent几何或FREE字节事实，也不代替真实持久化、filesystem预算或liveness。
+
+本切片只保护新pool的内部whole-block容量。现有allocator仅复用同尺寸完整extent，没有split/coalesce；碎片或无净收益候选仍会拒绝，内部空闲总数不保证连续目的地。维护PARTIAL实际已占容量不会因响应取消或重启被退回；预算不足时继续等待实际FREE。SST/flush/compaction临时输出、control/checkpoint新旧文件并存、共享filesystem的Bookie总预算、低水位/hysteresis、长期负载、多Arena、完整partial收敛、掉电/正式性能未完成；FREE未增加filesystem available bytes。本切片不关闭B17、步骤9/10或生产Gate，完整16步目标继续。

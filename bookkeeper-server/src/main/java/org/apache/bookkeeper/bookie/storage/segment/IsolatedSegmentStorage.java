@@ -120,15 +120,12 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    record Limits(long controlLogBytes, int hotEntries, int indexedEntries, int poolBlocks,
+    record Limits(long controlLogBytes, int hotEntries, int indexedEntries, int poolBlocks, int maintenanceBlocks,
                   SegmentDataPhysicalDriver.BatchLimits batches) {
-        Limits(long controlLogBytes, int hotEntries, int poolBlocks, SegmentDataPhysicalDriver.BatchLimits batches) {
-            this(controlLogBytes, hotEntries, hotEntries, poolBlocks, batches);
-        }
-
         Limits {
             Objects.requireNonNull(batches, "batches");
-            if (controlLogBytes < 4096 + 320 || hotEntries < 1 || indexedEntries < hotEntries || poolBlocks < 1) {
+            if (controlLogBytes < 4096 + 320 || hotEntries < 1 || indexedEntries < hotEntries
+                    || poolBlocks < 1 || maintenanceBlocks < 1) {
                 throw new IllegalArgumentException("Invalid isolated storage bounds");
             }
         }
@@ -174,6 +171,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         this.limits = Objects.requireNonNull(limits, "limits");
         if (limits.hotEntries() < config.logicalShards()) {
             throw new IllegalArgumentException("Global hot capacity must provide at least one entry per shard");
+        }
+        long blocks = (config.bytesPerFile() - 4096) / SegmentArenaControlLog.BLOCK_BYTES;
+        if ((long) limits.poolBlocks() + limits.maintenanceBlocks() > blocks) {
+            throw new IllegalArgumentException("Each DATA file needs one foreground pool and its maintenance reserve");
         }
         writes = new SegmentDataPhysicalDriver.NormalBatcher[config.logicalShards()];
         reads = new SegmentPointRead.Reader[config.logicalShards()];
@@ -234,7 +235,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     private void bootstrap() throws IOException, InterruptedException {
-        allocator = new SegmentArenaControlDriver(execution.owner(0), execution.io(), arena);
+        allocator = new SegmentArenaControlDriver(execution.owner(0), execution.io(), arena,
+                limits.maintenanceBlocks());
         long end = System.nanoTime() + executionSettings.startupTimeout().toNanos();
         for (int shard = 0; shard < config.logicalShards(); shard++) {
             final int selected = shard;
@@ -613,6 +615,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 finish(CompactionStatus.TRANSIENT_UNAVAILABLE, failure);
             } else if (!plan.hasNetGain()) {
                 finish(CompactionStatus.NO_NET_GAIN, null);
+            } else if (plan.destinationBlocks() > limits.maintenanceBlocks()) {
+                finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
             } else if (plan.batches().isEmpty()) {
                 prepareFrees();
             } else {

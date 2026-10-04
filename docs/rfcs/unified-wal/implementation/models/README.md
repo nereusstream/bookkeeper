@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影及保留tail投影共23个完整正向配置、57个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影及保留tail投影与维护容量预留投影共24个完整正向配置、61个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -488,3 +488,22 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 最终回执 `unified-wal-model-63bfz3qg` 绑定父提交 `6d05ff02399be4218ae776bd9d851e2253be521b`、125个输入及241个checksum，23个完整正向PASS/57个指定反例。最后修正结果中的实际目的地ID计数后，按最终Java输入重新冻结模型run；历史回执与父提交合同哈希不重绑。[真实回归](../local-storage/README.md#满容量部分-move-的保留-tail-续写)独立覆盖1/4 worker、gen2残留tail、健康重启、源复用、全批容量不足及坏字节拒绝。
 
 本模型的latest/currentCopy是已验证的输入，不枚举原始record、SHA/CRC、selector/Bookie cut或实际CLOSED witness；有限计数/阶段不证明完整预算、I/O、调度liveness、一般OPEN错误恢复、long-run、多Arena、完整A/C/D组合或生产authority。`AllocationOrder`原投影继续验证进入后继grant后不回旧grant；新显式最新tail证明并不授权更旧allocation重入。
+
+
+## 维护容量预留投影
+
+`MaintenanceReserve.tla` 声明两个固定DATA文件、每文件7个whole blocks、维护目的地上限/预留1或2、一批3个跨文件请求（各1..2 blocks）及单compaction。Plan逐个扣减同文件剩余容量，Apply才成为占用；restart按已有grant重建，未apply计划不成为空间权威。维护可使用保留容量，但全目的地成本不得超过声明上限；经过独立真实FREE证明后恢复内部容量，PARTIAL仍保留已占用目的地。模型只表示计数，不模拟extent split/coalesce、actual DATA、FREE proof、fsync或filesystemavailable。
+
+| 配置 | 结果 | generated/distinct/queue | depth/diameter | elapsed s | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- |
+| `c-maintenance-reserve` | PASS | 3872/3872/0 | 9/9 | 0.916933 | 146767872 |
+| `ce-maintenance-reserve-foreground` | EXPECTED_COUNTEREXAMPLE | 898/898/383 | 4/— | 0.897642 | 117555200 |
+| `ce-maintenance-reserve-merged` | EXPECTED_COUNTEREXAMPLE | 898/898/383 | 4/— | 0.841703 | 117669888 |
+| `ce-maintenance-reserve-workset` | EXPECTED_COUNTEREXAMPLE | 1540/1539/385 | 6/— | 0.857535 | 122044416 |
+| `ce-maintenance-reserve-restart` | EXPECTED_COUNTEREXAMPLE | 1537/1537/383 | 6/— | 0.850071 | 120717312 |
+
+敏感性分别允许前台消耗保留、同批每请求重置预算、忽略目的地工作集上限、restart忘记已有grant，得到指定性质反例。正向完整终结、queue=0，没有state constraint或symmetry reduction；不能从有限安全性质推出维护调度或长期进展。
+
+最终回执 `unified-wal-model-dzggb6ip` 绑定父提交 `10f7eccccf6284d6dcf352f05c600084da1b57fb`、131个输入及256个checksum；完整矩阵24正向PASS/61指定反例，历史回执和父提交合同哈希不重绑。修正Java格式及新增模型文件的EOF空行后，按最终实际输入重新冻结本回执；较早模型run不用于当前绑定。[真实回归](../local-storage/README.md#前台-refill-的维护容量预留)独立验证前台拒绝/恢复、两文件合批、1/2 blocks工作集、健康重启和读/幂等。
+
+Source死亡/selector/generation、CLOSED witness、真实内存、I/O terminal与filesystem/SST/control/checkpoint余量继续由独立合同及测试承担；碎片和无净收益组可以拒绝。本切片不关闭B17、完整Model C/A+C/D或生产Gate。

@@ -38,6 +38,7 @@ final class SegmentArenaControlDriver {
     private final SegmentOwnerLoop owner;
     private final SegmentIoExecutor io;
     private final SegmentArenaControlLog log;
+    private final int maintenanceBlocks;
     private final AtomicBoolean busy = new AtomicBoolean();
     private record PoolSubmission(SegmentArenaControlLog.PoolRequest request, Completion completion) { }
     private final Object poolGate = new Object();
@@ -47,9 +48,18 @@ final class SegmentArenaControlDriver {
     private final ArrayDeque<FailureNotice> waitingFailures = new ArrayDeque<>();
 
     SegmentArenaControlDriver(SegmentOwnerLoop owner, SegmentIoExecutor io, SegmentArenaControlLog log) {
+        this(owner, io, log, 0);
+    }
+
+    SegmentArenaControlDriver(SegmentOwnerLoop owner, SegmentIoExecutor io, SegmentArenaControlLog log,
+                              int maintenanceBlocks) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.io = Objects.requireNonNull(io, "io");
         this.log = Objects.requireNonNull(log, "log");
+        if (maintenanceBlocks < 0) {
+            throw new IllegalArgumentException("Negative maintenance reserve");
+        }
+        this.maintenanceBlocks = maintenanceBlocks;
         notices = new FailureNotice[log.dataFiles()];
     }
 
@@ -319,7 +329,7 @@ final class SegmentArenaControlDriver {
         public void run(SegmentOwnerLoop.Ticket ticket) {
             freezeRequests();
             try {
-                planned = log.planPools(batch.stream().map(PoolSubmission::request).toList());
+                planned = log.planPools(batch.stream().map(PoolSubmission::request).toList(), maintenanceBlocks);
             } catch (IOException failure) {
                 ticket.complete(() -> deliver(this::completed, null, failure));
                 return;

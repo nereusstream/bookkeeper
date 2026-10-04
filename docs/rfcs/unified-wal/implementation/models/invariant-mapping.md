@@ -269,3 +269,14 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | `FreeHasCompleteCurrentSuccessor` | 全部新COPY barrier/MOVE/native覆盖和真实whole proof后FREE；有限model以计数/证明输入表示，不能自证actual DATA/CRC/权限 |
 
 健康恢复默认仍跳过旧tail；只显式开启已验证最新current COPY tail，不回到更早grant。无合格tail或不足时继续拒绝；不宣称一般partial、OPEN错误、调度、长期容量或全资源闭合。
+
+
+## 维护容量预留
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| `WholeBlocksAccountOnce` | fresh高水位后的whole blocks加每个retired slot，已apply grant仍占用；restart重新推导，没有新增持久预算日志。FREE只增加内部reusable，不增加filesystem available |
+| `PlannedForegroundKeepsReserve` / `ForegroundKeepsReserve` | 同文件多个shard的成功计划逐个扣减，容量拒绝不新增DATA sequence或UNKNOWN；仅限制新pool分配，旧grant可用tail不计新空间 |
+| `DestinationFitsDeclaredWorkset` | 单compaction并发，声明每文件维护blocks同时是全aligned目的地最大值；超过限制在ALLOC前拒绝，全死直接FREE仍可推进 |
+
+计数不能证明连续extent可用、source死亡或系统liveness。现有同尺寸whole reuse、无split/coalesce，SST/control/checkpoint临时工作集和共享filesystem尚未关闭。

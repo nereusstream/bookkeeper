@@ -76,6 +76,39 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void mergedForegroundPoolsShareReservePerFileAndMaintenanceCanUseItAfterReplay() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("reserve"),
+                1, 4, 2, 4096 + 3 * SegmentArenaControlLog.BLOCK_BYTES + 4096, 4096, 1024, 16,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            var planned = log.planPools(List.of(
+                    new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 2),
+                    new SegmentArenaControlLog.PoolRequest(2, new Generation(1), 1, 1),
+                    new SegmentArenaControlLog.PoolRequest(1, new Generation(1), 1, 1),
+                    new SegmentArenaControlLog.PoolRequest(3, new Generation(1), 1, 1)), 1);
+            assertTrue(planned.get(0).isPresent());
+            assertTrue(planned.get(1).isEmpty());
+            assertTrue(planned.get(2).isPresent());
+            assertTrue(planned.get(3).isPresent());
+            for (var result : log.submitBatch(planned.stream().flatMap(java.util.Optional::stream).toList())) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, result.status());
+            }
+        }
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            var requests = List.of(new SegmentArenaControlLog.PoolRequest(2, new Generation(1), 1, 1),
+                    new SegmentArenaControlLog.PoolRequest(1, new Generation(1), 1, 1));
+            assertTrue(log.planPools(requests, 1).stream().allMatch(java.util.Optional::isEmpty));
+            var maintenance = log.planPools(requests);
+            assertTrue(maintenance.stream().allMatch(java.util.Optional::isPresent));
+            for (var result : log.submitBatch(maintenance.stream().flatMap(java.util.Optional::stream).toList())) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, result.status());
+            }
+            assertTrue(log.planPools(requests).stream().allMatch(java.util.Optional::isEmpty));
+        }
+    }
+
+    @Test
     public void rotationHeaderAndPublicationMatchIndependentByteVectors() throws Exception {
         SegmentControlCheckpoint.Reference first = new SegmentControlCheckpoint.Reference(1, 0, -1, 4096, 0,
                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
