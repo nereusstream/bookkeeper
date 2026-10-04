@@ -1127,3 +1127,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04 当前模型增量：[有界合批compaction投影](../implementation/models/README.md#有界合批-compaction-投影)加入既有runner：allocation粒度净成本、COPY/MOVE/native/FREE顺序、逐FREE selector cut和全claimed成员gate。有限范围为1/2 source、1 destination；实际字节/权限/native发布为输入假设，crash/reuse及完整资源/进展未在此投影展开。完整矩阵19正向/48指定反例仍不构成完整A/C/D、组合模型、Block G或生产authority。
+
+
+2026-10-04 当前模型增量：[多批compaction投影](../implementation/models/README.md#多批-compaction-投影)扩展既有group有限域为1..3 source/COPY batch，按全部aligned成本取整、全部COPY/MOVE完成后才native/FREE，增加后批失败及首批后错误FREE候选反例。矩阵为19正向/49指定反例，仍无真实字节、资源、crash/reuse或完整A/C/D/组合与Block G authority。

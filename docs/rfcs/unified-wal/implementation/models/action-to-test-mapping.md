@@ -244,3 +244,15 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | 投影外输入 | `graphCompactionTerminalGroupNeedsNoCopyAllocation`验证全T无需destination；`preparedResolvedMoveRetryReleasesItsUnclaimedProtection`验证同一guard的零claim已解析MOVE重试 |
 
 没有在本轮新执行掉电或JVM halt；健康restart/实际storage字节回归与有限模型动作分别说明证据。
+
+
+## 多批 compaction
+
+| 动作 | 当前真实路径与测试 |
+| --- | --- |
+| Select/NextCopy/Allocate/ForceCopy/ForceMove/ApplyMove | `graphCompactionSplitsByBufferAndMoveRowsAndRecoversEveryBatchAfterSourceReuse`：1/4 worker、40/402坐标、3/2批、不同COPY身份、当前读/幂等、覆盖及source generation2复用后的全量恢复 |
+| CopyFailure | `laterCompactionCopyForceUnknownRetainsSourcesAndOnlyEarlierMoveSelectors`：第二实际force unknown，只保留首19个MOVE，无FREE；控制重放保留source generation和quarantine，业务restart拒绝 |
+| 全批allocation成本 | `multiBatchCompactionIncludesEveryFrameInAllocationNetCost`：payload小于一块，但各批framing/padding合计后两块destination，source组净零不产生ALLOC/COPY/MOVE |
+| 有界输入/拒绝归还 | `multiBatchCompactionSourceBudgetRefusalReleasesAllCapturedInputs`：合法源预算捕获中途拒绝，全部输入归还，后续旧坐标幂等仍可完成 |
+
+新模型不称为实际IO失败恢复或掉电证明；source已搬迁部分在旧source整块FREE前仍必须满足全范围proof。

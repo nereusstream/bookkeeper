@@ -505,6 +505,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private int freedAllocations;
         private long freedBytes;
         private long destinationBytes;
+        private int batchIndex;
+        private long destinationOffset;
 
         private CompactionOperation(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
                                     CompactionRequest request, SegmentFileIo publicationIo) {
@@ -557,7 +559,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 finish(CompactionStatus.TRANSIENT_UNAVAILABLE, failure);
             } else if (!plan.hasNetGain()) {
                 finish(CompactionStatus.NO_NET_GAIN, null);
-            } else if (plan.entries().isEmpty()) {
+            } else if (plan.batches().isEmpty()) {
                 prepareFrees();
             } else {
                 try {
@@ -594,13 +596,27 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return;
             }
             destinationBytes = destination.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+            destinationOffset = destination.offset();
+            copyNextBatch();
+        }
+
+        private SegmentDataRecovery.CompactionBatch currentBatch() {
+            return plan.batches().get(batchIndex);
+        }
+
+        private void copyNextBatch() {
             try {
+                UUID copyId = batchIndex == 0 ? operationId : phaseId(operationId, "COPY/" + batchIndex);
+                arena.requireUnusedOperation(copyId);
                 SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encodePooled(config,
-                        drivers[shard].relocationAddress(destination), plan.entries().stream().map(entry ->
+                        drivers[shard].relocationAddress(destination, destinationOffset),
+                        currentBatch().entries().stream().map(entry ->
                                 SegmentBatchFormat.relocation(entry.source().location().context(),
                                         entry.input().bytes(),
-                                        operationId, new Generation(1))).toList(), execution.owner(shard).pool());
-                plan.close();
+                                        copyId, new Generation(1))).toList(), execution.owner(shard).pool());
+                for (SegmentDataRecovery.CompactionEntry entry : currentBatch().entries()) {
+                    entry.input().close();
+                }
                 if (batch == null) {
                     finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
                 } else if (!drivers[shard].submitRelocation(batch, (copy, cause) ->
@@ -621,8 +637,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 finish(CompactionStatus.PARTIAL, null);
                 return;
             }
+            move = null;
+            moveSubmitted = false;
             execution.io().submitContinuing(ticket, () -> move = SegmentArenaMove.prepare(arena, files, bookie,
-                    copy, plan.entries().stream().map(SegmentDataRecovery.CompactionEntry::source).toList(),
+                    copy, currentBatch().entries().stream().map(SegmentDataRecovery.CompactionEntry::source).toList(),
                     buffer.bytes()), cause -> {
                         releaseBuffer();
                         if (cause != null) {
@@ -643,7 +661,12 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 finish(failure == null ? CompactionStatus.PARTIAL : CompactionStatus.UNKNOWN, failure);
                 return;
             }
-            movedEntries = plan.entries().size();
+            movedEntries += currentBatch().entries().size();
+            destinationOffset = Math.addExact(destinationOffset, currentBatch().bytes());
+            if (++batchIndex < plan.batches().size()) {
+                copyNextBatch();
+                return;
+            }
             if (!maintainIndex(new IndexCheckpointRequest((result, cause) -> ticket.resume(() -> {
                 if (cause != null || result.status() != IndexCheckpointStatus.PERSISTED) {
                     finish(cause == null ? CompactionStatus.PARTIAL : CompactionStatus.UNKNOWN, cause);

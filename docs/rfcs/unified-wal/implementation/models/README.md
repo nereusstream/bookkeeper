@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖和合批compaction投影共19个完整正向配置、48个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖和多批compaction投影共19个完整正向配置、49个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -393,3 +393,24 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 | `ce-compaction-cancel` | EXPECTED_COUNTEREXAMPLE | 30 / 23 | 4 | 10 / — | 0.752421 | 108,871,680 |
 
 四个trace分别在选择单source、COPY后提前FREE、第二FREE apply和claimed组取消时出现指定性质错误；都是候选规则反例，不是Java源码变异或生产开关。对应真实Java七类282项，277通过、5平台跳过；完整模型/Block G/生产authority未提升。
+
+
+### 多批 compaction 投影
+
+`CompactionGroup.tla`扩展为1..3个4单位source、1..3个各2单位aligned COPY batch；destination容量为aligned总成本向上取整到4单位，不再只扣首批。每批COPY force、MOVE force/apply分别累计，全部moved后才能发布native和FREE；增加后批CopyFailure，先前moved事实不回滚，也不允许whole-source FREE。FREE自身cut/全部claimed成员保护性质继续保留。
+
+新增 `ce-compaction-incomplete-group` 故意允许在首批MOVE后发布native并释放整组，必须违反 `FreedSourcesHaveDurableSuccessor`。原五个配置随新有限域得到新的结果，历史35-state回执不重绑。有限投影仍不包含全T、实际CRC/SHA/operation identity、native flush、snapshot/队列资源、真实crash/reuse、跨stream/多Arena或进展；这些来自输入假设、其他切片及实际Java验证。
+
+
+2026-10-04最终回执 `unified-wal-model-e8rktusu` 绑定父提交 `95fc090067b084f9cc50365df29037fac673b91a`、108个输入（18个TLA module、68个cfg、runner、21个Java）与205个checksum，全部68配置为19个完整正向PASS及49个指定性质反例。既有tool/平台/JDK、1 worker、512/64 MiB、fp/seed和120秒参数保持不变。原其他切片状态计数未变；下面为本次扩展投影的新结果。
+
+| 配置 | 结果 | generated / distinct | 剩余queue | 深度 / 完整图直径 | elapsed秒 | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `c-compaction-group` | PASS | 378 / 259 | 0 | 28 / 28 | 0.800760 | 113,475,584 |
+| `ce-compaction-allocation-cost` | EXPECTED_COUNTEREXAMPLE | 4 / 4 | 2 | 2 / — | 0.793457 | 103,071,744 |
+| `ce-compaction-early-free` | EXPECTED_COUNTEREXAMPLE | 63 / 53 | 15 | 6 / — | 0.791054 | 109,641,728 |
+| `ce-compaction-shared-cut` | EXPECTED_COUNTEREXAMPLE | 201 / 144 | 15 | 12 / — | 0.837998 | 112,738,304 |
+| `ce-compaction-cancel` | EXPECTED_COUNTEREXAMPLE | 156 / 114 | 14 | 10 / — | 0.805309 | 112,934,912 |
+| `ce-compaction-incomplete-group` | EXPECTED_COUNTEREXAMPLE | 214 / 151 | 19 | 11 / — | 0.815862 | 112,164,864 |
+
+新增完整trace为两批任务完成首批MOVE后，错误PublishNative→PrepareFree→ForceFree→ApplyFree；此时还有未搬迁批次。Java的完整whole-source successor proof不由计数替代。真实四项回归及七类281通过/5平台跳过分别验证storage语义；没有执行JVM halt或掉电，不提升完整模型/Block G/生产authority。

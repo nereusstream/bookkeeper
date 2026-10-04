@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[同 Arena 有界合批 compaction](#同-arena-有界合批-compaction)。已组合真实 COPY/MOVE、原owner native覆盖维护及整块FREE/reuse；下列历史切片保留各自当时范围和receipt。当前请求使用全图准入暂停和显式victim组，整块复用仍限健康管理会话；自动选组、多批搬迁、逐allocation在线cut和长期净容量仍未完成。
+2026-10-04 当前增量为[同 Arena 多批 compaction](#同-arena-多批-compaction)。显式victim组可按原owner buffer与256行上限分成多批COPY/MOVE，全部完成后统一native覆盖与整块FREE/reuse；下列历史切片保留各自当时范围和receipt。当前仍用全图准入暂停，整块复用仍限健康管理会话；自动选组、逐allocation在线cut和长期净容量仍未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -593,3 +593,22 @@ Arena 控制日志、checkpoint 与 rotation metadata-only 重放同一有序命
 最终Java回执 `unified-wal-local-hJWzTjdn` 冻结父提交 `97e25c317e044d04c7c0cf6c6eb9bf2a8aa92f17` 及207个源码/测试/向量输入：既有七类282项，277通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。六个新增用例先定向验证，再因共享guard/驱动/恢复扩大到相关七类。初次resolved重试测试遗漏已取得ReadAdmission.finish造成测试关闭失败，已补齐实际资源归还；格式检查的5处超长行及模型表达式解析冲突也已修正，未通过中间run不计为PASS。最终源码哈希逐项吻合，历史receipt不重绑。
 
 [合批有限投影](../models/README.md#有界合批-compaction-投影)回执 `unified-wal-model-inrar5jz` 冻结107个输入与202个checksum：19个完整正向PASS、48个指定反例；当前新增投影50个generated/35个distinct、队列0、深度/直径16。不代表真实掉电、长负载性能或完整资源/分布式验收。
+
+
+## 同 Arena 多批 compaction
+
+2026-10-04，既有1..16个同文件、同shard/stream source请求不再要求全部live数据装入一个COPY batch。实际扫描仍逐batch校验CRC、当前selector和Bookie权限；每个已有source batch须装入当前原owner的扫描buffer。live snapshot仍从既有全局源bytes预算取得、整组容量有界；按COPY完整framing/padding是否装得进owner buffer及最多256行分别封批，整组预算不足在新destination分配前拒绝并归还已捕获输入。
+
+目的地成本是各批完整aligned bytes之和，再向上取整为一个整allocation的1 MiB单位。严格净收益判断使用整个source组容量减该完整成本；不能只看payload、只算首批或忽略每批padding。新destination一次durable ALLOC，各批在其当前授权范围内按连续物理sequence和累加offset顺序追加，不回到旧source尾部。第一批沿用root operation UUID；后续COPY/MOVE使用由root和固定 `COPY/<index>` 派生的不同UUID，operation generation保持1，均用现有COPY/MOVE字节。
+
+每批复用现有driver内部COPY barrier/prefix结果、真实source/target proof及条件MOVE，结果累加已成功的moved entry。冻结进COPY buffer后释放该批的源输入，其他批输入继续计费。全部COPY/MOVE成功后只执行一次原owner native维护/flush/A/B覆盖，再完整重验整个source组并一次CONTROL barrier合批FREE；后批失败绝不因为前批已MOVE就退役source。后批force unknown保持先前MOVE selector、所有source grant及当前文件quarantine，未完成副本不取得MOVE/普通Add权限；不能凭后来同步恢复writable。
+
+现有取消/原owner I/O与pool两方终结规则不变。部分结果分别保留真实已搬迁条数、destination占用、实际FREE数和净容量；一个新operation重新选组时，已经占用且含current COPY的目的地仍是实际空间，不能当orphan或忽略其成本。自动追踪/合并部分任务、source组优化、分散destination grant与per-allocation在线cut仍未实现。
+
+四项新真实回归覆盖：1/4 worker下4096字节buffer的40坐标/3批、65536字节buffer的402坐标/2批，跨批读取/幂等、所有current target覆盖恢复与source generation2真实复用后的全量恢复；第二COPY force失败只保留前19个MOVE、未FREE source、控制重放保留旧generation与quarantine且restart拒绝；882坐标的payload不足1 MiB但framing/padding使destination为2 MiB，两个source组零净收益、不产生ALLOC/COPY/MOVE；合法源预算不足时全部已捕获输入归还，原坐标幂等仍可执行。
+
+当前总snapshot必须适配显式全局源bytes预算，已有source batch须适配当前扫描buffer；不宣称流式任意大输入、自动victim/partial任务收敛、持续净回收、控制历史/SST/文件系统完整预算、多Arena、OPEN错误恢复、真实掉电或生产ACK。步骤9/10与完整16步目标保持未完成。
+
+最终Java回执 `unified-wal-local-X5LKGFDY` 绑定父提交 `95fc090067b084f9cc50365df29037fac673b91a` 与207个实际源码/测试/向量输入：既有七类286项，281通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。先验证既有三项及新增四项，再因physical prefix/driver/恢复共用路径扩大到七类。初次新增测试误用不存在的point-read locator getter导致编译失败，已通过实际duplicate结果验证destination；源预算用例初始低于既有最大entry启动下限，已改合法下限并验证中途拒绝与归还。中间失败不计为通过，最终207个哈希逐项吻合。
+
+[多批有限投影](../models/README.md#多批-compaction-投影) `unified-wal-model-e8rktusu` 绑定同一父提交、108个输入和205个checksum，矩阵19个完整正向PASS、49个指定反例；多批投影378个generated/259个distinct、队列0、深度/直径28。真实掉电、long-run/性能与完整资源/分布式Gate未运行或未闭合，历史回执保留。

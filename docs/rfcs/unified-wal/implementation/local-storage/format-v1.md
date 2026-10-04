@@ -295,3 +295,6 @@ v2证明依赖当前selector：迁走的普通源须匹配成功后继entry dige
 
 
 2026-10-04 [合批compaction](README.md#同-arena-有界合批-compaction)沿用原ALLOC、COPY、MOVE及FREE v1/v2字节。FREE合批首次apply时，各v2 proof的Arena cut为起始applied cut加前序成员数；每条命令仍消费自身sequence，不能给全部FREE写相同cut。共享runtime保护和phase UUID派生不增加持久字段；既有独立向量保留。
+
+
+2026-10-04 [多批compaction](README.md#同-arena-多批-compaction)不改持久/wire字段。一个新destination allocation内各COPY使用连续物理sequence和递增offset；首批root UUID，后批按 `COPY/<index>` 派生不同UUID，各自对应一次条件MOVE。整组FREE仍逐命令绑定自身前序selector cut；不增加另一份任务日志或成功位，独立向量继续适用。

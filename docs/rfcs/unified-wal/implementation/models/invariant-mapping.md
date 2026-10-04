@@ -219,3 +219,8 @@ COPY/MOVE durability、grant与权限为输入假设；有限PASS不等于实际
 | `PendingMembersKeepProtection` | 同一guard覆盖所有实际claimed成员；取消仅撤销回复，重复finish不提前解锁 |
 
 此投影未展开全T、真实字节/资源、native失败恢复、crash/reuse或进展；这些由Java和既有有限切片分别验证。
+
+
+## 多批 compaction
+
+`SelectionHasAllocationNetGain`现在扣除全部aligned COPY batch的总成本并按目的地allocation取整；`MovedTargetHasDurableCopy`累计各批的COPY/MOVE force事实；`FreedSourcesHaveDurableSuccessor`要求完成全部批次，再经native发布及FREE barrier。共享guard和各FREE前序cut的已有性质继续适用。`FreeIncompleteGroup`是被否证候选规则，whole-allocation当前successor proof在Java中仍独立重验，不能由moved计数替代。字节/身份/资源与进展不在有限计数投影内证明。

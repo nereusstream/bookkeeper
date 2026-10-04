@@ -246,7 +246,7 @@ DATA durable → hot locator → local result
 
 #### 9. 实现本地tombstone、compaction与FREE/reuse
 
-2026-10-03 [分配控制顺序与低地址追加](local-storage/README.md#分配控制顺序与低地址追加)已消除必要的文件offset排序约束：写游标按原成功allocation控制sequence推进，进入后继grant不返回旧尾；restart跳过全部旧grant尾部而允许新的低地址grant。恢复按每allocation连续区间与原控制顺序验证stream，真正gap/duplicate仍拒绝。真实rotation、全量/覆盖辅助storage重启及有限分配顺序模型通过。该前置的历史回执不授予FREE。2026-10-04已接通[整allocation全死FREE与退役前缀](local-storage/README.md#整-allocation-全死-free-与退役前缀)：真实DATA/终态tombstone proof、先Bookie后文件准入冻结与旧I/O/read lease排空、条件durable apply/generation 1→2、原owner保护、控制rotation与全量/覆盖辅助恢复。随后已接通[健康会话整块复用](local-storage/README.md#整-allocation-复用与健康关闭末端)：现有refill使用准确FREE generation，健康CLOSED保存当前写入末端，恢复排除旧suffix而校验必要prefix；真实同块两轮FREE/写入与共享活数据恢复验证。后续已接通[运行期终态派生清理](local-storage/README.md#运行期终态索引与坐标回收)：真实native行删除、原owner坐标预算释放及持久coverage，固定小容量四轮FREE/reuse在1/4 worker下验证。后续[relocation内部完成](local-storage/README.md#relocation-副本内部持久化完成)已接通copy-only实际DATA barrier、连续前缀与原owner内部结果，copy不成为普通定位。compaction/MOVE、控制历史/SST长期净空间及长期循环验收仍未完成，不标步骤9完成。
+2026-10-03 [分配控制顺序与低地址追加](local-storage/README.md#分配控制顺序与低地址追加)已消除必要的文件offset排序约束：写游标按原成功allocation控制sequence推进，进入后继grant不返回旧尾；restart跳过全部旧grant尾部而允许新的低地址grant。恢复按每allocation连续区间与原控制顺序验证stream，真正gap/duplicate仍拒绝。真实rotation、全量/覆盖辅助storage重启及有限分配顺序模型通过。该前置的历史回执不授予FREE。2026-10-04已接通[整allocation全死FREE与退役前缀](local-storage/README.md#整-allocation-全死-free-与退役前缀)：真实DATA/终态tombstone proof、先Bookie后文件准入冻结与旧I/O/read lease排空、条件durable apply/generation 1→2、原owner保护、控制rotation与全量/覆盖辅助恢复。随后已接通[健康会话整块复用](local-storage/README.md#整-allocation-复用与健康关闭末端)：现有refill使用准确FREE generation，健康CLOSED保存当前写入末端，恢复排除旧suffix而校验必要prefix；真实同块两轮FREE/写入与共享活数据恢复验证。后续已接通[运行期终态派生清理](local-storage/README.md#运行期终态索引与坐标回收)：真实native行删除、原owner坐标预算释放及持久coverage，固定小容量四轮FREE/reuse在1/4 worker下验证。后续[relocation内部完成](local-storage/README.md#relocation-副本内部持久化完成)已接通copy-only实际DATA barrier、连续前缀与原owner内部结果，copy不成为普通定位。2026-10-04已接通[条件MOVE、native覆盖与多批source组compaction](local-storage/README.md#同-arena-多批-compaction)，全部批次成功后整块FREE；按完整aligned COPY总成本判断allocation净收益。自动选组、逐allocation在线cut、控制历史/SST长期净空间及持续循环验收仍未完成，不标步骤9完成。
 
 依赖步骤8，对应UW-4/UW-5。按本地tombstone禁止新访问→整块全死直接FREE/reuse→部分存活块compaction→多次搬迁/orphan/并发回收推进。搬迁复用DATA I/O，但使用独立内部完成分支：
 
@@ -432,3 +432,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-04 当前增量：[同Arena有界合批compaction](local-storage/README.md#同-arena-有界合批-compaction)已组合显式1..16个同stream source的实际扫描、allocation粒度净收益判断、独立destination、一批COPY/条件MOVE、原owner native覆盖维护及一次CONTROL barrier的合批整块FREE。各v2 FREE绑定自身前序cut，共享保护到全部claimed成员终结；取消/发布失败不提前释放或伪造净回收，后续新operation可完成保留source的回收。真实共享块、零净收益拒绝、两块减一块的净容量、全T无destination、复用恢复及失败/取消重启由当前回归验证。仍为全图暂停/一个COPY/显式组，自动选组、逐allocation在线cut、长期control/SST/文件系统净预算、多Arena、OPEN错误恢复、掉电和生产ACK未完成，步骤9/10和完整Gate不提升。
+
+
+2026-10-04 当前增量：[同Arena多批compaction](local-storage/README.md#同-arena-多批-compaction)在既有显式source组内按owner buffer与256行上限划分COPY/MOVE，所有批次完成后统一native覆盖及合批FREE。净成本包括各批framing/padding总和再按destination整allocation向上取整；后批失败保留已成功selector与所有source，不伪造整组回收。40/402坐标的跨批读取、覆盖/全量恢复及source复用、后批force unknown隔离、零净收益和源预算拒绝已由真实路径验证。源snapshot总预算和既有source batch扫描buffer仍有显式上限；自动选组、逐allocation在线cut、长期净容量、多Arena、OPEN错误恢复和生产Gate保持未完成。

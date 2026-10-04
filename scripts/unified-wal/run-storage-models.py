@@ -24,6 +24,7 @@ MATRIX = {
     "ce-compaction-early-free": "FreedSourcesHaveDurableSuccessor",
     "ce-compaction-shared-cut": "AppliedFreeUsesOwnCut",
     "ce-compaction-cancel": "PendingMembersKeepProtection",
+    "ce-compaction-incomplete-group": "FreedSourcesHaveDurableSuccessor",
     "c-move-index": None,
     "ce-move-index-old-put": "CapturedOwnersHadNoOldPut",
     "ce-move-index-cancel": "MaintenanceKeepsProtection",
