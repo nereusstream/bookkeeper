@@ -146,6 +146,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private final SegmentPointRead.Reader[] reads;
     private final SegmentHotDirectory[] hotDirectories;
     private final SegmentDataPhysicalDriver[] drivers;
+    private record CompactionCursor(long afterOrder, long throughOrder) { }
+    private final CompactionCursor[] compactionCursors;
     private IsolatedSegmentFiles files;
     private SegmentArenaControlLog arena;
     private SegmentBookieControlLog bookie;
@@ -177,6 +179,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         reads = new SegmentPointRead.Reader[config.logicalShards()];
         hotDirectories = new SegmentHotDirectory[config.logicalShards()];
         drivers = new SegmentDataPhysicalDriver[config.logicalShards()];
+        compactionCursors = new CompactionCursor[config.logicalShards()];
     }
 
     void startNew() throws IOException, InterruptedException {
@@ -456,9 +459,26 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             if (!canCompact()) {
                 return false;
             }
-            List<SegmentArenaControlLog.Allocation> candidates = arena.compactionCandidates(shard);
-            return !candidates.isEmpty() && admitCompaction(operationId, candidates, request, new SegmentFileIo(),
-                    true);
+            CompactionCursor cursor = compactionCursors[shard];
+            if (cursor == null) {
+                cursor = new CompactionCursor(-1, arena.appliedThrough());
+            }
+            SegmentArenaControlLog.CompactionWindow window = arena.compactionCandidates(shard,
+                    cursor.afterOrder(), cursor.throughOrder());
+            if (window.allocations().isEmpty()) {
+                // Refresh once: new grants cannot indefinitely delay revisiting earlier current allocations.
+                cursor = new CompactionCursor(-1, arena.appliedThrough());
+                window = arena.compactionCandidates(shard, cursor.afterOrder(), cursor.throughOrder());
+                if (window.allocations().isEmpty()) {
+                    compactionCursors[shard] = null;
+                    return false;
+                }
+            }
+            boolean admitted = admitCompaction(operationId, window.allocations(), request, new SegmentFileIo(), true);
+            if (admitted) {
+                compactionCursors[shard] = new CompactionCursor(window.lastOrder(), cursor.throughOrder());
+            }
+            return admitted;
         }
     }
 

@@ -259,7 +259,7 @@ DATA durable → hot locator → local result
 
 **完成条件：** 部分ledger删除不提前释放共享块；copy durable而MOVE未成功不成为当前数据；A→B→C且A/B已复用、没有新增checkpoint时仍能恢复C，C损坏或必要控制后缀缺失仍隔离；并发MOVE/FREE不产生两个winner，旧I/O不覆盖新owner。FREE以整allocation generation可回收为条件，不以单ledger删除原因代替。
 
-当前[固定shard有界选择](local-storage/README.md#固定-shard-的有界回收选择)先测量真实DATA，零current live组先于快照和destination分配处理；保留独立整allocation证明。该入口只查看最多16个最早同文件grant，未实现窗口外公平选择、partial任务收敛或长期净容量验收。
+当前[固定shard有界选择](local-storage/README.md#固定-shard-的有界回收选择)先测量真实DATA，零current live组先于快照和destination分配处理；保留独立整allocation证明。该入口每次查看最多16个同文件grant；当前[有界轮转](local-storage/README.md#有界回收窗口轮转与有限容量循环)固定本轮控制上限并推进进程内游标，新grant留至下轮，随后回访旧候选。partial任务收敛、维护调度或长期净容量验收未完成。
 
 #### 10. 完成空间耗尽、长期负载与多Arena验证
 
@@ -440,3 +440,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-04 当前选择增量：[固定shard有界回收](local-storage/README.md#固定-shard-的有界回收选择)按成功ALLOC顺序查看同文件/唯一stream最多16个当前grant；真实DATA测量先于payload捕获，优先直接回收零current live组，最终仍独立whole-allocation后继证明与合批FREE。满容量且无关current live超过源输入预算的实际回收、source generation2复用及17个grant窗口保留年轻共享活数据已验证；既有共享T及多批COPY/MOVE回归改经shard入口。七类283通过/5平台跳过及20正向/51指定反例仅为局部证据。窗口外公平选择、partial任务自动收敛、逐allocation在线cut、长期完整净容量、多Arena、OPEN错误恢复与生产Gate仍未完成。
+
+
+2026-10-04 当前轮转增量：[有界回收窗口与容量循环](local-storage/README.md#有界回收窗口轮转与有限容量循环)复用固定shard/file映射，按固定本轮ALLOC上限推进进程内游标；新grant留至下轮，首窗口拒绝后可轮到更晚dead并恢复destination，完成轮次后回访旧T。真实17个满容量grant、后续普通refill、1/4 worker及四shard四轮自动FREE/generation1→5、重启读取已验证。七类285通过/5平台跳过及21正向/53指定反例保持局部范围；跨窗口最优组合、部分任务收敛、维护调度、per-allocation cut、长期control/SST/文件系统完整净预算、多Arena、OPEN错误恢复与生产Gate未完成。

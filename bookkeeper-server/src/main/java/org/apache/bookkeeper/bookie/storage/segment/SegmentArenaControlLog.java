@@ -734,39 +734,35 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return allocation;
     }
 
-    /** At most 16 oldest current grants in the oldest available file of this fixed shard/stream. */
-    synchronized List<Allocation> compactionCandidates(int shard) throws IOException {
+    record CompactionWindow(List<Allocation> allocations, long lastOrder) { }
+
+    /** Fixed file and bounded control-order interval; this scan cut never authorizes MOVE or FREE. */
+    synchronized CompactionWindow compactionCandidates(int shard, long afterOrder, long throughOrder)
+            throws IOException {
         requireQuiescentControl(config, identity);
-        Optional<SingleStream> stream = restartStreamForShard(shard);
-        if (stream.isEmpty()) {
-            return List.of();
+        if (afterOrder < -1 || throughOrder < afterOrder
+                || throughOrder > appliedThrough) {
+            throw new IllegalArgumentException("Invalid compaction scan interval");
         }
-        Allocation oldest = null;
-        long oldestOrder = Long.MAX_VALUE;
-        for (Allocation allocation : allocationIds.values()) {
-            if (allocation.ownerShard() == shard && !retiredAllocations.containsKey(allocation.allocationId())
-                    && dataFileAvailable(allocation.file())) {
-                long order = appliedOperations.get(allocation.operationId()).sequence();
-                if (order < oldestOrder) {
-                    oldest = allocation;
-                    oldestOrder = order;
-                }
-            }
-        }
-        if (oldest == null) {
-            return List.of();
+        int file = shard % config.dataFiles();
+        if (restartStreamForShard(shard).isEmpty() || !dataFileAvailable(file)) {
+            return new CompactionWindow(List.of(), afterOrder);
         }
         TreeMap<Long, Allocation> candidates = new TreeMap<>();
         for (Allocation allocation : allocationIds.values()) {
-            if (allocation.ownerShard() == shard && allocation.file() == oldest.file()
+            if (allocation.ownerShard() == shard && allocation.file() == file
                     && !retiredAllocations.containsKey(allocation.allocationId())) {
-                candidates.put(appliedOperations.get(allocation.operationId()).sequence(), allocation);
-                if (candidates.size() > 16) {
-                    candidates.pollLastEntry();
+                long order = appliedOperations.get(allocation.operationId()).sequence();
+                if (order > afterOrder && order <= throughOrder) {
+                    candidates.put(order, allocation);
+                    if (candidates.size() > 16) {
+                        candidates.pollLastEntry();
+                    }
                 }
             }
         }
-        return List.copyOf(candidates.values());
+        return new CompactionWindow(List.copyOf(candidates.values()),
+                candidates.isEmpty() ? afterOrder : candidates.lastKey());
     }
 
     synchronized void requireUnusedOperation(UUID operationId) throws IOException {

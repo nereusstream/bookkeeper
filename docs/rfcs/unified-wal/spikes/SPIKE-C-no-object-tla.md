@@ -1133,3 +1133,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04 当前选择模型：[有界source选择投影](../implementation/models/README.md#有界-source-选择投影)检验真实current DATA测量后优先dead、选择先于输入/目的地准入、保留最终proof与FREE barrier；选择前捕获全候选与index缺行测量两个候选被指定性质否证。矩阵20正向/51指定反例、112个输入/214个checksum；真实DATA/权限/稳定cut/whole proof为输入假设，无全存储进展、真实字节、完整资源、crash或生产authority。
+
+
+2026-10-04 当前轮转模型：[有界窗口轮转投影](../implementation/models/README.md#有界窗口轮转投影)在固定shard/file、有限稳定候选与调用方继续已准入尝试的条件下检验轮次覆盖及旧候选回访；每次从头/持续扩大轮cut分别产生指定反例。矩阵21正向/53指定反例、116个输入/223个checksum；实际16上限、refill/T/复用由Java独立验证，不形成完整预算、调度fairness、long-run或生产authority。

@@ -629,3 +629,20 @@ Arena 控制日志、checkpoint 与 rotation metadata-only 重放同一有序命
 [选择有限投影](../models/README.md#有界-source-选择投影) `unified-wal-model-q9uihppa` 绑定同一父提交、112个输入及214个checksum；完整矩阵20正向PASS、51指定反例。候选测量、先选dead再占输入、无spare时直接FREE与最终proof/barrier分别投影，真实字节/身份/guard完整实现仍是输入假设。
 
 选择窗口及所有source读取均有界，但不保证最早窗口之外的dead发现、公平轮转、自动partial任务收敛、全局最优净回收或逐allocation在线cut；目的地仍需要单个可用连续grant。持续create/write/read/delete净容量、控制历史/SST/文件系统完整预算、多Arena、OPEN错误恢复、实际掉电/性能与生产Gate未完成。步骤9/10及完整16步目标保持未完成。
+
+
+## 有界回收窗口轮转与有限容量循环
+
+2026-10-04，shard回收入口增加每shard两项标量的进程内游标：最后尝试的成功ALLOC控制sequence与本轮控制上限。现有ALLOC合同固定 `file = shard % dataFiles`，因此只扫描这个文件及唯一stream，不增加跨文件策略。每轮固定Arena applied上限，按原ALLOC顺序查看最多16个当前grant；已准入的窗口尝试推进游标，包括零净收益、目的地/源资源不足或后续部分失败。拒绝准入不推进；空窗最多重开一轮，然后没有当前候选就返回false，不形成空窗循环。控制首sequence为0，初始游标为-1。新grant在下一轮进入；重启游标重新开始，无wire/持久任务字段、后台线程或新额度。
+
+本轮上限只用于扫描，不冻结Bookie权限、不授权MOVE/FREE，也不替代真实DATA测量、当前selector、private输入所有权、净allocation收益或最终whole-allocation后继证明。每个新请求继续取得实际Bookie/file保护与当前cut。持续追加不能靠不断扩大本轮上限延迟旧grant回访；这一结论限定在调用方继续发起已准入请求、当前候选仍可用及每轮有限grant的条件内，不是后台调度或全存储liveness保证。
+
+两项新增真实回归：17个grant占满文件，首窗口16个live source虽有聚合净收益但无destination，返回资源拒绝；下一请求直接FREE第17个准确T，随后重新巡回完成17条live COPY/MOVE、16个source FREE，净恢复15 MiB且使用原T slot的generation2目的地，重启保持当前COPY。另一项在1/4 worker下，于当前轮已尝试旧grant之后触发真实ordinary refill生成新grant，再将旧ledger变为T；接着先回访原16个source，再处理新grant，全死空窗返回false，低地址generation2普通写入与重启可读。
+
+既有四shard、1/4 worker的有限容量回归现在通过shard入口执行四轮自动FREE；每轮native坐标满额拒绝、准确T清理、各shard原物理块复用与generation1→5、第五代最终覆盖和重启读取继续验证。它是固定次数的真实资源循环，不是长期负载、性能曲线或文件系统/SST/控制历史完整容量验收。
+
+Java最终回执 `unified-wal-local-Isqf1iu7` 绑定父提交 `c7832d4c0695bb27b8ec049df488b1b3273a04f7`、207个实际输入，七类290项、285通过/5项macOS上的Linux亲和性跳过，0失败/错误；Spotless/Checkstyle通过。首次新断言缺静态导入导致编译失败；初次跨文件fixture被既有固定映射合同拒绝，已移除无依据跨文件设计；随后单条ordinary refill因测试使用16条/30秒封包而等待超出测试期限，改用既有逐条封包入口验证实际refill，未增大超时或弱化断言。失败运行不计通过。
+
+[轮转有限投影](../models/README.md#有界窗口轮转投影) `unified-wal-model-vzkxsq35` 绑定同一父提交、116个模块/config/runner/Java输入和223个checksum，完整矩阵21正向PASS、53指定反例。每次重置游标及持续扩大本轮上限两个候选分别违反稳定轮覆盖与旧grant回访性质；真实测量、数据I/O、资源终结与整组FREE仍由Java及既有切片提供各自范围的证据。
+
+当前窗口外候选可在有限轮次内被尝试、旧候选可在下一轮回访，但仍无全局最优组、跨窗口组合、任意大snapshot流式搬迁、部分任务自动收敛、per-allocation在线cut或维护调度；全graph暂停与单连续destination限制保留。步骤9/10、完整16步目标、真实掉电和生产Gate未完成，历史receipt及父提交合同哈希不重绑。

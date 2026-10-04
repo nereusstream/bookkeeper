@@ -268,3 +268,15 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | 部分live路径Move | 既有 `graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource` 与 `graphCompactionSplitsByBufferAndMoveRowsAndRecoversEveryBatchAfterSourceReuse` 改经shard入口，复用真实共享T/净成本、多批、覆盖及复用验证 |
 
 有限投影只检查选择与输入/目的地准入顺序，不能替代真实whole-allocation proof、I/O、资源终结或持续负载验收。
+
+
+## 有界窗口轮转
+
+| 动作 | 真实实现与风险回归 |
+| --- | --- |
+| Admit/固定cut/顺序窗口 | `compactShard` 每shard进程内after/through；`compactionCandidates` 既有固定文件、原ALLOC sequence区间及16上限；扫描cut不授予FREE |
+| 继续下一窗口 | `shardCompactionAdvancesPastFullLiveWindowToRecoverDestinationSupply`：17 grant满文件，首16 live目的地无空间，下一dead直接FREE，再搬迁17条并FREE16源、generation2目的地及重启 |
+| Append/回访与空窗 | `shardCompactionFreezesScanRoundAndRevisitsEarlierSourcesAfterRefill`：真实ordinary refill新grant、准确T后先回访原16、再处理新grant，全空返回false、低地址gen2再写与重启 |
+| 资源循环输入 | `runtimeTerminalCleanupRecyclesEveryOriginalOwnersCoordinateAndPhysicalBlock` 改经自动shard选择；1/4 worker、4 shard、4轮FREE、gen1→5及最终覆盖/重启；有限次数，不是long-run测量 |
+
+模型每窗口1个grant只投影推进顺序；Java实际16上限与byte/资源语义由真实路径验证，不能从游标推出数据死亡或FREE authority。

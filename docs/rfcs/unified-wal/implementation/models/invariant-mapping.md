@@ -236,3 +236,13 @@ COPY/MOVE durability、grant与权限为输入假设；有限PASS不等于实际
 | `FreedCurrentRowsHaveSuccessor` | live路径复用已durable COPY/MOVE，最终重新证明；模型不自行证明实际target bytes/权限正确性 |
 
 这是有限输入假设下的选择约束及准入性质，不是全存储liveness、窗口外公平性、持续容量或完整resource模型。
+
+
+## 有界窗口轮转
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| `ThreeAdmittedCallsCoverStableRound` | 固定本轮上限、从最后尝试的原ALLOC sequence继续；零净收益/资源不足结果也推进已准入窗口，拒绝准入不推进；模型3候选/窗口1，仅检验继续发起已准入尝试且候选稳定时的有限覆盖 |
+| `FourthAdmittedCallRevisitsOldestGrant` | 老轮空窗后最多一次刷新上限并从-1开始；后来grant不扩大未完成轮；实际ordinary refill后准确T回访验证 |
+
+cursor没有持久授权语义，重启从头不影响selector/T/generation；真实FREE继续独立whole-allocation proof与CONTROL cut/barrier。未模型化调度、完整预算、失败存储或全系统liveness。

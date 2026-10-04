@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影共20个完整正向配置、51个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影共21个完整正向配置、53个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,9 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-compaction-sweep` | 1固定文件、3稳定grant、每窗口1 grant、至多2后来grant及6个已准入请求，固定上限保证有限轮覆盖与回访 |
+| `ce-compaction-sweep-reset` | 故意每请求重置游标，须违反 `ThreeAdmittedCallsCoverStableRound` |
+| `ce-compaction-sweep-expanding` | 故意每请求扩大轮上限，须违反 `FourthAdmittedCallRevisitsOldestGrant` |
 | `c-compaction-selection` | 3个current候选、各0..3 live记录、1..3输入预算、0/1 spare，真实测量后优先dead并保留最终proof/barrier |
 | `ce-compaction-selection-input` | 故意选择前捕获全部输入，必须违反 `DeadCandidatesAvoidInputRefusal` |
 | `ce-compaction-selection-index` | 故意以native缺行测量死亡，必须违反 `SelectedSourcesUseActualData` |
@@ -432,3 +435,18 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 | `ce-compaction-selection-index` | 指定 `SelectedSourcesUseActualData` 反例 | 4118 / 4118 / 2057 | 3 / 不适用 | 0.890857 | 136691712 |
 
 回执 `unified-wal-model-q9uihppa` 绑定父提交 `a3da98d3c0a734b61bb7fa06c53ecb6c6aac5840`、112个模块/config/runner/实际Java输入和214个checksum，完整矩阵20正向PASS/51指定反例；输入及checksum逐项验证。父提交合同哈希保留父提交原值，不改绑定历史回执；Java七类288项、283通过/5平台跳过为独立真实路径证据，见[本地选择实现](../local-storage/README.md#固定-shard-的有界回收选择)。仍无完整A/C/D/组合、Block G、掉电或生产authority。
+
+
+## 有界窗口轮转投影
+
+`CompactionSweep.tla`投影一个固定shard/file、3个持续可用grant、每窗口1个grant、至多2个后来grant与6个已准入尝试；一次拒绝准入动作不改变游标。模型sequence从1开始，实现控制首sequence为0/初始游标-1，实际每窗口最多16个grant由Java真实17个grant验证。候选是否dead、有净收益或资源不足不改变已准入窗口的尝试进度；真实DATA/权限/当前grant及正常资源终结为外部输入，本模块不证明MOVE/FREE正确性。
+
+`ThreeAdmittedCallsCoverStableRound`检查3个持续可用旧候选在3次已准入尝试中均被访问；`FourthAdmittedCallRevisitsOldestGrant`检查固定本轮上限后下一次重开从旧候选开始，而非不断把后来grant纳入当前轮。两个故意错误候选分别每次从头，以及每次扩大上限；前者漏查后续旧grant，后者延迟已变化旧source的回访。未增加调度fairness或deadlock/liveness检查，性质只在上述有限域、持续候选和调用方继续已准入尝试的条件下成立。
+
+| 配置 | 结果 | generated / distinct / queue | 深度 / 直径 | 秒 | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- |
+| `c-compaction-sweep` | 完整PASS | 113 / 60 / 0 | 10 / 10 | 0.787118 | 109789184 |
+| `ce-compaction-sweep-reset` | 指定 `ThreeAdmittedCallsCoverStableRound` 反例 | 24 / 15 / 5 | 4 / 不适用 | 0.822043 | 108871680 |
+| `ce-compaction-sweep-expanding` | 指定 `FourthAdmittedCallRevisitsOldestGrant` 反例 | 60 / 38 / 11 | 6 / 不适用 | 0.778721 | 108593152 |
+
+回执 `unified-wal-model-vzkxsq35` 绑定父提交 `c7832d4c0695bb27b8ec049df488b1b3273a04f7`、116个输入/223个checksum、21完整正向PASS/53指定反例。历史设计输入仍取父提交哈希，旧回执不重绑；本轮[真实容量回归](../local-storage/README.md#有界回收窗口轮转与有限容量循环)分别验证实际16上限、满容量/ordinary refill/准确T/多代复用，未做长期负载、性能、多Arena、掉电或生产authority验收。
