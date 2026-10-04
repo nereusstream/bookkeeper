@@ -48,14 +48,21 @@ final class SegmentDataRecovery {
     private record CompactionKey(ProfileLedgerContext context, long entryId) { }
 
     static final class CompactionPlan implements AutoCloseable {
+        private final List<SegmentArenaControlLog.Allocation> victims;
         private final List<CompactionBatch> batches;
         private final long sourceBytes;
         private final long batchBytes;
 
-        private CompactionPlan(List<CompactionBatch> batches, long sourceBytes) {
+        private CompactionPlan(List<SegmentArenaControlLog.Allocation> victims, List<CompactionBatch> batches,
+                               long sourceBytes) {
+            this.victims = List.copyOf(victims);
             this.batches = List.copyOf(batches);
             this.sourceBytes = sourceBytes;
             batchBytes = batches.stream().mapToLong(CompactionBatch::bytes).sum();
+        }
+
+        List<SegmentArenaControlLog.Allocation> victims() {
+            return victims;
         }
 
         List<CompactionBatch> batches() {
@@ -81,119 +88,179 @@ final class SegmentDataRecovery {
         }
     }
 
-    /** The caller holds the graph admission cut and live Bookie/file proof gate, never an index-absence proof. */
-    static CompactionPlan inspectCompaction(IsolatedSegmentConfig config, SegmentFileHeader identity,
-                                                    SegmentArenaControlLog arena, FileChannel data,
-                                                    List<SegmentArenaControlLog.Allocation> victims, List<Long> ends,
-                                                    SegmentBookieControlLog bookie, SegmentEntryInputs inputs,
-                                                    ByteBuffer workspace, IsolatedSegmentFiles files,
-                                                    IsolatedSegmentFiles.ReclamationGuard protection)
-            throws IOException {
-        protection.requireHeld(files, arena);
-        List<CompactionEntry> entries = new ArrayList<>();
-        List<CompactionBatch> batches = new ArrayList<>();
-        HashSet<CompactionKey> distinct = new HashSet<>();
-        long sourceBytes = 0;
-        int recordBytes = 0;
-        int batchStart = 0;
-        long arenaCut = arena.appliedThrough();
-        long bookieCut = bookie.recoveryReadCut(config, identity);
-        try {
-            for (int victimIndex = 0; victimIndex < victims.size(); victimIndex++) {
-                SegmentArenaControlLog.Allocation victim = victims.get(victimIndex);
-                if (!victim.equals(arena.currentAllocation(victim.allocationId()))) {
-                    throw new IOException("Compaction source allocation changed before its capture");
-                }
-                sourceBytes = Math.addExact(sourceBytes, victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES);
-                long end = victim.offset() + victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
-                long usedEnd = ends.get(victimIndex);
-                long through = -1;
-                if (usedEnd < victim.offset() || usedEnd > end || usedEnd % config.alignment() != 0) {
-                    throw new IOException("Compaction victim has an invalid current DATA boundary");
-                }
-                for (long offset = victim.offset(); offset < usedEnd;) {
-                    ByteBuffer page = workspace.slice(0, 4096);
-                    SegmentFileIo.readFully(data, page, offset);
-                    if (allZero(page)) {
-                        if (victim.expectedGeneration() > 0) {
-                            throw new IOException("Reused compaction source has an unwritten required page");
-                        }
-                        offset += 4096;
-                        continue;
-                    }
-                    SegmentBatchFormat.Address address = address(page, offset);
-                    if (address.fileIndex() != victim.file() || address.shard() != victim.ownerShard()
-                            || address.allocation() != victim.allocationId()
-                            || address.generation().value() != victim.generation()
-                            || !address.streamGeneration().equals(victim.ownerGeneration())) {
-                        throw new IOException("Compaction source has another allocation identity");
-                    }
-                    int length = SegmentBatchParser.batchLength(page.slice(0, 128), address, config.bytesPerFile());
-                    if (length > workspace.capacity() || length > usedEnd - offset
-                            || through >= 0 && address.sequence() != through + 1) {
-                        throw new IOException("Compaction source exceeds its buffer or has a DATA sequence gap");
-                    }
-                    through = address.sequence();
-                    ByteBuffer content = workspace.slice(0, length);
-                    SegmentFileIo.readFully(data, content, offset);
-                    SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address, config.bytesPerFile());
-                    List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
-                    for (int i = 0; i < locations.size(); i++) {
-                        SegmentBatchParser.Record record = parsed.records().get(i);
-                        SegmentPointRead.Location location = locations.get(i);
-                        if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
-                                != victim.ownerShard()) {
-                            throw new IOException("Compaction source record has another logical shard");
-                        }
-                        if (bookie.hasTerminalTombstone(record.context())
-                                || !arena.isSelectedRecord(location, record)) {
-                            continue;
-                        }
-                        if (!bookie.locallyReadableContext(record.context())) {
-                            throw new IOException("Compaction source has no locally readable Bookie context");
-                        }
-                        SegmentArenaMove.Source source = new SegmentArenaMove.Source(location,
-                                arena.currentSelectorSequence(record.context(), record.entryId()));
-                        if (!distinct.add(new CompactionKey(record.context(), record.entryId()))) {
-                            throw new IOException("Compaction live set repeats a selected coordinate");
-                        }
-                        if (entries.size() - batchStart == SegmentBatchFormat.MAX_RECORDS
-                                || SegmentBatchFormat.alignedLength(Math.addExact(recordBytes,
-                                        location.recordLength())) > workspace.capacity()) {
-                            batches.add(new CompactionBatch(entries.subList(batchStart, entries.size()),
-                                    SegmentBatchFormat.alignedLength(recordBytes)));
-                            batchStart = entries.size();
-                            recordBytes = 0;
-                        }
-                        recordBytes = Math.addExact(recordBytes, location.recordLength());
-                        if (SegmentBatchFormat.alignedLength(recordBytes) > workspace.capacity()) {
-                            throw new IOException("Compaction entry exceeds its bounded COPY buffer");
-                        }
-                        SegmentEntryInputs.Input input = inputs.acquire(record.context(), record.entry().remaining());
-                        if (input == null) {
-                            throw new IOException("Compaction source input budget is unavailable");
-                        }
-                        entries.add(new CompactionEntry(source, input));
-                        input.bytes().writeBytes(record.entry().duplicate());
-                    }
-                    offset += length;
-                }
+    @FunctionalInterface
+    private interface CompactionVisitor {
+        void accept(SegmentArenaMove.Source source, SegmentBatchParser.Record record) throws IOException;
+    }
+
+    /** Owns only selected source snapshots and returns every partial capture on failure. */
+    private static final class CompactionCapture implements CompactionVisitor, AutoCloseable {
+        private final SegmentEntryInputs inputs;
+        private final int capacity;
+        private final List<CompactionEntry> entries = new ArrayList<>();
+        private final List<CompactionBatch> batches = new ArrayList<>();
+        private final HashSet<CompactionKey> distinct = new HashSet<>();
+        private int recordBytes;
+        private int batchStart;
+
+        private CompactionCapture(SegmentEntryInputs inputs, int capacity) {
+            this.inputs = inputs;
+            this.capacity = capacity;
+        }
+
+        @Override
+        public void accept(SegmentArenaMove.Source source, SegmentBatchParser.Record record) throws IOException {
+            if (!distinct.add(new CompactionKey(record.context(), record.entryId()))) {
+                throw new IOException("Compaction live set repeats a selected coordinate");
             }
-            protection.requireHeld(files, arena);
-            arena.requireMovePreparation(files);
-            if (arena.appliedThrough() != arenaCut || bookie.recoveryReadCut(config, identity) != bookieCut) {
-                throw new IOException("Compaction authority changed during source capture");
+            if (entries.size() - batchStart == SegmentBatchFormat.MAX_RECORDS
+                    || SegmentBatchFormat.alignedLength(Math.addExact(recordBytes,
+                            source.location().recordLength())) > capacity) {
+                seal();
             }
+            recordBytes = Math.addExact(recordBytes, source.location().recordLength());
+            if (SegmentBatchFormat.alignedLength(recordBytes) > capacity) {
+                throw new IOException("Compaction entry exceeds its bounded COPY buffer");
+            }
+            SegmentEntryInputs.Input input = inputs.acquire(record.context(), record.entry().remaining());
+            if (input == null) {
+                throw new IOException("Compaction source input budget is unavailable");
+            }
+            entries.add(new CompactionEntry(source, input));
+            input.bytes().writeBytes(record.entry().duplicate());
+        }
+
+        private void seal() {
             if (batchStart < entries.size()) {
                 batches.add(new CompactionBatch(entries.subList(batchStart, entries.size()),
                         SegmentBatchFormat.alignedLength(recordBytes)));
             }
-            return new CompactionPlan(batches, sourceBytes);
-        } catch (IOException | RuntimeException | Error failure) {
+            batchStart = entries.size();
+            recordBytes = 0;
+        }
+
+        private CompactionPlan finish(List<SegmentArenaControlLog.Allocation> victims, long sourceBytes) {
+            seal();
+            return new CompactionPlan(victims, batches, sourceBytes);
+        }
+
+        @Override
+        public void close() {
             for (CompactionEntry entry : entries) {
                 entry.input().close();
             }
+        }
+    }
+
+    /** Measure before reserving input bytes: unrelated current live data must not block direct dead-source FREE. */
+    static CompactionPlan inspectCompaction(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                            SegmentArenaControlLog arena, FileChannel data,
+                                            List<SegmentArenaControlLog.Allocation> victims, List<Long> ends,
+                                            SegmentBookieControlLog bookie, SegmentEntryInputs inputs,
+                                            ByteBuffer workspace, IsolatedSegmentFiles files,
+                                            IsolatedSegmentFiles.ReclamationGuard protection, boolean selectVictims)
+            throws IOException {
+        protection.requireHeld(files, arena);
+        long arenaCut = arena.appliedThrough();
+        long bookieCut = bookie.recoveryReadCut(config, identity);
+        List<SegmentArenaControlLog.Allocation> selected = victims;
+        List<Long> selectedEnds = ends;
+        if (selectVictims) {
+            List<SegmentArenaControlLog.Allocation> dead = new ArrayList<>();
+            List<Long> deadEnds = new ArrayList<>();
+            for (int i = 0; i < victims.size(); i++) {
+                boolean[] live = {false};
+                scanCompactionAllocation(config, arena, data, victims.get(i), ends.get(i), bookie, workspace,
+                        (source, record) -> live[0] = true);
+                if (!live[0]) {
+                    dead.add(victims.get(i));
+                    deadEnds.add(ends.get(i));
+                }
+            }
+            if (!dead.isEmpty()) {
+                selected = List.copyOf(dead);
+                selectedEnds = List.copyOf(deadEnds);
+            }
+        }
+        CompactionCapture capture = new CompactionCapture(inputs, workspace.capacity());
+        long sourceBytes = 0;
+        try {
+            for (int i = 0; i < selected.size(); i++) {
+                SegmentArenaControlLog.Allocation victim = selected.get(i);
+                sourceBytes = Math.addExact(sourceBytes, victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES);
+                scanCompactionAllocation(config, arena, data, victim, selectedEnds.get(i), bookie, workspace, capture);
+            }
+            protection.requireHeld(files, arena);
+            arena.requireMovePreparation(files);
+            if (arena.appliedThrough() != arenaCut || bookie.recoveryReadCut(config, identity) != bookieCut) {
+                throw new IOException("Compaction authority changed during source selection/capture");
+            }
+            return capture.finish(selected, sourceBytes);
+        } catch (IOException | RuntimeException | Error failure) {
+            capture.close();
             throw failure;
+        }
+    }
+
+    /** Record bytes borrow the original owner's workspace only during the synchronous visitor call. */
+    private static void scanCompactionAllocation(IsolatedSegmentConfig config, SegmentArenaControlLog arena,
+                                                FileChannel data, SegmentArenaControlLog.Allocation victim,
+                                                long usedEnd, SegmentBookieControlLog bookie, ByteBuffer workspace,
+                                                CompactionVisitor visitor) throws IOException {
+        if (!victim.equals(arena.currentAllocation(victim.allocationId()))) {
+            throw new IOException("Compaction source allocation changed before its capture");
+        }
+        long end = victim.offset() + victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+        long through = -1;
+        if (usedEnd < victim.offset() || usedEnd > end || usedEnd % config.alignment() != 0) {
+            throw new IOException("Compaction victim has an invalid current DATA boundary");
+        }
+        for (long offset = victim.offset(); offset < usedEnd;) {
+            ByteBuffer page = workspace.slice(0, 4096);
+            SegmentFileIo.readFully(data, page, offset);
+            if (allZero(page)) {
+                if (victim.expectedGeneration() > 0) {
+                    throw new IOException("Reused compaction source has an unwritten required page");
+                }
+                offset += 4096;
+                continue;
+            }
+            SegmentBatchFormat.Address address = address(page, offset);
+            if (address.fileIndex() != victim.file() || address.shard() != victim.ownerShard()
+                    || address.allocation() != victim.allocationId()
+                    || address.generation().value() != victim.generation()
+                    || !address.streamGeneration().equals(victim.ownerGeneration())) {
+                throw new IOException("Compaction source has another allocation identity");
+            }
+            int length = SegmentBatchParser.batchLength(page.slice(0, 128), address, config.bytesPerFile());
+            if (length > workspace.capacity() || length > usedEnd - offset
+                    || through >= 0 && address.sequence() != through + 1) {
+                throw new IOException("Compaction source exceeds its buffer or has a DATA sequence gap");
+            }
+            through = address.sequence();
+            ByteBuffer content = workspace.slice(0, length);
+            SegmentFileIo.readFully(data, content, offset);
+            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address, config.bytesPerFile());
+            List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+            for (int i = 0; i < locations.size(); i++) {
+                SegmentBatchParser.Record record = parsed.records().get(i);
+                SegmentPointRead.Location location = locations.get(i);
+                if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                        != victim.ownerShard()) {
+                    throw new IOException("Compaction source record has another logical shard");
+                }
+                if (bookie.hasTerminalTombstone(record.context())
+                        || !arena.isSelectedRecord(location, record)) {
+                    continue;
+                }
+                if (!bookie.locallyReadableContext(record.context())) {
+                    throw new IOException("Compaction source has no locally readable Bookie context");
+                }
+                SegmentArenaMove.Source source = new SegmentArenaMove.Source(location,
+                        arena.currentSelectorSequence(record.context(), record.entryId()));
+                visitor.accept(source, record);
+            }
+            offset += length;
         }
     }
 

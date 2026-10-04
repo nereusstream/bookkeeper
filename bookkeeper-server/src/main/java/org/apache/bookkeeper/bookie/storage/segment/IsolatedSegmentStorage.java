@@ -445,6 +445,43 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         return compactAllocations(operationId, allocationIds, request, new SegmentFileIo());
     }
 
+    /** Select from actual current DATA in a bounded shard window; the final FREE still requires its own proof. */
+    boolean compactShard(UUID operationId, int shard, CompactionRequest request) throws IOException {
+        Objects.requireNonNull(operationId, "operationId");
+        Objects.requireNonNull(request, "request");
+        if (operationId.equals(new UUID(0, 0)) || shard < 0 || shard >= config.logicalShards()) {
+            throw new IllegalArgumentException("Compaction needs a new operation and a valid fixed shard");
+        }
+        synchronized (gate) {
+            if (!canCompact()) {
+                return false;
+            }
+            List<SegmentArenaControlLog.Allocation> candidates = arena.compactionCandidates(shard);
+            return !candidates.isEmpty() && admitCompaction(operationId, candidates, request, new SegmentFileIo(),
+                    true);
+        }
+    }
+
+    private boolean canCompact() {
+        return accepting && execution.accepting() && indexCheckpoint == null && freeOperation == null
+                && compaction == null && config.maxPendingEntries() >= 2;
+    }
+
+    private boolean admitCompaction(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
+                                    CompactionRequest request, SegmentFileIo publicationIo, boolean selectVictims)
+            throws IOException {
+        arena.requireUnusedOperation(operationId);
+        arena.requireUnusedOperation(phaseId(operationId, "ALLOC"));
+        CompactionOperation operation = new CompactionOperation(operationId, victims, request, publicationIo,
+                selectVictims);
+        compaction = operation;
+        if (!maintainIndex(new IndexCheckpointRequest(operation::prepared), new SegmentFileIo(), true, operation)) {
+            compaction = null;
+            return false;
+        }
+        return true;
+    }
+
     boolean compactAllocations(UUID operationId, List<Long> allocationIds, CompactionRequest request,
                                SegmentFileIo publicationIo) throws IOException {
         Objects.requireNonNull(operationId, "operationId");
@@ -456,12 +493,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             throw new IllegalArgumentException("Compaction needs 1..16 unique same-stream allocations");
         }
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null
-                    || compaction != null || config.maxPendingEntries() < 2) {
+            if (!canCompact()) {
                 return false;
             }
-            arena.requireUnusedOperation(operationId);
-            arena.requireUnusedOperation(phaseId(operationId, "ALLOC"));
             List<SegmentArenaControlLog.Allocation> victims = new ArrayList<>();
             for (long allocationId : allocationIds) {
                 SegmentArenaControlLog.Allocation victim = arena.currentAllocation(allocationId);
@@ -471,14 +505,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 }
                 victims.add(victim);
             }
-            CompactionOperation operation = new CompactionOperation(operationId, victims, request, publicationIo);
-            compaction = operation;
-            if (!maintainIndex(new IndexCheckpointRequest(operation::prepared), new SegmentFileIo(), true,
-                    operation)) {
-                compaction = null;
-                return false;
-            }
-            return true;
+            return admitCompaction(operationId, victims, request, publicationIo, false);
         }
     }
 
@@ -488,10 +515,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     private final class CompactionOperation implements SegmentOwnerLoop.Command {
         private final UUID operationId;
-        private final List<SegmentArenaControlLog.Allocation> victims;
+        private List<SegmentArenaControlLog.Allocation> victims;
         private final CompactionRequest request;
         private final SegmentFileIo publicationIo;
         private final int shard;
+        private final boolean selectVictims;
         private SegmentOwnerLoop.Ticket ticket;
         private SegmentBufferPool.Lease buffer;
         private SegmentDataRecovery.CompactionPlan plan;
@@ -509,12 +537,13 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private long destinationOffset;
 
         private CompactionOperation(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
-                                    CompactionRequest request, SegmentFileIo publicationIo) {
+                                    CompactionRequest request, SegmentFileIo publicationIo, boolean selectVictims) {
             this.operationId = operationId;
             this.victims = List.copyOf(victims);
             this.request = request;
             this.publicationIo = publicationIo;
             shard = victims.get(0).ownerShard();
+            this.selectVictims = selectVictims;
         }
 
         private void prepared(IndexCheckpointResult result, Throwable failure) {
@@ -536,7 +565,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 try (SegmentBookieControlLog.ReclamationLease lease = bookie.protectReclamation(config, identity);
                         IsolatedSegmentFiles.ReclamationGuard guard = files.protectReclamation(arena,
                                 victims.get(0).file(), lease)) {
-                    plan = guard.inspectCompaction(victims, bookie, execution.inputs(), buffer.bytes());
+                    plan = guard.inspectCompaction(victims, bookie, execution.inputs(), buffer.bytes(), selectVictims);
+                    victims = plan.victims();
                 }
             }, this::captured);
         }

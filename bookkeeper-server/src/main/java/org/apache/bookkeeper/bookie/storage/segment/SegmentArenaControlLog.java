@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -731,6 +732,41 @@ final class SegmentArenaControlLog implements AutoCloseable {
             throw new IOException("Allocation is not current and available");
         }
         return allocation;
+    }
+
+    /** At most 16 oldest current grants in the oldest available file of this fixed shard/stream. */
+    synchronized List<Allocation> compactionCandidates(int shard) throws IOException {
+        requireQuiescentControl(config, identity);
+        Optional<SingleStream> stream = restartStreamForShard(shard);
+        if (stream.isEmpty()) {
+            return List.of();
+        }
+        Allocation oldest = null;
+        long oldestOrder = Long.MAX_VALUE;
+        for (Allocation allocation : allocationIds.values()) {
+            if (allocation.ownerShard() == shard && !retiredAllocations.containsKey(allocation.allocationId())
+                    && dataFileAvailable(allocation.file())) {
+                long order = appliedOperations.get(allocation.operationId()).sequence();
+                if (order < oldestOrder) {
+                    oldest = allocation;
+                    oldestOrder = order;
+                }
+            }
+        }
+        if (oldest == null) {
+            return List.of();
+        }
+        TreeMap<Long, Allocation> candidates = new TreeMap<>();
+        for (Allocation allocation : allocationIds.values()) {
+            if (allocation.ownerShard() == shard && allocation.file() == oldest.file()
+                    && !retiredAllocations.containsKey(allocation.allocationId())) {
+                candidates.put(appliedOperations.get(allocation.operationId()).sequence(), allocation);
+                if (candidates.size() > 16) {
+                    candidates.pollLastEntry();
+                }
+            }
+        }
+        return List.copyOf(candidates.values());
     }
 
     synchronized void requireUnusedOperation(UUID operationId) throws IOException {

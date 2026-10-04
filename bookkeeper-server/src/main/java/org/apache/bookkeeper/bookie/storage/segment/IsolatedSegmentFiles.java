@@ -139,7 +139,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
         SegmentDataRecovery.CompactionPlan inspectCompaction(List<SegmentArenaControlLog.Allocation> victims,
                                                               SegmentBookieControlLog bookie,
-                                                              SegmentEntryInputs inputs, ByteBuffer workspace)
+                                                              SegmentEntryInputs inputs, ByteBuffer workspace,
+                                                              boolean selectVictims)
                 throws IOException {
             requireHeld(owner, authority);
             List<Long> ends = new ArrayList<>();
@@ -150,7 +151,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 ends.add(owner.allocationEnd(victim, authority));
             }
             return SegmentDataRecovery.inspectCompaction(owner.config, owner.identity, authority,
-                    owner.data.get(file), victims, ends, bookie, inputs, workspace, owner, this);
+                    owner.data.get(file), victims, ends, bookie, inputs, workspace, owner, this, selectVictims);
         }
 
         @Override

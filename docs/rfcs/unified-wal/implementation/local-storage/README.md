@@ -612,3 +612,20 @@ Arena 控制日志、checkpoint 与 rotation metadata-only 重放同一有序命
 最终Java回执 `unified-wal-local-X5LKGFDY` 绑定父提交 `95fc090067b084f9cc50365df29037fac673b91a` 与207个实际源码/测试/向量输入：既有七类286项，281通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。先验证既有三项及新增四项，再因physical prefix/driver/恢复共用路径扩大到七类。初次新增测试误用不存在的point-read locator getter导致编译失败，已通过实际duplicate结果验证destination；源预算用例初始低于既有最大entry启动下限，已改合法下限并验证中途拒绝与归还。中间失败不计为通过，最终207个哈希逐项吻合。
 
 [多批有限投影](../models/README.md#多批-compaction-投影) `unified-wal-model-e8rktusu` 绑定同一父提交、108个输入和205个checksum，矩阵19个完整正向PASS、49个指定反例；多批投影378个generated/259个distinct、队列0、深度/直径28。真实掉电、long-run/性能与完整资源/分布式Gate未运行或未闭合，历史回执保留。
+
+
+## 固定 shard 的有界回收选择
+
+2026-10-04，新package入口 `compactShard(operationId, shard, request)` 复用既有compaction资源与全graph准入暂停，不增加线程、队列、后台调度或wire/持久任务字段。控制元数据按原成功ALLOC sequence选择指定固定shard唯一stream在最早可用文件中的最多16个最早当前grant；已退役grant不再进入窗口，其他shard/文件不会随组退役。本轮只选择这个窗口，不声称全Arena最优组或自动遍历所有候选。
+
+原owner终态索引排空后，在同一个Bookie/文件保护及原owner scratch内，先逐批读取真实当前DATA，校验framing/CRC、grant/generation、连续sequence、逻辑shard、Bookie权限、准确T与当前selector。测量阶段不捕获payload，不用native缺行判断死亡。窗口中存在零current live记录的allocation时，只选择这些allocation；否则使用整个窗口，复用已有全组输入预算、多批COPY成本及严格正净收益检查。选择之后再次扫描选中组，取得既有全局源bytes预算内的不可变输入。两个阶段分别用于选择和所有权捕获；任何authority cut变化仍拒绝，已有source batch仍须适配原owner buffer。
+
+零current live只是候选测量，不授予FREE：后续仍逐allocation独立验证完整原DATA、准确终态或当前MOVE后继实际字节、原grant与selector cut，在现有共享guard下合批CONTROL durable/apply，并等待全部实际成员终结。因此容量已满时，可直接恢复可复用source供给；不能跳过当前后继证明、native/owner资源终结或把索引缺行当T。
+
+两项新真实回归验证：40坐标完成3批MOVE但native页发布unknown后，3个1 MiB DATA grant已占满可分配容量；重启使用合法1060字节源预算，而无关current目的地payload为1760字节，shard请求仍无新ALLOC/COPY退役两个旧source，保留当前COPY，随后原低地址generation2真实写入并再次重启读取。17个grant窗口中前16个准确T退役、更晚共享活ledger保留；下一窗口只有一个live grant时零净收益拒绝，跨worker重启仍读取该原数据。既有共享T/3坐标与40/402坐标多批回归改经shard入口，继续检验实际COPY/MOVE、净收益、跨批幂等、native覆盖和source复用后完整恢复。
+
+最终Java回执 `unified-wal-local-cR8F1lPd` 绑定父提交 `a3da98d3c0a734b61bb7fa06c53ecb6c6aac5840` 与207个实际输入：先跑六项相关回归，再扩大至既有七类288项，283通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。首次新测试误用不存在的record类型getter导致编译失败，已按真实 `origin()` 字段修复；随后检查发现测试一行超长，已折行并以最终输入重新运行七类验证，模型输入未变化。失败运行不计通过。最终输入哈希逐项验证，历史回执不重绑。
+
+[选择有限投影](../models/README.md#有界-source-选择投影) `unified-wal-model-q9uihppa` 绑定同一父提交、112个输入及214个checksum；完整矩阵20正向PASS、51指定反例。候选测量、先选dead再占输入、无spare时直接FREE与最终proof/barrier分别投影，真实字节/身份/guard完整实现仍是输入假设。
+
+选择窗口及所有source读取均有界，但不保证最早窗口之外的dead发现、公平轮转、自动partial任务收敛、全局最优净回收或逐allocation在线cut；目的地仍需要单个可用连续grant。持续create/write/read/delete净容量、控制历史/SST/文件系统完整预算、多Arena、OPEN错误恢复、实际掉电/性能与生产Gate未完成。步骤9/10及完整16步目标保持未完成。

@@ -1130,3 +1130,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04 当前模型增量：[多批compaction投影](../implementation/models/README.md#多批-compaction-投影)扩展既有group有限域为1..3 source/COPY batch，按全部aligned成本取整、全部COPY/MOVE完成后才native/FREE，增加后批失败及首批后错误FREE候选反例。矩阵为19正向/49指定反例，仍无真实字节、资源、crash/reuse或完整A/C/D/组合与Block G authority。
+
+
+2026-10-04 当前选择模型：[有界source选择投影](../implementation/models/README.md#有界-source-选择投影)检验真实current DATA测量后优先dead、选择先于输入/目的地准入、保留最终proof与FREE barrier；选择前捕获全候选与index缺行测量两个候选被指定性质否证。矩阵20正向/51指定反例、112个输入/214个checksum；真实DATA/权限/稳定cut/whole proof为输入假设，无全存储进展、真实字节、完整资源、crash或生产authority。

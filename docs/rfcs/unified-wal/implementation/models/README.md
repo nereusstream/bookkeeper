@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖和多批compaction投影共19个完整正向配置、49个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影共20个完整正向配置、51个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,9 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-compaction-selection` | 3个current候选、各0..3 live记录、1..3输入预算、0/1 spare，真实测量后优先dead并保留最终proof/barrier |
+| `ce-compaction-selection-input` | 故意选择前捕获全部输入，必须违反 `DeadCandidatesAvoidInputRefusal` |
+| `ce-compaction-selection-index` | 故意以native缺行测量死亡，必须违反 `SelectedSourcesUseActualData` |
 | `c-relocation-completion` | 2个copy batch的实际IO、原owner结果、连续前缀与原池释放；copy不发布普通定位 |
 | `ce-relocation-early-facts` | 故意force即返回内部事实；必须违反`CopyFactsHaveBarrierAndPrefix` |
 | `ce-relocation-ordinary` | 故意将copy发布为普通定位；必须违反`CopyDoesNotPublishOrdinary` |
@@ -414,3 +417,18 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 | `ce-compaction-incomplete-group` | EXPECTED_COUNTEREXAMPLE | 214 / 151 | 19 | 11 / — | 0.815862 | 112,164,864 |
 
 新增完整trace为两批任务完成首批MOVE后，错误PublishNative→PrepareFree→ForceFree→ApplyFree；此时还有未搬迁批次。Java的完整whole-source successor proof不由计数替代。真实四项回归及七类281通过/5平台跳过分别验证storage语义；没有执行JVM halt或掉电，不提升完整模型/Block G/生产authority。
+
+
+## 有界 source 选择投影
+
+`CompactionSelection.tla`投影3个已固定候选及其各0..3个current live记录、1..3个输入单位和0/1可用destination。真实DATA测量在选择前不占payload输入；有dead时只选dead，没有dead时选择窗口整组，再判输入和目的地额度。部分live路径保留COPY/MOVE成功或失败，FREE仍需要独立whole-allocation当前后继proof与CONTROL barrier。source/target实际CRC、身份、Bookie权限、稳定cut及资源guard均为实现输入假设；候选窗口排序、16上限、allocation取整净成本由Java及已有group投影分别验证。
+
+两个敏感性候选分别是选择前捕获全部输入，以及用native缺行代替current DATA测量。模型明确把全候选捕获成本与选中组COPY需求分开：无关payload只影响错误的输入捕获，不能使零live组产生destination需求。后者反例仅证明候选选择违约，不宣称错误候选已经通过最终FREE proof。无spare的dead直接回收只在本有限域与输入假设下检验，不是整体存储进展、完整内存界限、liveness或crash/复用证明。
+
+| 配置 | 结果 | generated / distinct / queue | 深度 / 直径 | 秒 | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- |
+| `c-compaction-selection` | 完整PASS | 10558 / 10558 / 0 | 8 / 8 | 0.972378 | 180174848 |
+| `ce-compaction-selection-input` | 指定 `DeadCandidatesAvoidInputRefusal` 反例 | 6178 / 6178 / 2057 | 4 / 不适用 | 0.863914 | 147275776 |
+| `ce-compaction-selection-index` | 指定 `SelectedSourcesUseActualData` 反例 | 4118 / 4118 / 2057 | 3 / 不适用 | 0.890857 | 136691712 |
+
+回执 `unified-wal-model-q9uihppa` 绑定父提交 `a3da98d3c0a734b61bb7fa06c53ecb6c6aac5840`、112个模块/config/runner/实际Java输入和214个checksum，完整矩阵20正向PASS/51指定反例；输入及checksum逐项验证。父提交合同哈希保留父提交原值，不改绑定历史回执；Java七类288项、283通过/5平台跳过为独立真实路径证据，见[本地选择实现](../local-storage/README.md#固定-shard-的有界回收选择)。仍无完整A/C/D/组合、Block G、掉电或生产authority。

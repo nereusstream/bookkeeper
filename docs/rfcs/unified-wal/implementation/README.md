@@ -259,6 +259,8 @@ DATA durable → hot locator → local result
 
 **完成条件：** 部分ledger删除不提前释放共享块；copy durable而MOVE未成功不成为当前数据；A→B→C且A/B已复用、没有新增checkpoint时仍能恢复C，C损坏或必要控制后缀缺失仍隔离；并发MOVE/FREE不产生两个winner，旧I/O不覆盖新owner。FREE以整allocation generation可回收为条件，不以单ledger删除原因代替。
 
+当前[固定shard有界选择](local-storage/README.md#固定-shard-的有界回收选择)先测量真实DATA，零current live组先于快照和destination分配处理；保留独立整allocation证明。该入口只查看最多16个最早同文件grant，未实现窗口外公平选择、partial任务收敛或长期净容量验收。
+
 #### 10. 完成空间耗尽、长期负载与多Arena验证
 
 依赖步骤8、9，在真实压力下验证已有预算，不另建资源框架。覆盖Arena空闲块、filesystem余量、SST/compaction临时空间、控制checkpoint空间、内存和completion工作集。暂停再恢复下游，验证无循环等待、不突破上限、已准入请求可完成且资源归还，随后自动恢复准入；无净收益候选时背压，不反复搬近全live块。
@@ -435,3 +437,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-04 当前增量：[同Arena多批compaction](local-storage/README.md#同-arena-多批-compaction)在既有显式source组内按owner buffer与256行上限划分COPY/MOVE，所有批次完成后统一native覆盖及合批FREE。净成本包括各批framing/padding总和再按destination整allocation向上取整；后批失败保留已成功selector与所有source，不伪造整组回收。40/402坐标的跨批读取、覆盖/全量恢复及source复用、后批force unknown隔离、零净收益和源预算拒绝已由真实路径验证。源snapshot总预算和既有source batch扫描buffer仍有显式上限；自动选组、逐allocation在线cut、长期净容量、多Arena、OPEN错误恢复和生产Gate保持未完成。
+
+
+2026-10-04 当前选择增量：[固定shard有界回收](local-storage/README.md#固定-shard-的有界回收选择)按成功ALLOC顺序查看同文件/唯一stream最多16个当前grant；真实DATA测量先于payload捕获，优先直接回收零current live组，最终仍独立whole-allocation后继证明与合批FREE。满容量且无关current live超过源输入预算的实际回收、source generation2复用及17个grant窗口保留年轻共享活数据已验证；既有共享T及多批COPY/MOVE回归改经shard入口。七类283通过/5平台跳过及20正向/51指定反例仅为局部证据。窗口外公平选择、partial任务自动收敛、逐allocation在线cut、长期完整净容量、多Arena、OPEN错误恢复与生产Gate仍未完成。

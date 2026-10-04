@@ -256,3 +256,15 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | 有界输入/拒绝归还 | `multiBatchCompactionSourceBudgetRefusalReleasesAllCapturedInputs`：合法源预算捕获中途拒绝，全部输入归还，后续旧坐标幂等仍可完成 |
 
 新模型不称为实际IO失败恢复或掉电证明；source已搬迁部分在旧source整块FREE前仍必须满足全范围proof。
+
+
+## 有界 source 选择
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| Measure/Select/Capture | `SegmentArenaControlLog.compactionCandidates` 固定shard/唯一stream、最多16个最早同文件current grant；`SegmentDataRecovery.inspectCompaction` 同guard真实DATA测量，再捕获选中组；不使用index缺行 |
+| 死source直接Prove/ForceFree/ApplyFree | `shardCompactionReclaimsAtFullCapacityBeforeCapturingUnrelatedLiveInputs`：3个grant无空闲、无关live payload超过源预算，直接FREE两旧source，无COPY；保留当前MOVE并实际generation2复用及重启 |
+| 固定窗口、共享活数据 | `shardCompactionBoundsOldestWindowAndRetainsYoungerSharedLiveData`：17 grant前16个T回收、年轻live保留，下一窗口净零拒绝，跨worker重启仍读原数据 |
+| 部分live路径Move | 既有 `graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource` 与 `graphCompactionSplitsByBufferAndMoveRowsAndRecoversEveryBatchAfterSourceReuse` 改经shard入口，复用真实共享T/净成本、多批、覆盖及复用验证 |
+
+有限投影只检查选择与输入/目的地准入顺序，不能替代真实whole-allocation proof、I/O、资源终结或持续负载验收。

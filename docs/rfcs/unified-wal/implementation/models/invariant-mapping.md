@@ -224,3 +224,15 @@ COPY/MOVE durability、grant与权限为输入假设；有限PASS不等于实际
 ## 多批 compaction
 
 `SelectionHasAllocationNetGain`现在扣除全部aligned COPY batch的总成本并按目的地allocation取整；`MovedTargetHasDurableCopy`累计各批的COPY/MOVE force事实；`FreedSourcesHaveDurableSuccessor`要求完成全部批次，再经native发布及FREE barrier。共享guard和各FREE前序cut的已有性质继续适用。`FreeIncompleteGroup`是被否证候选规则，whole-allocation当前successor proof在Java中仍独立重验，不能由moved计数替代。字节/身份/资源与进展不在有限计数投影内证明。
+
+
+## 有界 source 选择
+
+| 性质 | 实现与证据边界 |
+| --- | --- |
+| `SelectedSourcesUseActualData` | 有dead时只选真实当前DATA零live候选；native缺行不决定death；窗口16与control顺序由Java验证 |
+| `DeadCandidatesAvoidInputRefusal` | 测量不捕获payload，有dead时仅捕获选中组；零live无需destination；满容量/合法小源预算实际回归 |
+| `FreedSourcesHaveWholeProof` | 候选测量不授予FREE，实际整allocation后继字节/准确T proof及CONTROL force仍必需 |
+| `FreedCurrentRowsHaveSuccessor` | live路径复用已durable COPY/MOVE，最终重新证明；模型不自行证明实际target bytes/权限正确性 |
+
+这是有限输入假设下的选择约束及准入性质，不是全存储liveness、窗口外公平性、持续容量或完整resource模型。
