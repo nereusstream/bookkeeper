@@ -63,6 +63,16 @@ final class SegmentBookieControlDriver {
         this.log = Objects.requireNonNull(log, "log");
     }
 
+    boolean reserveMaintenance() {
+        return busy.compareAndSet(false, true);
+    }
+
+    void releaseMaintenance() {
+        if (!busy.compareAndSet(true, false)) {
+            throw new IllegalStateException("Bookie maintenance reservation was not held");
+        }
+    }
+
     boolean submitBatch(List<ProtectedProfileStateStore.Transition> commands, BatchCompletion completion) {
         List<ProtectedProfileStateStore.Transition> batch = List.copyOf(commands);
         return submitDurableBatch(() -> log.appendDurably(batch), completion);

@@ -990,14 +990,29 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     SegmentControlRotation.Root rotate(SegmentFileIo rotationIo) throws IOException {
+        return rotate(rotationIo, null);
+    }
+
+    /** Runtime rotation retains the OPEN session and cursor, with actual DATA I/O and read pins excluded. */
+    SegmentControlRotation.Root rotate(SegmentFileIo rotationIo,
+                                       IsolatedSegmentFiles.ReclamationGuard protectedWriter) throws IOException {
         Objects.requireNonNull(rotationIo, "rotationIo");
+        if (protectedWriter != null) {
+            IsolatedSegmentFiles writer;
+            synchronized (this) {
+                writer = sessionOwner;
+            }
+            protectedWriter.requireHeld(writer, this);
+        }
         synchronized (this) {
             requireControlWritable();
-            if (rotating != null || checkpointing || writing || pending != null || sessionOwner != null
-                    || sessionCloseReserved || checkpointGeneration > Long.MAX_VALUE - 2
+            long closeBytes = sessionCloseReserved ? sessionCloseBytes(0) : 0;
+            if (rotating != null || checkpointing || writing || pending != null
+                    || (sessionOwner != null || sessionCloseReserved) && protectedWriter == null
+                    || checkpointGeneration > Long.MAX_VALUE - 2
                     || physicalGeneration.value() == Long.MAX_VALUE || appliedThrough > Long.MAX_VALUE - 3
                     || rotationReserveBytes() == 0
-                    || nextOffset > maxLogBytes - 416) {
+                    || nextOffset > maxLogBytes - 416 - closeBytes) {
                 throw new IOException("Arena rotation requires a quiescent writer and two commit slots");
             }
             for (boolean reserved : quarantineReserved) {

@@ -701,3 +701,22 @@ COPY复用原owner双buffer与DATA driver，在tail后追加连续sequence；前
 [维护容量有限投影](../models/README.md#维护容量预留投影) `unified-wal-model-dzggb6ip` 检验逐文件容量、合批扣减、声明目的地上限及按已有grant重建restart预算；它不证明实际 extent几何或FREE字节事实，也不代替真实持久化、filesystem预算或liveness。
 
 本切片只保护新pool的内部whole-block容量。现有allocator仅复用同尺寸完整extent，没有split/coalesce；碎片或无净收益候选仍会拒绝，内部空闲总数不保证连续目的地。维护PARTIAL实际已占容量不会因响应取消或重启被退回；预算不足时继续等待实际FREE。SST/flush/compaction临时输出、control/checkpoint新旧文件并存、共享filesystem的Bookie总预算、低水位/hysteresis、长期负载、多Arena、完整partial收敛、掉电/正式性能未完成；FREE未增加filesystem available bytes。本切片不关闭B17、步骤9/10或生产Gate，完整16步目标继续。
+
+## 运行期控制日志轮转
+
+2026-10-04，隔离资源图提供显式 `rotateControls` 维护入口。它先在既有 Bookie/Arena driver 上取得排他名额，并暂停新 DATA/read/index/FREE/compaction 准入，再用一份原 owner 的 CONTROL ticket 和既有 CONTROL I/O 服务执行轮转。已经持有的 entry admission、DATA I/O、物理预留或文件 read pin 尚未终结时，保护取得失败，返回 TRANSIENT_UNAVAILABLE；没有新线程、第二份请求队列或重试层。
+
+取得 Bookie admission lease 与全 DATA 文件保护后，依次调用两 owner 既有双恢复根物理协议。Arena 的受保护入口保留实际 OPEN session、epoch、pool、连续前缀和追加 cursor，不伪造 CLOSED 后重新打开。两个 CHECKPOINT_COMMIT 的容量检查还保留当前真实 CLOSED-tail witness 所需空间。两 owner 各自发布和回收，结果分别报告实际已完成 root；它们不是跨 owner 的原子提交。任一轮转尝试失败报告 UNKNOWN，并停止该资源图的新准入；Arena 失败后的 OPEN 会话仍不能借 checkpoint 恢复为 ready。
+
+保护和两个 driver 排他名额持续到实际 I/O 返回原 owner 后才释放。取消只撤销响应，短时 shutdown 不会抢先关闭 DATA 文件或释放 writer lock。已有 DATA 在维护排他期间产生的真实 quarantine 通知，仍由既有失败队列在排他释放后推进，不被维护入口丢弃。
+
+三项新增真实回归覆盖：1/4 worker 下实际 Bookie/Arena 普通控制容量满额，连续两轮轮转后在同一已授权 pool 内续写，epoch、allocation、generation、sequence 和 offset 保持连续，读/幂等及健康 restart 成功；真实 DATA 文件 read pin 阻止轮转，暂停 force、取消响应、缓存控制 driver 与 DATA 拒绝、短 shutdown 后实际排空；分别注入 Bookie/Arena force 失败，检查 UNKNOWN、实际已完成 root、停止准入及重启边界。早期夹具把已复制的点读结果误当仍持有文件 pin，并把同步容量拒绝误当异步结果，已按现有契约修正；未弱化生产断言。
+
+最终 Java 回执 `unified-wal-local-bnGoFCVU` 绑定父提交 `f2984c57f65d833d99f95149bc87bf9404e29ed8` 和207个实际输入。相关七类300项，295通过、5项 Linux 亲和性在macOS跳过，零失败/错误；Spotless/Checkstyle通过。复现：
+
+```sh
+scripts/unified-wal/run-local-storage-tests.sh 'IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentArenaControlLogTest,SegmentBookieControlLogTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+```
+
+[有限运行期轮转投影](../models/README.md#运行期控制日志轮转投影)独立检查响应取消、原 owner 终结、会话保留及 UNKNOWN 停止准入。当前是显式、有界、全图短暂停写的入口；没有自动容量触发/调度、一般 OPEN 错误恢复或共享 filesystem 的控制/checkpoint 临时工作集预算。持续 create/write/read/delete、SST 与多 Arena、实际掉电和正式性能仍待验证；不关闭 B17、步骤8/10或生产Gate，完整16步目标保持进行中。

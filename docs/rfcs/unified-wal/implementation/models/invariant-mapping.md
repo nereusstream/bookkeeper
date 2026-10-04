@@ -280,3 +280,15 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | `DestinationFitsDeclaredWorkset` | 单compaction并发，声明每文件维护blocks同时是全aligned目的地最大值；超过限制在ALLOC前拒绝，全死直接FREE仍可推进 |
 
 计数不能证明连续extent可用、source死亡或系统liveness。现有同尺寸whole reuse、无split/coalesce，SST/control/checkpoint临时工作集和共享filesystem尚未关闭。
+
+## 运行期控制日志轮转
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| RotationKeepsReservations / GuardWaitsForOriginalOwner | 全图pause、两个driver维护排他和真实file/Bookie保护一直保留到原owner的terminal action；stopWaiting仅撤回复，实际CONTROL I/O返回前不释放 |
+| ProtectedDataIsTerminal | Bookie lease拒绝未终结entry，文件guard拒绝实际DATA I/O、预留和read pin；不是所有网络buffer或native索引工作集证明 |
+| OpenSessionAndCursorRemain | 受保护Arena rotation保存原OPEN/epoch/append cursor，保留两commit以外的真实CLOSE空间；不伪造CLOSED或归还已使用tail |
+| ArenaRootHasCompletedBookie / SuccessHasBothRoots | 两owner顺序各自提交，返回各自实际root，只有全部完成才ROTATED；无跨owner原子提交承诺 |
+| UnknownStopsGraph | 任一已尝试轮转失败报告UNKNOWN，停止新准入；Arena失败仍需已有OPEN恢复规则，不靠checkpoint宣称ready |
+
+物理双恢复根、CRC/identity/目录持久化是既有独立模型与真实回归的输入合同；本投影不关闭完整A+C、B17、liveness或生产Gate。

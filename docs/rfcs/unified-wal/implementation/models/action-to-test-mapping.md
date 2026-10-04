@@ -315,3 +315,14 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | Partial/Restart | `foregroundRefillPreservesCompactionCapacityAndRestoresAdmissionAfterRestart` 由普通路径填两个source，拒绝最后refill后维护恢复容量，1/4 worker及健康重启的gen2低地址写入不消耗拒绝的sequence；partial已用容量继续由真实grant占用 |
 
 FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/真实路径的独立义务；本投影不声明长期进展。
+
+## 运行期控制日志轮转
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| Admit/Protect/Refuse/DataTerminal/Unpin | `rotateControls` 复用两个 driver 排他、Bookie admission lease 与文件保护；`runtimeControlRotationWaitsForDataReadPinsAndCancelledIoOwnerResolution` 实际文件pin下零rotation I/O，释放后可重试 |
+| BookieDone/ArenaTerminal | 两个已有 `rotate` 物理协议，Arena新入口要求准确writer保护；`runtimeControlRotationReclaimsFullLogsPreservesOpenSessionAndOriginalAppendCursor` 的1/4 worker满额后两轮原pool续写、OPEN epoch/游标/读/幂等/健康重启 |
+| CancelWait/OwnerResolve | 原 CONTROL ticket 将实际I/O完成返回原owner，取消只撤回复；force暂停、缓存控制driver和DATA拒绝、短shutdown保持保护至实际排空 |
+| BookieUnknown/ArenaTerminal失败 | `runtimeControlRotationForceFailureStopsGraphAndReportsOnlyCompletedOwnerRoots` 分别注入真实force失败，UNKNOWN停止准入，Bookie已完成root不被误报为双owner成功，Arena OPEN仍拒绝恢复 |
+
+正向全部10个Next动作有非零coverage；既有物理发布、损坏与JVM退出测试仍独立保留。模型不自行证明字节、真实force、全部通知队列或长期进展。

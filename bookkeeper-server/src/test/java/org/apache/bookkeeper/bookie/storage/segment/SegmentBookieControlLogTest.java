@@ -5823,6 +5823,254 @@ public class SegmentBookieControlLogTest {
         return ((SegmentExecutionGroup) field.get(storage)).owner(shard);
     }
 
+    private IsolatedSegmentStorage rotatingStorage(IsolatedSegmentConfig config, int workers) {
+        int buffers = workers * 2;
+        return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
+                new SegmentExecutionGroup.Settings(workers, 3, 8, buffers, 4096, 4096,
+                        buffers * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                new IsolatedSegmentStorage.Limits(32768, 16, 32, 1, 1,
+                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
+    }
+
+    private static Object storageField(IsolatedSegmentStorage storage, String name) throws Exception {
+        var field = IsolatedSegmentStorage.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(storage);
+    }
+
+    private static IsolatedSegmentStorage.ControlRotationResult rotateStorage(IsolatedSegmentStorage storage)
+            throws Exception {
+        CompletableFuture<IsolatedSegmentStorage.ControlRotationResult> reply = new CompletableFuture<>();
+        assertTrue(storage.rotateControls(new IsolatedSegmentStorage.ControlRotationRequest((result, cause) -> {
+            if (cause == null) {
+                reply.complete(result);
+            } else {
+                reply.completeExceptionally(cause);
+            }
+        })));
+        return reply.get(5, TimeUnit.SECONDS);
+    }
+
+    private void exhaustGraphControlLogs(IsolatedSegmentStorage storage, long allocationId) throws Exception {
+        SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+        SegmentArenaControlDriver allocator = (SegmentArenaControlDriver) storageField(storage, "allocator");
+        SegmentOwnerLoop owner = storageOwner(storage, 0);
+        boolean full = false;
+        for (int i = 0; i < 200; i++) {
+            CompletableFuture<Throwable> reply = new CompletableFuture<>();
+            assertTrue(storage.controls().submitBatch(List.of(install(44, 1, (byte) 5)), (results, cause) -> {
+                if (cause == null) {
+                    assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE, results.get(0).status());
+                }
+                reply.complete(cause);
+            }));
+            Throwable cause = reply.get(5, TimeUnit.SECONDS);
+            ownerBarrier(owner);
+            if (cause != null) {
+                assertTrue(cause.toString(), cause instanceof IOException);
+                assertTrue(cause.toString(), cause.getMessage().contains("control log capacity exhausted"));
+                full = true;
+                break;
+            }
+        }
+        assertTrue("Bookie ordinary capacity must be exhausted", full);
+        full = false;
+        SegmentArenaControlLog.Allocation allocation = arena.currentAllocation(allocationId);
+        for (int i = 0; i < 200; i++) {
+            CompletableFuture<Throwable> reply = new CompletableFuture<>();
+            assertTrue(allocator.submit(List.of(allocation), (results, cause) -> {
+                if (cause == null) {
+                    assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE, results.get(0).status());
+                }
+                reply.complete(cause);
+            }));
+            Throwable cause = reply.get(5, TimeUnit.SECONDS);
+            ownerBarrier(owner);
+            if (cause != null) {
+                assertTrue(cause.toString(), cause instanceof IOException);
+                assertTrue(cause.toString(), cause.getMessage().contains("control log capacity exhausted"));
+                full = true;
+                break;
+            }
+        }
+        assertTrue("Arena ordinary capacity must be exhausted", full);
+    }
+
+    @Test
+    public void runtimeControlRotationReclaimsFullLogsPreservesOpenSessionAndOriginalAppendCursor() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("runtime-rotation-" + workers);
+            SegmentBatchFormat.Address first;
+            try (IsolatedSegmentStorage storage = rotatingStorage(config, workers)) {
+                storage.startNew();
+                installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+                first = storageWrite(storage, context(), 1).candidate().address();
+                ownerBarrier(storageOwner(storage, 0));
+                SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+                long epoch = arena.dataSessionEpoch();
+                for (int cycle = 0; cycle < 2; cycle++) {
+                    exhaustGraphControlLogs(storage, first.allocation());
+                    ByteBuf refused = entry(context(), cycle + 2);
+                    try {
+                        assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), refused,
+                                new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                                    throw new AssertionError("Capacity refusal must not produce a result");
+                                })));
+                        assertEquals(1, refused.refCnt());
+                    } finally {
+                        refused.release();
+                    }
+                    ownerBarrier(storageOwner(storage, 0));
+                    IsolatedSegmentStorage.ControlRotationResult rotated = rotateStorage(storage);
+                    assertEquals(IsolatedSegmentStorage.ControlRotationStatus.ROTATED, rotated.status());
+                    assertEquals(cycle + 2, rotated.bookieRoot().generation());
+                    assertEquals(cycle + 2, rotated.arenaRoot().generation());
+                    assertTrue(arena.hasUnclosedDataSession());
+                    assertEquals(epoch, arena.dataSessionEpoch());
+                    SegmentBatchFormat.Address next = storageWrite(storage, context(), cycle + 2)
+                            .candidate().address();
+                    assertEquals(first.allocation(), next.allocation());
+                    assertEquals(first.generation(), next.generation());
+                    assertEquals(cycle + 2, next.sequence());
+                    assertEquals(4096L * (cycle + 2), next.offset());
+                    ownerBarrier(storageOwner(storage, 0));
+                    for (long entryId = 1; entryId <= cycle + 2; entryId++) {
+                        try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                            assertEquals(entryId, read.result().record().entryId());
+                        }
+                        assertEquals(first.allocation(), storageWrite(storage, context(), entryId)
+                                .candidate().address().allocation());
+                    }
+                    if (cycle > 0) {
+                        for (SegmentControlFormat.Owner owner : SegmentControlFormat.Owner.values()) {
+                            assertFalse(Files.exists(SegmentControlRotation.path(config, owner, cycle + 1)));
+                        }
+                    }
+                }
+            }
+            try (IsolatedSegmentStorage storage = rotatingStorage(config, workers)) {
+                storage.restart();
+                for (long entryId : new long[] {1, 2, 3}) {
+                    assertEquals(first.allocation(), storageWrite(storage, context(), entryId)
+                            .candidate().address().allocation());
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                        assertEquals(entryId, read.result().record().entryId());
+                    }
+                }
+                assertEquals(4, storageWrite(storage, context(), 4).candidate().address().sequence());
+            }
+        }
+    }
+
+    @Test
+    public void runtimeControlRotationWaitsForDataReadPinsAndCancelledIoOwnerResolution() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("runtime-rotation-cancel");
+        CountDownLatch atForce = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        IsolatedSegmentStorage storage = rotatingStorage(config, 4);
+        try {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            storageWrite(storage, context(), 1);
+            ownerBarrier(storageOwner(storage, 0));
+            SegmentBookieControlDriver cachedControls = storage.controls();
+            try (IsolatedSegmentFiles.DataReadLease held =
+                         ((IsolatedSegmentFiles) storageField(storage, "files")).pinDataRead()) {
+                CompletableFuture<IsolatedSegmentStorage.ControlRotationResult> reply = new CompletableFuture<>();
+                SegmentFileIo untouched = new SegmentFileIo();
+                assertTrue(storage.rotateControls(new IsolatedSegmentStorage.ControlRotationRequest(
+                        (result, cause) -> reply.complete(result)), untouched, untouched));
+                assertEquals(IsolatedSegmentStorage.ControlRotationStatus.TRANSIENT_UNAVAILABLE,
+                        reply.get(5, TimeUnit.SECONDS).status());
+                assertEquals(0, untouched.writes);
+                assertEquals(0, untouched.forces);
+            }
+            ownerBarrier(storageOwner(storage, 0));
+            AtomicInteger responses = new AtomicInteger();
+            SegmentFileIo paused = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                atForce.countDown();
+                await(releaseForce);
+            });
+            IsolatedSegmentStorage.ControlRotationRequest request = new IsolatedSegmentStorage.ControlRotationRequest(
+                    (result, cause) -> responses.incrementAndGet());
+            assertTrue(storage.rotateControls(request, paused, new SegmentFileIo()));
+            assertTrue(atForce.await(5, TimeUnit.SECONDS));
+            assertTrue(request.stopWaiting());
+            assertFalse(cachedControls.submitBatch(List.of(install(48, 10, (byte) 5)), (results, cause) -> {
+                throw new AssertionError("Cancelled rotation must retain both control reservations");
+            }));
+            ByteBuf bytes = entry(context(), 2);
+            try {
+                assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            throw new AssertionError("No DATA admission while rotation is protected");
+                        })));
+                assertEquals(1, bytes.refCnt());
+            } finally {
+                bytes.release();
+            }
+            assertFalse(storage.close(Duration.ofMillis(50)));
+            assertEquals(0, responses.get());
+            releaseForce.countDown();
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+            assertEquals(0, responses.get());
+        } finally {
+            releaseForce.countDown();
+            storage.close();
+        }
+        try (IsolatedSegmentStorage reopened = rotatingStorage(config, 1)) {
+            reopened.restart();
+            storageWrite(reopened, context(), 1);
+            assertEquals(2, storageWrite(reopened, context(), 2).candidate().address().sequence());
+        }
+    }
+
+    @Test
+    public void runtimeControlRotationForceFailureStopsGraphAndReportsOnlyCompletedOwnerRoots() throws Exception {
+        for (boolean arenaFailure : new boolean[] {false, true}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("runtime-rotation-fail-" + arenaFailure);
+            IsolatedSegmentStorage storage = rotatingStorage(config, 1);
+            try {
+                storage.startNew();
+                installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+                storageWrite(storage, context(), 1);
+                ownerBarrier(storageOwner(storage, 0));
+                CompletableFuture<IsolatedSegmentStorage.ControlRotationResult> reply = new CompletableFuture<>();
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+                SegmentFileIo faulty = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                assertTrue(storage.rotateControls(new IsolatedSegmentStorage.ControlRotationRequest((result, cause) -> {
+                    failure.set(cause);
+                    reply.complete(result);
+                }), arenaFailure ? new SegmentFileIo() : faulty, arenaFailure ? faulty : new SegmentFileIo()));
+                IsolatedSegmentStorage.ControlRotationResult result = reply.get(5, TimeUnit.SECONDS);
+                assertEquals(IsolatedSegmentStorage.ControlRotationStatus.UNKNOWN, result.status());
+                assertTrue(failure.get() instanceof IOException);
+                assertEquals(arenaFailure, result.bookieRoot() != null);
+                assertNull(result.arenaRoot());
+                assertThrows(IllegalStateException.class, storage::controls);
+                assertFalse(storage.submitRead(context(), 1, new SegmentPointRead.ReadRequest(
+                        (status, read, cause) -> {
+                            throw new AssertionError("Failed graph cannot serve success");
+                        })));
+            } finally {
+                if (arenaFailure) {
+                    assertThrows(IOException.class, storage::close);
+                } else {
+                    storage.close();
+                }
+            }
+            try (IsolatedSegmentStorage reopened = rotatingStorage(config, 1)) {
+                if (arenaFailure) {
+                    IOException failure = assertThrows(IOException.class, reopened::restart);
+                    assertTrue(failure.toString(), failure.getMessage().contains("Unclosed DATA writer session"));
+                } else {
+                    reopened.restart();
+                    storageWrite(reopened, context(), 1);
+                }
+            }
+        }
+    }
+
     @Test
     public void declaredTwoBlockMaintenanceWorksetCompactsWhileSmallerBoundRefusesBeforeAlloc() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("reserve-two"),

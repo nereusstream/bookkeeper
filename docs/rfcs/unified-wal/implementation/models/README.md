@@ -507,3 +507,21 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 最终回执 `unified-wal-model-dzggb6ip` 绑定父提交 `10f7eccccf6284d6dcf352f05c600084da1b57fb`、131个输入及256个checksum；完整矩阵24正向PASS/61指定反例，历史回执和父提交合同哈希不重绑。修正Java格式及新增模型文件的EOF空行后，按最终实际输入重新冻结本回执；较早模型run不用于当前绑定。[真实回归](../local-storage/README.md#前台-refill-的维护容量预留)独立验证前台拒绝/恢复、两文件合批、1/2 blocks工作集、健康重启和读/幂等。
 
 Source死亡/selector/generation、CLOSED witness、真实内存、I/O terminal与filesystem/SST/control/checkpoint余量继续由独立合同及测试承担；碎片和无净收益组可以拒绝。本切片不关闭B17、完整Model C/A+C/D或生产Gate。
+
+## 运行期控制日志轮转投影
+
+`RuntimeControlRotation.tla` 只展开一份 graph 维护请求、两个 driver 排他名额、全 DATA 保护、独立 Bookie/Arena 完成 root 以及原 owner 返回。每种已有 admission/read pin 只有0或1；实际排空后才能取得保护，否则当前尝试拒绝。取消不取消 I/O，I/O 终结不代替原 owner 终结；OPEN session 与既有 cursor 保留，尝试失败停止图准入。原 owner resolve 的 TRANSIENT_UNAVAILABLE、ROTATED 和 UNKNOWN 分别保留对应边界，不假设跨 owner 原子发布。
+
+每个 Next 动作在正向配置都有非零 coverage。物理 image/commit/header/双 root/目录 force 协议继续由既有 ArenaRotation/BookieCheckpoint 模型及真实文件/JVM退出回归独立承担；本投影接受单 owner 的成功或不确定完成为输入，不是完整 A+C 组合或实际掉电证明。
+
+| 配置 | generated / distinct / queue | depth / diameter | 时间 / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-runtime-control-rotation | 81 / 44 / 0 | 7 / 7 | 0.796 s / 109,379,584 bytes | PASS |
+| ce-runtime-control-rotation-cancel | 14 / 10 / 4 | 3 / 不适用 | 0.843 s / 101,531,648 bytes | EXPECTED_COUNTEREXAMPLE: RotationKeepsReservations |
+| ce-runtime-control-rotation-owner | 28 / 19 / 9 | 4 / 不适用 | 0.841 s / 102,367,232 bytes | EXPECTED_COUNTEREXAMPLE: GuardWaitsForOriginalOwner |
+| ce-runtime-control-rotation-session | 13 / 9 / 3 | 3 / 不适用 | 0.903 s / 101,777,408 bytes | EXPECTED_COUNTEREXAMPLE: OpenSessionAndCursorRemain |
+| ce-runtime-control-rotation-failure | 54 / 31 / 11 | 5 / 不适用 | 0.788 s / 108,871,680 bytes | EXPECTED_COUNTEREXAMPLE: UnknownStopsGraph |
+
+回执 `unified-wal-model-2b0qki3w` 绑定父提交 `f2984c57f65d833d99f95149bc87bf9404e29ed8`、138个输入和271个checksum；25正向配置完整PASS、65指定反例。源码输入新增 Bookie control driver 的实际维护排他路径，历史sourceCommit/designInputs/receipt不重绑。提前取消释放、I/O结束就释放guard、伪造CLOSED/cursor重置和 UNKNOWN 后重新开放四个候选分别被指定性质否证。[真实运行期回归](../local-storage/README.md#运行期控制日志轮转)独立验证容量满额/连续续写、真实pin、force暂停、取消、失败及健康重启。
+
+有限终态保持 CHECK_DEADLOCK FALSE，不证明liveness；真实buffer总账、quarantine通知队列、全部控制并发、自动容量调度、filesystem/SST临时空间、长期负载、多Arena、OPEN错误恢复和完整模型/生产Gate仍未闭合。

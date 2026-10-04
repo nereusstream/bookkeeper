@@ -47,6 +47,21 @@ final class SegmentArenaControlDriver {
     private final FailureNotice[] notices;
     private final ArrayDeque<FailureNotice> waitingFailures = new ArrayDeque<>();
 
+    boolean reserveMaintenance() {
+        synchronized (poolGate) {
+            for (FailureNotice notice : notices) {
+                if (notice != null) {
+                    return false;
+                }
+            }
+            return busy.compareAndSet(false, true);
+        }
+    }
+
+    void releaseMaintenance() {
+        releaseBusy();
+    }
+
     SegmentArenaControlDriver(SegmentOwnerLoop owner, SegmentIoExecutor io, SegmentArenaControlLog log) {
         this(owner, io, log, 0);
     }
@@ -397,14 +412,18 @@ final class SegmentArenaControlDriver {
         try {
             completion.complete(results, failure);
         } finally {
-            synchronized (poolGate) {
-                busy.set(false);
-                FailureNotice next = waitingFailures.pollFirst();
-                if (next != null) {
-                    busy.set(true);
-                    next.inFlight = true;
-                    next.ticket.resume(() -> forceFailure(next));
-                }
+            releaseBusy();
+        }
+    }
+
+    private void releaseBusy() {
+        synchronized (poolGate) {
+            busy.set(false);
+            FailureNotice next = waitingFailures.pollFirst();
+            if (next != null) {
+                busy.set(true);
+                next.inFlight = true;
+                next.ticket.resume(() -> forceFailure(next));
             }
         }
     }
