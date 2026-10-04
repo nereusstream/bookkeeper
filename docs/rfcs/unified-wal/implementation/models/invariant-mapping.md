@@ -313,3 +313,15 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | ReadyHasDurableOpenAndNoFailure | sessionReady只在OPEN成功后设置，owner bootstrap后再开放图；checkpoint/候选/OPEN force失败不发布成功，真实未知OPEN继续拒绝恢复 |
 
 有限终态CHECK_DEADLOCK FALSE；byte/force、崩溃、完整控制并发、liveness及生产Gate不由本投影闭合。
+
+
+## Arena 空间压力维护
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| MaintenanceStartsWithActualResources / ControlRotationRetainsPriority | 既有owner pump先恢复控制容量，实际Bookie/file drain与各原池buffer额度再允许job；诊断不代替真实guard和原owner借池 |
+| UnchangedFullLiveWindowsVisitedOnce | 每文件冻结cut、同文件固定shard逐窗口，只有准入成功才前进，无净收益轮结束等待新的控制事实；不证明全局公平或长期deadline |
+| KnownRefusalKeepsFreshProtectedWork | 仅写入开始前typed容量拒绝可保留压力、清除cursor、先rotation再重新检查；已写COPY/MOVE仍保留真实事实，不重放旧业务 |
+| UnknownStopsDataAdmission / RestoredAdmissionHasActualCapacity | 实际未知失败保留cause、停止图，新pool需要实际同尺寸extent和预留；模型把真实whole-block事实作为输入，不证明物理回收 |
+
+有限终态没有liveness、公平调度或共享filesystem预算证明；完整A/C/D与组合、B17和生产Gate仍未关闭。

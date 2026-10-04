@@ -555,3 +555,20 @@ fresh-fit与实际terminal/轮转结果为输入假设，不能推出真实CRC/�
 正向六个生产动作Recover/Capacity/Rotation/Open/Publish/Fail的coverage均非零；`PrematureRotation` 是只在敏感性配置启用的错误候选，正向为零。回执 `unified-wal-model-4g96l4uk` 绑定父提交 `b03b1125ea0c34dacbdd4bf1447aaa6ca7e0a442`、148个实际输入和295个checksum；27正向完整PASS、71指定反例。绕过恢复/保护、容量未恢复先OPEN和失败发布ready分别被指定性质否证。[真实冷启动路径](../local-storage/README.md#满控制日志的健康冷启动)独立提供满日志、锁、CRC/force、恢复数据、新grant和未知OPEN证据。
 
 此投影不模拟CRC、目录force、真实排他锁实现或全部reuse witness字节上限；这些均为输入边界，不因模型PASS就推广为全部持久化/并发正确。有限终态CHECK_DEADLOCK FALSE，liveness、掉电、filesystem工作集、完整A/C/D与组合、B17和生产Gate仍未完成；历史receipt/designInputs保持原绑定。
+
+
+## Arena 空间压力维护投影
+
+`ArenaSpaceMaintenance.tla` 有限展开同一文件的两个shard窗口、一次tombstone与一次已知控制容量拒绝。资源和受保护compaction结果是输入：控制rotation先行，实际buffer/pin条件满足后才开始，冻结cut不变且无净收益时不重复窗口；控制拒绝重置cursor以重新保护，UNKNOWN停止DATA准入，实际容量恢复后才放行。真实COPY/MOVE/FREE、dual-root、native覆盖和字节成本仍由既有路径与独立模型负责，此投影不是物理语义或完整组合证明。
+
+| 配置 | generated / distinct / queue | depth / diameter | 时间 / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-arena-space-maintenance | 107 / 85 / 0 | 15 / 15 | 0.791 s / 109,903,872 bytes | PASS |
+| ce-arena-space-maintenance-resources | 10 / 9 / 7 | 2 / 不适用 | 0.781 s / 106,397,696 bytes | EXPECTED_COUNTEREXAMPLE: MaintenanceStartsWithActualResources |
+| ce-arena-space-maintenance-repeat | 84 / 63 / 9 | 8 / 不适用 | 0.807 s / 110,706,688 bytes | EXPECTED_COUNTEREXAMPLE: UnchangedFullLiveWindowsVisitedOnce |
+| ce-arena-space-maintenance-refusal | 25 / 16 / 5 | 3 / 不适用 | 0.795 s / 106,708,992 bytes | EXPECTED_COUNTEREXAMPLE: KnownRefusalKeepsFreshProtectedWork |
+| ce-arena-space-maintenance-unknown | 36 / 24 / 6 | 4 / 不适用 | 0.806 s / 108,363,776 bytes | EXPECTED_COUNTEREXAMPLE: UnknownStopsDataAdmission |
+
+正向全部10个Next动作均有非零执行coverage。回执 `unified-wal-model-ez7490vu` 绑定父提交 `860aac1ea5b9b34af1d077edcda7f1aa409e6fcd`、155实际输入和310个checksum，28正向完整PASS、75指定反例；新增四个错误候选分别被指定性质否证。运行命令仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方1.7.4工具身份、单worker、固定seed/fp、无状态约束或对称化均保留。真实行为证据见[自动空间回收](../local-storage/README.md#数据空间压力的自动回收)。
+
+CHECK_DEADLOCK FALSE仅允许有限终态，不证明公平调度、全部park/unpark或长期liveness。该投影没有filesystem/SST工作集、完整partial收敛、多Arena、实际掉电或正式性能；B17、完整A/C/D及组合和生产Gate仍未完成，历史receipt/designInputs保持原绑定。

@@ -19,6 +19,11 @@ import time
 
 
 MATRIX = {
+    "c-arena-space-maintenance": None,
+    "ce-arena-space-maintenance-resources": "MaintenanceStartsWithActualResources",
+    "ce-arena-space-maintenance-repeat": "UnchangedFullLiveWindowsVisitedOnce",
+    "ce-arena-space-maintenance-refusal": "KnownRefusalKeepsFreshProtectedWork",
+    "ce-arena-space-maintenance-unknown": "UnknownStopsDataAdmission",
     "c-cold-control-startup": None,
     "ce-cold-control-startup-guard": "RotationHasValidatedProtectedClosedData",
     "ce-cold-control-startup-open": "OpenHasRecoveredCapacity",
@@ -143,7 +148,7 @@ def main():
     inputs = [*model.glob("modules/*.tla"), *model.glob("configs/*.cfg"), Path(__file__).resolve()]
     sources = root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment"
     inputs.extend(sources / name for name in ["IsolatedSegmentStorage.java", "IsolatedSegmentFiles.java",
-                  "SegmentArenaControlLog.java", "SegmentBookieControlLog.java",
+                  "SegmentArenaControlLog.java", "SegmentBookieControlLog.java", "SegmentControlCapacityException.java",
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
                   "SegmentControlRotation.java", "SegmentDataFileLock.java", "SegmentDerivedIndex.java",
                   "SegmentDataRecovery.java", "SegmentOwnerLoop.java", "SegmentIoExecutor.java", "SegmentPointRead.java",
@@ -164,7 +169,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -177,7 +182,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "ColdControlStartup.tla" if "cold-control-startup" in name
+                   "-metadir", str(states), "ArenaSpaceMaintenance.tla" if "arena-space-maintenance" in name
+                   else "ColdControlStartup.tla" if "cold-control-startup" in name
                    else "ControlCapacityRecovery.tla" if "control-capacity" in name
                    else "RuntimeControlRotation.tla" if "runtime-control-rotation" in name
                    else "MaintenanceReserve.tla" if "maintenance-reserve" in name

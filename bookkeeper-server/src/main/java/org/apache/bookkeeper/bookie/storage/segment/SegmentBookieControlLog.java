@@ -1025,7 +1025,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (bytes > maxLogBytes - nextOffset - reserve) {
             rotationRequested |= reserve != 0
                     && bytes <= maxLogBytes - SegmentControlRotation.FIRST_RECORD - reserve;
-            throw new IOException("Bookie control log capacity exhausted");
+            throw new SegmentControlCapacityException("Bookie control log capacity exhausted");
         }
     }
 
@@ -1249,6 +1249,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     synchronized boolean matchesScope(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity) {
         return !closed && !failed && config.sameStorageScope(source) && identity.equals(sourceIdentity);
+    }
+
+    /** A diagnostic change counter; actual reclamation still requires its existing protected lease. */
+    synchronized long appliedThrough() {
+        return appliedThrough;
     }
 
     /** Capture or recheck a replayed local read cut without holding the Bookie monitor during DATA I/O. */

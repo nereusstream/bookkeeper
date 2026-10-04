@@ -748,3 +748,18 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 首次七类回归 `unified-wal-local-eo0rurBY` 在既有 `storageGraphCleansFailedBootstrapAndEnforcesPartitionedHotCapacity` 的第二条写入准入断言失败。静态路径确认local-result回调之后才关闭failure lease、排队归还唯一notification ticket，因此回调唤醒测试不代表该额度已归还。夹具在第一条写入后等待既有owner barrier再提交第二条，保留清理/分区容量及所有结果断言，不改生产准入；失败回执不计PASS。
 
 [冷启动有限投影](../models/README.md#冷启动控制容量投影)独立检查恢复/锁/CLOSED先于轮转、容量先于OPEN、失败不发布ready；物理双root、字节CRC与目录force仍由既有真实路径/独立模型承担。没有执行掉电、共享filesystem/SST/control-checkpoint临时空间总账、持续长期负载、多Arena或完整A+C；B17、步骤8/10及生产Gate保持未完成，完整16步目标继续进行。
+
+
+## 数据空间压力的自动回收
+
+2026-10-04，前台普通/recovery pool refill 因 whole-block 容量或维护预留而拒绝时，Arena 保留进程内文件 pressure。图暂停新 DATA，已接受义务继续终结，读取及 Bookie 控制仍可推进；实际 compaction/rotation 期间沿用已有全图保护。既有 owner 维护 pump 先服务控制日志压力，再在 Bookie admission 与实际文件 I/O、reservation、read pin 排空后，扫描同一文件上的固定 shard。每文件一轮冻结 Arena/Bookie applied cut，每个候选窗口至多16个 grant，只有实际维护准入才前进；不增加线程、请求队列或业务重放。
+
+自动任务复用原 compaction 的真实 native terminal cleanup、受保护 DATA 检查、按完整对齐成本计算净收益、pooled COPY、条件 MOVE、native coverage 和 whole-allocation FREE。所有 worker 需至少一个当前空闲原池 buffer，被选 shard 的 worker 需两个；归还排队中的 buffer 仍计入 outstanding，原 owner drain 后才能使用。预检查不代替真实 guard 或 owner 内借池，长期持有 pin/buffer 或只有单个 buffer 的配置没有自动回收进展保证。无净收益的冻结轮结束后，重复 DATA 拒绝不会重新扫相同 cut；新的控制事实可触发下一轮，不循环复制几乎全 live 的数据。
+
+恢复前台准入要求实际 fresh tail/retired whole blocks 同时满足 pool 宽度与维护预留，且存在同尺寸可用 extent；不以 FREE 的返回数量伪造容量。控制写入在预留任何字节/坐标之前拒绝使用 `SegmentControlCapacityException`：保留压力，丢弃本轮 cursor，先轮转再重新保护并检查候选；不重放旧业务或旧 MOVE/FREE 命令。真实 DATA/索引/控制失败或 UNKNOWN 通过 `spaceMaintenanceFailure()` 保留 cause 并停止图准入，不能被当作容量重试。
+
+旧生产红反例 `unified-wal-local-4z45WhsM` 绑定父提交 `860aac1ea5b9b34af1d077edcda7f1aa409e6fcd`，207输入中除新行为测试文件外206个其余输入与父提交相同：真实普通写入填满两 source、durable tombstone 后，五秒内无法在没有显式 compaction 的情况下恢复。新行为在1/4 worker下自动回收两稀疏 source，旧记录为 COPY、当前普通写入可续用 COPY 的新 tail，健康 restart 后跳过旧 tail 并以gen2复用低地址 source，点读/幂等保持一致。新增四项回归检验跨 shard 同文件、实际read pin与原池buffer等待、真正无净收益的全live块在tombstone后直接FREE、实际控制journal最后可容纳记录后的自动轮转，以及COPY force未知结果停止准入/保留源/拒绝restart。
+
+初次边界运行 `unified-wal-local-cfDCYQCO` 有1失败/3错误：跨worker barrier误用shard0、小entry可被COPY合批而非无净收益，以及错误断言仅检查外层消息且被失败close遮盖。夹具改为匹配shard、2000-byte payload使每COPY独占4096-byte batch、检查真实root cause和预期失败close，未弱化生产契约。失败不计PASS。最小五项通过后，最终七类回执 `unified-wal-local-9s7vU6na` 绑定上述父提交及208实际输入：311项中306通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。复现使用[运行期控制轮转](#运行期控制日志轮转)中的七类runner及style命令。
+
+[有限空间维护投影](../models/README.md#arena-空间压力维护投影)独立检查资源、控制优先级、冻结轮停止、已知拒绝保留需求与UNKNOWN停止。当前只有容量拒绝触发的同文件有限窗口维护：没有低水位/hysteresis、维护份额、共享filesystem/SST/control-checkpoint临时工作集总账、完整历史压缩、全部partial收敛、持续长期负载或多Arena证据；pool宽度碎片仍可能拒绝，FREE不增加filesystem余量。volatile outstanding诊断的热路径成本未测量，不宣称性能提升。一般OPEN错误恢复、掉电和完整A/C/D组合仍待验证；不关闭B17、步骤9/10或生产Gate，完整16步目标保持进行中。

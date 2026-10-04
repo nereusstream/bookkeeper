@@ -6458,8 +6458,39 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private static SegmentDataPhysicalDriver.NormalResult writeAfterArenaSpaceMaintenance(
+            IsolatedSegmentStorage storage, ProfileLedgerContext context, long entryId) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        ByteBuf input = entry(context, entryId);
+        try {
+            do {
+                CompletableFuture<SegmentDataPhysicalDriver.NormalResult> reply = new CompletableFuture<>();
+                if (storage.submitNormal(context, filled(20, (byte) 5), input,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            if (cause == null) {
+                                reply.complete(result);
+                            } else {
+                                reply.completeExceptionally(cause);
+                            }
+                        }))) {
+                    SegmentDataPhysicalDriver.NormalResult result = reply.get(5, TimeUnit.SECONDS);
+                    if (result.status() == SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE) {
+                        return result;
+                    }
+                    assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE, result.status());
+                }
+                assertEquals(1, input.refCnt());
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            } while (System.nanoTime() < deadline);
+            throw new AssertionError("Arena capacity must recover without an explicit compaction");
+        } finally {
+            input.release();
+        }
+    }
+
     @Test
-    public void foregroundRefillPreservesCompactionCapacityAndRestoresAdmissionAfterRestart() throws Exception {
+    public void automaticSpaceMaintenanceReclaimsSparseBlocksAndRestoresAdmissionBeforeAndAfterRestart()
+            throws Exception {
         for (int workers : new int[] {1, 4}) {
             IsolatedSegmentConfig config = coverageRecoveryConfig("foreground-reserve-" + workers);
             long destination;
@@ -6481,13 +6512,14 @@ public class SegmentBookieControlLogTest {
                 SegmentDataPhysicalDriver.NormalResult refused = storageWriteReply(storage, context(), 3);
                 assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE, refused.status());
                 assertNull(refused.candidate());
-                IsolatedSegmentStorage.CompactionResult reclaimed = compactShard(storage, 950, 0);
-                assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, reclaimed.status());
-                assertEquals(2, reclaimed.movedEntries());
-                assertEquals(2, reclaimed.freedAllocations());
-                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, reclaimed.destinationBytes());
-                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, reclaimed.netFreedBytes());
-                destination = reclaimed.destinationAllocation();
+                SegmentPointRead.Location added = writeAfterArenaSpaceMaintenance(storage, context(), 3).candidate();
+                assertEquals(1, added.address().generation().value());
+                assertEquals(8192 + 2 * SegmentArenaControlLog.BLOCK_BYTES, added.address().offset());
+                assertEquals(514, added.address().sequence());
+                SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+                destination = arena.currentMoveLocation(context(), 1).orElseThrow().address().allocation();
+                assertEquals(destination, added.address().allocation());
+                assertEquals(2, arena.retiredAllocations().size());
                 for (long entryId : new long[] {1, 2}) {
                     assertEquals(destination, storageWrite(storage, context(), entryId).candidate()
                             .address().allocation());
@@ -6499,20 +6531,237 @@ public class SegmentBookieControlLogTest {
             try (IsolatedSegmentStorage storage = storage(config, workers, 6, 4096, 4096, 3)) {
                 storage.restart();
                 SegmentPointRead.Location added = storageWrite(storage, context(), 3).candidate();
-                assertEquals(2, added.address().generation().value());
-                assertEquals(4096, added.address().offset());
-                assertEquals(514, added.address().sequence()); // Rejected refill did not consume 513; COPY did.
+                assertEquals(1, added.address().generation().value());
+                assertEquals(destination, added.address().allocation());
+                assertEquals(514, added.address().sequence()); // Existing success remains a duplicate after restart.
                 for (long entryId : new long[] {1, 2}) {
                     assertEquals(destination, storageWrite(storage, context(), entryId).candidate()
                             .address().allocation());
                 }
-                installStorage(storage, install(45, 6, (byte) 5), activate(45, 7));
-                assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
-                        storageWriteReply(storage, context(45), 1).status());
+                SegmentPointRead.Location fresh = storageWrite(storage, context(), 4).candidate();
+                assertEquals(2, fresh.address().generation().value());
+                assertEquals(4096, fresh.address().offset());
+                assertEquals(515, fresh.address().sequence());
                 try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 3).result()) {
                     assertEquals(3, read.result().record().entryId());
                 }
             }
+        }
+    }
+
+    @Test
+    public void automaticSpaceMaintenanceWaitsForReadPinAndOwnerBuffersBeforeServingAnotherShard() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("automatic-space-cross-shard");
+        createCompactionVictims(config, false);
+        try (IsolatedSegmentStorage storage = storage(config, 4, 6, 16, 32, 3)) {
+            storage.restart();
+            installStorage(storage, install(45, 30, (byte) 5), activate(45, 31));
+            SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+            IsolatedSegmentFiles files = (IsolatedSegmentFiles) storageField(storage, "files");
+            SegmentFileIo copyIo = new SegmentFileIo();
+            files.dataIo = copyIo;
+            SegmentBufferPool.Lease held;
+            try (IsolatedSegmentFiles.DataReadLease pin = files.pinDataRead()) {
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                        storageWriteReply(storage, context(45), 1).status());
+                ownerBarrier(storageOwner(storage, 1), 1);
+                assertTrue(arena.hasSpacePressure());
+                assertTrue(arena.currentMoveLocations().isEmpty());
+                assertEquals(0, copyIo.forces);
+                FutureTask<SegmentBufferPool.Lease> borrow = new FutureTask<>(
+                        () -> storageOwner(storage, 0).pool().acquire());
+                assertTrue(storageOwner(storage, 0).control(borrow));
+                held = borrow.get(5, TimeUnit.SECONDS);
+                assertNotNull(held);
+            }
+            try {
+                for (int worker = 0; worker < 4; worker++) {
+                    ownerBarrier(storageOwner(storage, worker), worker);
+                }
+                assertTrue(arena.hasSpacePressure());
+                assertFalse(storage.spaceMaintenanceIdle());
+                assertTrue(arena.currentMoveLocations().isEmpty());
+                assertEquals(0, copyIo.forces);
+            } finally {
+                held.close();
+            }
+            SegmentBatchFormat.Address reused = writeAfterArenaSpaceMaintenance(storage, context(45), 1)
+                    .candidate().address();
+            assertEquals(1, reused.shard());
+            assertEquals(2, reused.generation().value());
+            assertEquals(4096, reused.offset());
+            assertEquals(2, arena.retiredAllocations().size());
+            assertNull(storage.spaceMaintenanceFailure());
+            for (long entryId = 1; entryId <= 3; entryId++) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(SegmentBatchFormat.RELOCATION_COPY, read.result().record().origin());
+                }
+            }
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 4, 6, 16, 32, 3)) {
+            storage.restart();
+            assertEquals(2, storageWrite(storage, context(45), 1).candidate().address().generation().value());
+            for (long entryId = 1; entryId <= 3; entryId++) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(SegmentBatchFormat.RELOCATION_COPY, read.result().record().origin());
+                }
+            }
+        }
+    }
+
+    @Test
+    public void automaticSpaceMaintenanceStopsFullLiveSweepUntilActualTombstoneCreatesCapacity() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("automatic-space-full-live"), 1, 4, 1,
+                4L * 1024 * 1024, 4096, 3072, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4096, 4096, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4));
+            SegmentOwnerLoop owner = storageOwner(storage, 0);
+            for (int row = 1; row <= 512; row++) {
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                        storageWriteReply(storage, context(), row,
+                                entry(context(), row, -1, row * 2000, (byte) 0, 2000)).status());
+                ownerBarrier(owner);
+            }
+            IsolatedSegmentFiles files = (IsolatedSegmentFiles) storageField(storage, "files");
+            SegmentFileIo copyIo = new SegmentFileIo();
+            files.dataIo = copyIo;
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                    storageWriteReply(storage, context(), 513).status());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!storage.spaceMaintenanceIdle() && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertTrue("Full-live sweep must finish without copying", storage.spaceMaintenanceIdle());
+            SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+            assertTrue(arena.hasSpacePressure());
+            long cut = arena.appliedThrough();
+            ByteBuf input = entry(context(), 513);
+            try {
+                // Repeated demand must not reset the unchanged full-live round or own the rejected input.
+                for (int attempt = 0; attempt < 12; attempt++) {
+                    assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), input,
+                            new SegmentDataPhysicalDriver.NormalRequest((result, failure) -> {
+                                throw new AssertionError("Paused DATA must not produce a result");
+                            })));
+                    assertEquals(1, input.refCnt());
+                    ownerBarrier(owner);
+                    assertTrue(storage.spaceMaintenanceIdle());
+                }
+            } finally {
+                input.release();
+            }
+            assertEquals(cut, arena.appliedThrough());
+            assertEquals(0, copyIo.forces);
+            assertTrue(arena.currentMoveLocations().isEmpty());
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+            installStorage(storage, tombstone(44, 5));
+            SegmentBatchFormat.Address reused = writeAfterArenaSpaceMaintenance(storage, context(48), 1)
+                    .candidate().address();
+            assertEquals(2, reused.generation().value());
+            assertEquals(4096, reused.offset());
+            assertEquals(2, arena.retiredAllocations().size());
+            assertTrue(arena.currentMoveLocations().isEmpty()); // All dead: no COPY destination was required.
+            assertEquals(1, copyIo.forces); // Only the new ordinary entry performed DATA I/O.
+            assertNull(storage.spaceMaintenanceFailure());
+        }
+    }
+
+    @Test
+    public void automaticSpaceMaintenanceRotatesKnownControlCapacityRefusalBeforeRetryingProtectedWork()
+            throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("automatic-space-control-capacity");
+        createCompactionVictims(config, false);
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, 4)) {
+            storage.restart();
+            installStorage(storage, install(45, 30, (byte) 5), activate(45, 31));
+            SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+            try (IsolatedSegmentFiles.DataReadLease pin =
+                         ((IsolatedSegmentFiles) storageField(storage, "files")).pinDataRead()) {
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                        storageWriteReply(storage, context(45), 1).status());
+                ownerBarrier(storageOwner(storage, 1), 1);
+                SegmentArenaControlLog.Allocation allocation = arena.currentAllocation(5);
+                int recordBytes = SegmentControlFormat.encode(allocation.type(), new Generation(1), 1,
+                        allocation.operationId(), allocation.operationGeneration(), allocation.expectedGeneration(),
+                        allocation.body()).remaining();
+                // Stop after the last fitting ordinary record, before any operation requests rotation.
+                while (Files.size(config.directory().resolve("arena-control")) + recordBytes + 416 + 192 <= 32768) {
+                    assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                            arena.submitBatch(List.of(allocation)).get(0).status());
+                }
+                assertTrue(arena.hasSpacePressure());
+                assertFalse(arena.rotationRequired());
+                assertFalse(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2)));
+            }
+            SegmentBatchFormat.Address reused = writeAfterArenaSpaceMaintenance(storage, context(45), 1)
+                    .candidate().address();
+            assertTrue(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, 2)));
+            assertEquals(2, reused.generation().value());
+            assertEquals(2, arena.retiredAllocations().size());
+            assertNull(storage.spaceMaintenanceFailure());
+            assertNull(storage.controlMaintenanceFailure());
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(SegmentBatchFormat.RELOCATION_COPY, read.result().record().origin());
+            }
+        }
+    }
+
+    @Test
+    public void automaticSpaceMaintenanceCopyForceUnknownStopsGraphAndRetainsActualSources() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("automatic-space-copy-unknown");
+        createCompactionVictims(config, false);
+        IsolatedSegmentStorage storage = storage(config, 4, 6, 16, 32, 3);
+        boolean expectedFailedClose = false;
+        try {
+            storage.restart();
+            installStorage(storage, install(45, 30, (byte) 5), activate(45, 31));
+            IsolatedSegmentFiles files = (IsolatedSegmentFiles) storageField(storage, "files");
+            SegmentFileIo copyIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            files.dataIo = copyIo;
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.TRANSIENT_UNAVAILABLE,
+                    storageWriteReply(storage, context(45), 1).status());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (storage.spaceMaintenanceFailure() == null && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            Throwable failure = storage.spaceMaintenanceFailure();
+            expectedFailedClose = copyIo.forces == 1;
+            assertNotNull("Actual COPY failure must stop automatic maintenance", failure);
+            Throwable root = failure;
+            while (root.getCause() != null) {
+                root = root.getCause();
+            }
+            assertTrue(root.toString(), root.getMessage().contains("force failure"));
+            assertEquals(1, copyIo.forces);
+            assertThrows(IllegalStateException.class, storage::controls);
+            SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+            assertTrue(arena.retiredAllocations().isEmpty());
+            assertTrue(arena.currentMoveLocations().isEmpty());
+            assertFalse(arena.dataFileAvailable(0));
+            ByteBuf refused = entry(context(45), 1);
+            try {
+                assertFalse(storage.submitNormal(context(45), filled(20, (byte) 5), refused,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            throw new AssertionError("Failed graph must not produce a DATA result");
+                        })));
+                assertEquals(1, refused.refCnt());
+            } finally {
+                refused.release();
+            }
+        } finally {
+            if (expectedFailedClose) {
+                assertThrows(IOException.class, storage::close);
+            } else {
+                storage.close();
+            }
+        }
+        try (IsolatedSegmentStorage restarted = storage(config, 4, 6, 16, 32, 3)) {
+            assertThrows(IOException.class, restarted::restart);
         }
     }
 

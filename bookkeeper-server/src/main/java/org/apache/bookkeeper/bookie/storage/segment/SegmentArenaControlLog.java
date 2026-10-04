@@ -380,6 +380,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private long sessionEpoch;
     private boolean sessionOpen;
     private boolean sessionCloseReserved;
+    private final boolean[] spacePressure;
     private IsolatedSegmentFiles sessionOwner;
     private DataSession preparedClose;
     private long nextOffset = FIRST_RECORD;
@@ -406,6 +407,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         this.originalChannel = channel;
         this.writerLock = writerLock;
         dataBlocked = new boolean[config.dataFiles()];
+        spacePressure = new boolean[config.dataFiles()];
         durableQuarantine = new boolean[config.dataFiles()];
         quarantineReserved = new boolean[config.dataFiles()];
     }
@@ -506,7 +508,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (bytes > maxLogBytes - nextOffset - reserved) {
                 rotationRequested |= rotating == null && rotationReserveBytes() != 0
                         && bytes <= maxLogBytes - SegmentControlRotation.FIRST_RECORD - reserved;
-                throw new IOException("Arena control log capacity exhausted");
+                throw new SegmentControlCapacityException("Arena control log capacity exhausted");
             }
             start = nextOffset;
             // Reserve the physical suffix before the first write; failure never reuses its coordinates.
@@ -1163,7 +1165,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             long required = recordBytes(command) + sessionCloseBytes(0) + rotationReserveBytes();
             if (required > maxLogBytes - nextOffset) {
                 if (rotationReserveBytes() == 0 || required > maxLogBytes - SegmentControlRotation.FIRST_RECORD) {
-                    throw new IOException("Arena control log capacity exhausted");
+                    throw new SegmentControlCapacityException("Arena control log capacity exhausted");
                 }
                 // Recovery validated and synced DATA under this writer's lock; the session is still CLOSED.
                 // Do not rotate Bookie here: the retained inventory is bound to its recovery cut.
@@ -1379,6 +1381,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     .min(Comparator.comparingLong(free -> free.facts().allocation().offset())).orElse(null);
             if (dataBlocked[file] || available[file] - request.blocks() < maintenanceBlocks || reusable == null
                     && request.blocks() > (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES) {
+                spacePressure[file] |= maintenanceBlocks > 0 && !dataBlocked[file];
                 planned.add(Optional.empty());
                 continue;
             }
@@ -1399,6 +1402,37 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
         }
         return List.copyOf(planned);
+    }
+
+    synchronized boolean spacePressure(int file) {
+        return spacePressure[file];
+    }
+
+    synchronized boolean hasSpacePressure() {
+        for (boolean pressured : spacePressure) {
+            if (pressured) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Actual whole-block capacity, including an extent of the requested width and the maintenance reserve. */
+    synchronized boolean restoreForegroundCapacity(int file, int blocks, int maintenanceBlocks) throws IOException {
+        long fresh = (config.bytesPerFile() - grantedHighWatermark(file)) / BLOCK_BYTES;
+        long available = fresh;
+        for (Slot slot : retiredSlots.keySet()) {
+            if (slot.file() == file) {
+                available++;
+            }
+        }
+        boolean reusable = retiredSlots.values().stream().anyMatch(free ->
+                free.facts().allocation().file() == file && free.facts().allocation().blocks() == blocks);
+        if (dataFileAvailable(file) && available - blocks >= maintenanceBlocks && (fresh >= blocks || reusable)) {
+            spacePressure[file] = false;
+            return true;
+        }
+        return false;
     }
 
     /** Original successful control sequence, retained by checkpoint/rotation; never inferred from file offsets. */

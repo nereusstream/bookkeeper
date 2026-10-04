@@ -185,6 +185,21 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private CompactionOperation compaction;
     private ControlRotation controlRotation;
     private volatile Throwable controlMaintenanceFailure;
+    private final SpaceSweep[] spaceSweeps;
+    private volatile Throwable spaceMaintenanceFailure;
+
+    private static final class SpaceSweep {
+        private final long arenaCut;
+        private final long bookieCut;
+        private int shard;
+        private long afterOrder = -1;
+
+        private SpaceSweep(int file, long arenaCut, long bookieCut) {
+            shard = file;
+            this.arenaCut = arenaCut;
+            this.bookieCut = bookieCut;
+        }
+    }
 
     /** Construct the resource owner before startup so a failed start still has an explicit cleanup handle. */
     IsolatedSegmentStorage(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
@@ -208,6 +223,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         hotDirectories = new SegmentHotDirectory[config.logicalShards()];
         drivers = new SegmentDataPhysicalDriver[config.logicalShards()];
         compactionCursors = new CompactionCursor[config.logicalShards()];
+        spaceSweeps = new SpaceSweep[config.dataFiles()];
     }
 
     void startNew() throws IOException, InterruptedException {
@@ -286,7 +302,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                         bookie, limits.batches(), allocator, limits.poolBlocks());
                 reads[selected] = SegmentPointRead.Reader.live(owner, execution.io(), files, arena, bookie, hot);
                 if (selected < executionSettings.workers()) {
-                    owner.attachControlMaintenance(this::rotatePressuredControls);
+                    owner.attachControlMaintenance(this::maintainPressuredCapacity);
                 }
                 return null;
             });
@@ -340,7 +356,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                          SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
         synchronized (gate) {
             if (!accepting || !execution.accepting() || freeOperation != null || compaction != null
-                    || controlRotation != null || controlCapacityPaused()) {
+                    || controlRotation != null || controlCapacityPaused() || dataCapacityPaused()) {
                 return false;
             }
             Objects.requireNonNull(context, "context");
@@ -386,7 +402,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             throws IOException {
         synchronized (gate) {
             if (!accepting || !execution.accepting() || freeOperation != null || compaction != null
-                    || controlRotation != null || controlCapacityPaused()) {
+                    || controlRotation != null || controlCapacityPaused() || dataCapacityPaused()) {
                 return false;
             }
             Objects.requireNonNull(request, "request");
@@ -536,6 +552,121 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             return true;
         }
         return false;
+    }
+
+    private boolean dataCapacityPaused() {
+        if (arena.hasSpacePressure()) {
+            execution.owner(0).wakeup();
+            return true;
+        }
+        return false;
+    }
+
+    /** One frozen, bounded-window sweep per pressured file; control rotation retains priority. */
+    private void maintainPressuredCapacity() {
+        synchronized (gate) {
+            if (!accepting || !execution.accepting()) {
+                return;
+            }
+            rotatePressuredControls();
+            if (!arena.hasSpacePressure() || !canCompact() || !bookie.quiescentForRotation()
+                    || !files.quiescentForControlRotation(arena)) {
+                return;
+            }
+            for (int file = 0; file < spaceSweeps.length; file++) {
+                if (!arena.spacePressure(file)) {
+                    continue;
+                }
+                try {
+                    if (arena.restoreForegroundCapacity(file, limits.poolBlocks(), limits.maintenanceBlocks())) {
+                        spaceSweeps[file] = null;
+                        continue;
+                    }
+                    long arenaCut = arena.appliedThrough();
+                    long bookieCut = bookie.appliedThrough();
+                    SpaceSweep sweep = spaceSweeps[file];
+                    if (sweep == null || sweep.shard >= config.logicalShards()
+                            && (sweep.arenaCut != arenaCut || sweep.bookieCut != bookieCut)) {
+                        sweep = new SpaceSweep(file, arenaCut, bookieCut);
+                        spaceSweeps[file] = sweep;
+                    }
+                    while (sweep.shard < config.logicalShards()) {
+                        SegmentArenaControlLog.CompactionWindow window = arena.compactionCandidates(sweep.shard,
+                                sweep.afterOrder, sweep.arenaCut);
+                        if (window.allocations().isEmpty()) {
+                            sweep.shard += config.dataFiles();
+                            sweep.afterOrder = -1;
+                            continue;
+                        }
+                        for (int worker = 0; worker < executionSettings.workers(); worker++) {
+                            int required = worker == sweep.shard % executionSettings.workers() ? 2 : 1;
+                            if (!execution.owner(worker).hasMaintenanceBuffers(required)) {
+                                return;
+                            }
+                        }
+                        if (admitCompaction(UUID.randomUUID(), window.allocations(),
+                                new CompactionRequest(this::spaceMaintenanceCompleted), new SegmentFileIo(), true)) {
+                            sweep.afterOrder = window.lastOrder();
+                        }
+                        return;
+                    }
+                } catch (IOException failure) {
+                    // A concurrent cached control can invalidate the diagnostic precheck before admission.
+                    if (!bookie.quiescentForRotation() || !files.quiescentForControlRotation(arena)
+                            || arena.rotationRequired()) {
+                        return;
+                    }
+                    stopFailedSpaceMaintenance(failure);
+                }
+            }
+        }
+    }
+
+    private void spaceMaintenanceCompleted(CompactionResult result, Throwable failure) {
+        synchronized (gate) {
+            if (failure instanceof SegmentControlCapacityException
+                    && (arena.rotationRequired() || bookie.rotationRequired())) {
+                // This write never started. A fresh sweep must inspect the group after control rotation.
+                for (int file = 0; file < spaceSweeps.length; file++) {
+                    if (arena.spacePressure(file)) {
+                        spaceSweeps[file] = null;
+                    }
+                }
+                execution.owner(0).wakeup();
+                return;
+            }
+            if (failure != null || result.status() == CompactionStatus.UNKNOWN) {
+                stopFailedSpaceMaintenance(failure != null ? failure
+                        : new IOException("Automatic space maintenance has an unknown result"));
+            } else {
+                execution.owner(0).wakeup();
+            }
+        }
+    }
+
+    private void stopFailedSpaceMaintenance(Throwable failure) {
+        spaceMaintenanceFailure = failure;
+        accepting = false;
+        execution.stopAdmission();
+    }
+
+    Throwable spaceMaintenanceFailure() {
+        return spaceMaintenanceFailure;
+    }
+
+    boolean spaceMaintenanceIdle() {
+        synchronized (gate) {
+            if (compaction != null || indexCheckpoint != null) {
+                return false;
+            }
+            for (int file = 0; file < spaceSweeps.length; file++) {
+                if (arena.spacePressure(file) && (spaceSweeps[file] == null
+                        || spaceSweeps[file].shard < config.logicalShards())) {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     private void rotatePressuredControls() {

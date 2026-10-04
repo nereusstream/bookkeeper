@@ -72,7 +72,8 @@ final class SegmentBufferPool implements AutoCloseable {
     private final ArrayBlockingQueue<Slot> returns;
     private final long reservedBytes;
     private final int bytesPerBuffer;
-    private int outstanding;
+    private final int bufferCount;
+    private volatile int outstanding;
     private boolean closed;
 
     SegmentBufferPool(int ownerId, long generation, int count, int bytesPerBuffer, int alignment,
@@ -84,6 +85,7 @@ final class SegmentBufferPool implements AutoCloseable {
         this.ownerId = ownerId;
         this.generation = generation;
         this.bytesPerBuffer = bytesPerBuffer;
+        bufferCount = count;
         this.wakeOwner = java.util.Objects.requireNonNull(wakeOwner, "wakeOwner");
         int allocationBytes = Math.addExact(bytesPerBuffer, alignment - 1);
         reservedBytes = Math.multiplyExact((long) count, allocationBytes);
@@ -159,6 +161,11 @@ final class SegmentBufferPool implements AutoCloseable {
     int outstanding() {
         requireOwner();
         return outstanding;
+    }
+
+    /** Conservative diagnostic; queued returns remain charged until their original owner drains them. */
+    boolean availableForMaintenance(int required) {
+        return bufferCount - outstanding >= required;
     }
 
     long reservedBytes() {

@@ -312,7 +312,7 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | --- | --- |
 | Plan/Apply | `planPools(requests, maintenanceBlocks)` 按固定文件汇总fresh/retired whole blocks，同批成功计划扣减；`mergedForegroundPoolsShareReservePerFileAndMaintenanceCanUseItAfterReplay` 验证两文件合批、控制apply、replay、前台拒绝及维护末块准入 |
 | StartMaintenance/VerifiedFree | `Limits.maintenanceBlocks` 是明确目的地工作集上限，compaction实际全aligned测量后在ALLOC前检查；`declaredTwoBlockMaintenanceWorksetCompactsWhileSmallerBoundRefusesBeforeAlloc` 验证声明1拒绝、2实际COPY/MOVE/native/FREE及净收益 |
-| Partial/Restart | `foregroundRefillPreservesCompactionCapacityAndRestoresAdmissionAfterRestart` 由普通路径填两个source，拒绝最后refill后维护恢复容量，1/4 worker及健康重启的gen2低地址写入不消耗拒绝的sequence；partial已用容量继续由真实grant占用 |
+| Partial/Restart | `automaticSpaceMaintenanceReclaimsSparseBlocksAndRestoresAdmissionBeforeAndAfterRestart` 由普通路径填两个source，拒绝最后refill后自动维护恢复容量；1/4 worker当前COPY新tail续写及健康重启的gen2低地址写入保持实际sequence；partial已用容量继续由真实grant占用 |
 
 FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/真实路径的独立义务；本投影不声明长期进展。
 
@@ -348,3 +348,16 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | PrematureRotation | 只为否证绕过恢复/保护的敏感性候选；正向禁用，不是新的生产入口 |
 
 本投影不包含双root字节协议或物理崩溃重演；这些旧验证与实际故障门槛保持独立，不宣称完整A+C或生产ready。
+
+
+## Arena 空间压力维护
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| StartJob/ReleaseResources/RotateControls | 原owner pump先控制rotation，再检查实际I/O/pin/Bookie与原池额度；`automaticSpaceMaintenanceWaitsForReadPinAndOwnerBuffersBeforeServingAnotherShard` 的实际pin和外持原池buffer下零COPY，归还后跨shard复用/读/健康restart |
+| NoGain/Tombstone/NewRound | 冻结逐文件cut与16-grant窗口；`automaticSpaceMaintenanceStopsFullLiveSweepUntilActualTombstoneCreatesCapacity` 用真实512条大entry形成无净收益两块，重复DATA拒绝不改变cut/产生COPY，durable T后无COPY直接FREE并恢复 |
+| Reclaim/ResumeData | 原native cleanup/COPY/MOVE/coverage/FREE及实际pool宽度+预留检查；`automaticSpaceMaintenanceReclaimsSparseBlocksAndRestoresAdmissionBeforeAndAfterRestart` 的旧生产红、新生产1/4worker绿、真实普通fill、当前COPY tail和restart gen2 |
+| KnownCapacityRefusal | 预写入typed refusal保持需求并清除cursor，控制优先、重新保护；`automaticSpaceMaintenanceRotatesKnownControlCapacityRefusalBeforeRetryingProtectedWork` 填到真实journal最后可容纳普通记录，自动轮转后恢复跨shardDATA |
+| Unknown | `automaticSpaceMaintenanceCopyForceUnknownStopsGraphAndRetainsActualSources` 实际COPY force失败，cause可见、源未FREE/无MOVE、停止DATA/控制且拒绝restart |
+
+十个模型Next动作有非零执行coverage；实际目录持久化、所有资源终结与长期进展不是本模型的自证结论。

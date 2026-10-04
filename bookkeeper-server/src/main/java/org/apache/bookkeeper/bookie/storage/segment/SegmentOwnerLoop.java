@@ -377,6 +377,10 @@ final class SegmentOwnerLoop {
         }
     }
 
+    boolean hasMaintenanceBuffers(int required) {
+        return pool != null && pool.availableForMaintenance(required);
+    }
+
     private void recordFailure(Throwable cause) {
         synchronized (gate) {
             if (failure == null) {
