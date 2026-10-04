@@ -1136,3 +1136,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04 当前轮转模型：[有界窗口轮转投影](../implementation/models/README.md#有界窗口轮转投影)在固定shard/file、有限稳定候选与调用方继续已准入尝试的条件下检验轮次覆盖及旧候选回访；每次从头/持续扩大轮cut分别产生指定反例。矩阵21正向/53指定反例、116个输入/223个checksum；实际16上限、refill/T/复用由Java独立验证，不形成完整预算、调度fairness、long-run或生产authority。
+
+
+2026-10-04 当前池化增量：[池化分批捕获](../implementation/local-storage/README.md#池化分批-compaction-捕获)复用原owner两个buffer逐批点读/复制，不持整组payload；有限计划以既有坐标上限约束，并在每批重新复核source hash、selector、Bookie cut与测量长度。所有COPY/MOVE、native覆盖及真实整块proof后仍才FREE；池不足或后批身份变化返回PARTIAL并保留实际占用。真实40条/三批超过源输入预算、单buffer拒绝及有效CRC源变化/实际控制变化、恢复验证通过。七类287通过/5平台跳过、22正向/55指定反例保持局部范围；原source batch扫描buffer、全graph暂停和单连续destination限制保留，长期完整净容量、多Arena、OPEN错误恢复、掉电/性能及生产Gate未完成。

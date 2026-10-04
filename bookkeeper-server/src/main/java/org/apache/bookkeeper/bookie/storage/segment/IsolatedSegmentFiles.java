@@ -139,7 +139,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
         SegmentDataRecovery.CompactionPlan inspectCompaction(List<SegmentArenaControlLog.Allocation> victims,
                                                               SegmentBookieControlLog bookie,
-                                                              SegmentEntryInputs inputs, ByteBuffer workspace,
+                                                              int maximumEntries, ByteBuffer workspace,
                                                               boolean selectVictims)
                 throws IOException {
             requireHeld(owner, authority);
@@ -151,7 +151,18 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 ends.add(owner.allocationEnd(victim, authority));
             }
             return SegmentDataRecovery.inspectCompaction(owner.config, owner.identity, authority,
-                    owner.data.get(file), victims, ends, bookie, inputs, workspace, owner, this, selectVictims);
+                    owner.data.get(file), victims, ends, bookie, maximumEntries, workspace, owner, this, selectVictims);
+        }
+
+        SegmentBatchFormat.FrozenBatch captureCompaction(SegmentDataRecovery.CompactionPlan plan, int batchIndex,
+                SegmentBookieControlLog bookie, SegmentBatchFormat.RelocationBuilder builder, ByteBuffer workspace)
+                throws IOException {
+            requireHeld(owner, authority);
+            if (plan.victims().get(0).file() != file) {
+                throw new IOException("Compaction capture belongs to another DATA file");
+            }
+            return SegmentDataRecovery.captureCompaction(owner.config, owner.identity, authority, bookie, owner, this,
+                    plan, batchIndex, builder, workspace);
         }
 
         @Override

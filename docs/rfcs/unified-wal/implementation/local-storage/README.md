@@ -646,3 +646,22 @@ Java最终回执 `unified-wal-local-Isqf1iu7` 绑定父提交 `c7832d4c0695bb27b
 [轮转有限投影](../models/README.md#有界窗口轮转投影) `unified-wal-model-vzkxsq35` 绑定同一父提交、116个模块/config/runner/Java输入和223个checksum，完整矩阵21正向PASS、53指定反例。每次重置游标及持续扩大本轮上限两个候选分别违反稳定轮覆盖与旧grant回访性质；真实测量、数据I/O、资源终结与整组FREE仍由Java及既有切片提供各自范围的证据。
 
 当前窗口外候选可在有限轮次内被尝试、旧候选可在下一轮回访，但仍无全局最优组、跨窗口组合、任意大snapshot流式搬迁、部分任务自动收敛、per-allocation在线cut或维护调度；全graph暂停与单连续destination限制保留。步骤9/10、完整16步目标、真实掉电和生产Gate未完成，历史receipt及父提交合同哈希不重绑。
+
+
+## 池化分批 compaction 捕获
+
+2026-10-04，compaction计划只保存有限坐标、原物理位置/selector与完整entry SHA-256，不再持有整组payload快照。行数以既有 `Limits.indexedEntries()` 为硬上限，测量仍逐批读取并验证实际DATA、准确T与当前selector，native缺行不参与死亡判断。记录数上限只约束计划元数据数量，不冒充全Java heap字节预算；上文多批切片中“整组源snapshot必须适配源bytes预算”的实现限制已由本切片取代，历史回执保持原绑定。
+
+每批在原owner取得两个既有池buffer：一个用于实际源点读scratch，另一个顺序装配COPY。源entry仅在同步append中借用scratch视图，完成复制后即可复用；没有整组entry array、第二输入池或新增I/O框架。COPY仍按完整framing/padding、owner buffer及256行上限封批，复用与普通writer相同的record/header/footer实现，持久字节与固定向量不变。所有批的aligned成本、整allocation目的地取整和严格正净收益仍在任何目的地分配前确定。
+
+每批捕获重新取得Bookie/file保护，复核原测量的Bookie cut、当前permission/T、selector/grant、实际源CRC/身份与完整entry hash；冻结长度必须匹配已测量目的地区间。前批MOVE导致的合法Arena变化不使下一批误用旧Arena全局cut；当前批期间的Arena cut仍须稳定。测量后任意Bookie控制变化会保守停止后续捕获，即使变化来自其他ledger。被捕获字节不能因后续源视图复用而变化，冻结COPY转交原driver后仍等实际I/O与原owner终结才归还。
+
+两个buffer不足时返回PARTIAL，scratch归还且不产生COPY/MOVE/FREE；已成功ALLOC的实际destination容量仍计入结果。后续新operation可经真实整块proof回收未使用destination。后批源hash/cut变化也返回PARTIAL，保留之前成功MOVE、所有source与实际destination；不能把先前搬迁计数当整块proof。全部COPY/MOVE、native维护/flush/A/B coverage及最终完整后继证明仍成功后才合批FREE。取消仅停止响应，既有实际I/O/owner保护规则不变。
+
+真实回归把旧的整组源预算拒绝断言替换为新契约：1/4 worker下40条、1760字节payload超过1060字节输入预算，实际3次COPY force、全部READ/幂等、native覆盖恢复及再次storage重启成功。另验证单owner仅1 buffer时保留源并回收unused destination，以及暂停首COPY force后改变后批源payload（保持BK与batch CRC有效）或真实其他ledger控制cut：均只保留前19条MOVE、1次COPY force、零FREE；源字节恢复后实际读/幂等与重启保持正确。既有402条/256行边界、净allocation成本、后批force unknown、source复用和有限容量循环继续通过。
+
+最终Java回执 `unified-wal-local-j08Fhxrg` 冻结父提交 `cd2b4e4facb7fca36eb1a9bda19eec80fd0240b5` 与207个实际源码/测试/向量输入：相关七类292项、287通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。先验证5项相关路径，再因共享writer/driver/恢复扩大到七类。初次运行唯一失败为已过时的整组预算拒绝断言，按变化行为改为成功契约并保留真正池不足回归；格式检查两处超长行已折行。失败中间run不计通过，源码最终哈希逐项核验，历史receipt不重绑。
+
+[池化捕获有限投影](../models/README.md#池化-compaction-捕获投影)回执 `unified-wal-model-uzyhx2mp` 绑定同一父提交、121个输入及232个checksum；完整矩阵22正向PASS、55指定反例。它检验元数据行上限、两个原池buffer、实际capture/COPY I/O与owner终结、取消及测量复核；不证明真实hash/CRC、fsync、完整heap/disk预算或调度liveness。
+
+当前source原batch仍须适配原owner扫描buffer，组/坐标数与单连续destination有上限，保留全graph暂停；跨窗口最优选择、partial任务自动收敛、长期control/SST/文件系统净预算、多Arena、OPEN错误恢复、真实掉电/性能及生产Gate未完成。步骤9/10和完整16步目标保持未完成。

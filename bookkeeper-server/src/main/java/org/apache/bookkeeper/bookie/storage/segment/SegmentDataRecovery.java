@@ -17,6 +17,8 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -39,7 +41,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
-    record CompactionEntry(SegmentArenaMove.Source source, SegmentEntryInputs.Input input) { }
+    record CompactionEntry(SegmentArenaMove.Source source, String entrySha256) { }
     record CompactionBatch(List<CompactionEntry> entries, int bytes) {
         CompactionBatch {
             entries = List.copyOf(entries);
@@ -47,17 +49,19 @@ final class SegmentDataRecovery {
     }
     private record CompactionKey(ProfileLedgerContext context, long entryId) { }
 
-    static final class CompactionPlan implements AutoCloseable {
+    static final class CompactionPlan {
         private final List<SegmentArenaControlLog.Allocation> victims;
         private final List<CompactionBatch> batches;
         private final long sourceBytes;
         private final long batchBytes;
+        private final long bookieCut;
 
         private CompactionPlan(List<SegmentArenaControlLog.Allocation> victims, List<CompactionBatch> batches,
-                               long sourceBytes) {
+                               long sourceBytes, long bookieCut) {
             this.victims = List.copyOf(victims);
             this.batches = List.copyOf(batches);
             this.sourceBytes = sourceBytes;
+            this.bookieCut = bookieCut;
             batchBytes = batches.stream().mapToLong(CompactionBatch::bytes).sum();
         }
 
@@ -77,15 +81,6 @@ final class SegmentDataRecovery {
         boolean hasNetGain() {
             return sourceBytes > destinationBlocks() * SegmentArenaControlLog.BLOCK_BYTES;
         }
-
-        @Override
-        public void close() {
-            for (CompactionBatch batch : batches) {
-                for (CompactionEntry entry : batch.entries()) {
-                    entry.input().close();
-                }
-            }
-        }
     }
 
     @FunctionalInterface
@@ -93,9 +88,9 @@ final class SegmentDataRecovery {
         void accept(SegmentArenaMove.Source source, SegmentBatchParser.Record record) throws IOException;
     }
 
-    /** Owns only selected source snapshots and returns every partial capture on failure. */
-    private static final class CompactionCapture implements CompactionVisitor, AutoCloseable {
-        private final SegmentEntryInputs inputs;
+    /** Bounded coordinate metadata only; payload is later copied through two existing owner buffers. */
+    private static final class CompactionCapture implements CompactionVisitor {
+        private final int maximumEntries;
         private final int capacity;
         private final List<CompactionEntry> entries = new ArrayList<>();
         private final List<CompactionBatch> batches = new ArrayList<>();
@@ -103,13 +98,16 @@ final class SegmentDataRecovery {
         private int recordBytes;
         private int batchStart;
 
-        private CompactionCapture(SegmentEntryInputs inputs, int capacity) {
-            this.inputs = inputs;
+        private CompactionCapture(int maximumEntries, int capacity) {
+            this.maximumEntries = maximumEntries;
             this.capacity = capacity;
         }
 
         @Override
         public void accept(SegmentArenaMove.Source source, SegmentBatchParser.Record record) throws IOException {
+            if (entries.size() == maximumEntries) {
+                throw new IOException("Compaction coordinate plan exceeds the configured index coordinate limit");
+            }
             if (!distinct.add(new CompactionKey(record.context(), record.entryId()))) {
                 throw new IOException("Compaction live set repeats a selected coordinate");
             }
@@ -122,12 +120,7 @@ final class SegmentDataRecovery {
             if (SegmentBatchFormat.alignedLength(recordBytes) > capacity) {
                 throw new IOException("Compaction entry exceeds its bounded COPY buffer");
             }
-            SegmentEntryInputs.Input input = inputs.acquire(record.context(), record.entry().remaining());
-            if (input == null) {
-                throw new IOException("Compaction source input budget is unavailable");
-            }
-            entries.add(new CompactionEntry(source, input));
-            input.bytes().writeBytes(record.entry().duplicate());
+            entries.add(new CompactionEntry(source, SegmentArenaMove.digest(record.entry())));
         }
 
         private void seal() {
@@ -139,24 +132,18 @@ final class SegmentDataRecovery {
             recordBytes = 0;
         }
 
-        private CompactionPlan finish(List<SegmentArenaControlLog.Allocation> victims, long sourceBytes) {
+        private CompactionPlan finish(List<SegmentArenaControlLog.Allocation> victims, long sourceBytes,
+                                      long bookieCut) {
             seal();
-            return new CompactionPlan(victims, batches, sourceBytes);
-        }
-
-        @Override
-        public void close() {
-            for (CompactionEntry entry : entries) {
-                entry.input().close();
-            }
+            return new CompactionPlan(victims, batches, sourceBytes, bookieCut);
         }
     }
 
-    /** Measure before reserving input bytes: unrelated current live data must not block direct dead-source FREE. */
+    /** Measure before COPY capture: unrelated current live data must not block direct dead-source FREE. */
     static CompactionPlan inspectCompaction(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                             SegmentArenaControlLog arena, FileChannel data,
                                             List<SegmentArenaControlLog.Allocation> victims, List<Long> ends,
-                                            SegmentBookieControlLog bookie, SegmentEntryInputs inputs,
+                                            SegmentBookieControlLog bookie, int maximumEntries,
                                             ByteBuffer workspace, IsolatedSegmentFiles files,
                                             IsolatedSegmentFiles.ReclamationGuard protection, boolean selectVictims)
             throws IOException {
@@ -182,24 +169,65 @@ final class SegmentDataRecovery {
                 selectedEnds = List.copyOf(deadEnds);
             }
         }
-        CompactionCapture capture = new CompactionCapture(inputs, workspace.capacity());
+        CompactionCapture capture = new CompactionCapture(maximumEntries,
+                Math.min(workspace.capacity(), SegmentBatchFormat.MAX_BATCH));
         long sourceBytes = 0;
-        try {
-            for (int i = 0; i < selected.size(); i++) {
-                SegmentArenaControlLog.Allocation victim = selected.get(i);
-                sourceBytes = Math.addExact(sourceBytes, victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES);
-                scanCompactionAllocation(config, arena, data, victim, selectedEnds.get(i), bookie, workspace, capture);
-            }
-            protection.requireHeld(files, arena);
-            arena.requireMovePreparation(files);
-            if (arena.appliedThrough() != arenaCut || bookie.recoveryReadCut(config, identity) != bookieCut) {
-                throw new IOException("Compaction authority changed during source selection/capture");
-            }
-            return capture.finish(selected, sourceBytes);
-        } catch (IOException | RuntimeException | Error failure) {
-            capture.close();
-            throw failure;
+        for (int i = 0; i < selected.size(); i++) {
+            SegmentArenaControlLog.Allocation victim = selected.get(i);
+            sourceBytes = Math.addExact(sourceBytes, victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES);
+            scanCompactionAllocation(config, arena, data, victim, selectedEnds.get(i), bookie, workspace, capture);
         }
+        protection.requireHeld(files, arena);
+        arena.requireMovePreparation(files);
+        if (arena.appliedThrough() != arenaCut || bookie.recoveryReadCut(config, identity) != bookieCut) {
+            throw new IOException("Compaction authority changed during source selection/capture");
+        }
+        return capture.finish(selected, sourceBytes, bookieCut);
+    }
+
+    /** Point-read one immutable measured chunk into pooled COPY bytes before any source view is reused. */
+    static SegmentBatchFormat.FrozenBatch captureCompaction(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentArenaControlLog arena, SegmentBookieControlLog bookie, IsolatedSegmentFiles files,
+            IsolatedSegmentFiles.ReclamationGuard protection, CompactionPlan plan, int batchIndex,
+            SegmentBatchFormat.RelocationBuilder builder, ByteBuffer workspace) throws IOException {
+        protection.requireHeld(files, arena);
+        long arenaCut = arena.appliedThrough();
+        if (bookie.recoveryReadCut(config, identity) != plan.bookieCut) {
+            throw new IOException("Bookie authority changed after compaction measurement");
+        }
+        CompactionBatch batch = plan.batches().get(batchIndex);
+        for (CompactionEntry entry : batch.entries()) {
+            SegmentArenaMove.Source source = entry.source();
+            SegmentPointRead.Location location = source.location();
+            if (bookie.hasTerminalTombstone(location.context()) || !bookie.locallyReadableContext(location.context())
+                    || arena.currentSelectorSequence(location.context(), location.entryId())
+                            != source.expectedSelector()) {
+                throw new IOException("Compaction source authority changed before chunk capture");
+            }
+            SegmentBatchParser.Record record = SegmentPointRead.readWithScratch(config, identity, arena,
+                    location, workspace).record();
+            if (!arena.isSelectedRecord(location, record)
+                    || !entry.entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
+                throw new IOException("Compaction source bytes changed after measurement");
+            }
+            ByteBuf borrowed = Unpooled.wrappedBuffer(record.entry());
+            try {
+                builder.append(location.context(), borrowed);
+            } finally {
+                borrowed.release();
+            }
+        }
+        protection.requireHeld(files, arena);
+        arena.requireMovePreparation(files);
+        if (arena.appliedThrough() != arenaCut || bookie.recoveryReadCut(config, identity) != plan.bookieCut) {
+            throw new IOException("Compaction authority changed during chunk capture");
+        }
+        SegmentBatchFormat.FrozenBatch frozen = builder.finish();
+        if (frozen.length() != batch.bytes()) {
+            frozen.close();
+            throw new IOException("Compaction COPY length differs from its measured destination range");
+        }
+        return frozen;
     }
 
     /** Record bytes borrow the original owner's workspace only during the synchronous visitor call. */

@@ -253,7 +253,7 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | Select/NextCopy/Allocate/ForceCopy/ForceMove/ApplyMove | `graphCompactionSplitsByBufferAndMoveRowsAndRecoversEveryBatchAfterSourceReuse`：1/4 worker、40/402坐标、3/2批、不同COPY身份、当前读/幂等、覆盖及source generation2复用后的全量恢复 |
 | CopyFailure | `laterCompactionCopyForceUnknownRetainsSourcesAndOnlyEarlierMoveSelectors`：第二实际force unknown，只保留首19个MOVE，无FREE；控制重放保留source generation和quarantine，业务restart拒绝 |
 | 全批allocation成本 | `multiBatchCompactionIncludesEveryFrameInAllocationNetCost`：payload小于一块，但各批framing/padding合计后两块destination，source组净零不产生ALLOC/COPY/MOVE |
-| 有界输入/拒绝归还 | `multiBatchCompactionSourceBudgetRefusalReleasesAllCapturedInputs`：合法源预算捕获中途拒绝，全部输入归还，后续旧坐标幂等仍可完成 |
+| 池化分批/归还 | 当前 `multiBatchCompactionUsesPooledChunksBeyondSourceInputBudget` 取代整组预算拒绝契约；真实池不足回归见下节，历史回执保留 |
 
 新模型不称为实际IO失败恢复或掉电证明；source已搬迁部分在旧source整块FREE前仍必须满足全范围proof。
 
@@ -280,3 +280,15 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | 资源循环输入 | `runtimeTerminalCleanupRecyclesEveryOriginalOwnersCoordinateAndPhysicalBlock` 改经自动shard选择；1/4 worker、4 shard、4轮FREE、gen1→5及最终覆盖/重启；有限次数，不是long-run测量 |
 
 模型每窗口1个grant只投影推进顺序；Java实际16上限与byte/资源语义由真实路径验证，不能从游标推出数据死亡或FREE authority。
+
+
+## 池化 compaction 捕获
+
+| 动作 | 实际路径与行为验证 |
+| --- | --- |
+| Measure/AcquireScratch/AcquireCopy | `inspectCompaction`只保留限额内source/hash，`CompactionOperation`从原owner取scratch与COPY池；`compactionSingleOwnerBufferRefusalReturnsScratchAndReclaimsUnusedDestination`检验实际1 buffer拒绝、读/幂等及未使用destination回收 |
+| CaptureIoEnd/CaptureOwnerEnd | guard下 `captureCompaction`重新点读真实source并复核hash/selector/Bookie cut；`RelocationBuilder.append`同步复制借用视图；`compactionRecapturesMeasuredSourceBytesAndBookieCutBeforeLaterCopy`分别保持CRC有效改变后批payload/实际其他ledger控制cut，仅前19 MOVE、1 COPY、0 FREE，并恢复读/重启 |
+| WriteIoEnd/WriteOwnerEnd/Move | 复用 `submitRelocation`实际DATA/prefix与原owner两终结；`multiBatchCompactionUsesPooledChunksBeyondSourceInputBudget` 1/4 worker、40条/1760 bytes大于1060输入额度、3次COPY、全部读/幂等/native覆盖与restart；既有后批force unknown与取消生命周期继续覆盖 |
+| Free | 全批MOVE后既有native/whole-allocation proof与共享CONTROL barrier；group模型及真实source复用回归继续独立验证，计划和moved计数不授予FREE |
+
+新有限模型只投影资源阶段与测量检查结果，不能把valid布尔值或有限行数当成实际字节/完整内存/掉电证据。

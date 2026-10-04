@@ -246,3 +246,15 @@ COPY/MOVE durability、grant与权限为输入假设；有限PASS不等于实际
 | `FourthAdmittedCallRevisitsOldestGrant` | 老轮空窗后最多一次刷新上限并从-1开始；后来grant不扩大未完成轮；实际ordinary refill后准确T回访验证 |
 
 cursor没有持久授权语义，重启从头不影响selector/T/generation；真实FREE继续独立whole-allocation proof与CONTROL cut/barrier。未模型化调度、完整预算、失败存储或全系统liveness。
+
+
+## 池化 compaction 捕获
+
+| 性质 | 实现与证据边界 |
+| --- | --- |
+| `TypeOK` | 原owner计划使用既有indexedEntries数量上限，不持整组payload；单批最多256行/buffer容量；有限模型行计数不证明实际heap字节上界 |
+| `CaptureAndCopyKeepOwnedBuffers` | capture I/O结束及原owner接续前持有scratch/COPY两个lease；转交driver后COPY等实际I/O与原owner终结；取消只停响应 |
+| `CopyMatchesMeasurement` | 每批guard下复核真实source SHA/CRC/selector/permission及测量Bookie cut、冻结长度；有效CRC的payload变化与其他ledger实际控制变化均使后批PARTIAL |
+| `FreeHasAllDurableMoves` | 先全部COPY/MOVE再native覆盖和最终真实whole proof；模型仅计数，不以计数替代实现证明 |
+
+正向选择模型不再消耗整组payload输入；错误capture-all反例保持。source原batch适配scratch、真实byte/hash、完整资源和持久化语义由Java/既有切片验证，未提升完整模型或生产Gate。

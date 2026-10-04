@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影共21个完整正向配置、53个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影共22个完整正向配置、55个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,10 +18,13 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-compaction-capture` | 2批COPY、2..4行计划/上限3、1..2原池buffer；capture及COPY I/O/owner终结与测量身份检查 |
+| `ce-compaction-capture-cancel` | 故意取消即归还buffer，须违反 `CaptureAndCopyKeepOwnedBuffers` |
+| `ce-compaction-capture-measurement` | 故意忽略测量身份变化，须违反 `CopyMatchesMeasurement` |
 | `c-compaction-sweep` | 1固定文件、3稳定grant、每窗口1 grant、至多2后来grant及6个已准入请求，固定上限保证有限轮覆盖与回访 |
 | `ce-compaction-sweep-reset` | 故意每请求重置游标，须违反 `ThreeAdmittedCallsCoverStableRound` |
 | `ce-compaction-sweep-expanding` | 故意每请求扩大轮上限，须违反 `FourthAdmittedCallRevisitsOldestGrant` |
-| `c-compaction-selection` | 3个current候选、各0..3 live记录、1..3输入预算、0/1 spare，真实测量后优先dead并保留最终proof/barrier |
+| `c-compaction-selection` | 3个current候选、各0..3 live记录、0/1 spare；正向COPY不占整组输入，真实测量优先dead并保留最终proof/barrier；1..3输入预算只用于错误整组捕获候选 |
 | `ce-compaction-selection-input` | 故意选择前捕获全部输入，必须违反 `DeadCandidatesAvoidInputRefusal` |
 | `ce-compaction-selection-index` | 故意以native缺行测量死亡，必须违反 `SelectedSourcesUseActualData` |
 | `c-relocation-completion` | 2个copy batch的实际IO、原owner结果、连续前缀与原池释放；copy不发布普通定位 |
@@ -450,3 +453,20 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 | `ce-compaction-sweep-expanding` | 指定 `FourthAdmittedCallRevisitsOldestGrant` 反例 | 60 / 38 / 11 | 6 / 不适用 | 0.778721 | 108593152 |
 
 回执 `unified-wal-model-vzkxsq35` 绑定父提交 `c7832d4c0695bb27b8ec049df488b1b3273a04f7`、116个输入/223个checksum、21完整正向PASS/53指定反例。历史设计输入仍取父提交哈希，旧回执不重绑；本轮[真实容量回归](../local-storage/README.md#有界回收窗口轮转与有限容量循环)分别验证实际16上限、满容量/ordinary refill/准确T/多代复用，未做长期负载、性能、多Arena、掉电或生产authority验收。
+
+
+## 池化 compaction 捕获投影
+
+`PooledCompactionCapture.tla`将当前两批COPY的scratch与冻结buffer分开：1..2个原owner buffer、2..4行测量计划及3行上限，source payload占用SegmentEntryInputs为0。超行数先拒绝，只有1个buffer时归还已取得scratch；捕获I/O终结后由原owner释放scratch并转交冻结COPY，实际COPY I/O及owner都终结后才归还COPY。取消只撤销等待，已取得资源保持到相应终结。测量后源身份变化使下一批拒绝，不生成新的COPY/MOVE；FREE依赖两批durable MOVE，native覆盖和整块proof仍是已有group/Java的独立输入。
+
+`CompactionSelection.tla`的正向Capture同步改为不占整组源输入；原错误 `CaptureAllFirst` 仍占全部候选payload并产生指定反例。目的地需求继续由选中live数量判断，与错误输入算法分开。完整正向选择图现在13758 generated/distinct、队列0、深度/直径8；此前10558状态的历史回执不改绑。
+
+| 配置 | 结果 | generated / distinct / queue | searchDepth / diameter | elapsed秒 | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- |
+| `c-compaction-capture` | 完整PASS | 248 / 188 / 0 | 19 / 19 | 0.895649 | 110755840 |
+| `ce-compaction-capture-cancel` | 指定 `CaptureAndCopyKeepOwnedBuffers` 反例 | 37 / 33 / 7 | 5 / 不适用 | 0.974862 | 107773952 |
+| `ce-compaction-capture-measurement` | 指定 `CopyMatchesMeasurement` 反例 | 57 / 47 / 9 | 7 / 不适用 | 0.948871 | 107282432 |
+
+最终回执 `unified-wal-model-uzyhx2mp` 绑定父提交 `cd2b4e4facb7fca36eb1a9bda19eec80fd0240b5`、121个输入和232个checksum；22完整正向PASS/55指定反例。新增共同writer `SegmentBatchFormat.java` 的输入绑定，原父提交合同哈希与历史回执保持。先验证模型后修正两处Java长行，因此最终run按最终源码重新冻结；中间run不重绑。本轮[真实路径](../local-storage/README.md#池化分批-compaction-捕获)独立验证hash/cut变化、池不足、三批与恢复。
+
+本模型的valid只代表guard下真实身份复核结果，不计算SHA/CRC或模型化文件字节；坐标计数不证明完整heap预算，有限进程切片不证明调度、long-run、掉电、完整A/C/D组合、Block G或生产authority。

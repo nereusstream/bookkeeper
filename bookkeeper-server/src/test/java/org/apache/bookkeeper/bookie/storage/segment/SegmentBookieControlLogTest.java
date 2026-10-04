@@ -10337,25 +10337,177 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
-    public void multiBatchCompactionSourceBudgetRefusalReleasesAllCapturedInputs() throws Exception {
-        IsolatedSegmentConfig config = coverageRecoveryConfig("multi-copy-source-refusal");
-        createMultiBatchCompactionVictims(config, 19);
-        try (IsolatedSegmentStorage storage = multiBatchStorage(config, 4, 4096, 1060)) {
+    public void multiBatchCompactionUsesPooledChunksBeyondSourceInputBudget() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("multi-copy-pooled-" + workers);
+            int entries = createMultiBatchCompactionVictims(config, 19);
+            assertTrue(entries * 44 > 1060);
+            long destination;
+            try (IsolatedSegmentStorage storage = multiBatchStorage(config, workers, 4096, 1060)) {
+                storage.restart();
+                var field = IsolatedSegmentStorage.class.getDeclaredField("files");
+                field.setAccessible(true);
+                SegmentFileIo copyIo = new SegmentFileIo();
+                ((IsolatedSegmentFiles) field.get(storage)).dataIo = copyIo;
+                IsolatedSegmentStorage.CompactionResult result = compactStorage(storage, 924, List.of(5L, 6L));
+                assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, result.status());
+                assertEquals(entries, result.movedEntries());
+                assertEquals(2, result.freedAllocations());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, result.destinationBytes());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, result.netFreedBytes());
+                assertEquals(3, copyIo.forces);
+                destination = result.destinationAllocation();
+                for (long entryId = 1; entryId <= entries; entryId++) {
+                    assertEquals(destination,
+                            storageWrite(storage, context(), entryId).candidate().address().allocation());
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                        assertEquals(SegmentBatchFormat.RELOCATION_COPY, read.result().record().origin());
+                    }
+                }
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR);
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 4096);
+                    IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(config, identity(), arena,
+                            bookie, new SegmentFileIo(), 4096, 4, index)) {
+                assertTrue(files.startupInventory().usesIndexCoverage());
+                assertEquals(entries, files.startupInventory().entries().size());
+            }
+            try (IsolatedSegmentStorage restarted = multiBatchStorage(config, workers, 4096, 1060)) {
+                restarted.restart();
+                for (long entryId : new long[] {1, 19, 20, entries}) {
+                    assertEquals(destination,
+                            storageWrite(restarted, context(), entryId).candidate().address().allocation());
+                }
+            }
+        }
+    }
+
+    @Test
+    public void compactionSingleOwnerBufferRefusalReturnsScratchAndReclaimsUnusedDestination() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("compaction-single-buffer");
+        int entries = createMultiBatchCompactionVictims(config, 19);
+        try (IsolatedSegmentStorage storage = new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
+                new SegmentExecutionGroup.Settings(1, 3, 6, 1, 4096, 1060,
+                        4096 + 4095L + 1060, Duration.ofSeconds(5)),
+                new IsolatedSegmentStorage.Limits(1024 * 1024, 4096, 4096, 1,
+                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
             storage.restart();
-            CompletableFuture<IsolatedSegmentStorage.CompactionResult> response = new CompletableFuture<>();
-            AtomicReference<Throwable> failure = new AtomicReference<>();
-            assertTrue(storage.compactAllocations(new UUID(0, 924), List.of(5L, 6L),
-                    new IsolatedSegmentStorage.CompactionRequest((result, cause) -> {
-                        failure.set(cause);
-                        response.complete(result);
-                    })));
-            IsolatedSegmentStorage.CompactionResult result = response.get(5, TimeUnit.SECONDS);
-            assertNotNull(failure.get());
-            assertEquals(IsolatedSegmentStorage.CompactionStatus.TRANSIENT_UNAVAILABLE, result.status());
-            assertEquals(0, result.destinationBytes());
-            assertEquals(0, result.movedEntries());
+            IsolatedSegmentStorage.CompactionResult refused = compactStorage(storage, 940, List.of(5L, 6L));
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.PARTIAL, refused.status());
+            assertEquals(0, refused.movedEntries());
+            assertEquals(0, refused.freedAllocations());
+            assertEquals(SegmentArenaControlLog.BLOCK_BYTES, refused.destinationBytes());
             assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
-                    storageWrite(storage, context(), 40).status());
+                    storageWrite(storage, context(), entries).status());
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(SegmentBatchFormat.ENTRY_DATA, read.result().record().origin());
+            }
+            IsolatedSegmentStorage.CompactionResult reclaimed = compactShard(storage, 941, 0);
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, reclaimed.status());
+            assertEquals(1, reclaimed.freedAllocations());
+            assertEquals(0, reclaimed.movedEntries());
+            assertEquals(0, reclaimed.destinationBytes());
+            assertEquals(SegmentArenaControlLog.BLOCK_BYTES, reclaimed.netFreedBytes());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertTrue(arena.dataFileAvailable(0));
+            assertEquals(0, arena.currentMoveLocations().size());
+            assertEquals(1, arena.retiredAllocations().size());
+            assertEquals(1, arena.allocationGeneration(0, 4096));
+            assertEquals(1, arena.allocationGeneration(0, 4096 + SegmentArenaControlLog.BLOCK_BYTES));
+        }
+    }
+
+    @Test
+    public void compactionRecapturesMeasuredSourceBytesAndBookieCutBeforeLaterCopy() throws Exception {
+        for (boolean changeBytes : new boolean[] {true, false}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("compaction-recapture-" + changeBytes);
+            int entries = createMultiBatchCompactionVictims(config, 19);
+            CountDownLatch atCopyForce = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            AtomicBoolean paused = new AtomicBoolean();
+            ByteBuffer original = ByteBuffer.allocate(4096);
+            try (IsolatedSegmentStorage storage = multiBatchStorage(config, 4, 4096, 1060)) {
+                storage.restart();
+                var field = IsolatedSegmentStorage.class.getDeclaredField("files");
+                field.setAccessible(true);
+                SegmentFileIo copyIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    if (paused.compareAndSet(false, true)) {
+                        atCopyForce.countDown();
+                        await(release);
+                    }
+                });
+                ((IsolatedSegmentFiles) field.get(storage)).dataIo = copyIo;
+                CompletableFuture<IsolatedSegmentStorage.CompactionResult> response = new CompletableFuture<>();
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+                assertTrue(storage.compactAllocations(new UUID(0, 942), List.of(5L, 6L),
+                        new IsolatedSegmentStorage.CompactionRequest((result, cause) -> {
+                            failure.set(cause);
+                            response.complete(result);
+                        })));
+                assertTrue(atCopyForce.await(5, TimeUnit.SECONDS));
+                if (changeBytes) {
+                    List<ByteBuf> modified = new ArrayList<>();
+                    try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                            StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                        SegmentFileIo.readFully(data, original, 8192);
+                        for (long entryId = 3; entryId <= 21; entryId++) {
+                            modified.add(entry(context(), entryId, -1, 8, (byte) (entryId == 21 ? 1 : 0), 8));
+                        }
+                        SegmentBatchFormat.FrozenBatch changed = SegmentBatchFormat.encode(config,
+                                new SegmentBatchFormat.Address(0, 0, 5, new Generation(1), new Generation(1), 2, 8192),
+                                modified.stream().map(value -> SegmentBatchFormat.entry(context(), value)).toList());
+                        new SegmentFileIo().writeFully(data, changed.bytes(), 8192);
+                        data.force(false);
+                    } finally {
+                        modified.forEach(ByteBuf::release);
+                    }
+                } else {
+                    installStorage(storage, install(45, 10, (byte) 5), activate(45, 11));
+                }
+                release.countDown();
+                IsolatedSegmentStorage.CompactionResult result = response.get(5, TimeUnit.SECONDS);
+                assertNotNull(failure.get());
+                assertTrue(failure.get().getMessage(), failure.get().getMessage().contains(changeBytes
+                        ? "source bytes changed" : "Bookie authority changed"));
+                assertEquals(IsolatedSegmentStorage.CompactionStatus.PARTIAL, result.status());
+                assertEquals(19, result.movedEntries());
+                assertEquals(0, result.freedAllocations());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, result.destinationBytes());
+                assertEquals(1, copyIo.forces);
+                if (changeBytes) {
+                    try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
+                            StandardOpenOption.WRITE)) {
+                        new SegmentFileIo().writeFully(data, original, 8192);
+                        data.force(false);
+                    }
+                }
+                for (long entryId : new long[] {1, 19, 20, entries}) {
+                    assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                            storageWrite(storage, context(), entryId).status());
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                        assertEquals(entryId <= 19 ? SegmentBatchFormat.RELOCATION_COPY : SegmentBatchFormat.ENTRY_DATA,
+                                read.result().record().origin());
+                    }
+                }
+            } finally {
+                release.countDown();
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                assertTrue(arena.dataFileAvailable(0));
+                assertEquals(19, arena.currentMoveLocations().size());
+                assertEquals(0, arena.retiredAllocations().size());
+            }
+            try (IsolatedSegmentStorage restarted = multiBatchStorage(config, 4, 4096, 1060)) {
+                restarted.restart();
+                for (long entryId : new long[] {1, 19, 20, entries}) {
+                    try (SegmentPointRead.LeasedResult read = storageRead(restarted, context(), entryId).result()) {
+                        assertEquals(entryId, read.result().record().entryId());
+                    }
+                }
+            }
         }
     }
 

@@ -543,6 +543,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private SegmentOwnerLoop.Ticket ticket;
         private SegmentBufferPool.Lease buffer;
         private SegmentDataRecovery.CompactionPlan plan;
+        private SegmentBatchFormat.RelocationBuilder copyBuilder;
+        private SegmentBatchFormat.FrozenBatch copyBatch;
         private SegmentArenaControlLog.Allocation destination;
         private SegmentArenaMove move;
         private List<SegmentArenaControlLog.Free> frees;
@@ -585,7 +587,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 try (SegmentBookieControlLog.ReclamationLease lease = bookie.protectReclamation(config, identity);
                         IsolatedSegmentFiles.ReclamationGuard guard = files.protectReclamation(arena,
                                 victims.get(0).file(), lease)) {
-                    plan = guard.inspectCompaction(victims, bookie, execution.inputs(), buffer.bytes(), selectVictims);
+                    plan = guard.inspectCompaction(victims, bookie, limits.indexedEntries(),
+                            buffer.bytes(), selectVictims);
                     victims = plan.victims();
                 }
             }, this::captured);
@@ -656,25 +659,48 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
         private void copyNextBatch() {
             try {
+                if (!acquireBuffer()) {
+                    finish(CompactionStatus.PARTIAL, null);
+                    return;
+                }
                 UUID copyId = batchIndex == 0 ? operationId : phaseId(operationId, "COPY/" + batchIndex);
                 arena.requireUnusedOperation(copyId);
-                SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encodePooled(config,
-                        drivers[shard].relocationAddress(destination, destinationOffset),
-                        currentBatch().entries().stream().map(entry ->
-                                SegmentBatchFormat.relocation(entry.source().location().context(),
-                                        entry.input().bytes(),
-                                        copyId, new Generation(1))).toList(), execution.owner(shard).pool());
-                for (SegmentDataRecovery.CompactionEntry entry : currentBatch().entries()) {
-                    entry.input().close();
+                copyBuilder = SegmentBatchFormat.relocationBuilder(config,
+                        drivers[shard].relocationAddress(destination, destinationOffset), copyId, new Generation(1),
+                        execution.owner(shard).pool());
+                if (copyBuilder == null) {
+                    finish(CompactionStatus.PARTIAL, null);
+                    return;
                 }
-                if (batch == null) {
-                    finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
-                } else if (!drivers[shard].submitRelocation(batch, (copy, cause) ->
+                execution.io().submitContinuing(ticket, () -> {
+                    try (SegmentBookieControlLog.ReclamationLease lease = bookie.protectReclamation(config, identity);
+                            IsolatedSegmentFiles.ReclamationGuard guard = files.protectReclamation(arena,
+                                    victims.get(0).file(), lease)) {
+                        copyBatch = guard.captureCompaction(plan, batchIndex, bookie, copyBuilder, buffer.bytes());
+                    }
+                }, this::copyCaptured);
+            } catch (IOException failureToCopy) {
+                finish(CompactionStatus.PARTIAL, failureToCopy);
+            }
+        }
+
+        private void copyCaptured(Throwable failure) {
+            releaseBuffer();
+            copyBuilder.close();
+            copyBuilder = null;
+            if (failure != null) {
+                finish(CompactionStatus.PARTIAL, failure);
+                return;
+            }
+            SegmentBatchFormat.FrozenBatch offered = copyBatch;
+            copyBatch = null;
+            try {
+                if (!drivers[shard].submitRelocation(offered, (copy, cause) ->
                         ticket.resume(() -> copied(copy, cause)))) {
-                    finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                    finish(CompactionStatus.PARTIAL, null);
                 }
             } catch (IOException failureToCopy) {
-                finish(CompactionStatus.UNKNOWN, failureToCopy);
+                finish(CompactionStatus.PARTIAL, failureToCopy);
             }
         }
 
@@ -782,8 +808,13 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
         private void deliver(CompactionStatus status, Throwable failure) {
             releaseBuffer();
-            if (plan != null) {
-                plan.close();
+            if (copyBuilder != null) {
+                copyBuilder.close();
+                copyBuilder = null;
+            }
+            if (copyBatch != null) {
+                copyBatch.close();
+                copyBatch = null;
             }
             synchronized (gate) {
                 compaction = null;

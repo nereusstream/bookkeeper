@@ -9,7 +9,7 @@ VARIABLE s
 vars == <<s>>
 Allocations == 1..3
 (* A bounded candidate window, exact current DATA counts and a held authority cut
-   are inputs. One record uses one input unit; spare destination is independent.
+   are inputs. Payload uses two owner buffers, not whole-group input units; destination is independent.
    Actual framing/CRC/permissions and whole-allocation successor proof remain
    implementation inputs, not consequences of this finite projection. *)
 Init == \E live \in [Allocations -> 0..3], budget \in 1..3, spare \in BOOLEAN :
@@ -30,7 +30,7 @@ Select == /\ s.stage = "measured"
                s' = [s EXCEPT !.stage = "selected",
                      !.selected = IF empty # {} THEN empty ELSE Allocations]
 Capture == /\ s.stage = "selected"
-           /\ LET need == InputCost(IF CaptureAllFirst THEN Allocations ELSE s.selected) IN
+           /\ LET need == IF CaptureAllFirst THEN InputCost(Allocations) ELSE 0 IN
                 s' = [s EXCEPT !.owned = IF need > s.budget THEN 0 ELSE need,
                       !.stage = IF need > s.budget \/ (InputCost(s.selected) > 0 /\ ~s.spare)
                                 THEN "refused" ELSE "captured"]
