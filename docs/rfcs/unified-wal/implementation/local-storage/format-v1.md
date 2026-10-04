@@ -292,3 +292,6 @@ v2证明依赖当前selector：迁走的普通源须匹配成功后继entry dige
 
 
 2026-10-04 [MOVE覆盖恢复增量](README.md#native-move-索引维护与覆盖恢复)复用原160字节native locator和独立A/B coverage页，不改变MOVE/FREE、DATA或coverage字节格式。当前selector行经真实target校验、原owner排空及native flush后可发布覆盖；恢复匹配覆盖仍验证当前必要副本，旧hint或缺失/坏target不产生权限。此前格式向量不重绑。
+
+
+2026-10-04 [合批compaction](README.md#同-arena-有界合批-compaction)沿用原ALLOC、COPY、MOVE及FREE v1/v2字节。FREE合批首次apply时，各v2 proof的Arena cut为起始applied cut加前序成员数；每条命令仍消费自身sequence，不能给全部FREE写相同cut。共享runtime保护和phase UUID派生不增加持久字段；既有独立向量保留。

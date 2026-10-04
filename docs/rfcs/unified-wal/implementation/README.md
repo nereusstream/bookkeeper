@@ -429,3 +429,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-04 最新增量：[当前原owner native MOVE/coverage增量](local-storage/README.md#native-move-索引维护与覆盖恢复)已复用现有checkpoint暂停全部原owner索引、Bookie entry/control及全文件I/O排空、原owner scratch池、256行native更新、flush与A/B coverage发布。当前MOVE目标实际字节校验失败不回退selector；旧native覆盖被拒绝，匹配覆盖恢复仍点读当前必要副本。取消保持保护到实际I/O和全owner终结，页发布失败可继续读并重发。四项新增真实回归及七类271通过/5平台跳过、18正向/44指定反例为当前局部证据；合批victim compaction请求、实际净回收循环、逐allocation在线cut、长期native/control/SST容量、多Arena、OPEN错误恢复和掉电/生产Gate仍未完成。
+
+
+2026-10-04 当前增量：[同Arena有界合批compaction](local-storage/README.md#同-arena-有界合批-compaction)已组合显式1..16个同stream source的实际扫描、allocation粒度净收益判断、独立destination、一批COPY/条件MOVE、原owner native覆盖维护及一次CONTROL barrier的合批整块FREE。各v2 FREE绑定自身前序cut，共享保护到全部claimed成员终结；取消/发布失败不提前释放或伪造净回收，后续新operation可完成保留source的回收。真实共享块、零净收益拒绝、两块减一块的净容量、全T无destination、复用恢复及失败/取消重启由当前回归验证。仍为全图暂停/一个COPY/显式组，自动选组、逐allocation在线cut、长期control/SST/文件系统净预算、多Arena、OPEN错误恢复、掉电和生产ACK未完成，步骤9/10和完整Gate不提升。

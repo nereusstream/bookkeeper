@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[搬迁源与 orphan 的整块回收](#搬迁源与-orphan-的整块回收)。下列切片保留各自历史范围和receipt；当前完成边界以最新切片为准。实际整块复用仍限健康管理会话及匹配整块范围；当前已接通受保护的 MOVE/FREE/reuse 与完整扫描恢复；原owner在线native维护/coverage和部分存活compaction、长期净容量仍未完成。
+2026-10-04 当前增量为[同 Arena 有界合批 compaction](#同-arena-有界合批-compaction)。已组合真实 COPY/MOVE、原owner native覆盖维护及整块FREE/reuse；下列历史切片保留各自当时范围和receipt。当前请求使用全图准入暂停和显式victim组，整块复用仍限健康管理会话；自动选组、多批搬迁、逐allocation在线cut和长期净容量仍未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -572,3 +572,24 @@ Arena 控制日志、checkpoint 与 rotation metadata-only 重放同一有序命
 新增四项真实回归验证旧行更新/同代发布、陈旧 coverage 拒绝、有效覆盖恢复、坏 CRC/零化当前 target、维护校验失败后完整恢复、页 force 失败后继续读及重发、1/4 worker 下暂停发布中的取消/短关闭与实际排空。最终 Java 回执 `unified-wal-local-BxAQvOwF` 冻结父提交 `e8589da6ab61a98f0cc1ef4e28700eeb1647ffe4` 及207个实际源码/测试/向量输入：相关七类276项，271通过、5项 Linux 亲和性在macOS跳过，零失败/错误；Spotless/Checkstyle通过。初次测试缺少 assertNotNull 导入导致编译失败，修正后分别完成三项/单项定向及最终七类回归，中间失败不计作通过。复现沿用既有七类 `scripts/unified-wal/run-local-storage-tests.sh` 命令。
 
 [Native MOVE coverage 有限投影](../models/README.md#native-move-coverage-投影)回执 `unified-wal-model-75i1oty1` 冻结99个输入、187个 checksum：18完整正向PASS、44指定反例。当前仍无 storage 图的 victim/source 选择与合批 relocation→MOVE 请求、部分存活 allocation 的实际净回收循环、逐 allocation 在线 cutover、控制历史/SST净容量、多Arena、OPEN错误恢复、掉电或生产ACK；步骤8/9及总16步目标保持未完成。此前历史切片的未覆盖项和 receipt 保留各自当时范围，以本节为这次增量的当前依据。
+
+
+## 同 Arena 有界合批 compaction
+
+2026-10-04，`IsolatedSegmentStorage.compactAllocations` 接受一个新的 operation UUID 和1..16个同 DATA 文件、同固定 shard/stream 的当前 allocation。复用现有 checkpoint 先排空原owner并清理准确T，再暂停全图新读写和维护准入；受保护地扫描实际source当前extent，检查批/record CRC、grant、当前selector与Bookie权限。存活entry通过既有全局源bytes预算取得独立输入，最多256个坐标，完整framing/padding必须装入原owner的一个对齐COPY buffer；超限或资源不足明确拒绝。
+
+选择比较整个source组的allocation容量与COPY完整aligned batch向上取整到1 MiB后的destination容量，只有严格正净收益才继续。单个1 MiB source搬到1 MiB destination为NO_NET_GAIN，不申请新allocation；两个source合并到一个destination可取得1 MiB净回收。全组无存活entry则无需COPY/destination。新destination独立申请已持久并成功apply的授权，不能继续写入待回收source的旧tail；保留原stream连续physical sequence。
+
+一次COPY复用既有DATA driver及内部durable结果，一次条件MOVE处理全组当前坐标；只有COPY实际barrier、连续prefix及MOVE成功apply后，才经原owner native更新/flush/A/B coverage，再完整重验每个source并合批FREE。`prepareFrees`为全组共享一次Bookie/file保护，v2成员分别绑定其自身apply前序cut（起始cut加成员序号，包括之前v1或no-op命令消费的sequence），多个FREE使用一次CONTROL barrier。保护直到所有实际claimed成员终结才释放，重复finish不计两次；既有单块接口和v1/v2持久字节不变。
+
+结果分别报告实际moved entry、成功FREE数/容量、已占destination容量和destination allocation ID，`netFreedBytes`只计算成功FREE减新占destination。未知barrier不伪造FREE；MOVE后覆盖发布失败保留当前副本和source，结果为UNKNOWN，后续新operation可不重复复制地完成旧source整块回收。新UUID的阶段UUID由原operation及固定phase派生，不持久化第二份任务/结果框架；已消费的operation不能直接重启完整任务。部分失败留下的destination由结果标识，orphan仍须既有真实整块proof才能退役。
+
+取消仅撤销响应。暂停发布期间新entry/另一compaction拒绝，短close保留原pool、控制义务和目录锁；实际I/O及owner终结后才排空。关闭可以停止尚未提交的后续CONTROL阶段，source继续保留，正常重启后可用新operation完成回收。没有新增线程、队列、缓存、重试层、wire字段或每entry fsync；OPEN ledger无需预先关闭。
+
+六项新增真实回归覆盖共享组的单CONTROL force与各成员保护、零净收益拒绝、两source三live entry/一准确T的合批COPY/MOVE/native/FREE、源generation2真实复用及coverage/full recovery、全T组无destination、MOVE后发布失败/新operation回收与1/4 worker取消/短close/重启、resolved MOVE新proof未claim重试后的保护归还。局部结果不能推导自动选择、长期吞吐或生产可用性。
+
+当前仍使用显式有界source组、一次COPY和全图暂停；未完成自动victim scheduler/阈值测量、多COPY组、逐allocation前台并发cutover、完整orphan自动收敛、持续净回收与共享文件系统/control/SST空间预算、多Arena、OPEN错误恢复、真实掉电和生产ACK。步骤9/10及总16步目标保持未完成。
+
+最终Java回执 `unified-wal-local-hJWzTjdn` 冻结父提交 `97e25c317e044d04c7c0cf6c6eb9bf2a8aa92f17` 及207个源码/测试/向量输入：既有七类282项，277通过、5项Linux亲和性在macOS跳过，0失败/错误；Spotless/Checkstyle通过。六个新增用例先定向验证，再因共享guard/驱动/恢复扩大到相关七类。初次resolved重试测试遗漏已取得ReadAdmission.finish造成测试关闭失败，已补齐实际资源归还；格式检查的5处超长行及模型表达式解析冲突也已修正，未通过中间run不计为PASS。最终源码哈希逐项吻合，历史receipt不重绑。
+
+[合批有限投影](../models/README.md#有界合批-compaction-投影)回执 `unified-wal-model-inrar5jz` 冻结107个输入与202个checksum：19个完整正向PASS、48个指定反例；当前新增投影50个generated/35个distinct、队列0、深度/直径16。不代表真实掉电、长负载性能或完整资源/分布式验收。

@@ -206,6 +206,10 @@ final class SegmentArenaControlDriver {
         return submitCommands(List.of(command), completion);
     }
 
+    boolean submitFrees(List<SegmentArenaControlLog.Free> commands, Completion completion) {
+        return submitCommands(commands, completion);
+    }
+
     /** Block immediately; refusal or failure does not establish a durable quarantine witness. */
     boolean submitQuarantine(int file, Completion completion) {
         Objects.requireNonNull(completion, "completion");

@@ -1124,3 +1124,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-04 最新增量：[Native MOVE coverage有限投影](../implementation/models/README.md#native-move-coverage-投影)已加入既有runner。99个输入、187个checksum；完整矩阵18正向PASS/44指定反例，新投影108个distinct状态、队列0、深度/直径15。普通COPY/MOVE/权限/CRC为输入假设；原worker旧Put排空、取消保留gate、当前selector与必要target验证获得有限反例检查。真实Java七类271通过/5平台跳过，见局部状态；完整A/C/D、组合与Block G保持未闭合。
+
+
+2026-10-04 当前模型增量：[有界合批compaction投影](../implementation/models/README.md#有界合批-compaction-投影)加入既有runner：allocation粒度净成本、COPY/MOVE/native/FREE顺序、逐FREE selector cut和全claimed成员gate。有限范围为1/2 source、1 destination；实际字节/权限/native发布为输入假设，crash/reuse及完整资源/进展未在此投影展开。完整矩阵19正向/48指定反例仍不构成完整A/C/D、组合模型、Block G或生产authority。

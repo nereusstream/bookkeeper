@@ -45,6 +45,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         private final SegmentBookieControlLog.ReclamationLease bookieLease;
         private boolean claimed;
         private boolean finished;
+        private int members = 1;
+        private int claims;
+        private int completions;
 
         private ReclamationGuard(IsolatedSegmentFiles owner, SegmentArenaControlLog authority, int file,
                                   SegmentBookieControlLog.ReclamationLease bookieLease) {
@@ -56,10 +59,21 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
         void claim(SegmentArenaControlLog log) throws IOException {
             synchronized (owner) {
-                if (log != authority || finished || claimed || owner.reclamation != this) {
+                if (log != authority || finished || claims == members || owner.reclamation != this) {
                     throw new IOException("FREE protection is unavailable or already submitted");
                 }
                 claimed = true;
+                claims++;
+            }
+        }
+
+        void expectClaims(int count) throws IOException {
+            synchronized (owner) {
+                requireHeld(owner, authority);
+                if (count < 1 || count > 16) {
+                    throw new IOException("Protected FREE batch exceeds its bounded member set");
+                }
+                members = count;
             }
         }
 
@@ -78,9 +92,17 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
 
         void finish(boolean uncertain) {
+            finish(uncertain, true);
+        }
+
+        void finish(boolean uncertain, boolean memberClaimed) {
             boolean release;
             synchronized (owner) {
-                release = markFinished(uncertain);
+                if (finished) {
+                    return;
+                }
+                owner.failed[file] |= uncertain;
+                release = (claims == 0 || memberClaimed && ++completions == claims) && markFinished(false);
             }
             if (release) {
                 bookieLease.close();
@@ -101,6 +123,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                 long allocationOrder, SegmentBookieControlLog bookie,
                                                 ByteBuffer workspace)
                 throws IOException {
+            if (allocation.file() != file) {
+                throw new IOException("Protected allocation proof belongs to another DATA file");
+            }
             long cut = bookieLease.cut();
             SegmentArenaControlLog.FreeFacts proof = SegmentDataRecovery.proveDeadAllocation(
                     owner.config, owner.identity, authority, owner.data.get(file), allocation,
@@ -110,6 +135,22 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 throw new IOException("Bookie authority changed during whole-allocation verification");
             }
             return proof;
+        }
+
+        SegmentDataRecovery.CompactionPlan inspectCompaction(List<SegmentArenaControlLog.Allocation> victims,
+                                                              SegmentBookieControlLog bookie,
+                                                              SegmentEntryInputs inputs, ByteBuffer workspace)
+                throws IOException {
+            requireHeld(owner, authority);
+            List<Long> ends = new ArrayList<>();
+            for (SegmentArenaControlLog.Allocation victim : victims) {
+                if (victim.file() != file) {
+                    throw new IOException("Compaction victim belongs to another DATA file");
+                }
+                ends.add(owner.allocationEnd(victim, authority));
+            }
+            return SegmentDataRecovery.inspectCompaction(owner.config, owner.identity, authority,
+                    owner.data.get(file), victims, ends, bookie, inputs, workspace, owner, this);
         }
 
         @Override

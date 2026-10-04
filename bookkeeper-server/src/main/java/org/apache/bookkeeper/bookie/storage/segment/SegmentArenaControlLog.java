@@ -36,6 +36,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
@@ -211,6 +212,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         private final long expectedGeneration;
         private final FreeFacts facts;
         private final IsolatedSegmentFiles.ReclamationGuard protection;
+        private final AtomicBoolean runtimeClaimed = new AtomicBoolean();
+        private final AtomicBoolean runtimeFinished = new AtomicBoolean();
 
         private Free(UUID operationId, Generation operationGeneration, long expectedGeneration,
                      FreeFacts facts, IsolatedSegmentFiles.ReclamationGuard protection) {
@@ -269,10 +272,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (log.resolvedFree(this)) {
                 return false;
             }
-            if (protection == null) {
+            if (protection == null || !runtimeClaimed.compareAndSet(false, true)) {
                 throw new IOException("Replayed FREE facts are not a new runtime proof");
             }
-            protection.claim(log);
+            try {
+                protection.claim(log);
+            } catch (IOException | RuntimeException | Error failure) {
+                runtimeClaimed.set(false);
+                throw failure;
+            }
             return true;
         }
 
@@ -280,14 +288,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (log.resolvedFree(this)) {
                 return;
             }
-            if (protection == null || !protection.claimedBy(log)) {
+            if (protection == null || !runtimeClaimed.get() || !protection.claimedBy(log)) {
                 throw new IOException("FREE has no protected runtime verification");
             }
         }
 
         void finish(SegmentArenaControlLog log) {
-            if (protection != null) {
-                protection.finish(!log.dataFileAvailable(facts.allocation().file()));
+            if (protection != null && runtimeFinished.compareAndSet(false, true)) {
+                protection.finish(!log.dataFileAvailable(facts.allocation().file()), runtimeClaimed.get());
             }
         }
 
@@ -710,39 +718,89 @@ final class SegmentArenaControlLog implements AutoCloseable {
     Free prepareFree(UUID operationId, long allocationId, IsolatedSegmentFiles files, SegmentBookieControlLog bookie,
                      ByteBuffer workspace)
             throws IOException {
+        return prepareFrees(List.of(new FreeTarget(operationId, allocationId)), files, bookie, workspace).get(0);
+    }
+
+    record FreeTarget(UUID operationId, long allocationId) { }
+
+    synchronized Allocation currentAllocation(long allocationId) throws IOException {
+        requireQuiescentControl(config, identity);
+        Allocation allocation = allocationIds.get(allocationId);
+        if (allocation == null || retiredAllocations.containsKey(allocationId)
+                || !dataFileAvailable(allocation.file())) {
+            throw new IOException("Allocation is not current and available");
+        }
+        return allocation;
+    }
+
+    synchronized void requireUnusedOperation(UUID operationId) throws IOException {
+        requireQuiescentControl(config, identity);
+        if (appliedOperations.containsKey(operationId)) {
+            throw new IOException("Internal maintenance operation identity was already used");
+        }
+    }
+
+    /** One actual proof gate and one ordered CONTROL batch; no per-victim barrier is required. */
+    List<Free> prepareFrees(List<FreeTarget> targets, IsolatedSegmentFiles files, SegmentBookieControlLog bookie,
+                            ByteBuffer workspace) throws IOException {
         if (!files.matchesScope(config, identity) || !bookie.matchesScope(config, identity)) {
             throw new IOException("Whole-allocation FREE has another storage scope");
         }
-        Allocation allocation;
-        long order;
+        targets = List.copyOf(targets);
+        if (targets.isEmpty() || targets.size() > 16
+                || targets.stream().map(FreeTarget::allocationId).distinct().count() != targets.size()
+                || targets.stream().map(FreeTarget::operationId).distinct().count() != targets.size()) {
+            throw new IOException("FREE batch needs 1..16 distinct allocations and operation identities");
+        }
+        List<Allocation> victims = new ArrayList<>();
+        List<Long> orders = new ArrayList<>();
+        long arenaCut;
         synchronized (this) {
             requireQuiescentControl(config, identity);
-            allocation = allocationIds.get(allocationId);
-            if (allocation == null || retiredAllocations.containsKey(allocationId)) {
-                throw new IOException("Whole-allocation FREE has no current applied allocation");
+            arenaCut = appliedThrough;
+            for (FreeTarget target : targets) {
+                Allocation allocation = currentAllocation(target.allocationId());
+                if (!victims.isEmpty() && allocation.file() != victims.get(0).file()) {
+                    throw new IOException("Protected FREE batch must use one DATA file");
+                }
+                victims.add(allocation);
+                orders.add(appliedOperations.get(allocation.operationId()).sequence());
             }
-            order = appliedOperations.get(allocation.operationId()).sequence();
         }
         SegmentBookieControlLog.ReclamationLease bookieLease = bookie.protectReclamation(config, identity);
         IsolatedSegmentFiles.ReclamationGuard protection;
         try {
-            protection = files.protectReclamation(this, allocation.file(), bookieLease);
+            protection = files.protectReclamation(this, victims.get(0).file(), bookieLease);
         } catch (IOException | RuntimeException | Error failure) {
             bookieLease.close();
             throw failure;
         }
         try {
-            FreeFacts facts = protection.verify(allocation, order, bookie, workspace);
+            List<Free> commands = new ArrayList<>();
+            for (int i = 0; i < victims.size(); i++) {
+                Allocation allocation = victims.get(i);
+                FreeFacts facts = protection.verify(allocation, orders.get(i), bookie, workspace);
+                if (facts.arenaCut() >= 0) {
+                    if (facts.arenaCut() != arenaCut) {
+                        throw new IOException("FREE batch selector changed during verification");
+                    }
+                    facts = new FreeFacts(facts.allocation(), facts.allocationOrder(), facts.firstSequence(),
+                            facts.through(), facts.records(), facts.bookieCut(), Math.addExact(arenaCut, i),
+                            facts.digest());
+                }
+                commands.add(new Free(targets.get(i).operationId(), new Generation(allocation.generation() + 1),
+                        allocation.generation(), facts, protection));
+            }
             synchronized (this) {
                 requireQuiescentControl(config, identity);
-                if (retiredAllocations.containsKey(allocationId)
-                        || !allocation.equals(allocationIds.get(allocationId))
-                        || facts.arenaCut() >= 0 && facts.arenaCut() != appliedThrough) {
+                if (appliedThrough != arenaCut || victims.stream().anyMatch(allocation ->
+                        retiredAllocations.containsKey(allocation.allocationId())
+                                || !allocation.equals(allocationIds.get(allocation.allocationId())))) {
                     throw new IOException("Whole-allocation FREE predecessor changed during verification");
                 }
             }
-            long previous = allocation.generation();
-            return new Free(operationId, new Generation(previous + 1), previous, facts, protection);
+            protection.expectClaims(commands.size());
+            return List.copyOf(commands);
         } catch (IOException | RuntimeException | Error failure) {
             protection.close();
             throw failure;

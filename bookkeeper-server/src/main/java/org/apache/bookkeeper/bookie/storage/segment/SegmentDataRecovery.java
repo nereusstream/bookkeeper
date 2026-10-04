@@ -39,6 +39,143 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
+    record CompactionEntry(SegmentArenaMove.Source source, SegmentEntryInputs.Input input) { }
+    private record CompactionKey(ProfileLedgerContext context, long entryId) { }
+
+    static final class CompactionPlan implements AutoCloseable {
+        private final List<CompactionEntry> entries;
+        private final long sourceBytes;
+        private final int batchBytes;
+
+        private CompactionPlan(List<CompactionEntry> entries, long sourceBytes, int batchBytes) {
+            this.entries = List.copyOf(entries);
+            this.sourceBytes = sourceBytes;
+            this.batchBytes = batchBytes;
+        }
+
+        List<CompactionEntry> entries() {
+            return entries;
+        }
+
+        int destinationBlocks() {
+            return Math.toIntExact((batchBytes + SegmentArenaControlLog.BLOCK_BYTES - 1)
+                    / SegmentArenaControlLog.BLOCK_BYTES);
+        }
+
+        boolean hasNetGain() {
+            return sourceBytes > destinationBlocks() * SegmentArenaControlLog.BLOCK_BYTES;
+        }
+
+        @Override
+        public void close() {
+            for (CompactionEntry entry : entries) {
+                entry.input().close();
+            }
+        }
+    }
+
+    /** The caller holds the graph admission cut and live Bookie/file proof gate, never an index-absence proof. */
+    static CompactionPlan inspectCompaction(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog arena, FileChannel data,
+                                                    List<SegmentArenaControlLog.Allocation> victims, List<Long> ends,
+                                                    SegmentBookieControlLog bookie, SegmentEntryInputs inputs,
+                                                    ByteBuffer workspace, IsolatedSegmentFiles files,
+                                                    IsolatedSegmentFiles.ReclamationGuard protection)
+            throws IOException {
+        protection.requireHeld(files, arena);
+        List<CompactionEntry> entries = new ArrayList<>();
+        HashSet<CompactionKey> distinct = new HashSet<>();
+        long sourceBytes = 0;
+        int recordBytes = 0;
+        long arenaCut = arena.appliedThrough();
+        long bookieCut = bookie.recoveryReadCut(config, identity);
+        try {
+            for (int victimIndex = 0; victimIndex < victims.size(); victimIndex++) {
+                SegmentArenaControlLog.Allocation victim = victims.get(victimIndex);
+                if (!victim.equals(arena.currentAllocation(victim.allocationId()))) {
+                    throw new IOException("Compaction source allocation changed before its capture");
+                }
+                sourceBytes = Math.addExact(sourceBytes, victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES);
+                long end = victim.offset() + victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+                long usedEnd = ends.get(victimIndex);
+                long through = -1;
+                if (usedEnd < victim.offset() || usedEnd > end || usedEnd % config.alignment() != 0) {
+                    throw new IOException("Compaction victim has an invalid current DATA boundary");
+                }
+                for (long offset = victim.offset(); offset < usedEnd;) {
+                    ByteBuffer page = workspace.slice(0, 4096);
+                    SegmentFileIo.readFully(data, page, offset);
+                    if (allZero(page)) {
+                        if (victim.expectedGeneration() > 0) {
+                            throw new IOException("Reused compaction source has an unwritten required page");
+                        }
+                        offset += 4096;
+                        continue;
+                    }
+                    SegmentBatchFormat.Address address = address(page, offset);
+                    if (address.fileIndex() != victim.file() || address.shard() != victim.ownerShard()
+                            || address.allocation() != victim.allocationId()
+                            || address.generation().value() != victim.generation()
+                            || !address.streamGeneration().equals(victim.ownerGeneration())) {
+                        throw new IOException("Compaction source has another allocation identity");
+                    }
+                    int length = SegmentBatchParser.batchLength(page.slice(0, 128), address, config.bytesPerFile());
+                    if (length > workspace.capacity() || length > usedEnd - offset
+                            || through >= 0 && address.sequence() != through + 1) {
+                        throw new IOException("Compaction source exceeds its buffer or has a DATA sequence gap");
+                    }
+                    through = address.sequence();
+                    ByteBuffer content = workspace.slice(0, length);
+                    SegmentFileIo.readFully(data, content, offset);
+                    SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address, config.bytesPerFile());
+                    List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+                    for (int i = 0; i < locations.size(); i++) {
+                        SegmentBatchParser.Record record = parsed.records().get(i);
+                        SegmentPointRead.Location location = locations.get(i);
+                        if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                                != victim.ownerShard()) {
+                            throw new IOException("Compaction source record has another logical shard");
+                        }
+                        if (bookie.hasTerminalTombstone(record.context())
+                                || !arena.isSelectedRecord(location, record)) {
+                            continue;
+                        }
+                        if (!bookie.locallyReadableContext(record.context())) {
+                            throw new IOException("Compaction source has no locally readable Bookie context");
+                        }
+                        SegmentArenaMove.Source source = new SegmentArenaMove.Source(location,
+                                arena.currentSelectorSequence(record.context(), record.entryId()));
+                        recordBytes = Math.addExact(recordBytes, location.recordLength());
+                        if (!distinct.add(new CompactionKey(record.context(), record.entryId()))
+                                || entries.size() == SegmentBatchFormat.MAX_RECORDS
+                                || SegmentBatchFormat.alignedLength(recordBytes) > workspace.capacity()) {
+                            throw new IOException("Compaction live set exceeds one bounded COPY batch");
+                        }
+                        SegmentEntryInputs.Input input = inputs.acquire(record.context(), record.entry().remaining());
+                        if (input == null) {
+                            throw new IOException("Compaction source input budget is unavailable");
+                        }
+                        entries.add(new CompactionEntry(source, input));
+                        input.bytes().writeBytes(record.entry().duplicate());
+                    }
+                    offset += length;
+                }
+            }
+            protection.requireHeld(files, arena);
+            arena.requireMovePreparation(files);
+            if (arena.appliedThrough() != arenaCut || bookie.recoveryReadCut(config, identity) != bookieCut) {
+                throw new IOException("Compaction authority changed during source capture");
+            }
+            return new CompactionPlan(entries, sourceBytes,
+                    entries.isEmpty() ? 0 : SegmentBatchFormat.alignedLength(recordBytes));
+        } catch (IOException | RuntimeException | Error failure) {
+            for (CompactionEntry entry : entries) {
+                entry.input().close();
+            }
+            throw failure;
+        }
+    }
+
     /** Called only with the live writer's reclamation gate held; no index absence or caller-supplied liveness. */
     static SegmentArenaControlLog.FreeFacts proveDeadAllocation(IsolatedSegmentConfig config,
                                                                SegmentFileHeader identity,

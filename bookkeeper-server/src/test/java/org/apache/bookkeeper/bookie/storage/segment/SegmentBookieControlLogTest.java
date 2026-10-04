@@ -9977,6 +9977,283 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void protectedFreeBatchSharesOneBarrierAndWaitsForEveryClaimedMember() throws Exception {
+        SegmentFileIo controlIo = new SegmentFileIo();
+        try (MoveFixture fixture = new MoveFixture(config(), controlIo)) {
+            long middle = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+            fixture.arena.submitBatch(List.of(reclaimableAllocation(6, middle),
+                    reclaimableAllocation(7, middle + SegmentArenaControlLog.BLOCK_BYTES)));
+            List<SegmentArenaControlLog.Free> frees = fixture.arena.prepareFrees(List.of(
+                    new SegmentArenaControlLog.FreeTarget(new UUID(0, 901), 6),
+                    new SegmentArenaControlLog.FreeTarget(new UUID(0, 902), 7)), fixture.files, fixture.bookie,
+                    ByteBuffer.allocate(4096));
+            fixture.arena.claimProtectedCommands(frees);
+            int forces = controlIo.forces;
+            SegmentArenaControlLog.DurableBatch batch = fixture.arena.appendDurably(frees);
+            assertEquals(forces + 1, controlIo.forces);
+            assertTrue(fixture.bookie.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+            for (SegmentArenaControlLog.Result result : fixture.arena.applyDurable(batch)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, result.status());
+            }
+            fixture.arena.finishProtectedCommands(List.of(frees.get(0)));
+            fixture.arena.finishProtectedCommands(List.of(frees.get(0)));
+            assertTrue(fixture.bookie.admitNormal(context(), filled(20, (byte) 5)).isEmpty());
+            fixture.arena.finishProtectedCommands(List.of(frees.get(1)));
+            fixture.bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow().physicalTerminal();
+            for (SegmentArenaControlLog.Free free : frees) {
+                free.close();
+            }
+        }
+    }
+
+    private void createCompactionVictims(IsolatedSegmentConfig config, boolean terminalAll) throws Exception {
+        try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
+            long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+            fixture.arena.submitBatch(List.of(reclaimableAllocation(6, upper)));
+            fixture.bookie.submitBatch(List.of(install(48, 10, (byte) 5), activate(48, 11)));
+            ByteBuf live = entry(context(), 3);
+            ByteBuf dead = entry(context(48), 1);
+            CompletableFuture<List<SegmentDataPhysicalDriver.NormalResult>> written = new CompletableFuture<>();
+            try {
+                assertTrue(fixture.driver.submitNormal(fixture.bookie, SegmentBatchFormat.encode(config,
+                        new SegmentBatchFormat.Address(0, 0, 6, new Generation(1), new Generation(1), 2, upper),
+                        List.of(SegmentBatchFormat.entry(context(), live),
+                                SegmentBatchFormat.entry(context(48), dead))),
+                        List.of(fixture.bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(),
+                                fixture.bookie.admitNormal(context(48), filled(20, (byte) 5)).orElseThrow()),
+                        (results, failure) -> {
+                            if (failure == null) {
+                                written.complete(results);
+                            } else {
+                                written.completeExceptionally(failure);
+                            }
+                        }));
+            } finally {
+                live.release();
+                dead.release();
+            }
+            for (SegmentDataPhysicalDriver.NormalResult result : written.get(5, TimeUnit.SECONDS)) {
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+            }
+            ownerBarrier(fixture.owner);
+            fixture.bookie.submitBatch(terminalAll ? List.of(tombstone(44, 20), tombstone(48, 21))
+                    : List.of(tombstone(48, 21)));
+        }
+    }
+
+    private static IsolatedSegmentStorage.CompactionResult compactStorage(IsolatedSegmentStorage storage,
+            long operationId, List<Long> victims) throws Exception {
+        CompletableFuture<IsolatedSegmentStorage.CompactionResult> response = new CompletableFuture<>();
+        assertTrue(storage.compactAllocations(new UUID(0, operationId), victims,
+                new IsolatedSegmentStorage.CompactionRequest((result, failure) -> {
+                    if (failure == null) {
+                        response.complete(result);
+                    } else {
+                        response.completeExceptionally(failure);
+                    }
+                })));
+        return response.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("net-compaction-" + workers);
+            createCompactionVictims(config, false);
+            long destination;
+            try (IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 16, 3)) {
+                storage.restart();
+                IsolatedSegmentStorage.CompactionResult refused = compactStorage(storage, 911, List.of(5L));
+                assertEquals(IsolatedSegmentStorage.CompactionStatus.NO_NET_GAIN, refused.status());
+                assertEquals(0, refused.destinationBytes());
+                assertEquals(0, refused.freedAllocations());
+                IsolatedSegmentStorage.CompactionResult result = compactStorage(storage, 912, List.of(5L, 6L));
+                assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, result.status());
+                assertEquals(3, result.movedEntries());
+                assertEquals(2, result.freedAllocations());
+                assertEquals(2 * SegmentArenaControlLog.BLOCK_BYTES, result.freedBytes());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, result.destinationBytes());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, result.netFreedBytes());
+                destination = result.destinationAllocation();
+                for (long entryId = 1; entryId <= 3; entryId++) {
+                    assertEquals(destination,
+                            storageWrite(storage, context(), entryId).candidate().address().allocation());
+                    try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                        assertEquals(912, read.result().record().moveId().getLeastSignificantBits());
+                    }
+                }
+                CompletableFuture<ReadReply> dead = new CompletableFuture<>();
+                assertTrue(storage.submitRead(context(48), 1, new SegmentPointRead.ReadRequest(
+                        (status, read, failure) -> dead.complete(new ReadReply(status, read, failure)))));
+                assertEquals(SegmentPointRead.ReadStatus.NOT_READY, dead.get(5, TimeUnit.SECONDS).status());
+            }
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR);
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16);
+                    IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(config, identity(), arena,
+                            bookie, new SegmentFileIo(), 16, 4, index)) {
+                assertTrue(files.startupInventory().usesIndexCoverage());
+                assertEquals(3, files.startupInventory().entries().size());
+                List<SegmentArenaControlLog.Free> retired = arena.retiredAllocations().stream()
+                        .sorted(java.util.Comparator.comparingLong(free -> free.facts().arenaCut())).toList();
+                assertEquals(2, retired.size());
+                assertEquals(retired.get(0).facts().arenaCut() + 1, retired.get(1).facts().arenaCut());
+                SegmentArenaControlLog.Allocation reused = arena.planPools(List.of(
+                        new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+                assertEquals(4096, reused.offset());
+                assertEquals(2, reused.generation());
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        arena.submitBatch(List.of(reused)).get(0).status());
+                ByteBuf bytes = entry(context(), 4);
+                try {
+                    files.writeAuthorized(SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, reused.allocationId(), new Generation(2),
+                                    new Generation(1), 4, reused.offset()),
+                            List.of(SegmentBatchFormat.entry(context(), bytes))), arena);
+                } finally {
+                    bytes.release();
+                }
+            }
+            try (IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 16, 3)) {
+                storage.restart();
+                for (long entryId = 1; entryId <= 3; entryId++) {
+                    assertEquals(destination,
+                            storageWrite(storage, context(), entryId).candidate().address().allocation());
+                }
+                assertEquals(2, storageWrite(storage, context(), 4).candidate().address().generation().value());
+            }
+        }
+    }
+
+    @Test
+    public void graphCompactionTerminalGroupNeedsNoCopyAllocation() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("terminal-compaction");
+        createCompactionVictims(config, true);
+        try (IsolatedSegmentStorage storage = storage(config, 4, 6, 4, 16, 3)) {
+            storage.restart();
+            IsolatedSegmentStorage.CompactionResult result = compactStorage(storage, 913, List.of(5L, 6L));
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, result.status());
+            assertEquals(0, result.movedEntries());
+            assertEquals(0, result.destinationBytes());
+            assertEquals(-1, result.destinationAllocation());
+            assertEquals(2 * SegmentArenaControlLog.BLOCK_BYTES, result.netFreedBytes());
+        }
+    }
+
+    @Test
+    public void graphCompactionPublicationFailureKeepsMovedDataAndSourcesForLaterFree() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("compaction-publication-failure");
+        createCompactionVictims(config, false);
+        try (IsolatedSegmentStorage storage = storage(config, 4, 6, 4, 16, 3)) {
+            storage.restart();
+            CompletableFuture<IsolatedSegmentStorage.CompactionResult> response = new CompletableFuture<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            assertTrue(storage.compactAllocations(new UUID(0, 914), List.of(5L, 6L),
+                    new IsolatedSegmentStorage.CompactionRequest((result, cause) -> {
+                        failure.set(cause);
+                        response.complete(result);
+                    }), new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false)));
+            IsolatedSegmentStorage.CompactionResult partial = response.get(5, TimeUnit.SECONDS);
+            assertNotNull(failure.get());
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.UNKNOWN, partial.status());
+            assertEquals(3, partial.movedEntries());
+            assertEquals(0, partial.freedAllocations());
+            assertEquals(-SegmentArenaControlLog.BLOCK_BYTES, partial.netFreedBytes());
+            for (long entryId = 1; entryId <= 3; entryId++) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(914, read.result().record().moveId().getLeastSignificantBits());
+                }
+            }
+            IsolatedSegmentStorage.CompactionResult reclaimed = compactStorage(storage, 915, List.of(5L, 6L));
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, reclaimed.status());
+            assertEquals(0, reclaimed.movedEntries());
+            assertEquals(0, reclaimed.destinationBytes());
+            assertEquals(2 * SegmentArenaControlLog.BLOCK_BYTES, reclaimed.netFreedBytes());
+        }
+        try (IsolatedSegmentStorage restarted = storage(config, 4, 6, 4, 16, 3)) {
+            restarted.restart();
+            for (long entryId = 1; entryId <= 3; entryId++) {
+                try (SegmentPointRead.LeasedResult read = storageRead(restarted, context(), entryId).result()) {
+                    assertEquals(914, read.result().record().moveId().getLeastSignificantBits());
+                }
+            }
+        }
+    }
+
+    @Test
+    public void cancelledGraphCompactionHoldsResourcesUntilPublicationAndCanReclaimAfterRestart() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("cancelled-compaction-" + workers);
+            createCompactionVictims(config, false);
+            CountDownLatch forced = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            AtomicInteger replies = new AtomicInteger();
+            IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 16, 3);
+            try {
+                storage.restart();
+                IsolatedSegmentStorage.CompactionRequest request =
+                        new IsolatedSegmentStorage.CompactionRequest((result, cause) -> replies.incrementAndGet());
+                assertTrue(storage.compactAllocations(new UUID(0, 916), List.of(5L, 6L), request,
+                        new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                            forced.countDown();
+                            await(release);
+                        })));
+                assertTrue(forced.await(5, TimeUnit.SECONDS));
+                ByteBuf bytes = entry(context(), 4);
+                try {
+                    assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                            new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> { })));
+                } finally {
+                    bytes.release();
+                }
+                assertFalse(storage.compactAllocations(new UUID(0, 917), List.of(5L, 6L),
+                        new IsolatedSegmentStorage.CompactionRequest((result, cause) -> { })));
+                assertTrue(request.stopWaiting());
+                assertFalse(storage.close(Duration.ofMillis(50)));
+                assertThrows(IOException.class, () -> SegmentDerivedIndex.open(config, identity(), 16));
+                release.countDown();
+                assertTrue(storage.close(Duration.ofSeconds(5)));
+                assertEquals(0, replies.get());
+            } finally {
+                release.countDown();
+                storage.close();
+            }
+            try (IsolatedSegmentStorage restarted = storage(config, workers, 6, 4, 16, 3)) {
+                restarted.restart();
+                for (long entryId = 1; entryId <= 3; entryId++) {
+                    try (SegmentPointRead.LeasedResult read = storageRead(restarted, context(), entryId).result()) {
+                        assertEquals(916, read.result().record().moveId().getLeastSignificantBits());
+                    }
+                }
+                IsolatedSegmentStorage.CompactionResult reclaimed = compactStorage(restarted, 917, List.of(5L, 6L));
+                assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, reclaimed.status());
+                assertEquals(0, reclaimed.destinationBytes());
+                assertEquals(2, reclaimed.freedAllocations());
+            }
+        }
+    }
+
+    @Test
+    public void preparedResolvedMoveRetryReleasesItsUnclaimedProtection() throws Exception {
+        try (MoveFixture fixture = new MoveFixture(config(), new SegmentFileIo())) {
+            SegmentDataPhysicalDriver.DurableRelocation copy = fixture.copy(918, 2, (byte) 0);
+            try (SegmentArenaMove move = fixture.prepare(copy, fixture.sources, -1)) {
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        fixture.arena.submitBatch(List.of(move)).get(0).status());
+            }
+            try (SegmentArenaMove retry = fixture.prepare(copy, fixture.sources, -1)) {
+                assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                        fixture.arena.submitBatch(List.of(retry)).get(0).status());
+                fixture.bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow().physicalTerminal();
+                try (IsolatedSegmentFiles.DataReadLease ignored = fixture.files.pinDataRead()) {
+                    fixture.bookie.admitRead(context()).orElseThrow().finish();
+                }
+            }
+        }
+    }
+
+    @Test
     public void nativeMoveMaintenanceReplacesDrainedRowsAndCoveredRestartVerifiesCurrentBytes() throws Exception {
         for (boolean zeroTarget : new boolean[] {false, true}) {
             IsolatedSegmentConfig config = coverageRecoveryConfig("native-move-coverage-" + zeroTarget);

@@ -19,6 +19,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import io.netty.buffer.ByteBuf;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -70,6 +71,36 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     record FreeResult(FreeStatus status, SegmentArenaControlLog.Result control) { }
 
+    enum CompactionStatus {
+        RECLAIMED, NO_NET_GAIN, TRANSIENT_UNAVAILABLE, PARTIAL, UNKNOWN
+    }
+
+    record CompactionResult(CompactionStatus status, int movedEntries, int freedAllocations,
+                            long freedBytes, long destinationBytes, long destinationAllocation) {
+        long netFreedBytes() {
+            return freedBytes - destinationBytes;
+        }
+    }
+
+    static final class CompactionRequest {
+        private final AtomicReference<BiConsumer<CompactionResult, Throwable>> response;
+
+        CompactionRequest(BiConsumer<CompactionResult, Throwable> completion) {
+            response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+        }
+
+        boolean stopWaiting() {
+            return response.getAndSet(null) != null;
+        }
+
+        private void complete(CompactionResult result, Throwable failure) {
+            BiConsumer<CompactionResult, Throwable> completion = response.getAndSet(null);
+            if (completion != null) {
+                completion.accept(result, failure);
+            }
+        }
+    }
+
     static final class FreeRequest {
         private final AtomicReference<BiConsumer<FreeResult, Throwable>> response;
 
@@ -114,6 +145,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private final SegmentDataPhysicalDriver.NormalBatcher[] writes;
     private final SegmentPointRead.Reader[] reads;
     private final SegmentHotDirectory[] hotDirectories;
+    private final SegmentDataPhysicalDriver[] drivers;
     private IsolatedSegmentFiles files;
     private SegmentArenaControlLog arena;
     private SegmentBookieControlLog bookie;
@@ -126,6 +158,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private boolean closed;
     private IndexCheckpoint indexCheckpoint;
     private FreeOperation freeOperation;
+    private CompactionOperation compaction;
 
     /** Construct the resource owner before startup so a failed start still has an explicit cleanup handle. */
     IsolatedSegmentStorage(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
@@ -143,6 +176,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         writes = new SegmentDataPhysicalDriver.NormalBatcher[config.logicalShards()];
         reads = new SegmentPointRead.Reader[config.logicalShards()];
         hotDirectories = new SegmentHotDirectory[config.logicalShards()];
+        drivers = new SegmentDataPhysicalDriver[config.logicalShards()];
     }
 
     void startNew() throws IOException, InterruptedException {
@@ -215,6 +249,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(selected, owner, execution.io(),
                         files, arena, new SegmentPhysicalPrefix(owner, selected, stream.generation(),
                                 stream.firstSequence(), config.maxPendingEntries()), hot);
+                drivers[selected] = driver;
                 writes[selected] = driver.enableNormalBatching(
                         bookie, limits.batches(), allocator, limits.poolBlocks());
                 reads[selected] = SegmentPointRead.Reader.live(owner, execution.io(), files, arena, bookie, hot);
@@ -269,7 +304,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitNormal(ProfileLedgerContext context, byte[] credential, ByteBuf entry,
                          SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || freeOperation != null) {
+            if (!accepting || !execution.accepting() || freeOperation != null || compaction != null) {
                 return false;
             }
             Objects.requireNonNull(context, "context");
@@ -310,7 +345,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                            SegmentDataPhysicalDriver.RecoveryRequest response)
             throws IOException {
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || freeOperation != null) {
+            if (!accepting || !execution.accepting() || freeOperation != null || compaction != null) {
                 return false;
             }
             Objects.requireNonNull(request, "request");
@@ -332,6 +367,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
+                    && compaction == null
                     && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
                             .submit(context, entryId, request);
         }
@@ -356,10 +392,16 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     private boolean maintainIndex(IndexCheckpointRequest request, SegmentFileIo publicationIo, boolean cleanup) {
+        return maintainIndex(request, publicationIo, cleanup, null);
+    }
+
+    private boolean maintainIndex(IndexCheckpointRequest request, SegmentFileIo publicationIo, boolean cleanup,
+                                  CompactionOperation admitted) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(publicationIo, "publicationIo");
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null) {
+            if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null
+                    || compaction != admitted) {
                 return false;
             }
             IndexCheckpoint checkpoint = new IndexCheckpoint(request, publicationIo, cleanup);
@@ -378,7 +420,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(operationId, "operationId");
         Objects.requireNonNull(request, "request");
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || freeOperation != null || indexCheckpoint != null) {
+            if (!accepting || !execution.accepting() || freeOperation != null || indexCheckpoint != null
+                    || compaction != null) {
                 return false;
             }
             FreeOperation operation = new FreeOperation(operationId, allocationId, request);
@@ -393,6 +436,300 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             freeOperation = null;
             return false;
+        }
+    }
+
+    /** One explicit, bounded same-stream victim group; the actual frozen live set must have positive net gain. */
+    boolean compactAllocations(UUID operationId, List<Long> allocationIds, CompactionRequest request)
+            throws IOException {
+        return compactAllocations(operationId, allocationIds, request, new SegmentFileIo());
+    }
+
+    boolean compactAllocations(UUID operationId, List<Long> allocationIds, CompactionRequest request,
+                               SegmentFileIo publicationIo) throws IOException {
+        Objects.requireNonNull(operationId, "operationId");
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(publicationIo, "publicationIo");
+        allocationIds = List.copyOf(allocationIds);
+        if (operationId.equals(new UUID(0, 0)) || allocationIds.isEmpty() || allocationIds.size() > 16
+                || allocationIds.stream().distinct().count() != allocationIds.size()) {
+            throw new IllegalArgumentException("Compaction needs 1..16 unique same-stream allocations");
+        }
+        synchronized (gate) {
+            if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null
+                    || compaction != null || config.maxPendingEntries() < 2) {
+                return false;
+            }
+            arena.requireUnusedOperation(operationId);
+            arena.requireUnusedOperation(phaseId(operationId, "ALLOC"));
+            List<SegmentArenaControlLog.Allocation> victims = new ArrayList<>();
+            for (long allocationId : allocationIds) {
+                SegmentArenaControlLog.Allocation victim = arena.currentAllocation(allocationId);
+                if (!victims.isEmpty() && (victim.ownerShard() != victims.get(0).ownerShard()
+                        || !victim.ownerGeneration().equals(victims.get(0).ownerGeneration()))) {
+                    throw new IllegalArgumentException("Compaction victims must belong to one fixed DATA stream");
+                }
+                victims.add(victim);
+            }
+            CompactionOperation operation = new CompactionOperation(operationId, victims, request, publicationIo);
+            compaction = operation;
+            if (!maintainIndex(new IndexCheckpointRequest(operation::prepared), new SegmentFileIo(), true,
+                    operation)) {
+                compaction = null;
+                return false;
+            }
+            return true;
+        }
+    }
+
+    private static UUID phaseId(UUID operationId, String phase) {
+        return UUID.nameUUIDFromBytes((operationId + "/" + phase).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private final class CompactionOperation implements SegmentOwnerLoop.Command {
+        private final UUID operationId;
+        private final List<SegmentArenaControlLog.Allocation> victims;
+        private final CompactionRequest request;
+        private final SegmentFileIo publicationIo;
+        private final int shard;
+        private SegmentOwnerLoop.Ticket ticket;
+        private SegmentBufferPool.Lease buffer;
+        private SegmentDataRecovery.CompactionPlan plan;
+        private SegmentArenaControlLog.Allocation destination;
+        private SegmentArenaMove move;
+        private List<SegmentArenaControlLog.Free> frees;
+        private boolean moveSubmitted;
+        private boolean freesSubmitted;
+        private boolean finishing;
+        private int movedEntries;
+        private int freedAllocations;
+        private long freedBytes;
+        private long destinationBytes;
+
+        private CompactionOperation(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
+                                    CompactionRequest request, SegmentFileIo publicationIo) {
+            this.operationId = operationId;
+            this.victims = List.copyOf(victims);
+            this.request = request;
+            this.publicationIo = publicationIo;
+            shard = victims.get(0).ownerShard();
+        }
+
+        private void prepared(IndexCheckpointResult result, Throwable failure) {
+            if (failure != null || result.status() != IndexCheckpointStatus.PERSISTED) {
+                finish(failure == null ? CompactionStatus.TRANSIENT_UNAVAILABLE : CompactionStatus.UNKNOWN, failure);
+            } else if (!execution.owner(shard).submit(shard, this)) {
+                finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+            }
+        }
+
+        @Override
+        public void run(SegmentOwnerLoop.Ticket admitted) {
+            ticket = admitted;
+            if (!acquireBuffer()) {
+                finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                return;
+            }
+            execution.io().submitContinuing(ticket, () -> {
+                try (SegmentBookieControlLog.ReclamationLease lease = bookie.protectReclamation(config, identity);
+                        IsolatedSegmentFiles.ReclamationGuard guard = files.protectReclamation(arena,
+                                victims.get(0).file(), lease)) {
+                    plan = guard.inspectCompaction(victims, bookie, execution.inputs(), buffer.bytes());
+                }
+            }, this::captured);
+        }
+
+        private boolean acquireBuffer() {
+            buffer = execution.owner(shard).pool().acquire(execution.owner(shard).pool().bufferBytes());
+            return buffer != null;
+        }
+
+        private void releaseBuffer() {
+            if (buffer != null) {
+                buffer.close();
+                buffer = null;
+            }
+        }
+
+        private void captured(Throwable failure) {
+            releaseBuffer();
+            if (failure != null) {
+                finish(CompactionStatus.TRANSIENT_UNAVAILABLE, failure);
+            } else if (!plan.hasNetGain()) {
+                finish(CompactionStatus.NO_NET_GAIN, null);
+            } else if (plan.entries().isEmpty()) {
+                prepareFrees();
+            } else {
+                try {
+                    SegmentArenaControlLog.Allocation selected = arena.planPools(List.of(
+                            new SegmentArenaControlLog.PoolRequest(shard, victims.get(0).ownerGeneration(),
+                                    victims.get(0).streamFirstSequence(), plan.destinationBlocks())))
+                            .get(0).orElse(null);
+                    if (selected == null) {
+                        finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                        return;
+                    }
+                    destination = new SegmentArenaControlLog.Allocation(selected.type(),
+                            phaseId(operationId, "ALLOC"),
+                            selected.operationGeneration(), selected.expectedGeneration(), selected.file(),
+                            selected.ownerShard(), selected.ownerGeneration(), selected.allocationId(),
+                            selected.offset(), selected.blocks(), selected.streamFirstSequence());
+                    if (!allocator.submit(List.of(destination), (results, cause) ->
+                            ticket.resume(() -> allocated(results, cause)))) {
+                        finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                    }
+                } catch (IOException failureToAllocate) {
+                    finish(CompactionStatus.TRANSIENT_UNAVAILABLE, failureToAllocate);
+                }
+            }
+        }
+
+        private void allocated(List<SegmentArenaControlLog.Result> results, Throwable failure) {
+            if (failure != null) {
+                finish(CompactionStatus.UNKNOWN, failure);
+                return;
+            }
+            if (!applied(results.get(0))) {
+                finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                return;
+            }
+            destinationBytes = destination.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+            try {
+                SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encodePooled(config,
+                        drivers[shard].relocationAddress(destination), plan.entries().stream().map(entry ->
+                                SegmentBatchFormat.relocation(entry.source().location().context(),
+                                        entry.input().bytes(),
+                                        operationId, new Generation(1))).toList(), execution.owner(shard).pool());
+                plan.close();
+                if (batch == null) {
+                    finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                } else if (!drivers[shard].submitRelocation(batch, (copy, cause) ->
+                        ticket.resume(() -> copied(copy, cause)))) {
+                    finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                }
+            } catch (IOException failureToCopy) {
+                finish(CompactionStatus.UNKNOWN, failureToCopy);
+            }
+        }
+
+        private void copied(SegmentDataPhysicalDriver.DurableRelocation copy, Throwable failure) {
+            if (failure != null) {
+                finish(CompactionStatus.UNKNOWN, failure);
+                return;
+            }
+            if (!acquireBuffer()) {
+                finish(CompactionStatus.PARTIAL, null);
+                return;
+            }
+            execution.io().submitContinuing(ticket, () -> move = SegmentArenaMove.prepare(arena, files, bookie,
+                    copy, plan.entries().stream().map(SegmentDataRecovery.CompactionEntry::source).toList(),
+                    buffer.bytes()), cause -> {
+                        releaseBuffer();
+                        if (cause != null) {
+                            finish(CompactionStatus.PARTIAL, cause);
+                        } else {
+                            moveSubmitted = allocator.submitMove(move, (results, error) ->
+                                    ticket.resume(() -> moved(results, error)));
+                            if (!moveSubmitted) {
+                                move.close();
+                                finish(CompactionStatus.PARTIAL, null);
+                            }
+                        }
+                    });
+        }
+
+        private void moved(List<SegmentArenaControlLog.Result> results, Throwable failure) {
+            if (failure != null || !applied(results.get(0))) {
+                finish(failure == null ? CompactionStatus.PARTIAL : CompactionStatus.UNKNOWN, failure);
+                return;
+            }
+            movedEntries = plan.entries().size();
+            if (!maintainIndex(new IndexCheckpointRequest((result, cause) -> ticket.resume(() -> {
+                if (cause != null || result.status() != IndexCheckpointStatus.PERSISTED) {
+                    finish(cause == null ? CompactionStatus.PARTIAL : CompactionStatus.UNKNOWN, cause);
+                } else {
+                    prepareFrees();
+                }
+            })), publicationIo, false, this)) {
+                finish(CompactionStatus.PARTIAL, null);
+            }
+        }
+
+        private void prepareFrees() {
+            if (!acquireBuffer()) {
+                finish(CompactionStatus.PARTIAL, null);
+                return;
+            }
+            execution.io().submitContinuing(ticket, () -> frees = arena.prepareFrees(victims.stream().map(victim ->
+                    new SegmentArenaControlLog.FreeTarget(phaseId(operationId, "FREE/" + victim.allocationId()),
+                            victim.allocationId())).toList(), files, bookie, buffer.bytes()), failure -> {
+                        releaseBuffer();
+                        if (failure != null) {
+                            finish(CompactionStatus.PARTIAL, failure);
+                        } else {
+                            freesSubmitted = allocator.submitFrees(frees, (results, cause) -> ticket.resume(() -> {
+                                if (cause == null) {
+                                    for (int i = 0; i < results.size(); i++) {
+                                        if (applied(results.get(i))) {
+                                            freedAllocations++;
+                                            freedBytes += victims.get(i).blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+                                        }
+                                    }
+                                }
+                                finish(cause != null ? CompactionStatus.UNKNOWN
+                                        : freedAllocations == victims.size() ? CompactionStatus.RECLAIMED
+                                                : CompactionStatus.PARTIAL, cause);
+                            }));
+                            if (!freesSubmitted) {
+                                for (SegmentArenaControlLog.Free free : frees) {
+                                    free.close();
+                                }
+                                finish(CompactionStatus.PARTIAL, null);
+                            }
+                        }
+                    });
+        }
+
+        private boolean applied(SegmentArenaControlLog.Result result) {
+            return result.status() == SegmentArenaControlLog.Status.APPLIED_DURABLE
+                    || result.status() == SegmentArenaControlLog.Status.ALREADY_DURABLE;
+        }
+
+        private synchronized void finish(CompactionStatus status, Throwable failure) {
+            if (finishing) {
+                return;
+            }
+            finishing = true;
+            if (ticket == null) {
+                deliver(status, failure);
+            } else {
+                ticket.complete(() -> deliver(status, failure));
+            }
+        }
+
+        private void deliver(CompactionStatus status, Throwable failure) {
+            releaseBuffer();
+            if (plan != null) {
+                plan.close();
+            }
+            synchronized (gate) {
+                compaction = null;
+            }
+            request.complete(new CompactionResult(status, movedEntries, freedAllocations, freedBytes,
+                    destinationBytes, destinationBytes == 0 ? -1 : destination.allocationId()), failure);
+        }
+
+        @Override
+        public void failed(Throwable cause) {
+            if (move != null && !moveSubmitted) {
+                move.close();
+            }
+            if (frees != null && !freesSubmitted) {
+                for (SegmentArenaControlLog.Free free : frees) {
+                    free.close();
+                }
+            }
+            deliver(CompactionStatus.UNKNOWN, cause);
         }
     }
 

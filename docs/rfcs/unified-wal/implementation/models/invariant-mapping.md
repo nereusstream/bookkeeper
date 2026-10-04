@@ -206,3 +206,16 @@ Native MOVE coverage 回执 `unified-wal-model-75i1oty1` 的新增性质：
 | CoveredReadyValidatesCurrentBytes | seed内当前可读MOVE target仍实际点读并检查operation/generation/CRC/SHA，坏或缺失副本拒绝恢复 |
 
 COPY/MOVE durability、grant与权限为输入假设；有限PASS不等于实际flush、字节验证、完整资源或掉电证明。
+
+
+## 有界合批 compaction
+
+| 性质 | 当前实现及边界 |
+| --- | --- |
+| `SelectionHasAllocationNetGain` | 实际source容量减COPY含framing/padding且向上取整的destination容量；单块零收益不分配 |
+| `MovedTargetHasDurableCopy` | 新applied grant、既有COPY实际force/prefix结果后才提交条件MOVE |
+| `FreedSourcesHaveDurableSuccessor` | MOVE及native覆盖之后，整组重新验证whole-allocation当前后继再durable/apply FREE |
+| `AppliedFreeUsesOwnCut` | 起始applied cut加前序成员数，最终apply仍等于自身sequence-1 |
+| `PendingMembersKeepProtection` | 同一guard覆盖所有实际claimed成员；取消仅撤销回复，重复finish不提前解锁 |
+
+此投影未展开全T、真实字节/资源、native失败恢复、crash/reuse或进展；这些由Java和既有有限切片分别验证。

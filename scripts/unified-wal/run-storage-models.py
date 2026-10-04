@@ -19,6 +19,11 @@ import time
 
 
 MATRIX = {
+    "c-compaction-group": None,
+    "ce-compaction-allocation-cost": "SelectionHasAllocationNetGain",
+    "ce-compaction-early-free": "FreedSourcesHaveDurableSuccessor",
+    "ce-compaction-shared-cut": "AppliedFreeUsesOwnCut",
+    "ce-compaction-cancel": "PendingMembersKeepProtection",
     "c-move-index": None,
     "ce-move-index-old-put": "CapturedOwnersHadNoOldPut",
     "ce-move-index-cancel": "MaintenanceKeepsProtection",
@@ -111,7 +116,8 @@ def main():
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
                   "SegmentControlRotation.java", "SegmentDataFileLock.java", "SegmentDerivedIndex.java",
                   "SegmentDataRecovery.java", "SegmentOwnerLoop.java", "SegmentIoExecutor.java", "SegmentPointRead.java",
-                  "SegmentArenaControlDriver.java", "SegmentArenaMove.java", "SegmentDuplicateCheck.java"])
+                  "SegmentArenaControlDriver.java", "SegmentArenaMove.java", "SegmentDuplicateCheck.java",
+                  "SegmentEntryInputs.java", "SegmentBufferPool.java"])
     design_paths = ["docs/rfcs/unified-wal/RFC-0003-segment-storage-allocator.md",
                     "docs/rfcs/unified-wal/RFC-0005-segment-bookie-state.md",
                     "docs/rfcs/unified-wal/spikes/SPIKE-C-no-object-tla.md"]
@@ -126,7 +132,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -139,7 +145,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "NativeMoveCoverage.tla" if "move-index" in name else (
+                   "-metadir", str(states), "CompactionGroup.tla" if "compaction" in name else (
+                       "NativeMoveCoverage.tla" if "move-index" in name else (
                        "MoveFreeReuse.tla" if "movefree" in name else (
                        "ConditionalMove.tla" if "move" in name else (
                        "RelocationCompletion.tla" if "relocation" in name else (
@@ -153,7 +160,7 @@ def main():
                        "DerivedCoverage.tla" if "derived" in name else (
                        "ArenaRotation.tla" if "arena-rotation" in name else (
                        "BookieCheckpoint.tla" if "bookie-checkpoint" in name or "bookie-rotation" in name else (
-                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla"))))))))))))))]
+                       "ArenaCheckpoint.tla" if "checkpoint" in name else "SegmentAllocator.tla")))))))))))))))]
         wrapper = ["/usr/bin/time", "-l" if platform.system() == "Darwin" else "-v"]
         output = run / "checker-output" / (name + ".log")
         start = time.monotonic()

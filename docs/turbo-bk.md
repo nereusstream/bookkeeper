@@ -488,3 +488,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-04 当前后续：[Native MOVE索引维护与覆盖恢复](rfcs/unified-wal/implementation/local-storage/README.md#native-move-索引维护与覆盖恢复)已接通现有checkpoint的原owner旧Put排空/暂停、保护下实际target验证与native更新、flush及A/B coverage；覆盖恢复仍验证当前必要副本，陈旧hint及坏/缺失target不能回退旧权限。取消/短关闭、维护校验失败及发布失败重发已由真实路径验证；七类271通过、5平台跳过，有限矩阵18正向/44指定反例。storage图的合批victim compaction/净回收循环、逐allocation在线cutover、长期控制/SST空间、多Arena、OPEN错误恢复及掉电/生产ACK仍待完成；完整16步与Gate不提升。
+
+
+2026-10-04 当前增量：[同Arena有界合批compaction](rfcs/unified-wal/implementation/local-storage/README.md#同-arena-有界合批-compaction)已组合显式1..16个同stream source的实际扫描、allocation粒度净收益判断、独立destination、一批COPY/条件MOVE、原owner native覆盖维护及一次CONTROL barrier的合批整块FREE。各v2 FREE绑定自身前序cut，共享保护到全部claimed成员终结；取消/发布失败不提前释放或伪造净回收，后续新operation可完成保留source的回收。真实共享块、零净收益拒绝、两块减一块的净容量、全T无destination、复用恢复及失败/取消重启由当前回归验证。仍为全图暂停/一个COPY/显式组，自动选组、逐allocation在线cut、长期control/SST/文件系统净预算、多Arena、OPEN错误恢复、掉电和生产ACK未完成，步骤9/10和完整Gate不提升。

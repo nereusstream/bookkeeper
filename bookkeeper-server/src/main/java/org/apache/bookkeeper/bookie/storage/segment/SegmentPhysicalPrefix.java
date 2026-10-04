@@ -140,6 +140,17 @@ final class SegmentPhysicalPrefix {
         return new SegmentArenaControlLog.PoolRequest(shard, streamGeneration, firstSequence, blocks);
     }
 
+    SegmentBatchFormat.Address relocationAddress(SegmentArenaControlLog.Allocation allocation) throws IOException {
+        owner.requireOwner();
+        if (failed || !pending.isEmpty() || nextSequence == Long.MAX_VALUE || allocation.ownerShard() != shard
+                || !allocation.ownerGeneration().equals(streamGeneration)
+                || allocation.streamFirstSequence() != firstSequence) {
+            throw new IOException("Relocation destination differs from the drained original DATA stream");
+        }
+        return new SegmentBatchFormat.Address(allocation.file(), shard, allocation.allocationId(),
+                new Generation(allocation.generation()), streamGeneration, nextSequence, allocation.offset());
+    }
+
     boolean poolMissing(IsolatedSegmentFiles files, SegmentArenaControlLog authority, int bytes) throws IOException {
         owner.requireOwner();
         return pending.size() < capacity

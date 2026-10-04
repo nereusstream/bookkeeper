@@ -364,6 +364,10 @@ final class SegmentDataPhysicalDriver {
         return submitPhysical(batch, new Obligation(completion, List.of()));
     }
 
+    SegmentBatchFormat.Address relocationAddress(SegmentArenaControlLog.Allocation allocation) throws IOException {
+        return prefix.relocationAddress(allocation);
+    }
+
     /** Consume a copy-only frozen batch through the same DATA I/O, prefix and original-owner obligation. */
     boolean submitRelocation(SegmentBatchFormat.FrozenBatch batch, RelocationCompletion completion)
             throws IOException {

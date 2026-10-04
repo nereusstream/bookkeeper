@@ -231,3 +231,16 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | Crash/CorruptTarget/Recover | 首项真实正常关闭、覆盖恢复与坏CRC/零化target；模型crash不代表新执行了JVM halt或掉电 |
 
 实际读取量包含覆盖 target 的点读；多worker/runtime票据协调仍由Java回归负责，不从这一个坐标投影推出完整MOVE/FREE组合或进展。
+
+
+## 有界合批 compaction
+
+| 动作 | 当前真实路径与测试 |
+| --- | --- |
+| `Select/Allocate/WriteCopy/ForceCopy/ForceMove/ApplyMove/PublishNative` | `graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource`：真实单块拒绝、双块合批、OPEN ledger、准确T、覆盖及generation2复用恢复 |
+| `PrepareFree/ForceFree/ApplyFree/FinishMember` | 同一graph回归验证两个v2 cut逐条递增；`protectedFreeBatchSharesOneBarrierAndWaitsForEveryClaimedMember`验证一次真实force、重复finish及保护到末成员 |
+| `NativeFailure` | `graphCompactionPublicationFailureKeepsMovedDataAndSourcesForLaterFree`：MOVE后真实页force失败不释放source，新operation无COPY地继续回收 |
+| `Cancel` | `cancelledGraphCompactionHoldsResourcesUntilPublicationAndCanReclaimAfterRestart`：1/4 worker，实际发布暂停、短close锁保留、重启读当前copy及继续FREE |
+| 投影外输入 | `graphCompactionTerminalGroupNeedsNoCopyAllocation`验证全T无需destination；`preparedResolvedMoveRetryReleasesItsUnclaimedProtection`验证同一guard的零claim已解析MOVE重试 |
+
+没有在本轮新执行掉电或JVM halt；健康restart/实际storage字节回归与有限模型动作分别说明证据。

@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。Model A Bookie已执行权限快照切片及Model C管理会话/前缀/barrier/错误隔离/Arena checkpoint发布/双根rotation及Bookie回收权限切片及派生索引覆盖及索引维护预留及运行期覆盖及尾部恢复/分配顺序/整allocation FREE及健康CLOSED复用及终态索引清理及 relocation 内部完成与条件 MOVE 和MOVE/FREE/reuse投影的十七个正向配置已完成有限状态探索，四十个负向配置均得到指定性质的反例；不是完整 Model C、A+C 或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖和合批compaction投影共19个完整正向配置、48个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -365,3 +365,31 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 | ce-move-index-missing-bytes | CoveredReadyValidatesCurrentBytes | 117/78 | 18 | 10/— | 0.840 | 111460352 |
 
 负向配置分别去掉旧 Put 排空、在取消时释放 gate、信任陈旧 native 行、跳过当前 target 验证，均产生指定 invariant 反例。模型不展开真实字节、RocksDB/JNI 原子性、256行批次、多个原 worker 的 ticket/lease 协调、实际 I/O/force/目录窗口、native 部分失败、FREE/reuse 的完整组合、全资源总账、真实进程退出或掉电；旧 Put 防止普通 append 替换的 Java 检查仍保留，反例只验证捕获 cut 的排空前提。真实维护/覆盖回归见[本地状态](../local-storage/README.md#native-move-索引维护与覆盖恢复)，完整A/C/D与组合、Block G、步骤8/9和生产Gate不提升。先前各回执不重绑。
+
+
+### 有界合批 compaction 投影
+
+`CompactionGroup.tla`投影一个或两个4单位source、每块1单位live payload和一块4单位destination；因此单块无净收益，双块有严格正净收益。COPY write/force、MOVE force/apply、native发布、FREE proof/control force、两个成员顺序apply与各自finish独立建模。v2 proof cut分别为7/8；取消只撤回复，所有实际claimed成员终结前保留共享保护。
+
+| 配置 | 检查 |
+| --- | --- |
+| `c-compaction-group` | 正确allocation净成本、durable后继、native前序、每成员cut与共享保护 |
+| `ce-compaction-allocation-cost` | 忽略向上取整destination成本，违反`SelectionHasAllocationNetGain` |
+| `ce-compaction-early-free` | MOVE前释放source，违反`FreedSourcesHaveDurableSuccessor` |
+| `ce-compaction-shared-cut` | 全部FREE使用同一cut，违反`AppliedFreeUsesOwnCut` |
+| `ce-compaction-cancel` | 取消即释放gate，违反`PendingMembersKeepProtection` |
+
+有限正向投影不包含全T组、multi-batch、crash/recovery、跨stream/多Arena、并发源选择、自动orphan清理或资源调度/进展。真实source冻结/输入预算、framing/CRC/SHA、native flush、完整whole-allocation successor proof作为已验证输入；其他既有切片和Java回归分别拥有这些语义，不将35个distinct状态投影称为完整组合证明。
+
+
+2026-10-04最终回执 `unified-wal-model-inrar5jz` 绑定父提交 `97e25c317e044d04c7c0cf6c6eb9bf2a8aa92f17`、107个实际输入（18个TLA module、67个cfg、runner、21个Java）及202个checksum；原tool/平台/worker/heap/fp/seed/120秒参数不变。全部67配置为19完整正向PASS和48指定性质反例，既有模型状态计数保持不变。初次新module的混合逻辑表达式缺少括号导致解析INCONCLUSIVE，修正后完整探索；未通过run不计为模型结果，格式修正后的最终源码重新绑定。
+
+| 配置 | 结果 | generated / distinct | 剩余queue | 深度 / 完整图直径 | elapsed秒 | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `c-compaction-group` | PASS | 50 / 35 | 0 | 16 / 16 | 0.788089 | 109,559,808 |
+| `ce-compaction-allocation-cost` | EXPECTED_COUNTEREXAMPLE | 2 / 2 | 0 | 2 / — | 0.830970 | 102,596,608 |
+| `ce-compaction-early-free` | EXPECTED_COUNTEREXAMPLE | 14 / 12 | 2 | 6 / — | 0.736586 | 107,675,648 |
+| `ce-compaction-shared-cut` | EXPECTED_COUNTEREXAMPLE | 37 / 27 | 1 | 12 / — | 0.809815 | 111,460,352 |
+| `ce-compaction-cancel` | EXPECTED_COUNTEREXAMPLE | 30 / 23 | 4 | 10 / — | 0.752421 | 108,871,680 |
+
+四个trace分别在选择单source、COPY后提前FREE、第二FREE apply和claimed组取消时出现指定性质错误；都是候选规则反例，不是Java源码变异或生产开关。对应真实Java七类282项，277通过、5平台跳过；完整模型/Block G/生产authority未提升。
