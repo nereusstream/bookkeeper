@@ -19,6 +19,9 @@ import time
 
 
 MATRIX = {
+    "c-compaction-tail": None,
+    "ce-compaction-tail-boundary": "TailWritesUseUnusedRange",
+    "ce-compaction-tail-retained": "RetainedCurrentCopyNeverFreed",
     "c-compaction-capture": None,
     "ce-compaction-capture-cancel": "CaptureAndCopyKeepOwnedBuffers",
     "ce-compaction-capture-measurement": "CopyMatchesMeasurement",
@@ -142,7 +145,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -157,6 +160,7 @@ def main():
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
                    "-metadir", str(states), "CompactionSweep.tla" if "compaction-sweep" in name
                    else "CompactionSelection.tla" if "compaction-selection" in name
+                   else "RetainedCompactionTail.tla" if "compaction-tail" in name
                    else "PooledCompactionCapture.tla" if "compaction-capture" in name
                    else "CompactionGroup.tla" if "compaction" in name else (
                        "NativeMoveCoverage.tla" if "move-index" in name else (

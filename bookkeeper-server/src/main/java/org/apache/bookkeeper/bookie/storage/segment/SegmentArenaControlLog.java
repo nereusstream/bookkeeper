@@ -736,6 +736,25 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     record CompactionWindow(List<Allocation> allocations, long lastOrder) { }
 
+    /** The retained tail must be the last current grant of this fixed physical stream. */
+    synchronized Optional<Allocation> latestAllocationForShard(int shard) throws IOException {
+        requireQuiescentControl(config, identity);
+        restartStreamForShard(shard);
+        Allocation latest = null;
+        long order = -1;
+        for (Allocation allocation : allocationIds.values()) {
+            if (allocation.ownerShard() == shard && !retiredAllocations.containsKey(allocation.allocationId())
+                    && dataFileAvailable(allocation.file())) {
+                long candidate = appliedOperations.get(allocation.operationId()).sequence();
+                if (candidate > order) {
+                    latest = allocation;
+                    order = candidate;
+                }
+            }
+        }
+        return Optional.ofNullable(latest);
+    }
+
     /** Fixed file and bounded control-order interval; this scan cut never authorizes MOVE or FREE. */
     synchronized CompactionWindow compactionCandidates(int shard, long afterOrder, long throughOrder)
             throws IOException {

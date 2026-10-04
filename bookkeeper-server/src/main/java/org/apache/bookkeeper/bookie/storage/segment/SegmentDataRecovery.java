@@ -49,19 +49,29 @@ final class SegmentDataRecovery {
     }
     private record CompactionKey(ProfileLedgerContext context, long entryId) { }
 
+    record CompactionTail(SegmentArenaControlLog.Allocation allocation, long offset) { }
+    private record CompactionEnd(long offset, long through) { }
+
     static final class CompactionPlan {
         private final List<SegmentArenaControlLog.Allocation> victims;
         private final List<CompactionBatch> batches;
         private final long sourceBytes;
         private final long batchBytes;
         private final long bookieCut;
+        private final CompactionTail tail;
 
         private CompactionPlan(List<SegmentArenaControlLog.Allocation> victims, List<CompactionBatch> batches,
                                long sourceBytes, long bookieCut) {
+            this(victims, batches, sourceBytes, bookieCut, null);
+        }
+
+        private CompactionPlan(List<SegmentArenaControlLog.Allocation> victims, List<CompactionBatch> batches,
+                               long sourceBytes, long bookieCut, CompactionTail tail) {
             this.victims = List.copyOf(victims);
             this.batches = List.copyOf(batches);
             this.sourceBytes = sourceBytes;
             this.bookieCut = bookieCut;
+            this.tail = tail;
             batchBytes = batches.stream().mapToLong(CompactionBatch::bytes).sum();
         }
 
@@ -79,7 +89,11 @@ final class SegmentDataRecovery {
         }
 
         boolean hasNetGain() {
-            return sourceBytes > destinationBlocks() * SegmentArenaControlLog.BLOCK_BYTES;
+            return sourceBytes > (tail == null ? destinationBlocks() * SegmentArenaControlLog.BLOCK_BYTES : 0);
+        }
+
+        CompactionTail tail() {
+            return tail;
         }
     }
 
@@ -230,8 +244,45 @@ final class SegmentDataRecovery {
         return frozen;
     }
 
+    /** Fresh protected measurement; the retained destination is never a member of the source FREE group. */
+    static CompactionPlan inspectCompactionTail(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentArenaControlLog arena, FileChannel data, List<SegmentArenaControlLog.Allocation> victims,
+            List<Long> ends, SegmentArenaControlLog.Allocation destination, long destinationEnd,
+            long nextSequence, SegmentBookieControlLog bookie, int maximumEntries, ByteBuffer workspace,
+            IsolatedSegmentFiles files, IsolatedSegmentFiles.ReclamationGuard protection) throws IOException {
+        protection.requireHeld(files, arena);
+        long arenaCut = arena.appliedThrough();
+        long bookieCut = bookie.recoveryReadCut(config, identity);
+        if (victims.isEmpty() || victims.contains(destination)
+                || !destination.equals(arena.latestAllocationForShard(destination.ownerShard()).orElse(null))) {
+            throw new IOException("Retained compaction destination is not the latest separate stream grant");
+        }
+        boolean[] hasCurrentCopy = {false};
+        CompactionEnd tail = scanCompactionAllocation(config, arena, data, destination, destinationEnd,
+                bookie, workspace, (source, record) -> {
+                    hasCurrentCopy[0] |= record.origin() == SegmentBatchFormat.RELOCATION_COPY;
+                });
+        if (!hasCurrentCopy[0]) {
+            return null;
+        }
+        if (tail.through() >= 0 && tail.through() != nextSequence - 1) {
+            throw new IOException("Retained compaction tail does not end at the drained physical prefix");
+        }
+        CompactionPlan sources = inspectCompaction(config, identity, arena, data, victims, ends, bookie,
+                maximumEntries, workspace, files, protection, false);
+        if (arena.appliedThrough() != arenaCut || bookie.recoveryReadCut(config, identity) != bookieCut) {
+            throw new IOException("Compaction authority changed during retained tail measurement");
+        }
+        if (sources.batchBytes > destination.offset() + destination.blocks() * SegmentArenaControlLog.BLOCK_BYTES
+                - tail.offset()) {
+            return null;
+        }
+        return new CompactionPlan(sources.victims, sources.batches, sources.sourceBytes, sources.bookieCut,
+                new CompactionTail(destination, tail.offset()));
+    }
+
     /** Record bytes borrow the original owner's workspace only during the synchronous visitor call. */
-    private static void scanCompactionAllocation(IsolatedSegmentConfig config, SegmentArenaControlLog arena,
+    private static CompactionEnd scanCompactionAllocation(IsolatedSegmentConfig config, SegmentArenaControlLog arena,
                                                 FileChannel data, SegmentArenaControlLog.Allocation victim,
                                                 long usedEnd, SegmentBookieControlLog bookie, ByteBuffer workspace,
                                                 CompactionVisitor visitor) throws IOException {
@@ -240,6 +291,7 @@ final class SegmentDataRecovery {
         }
         long end = victim.offset() + victim.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
         long through = -1;
+        long writtenEnd = victim.offset();
         if (usedEnd < victim.offset() || usedEnd > end || usedEnd % config.alignment() != 0) {
             throw new IOException("Compaction victim has an invalid current DATA boundary");
         }
@@ -289,7 +341,9 @@ final class SegmentDataRecovery {
                 visitor.accept(source, record);
             }
             offset += length;
+            writtenEnd = offset;
         }
+        return new CompactionEnd(writtenEnd, through);
     }
 
     /** Called only with the live writer's reclamation gate held; no index absence or caller-supplied liveness. */

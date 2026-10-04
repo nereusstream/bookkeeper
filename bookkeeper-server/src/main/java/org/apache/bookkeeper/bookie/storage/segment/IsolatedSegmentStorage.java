@@ -555,6 +555,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private int freedAllocations;
         private long freedBytes;
         private long destinationBytes;
+        private long destinationAllocation = -1;
         private int batchIndex;
         private long destinationOffset;
 
@@ -621,7 +622,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                                     victims.get(0).streamFirstSequence(), plan.destinationBlocks())))
                             .get(0).orElse(null);
                     if (selected == null) {
-                        finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                        resumeRetainedTail();
                         return;
                     }
                     destination = new SegmentArenaControlLog.Allocation(selected.type(),
@@ -639,6 +640,44 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
         }
 
+        private void resumeRetainedTail() throws IOException {
+            SegmentArenaControlLog.Allocation retained = arena.latestAllocationForShard(shard).orElse(null);
+            if (retained == null || !selectVictims && victims.contains(retained)) {
+                finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                return;
+            }
+            List<SegmentArenaControlLog.Allocation> sources = victims.stream()
+                    .filter(victim -> !victim.equals(retained)).toList();
+            if (sources.isEmpty() || !acquireBuffer()) {
+                finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
+                return;
+            }
+            long nextSequence = drivers[shard].relocationAddress(retained, retained.offset()).sequence();
+            execution.io().submitContinuing(ticket, () -> {
+                try (SegmentBookieControlLog.ReclamationLease lease = bookie.protectReclamation(config, identity);
+                        IsolatedSegmentFiles.ReclamationGuard guard = files.protectReclamation(arena,
+                                retained.file(), lease)) {
+                    plan = guard.inspectCompactionTail(sources, retained, nextSequence, bookie,
+                            limits.indexedEntries(), buffer.bytes());
+                }
+            }, failure -> {
+                releaseBuffer();
+                if (failure != null || plan == null) {
+                    finish(CompactionStatus.TRANSIENT_UNAVAILABLE, failure);
+                } else {
+                    victims = plan.victims();
+                    if (plan.batches().isEmpty()) {
+                        prepareFrees();
+                    } else {
+                        destination = plan.tail().allocation();
+                        destinationAllocation = destination.allocationId();
+                        destinationOffset = plan.tail().offset();
+                        copyNextBatch();
+                    }
+                }
+            });
+        }
+
         private void allocated(List<SegmentArenaControlLog.Result> results, Throwable failure) {
             if (failure != null) {
                 finish(CompactionStatus.UNKNOWN, failure);
@@ -649,6 +688,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return;
             }
             destinationBytes = destination.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
+            destinationAllocation = destination.allocationId();
             destinationOffset = destination.offset();
             copyNextBatch();
         }
@@ -820,7 +860,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 compaction = null;
             }
             request.complete(new CompactionResult(status, movedEntries, freedAllocations, freedBytes,
-                    destinationBytes, destinationBytes == 0 ? -1 : destination.allocationId()), failure);
+                    destinationBytes, destinationAllocation), failure);
         }
 
         @Override

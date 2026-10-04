@@ -665,3 +665,22 @@ Java最终回执 `unified-wal-local-Isqf1iu7` 绑定父提交 `c7832d4c0695bb27b
 [池化捕获有限投影](../models/README.md#池化-compaction-捕获投影)回执 `unified-wal-model-uzyhx2mp` 绑定同一父提交、121个输入及232个checksum；完整矩阵22正向PASS、55指定反例。它检验元数据行上限、两个原池buffer、实际capture/COPY I/O与owner终结、取消及测量复核；不证明真实hash/CRC、fsync、完整heap/disk预算或调度liveness。
 
 当前source原batch仍须适配原owner扫描buffer，组/坐标数与单连续destination有上限，保留全graph暂停；跨窗口最优选择、partial任务自动收敛、长期control/SST/文件系统净预算、多Arena、OPEN错误恢复、真实掉电/性能及生产Gate未完成。步骤9/10和完整16步目标保持未完成。
+
+
+## 满容量部分 MOVE 的保留 tail 续写
+
+2026-10-04，修复可复现的局部容量阻塞：40条live从两个1 MiB source分批搬迁，第一批19条COPY/MOVE已成功，但Bookie cut变化使后续捕获PARTIAL；A/B/目的地C占满文件，健康关闭并重启后，旧路径只申请新的destination，持续返回TRANSIENT_UNAVAILABLE。新operation仍先真实测量并优先dead、按整allocation判断净收益、尝试新grant；仅原计划有净收益但新grant无空间时，尝试保留同shard/stream的最新current grant并续写其已验证空闲tail。
+
+保留grant须包含至少一条当前选中的RELOCATION_COPY，原source扫描须确认真实CRC/身份、grant/generation/selector、Bookie权限及稳定cut；不凭索引行或operation任务状态决定。自动shard选择将该grant排除出本次source/FREE组，显式source请求只可使用组外grant，不暗中减少其指定victim。latest grant由原成功ALLOC order确定；有内容时，其最后实际DATA sequence必须等于原owner已排空physical prefix的前序。完整aligned COPY总量必须全部适配剩余tail，不能只试首批、覆盖已有bytes或要求目的地内当前副本被搬走。
+
+原Bookie/file guard中完成新source计划和目的地全范围检查后，只为该最新grant建立当前AppendCursor；已有cursor不能越过它或与实际written end不一致。健康恢复默认仍跳过旧授权tail；本显式受保护路径是复用最新current COPY tail的限定例外，不回到更旧grant，不启用未知OPEN/force-error会话。初始generation范围读取全部真实DATA/零页；复用generation只读取已由健康CLOSED witness说明的当前used end，旧generation残留不取得权限。续写后的allocationEnds仍由正常实际DATA预留推进，下一次CLOSED witness包括新末端。
+
+COPY复用原owner双buffer与DATA driver，在tail后追加连续sequence；前批已有MOVE保持，剩余条目另用新operation/phase COPY与条件MOVE。全部新批完成后，仍经native/flush/A/B coverage与每个source独立whole-allocation后继proof才合批FREE。结果的destinationBytes只计新占allocation容量，因此复用为0，destinationAllocation仍报告实际保留grant；未成功ALLOC的候选ID不报成实际占用。净回收只等于实际FREE容量减新占容量，保留目的地从不加入FREE。
+
+两项新增真实回归：在1/4 worker下，第一批MOVE后实际控制cut变化、PARTIAL、关闭并重启，确认无法取得第四个grant；新shard请求只做剩余21条/两COPY，FREE两源、净恢复2 MiB，全部40条READ/幂等仍在同一目的地。覆盖目的地generation1及generation2，后一场景unused tail留有前generation合法DATA；完成后旧source低地址gen2普通写入及再次重启均验证。另一项填满目的地至只余4096 bytes而剩余COPY需8192，全部拒绝、不COPY/MOVE/FREE；在重启后破坏目的地已有非current终态record，也在新COPY前拒绝，恢复字节后原当前数据仍可读/重发。
+
+红反例 `unified-wal-local-qY5I0thc` 记录旧实现期待RECLAIMED却实际TRANSIENT_UNAVAILABLE，生产输入绑定父提交 `6d05ff02399be4218ae776bd9d851e2253be521b`，不计为PASS。收窄候选前曾让旧dead窗口回归走另一回收路径，已限定为存在current COPY的grant并保留原回归；相关5项最终定向通过。最终Java回执 `unified-wal-local-ZWXV1mKG` 冻结同一父提交与207个实际源码/测试/向量输入，七类294项、289通过、5项Linux亲和性在macOS跳过、0失败/错误；Spotless/Checkstyle通过。最后核对结果语义后，以最终输入重新扩大验证，历史receipt不重绑。
+
+[保留tail有限投影](../models/README.md#保留-compaction-tail-投影) `unified-wal-model-63bfz3qg` 绑定125个输入/241个checksum；完整矩阵23正向PASS/57指定反例。最新grant/当前COPY/实际prefix与字节证明为输入假设，模型仅检验容量范围、目的地排除FREE及全部新COPY/MOVE/native/FREE阶段。不代替真实字节、I/O、guard、掉电或完整资源验证。
+
+没有新增wire/持久任务格式、buffer池、调度/重试线程或每entry fsync。新operation由控制/DATA事实重新选组，不恢复旧任务UUID。缺少合格latest COPY tail、tail不足或当前文件quarantine仍拒绝；任意partial任务自动收敛、维护调度、跨窗口最优组合、长期control/SST/文件系统净预算、多Arena、OPEN错误恢复、实际掉电/性能和生产Gate未完成，步骤9/10及完整16步目标保持未完成。

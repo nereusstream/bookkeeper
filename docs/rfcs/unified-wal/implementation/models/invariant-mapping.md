@@ -258,3 +258,14 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | `FreeHasAllDurableMoves` | 先全部COPY/MOVE再native覆盖和最终真实whole proof；模型仅计数，不以计数替代实现证明 |
 
 正向选择模型不再消耗整组payload输入；错误capture-all反例保持。source原batch适配scratch、真实byte/hash、完整资源和持久化语义由Java/既有切片验证，未提升完整模型或生产Gate。
+
+
+## 保留 compaction tail
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| `TailWritesUseUnusedRange` | guard下扫描当前generation实际末端，校验最新grant/原owner已排空prefix，完整aligned COPY总需求须适配剩余tail；gen2按CLOSED used-end排除旧残留，已有cursor不得越过或与末端矛盾 |
+| `RetainedCurrentCopyNeverFreed` | 自动组排除保留grant，显式请求只使用组外目的地；共享source proof/CONTROL FREE始终只退役原source，最新目的地中已MOVE副本保持当前 |
+| `FreeHasCompleteCurrentSuccessor` | 全部新COPY barrier/MOVE/native覆盖和真实whole proof后FREE；有限model以计数/证明输入表示，不能自证actual DATA/CRC/权限 |
+
+健康恢复默认仍跳过旧tail；只显式开启已验证最新current COPY tail，不回到更早grant。无合格tail或不足时继续拒绝；不宣称一般partial、OPEN错误、调度、长期容量或全资源闭合。

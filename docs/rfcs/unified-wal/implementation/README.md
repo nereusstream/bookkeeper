@@ -259,7 +259,7 @@ DATA durable → hot locator → local result
 
 **完成条件：** 部分ledger删除不提前释放共享块；copy durable而MOVE未成功不成为当前数据；A→B→C且A/B已复用、没有新增checkpoint时仍能恢复C，C损坏或必要控制后缀缺失仍隔离；并发MOVE/FREE不产生两个winner，旧I/O不覆盖新owner。FREE以整allocation generation可回收为条件，不以单ledger删除原因代替。
 
-当前[固定shard有界选择](local-storage/README.md#固定-shard-的有界回收选择)先测量真实DATA，零current live组先于快照和destination分配处理；保留独立整allocation证明。该入口每次查看最多16个同文件grant；当前[有界轮转](local-storage/README.md#有界回收窗口轮转与有限容量循环)固定本轮控制上限并推进进程内游标，新grant留至下轮，随后回访旧候选。partial任务收敛、维护调度或长期净容量验收未完成。
+当前[固定shard有界选择](local-storage/README.md#固定-shard-的有界回收选择)先测量真实DATA，零current live组先于快照和destination分配处理；保留独立整allocation证明。该入口每次查看最多16个同文件grant；当前[有界轮转](local-storage/README.md#有界回收窗口轮转与有限容量循环)固定本轮控制上限并推进进程内游标，新grant留至下轮，随后回访旧候选。后续已接通健康重启后的最新current COPY tail续写；一般partial任务收敛、维护调度或长期净容量验收未完成。
 
 #### 10. 完成空间耗尽、长期负载与多Arena验证
 
@@ -446,3 +446,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-04 当前池化增量：[池化分批捕获](local-storage/README.md#池化分批-compaction-捕获)复用原owner两个buffer逐批点读/复制，不持整组payload；有限计划以既有坐标上限约束，并在每批重新复核source hash、selector、Bookie cut与测量长度。所有COPY/MOVE、native覆盖及真实整块proof后仍才FREE；池不足或后批身份变化返回PARTIAL并保留实际占用。真实40条/三批超过源输入预算、单buffer拒绝及有效CRC源变化/实际控制变化、恢复验证通过。七类287通过/5平台跳过、22正向/55指定反例保持局部范围；原source batch扫描buffer、全graph暂停和单连续destination限制保留，长期完整净容量、多Arena、OPEN错误恢复、掉电/性能及生产Gate未完成。
+
+
+2026-10-04 当前部分搬迁增量：[满容量保留tail续写](local-storage/README.md#满容量部分-move-的保留-tail-续写)在新grant无空间时，验证含current COPY的最新同stream grant并保留为目的地，剩余COPY总量须适配其实际空闲tail；只为受保护证明建立最新tail cursor，不回更旧grant，目的地排除FREE。真实PARTIAL后健康重启、1/4 worker、gen1/gen2旧残留tail、21条/两批续写、两源净FREE2 MiB与普通source复用/重启、tail不足及坏字节0COPY已验证。复用新增destination容量为0仍报告实际ID。七类289通过/5平台跳过及23正向/57指定反例保持局部范围；任意partial自动收敛、调度、长期完整容量、多Arena、OPEN错误恢复、掉电/性能及生产Gate仍未完成。

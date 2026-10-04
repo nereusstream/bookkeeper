@@ -165,6 +165,45 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                     plan, batchIndex, builder, workspace);
         }
 
+        SegmentDataRecovery.CompactionPlan inspectCompactionTail(List<SegmentArenaControlLog.Allocation> victims,
+                SegmentArenaControlLog.Allocation destination, long nextSequence, SegmentBookieControlLog bookie,
+                int maximumEntries, ByteBuffer workspace) throws IOException {
+            requireHeld(owner, authority);
+            if (destination.file() != file || victims.stream().anyMatch(victim -> victim.file() != file
+                    || victim.ownerShard() != destination.ownerShard()
+                    || !victim.ownerGeneration().equals(destination.ownerGeneration()))) {
+                throw new IOException("Retained compaction tail belongs to another DATA stream");
+            }
+            List<Long> ends = new ArrayList<>();
+            for (SegmentArenaControlLog.Allocation victim : victims) {
+                ends.add(owner.allocationEnd(victim, authority));
+            }
+            SegmentDataRecovery.CompactionPlan plan = SegmentDataRecovery.inspectCompactionTail(owner.config,
+                    owner.identity, authority, owner.data.get(file), victims, ends, destination,
+                    owner.allocationEnd(destination, authority), nextSequence, bookie, maximumEntries,
+                    workspace, owner, this);
+            if (plan != null && !plan.batches().isEmpty()) {
+                synchronized (owner) {
+                    SegmentDataRecovery.CompactionTail tail = plan.tail();
+                    SegmentBatchFormat.Address address = new SegmentBatchFormat.Address(file, destination.ownerShard(),
+                            destination.allocationId(), new Generation(destination.generation()),
+                            destination.ownerGeneration(), nextSequence, tail.offset());
+                    long order = authority.appliedAllocationOrder(address);
+                    Stream stream = new Stream(address.shard(), address.streamGeneration().value());
+                    AppendCursor cursor = owner.streamOffsets.get(stream);
+                    if (owner.sessionAuthority != authority || !owner.sessionReady || order < 0
+                            || cursor != null && (cursor.allocationOrder() > order
+                                    || cursor.allocationOrder() == order && cursor.offset() != tail.offset())) {
+                        throw new IOException("Retained compaction tail differs from the current managed writer");
+                    }
+                    // Only this protected latest-grant proof may reopen a healthy restored tail.
+                    owner.streamOffsets.put(stream, new AppendCursor(order, tail.offset()));
+                    owner.allocationEnds.merge(destination.allocationId(), tail.offset(), Math::max);
+                }
+            }
+            return plan;
+        }
+
         @Override
         public void close() {
             boolean release;

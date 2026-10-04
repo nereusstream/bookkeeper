@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影共22个完整正向配置、55个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影及保留tail投影共23个完整正向配置、57个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,9 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `c-compaction-tail` | 两source与一个current COPY grant已占满，最新有效tail证明后复用剩余范围；保留目的地不FREE |
+| `ce-compaction-tail-boundary` | 故意忽略全批COPY空间，须违反 `TailWritesUseUnusedRange` |
+| `ce-compaction-tail-retained` | 故意将保留目的地加入FREE，须违反 `RetainedCurrentCopyNeverFreed` |
 | `c-compaction-capture` | 2批COPY、2..4行计划/上限3、1..2原池buffer；capture及COPY I/O/owner终结与测量身份检查 |
 | `ce-compaction-capture-cancel` | 故意取消即归还buffer，须违反 `CaptureAndCopyKeepOwnedBuffers` |
 | `ce-compaction-capture-measurement` | 故意忽略测量身份变化，须违反 `CopyMatchesMeasurement` |
@@ -470,3 +473,18 @@ copy实际持久/前缀、源/目标framing/CRC/hash与grant/Bookie权限是输�
 最终回执 `unified-wal-model-uzyhx2mp` 绑定父提交 `cd2b4e4facb7fca36eb1a9bda19eec80fd0240b5`、121个输入和232个checksum；22完整正向PASS/55指定反例。新增共同writer `SegmentBatchFormat.java` 的输入绑定，原父提交合同哈希与历史回执保持。先验证模型后修正两处Java长行，因此最终run按最终源码重新冻结；中间run不重绑。本轮[真实路径](../local-storage/README.md#池化分批-compaction-捕获)独立验证hash/cut变化、池不足、三批与恢复。
 
 本模型的valid只代表guard下真实身份复核结果，不计算SHA/CRC或模型化文件字节；坐标计数不证明完整heap预算，有限进程切片不证明调度、long-run、掉电、完整A/C/D组合、Block G或生产authority。
+
+
+## 保留 compaction tail 投影
+
+`RetainedCompactionTail.tla`投影两个source及一个保留current COPY grant占满文件：目的地容量4单位、当前used end为2、剩余新COPY需求1..3单位，最新grant与current COPY两个布尔事实代表Java受保护证明。需求不适配全部剩余范围即拒绝；接受后只在oldEnd之后追加COPY，实际barrier→MOVE逐批成功，再native/whole proof→FREE，只退役两个source。中途停止保留旧目的地和全部source，无新增allocation容量。
+
+| 配置 | 结果 | generated / distinct / queue | searchDepth / diameter | elapsed秒 | peak RSS bytes |
+| --- | --- | --- | --- | --- | --- |
+| `c-compaction-tail` | 完整PASS | 42 / 42 / 0 | 11 / 11 | 0.799228 | 105627648 |
+| `ce-compaction-tail-boundary` | 指定 `TailWritesUseUnusedRange` 反例 | 49 / 49 / 1 | 9 / 不适用 | 0.845209 | 108068864 |
+| `ce-compaction-tail-retained` | 指定 `RetainedCurrentCopyNeverFreed` 反例 | 38 / 38 / 1 | 8 / 不适用 | 0.771254 | 105398272 |
+
+最终回执 `unified-wal-model-63bfz3qg` 绑定父提交 `6d05ff02399be4218ae776bd9d851e2253be521b`、125个输入及241个checksum，23个完整正向PASS/57个指定反例。最后修正结果中的实际目的地ID计数后，按最终Java输入重新冻结模型run；历史回执与父提交合同哈希不重绑。[真实回归](../local-storage/README.md#满容量部分-move-的保留-tail-续写)独立覆盖1/4 worker、gen2残留tail、健康重启、源复用、全批容量不足及坏字节拒绝。
+
+本模型的latest/currentCopy是已验证的输入，不枚举原始record、SHA/CRC、selector/Bookie cut或实际CLOSED witness；有限计数/阶段不证明完整预算、I/O、调度liveness、一般OPEN错误恢复、long-run、多Arena、完整A/C/D组合或生产authority。`AllocationOrder`原投影继续验证进入后继grant后不回旧grant；新显式最新tail证明并不授权更旧allocation重入。

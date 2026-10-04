@@ -292,3 +292,15 @@ Native MOVE coverage 增量回执 `unified-wal-model-75i1oty1` 的动作映射�
 | Free | 全批MOVE后既有native/whole-allocation proof与共享CONTROL barrier；group模型及真实source复用回归继续独立验证，计划和moved计数不授予FREE |
 
 新有限模型只投影资源阶段与测量检查结果，不能把valid布尔值或有限行数当成实际字节/完整内存/掉电证据。
+
+
+## 保留 compaction tail
+
+| 动作 | 实际实现与风险验证 |
+| --- | --- |
+| Measure | 新grant无空间后，`latestAllocationForShard`取得同stream最新grant；guard `inspectCompactionTail`实际完整CRC/selector/permission/prefix/tail及全批空间检查，只接受含current COPY且不属于显式source组的目的地 |
+| Copy/ForceCopy/Move | `resumeRetainedTail`在原owner、原双buffer/driver中续写；`shardCompactionResumesPartialMoveAtFullCapacityAfterHealthyRestart`：实际PARTIAL→健康CLOSE/restart，1/4 worker、gen1/gen2残留tail、21条/两COPY、全部旧数据/幂等及source gen2新普通写/再重启 |
+| 拒绝与StopBeforeNextCopy输入 | `retainedCompactionTailRejectsInsufficientRangeAndCorruptExistingBytes`：只剩一批但需要两批时0COPY/0FREE；破坏已有终态record后0COPY，恢复原字节仍可读/重发；已有cut变化/force unknown/取消回归继续覆盖各自资源路径 |
+| Native/ForceFree/Free | 原native/coverage和完整source proof，保留目的地排除FREE；实际source净FREE2 MiB、destinationBytes=0但ID为实际保留grant；未apply ALLOC不报告实际ID |
+
+模型只接受Java已证明的latest/currentCopy为输入；阶段计数不代替真实whole proof或持久化。
