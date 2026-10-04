@@ -5838,17 +5838,34 @@ public class SegmentBookieControlLogTest {
         return field.get(storage);
     }
 
-    private static IsolatedSegmentStorage.ControlRotationResult rotateStorage(IsolatedSegmentStorage storage)
+    private SegmentBatchFormat.Address storageWriteAfterControlRotation(IsolatedSegmentStorage storage, long entryId)
             throws Exception {
-        CompletableFuture<IsolatedSegmentStorage.ControlRotationResult> reply = new CompletableFuture<>();
-        assertTrue(storage.rotateControls(new IsolatedSegmentStorage.ControlRotationRequest((result, cause) -> {
-            if (cause == null) {
-                reply.complete(result);
-            } else {
-                reply.completeExceptionally(cause);
+        CompletableFuture<SegmentDataPhysicalDriver.NormalResult> reply = new CompletableFuture<>();
+        ByteBuf bytes = entry(context(), entryId);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        try {
+            boolean accepted = false;
+            while (!accepted && System.nanoTime() < deadline) {
+                accepted = storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            if (cause == null) {
+                                reply.complete(result);
+                            } else {
+                                reply.completeExceptionally(cause);
+                            }
+                        }));
+                if (!accepted) {
+                    assertEquals(1, bytes.refCnt());
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
             }
-        })));
-        return reply.get(5, TimeUnit.SECONDS);
+            assertTrue("Control capacity must recover without an explicit rotation", accepted);
+            SegmentDataPhysicalDriver.NormalResult result = reply.get(5, TimeUnit.SECONDS);
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+            return result.candidate().address();
+        } finally {
+            bytes.release();
+        }
     }
 
     private void exhaustGraphControlLogs(IsolatedSegmentStorage storage, long allocationId) throws Exception {
@@ -5897,7 +5914,7 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
-    public void runtimeControlRotationReclaimsFullLogsPreservesOpenSessionAndOriginalAppendCursor() throws Exception {
+    public void automaticControlRotationReclaimsFullLogsPreservesOpenSessionAndOriginalAppendCursor() throws Exception {
         for (int workers : new int[] {1, 4}) {
             IsolatedSegmentConfig config = coverageRecoveryConfig("runtime-rotation-" + workers);
             SegmentBatchFormat.Address first;
@@ -5909,26 +5926,30 @@ public class SegmentBookieControlLogTest {
                 SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
                 long epoch = arena.dataSessionEpoch();
                 for (int cycle = 0; cycle < 2; cycle++) {
-                    exhaustGraphControlLogs(storage, first.allocation());
-                    ByteBuf refused = entry(context(), cycle + 2);
-                    try {
-                        assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), refused,
-                                new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
-                                    throw new AssertionError("Capacity refusal must not produce a result");
-                                })));
-                        assertEquals(1, refused.refCnt());
-                    } finally {
-                        refused.release();
+                    try (IsolatedSegmentFiles.DataReadLease pin =
+                                 ((IsolatedSegmentFiles) storageField(storage, "files")).pinDataRead()) {
+                        exhaustGraphControlLogs(storage, first.allocation());
+                        ByteBuf refused = entry(context(), cycle + 2);
+                        try {
+                            assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), refused,
+                                    new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                                        throw new AssertionError("Capacity refusal must not produce a result");
+                                    })));
+                            assertEquals(1, refused.refCnt());
+                        } finally {
+                            refused.release();
+                        }
+                        ownerBarrier(storageOwner(storage, 0));
+                        for (SegmentControlFormat.Owner owner : SegmentControlFormat.Owner.values()) {
+                            assertFalse(Files.exists(SegmentControlRotation.path(config, owner, cycle + 2)));
+                        }
                     }
-                    ownerBarrier(storageOwner(storage, 0));
-                    IsolatedSegmentStorage.ControlRotationResult rotated = rotateStorage(storage);
-                    assertEquals(IsolatedSegmentStorage.ControlRotationStatus.ROTATED, rotated.status());
-                    assertEquals(cycle + 2, rotated.bookieRoot().generation());
-                    assertEquals(cycle + 2, rotated.arenaRoot().generation());
+                    SegmentBatchFormat.Address next = storageWriteAfterControlRotation(storage, cycle + 2);
+                    for (SegmentControlFormat.Owner owner : SegmentControlFormat.Owner.values()) {
+                        assertTrue(Files.exists(SegmentControlRotation.path(config, owner, cycle + 2)));
+                    }
                     assertTrue(arena.hasUnclosedDataSession());
                     assertEquals(epoch, arena.dataSessionEpoch());
-                    SegmentBatchFormat.Address next = storageWrite(storage, context(), cycle + 2)
-                            .candidate().address();
                     assertEquals(first.allocation(), next.allocation());
                     assertEquals(first.generation(), next.generation());
                     assertEquals(cycle + 2, next.sequence());
@@ -5958,6 +5979,121 @@ public class SegmentBookieControlLogTest {
                     }
                 }
                 assertEquals(4, storageWrite(storage, context(), 4).candidate().address().sequence());
+            }
+        }
+    }
+
+    @Test
+    public void arenaQuarantineCapacityRefusalWakesAutomaticRotationWithoutControlFailure() throws Exception {
+        for (int workers : new int[] {1, 4}) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("automatic-quarantine-capacity-" + workers);
+            try (IsolatedSegmentStorage storage = rotatingStorage(config, workers)) {
+                storage.startNew();
+                installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+                SegmentBatchFormat.Address first = storageWrite(storage, context(), 1).candidate().address();
+                SegmentOwnerLoop owner = storageOwner(storage, 0);
+                ownerBarrier(owner);
+                SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+                SegmentArenaControlDriver allocator = (SegmentArenaControlDriver) storageField(storage, "allocator");
+                SegmentArenaControlLog.Allocation allocation = arena.currentAllocation(first.allocation());
+                // Leave CLOSE (160) and the two rotation commits (416), but less than one new
+                // quarantine notification (160) in addition. Every submitted control still fits.
+                Path journal = config.directory().resolve("arena-control");
+                for (int i = 0; i < 200 && 32768 - Files.size(journal) >= 736; i++) {
+                    CompletableFuture<Throwable> reply = new CompletableFuture<>();
+                    assertTrue(allocator.submit(List.of(allocation), (results, cause) -> {
+                        if (cause == null) {
+                            assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE, results.get(0).status());
+                        }
+                        reply.complete(cause);
+                    }));
+                    assertNull(reply.get(5, TimeUnit.SECONDS));
+                    ownerBarrier(owner);
+                }
+                long remaining = 32768 - Files.size(journal);
+                assertTrue("Actual reserved-space boundary: " + remaining, remaining >= 576 && remaining < 736);
+                for (SegmentControlFormat.Owner controlOwner : SegmentControlFormat.Owner.values()) {
+                    assertFalse(Files.exists(SegmentControlRotation.path(config, controlOwner, 2)));
+                }
+                ByteBuf bytes = entry(context(), 2);
+                try {
+                    assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                            new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                                throw new AssertionError("Quarantine reserve refusal must retain caller ownership");
+                            })));
+                    assertEquals(1, bytes.refCnt());
+                } finally {
+                    bytes.release();
+                }
+                SegmentBatchFormat.Address next = storageWriteAfterControlRotation(storage, 2);
+                assertEquals(first.allocation(), next.allocation());
+                assertEquals(2, next.sequence());
+                assertEquals(8192, next.offset());
+                for (SegmentControlFormat.Owner controlOwner : SegmentControlFormat.Owner.values()) {
+                    assertTrue(Files.exists(SegmentControlRotation.path(config, controlOwner, 2)));
+                }
+                assertNull(storage.controlMaintenanceFailure());
+            }
+        }
+    }
+
+    @Test
+    public void oversizedControlBatchDoesNotTriggerUnproductiveAutomaticRotation() throws Exception {
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                temporary.getRoot().toPath().resolve("automatic-rotation-oversized"), 1, 4, 1,
+                4 * SegmentArenaControlLog.BLOCK_BYTES, 4096, 512, 320,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, 4)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            storageWrite(storage, context(), 1);
+            ownerBarrier(storageOwner(storage, 0));
+            CompletableFuture<Throwable> reply = new CompletableFuture<>();
+            assertTrue(storage.controls().submitBatch(java.util.Collections.nCopies(300, install(44, 1, (byte) 5)),
+                    (results, cause) -> reply.complete(cause)));
+            Throwable cause = reply.get(5, TimeUnit.SECONDS);
+            assertTrue(String.valueOf(cause), cause instanceof IOException);
+            assertTrue(cause.toString(), cause.getMessage().contains("control log capacity exhausted"));
+            ownerBarrier(storageOwner(storage, 0));
+            assertEquals(2, storageWrite(storage, context(), 2).candidate().address().sequence());
+            ownerBarrier(storageOwner(storage, 0));
+            for (SegmentControlFormat.Owner owner : SegmentControlFormat.Owner.values()) {
+                assertFalse(Files.exists(SegmentControlRotation.path(config, owner, 2)));
+            }
+            assertNull(storage.controlMaintenanceFailure());
+        }
+    }
+
+    @Test
+    public void automaticControlRotationFailureIsObservableAndStopsGraphAdmission() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("automatic-rotation-failure");
+        try (IsolatedSegmentStorage storage = rotatingStorage(config, 1)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            SegmentBatchFormat.Address first = storageWrite(storage, context(), 1).candidate().address();
+            ownerBarrier(storageOwner(storage, 0));
+            // A real invalid candidate cannot acquire journal authority; no force-success mock is used.
+            Files.write(SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE, 2), new byte[4096]);
+            try (IsolatedSegmentFiles.DataReadLease pin =
+                         ((IsolatedSegmentFiles) storageField(storage, "files")).pinDataRead()) {
+                exhaustGraphControlLogs(storage, first.allocation());
+            }
+            storageOwner(storage, 0).wakeup();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (storage.controlMaintenanceFailure() == null && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertTrue(storage.controlMaintenanceFailure() instanceof IOException);
+            assertThrows(IllegalStateException.class, storage::controls);
+            ByteBuf bytes = entry(context(), 2);
+            try {
+                assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            throw new AssertionError("Failed automatic maintenance cannot admit DATA");
+                        })));
+                assertEquals(1, bytes.refCnt());
+            } finally {
+                bytes.release();
             }
         }
     }

@@ -425,6 +425,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final Map<Long, SegmentControlCheckpoint.Operation> checkpointLacs = new HashMap<>();
     private final HashSet<UUID> checkpointIds = new HashSet<>();
     private long nextOffset = FIRST_RECORD;
+    private boolean rotationRequested;
     private long durableThrough = -1;
     private long appliedThrough = -1;
     private long appliedOffset = FIRST_RECORD;
@@ -612,9 +613,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         long sequence = durableThrough + 1;
         ByteBuffer record = SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence,
                 command.operationId(), new Generation(command.scope.authorityGeneration()), 0, body(command));
-        if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
-            throw new IOException("Bookie control log capacity exhausted");
-        }
+        requireCapacity(record.remaining());
         RecoveryCloseWrite write = new RecoveryCloseWrite(command, record, sequence, nextOffset);
         nextOffset += record.remaining();
         pendingRecoveryCloseWrite = write;
@@ -710,9 +709,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 bytes = Math.addExact(bytes, record.remaining());
                 records.add(record);
             }
-            if (bytes > maxLogBytes - nextOffset - rotationReserveBytes()) {
-                throw new IOException("Bookie control log capacity exhausted");
-            }
+            requireCapacity(bytes);
             start = nextOffset;
             nextOffset += bytes;
             for (Command command : commands) {
@@ -869,9 +866,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             record = SegmentControlFormat.encode(SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT,
                     LOG_GENERATION, sequence, operationId, new Generation(reference.generation()),
                     reference.generation() - 1, reference.encode());
-            if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
-                throw new IOException("Bookie control log capacity exhausted");
-            }
+            requireCapacity(record.remaining());
             offset = nextOffset;
             nextOffset += record.remaining();
             writing = true;
@@ -972,6 +967,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 rotationRoot = root;
                 physicalGeneration = new Generation(root.generation());
                 nextOffset = SegmentControlRotation.FIRST_RECORD;
+                rotationRequested = false;
                 appliedOffset = nextOffset;
             }
             if (previous != originalChannel) {
@@ -1022,6 +1018,26 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private boolean knownRotation(SegmentControlRotation.Root root) throws IOException {
         return root.firstId().equals(checkpointId(root.first())) && root.secondId().equals(checkpointId(root.second()));
+    }
+
+    private void requireCapacity(long bytes) throws IOException {
+        long reserve = rotationReserveBytes();
+        if (bytes > maxLogBytes - nextOffset - reserve) {
+            rotationRequested |= reserve != 0
+                    && bytes <= maxLogBytes - SegmentControlRotation.FIRST_RECORD - reserve;
+            throw new IOException("Bookie control log capacity exhausted");
+        }
+    }
+
+    synchronized boolean rotationRequired() {
+        return rotationRequested && !closed && !failed;
+    }
+
+    /** A precheck only; driver exclusion and actual admission protection are still required. */
+    synchronized boolean quiescentForRotation() {
+        return !closed && !failed && !writing && !checkpointing && pending == null && activeAdmissions == 0
+                && rotating == null && reclamation == null && pendingFenceWrite == null
+                && pendingLacWrite == null && pendingRecoveryCloseWrite == null;
     }
 
     private long rotationReserveBytes() {
@@ -1332,9 +1348,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 body.length)).put(context.encode()).putLong(request.lac()).putInt(body.length).put(body).flip();
         ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.EXPLICIT_LAC, LOG_GENERATION,
                 sequence, UUID.randomUUID(), new Generation(generation), 0, value);
-        if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
-            throw new IOException("Bookie control log capacity exhausted");
-        }
+        requireCapacity(record.remaining());
         LacWrite write = new LacWrite(context, request.lac(), body, record, sequence, nextOffset, generation);
         nextOffset += record.remaining();
         pendingLacWrite = write;
@@ -1455,9 +1469,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         long sequence = durableThrough + 1;
         ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.FENCE, LOG_GENERATION,
                 sequence, operationId, LOG_GENERATION, 0, ByteBuffer.wrap(context.encode()));
-        if (record.remaining() > maxLogBytes - nextOffset - rotationReserveBytes()) {
-            throw new IOException("Bookie control log capacity exhausted");
-        }
+        requireCapacity(record.remaining());
         FenceWrite write = new FenceWrite(context, operationId, record, sequence, nextOffset);
         nextOffset += record.remaining();
         pendingFenceWrite = write;

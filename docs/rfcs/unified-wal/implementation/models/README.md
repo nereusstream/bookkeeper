@@ -525,3 +525,18 @@ Source死亡/selector/generation、CLOSED witness、真实内存、I/O terminal�
 回执 `unified-wal-model-2b0qki3w` 绑定父提交 `f2984c57f65d833d99f95149bc87bf9404e29ed8`、138个输入和271个checksum；25正向配置完整PASS、65指定反例。源码输入新增 Bookie control driver 的实际维护排他路径，历史sourceCommit/designInputs/receipt不重绑。提前取消释放、I/O结束就释放guard、伪造CLOSED/cursor重置和 UNKNOWN 后重新开放四个候选分别被指定性质否证。[真实运行期回归](../local-storage/README.md#运行期控制日志轮转)独立验证容量满额/连续续写、真实pin、force暂停、取消、失败及健康重启。
 
 有限终态保持 CHECK_DEADLOCK FALSE，不证明liveness；真实buffer总账、quarantine通知队列、全部控制并发、自动容量调度、filesystem/SST临时空间、长期负载、多Arena、OPEN错误恢复和完整模型/生产Gate仍未闭合。
+
+## 控制容量恢复投影
+
+`ControlCapacityRecovery.tla` 展开一次容量拒绝、一个fresh-fit判据、0/1个旧entry与pin/control阻塞、一次新entry尝试和一份自动CONTROL I/O。pressure拒绝新entry，旧资源终结后既有owner pump才启动轮转；暂不可用时保留需求。物理终结后仍保留graph pause到原owner，失败则保留诊断并停止准入。新的journal与真实原owner协议继续由RuntimeControlRotation和既有双恢复根模型独立承担，本投影不合并这些字节事实为完整A+C。
+
+| 配置 | generated / distinct / queue | depth / diameter | 时间 / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-control-capacity-recovery | 172 / 62 / 0 | 6 / 6 | 0.786 s / 108,937,216 bytes | PASS |
+| ce-control-capacity-oversize | 17 / 17 / 15 | 2 / 不适用 | 0.736 s / 101,171,200 bytes | EXPECTED_COUNTEREXAMPLE: OversizeNeverStartsRotation |
+| ce-control-capacity-pause | 59 / 34 / 15 | 3 / 不适用 | 0.822 s / 108,068,864 bytes | EXPECTED_COUNTEREXAMPLE: PressureRefusesNewEntries |
+| ce-control-capacity-demand | 66 / 38 / 17 | 3 / 不适用 | 0.777 s / 106,037,248 bytes | EXPECTED_COUNTEREXAMPLE: BlockedDemandRemains |
+
+正向全部8个Next动作有非零coverage。回执 `unified-wal-model-tqstjlab` 绑定父提交 `59d1c4cfe0cb4e03ee95e594fa81310301fdbb3a`、143个输入和283个checksum；26完整正向PASS、68指定反例。超大请求触发轮转、pressure下继续接受新entry、资源暂不可用便忘记需求三个候选分别被指定性质否证。[真实容量恢复](../local-storage/README.md#控制容量压力的自动轮转)另证真实journal字节、pin解除、同步quarantine拒绝的唤醒、原pool续写及错误可见性。
+
+fresh-fit与实际terminal/轮转结果为输入假设，不能推出真实CRC/目录force、所有线程/通知队列或filesystem预算正确。有限终态保留CHECK_DEADLOCK FALSE，不证明一般liveness、低水位调度或持续负载；历史receipt和父提交designInputs哈希不重绑，完整A/C/D及组合、B17和生产Gate未完成。

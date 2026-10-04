@@ -321,8 +321,19 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | 动作 | 实际路径与风险验证 |
 | --- | --- |
 | Admit/Protect/Refuse/DataTerminal/Unpin | `rotateControls` 复用两个 driver 排他、Bookie admission lease 与文件保护；`runtimeControlRotationWaitsForDataReadPinsAndCancelledIoOwnerResolution` 实际文件pin下零rotation I/O，释放后可重试 |
-| BookieDone/ArenaTerminal | 两个已有 `rotate` 物理协议，Arena新入口要求准确writer保护；`runtimeControlRotationReclaimsFullLogsPreservesOpenSessionAndOriginalAppendCursor` 的1/4 worker满额后两轮原pool续写、OPEN epoch/游标/读/幂等/健康重启 |
+| BookieDone/ArenaTerminal | 两个已有 `rotate` 物理协议，Arena新入口要求准确writer保护；`automaticControlRotationReclaimsFullLogsPreservesOpenSessionAndOriginalAppendCursor` 的1/4 worker满额后两轮原pool续写、OPEN epoch/游标/读/幂等/健康重启 |
 | CancelWait/OwnerResolve | 原 CONTROL ticket 将实际I/O完成返回原owner，取消只撤回复；force暂停、缓存控制driver和DATA拒绝、短shutdown保持保护至实际排空 |
 | BookieUnknown/ArenaTerminal失败 | `runtimeControlRotationForceFailureStopsGraphAndReportsOnlyCompletedOwnerRoots` 分别注入真实force失败，UNKNOWN停止准入，Bookie已完成root不被误报为双owner成功，Arena OPEN仍拒绝恢复 |
 
 正向全部10个Next动作有非零coverage；既有物理发布、损坏与JVM退出测试仍独立保留。模型不自行证明字节、真实force、全部通知队列或长期进展。
+
+## 控制容量恢复
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| CapacityRefusal/EntryAttempt | Bookie `requireCapacity`、Arena append/quarantine预留标记fresh-fit压力；图新准入保持false与caller buffer所有权；`automaticControlRotationReclaimsFullLogsPreservesOpenSessionAndOriginalAppendCursor` 的旧生产红/新生产绿、1/4 worker两轮原pool续写及健康restart |
+| DataTerminal/Unpin/ControlTerminal/Pump | 每原owner `attachControlMaintenance`，只在实际entry/I/O/pin排空时用既有CONTROL ticket；`arenaQuarantineCapacityRefusalWakesAutomaticRotationWithoutControlFailure` 检验没有control错误回调时的同步DATA拒绝唤醒 |
+| IoTerminal/OwnerResolve | 既有受保护双owner协议与原ownerterminal；`automaticControlRotationFailureIsObservableAndStopsGraphAdmission` 用真实无效候选验证cause与停止准入，原force/取消/drain回归保留 |
+| fresh-fit拒绝分支 | `oversizedControlBatchDoesNotTriggerUnproductiveAutomaticRotation`：300项合法batch数量的真实字节超限、没有新journal、DATA继续成功；不是用非法batch数量替代容量验证 |
+
+模型只检查有限安全关系，不证明所有park/unpark或真实事件最终完成；这些真实回归仍保持局部、可复现的deadline与证据边界。

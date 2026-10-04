@@ -85,7 +85,7 @@ final class SegmentBookieControlDriver {
 
     private boolean submitDurableBatch(DurableAppend append, BatchCompletion completion) {
         Objects.requireNonNull(completion, "completion");
-        if (!busy.compareAndSet(false, true)) {
+        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
             return false;
         }
         boolean accepted;
@@ -134,7 +134,7 @@ final class SegmentBookieControlDriver {
     boolean submitFence(ProfileOperationCodec.FenceLedger request, FenceCompletion completion) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(completion, "completion");
-        if (!busy.compareAndSet(false, true)) {
+        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
             return false;
         }
         boolean accepted;
@@ -213,7 +213,7 @@ final class SegmentBookieControlDriver {
                                 RecoveryCloseCompletion completion) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(completion, "completion");
-        if (!busy.compareAndSet(false, true)) {
+        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
             return false;
         }
         boolean accepted;
@@ -291,7 +291,7 @@ final class SegmentBookieControlDriver {
     boolean submitExplicitLac(ProfileOperationCodec.WriteLac request, LacCompletion completion) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(completion, "completion");
-        if (!busy.compareAndSet(false, true)) {
+        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
             return false;
         }
         boolean accepted;

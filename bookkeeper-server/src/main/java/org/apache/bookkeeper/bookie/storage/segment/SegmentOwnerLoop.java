@@ -141,6 +141,7 @@ final class SegmentOwnerLoop {
     private SegmentBufferPool pool;
     private volatile SegmentEntryInputs inputs;
     private Runnable placementCheck;
+    private Runnable controlMaintenance;
 
     SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity) {
         this(logicalShards, workerCount, workerId, capacity, controlCapacity,
@@ -313,6 +314,15 @@ final class SegmentOwnerLoop {
         indexMaintenance[shard] = Objects.requireNonNull(action, "action");
     }
 
+    /** One resource-graph pump; it uses an existing CONTROL ticket and never replaces DATA deadlines. */
+    void attachControlMaintenance(Runnable action) {
+        requireOwner();
+        if (controlMaintenance != null) {
+            throw new IllegalStateException("Control maintenance already attached");
+        }
+        controlMaintenance = Objects.requireNonNull(action, "action");
+    }
+
     void stopAdmission() {
         synchronized (gate) {
             accepting = false;
@@ -459,6 +469,13 @@ final class SegmentOwnerLoop {
                     } catch (Throwable cause) {
                         recordFailure(cause);
                     }
+                }
+            }
+            if (controlMaintenance != null) {
+                try {
+                    controlMaintenance.run();
+                } catch (Throwable cause) {
+                    recordFailure(cause);
                 }
             }
             if (!work) {

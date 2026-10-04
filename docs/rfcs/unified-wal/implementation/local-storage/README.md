@@ -720,3 +720,17 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 ```
 
 [有限运行期轮转投影](../models/README.md#运行期控制日志轮转投影)独立检查响应取消、原 owner 终结、会话保留及 UNKNOWN 停止准入。当前是显式、有界、全图短暂停写的入口；没有自动容量触发/调度、一般 OPEN 错误恢复或共享 filesystem 的控制/checkpoint 临时工作集预算。持续 create/write/read/delete、SST 与多 Arena、实际掉电和正式性能仍待验证；不关闭 B17、步骤8/10或生产Gate，完整16步目标保持进行中。
+
+## 控制容量压力的自动轮转
+
+2026-10-04，Bookie/Arena 控制日志把可通过新日志恢复的普通容量拒绝记录为进程内 pressure。Bookie 的 batch/FENCE/explicit LAC/recovery close 和 Arena 普通控制写入、DATA quarantine 预留均保留原拒绝结果；只有请求连同现有保留量能放入新的 journal 才触发。超大 batch 或不支持双root预留的小日志不会引发无收益轮转，不新建持久预算或修改wire。
+
+每个既有 owner 循环挂接一份 graph 控制维护 pump，与已有 index pump 共用调度轮次，不替换 DATA batch deadline、增加线程或保存待重试业务请求。pressure 出现后，图暂停新普通/recovery/read/index/FREE/compaction 准入，已接受义务继续终结；缓存 Bookie driver 也在 pressure 时拒绝新提交。DATA quarantine 同步拒绝会唤醒原 control owner。pump 只在 Bookie entry/control 与实际 DATA I/O/reservation/pin 已排空时尝试既有轮转入口；driver或ticket尚未可用时保留pressure，下一实际owner事件再检查，不反复投递I/O。真实guard仍在CONTROL I/O中再次取得，预检查不代替保护。
+
+轮转继续保留两个driver排他及原OPEN/epoch/pool/append cursor，实际新journal完成后清除该owner的pressure，全图准入仍等到原owner终结。取消只撤回复的既有规则不变。自动尝试的UNKNOWN停止图准入，并通过 `controlMaintenanceFailure()` 保留真实cause，不伪造成功或吞掉维护失败。业务拒绝本身仍交给调用方处理，没有隐藏重放或新的请求重试层。
+
+真实红反例 `unified-wal-local-A3hwxUW0` 使用父提交 `59d1c4cfe0cb4e03ee95e594fa81310301fdbb3a` 的全部生产输入和新行为测试：满额后释放pin，五秒内仍不能恢复准入；只新增测试输入，不计PASS。修复后1/4 worker的两个控制日志满额、两轮自动轮转、同pool连续写入、读/幂等及健康restart通过。另验证只有Arena quarantine余量不足时同步DATA拒绝也会唤醒轮转；有效batch数量内的超大字节请求不会产生新journal；真实无效Bookie候选使自动维护失败，cause可见且停止准入。原显式rotation的pin/force暂停/取消/短shutdown及Bookie/Arena force失败回归保留。最初超大夹具先撞batch数量上限，现明确声明320项请求预算，日志仍为32768 bytes；quarantine与无reuse CLOSE的实际160-byte预算来自当前格式，最终夹具按该边界重新冻结。
+
+最终 Java 回执 `unified-wal-local-Bk6PII5c` 绑定上述父提交与207个实际输入；相关七类303项，298通过、5项Linux亲和性在macOS跳过、0失败/错误，Spotless/Checkstyle通过。复现命令沿用[上一增量](#运行期控制日志轮转)的七类runner与必要style检查。共享owner pump和控制容量语义受影响，因此在最小新行为通过后扩大至既有七类，不重绑历史receipt。
+
+[控制容量有限投影](../models/README.md#控制容量恢复投影)检查fresh-fit、pressure准入、阻塞时保留需求、真实终结后才提交I/O及原owner恢复。当前仍以实际容量拒绝为触发，没有提前低水位/hysteresis、完整control/checkpoint临时文件工作集预留或一般维护调度。 正常CLOSE后控制日志仍满时，restart在新OPEN之前的容量维护路径尚未接通/验证；本节健康重启证据只覆盖运行期轮转成功后的状态。SST/共享filesystem、多Arena、持续create/write/read/delete、全部partial任务收敛、OPEN错误恢复、掉电和正式性能仍未完成；不关闭B17、步骤8/10或生产Gate，完整16步目标保持进行中。

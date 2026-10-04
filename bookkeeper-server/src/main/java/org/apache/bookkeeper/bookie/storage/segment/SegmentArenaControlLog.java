@@ -383,6 +383,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private IsolatedSegmentFiles sessionOwner;
     private DataSession preparedClose;
     private long nextOffset = FIRST_RECORD;
+    private boolean rotationRequested;
     private long durableThrough = -1;
     private long appliedThrough = -1;
     private long appliedOffset = FIRST_RECORD;
@@ -503,6 +504,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 reserved += rotationReserveBytes();
             }
             if (bytes > maxLogBytes - nextOffset - reserved) {
+                rotationRequested |= rotating == null && rotationReserveBytes() != 0
+                        && bytes <= maxLogBytes - SegmentControlRotation.FIRST_RECORD - reserved;
                 throw new IOException("Arena control log capacity exhausted");
             }
             start = nextOffset;
@@ -1077,6 +1080,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 rotationRoot = root;
                 physicalGeneration = new Generation(root.generation());
                 nextOffset = SegmentControlRotation.FIRST_RECORD;
+                rotationRequested = false;
                 appliedOffset = nextOffset;
             }
             if (previous != originalChannel) {
@@ -1131,6 +1135,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 && second.status() == Status.APPLIED_DURABLE
                 && first.command().equals(new CheckpointCommit(root.firstId(), root.first()))
                 && second.command().equals(new CheckpointCommit(root.secondId(), root.second()));
+    }
+
+    synchronized boolean rotationRequired() {
+        return rotationRequested && !closed && !failed;
     }
 
     private long rotationReserveBytes() {
@@ -1258,6 +1266,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
         }
         if (reserved + rotationReserveBytes() > maxLogBytes - nextOffset) {
+            rotationRequested |= rotationReserveBytes() != 0
+                    && reserved + rotationReserveBytes() <= maxLogBytes - SegmentControlRotation.FIRST_RECORD;
             return false;
         }
         quarantineReserved[file] = true;

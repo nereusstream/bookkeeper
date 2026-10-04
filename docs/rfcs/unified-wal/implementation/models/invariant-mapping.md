@@ -292,3 +292,14 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | UnknownStopsGraph | 任一已尝试轮转失败报告UNKNOWN，停止新准入；Arena失败仍需已有OPEN恢复规则，不靠checkpoint宣称ready |
 
 物理双恢复根、CRC/identity/目录持久化是既有独立模型与真实回归的输入合同；本投影不关闭完整A+C、B17、liveness或生产Gate。
+
+## 控制容量恢复
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| OversizeNeverStartsRotation | 当前容量不足且请求连同保留量能适配新journal时才标记pressure；本身超大请求保持拒绝，不靠无限轮转制造容量 |
+| PressureRefusesNewEntries / BlockedDemandRemains | 新graph准入在pressure期间拒绝；driver/ticket/guard暂不可用不清除日志需求，旧义务仍终结，不存储业务重试队列 |
+| AutomaticIoHasTerminalResources | Bookie与files预检查避免反复投递无收益I/O，实际driver排他和guard仍二次取得；不自证真实pin或全部并发 |
+| PauseWaitsForOwner / FailureIsObservableAndStopped | 实际I/O终结不提前解冻图；UNKNOWN原owner保存cause、停止准入，不因日志failed使pressure谓词为false就伪造恢复 |
+
+资源总账、字节/force、全notify路径与长期liveness仍由相应真实验证/完整模型承担，本有限投影不关闭B17或生产Gate。

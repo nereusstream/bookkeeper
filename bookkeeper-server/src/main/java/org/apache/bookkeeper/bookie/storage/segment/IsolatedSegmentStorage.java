@@ -184,6 +184,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private FreeOperation freeOperation;
     private CompactionOperation compaction;
     private ControlRotation controlRotation;
+    private volatile Throwable controlMaintenanceFailure;
 
     /** Construct the resource owner before startup so a failed start still has an explicit cleanup handle. */
     IsolatedSegmentStorage(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
@@ -284,6 +285,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 writes[selected] = driver.enableNormalBatching(
                         bookie, limits.batches(), allocator, limits.poolBlocks());
                 reads[selected] = SegmentPointRead.Reader.live(owner, execution.io(), files, arena, bookie, hot);
+                if (selected < executionSettings.workers()) {
+                    owner.attachControlMaintenance(this::rotatePressuredControls);
+                }
                 return null;
             });
             if (!owner.control(task)) {
@@ -336,7 +340,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                          SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
         synchronized (gate) {
             if (!accepting || !execution.accepting() || freeOperation != null || compaction != null
-                    || controlRotation != null) {
+                    || controlRotation != null || controlCapacityPaused()) {
                 return false;
             }
             Objects.requireNonNull(context, "context");
@@ -364,7 +368,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
             try {
-                return writes[shard].submit(input, admission, request);
+                boolean accepted = writes[shard].submit(input, admission, request);
+                if (!accepted) {
+                    controlCapacityPaused();
+                }
+                return accepted;
             } catch (IOException | RuntimeException | Error failure) {
                 input.close();
                 admission.releaseUnclaimed();
@@ -378,7 +386,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             throws IOException {
         synchronized (gate) {
             if (!accepting || !execution.accepting() || freeOperation != null || compaction != null
-                    || controlRotation != null) {
+                    || controlRotation != null || controlCapacityPaused()) {
                 return false;
             }
             Objects.requireNonNull(request, "request");
@@ -388,8 +396,12 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return false;
             }
             try {
-                return writes[SegmentOwnerLoop.shardFor(admission.context().ledgerId(),
+                boolean accepted = writes[SegmentOwnerLoop.shardFor(admission.context().ledgerId(),
                         config.logicalShards())].submitRecovery(admission, response);
+                if (!accepted) {
+                    controlCapacityPaused();
+                }
+                return accepted;
             } catch (IOException | RuntimeException | Error failure) {
                 admission.releaseUnclaimed();
                 throw failure;
@@ -400,7 +412,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
-                    && compaction == null && controlRotation == null
+                    && compaction == null && controlRotation == null && !controlCapacityPaused()
                     && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
                             .submit(context, entryId, request);
         }
@@ -434,7 +446,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(publicationIo, "publicationIo");
         synchronized (gate) {
             if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null
-                    || compaction != admitted || controlRotation != null) {
+                    || compaction != admitted || controlRotation != null || controlCapacityPaused()) {
                 return false;
             }
             IndexCheckpoint checkpoint = new IndexCheckpoint(request, publicationIo, cleanup);
@@ -454,7 +466,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(request, "request");
         synchronized (gate) {
             if (!accepting || !execution.accepting() || freeOperation != null || indexCheckpoint != null
-                    || compaction != null || controlRotation != null) {
+                    || compaction != null || controlRotation != null || controlCapacityPaused()) {
                 return false;
             }
             FreeOperation operation = new FreeOperation(operationId, allocationId, request);
@@ -514,7 +526,35 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     private boolean canCompact() {
         return accepting && execution.accepting() && indexCheckpoint == null && freeOperation == null
-                && compaction == null && controlRotation == null && config.maxPendingEntries() >= 2;
+                && compaction == null && controlRotation == null && !controlCapacityPaused()
+                && config.maxPendingEntries() >= 2;
+    }
+
+    private boolean controlCapacityPaused() {
+        if (bookie.rotationRequired() || arena.rotationRequired()) {
+            execution.owner(0).wakeup();
+            return true;
+        }
+        return false;
+    }
+
+    private void rotatePressuredControls() {
+        synchronized (gate) {
+            if (!accepting || !execution.accepting() || controlRotation != null
+                    || (!bookie.rotationRequired() && !arena.rotationRequired())
+                    || !bookie.quiescentForRotation() || !files.quiescentForControlRotation(arena)) {
+                return;
+            }
+            rotateControls(new ControlRotationRequest((result, failure) -> {
+                if (result.status() == ControlRotationStatus.UNKNOWN) {
+                    controlMaintenanceFailure = failure;
+                }
+            }));
+        }
+    }
+
+    Throwable controlMaintenanceFailure() {
+        return controlMaintenanceFailure;
     }
 
     boolean rotateControls(ControlRotationRequest request) {

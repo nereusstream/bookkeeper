@@ -819,6 +819,12 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return reclamation;
     }
 
+    /** Diagnostic only; the actual guard is acquired again in CONTROL I/O before rotation. */
+    synchronized boolean quiescentForControlRotation(SegmentArenaControlLog authority) {
+        return !closed && reclamation == null && activeIo == 0 && pendingReservations == 0
+                && writerLock.lock().isValid() && !failed[0] && sessionReady && sessionAuthority == authority;
+    }
+
     private synchronized void releaseDataRead() {
         activeIo--;
     }
