@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影及保留tail投影与维护容量预留投影共29个完整正向配置、80个指定性质反例，含 original/rotated checkpoint 恢复投影；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness 与 authority cold-read 投影及 Model C 既有切片，共 36 个完整正向配置、109 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,11 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-authority-read` | 八种单 view 结果、一次 concurrent update、sync/get/callback/deadline，合法旧 snapshot 保持自己的 payload/version |
+| `ce-authority-read-key` | 忽略 derived key，须违反 `FoundMatchesRequestedKey` |
+| `ce-authority-read-invalid` | 允许无效/incomplete/ephemeral/wrong-state view，须违反 `FoundHasValidPersistentCompleteRecord` |
+| `ce-authority-read-error` | 错误映射为不存在，须违反 `AbsentOnlyFromActualNoNode` |
+| `ce-authority-read-version` | 用更新后的版本配旧 payload，须违反 `FoundKeepsOneAtomicSnapshot` |
 | `c-compaction-tail` | 两source与一个current COPY grant已占满，最新有效tail证明后复用剩余范围；保留目的地不FREE |
 | `ce-compaction-tail-boundary` | 故意忽略全批COPY空间，须违反 `TailWritesUseUnusedRange` |
 | `ce-compaction-tail-retained` | 故意将保留目的地加入FREE，须违反 `RetainedCurrentCopyNeverFreed` |
@@ -738,3 +743,22 @@ CHECK_DEADLOCK FALSE 只允许有限终态。当前性质不要求一个以前�
 最终回执 `unified-wal-model-4h3zm7ae` 绑定父提交 `4f9c2c24151cbef9ddb8c7da9b6fc86e9ec10fc7`、245 source inputs 和 421 checksum；140 配置为 35 正向完整 PASS、105 指定反例，全部符合预期。47 Java 输入均包含于该 source set，全部 source/checksum 及 5 个父提交 designInputs 已核对。复现命令保持 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 TLC 1.7.4、单 worker、固定 seed/fp，无状态约束或对称化，旧回执不改绑定。
 
 CHECK_DEADLOCK FALSE 只允许有限终态。物理 FileChannel 和进程退出证据不等于掉电，输入的 fsync/atomic-rename 假设也不由 TLC 自证。真实 recovery/device/delete catch-up、生产 startup/registry、持续失连准入、quorum、长期工作集、性能、完整 A/C/D 与组合、Block G 和生产 Gate 均未由该 receipt 投影闭合。
+
+
+## 控制权威 cold read 投影
+
+2026-10-05，`AuthorityRead.tla` 为 [RFC-0001 fixed-key authority read](../../RFC-0001-profile-capability-install.md#66-control-authority-与-protected-local-binding) 的单次读取投影：一个 requested key、八种结果（valid/foreign/corrupt/incomplete/ephemeral/wrong-state/NONODE/backend error）、generation/version 1→2 一次更新、sync/get/captured callback/timeout。它允许 snapshot 捕获后发生更新以及延迟交付；FOUND 必须仍使用同一 snapshot 的 payload/version，不能误装新版本。只有实际 NONODE 返回 absent，其余错误保持 unavailable，无效记录 quarantine。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-authority-read | 168 / 120 / 0 | 5 / 5 | 0.768 s / 108,347,392 bytes | PASS |
+| ce-authority-read-key | 87 / 62 / 25 | 4 / 不适用 | 0.789 s / 107,003,904 bytes | EXPECTED_COUNTEREXAMPLE: FoundMatchesRequestedKey |
+| ce-authority-read-invalid | 92 / 66 / 26 | 4 / 不适用 | 0.778 s / 107,855,872 bytes | EXPECTED_COUNTEREXAMPLE: FoundHasValidPersistentCompleteRecord |
+| ce-authority-read-error | 10 / 10 / 8 | 2 / 不适用 | 0.781 s / 104,202,240 bytes | EXPECTED_COUNTEREXAMPLE: AbsentOnlyFromActualNoNode |
+| ce-authority-read-version | 121 / 89 / 31 | 5 / 不适用 | 0.811 s / 107,806,720 bytes | EXPECTED_COUNTEREXAMPLE: FoundKeepsOneAtomicSnapshot |
+
+六个 Next 动作均有非零 coverage：SyncSuccess 8:16、SyncFailure 8:16、Capture 16:16、ConcurrentUpdate 32:48、Reply 24:24、Timeout 24:40。四个错误规则分别忽略 key、放行 invalid view、将错误视为不存在、混用更新后的 store version，均沿 Next 轨迹违反指定性质。atomic ZooKeeper get 的 bytes/Stat 一致性、实际解析/CRC/ACL/Stat 校验以及 deadline 为输入假设；这些机制由[真实 ZK 读取测试](../profile-control/README.md#步骤-12真实-zk-控制权威读取)分别验证。该模型不展开字节、真实会话内部状态或更新的发布协议。
+
+最终回执 `unified-wal-model-9jv2zpi_` 绑定父提交 `0231ac595a4d881488c913002dcb3002a4564484`、285 source inputs 和 436 checksum；145 配置为 36 正向完整 PASS、109 指定反例，全部符合预期。Java run 的 81 输入均为该 source set 子集，全部 source/checksum 及 5 个父提交 designInputs 已核对。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 TLC 1.7.4、单 worker、固定 seed/fp，无状态约束或对称化；旧回执保持原绑定。
+
+CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUND 是一次读取 snapshot，没有连续 authority 租约；无全局 sidecar/membership、backlink、fanout/page、publication CAS、安装激活、实际 startup/delete catch-up、生产 registry/连续准入、quorum、SDK/socket 总预算、长期工作集、性能或掉电结论。完整 A/C/D、组合与 Block G 继续 OPEN，读取投影不提升步骤 12 或生产 Gate。

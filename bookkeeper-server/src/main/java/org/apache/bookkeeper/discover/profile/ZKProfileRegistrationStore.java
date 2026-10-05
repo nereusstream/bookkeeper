@@ -25,8 +25,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
@@ -48,6 +46,7 @@ import org.apache.zookeeper.data.Stat;
  */
 public final class ZKProfileRegistrationStore implements ProfileRegistrationStore {
     private final ZooKeeper zk;
+    private final ProfileZKReadClient reads;
     private final String root;
     private final List<ACL> acls;
     private final List<ACL> markerAcls;
@@ -98,6 +97,7 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
 
     public ZKProfileRegistrationStore(ZooKeeper zk, String root, List<ACL> acls, Duration timeout) {
         this.zk = Objects.requireNonNull(zk, "zk");
+        reads = new ProfileZKReadClient(zk);
         PathUtils.validatePath(root);
         if (root.equals("/") || acls.isEmpty() || timeout.isNegative() || timeout.isZero()
                 || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
@@ -245,33 +245,21 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
     }
 
     Node get(String path, long deadline) throws InterruptedException, TimeoutException {
-        requireTime(deadline);
-        CompletableFuture<Node> reply = new CompletableFuture<>();
-        zk.getData(path, false, (code, ignored, context, bytes, stat) ->
-                reply.complete(new Node(code, bytes, stat)), null);
-        return await(reply, deadline);
+        ProfileZKReadClient.Node node = reads.get(path, deadline);
+        return new Node(node.code(), node.bytes(), node.stat());
     }
 
     private int sync(long deadline) throws InterruptedException, TimeoutException {
-        requireTime(deadline);
-        CompletableFuture<Integer> reply = new CompletableFuture<>();
-        zk.sync(root, (code, ignored, context) -> reply.complete(code), null);
-        return await(reply, deadline);
+        return reads.sync(root, deadline);
     }
 
     static void requireTime(long deadline) throws TimeoutException {
-        if (deadline - System.nanoTime() <= 0) {
-            throw new TimeoutException("Readiness operation deadline elapsed");
-        }
+        ProfileZKReadClient.requireTime(deadline);
     }
 
     private static <T> T await(CompletableFuture<T> reply, long deadline)
             throws InterruptedException, TimeoutException {
-        try {
-            return reply.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-        } catch (ExecutionException impossible) {
-            throw new IllegalStateException("Readiness callback completed exceptionally", impossible);
-        }
+        return ProfileZKReadClient.await(reply, deadline);
     }
 
     static boolean knownRejection(int result) {

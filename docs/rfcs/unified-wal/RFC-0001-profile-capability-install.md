@@ -406,6 +406,8 @@ Wave 0 已在 `bookkeeper-common` internal unstable package实现typed principal
 
 该实现没有socket listener、TLS termination、concrete MetadataStore/local-store adapter、production route/registration/Add/ACK接入或physical control bytes，不能证明real TLS/auth/secret-leak matrix、A24或stable wire，也不解锁G1和任何production authority。normal Add调用点仍为0，因而没有remote MetadataStore、per-request descriptor/auth hash、KMS、certificate/signature或control fsync增量。
 
+2026-10-05 后续隔离实现：[真实 ZK 控制权威读取](implementation/profile-control/README.md#步骤-12真实-zk-控制权威读取)实现原 cold-read 接口的 provisioned view reader，严格 key/state/codec 与单次 bytes/Stat.mzxid 绑定，73 项相关测试及 style 通过。该 view 不能替代本 RFC 的完整 sidecar、target 集、immutable backlink 或 coordinator 发布/CAS；完整 scope/AuthZ/credential 和 local durable effect 仍由 endpoint/physical owner 拥有。只读 adapter 不完成安装激活、真实 startup、stable wire 或生产 authority，历史 Wave 0 回执不改绑。
+
 ## 7. Bookie 安装语义
 
 候选请求：

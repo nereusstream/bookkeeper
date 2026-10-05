@@ -24,8 +24,10 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.test.ZooKeeperUtil;
+import org.apache.zookeeper.AsyncCallback.DataCallback;
 import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException.Code;
@@ -106,10 +108,29 @@ abstract class ProfileZKTestBase {
         final AtomicReference<List<Op>> lastOperations = new AtomicReference<>();
         final CountDownLatch replyHeld = new CountDownLatch(1);
         final CountDownLatch expired;
+        final AtomicInteger reads = new AtomicInteger();
+        final AtomicBoolean holdReadReply = new AtomicBoolean();
+        final AtomicReference<Runnable> lateReadReply = new AtomicReference<>();
+        final CountDownLatch readReplyHeld = new CountDownLatch(1);
 
         private TestClient(String connect, Watcher watcher, CountDownLatch expired) throws IOException {
             super(connect, 10000, watcher);
             this.expired = expired;
+        }
+
+        @Override
+        public void getData(String path, boolean watch, DataCallback callback, Object context) {
+            reads.incrementAndGet();
+            boolean hold = holdReadReply.getAndSet(false);
+            super.getData(path, watch, (code, returnedPath, ignored, bytes, stat) -> {
+                Runnable reply = () -> callback.processResult(code, returnedPath, context, bytes, stat);
+                if (hold) {
+                    lateReadReply.set(reply);
+                    readReplyHeld.countDown();
+                } else {
+                    reply.run();
+                }
+            }, context);
         }
 
         @Override

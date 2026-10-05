@@ -1175,3 +1175,6 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-05 本地 readiness 增量：[真实文件 receipt](../implementation/startup-readiness/README.md#步骤-12真实本地-readiness-receipt)实现原 LocalReadinessStore，复用实际 writer 锁与 FileChannel；完整 temp write/force→原子替换→目录 force 后才 APPLIED，UNKNOWN 实例拒绝读成功，新 attempt 严格解析并同步已发布 receipt，未发布 temp 不恢复。100 代替换保持固定文件集合，短写、两个 barrier 故障、scope/格式损坏、跨进程互斥及两轮退出/重开已验证；原 harness 已组合真实文件与两个 ZK stores。48 项相关测试及 style 通过，有限本地 publication 与既有模型为 35 正向完整通过/105 指定反例。输入的 recovery/device/delete facts 仍非真实恢复，pre-replay startup、生产 registry、持续失连准入、control store/安装激活及完整模型/掉电/性能未完成，步骤 12 与生产 Gate 保持 PARTIAL。 本地 receipt 同步只确认该文件，不解除 DATA/control 的已知错误或未 CLOSED 会话；实际 filesystem barrier/crash 规则是有限模型输入，既非完整 A+C/D 组合，也非 liveness 证明。旧 receipt/design/scope guard 不改绑。
+
+
+2026-10-05 新增[控制权威读取投影](../implementation/models/README.md#控制权威-cold-read-投影)：一个 derived key、八类单 view 结果和一次并发更新，检查合法 snapshot 的 payload/store version 不混用、无效 view 不放行、错误不算 absence。新配置 120 distinct states、六个 Next 动作 coverage 非零、四个指定反例；全部矩阵 36 正向完整 PASS/109 指定反例。atomic get、parser/ACL/deadline 是[真实 ZK reader](../implementation/profile-control/README.md#步骤-12真实-zk-控制权威读取)的输入机制，不由 TLC 自证。该切片属于 Model A cold read，不是完整 A+C、服务生命周期、quorum、总工作集或 liveness 证明；Block G、完整模型与生产 Gate 仍 OPEN，旧回执不改绑。
