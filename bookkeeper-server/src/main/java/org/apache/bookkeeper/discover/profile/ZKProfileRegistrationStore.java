@@ -53,9 +53,48 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
     private final List<ACL> markerAcls;
     private final long timeoutNanos;
 
-    private record Node(int code, byte[] bytes, Stat stat) { }
+    record Node(int code, byte[] bytes, Stat stat) { }
+
+    record Snapshot(String path, ProfileReadinessCodec.Envelope envelope, Stat stat) { }
 
     private record Current(String path, ProfileReadinessCodec.Envelope envelope) { }
+
+    Snapshot snapshot(String bookieId, long deadline) throws InterruptedException, TimeoutException {
+        if (sync(deadline) != Code.OK.intValue()) {
+            throw new IllegalStateException("Readiness sync unavailable");
+        }
+        Node node = get(path(bookieId), deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        if (node.code() != Code.OK.intValue()) {
+            throw new IllegalStateException("Readiness read unavailable");
+        }
+        Current current = validate(bookieId, node);
+        Node marker = get(anchor(current), deadline);
+        if (marker.code() == Code.NONODE.intValue() || marker.code() == Code.OK.intValue() && !validAnchor(marker)) {
+            throw new IllegalArgumentException("Invalid readiness birth marker");
+        }
+        if (marker.code() != Code.OK.intValue()) {
+            throw new IllegalStateException("Readiness birth read unavailable");
+        }
+        return new Snapshot(current.path(), current.envelope(), node.stat());
+    }
+
+    List<ACL> publicationAcls() {
+        return acls;
+    }
+
+    List<ACL> publicationMarkerAcls() {
+        return markerAcls;
+    }
+
+    int multi(List<Op> operations, long deadline) throws InterruptedException, TimeoutException {
+        requireTime(deadline);
+        CompletableFuture<Integer> reply = new CompletableFuture<>();
+        zk.multi(operations, (code, ignored, context, results) -> reply.complete(code), null);
+        return await(reply, deadline);
+    }
 
     public ZKProfileRegistrationStore(ZooKeeper zk, String root, List<ACL> acls, Duration timeout) {
         this.zk = Objects.requireNonNull(zk, "zk");
@@ -197,7 +236,7 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
         return current.path() + "/birth-" + current.envelope().birthId();
     }
 
-    private String path(String bookieId) {
+    String path(String bookieId) {
         byte[] name = Objects.requireNonNull(bookieId, "bookieId").getBytes(StandardCharsets.UTF_8);
         if (name.length < 1 || name.length > BookieCompatibilityFact.MAX_BOOKIE_ID_BYTES) {
             throw new IllegalArgumentException("Invalid readiness scope length");
@@ -205,7 +244,7 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
         return root + "/" + Base64.getUrlEncoder().withoutPadding().encodeToString(name);
     }
 
-    private Node get(String path, long deadline) throws InterruptedException, TimeoutException {
+    Node get(String path, long deadline) throws InterruptedException, TimeoutException {
         requireTime(deadline);
         CompletableFuture<Node> reply = new CompletableFuture<>();
         zk.getData(path, false, (code, ignored, context, bytes, stat) ->
@@ -220,7 +259,7 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
         return await(reply, deadline);
     }
 
-    private static void requireTime(long deadline) throws TimeoutException {
+    static void requireTime(long deadline) throws TimeoutException {
         if (deadline - System.nanoTime() <= 0) {
             throw new TimeoutException("Readiness operation deadline elapsed");
         }
@@ -235,7 +274,7 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
         }
     }
 
-    private static boolean knownRejection(int result) {
+    static boolean knownRejection(int result) {
         return result == Code.NOAUTH.intValue() || result == Code.INVALIDACL.intValue()
                 || result == Code.BADARGUMENTS.intValue() || result == Code.UNIMPLEMENTED.intValue();
     }

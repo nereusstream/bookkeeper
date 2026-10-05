@@ -429,3 +429,16 @@ slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限
 | Reply / Query | `lostCreateAndUpdateRepliesResolveThroughFreshRealReads` 在真实创建和更新后丢回复，fresh-read exact record，原 CAS 重投不重复更新；`actualCommittedTransactionRemainsUnknownWhenCallbackExceedsDeadline` 检查提交后超时仍 UNKNOWN，真实记录可解析 |
 
 `corruptPayloadOrMutableBirthMarkerCannotBeRepairedByCas`、`actualAclDenialDoesNotChangePersistentReadiness`、`codecRejectsBadChecksumSchemaCountAndTrailingBytes` 另验证实际格式、锚点及 ACL；模型把这些有效输入及 ZooKeeper atomic multi 当作假设。模型没有展开 quorum、ACL、完整 envelope 字节、client deadline、真实 startup、ephemeral 生命周期或普通 Add。
+
+
+## Session 绑定的 publication 动作
+
+| 动作 | 实现与真实 server 验证 |
+| --- | --- |
+| CaptureInfo / PublishInfo / AuthorityChange | persistent snapshot 加 birth/dataVersion 原子 check；`persistentChangeBeforeServiceTransactionRejectsAllEphemeralCreates` 检验 marker/info 整体拒绝，`persistentChangeBeforeWritableTransactionCannotPublishOldReadiness` 检验下一边界 |
+| CaptureWritable / CreateWritable | 原 session marker、owned projection、同字节 service-info conditional set，再创建 writable；`orderedPublicationHasSessionOwnershipAndDoesNotChangePersistentReadiness` 检查顺序、实际 Stat、完整字段及幂等不二次 bump |
+| CaptureRefresh / Refresh | service-info 版本把 refresh 与 writable 创建排序；`serviceRefreshAndWritableCreationCannotCrossInEitherOrder` 在两种实际交错均拒绝一方，不混合 projections |
+| CaptureDemote / Replace / Demote | demote 永久退休 nonce，actual version/marker multi 删除；`lostPublishRepliesReconcileAndOldDemotionCannotDeleteNewNonce` 原样重投旧 delete，确认新同版本注册保持 |
+| Reply / Query | 实际提交后 lost/held callback，fresh owned exact read；lost info/writable/demote 与 `committedWritableWithHeldReplyRemainsUnknownUntilFreshRead` 不猜测成功 |
+
+`actualServerSessionExpiryRemovesAllEphemeralsAndKeepsPersistentRecord` 与 `actualSessionExpiryBeforeSuccessCallbackCannotReportApplied` 使用真实 server `closeSession`，不是模拟过期回调；foreign 相同字段不得被新 harness 认领，实际 ACL 拒绝/坏 envelope 不等于 absent。`referenceStartupUsesActualPersistentAndEphemeralStoresWithoutClaimingLocalRecovery` 只证明 reference 顺序与两个真实 ZK stores 的组合；local fsync/recovery/readiness 均未由 typed inputs 自动取得。

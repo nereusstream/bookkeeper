@@ -417,7 +417,7 @@ ProfileRegistrationStore.compareAndSet(
     newRecord)
 ```
 
-BookieServiceInfo ephemeral registration只发布`bookie-profile` endpoint、readiness generation/reference与capability hint。顺序固定为persistent readiness CAS → matching service info → existing ephemeral writable registration；response loss重读两者，generation/incarnation mismatch立即demote/non-writable。实验 ZooKeeper persistent CAS 的 path/schema/escaping 与故障验证已有[步骤 12 增量](implementation/startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)；稳定 backend 合同、真实 startup/service-info/ephemeral 接线与失连降级仍 BLOCK，readiness 不成为 per-Add lease。
+BookieServiceInfo ephemeral registration只发布`bookie-profile` endpoint、readiness generation/reference与capability hint。顺序固定为persistent readiness CAS → matching service info → existing ephemeral writable registration；response loss重读两者，generation/incarnation mismatch立即demote/non-writable。实验 ZooKeeper persistent CAS 的 path/schema/escaping 与故障验证已有[步骤 12 增量](implementation/startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)；另已有[实验 session-owned info/ephemeral 发布](implementation/startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)及真实过期/交错验证；稳定 backend 合同、生产 BookieServiceInfo/registry、真实 startup 与持续失连降级仍 BLOCK，readiness 不成为 per-Add lease。
 
 restart/startup hook必须放在`EmbeddedServer`创建任何可能触碰Profile/Segment storage的组件之前，顺序锁定为：
 
@@ -739,7 +739,7 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 - local seal 是否确有需求；若有，其 authority 与 metadata CLOSED 的关系；
 - RFC-0003 `MOVE_COMMIT` exact local record packing、batch completion、reader cutover接口、orphan GC 与 cross-Arena unsupported 后续协议；
 - RFC-0004 delete stream topology、assignment/snapshot schema 与 exact local cursor packing；
-- `ProfileRegistrationStore` 已有隔离 ZooKeeper persistent CAS 与 response-loss fresh-read 验证；稳定 path/schema、真实 startup/ephemeral、失连降级和完整 readiness 接线仍待实现；persistent-before-ephemeral 顺序已冻结；
+- `ProfileRegistrationStore` 与 `EphemeralProfileRegistrationStore` 已有隔离 ZooKeeper persistent CAS、session-owned publication/demotion/expiration 与 response-loss fresh-read 验证；稳定 path/schema、生产 registry、真实 startup/local receipt/持续失连降级和完整 readiness 接线仍待实现；persistent-before-ephemeral 顺序已冻结；
 - recovery strong assertion/local evidence binding、accepted loss ordering与五类 outcome到现有Bookie API/error的exact dependency mapping；
 - performance Gate 的 exact thresholds。
 
@@ -801,3 +801,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-05 步骤 12 增量：[真实 ZooKeeper readiness CAS](implementation/startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)复用原接口，验证完整持久记录、store/readiness 双版本、birth 原子检查和提交后 UNKNOWN/fresh-read 解析；真实双 client/server 的 8 项测试加原 17 项 reference 测试全部通过，Spotless/Checkstyle 通过。有限 registration 投影为 Model A 局部验证，当前矩阵 33 正向完整通过/96 指定反例，不代表 A+C 组合或真实 quorum。原 Wave 0 回执冻结；其旧 scope guard 对累计后续路径返回 BLOCK，未扩充 allowlist。真实 startup/ephemeral、ProfileControlStore、安装激活及生产 readiness 仍未完成，步骤 12/Gate 不提升。
+
+
+2026-10-05 registration 增量：[session-owned ephemeral 发布](implementation/startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)复用既有接口及 persistent scope，info/writable multi 检查 authority、nonce 与版本；demote 永久退休 nonce，实际过期清除 ephemeral，旧删除不命中新同版本注册。12 新测试加原 25 项全部通过，Spotless/Checkstyle 通过；有限 Model A publication 投影及全部先前切片为 34 正向完整通过/100 指定反例，不是 A+C/D 完整组合。typed local facts/内存 local receipt 不代表真实恢复，生产 BookieServiceInfo/registry、startup/delete catch-up 与持续连接事件降级仍未接线；步骤 12 与生产 Gate 保持 PARTIAL，历史 receipt/scope guard 不改绑。

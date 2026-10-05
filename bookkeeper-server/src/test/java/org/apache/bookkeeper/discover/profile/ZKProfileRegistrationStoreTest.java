@@ -23,7 +23,6 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Arrays;
@@ -32,8 +31,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -43,71 +40,13 @@ import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.Cas
 import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.ReadStatus;
 import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.VersionedRecord;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
-import org.apache.bookkeeper.test.ZooKeeperUtil;
-import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.CreateMode;
-import org.apache.zookeeper.KeeperException.Code;
-import org.apache.zookeeper.Op;
-import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.Stat;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
 
-public class ZKProfileRegistrationStoreTest {
-    private static final String ROOT = "/profile-readiness-test";
-    private static final String BOOKIE = "bookie:[::1]:3181";
-    private final ZooKeeperUtil cluster = new ZooKeeperUtil() {
-        @Override
-        public String getZooKeeperConnectString() {
-            String address = super.getZooKeeperConnectString();
-            return "127.0.0.1" + address.substring(address.lastIndexOf(':'));
-        }
-    };
-    private TestClient first;
-    private TestClient second;
-
-    @Before
-    public void setup() throws Exception {
-        cluster.startCluster();
-        first = connect();
-        second = connect();
-        first.create(ROOT, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-    }
-
-    @After
-    public void cleanup() throws Exception {
-        try {
-            if (first != null) {
-                first.close();
-            }
-        } finally {
-            try {
-                if (second != null) {
-                    second.close();
-                }
-            } finally {
-                cluster.stopCluster();
-            }
-        }
-    }
-
-    private TestClient connect() throws Exception {
-        CountDownLatch connected = new CountDownLatch(1);
-        TestClient client = new TestClient(cluster.getZooKeeperConnectString(), event -> {
-            if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
-                connected.countDown();
-            }
-        });
-        if (!connected.await(10, TimeUnit.SECONDS)) {
-            client.close();
-            throw new IOException("ZooKeeper test client did not connect");
-        }
-        return client;
-    }
-
+public class ZKProfileRegistrationStoreTest extends ProfileZKTestBase {
     private static ZKProfileRegistrationStore store(ZooKeeper client) {
         return new ZKProfileRegistrationStore(client, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
     }
@@ -299,34 +238,4 @@ public class ZKProfileRegistrationStoreTest {
         ByteBuffer.wrap(bytes).putInt(bytes.length - 4, (int) crc.getValue());
     }
 
-    /** Faults affect only response delivery or the pre-submit race; every successful write is a real ZK transaction. */
-    private static final class TestClient extends ZooKeeper {
-        private final AtomicBoolean loseReply = new AtomicBoolean();
-        private final AtomicBoolean holdReply = new AtomicBoolean();
-        private final AtomicReference<Runnable> beforeMulti = new AtomicReference<>();
-        private final AtomicReference<Runnable> lateReply = new AtomicReference<>();
-
-        private TestClient(String connect, Watcher watcher) throws IOException {
-            super(connect, 10000, watcher);
-        }
-
-        @Override
-        public void multi(Iterable<Op> operations, MultiCallback callback, Object context) {
-            Runnable before = beforeMulti.getAndSet(null);
-            if (before != null) {
-                before.run();
-            }
-            boolean lose = loseReply.getAndSet(false);
-            boolean hold = holdReply.getAndSet(false);
-            super.multi(operations, (code, path, ignored, results) -> {
-                Runnable reply = () -> callback.processResult(lose && code == Code.OK.intValue()
-                        ? Code.CONNECTIONLOSS.intValue() : code, path, context, results);
-                if (hold) {
-                    lateReply.set(reply);
-                } else {
-                    reply.run();
-                }
-            }, context);
-        }
-    }
 }

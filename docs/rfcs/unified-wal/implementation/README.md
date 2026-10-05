@@ -318,7 +318,10 @@ DATA durable → hot locator → local result
 **完成条件：** 每个CAS响应丢失都可查询同一结果；未知状态不放行，metadata不复制第二份membership权威；普通Add不查远端控制状态；断点重启不扩大权限。复用已有reference契约测试，不重新建设同名内存框架。
 
 
-2026-10-05 当前增量：[真实 ZooKeeper readiness CAS](startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)直接实现已有接口，fresh-read 校验完整 envelope、store mzxid/readiness generation，原子 birth 检查防止删除重建的 dataVersion ABA。真实双 client/server 验证单 winner、response-loss 查询、ACL/损坏和提交后超时；25 项相关测试全部通过，Spotless/Checkstyle 通过，当前有限模型 33 正向完整通过/96 指定反例。历史 Wave 0 scope guard 对后续累计路径返回 BLOCK，原 reference 回执及脚本未改。仅完成隔离 persistent CAS，未接 service startup、ephemeral、完整 control store/metadata/安装激活；步骤 12 与生产 Gate 仍未完成。
+2026-10-05 persistent CAS 增量：[真实 ZooKeeper readiness CAS](startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)直接实现已有接口，fresh-read 校验完整 envelope、store mzxid/readiness generation，原子 birth 检查防止删除重建的 dataVersion ABA。真实双 client/server 验证单 winner、response-loss 查询、ACL/损坏和提交后超时；25 项相关测试全部通过，Spotless/Checkstyle 通过，当前有限模型 33 正向完整通过/96 指定反例。历史 Wave 0 scope guard 对后续累计路径返回 BLOCK，原 reference 回执及脚本未改。仅完成隔离 persistent CAS，未接 service startup、ephemeral、完整 control store/metadata/安装激活；步骤 12 与生产 Gate 仍未完成。
+
+
+2026-10-05 当前 registration 增量：[session 绑定的真实 ephemeral 发布](startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)实现原接口，persistent birth/dataVersion 条件后创建 owned info/marker，再以 info 版本递增原子发布 writable。retired nonce 不复用，旧 demote 不能删除同版本新注册；unknown/foreign/corrupt 不认领成功。真实 server 的 publication 交错、丢回复、parent ACL 拒绝、session expiration/新 attempt 与原 harness 的 ZK store 组合已验证，37 项相关测试及 style 通过；模型 34 正向完整通过/100 指定反例。仅为独立实验 namespace，typed local recovery 输入未变真实文件事实；生产 BookieServiceInfo/available registry、真实 startup/local receipt/delete catch-up、listener/placement/local admission 的持续失连降级、完整控制 metadata 与安装激活仍未接线，步骤 12/Gate 保持未完成。
 
 #### 13. 接入客户端普通写、ACK、背压重试和写期换组
 

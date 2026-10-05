@@ -393,3 +393,16 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | ReconciledSuccessMatchesCurrentRecord | Query 仅在当前目标相等时得到等价结果，后续修改可使旧目标不再匹配 | 模型只以 generation 2 代表完整目标；完整 record 的 equality 另由实际 codec/多字段测试验证 |
 
 三个错误规则分别跳过 birth、忽略 expected readiness generation、直接提升丢回复，必须从 Next 轨迹违反指定性质。有限终态允许 `CHECK_DEADLOCK FALSE`；不从此推导 liveness、实际持久化、安装/激活、service-info、ephemeral registration 或生产 authority。
+
+
+## Session 绑定的 publication 性质
+
+| 性质 | 合同与实现 | 边界 |
+| --- | --- | --- |
+| TypeOK（RegistrationPublication） | 两代 authority/nonce/projection，serviceVersion 0～3，phase 0～6 | 不代表 Java 内存/客户端队列或长期预算 |
+| PublishedOnlyAgainstMatchingAuthority | info/writable 提交均 check 原 birth/dataVersion，必须匹配 READY、incarnation/gen/mzxid/hints | 原子 backend 与有效输入是假设，真实查读后修改由双 client 验证 |
+| OldDemotionCannotRemoveReplacement | retired nonce 不复用，旧删除 multi 检查原 session marker；新注册即使节点版本相同也不能被删除 | 唯一 marker/当前 session 为输入，不证明恶意管理员复制 marker |
+| WritableProjectionMatchesService | writable 创建原子条件更新相同 service-info 字节以 bump 版本，排除并发旧 refresh | 实际 envelope/Stat/endpoint equality 由 Java 验证；不授予持续 local 服务准入 |
+| UnresolvedPublicationNeverReportsApplied | post-submit timeout/loss 仍 RESPONSE_LOST，owned exact read 才解析；demote unknown 不重新开放 nonce | 模型不证明实际网络、client deadline 或 watcher；真实回复故障由 server 事务后注入 |
+
+generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务准入必须重新匹配，不能把过往 publish PASS 视为 lease。当前有限投影不是 service lifecycle、安装/激活、quorum 或完整 A+C/D 证明。

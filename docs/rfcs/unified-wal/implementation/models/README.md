@@ -699,3 +699,22 @@ CHECK_DEADLOCK FALSE 只允许有限终态。本投影不证明物理持久化�
 最终回执 `unified-wal-model-o4tiypiw` 绑定父提交 `aee4bed4060d6f52097fc113978c462662b314e5`、224 source inputs 与 388 个 checksum；129 配置为 33 正向完整 PASS、96 指定反例，全部符合预期。复现命令 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，仍使用官方 TLC 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化。全部 source/checksum 已核对；5 份 designInputs 始终绑定父提交，历史回执不改绑定。
 
 CHECK_DEADLOCK FALSE 只允许有限终态；无 fairness/liveness、真实 quorum/持久化、ACL、安装/激活、startup 与 ephemeral 生命周期、性能或生产 authority 结论。完整 A/C/D 与组合、Block G、长期负载和服务 readiness 仍未完成。
+
+
+## Session 绑定的 registration publication 投影
+
+2026-10-05，`RegistrationPublication.tla` 为 Model A 的单 Bookie/两代 publisher 局部投影。authority 1→2 一次变化，service/writable 各用 0/1/2 表示 absent/旧 projection/刷新或替代 projection，节点版本 0～3；允许一个 info refresh、old demote capture 和 nonce 2 replacement。实际原子 multi、已验证的记录/ACL/scope、唯一 immutable session marker、demote/失连后 local gate 关闭为输入。它检查 authority 查读后变化、两种 info/writable 竞争、同版本新 nonce 与旧删除、丢回复保持 UNKNOWN，不展开 protobuf/字节、ZooKeeper 内部协议或真实 startup。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-registration-publication | 1793 / 868 / 0 | 13 / 13 | 0.899 s / 117,899,264 bytes | PASS |
+| ce-registration-publication-authority | 5 / 5 / 1 | 4 / 不适用 | 0.809 s / 108,396,544 bytes | EXPECTED_COUNTEREXAMPLE: PublishedOnlyAgainstMatchingAuthority |
+| ce-registration-publication-session | 303 / 197 / 102 | 8 / 不适用 | 0.796 s / 117,047,296 bytes | EXPECTED_COUNTEREXAMPLE: OldDemotionCannotRemoveReplacement |
+| ce-registration-publication-service | 103 / 74 / 39 | 7 / 不适用 | 0.799 s / 111,443,968 bytes | EXPECTED_COUNTEREXAMPLE: WritableProjectionMatchesService |
+| ce-registration-publication-unknown | 50 / 39 / 22 | 6 / 不适用 | 0.801 s / 108,838,912 bytes | EXPECTED_COUNTEREXAMPLE: UnresolvedPublicationNeverReportsApplied |
+
+12 个 Next 动作都有非零 coverage：CaptureInfo 1:1、AuthorityChange 13:264、PublishInfo 2:2、CaptureWritable 6:18、CaptureRefresh 4:8、Refresh 12:176、CreateWritable 27:68、Reply 76:296、Query 190:296、CaptureDemote 58:58、Replace 151:278、Demote 327:327。四个错误规则分别省略 authority 条件、取消旧 session marker 检查、不递增相同 service-info 字节的版本、直接提升丢回复，均在指定性质给出 Next 轨迹反例。
+
+最终回执 `unified-wal-model-s992kax7` 绑定父提交 `8e2d6668168e9983a270781d027f714159908c89`、234 source inputs 与 403 checksum；134 配置为 34 正向完整 PASS、100 指定反例，全部符合预期。官方 TLC 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化；复现仍用 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`。全部 source/hash 校验已执行，5 份 designInputs 保持父提交绑定，旧结果不改绑。实际 server session expiration、ACL/codec 和发布交错另见[真实 registration 验证](../startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)。
+
+CHECK_DEADLOCK FALSE 只允许有限终态。当前性质不要求一个以前成功的 ephemeral hint 在 authority 后续变化后仍有效；实际读取仍需 fresh authority/reference，持续服务准入必须单独接失连/降级事件。模型不证明 liveness/fairness、quorum、真实持久化或 local receipt、全部工作集、listener/placement、生产 registry、安装激活、完整 A/C/D/组合、Block G、掉电或性能。

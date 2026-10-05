@@ -533,3 +533,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-05 步骤 12 增量：[真实 ZooKeeper readiness CAS](rfcs/unified-wal/implementation/startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)复用原接口，验证完整持久记录、store/readiness 双版本、birth 原子检查和提交后 UNKNOWN/fresh-read 解析；真实双 client/server 的 8 项测试加原 17 项 reference 测试全部通过，Spotless/Checkstyle 通过。有限 registration 投影为 Model A 局部验证，当前矩阵 33 正向完整通过/96 指定反例，不代表 A+C 组合或真实 quorum。原 Wave 0 回执冻结；其旧 scope guard 对累计后续路径返回 BLOCK，未扩充 allowlist。真实 startup/ephemeral、ProfileControlStore、安装激活及生产 readiness 仍未完成，步骤 12/Gate 不提升。
+
+
+2026-10-05 registration 增量：[session-owned ephemeral 发布](rfcs/unified-wal/implementation/startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)复用既有接口及 persistent scope，info/writable multi 检查 authority、nonce 与版本；demote 永久退休 nonce，实际过期清除 ephemeral，旧删除不命中新同版本注册。12 新测试加原 25 项全部通过，Spotless/Checkstyle 通过；有限 Model A publication 投影及全部先前切片为 34 正向完整通过/100 指定反例，不是 A+C/D 完整组合。typed local facts/内存 local receipt 不代表真实恢复，生产 BookieServiceInfo/registry、startup/delete catch-up 与持续连接事件降级仍未接线；步骤 12 与生产 Gate 保持 PARTIAL，历史 receipt/scope guard 不改绑。
