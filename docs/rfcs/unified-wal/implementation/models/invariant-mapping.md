@@ -457,3 +457,16 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 | SubmittedUnknownNeverBecomesNone | 已提交请求timeout不能解释为未执行或取消成功；精确retry解析实际状态 | 更早UNKNOWN的跨attempt保持由调用方负责，未建全局client/coordinator |
 
 六个指定反例各破坏上述exact/barrier/owner/ownership/normal/unknown边界；全E完成、receipt discovery、READY/CAS/delete cut、quorum、完整模型、活性与性能仍未由该投影证明。
+
+
+## 初始 all-E metadata 门槛
+
+| 性质 | 合同与实际实现 | 模型边界 |
+| --- | --- | --- |
+| InvalidPlanHasNoReservation | descriptor/metadata quorum及ordered E、credential与peer HELLO不匹配时在root写前拒绝 | 计划有效性为有限输入，具体codec/密码派生由Java验证 |
+| MetadataWaitsForAllE / MetadataHasExactDurableResults | 收齐全部E的durable、正确关联结果，不能由A/W或错binding代替；UNKNOWN不会变NONE | 每target真实barrier/owner与correlation为输入，physical INSTALL另验 |
+| MetadataHasSameRootSnapshot / MetadataHasCommittedReservation | all-E后sync/get与最初root的payload/mzxid一致且committed；缺失/不可用不放行 | read后的跨key窗口可产生inert orphan，后续READY/delete CAS仍待实现 |
+| MetadataAloneNeverReturnsWriter | coordinator仅返回actual metadata及bounded receipts，不授予READY/ACTIVE | 没有完整writer availability、activation或quorum证明 |
+| InstallReceiptKeepsBirthGeneration | current local generation推进不改变INSTALL birth；同op retry/文件replay恢复固定birth | generation取1/2，物理framing/schema由原控制log拥有 |
+
+六个coordinator mutation和一个generation mutation命中各自边界；receipt capability digest及redacted字符串由真实/独立vector Java回归覆盖。未证明cryptographic HELLO、persistent receipt retention、full lifecycle CAS、完整模型组合、活性及性能。

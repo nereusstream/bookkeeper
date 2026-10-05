@@ -40,6 +40,11 @@ public final class ProfileLedgerMetadataStore {
                 throw new IllegalArgumentException("Only a proved creation carries metadata");
             }
         }
+
+        @Override
+        public String toString() {
+            return "ProfileMetadataResult{outcome=" + outcome + ", metadataPresent=" + (metadata != null) + '}';
+        }
     }
 
     private final LedgerManager manager;
@@ -49,6 +54,17 @@ public final class ProfileLedgerMetadataStore {
     }
 
     public CompletableFuture<Result> createIfAbsent(LedgerMetadata initial, ProfileMetadataBacklink backlink) {
+        LedgerMetadata desired = snapshotInitial(initial, backlink);
+        // The create callback can return the submitted object, including its NODEEXISTS token-resolution path.
+        // One actual snapshot must prove the full reference/content/version even after an acknowledged create.
+        return manager.createLedgerMetadata(desired.getLedgerId(), desired).handle((created, failure) ->
+                manager.readLedgerMetadata(desired.getLedgerId()).handle((current, readFailure) ->
+                        readFailure == null ? classify(desired, backlink, current,
+                                failure == null ? Outcome.APPLIED : Outcome.ALREADY_APPLIED)
+                                : new Result(Outcome.DURABILITY_UNKNOWN, null))).thenCompose(result -> result);
+    }
+
+    static LedgerMetadata snapshotInitial(LedgerMetadata initial, ProfileMetadataBacklink backlink) {
         Objects.requireNonNull(initial, "initial");
         Objects.requireNonNull(backlink, "backlink");
         if (initial.getMetadataFormatVersion() != 3 || initial.getState() != LedgerMetadata.State.OPEN
@@ -60,14 +76,7 @@ public final class ProfileLedgerMetadataStore {
             throw new IllegalArgumentException("Invalid initial Profile metadata");
         }
         // Own the reserved reference and copies of custom values before the asynchronous create.
-        LedgerMetadata desired = backlink.attachTo(initial);
-        // The create callback can return the submitted object, including its NODEEXISTS token-resolution path.
-        // One actual snapshot must prove the full reference/content/version even after an acknowledged create.
-        return manager.createLedgerMetadata(desired.getLedgerId(), desired).handle((created, failure) ->
-                manager.readLedgerMetadata(desired.getLedgerId()).handle((current, readFailure) ->
-                        readFailure == null ? classify(desired, backlink, current,
-                                failure == null ? Outcome.APPLIED : Outcome.ALREADY_APPLIED)
-                                : new Result(Outcome.DURABILITY_UNKNOWN, null))).thenCompose(result -> result);
+        return backlink.attachTo(initial);
     }
 
     private static Result classify(LedgerMetadata desired, ProfileMetadataBacklink backlink,

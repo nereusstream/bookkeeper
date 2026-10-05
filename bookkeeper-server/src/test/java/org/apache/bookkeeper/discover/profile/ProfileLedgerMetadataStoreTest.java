@@ -255,4 +255,18 @@ public class ProfileLedgerMetadataStoreTest extends ProfileZKTestBase {
                     store.createIfAbsent(metadata(), backlink(1, 2)).get(5, TimeUnit.SECONDS).outcome());
         }
     }
+    @Test
+    public void creationResultDoesNotExposeStandardMetadataPasswordOrCustomBytes() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            LedgerMetadata input = LedgerMetadataBuilder.from(metadata()).withPassword(new byte[]{81, 82, 83, 84})
+                    .withCustomMetadata(Map.of("private-value", new byte[]{91, 92, 93})).build();
+            var result = new ProfileLedgerMetadataStore(lm).createIfAbsent(input, backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS);
+            assertEquals(Outcome.APPLIED, result.outcome());
+            assertFalse(result.toString().contains("password"));
+            assertFalse(result.toString().contains("UVJTVA=="));
+            assertFalse(result.toString().contains("private-value"));
+        }
+    }
+
 }

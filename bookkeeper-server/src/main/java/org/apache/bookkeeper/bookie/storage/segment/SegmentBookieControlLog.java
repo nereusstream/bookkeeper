@@ -73,7 +73,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         UNAVAILABLE, IDENTITY_CONFLICT, UNAUTHORIZED, TOMBSTONED, FENCED, NOT_ACTIVE, INVALID_GRANT
     }
 
-    record Result(Status status, UUID operationId, long sequence, long localGeneration) { }
+    record Result(Status status, UUID operationId, long sequence, long localGeneration,
+                  long localInstallGeneration) { }
 
     record ExplicitLac(long lac, byte[] body) {
         ExplicitLac {
@@ -391,6 +392,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final byte[] descriptor;
         private final ProtectedProfileCredential credential;
         private long localGeneration = 1;
+        private final long localInstallGeneration;
         private long activationGeneration;
         private boolean active;
         private boolean fenced;
@@ -401,6 +403,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private int inFlight;
 
         private LedgerState(Command command) {
+            localInstallGeneration = localGeneration;
             install = command.scope;
             context = context(command.scope);
             descriptor = command.descriptor;
@@ -769,7 +772,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 appliedOffset += record.remaining();
                 LedgerState state = ledgers.get(command.scope.ledgerId());
                 results.add(new Result(status, command.operationId(), sequence,
-                        state == null ? 0 : state.localGeneration));
+                        state == null ? 0 : state.localGeneration,
+                        state == null ? 0 : state.localInstallGeneration));
             }
         } catch (RuntimeException | Error failure) {
             failed = true;

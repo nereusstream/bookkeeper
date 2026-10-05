@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 45 个完整正向配置、156 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 46 个完整正向配置、163 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,14 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-initial-metadata` | E/W/A=3/3/2、计划有效/无效、每target四类结果、root变化/删除与fresh read，全部E匹配才提交metadata |
+| `ce-profile-initial-metadata-ack` | 只等A个结果就推进，须违反 `MetadataWaitsForAllE` |
+| `ce-profile-initial-metadata-binding` | 接受错绑定success，须违反 `MetadataHasExactDurableResults` |
+| `ce-profile-initial-metadata-root` | 忽略root version变化，须违反 `MetadataHasSameRootSnapshot` |
+| `ce-profile-initial-metadata-absence` | root missing仍推进，须违反 `MetadataHasCommittedReservation` |
+| `ce-profile-initial-metadata-plan` | 错计划仍写reservation，须违反 `InvalidPlanHasNoReservation` |
+| `ce-profile-initial-metadata-writer` | metadata alone返回writer，须违反 `MetadataAloneNeverReturnsWriter` |
+| `ce-profile-install-dispatch-generation` | INSTALL receipt用推进后的current generation，须违反 `InstallReceiptKeepsBirthGeneration` |
 | `a-profile-install-dispatch` | 一次typed INSTALL的control提交、write/force/owner apply、可选停止等待与实际completion，成功晚于barrier/owner且不改变normal状态 |
 | `ce-profile-install-dispatch-exact` | 忽略exact authority/physical target，须违反 `AdmissionHasExactAuthorityAndTarget` |
 | `ce-profile-install-dispatch-barrier` | 提交即成功，须违反 `InstallSuccessHasBarrier` |
@@ -970,3 +978,25 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-install-dispatch-stop | 82 / 82 / 37 | 3 / 不适用 | 0.861 s / 109,330,432 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedOwnershipWaitsForBothTerminals |
 | ce-profile-install-dispatch-normal | 140 / 127 / 19 | 5 / 不适用 | 0.797 s / 110,952,448 bytes | EXPECTED_COUNTEREXAMPLE:InstallPreservesNormalState |
 | ce-profile-install-dispatch-unknown | 82 / 82 / 37 | 3 / 不适用 | 0.792 s / 107,741,184 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedUnknownNeverBecomesNone |
+
+
+## 初始 all-E metadata 门槛投影
+
+2026-10-06 `ProfileInitialMetadata`固定E/W/A=3/3/2、三个nonblocking target、有效/无效初始计划、每target exact durable/known refusal/UNKNOWN/错绑定success四类结果。发送整个E后按任意顺序收结果；只允许全部matching durable及fresh root snapshot相同且committed的路径提交metadata。read之后的root变化/删除仍允许metadata形成inert orphan：模型明确不把root read和standard metadata create视作跨key原子事务，也不从metadata alone返回writer。
+
+六个mutation分别用A代替E、接受错binding、忽略root version、接受missing root、忽略初始plan和从metadata alone返回writer。实际target force/结果关联、严格descriptor/HELLO/password-credential/metadata codec及SDK原子操作为输入，分别由[真实协调门槛与receipts测试](../profile-control/README.md#步骤-12all-e-后的初始-metadata-协调门槛)、原physical INSTALL/metadata-create投影验证；不枚举所有byte/crypto、persistent receipt/target page、READY/delete cut CAS、全E activation、完整restart/client quorum、actual INSTALL TLS/wire、活性/公平性、掉电/性能或完整A/C/D组合。
+
+既有ProfileInstallDispatch另保留birthGeneration1与可推进的currentGeneration1/2，新增`InstallReceiptKeepsBirthGeneration`；既有正向及六个敏感性配置保持原性质，新增current-gen-as-install mutation命中该性质。真实activation后same INSTALL retry和文件replay回归支持此映射，未改control record schema。历史run/source/config统计保留原绑定，最终 `unified-wal-local-CgLIZ88L` tool exit0，991冻结source inputs，相关10类351项为346通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-initial-style-E82C4Awl` Spotless/Checkstyle exit0，source集精确一致，16份Java回执checksums已核验。最终模型 `unified-wal-model-ufcpvr46` tool exit0，209配置为46正向完整PASS/163指定反例，448冻结inputs/629 checksums；189共享输入及1250去重union一致，五个designInputs绑定父提交 `60a0bab6e5793cff79216ea6c99de080bf60ae0f`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。
+
+新正向gate投影完整遍历6168 generated/2767 distinct/queue0，search depth和diameter均12；六个gate及一个birth-generation mutation均命中指定性质。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-initial-metadata | 6168 / 2767 / 0 | 12 / 12 | 0.904 s / 141,115,392 bytes | PASS |
+| ce-profile-initial-metadata-ack | 6324 / 3094 / 783 | 8 / 不适用 | 0.967 s / 153,305,088 bytes | EXPECTED_COUNTEREXAMPLE:MetadataWaitsForAllE |
+| ce-profile-initial-metadata-binding | 6121 / 2710 / 200 | 9 / 不适用 | 0.958 s / 145,883,136 bytes | EXPECTED_COUNTEREXAMPLE:MetadataHasExactDurableResults |
+| ce-profile-initial-metadata-root | 6157 / 2761 / 69 | 10 / 不适用 | 0.901 s / 149,749,760 bytes | EXPECTED_COUNTEREXAMPLE:MetadataHasSameRootSnapshot |
+| ce-profile-initial-metadata-absence | 6157 / 2761 / 68 | 10 / 不适用 | 0.923 s / 150,994,944 bytes | EXPECTED_COUNTEREXAMPLE:MetadataHasCommittedReservation |
+| ce-profile-initial-metadata-plan | 129 / 129 / 127 | 2 / 不适用 | 0.796 s / 110,034,944 bytes | EXPECTED_COUNTEREXAMPLE:InvalidPlanHasNoReservation |
+| ce-profile-initial-metadata-writer | 6162 / 2763 / 67 | 10 / 不适用 | 0.914 s / 146,079,744 bytes | EXPECTED_COUNTEREXAMPLE:MetadataAloneNeverReturnsWriter |
+| ce-profile-install-dispatch-generation | 185 / 157 / 19 | 6 / 不适用 | 0.863 s / 113,147,904 bytes | EXPECTED_COUNTEREXAMPLE:InstallReceiptKeepsBirthGeneration |

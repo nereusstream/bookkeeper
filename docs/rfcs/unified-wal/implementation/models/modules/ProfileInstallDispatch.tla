@@ -4,7 +4,7 @@
    this work for additional information regarding copyright ownership.
    The ASF licenses this file to you under the Apache License, Version 2.0. *)
 EXTENDS Naturals
-CONSTANTS SkipExact, EarlySuccess, ReleaseOnStop, ResultBeforeOwner, ActivateNormal, UnknownAsNone
+CONSTANTS SkipExact, EarlySuccess, ReleaseOnStop, ResultBeforeOwner, ActivateNormal, UnknownAsNone, DynamicInstallGeneration
 VARIABLE s
 vars == <<s>>
 (* One cold typed INSTALL using the reserved control driver. Kind 1 is absent,
@@ -17,7 +17,8 @@ Init == \E exact \in BOOLEAN, capacity \in BOOLEAN, kind \in 1..3,
            ioOK \in BOOLEAN, normal \in BOOLEAN :
            /\ (kind = 1 => ~normal)
            /\ s = [exact |-> exact, capacity |-> capacity, kind |-> kind, ioOK |-> ioOK,
-                    initialNormal |-> normal, normal |-> normal, phase |-> 0,
+                    initialNormal |-> normal, normal |-> normal, birthGeneration |-> 1,
+                    currentGeneration |-> IF normal THEN 2 ELSE 1, returnedGeneration |-> 1, phase |-> 0,
                     submitted |-> FALSE, held |-> FALSE, stopped |-> FALSE,
                     forced |-> FALSE, ioTerminal |-> FALSE, ownerTerminal |-> FALSE,
                     applied |-> FALSE, actualResult |-> 0, result |-> 0]
@@ -36,13 +37,16 @@ Apply == /\ s.phase = 3
                   !.normal = IF ActivateNormal /\ s.forced /\ s.kind \in 1..2 THEN TRUE ELSE s.normal]
 Finish == /\ s.phase = 4
           /\ s' = [s EXCEPT !.phase = 6, !.held = FALSE,
-                   !.result = IF s.stopped THEN s.result ELSE s.actualResult]
+                   !.result = IF s.stopped THEN s.result ELSE s.actualResult,
+                   !.returnedGeneration = IF DynamicInstallGeneration THEN s.currentGeneration
+                                          ELSE s.birthGeneration]
 StopWaiting == /\ s.phase \in 1..4 /\ ~s.stopped
                /\ s' = [s EXCEPT !.stopped = TRUE, !.result = IF UnknownAsNone THEN 4 ELSE 5,
                         !.held = IF ReleaseOnStop THEN FALSE ELSE s.held]
 Next == Admit \/ Write \/ Force \/ Apply \/ Finish \/ StopWaiting
 Spec == Init /\ [][Next]_vars
-TypeOK == /\ s.kind \in 1..3 /\ s.phase \in 0..6 /\ s.result \in 0..5 /\ s.actualResult \in 0..5
+TypeOK == /\ s.birthGeneration = 1 /\ s.currentGeneration \in 1..2 /\ s.returnedGeneration \in 1..2
+          /\ s.kind \in 1..3 /\ s.phase \in 0..6 /\ s.result \in 0..5 /\ s.actualResult \in 0..5
           /\ s.exact \in BOOLEAN /\ s.capacity \in BOOLEAN /\ s.ioOK \in BOOLEAN
           /\ s.initialNormal \in BOOLEAN /\ s.normal \in BOOLEAN /\ s.submitted \in BOOLEAN
           /\ s.held \in BOOLEAN /\ s.stopped \in BOOLEAN /\ s.forced \in BOOLEAN
@@ -54,4 +58,5 @@ SubmittedOwnershipWaitsForBothTerminals ==
     s.submitted /\ ~(s.ioTerminal /\ s.ownerTerminal) => s.held
 InstallPreservesNormalState == s.normal = s.initialNormal
 SubmittedUnknownNeverBecomesNone == s.submitted => s.result # 4
+InstallReceiptKeepsBirthGeneration == s.result \in 1..2 => s.returnedGeneration = s.birthGeneration
 =====================================================================

@@ -29,7 +29,8 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/version
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/meta/TestLedgerMetadataSerDe.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
              ('client/api/LedgerMetadata.java', 'client/api/DigestType.java',
-              'conf/AbstractConfiguration.java', 'conf/ClientConfiguration.java', 'meta/zk/ZKMetadataDriverBase.java'))
+              'conf/AbstractConfiguration.java', 'conf/ClientConfiguration.java', 'meta/zk/ZKMetadataDriverBase.java',
+              'proto/checksum/DigestManager.java', 'proto/checksum/MacDigestManager.java'))
 paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile').rglob('*.java'))
 paths.update(Path('bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile').rglob('*.java'))
 paths.update(Path('bookkeeper-common/src/test/resources/profile-wire').rglob('*.bin'))

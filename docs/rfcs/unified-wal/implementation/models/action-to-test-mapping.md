@@ -491,3 +491,16 @@ slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限
 | 同phase E验证（模型外） | actual ZK PREPARING root → typed endpoint → 3个控制文件全部进入force后统一释放，全部真实durable且仍inactive |
 
 transport facts未替代实际TLS，driver的当前duplicate路径仍追加durable control record；未实现全局receipt retention/READY/activation或normal writer。
+
+
+## 初始 metadata 协调动作
+
+| 动作 | 实际实现与验证 |
+| --- | --- |
+| Validate / Reserve | 冻结metadata/descriptor/credential/target HELLO，验证E/W/A/顺序及原BK credential派生，随后实际create/resolve PREPARING；wrong plan/peer/credential零root写入 |
+| Dispatch / Receive / Join | `InstallClient`提交整个E后统一等待；3个实际control文件全部force前metadata absent；A=2成功、UNKNOWN或错bound success不调用manager |
+| ReadRoot | actual sync/get与最初完整snapshot+mzxid相等；安装期间root实际setData后拒绝，snapshot不是持续lease |
+| CreateMetadata / MetadataReply | 原manager create后actual full read；同内容retry的实际version/receipt内容等价，输出user bytes由开始时snapshot决定 |
+| Install birth / redaction | INSTALL返回原birth generation，真实activation/replay保持1；真实metadata result字符串password暴露先红后绿，coordinator结果不展开metadata/custom values |
+
+known拒绝或损坏response字段使用负向client控制；successful/unknown target与metadata persistence依靠真实FileChannel/ZK。实际TLS/wire、retention、READY/CAS和writer completion仍不在本动作范围。

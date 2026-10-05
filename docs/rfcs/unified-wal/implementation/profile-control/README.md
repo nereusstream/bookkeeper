@@ -224,3 +224,32 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 最终 `unified-wal-local-xzOtn4EW` tool exit0，987冻结source inputs，相关10类102项为97通过/5 macOS Linux-affinity跳过、0 failure/error；`unified-wal-install-style-mVFZelYE` Spotless/Checkstyle exit0，source集精确一致，16份Java回执checksums已核验。最终模型 `unified-wal-model-nbfk9uf2` tool exit0，201配置为45正向完整PASS/156指定反例，435冻结inputs/605 checksums；185共享输入及1237去重union一致，五个designInputs绑定父提交 `eb8408cb5cac686e0e7e9a72cd706877c067c1ce`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。
 
 有限[physical INSTALL投影](../models/README.md#physical-install-分发投影)检查exact admission、barrier/owner结果、停止等待后的实际ownership及normal-state保留。真实READY/有界target pages/delete cut与birth-bound CAS、global all-E receipt/coordinator及metadata前置组合、activation、INSTALL实际TLS/wire、生产startup/readiness、quorum、完整恢复/完整A/C/D组合、长期/掉电/性能仍未闭合。步骤12和生产Gate保持PARTIAL。
+
+
+## 步骤 12：all-E 后的初始 metadata 协调门槛
+
+2026-10-06，`ProfileInitialMetadataCoordinator`复用真实PREPARING root、原typed INSTALL endpoint/physical adapter和标准metadata create adapter，接通初始创建到metadata阶段。创建开始前冻结标准metadata（含其他custom bytes和password）、canonical descriptor、全部有序计划E、credential及target binding；要求同ledger/backlink、descriptor identity、E/W/A与ensemble顺序，当前SEGMENT/SYNC_ON_ACK以及完整peer Bookie/incarnation/Engine和mandatory capabilities匹配。kind-1 credential必须与原`DigestManager.generateMasterKey(metadata.password)`相同，错误输入在任何reservation写入前拒绝。
+
+调用方提供有界cold executor和nonblocking、request-correlated `InstallClient`，coordinator不拥有线程、client、timer或retry。每个Target绑定已验证的HELLO facts；source构造未替代真实mTLS/peer身份校验，未来wire client必须保证同一peer/request的关联。先实际create/resolve reservation，再发出全部E请求，随后统一等待结果；不会按E逐个串行等待，也不能用W或A代替E。
+
+只有每个目标的APPLIED/ALREADY_APPLIED、durable=true、matching INSTALL/ledger/operationId/authority generation及positive install generation才形成`ProfileInstallReceipt`。receipt绑定完整immutable scope（含instance、descriptor、target/incarnation、operation/public payload/generation）、SEGMENT Engine、public capability digest及稳定local install generation；无secret/offline verifier。digest为SHA-256，domain `BookKeeper/ProfileInstallCapabilities/v1`加NUL，随后big-endian `schema:u32=1 + engine:u16 + capabilityCount:u16 + sorted capabilityId:u32/semanticVersion:u16/reserved:u16=0`；排除credential和readiness generation。空capabilities、Engine 3的独立vector为`d6ff18b72491b4622e7e0d9270c7a90b007e8af46a3d84d598e889deda594bdf`。它是当前experimental logical receipt，未冻结INSTALL response wire、stable capability inventory或生产client认证规则。
+
+known拒绝使结果INSTALL_NOT_READY，UNKNOWN/exception/null或错绑定success为INSTALL_UNCERTAIN；均不调用standard metadata，不能据此清除更早UNKNOWN或更换instance。不会cancel已提交target任务。全部E匹配后，cold sync/get再次验证与最初同一完整PREPARING snapshot和mzxid；absent/unavailable保持RESERVATION_UNKNOWN，坏root隔离，改变/删除重建的snapshot拒绝。通过后才调用原metadata adapter，并继续以一次实际read验证完整backlink/初始内容及actual version/token。返回METADATA_CREATED/METADATA_ALREADY_CREATED只陈述metadata snapshot及有界install receipts，不是READY、local ACTIVE或normal writer。
+
+root read与standard metadata create不是跨key原子事务；read之后root被改/删仍可能形成inert orphan。后续READY/target publication必须以实际lifecycle/delete cut CAS解决此窗口，不能从此门槛推导即时撤权、normal authority或GC许可。receipt目前随结果返回，persistent receipt/target retention及restart coordinator尚未实现。
+
+本轮补齐两个实际依赖：原控制log保留安装时的local generation，INSTALL adapter返回该birth generation；activation/fence推进current local generation不改install generation，重放按原install顺序还原，无control/on-disk格式变更。新回归重现旧映射在activation后expected1/actual2（`unified-wal-local-JvZNZYfY` exit1），修复后真实force/retry及文件replay保持1且不deactivate既有normal状态。原metadata Result默认字符串会通过`Versioned`/LedgerMetadata展开password，真实ZK回归`unified-wal-local-jbU3g2Kj` exit1；现在两层control结果字符串只显示状态、是否有metadata及receipt数量，不展开password或custom values。
+
+新增5项真实初始协调流程、1项install-birth replay、1项metadata结果redaction回归：3个控制文件全部force前实际ZK metadata不存在；期间修改caller custom bytes不改变已冻结输出；同内容retry返回既有metadata/version和等价receipts；A=2的成功不足、错绑定success、提交后timeout保持metadata absent；实际root version变化拒绝推进；错quorum/顺序/credential/peer在root创建前拒绝。`unified-wal-local-yymOrOq2`相关22项通过；仅known拒绝/错误response字段的负向测试使用受控client返回，成功、UNKNOWN和metadata持久事实均经实际FileChannel/ZK路径。transport仍为typed facts，测试不证明真实INSTALL socket或quorum。
+
+复现：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInstallStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileReservationStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,IsolatedProfileControlEndpointTest,TestLedgerMetadataSerDe,SegmentExecutionGroupTest,SegmentBookieControlLogTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
+
+首次完整`unified-wal-local-IhkLzTlW`的351项为346通过/5平台跳过；首次style因新增测试import顺序/unused import exit1，只有import修正后重新冻结完整验证，旧运行保持原输入。
+
+最终 `unified-wal-local-CgLIZ88L` tool exit0，991冻结source inputs，相关10类351项为346通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-initial-style-E82C4Awl` Spotless/Checkstyle exit0，source集精确一致，16份Java回执checksums已核验。最终模型 `unified-wal-model-ufcpvr46` tool exit0，209配置为46正向完整PASS/163指定反例，448冻结inputs/629 checksums；189共享输入及1250去重union一致，五个designInputs绑定父提交 `60a0bab6e5793cff79216ea6c99de080bf60ae0f`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。READY/有界target page与persistent receipt retention、birth-bound lifecycle/delete cut CAS、full restart coordinator、actual INSTALL TLS/wire、全E activation/normal writer、生产startup/readiness、client quorum/CLOSED/完整恢复、完整A/C/D与组合、长期/掉电/性能仍未闭合，步骤12和生产Gate保持PARTIAL。

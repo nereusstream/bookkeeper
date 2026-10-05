@@ -26,14 +26,22 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import javax.crypto.spec.SecretKeySpec;
+import org.apache.bookkeeper.client.LedgerMetadataBuilder;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.profile.DurabilityMode;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.PayloadFormat;
@@ -53,11 +61,21 @@ import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.control.ProfileTransportContext;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
+import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
+import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator.Status;
+import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
+import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LongHierarchicalLedgerManagerFactory;
+import org.apache.bookkeeper.meta.ZkLayoutManager;
 import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.checksum.DigestManager;
 import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 import org.apache.zookeeper.CreateMode;
@@ -400,4 +418,288 @@ public class SegmentProfileInstallStoreTest {
             assertTrue(result.durable());
         }
     }
+    private final class InitialCreate implements AutoCloseable {
+        final ZooKeeperUtil cluster = new ZooKeeperUtil() {
+            @Override
+            public String getZooKeeperConnectString() {
+                String address = super.getZooKeeperConnectString();
+                return "127.0.0.1" + address.substring(address.lastIndexOf(':'));
+            }
+        };
+        final List<Local> locals = new ArrayList<>();
+        final List<ProfileControlScope> scopes = new ArrayList<>();
+        final Map<String, ProfileInitialMetadataCoordinator.Target> targets = new HashMap<>();
+        final ExecutorService cold = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(32));
+        final CountDownLatch allForces = new CountDownLatch(3);
+        final CountDownLatch release = new CountDownLatch(1);
+        final AtomicBoolean armed = new AtomicBoolean();
+        final ZooKeeper zk;
+        final LedgerManager manager;
+        final ZKProfileReservationStore reservations;
+        final ProfileReservation reservation;
+        final ProfileInitialMetadataCoordinator coordinator;
+        final byte[] password = "initial-create-password".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        final ProtectedProfileCredential credential;
+        final String root = "/initial-profile-reservation";
+
+        InitialCreate(Duration installTimeout) throws Exception {
+            cluster.startCluster();
+            ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
+            zk = new ZooKeeper(cluster.getZooKeeperConnectString(), 10000, watcher);
+            watcher.waitForConnection();
+            zk.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            zk.create("/initial-profile-ledgers", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            ClientConfiguration conf = new ClientConfiguration();
+            conf.setMetadataServiceUri("zk+longhierarchical://127.0.0.1:2181/initial-profile-ledgers");
+            var factory = new LongHierarchicalLedgerManagerFactory();
+            factory.initialize(conf, new ZkLayoutManager(zk, "/initial-profile-ledgers", ZooDefs.Ids.OPEN_ACL_UNSAFE),
+                    factory.getCurrentVersion());
+            manager = factory.newLedgerManager();
+            reservations = new ZKProfileReservationStore(zk, root, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            credential = ProtectedProfileCredential.of(ProtectedProfileCredential.BK_MASTER_KEY_SHA1,
+                    DigestManager.generateMasterKey(password));
+            ProfilePrincipal principal = new ProfilePrincipal(
+                    ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                    "operators", "cn=test-ca", "cn=initial-controller");
+            ProfileTransportContext transport = new ProfileTransportContext("bookie-profile", "TLSv1.3",
+                    true, true, true, principal);
+            for (int target = 1; target <= 3; target++) {
+                SegmentFileIo fault = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    if (armed.get()) {
+                        allForces.countDown();
+                        waitFor(release);
+                    }
+                });
+                Local local = new Local("c" + target, target + 4, fault, installTimeout);
+                locals.add(local);
+                ProfileControlScope scope = scope(local.identity.bookieId().toString(), target + 4);
+                scopes.add(scope);
+                var endpoint = new IsolatedProfileControlEndpoint(EngineProfile.SEGMENT_WAL_ENGINE, VALIDATOR,
+                        (caller, operation) -> caller.equals(principal) && operation == ProfileControlOperation.INSTALL,
+                        reservations.installAuthorityReader(scope.targetBookie()),
+                        (caller, requested, authority) -> caller.equals(principal)
+                                && requested.equals(authority.scope()) ? Decision.ALLOW : Decision.DENY, local.store);
+                ProfileHello.Server hello = new ProfileHello.Server(EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
+                        local.identity.incarnation().value(), 0, local.identity.bookieId().toString(), List.of());
+                targets.put(scope.targetBookie(), new ProfileInitialMetadataCoordinator.Target(hello,
+                        request -> CompletableFuture.supplyAsync(() -> endpoint.handle(transport, request), cold)));
+            }
+            reservation = new ProfileReservation(new ProfileMetadataBacklink(44, bytes(16, 1), bytes(16, 2)), scopes);
+            coordinator = new ProfileInitialMetadataCoordinator(reservations, new ProfileLedgerMetadataStore(manager),
+                    VALIDATOR, cold);
+        }
+
+        LedgerMetadata metadata() {
+            return LedgerMetadataBuilder.create().withId(44).withEnsembleSize(3).withWriteQuorumSize(3)
+                    .withAckQuorumSize(2).withDigestType(org.apache.bookkeeper.client.api.DigestType.CRC32C)
+                    .withPassword(password).withCustomMetadata(Map.of("user", new byte[]{8}))
+                    .newEnsembleEntry(0, scopes.stream().map(scope -> BookieId.parse(scope.targetBookie())).toList())
+                    .build();
+        }
+
+        CompletableFuture<ProfileInitialMetadataCoordinator.Result> create(LedgerMetadata initial) {
+            return coordinator.create(initial, reservation, DESCRIPTOR_BYTES, credential, targets);
+        }
+
+        String metadataPath() {
+            return ((AbstractZkLedgerManager) manager).getLedgerPath(44);
+        }
+
+        @Override
+        public void close() throws Exception {
+            armed.set(false);
+            release.countDown();
+            cold.shutdown();
+            assertTrue(cold.awaitTermination(5, TimeUnit.SECONDS));
+            try {
+                for (Local local : locals) {
+                    local.close();
+                }
+                manager.close();
+            } finally {
+                zk.close();
+                cluster.stopCluster();
+            }
+        }
+    }
+
+    @Test
+    public void coordinatorWaitsForAllEAndPublishesOnlyFrozenExactInitialMetadata() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            LedgerMetadata input = initial.metadata();
+            initial.armed.set(true);
+            var pending = initial.create(input);
+            try {
+                assertTrue(initial.allForces.await(5, TimeUnit.SECONDS));
+                assertFalse(pending.isDone());
+                assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
+                input.getCustomMetadata().get("user")[0] = 99;
+            } finally {
+                initial.armed.set(false);
+                initial.release.countDown();
+            }
+            var created = pending.get(5, TimeUnit.SECONDS);
+            assertEquals(Status.METADATA_CREATED, created.status());
+            assertEquals(3, created.installs().size());
+            assertEquals(8, created.metadata().getValue().getCustomMetadata().get("user")[0]);
+            assertEquals(initial.reservation.backlink(), ProfileMetadataBacklink.from(created.metadata().getValue()));
+            for (int index = 0; index < 3; index++) {
+                assertEquals(initial.scopes.get(index), created.installs().get(index).scope());
+                assertEquals(1, created.installs().get(index).localInstallGeneration());
+                assertEquals("d6ff18b72491b4622e7e0d9270c7a90b007e8af46a3d84d598e889deda594bdf",
+                        HexFormat.of().formatHex(created.installs().get(index).capabilityDigest()));
+                assertFalse(initial.locals.get(index).log.normalAdmission(context(),
+                        DigestManager.generateMasterKey(initial.password)));
+            }
+            assertFalse(created.toString().contains("password"));
+            assertFalse(created.toString().contains("user"));
+            var retried = initial.create(initial.metadata()).get(5, TimeUnit.SECONDS);
+            assertEquals(Status.METADATA_ALREADY_CREATED, retried.status());
+            assertEquals(created.installs(), retried.installs());
+            assertEquals(created.metadata().getVersion(), retried.metadata().getVersion());
+        }
+    }
+
+    @Test
+    public void coordinatorRequiresAllENotAckQuorumAndRejectsWrongSuccessfulResultBinding() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            String last = initial.scopes.get(2).targetBookie();
+            var target = initial.targets.get(last);
+            initial.targets.put(last, new ProfileInitialMetadataCoordinator.Target(target.hello(), request ->
+                    CompletableFuture.completedFuture(new ProfileControlResult(Outcome.TRANSIENT_RECONCILING,
+                            request.scope().operation(), 44, HexFormat.of().formatHex(request.scope().operationId()),
+                            1, 0, false))));
+            var partial = initial.create(initial.metadata()).get(5, TimeUnit.SECONDS);
+            assertEquals(Status.INSTALL_NOT_READY, partial.status());
+            assertEquals(2, partial.installs().size());
+            assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
+            initial.targets.put(last, new ProfileInitialMetadataCoordinator.Target(target.hello(), request ->
+                    target.client().install(request).thenApply(result -> new ProfileControlResult(result.outcome(),
+                            result.operation(), 45, result.operationIdHex(), result.authorityGeneration(),
+                            result.localGeneration(), result.durable()))));
+            var misbound = initial.create(initial.metadata()).get(5, TimeUnit.SECONDS);
+            assertEquals(Status.INSTALL_UNCERTAIN, misbound.status());
+            assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
+            initial.targets.put(last, target);
+            assertEquals(Status.METADATA_CREATED, initial.create(initial.metadata()).get(5, TimeUnit.SECONDS).status());
+        }
+    }
+
+    @Test
+    public void coordinatorKeepsMetadataAbsentAfterSubmittedInstallTimeoutAndResolvesExactRetry() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofMillis(200))) {
+            initial.armed.set(true);
+            var pending = initial.create(initial.metadata());
+            try {
+                assertTrue(initial.allForces.await(5, TimeUnit.SECONDS));
+                var unknown = pending.get(5, TimeUnit.SECONDS);
+                assertEquals(Status.INSTALL_UNCERTAIN, unknown.status());
+                assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
+                for (Local local : initial.locals) {
+                    assertThrows(IOException.class, local.log::close);
+                }
+            } finally {
+                initial.armed.set(false);
+                initial.release.countDown();
+            }
+            for (Local local : initial.locals) {
+                awaitApplied(local.log, -1);
+            }
+            assertEquals(Status.METADATA_CREATED, initial.create(initial.metadata()).get(5, TimeUnit.SECONDS).status());
+        }
+    }
+
+    @Test
+    public void coordinatorRechecksTheSameRootSnapshotBeforeCreatingStandardMetadata() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            initial.armed.set(true);
+            var pending = initial.create(initial.metadata());
+            try {
+                assertTrue(initial.allForces.await(5, TimeUnit.SECONDS));
+                byte[] bytes = initial.zk.getData(initial.root + "/2c", false, null);
+                initial.zk.setData(initial.root + "/2c", bytes, 0);
+            } finally {
+                initial.armed.set(false);
+                initial.release.countDown();
+            }
+            assertEquals(Status.RESERVATION_CONFLICT, pending.get(5, TimeUnit.SECONDS).status());
+            assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
+        }
+    }
+
+    @Test
+    public void coordinatorRejectsWrongPlanQuorumCredentialAndPeerBeforeAnyReservationWrite() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var metadata = initial.metadata();
+            assertThrows(IllegalArgumentException.class, () -> initial.create(
+                    LedgerMetadataBuilder.from(metadata).withAckQuorumSize(3).build()));
+            assertThrows(IllegalArgumentException.class, () -> initial.create(
+                    LedgerMetadataBuilder.from(metadata).replaceEnsembleEntry(0, List.of(
+                            BookieId.parse("c2:3181"), BookieId.parse("c1:3181"), BookieId.parse("c3:3181"))).build()));
+            assertThrows(IllegalArgumentException.class, () -> initial.coordinator.create(metadata, initial.reservation,
+                    DESCRIPTOR_BYTES, ProtectedProfileCredential.of(ProtectedProfileCredential.BK_MASTER_KEY_SHA1,
+                            bytes(20, 6)), initial.targets));
+            var target = initial.targets.get("c3:3181");
+            initial.targets.put("c3:3181", new ProfileInitialMetadataCoordinator.Target(new ProfileHello.Server(
+                    EngineProfile.SEGMENT_WAL_ENGINE.wireValue(), bytes(16, 9), 0, "c3:3181", List.of()),
+                    target.client()));
+            assertThrows(IllegalArgumentException.class, () -> initial.create(metadata));
+            assertEquals(null, initial.zk.exists(initial.root + "/2c", false));
+            assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
+        }
+    }
+
+    @Test
+    public void installReceiptKeepsItsBirthGenerationAfterActivationAndFileReplay() throws Exception {
+        IsolatedSegmentConfig config;
+        SegmentFileHeader identity;
+        var install = transition(scope("b1:3181", 5), 6);
+        try (Local local = new Local("b1", 5, new SegmentFileIo(), Duration.ofSeconds(5))) {
+            config = local.config;
+            identity = local.identity;
+            assertEquals(1, retry(local, install).localGeneration());
+            var old = install.request().scope();
+            var active = new ProfileControlScope(ProfileControlOperation.ACTIVATE_INITIAL,
+                    ProfileControlOperation.ACTIVATE_INITIAL.purpose(), 44, old.ledgerInstanceId(), DESCRIPTOR_ID,
+                    old.targetBookie(), old.targetStorageIncarnation(), old.authorityDomain(), 2,
+                    bytes(16, 9), old.publicSemanticPayloadIdentity(), null);
+            var activation = new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(active),
+                    new CommittedProfileAuthority(active, CommittedProfileAuthority.State.READY_INITIAL,
+                            EngineProfile.SEGMENT_WAL_ENGINE, 1, true), null);
+            CompletableFuture<List<SegmentBookieControlLog.Result>> result = new CompletableFuture<>();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!local.driver.submitBatch(List.of(activation), (value, failed) -> {
+                if (failed == null) {
+                    result.complete(value);
+                } else {
+                    result.completeExceptionally(failed);
+                }
+            })) {
+                assertTrue(System.nanoTime() < deadline);
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertEquals(2, result.get(5, TimeUnit.SECONDS).get(0).localGeneration());
+            assertEquals(1, retry(local, install).localGeneration());
+            assertTrue(local.log.normalAdmission(context(), bytes(20, 6)));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR)) {
+            SegmentOwnerLoop owner = new SegmentOwnerLoop(1, 1, 0, 1, 2);
+            SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+            try {
+                owner.start();
+                var driver = new SegmentBookieControlDriver(owner, io, replay);
+                var store = new SegmentProfileInstallStore(driver, identity, Duration.ofSeconds(5));
+                assertEquals(1, store.conditionalApply(install).localGeneration());
+                assertTrue(replay.normalAdmission(context(), bytes(20, 6)));
+            } finally {
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
 }

@@ -87,7 +87,7 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                 case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
                 case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
             };
-            reply.complete(new TransitionResult(outcome, applied.localGeneration(),
+            reply.complete(new TransitionResult(outcome, applied.localInstallGeneration(),
                     outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED));
         });
         if (!accepted) {
