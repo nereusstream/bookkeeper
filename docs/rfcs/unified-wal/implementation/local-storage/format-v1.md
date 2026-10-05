@@ -245,7 +245,7 @@ stream至多logicalShards个、按shard递增，当前无MOVE/FREE范围内每sh
 | 64 / 72 / 80 | first retired batch sequence i64 / through i64 / parsed record count u64 |
 | 88 / 96 | required Bookie applied cut i64 / SHA-256 of the entire verified allocation, 32 bytes |
 
-无 DATA 的初始全零范围使用 record count=0、first/through=-1；它不增加 stream 前缀。非空区间有界、连续，所有 record 都具有相同匹配 allocation 身份及准确终态 tombstone，且不含 RELOCATION_COPY。外层仍验证 header/body CRC32C、sequence、owner/type、operation id 与 generation。成功 apply 后原 grant 失效，保留 retirement 和 generation 2；同一 operation 的重试不重复 bump，generation 0 ALLOC 不得复占退役 slot。
+无 DATA 的初始全零范围使用 record count=0、first/through=-1；它不增加 stream 前缀。空 FREE 仍保留其必要 Bookie cut；恢复不能因没有物理序号范围省略该检查。非空区间有界、连续，所有 record 都具有相同匹配 allocation 身份及准确终态 tombstone，且不含 RELOCATION_COPY。外层仍验证 header/body CRC32C、sequence、owner/type、operation id 与 generation。成功 apply 后原 grant 失效，保留 retirement 和 generation 2；同一 operation 的重试不重复 bump，generation 0 ALLOC 不得复占退役 slot。
 
 重放只按前序 applied grant、原 operation sequence、完整范围及 expected generation 判断，保留必要 Bookie cut；不重读已退役历史 DATA，也不通过重启时 pin=0 补认 proof。原 allocation 与 retirement facts 随既有 applied checkpoint/rotation 保留。固定独立向量 `arena-whole-free-v1.hex` 为272字节：file=0/shard=1、allocation=1、offset=4096、1 block、stream generation/start=1、原控制序号0、退役区间1..1/1 record、Bookie cut=0、digest=00..1f、FREE sequence=1、UUID=0:2。此向量验证编码/解码，不能单独授权 runtime 回收。
 

@@ -789,3 +789,18 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 最终七类 Java 回执 `unified-wal-local-yQN4LTSM` 绑定上述父提交及 210 实际输入，316 项中 311 通过、5 项 Linux 亲和性在 macOS 跳过，0 失败/错误；Spotless/Checkstyle 通过。两个新增风险先执行最小集，再扩大至共享 codec/控制/DATA/owner 的七类，复现命令沿用[运行期轮转](#运行期控制日志轮转)。[有限恢复入口投影](../models/README.md#原-journal-的压缩-checkpoint-恢复投影)回执 `unified-wal-model-4gs7yzfe` 绑定同一父提交、162 实际输入与 328 个 checksum；29 正向完整 PASS、80 指定反例，含原 journal 误拒合法 image 的新反例。最终 Java/模型输入 hash 与当前源码一致，历史 receipt 不改绑定。
 
 本增量只统一合法 checkpoint 的恢复，业务状态压缩尚未完成。Arena 的历史 FREE 还承担退役 DATA 序号区间、generation 与 Bookie cut，当前复用还需要健康 CLOSE 的末端见证；Bookie terminal T 仍承担防止迟到授权及重建删除义务。压缩必须完整接管这些事实，不能直接删除旧命令。持续创建删除、业务/会话历史、完整临时工作集、长期负载、多 Arena、一般 OPEN 错误恢复、掉电、正式性能及完整 A/C/D 仍未验证，步骤 8/10、B17 与生产 Gate 保持未完成。
+
+
+## 退役 DATA 序号区间的合并
+
+2026-10-05，Arena 从成功 FREE 的持久事实生成 `retiredStreamRanges` 恢复投影。按准确 shard/stream generation 与原成功 allocation 控制序号排序，仅合并同一 stream 起点、物理序号连续的退役区间；当前 allocation 的控制顺序必须留作边界，即使该 grant 还没有写入 DATA。合并保留首尾 allocation 顺序、精确首尾物理序号及最大必要 Bookie cut，不跨 stream、序号缺口或 current grant。恢复消费这些区间，仍验证当前 DATA、generation、健康 CLOSE 尾部及必要同步，不增加新的空间或读取授权。
+
+空 allocation 的 FREE 没有物理序号区间，但仍携带必要 Bookie cut。恢复在消费区间前，检查全部 FREE 的最大必要 cut，包括空退役；不能因 record count 为零跳过该授权依赖。原 FREE v1/v2 与 image v1/v2 字节不变，历史 facts 仍完整保留。
+
+三个真实文件回归覆盖：同一 block 连续 24 次 FREE/reuse 后只投影一个退役区间，第 25 次当前 DATA 经双 owner rotation 与健康 restart 后可读；两段退役之间的未写 current grant 保留两个区间及完整 stream prefix；空 grant 已 FREE、Bookie 控制事实被移除时拒绝恢复。初次 `unified-wal-local-JhWlKjAZ` 的后一夹具在下一 OPEN 推进 cut 后错误使用旧启动清单，按正确契约改为现有稳定 cut 下的 `IndexFixture`；没有放宽 `requireCurrentArena`。候选反例 `unified-wal-local-ZdO9VzjP` 中两个区间用例通过，空 FREE 缺少 cut 却未拒绝，1 项断言失败。修复后先完成最小三项，再扩大回归；失败回执不计 PASS。
+
+最终七类 Java 回执 `unified-wal-local-PJgKZ5Yy` 绑定父提交 `efbcacc4e0164b548cdca160dfbdf43c031e85b8` 及 210 实际输入：319 项中 314 通过、5 项 Linux 亲和性在 macOS 跳过，0 失败/错误；Spotless/Checkstyle 通过。最小三项通过后，因共享恢复与控制合同扩大至既有七类，复现沿用[运行期轮转](#运行期控制日志轮转)的 runner 和 style 命令。[有限区间投影](../models/README.md#退役-data-序号区间投影)回执 `unified-wal-model-67aozqxn` 绑定同一父提交、168 实际输入与 343 个 checksum：30 正向完整 PASS、84 指定反例全部符合预期。354 个去重的 Java/模型输入 hash 与当前源码一致，历史 receipt 保持原绑定。
+
+请求身份的静态核对建议独立的 Arena 请求代，首次身份与重试保持不变；持久拒绝下界须跨 checkpoint/fallback/restart 保留，过期 stale 不表示原操作未执行。当前候选尚未替代裸 UUID API、既有 operationGeneration 或实验编码，完整业务历史压缩尚未实现。
+
+这一步提供紧凑业务状态的恢复事实，尚未删除 request-id、ALLOC、FREE、MOVE 或 session 历史。投影仍从历史表排序并创建临时列表，历史内存、磁盘及排序工作集仍随业务增长，不宣称长期资源有界或性能改善。有界请求身份、完整业务快照、Bookie terminal T 的清理义务、共享 filesystem/SST/checkpoint 临时预算、长期负载、多 Arena、一般 OPEN 错误恢复、掉电、正式性能与完整模型仍待完成；步骤 8/10、B17 和生产 Gate 保持未完成。

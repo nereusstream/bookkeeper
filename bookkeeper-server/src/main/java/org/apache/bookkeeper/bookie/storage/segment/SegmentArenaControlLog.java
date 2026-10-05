@@ -868,6 +868,57 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return List.copyOf(retiredAllocations.values());
     }
 
+    /** Empty retirements carry no sequence range, but keep their required authority cut. */
+    synchronized long requiredRetiredBookieCut() {
+        return retiredAllocations.values().stream().mapToLong(free -> free.facts().bookieCut()).max().orElse(-1);
+    }
+
+    record RetiredRange(int shard, Generation generation, long streamFirstSequence, long allocationOrder,
+                        long lastAllocationOrder, long firstSequence, long through, long bookieCut) { }
+
+    /** Consecutive retired DATA can share a recovery range, but never cross a current allocation's control order. */
+    synchronized List<RetiredRange> retiredStreamRanges() {
+        List<RetiredRange> ordered = retiredAllocations.values().stream()
+                .filter(free -> free.facts().records() != 0).map(free -> {
+                    FreeFacts facts = free.facts();
+                    AllocationIdentity allocation = facts.allocation();
+                    return new RetiredRange(allocation.ownerShard(), allocation.ownerGeneration(),
+                            allocation.streamFirstSequence(), facts.allocationOrder(), facts.allocationOrder(),
+                            facts.firstSequence(), facts.through(), facts.bookieCut());
+                }).sorted(Comparator.comparingInt(RetiredRange::shard)
+                        .thenComparingLong(range -> range.generation().value())
+                        .thenComparingLong(RetiredRange::allocationOrder)).toList();
+        List<RetiredRange> merged = new ArrayList<>();
+        for (RetiredRange next : ordered) {
+            RetiredRange previous = merged.isEmpty() ? null : merged.get(merged.size() - 1);
+            boolean join = previous != null && previous.shard() == next.shard()
+                    && previous.generation().equals(next.generation())
+                    && previous.streamFirstSequence() == next.streamFirstSequence()
+                    && previous.lastAllocationOrder() < next.allocationOrder()
+                    && previous.through() + 1 == next.firstSequence();
+            if (join) {
+                for (Grant grant : allocations.values()) {
+                    Allocation allocation = grant.command();
+                    long order = appliedOperations.get(allocation.operationId()).sequence();
+                    if (allocation.ownerShard() == next.shard()
+                            && allocation.ownerGeneration().equals(next.generation())
+                            && order > previous.allocationOrder() && order < next.lastAllocationOrder()) {
+                        join = false;
+                        break;
+                    }
+                }
+            }
+            if (join) {
+                merged.set(merged.size() - 1, new RetiredRange(previous.shard(), previous.generation(),
+                        previous.streamFirstSequence(), previous.allocationOrder(), next.lastAllocationOrder(),
+                        previous.firstSequence(), next.through(), Math.max(previous.bookieCut(), next.bookieCut())));
+            } else {
+                merged.add(next);
+            }
+        }
+        return List.copyOf(merged);
+    }
+
     synchronized long retiredExtentEnd(int file, long offset) {
         Free free = retiredSlots.get(slot(file, offset));
         return free == null ? -1 : free.facts().allocation().offset()

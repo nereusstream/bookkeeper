@@ -381,3 +381,14 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | RejectOriginalGap 错误候选 | 有效 v2 仍按旧完整内部历史拒绝，指定 `OriginalRestoresValidCompactedImage` 检查该门槛；不允许用完整日志可回放掩盖合法 image 被错误丢弃 |
 
 模型仅投影 snapshot 可恢复条件，物理原日志、commit/reference/CRC、发布同步与 fallback/suffix 由既有真实回归承担；实际正向与指定反例结果见模型 README；配置内容与回执输出分别核对，不把候选存在当作通过。
+
+
+## 退役 DATA 序号区间
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| CheckBookieCut | 恢复先检查 `requiredRetiredBookieCut`，包括不进入物理区间的空 FREE；`emptyRetiredAllocationStillRequiresItsBookieControlCut` 真实移除 Bookie 后缀后拒绝，候选实现先红后绿 |
+| Advance | Arena 按原成功 allocation 顺序合并准确 stream 的连续 retired sequence；`retiredStreamRangesMergeRepeatedReuseAndRestoreCurrentDataPrefix` 真实 24 次 FREE/reuse、一个投影、当前第 25 次 DATA 与双控制轮转/健康重启读取 |
+| Advance / Finish | 当前 grant 顺序不能跨越；`retiredStreamRangesKeepUnwrittenCurrentAllocationOrderBetweenRetirements` 保留未写的中间 grant、两个退役区间及稳定恢复 cut 的完整 stream prefix |
+
+模型把成功 FREE、原控制顺序、stream 身份及 Bookie cut 作为输入；不证明新的 FREE、物理字节、持久化或压缩历史本身安全。

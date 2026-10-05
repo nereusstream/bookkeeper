@@ -609,3 +609,24 @@ CHECK_DEADLOCK FALSE 仅允许有限终态，没有 liveness、公平调度、�
 复现仍使用 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`。本轮原临时工具缺失，curl 下载超时、续传 TLS 失败均没有执行模型或产生 PASS；恢复官方 1.7.4 完整文件并核对锁定 SHA-1/SHA-256 后才运行。单 worker、固定 seed/fp、无状态约束或对称化保持不变；真实路径见[原 journal 恢复](../local-storage/README.md#原-journal-的压缩-checkpoint-恢复)。
 
 本模型把物理原日志/轮转、commit/framing/hash、业务条件及实际同步作为输入；CHECK_DEADLOCK FALSE 仅允许有限终态，不证明 liveness、公平调度或物理 durability。业务/会话历史压缩、完整 filesystem 临时工作集、长期负载、多 Arena、完整 A/C/D 与组合、B17 和生产 Gate 仍未闭合。
+
+
+## 退役 DATA 序号区间投影
+
+2026-10-05，`RetiredSequenceRanges.tla` 固定三个已有成功退役事实、两个抽象 stream、原 allocation 控制顺序 1/3/5、current grant 边界 2/4、连续或缺口物理序号，以及可能没有物理范围的空 FREE 必要 cut。准确 shard/generation/start 与成功 FREE 是输入；CheckBookieCut 先保留全部必要 cut，再 Advance 折叠连续区间，Finish 进入有限终态。覆盖集合必须相同，当前 grant 的顺序不能被桥接，合并保留最大 cut；空 FREE 不得因未进入区间而失去 cut。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-retired-sequence-ranges | 192 / 192 / 0 | 6 / 6 | 0.914 s / 127,696,896 bytes | PASS |
+| ce-retired-sequence-ranges-gap | 98 / 98 / 31 | 4 / 不适用 | 0.841 s / 113,917,952 bytes | EXPECTED_COUNTEREXAMPLE: RetiredCoverageIsExact |
+| ce-retired-sequence-ranges-live | 101 / 101 / 31 | 4 / 不适用 | 0.838 s / 115,245,056 bytes | EXPECTED_COUNTEREXAMPLE: CurrentAllocationOrderIsNotBridged |
+| ce-retired-sequence-ranges-cut | 97 / 97 / 31 | 4 / 不适用 | 0.857 s / 117,112,832 bytes | EXPECTED_COUNTEREXAMPLE: RequiredBookieCutIsRetained |
+| ce-retired-sequence-ranges-empty | 49 / 49 / 31 | 2 / 不适用 | 0.848 s / 110,821,376 bytes | EXPECTED_COUNTEREXAMPLE: EmptyRetirementKeepsRequiredBookieCut |
+
+正向三个 Next 动作均有非零 coverage：CheckBookieCut 32:32、Advance 96:96、Finish 32:32（保留工具双计数）。四个错误候选分别忽略序号缺口、current grant 顺序边界、区间最大 cut 或空 FREE 的 cut，均在指定性质上产生反例。
+
+初次候选回执 `unified-wal-model-7kzdbnvc` 的空 FREE 敏感性错误在 Init 即违反性质，没有 runner 要求的 Next 轨迹，因此整轮 exit 1、该项 INCONCLUSIVE，不计 PASS。将 cut 计算表示为独立 CheckBookieCut 步骤后保持同一性质与失败判定，再运行得到上述明确反例；没有修改 runner 的通过标准。
+
+最终回执 `unified-wal-model-67aozqxn` 绑定父提交 `efbcacc4e0164b548cdca160dfbdf43c031e85b8`、168 实际输入与 343 个 checksum；114 配置为 30 正向完整 PASS、84 指定反例，全部符合预期。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化保留。真实复用、未写 current grant 与缺失 Bookie authority 的验证见[区间合并](../local-storage/README.md#退役-data-序号区间的合并)。
+
+CHECK_DEADLOCK FALSE 仅允许有限终态。本模型不新增 FREE/字节/权限或持久化权威，不证明历史可以安全删除、长期工作集有界、liveness、一般 OPEN 错误恢复、完整 A/C/D 与组合、B17 或生产 Gate；原历史 receipt/designInputs 保持原绑定。

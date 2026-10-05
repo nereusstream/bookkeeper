@@ -9991,6 +9991,125 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void retiredStreamRangesMergeRepeatedReuseAndRestoreCurrentDataPrefix() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("retired-range-reuse");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            for (int cycle = 0; cycle <= 24; cycle++) {
+                long ledger = 44 + 4L * cycle;
+                SegmentArenaControlLog.Allocation allocation = arena.planPools(List.of(
+                        new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+                arena.submitBatch(List.of(allocation));
+                assertEquals(4096, allocation.offset());
+                assertEquals(cycle + 1, allocation.generation());
+                ByteBuf input = entry(context(ledger), cycle + 1);
+                try {
+                    files.writeAuthorized(SegmentBatchFormat.encode(config,
+                            new SegmentBatchFormat.Address(0, 0, allocation.allocationId(),
+                                    new Generation(allocation.generation()), new Generation(1), cycle + 1, 4096),
+                            List.of(SegmentBatchFormat.entry(context(ledger), input))), arena);
+                } finally {
+                    input.release();
+                }
+                if (cycle == 24) {
+                    bookie.submitBatch(List.of(install(ledger, 4000, (byte) 5), activate(ledger, 4001)));
+                } else {
+                    bookie.submitBatch(List.of(tombstone(ledger, 2000 + cycle)));
+                    try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 3000 + cycle),
+                            allocation.allocationId(), files, bookie, ByteBuffer.allocate(4096))) {
+                        arena.submitBatch(List.of(free));
+                        List<SegmentArenaControlLog.RetiredRange> ranges = arena.retiredStreamRanges();
+                        assertEquals(1, ranges.size());
+                        assertEquals(1, ranges.get(0).firstSequence());
+                        assertEquals(cycle + 1, ranges.get(0).through());
+                        assertEquals(free.facts().bookieCut(), ranges.get(0).bookieCut());
+                    }
+                }
+            }
+            files.close();
+            arena.rotate();
+            bookie.rotate();
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(140), 25).result()) {
+                assertEquals(25, read.result().record().entryId());
+            }
+            SegmentArenaControlLog arena = (SegmentArenaControlLog) storageField(storage, "arena");
+            assertEquals(1, arena.retiredStreamRanges().size());
+            assertEquals(24, arena.retiredStreamRanges().get(0).through());
+        }
+    }
+
+    @Test
+    public void retiredStreamRangesKeepUnwrittenCurrentAllocationOrderBetweenRetirements() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("retired-range-live-order");
+        long middle = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+        long last = middle + SegmentArenaControlLog.BLOCK_BYTES;
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096),
+                    reclaimableAllocation(102, middle), reclaimableAllocation(103, last)));
+            files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44), arena);
+            files.writeAuthorized(reclamationBatch(config, 103, last, 2, 48), arena);
+            bookie.submitBatch(List.of(tombstone(44, 201), tombstone(48, 202)));
+            for (long allocation : new long[] {101, 103}) {
+                try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 500 + allocation),
+                        allocation, files, bookie, ByteBuffer.allocate(4096))) {
+                    arena.submitBatch(List.of(free));
+                }
+            }
+            assertEquals(2, arena.retiredStreamRanges().size());
+            files.close();
+            arena.rotate();
+        }
+        try (IndexFixture recovered = new IndexFixture(config, identity())) {
+            assertEquals(2, recovered.arena.retiredStreamRanges().size());
+            assertEquals(List.of(new SegmentDataRecovery.StreamCoverage(0, new Generation(1), 1, 2)),
+                    recovered.inventory.indexStreams(recovered.arena));
+            assertEquals(102, recovered.arena.currentAllocation(102).allocationId());
+        }
+    }
+
+    @Test
+    public void emptyRetiredAllocationStillRequiresItsBookieControlCut() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("empty-retired-range-cut");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            bookie.submitBatch(List.of(install(44, 201, (byte) 5), activate(44, 202)));
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 601), 101,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                assertEquals(0, free.facts().records());
+                assertTrue(free.facts().bookieCut() > 0);
+                arena.submitBatch(List.of(free));
+            }
+            files.close();
+            arena.rotate();
+        }
+        try (FileChannel control = FileChannel.open(config.directory().resolve("bookie-control"),
+                StandardOpenOption.WRITE)) {
+            control.truncate(4096);
+            control.force(true);
+        }
+        IOException missing = assertThrows(IOException.class, () -> {
+            try (IndexFixture recovered = new IndexFixture(config, identity())) {
+                recovered.inventory.indexStreams(recovered.arena);
+            }
+        });
+        assertTrue(missing.getMessage().contains("missing required Bookie authority cut"));
+    }
+
+    @Test
     public void runtimeAllocatorReusesOnePhysicalBlockAcrossTwoTerminalFreeGenerations() throws Exception {
         IsolatedSegmentConfig config = coverageRecoveryConfig("runtime-reuse-generations");
         try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {

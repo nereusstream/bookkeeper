@@ -911,6 +911,9 @@ final class SegmentDataRecovery {
         if (bookie != null && bookie.indexAppliedCut(config, identity) < authority.requiredMoveBookieCut()) {
             throw new IOException("MOVE has a missing required Bookie authority cut");
         }
+        if (bookie != null && bookie.indexAppliedCut(config, identity) < authority.requiredRetiredBookieCut()) {
+            throw new IOException("Retired allocation has a missing required Bookie authority cut");
+        }
         long batches = 0;
         long records = 0;
         long validatedBytes = 0;
@@ -923,26 +926,18 @@ final class SegmentDataRecovery {
         Map<StreamKey, StreamProgress> streams = new HashMap<>();
         Map<StreamKey, StreamCoverage> covered = new HashMap<>();
         Map<SegmentBatchFormat.Address, Integer> expectedHeaders = new HashMap<>();
-        for (SegmentArenaControlLog.Free free : authority.retiredAllocations()) {
-            SegmentArenaControlLog.FreeFacts facts = free.facts();
-            if (bookie != null && bookie.indexAppliedCut(config, identity) < facts.bookieCut()) {
-                throw new IOException("Retired allocation has a missing required Bookie authority cut");
-            }
-            SegmentArenaControlLog.AllocationIdentity allocation = facts.allocation();
-            if (facts.records() == 0) {
-                continue;
-            }
-            if (stream != null && stream.shard == allocation.ownerShard()
-                    && stream.generation.equals(allocation.ownerGeneration())) {
-                stream.retiredRanges.add(new long[] {facts.firstSequence(), facts.through()});
+        for (SegmentArenaControlLog.RetiredRange range : authority.retiredStreamRanges()) {
+            if (stream != null && stream.shard == range.shard()
+                    && stream.generation.equals(range.generation())) {
+                stream.retiredRanges.add(new long[] {range.firstSequence(), range.through()});
             }
             if (maxStreams > 0) {
-                StreamKey key = new StreamKey(allocation.ownerShard(), allocation.ownerGeneration());
+                StreamKey key = new StreamKey(range.shard(), range.generation());
                 if (!streams.containsKey(key) && streams.size() == maxStreams) {
                     throw new IOException("Retired stream recovery capacity exhausted");
                 }
-                streams.computeIfAbsent(key, ignored -> new StreamProgress(allocation.streamFirstSequence()))
-                        .retire(facts.allocationOrder(), facts.firstSequence(), facts.through());
+                streams.computeIfAbsent(key, ignored -> new StreamProgress(range.streamFirstSequence()))
+                        .retire(range.allocationOrder(), range.firstSequence(), range.through());
             }
         }
         if (seed != null) {

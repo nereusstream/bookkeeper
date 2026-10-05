@@ -345,3 +345,15 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | ReadyHasCheckpointPredecessor / LegacyReadyHasCompleteCheckpointHistory | 同一验证入口仍要求准确 predecessor，v1 完整历史、原条件结果及必要 suffix 不放宽；模型门槛不代替 commit/hash/真实同步 |
 
 完整日志回退保留，但不能掩盖合法 checkpoint 的恢复遗漏；本增量不证明业务历史压缩、liveness、完整模型或生产 Gate。
+
+
+## 退役 DATA 序号区间
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| RetiredCoverageIsExact | 同准确 shard/generation/start 且物理序号连续才合并，合并前后覆盖集合相同；有缺口或不同 stream 则保持分离 |
+| CurrentAllocationOrderIsNotBridged | current grant 的原成功控制序号作为边界，包括无 DATA 的 grant；不能按 file offset 或仅按物理序号忽略它 |
+| RequiredBookieCutIsRetained | 合并区间携带成员最大必要 cut；模型输入已有成功 FREE，不授予新的业务权限 |
+| EmptyRetirementKeepsRequiredBookieCut | 空 FREE 无序号范围但仍保留必要 Bookie cut；恢复检查所有退役事实的最大 cut，不只检查非空投影 |
+
+原 request-id/allocation/FREE/session 等历史仍保留，排序工作集仍随历史增长；有限投影不证明完整业务压缩、有界长期资源、liveness 或生产 Gate。
