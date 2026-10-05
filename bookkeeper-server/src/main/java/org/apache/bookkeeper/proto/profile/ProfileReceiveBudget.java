@@ -24,9 +24,34 @@ public final class ProfileReceiveBudget {
     final class ConnectionPermit implements AutoCloseable {
         private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
         private Lane lane = Lane.UNCLASSIFIED;
+        private int byteLimit;
+        private long bytes;
         private boolean closed;
 
         private ConnectionPermit() {
+        }
+
+        void limit(int limit) {
+            synchronized (ProfileReceiveBudget.this) {
+                if (closed || limit < 1 || byteLimit != 0) {
+                    throw new IllegalStateException("Receive connection limit must be configured once");
+                }
+                byteLimit = limit;
+            }
+        }
+
+        Credit reserve(int requested) {
+            synchronized (ProfileReceiveBudget.this) {
+                if (closed || byteLimit == 0 || requested > byteLimit - bytes) {
+                    return null;
+                }
+                Credit credit = ProfileReceiveBudget.this.reserve(lane, requested);
+                if (credit != null) {
+                    credit.connection = this;
+                    bytes += requested;
+                }
+                return credit;
+            }
         }
 
         @Override
@@ -43,12 +68,33 @@ public final class ProfileReceiveBudget {
     final class Credit implements AutoCloseable {
         private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
         private Lane lane;
-        private final int bytes;
+        private int bytes;
+        private ConnectionPermit connection;
         private boolean closed;
 
         private Credit(Lane lane, int bytes) {
             this.lane = lane;
             this.bytes = bytes;
+        }
+
+        void require(ConnectionPermit expected, int size) {
+            synchronized (ProfileReceiveBudget.this) {
+                if (closed || connection != expected || expected.closed || bytes != size) {
+                    throw new IllegalStateException("Invalid backing buffer receive credit");
+                }
+            }
+        }
+
+        Credit split(int size) {
+            synchronized (ProfileReceiveBudget.this) {
+                if (closed || size < 0 || size > bytes) {
+                    throw new IllegalStateException("Invalid receive credit split");
+                }
+                Credit child = new Credit(lane, size);
+                child.connection = connection;
+                bytes -= size;
+                return child;
+            }
         }
 
         @Override
@@ -59,6 +105,9 @@ public final class ProfileReceiveBudget {
                 }
                 closed = true;
                 usedBytes[lane.ordinal()] -= bytes;
+                if (connection != null) {
+                    connection.bytes -= bytes;
+                }
             }
         }
     }
@@ -117,7 +166,8 @@ public final class ProfileReceiveBudget {
         long bytes = 0;
         for (int i = 0; i < credits.length; i++) {
             Credit credit = credits[i];
-            if (credit == null || credit.owner != this || credit.closed || credit.lane != source) {
+            if (credit == null || credit.owner != this || credit.closed || credit.lane != source
+                    || (credit.connection != null && credit.connection != connection)) {
                 throw new IllegalStateException("Invalid receive credit transfer");
             }
             for (int previous = 0; previous < i; previous++) {

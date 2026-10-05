@@ -27,24 +27,22 @@ import java.util.Objects;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 
-/** Charged plaintext framing after TLS. The eventual listener must also account for TLS/socket buffers. */
+/** Charged plaintext framing after TLS, sharing the connection ledger with its backing allocator. */
 final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private enum ConnectionPurpose { UNCLASSIFIED, DATA, CONTROL_PENDING, CONTROL }
 
     private final class HeldCredit implements ProfileInboundPipeline.ResponseCredit {
         private final ProfileReceiveDecoder receiver = ProfileReceiveDecoder.this;
-        private final int bytes;
         private final ProfileReceiveBudget.Credit shared;
         private final AtomicBoolean closed = new AtomicBoolean();
+        private boolean backingOwned;
 
-        private HeldCredit(int bytes, ProfileReceiveBudget.Credit shared) {
-            this.bytes = bytes;
+        private HeldCredit(ProfileReceiveBudget.Credit shared) {
             this.shared = shared;
         }
 
@@ -53,10 +51,8 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             if (!closed.compareAndSet(false, true)) {
                 throw new IllegalStateException("Connection receive credit returned twice");
             }
-            try {
+            if (!backingOwned) {
                 shared.close();
-            } finally {
-                connectionBytes.addAndGet(-bytes);
             }
         }
     }
@@ -67,11 +63,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private static final long FIRST_REQUEST_TIMEOUT_MILLIS = 30_000;
     private final ProfileReceiveBudget budget;
     private final ProfileReceiveBudget.ConnectionPermit connectionPermit;
-    private final int connectionLimit;
     private final int connectionBaseBytes;
     private int maxNormalBodyBytes = ProfileFrameCodec.ABSOLUTE_FRAME_MAX;
     private int maxRecoveryBodyBytes = ProfileFrameCodec.ABSOLUTE_FRAME_MAX;
-    private final AtomicLong connectionBytes = new AtomicLong();
     private final byte[] fixedHeader = new byte[FIXED_HEADER_BYTES];
     private ChannelHandlerContext context;
     private HeldCredit baseCredit;
@@ -97,7 +91,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         if (connectionBaseBytes < FIXED_HEADER_BYTES || connectionLimit <= connectionBaseBytes) {
             throw new IllegalArgumentException("Invalid fixed connection or receive limit");
         }
-        this.connectionLimit = connectionLimit;
+        connectionPermit.limit(connectionLimit);
         this.connectionBaseBytes = connectionBaseBytes;
     }
 
@@ -129,6 +123,23 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             throw new IOException("Profile response requires a live receiving event loop");
         }
         return charge(bytes);
+    }
+
+    ByteBuf allocateResponse(ProfileInboundPipeline.ResponseCredit workspace, int bytes) {
+        if (!(workspace instanceof HeldCredit held) || held.receiver != this || held.closed.get()
+                || held.backingOwned || context == null || !context.executor().inEventLoop() || terminated) {
+            throw new IllegalStateException("Response workspace is not owned by this receiving connection");
+        }
+        if (!(context.alloc() instanceof ProfileByteBufAllocator allocator)) {
+            return context.alloc().buffer(bytes, bytes);
+        }
+        ProfileReceiveBudget.Credit backing = held.shared.split(bytes);
+        try {
+            return allocator.adopt(backing, bytes);
+        } catch (RuntimeException | Error failure) {
+            backing.close();
+            throw failure;
+        }
     }
 
     void limitNormalBody(int bytes) {
@@ -221,7 +232,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         }
         HeldCredit inbound = null;
         try {
-            inbound = charge(input.readableBytes());
+            if (!(ctx.alloc() instanceof ProfileByteBufAllocator allocator) || !allocator.owns(input)) {
+                inbound = charge(input.readableBytes());
+            }
             decode(ctx, input);
         } catch (Exception | Error failure) {
             discardPartial();
@@ -260,7 +273,12 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 HeldCredit reserved = charge(inspected.frameBytes());
                 ByteBuf allocated = null;
                 try {
-                    allocated = ctx.alloc().buffer(inspected.frameBytes(), inspected.frameBytes());
+                    if (ctx.alloc() instanceof ProfileByteBufAllocator allocator) {
+                        allocated = allocator.adopt(reserved.shared, inspected.frameBytes());
+                        reserved.backingOwned = true;
+                    } else {
+                        allocated = ctx.alloc().buffer(inspected.frameBytes(), inspected.frameBytes());
+                    }
                     allocated.writeBytes(fixedHeader);
                 } catch (RuntimeException | Error failure) {
                     if (allocated != null) {
@@ -359,21 +377,11 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     }
 
     private HeldCredit charge(int bytes) throws IOException {
-        for (;;) {
-            long before = connectionBytes.get();
-            if (bytes > connectionLimit - before) {
-                throw new IOException("Connection Profile receive capacity exhausted");
-            }
-            if (connectionBytes.compareAndSet(before, before + bytes)) {
-                break;
-            }
-        }
-        ProfileReceiveBudget.Credit shared = budget.reserve(lane, bytes);
+        ProfileReceiveBudget.Credit shared = connectionPermit.reserve(bytes);
         if (shared == null) {
-            connectionBytes.addAndGet(-bytes);
-            throw new IOException("Bookie Profile receive capacity exhausted");
+            throw new IOException("Connection or Bookie Profile receive capacity exhausted");
         }
-        return new HeldCredit(bytes, shared);
+        return new HeldCredit(shared);
     }
 
     private void discardPartial() {

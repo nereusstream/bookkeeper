@@ -17,6 +17,7 @@
  */
 package org.apache.bookkeeper.proto.profile;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelInboundHandler;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.ssl.SslHandler;
@@ -67,6 +68,8 @@ public final class ProfileInboundPipeline {
                     budget, permit, connectionLimit, connectionBaseBytes);
             decoder.limitNormalBody(maxNormalBodyBytes);
             decoder.limitRecoveryBody(maxRecoveryBodyBytes);
+            pipeline.channel().config().setAllocator(new ProfileByteBufAllocator(permit));
+            pipeline.channel().closeFuture().addListener(closed -> permit.close());
             SslHandler ssl = tls.newProfileServerTLSHandler();
             ssl.setHandshakeTimeoutMillis(TLS_HANDSHAKE_TIMEOUT_MILLIS);
             pipeline.addLast("profileTls", ssl);
@@ -100,5 +103,10 @@ public final class ProfileInboundPipeline {
     /** Charge response/parse buffers against the existing connection and Bookie ledger until their final use. */
     public static ResponseCredit reserveResponse(ChannelPipeline pipeline, int bytes) throws IOException {
         return pipeline.get(ProfileReceiveDecoder.class).reserveResponse(bytes);
+    }
+
+    /** Transfer the response's exact capacity from its precharged workspace to the final backing lifetime. */
+    public static ByteBuf allocateResponse(ChannelPipeline pipeline, ResponseCredit workspace, int bytes) {
+        return pipeline.get(ProfileReceiveDecoder.class).allocateResponse(workspace, bytes);
     }
 }

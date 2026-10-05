@@ -400,7 +400,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         }
         int bodyLength = helloBody != null ? helloBody.length : ProfileStatus.ENCODED_LENGTH;
         int bytes = ProfileFrameCodec.OUTER_LENGTH_PREFIX + ProfileFrameHeader.ENCODED_LENGTH + bodyLength;
-        ByteBuf response = ctx.alloc().buffer(bytes, bytes);
+        ByteBuf response = ProfileInboundPipeline.allocateResponse(ctx.pipeline(), request.credit, bytes);
         try {
             int flags = ProfileFrameHeader.RESPONSE;
             if (status != null && status.statusClass() != StatusClass.OK) {

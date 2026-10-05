@@ -23,6 +23,7 @@ import static org.junit.Assert.assertTrue;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.Channel;
@@ -74,7 +75,7 @@ public class ProfileInboundPipelineSocketTest {
         SslContext clientTls = SslContextBuilder.forClient().sslProvider(SslProvider.JDK)
                 .keyManager(new File(certificate("client-cert.pem")), new File(certificate("client-key.pem")))
                 .trustManager(new File(certificate("server-san-cert.pem"))).protocols("TLSv1.3").build();
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096, 2_048, 2, 2, 1);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(262_144, 65_536, 131_072, 2, 2, 1);
         CountDownLatch helloReceived = new CountDownLatch(1);
         CountDownLatch addReceived = new CountDownLatch(1);
         CountDownLatch serverInactive = new CountDownLatch(1);
@@ -93,7 +94,7 @@ public class ProfileInboundPipelineSocketTest {
                         protected void initChannel(SocketChannel channel) throws Exception {
                             accepted.set(channel);
                             assertTrue(ProfileInboundPipeline.install(channel.pipeline(), profileTls, budget,
-                                    8_192, 64, new ChannelInboundHandlerAdapter() {
+                                    131_072, 64, new ChannelInboundHandlerAdapter() {
                                 @Override
                                 public void channelRead(ChannelHandlerContext ctx, Object message) {
                                     ProfileOperation operation = ((ProfileInboundFrame) message).header().operation();
@@ -151,6 +152,22 @@ public class ProfileInboundPipelineSocketTest {
             client.writeAndFlush(Unpooled.wrappedBuffer(hello)).sync();
             assertTrue(helloReceived.await(5, TimeUnit.SECONDS));
             assertNull(failure.get());
+            accepted.get().eventLoop().submit(() -> {
+                long before = budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED);
+                ByteBuf root = accepted.get().alloc().heapBuffer(256, 256);
+                ByteBuf retained = root.retainedSlice(0, 128);
+                try {
+                    assertEquals(before + 256, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    root.release();
+                    assertEquals(before + 256, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                } finally {
+                    if (root.refCnt() > 1) {
+                        root.release();
+                    }
+                    retained.release();
+                }
+                assertEquals(before, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            }).sync();
             byte[] add = ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.ADD_NORMAL, 1, new byte[64]));
             client.writeAndFlush(Unpooled.wrappedBuffer(add)).sync();
             assertTrue(addReceived.await(5, TimeUnit.SECONDS));

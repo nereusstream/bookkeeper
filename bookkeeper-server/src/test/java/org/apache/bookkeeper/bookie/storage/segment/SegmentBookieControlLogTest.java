@@ -6246,7 +6246,7 @@ public class SegmentBookieControlLogTest {
             int writes = bookieIo(bookie).writes;
             // The frame and base alone fit 256 bytes; including the real response workspace must fail.
             try (ProfileSocket socket = new ProfileSocket(storage,
-                    new ProfileReceiveBudget(4096, 256, 2048, 1, 1, 1))) {
+                    new ProfileReceiveBudget(196608, 256, 131072, 1, 1, 1))) {
                 socket.send(ProfileOperation.FENCE_LEDGER, 2,
                         ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
                 assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
@@ -6263,7 +6263,7 @@ public class SegmentBookieControlLogTest {
         try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
             storage.startNew();
             installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
-            ProfileReceiveBudget budget = new ProfileReceiveBudget(3348, 1024, 1024, 1, 2, 1);
+            ProfileReceiveBudget budget = new ProfileReceiveBudget(409600, 131072, 262144, 1, 2, 1);
             try (ProfileSocket socket = new ProfileSocket(storage, budget)) {
                 byte[] full = ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.ADD_NORMAL, 2,
                         profileAddBody(context(), 1, (byte) 5, entry(context(), 1, -1, 1024, (byte) 0, 1024))));
@@ -6274,35 +6274,44 @@ public class SegmentBookieControlLogTest {
                     assertTrue(System.nanoTime() < deadline);
                     LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
                 }
-                Channel refusedData = socket.peer(true);
-                Channel refusedServer = socket.accepted.get();
-                refusedData.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 36))).sync();
-                assertTrue("Second DATA body cannot fit the held partial frame's budget",
-                        refusedServer.closeFuture().await(5, TimeUnit.SECONDS));
-                Channel control = socket.peer(true); // Same acceptor, port, TLS, decoder and shared Bookie budget.
-                Channel serverControl = socket.accepted.get();
-                byte[] fence = ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5));
-                socket.send(control, ProfileOperation.FENCE_LEDGER, 3, fence);
-                socket.status(ProfileOperation.FENCE_LEDGER, 3, ProfileStatus.StatusClass.OK,
-                        ProfileStatus.DurableResult.APPLIED);
-                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
-                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
-                // A TLS-authenticated connection withholding HELLO occupies the sole unclassified slot.
-                socket.peer(false);
-                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-                assertThrows(Exception.class, () -> socket.peer(false));
-                socket.send(control, ProfileOperation.FENCE_LEDGER, 4, fence);
-                socket.status(ProfileOperation.FENCE_LEDGER, 4, ProfileStatus.StatusClass.OK,
-                        ProfileStatus.DurableResult.ALREADY_APPLIED);
-                fence[80] ^= 1;
-                socket.send(control, ProfileOperation.FENCE_LEDGER, 5, fence);
-                socket.status(ProfileOperation.FENCE_LEDGER, 5, ProfileStatus.StatusClass.UNAUTHORIZED,
-                        ProfileStatus.DurableResult.NONE);
-                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
-                // DATA cannot follow on the authenticated control connection even with only its header.
-                control.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 36))).sync();
-                assertTrue(serverControl.closeFuture().await(5, TimeUnit.SECONDS));
-                assertEquals(0, ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo.writes);
+                Channel dataServer = socket.accepted.get();
+                // Include actual TLS buffers, then hold backing capacity so the second full body cannot fit.
+                ByteBuf pressure = dataServer.eventLoop().submit(() -> dataServer.alloc().heapBuffer(
+                        Math.toIntExact(16384 - budget.used(ProfileReceiveBudget.Lane.DATA) - 64 - full.length + 1)))
+                        .sync().getNow();
+                try {
+                    Channel refusedData = socket.peer(true);
+                    Channel refusedServer = socket.accepted.get();
+                    refusedData.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 36))).sync();
+                    assertTrue("Second DATA body cannot fit the held partial frame's budget",
+                            refusedServer.closeFuture().await(5, TimeUnit.SECONDS));
+                    Channel control = socket.peer(true); // Same acceptor, port, TLS, decoder and shared Bookie budget.
+                    Channel serverControl = socket.accepted.get();
+                    byte[] fence = ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5));
+                    socket.send(control, ProfileOperation.FENCE_LEDGER, 3, fence);
+                    socket.status(ProfileOperation.FENCE_LEDGER, 3, ProfileStatus.StatusClass.OK,
+                            ProfileStatus.DurableResult.APPLIED);
+                    assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                    // A TLS-authenticated connection withholding HELLO occupies the sole unclassified slot.
+                    socket.peer(false);
+                    assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertThrows(Exception.class, () -> socket.peer(false));
+                    socket.send(control, ProfileOperation.FENCE_LEDGER, 4, fence);
+                    socket.status(ProfileOperation.FENCE_LEDGER, 4, ProfileStatus.StatusClass.OK,
+                            ProfileStatus.DurableResult.ALREADY_APPLIED);
+                    fence[80] ^= 1;
+                    socket.send(control, ProfileOperation.FENCE_LEDGER, 5, fence);
+                    socket.status(ProfileOperation.FENCE_LEDGER, 5, ProfileStatus.StatusClass.UNAUTHORIZED,
+                            ProfileStatus.DurableResult.NONE);
+                    assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                    // DATA cannot follow on the authenticated control connection even with only its header.
+                    control.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 36))).sync();
+                    assertTrue(serverControl.closeFuture().await(5, TimeUnit.SECONDS));
+                    assertEquals(0, ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo.writes);
+                } finally {
+                    pressure.release();
+                }
             }
         }
     }
@@ -6762,7 +6771,7 @@ public class SegmentBookieControlLogTest {
         private Channel client;
 
         private ProfileSocket(IsolatedSegmentStorage storage) throws Exception {
-            this(storage, new ProfileReceiveBudget(32768, 4096, 4096, 2, 2, 1));
+            this(storage, new ProfileReceiveBudget(524288, 131072, 262144, 2, 2, 1));
         }
 
         private ProfileSocket(IsolatedSegmentStorage storage, ProfileReceiveBudget budget) throws Exception {
@@ -6786,7 +6795,7 @@ public class SegmentBookieControlLogTest {
                                 accepted.set(channel);
                                 acceptedChannels.add(channel);
                                 if (!storage.installProfileConnection(channel.pipeline(), serverTls, budget,
-                                        8192, 64, "test-domain", 0)) {
+                                        131072, 64, "test-domain", 0)) {
                                     return;
                                 }
                                 channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {

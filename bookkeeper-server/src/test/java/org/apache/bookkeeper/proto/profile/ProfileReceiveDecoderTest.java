@@ -40,6 +40,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrame;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
@@ -523,16 +524,16 @@ public class ProfileReceiveDecoderTest {
         conf.setTLSTrustStore(certificate("client-cert.pem"));
         TLSContextFactory profile = TLSContextFactory.forProfileServer();
         profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 1_024, 1, 2, 1);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(262_144, 65_536, 131_072, 1, 2, 1);
         EmbeddedChannel first = new EmbeddedChannel();
         first.freezeTime();
-        assertTrue(ProfileInboundPipeline.install(first.pipeline(), profile, budget, 3_000, 64,
+        assertTrue(ProfileInboundPipeline.install(first.pipeline(), profile, budget, 131_072, 64,
                 new ChannelInboundHandlerAdapter()));
         assertNotNull(first.pipeline().get(SslHandler.class));
         assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
 
         EmbeddedChannel denied = new EmbeddedChannel();
-        assertFalse(ProfileInboundPipeline.install(denied.pipeline(), profile, budget, 3_000, 64,
+        assertFalse(ProfileInboundPipeline.install(denied.pipeline(), profile, budget, 131_072, 64,
                 new ChannelInboundHandlerAdapter()));
         assertFalse(denied.isActive());
         assertNull(denied.pipeline().get(SslHandler.class));
@@ -545,11 +546,11 @@ public class ProfileReceiveDecoderTest {
         EmbeddedChannel wrongTls = new EmbeddedChannel();
         assertThrows(org.apache.bookkeeper.tls.SecurityException.class,
                 () -> ProfileInboundPipeline.install(wrongTls.pipeline(), new TLSContextFactory(), budget,
-                        3_000, 64, new ChannelInboundHandlerAdapter()));
+                        131_072, 64, new ChannelInboundHandlerAdapter()));
         assertFalse(wrongTls.isActive());
         assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         EmbeddedChannel recovered = new EmbeddedChannel();
-        assertTrue(ProfileInboundPipeline.install(recovered.pipeline(), profile, budget, 3_000, 64,
+        assertTrue(ProfileInboundPipeline.install(recovered.pipeline(), profile, budget, 131_072, 64,
                 new ChannelInboundHandlerAdapter()));
         recovered.finishAndReleaseAll();
         assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
@@ -566,10 +567,10 @@ public class ProfileReceiveDecoderTest {
         conf.setTLSTrustStore(certificate("client-cert.pem"));
         TLSContextFactory profile = TLSContextFactory.forProfileServer();
         profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 1_024, 1, 2, 1);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(262_144, 65_536, 131_072, 1, 2, 1);
         EmbeddedChannel server = new EmbeddedChannel();
         server.freezeTime();
-        assertTrue(ProfileInboundPipeline.install(server.pipeline(), profile, budget, 3_000, 64,
+        assertTrue(ProfileInboundPipeline.install(server.pipeline(), profile, budget, 131_072, 64,
                 new ChannelInboundHandlerAdapter()));
         SslHandler serverTls = server.pipeline().get(SslHandler.class);
         SslHandler clientTls = clientTls();
@@ -582,9 +583,11 @@ public class ProfileReceiveDecoderTest {
         server.runScheduledPendingTasks();
         assertFalse(server.isActive());
         assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        // EmbeddedChannel still owns queued TLS close output after the connection slot is returned.
+        assertTrue(budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED) > 0);
         client.finishAndReleaseAll();
         server.finishAndReleaseAll();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
     @Test
@@ -597,10 +600,10 @@ public class ProfileReceiveDecoderTest {
         conf.setTLSTrustStore(certificate("client-cert.pem"));
         TLSContextFactory profile = TLSContextFactory.forProfileServer();
         profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 1_024, 1_024, 1, 2, 1);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(262_144, 65_536, 131_072, 1, 2, 1);
         EmbeddedChannel server = new EmbeddedChannel();
         server.freezeTime();
-        assertTrue(ProfileInboundPipeline.install(server.pipeline(), profile, budget, 4_000, 64,
+        assertTrue(ProfileInboundPipeline.install(server.pipeline(), profile, budget, 131_072, 64,
                 new ChannelInboundHandlerAdapter()));
         SslHandler serverTls = server.pipeline().get(SslHandler.class);
         SslHandler clientTls = clientTls();
@@ -625,9 +628,11 @@ public class ProfileReceiveDecoderTest {
         server.runScheduledPendingTasks();
         assertFalse(server.isActive());
         assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
-        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        // EmbeddedChannel still owns queued TLS close output after the connection slot is returned.
+        assertTrue(budget.used(ProfileReceiveBudget.Lane.DATA) > 0);
         client.finishAndReleaseAll();
         server.finishAndReleaseAll();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
     }
 
     @Test
@@ -720,6 +725,45 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void tlsBackingRefusalClosesConnectionAndReturnsCreditAfterActualRelease() throws Exception {
+        ServerConfiguration conf = new ServerConfiguration();
+        conf.setTLSKeyStoreType("PEM");
+        conf.setTLSKeyStore(certificate("server-key.pem"));
+        conf.setTLSCertificatePath(certificate("server-cert.pem"));
+        conf.setTLSTrustStoreType("PEM");
+        conf.setTLSTrustStore(certificate("client-cert.pem"));
+        TLSContextFactory profile = TLSContextFactory.forProfileServer();
+        profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(4096, 1024, 1024, 1, 1, 1);
+        EmbeddedChannel server = new EmbeddedChannel();
+        AtomicReference<Throwable> refused = new AtomicReference<>();
+        assertTrue(ProfileInboundPipeline.install(server.pipeline(), profile, budget, 3000, 64,
+                new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void exceptionCaught(ChannelHandlerContext ctx, Throwable failure) {
+                        refused.set(failure);
+                        ctx.close();
+                    }
+                }));
+        SslHandler serverTls = server.pipeline().get(SslHandler.class);
+        EmbeddedChannel client = new EmbeddedChannel(clientTls());
+        try {
+            transfer(client, server);
+            server.runPendingTasks();
+            assertNotNull(refused.get());
+            assertFalse(server.isActive());
+            assertFalse(serverTls.handshakeFuture().isSuccess());
+            assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        } finally {
+            client.finishAndReleaseAll();
+            server.finishAndReleaseAll();
+        }
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    @Test
     public void receivesHelloAndDataOnlyAfterRealMutualTlsHandshake() throws Exception {
         ServerConfiguration conf = new ServerConfiguration();
         conf.setTLSKeyStoreType("PEM");
@@ -729,9 +773,9 @@ public class ProfileReceiveDecoderTest {
         conf.setTLSTrustStore(certificate("client-cert.pem"));
         TLSContextFactory profile = TLSContextFactory.forProfileServer();
         profile.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
-        ProfileReceiveBudget budget = new ProfileReceiveBudget(16_384, 4_096, 1_024, 8, 8, 4);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(262_144, 65_536, 131_072, 8, 8, 4);
         EmbeddedChannel server = new EmbeddedChannel();
-        assertTrue(ProfileInboundPipeline.install(server.pipeline(), profile, budget, 8_192, 64,
+        assertTrue(ProfileInboundPipeline.install(server.pipeline(), profile, budget, 131_072, 64,
                 new ChannelInboundHandlerAdapter()));
         SslHandler serverTls = server.pipeline().get(SslHandler.class);
         ProfileReceiveDecoder decoder = server.pipeline().get(ProfileReceiveDecoder.class);

@@ -19,6 +19,13 @@ import time
 
 
 MATRIX = {
+    'a-profile-backing-budget': None,
+    'ce-profile-backing-budget-allocation': 'BackingsKeepFullCredit',
+    'ce-profile-backing-budget-resize': 'ResizeKeepsOldAndNewCredit',
+    'ce-profile-backing-budget-view': 'BackingsKeepFullCredit',
+    'ce-profile-backing-budget-close': 'BackingsKeepFullCredit',
+    'ce-profile-backing-budget-response': 'ResponseSplitConservesReservation',
+    'ce-profile-backing-budget-lane': 'ReadBackingKeepsAllocationLane',
     'a-profile-recovery-dispatch': None,
     'ce-profile-recovery-dispatch-auth': 'SubmittedRequiresExactOpenGrant',
     'ce-profile-recovery-dispatch-source': 'CopyRequiresSourceCredit',
@@ -264,7 +271,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -277,7 +284,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "ProfileRecoveryDispatch.tla" if "profile-recovery-dispatch" in name
+                   "-metadir", str(states), "ProfileBackingBudget.tla" if "profile-backing-budget" in name
+                   else "ProfileRecoveryDispatch.tla" if "profile-recovery-dispatch" in name
                    else "ProfileFenceDispatch.tla" if "profile-fence-dispatch" in name
                    else "ProfileNormalDispatch.tla" if "profile-normal-dispatch" in name
                    else "StartupDataExclusion.tla" if "startup-data-exclusion" in name

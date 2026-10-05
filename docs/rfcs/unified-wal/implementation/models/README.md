@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他与 Profile 普通 Add/FENCE 分发投影及 Model C 既有切片，共 40 个完整正向配置、128 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他与 Profile 普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 42 个完整正向配置、140 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -869,3 +869,24 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 最终 `unified-wal-model-vuhtsh6x` tool exit0，175配置为41正向完整PASS/134指定反例；冻结348 source inputs/527 checksums，父提交 `6f44a97fc9c679cda0e0919663497c4dde1d4715`与五个designInputs保持父提交绑定。Java `unified-wal-local-WaFfvigz`922输入、14类398项为393通过/5 macOS Linux-affinity跳过；116共享hash精确匹配，1154去重union与20份Java回执checksum已核验，Spotless/Checkstyle通过。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint，CHECK_DEADLOCK FALSE，复现命令不变。
 
 [真实恢复socket与文件交错](../profile-wire/README.md#真实隔离-add_recovery-接线)另验CRC、固定头N、实际源占用、force、关闭grant、断连/native锁及restart重复点读。该有限投影不证明实际mTLS/密码学、fsync、确定missing、真实RepairIntent授权/CLOSED、coordinator/client quorum、生产listener/readiness、总内存、业务timer、公平性/活性、掉电或性能；完整A/C/D、组合、Block G及步骤11/14/Gate仍OPEN。
+
+
+## Profile backing 额度投影
+
+2026-10-06 [ProfileBackingBudget](modules/ProfileBackingBudget.tla)投影一个连接、两个根backing、每根至多两个引用、capacity 1..3、每lane额度6/每连接额度8。真实授权转账是既有FENCE分发投影的输入；模型保留原read backing的allocation lane。扩容显式保留旧根及新temporary，完成或失败后才归还对应份额；response从已计费workspace拆出独立backing，断连释放名额/base但保留仍持有的根和workspace，最后引用才释放根。
+
+六个mutation分别跳过根分配计费、扩容只计新旧差额、先释放一个view就归还全部backing、断连提前归还backing、拆出response却继续重复计workspace，以及转账时搬走原read backing；均命中各自指定性质。首次scoped `unified-wal-model-9w4exq9h`七配置通过，正向11,482 generated / 2,404 distinct / queue0、depth/diameter9。调用runner时一次Python参数错误与一次非可执行脚本调用不计模型结果，未修改文件权限。
+
+该投影不枚举实际ByteBuf字节、heap/native分配器、多个连接调度、每次缩容、TLS密码学/engine内部内存、kernel buffers、credit等对象开销或storage统一总预算。对应[Java allocator及真实socket回归](../profile-wire/README.md#netty-backing-buffer-额度接线)另验实际capacity/refcount、缩容/拒绝后数据/index、TLS拒绝和相同port控制可达性。模型不证明fsync、quorum、时间、公平性/活性、生产listener/readiness、掉电或性能；完整A/C/D、组合、Block G和步骤11/Gate仍OPEN。
+
+最终 `unified-wal-model-wci6ds2z` tool exit0，42正向完整PASS/140指定反例、358冻结inputs/548 checksums。Java `unified-wal-local-V4ePSx6Q`924 inputs、15类405项为400通过/5平台跳过及style通过，118共享输入与1164去重union精确匹配；五个designInputs绑定父提交 `15df420b42a69b88c1b9c03372d920d54ea49bf5`，历史回执不变。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint，CHECK_DEADLOCK FALSE。以下统计来自最终矩阵：
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-backing-budget | 11482 / 2404 / 0 | 9 / 9 | 0.972 s / 156,958,720 bytes | PASS |
+| ce-profile-backing-budget-allocation | 3 / 3 / 1 | 2 / 不适用 | 0.861 s / 111,771,648 bytes | EXPECTED_COUNTEREXAMPLE:BackingsKeepFullCredit |
+| ce-profile-backing-budget-resize | 15 / 15 / 12 | 3 / 不适用 | 0.849 s / 112,443,392 bytes | EXPECTED_COUNTEREXAMPLE:ResizeKeepsOldAndNewCredit |
+| ce-profile-backing-budget-view | 96 / 69 / 55 | 4 / 不适用 | 0.908 s / 114,311,168 bytes | EXPECTED_COUNTEREXAMPLE:BackingsKeepFullCredit |
+| ce-profile-backing-budget-close | 22 / 22 / 19 | 3 / 不适用 | 0.838 s / 112,295,936 bytes | EXPECTED_COUNTEREXAMPLE:BackingsKeepFullCredit |
+| ce-profile-backing-budget-response | 2 / 2 / 0 | 2 / 不适用 | 0.800 s / 110,690,304 bytes | EXPECTED_COUNTEREXAMPLE:ResponseSplitConservesReservation |
+| ce-profile-backing-budget-lane | 21 / 21 / 18 | 3 / 不适用 | 0.848 s / 111,493,120 bytes | EXPECTED_COUNTEREXAMPLE:ReadBackingKeepsAllocationLane |
