@@ -400,7 +400,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             SegmentEntryInputs.Input input = null;
             try {
-                input = execution.inputs().acquire(context, entry.readableBytes());
+                input = execution.inputs().acquire(context, entry.readableBytes(),
+                        ProfileInboundPipeline.inputCopyAllocator(entry));
                 if (input == null) {
                     admission.physicalTerminal();
                     return false;
@@ -558,7 +559,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             SegmentEntryInputs.Input input = null;
             try {
-                input = execution.inputs().acquire(tuple.context(), entry.readableBytes());
+                input = execution.inputs().acquire(tuple.context(), entry.readableBytes(),
+                        ProfileInboundPipeline.inputCopyAllocator(entry));
                 if (input == null) {
                     admission.releaseUnclaimed();
                     return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;

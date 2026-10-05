@@ -18,6 +18,8 @@
 package org.apache.bookkeeper.proto.profile;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelInboundHandler;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.ssl.SslHandler;
@@ -108,5 +110,11 @@ public final class ProfileInboundPipeline {
     /** Transfer the response's exact capacity from its precharged workspace to the final backing lifetime. */
     public static ByteBuf allocateResponse(ChannelPipeline pipeline, ResponseCredit workspace, int bytes) {
         return pipeline.get(ProfileReceiveDecoder.class).allocateResponse(workspace, bytes);
+    }
+
+    /** Share a Profile source's ledger; other callers retain the original independent unpooled copy contract. */
+    public static ByteBufAllocator inputCopyAllocator(ByteBuf source) {
+        ByteBufAllocator allocator = Objects.requireNonNull(source, "source").alloc();
+        return allocator instanceof ProfileByteBufAllocator ? allocator : UnpooledByteBufAllocator.DEFAULT;
     }
 }

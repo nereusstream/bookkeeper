@@ -29,6 +29,7 @@ import static org.junit.Assert.fail;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.Channel;
@@ -39,6 +40,7 @@ import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -117,6 +119,7 @@ import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.LedgerMetadataFormat.DigestType;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.tls.SecurityHandlerFactory;
@@ -6456,6 +6459,127 @@ public class SegmentBookieControlLogTest {
                 socket.status(ProfileOperation.ADD_RECOVERY, 6, ProfileStatus.StatusClass.OK,
                         ProfileStatus.DurableResult.APPLIED);
                 assertEquals(0, ((IsolatedSegmentFiles) storageField(restarted, "files")).dataIo.writes);
+            }
+        }
+    }
+
+    @Test
+    public void profileSourceAllocatorRefusalRollsBackQuotaAndKeepsPrivateCopyContract() throws Exception {
+        SegmentEntryInputs inputs = new SegmentEntryInputs(4096, 1060);
+        ByteBuf pooled = PooledByteBufAllocator.DEFAULT.heapBuffer(36, 36);
+        try (SegmentEntryInputs.Input copy = inputs.acquire(context(), 36,
+                ProfileInboundPipeline.inputCopyAllocator(pooled))) {
+            assertNotNull(copy);
+            assertTrue(copy.bytes().alloc() instanceof UnpooledByteBufAllocator);
+            assertEquals(36, copy.bytes().array().length);
+        } finally {
+            pooled.release();
+        }
+        assertEquals(0, inputs.usedBytes());
+
+        ServerConfiguration conf = new ServerConfiguration();
+        conf.setTLSKeyStoreType("PEM");
+        conf.setTLSKeyStore(ProfileSocket.certificate("server-key.pem"));
+        conf.setTLSCertificatePath(ProfileSocket.certificate("server-cert.pem"));
+        conf.setTLSTrustStoreType("PEM");
+        conf.setTLSTrustStore(ProfileSocket.certificate("client-cert.pem"));
+        TLSContextFactory tls = TLSContextFactory.forProfileServer();
+        tls.init(SecurityHandlerFactory.NodeType.Server, conf, UnpooledByteBufAllocator.DEFAULT);
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(1024, 256, 256, 1, 1, 1);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        assertTrue(ProfileInboundPipeline.install(channel.pipeline(), tls, budget, 128, 64,
+                new ChannelInboundHandlerAdapter()));
+        try {
+            try (SegmentEntryInputs.Input first = inputs.acquire(context(), 36, channel.alloc())) {
+                assertNotNull(first);
+                assertEquals(36, inputs.usedBytes());
+                assertEquals(100, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                // Source has room, but 64 + 36 + 36 cannot fit this connection's 128-byte limit.
+                assertNull(inputs.acquire(context(), 36, channel.alloc()));
+                assertEquals(36, inputs.usedBytes());
+                assertEquals(100, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            }
+            assertEquals(0, inputs.usedBytes());
+            assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            try (SegmentEntryInputs.Input restored = inputs.acquire(context(), 36, channel.alloc())) {
+                assertNotNull(restored);
+                channel.finishAndReleaseAll();
+                assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertEquals(36, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertNull(inputs.acquire(context(), 36, channel.alloc()));
+                assertEquals(36, inputs.usedBytes());
+            }
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+        assertEquals(0, inputs.usedBytes());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+    }
+
+    @Test
+    public void profileSocketSourceCopyRemainsChargedAfterDisconnectUntilOwnerConsumesIt() throws Exception {
+        for (ProfileOperation operation : List.of(ProfileOperation.ADD_NORMAL, ProfileOperation.ADD_RECOVERY)) {
+            IsolatedSegmentConfig base = config();
+            IsolatedSegmentConfig config = new IsolatedSegmentConfig(
+                    base.directory().resolveSibling("profile-source-" + operation), 1, 4, 1,
+                    4L * 1024 * 1024, 4096, 1024, 8, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            CountDownLatch paused = new CountDownLatch(1);
+            CountDownLatch releaseOwner = new CountDownLatch(1);
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch releaseIo = new CountDownLatch(1);
+            try (IsolatedSegmentStorage storage = storage(config, 1, 6, 8, 16, 3)) {
+                storage.startNew();
+                if (operation == ProfileOperation.ADD_NORMAL) {
+                    installStorage(storage, install(44, 1, (byte) 6), activate(44, 2));
+                } else {
+                    installStorage(storage, install(44, 1, (byte) 6));
+                    grantStorage(storage);
+                }
+                SegmentExecutionGroup execution = (SegmentExecutionGroup) storageField(storage, "execution");
+                SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    forcing.countDown();
+                    await(releaseIo);
+                });
+                ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo = io;
+                try (ProfileSocket socket = new ProfileSocket(storage)) {
+                    assertTrue(execution.owner(0).control(() -> {
+                        paused.countDown();
+                        await(releaseOwner);
+                    }));
+                    assertTrue(paused.await(5, TimeUnit.SECONDS));
+                    byte[] body = operation == ProfileOperation.ADD_NORMAL
+                            ? profileAddBody(context(), 2, (byte) 6,
+                                    entry(context(), 2, -1, 1024, (byte) 0, 1024))
+                            : recoveryBody(2, (byte) 0, 1024);
+                    socket.send(operation, 2, body);
+                    long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (execution.inputs().usedBytes() != 1060) {
+                        assertTrue("The queued source must be charged", System.nanoTime() < end);
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    socket.accepted.get().eventLoop().submit(() -> { }).sync();
+                    int workspace = operation == ProfileOperation.ADD_NORMAL ? 144 : 244;
+                    assertEquals(64 + 36 + body.length + workspace + 1060,
+                            socket.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(0, io.writes);
+                    socket.disconnect();
+                    assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(1060, socket.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(1060, execution.inputs().usedBytes());
+                    releaseOwner.countDown();
+                    assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                    assertEquals(0, execution.inputs().usedBytes());
+                    socket.assertBudgetZero(); // The preallocated aligned pool now owns the copied bytes.
+                    assertFalse(storage.close(Duration.ofMillis(50)));
+                    assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                    releaseIo.countDown();
+                    assertTrue(storage.close(Duration.ofSeconds(5)));
+                    assertEquals(1, io.forces);
+                    assertNull(socket.responses.poll());
+                } finally {
+                    releaseOwner.countDown();
+                    releaseIo.countDown();
+                }
             }
         }
     }

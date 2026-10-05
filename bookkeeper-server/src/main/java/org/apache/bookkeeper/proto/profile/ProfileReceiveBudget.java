@@ -21,6 +21,13 @@ package org.apache.bookkeeper.proto.profile;
 public final class ProfileReceiveBudget {
     public enum Lane { UNCLASSIFIED, DATA, CONTROL }
 
+    /** The allocator refused credit before allocating backing storage. */
+    public static final class CapacityExceededException extends IllegalStateException {
+        CapacityExceededException() {
+            super("Profile backing buffer capacity exhausted or connection closed");
+        }
+    }
+
     final class ConnectionPermit implements AutoCloseable {
         private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
         private Lane lane = Lane.UNCLASSIFIED;

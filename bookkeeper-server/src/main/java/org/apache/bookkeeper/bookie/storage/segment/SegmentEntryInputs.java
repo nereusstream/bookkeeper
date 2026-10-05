@@ -18,11 +18,14 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 
 /** Group-wide full-capacity source bytes for normal allocations or adopted private recovery snapshots. */
 final class SegmentEntryInputs {
@@ -108,12 +111,21 @@ final class SegmentEntryInputs {
     }
 
     synchronized Input acquire(ProfileLedgerContext context, int bytes) {
+        return acquire(context, bytes, UnpooledByteBufAllocator.DEFAULT);
+    }
+
+    /** Copy allocation shares the caller's backing ledger while preserving the independent source limit. */
+    synchronized Input acquire(ProfileLedgerContext context, int bytes, ByteBufAllocator allocator) {
+        Objects.requireNonNull(allocator, "allocator");
         if (!reserve(context, bytes)) {
             return null;
         }
         try {
             // No borrowed slice or pooled parent whose actual retained capacity exceeds this charge.
-            return new Input(context, Unpooled.buffer(bytes, bytes));
+            return new Input(context, allocator.heapBuffer(bytes, bytes));
+        } catch (ProfileReceiveBudget.CapacityExceededException refused) {
+            usedBytes -= bytes;
+            return null;
         } catch (RuntimeException | Error failure) {
             usedBytes -= bytes;
             throw failure;

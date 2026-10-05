@@ -151,3 +151,26 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 ```
 
 [有限 backing 额度投影](../models/README.md#profile-backing-额度投影)同步检查根及临时扩容 ownership，不证明 TLS 或内核总内存。JDK SSLEngine 的内部对象/缓存/内部 ByteBuffer、opaque native TLS 分配、kernel socket buffers、buffer/credit等对象开销，以及存储、索引、接收资源的统一总账仍未闭合。生产listener、fresh readiness、READ_ENTRY成功/确定missing、真实grant控制面、client quorum/CLOSED、完整A/C/D、掉电、长期负载及性能Gate保持OPEN；步骤11仍为PARTIAL。
+
+
+## 接收至存储源副本交接
+
+2026-10-06，隔离普通 Add 与 ADD_RECOVERY 的同步entry复制复用原 `SegmentEntryInputs.acquire`、batcher与driver，并取得借用frame所属连接的 `ProfileByteBufAllocator`。复制之前同时满足原source子上限与连接/共享Bookie接收账本；新的独立exact-size heap backing在分配前取得DATA credit。source计数是入口子上限，接收账本记录同一backing的实际持有，不把两份计数相加当作两份实际allocation。frame、解析workspace与源副本同时存在时各自保留实际费用，不先释放frame再复制。
+
+- driver接管后，frame取消或断连只停止原response等待。未被owner实际用完的源root仍保持原连接DATA归属及byte credit；名额可以归还，新source分配被关闭的permit拒绝。owner复制进既有预分配对齐池或完成实际duplicate比较后，才由原source释放路径归还root费用。对齐池的全部backing/alignment padding仍在原启动保留量内，lease保留至实际I/O和owner结果终结；这里没有把root费用延长到source已经不存在的force阶段。
+- allocator只对明确的credit拒绝抛 `ProfileReceiveBudget.CapacityExceededException`，source入口回滚已经取得的source份额并返回未接纳；原ordinary/recovery状态映射不变，未开始DATA的拒绝不重置此前UNKNOWN。其他runtime/JVM allocation错误仍回滚原source份额并传播。只有Profile source复用该账本；手动/其他allocator入口保持独立unpooled精确副本，不能因调用方使用pooled buffer而把未计费的大backing带入源契约。
+- 无新队列、线程、池或配置后端，不改wire、持久化格式、credential/grant规则或Classic行为。原手动Recovery快照adopt路径仍按原source预算与不可变snapshot合同执行。
+
+真实socket红色 `unified-wal-local-NSgvXgpc` 编译成功后预期失败：暂停owner时1060-byte源已排队，normal账本应为2464，实际1404。接线后 `unified-wal-local-xYus7kZX` 中normal/recovery两条真实mTLS路径均通过：frame/workspace/source共存时分别2464/2608字节，断连后仅保留1060源字节；owner复制到对齐池后source与接收费用归零，force未结束时50ms close仍失败、native DATA writer锁仍排他，force实际完成后可关闭且不回响应。第一次green中的目录重用错误与后续测试helper作用域编译错误保留，不计PASS；夹具改用独立实验目录并正确复用既有certificate helper，未放宽生产断言。
+
+focused `unified-wal-local-p2xdB0HL`两项通过。另一个用真实已安装channel allocator的单测把连接limit设128/base64：36-byte源使两个计数为36/100，第二个36-byte复制因连接额度拒绝而source/接收计数保持36/100，释放后恢复，关闭后已有source仍占36直至最终释放；pooled调用者的副本仍使用36-byte独立unpooled backing。这是allocator/ownership验证，不是该小预算完成TLS握手的证明。完整mTLS及实际I/O由前述socket回归验证。
+
+最终 `unified-wal-local-1PlKPtbk` tool exit0，924冻结输入，相关15类407项为402通过/5 macOS Linux-affinity跳过、0失败/错误；`unified-wal-source-style-Thj6khH7` Spotless/Checkstyle exit0，source集一致，21份Java回执checksums已核验。模型 `unified-wal-model-37pz7m69` tool exit0，182配置为42正向完整PASS/140指定反例，358冻结输入/548 checksums，118共享输入与1164去重union一致；五个designInputs仍绑定父提交 `b61887fd56b2037b886114ef924c40cbf26460ad`。初次style `unified-wal-source-style-IF6pd8GN` 的import排序错误不计PASS；最终运行发生在修正之后，先前测试/模型回执保留其原输入，不改绑定。验证耗时不作为性能结论。
+
+复现最小新行为：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest#profileSocketSourceCopyRemainsChargedAfterDisconnectUntilOwnerConsumesIt+profileSourceAllocatorRefusalRollsBackQuotaAndKeepsPrivateCopyContract'
+```
+
+原[有限backing投影](../models/README.md#profile-backing-额度投影)检查两个根的分配/最终引用/关闭计费，原ordinary/recovery分发模型检查实际I/O/owner终结；这些是分开的有限切片，不声明完整pipeline/source/pool组合或总内存证明。JDK/native TLS内部对象、kernel buffers、metadata/index/object工作集、对齐池与接收资源的统一配置及总账、生产listener/readiness、READ_ENTRY成功/确定missing、真正RepairIntent/grant控制面、client quorum、完整A/C/D、掉电、长期及性能Gate仍OPEN；步骤6/11继续PARTIAL。

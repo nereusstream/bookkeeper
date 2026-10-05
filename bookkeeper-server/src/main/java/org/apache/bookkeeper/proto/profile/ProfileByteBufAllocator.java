@@ -34,7 +34,7 @@ final class ProfileByteBufAllocator extends AbstractByteBufAllocator {
     private ProfileReceiveBudget.Credit reserve(int bytes) {
         ProfileReceiveBudget.Credit credit = connection.reserve(bytes);
         if (credit == null) {
-            throw new IllegalStateException("Profile backing buffer capacity exhausted or connection closed");
+            throw new ProfileReceiveBudget.CapacityExceededException();
         }
         return credit;
     }

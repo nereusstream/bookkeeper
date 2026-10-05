@@ -890,3 +890,8 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-backing-budget-close | 22 / 22 / 19 | 3 / 不适用 | 0.838 s / 112,295,936 bytes | EXPECTED_COUNTEREXAMPLE:BackingsKeepFullCredit |
 | ce-profile-backing-budget-response | 2 / 2 / 0 | 2 / 不适用 | 0.800 s / 110,690,304 bytes | EXPECTED_COUNTEREXAMPLE:ResponseSplitConservesReservation |
 | ce-profile-backing-budget-lane | 21 / 21 / 18 | 3 / 不适用 | 0.848 s / 111,493,120 bytes | EXPECTED_COUNTEREXAMPLE:ReadBackingKeepsAllocationLane |
+
+
+2026-10-06 [接收至存储源副本](../profile-wire/README.md#接收至存储源副本交接)沿用现有ProfileBackingBudget两个根的capacity/refcount/关闭投影及ordinary/recovery分发的I/O/owner终结投影重新验证。Java接线把源副本实际交给该allocator，所以第二根可以对应source；原模型仍不枚举source子额度、对齐池交接或完整组合，未新增性质或扩大有限模型声明。真实socket另验复制前后两份账本、断连与实际force/native锁的生命周期。
+
+当前源副本交接最终矩阵 `unified-wal-model-37pz7m69` tool exit0，42正向配置完整PASS/140指定反例，358冻结inputs/548 checksums；Java `unified-wal-local-1PlKPtbk`924 inputs、15类407项为402通过/5平台跳过，Spotless/Checkstyle `unified-wal-source-style-Thj6khH7`通过。118共享输入与1164去重union精确匹配，五个designInputs绑定父提交 `b61887fd56b2037b886114ef924c40cbf26460ad`；此前矩阵及统计保留各自原运行身份，未新增模型或性质，也不声明上述独立切片已经形成source/pool/TLS组合证明。
