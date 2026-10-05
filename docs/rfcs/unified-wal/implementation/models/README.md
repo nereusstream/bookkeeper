@@ -630,3 +630,35 @@ CHECK_DEADLOCK FALSE 仅允许有限终态，没有 liveness、公平调度、�
 最终回执 `unified-wal-model-67aozqxn` 绑定父提交 `efbcacc4e0164b548cdca160dfbdf43c031e85b8`、168 实际输入与 343 个 checksum；114 配置为 30 正向完整 PASS、84 指定反例，全部符合预期。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化保留。真实复用、未写 current grant 与缺失 Bookie authority 的验证见[区间合并](../local-storage/README.md#退役-data-序号区间的合并)。
 
 CHECK_DEADLOCK FALSE 仅允许有限终态。本模型不新增 FREE/字节/权限或持久化权威，不证明历史可以安全删除、长期工作集有界、liveness、一般 OPEN 错误恢复、完整 A/C/D 与组合、B17 或生产 Gate；原历史 receipt/designInputs 保持原绑定。
+
+
+## Arena 当前状态索引投影
+
+2026-10-05，`ArenaStateIndices.tla` 固定四个正 allocation ID 和六个已应用命令，区分当前 grant、历史已用身份闭区间及成功高水位。Allocate 的 slot/stream 合法性与 durable 顺序 apply 是输入；独立 reference set 与首次成功序号检查区间覆盖和原 grant order。Free 删除 current，不删除已用身份。有限范围内枚举失败分配、未用低 ID 空洞、退役身份与不同操作顺序；不以 planner 的连续 ID 假定所有低 ID 都已使用。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-arena-state-indices | 23517 / 7411 / 0 | 7 / 7 | 0.896 s / 251,920,384 bytes | PASS |
+| ce-arena-state-indices-free | 26 / 16 / 12 | 3 / 不适用 | 0.736 s / 109,527,040 bytes | EXPECTED_COUNTEREXAMPLE: IssuedRangesAreExact |
+| ce-arena-state-indices-hole | 31 / 18 / 13 | 3 / 不适用 | 0.832 s / 108,937,216 bytes | EXPECTED_COUNTEREXAMPLE: FeasibleUnissuedIdentityIsAccepted |
+| ce-arena-state-indices-high | 2 / 2 / 0 | 2 / 不适用 | 0.755 s / 109,838,336 bytes | EXPECTED_COUNTEREXAMPLE: HighWatermarkTracksOnlySuccessfulIdentity |
+| ce-arena-state-indices-order | 6 / 3 / 1 | 2 / 不适用 | 0.720 s / 106,807,296 bytes | EXPECTED_COUNTEREXAMPLE: CurrentGrantKeepsOriginalOrder |
+
+两个正向 Next 动作均有非零 coverage：Allocate 3630:18800、Free 3780:4716（保留工具原始双计数）。四个指定错误分别遗忘 FREE 后的已用 ID、用高水位拒绝未用空洞、由失败高 ID 推进高水位、丢失原 grant order，均在指定性质上产生反例。区间精确性、互不重叠及成功高水位同时检查；这里没有模拟实际物理 slot、请求 UUID/请求代、session 或 checkpoint 字节恢复。
+
+既有 `RetiredSequenceRanges.tla` 增加 RetireEmpty：当前空 grant 的 order 2 或 4 移除后，以先前折叠的范围作为输入再次 Advance，不重新扫描原 FREE 历史。保留物理覆盖、stream、最大 cut 和剩余 current order 边界，新增性质要求有限终态中不残留可合并的相邻范围。拒绝再折叠的错误候选单独否证这个行为。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-retired-sequence-ranges | 492 / 476 / 0 | 12 / 12 | 0.796 s / 132,382,720 bytes | PASS |
+| ce-retired-sequence-ranges-gap | 194 / 194 / 63 | 4 / 不适用 | 0.764 s / 115,556,352 bytes | EXPECTED_COUNTEREXAMPLE: RetiredCoverageIsExact |
+| ce-retired-sequence-ranges-live | 197 / 197 / 63 | 4 / 不适用 | 0.826 s / 116,178,944 bytes | EXPECTED_COUNTEREXAMPLE: CurrentAllocationOrderIsNotBridged |
+| ce-retired-sequence-ranges-cut | 193 / 193 / 63 | 4 / 不适用 | 0.765 s / 114,999,296 bytes | EXPECTED_COUNTEREXAMPLE: RequiredBookieCutIsRetained |
+| ce-retired-sequence-ranges-empty | 81 / 81 / 63 | 2 / 不适用 | 0.743 s / 111,493,120 bytes | EXPECTED_COUNTEREXAMPLE: EmptyRetirementKeepsRequiredBookieCut |
+| ce-retired-sequence-ranges-empty-barrier | 385 / 385 / 59 | 7 / 不适用 | 0.754 s / 119,488,512 bytes | EXPECTED_COUNTEREXAMPLE: EmptyBarrierRemovalIsFolded |
+
+扩展后的四个 Next 动作都有非零 coverage：CheckBookieCut 80:80、Advance 236:236、Finish 80:80、RetireEmpty 16:32。当前 grant 的控制顺序、已成功 FREE、准确 stream 与必要 Bookie cut 仍是输入；物理证明、同步与 fallback 的派生状态清空由[真实文件验证](../local-storage/README.md#arena-当前授权与历史身份的分离)承担，不能把该有限模型当作真实恢复证明。
+
+最终回执 `unified-wal-model-0ygt08z3` 绑定父提交 `ddf5e2700afcee6bbb0e25e130edfc7ec9d15a80`、175 实际输入与 361 个 checksum；120 配置为 31 正向完整 PASS、89 指定反例，全部符合预期。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`；官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化不变。全部 source hash 与最终代码一致，designInputs 仍绑定父提交；历史 receipt 不改绑定。
+
+CHECK_DEADLOCK FALSE 只允许有限终态，没有公平调度、liveness、真实持久化或性能结论。稀疏 ID 与序号缺口的范围数没有常数上限，UUID/业务/会话历史尚未压缩；完整业务 image、请求代、长期负载、多 Arena、filesystem 临时工作集、掉电、完整 A/C/D 与组合、B17 及生产 Gate 仍未闭合。

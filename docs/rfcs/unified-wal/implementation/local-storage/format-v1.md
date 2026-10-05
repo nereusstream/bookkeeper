@@ -315,3 +315,6 @@ v2保留所有现有业务状态表记录与原sequence/首次条件结果，包
 2026-10-05，原 journal 与物理轮转 journal 均复用各 owner 的同一 snapshot 恢复入口。原 journal 先核对全部完整控制记录、commit 与发布引用，并完成日志同步；随后合法 v2 image 可按内部 generation 间隔恢复，仍须准确保留目标代的 predecessor。正常条件结果、完整必要 suffix、发布页同步和坏 image 回退规则不变；不能因使用原 journal 而把完整 v2 快照误判为坏 image，或跳过 predecessor 校验。本增量不改任何持久字节/版本。
 
 该扩展不压缩业务历史、T身份或DATA session/generation链；持续create/delete、反复MOVE/FREE/reuse、完整metadata内存/磁盘总账仍可能达到声明上限并拒绝。没有放宽2×control-state image预算或DATA/控制成功条件，不代表B17、长期负载、多Arena、掉电、旧binary或生产Gate通过。
+
+
+2026-10-05，[Arena 当前状态索引](README.md#arena-当前授权与历史身份的分离)在成功控制 apply 时保留 grant 的首次序号、已用 ID 闭区间/高水位、增量退役范围和含空 FREE 的必要 Bookie cut。上述字段是由原完整命令 replay 重建的派生业务状态；原 ALLOC/FREE、MOVE、session、控制 framing 与 checkpoint image v1/v2 字节不变。当前 image 仍保存完整业务命令/首次结果，没有新增请求代或紧凑状态编码，也没有删除可证明幂等所需的历史。

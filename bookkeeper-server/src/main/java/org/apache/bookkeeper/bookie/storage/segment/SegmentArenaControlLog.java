@@ -349,7 +349,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    private record Grant(Allocation command, long generation) { }
+    private record Grant(Allocation command, long generation, long allocationOrder) { }
 
     private record AppliedOperation(Command command, Status status, long sequence) { }
 
@@ -368,8 +368,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private Thread rotating;
     private Generation physicalGeneration = LOG_GENERATION;
     private final Map<Slot, Grant> allocations = new HashMap<>();
-    private final Map<Long, Allocation> allocationIds = new HashMap<>();
-    private final Map<Long, Free> retiredAllocations = new HashMap<>();
+    private final Map<Long, Grant> currentAllocations = new HashMap<>();
+    private final TreeMap<Long, Long> issuedAllocationIds = new TreeMap<>();
+    private long allocationHighWatermark;
+    private final List<RetiredRange> retiredRanges = new ArrayList<>();
+    private long retiredBookieCut = -1;
     private final Map<Slot, Free> retiredSlots = new HashMap<>();
     private final Map<Long, AllocationTail> sealedTails = new HashMap<>();
     private final Map<Stream, Long> streamStarts = new HashMap<>();
@@ -732,12 +735,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized Allocation currentAllocation(long allocationId) throws IOException {
         requireQuiescentControl(config, identity);
-        Allocation allocation = allocationIds.get(allocationId);
-        if (allocation == null || retiredAllocations.containsKey(allocationId)
-                || !dataFileAvailable(allocation.file())) {
+        Grant grant = currentAllocations.get(allocationId);
+        if (grant == null || !dataFileAvailable(grant.command().file())) {
             throw new IOException("Allocation is not current and available");
         }
-        return allocation;
+        return grant.command();
     }
 
     record CompactionWindow(List<Allocation> allocations, long lastOrder) { }
@@ -748,10 +750,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
         restartStreamForShard(shard);
         Allocation latest = null;
         long order = -1;
-        for (Allocation allocation : allocationIds.values()) {
-            if (allocation.ownerShard() == shard && !retiredAllocations.containsKey(allocation.allocationId())
-                    && dataFileAvailable(allocation.file())) {
-                long candidate = appliedOperations.get(allocation.operationId()).sequence();
+        for (Grant grant : currentAllocations.values()) {
+            Allocation allocation = grant.command();
+            if (allocation.ownerShard() == shard && dataFileAvailable(allocation.file())) {
+                long candidate = grant.allocationOrder();
                 if (candidate > order) {
                     latest = allocation;
                     order = candidate;
@@ -774,10 +776,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
             return new CompactionWindow(List.of(), afterOrder);
         }
         TreeMap<Long, Allocation> candidates = new TreeMap<>();
-        for (Allocation allocation : allocationIds.values()) {
-            if (allocation.ownerShard() == shard && allocation.file() == file
-                    && !retiredAllocations.containsKey(allocation.allocationId())) {
-                long order = appliedOperations.get(allocation.operationId()).sequence();
+        for (Grant grant : currentAllocations.values()) {
+            Allocation allocation = grant.command();
+            if (allocation.ownerShard() == shard && allocation.file() == file) {
+                long order = grant.allocationOrder();
                 if (order > afterOrder && order <= throughOrder) {
                     candidates.put(order, allocation);
                     if (candidates.size() > 16) {
@@ -821,7 +823,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     throw new IOException("Protected FREE batch must use one DATA file");
                 }
                 victims.add(allocation);
-                orders.add(appliedOperations.get(allocation.operationId()).sequence());
+                orders.add(currentAllocations.get(allocation.allocationId()).allocationOrder());
             }
         }
         SegmentBookieControlLog.ReclamationLease bookieLease = bookie.protectReclamation(config, identity);
@@ -850,9 +852,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
             synchronized (this) {
                 requireQuiescentControl(config, identity);
-                if (appliedThrough != arenaCut || victims.stream().anyMatch(allocation ->
-                        retiredAllocations.containsKey(allocation.allocationId())
-                                || !allocation.equals(allocationIds.get(allocation.allocationId())))) {
+                if (appliedThrough != arenaCut || victims.stream().anyMatch(allocation -> {
+                    Grant current = currentAllocations.get(allocation.allocationId());
+                    return current == null || !allocation.equals(current.command());
+                })) {
                     throw new IOException("Whole-allocation FREE predecessor changed during verification");
                 }
             }
@@ -865,12 +868,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized List<Free> retiredAllocations() {
-        return List.copyOf(retiredAllocations.values());
+        return appliedOperations.values().stream().filter(operation ->
+                operation.status() == Status.APPLIED_DURABLE && operation.command() instanceof Free)
+                .map(operation -> (Free) operation.command()).toList();
     }
 
     /** Empty retirements carry no sequence range, but keep their required authority cut. */
     synchronized long requiredRetiredBookieCut() {
-        return retiredAllocations.values().stream().mapToLong(free -> free.facts().bookieCut()).max().orElse(-1);
+        return retiredBookieCut;
     }
 
     record RetiredRange(int shard, Generation generation, long streamFirstSequence, long allocationOrder,
@@ -878,18 +883,22 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Consecutive retired DATA can share a recovery range, but never cross a current allocation's control order. */
     synchronized List<RetiredRange> retiredStreamRanges() {
-        List<RetiredRange> ordered = retiredAllocations.values().stream()
-                .filter(free -> free.facts().records() != 0).map(free -> {
-                    FreeFacts facts = free.facts();
-                    AllocationIdentity allocation = facts.allocation();
-                    return new RetiredRange(allocation.ownerShard(), allocation.ownerGeneration(),
-                            allocation.streamFirstSequence(), facts.allocationOrder(), facts.allocationOrder(),
-                            facts.firstSequence(), facts.through(), facts.bookieCut());
-                }).sorted(Comparator.comparingInt(RetiredRange::shard)
-                        .thenComparingLong(range -> range.generation().value())
-                        .thenComparingLong(RetiredRange::allocationOrder)).toList();
+        return List.copyOf(retiredRanges);
+    }
+
+    private void addRetirement(FreeFacts facts) {
+        retiredBookieCut = Math.max(retiredBookieCut, facts.bookieCut());
+        if (facts.records() != 0) {
+            AllocationIdentity allocation = facts.allocation();
+            retiredRanges.add(new RetiredRange(allocation.ownerShard(), allocation.ownerGeneration(),
+                    allocation.streamFirstSequence(), facts.allocationOrder(), facts.allocationOrder(),
+                    facts.firstSequence(), facts.through(), facts.bookieCut()));
+        }
+        retiredRanges.sort(Comparator.comparingInt(RetiredRange::shard)
+                .thenComparingLong(range -> range.generation().value())
+                .thenComparingLong(RetiredRange::allocationOrder));
         List<RetiredRange> merged = new ArrayList<>();
-        for (RetiredRange next : ordered) {
+        for (RetiredRange next : retiredRanges) {
             RetiredRange previous = merged.isEmpty() ? null : merged.get(merged.size() - 1);
             boolean join = previous != null && previous.shard() == next.shard()
                     && previous.generation().equals(next.generation())
@@ -897,9 +906,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     && previous.lastAllocationOrder() < next.allocationOrder()
                     && previous.through() + 1 == next.firstSequence();
             if (join) {
-                for (Grant grant : allocations.values()) {
+                for (Grant grant : currentAllocations.values()) {
                     Allocation allocation = grant.command();
-                    long order = appliedOperations.get(allocation.operationId()).sequence();
+                    long order = grant.allocationOrder();
                     if (allocation.ownerShard() == next.shard()
                             && allocation.ownerGeneration().equals(next.generation())
                             && order > previous.allocationOrder() && order < next.lastAllocationOrder()) {
@@ -916,7 +925,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 merged.add(next);
             }
         }
-        return List.copyOf(merged);
+        retiredRanges.clear();
+        retiredRanges.addAll(merged);
     }
 
     synchronized long retiredExtentEnd(int file, long offset) {
@@ -932,8 +942,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized List<Allocation> currentReusedAllocations() {
-        return allocationIds.values().stream().filter(allocation -> allocation.expectedGeneration() > 0
-                && !retiredAllocations.containsKey(allocation.allocationId()))
+        return currentAllocations.values().stream().map(Grant::command)
+                .filter(allocation -> allocation.expectedGeneration() > 0)
                 .sorted(Comparator.comparingLong(Allocation::allocationId)).toList();
     }
 
@@ -1447,7 +1457,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         for (Slot slot : retiredSlots.keySet()) {
             available[slot.file()]++;
         }
-        long id = allocationIds.keySet().stream().mapToLong(Long::longValue).max().orElse(0);
+        long id = allocationHighWatermark;
         List<Optional<Allocation>> planned = new ArrayList<>(requests.size());
         HashSet<Long> selectedRetirements = new HashSet<>();
         for (PoolRequest request : requests) {
@@ -1515,16 +1525,16 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Original successful control sequence, retained by checkpoint/rotation; never inferred from file offsets. */
     synchronized long appliedAllocationOrder(SegmentBatchFormat.Address address) {
-        Allocation command = allocationIds.get(address.allocation());
-        if (failed || closed || command == null || retiredAllocations.containsKey(address.allocation())
+        Grant grant = currentAllocations.get(address.allocation());
+        Allocation command = grant == null ? null : grant.command();
+        if (failed || closed || command == null
                 || command.file() != address.fileIndex()
                 || command.ownerShard() != address.shard()
                 || !command.ownerGeneration().equals(address.streamGeneration())
                 || command.generation() != address.generation().value()) {
             return -1;
         }
-        AppliedOperation operation = appliedOperations.get(command.operationId());
-        return operation == null || operation.status() != Status.APPLIED_DURABLE ? -1 : operation.sequence();
+        return grant.allocationOrder();
     }
 
     /** Earliest whole-batch applied pool in control order; does not reserve or refill space. */
@@ -1536,13 +1546,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         SegmentBatchFormat.Address selected = null;
         long selectedOrder = Long.MAX_VALUE;
-        for (Allocation command : allocationIds.values()) {
-            if (retiredAllocations.containsKey(command.allocationId())
-                    || command.file() != file || command.ownerShard() != shard
+        for (Grant grant : currentAllocations.values()) {
+            Allocation command = grant.command();
+            if (command.file() != file || command.ownerShard() != shard
                     || !command.ownerGeneration().equals(stream)) {
                 continue;
             }
-            long order = appliedOperations.get(command.operationId()).sequence();
+            long order = grant.allocationOrder();
             if (order < minimumOrder) {
                 continue;
             }
@@ -1886,11 +1896,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     private void resetRecoveredState() {
-        retiredAllocations.clear();
+        retiredRanges.clear();
+        retiredBookieCut = -1;
         retiredSlots.clear();
         sealedTails.clear();
         allocations.clear();
-        allocationIds.clear();
+        currentAllocations.clear();
+        issuedAllocationIds.clear();
+        allocationHighWatermark = 0;
         streamStarts.clear();
         appliedOperations.clear();
         selectedMoves.clear();
@@ -2277,18 +2290,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private Status applyFree(Free free) {
         FreeFacts facts = free.facts();
         AllocationIdentity target = facts.allocation();
-        Allocation predecessor = allocationIds.get(target.allocationId());
-        AppliedOperation original = predecessor == null ? null : appliedOperations.get(predecessor.operationId());
-        boolean allowed = predecessor != null && AllocationIdentity.of(predecessor).equals(target)
-                && predecessor.generation() == free.expectedGeneration()
-                && !retiredAllocations.containsKey(target.allocationId()) && !durableQuarantine[target.file()]
-                && original != null && original.status() == Status.APPLIED_DURABLE
-                && original.sequence() == facts.allocationOrder()
+        Grant predecessor = currentAllocations.get(target.allocationId());
+        boolean allowed = predecessor != null && AllocationIdentity.of(predecessor.command()).equals(target)
+                && predecessor.generation() == free.expectedGeneration() && !durableQuarantine[target.file()]
+                && predecessor.allocationOrder() == facts.allocationOrder()
                 && (facts.arenaCut() < 0 || facts.arenaCut() == appliedThrough - 1);
         for (int block = 0; allowed && block < target.blocks(); block++) {
             Grant grant = allocations.get(slot(target.file(), target.offset() + block * BLOCK_BYTES));
-            allowed = grant != null && grant.command().equals(predecessor)
-                    && grant.generation() == free.expectedGeneration();
+            allowed = predecessor.equals(grant);
         }
         Status status = allowed ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
         Free retained = free.replayFacts();
@@ -2298,7 +2307,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 allocations.remove(slot);
                 retiredSlots.put(slot, retained);
             }
-            retiredAllocations.put(target.allocationId(), retained);
+            currentAllocations.remove(target.allocationId());
+            addRetirement(facts);
             sealedTails.remove(target.allocationId());
             selectedMoves.values().removeIf(selected ->
                     selected.entry().target().address().allocation() == target.allocationId());
@@ -2308,7 +2318,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     private Status applyAllocation(Allocation command) {
-        if (durableQuarantine[command.file()] || allocationIds.containsKey(command.allocationId())
+        if (durableQuarantine[command.file()] || wasAllocationIdIssued(command.allocationId())
                 || command.expectedGeneration() > 0 && (!sessionOpen || sessionEpoch == 0)) {
             appliedOperations.put(command.operationId(),
                     new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
@@ -2334,17 +2344,40 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 return Status.CONDITION_FAILED;
             }
         }
-        Grant grant = new Grant(command, command.generation());
+        Grant grant = new Grant(command, command.generation(), appliedThrough);
         for (int block = 0; block < command.blocks(); block++) {
             Slot slot = slot(command.file(), command.offset() + block * BLOCK_BYTES);
             allocations.put(slot, grant);
             retiredSlots.remove(slot);
         }
-        allocationIds.put(command.allocationId(), command);
+        currentAllocations.put(command.allocationId(), grant);
+        recordIssuedAllocationId(command.allocationId());
         streamStarts.putIfAbsent(stream, command.streamFirstSequence());
         appliedOperations.put(command.operationId(),
                 new AppliedOperation(command, Status.APPLIED_DURABLE, appliedThrough));
         return Status.APPLIED_DURABLE;
+    }
+
+    private boolean wasAllocationIdIssued(long id) {
+        Map.Entry<Long, Long> range = issuedAllocationIds.floorEntry(id);
+        return range != null && id <= range.getValue();
+    }
+
+    private void recordIssuedAllocationId(long id) {
+        long first = id;
+        long through = id;
+        Map.Entry<Long, Long> previous = issuedAllocationIds.floorEntry(id);
+        if (previous != null && previous.getValue() + 1 == id) {
+            first = previous.getKey();
+            issuedAllocationIds.remove(first);
+        }
+        Map.Entry<Long, Long> next = issuedAllocationIds.ceilingEntry(id);
+        if (id != Long.MAX_VALUE && next != null && id + 1 == next.getKey()) {
+            through = next.getValue();
+            issuedAllocationIds.remove(next.getKey());
+        }
+        issuedAllocationIds.put(first, through);
+        allocationHighWatermark = Math.max(allocationHighWatermark, id);
     }
 
     private Slot slot(int file, long offset) {

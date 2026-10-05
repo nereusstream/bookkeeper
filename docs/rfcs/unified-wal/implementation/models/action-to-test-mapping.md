@@ -392,3 +392,14 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | Advance / Finish | 当前 grant 顺序不能跨越；`retiredStreamRangesKeepUnwrittenCurrentAllocationOrderBetweenRetirements` 保留未写的中间 grant、两个退役区间及稳定恢复 cut 的完整 stream prefix |
 
 模型把成功 FREE、原控制顺序、stream 身份及 Bookie cut 作为输入；不证明新的 FREE、物理字节、持久化或压缩历史本身安全。
+
+
+## Arena 当前授权与历史身份
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| Allocate | `applyAllocation` 成功才更新 issued ID 区间、高水位与 immutable grant order；`issuedAllocationIdentityPreservesHolesHighWatermarkAndAbaAcrossCheckpointFallback` 验证 101/103 已退役时允许 102、失败 2000 不推进 planner、原序号不因重试改变、新 UUID 不能重用 101 |
+| Free | 成功 FREE 移除当前 grant，但 issued 身份仍保留；同一真实回归在完整及损坏最新 image 的 fallback 后继续验证拒绝/高水位和 suffix |
+| RetireEmpty / Advance | 既有未写中间 grant 测试扩展为空 FREE 消除最后边界，保留旧 list snapshot、合并 1..2、更新必要 Bookie cut，gen2 复用后真实写入第 3 batch、双轮转及健康 restart 可读 |
+
+slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限模型的输入；当前 indices 仍由原完整命令 replay 重建，未证明 compact checkpoint 或请求代。

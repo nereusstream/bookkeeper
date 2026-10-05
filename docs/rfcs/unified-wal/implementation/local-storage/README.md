@@ -804,3 +804,22 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 请求身份的静态核对建议独立的 Arena 请求代，首次身份与重试保持不变；持久拒绝下界须跨 checkpoint/fallback/restart 保留，过期 stale 不表示原操作未执行。当前候选尚未替代裸 UUID API、既有 operationGeneration 或实验编码，完整业务历史压缩尚未实现。
 
 这一步提供紧凑业务状态的恢复事实，尚未删除 request-id、ALLOC、FREE、MOVE 或 session 历史。投影仍从历史表排序并创建临时列表，历史内存、磁盘及排序工作集仍随业务增长，不宣称长期资源有界或性能改善。有界请求身份、完整业务快照、Bookie terminal T 的清理义务、共享 filesystem/SST/checkpoint 临时预算、长期负载、多 Arena、一般 OPEN 错误恢复、掉电、正式性能与完整模型仍待完成；步骤 8/10、B17 和生产 Gate 保持未完成。
+
+
+## Arena 当前授权与历史身份的分离
+
+2026-10-05，Arena 的 current grant 直接保留原首次成功 allocation 控制序号。当前 allocation 按 ID 与物理 slot 索引同一个 grant，append、latest tail、16-grant compaction window、MOVE 前驱和 FREE 证明读取当前授权，不再从历史 ALLOC 或 UUID 表寻找原序号。只有成功 ALLOC 创建 grant，准确重试不改变其 order；成功 FREE 删除全部当前 slot/ID，条件失败不发布授权。
+
+已成功使用的 allocation ID 独立保留为不相交闭区间，同时维护单调高水位。已退役 ID 仍不可再用，但未使用的低 ID 空洞允许准入；高水位只在成功分配时更新，失败的高 ID 不推进它。正常 planner 的连续 ID 可归并为一个区间，任意稀疏调用仍可能产生更多区间，不把高水位当作“所有更小 ID 都已使用”。这一步保持既有 API 与 anti-ABA 语义。
+
+成功 FREE 在 Arena 控制 apply 内增量折叠当前 retired ranges，独立更新最大必要 Bookie cut。空 FREE 也必须触发折叠：它移除最后的 current grant 顺序边界后，原先分开的连续序号区间才可以合并。恢复读者只复制已合并范围，不再排序所有历史 FREE；每次维护的排序输入是既有合并范围加本次非空事实，current grant 边界来自当前授权。重复 FREE、失败条件不追加范围或重复 bump。
+
+重复的历史 FREE 索引已移除，既有 `retiredAllocations` 诊断仍从首次操作结果中列出原成功 FREE。新派生状态由控制 replay 重建，每次 fallback 尝试清空 current grant、issued ID 区间、高水位、retired ranges 和必要 cut。控制记录及 image v1/v2 编码不变，snapshot 仍保存原命令/首次结果并重放；不把派生索引改动描述为紧凑业务 checkpoint 已完成。
+
+真实文件测试在 ID 101/103 成功分配并退役后，允许未使用的 102；对占用 slot 的 2000 条件失败不推进 planner，101 换 UUID 仍不能再次使用。原 journal 第八代 image 与损坏后第七代 fallback 加完整 suffix 都保留原 102 allocation 顺序、准确重试结果及下一 ID 104/105。扩展既有未写中间 grant 测试：空 FREE 移除最后顺序边界后，两段连续范围合为一段，更新必要 cut；随后 gen2 DATA 经双 owner rotation 与健康 restart 后点读成功。原 24 次 reuse 与空 FREE 缺少 Bookie cut 的回归保留。
+
+首次最小四项回执 `unified-wal-local-O8s26SoR` 为 3 通过、1 error：新 ID 夹具先关闭控制 owner，却让 DATA 仍持有 session，下一次 OPEN 正确拒绝。改为先执行健康 `files.close()`，保留所有会话、身份、结果与恢复断言，不修改生产语义；该失败不计 PASS。修正后的最小四项通过，再因共享控制/恢复合同扩大至原七类。最终 Java 回执 `unified-wal-local-S8SUAiaK` 绑定父提交 `ddf5e2700afcee6bbb0e25e130edfc7ec9d15a80` 与 210 实际输入：320 项中 315 通过、5 项 Linux 亲和性在 macOS 跳过，0 失败/错误；Spotless/Checkstyle 通过。复现沿用[运行期轮转](#运行期控制日志轮转)的 runner 和 style 命令。
+
+[当前索引有限投影](../models/README.md#arena-当前状态索引投影)检查已用 ID 区间、空洞、成功高水位、原 grant 顺序与空边界退役后的再折叠。最终回执 `unified-wal-model-0ygt08z3` 绑定同一父提交、175 实际输入与 361 个 checksum；31 正向完整 PASS、89 指定反例全部符合预期。361 个去重 Java/模型输入 hash 与当前源码一致，设计输入仍绑定父提交，历史 receipt 不改绑定。最小验证与最终回归间没有改变验证合同或跳过有效检查。
+
+原 UUID 操作表、会话/stream 与 MOVE/Bookie T 历史仍按现有保留合同增长；稀疏 issued ID 与序号缺口也没有常数范围数保证。尚未实现独立请求代及完整业务状态编码/裁剪，没有总内存、磁盘、长期吞吐或掉电结论。步骤 8/10、B17、长期负载、多 Arena、完整 A/C/D 与组合及生产 Gate 保持未完成。

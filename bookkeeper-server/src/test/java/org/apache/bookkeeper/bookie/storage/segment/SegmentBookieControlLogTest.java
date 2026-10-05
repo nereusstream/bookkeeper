@@ -10049,13 +10049,14 @@ public class SegmentBookieControlLogTest {
         IsolatedSegmentConfig config = coverageRecoveryConfig("retired-range-live-order");
         long middle = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
         long last = middle + SegmentArenaControlLog.BLOCK_BYTES;
+        long middleOrder;
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
                         1024 * 1024, key((byte) 3), VALIDATOR)) {
             files.startSession(arena);
-            arena.submitBatch(List.of(reclaimableAllocation(101, 4096),
-                    reclaimableAllocation(102, middle), reclaimableAllocation(103, last)));
+            middleOrder = arena.submitBatch(List.of(reclaimableAllocation(101, 4096),
+                    reclaimableAllocation(102, middle), reclaimableAllocation(103, last))).get(1).sequence();
             files.writeAuthorized(reclamationBatch(config, 101, 4096, 1, 44), arena);
             files.writeAuthorized(reclamationBatch(config, 103, last, 2, 48), arena);
             bookie.submitBatch(List.of(tombstone(44, 201), tombstone(48, 202)));
@@ -10074,6 +10075,119 @@ public class SegmentBookieControlLogTest {
             assertEquals(List.of(new SegmentDataRecovery.StreamCoverage(0, new Generation(1), 1, 2)),
                     recovered.inventory.indexStreams(recovered.arena));
             assertEquals(102, recovered.arena.currentAllocation(102).allocationId());
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR);
+                IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(config, identity(),
+                        arena, bookie, new SegmentFileIo(), 32, 4)) {
+            bookie.submitBatch(List.of(install(52, 701, (byte) 5), activate(52, 702)));
+            List<SegmentArenaControlLog.RetiredRange> before = arena.retiredStreamRanges();
+            try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 703), 102,
+                    files, bookie, ByteBuffer.allocate(4096))) {
+                assertEquals(0, free.facts().records());
+                assertEquals(middleOrder, free.facts().allocationOrder());
+                arena.submitBatch(List.of(free));
+                assertEquals(free.facts().bookieCut(), arena.requiredRetiredBookieCut());
+            }
+            assertEquals(2, before.size());
+            assertEquals(1, arena.retiredStreamRanges().size());
+            assertEquals(2, arena.retiredStreamRanges().get(0).through());
+            SegmentArenaControlLog.Allocation reused = arena.planPools(List.of(
+                    new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+            assertEquals(104, reused.allocationId());
+            assertEquals(2, reused.generation());
+            arena.submitBatch(List.of(reused));
+            ByteBuf input = entry(context(52), 3);
+            try {
+                files.writeAuthorized(SegmentBatchFormat.encode(config,
+                        new SegmentBatchFormat.Address(0, 0, reused.allocationId(), new Generation(2),
+                                new Generation(1), 3, reused.offset()),
+                        List.of(SegmentBatchFormat.entry(context(52), input))), arena);
+            } finally {
+                input.release();
+            }
+            files.close();
+            arena.rotate();
+            bookie.rotate();
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(52), 3).result()) {
+                assertEquals(3, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void issuedAllocationIdentityPreservesHolesHighWatermarkAndAbaAcrossCheckpointFallback() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("issued-allocation-identities", 8L * 1024 * 1024);
+        long occupied = 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES;
+        long unused = occupied + SegmentArenaControlLog.BLOCK_BYTES;
+        SegmentControlCheckpoint.Reference previous = null;
+        SegmentControlCheckpoint.Reference latest = null;
+        long order;
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            files.startSession(arena);
+            arena.submitBatch(List.of(reclaimableAllocation(101, 4096),
+                    reclaimableAllocation(103, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
+            for (long id : new long[] {101, 103}) {
+                try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 800 + id), id,
+                        files, bookie, ByteBuffer.allocate(4096))) {
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                            arena.submitBatch(List.of(free)).get(0).status());
+                }
+            }
+            for (int cycle = 0; cycle < 8; cycle++) {
+                previous = latest;
+                latest = arena.checkpoint();
+            }
+            SegmentArenaControlLog.Result accepted = arena.submitBatch(
+                    List.of(reclaimableAllocation(102, occupied))).get(0);
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, accepted.status());
+            order = accepted.sequence();
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    arena.submitBatch(List.of(reclaimableAllocation(2000, occupied))).get(0).status());
+            files.close();
+        }
+        int cycle = 0;
+        for (SegmentControlCheckpoint.Reference expected : List.of(latest, previous)) {
+            try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR);
+                    IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(config, identity(),
+                            arena, bookie, new SegmentFileIo(), 32, 4)) {
+                assertEquals(expected, arena.publishedCheckpoint().orElseThrow());
+                assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                        arena.submitBatch(List.of(reclaimableAllocation(102, occupied))).get(0).status());
+                assertEquals(order, arena.appliedAllocationOrder(new SegmentBatchFormat.Address(
+                        0, 0, 102, new Generation(1), new Generation(1), 1, occupied)));
+                SegmentArenaControlLog.Allocation aba = new SegmentArenaControlLog.Allocation(
+                        SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 1901 + cycle), new Generation(1),
+                        0, 0, 0, new Generation(1), 101, unused, 1, 1);
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        arena.submitBatch(List.of(aba)).get(0).status());
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        arena.submitBatch(List.of(reclaimableAllocation(2000, occupied))).get(0).status());
+                SegmentArenaControlLog.Allocation planned = arena.planPools(List.of(
+                        new SegmentArenaControlLog.PoolRequest(0, new Generation(1), 1, 1))).get(0).orElseThrow();
+                assertEquals(104 + cycle, planned.allocationId());
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        arena.submitBatch(List.of(planned)).get(0).status());
+            }
+            if (cycle++ == 0) {
+                byte[] damaged = Files.readAllBytes(SegmentControlCheckpoint.path(
+                        config, SegmentControlFormat.Owner.ARENA, latest.slot()));
+                damaged[4224] ^= 1;
+                Path image = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, latest.slot());
+                Files.write(image, damaged);
+                try (FileChannel channel = FileChannel.open(image, StandardOpenOption.WRITE)) {
+                    channel.force(true);
+                }
+            }
         }
     }
 

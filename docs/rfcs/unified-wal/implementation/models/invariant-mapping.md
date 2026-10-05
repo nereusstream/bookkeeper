@@ -357,3 +357,16 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | EmptyRetirementKeepsRequiredBookieCut | 空 FREE 无序号范围但仍保留必要 Bookie cut；恢复检查所有退役事实的最大 cut，不只检查非空投影 |
 
 原 request-id/allocation/FREE/session 等历史仍保留，排序工作集仍随历史增长；有限投影不证明完整业务压缩、有界长期资源、liveness 或生产 Gate。
+
+
+## Arena 当前授权与历史身份
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| IssuedRangesAreExact / IssuedRangesAreDisjoint | 独立 issued ID 闭区间只覆盖实际成功分配，左右相邻区间合并；FREE 不移除已用身份，任意 ID 空洞不是已使用 |
+| FeasibleUnissuedIdentityIsAccepted | 不以 ID 低于高水位代替 issued 查询；已满足实际 slot/stream 条件的未用低 ID 可成功，模型将这些前置条件作为输入 |
+| HighWatermarkTracksOnlySuccessfulIdentity | planner 从独立成功高水位产生新 ID，失败分配不推进；实际边界/溢出仍按既有 API，模型固定四个 ID |
+| CurrentGrantKeepsOriginalOrder | 当前 grant 保留首次成功序号，MOVE/FREE/append 从当前授权读取；准确重试不重新定义顺序 |
+| EmptyBarrierRemovalIsFolded | 空 FREE 移除 current grant 后重新折叠已有范围；新的可合并邻居不能永久保留过时边界 |
+
+新状态在每次恢复候选前清空、原完整命令 replay 重建；该真实恢复门槛不由输入型有限 indices 模型自证。整体幂等历史、compact image、长期资源与生产 Gate 尚未闭合。
