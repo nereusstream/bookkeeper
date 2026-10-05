@@ -466,3 +466,15 @@ slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限
 | CreateReply / Read / Update / Resolve | `acknowledgedCreateRechecksActualMetadataRatherThanItsSubmittedObject`在真实create成功回调延迟期间修改实际ack quorum，修复前APPLIED、修复后CONFLICT，验证成功必须来自实际read |
 
 原子metadata backend操作、严格字节解码是模型输入；真实测试使用既有server与两个client，并只改变实际操作之后的callback交付。该动作表不包含all-E安装、READY、后续membership/delete mutation CAS或初始writer完成。
+
+
+## PREPARING reservation authority 动作
+
+| 动作 | 实际实现与验证 |
+| --- | --- |
+| Root create / result resolution（沿用metadata-create投影） | `ZKProfileReservationStore.createIfAbsent`真实persistent create后sync/get；同操作冲突、双client单winner、lost/held callback、实际删除后的UNKNOWN与提交后timeout |
+| Read | `read`严格校验PREPARING root及原子bytes/Stat，独立vector、32目标上限、wrong-ledger/ephemeral/ACL/closed-session回归 |
+| Project | `installAuthorityReader(localBookieId)`显式绑定本地目标，从同一root为全部计划E分别生成原接口authority；错误target/key与ACTIVATE无authority |
+| Replace | ack callback延迟期间实际第二client更改root，结果CONFLICT；后续read不混用旧scope与新version |
+
+这里的INSTALL投影没有mock本地durable结果；实际route/credential/inactive install及READY/activation仍为后续接线，PREPARING不能返回normal writer。

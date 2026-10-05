@@ -157,3 +157,43 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 最终 `unified-wal-local-asvuwC2b` tool exit0，981冻结source inputs，相关6类70/70通过、0 failure/error/skip；`unified-wal-metadata-style-RCI77e1E` Spotless/Checkstyle exit0，source集一致，12份Java回执checksums已核验。模型 `unified-wal-model-7mo2zzed` tool exit0，188配置为43正向完整PASS/145指定反例，414冻结inputs/566 checksums；179共享输入及1216去重union一致，五个designInputs绑定父提交 `ffc3e8cdea081280a8f21da8c63dea3c235dfbd7`。此前不存在的isOpen接口、初次style超长行与上述实际snapshot回归失败均不计PASS；最终验证在实际read修复之后，旧运行保留原输入。验证耗时不是性能前后对照。
 
 [有限metadata创建投影](../models/README.md#标准-metadata-backlink-创建投影)独立验证snapshot匹配和unknown规则；它不枚举全部字节、backend内部或all-E/READY组合。真实sidecar PREPARING/有界target publication、all-E durable receipts、READY与delete cut、后续birth-bound mutation CAS、安装激活coordinator、生产listener/readiness、quorum/CLOSED/完整恢复、完整A/C/D、长期、掉电及性能仍未闭合；步骤12及生产Gate保持PARTIAL。
+
+
+## 步骤 12：真实 PREPARING reservation 与 INSTALL 冷读
+
+2026-10-06，`ProfileReservation`、`ProfileReservationCodec` 与 `ZKProfileReservationStore`将初始PREPARING/reservation写入真实ZK单个persistent root，再从该root投影现有`ProfileControlStore`的INSTALL authority。原provisioned单目标view reader保留其原范围；新root是coordinator准备阶段的不可覆盖创建原语，不是人工预置view、第二份membership或normal-write authority。
+
+root key固定为`<provisioned-root>/<ledgerId hex>`，同一ledger的不同instance/sidecarId也竞争同一key。调用方拥有client、namespace与publication ACL，adapter不建父目录、不拥有client、不自动retry/cache/watch或启动新线程。冷操作必须由有界caller执行，不能运行在ZK event线程或DATA owner；一次调用共享绝对deadline，timeout/interrupt不取消已提交写入。
+
+reservation绑定上一节的52-byte backlink，以及有序计划E集合中每个目标的完整secret-free INSTALL scope：Bookie identity/storage incarnation、descriptor identity、domain/generation、operation identity和public semantic payload identity。全部目标必须共享ledger/instance/descriptor/domain/generation/operation/payload，Bookie identity不得重复；最多32个目标，当前required engine固定SEGMENT_WAL。该集合仅表达计划安装范围，标准metadata创建后membership仍由LedgerMetadata独占。
+
+可丢弃实验schema 1使用big-endian：
+
+| Offset | 字段 |
+| --- | --- |
+| 0 / 4 / 8 / 12 | `UWPR` magic、schema 1、完整length、PREPARING kind 1，各u32 |
+| 16 | mandatory feature set，u64，当前必须0 |
+| 24 | 原52-byte instance/opaque sidecar backlink |
+| 76 | target count，u32，1..32 |
+| 80起 | 每target的u32 length与原严格`ProfileAuthorityCodec`记录；必须complete PREPARING/INSTALL/SEGMENT且无range |
+| 最后4 bytes | CRC32C，覆盖此前全部bytes |
+
+固定部分84 bytes；decoder硬上限18,740 bytes，INSTALL实际无range的最大编码18,228 bytes。列表与scope保持immutable，未知mandatory字段、坏CRC/length/count、trailing bytes、scope不一致、错误ledger和ephemeral root拒绝开放；不修复或覆盖坏authority。root没有secret、credential digest、receipt history或store version复制；版本来自同一次实际get的Stat.mzxid。
+
+`createIfAbsent`仅提交一次persistent create，无论成功、NODEEXISTS或回复丢失，都以一次sync/get实际snapshot解析：完整backlink和全部有序scope相同才返回APPLIED/ALREADY_APPLIED及实际version；相同operation/payload identity却改变目标、incarnation、顺序、generation、instance或sidecar仍CONFLICT。损坏root为QUARANTINED，查询失败或提交后实际NONODE保持DURABILITY_UNKNOWN，不能据此认定原请求没有执行。调用方仍须保留更早UNKNOWN，不用当前未提交结果清除它。
+
+`installAuthorityReader(localBookieId)`显式绑定本地目标，因为原AuthorityKey命名共享domain而不含target。它冷读已提交root，以exact ledger/instance/purpose/domain key和计划目标选择完整scope，生成PREPARING authority及该snapshot的mzxid。未计划目标、其他instance/domain及ACTIVATE purpose均无authority；完整请求的principal、incarnation、operation/payload、descriptor/credential和local conditional durable install仍由原endpoint/physical owner验证。该reader不授予READY、normal ACTIVE或Add，也不把一次cold read当作持续租约或跨store/local原子撤权。
+
+新10项测试使用原真实单server/双client fixture，验证独立270-byte向量、最大目标数与输入复制、字段/范围严格拒绝、真实create及每个目标cold-interface投影、同operation冲突不覆盖、并发单physical winner、实际commit后丢reply、ack回调延迟期间其他client改变root、实际删除后的UNKNOWN、200ms提交后timeout/迟到callback、ACL/关闭session及ephemeral/wrong-ledger/corrupt拒绝。测试改变实际server操作之后的callback交付；这里没有把mock成功当作root提交或all-E local durability。
+
+复现：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileReservationStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,IsolatedProfileControlEndpointTest,TestLedgerMetadataSerDe'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
+
+定向开发运行`unified-wal-local-DW0FfPZX`的10项通过；其后扩展相关覆盖，并保留原运行输入。最终 `unified-wal-local-K2IDKqqY` tool exit0，985冻结source inputs，相关7类80/80通过、0 failure/error/skip；`unified-wal-reservation-style-aHMhoBh8` Spotless/Checkstyle exit0，source集精确一致，13份Java回执checksums已核验。最终模型 `unified-wal-model-2iaijevf` tool exit0，194配置为44正向完整PASS/150指定反例，425冻结inputs/584 checksums；183共享输入及1227去重union一致，五个designInputs绑定父提交 `2877d79cc2a4c61db1f9fae272c7b171592f4abe`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。
+
+本次仅创建不可覆盖PREPARING root和实际INSTALL冷读投影；真实all-E local install/receipts、标准metadata前置组合、READY/目标page及delete cut CAS、birth-bound mutation、activation/coordinator、orphan GC/retention、生产listener/startup/readiness、quorum、完整A/C/D组合、长期、掉电和性能仍未闭合。步骤12和生产Gate保持PARTIAL。

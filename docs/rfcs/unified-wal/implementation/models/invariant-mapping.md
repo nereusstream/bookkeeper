@@ -431,3 +431,16 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 | AbsenceDoesNotProveNoEffect | 创建reply丢失后，即使实际节点被删除且fresh read NONODE仍UNKNOWN | 不证明先前Add/其他operation outcome，也不引入自动重建或重试 |
 
 五个指定反例各取消一条instance/reference/content/unknown/实际snapshot边界。reservation、all-E durable receipts、sidecar READY及目标留存、delete cut、后续birth-bound mutation CAS、quorum、liveness和完整模型组合仍未覆盖。
+
+
+## PREPARING reservation authority
+
+| 性质 | 合同与实际实现 | 模型边界 |
+| --- | --- | --- |
+| GrantedHasValidCommittedRoot | 只有完整persistent且严格解码的PREPARING root形成authority；缺失/坏root/不可用均不放行 | 编码/CRC/count上限及实际ZK操作由Java验证 |
+| GrantedMatchesRequestedKey | ledger/instance/purpose/domain exact key匹配，不能由caller选任意backend path | descriptor/完整operation/payload/principal继续由原endpoint exact AuthZ验证 |
+| GrantedTargetIsPlanned | reader固定本地target，并仅选有序计划集合中的该target/incarnation | 不证明E个Bookie实际已完成inactive install |
+| PreparingOnlyAuthorizesInstall | PREPARING只生成INSTALL authority，不能ACTIVATE或normal Add | 不包含READY publication及local ACTIVE状态 |
+| ProjectionKeepsReadVersion | 同一次read的scope与Stat.mzxid对应，后续root替换不改旧snapshot | snapshot不是持续authority租约，也没有birth-bound mutation CAS |
+
+五个敏感性反例各破坏以上一条边界。创建/重试/response-loss的完整内容和UNKNOWN性质沿用metadata-create投影及真实server测试；root/child CAS、delete cut、retention、quorum、完整模型组合、活性及性能仍未覆盖。

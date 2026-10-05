@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 43 个完整正向配置、145 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 44 个完整正向配置、150 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,12 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-reservation-authority` | 一次PREPARING root cold read、可选后续root替换及INSTALL投影，检查exact key/计划目标/严格root及同snapshot版本 |
+| `ce-profile-reservation-authority-key` | 忽略instance/domain/purpose key，须违反 `GrantedMatchesRequestedKey` |
+| `ce-profile-reservation-authority-target` | 忽略计划目标，须违反 `GrantedTargetIsPlanned` |
+| `ce-profile-reservation-authority-corrupt` | 将坏/不完整/超限/ephemeral root当成可用，须违反 `GrantedHasValidCommittedRoot` |
+| `ce-profile-reservation-authority-normal` | PREPARING授予ACTIVATE，须违反 `PreparingOnlyAuthorizesInstall` |
+| `ce-profile-reservation-authority-version` | 新version配旧scope，须违反 `ProjectionKeepsReadVersion` |
 | `a-profile-metadata-create` | 一次standard metadata create、一次resolving snapshot read及可选delete/recreate/update，检查完整instance/reference/初始内容和UNKNOWN |
 | `ce-profile-metadata-create-instance` | 忽略instance，须违反 `SuccessMatchesInstance` |
 | `ce-profile-metadata-create-sidecar` | 忽略opaque sidecar reference，须违反 `SuccessMatchesSidecar` |
@@ -918,3 +924,21 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-metadata-create-payload | 52 / 45 / 19 | 4 / 不适用 | 0.842 s / 110,460,928 bytes | EXPECTED_COUNTEREXAMPLE:SuccessMatchesInitialPayload |
 | ce-profile-metadata-create-absence | 84 / 73 / 22 | 6 / 不适用 | 0.858 s / 110,526,464 bytes | EXPECTED_COUNTEREXAMPLE:AbsenceDoesNotProveNoEffect |
 | ce-profile-metadata-create-ack | 17 / 17 / 7 | 3 / 不适用 | 0.810 s / 107,347,968 bytes | EXPECTED_COUNTEREXAMPLE:SuccessHasActualMetadataSnapshot |
+
+
+## PREPARING reservation authority 投影
+
+2026-10-06 `ProfileReservationAuthority`验证一次真实root冷读之后的INSTALL authority选择。kind为absent、matching、错误instance/domain key、目标未计划、坏/不完整/超限/ephemeral root及unavailable六类；purpose分别INSTALL与ACTIVATE，root version为0/1，可在read前后发生一次替换。返回保留read的scope与版本，不把后来的root/version拼入旧snapshot，也不声称read之后仍持有持续authority。
+
+五个mutation分别忽略key、忽略计划目标、接受坏root、PREPARING授予normal activation以及混用后来的version。原子bytes/Stat read和严格codec是输入；真实root创建的完整payload/instance/reference匹配与UNKNOWN边界沿用既有metadata-create投影，加上[真实ZK root与接口回归](../profile-control/README.md#步骤-12真实-preparing-reservation-与-install-冷读)。此处没有root publication CAS、all-E local durability/receipt、READY/child-page/delete cut、birth lineage、orphan GC/retention、quorum、公平性/活性、fsync、实际TLS、掉电、性能或完整A/C/D组合证明。最终 `unified-wal-local-K2IDKqqY` tool exit0，985冻结source inputs，相关7类80/80通过、0 failure/error/skip；`unified-wal-reservation-style-aHMhoBh8` Spotless/Checkstyle exit0，source集精确一致，13份Java回执checksums已核验。最终模型 `unified-wal-model-2iaijevf` tool exit0，194配置为44正向完整PASS/150指定反例，425冻结inputs/584 checksums；183共享输入及1227去重union一致，五个designInputs绑定父提交 `2877d79cc2a4c61db1f9fae272c7b171592f4abe`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。历史回执保持原绑定。
+
+新正向投影完整遍历76 generated/66 distinct/queue0，search depth和diameter均4；五个mutation命中各自指定性质。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-reservation-authority | 76 / 66 / 0 | 4 / 4 | 0.791 s / 107,118,592 bytes | PASS |
+| ce-profile-reservation-authority-key | 43 / 33 / 16 | 3 / 不适用 | 0.850 s / 105,857,024 bytes | EXPECTED_COUNTEREXAMPLE:GrantedMatchesRequestedKey |
+| ce-profile-reservation-authority-target | 45 / 35 / 17 | 3 / 不适用 | 0.792 s / 107,118,592 bytes | EXPECTED_COUNTEREXAMPLE:GrantedTargetIsPlanned |
+| ce-profile-reservation-authority-corrupt | 47 / 37 / 18 | 3 / 不适用 | 0.790 s / 106,004,480 bytes | EXPECTED_COUNTEREXAMPLE:GrantedHasValidCommittedRoot |
+| ce-profile-reservation-authority-normal | 54 / 44 / 21 | 3 / 不适用 | 0.839 s / 106,692,608 bytes | EXPECTED_COUNTEREXAMPLE:PreparingOnlyAuthorizesInstall |
+| ce-profile-reservation-authority-version | 65 / 55 / 24 | 4 / 不适用 | 0.804 s / 104,677,376 bytes | EXPECTED_COUNTEREXAMPLE:ProjectionKeepsReadVersion |
