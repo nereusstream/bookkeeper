@@ -12703,6 +12703,10 @@ public class SegmentBookieControlLogTest {
         IsolatedSegmentConfig config = config();
         List<SegmentPointRead.Location> original;
         List<SegmentPointRead.Location> targets;
+        List<SegmentPointRead.Location> superseded;
+        List<SegmentPointRead.Location> rejected;
+        SegmentControlCheckpoint.Reference previous = null;
+        SegmentControlCheckpoint.Reference latest = null;
         try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
             original = fixture.sources;
             SegmentDataPhysicalDriver.DurableRelocation first = fixture.copy(601, 2, (byte) 0);
@@ -12736,16 +12740,47 @@ public class SegmentBookieControlLogTest {
                     fixture.arena.submitBatch(List.of(prior)).get(0).status());
             targets = next.copies().stream()
                     .map(SegmentDataPhysicalDriver.RelocationCopy::location).toList();
+            superseded = first.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList();
+            rejected = losing.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList();
+            for (int cycle = 0; cycle < 8; cycle++) {
+                previous = latest;
+                latest = fixture.arena.checkpoint();
+            }
         }
         try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(latest, arena.publishedCheckpoint().orElseThrow());
             for (int i = 0; i < 2; i++) {
                 assertEquals(targets.get(i), arena.resolveLocation(original.get(i)));
                 arena.validateSelectedRecord(targets.get(i), SegmentPointRead.read(config, identity(),
                         arena, targets.get(i)).record());
+                assertTrue(arena.wasCommittedCopy(superseded.get(i), SegmentPointRead.read(config, identity(),
+                        arena, superseded.get(i)).record()));
+                assertFalse(arena.wasCommittedCopy(rejected.get(i), SegmentPointRead.read(config, identity(),
+                        arena, rejected.get(i)).record()));
             }
             SegmentDataRecovery.PhysicalInventory inventory = SegmentDataRecovery.recoverPhysicalInventory(
                     config, identity(), arena, new SegmentFileIo(), 2);
             assertEquals(targets, inventory.entries());
+        }
+        Path image = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, latest.slot());
+        byte[] damaged = Files.readAllBytes(image);
+        damaged[4224] ^= 1;
+        Files.write(image, damaged);
+        try (FileChannel channel = FileChannel.open(image, StandardOpenOption.WRITE)) {
+            channel.force(true);
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(previous, arena.publishedCheckpoint().orElseThrow());
+            for (int i = 0; i < 2; i++) {
+                assertTrue(arena.wasCommittedCopy(superseded.get(i), SegmentPointRead.read(config, identity(),
+                        arena, superseded.get(i)).record()));
+                assertFalse(arena.wasCommittedCopy(rejected.get(i), SegmentPointRead.read(config, identity(),
+                        arena, rejected.get(i)).record()));
+                assertTrue(arena.wasCommittedCopy(targets.get(i), SegmentPointRead.read(config, identity(),
+                        arena, targets.get(i)).record()));
+            }
+            assertEquals(targets, SegmentDataRecovery.recoverPhysicalInventory(
+                    config, identity(), arena, new SegmentFileIo(), 2).entries());
             arena.rotate();
         }
         try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
@@ -12878,6 +12913,9 @@ public class SegmentBookieControlLogTest {
             try (SegmentArenaMove move = fixture.prepare(first, fixture.sources, -1)) {
                 selector = fixture.arena.submitBatch(List.of(move)).get(0).sequence();
             }
+            SegmentPointRead.Location oldCopy = first.copies().get(0).location();
+            SegmentBatchParser.Record oldRecord = SegmentPointRead.read(config, identity(),
+                    fixture.arena, oldCopy).record();
             SegmentDataPhysicalDriver.DurableRelocation next = fixture.copy(602, 3, (byte) 0, 7, last);
             try (SegmentArenaMove move = fixture.prepare(next,
                     first.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList(),
@@ -12886,6 +12924,7 @@ public class SegmentBookieControlLogTest {
                         fixture.arena.submitBatch(List.of(move)).get(0).status());
             }
             targets = next.copies().stream().map(SegmentDataPhysicalDriver.RelocationCopy::location).toList();
+            assertTrue(fixture.arena.wasCommittedCopy(oldCopy, oldRecord));
             assertThrows(IOException.class, () -> fixture.arena.prepareFree(new UUID(0, 701), 7,
                     fixture.files, fixture.bookie, ByteBuffer.allocate(4096)));
             try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0),
@@ -12909,6 +12948,10 @@ public class SegmentBookieControlLogTest {
                             fixture.arena.submitBatch(List.of(free)).get(0).status());
                 }
             }
+            assertFalse(fixture.arena.wasCommittedCopy(oldCopy, oldRecord));
+            assertThrows(IOException.class, () -> SegmentPointRead.read(config, identity(), fixture.arena, oldCopy));
+            assertTrue(fixture.arena.wasCommittedCopy(targets.get(0), SegmentPointRead.read(config, identity(),
+                    fixture.arena, targets.get(0)).record()));
             assertEquals(SegmentDataPhysicalDriver.DuplicateStatus.SAME_DURABLE,
                     checkPublishedDuplicate(fixture.driver, fixture.bookie,
                             entryBytes(context(), 1, -1, 8, (byte) 0)));

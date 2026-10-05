@@ -662,3 +662,22 @@ CHECK_DEADLOCK FALSE 仅允许有限终态。本模型不新增 FREE/字节/权�
 最终回执 `unified-wal-model-0ygt08z3` 绑定父提交 `ddf5e2700afcee6bbb0e25e130edfc7ec9d15a80`、175 实际输入与 361 个 checksum；120 配置为 31 正向完整 PASS、89 指定反例，全部符合预期。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`；官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化不变。全部 source hash 与最终代码一致，designInputs 仍绑定父提交；历史 receipt 不改绑定。
 
 CHECK_DEADLOCK FALSE 只允许有限终态，没有公平调度、liveness、真实持久化或性能结论。稀疏 ID 与序号缺口的范围数没有常数上限，UUID/业务/会话历史尚未压缩；完整业务 image、请求代、长期负载、多 Arena、filesystem 临时工作集、掉电、完整 A/C/D 与组合、B17 及生产 Gate 仍未闭合。
+
+
+## 当前 COPY 证明投影
+
+2026-10-05，`CurrentCopyFacts.tla` 固定三条 COPY、两坐标、两 allocation、原 generation 1 与一次 generation 2 复用。成功 MOVE reference set 保留历史；查询索引只保留当前 allocation 的成功 COPY，selector 更新不删尚在当前 allocation 内的旧成功证明。Free 在 terminal/current selector 条件允许时清空该 allocation 的证明和 selector，Reuse 不复活原 generation。实际 COPY 字节、准确 location、MOVE 前驱和 Bookie 合法性、durable ordered apply 都是输入，不由有限状态自行授予。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-current-copy-facts | 22424 / 1266 / 0 | 12 / 12 | 0.852 s / 157,171,712 bytes | PASS |
+| ce-current-copy-facts-superseded | 98 / 33 / 27 | 3 / 不适用 | 0.765 s / 110,084,096 bytes | EXPECTED_COUNTEREXAMPLE: CurrentCopyProofIsExact |
+| ce-current-copy-facts-rejected | 2 / 2 / 0 | 2 / 不适用 | 0.714 s / 101,466,112 bytes | EXPECTED_COUNTEREXAMPLE: CurrentCopyProofIsExact |
+| ce-current-copy-facts-retired | 690 / 119 / 85 | 4 / 不适用 | 0.724 s / 111,280,128 bytes | EXPECTED_COUNTEREXAMPLE: CurrentCopyProofIsExact |
+| ce-current-copy-facts-identity | 106 / 38 / 32 | 3 / 不适用 | 0.704 s / 110,821,376 bytes | EXPECTED_COUNTEREXAMPLE: QueriesBindCurrentIdentityAndDigest |
+
+五个 Next 动作都有非零执行 coverage：ApplyMove 29:758、Tombstone 90:1020、Free 699:4876、Reuse 447:577、Query 0:15192（保留工具双计数）。正确 Query 只检查结果，保持业务和校验状态，所以不生成新 distinct 状态；敏感性候选分别丢弃仍占当前 allocation 的已替代 COPY、为失败 MOVE 发布证明、FREE 遗留证明、查询忽略 UUID/generation/digest，均通过 Next 轨迹在指定性质上失败。查询模型的三个错误参数各抽象一种身份或字节差异，实际原始记录字段与 SHA-256 由真实测试验证。
+
+最终回执 `unified-wal-model-qx5snprk` 绑定父提交 `c23f50a4059d8853258aec36073ee8bbb4a99dda`、181 实际输入与 376 个 checksum；125 配置为 32 正向完整 PASS、93 指定反例，全部符合预期。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化保留。当前 source hash 和全部 receipt checksum 已核对，designInputs 保持父提交绑定，历史结果不改绑定。实际 image/fallback/rotation 与旧/current/失败 COPY 验证见[当前 COPY 与 selector 状态](../local-storage/README.md#当前-copy-证明与-selector-状态)。
+
+CHECK_DEADLOCK FALSE 只允许有限终态。本投影不证明物理持久化、恢复协议、请求代或 UUID/MOVE 历史可以裁剪，也不证明全部业务 image、总内存/磁盘/临时工作集有界、长期负载、liveness、多 Arena、掉电、性能、完整 A/C/D 与组合、B17 或生产 Gate。

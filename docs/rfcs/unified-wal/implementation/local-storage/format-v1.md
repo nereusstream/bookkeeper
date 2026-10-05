@@ -318,3 +318,6 @@ v2保留所有现有业务状态表记录与原sequence/首次条件结果，包
 
 
 2026-10-05，[Arena 当前状态索引](README.md#arena-当前授权与历史身份的分离)在成功控制 apply 时保留 grant 的首次序号、已用 ID 闭区间/高水位、增量退役范围和含空 FREE 的必要 Bookie cut。上述字段是由原完整命令 replay 重建的派生业务状态；原 ALLOC/FREE、MOVE、session、控制 framing 与 checkpoint image v1/v2 字节不变。当前 image 仍保存完整业务命令/首次结果，没有新增请求代或紧凑状态编码，也没有删除可证明幂等所需的历史。
+
+
+2026-10-05，[当前 COPY 与 selector 状态](README.md#当前-copy-证明与-selector-状态)由原成功 MOVE/FREE replay 重建。原 MOVE 完整命令和首次结果仍进入 image v1/v2；当前索引不是新的持久编码，不改变 COPY 记录的 MOVE UUID/generation、准确几何或 entry SHA-256 校验。

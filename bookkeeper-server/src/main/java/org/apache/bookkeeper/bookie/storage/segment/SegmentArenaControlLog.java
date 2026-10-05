@@ -355,7 +355,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private record EntryKey(ProfileLedgerContext context, long entryId) { }
 
-    private record SelectedMove(SegmentArenaMove move, SegmentArenaMove.Entry entry, long sequence) { }
+    private record CopyKey(SegmentPointRead.Location location, UUID moveId, long moveGeneration) { }
+
+    private record SelectedMove(UUID moveId, Generation moveGeneration, long bookieCut,
+                                SegmentPointRead.Location target, String entrySha256, long sequence) { }
 
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
@@ -378,6 +381,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final Map<Stream, Long> streamStarts = new HashMap<>();
     private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
     private final Map<EntryKey, SelectedMove> selectedMoves = new HashMap<>();
+    private final Map<Long, Map<CopyKey, String>> committedCopies = new HashMap<>();
     private final boolean[] dataBlocked;
     private final boolean[] durableQuarantine;
     private final boolean[] quarantineReserved;
@@ -620,12 +624,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized SegmentPointRead.Location resolveLocation(SegmentPointRead.Location hint) {
         SelectedMove selected = selectedMoves.get(new EntryKey(hint.context(), hint.entryId()));
-        return selected == null ? hint : selected.entry().target();
+        return selected == null ? hint : selected.target();
     }
 
     synchronized Optional<SegmentPointRead.Location> currentMoveLocation(ProfileLedgerContext context, long entryId) {
         SelectedMove selected = selectedMoves.get(new EntryKey(context, entryId));
-        return selected == null ? Optional.empty() : Optional.of(selected.entry().target());
+        return selected == null ? Optional.empty() : Optional.of(selected.target());
     }
 
     synchronized long currentSelectorSequence(ProfileLedgerContext context, long entryId) {
@@ -638,20 +642,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized List<SegmentPointRead.Location> currentMoveLocations() {
-        return selectedMoves.values().stream().map(selected -> selected.entry().target()).toList();
+        return selectedMoves.values().stream().map(selected -> selected.target()).toList();
     }
 
     synchronized long requiredMoveBookieCut() {
-        return selectedMoves.values().stream().mapToLong(selected -> selected.move().bookieCut()).max().orElse(-1);
+        return selectedMoves.values().stream().mapToLong(SelectedMove::bookieCut).max().orElse(-1);
     }
 
+    /** Successful copies remain proven while their allocation is current, including superseded selectors. */
     synchronized boolean wasCommittedCopy(SegmentPointRead.Location location, SegmentBatchParser.Record record) {
-        AppliedOperation prior = appliedOperations.get(record.moveId());
-        return prior != null && prior.status() == Status.APPLIED_DURABLE
-                && prior.command() instanceof SegmentArenaMove move
-                && move.operationGeneration().value() == record.moveGeneration()
-                && move.entries().stream().anyMatch(entry -> entry.target().equals(location)
-                        && entry.entrySha256().equals(SegmentArenaMove.digest(record.entry())));
+        Map<CopyKey, String> copies = committedCopies.get(location.address().allocation());
+        String digest = copies == null ? null : copies.get(new CopyKey(location, record.moveId(),
+                record.moveGeneration()));
+        return digest != null && digest.equals(SegmentArenaMove.digest(record.entry()));
     }
 
     synchronized boolean isSelectedRecord(SegmentPointRead.Location location, SegmentBatchParser.Record record)
@@ -660,13 +663,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (selected == null) {
             return record.origin() == SegmentBatchFormat.ENTRY_DATA;
         }
-        if (!selected.entry().target().equals(location)) {
+        if (!selected.target().equals(location)) {
             return false;
         }
         if (record.origin() != SegmentBatchFormat.RELOCATION_COPY
-                || !record.moveId().equals(selected.move().operationId())
-                || record.moveGeneration() != selected.move().operationGeneration().value()
-                || !selected.entry().entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
+                || !record.moveId().equals(selected.moveId())
+                || record.moveGeneration() != selected.moveGeneration().value()
+                || !selected.entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
             throw new IOException("Current MOVE target does not match its durable identity and digest");
         }
         return true;
@@ -684,15 +687,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
                                                                          SegmentBatchParser.Record record)
             throws IOException {
         SelectedMove selected = selectedMoves.get(new EntryKey(source.context(), source.entryId()));
-        if (selected == null || selected.entry().target().equals(source)) {
+        if (selected == null || selected.target().equals(source)) {
             return Optional.empty();
         }
-        SegmentPointRead.Location target = selected.entry().target();
+        SegmentPointRead.Location target = selected.target();
         if (target.address().allocation() == source.address().allocation()) {
             throw new IOException("A live MOVE target still occupies the victim allocation");
         }
         if (record.origin() == SegmentBatchFormat.ENTRY_DATA
-                && !selected.entry().entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
+                && !selected.entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
             throw new IOException("MOVE predecessor bytes differ from the selected successor");
         }
         return Optional.of(target);
@@ -1907,6 +1910,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         streamStarts.clear();
         appliedOperations.clear();
         selectedMoves.clear();
+        committedCopies.clear();
         Arrays.fill(dataBlocked, false);
         Arrays.fill(durableQuarantine, false);
         sessionEpoch = 0;
@@ -2179,7 +2183,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     && move.entries().stream().anyMatch(entry -> {
                         SelectedMove selected = selectedMoves.get(new EntryKey(entry.target().context(),
                                 entry.target().entryId()));
-                        return selected == null || !selected.move().equals(move);
+                        return selected == null || !selected.moveId().equals(move.operationId())
+                                || !selected.moveGeneration().equals(move.operationGeneration());
                     })) {
                 return Status.CONDITION_FAILED;
             }
@@ -2271,7 +2276,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             SelectedMove previous = selectedMoves.get(new EntryKey(entry.target().context(), entry.target().entryId()));
             allowed &= previous == null ? entry.source().expectedSelector() == -1
                     : previous.sequence() == entry.source().expectedSelector()
-                            && previous.entry().target().equals(entry.source().location());
+                            && previous.target().equals(entry.source().location());
             allowed &= currentMoveGrant(entry.source().location(), entry.sourceOrder())
                     && currentMoveGrant(entry.target(), entry.targetOrder());
         }
@@ -2280,7 +2285,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (allowed) {
             for (SegmentArenaMove.Entry entry : retained.entries()) {
                 selectedMoves.put(new EntryKey(entry.target().context(), entry.target().entryId()),
-                        new SelectedMove(retained, entry, appliedThrough));
+                        new SelectedMove(retained.operationId(), retained.operationGeneration(),
+                                retained.bookieCut(), entry.target(), entry.entrySha256(), appliedThrough));
+                committedCopies.computeIfAbsent(entry.target().address().allocation(), ignored -> new HashMap<>())
+                        .put(new CopyKey(entry.target(), retained.operationId(),
+                                retained.operationGeneration().value()), entry.entrySha256());
             }
         }
         appliedOperations.put(move.operationId(), new AppliedOperation(retained, status, appliedThrough));
@@ -2308,10 +2317,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 retiredSlots.put(slot, retained);
             }
             currentAllocations.remove(target.allocationId());
+            committedCopies.remove(target.allocationId());
             addRetirement(facts);
             sealedTails.remove(target.allocationId());
             selectedMoves.values().removeIf(selected ->
-                    selected.entry().target().address().allocation() == target.allocationId());
+                    selected.target().address().allocation() == target.allocationId());
         }
         appliedOperations.put(free.operationId(), new AppliedOperation(retained, status, appliedThrough));
         return status;

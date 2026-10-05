@@ -823,3 +823,18 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 [当前索引有限投影](../models/README.md#arena-当前状态索引投影)检查已用 ID 区间、空洞、成功高水位、原 grant 顺序与空边界退役后的再折叠。最终回执 `unified-wal-model-0ygt08z3` 绑定同一父提交、175 实际输入与 361 个 checksum；31 正向完整 PASS、89 指定反例全部符合预期。361 个去重 Java/模型输入 hash 与当前源码一致，设计输入仍绑定父提交，历史 receipt 不改绑定。最小验证与最终回归间没有改变验证合同或跳过有效检查。
 
 原 UUID 操作表、会话/stream 与 MOVE/Bookie T 历史仍按现有保留合同增长；稀疏 issued ID 与序号缺口也没有常数范围数保证。尚未实现独立请求代及完整业务状态编码/裁剪，没有总内存、磁盘、长期吞吐或掉电结论。步骤 8/10、B17、长期负载、多 Arena、完整 A/C/D 与组合及生产 Gate 保持未完成。
+
+
+## 当前 COPY 证明与 selector 状态
+
+2026-10-05，Arena 的逐条 COPY 证明按当前 allocation 保留，成功 MOVE apply 才发布准确 location、MOVE UUID/generation 和 entry SHA-256；COPY durable 本身、条件失败或尚未 apply 都不能生成成功证明。来源检查直接读取这个状态，不再查询历史 MOVE 命令或扫描整批 entries。已被后继 selector 取代的 COPY 只要 allocation 仍当前，其成功证明仍保留；FREE 删除对应 allocation 的全部 COPY 证明，复用后的新身份不能引用旧证明。
+
+当前 selector 仅持有本条 target、entry digest、MOVE 身份、原成功控制序号和必要 Bookie cut，不再持有整个 MOVE 批次及其他 rows/source。逐 entry 前驱、重试是否已被后继替代、当前读取和必要 cut 保持原判断；裸 UUID 首次结果及冲突内容仍由原历史表负责。每次 fallback 清空新 COPY 状态，随后按原持久命令与首次结果重建。control、MOVE、COPY 和 image v1/v2 字节均不变。
+
+扩展既有真实文件回归：链式 MOVE 在成功后继发布后仍识别当前 allocation 内的旧成功 COPY，不承认条件失败的 COPY；八次原 journal checkpoint 后分别选择第八代 image 和损坏后第七代加完整 suffix，随后物理 rotation/restart 的 selector、成功/失败证明和实际 DATA 校验均保持正确。旧 target FREE 后，保存的旧记录不再有当前证明，真实点读也拒绝；新 target 的 COPY 仍可读，旧 extent gen2 复用、幂等及健康 restart 保持原结果。当前 target 的 terminal FREE、orphan/迟到 MOVE 和 control force 未知结果回归继续通过。
+
+上述五项最小集通过后，因共享 MOVE/FREE、恢复及控制契约扩大至原七类。最终 Java 回执 `unified-wal-local-PhL19Y0w` 绑定父提交 `c23f50a4059d8853258aec36073ee8bbb4a99dda` 和 210 实际输入：320 项中 315 通过、5 项 Linux 亲和性在 macOS 跳过，0 失败/错误；Spotless/Checkstyle 通过。复现沿用[运行期轮转](#运行期控制日志轮转)的七类 runner 和 style 命令，没有新增镜像内部结构断言或大型验证框架。
+
+[有限 COPY 证明投影](../models/README.md#当前-copy-证明投影)回执 `unified-wal-model-qx5snprk` 绑定同一父提交、181 实际输入及 376 个 checksum：32 正向完整 PASS、93 指定反例全部符合预期。367 个去重 Java/模型输入 hash 已核对当前源码，历史 receipt/designInputs 保持原提交绑定；实际字节/同步/fallback 不由该有限索引模型替代。
+
+这一步分离当前业务证明与幂等历史，尚未编码独立紧凑业务 image 或删除 UUID/MOVE/session/Bookie T 历史。新增当前 COPY 摘要仍与保留历史同时存在，不能据此宣称总内存减少或长期资源有界；物理当前 COPY 数量、总工作集、长期负载、多 Arena、一般 OPEN 错误恢复、掉电、正式性能及完整模型仍需相应证据。步骤 8/10、B17 与生产 Gate 保持未完成。

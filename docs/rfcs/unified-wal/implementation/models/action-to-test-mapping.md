@@ -403,3 +403,15 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | RetireEmpty / Advance | 既有未写中间 grant 测试扩展为空 FREE 消除最后边界，保留旧 list snapshot、合并 1..2、更新必要 Bookie cut，gen2 复用后真实写入第 3 batch、双轮转及健康 restart 可读 |
 
 slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限模型的输入；当前 indices 仍由原完整命令 replay 重建，未证明 compact checkpoint 或请求代。
+
+
+## 当前 COPY 证明
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| ApplyMove | 成功 `applyMove` 才将逐条 target/UUID/generation/digest 放入 allocation 的 COPY 证明，同时发布当前 selector；`moveChainRejectsStalePredecessorAndReplaysSelectorsThroughRotation` 保留成功但已被后继替代的 COPY 证明，拒绝同批条件失败的 COPY |
+| Free / Reuse | `applyFree` 移除 victim 的所有 COPY 证明；`movedSourcesFreeAndReuseWithoutNewCheckpointRecoverCurrentCopy` 检验旧 COPY 证明和真实读取都失效，后继 COPY 保留，gen2 复用、点读、幂等及 restart 正确 |
+| Tombstone | `terminalCurrentCopyFreeRetiresSelectorWithoutRestoringOldPermission` 仍要求真实 terminal authority 后才 FREE 当前目标并移除 selector；`orphanCopyFreeRevokesLateMoveAndStaleSelectorCutCannotRetireAllocation` 保留无成功 MOVE 的 orphan 拒绝 |
+| Query | 实际来源校验绑定 location、MOVE UUID/generation 与 entry SHA-256；已有 wrong bytes 与 future selector 回归继续执行，不由 COPY durable 直接授予成功身份 |
+
+有限模型不重演真实字节/force/checkpoint。扩展链式 MOVE 测试分别从最高第八代 image、损坏后的第七代加完整 suffix、物理 rotation 后恢复，检查成功旧 COPY、失败 COPY 与当前 selector；force 未知结果回归检验 apply 前后区分。请求结果历史仍按原保留合同处理。

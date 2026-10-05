@@ -370,3 +370,14 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | EmptyBarrierRemovalIsFolded | 空 FREE 移除 current grant 后重新折叠已有范围；新的可合并邻居不能永久保留过时边界 |
 
 新状态在每次恢复候选前清空、原完整命令 replay 重建；该真实恢复门槛不由输入型有限 indices 模型自证。整体幂等历史、compact image、长期资源与生产 Gate 尚未闭合。
+
+
+## 当前 COPY 证明
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| CurrentCopyProofIsExact | 当前 allocation 的索引包含全部且仅包含已成功 MOVE 的 COPY；selector 更换不丢弃仍占当前 allocation 的旧成功 COPY，FREE 一次删除该 allocation 的全部证明 |
+| CurrentSelectorHasCopyProof | 当前 selector 来自实际成功 MOVE 的 target 和身份，不由 COPY durable 或失败条件生成；真实成功前驱、源与目标 grant 和 Bookie cut 是输入，不由该投影证明 |
+| QueriesBindCurrentIdentityAndDigest | 来源判断要求准确 location/UUID/generation/digest；失效 allocation 的历史成功、错误身份或不同字节都不能成为当前 COPY 证明 |
+
+模型固定三 COPY、两坐标、两 allocation 与一次复用；独立成功 reference set 保留历史，而查询投影只取当前 generation。实际记录/校验和/同步与 A/B fallback 在真实文件测试中验证，有限模型不等于完整恢复、请求历史裁剪或总工作集有界。

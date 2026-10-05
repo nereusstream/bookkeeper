@@ -19,6 +19,11 @@ import time
 
 
 MATRIX = {
+    "c-current-copy-facts": None,
+    "ce-current-copy-facts-superseded": "CurrentCopyProofIsExact",
+    "ce-current-copy-facts-rejected": "CurrentCopyProofIsExact",
+    "ce-current-copy-facts-retired": "CurrentCopyProofIsExact",
+    "ce-current-copy-facts-identity": "QueriesBindCurrentIdentityAndDigest",
     "c-arena-state-indices": None,
     "ce-arena-state-indices-free": "IssuedRangesAreExact",
     "ce-arena-state-indices-hole": "FeasibleUnissuedIdentityIsAccepted",
@@ -186,7 +191,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -199,7 +204,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "ArenaStateIndices.tla" if "arena-state-indices" in name
+                   "-metadir", str(states), "CurrentCopyFacts.tla" if "current-copy-facts" in name
+                   else "ArenaStateIndices.tla" if "arena-state-indices" in name
                    else "RetiredSequenceRanges.tla" if "retired-sequence-ranges" in name
                    else "InternalCheckpointHistory.tla" if "internal-checkpoint-history" in name
                    else "ArenaSpaceMaintenance.tla" if "arena-space-maintenance" in name
