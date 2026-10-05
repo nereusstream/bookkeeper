@@ -425,6 +425,35 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                     SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
                                                     SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
                                                     SegmentDerivedIndex index) throws IOException {
+        return openForLocalResults(config, identity, authority, bookie,
+                recoveryIo, maxEntries, maxStreams, index, null);
+    }
+
+    /** Reuse the graph's already-held startup exclusion; failures also close the supplied lock. */
+    static IsolatedSegmentFiles openForLocalResults(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                    SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
+                                                    SegmentDerivedIndex index, SegmentDataFileLock startupLock)
+            throws IOException {
+        try {
+            return openLocalResultsWhileExcluded(config, identity, authority, bookie,
+                    recoveryIo, maxEntries, maxStreams, index, startupLock);
+        } catch (IOException | RuntimeException | Error failure) {
+            if (startupLock != null) {
+                try {
+                    startupLock.close();
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+            }
+            throw failure;
+        }
+    }
+
+    private static IsolatedSegmentFiles openLocalResultsWhileExcluded(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
+            SegmentBookieControlLog bookie, SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
+            SegmentDerivedIndex index, SegmentDataFileLock startupLock) throws IOException {
         Objects.requireNonNull(bookie, "bookie");
         if (maxEntries < 1 || maxStreams < 1) {
             throw new IllegalArgumentException("Positive restart locator and stream capacities required");
@@ -439,7 +468,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             }
             long cut = bookie.recoveryReadCut(config, identity);
             IsolatedSegmentFiles result = openAppendOnly(config, identity, authority, bookie,
-                    recoveryIo, maxEntries, maxStreams, index);
+                    recoveryIo, maxEntries, maxStreams, index, startupLock);
             try {
                 if (index != null) {
                     if (result.startupInventory.usesIndexCoverage()) {
@@ -477,13 +506,22 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                        SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
                                                        SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
                                                        SegmentDerivedIndex index) throws IOException {
+        return openAppendOnly(config, identity, authority, bookie, recoveryIo, maxEntries, maxStreams, index, null);
+    }
+
+    private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                       SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                       SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
+                                                       SegmentDerivedIndex index, SegmentDataFileLock startupLock)
+            throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(authority, "authority");
         Objects.requireNonNull(recoveryIo, "recoveryIo");
         synchronized (authority) {
             authority.requireQuiescentRecovery(config, identity);
-            SegmentDataFileLock guard = SegmentDataFileLock.open(config.directory());
+            SegmentDataFileLock guard = startupLock == null
+                    ? SegmentDataFileLock.open(config.directory()) : startupLock;
             IsolatedSegmentFiles result = null;
             try {
                 // Keep the same writer exclusion through validation, sync and the reopened writer lifetime.

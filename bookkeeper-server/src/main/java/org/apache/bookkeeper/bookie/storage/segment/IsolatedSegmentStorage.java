@@ -172,6 +172,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private record CompactionCursor(long afterOrder, long throughOrder) { }
     private final CompactionCursor[] compactionCursors;
     private IsolatedSegmentFiles files;
+    private SegmentDataFileLock startupLock;
     private SegmentArenaControlLog arena;
     private SegmentBookieControlLog bookie;
     private SegmentDerivedIndex index;
@@ -265,13 +266,17 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             try {
                 if (!existing) {
                     files = IsolatedSegmentFiles.create(config, identity);
+                } else {
+                    // Exclude another DATA writer before any control replay, recovery force or index open.
+                    startupLock = SegmentDataFileLock.open(config.directory());
                 }
                 arena = SegmentArenaControlLog.open(config, identity, limits.controlLogBytes());
                 bookie = SegmentBookieControlLog.open(config, identity, limits.controlLogBytes(), key, validator);
                 index = SegmentDerivedIndex.open(config, identity, limits.indexedEntries());
                 if (existing) {
                     files = IsolatedSegmentFiles.openForLocalResults(config, identity, arena, bookie,
-                            new SegmentFileIo(), limits.indexedEntries(), config.logicalShards(), index);
+                            new SegmentFileIo(), limits.indexedEntries(), config.logicalShards(), index, startupLock);
+                    startupLock = null; // The same native lock now belongs to files.
                 } else {
                     files.startSession(arena);
                 }
@@ -1587,7 +1592,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     first = failure;
                 }
             }
-            for (AutoCloseable resource : new AutoCloseable[] {files, index, bookie, arena}) {
+            for (AutoCloseable resource : new AutoCloseable[] {files, index, bookie, arena, startupLock}) {
                 if (resource != null) {
                     try {
                         resource.close();

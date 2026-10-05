@@ -5799,6 +5799,105 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void restartTakesDataExclusionBeforeOpeningAnyControlOwner() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            storageWrite(storage, context(), 1);
+        }
+        // These fixture lock files are unused after the healthy close; their recreation observes control open.
+        Files.delete(config.directory().resolve("arena-control.lock"));
+        Files.delete(config.directory().resolve("bookie-control.lock"));
+        Path held = temporary.getRoot().toPath().resolve("startup-data-held");
+        Path output = temporary.getRoot().toPath().resolve("startup-lock-child.log");
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), SegmentBookieControlLogTest.class.getName(),
+                "hold-data-lock", config.directory().toString(), held.toString())
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!Files.exists(held) && child.isAlive() && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertTrue(Files.readString(output), Files.exists(held) && child.isAlive());
+            try (IsolatedSegmentStorage refused = storage(config, 1, 6, 8, 16, 3)) {
+                assertThrows(IOException.class, refused::restart);
+            }
+            assertFalse("Arena recovery started without DATA exclusion",
+                    Files.exists(config.directory().resolve("arena-control.lock")));
+            assertFalse("Bookie recovery started without DATA exclusion",
+                    Files.exists(config.directory().resolve("bookie-control.lock")));
+            assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+        } finally {
+            child.getOutputStream().close();
+            if (!child.waitFor(5, TimeUnit.SECONDS)) {
+                child.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+        assertEquals(Files.readString(output), 0, child.exitValue());
+        try (IsolatedSegmentStorage reopened = storage(config, 1, 6, 8, 16, 3)) {
+            reopened.restart();
+            assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+            try (SegmentPointRead.LeasedResult read = storageRead(reopened, context(), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+        }
+        try (SegmentDataFileLock available = SegmentDataFileLock.open(config.directory())) {
+            assertTrue(available.lock().isValid());
+        }
+    }
+
+    @Test
+    public void restartFailureReleasesOnlyItsOwnDataExclusionBeforeAndAfterFileHandoff() throws Exception {
+        IsolatedSegmentConfig config = config();
+        long payloadOffset;
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            payloadOffset = storageWrite(storage, context(), 1).candidate().recordOffset()
+                    + SegmentBatchFormat.RECORD_HEADER + 36;
+        }
+        for (String name : List.of("arena-control.lock", "bookie-control.lock")) {
+            Path controlPath = config.directory().resolve(name);
+            try (SegmentDataFileLock foreign = SegmentDataFileLock.openControl(controlPath);
+                    IsolatedSegmentStorage refused = storage(config, 1, 6, 8, 16, 3)) {
+                assertThrows(IOException.class, refused::restart);
+                try (SegmentDataFileLock available = SegmentDataFileLock.open(config.directory())) {
+                    assertTrue(available.lock().isValid());
+                }
+                assertTrue(foreign.lock().isValid());
+                assertThrows(IOException.class, () -> SegmentDataFileLock.openControl(controlPath));
+            }
+        }
+        Path data = IsolatedSegmentFiles.dataPath(config, 0);
+        ByteBuffer original = ByteBuffer.allocate(1);
+        try (FileChannel file = FileChannel.open(data, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            SegmentFileIo.readFully(file, original, payloadOffset);
+            file.write(ByteBuffer.wrap(new byte[] {(byte) (original.get(0) ^ 1)}), payloadOffset);
+            file.force(false);
+        }
+        try (IsolatedSegmentStorage corrupt = storage(config, 1, 6, 8, 16, 3)) {
+            assertThrows(IOException.class, corrupt::restart);
+            try (SegmentDataFileLock available = SegmentDataFileLock.open(config.directory())) {
+                assertTrue(available.lock().isValid());
+            }
+        } finally {
+            try (FileChannel file = FileChannel.open(data, StandardOpenOption.WRITE)) {
+                file.write(original, payloadOffset);
+                file.force(false);
+            }
+        }
+        try (IsolatedSegmentStorage recovered = storage(config, 1, 6, 8, 16, 3)) {
+            recovered.restart();
+            assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+            try (SegmentPointRead.LeasedResult read = storageRead(recovered, context(), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test
     public void realRegistrationRetirementRefusesNewDataButDrainsAlreadyAdmittedStorageWork() throws Exception {
         ZooKeeperUtil cluster = new ZooKeeperUtil() {
             @Override
@@ -5893,10 +5992,10 @@ public class SegmentBookieControlLogTest {
             }
             SegmentExecutionGroup execution = (SegmentExecutionGroup) storageField(storage, "execution");
             assertEquals(0, execution.inputs().usedBytes()); // Sources were copied; the native I/O owns the pool lease.
-            assertFalse(execution.owner(0).hasMaintenanceBuffers(4));
+            assertFalse(execution.owner(0).hasMaintenanceBuffers(2));
             assertFalse(completed.isDone());
             assertFalse(storage.close(Duration.ofMillis(50)));
-            assertFalse(execution.owner(0).hasMaintenanceBuffers(4));
+            assertFalse(execution.owner(0).hasMaintenanceBuffers(2));
             assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
             release.countDown();
             assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
@@ -8245,6 +8344,13 @@ public class SegmentBookieControlLogTest {
 
     /** Child process for the real process-boundary tests; never returns after the chosen cut. */
     public static void main(String[] args) throws Exception {
+        if (args.length == 3 && "hold-data-lock".equals(args[0])) {
+            try (SegmentDataFileLock held = SegmentDataFileLock.open(Path.of(args[1]))) {
+                Files.writeString(Path.of(args[2]), "DATA_SCOPE_HELD");
+                System.in.read();
+            }
+            return;
+        }
         if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0])
                 && !"normal-after-force".equals(args[0]) && !"normal-before-force".equals(args[0])
                 && !"append-after-restart".equals(args[0]) && !"session-force-error".equals(args[0])

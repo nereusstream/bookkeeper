@@ -196,3 +196,5 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 模型 `unified-wal-model-1jom7_es` 绑定同一父提交、293 source inputs/451 checksum：150 配置为 37 正向完整 PASS、113 指定反例；106 Java 输入均为其子集，source/checksum 与五个父提交 designInputs 已核对。新投影 220 distinct states、11 个 Next 动作 coverage 非零及四个指定反例，见[本地准入模型](../models/README.md#session-绑定的本地-data-准入投影)。旧 receipt、设计输入与冻结 scope guard 不改绑。
 
 这一步接上隔离 graph 的 session 事件与本地 DATA gate，没有接入真实 Bookie listener、生产 BookieServiceInfo/available registry、fresh recovery/compatibility/device/delete facts 或 pre-replay startup。远端 authority 持续变化、完整 sidecar/backlink/安装激活、真实 quorum、掉电/性能、完整 A/C/D 及组合、Block G 与步骤 12/生产 Gate 仍未完成。
+
+2026-10-05 启动排他增量：[restart DATA 排他前置](../local-storage/README.md#restart-的-data-排他与控制恢复顺序)先取得真实 DATA 目录 writer lock，再恢复控制及 index，把同一 native lock 交给 files，保留原全部 header 校验/恢复同步与 CLOSED 限制。实际子进程外部锁红绿、控制打开/DATA 恢复失败清理及成功移交/读回验证完成；340 项中 335 通过、5 项 macOS 上的 Linux 亲和性跳过，style 通过。有限矩阵 38 正向完整 PASS/117 指定反例。只补本地 ownership 前置，compatibility/device/delete 权威、真实 startup/readiness、生产接线及完整模型仍待完成。

@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-04 当前增量为[同 Arena 多批 compaction](#同-arena-多批-compaction)。显式victim组可按原owner buffer与256行上限分成多批COPY/MOVE，全部完成后统一native覆盖与整块FREE/reuse；下列历史切片保留各自当时范围和receipt。当前仍用全图准入暂停，整块复用仍限健康管理会话；自动选组、逐allocation在线cut和长期净容量仍未完成。
+2026-10-05 当前增量为[restart 的 DATA 排他与控制恢复顺序](#restart-的-data-排他与控制恢复顺序)。既有同 Arena 多批 compaction、自动容量压力维护及其历史回执保留各自范围；当前仍用全图准入暂停、健康 CLOSED 管理会话恢复，长期净容量和多 Arena 尚未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -844,3 +844,28 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 2026-10-05，隔离 graph 可在 startup 前通过 `bindProfileRegistration` 绑定真实 ZK publisher attempt；pending、失连退休或本地 Bookie/incarnation 不匹配时，普通/恢复 DATA 在取得输入 ownership 前拒绝。控制、读取、维护及已提交 I/O 沿用原终结路径，graph close 先退休注册资格再排空。未绑定的 graph 保持 local-only 实验用途。
 
 真实组合在 DATA write 后/native force 前暂停 I/O，关闭 ZK client 后新 DATA 拒绝；已复制原输入可归还，I/O pool lease/OS writer lock 保留，短期限关闭拒绝提前释放。原 I/O 完成后 LOCAL_DURABLE、正常排空及 restart 读取通过。八类 296 项、Spotless/Checkstyle 及 37 正向/113 指定反例通过；源码绑定、命令和边界见[readiness 实现记录](../startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)。本轮不为尚未提交 I/O 的排队请求保证成功，也不证明真实 startup facts、生产服务 readiness、瞬时失连检测、掉电/性能或完整模型。
+
+
+## Restart 的 DATA 排他与控制恢复顺序
+
+2026-10-05，修正隔离 graph 的 restart ownership 顺序。原 graph 先打开/replay Arena 与 Bookie 控制日志、打开 native index，才在 DATA 恢复时取得 `isolated.lock`；被另一进程的 DATA writer 拒绝时，控制恢复已开始。现行 restart 先通过 `SegmentDataFileLock.open` 取得同一真实目录排他，再打开两控制 owner 及 index。各控制 owner 原有的全部 storage identity/header 校验与恢复 force 保留，不增加另一套 preflight，也不把 compatibility/delete facts 默认为成功。
+
+`IsolatedSegmentFiles.openForLocalResults` 接收已持有的 startup lock，经原 inventory 校验、必要 DATA 同步、index 恢复、健康会话 OPEN 和稳定 Bookie cut 检查后，把同一个 native lock 留在 files owner 中；交接不 close/reopen，不出现恢复与运行期之间的无锁窗口。原低层调用仍可按既有入口自行取得锁。graph 保留尚未交接的 startup handle，失败走原关闭路径；控制打开失败和文件恢复失败均清理本次 handle，借用的外部 writer/control lock 不被释放。原管理会话、quarantine、CLOSED proof、实际 I/O/owner drain 和回调含义不变。
+
+两项新增真实回归分别验证：子进程持有 DATA OS lock 时 restart 不创建任一控制 owner 的锁文件，拒绝后外部排他仍有效；外部 Arena/Bookie control lock 拒绝和实际 DATA payload 损坏拒绝后，本次 DATA 锁可再次取得，外部 control scope 不受影响。成功交接后锁持续有效，健康 close 释放；恢复后真实读取同一 entry。旧生产红回执 `unified-wal-local-rSzrz0XS` 在父提交 `a0054d5771f9f40bd1447f324380bc73672ca12f` 失败于“缺少 DATA exclusion 却开始 Arena recovery”，新实现最小三项通过。
+
+本轮另校正前一 registration 组合测试的 buffer 保留断言：该 fixture 的 owner 实际有两块 buffer，应检查这两块的完整可用量；此前检查四块始终无法满足，不能检验 live lease。新的两块断言在 force-held/短期限 close 两个切点通过，生产池与关闭逻辑未改变。
+
+Java 最终 `unified-wal-startup-exclusion-final-8m0a_enj` 绑定上述父提交与 288 输入：八类 340 项，335 通过、5 项 Linux 亲和性在 macOS 跳过，0 failure/error；Spotless/Checkstyle 通过。先执行新增两项和原 registration 组合，再因共享 files/control/restart 入口扩大至原七类本地存储及实际 ephemeral publisher。历史 scope guard、receipt 和设计输入不改绑定。
+
+```bash
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am \
+  -Dtest=IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentArenaControlLogTest,SegmentBookieControlLogTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest,ZKProfileEphemeralRegistrationStoreTest \
+  -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 -Dsurefire.rerunFailingTestsCount=0 test
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+```
+
+有限 [startup DATA 排他投影](../models/README.md#startup-data-排他投影)为一次 graph attempt 的 acquire/recovery/adoption/failure/cleanup，20 distinct states、四个指定反例；全部矩阵 38 正向完整 PASS/117 指定反例。最终 `unified-wal-model-9t0slz3k` 冻结同一父提交、299 source inputs/466 checksum；Java/model 的 106 重合输入逐项相同，481 个去重输入及五个父提交 designInputs 已核对。两份回执分别保留其真实输入范围，Java 288 输入并非全部属于模型 source set。
+
+该改动只补本地 restart 的排他前置和移交，未实现独立 compatibility fence、device manifest authority、delete assignment/cursor、真实 readiness facts/生产启动、一般未 CLOSED 会话恢复、quorum、长期/多 Arena、掉电、性能或完整 A/C/D/组合。步骤 7/12 与生产 Gate 继续 PARTIAL；真实进程锁和文件测试不授予生产 authority。
