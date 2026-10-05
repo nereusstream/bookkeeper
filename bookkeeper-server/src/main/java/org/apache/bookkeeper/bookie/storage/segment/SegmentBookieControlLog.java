@@ -69,6 +69,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
         APPLIED_DURABLE, ALREADY_DURABLE, CONDITION_FAILED, INCOMPATIBLE
     }
 
+    enum NormalRejection {
+        UNAVAILABLE, IDENTITY_CONFLICT, UNAUTHORIZED, TOMBSTONED, FENCED, NOT_ACTIVE
+    }
+
     record Result(Status status, UUID operationId, long sequence, long localGeneration) { }
 
     record ExplicitLac(long lac, byte[] body) {
@@ -1087,6 +1091,31 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 && !state.pendingTombstone && !tombstones.containsKey(context.ledgerId())
                 && state.pendingFence == null && state.context.equals(context)
                 && state.credential.matchesWireVerifier(wireVerifier);
+    }
+
+    /** Explains a refused, unsubmitted request; this snapshot never grants DATA admission. */
+    synchronized NormalRejection normalRejection(ProfileLedgerContext context, byte[] wireVerifier) {
+        if (closed || failed) {
+            return NormalRejection.UNAVAILABLE;
+        }
+        LedgerState state = ledgers.get(context.ledgerId());
+        ProfileLedgerContext deleted = tombstones.get(context.ledgerId());
+        if (state != null && !state.context.equals(context) || deleted != null && !deleted.equals(context)) {
+            return NormalRejection.IDENTITY_CONFLICT;
+        }
+        if (state == null) {
+            return deleted != null ? NormalRejection.TOMBSTONED : NormalRejection.NOT_ACTIVE;
+        }
+        if (!state.credential.matchesWireVerifier(wireVerifier)) {
+            return NormalRejection.UNAUTHORIZED;
+        }
+        if (state.pendingTombstone || deleted != null) {
+            return NormalRejection.TOMBSTONED;
+        }
+        if (state.fenced || state.pendingFence != null) {
+            return NormalRejection.FENCED;
+        }
+        return state.active ? null : NormalRejection.NOT_ACTIVE;
     }
 
     synchronized Optional<Admission> admitNormal(ProfileLedgerContext context, byte[] wireVerifier) {

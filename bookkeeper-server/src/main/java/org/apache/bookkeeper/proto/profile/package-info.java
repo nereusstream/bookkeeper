@@ -16,6 +16,8 @@
  * limitations under the License.
  */
 /**
- * Profile transport ingress components before the dedicated TLS listener is connected.
+ * Internal experimental Profile transport components; no stable wire or production listener authority.
  */
+@org.apache.bookkeeper.common.annotation.InterfaceAudience.Private
+@org.apache.bookkeeper.common.annotation.InterfaceStability.Unstable
 package org.apache.bookkeeper.proto.profile;

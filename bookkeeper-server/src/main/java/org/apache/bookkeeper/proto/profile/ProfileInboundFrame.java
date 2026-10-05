@@ -24,7 +24,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 
 /** One charged frame. The receiving handler owns and closes it after its final use. */
-final class ProfileInboundFrame implements AutoCloseable {
+public final class ProfileInboundFrame implements AutoCloseable {
     private final ProfileFrameHeader header;
     private final ByteBuf bytes;
     private final Runnable releaseCredit;
@@ -36,12 +36,12 @@ final class ProfileInboundFrame implements AutoCloseable {
         this.releaseCredit = Objects.requireNonNull(releaseCredit, "releaseCredit");
     }
 
-    ProfileFrameHeader header() {
+    public ProfileFrameHeader header() {
         return header;
     }
 
     /** View shares this frame's lifetime; consumers must keep the frame until work using the view finishes. */
-    ByteBuf body() {
+    public ByteBuf body() {
         if (closed.get()) {
             throw new IllegalStateException("Profile frame already released");
         }

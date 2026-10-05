@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入与 startup DATA 排他投影及 Model C 既有切片，共 38 个完整正向配置、117 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他与 Profile 普通 Add 分发投影及 Model C 既有切片，共 39 个完整正向配置、122 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -809,3 +809,22 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 最终 `unified-wal-model-9t0slz3k` 绑定父提交 `a0054d5771f9f40bd1447f324380bc73672ca12f`、299 source inputs/466 checksum；155 配置为 38 正向完整 PASS、117 指定反例，全部符合预期。Java `unified-wal-startup-exclusion-final-8m0a_enj` 单独冻结 288 输入，106 重合输入准确匹配，481 个去重输入与五个父提交 designInputs 已核对。官方 1.7.4 tool、单 worker、固定 seed/fp、无 symmetry/state constraint，复现命令不变。首次 `unified-wal-model-h_emm1xt` 新模块因运算符优先级解析失败，补齐括号后重建冻结输入；旧失败输出保留，不计 PASS，也不改绑定。
 
 [真实 startup 锁回归](../local-storage/README.md#restart-的-data-排他与控制恢复顺序)与既有所有文件恢复路径分别验证 native 机制。CHECK_DEADLOCK FALSE 只允许有限终态；无 fairness/liveness、一般未 CLOSED 恢复、真实 compatibility/device/delete facts、服务 readiness、生产 listener/registry、quorum、长期总工作集、掉电或性能结论。完整 A/C/D、A+C/C+D、Block G 及生产 Gate 仍 OPEN。
+
+## Profile 普通 Add 分发投影
+
+2026-10-06 `ProfileNormalDispatch`覆盖一个normal请求、同步source交接、真实I/O/owner终结、排到event loop的完成对象及一个真实下游响应buffer。输入假设是合法TLS、canonical frame、实际local credential/activation校验、已计费同步复制及真实I/O终结；Java socket回归分别验证这些具体实现。模型不证明TLS/socket总bytes、实际fsync、readiness、网络送达、时间、公平性、quorum或完整A/C。
+
+性质为：超限header不能分配body；成功晚于实际durability和owner终结；实际DATA unknown不能变NONE；取消不能提前释放I/O资源；已排队completion和下游response在各自终结前保持frame与响应额度；已提交源已经复制。响应等待取消与实际终结分别建模，关闭连接不会抹掉旧I/O。五个mutation逐个破坏header、早成功、unknown映射、I/O保护、排队/下游响应保护。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-normal-dispatch | 94 / 69 / 0 | 11 / 11 | 0.849 s / 111,083,520 bytes | PASS |
+| ce-profile-normal-dispatch-header | 5 / 5 / 3 | 2 / 不适用 | 0.803 s / 103,661,568 bytes | EXPECTED_COUNTEREXAMPLE:HeaderBoundPrecedesBody |
+| ce-profile-normal-dispatch-early | 25 / 25 / 5 | 5 / 不适用 | 0.851 s / 108,953,600 bytes | EXPECTED_COUNTEREXAMPLE:SuccessRequiresActualDurability |
+| ce-profile-normal-dispatch-unknown | 56 / 48 / 8 | 8 / 不适用 | 0.780 s / 109,625,344 bytes | EXPECTED_COUNTEREXAMPLE:NoneIsNotUnknownData |
+| ce-profile-normal-dispatch-io | 25 / 25 / 5 | 5 / 不适用 | 0.804 s / 109,051,904 bytes | EXPECTED_COUNTEREXAMPLE:IoProtectionWaitsForActualTerminals |
+| ce-profile-normal-dispatch-response | 27 / 27 / 5 | 6 / 不适用 | 0.809 s / 109,264,896 bytes | EXPECTED_COUNTEREXAMPLE:ResponseProtectionWaitsForWriteTerminal |
+
+最终 `unified-wal-model-2o8mhfyh` tool process exit 0，161配置为39正向完整PASS/122指定反例；冻结332 inputs/485 checksums，父提交 `25343736717180ed6e05818f44cfa88f02409600`及五个designInputs保持父提交绑定。Java `unified-wal-local-uA3Q6Jy1` 922输入与模型116重合hash准确一致，去重union 1138已核验；其14类383项为378通过/5 macOS Linux-affinity跳过。官方tool 1.7.4、单worker、固定seed/fp、无symmetry/state constraint，CHECK_DEADLOCK FALSE不声称活性证明。先前 `unified-wal-model-9awbrno9` 是尚无queued阶段、测试fixture未最终修正的探索运行，保留原输入，不充当本轮最终回执。
+
+[真实隔离socket与取消红绿](../profile-wire/README.md#真实隔离普通-add-接线)验证具体网络/文件/额度交错。生产listener、真实控制授权、TLS/socket/native与存储总账、startup readiness、完整A/C/D、A+C/C+D、Block G、长期负载、掉电和性能仍未完成。

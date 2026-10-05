@@ -33,11 +33,16 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiConsumer;
 import javax.crypto.SecretKey;
+import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
+import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
+import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
+import org.apache.bookkeeper.tls.TLSContextFactory;
 
 /** Owns the isolated local storage graph. This is not Bookie registration or production ACK readiness. */
 final class IsolatedSegmentStorage implements AutoCloseable {
@@ -420,6 +425,55 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 admission.releaseUnclaimed();
                 throw failure;
             }
+        }
+    }
+
+    /** Disposable socket integration only; the supplied readiness generation is not a recovery proof. */
+    boolean installProfileConnection(io.netty.channel.ChannelPipeline pipeline, TLSContextFactory tls,
+                                     ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
+                                     String trustDomain, long readinessGeneration)
+            throws org.apache.bookkeeper.tls.SecurityException {
+        synchronized (gate) {
+            if (!accepting) {
+                pipeline.channel().close();
+                return false;
+            }
+            ProfileHello.Server hello = new ProfileHello.Server(
+                    EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
+                    identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(), List.of());
+            return ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
+                    100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
+                    new SegmentProfileAddHandler(this, tls, trustDomain, hello,
+                            SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
+                            config.maxPendingEntries()));
+        }
+    }
+
+    /** Exact validation precedes the existing charged synchronous copy and real admission path. */
+    SegmentBookieControlLog.NormalRejection submitProfileNormal(ProfileLedgerContext context, byte[] credential,
+            long entryId, ByteBuf entry, SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
+        synchronized (gate) {
+            if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()) {
+                return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            }
+            SegmentBookieControlLog.NormalRejection rejection = bookie.normalRejection(context, credential);
+            if (rejection != null) {
+                return rejection;
+            }
+            SegmentEntryIdentity parsed;
+            try {
+                parsed = SegmentEntryIdentity.parse(context, entry.nioBuffer());
+            } catch (IOException invalid) {
+                throw new IllegalArgumentException("Invalid Profile BK entry", invalid);
+            }
+            if (parsed.entryId() != entryId) {
+                throw new IllegalArgumentException("Profile coordinate differs from its BK entry");
+            }
+            if (submitNormal(context, credential, entry, request)) {
+                return null;
+            }
+            rejection = bookie.normalRejection(context, credential);
+            return rejection != null ? rejection : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
         }
     }
 

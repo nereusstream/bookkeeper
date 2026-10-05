@@ -20,6 +20,15 @@ paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/
 paths.update(Path('bookkeeper-server/src/test/resources/unified-wal-segment').glob('*'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/client').glob('*.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/client').glob('*.java'))
+paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/profile').glob('*.java'))
+paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/proto/profile').glob('*.java'))
+paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile').rglob('*.java'))
+paths.update(Path('bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile').rglob('*.java'))
+paths.update(Path('bookkeeper-common/src/test/resources/profile-wire').rglob('*.bin'))
+paths.update([Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/tls/TLSContextFactory.java'),
+              Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/tls/ProfileTlsContextFactoryTest.java')])
+paths.update(Path('bookkeeper-server/src/test/resources') / name for name in
+             ('server-key.pem', 'server-san-cert.pem', 'client-cert.pem', 'client-key.pem'))
 paths.update([Path('pom.xml'), Path('bookkeeper-server/pom.xml'), Path('scripts/unified-wal/run-local-storage-tests.sh')])
 manifest = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
             'branch': subprocess.check_output(['git', 'branch', '--show-current'], text=True).strip(),
@@ -36,7 +45,8 @@ set -e
 printf '%s\n' "$result" > "$run_dir/exit-code"
 # Maven/test failure is preserved, never converted to PASS by the receipt collection.
 mkdir "$run_dir/reports"
-find bookkeeper-server/target/surefire-reports -name 'TEST-*.xml' -newer "$run_dir/inputs.json" \
+find bookkeeper-common/target/surefire-reports bookkeeper-server/target/surefire-reports \
+  -name 'TEST-*.xml' -newer "$run_dir/inputs.json" \
   -exec cp {} "$run_dir/reports/" \; 2>/dev/null || true
 tail -35 "$run_dir/maven.log"
 exit "$result"

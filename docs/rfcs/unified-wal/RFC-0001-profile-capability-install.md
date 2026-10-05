@@ -808,6 +808,8 @@ body额度可逻辑预留，不按声明长度立即分配整块内存。连接�
 
 后续定向修复使下游同步关闭或移除接收器后，同次read的残留帧不再被继续解析；固定100字节的`FENCE_LEDGER`请求在申请body额度前拒绝其他声明长度。当前decoder在HELLO阶段占用有限未分类明文份额，首个非HELLO固定头把DATA连接的基础额度原子转入DATA；首个控制请求的frame先占未分类额度，只有下游针对该frame显式报告已授权，才把基础及仍持有的frame额度原子转入CONTROL。同次read已到的ByteBuf仍按原未分类额度计费至释放，转移失败不先归还旧账；后续连接用途固定。`ProfileInboundPipeline`在构造`SslHandler`前先取得未分类连接名额，名额与明文额度在同一账本中跨用途原子交接；握手、HELLO及首请求分别以10/10/30秒绝对期限关闭慢连接，零碎字节不续期。首请求后，后续帧从收到首字节起也有不因零碎字节续期的30秒接收期限，完整交付后取消；空闲连接及已交付下游frame的执行时间不受此期限约束，frame仍由最后使用者释放额度。首个控制请求授权前收到下一帧的任意字节即关闭。localhost NIO socket测试已验证带SAN证书的真实mTLS主机名校验、服务端提取已验证的客户端证书身份、HELLO/DATA解帧，以及`channelInactive`后的账本归零；应用handler只验证framing并关闭连接，不返回业务成功。测试中的下游授权标记仅验证计费和状态转换，不证明真实operation/credential授权。管线尚未接入Bookie listener；TLS/socket实际buffer计费、真实控制授权及存储接管仍未实现。
 
+2026-10-06 后续步骤11已有[真实隔离普通 Add 接线](implementation/profile-wire/README.md#真实隔离普通-add-接线)：使用实际 mTLS/HELLO 与存储 identity，在固定头阶段检查本地 N 上限，再校验 credential/context/CRC/entry 坐标并复用原有界输入复制；仅实际 local-durable 结果产生 OK/APPLIED，force/提交不确定性保留 UNKNOWN。已取消但仍排队的 completion、下游持有的响应，均等实际终结才归还额度。八个真实 socket 场景及相关383项（378通过、5项macOS/Linux亲和性跳过）、style与有限39正向/122指定反例通过。readiness仍为显式输入，生产listener、真实控制授权、TLS/socket/存储总账、完整startup/readiness、quorum、性能及完整模型未闭合；稳定wire与Gate不提升。
+
 ## 12. Capability negotiation
 
 HELLO是每个Profile connection的第一条application frame且最大4KiB。client body固定为：

@@ -18,8 +18,8 @@
 package org.apache.bookkeeper.proto.profile;
 
 /** One bounded receive ledger shared by unclassified, DATA and reserved CONTROL connections. */
-final class ProfileReceiveBudget {
-    enum Lane { UNCLASSIFIED, DATA, CONTROL }
+public final class ProfileReceiveBudget {
+    public enum Lane { UNCLASSIFIED, DATA, CONTROL }
 
     final class ConnectionPermit implements AutoCloseable {
         private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
@@ -68,7 +68,7 @@ final class ProfileReceiveBudget {
     private final int[] connectionLimits = new int[Lane.values().length];
     private final int[] usedConnections = new int[Lane.values().length];
 
-    ProfileReceiveBudget(long totalBytes, long reservedControlBytes, long unclassifiedBytes,
+    public ProfileReceiveBudget(long totalBytes, long reservedControlBytes, long unclassifiedBytes,
                          int maxUnclassifiedConnections, int maxDataConnections, int maxControlConnections) {
         if (totalBytes < 3 || reservedControlBytes < 1 || reservedControlBytes >= totalBytes
                 || unclassifiedBytes < 1 || unclassifiedBytes >= totalBytes - reservedControlBytes
@@ -142,14 +142,14 @@ final class ProfileReceiveBudget {
         return true;
     }
 
-    synchronized long used(Lane lane) {
+    public synchronized long used(Lane lane) {
         if (lane == null) {
             throw new IllegalArgumentException("Receive lane required");
         }
         return usedBytes[lane.ordinal()];
     }
 
-    synchronized int usedConnections(Lane lane) {
+    public synchronized int usedConnections(Lane lane) {
         if (lane == null) {
             throw new IllegalArgumentException("Receive lane required");
         }

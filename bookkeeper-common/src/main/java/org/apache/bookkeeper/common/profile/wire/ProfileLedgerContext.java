@@ -76,7 +76,8 @@ public final class ProfileLedgerContext {
         return decode(ByteBuffer.wrap(bytes));
     }
 
-    static ProfileLedgerContext decode(ByteBuffer buffer) {
+    /** Consume one fixed context from a bounded transport view, without copying its surrounding entry. */
+    public static ProfileLedgerContext decode(ByteBuffer buffer) {
         if (buffer.remaining() < ENCODED_LENGTH) {
             throw ProfileWireCodecSupport.failure(ProfileWireValidationException.Reason.INVALID_LEDGER_CONTEXT);
         }

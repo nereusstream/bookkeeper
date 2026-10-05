@@ -20,20 +20,30 @@ package org.apache.bookkeeper.proto.profile;
 import io.netty.channel.ChannelInboundHandler;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.ssl.SslHandler;
+import java.io.IOException;
 import java.util.Objects;
+import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.tls.SecurityException;
 import org.apache.bookkeeper.tls.TLSContextFactory;
 
 /** Installs the isolated Profile receive path after obtaining its pre-TLS connection slot. */
-final class ProfileInboundPipeline {
+public final class ProfileInboundPipeline {
     private static final long TLS_HANDSHAKE_TIMEOUT_MILLIS = 10_000;
 
     private ProfileInboundPipeline() {
     }
 
-    static boolean install(ChannelPipeline pipeline, TLSContextFactory tls,
+    public static boolean install(ChannelPipeline pipeline, TLSContextFactory tls,
                            ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
                            ChannelInboundHandler application) throws SecurityException {
+        return install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
+                ProfileFrameCodec.ABSOLUTE_FRAME_MAX, application);
+    }
+
+    /** An installed normal-entry limit is checked from the fixed header, before body allocation. */
+    public static boolean install(ChannelPipeline pipeline, TLSContextFactory tls,
+                           ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
+                           int maxNormalBodyBytes, ChannelInboundHandler application) throws SecurityException {
         Objects.requireNonNull(pipeline, "pipeline");
         Objects.requireNonNull(tls, "tls");
         Objects.requireNonNull(budget, "budget");
@@ -46,6 +56,7 @@ final class ProfileInboundPipeline {
         try {
             ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(
                     budget, permit, connectionLimit, connectionBaseBytes);
+            decoder.limitNormalBody(maxNormalBodyBytes);
             SslHandler ssl = tls.newProfileServerTLSHandler();
             ssl.setHandshakeTimeoutMillis(TLS_HANDSHAKE_TIMEOUT_MILLIS);
             pipeline.addLast("profileTls", ssl);
@@ -57,5 +68,21 @@ final class ProfileInboundPipeline {
             permit.close();
             throw failure;
         }
+    }
+
+    /** The operation handler has accepted this connection's authenticated, validated HELLO. */
+    public static void markEstablished(ChannelPipeline pipeline) {
+        pipeline.get(ProfileReceiveDecoder.class).markEstablished();
+    }
+
+    @FunctionalInterface
+    public interface ResponseCredit extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /** Charge response/parse buffers against the existing connection and Bookie ledger until their final use. */
+    public static ResponseCredit reserveResponse(ChannelPipeline pipeline, int bytes) throws IOException {
+        return pipeline.get(ProfileReceiveDecoder.class).reserveResponse(bytes);
     }
 }

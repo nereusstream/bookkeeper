@@ -68,6 +68,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private final ProfileReceiveBudget.ConnectionPermit connectionPermit;
     private final int connectionLimit;
     private final int connectionBaseBytes;
+    private int maxNormalBodyBytes = ProfileFrameCodec.ABSOLUTE_FRAME_MAX;
     private final AtomicLong connectionBytes = new AtomicLong();
     private final byte[] fixedHeader = new byte[FIXED_HEADER_BYTES];
     private ChannelHandlerContext context;
@@ -119,6 +120,21 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         if (tlsReady) {
             armDeadline(FIRST_REQUEST_TIMEOUT_MILLIS);
         }
+    }
+
+    ProfileInboundPipeline.ResponseCredit reserveResponse(int bytes) throws IOException {
+        if (terminated || context == null || !context.executor().inEventLoop()) {
+            throw new IOException("Profile response requires a live receiving event loop");
+        }
+        HeldCredit reserved = charge(bytes);
+        return reserved::close;
+    }
+
+    void limitNormalBody(int bytes) {
+        if (context != null || bytes < 100 || bytes > ProfileFrameCodec.ABSOLUTE_FRAME_MAX) {
+            throw new IllegalArgumentException("Normal body bound must be set before installing the decoder");
+        }
+        maxNormalBodyBytes = bytes;
     }
 
     /** Called by the downstream operation handler after it validates and authorizes the first control request. */
@@ -285,6 +301,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 && operation == ProfileOperation.HELLO)
                 // The frozen fence request body is exactly 100 bytes; reject a larger claim before reserving it.
                 || (operation == ProfileOperation.FENCE_LEDGER && header.bodyLength() != 100)
+                || (operation == ProfileOperation.ADD_NORMAL && header.bodyLength() > maxNormalBodyBytes)
                 || (operation.isReservedDisabled() && header.bodyLength() != 0)) {
             throw new IOException("Invalid Profile request header");
         }

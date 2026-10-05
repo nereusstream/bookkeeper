@@ -302,6 +302,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤6/7的[driver重复点读](rfcs/unified-wal/implementation/local-storage/README.md)复用既有owner固定对齐池和已拥有的源view，不再分配大record副本或重复制输入；池不足在I/O前背压，取消与读取错误不提前归还源/scratch。通用物理点读、只读重启检查及无池手动入口仍为堆buffer实验路径，全读取/网络/索引预算和服务级可写restart尚未闭合，不提升Gate。
 
+2026-10-06 步骤11增量：[真实隔离普通 Add 接线](rfcs/unified-wal/implementation/profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。
+
 2026-10-02 步骤7接入[owner/I/O本地点读](rfcs/unified-wal/implementation/local-storage/README.md)：live hot与多stream重开清单共用固定池读取，排队前保持文件pin，回owner复核Bookie资格及候选/Arena cut。结果由最后消费者关闭归还lease，慢消费背压读/DATA，取消/撤权/读盘/owner/回调失败按真实终结排空；重开池须覆盖保留旧entry，不能因降低新写N忽略旧读。真实网络读授权、响应credit、一般MOVE/FREE selector和可写服务restart仍未闭合，不提升Gate。
 
 2026-10-02 步骤5～7新增[DATA文件持久隔离子集](rfcs/unified-wal/implementation/local-storage/README.md)：实际绑定的DATA在I/O前共享预留每文件通知ticket与逻辑日志容量，普通控制仍保留槽位；不足先背压，不占DATA坐标。失败先切断文件准入，控制忙时通知等待原批次，停收后用原ticket排空，再持久化/apply已有DEVICE_STATE；旧grant保留，重放与后续sync不解除隔离。实际控制I/O或owner故障、落盘前退出仍未闭合跨重启判定；未见记录不授权旧错误清除，clear/reset及服务级可写restart未启用，不提升Gate。

@@ -19,6 +19,12 @@ import time
 
 
 MATRIX = {
+    "a-profile-normal-dispatch": None,
+    "ce-profile-normal-dispatch-header": "HeaderBoundPrecedesBody",
+    "ce-profile-normal-dispatch-early": "SuccessRequiresActualDurability",
+    "ce-profile-normal-dispatch-unknown": "NoneIsNotUnknownData",
+    "ce-profile-normal-dispatch-io": "IoProtectionWaitsForActualTerminals",
+    "ce-profile-normal-dispatch-response": "ResponseProtectionWaitsForWriteTerminal",
     "a-startup-data-exclusion": None,
     "ce-startup-data-exclusion-order": "RecoveryStartsWithOwnExclusion",
     "ce-startup-data-exclusion-handoff": "FileHandoffKeepsExclusion",
@@ -199,6 +205,12 @@ def main():
     (run / "counterexamples").mkdir()
     inputs = [*model.glob("modules/*.tla"), *model.glob("configs/*.cfg"), Path(__file__).resolve()]
     sources = root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment"
+    inputs.append(sources / "SegmentProfileAddHandler.java")
+    inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/profile").glob("*.java"))
+    inputs.extend((root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/proto/profile").glob("*.java"))
+    inputs.extend((root / "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/wire").glob("*.java"))
+    inputs.extend((root / "bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/wire").glob("*.java"))
+    inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/tls/TLSContextFactory.java")
     inputs.extend(sources / name for name in ["IsolatedSegmentStorage.java", "IsolatedSegmentFiles.java",
                   "SegmentArenaControlLog.java", "SegmentBookieControlLog.java", "SegmentControlCapacityException.java",
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
@@ -238,7 +250,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -251,7 +263,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "StartupDataExclusion.tla" if "startup-data-exclusion" in name
+                   "-metadir", str(states), "ProfileNormalDispatch.tla" if "profile-normal-dispatch" in name
+                   else "StartupDataExclusion.tla" if "startup-data-exclusion" in name
                    else "RegistrationAdmission.tla" if "registration-admission" in name
                    else "AuthorityRead.tla" if "authority-read" in name
                    else "LocalReadinessPublication.tla" if "local-readiness-publication" in name
@@ -329,10 +342,11 @@ def main():
         if states.exists():
             shutil.rmtree(states)
         print(name, status, counts, flush=True)
-    files = [p for p in run.rglob("*") if p.is_file()]
-    (run / "checksums.txt").write_text("".join(f"{sha256(p)}  {p.relative_to(run)}\n" for p in sorted(files)))
     good = all(r["status"] == ("PASS" if MATRIX[name] is None else "EXPECTED_COUNTEREXAMPLE")
                for name, r in results.items())
+    (run / "exit-code").write_text("0\n" if good else "1\n")
+    files = [p for p in run.rglob("*") if p.is_file()]
+    (run / "checksums.txt").write_text("".join(f"{sha256(p)}  {p.relative_to(run)}\n" for p in sorted(files)))
     return 0 if good else 1
 
 

@@ -869,3 +869,7 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 有限 [startup DATA 排他投影](../models/README.md#startup-data-排他投影)为一次 graph attempt 的 acquire/recovery/adoption/failure/cleanup，20 distinct states、四个指定反例；全部矩阵 38 正向完整 PASS/117 指定反例。最终 `unified-wal-model-9t0slz3k` 冻结同一父提交、299 source inputs/466 checksum；Java/model 的 106 重合输入逐项相同，481 个去重输入及五个父提交 designInputs 已核对。两份回执分别保留其真实输入范围，Java 288 输入并非全部属于模型 source set。
 
 该改动只补本地 restart 的排他前置和移交，未实现独立 compatibility fence、device manifest authority、delete assignment/cursor、真实 readiness facts/生产启动、一般未 CLOSED 会话恢复、quorum、长期/多 Arena、掉电、性能或完整 A/C/D/组合。步骤 7/12 与生产 Gate 继续 PARTIAL；真实进程锁和文件测试不授予生产 authority。
+
+## Profile 普通 Add 的真实接线
+
+2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。
