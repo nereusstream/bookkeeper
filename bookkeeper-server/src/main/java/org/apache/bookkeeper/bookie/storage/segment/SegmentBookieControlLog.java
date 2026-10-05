@@ -1095,6 +1095,19 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     /** Explains a refused, unsubmitted request; this snapshot never grants DATA admission. */
     synchronized NormalRejection normalRejection(ProfileLedgerContext context, byte[] wireVerifier) {
+        NormalRejection rejection = fenceRejection(context, wireVerifier);
+        if (rejection != null) {
+            return rejection;
+        }
+        LedgerState state = ledgers.get(context.ledgerId());
+        if (state.fenced || state.pendingFence != null) {
+            return NormalRejection.FENCED;
+        }
+        return state.active ? null : NormalRejection.NOT_ACTIVE;
+    }
+
+    /** Fence uses the exact installed data credential even after normal admission has closed. */
+    synchronized NormalRejection fenceRejection(ProfileLedgerContext context, byte[] wireVerifier) {
         if (closed || failed) {
             return NormalRejection.UNAVAILABLE;
         }
@@ -1112,10 +1125,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (state.pendingTombstone || deleted != null) {
             return NormalRejection.TOMBSTONED;
         }
-        if (state.fenced || state.pendingFence != null) {
-            return NormalRejection.FENCED;
-        }
-        return state.active ? null : NormalRejection.NOT_ACTIVE;
+        return null;
     }
 
     synchronized Optional<Admission> admitNormal(ProfileLedgerContext context, byte[] wireVerifier) {

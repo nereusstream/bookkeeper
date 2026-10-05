@@ -186,9 +186,11 @@ public class ProfileReceiveDecoderTest {
         ProfileInboundFrame accepted = control.readInbound();
         assertEquals(ProfileOperation.INSTALL, accepted.header().operation());
         assertThrows(IllegalStateException.class, () -> controlDecoder.markControlAuthorized(controlHello));
-        controlDecoder.markControlAuthorized(accepted);
-        assertEquals(64 + install.length, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        ProfileInboundPipeline.ResponseCredit workspace = controlDecoder.reserveResponse(100);
+        controlDecoder.markControlAuthorized(accepted, workspace);
+        assertEquals(64 + install.length + 100, budget.used(ProfileReceiveBudget.Lane.CONTROL));
         accepted.close();
+        workspace.close();
         assertThrows(IOException.class, () -> control.writeInbound(
                 Unpooled.wrappedBuffer(frame(ProfileOperation.ADD_NORMAL, 0))));
         assertFalse(control.isActive());
@@ -371,6 +373,36 @@ public class ProfileReceiveDecoderTest {
         assertEquals(fence.length, budget.used(ProfileReceiveBudget.Lane.CONTROL));
         retained[0].close();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    @Test
+    public void controlTransferCannotMoveAnotherConnectionsWorkspace() throws Exception {
+        ProfileReceiveBudget budget = new ProfileReceiveBudget(2_000, 500, 1_000, 2, 2, 2);
+        ProfileReceiveDecoder decoder = decoder(budget, 900, 64);
+        ProfileReceiveDecoder otherDecoder = decoder(budget, 900, 64);
+        EmbeddedChannel channel = new EmbeddedChannel(decoder);
+        EmbeddedChannel other = new EmbeddedChannel(otherDecoder);
+        for (EmbeddedChannel connection : new EmbeddedChannel[] {channel, other}) {
+            assertTrue(connection.writeInbound(Unpooled.wrappedBuffer(hello())));
+            ProfileInboundFrame greeting = connection.readInbound();
+            greeting.close();
+            connection.pipeline().get(ProfileReceiveDecoder.class).markEstablished();
+        }
+        ProfileInboundPipeline.ResponseCredit foreign = otherDecoder.reserveResponse(75);
+        byte[] fence = frame(ProfileOperation.FENCE_LEDGER, 100);
+        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(fence)));
+        ProfileInboundFrame candidate = channel.readInbound();
+        assertThrows(IllegalStateException.class, () -> decoder.markControlAuthorized(candidate, foreign));
+        assertFalse(channel.isActive());
+        assertTrue(other.isActive());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        assertEquals(fence.length + 64 + 75, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        candidate.close();
+        foreign.close();
+        channel.finishAndReleaseAll();
+        other.finishAndReleaseAll();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
     @Test

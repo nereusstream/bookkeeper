@@ -6153,11 +6153,282 @@ public class SegmentBookieControlLogTest {
     }
 
     /** Actual TLS socket fixture; all operation dispatch and persistence use the production adapter code. */
+    @Test
+    public void profileSocketFencePersistsAndResolvesSameOperationAfterRestart() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            SegmentFileIo io = bookieIo(bookie);
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                socket.send(ProfileOperation.FENCE_LEDGER, 2, ProfileOperationCodec.encode(
+                        ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
+                socket.status(ProfileOperation.FENCE_LEDGER, 2, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+                assertFalse(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                int writes = io.writes;
+                assertTrue(writes > 0);
+                socket.send(ProfileOperation.FENCE_LEDGER, 3, ProfileOperationCodec.encode(
+                        ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
+                socket.status(ProfileOperation.FENCE_LEDGER, 3, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.ALREADY_APPLIED);
+                assertEquals(writes, io.writes);
+                assertEquals(1, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            }
+            try (ProfileSocket data = new ProfileSocket(storage)) {
+                data.add(2, context(), 1, (byte) 5, entry(context(), 1));
+                data.status(2, ProfileStatus.StatusClass.FENCED, ProfileStatus.DurableResult.NONE);
+            }
+        }
+        try (IsolatedSegmentStorage restarted = storage(config, 1, 6, 8, 16, 3)) {
+            restarted.restart();
+            try (ProfileSocket socket = new ProfileSocket(restarted)) {
+                socket.send(ProfileOperation.FENCE_LEDGER, 4, ProfileOperationCodec.encode(
+                        ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
+                socket.status(ProfileOperation.FENCE_LEDGER, 4, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.ALREADY_APPLIED);
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketFenceDenialsNeverClaimControlOrChangeLocalAuthority() throws Exception {
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            int writes = bookieIo(bookie).writes;
+            byte[] valid = ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5));
+            for (int variant = 0; variant < 4; variant++) {
+                byte[] body = valid.clone();
+                ProfileStatus.StatusClass expected;
+                switch (variant) {
+                    case 0 -> {
+                        body[80] ^= 1;
+                        expected = ProfileStatus.StatusClass.UNAUTHORIZED;
+                    }
+                    case 1 -> {
+                        body[8] ^= 1;
+                        expected = ProfileStatus.StatusClass.PROFILE_IDENTITY_CONFLICT;
+                    }
+                    case 2 -> {
+                        Arrays.fill(body, 60, 76, (byte) 0);
+                        expected = ProfileStatus.StatusClass.BAD_REQUEST;
+                    }
+                    default -> {
+                        body[79] = 19;
+                        expected = ProfileStatus.StatusClass.BAD_REQUEST;
+                    }
+                }
+                try (ProfileSocket socket = new ProfileSocket(storage)) {
+                    socket.send(ProfileOperation.FENCE_LEDGER, 2, body);
+                    socket.status(ProfileOperation.FENCE_LEDGER, 2, expected, ProfileStatus.DurableResult.NONE);
+                    assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                    socket.assertBudgetZero();
+                    assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                }
+                assertTrue(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                assertEquals(writes, bookieIo(bookie).writes);
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketFenceCapacityTransferFailsBeforeAdmissionCutOrIo() throws Exception {
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            int writes = bookieIo(bookie).writes;
+            // The frame and base alone fit 256 bytes; including the real response workspace must fail.
+            try (ProfileSocket socket = new ProfileSocket(storage,
+                    new ProfileReceiveBudget(4096, 256, 2048, 1, 1, 1))) {
+                socket.send(ProfileOperation.FENCE_LEDGER, 2,
+                        ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
+                assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                assertNull(socket.responses.poll(100, TimeUnit.MILLISECONDS));
+                socket.assertBudgetZero();
+            }
+            assertTrue(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+            assertEquals(writes, bookieIo(bookie).writes);
+        }
+    }
+
+    @Test
+    public void profileSocketFenceProgressesOnSameListenerWithDataHalfFrameAndFullUnclassifiedSlots() throws Exception {
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            ProfileReceiveBudget budget = new ProfileReceiveBudget(3348, 1024, 1024, 1, 2, 1);
+            try (ProfileSocket socket = new ProfileSocket(storage, budget)) {
+                byte[] full = ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.ADD_NORMAL, 2,
+                        profileAddBody(context(), 1, (byte) 5, entry(context(), 1, -1, 1024, (byte) 0, 1024))));
+                socket.client.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 37))).sync();
+                socket.accepted.get().eventLoop().submit(() -> { }).sync();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (budget.used(ProfileReceiveBudget.Lane.DATA) < full.length + 64) {
+                    assertTrue(System.nanoTime() < deadline);
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                Channel refusedData = socket.peer(true);
+                Channel refusedServer = socket.accepted.get();
+                refusedData.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 36))).sync();
+                assertTrue("Second DATA body cannot fit the held partial frame's budget",
+                        refusedServer.closeFuture().await(5, TimeUnit.SECONDS));
+                Channel control = socket.peer(true); // Same acceptor, port, TLS, decoder and shared Bookie budget.
+                Channel serverControl = socket.accepted.get();
+                byte[] fence = ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5));
+                socket.send(control, ProfileOperation.FENCE_LEDGER, 3, fence);
+                socket.status(ProfileOperation.FENCE_LEDGER, 3, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                // A TLS-authenticated connection withholding HELLO occupies the sole unclassified slot.
+                socket.peer(false);
+                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertThrows(Exception.class, () -> socket.peer(false));
+                socket.send(control, ProfileOperation.FENCE_LEDGER, 4, fence);
+                socket.status(ProfileOperation.FENCE_LEDGER, 4, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.ALREADY_APPLIED);
+                fence[80] ^= 1;
+                socket.send(control, ProfileOperation.FENCE_LEDGER, 5, fence);
+                socket.status(ProfileOperation.FENCE_LEDGER, 5, ProfileStatus.StatusClass.UNAUTHORIZED,
+                        ProfileStatus.DurableResult.NONE);
+                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                // DATA cannot follow on the authenticated control connection even with only its header.
+                control.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 36))).sync();
+                assertTrue(serverControl.closeFuture().await(5, TimeUnit.SECONDS));
+                assertEquals(0, ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo.writes);
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketFenceWaitsForPrecutDataAndRetryUsesSameOperation() throws Exception {
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo = new SegmentFileIo(
+                    Integer.MAX_VALUE, -1, -1, false, () -> {
+                        forcing.countDown();
+                        await(release);
+                    });
+            try (ProfileSocket data = new ProfileSocket(storage); ProfileSocket control = new ProfileSocket(storage)) {
+                data.add(2, context(), 1, (byte) 5, entry(context(), 1));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                byte[] fence = ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5));
+                control.send(ProfileOperation.FENCE_LEDGER, 3, fence);
+                control.status(ProfileOperation.FENCE_LEDGER, 3, ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE,
+                        ProfileStatus.DurableResult.NONE);
+                data.add(4, context(), 2, (byte) 5, entry(context(), 2));
+                data.status(4, ProfileStatus.StatusClass.FENCED, ProfileStatus.DurableResult.NONE);
+                release.countDown();
+                data.status(2, ProfileStatus.StatusClass.OK, ProfileStatus.DurableResult.APPLIED);
+                // The actual owner callback must finish releasing its pre-cut admission before retrying.
+                SegmentExecutionGroup execution = (SegmentExecutionGroup) storageField(storage, "execution");
+                CountDownLatch done = new CountDownLatch(1);
+                assertTrue(execution.owner(0).control(done::countDown));
+                assertTrue(done.await(5, TimeUnit.SECONDS));
+                control.send(ProfileOperation.FENCE_LEDGER, 5, fence);
+                control.status(ProfileOperation.FENCE_LEDGER, 5, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketFenceDisconnectRetainsControlCopyAndIoUntilActualTerminal() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            replaceBookieIo(bookie, io);
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                socket.send(ProfileOperation.FENCE_LEDGER, 2,
+                        ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(1, io.writes);
+                assertEquals(0, io.forces);
+                assertNull(socket.responses.poll(100, TimeUnit.MILLISECONDS));
+                socket.disconnect();
+                assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                assertTrue("Submitted control copies must remain charged", socket.budget.used(
+                        ProfileReceiveBudget.Lane.CONTROL) > 64);
+                assertFalse(storage.close(Duration.ofMillis(5)));
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                release.countDown();
+                assertTrue(storage.close(Duration.ofSeconds(5)));
+                assertEquals(1, io.forces);
+                socket.assertBudgetZero();
+            } finally {
+                release.countDown();
+            }
+        }
+        try (IsolatedSegmentStorage restarted = storage(config, 1, 6, 8, 16, 3)) {
+            restarted.restart();
+            try (ProfileSocket socket = new ProfileSocket(restarted)) {
+                socket.send(ProfileOperation.FENCE_LEDGER, 3,
+                        ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
+                socket.status(ProfileOperation.FENCE_LEDGER, 3, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.ALREADY_APPLIED);
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketFenceForceFailureIsUnknownAndNeverSuccess() throws Exception {
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            replaceBookieIo(bookie, io);
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                socket.send(ProfileOperation.FENCE_LEDGER, 2,
+                        ProfileOperationCodec.encode(ProfileOperation.FENCE_LEDGER, fence(3, (byte) 5)));
+                socket.status(ProfileOperation.FENCE_LEDGER, 2, ProfileStatus.StatusClass.DURABILITY_RESULT_UNKNOWN,
+                        ProfileStatus.DurableResult.UNKNOWN);
+                assertEquals(1, io.writes);
+                assertEquals(1, io.forces);
+                assertFalse(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+            }
+        }
+    }
+
+    private static void replaceBookieIo(SegmentBookieControlLog bookie, SegmentFileIo io) throws Exception {
+        var field = SegmentBookieControlLog.class.getDeclaredField("io");
+        field.setAccessible(true);
+        field.set(bookie, io);
+    }
+
+    private static SegmentFileIo bookieIo(SegmentBookieControlLog bookie) throws Exception {
+        var field = SegmentBookieControlLog.class.getDeclaredField("io");
+        field.setAccessible(true);
+        return (SegmentFileIo) field.get(bookie);
+    }
+
     private final class ProfileSocket implements AutoCloseable {
         private final EventLoopGroup acceptor = new NioEventLoopGroup(1);
         private final EventLoopGroup worker = new NioEventLoopGroup(1);
         private final EventLoopGroup clientGroup = new NioEventLoopGroup(1);
-        private final ProfileReceiveBudget budget = new ProfileReceiveBudget(32768, 4096, 4096, 2, 2, 1);
+        private final ProfileReceiveBudget budget;
+        private final List<Channel> acceptedChannels = new CopyOnWriteArrayList<>();
+        private final List<Channel> peers = new ArrayList<>();
+        private Bootstrap clientBootstrap;
+        private SslContext peerTls;
         private final ArrayBlockingQueue<ProfileFrame> responses = new ArrayBlockingQueue<>(16);
         private final AtomicReference<Throwable> failure = new AtomicReference<>();
         private final AtomicReference<Channel> accepted = new AtomicReference<>();
@@ -6166,6 +6437,11 @@ public class SegmentBookieControlLogTest {
         private Channel client;
 
         private ProfileSocket(IsolatedSegmentStorage storage) throws Exception {
+            this(storage, new ProfileReceiveBudget(32768, 4096, 4096, 2, 2, 1));
+        }
+
+        private ProfileSocket(IsolatedSegmentStorage storage, ProfileReceiveBudget budget) throws Exception {
+            this.budget = budget;
             try {
                 ServerConfiguration conf = new ServerConfiguration();
                 conf.setTLSKeyStoreType("PEM");
@@ -6183,8 +6459,11 @@ public class SegmentBookieControlLogTest {
                             @Override
                             protected void initChannel(SocketChannel channel) throws Exception {
                                 accepted.set(channel);
-                                assertTrue(storage.installProfileConnection(channel.pipeline(), serverTls, budget,
-                                        8192, 64, "test-domain", 0));
+                                acceptedChannels.add(channel);
+                                if (!storage.installProfileConnection(channel.pipeline(), serverTls, budget,
+                                        8192, 64, "test-domain", 0)) {
+                                    return;
+                                }
                                 channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
                                     @Override
                                     public void channelInactive(ChannelHandlerContext ctx) {
@@ -6194,7 +6473,8 @@ public class SegmentBookieControlLogTest {
                             }
                         }).bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
                 int port = ((InetSocketAddress) listener.localAddress()).getPort();
-                client = new Bootstrap().group(clientGroup).channel(NioSocketChannel.class)
+                peerTls = clientTls;
+                clientBootstrap = new Bootstrap().group(clientGroup).channel(NioSocketChannel.class)
                         .handler(new ChannelInitializer<SocketChannel>() {
                             @Override
                             protected void initChannel(SocketChannel channel) {
@@ -6222,7 +6502,8 @@ public class SegmentBookieControlLogTest {
                                     }
                                 });
                             }
-                        }).connect("127.0.0.1", port).sync().channel();
+                        });
+                client = clientBootstrap.connect("127.0.0.1", port).sync().channel();
                 client.pipeline().get(SslHandler.class).handshakeFuture().sync();
                 send(ProfileOperation.HELLO, 1, new ProfileHello.Client(List.of()).encode());
                 ProfileFrame frame = response();
@@ -6246,8 +6527,35 @@ public class SegmentBookieControlLogTest {
             return Paths.get(SegmentBookieControlLogTest.class.getClassLoader().getResource(name).toURI()).toString();
         }
 
+        private Channel peer(boolean hello) throws Exception {
+            int port = ((InetSocketAddress) listener.localAddress()).getPort();
+            Bootstrap bootstrap = hello ? clientBootstrap.clone()
+                    : new Bootstrap().group(clientGroup).channel(NioSocketChannel.class)
+                            .handler(new ChannelInitializer<SocketChannel>() {
+                                @Override
+                                protected void initChannel(SocketChannel channel) {
+                                    channel.pipeline().addLast(peerTls.newHandler(
+                                            channel.alloc(), "apache.bookkeeper.org", port));
+                                }
+                            });
+            Channel peer = bootstrap.connect("127.0.0.1", port).sync().channel();
+            peers.add(peer);
+            peer.pipeline().get(SslHandler.class).handshakeFuture().sync();
+            if (hello) {
+                send(peer, ProfileOperation.HELLO, 1, new ProfileHello.Client(List.of()).encode());
+                ProfileFrame greeting = response();
+                assertEquals(ProfileOperation.HELLO, greeting.header().operation());
+                assertFalse(greeting.header().isError());
+            }
+            return peer;
+        }
+
         private void send(ProfileOperation operation, long requestId, byte[] body) throws Exception {
-            client.writeAndFlush(Unpooled.wrappedBuffer(ProfileFrameCodec.encode(
+            send(client, operation, requestId, body);
+        }
+
+        private void send(Channel channel, ProfileOperation operation, long requestId, byte[] body) throws Exception {
+            channel.writeAndFlush(Unpooled.wrappedBuffer(ProfileFrameCodec.encode(
                     ProfileFrame.request(operation, requestId, body)))).sync();
         }
 
@@ -6265,9 +6573,14 @@ public class SegmentBookieControlLogTest {
 
         private ProfileStatus status(long requestId, ProfileStatus.StatusClass status,
                                      ProfileStatus.DurableResult durable) throws Exception {
+            return status(ProfileOperation.ADD_NORMAL, requestId, status, durable);
+        }
+
+        private ProfileStatus status(ProfileOperation operation, long requestId, ProfileStatus.StatusClass status,
+                                     ProfileStatus.DurableResult durable) throws Exception {
             ProfileFrame frame = response();
             assertEquals(requestId, frame.header().requestId());
-            assertEquals(ProfileOperation.ADD_NORMAL, frame.header().operation());
+            assertEquals(operation, frame.header().operation());
             assertTrue(frame.header().isResponse());
             assertEquals(status != ProfileStatus.StatusClass.OK, frame.header().isError());
             assertEquals(ProfileStatus.ENCODED_LENGTH, frame.body().length);
@@ -6302,8 +6615,11 @@ public class SegmentBookieControlLogTest {
             if (client != null) {
                 client.close().syncUninterruptibly();
             }
-            if (accepted.get() != null) {
-                accepted.get().close().syncUninterruptibly();
+            for (Channel peer : peers) {
+                peer.close().syncUninterruptibly();
+            }
+            for (Channel channel : acceptedChannels) {
+                channel.close().syncUninterruptibly();
             }
             if (listener != null) {
                 listener.close().syncUninterruptibly();

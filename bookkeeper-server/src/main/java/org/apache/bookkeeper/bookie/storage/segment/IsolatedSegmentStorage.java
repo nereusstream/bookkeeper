@@ -477,6 +477,28 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
+    SegmentBookieControlLog.NormalRejection profileFenceRejection(ProfileOperationCodec.FenceLedger request) {
+        synchronized (gate) {
+            if (!accepting || !execution.accepting()) {
+                return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            }
+            return bookie.fenceRejection(request.context(), request.credential());
+        }
+    }
+
+    /** Controls keep their reserved owner/I/O path when DATA input or space is backpressured. */
+    SegmentBookieControlLog.NormalRejection submitProfileFence(ProfileOperationCodec.FenceLedger request,
+            SegmentBookieControlDriver.FenceCompletion completion) {
+        synchronized (gate) {
+            SegmentBookieControlLog.NormalRejection rejection = profileFenceRejection(request);
+            if (rejection != null) {
+                return rejection;
+            }
+            return controls.submitFence(request, completion)
+                    ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
     boolean submitRecovery(ProfileOperationCodec.AddRecovery request,
                            SegmentDataPhysicalDriver.RecoveryRequest response)
             throws IOException {

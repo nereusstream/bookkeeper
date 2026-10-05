@@ -810,6 +810,8 @@ body额度可逻辑预留，不按声明长度立即分配整块内存。连接�
 
 2026-10-06 后续步骤11已有[真实隔离普通 Add 接线](implementation/profile-wire/README.md#真实隔离普通-add-接线)：使用实际 mTLS/HELLO 与存储 identity，在固定头阶段检查本地 N 上限，再校验 credential/context/CRC/entry 坐标并复用原有界输入复制；仅实际 local-durable 结果产生 OK/APPLIED，force/提交不确定性保留 UNKNOWN。已取消但仍排队的 completion、下游持有的响应，均等实际终结才归还额度。八个真实 socket 场景及相关383项（378通过、5项macOS/Linux亲和性跳过）、style与有限39正向/122指定反例通过。readiness仍为显式输入，生产listener、真实控制授权、TLS/socket/存储总账、完整startup/readiness、quorum、性能及完整模型未闭合；稳定wire与Gate不提升。
 
+2026-10-06 控制网络增量：[真实隔离FENCE与控制额度](implementation/profile-wire/README.md#真实隔离-fence-与控制额度)复用原context/credential校验、Bookie控制driver与实际write/force/owner apply，首次授权后把连接/frame/解析响应workspace原子转入CONTROL；后续逐次鉴权。pre-cut等待返回原操作transient/NONE、force/apply不确定性保留UNKNOWN，断连不提前释放已复制控制请求或实际I/O资源。同一port的真实DATA半包/第二DATA额度拒绝、UNCLASSIFIED满额下已有CONTROL推进及零effect拒绝已验证；14类391项为386通过/5平台跳过，style通过；有限矩阵40正向完整PASS/128指定反例。生产listener、完整control-plane、TLS/socket/native/storage总账、fresh startup/readiness及步骤11/Gate仍未完成。
+
 ## 12. Capability negotiation
 
 HELLO是每个Profile connection的第一条application frame且最大4KiB。client body固定为：

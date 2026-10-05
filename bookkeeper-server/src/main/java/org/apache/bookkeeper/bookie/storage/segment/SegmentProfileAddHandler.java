@@ -44,7 +44,7 @@ import org.apache.bookkeeper.proto.profile.ProfileInboundFrame;
 import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.tls.TLSContextFactory;
 
-/** Real isolated normal-Add dispatch. Caller owns the listener, event loops and storage lifetime. */
+/** Isolated normal-Add and credential-authorized fence; caller owns listener, event loops and storage lifetime. */
 final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private static final int ADD_PREFIX_BYTES = 100;
     private static final int RESPONSE_BYTES = ProfileFrameCodec.OUTER_LENGTH_PREFIX
@@ -57,6 +57,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final int maxPending;
     private final Set<Pending> pending = new HashSet<>();
     private boolean established;
+    private boolean controlEstablished;
     private boolean closed;
 
     SegmentProfileAddHandler(IsolatedSegmentStorage storage, TLSContextFactory tls, String trustDomain,
@@ -85,7 +86,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             int bytes = frame.header().operation() == ProfileOperation.HELLO
                     ? 2 * (ProfileFrameHeader.ENCODED_LENGTH + ProfileFrameCodec.OUTER_LENGTH_PREFIX
                             + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES)
-                    : ADD_PREFIX_BYTES + RESPONSE_BYTES;
+                    : (frame.header().operation() == ProfileOperation.FENCE_LEDGER ? 200 : ADD_PREFIX_BYTES)
+                            + RESPONSE_BYTES;
             credit = ProfileInboundPipeline.reserveResponse(ctx.pipeline(), bytes);
             request = new Pending(frame, credit);
             pending.add(request);
@@ -98,13 +100,15 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             if (frame.header().operation() == ProfileOperation.HELLO) {
                 tls.authenticatedProfilePrincipal(ctx.pipeline().get(SslHandler.class), trustDomain);
                 // The decoder validated protocol range and the canonical client capability vector.
-                // This slice advertises no optional capabilities; it cannot enable recovery/range/control.
+                // This slice advertises no optional capabilities; it cannot enable install/recovery/range.
                 ProfileInboundPipeline.markEstablished(ctx.pipeline());
                 established = true;
                 byte[] body = hello.encode();
                 write(ctx, request, null, body);
             } else if (!established) {
                 ctx.close();
+            } else if (frame.header().operation() == ProfileOperation.FENCE_LEDGER) {
+                fence(ctx, request);
             } else if (frame.header().operation() != ProfileOperation.ADD_NORMAL) {
                 write(ctx, request, ProfileStatus.unsupported(), null);
             } else {
@@ -161,35 +165,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     null);
             return;
         }
-        pendingRequest.storageRequest = new SegmentDataPhysicalDriver.NormalRequest((result, failure) -> {
-            if (pendingRequest.finished.get()) {
-                return;
-            }
-            ProfileStatus response = resultStatus(result, failure);
-            if (!pendingRequest.beginDelivery()) {
-                return;
-            }
-            try {
-                ctx.executor().execute(() -> {
-                    try {
-                        if (!pendingRequest.finished.get()) {
-                            write(ctx, pendingRequest, response, null);
-                        }
-                    } catch (RuntimeException | Error failedResponse) {
-                        finish(pendingRequest);
-                        ctx.close();
-                        throw failedResponse;
-                    } finally {
-                        pendingRequest.endDelivery();
-                    }
-                });
-            } catch (RejectedExecutionException shutdown) {
-                // No original frame view is used after submitProfileNormal's synchronous copy.
-                pendingRequest.endDelivery();
-                pendingRequest.release();
-                ctx.close();
-            }
-        });
+        pendingRequest.storageRequest = new SegmentDataPhysicalDriver.NormalRequest((result, failure) ->
+                complete(ctx, pendingRequest, resultStatus(result, failure)));
         try {
             SegmentBookieControlLog.NormalRejection refused = storage.submitProfileNormal(
                     context, credential, entryId, entry, pendingRequest.storageRequest);
@@ -204,6 +181,102 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         } catch (IOException uncertain) {
             pendingRequest.storageRequest.stopWaiting();
             write(ctx, pendingRequest, unknown(), null);
+        }
+    }
+
+    private void fence(ChannelHandlerContext ctx, Pending request) throws IOException {
+        ProfileOperationCodec.FenceLedger fence;
+        try {
+            ByteBuf body = request.frame.body();
+            int start = body.readerIndex();
+            if (body.readableBytes() != 100
+                    || body.getUnsignedShort(start + 76) != ProfileOperationCodec.CREDENTIAL_KIND
+                    || body.getUnsignedShort(start + 78) != ProfileOperationCodec.CREDENTIAL_LENGTH) {
+                throw new IllegalArgumentException("Invalid Profile fence body");
+            }
+            ProfileLedgerContext context = ProfileLedgerContext.decode(
+                    body.nioBuffer(start, ProfileLedgerContext.ENCODED_LENGTH));
+            byte[] operationId = new byte[ProfileOperationCodec.OPERATION_ID_LENGTH];
+            byte[] credential = new byte[ProfileOperationCodec.CREDENTIAL_LENGTH];
+            body.getBytes(start + 60, operationId);
+            body.getBytes(start + 80, credential);
+            fence = new ProfileOperationCodec.FenceLedger(context, operationId, credential);
+        } catch (IllegalArgumentException invalid) {
+            request.closeAfterWrite = !controlEstablished;
+            write(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE), null);
+            return;
+        }
+        SegmentBookieControlLog.NormalRejection refused = storage.profileFenceRejection(fence);
+        if (refused != null) {
+            request.closeAfterWrite = !controlEstablished;
+            write(ctx, request, rejectionStatus(refused), null);
+            return;
+        }
+        if (!controlEstablished) {
+            ProfileInboundPipeline.markControlAuthorized(ctx.pipeline(), request.frame, request.credit);
+            controlEstablished = true;
+        }
+        request.beginControl();
+        boolean submitted = false;
+        try {
+            refused = storage.submitProfileFence(fence, (result, failure) -> {
+                try {
+                    ProfileStatus response;
+                    if (failure != null || result == null) {
+                        response = unknown();
+                    } else {
+                        response = switch (result.status()) {
+                            case APPLIED_DURABLE -> status(StatusClass.OK, RetryDisposition.NEVER,
+                                    DurableResult.APPLIED);
+                            case ALREADY_DURABLE -> status(StatusClass.OK, RetryDisposition.NEVER,
+                                    DurableResult.ALREADY_APPLIED);
+                            case WAITING_PRECUT -> status(StatusClass.TRANSIENT_UNAVAILABLE,
+                                    RetryDisposition.SAME_PROFILE_OPERATION, DurableResult.NONE);
+                            case REJECTED -> {
+                                SegmentBookieControlLog.NormalRejection reason = storage.profileFenceRejection(fence);
+                                yield rejectionStatus(reason != null ? reason
+                                        : SegmentBookieControlLog.NormalRejection.IDENTITY_CONFLICT);
+                            }
+                        };
+                    }
+                    complete(ctx, request, response);
+                } finally {
+                    request.endControl();
+                }
+            });
+            submitted = refused == null;
+            if (!submitted) {
+                write(ctx, request, rejectionStatus(refused), null);
+            }
+        } finally {
+            if (!submitted) {
+                request.endControl();
+            }
+        }
+    }
+
+    private void complete(ChannelHandlerContext ctx, Pending request, ProfileStatus response) {
+        if (!request.beginDelivery()) {
+            return;
+        }
+        try {
+            ctx.executor().execute(() -> {
+                try {
+                    if (!request.finished.get()) {
+                        write(ctx, request, response, null);
+                    }
+                } catch (RuntimeException | Error failedResponse) {
+                    finish(request);
+                    ctx.close();
+                    throw failedResponse;
+                } finally {
+                    request.endDelivery();
+                }
+            });
+        } catch (RejectedExecutionException shutdown) {
+            request.endDelivery();
+            request.release();
+            ctx.close();
         }
     }
 
@@ -280,7 +353,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         ctx.writeAndFlush(response).addListener(written -> {
             request.writing = false;
             finish(request);
-            if (!written.isSuccess()) {
+            if (!written.isSuccess() || request.closeAfterWrite) {
                 ctx.close();
             }
         });
@@ -323,12 +396,23 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         private final AtomicBoolean resourcesReturned = new AtomicBoolean();
         private volatile boolean writing;
         private boolean delivering;
+        private boolean controlInFlight;
+        private boolean closeAfterWrite;
         private ScheduledFuture<?> deadline;
         private SegmentDataPhysicalDriver.NormalRequest storageRequest;
 
         private Pending(ProfileInboundFrame frame, ProfileInboundPipeline.ResponseCredit credit) {
             this.frame = frame;
             this.credit = credit;
+        }
+
+        private synchronized void beginControl() {
+            controlInFlight = true;
+        }
+
+        private synchronized void endControl() {
+            controlInFlight = false;
+            returnResourcesIfTerminal();
         }
 
         private synchronized boolean beginDelivery() {
@@ -358,8 +442,10 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
 
         private void returnResourcesIfTerminal() {
             // Removing the application handler can precede the downstream write's actual completion.
+            // A submitted fence also retains its charged immutable request until the actual owner terminal.
             // Cancellation stops responses, but the write promise still owns the charged response workspace.
-            if (finished.get() && !writing && !delivering && resourcesReturned.compareAndSet(false, true)) {
+            if (finished.get() && !writing && !delivering && !controlInFlight
+                    && resourcesReturned.compareAndSet(false, true)) {
                 try {
                     frame.close();
                 } finally {

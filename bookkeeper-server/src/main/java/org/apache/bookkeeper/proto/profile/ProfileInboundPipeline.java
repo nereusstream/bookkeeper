@@ -75,6 +75,12 @@ public final class ProfileInboundPipeline {
         pipeline.get(ProfileReceiveDecoder.class).markEstablished();
     }
 
+    /** Move this authorized request and its still-held workspace together; no effect precedes a failed move. */
+    public static void markControlAuthorized(ChannelPipeline pipeline, ProfileInboundFrame frame,
+                                             ResponseCredit workspace) throws IOException {
+        pipeline.get(ProfileReceiveDecoder.class).markControlAuthorized(frame, workspace);
+    }
+
     @FunctionalInterface
     public interface ResponseCredit extends AutoCloseable {
         @Override

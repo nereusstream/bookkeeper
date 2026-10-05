@@ -37,7 +37,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private enum ConnectionPurpose { UNCLASSIFIED, DATA, CONTROL_PENDING, CONTROL }
 
-    private final class HeldCredit implements AutoCloseable {
+    private final class HeldCredit implements ProfileInboundPipeline.ResponseCredit {
+        private final ProfileReceiveDecoder receiver = ProfileReceiveDecoder.this;
         private final int bytes;
         private final ProfileReceiveBudget.Credit shared;
         private final AtomicBoolean closed = new AtomicBoolean();
@@ -126,8 +127,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         if (terminated || context == null || !context.executor().inEventLoop()) {
             throw new IOException("Profile response requires a live receiving event loop");
         }
-        HeldCredit reserved = charge(bytes);
-        return reserved::close;
+        return charge(bytes);
     }
 
     void limitNormalBody(int bytes) {
@@ -139,6 +139,11 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     /** Called by the downstream operation handler after it validates and authorizes the first control request. */
     void markControlAuthorized(ProfileInboundFrame validatedFrame) throws IOException {
+        markControlAuthorized(validatedFrame, null);
+    }
+
+    void markControlAuthorized(ProfileInboundFrame validatedFrame,
+                               ProfileInboundPipeline.ResponseCredit workspace) throws IOException {
         if (terminated || context == null || !context.executor().inEventLoop()
                 || purpose != ConnectionPurpose.CONTROL_PENDING || pendingControlCredit == null
                 || pendingControlFrame != validatedFrame) {
@@ -146,8 +151,15 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         }
         final boolean transferred;
         try {
-            transferred = budget.transfer(ProfileReceiveBudget.Lane.CONTROL,
-                    connectionPermit, baseCredit.shared, pendingControlCredit.shared);
+            if (workspace == null) {
+                transferred = budget.transfer(ProfileReceiveBudget.Lane.CONTROL,
+                        connectionPermit, baseCredit.shared, pendingControlCredit.shared);
+            } else if (workspace instanceof HeldCredit held && held.receiver == this && !held.closed.get()) {
+                transferred = budget.transfer(ProfileReceiveBudget.Lane.CONTROL,
+                        connectionPermit, baseCredit.shared, pendingControlCredit.shared, held.shared);
+            } else {
+                throw new IllegalStateException("Control workspace is not owned by this receiving connection");
+            }
         } catch (IllegalStateException failure) {
             context.close();
             throw failure;

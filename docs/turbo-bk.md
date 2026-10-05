@@ -346,6 +346,8 @@ DirectJournal是独立对照/优化支线，可并行或等主线取得基础数
 
 2026-10-03 Arena checkpoint已补applied状态/字节cut、有界A/B image、durable CHECKPOINT_COMMIT后发布、完整后缀与旧image/全日志回退。新增真实JVM四个发布边界及DATA重启验证；checkpoint有限模型179,279 distinct states正向PASS，两种错误规则取得指定反例。新回执为`unified-wal-local-rO6YbO7C`和`unified-wal-model-thb7_nqa`，历史回执保持原绑定。全部旧控制日志仍必需，Bookie checkpoint、在线维护、prefix回收/rotation、index/MOVE/FREE及完整Model C/Block G尚未完成。
 
+2026-10-06 控制网络增量：[真实隔离FENCE与控制额度](rfcs/unified-wal/implementation/profile-wire/README.md#真实隔离-fence-与控制额度)复用原context/credential校验、Bookie控制driver与实际write/force/owner apply，首次授权后把连接/frame/解析响应workspace原子转入CONTROL；后续逐次鉴权。pre-cut等待返回原操作transient/NONE、force/apply不确定性保留UNKNOWN，断连不提前释放已复制控制请求或实际I/O资源。同一port的真实DATA半包/第二DATA额度拒绝、UNCLASSIFIED满额下已有CONTROL推进及零effect拒绝已验证；14类391项为386通过/5平台跳过，style通过；有限矩阵40正向完整PASS/128指定反例。生产listener、完整control-plane、TLS/socket/native/storage总账、fresh startup/readiness及步骤11/Gate仍未完成。
+
 ## 11. Gate 与证据合同
 
 每个正式性能 Gate 必须在运行前冻结：
