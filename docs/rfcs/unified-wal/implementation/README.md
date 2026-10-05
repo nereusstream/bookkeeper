@@ -8,7 +8,7 @@
 
 - [`ProfileDescriptor` reference implementation](profile-descriptor/README.md)
 - [`Profile control/auth typed reference endpoint`](profile-control/README.md)：已完成interfaces、isolated endpoint、12项普通功能测试、机器回执与最终scope audit；仅消费transport facts与semantic store interfaces，不接入production listener/store/route/Add/ACK。
-- [`Bookie startup/readiness/new-scope reference harness`](startup-readiness/README.md)：typed immutable facts、固定fail-closed startup顺序、durable local readiness、persistent CAS/response-loss重读、matching service-info、stale demotion、ephemeral writable registration、new-scope access isolation、九个crash/restart边界、17项普通测试、机器manifest/receipt/test summary与最终scope audit已完成；不提升Spike/Gate/production状态。
+- [`Bookie startup/readiness/new-scope reference harness`](startup-readiness/README.md)：typed immutable facts、固定fail-closed startup顺序、durable local readiness、persistent CAS/response-loss重读、matching service-info、stale demotion、ephemeral writable registration、new-scope access isolation、九个crash/restart边界、17项普通测试、机器manifest/receipt/test summary与最终scope audit已完成；另有步骤12隔离真实ZooKeeper persistent CAS增量，原reference回执保持冻结；不提升Spike/Gate/production状态。
 
 已冻结、延期验证的模块：
 
@@ -316,6 +316,9 @@ DATA durable → hot locator → local result
 同phase请求并发，不逐个串行安装E个节点。只读打开不激活；恢复打开另走fence/grant。将startup/readiness reference接到真实文件与registration：本地恢复和所需delete catch-up完成后，先持久readiness，再发布匹配的ephemeral registration；完整delete追赶在步骤15闭合，未实现状态不能默认就绪。
 
 **完成条件：** 每个CAS响应丢失都可查询同一结果；未知状态不放行，metadata不复制第二份membership权威；普通Add不查远端控制状态；断点重启不扩大权限。复用已有reference契约测试，不重新建设同名内存框架。
+
+
+2026-10-05 当前增量：[真实 ZooKeeper readiness CAS](startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)直接实现已有接口，fresh-read 校验完整 envelope、store mzxid/readiness generation，原子 birth 检查防止删除重建的 dataVersion ABA。真实双 client/server 验证单 winner、response-loss 查询、ACL/损坏和提交后超时；25 项相关测试全部通过，Spotless/Checkstyle 通过，当前有限模型 33 正向完整通过/96 指定反例。历史 Wave 0 scope guard 对后续累计路径返回 BLOCK，原 reference 回执及脚本未改。仅完成隔离 persistent CAS，未接 service startup、ephemeral、完整 control store/metadata/安装激活；步骤 12 与生产 Gate 仍未完成。
 
 #### 13. 接入客户端普通写、ACK、背压重试和写期换组
 

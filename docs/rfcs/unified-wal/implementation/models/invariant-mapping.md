@@ -381,3 +381,15 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | QueriesBindCurrentIdentityAndDigest | 来源判断要求准确 location/UUID/generation/digest；失效 allocation 的历史成功、错误身份或不同字节都不能成为当前 COPY 证明 |
 
 模型固定三 COPY、两坐标、两 allocation 与一次复用；独立成功 reference set 保留历史，而查询投影只取当前 generation。实际记录/校验和/同步与 A/B fallback 在真实文件测试中验证，有限模型不等于完整恢复、请求历史裁剪或总工作集有界。
+
+
+## ZooKeeper readiness CAS
+
+| 性质 | 当前合同与实现 | 证据边界 |
+| --- | --- | --- |
+| TypeOK（ReadinessCas） | 两个 birth、三代 readiness、dataVersion 0～2、一次并发修改/重建、phase 0～5 | 不是 ZooKeeper zxid 完整范围、client 队列或内存预算证明 |
+| ReadinessCasPreservesBirthAndExpectedGeneration | 先检查 exact mzxid/readiness generation，提交时原子检查不可变 birth 与 dataVersion；重建后不能以 version 0 接受旧 CAS | 模型抽象 birth 唯一且不可变、scope/ACL 有效及 atomic multi；删除重建与双版本比较另由真实 server 测试验证 |
+| UnresolvedLostReplyNeverReportsApplied | 提交后丢回复/超时不转为成功，保留 RESPONSE_LOST，fresh exact-read 才解析 | 模型不证明实际网络或 deadline 实现，实际已提交回调故障由 Java 测试注入 |
+| ReconciledSuccessMatchesCurrentRecord | Query 仅在当前目标相等时得到等价结果，后续修改可使旧目标不再匹配 | 模型只以 generation 2 代表完整目标；完整 record 的 equality 另由实际 codec/多字段测试验证 |
+
+三个错误规则分别跳过 birth、忽略 expected readiness generation、直接提升丢回复，必须从 Next 轨迹违反指定性质。有限终态允许 `CHECK_DEADLOCK FALSE`；不从此推导 liveness、实际持久化、安装/激活、service-info、ephemeral registration 或生产 authority。

@@ -681,3 +681,21 @@ CHECK_DEADLOCK FALSE 只允许有限终态，没有公平调度、liveness、真
 最终回执 `unified-wal-model-qx5snprk` 绑定父提交 `c23f50a4059d8853258aec36073ee8bbb4a99dda`、181 实际输入与 376 个 checksum；125 配置为 32 正向完整 PASS、93 指定反例，全部符合预期。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化保留。当前 source hash 和全部 receipt checksum 已核对，designInputs 保持父提交绑定，历史结果不改绑定。实际 image/fallback/rotation 与旧/current/失败 COPY 验证见[当前 COPY 与 selector 状态](../local-storage/README.md#当前-copy-证明与-selector-状态)。
 
 CHECK_DEADLOCK FALSE 只允许有限终态。本投影不证明物理持久化、恢复协议、请求代或 UUID/MOVE 历史可以裁剪，也不证明全部业务 image、总内存/磁盘/临时工作集有界、长期负载、liveness、多 Arena、掉电、性能、完整 A/C/D 与组合、B17 或生产 Gate。
+
+
+## ZooKeeper readiness CAS 投影
+
+2026-10-05，`ReadinessCas.tla` 是 Model A 的持久 registration 条件更新投影：两个 birth、readiness generation 1～3、dataVersion 0～2、一次并发更新/删除重建，捕获→提交→原子条件应用→回复→fresh query 的阶段 0～5。重建改变 birth 并使 dataVersion 回到 0；成功不能跨 birth 或忽略 expected semantic generation。丢回复保留 UNKNOWN，查询以 generation 2 抽象完整目标 equality。公开 mzxid 的实际双版本比较、codec/ACL、persistent/空锚点、整次 deadline 由[真实 ZK 测试](../startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)验证，模型不展开这些字节和 backend 机制。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-readiness-cas | 85 / 67 / 0 | 8 / 8 | 0.789 s / 109,625,344 bytes | PASS |
+| ce-readiness-cas-birth | 23 / 21 / 9 | 5 / 不适用 | 0.815 s / 107,921,408 bytes | EXPECTED_COUNTEREXAMPLE: ReadinessCasPreservesBirthAndExpectedGeneration |
+| ce-readiness-cas-generation | 20 / 18 / 9 | 4 / 不适用 | 0.814 s / 107,249,664 bytes | EXPECTED_COUNTEREXAMPLE: ReadinessCasPreservesBirthAndExpectedGeneration |
+| ce-readiness-cas-unknown | 29 / 27 / 13 | 5 / 不适用 | 0.823 s / 106,037,248 bytes | EXPECTED_COUNTEREXAMPLE: UnresolvedLostReplyNeverReportsApplied |
+
+七个 Next 动作都有非零 coverage：Capture 2:2、Submit 1:5、Replace 8:15、ConcurrentUpdate 8:15、Commit 5:5、Reply 18:18、Query 23:23。三个错误规则分别取消 birth 检查、忽略 expected readiness generation、将丢回复直接提升成功，都在指定性质上给出 Next 轨迹反例。atomic multi、唯一不可变 birth、有效 record/scope/ACL 及有序修改是输入假设；它不是 MetadataStore quorum、服务生命周期或 ZooKeeper 内部协议证明。
+
+最终回执 `unified-wal-model-o4tiypiw` 绑定父提交 `aee4bed4060d6f52097fc113978c462662b314e5`、224 source inputs 与 388 个 checksum；129 配置为 33 正向完整 PASS、96 指定反例，全部符合预期。复现命令 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，仍使用官方 TLC 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化。全部 source/checksum 已核对；5 份 designInputs 始终绑定父提交，历史回执不改绑定。
+
+CHECK_DEADLOCK FALSE 只允许有限终态；无 fairness/liveness、真实 quorum/持久化、ACL、安装/激活、startup 与 ephemeral 生命周期、性能或生产 authority 结论。完整 A/C/D 与组合、Block G、长期负载和服务 readiness 仍未完成。

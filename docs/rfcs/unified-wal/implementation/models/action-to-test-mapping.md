@@ -415,3 +415,17 @@ slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限
 | Query | 实际来源校验绑定 location、MOVE UUID/generation 与 entry SHA-256；已有 wrong bytes 与 future selector 回归继续执行，不由 COPY durable 直接授予成功身份 |
 
 有限模型不重演真实字节/force/checkpoint。扩展链式 MOVE 测试分别从最高第八代 image、损坏后的第七代加完整 suffix、物理 rotation 后恢复，检查成功旧 COPY、失败 COPY 与当前 selector；force 未知结果回归检验 apply 前后区分。请求结果历史仍按原保留合同处理。
+
+
+## ZooKeeper readiness CAS
+
+`ReadinessCas.tla` 是 Model A 的持久 registration 条件变更投影；每个动作都有实际启用的轨迹，实际事务由 `ZKProfileRegistrationStoreTest` 的两个 client 和真实 ZooKeeper server 验证。测试仅在提交前设置竞争屏障，或在真实事务成功后丢弃/延迟回调，不以 mock 写入替代 server 状态。
+
+| 动作 | 实现与验证 |
+| --- | --- |
+| Capture / Submit | `sync`、fresh `getData`、store mzxid 与 readiness generation 双比较；`realStorePreservesEveryFieldAndChecksBothVersions` 检查全部字段、错误 semantic generation 和过期 store version |
+| Replace | 管理 client 在查读与提交之间删除/重建节点，新 birth/reset dataVersion 0；`deletionAndRecreationBetweenReadAndCommitCannotPassOldCas` 确认旧 CAS 冲突且新记录不变 |
+| ConcurrentUpdate / Commit | `check(birth, 0) + setData(parent, expected version)` 原子提交；`simultaneousRealTransactionsHaveOneWinner` 确认只有一个 APPLIED、一个 CONFLICT |
+| Reply / Query | `lostCreateAndUpdateRepliesResolveThroughFreshRealReads` 在真实创建和更新后丢回复，fresh-read exact record，原 CAS 重投不重复更新；`actualCommittedTransactionRemainsUnknownWhenCallbackExceedsDeadline` 检查提交后超时仍 UNKNOWN，真实记录可解析 |
+
+`corruptPayloadOrMutableBirthMarkerCannotBeRepairedByCas`、`actualAclDenialDoesNotChangePersistentReadiness`、`codecRejectsBadChecksumSchemaCountAndTrailingBytes` 另验证实际格式、锚点及 ACL；模型把这些有效输入及 ZooKeeper atomic multi 当作假设。模型没有展开 quorum、ACL、完整 envelope 字节、client deadline、真实 startup、ephemeral 生命周期或普通 Add。
