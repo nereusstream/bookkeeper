@@ -24,6 +24,7 @@ MATRIX = {
     "ce-internal-checkpoint-history-root": "SnapshotRetainsCurrentRootIdentities",
     "ce-internal-checkpoint-history-legacy": "LegacyReadyHasCompleteCheckpointHistory",
     "ce-internal-checkpoint-history-business": "SnapshotKeepsBusinessResults",
+    "ce-internal-checkpoint-history-original": "OriginalRestoresValidCompactedImage",
     "c-arena-space-maintenance": None,
     "ce-arena-space-maintenance-resources": "MaintenanceStartsWithActualResources",
     "ce-arena-space-maintenance-repeat": "UnchangedFullLiveWindowsVisitedOnce",

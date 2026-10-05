@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影及保留tail投影与维护容量预留投影共24个完整正向配置、61个指定性质反例；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前Model A Bookie权限快照及Model C既有切片、native MOVE覆盖、多批compaction与有界source选择投影及池化捕获投影及保留tail投影与维护容量预留投影共29个完整正向配置、80个指定性质反例，含 original/rotated checkpoint 恢复投影；当前回执见末节。不是完整Model C、A+C或Block G验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -590,3 +590,22 @@ CHECK_DEADLOCK FALSE仅允许有限终态，不证明公平调度、全部park/u
 最终回执 `unified-wal-model-_nzaxgir` 绑定父提交 `386478b6749250b737ea8dcc358d7e7414715b03`、161 实际输入与 325 个 checksum；29 个正向完整 PASS、79 个指定反例，108 配置全部符合预期。复现命令仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化保留。真实行为、旧 v1/新 v2 向量与恢复证据见[有界内部历史](../local-storage/README.md#内部-checkpoint-历史的有界保留)。
 
 CHECK_DEADLOCK FALSE 仅允许有限终态，没有 liveness、公平调度、物理 durability 或性能结论。业务/会话历史压缩、持续创建删除、filesystem 临时工作集、多 Arena、掉电、完整 A/C/D 与组合及生产 Gate 未由本投影闭合；历史 receipt/designInputs 继续保留原绑定。
+
+## 原 journal 的压缩 checkpoint 恢复投影
+
+2026-10-05，既有 `InternalCheckpointHistory.tla` 增加 original/rotated 两种恢复入口，仍固定八个内部 generation 与 grant/credential/tombstone 业务角色。合法 v2 在两种入口采用同一 predecessor 与条件结果门槛，original 不能因已替代内部历史被省略而拒绝完整 image。`RejectOriginalGap` 敏感性候选专门模拟遗漏，要求在指定性质上失败；不借完整日志 fallback 掩盖合法最高 image 未被选中的问题。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| c-internal-checkpoint-history | 1694 / 906 / 0 | 14 / 14 | 0.897 s / 117,178,368 bytes | PASS |
+| ce-internal-checkpoint-history-unbounded | 129 / 89 / 41 | 7 / 不适用 | 0.736 s / 110,592,000 bytes | EXPECTED_COUNTEREXAMPLE: ImageHasBoundedInternalHistory |
+| ce-internal-checkpoint-history-root | 79 / 59 / 30 | 6 / 不适用 | 0.736 s / 109,543,424 bytes | EXPECTED_COUNTEREXAMPLE: SnapshotRetainsCurrentRootIdentities |
+| ce-internal-checkpoint-history-legacy | 142 / 99 / 49 | 7 / 不适用 | 0.722 s / 110,346,240 bytes | EXPECTED_COUNTEREXAMPLE: LegacyReadyHasCompleteCheckpointHistory |
+| ce-internal-checkpoint-history-business | 3 / 3 / 1 | 2 / 不适用 | 0.753 s / 101,761,024 bytes | EXPECTED_COUNTEREXAMPLE: SnapshotKeepsBusinessResults |
+| ce-internal-checkpoint-history-original | 65 / 51 / 27 | 6 / 不适用 | 0.815 s / 109,969,408 bytes | EXPECTED_COUNTEREXAMPLE: OriginalRestoresValidCompactedImage |
+
+正向五个 Next 动作均有非零 coverage：Checkpoint 58:342、Rotate 56:448、MarkLegacy 114:226、CorruptPredecessor 224:224、Restore 452:452（保留工具原始双计数）。两种 recoveryMode 均由 Init 可达。回执 `unified-wal-model-4gs7yzfe` 绑定父提交 `bb18e0fc6e9473c742ef01d38ac25af5dfbff35b`、162 实际输入与 328 个 checksum；109 配置中 29 个正向完整 PASS、80 个指定反例全部符合预期。新增反例在 `OriginalRestoresValidCompactedImage` 失败；既有 v1、root 保留、业务结果及 predecessor 性质继续检查，旧 receipt 不改绑定。
+
+复现仍使用 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`。本轮原临时工具缺失，curl 下载超时、续传 TLS 失败均没有执行模型或产生 PASS；恢复官方 1.7.4 完整文件并核对锁定 SHA-1/SHA-256 后才运行。单 worker、固定 seed/fp、无状态约束或对称化保持不变；真实路径见[原 journal 恢复](../local-storage/README.md#原-journal-的压缩-checkpoint-恢复)。
+
+本模型把物理原日志/轮转、commit/framing/hash、业务条件及实际同步作为输入；CHECK_DEADLOCK FALSE 仅允许有限终态，不证明 liveness、公平调度或物理 durability。业务/会话历史压缩、完整 filesystem 临时工作集、长期负载、多 Arena、完整 A/C/D 与组合、B17 和生产 Gate 仍未闭合。

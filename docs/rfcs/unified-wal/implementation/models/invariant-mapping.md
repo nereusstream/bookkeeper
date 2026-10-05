@@ -336,3 +336,12 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | ReadyHasCheckpointPredecessor | v2 保留内部 commit 严格递增且小于目标代，正常重放条件结果，最终 generation 必须恰为目标 predecessor；真实 commit/image/reference 和完整必要 suffix 仍不可缺失 |
 
 有限模型不证明业务历史可无限创建删除、共享 filesystem 工作集、长期 liveness 或完整 A/C/D；B17、步骤 8/10 与生产 Gate 仍未关闭。
+
+## 原 journal 的压缩 checkpoint 恢复
+
+| 性质 | 实现与边界 |
+| --- | --- |
+| OriginalRestoresValidCompactedImage | original 与 rotated 使用相同 image 语义，完整 v2 不因缺少已替代的内部 history 被拒绝；模型固定两种 recoveryMode 和八个内部 generation，真实测试核对最高已发布恢复根 |
+| ReadyHasCheckpointPredecessor / LegacyReadyHasCompleteCheckpointHistory | 同一验证入口仍要求准确 predecessor，v1 完整历史、原条件结果及必要 suffix 不放宽；模型门槛不代替 commit/hash/真实同步 |
+
+完整日志回退保留，但不能掩盖合法 checkpoint 的恢复遗漏；本增量不证明业务历史压缩、liveness、完整模型或生产 Gate。

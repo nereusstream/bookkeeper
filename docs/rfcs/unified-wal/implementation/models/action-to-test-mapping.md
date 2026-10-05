@@ -372,3 +372,12 @@ FREE proof、extent几何、并发I/O终结及filesystem预算是其他模型/�
 | 独立格式向量 | Arena/Bookie 现有 empty checkpoint 测试分别逐字节比对新增 v2 与未变 v1；独立 Python struct/逐位 CRC32C，不用 writer 产出期望值 |
 
 模型的物理轮转、framing/hash 与业务条件作为输入；真实回归只证明本节固定状态范围，不关闭业务历史压缩或长期运行验收。
+
+## 原 journal 的压缩 checkpoint 恢复
+
+| 动作 | 实际路径与风险验证 |
+| --- | --- |
+| Restore（original / rotated） | 两 owner 的原 journal 恢复复用 `restoreSnapshot`，v2 generation 间隔与准确 predecessor 规则一致；两类 `originalJournalRestoresLatestCompactedCheckpointAndCorruptionFallback` 分别以真实八次 checkpoint、最高 image 选择、单 image 损坏后的上一代及完整 suffix、原业务结果/冲突/T 拒绝验证 |
+| RejectOriginalGap 错误候选 | 有效 v2 仍按旧完整内部历史拒绝，指定 `OriginalRestoresValidCompactedImage` 检查该门槛；不允许用完整日志可回放掩盖合法 image 被错误丢弃 |
+
+模型仅投影 snapshot 可恢复条件，物理原日志、commit/reference/CRC、发布同步与 fallback/suffix 由既有真实回归承担；实际正向与指定反例结果见模型 README；配置内容与回执输出分别核对，不把候选存在当作通过。

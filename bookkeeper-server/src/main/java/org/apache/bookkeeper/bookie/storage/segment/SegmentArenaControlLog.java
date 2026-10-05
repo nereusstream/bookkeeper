@@ -1821,23 +1821,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         config, SegmentControlFormat.Owner.ARENA, reference.slot()))) {
                     continue;
                 }
-                SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(
-                        config, identity, SegmentControlFormat.Owner.ARENA, reference, maxLogBytes);
-                resetRecoveredState();
-                for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
-                    Command command = decodeCommand(operation.record(), operation.sequence());
-                    if (appliedOperations.containsKey(command.operationId())) {
-                        throw new IOException("Repeated operation in Arena checkpoint");
-                    }
-                    appliedThrough = operation.sequence();
-                    if (apply(command).ordinal() + 1 != operation.status()) {
-                        throw new IOException("Arena checkpoint conditional result mismatch");
-                    }
-                }
-                appliedThrough = snapshot.through();
-                durableThrough = snapshot.through();
-                appliedOffset = snapshot.logOffset();
-                publishedCheckpoint = reference;
+                restoreSnapshot(reference);
             } catch (IOException | IllegalArgumentException invalidCheckpoint) {
                 resetRecoveredState();
                 continue;

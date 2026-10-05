@@ -312,4 +312,6 @@ v2保留所有现有业务状态表记录与原sequence/首次条件结果，包
 
 新增独立Python struct/逐位CRC32C向量 `arena-empty-checkpoint-v2.hex` 与 `bookie-empty-checkpoint-v2.hex`（均4224 bytes）：只把对应v1空image的metadata version改为2并重算CRC。既有v1向量保持原文件/哈希，实际Java writer同时逐字节核对v2和显式legacy v1 codec；读者区分两者，原commit/publication向量保持匹配。恢复、固定状态96轮、空状态/legacy误分类和损坏回退证据见[本地增量](README.md#内部-checkpoint-历史的有界保留)。
 
+2026-10-05，原 journal 与物理轮转 journal 均复用各 owner 的同一 snapshot 恢复入口。原 journal 先核对全部完整控制记录、commit 与发布引用，并完成日志同步；随后合法 v2 image 可按内部 generation 间隔恢复，仍须准确保留目标代的 predecessor。正常条件结果、完整必要 suffix、发布页同步和坏 image 回退规则不变；不能因使用原 journal 而把完整 v2 快照误判为坏 image，或跳过 predecessor 校验。本增量不改任何持久字节/版本。
+
 该扩展不压缩业务历史、T身份或DATA session/generation链；持续create/delete、反复MOVE/FREE/reuse、完整metadata内存/磁盘总账仍可能达到声明上限并拒绝。没有放宽2×control-state image预算或DATA/控制成功条件，不代表B17、长期负载、多Arena、掉电、旧binary或生产Gate通过。

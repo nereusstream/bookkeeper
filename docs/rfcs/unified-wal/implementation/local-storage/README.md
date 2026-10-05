@@ -777,3 +777,15 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 最终七类 Java 回执 `unified-wal-local-LcPGoBvs` 绑定上述父提交与 210 实际输入：314 项中 309 通过、5 项 Linux 亲和性在 macOS 跳过，0 失败/错误；Spotless/Checkstyle 通过。复现命令沿用[运行期控制日志轮转](#运行期控制日志轮转)的七类 runner 和 style 检查。最终输入 hash 与当前工作区一致，历史 receipt 不改绑定。
 
 [有限内部历史投影](../models/README.md#内部-checkpoint-历史投影)检查内部项数量、当前 root 身份、业务结果保留、v1 完整历史及恢复 predecessor。当前只消除固定业务状态下 O(rotation) 的内部历史增长，不压缩业务 request-id/ALLOC/MOVE/FREE/session/tombstone 历史，不证明持续 create/write/read/delete 或共享 filesystem/SST/checkpoint 临时工作集有界。旧二进制/stable 格式、一般 OPEN 错误恢复、长期负载、多 Arena、掉电、正式性能和完整 A/C/D 组合仍待完成；步骤 8/10、B17 及生产 Gate 保持未完成，完整 16 步目标继续进行。
+
+## 原 journal 的压缩 checkpoint 恢复
+
+2026-10-05，补齐未执行物理 rotation 时的 v2 image 恢复。原 journal 的 Bookie/Arena 恢复入口仍重复使用旧的完整历史重放代码，内部 generation 已压缩的合法 image 会被误判条件失败，最终退回完整日志。现复用每个 owner 在轮转恢复中已有的 `restoreSnapshot`，同时保留 v1/v2 区分、每条命令与原结果校验，以及准确 predecessor；不新增持久字节、预算或恢复权威。
+
+原 journal 仍先验证全部控制 framing、逐序号完整记录、commit/reference/publication 匹配和真实边界并完成日志同步；合法最高 image 之后的完整必要 suffix 正常重放。image 损坏或不合法时，按既有规则选择另一份 image 或完整日志，完整 publication 在恢复结果开放前同步。v2 允许的内部代际间隔不允许日志缺口，不把未知操作或坏条件结果判为成功。
+
+真实红回执 `unified-wal-local-xH2TwpJO` 绑定父提交 `bb18e0fc6e9473c742ef01d38ac25af5dfbff35b`，210 输入中只有两个新行为测试文件变化，208 个其余输入与父提交一致。两个 owner 各连续 checkpoint 八次，均未选择完整第八代 image，`publishedCheckpoint` 为空；两项断言失败，不计 PASS。修复后同样真实文件路径选择第八代；最新 image 损坏后选择第七代并重放完整 suffix，原 allocation/INSTALL 首次结果、失败/冲突和 tombstone 拒绝保持正确。
+
+最终七类 Java 回执 `unified-wal-local-yQN4LTSM` 绑定上述父提交及 210 实际输入，316 项中 311 通过、5 项 Linux 亲和性在 macOS 跳过，0 失败/错误；Spotless/Checkstyle 通过。两个新增风险先执行最小集，再扩大至共享 codec/控制/DATA/owner 的七类，复现命令沿用[运行期轮转](#运行期控制日志轮转)。[有限恢复入口投影](../models/README.md#原-journal-的压缩-checkpoint-恢复投影)回执 `unified-wal-model-4gs7yzfe` 绑定同一父提交、162 实际输入与 328 个 checksum；29 正向完整 PASS、80 指定反例，含原 journal 误拒合法 image 的新反例。最终 Java/模型输入 hash 与当前源码一致，历史 receipt 不改绑定。
+
+本增量只统一合法 checkpoint 的恢复，业务状态压缩尚未完成。Arena 的历史 FREE 还承担退役 DATA 序号区间、generation 与 Bookie cut，当前复用还需要健康 CLOSE 的末端见证；Bookie terminal T 仍承担防止迟到授权及重建删除义务。压缩必须完整接管这些事实，不能直接删除旧命令。持续创建删除、业务/会话历史、完整临时工作集、长期负载、多 Arena、一般 OPEN 错误恢复、掉电、正式性能及完整 A/C/D 仍未验证，步骤 8/10、B17 与生产 Gate 保持未完成。

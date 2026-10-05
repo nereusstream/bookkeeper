@@ -467,6 +467,41 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void originalJournalRestoresLatestCompactedCheckpointAndCorruptionFallback() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentControlCheckpoint.Reference previous = null;
+        SegmentControlCheckpoint.Reference latest = null;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            log.submitBatch(List.of(alloc(1, 4096), alloc(2, 4096)));
+            for (int cycle = 0; cycle < 8; cycle++) {
+                previous = latest;
+                latest = log.checkpoint();
+            }
+            assertTrue(SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    latest, 32768).compactedCheckpointHistory());
+            log.submitBatch(List.of(alloc(3, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
+        }
+        for (SegmentControlCheckpoint.Reference expected : List.of(latest, previous)) {
+            try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                assertEquals(java.util.Optional.of(expected), log.publishedCheckpoint());
+                assertTrue(granted(log, 4096, 1, 1, 1));
+                assertTrue(granted(log, 4096 + SegmentArenaControlLog.BLOCK_BYTES, 1, 1, 3));
+                assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                        log.submitBatch(List.of(alloc(1, 4096))).get(0).status());
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                        log.submitBatch(List.of(alloc(2, 4096))).get(0).status());
+                assertEquals(SegmentArenaControlLog.Status.INCOMPATIBLE,
+                        log.submitBatch(List.of(alloc(1, 4096 + SegmentArenaControlLog.BLOCK_BYTES))).get(0).status());
+            }
+            if (expected.equals(latest)) {
+                corruptCheckpointByte(SegmentControlCheckpoint.path(
+                        config, SegmentControlFormat.Owner.ARENA, latest.slot()), 4224);
+            }
+        }
+    }
+
+    @Test
     public void checkpointRestoresAppliedResultsAndSuffixAndFallsBackAfterCorruption() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentControlCheckpoint.Reference first;

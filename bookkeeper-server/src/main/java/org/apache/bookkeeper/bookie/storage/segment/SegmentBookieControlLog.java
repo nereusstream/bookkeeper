@@ -1979,16 +1979,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         for (int index = checkpoints.size() - 1; index >= 0; index--) {
             SegmentControlCheckpoint.Reference reference = checkpoints.get(index);
             try {
-                SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(config, identity,
-                        SegmentControlFormat.Owner.BOOKIE, reference, maxLogBytes);
-                resetRecoveredState();
-                for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
-                    replay(operation.record(), operation.sequence(), operation.status());
-                }
-                appliedThrough = snapshot.through();
-                durableThrough = snapshot.through();
-                appliedOffset = snapshot.logOffset();
-                publishedCheckpoint = reference;
+                restoreSnapshot(reference);
             } catch (IOException | IllegalArgumentException invalidCheckpoint) {
                 resetRecoveredState();
                 continue;

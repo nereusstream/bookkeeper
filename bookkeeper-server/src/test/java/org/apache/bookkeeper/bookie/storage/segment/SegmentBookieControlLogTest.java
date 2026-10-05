@@ -6498,6 +6498,42 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void originalJournalRestoresLatestCompactedCheckpointAndCorruptionFallback() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("original-checkpoint-history");
+        SegmentControlCheckpoint.Reference previous = null;
+        SegmentControlCheckpoint.Reference latest = null;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        32768, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(48, 3, (byte) 5), activate(48, 4), tombstone(48, 5)));
+            for (int cycle = 0; cycle < 8; cycle++) {
+                previous = latest;
+                latest = log.checkpoint();
+            }
+            assertTrue(SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.BOOKIE,
+                    latest, 32768).compactedCheckpointHistory());
+            log.submitBatch(List.of(tombstone(44, 6)));
+        }
+        for (SegmentControlCheckpoint.Reference expected : List.of(latest, previous)) {
+            try (SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                    32768, key((byte) 3), VALIDATOR)) {
+                assertEquals(java.util.Optional.of(expected), log.publishedCheckpoint());
+                assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+                assertTrue(log.admitNormal(context(48), filled(20, (byte) 5)).isEmpty());
+                assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                        log.submitBatch(List.of(install(48, 3, (byte) 5), tombstone(44, 6))).get(0).status());
+                assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                        log.submitBatch(List.of(install(48, 3, (byte) 6))).get(0).status());
+            }
+            if (expected.equals(latest)) {
+                Files.write(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.BOOKIE, latest.slot()),
+                        new byte[] {0}, StandardOpenOption.TRUNCATE_EXISTING);
+            }
+        }
+    }
+
+    @Test
     public void legacyCheckpointImagesRemainReadableBeforeInternalHistoryIsCompacted() throws Exception {
         IsolatedSegmentConfig config = coverageRecoveryConfig("legacy-checkpoint-history");
         try (IsolatedSegmentStorage storage = rotatingStorage(config, 1)) {
