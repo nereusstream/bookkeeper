@@ -70,14 +70,27 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
+import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore.PublicationStatus;
+import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore.WritableRegistration;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
+import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
+import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.CasStatus;
+import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.LedgerMetadataFormat.DigestType;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.util.ByteBufList;
+import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -5783,6 +5796,135 @@ public class SegmentBookieControlLogTest {
         SegmentDataPhysicalDriver.NormalResult result = storageWriteReply(storage, context, entryId);
         assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
         return result;
+    }
+
+    @Test
+    public void realRegistrationRetirementRefusesNewDataButDrainsAlreadyAdmittedStorageWork() throws Exception {
+        ZooKeeperUtil cluster = new ZooKeeperUtil() {
+            @Override
+            public String getZooKeeperConnectString() {
+                String address = super.getZooKeeperConnectString();
+                return "127.0.0.1" + address.substring(address.lastIndexOf(':'));
+            }
+        };
+        ZooKeeper zk = null;
+        IsolatedSegmentStorage storage = null;
+        CountDownLatch forceHeld = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        IsolatedSegmentConfig config = config();
+        try {
+            cluster.startCluster();
+            ZooKeeperWatcherBase watcherManager = new ZooKeeperWatcherBase(10000, false);
+            String address = cluster.getZooKeeperConnectString();
+            zk = new ZooKeeper("127.0.0.1" + address.substring(address.lastIndexOf(':')), 10000, watcherManager);
+            watcherManager.waitForConnection();
+            String root = "/segment-registration-test";
+            String bookieId = install(44, 1, (byte) 5).request().scope().targetBookie();
+            zk.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            ZKProfileRegistrationStore persistent = new ZKProfileRegistrationStore(zk, root,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            ProfileReadinessRecord record = new ProfileReadinessRecord(bookieId, identity().incarnation(),
+                    EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, new Generation(1), new Generation(1),
+                    new ManifestIdentity(filled(32, (byte) 2)), new Generation(1), new Generation(1),
+                    new Generation(1), 1, 1, List.of(11, 13), ProfileReadinessRecord.State.READY);
+            assertEquals(CasStatus.APPLIED,
+                    persistent.compareAndSet(bookieId, -1, 0, record).status());
+            var authority = persistent.read(bookieId).versionedRecord().orElseThrow();
+            ProfileServiceInfoProjection projection = new ProfileServiceInfoProjection(bookieId,
+                    identity().incarnation(), new Generation(1), authority.storeVersion(),
+                    "isolated-profile", List.of(11, 13));
+            ZKProfileEphemeralRegistrationStore publisher = new ZKProfileEphemeralRegistrationStore(zk, root,
+                    bookieId, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var admission = publisher.watchAdmission(watcherManager);
+            storage = storage(config, 1, 6, 4, 16, 3);
+            storage.bindProfileRegistration(admission);
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+            IsolatedSegmentStorage graph = storage;
+            assertThrows(IllegalStateException.class, () -> graph.bindProfileRegistration(admission));
+            ByteBuf input = entry(context(), 1);
+            try {
+                assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), input,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) ->
+                                fail("Pending gate admitted DATA"))));
+                assertEquals(1, input.refCnt());
+            } finally {
+                input.release();
+            }
+            assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+            var writable = new WritableRegistration(bookieId, identity().incarnation(), new Generation(1),
+                    authority.storeVersion());
+            assertEquals(PublicationStatus.APPLIED, publisher.registerWritable(writable).status());
+            assertTrue(admission.openAfterReconciliation(writable));
+            // Existing real DATA I/O seam: hold after write, before the covering native force.
+            ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo =
+                    new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                        forceHeld.countDown();
+                        await(release);
+                    });
+            CompletableFuture<SegmentDataPhysicalDriver.NormalResult> completed = new CompletableFuture<>();
+            input = entry(context(), 1);
+            try {
+                assertTrue(storage.submitNormal(context(), filled(20, (byte) 5), input,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) -> {
+                            if (cause == null) {
+                                completed.complete(result);
+                            } else {
+                                completed.completeExceptionally(cause);
+                            }
+                        })));
+            } finally {
+                input.release();
+            }
+            assertTrue(forceHeld.await(5, TimeUnit.SECONDS));
+            zk.close();
+            assertFalse(admission.getAsBoolean());
+            assertFalse(storage.submitRecovery(recoveryAddWithEntry(entryBytes(context(), 2, -1, 8, (byte) 0)),
+                    new SegmentDataPhysicalDriver.RecoveryRequest((result, cause) ->
+                            fail("Retired gate admitted DATA"))));
+            input = entry(context(), 2);
+            try {
+                assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), input,
+                        new SegmentDataPhysicalDriver.NormalRequest((result, cause) ->
+                            fail("Retired gate admitted DATA"))));
+                assertEquals(1, input.refCnt());
+            } finally {
+                input.release();
+            }
+            SegmentExecutionGroup execution = (SegmentExecutionGroup) storageField(storage, "execution");
+            assertEquals(0, execution.inputs().usedBytes()); // Sources were copied; the native I/O owns the pool lease.
+            assertFalse(execution.owner(0).hasMaintenanceBuffers(4));
+            assertFalse(completed.isDone());
+            assertFalse(storage.close(Duration.ofMillis(50)));
+            assertFalse(execution.owner(0).hasMaintenanceBuffers(4));
+            assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+            release.countDown();
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                    completed.get(5, TimeUnit.SECONDS).status());
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+            assertEquals(0, execution.inputs().usedBytes());
+            try (IsolatedSegmentStorage reopened = storage(config, 1, 6, 4, 16, 3)) {
+                reopened.restart();
+                try (SegmentPointRead.LeasedResult read = storageRead(reopened, context(), 1).result()) {
+                    assertEquals(1, read.result().record().entryId());
+                }
+            }
+        } finally {
+            release.countDown();
+            try {
+                if (storage != null) {
+                    storage.close();
+                }
+            } finally {
+                try {
+                    if (zk != null) {
+                        zk.close();
+                    }
+                } finally {
+                    cluster.stopCluster();
+                }
+            }
+        }
     }
 
     private static SegmentDataPhysicalDriver.NormalResult storageWriteReply(IsolatedSegmentStorage storage,

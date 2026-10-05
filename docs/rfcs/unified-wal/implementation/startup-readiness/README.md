@@ -166,3 +166,33 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-05 新增前置 [真实 ZK 控制权威读取](../profile-control/README.md#步骤-12真实-zk-控制权威读取)，73 项相关测试和 style 通过；它只读取 provisioned 单 view，并与原 reference endpoint 的 exact AuthZ/scope 检查组合，不发布控制 authority，也不改变本目录恢复输入。实际文件 recovery、required-device/compatibility 与 delete assignment/cursor 尚未产生完整 readiness facts；不得以 typed 成功、可读 authority 或 receipt 替代真实恢复。pre-replay startup、生产 registry/连续连接准入、完整 sidecar/安装激活与步骤 12 仍未完成。历史 reference/真实文件/ZK receipts 保持原绑定。
+
+## 步骤 12：session 绑定的本地 DATA 准入
+
+2026-10-05，`ZKProfileEphemeralRegistrationStore.watchAdmission` 在该 attempt 第一次 cold 操作前，绑定借用 client 的既有 `ZooKeeperWatcherBase`，不新建 client、线程、重试或 watcher manager。gate 最初关闭；调用方完成本地 startup 检查并发布后，`openAfterReconciliation` 再读匹配的 persistent/info/writable/owned marker 与原 session，完整 tuple 相符才开放。缺失或不匹配退休该 attempt；读取故障退休并传播原因，已并发退休的 attempt 返回 false。该方法不产生或验证真实 recovery/device/delete facts，不能用发布成功替代这些前置检查。
+
+连接事件除 SyncConnected/SaslAuthenticated 外均永久退休原 session/nonce；热检查还要求 SDK 当前为 CONNECTED 且 session 未变。临时断连后的同 session 重连、session 过期、显式 close/demote 及迟到 cold 回调都不能重开旧 gate。新 nonce 是显式的新 attempt，仍须重新满足 startup 与 reconciliation；连接恢复本身不开放服务。绑定一次且先于 cold 操作，退休先关闭 gate 再移除 observer；gate close 不关闭借用 client，也不假装远端 ephemeral 已删除。
+
+`IsolatedSegmentStorage.bindProfileRegistration` 仅允许启动前绑定一次，Bookie scope 必须一致；每次普通/恢复 DATA 接纳再检查已开放 registration 的 Bookie 与本地 incarnation。热路径不做 metadata RPC，不增加按 entry 的 handshake/proof 读取。拒绝不取得调用方 buffer ownership；控制、读取及维护沿用原路径，已提交工作沿用原 I/O/owner 终结协议。graph close 先关闭接收及注册 gate，再排空；超时不能提前释放实际 I/O buffer、writer lock 或文件描述符。未绑定的 graph 仍只是既有 local-only 实验入口，不能据此发布 Profile 服务。
+
+这里的失连切点是可观察的 connection event/SDK state。网络中断在 SDK 发现前可能尚未反映，本 gate 不是瞬时故障检测器，也不 watch 远端 persistent authority 的持续变化或提供 authority 租约。AuthFailed/ConnectedReadOnly 被代码拒绝，但本轮没有实际后端触发这两类状态；没有扩展为 quorum/SDK 自动重建实证。
+
+### 本轮验证与边界
+
+最终 Java `unified-wal-registration-admission-final-qdyeu_q7` 绑定父提交 `f7aebbd97412d0ccd78c37cb9d6dad7fcbf6c37a` 与 106 Java/POM 输入：八类共 296/296 通过，0 failure/error/skip，Spotless/Checkstyle 通过。publisher 的 17 项包含四项新增回归：exact final read 与 scope/incarnation、1,000 次热检查不新增真实 get、实际 server 断连/同 session 重连、新 attempt、真实 expiry、缺失/错 tuple/坏记录及 held actual reconciliation callback。共享 ZK fixture 使用实际 watcher manager，原 control/readiness 回归一并执行。
+
+真实 storage 组合测试先验证 pending gate 拒绝，再在实际 DATA write 后、native force 前暂停 I/O，关闭实际 ZK client。后续普通/恢复 DATA 均拒绝，调用方仍持有输入；原输入已复制可正常归还，I/O 对齐池 lease 与 OS writer lock 则保留。短期限 close 返回 false；释放 I/O 后原请求为 LOCAL_DURABLE，排空成功且真实 restart 读回 entry。它证明已提交本地 I/O 的资源与结果，不承诺尚未提交 I/O 的排队请求必然成功，也不是生产 ACK。
+
+最小 publisher/组合验证通过后，因共享 fixture 和存储接纳/关闭契约扩大至完整八类。中间失败包括 API/格式及 fixture 构造问题，另有把 owner 排队当成已提交 I/O、把已复制的原输入当成 I/O buffer 的错误预期；已按真实提交切点和原池 ownership 修正，没有削弱生产拒绝、持久化或关闭契约。失败日志保留且不计 PASS。
+
+```bash
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am \
+  -Dtest=ZKProfileControlStoreTest,IsolatedProfileControlEndpointTest,SegmentLocalReadinessStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,StartupReadinessFactsTest,StartupReadinessHarnessTest,SegmentBookieControlLogTest \
+  -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+```
+
+模型 `unified-wal-model-1jom7_es` 绑定同一父提交、293 source inputs/451 checksum：150 配置为 37 正向完整 PASS、113 指定反例；106 Java 输入均为其子集，source/checksum 与五个父提交 designInputs 已核对。新投影 220 distinct states、11 个 Next 动作 coverage 非零及四个指定反例，见[本地准入模型](../models/README.md#session-绑定的本地-data-准入投影)。旧 receipt、设计输入与冻结 scope guard 不改绑。
+
+这一步接上隔离 graph 的 session 事件与本地 DATA gate，没有接入真实 Bookie listener、生产 BookieServiceInfo/available registry、fresh recovery/compatibility/device/delete facts 或 pre-replay startup。远端 authority 持续变化、完整 sidecar/backlink/安装激活、真实 quorum、掉电/性能、完整 A/C/D 及组合、Block G 与步骤 12/生产 Gate 仍未完成。

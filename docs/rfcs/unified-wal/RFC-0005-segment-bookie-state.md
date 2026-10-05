@@ -810,3 +810,5 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-05 控制读取前置：[真实 ZK cold reader](implementation/profile-control/README.md#步骤-12真实-zk-控制权威读取)已实现独立 view 的固定键读取、严格隔离与 snapshot 版本绑定；73 项定向测试及 style 通过。它没有将 IsolatedSegmentStorage 的实际恢复转成 readiness facts；required-device、兼容检查及 delete assignment/cursor 尚未与 startup/reference 闭合，不能以 authority 可读或 local receipt 可读开放服务。生产 registration/持续失连准入、完整控制发布与安装激活及步骤 12 保持 PARTIAL。
+
+2026-10-05 准入增量：[session 绑定的本地 DATA gate](implementation/startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)在首次 cold 操作前绑定实际 ZK watcher manager；匹配 owned registration 后开放，观察到失连、过期、close/demote 即永久退休原 attempt，同 session 重连及迟到读取不重开。隔离 graph 的普通/恢复 DATA 按本地 Bookie/incarnation 检查，热路径不查 metadata；已提交 I/O 与原池资源正常排空。八类 296 项及 style 通过，有限矩阵 37 正向完整 PASS/113 指定反例。真实 startup/fresh recovery/delete facts、生产 listener/registry、持续远端 authority、完整安装激活、quorum、完整模型与步骤 12/Gate 仍未完成。

@@ -19,6 +19,11 @@ import time
 
 
 MATRIX = {
+    "a-registration-admission": None,
+    "ce-registration-admission-session": "AdmissionUsesOriginalConnectedSession",
+    "ce-registration-admission-reconnect": "RetiredAttemptNeverReopens",
+    "ce-registration-admission-late": "RetiredAttemptNeverReopens",
+    "ce-registration-admission-release": "OutstandingOwnershipWaitsForActualTerminals",
     "a-authority-read": None,
     "ce-authority-read-key": "FoundMatchesRequestedKey",
     "ce-authority-read-invalid": "FoundHasValidPersistentCompleteRecord",
@@ -199,6 +204,8 @@ def main():
                   "SegmentEntryInputs.java", "SegmentBufferPool.java", "SegmentBatchFormat.java",
                   "SegmentLocalReadinessStore.java", "SegmentLocalReadinessCodec.java", "SegmentFileIo.java"])
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentLocalReadinessStoreTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBookieControlLogTest.java")
+    inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/zookeeper/ZooKeeperWatcherBase.java")
     inputs.extend((root / "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/startup").glob("*.java"))
     inputs.extend((root / "bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/startup").glob("*.java"))
     inputs.extend((root / "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile").glob("*.java"))
@@ -226,7 +233,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read slices",
+        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -239,7 +246,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "AuthorityRead.tla" if "authority-read" in name
+                   "-metadir", str(states), "RegistrationAdmission.tla" if "registration-admission" in name
+                   else "AuthorityRead.tla" if "authority-read" in name
                    else "LocalReadinessPublication.tla" if "local-readiness-publication" in name
                    else "RegistrationPublication.tla" if "registration-publication" in name
                    else "ReadinessCas.tla" if "readiness-cas" in name

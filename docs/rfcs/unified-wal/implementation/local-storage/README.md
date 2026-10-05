@@ -838,3 +838,9 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:
 [有限 COPY 证明投影](../models/README.md#当前-copy-证明投影)回执 `unified-wal-model-qx5snprk` 绑定同一父提交、181 实际输入及 376 个 checksum：32 正向完整 PASS、93 指定反例全部符合预期。367 个去重 Java/模型输入 hash 已核对当前源码，历史 receipt/designInputs 保持原提交绑定；实际字节/同步/fallback 不由该有限索引模型替代。
 
 这一步分离当前业务证明与幂等历史，尚未编码独立紧凑业务 image 或删除 UUID/MOVE/session/Bookie T 历史。新增当前 COPY 摘要仍与保留历史同时存在，不能据此宣称总内存减少或长期资源有界；物理当前 COPY 数量、总工作集、长期负载、多 Arena、一般 OPEN 错误恢复、掉电、正式性能及完整模型仍需相应证据。步骤 8/10、B17 与生产 Gate 保持未完成。
+
+## Profile registration 的本地 DATA 准入
+
+2026-10-05，隔离 graph 可在 startup 前通过 `bindProfileRegistration` 绑定真实 ZK publisher attempt；pending、失连退休或本地 Bookie/incarnation 不匹配时，普通/恢复 DATA 在取得输入 ownership 前拒绝。控制、读取、维护及已提交 I/O 沿用原终结路径，graph close 先退休注册资格再排空。未绑定的 graph 保持 local-only 实验用途。
+
+真实组合在 DATA write 后/native force 前暂停 I/O，关闭 ZK client 后新 DATA 拒绝；已复制原输入可归还，I/O pool lease/OS writer lock 保留，短期限关闭拒绝提前释放。原 I/O 完成后 LOCAL_DURABLE、正常排空及 restart 读取通过。八类 296 项、Spotless/Checkstyle 及 37 正向/113 指定反例通过；源码绑定、命令和边界见[readiness 实现记录](../startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)。本轮不为尚未提交 I/O 的排队请求保证成功，也不证明真实 startup facts、生产服务 readiness、瞬时失连检测、掉电/性能或完整模型。

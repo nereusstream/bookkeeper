@@ -19,6 +19,7 @@
 package org.apache.bookkeeper.discover.profile;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -32,6 +33,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentLocalReadinessStore;
@@ -56,6 +58,7 @@ import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessResult;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.data.Stat;
 import org.junit.Rule;
@@ -100,6 +103,139 @@ public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
     private static WritableRegistration writable(ProfileServiceInfoProjection projection) {
         return new WritableRegistration(BOOKIE, projection.storageIncarnation(),
                 projection.readinessGeneration(), projection.persistentStoreVersion());
+    }
+
+    @Test
+    public void admissionRequiresExactFinalReadAndHotChecksDoNotReadMetadata() throws Exception {
+        ProfileServiceInfoProjection projection = projection(create());
+        ZKProfileEphemeralRegistrationStore publisher = publisher(first);
+        try (var admission = publisher.watchAdmission(first.watcherManager)) {
+            assertFalse(admission.getAsBoolean());
+            assertThrows(IllegalStateException.class, () -> publisher.watchAdmission(first.watcherManager));
+            assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+            assertEquals(PublicationStatus.APPLIED, publisher.registerWritable(writable(projection)).status());
+            assertFalse(admission.getAsBoolean());
+            assertTrue(admission.openAfterReconciliation(writable(projection)));
+            assertTrue(admission.allows(BOOKIE, projection.storageIncarnation()));
+            assertFalse(admission.allows("another-bookie", projection.storageIncarnation()));
+            assertFalse(admission.allows(BOOKIE, storage(2)));
+            int reads = first.reads.get();
+            for (int check = 0; check < 1000; check++) {
+                assertTrue(admission.getAsBoolean());
+            }
+            assertEquals(reads, first.reads.get());
+            publisher.demote(BOOKIE);
+            assertFalse(admission.getAsBoolean());
+            assertFalse(admission.openAfterReconciliation(writable(projection)));
+        }
+        assertTrue(first.getState().isConnected());
+        ZKProfileEphemeralRegistrationStore late = publisher(first);
+        late.readServiceInfo(BOOKIE);
+        assertThrows(IllegalStateException.class, () -> late.watchAdmission(first.watcherManager));
+    }
+
+    @Test
+    public void actualDisconnectAndSameSessionReconnectNeverReopenOldAdmission() throws Exception {
+        ProfileServiceInfoProjection projection = projection(create());
+        ZKProfileEphemeralRegistrationStore publisher = publisher(first);
+        try (var admission = publisher.watchAdmission(first.watcherManager)) {
+            assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+            assertEquals(PublicationStatus.APPLIED, publisher.registerWritable(writable(projection)).status());
+            assertTrue(admission.openAfterReconciliation(writable(projection)));
+            long session = first.getSessionId();
+            CountDownLatch disconnected = new CountDownLatch(1);
+            CountDownLatch reconnected = new CountDownLatch(1);
+            Watcher observer = event -> {
+                if (event.getState() == Watcher.Event.KeeperState.Disconnected) {
+                    disconnected.countDown();
+                } else if (event.getState() == Watcher.Event.KeeperState.SyncConnected
+                        && disconnected.getCount() == 0) {
+                    reconnected.countDown();
+                }
+            };
+            first.watcherManager.addChildWatcher(observer);
+            try {
+                cluster.disconnectClients();
+                assertTrue(disconnected.await(10, TimeUnit.SECONDS));
+                assertTrue(reconnected.await(10, TimeUnit.SECONDS));
+                assertEquals(session, first.getSessionId());
+                assertFalse(admission.getAsBoolean());
+                assertFalse(admission.openAfterReconciliation(writable(projection)));
+                assertEquals(PublicationStatus.UNAVAILABLE,
+                        publisher.registerWritable(writable(projection)).status());
+                // Actual session nodes may survive a temporary disconnect; retire/demote before a fresh attempt.
+                publisher.demote(BOOKIE);
+                ZKProfileEphemeralRegistrationStore replacement = publisher(first);
+                try (var next = replacement.watchAdmission(first.watcherManager)) {
+                    assertEquals(PublicationStatus.APPLIED, replacement.publishServiceInfo(projection).status());
+                    assertEquals(PublicationStatus.APPLIED,
+                            replacement.registerWritable(writable(projection)).status());
+                    assertTrue(next.openAfterReconciliation(writable(projection)));
+                }
+            } finally {
+                first.watcherManager.removeChildWatcher(observer);
+            }
+        }
+    }
+
+    @Test
+    public void retiredAdmissionCannotBeOpenedByDelayedActualReconciliationCallback() throws Exception {
+        ProfileServiceInfoProjection projection = projection(create());
+        ZKProfileEphemeralRegistrationStore publisher = publisher(first);
+        try (var admission = publisher.watchAdmission(first.watcherManager)) {
+            assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+            assertEquals(PublicationStatus.APPLIED, publisher.registerWritable(writable(projection)).status());
+            first.holdReadReply.set(true);
+            var opening = CompletableFuture.supplyAsync(
+                    () -> admission.openAfterReconciliation(writable(projection)));
+            assertTrue(first.readReplyHeld.await(5, TimeUnit.SECONDS));
+            admission.close();
+            first.lateReadReply.getAndSet(null).run();
+            assertFalse(opening.get(5, TimeUnit.SECONDS));
+            assertFalse(admission.getAsBoolean());
+            assertNotNull(second.exists(path() + "/writable", false));
+        }
+    }
+
+    @Test
+    public void missingOrDifferentRegistrationAndActualExpiryKeepAdmissionClosed() throws Exception {
+        ProfileServiceInfoProjection projection = projection(create());
+        ZKProfileEphemeralRegistrationStore absent = publisher(first);
+        try (var admission = absent.watchAdmission(first.watcherManager)) {
+            assertFalse(admission.openAfterReconciliation(writable(projection)));
+            assertFalse(admission.getAsBoolean());
+        }
+        ZKProfileEphemeralRegistrationStore publisher = publisher(first);
+        try (var admission = publisher.watchAdmission(first.watcherManager)) {
+            assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+            assertEquals(PublicationStatus.APPLIED, publisher.registerWritable(writable(projection)).status());
+            assertTrue(admission.openAfterReconciliation(writable(projection)));
+            WritableRegistration wrong = new WritableRegistration(BOOKIE, projection.storageIncarnation(),
+                    new Generation(2), projection.persistentStoreVersion());
+            assertFalse(admission.openAfterReconciliation(wrong));
+            assertFalse(admission.getAsBoolean());
+            assertFalse(admission.openAfterReconciliation(writable(projection)));
+        }
+        publisher.demote(BOOKIE);
+        ZKProfileEphemeralRegistrationStore next = publisher(first);
+        try (var admission = next.watchAdmission(first.watcherManager)) {
+            assertEquals(PublicationStatus.APPLIED, next.publishServiceInfo(projection).status());
+            assertEquals(PublicationStatus.APPLIED, next.registerWritable(writable(projection)).status());
+            assertTrue(admission.openAfterReconciliation(writable(projection)));
+            cluster.expire(first.getSessionId());
+            assertTrue(first.expired.await(15, TimeUnit.SECONDS));
+            assertFalse(admission.getAsBoolean());
+            assertFalse(admission.openAfterReconciliation(writable(projection)));
+        }
+        ZKProfileEphemeralRegistrationStore corrupt = publisher(second);
+        try (var admission = corrupt.watchAdmission(second.watcherManager)) {
+            assertEquals(PublicationStatus.APPLIED, corrupt.publishServiceInfo(projection).status());
+            assertEquals(PublicationStatus.APPLIED, corrupt.registerWritable(writable(projection)).status());
+            second.setData(path() + "/writable", new byte[1], -1);
+            assertThrows(IllegalArgumentException.class,
+                    () -> admission.openAfterReconciliation(writable(projection)));
+            assertFalse(admission.getAsBoolean());
+        }
     }
 
     @Test
@@ -151,7 +287,8 @@ public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
         assertEquals(1, second.getChildren(path(), false).size());
         ZKProfileEphemeralRegistrationStore replacement = publisher(first);
         assertEquals(PublicationStatus.APPLIED, replacement.publishServiceInfo(projection).status());
-        assertEquals(PublicationStatus.APPLIED, replacement.registerWritable(writable(projection)).status());
+        assertEquals(PublicationStatus.APPLIED,
+                            replacement.registerWritable(writable(projection)).status());
         assertThrows(KeeperException.NoNodeException.class, () -> second.multi(oldDemotion));
         assertEquals(writable(projection), replacement.readWritable(BOOKIE).orElseThrow());
         assertEquals(PublicationStatus.UNAVAILABLE, publisher.registerWritable(writable(projection)).status());

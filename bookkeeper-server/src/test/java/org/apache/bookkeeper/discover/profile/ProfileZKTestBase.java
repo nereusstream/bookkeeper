@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.test.ZooKeeperUtil;
+import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 import org.apache.zookeeper.AsyncCallback.DataCallback;
 import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.CreateMode;
@@ -35,6 +36,7 @@ import org.apache.zookeeper.Op;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.server.ServerCnxn.DisconnectReason;
 import org.junit.After;
 import org.junit.Before;
 
@@ -74,13 +76,15 @@ abstract class ProfileZKTestBase {
     private TestClient connect() throws Exception {
         CountDownLatch connected = new CountDownLatch(1);
         CountDownLatch expired = new CountDownLatch(1);
-        TestClient client = new TestClient(cluster.getZooKeeperConnectString(), event -> {
+        ZooKeeperWatcherBase watcherManager = new ZooKeeperWatcherBase(10000, false);
+        watcherManager.addChildWatcher(event -> {
             if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
                 connected.countDown();
             } else if (event.getState() == Watcher.Event.KeeperState.Expired) {
                 expired.countDown();
             }
-        }, expired);
+        });
+        TestClient client = new TestClient(cluster.getZooKeeperConnectString(), watcherManager, expired);
         if (!connected.await(10, TimeUnit.SECONDS)) {
             client.close();
             throw new IOException("ZooKeeper test client did not connect");
@@ -98,6 +102,10 @@ abstract class ProfileZKTestBase {
         void expire(long sessionId) {
             zks.closeSession(sessionId);
         }
+
+        void disconnectClients() {
+            serverFactory.closeAll(DisconnectReason.CLOSE_ALL_CONNECTIONS_FORCED);
+        }
     }
 
     static final class TestClient extends ZooKeeper {
@@ -108,14 +116,16 @@ abstract class ProfileZKTestBase {
         final AtomicReference<List<Op>> lastOperations = new AtomicReference<>();
         final CountDownLatch replyHeld = new CountDownLatch(1);
         final CountDownLatch expired;
+        final ZooKeeperWatcherBase watcherManager;
         final AtomicInteger reads = new AtomicInteger();
         final AtomicBoolean holdReadReply = new AtomicBoolean();
         final AtomicReference<Runnable> lateReadReply = new AtomicReference<>();
         final CountDownLatch readReplyHeld = new CountDownLatch(1);
 
-        private TestClient(String connect, Watcher watcher, CountDownLatch expired) throws IOException {
+        private TestClient(String connect, ZooKeeperWatcherBase watcher, CountDownLatch expired) throws IOException {
             super(connect, 10000, watcher);
             this.expired = expired;
+            watcherManager = watcher;
         }
 
         @Override

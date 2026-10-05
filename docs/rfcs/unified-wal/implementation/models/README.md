@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness 与 authority cold-read 投影及 Model C 既有切片，共 36 个完整正向配置、109 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read 与本地 session 准入投影及 Model C 既有切片，共 37 个完整正向配置、113 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,11 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-registration-admission` | 一次 owned reconciliation、一次连接丢失/观察/重连、一次已提交 DATA I/O，退休与原 I/O/owner 终结分离 |
+| `ce-registration-admission-session` | 忽略当前 session/SDK 连接检查，须违反 `AdmissionUsesOriginalConnectedSession` |
+| `ce-registration-admission-reconnect` | 连接恢复自动重开旧 gate，须违反 `RetiredAttemptNeverReopens` |
+| `ce-registration-admission-late` | 迟到 reconciliation 重开退休 gate，须违反 `RetiredAttemptNeverReopens` |
+| `ce-registration-admission-release` | 退休提前释放已提交 I/O ownership，须违反 `OutstandingOwnershipWaitsForActualTerminals` |
 | `a-authority-read` | 八种单 view 结果、一次 concurrent update、sync/get/callback/deadline，合法旧 snapshot 保持自己的 payload/version |
 | `ce-authority-read-key` | 忽略 derived key，须违反 `FoundMatchesRequestedKey` |
 | `ce-authority-read-invalid` | 允许无效/incomplete/ephemeral/wrong-state view，须违反 `FoundHasValidPersistentCompleteRecord` |
@@ -762,3 +767,21 @@ CHECK_DEADLOCK FALSE 只允许有限终态。物理 FileChannel 和进程退出�
 最终回执 `unified-wal-model-9jv2zpi_` 绑定父提交 `0231ac595a4d881488c913002dcb3002a4564484`、285 source inputs 和 436 checksum；145 配置为 36 正向完整 PASS、109 指定反例，全部符合预期。Java run 的 81 输入均为该 source set 子集，全部 source/checksum 及 5 个父提交 designInputs 已核对。复现仍为 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 TLC 1.7.4、单 worker、固定 seed/fp，无状态约束或对称化；旧回执保持原绑定。
 
 CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUND 是一次读取 snapshot，没有连续 authority 租约；无全局 sidecar/membership、backlink、fanout/page、publication CAS、安装激活、实际 startup/delete catch-up、生产 registry/连续准入、quorum、SDK/socket 总预算、长期工作集、性能或掉电结论。完整 A/C/D、组合与 Block G 继续 OPEN，读取投影不提升步骤 12 或生产 Gate。
+
+## Session 绑定的本地 DATA 准入投影
+
+2026-10-05，`RegistrationAdmission.tla` 投影一个 bound session/nonce、exact owned view 与本地 identity、一次 final reconciliation、一次连接丢失/事件观察/重连和一次实际已提交 DATA I/O。startup 检查完成及 backend read 的准确性是输入，不由该模型产生。transport loss 与观察事件分开；gate 热检查还验证可见连接/session，但不提供瞬时网络故障检测或远端 authority 租约。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-registration-admission | 466 / 220 / 0 | 12 / 12 | 0.854 s / 113,623,040 bytes | PASS |
+| ce-registration-admission-session | 194 / 117 / 36 | 6 / 不适用 | 0.849 s / 112,050,176 bytes | EXPECTED_COUNTEREXAMPLE:AdmissionUsesOriginalConnectedSession |
+| ce-registration-admission-reconnect | 103 / 72 / 36 | 5 / 不适用 | 0.841 s / 109,117,440 bytes | EXPECTED_COUNTEREXAMPLE:RetiredAttemptNeverReopens |
+| ce-registration-admission-late | 135 / 92 / 41 | 5 / 不适用 | 0.858 s / 110,575,616 bytes | EXPECTED_COUNTEREXAMPLE:RetiredAttemptNeverReopens |
+| ce-registration-admission-release | 200 / 122 / 38 | 6 / 不适用 | 0.839 s / 112,017,408 bytes | EXPECTED_COUNTEREXAMPLE:OutstandingOwnershipWaitsForActualTerminals |
+
+11 个 Next 动作 coverage 均非零：Publish 2:4、CaptureRead 2:10、CompleteRead 4:36、TransportLoss 18:48、ObserveLoss 19:100、Reconnect 36:98、Close 81:112、Admit 2:2、FinishIo 18:18、FinishOwner 18:18、Release 18:18。四个 mutation 分别忽略原 session/连接、重连重开、迟到读取重开及退休即释放 I/O ownership，均沿真实 Next 轨迹违反指定不变量。源输入在复制后可提前释放、已知 pre-I/O refusal 及多请求/SDK 自动重建不在该单已提交 I/O 投影内。
+
+最终 `unified-wal-model-1jom7_es` 绑定父提交 `f7aebbd97412d0ccd78c37cb9d6dad7fcbf6c37a`、293 source inputs/451 checksum：150 配置为 37 正向完整 PASS、113 指定反例，全部符合预期。Java `unified-wal-registration-admission-final-qdyeu_q7` 的 106 输入均在该 source set 中；source/checksum、五个父提交 designInputs 已逐项核对。官方 TLC 1.7.4、单 worker、固定 seed/fp、无 symmetry/state constraint，复现命令不变，历史回执不重绑定。
+
+[实际 watcher/session 与 storage I/O 测试](../startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)覆盖真实 server 断连/同 session 重连、expiry、延迟实际回调以及正常 DATA force/排空/重启；它们与模型输入分别验证。CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness、quorum、瞬时 lease、持续 remote authority、总 SDK/socket 工作集、真实 startup/delete facts、生产服务接线、掉电或性能结论；完整 A/C/D、A+C/C+D、Block G 与步骤 12/生产 Gate 继续 OPEN。

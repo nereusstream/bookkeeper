@@ -542,3 +542,5 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-05 控制读取增量：[真实 ZK 控制权威读取](rfcs/unified-wal/implementation/profile-control/README.md#步骤-12真实-zk-控制权威读取)直接实现原 ProfileControlStore，在独立 provisioned namespace 内按 derived key 执行一次 sync/get；只有真实 NONODE 才是不存在，无效/不完整/ephemeral view 隔离，错误/超时/过期为 unavailable，payload 与实际 Stat.mzxid 来自同一 snapshot。73 项相关测试及 style 通过，有限读取和全部既有模型为 36 正向完整通过/109 指定反例。它只读取单份 experimental authority view，未实现完整 sidecar/backlink/fanout/发布 CAS/安装激活；真实 startup/delete catch-up、生产 registry/持续准入及步骤 12/Gate 仍未完成。
+
+2026-10-05 准入增量：[session 绑定的本地 DATA gate](rfcs/unified-wal/implementation/startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)在首次 cold 操作前绑定实际 ZK watcher manager；匹配 owned registration 后开放，观察到失连、过期、close/demote 即永久退休原 attempt，同 session 重连及迟到读取不重开。隔离 graph 的普通/恢复 DATA 按本地 Bookie/incarnation 检查，热路径不查 metadata；已提交 I/O 与原池资源正常排空。八类 296 项及 style 通过，有限矩阵 37 正向完整 PASS/113 指定反例。真实 startup/fresh recovery/delete facts、生产 listener/registry、持续远端 authority、完整安装激活、quorum、完整模型与步骤 12/Gate 仍未完成。

@@ -25,22 +25,29 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
 import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
+import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.discover.profile.ProfileEphemeralCodec.Envelope;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore.Node;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore.Snapshot;
+import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.Op;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.ACL;
 
 /**
  * Experimental cold-path publisher under the persistent readiness namespace.
  * Only this publisher's session/nonce can be reconciled or demoted; foreign, unavailable and corrupt reads throw.
- * Caller owns the connected client and local admission gate. No watcher, reconnect, retry or production registration.
+ * Caller owns the client. Optional admission watches its existing manager and retires on connection loss;
+ * no automatic reopen, retry or production registration is supplied.
  */
 public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfileRegistrationStore {
     private final ZooKeeper zk;
@@ -50,6 +57,8 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     private final UUID nonce = UUID.randomUUID();
     private final long timeoutNanos;
     private volatile boolean retired;
+    private boolean operationStarted;
+    private volatile Admission admission;
 
     public ZKProfileEphemeralRegistrationStore(ZooKeeper zk, String root, String bookieId,
                                               List<ACL> acls, Duration timeout) {
@@ -60,6 +69,122 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         sessionId = zk.getSessionId();
         timeoutNanos = timeout.toNanos();
         requireSession();
+    }
+
+    /** Bind before any cold operation, using the watcher manager of this exact client. */
+    public synchronized Admission watchAdmission(ZooKeeperWatcherBase watcherManager) {
+        Objects.requireNonNull(watcherManager, "watcherManager");
+        if (operationStarted || admission != null || retired) {
+            throw new IllegalStateException("Admission must be bound once before the startup attempt");
+        }
+        Admission bound = new Admission(watcherManager);
+        admission = bound;
+        watcherManager.addChildWatcher(bound);
+        try {
+            requirePublishingSession();
+        } catch (RuntimeException unavailable) {
+            bound.close();
+            throw unavailable;
+        }
+        return bound;
+    }
+
+    private synchronized void beginOperation() {
+        operationStarted = true;
+    }
+
+    private void retire() {
+        retired = true;
+        Admission bound = admission;
+        if (bound != null) {
+            bound.state.set(2);
+            bound.watcherManager.removeChildWatcher(bound);
+        }
+    }
+
+    /** One session/nonce/registration gate; reconnect never reopens it, and close does not own the client. */
+    public final class Admission implements BooleanSupplier, Watcher, AutoCloseable {
+        private final ZooKeeperWatcherBase watcherManager;
+        private final AtomicInteger state = new AtomicInteger(); // 0 pending, 1 open, 2 permanently retired.
+        private volatile WritableRegistration openedRegistration;
+
+        private Admission(ZooKeeperWatcherBase watcherManager) {
+            this.watcherManager = watcherManager;
+        }
+
+        public String bookieId() {
+            return bookieId;
+        }
+
+        /** Bind the hot gate to the exact local storage identity, not just to a connected registration. */
+        public boolean allows(String localBookieId, StorageIncarnation localIncarnation) {
+            if (!getAsBoolean()) {
+                return false;
+            }
+            WritableRegistration opened = openedRegistration;
+            return opened != null && opened.bookieId().equals(localBookieId)
+                    && opened.storageIncarnation().equals(localIncarnation);
+        }
+
+        /** Cold-path final reconciliation after local startup checks; read failures retire and propagate. */
+        public synchronized boolean openAfterReconciliation(WritableRegistration expected) {
+            Objects.requireNonNull(expected, "expected");
+            if (state.get() == 2) {
+                return false;
+            }
+            if (state.get() == 1) {
+                if (!expected.equals(openedRegistration)) {
+                    close();
+                    return false;
+                }
+                return getAsBoolean();
+            }
+            try {
+                requirePublishingSession();
+                if (!readWritable(bookieId).filter(expected::equals).isPresent()) {
+                    close();
+                    return false;
+                }
+                requirePublishingSession();
+                openedRegistration = expected;
+                return state.compareAndSet(0, 1) && getAsBoolean();
+            } catch (RuntimeException unavailable) {
+                boolean alreadyRetired = retired;
+                close();
+                if (alreadyRetired) {
+                    return false;
+                }
+                throw unavailable;
+            }
+        }
+
+        /** Local DATA admission only: no metadata read, watcher registration, allocation or blocking. */
+        @Override
+        public boolean getAsBoolean() {
+            if (state.get() != 1) {
+                return false;
+            }
+            if (retired || zk.getSessionId() != sessionId || zk.getState() != ZooKeeper.States.CONNECTED) {
+                close();
+                return false;
+            }
+            return state.get() == 1 && !retired;
+        }
+
+        @Override
+        public void process(WatchedEvent event) {
+            if (event.getType() == Watcher.Event.EventType.None
+                    && event.getState() != Watcher.Event.KeeperState.SyncConnected
+                    && event.getState() != Watcher.Event.KeeperState.SaslAuthenticated) {
+                close();
+            }
+        }
+
+        @Override
+        public void close() {
+            // Retire before detaching; delayed publication callbacks cannot restore this attempt.
+            retire();
+        }
     }
 
     @Override
@@ -73,6 +198,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     }
 
     private Optional<Envelope> read(String bookieId, boolean writable) {
+        beginOperation();
         long deadline = System.nanoTime() + timeoutNanos;
         try {
             requireScope(bookieId);
@@ -123,6 +249,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
 
     private PublicationResult publish(String bookieId, ProfileServiceInfoProjection requested,
                                       WritableRegistration registration) {
+        beginOperation();
         long deadline = System.nanoTime() + timeoutNanos;
         boolean submitted = false;
         try {
@@ -198,9 +325,10 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
 
     @Override
     public void demote(String bookieId) {
+        beginOperation();
         requireScope(bookieId);
         // A demoted nonce is never reused, including after a lost deletion reply.
-        retired = true;
+        retire();
         long deadline = System.nanoTime() + timeoutNanos;
         try {
             requireSession();

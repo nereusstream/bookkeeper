@@ -408,6 +408,8 @@ Wave 0 已在 `bookkeeper-common` internal unstable package实现typed principal
 
 2026-10-05 后续隔离实现：[真实 ZK 控制权威读取](implementation/profile-control/README.md#步骤-12真实-zk-控制权威读取)实现原 cold-read 接口的 provisioned view reader，严格 key/state/codec 与单次 bytes/Stat.mzxid 绑定，73 项相关测试及 style 通过。该 view 不能替代本 RFC 的完整 sidecar、target 集、immutable backlink 或 coordinator 发布/CAS；完整 scope/AuthZ/credential 和 local durable effect 仍由 endpoint/physical owner 拥有。只读 adapter 不完成安装激活、真实 startup、stable wire 或生产 authority，历史 Wave 0 回执不改绑。
 
+2026-10-05 准入增量：[session 绑定的本地 DATA gate](implementation/startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)在首次 cold 操作前绑定实际 ZK watcher manager；匹配 owned registration 后开放，观察到失连、过期、close/demote 即永久退休原 attempt，同 session 重连及迟到读取不重开。隔离 graph 的普通/恢复 DATA 按本地 Bookie/incarnation 检查，热路径不查 metadata；已提交 I/O 与原池资源正常排空。八类 296 项及 style 通过，有限矩阵 37 正向完整 PASS/113 指定反例。真实 startup/fresh recovery/delete facts、生产 listener/registry、持续远端 authority、完整安装激活、quorum、完整模型与步骤 12/Gate 仍未完成。
+
 ## 7. Bookie 安装语义
 
 候选请求：

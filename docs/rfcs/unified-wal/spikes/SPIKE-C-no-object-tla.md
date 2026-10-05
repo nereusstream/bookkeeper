@@ -1178,3 +1178,5 @@ PASS 不能表述为“已证明生产系统安全”，也不能单独授权 Se
 
 
 2026-10-05 新增[控制权威读取投影](../implementation/models/README.md#控制权威-cold-read-投影)：一个 derived key、八类单 view 结果和一次并发更新，检查合法 snapshot 的 payload/store version 不混用、无效 view 不放行、错误不算 absence。新配置 120 distinct states、六个 Next 动作 coverage 非零、四个指定反例；全部矩阵 36 正向完整 PASS/109 指定反例。atomic get、parser/ACL/deadline 是[真实 ZK reader](../implementation/profile-control/README.md#步骤-12真实-zk-控制权威读取)的输入机制，不由 TLC 自证。该切片属于 Model A cold read，不是完整 A+C、服务生命周期、quorum、总工作集或 liveness 证明；Block G、完整模型与生产 Gate 仍 OPEN，旧回执不改绑。
+
+2026-10-05 新增[session 本地准入投影](../implementation/models/README.md#session-绑定的本地-data-准入投影)：原 session/nonce 永久退休、SDK 连接检查、迟到 reconciliation 不重开与已提交 I/O 两方终结。220 distinct states、11 个 Next 动作 coverage 非零、四个指定反例；全部矩阵 37 正向完整 PASS/113 指定反例。真实 backend 事件与 storage 排空见[实现验证](../implementation/startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)；事件观察与网络丢失分离，不证明瞬时故障检测、持续远端 authority、真实 startup 或完整 A+C/D。Block G/生产 Gate 仍 OPEN，旧回执保持绑定。

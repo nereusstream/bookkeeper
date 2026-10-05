@@ -37,6 +37,7 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 
 /** Owns the isolated local storage graph. This is not Bookie registration or production ACK readiness. */
 final class IsolatedSegmentStorage implements AutoCloseable {
@@ -179,6 +180,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private SegmentArenaControlDriver allocator;
     private boolean startAttempted;
     private boolean accepting;
+    private ZKProfileEphemeralRegistrationStore.Admission profileAdmission;
     private boolean closed;
     private IndexCheckpoint indexCheckpoint;
     private FreeOperation freeOperation;
@@ -228,6 +230,24 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     void startNew() throws IOException, InterruptedException {
         start(false);
+    }
+
+    /** Bind the real Profile registration attempt before opening this otherwise local-only graph. */
+    void bindProfileRegistration(ZKProfileEphemeralRegistrationStore.Admission admission) {
+        synchronized (gate) {
+            if (startAttempted || closed || profileAdmission != null) {
+                throw new IllegalStateException("Profile registration must be bound once before startup");
+            }
+            if (!Objects.requireNonNull(admission, "admission").bookieId().equals(identity.bookieId().toString())) {
+                throw new IllegalArgumentException("Profile registration belongs to another Bookie");
+            }
+            profileAdmission = admission;
+        }
+    }
+
+    private boolean writableRegistrationAllowsAdmission() {
+        return profileAdmission == null
+                || profileAdmission.allows(identity.bookieId().toString(), identity.incarnation());
     }
 
     void restart() throws IOException, InterruptedException {
@@ -355,7 +375,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitNormal(ProfileLedgerContext context, byte[] credential, ByteBuf entry,
                          SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || freeOperation != null || compaction != null
+            if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()
+                    || freeOperation != null || compaction != null
                     || controlRotation != null || controlCapacityPaused() || dataCapacityPaused()) {
                 return false;
             }
@@ -401,7 +422,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                            SegmentDataPhysicalDriver.RecoveryRequest response)
             throws IOException {
         synchronized (gate) {
-            if (!accepting || !execution.accepting() || freeOperation != null || compaction != null
+            if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()
+                    || freeOperation != null || compaction != null
                     || controlRotation != null || controlCapacityPaused() || dataCapacityPaused()) {
                 return false;
             }
@@ -1542,6 +1564,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         synchronized (closeGate) {
             synchronized (gate) {
                 accepting = false;
+                if (profileAdmission != null) {
+                    profileAdmission.close();
+                }
                 if (closed) {
                     return true;
                 }

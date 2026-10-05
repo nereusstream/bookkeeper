@@ -122,3 +122,5 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am \
 ~~~
 
 有限读取及四个指定反例见[authority read 模型](../models/README.md#控制权威-cold-read-投影)。真实 quorum、节点重启、实际连续失连 gate、protected-state endpoint 接线、global publication/安装激活、完整模型、掉电和性能未验证。步骤 12、Block G 与生产 Gate 保持 PARTIAL；原 Wave 0 receipt、manifest 和 scope guard 未改。
+
+2026-10-05 后续[session 本地 DATA gate](../startup-readiness/README.md#步骤-12session-绑定的本地-data-准入)绑定实际 publisher attempt 与隔离 storage graph，失连退休不重开、原 I/O 继续排空。296 项共享 control/readiness/storage 测试及 style 通过。它不把此 reader 的 snapshot 升为持续 authority 租约，也不补齐真实 startup、生产 listener/registry、sidecar 发布或安装激活；步骤 12 仍 PARTIAL。
