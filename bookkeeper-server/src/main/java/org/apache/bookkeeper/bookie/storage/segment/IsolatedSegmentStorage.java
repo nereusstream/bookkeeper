@@ -35,6 +35,7 @@ import java.util.function.BiConsumer;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -370,6 +371,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         } catch (ExecutionException | TimeoutException failure) {
             throw new IOException("Storage owner bootstrap failed", failure);
         }
+    }
+
+    /** Borrow the original control driver for a bounded, synchronous cold INSTALL endpoint. */
+    ProtectedProfileStateStore profileInstallStore(Duration timeout) {
+        return new SegmentProfileInstallStore(controls(), identity, timeout);
     }
 
     SegmentBookieControlDriver controls() {

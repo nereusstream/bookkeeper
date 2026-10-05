@@ -444,3 +444,16 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 | ProjectionKeepsReadVersion | 同一次read的scope与Stat.mzxid对应，后续root替换不改旧snapshot | snapshot不是持续authority租约，也没有birth-bound mutation CAS |
 
 五个敏感性反例各破坏以上一条边界。创建/重试/response-loss的完整内容和UNKNOWN性质沿用metadata-create投影及真实server测试；root/child CAS、delete cut、retention、quorum、完整模型组合、活性及性能仍未覆盖。
+
+
+## Physical INSTALL
+
+| 性质 | 合同与实际实现 | 模型边界 |
+| --- | --- | --- |
+| AdmissionHasExactAuthorityAndTarget | 原endpoint AuthZ/descriptor及adapter的实际target/incarnation验证晚于committed root读取、早于control提交 | principal/严格解析为输入，不证明TLS密码学 |
+| InstallSuccessHasBarrier / InstallSuccessHasOwnerApply | 原driver的实际force与owner apply后才返回durable安装结果；barrier失败UNKNOWN | FileChannel测试验证顺序，不证明设备/掉电barrier实现 |
+| SubmittedOwnershipWaitsForBothTerminals | timeout/interruption只结束等待，busy/control ticket/实际I/O及writer隔离由原driver终结 | 模型held聚合ownership，不证明所有TLS/socket/native内存总预算 |
+| InstallPreservesNormalState | absent安装inactive，已active同内容retry也保持原状态，不用INSTALL激活或撤销normal | local READY/activation/fence/tombstone组合仍由既有/后续模型验证 |
+| SubmittedUnknownNeverBecomesNone | 已提交请求timeout不能解释为未执行或取消成功；精确retry解析实际状态 | 更早UNKNOWN的跨attempt保持由调用方负责，未建全局client/coordinator |
+
+六个指定反例各破坏上述exact/barrier/owner/ownership/normal/unknown边界；全E完成、receipt discovery、READY/CAS/delete cut、quorum、完整模型、活性与性能仍未由该投影证明。

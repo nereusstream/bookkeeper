@@ -478,3 +478,16 @@ slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限
 | Replace | ack callback延迟期间实际第二client更改root，结果CONFLICT；后续read不混用旧scope与新version |
 
 这里的INSTALL投影没有mock本地durable结果；实际route/credential/inactive install及READY/activation仍为后续接线，PREPARING不能返回normal writer。
+
+
+## Physical INSTALL 动作
+
+| 动作 | 实际实现与验证 |
+| --- | --- |
+| Admit | 原endpoint先mTLS facts/static/root cold read/exact AuthZ/descriptor，adapter再验证实际local target并借用control driver；wrong-target及owner wait零提交 |
+| Write / Force | 原AES-GCM credential/Bookie控制record、FileChannel write/force；force阻塞时response未完成、owner可继续control通知，force失败UNKNOWN |
+| Apply / Finish | 原owner按序apply之后才映APPLIED/ALREADY_APPLIED及实际local generation；同操作冲突不覆盖route/secret，INSTALL不normal-activate |
+| StopWaiting | 200ms实际force等待超时不cancel原任务；log close/第二writer拒绝至实际terminal，精确INSTALL retry解析ALREADY_APPLIED |
+| 同phase E验证（模型外） | actual ZK PREPARING root → typed endpoint → 3个控制文件全部进入force后统一释放，全部真实durable且仍inactive |
+
+transport facts未替代实际TLS，driver的当前duplicate路径仍追加durable control record；未实现全局receipt retention/READY/activation或normal writer。

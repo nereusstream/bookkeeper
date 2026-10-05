@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 44 个完整正向配置、150 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 45 个完整正向配置、156 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,13 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-install-dispatch` | 一次typed INSTALL的control提交、write/force/owner apply、可选停止等待与实际completion，成功晚于barrier/owner且不改变normal状态 |
+| `ce-profile-install-dispatch-exact` | 忽略exact authority/physical target，须违反 `AdmissionHasExactAuthorityAndTarget` |
+| `ce-profile-install-dispatch-barrier` | 提交即成功，须违反 `InstallSuccessHasBarrier` |
+| `ce-profile-install-dispatch-owner` | I/O terminal即成功、尚无owner apply，须违反 `InstallSuccessHasOwnerApply` |
+| `ce-profile-install-dispatch-stop` | 停止等待即释放ownership，须违反 `SubmittedOwnershipWaitsForBothTerminals` |
+| `ce-profile-install-dispatch-normal` | INSTALL激活normal，须违反 `InstallPreservesNormalState` |
+| `ce-profile-install-dispatch-unknown` | 提交后timeout清成NONE，须违反 `SubmittedUnknownNeverBecomesNone` |
 | `a-profile-reservation-authority` | 一次PREPARING root cold read、可选后续root替换及INSTALL投影，检查exact key/计划目标/严格root及同snapshot版本 |
 | `ce-profile-reservation-authority-key` | 忽略instance/domain/purpose key，须违反 `GrantedMatchesRequestedKey` |
 | `ce-profile-reservation-authority-target` | 忽略计划目标，须违反 `GrantedTargetIsPlanned` |
@@ -942,3 +949,24 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-reservation-authority-corrupt | 47 / 37 / 18 | 3 / 不适用 | 0.790 s / 106,004,480 bytes | EXPECTED_COUNTEREXAMPLE:GrantedHasValidCommittedRoot |
 | ce-profile-reservation-authority-normal | 54 / 44 / 21 | 3 / 不适用 | 0.839 s / 106,692,608 bytes | EXPECTED_COUNTEREXAMPLE:PreparingOnlyAuthorizesInstall |
 | ce-profile-reservation-authority-version | 65 / 55 / 24 | 4 / 不适用 | 0.804 s / 104,677,376 bytes | EXPECTED_COUNTEREXAMPLE:ProjectionKeepsReadVersion |
+
+
+## Physical INSTALL 分发投影
+
+2026-10-06 `ProfileInstallDispatch`投影一个typed INSTALL通过预留control driver的提交、write、force、owner apply和completion。输入为已验证exact principal/committed scope/descriptor/physical target、control容量、route为absent/same/conflicting及实际I/O结果；已有route的normal状态可以true或false，INSTALL都保持原状态。首次absent install仍为inactive，不能借INSTALL越过READY/activation。
+
+停止等待只产生UNKNOWN，不取消已经提交的任务；held资源保留至实际I/O和owner都终结。callback成功必须有当前barrier和owner apply；failure仍由owner终结并释放资源。六个mutation分别取消exact check、提交即成功、仅I/O终结即成功、停止等待提前释放、INSTALL激活normal与UNKNOWN映NONE，检查各自指定性质。
+
+本投影不枚举真实credential/加密、文件framing/byte buffers、全E并发/receipt coordinator、local generation历史、READY/CAS/delete cut、业务timer、公平性/活性、实际TLS、fsync硬件、quorum、掉电、性能或完整A/C/D组合；[真实FileChannel与ZK/typed endpoint验证](../profile-control/README.md#步骤-12preparing-接线真实-local-inactive-install)分别提供实际对应证据。旧source/config/run不重绑定，最终 `unified-wal-local-xzOtn4EW` tool exit0，987冻结source inputs，相关10类102项为97通过/5 macOS Linux-affinity跳过、0 failure/error；`unified-wal-install-style-mVFZelYE` Spotless/Checkstyle exit0，source集精确一致，16份Java回执checksums已核验。最终模型 `unified-wal-model-nbfk9uf2` tool exit0，201配置为45正向完整PASS/156指定反例，435冻结inputs/605 checksums；185共享输入及1237去重union一致，五个designInputs绑定父提交 `eb8408cb5cac686e0e7e9a72cd706877c067c1ce`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。
+
+新正向投影完整遍历200 generated/170 distinct/queue0，search depth和diameter均7；六个mutation命中各自指定性质。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-install-dispatch | 200 / 170 / 0 | 7 / 7 | 0.791 s / 112,230,400 bytes | PASS |
+| ce-profile-install-dispatch-exact | 43 / 43 / 39 | 2 / 不适用 | 0.852 s / 109,035,520 bytes | EXPECTED_COUNTEREXAMPLE:AdmissionHasExactAuthorityAndTarget |
+| ce-profile-install-dispatch-barrier | 44 / 44 / 39 | 2 / 不适用 | 0.838 s / 108,937,216 bytes | EXPECTED_COUNTEREXAMPLE:InstallSuccessHasBarrier |
+| ce-profile-install-dispatch-owner | 110 / 107 / 19 | 4 / 不适用 | 0.812 s / 109,920,256 bytes | EXPECTED_COUNTEREXAMPLE:InstallSuccessHasOwnerApply |
+| ce-profile-install-dispatch-stop | 82 / 82 / 37 | 3 / 不适用 | 0.861 s / 109,330,432 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedOwnershipWaitsForBothTerminals |
+| ce-profile-install-dispatch-normal | 140 / 127 / 19 | 5 / 不适用 | 0.797 s / 110,952,448 bytes | EXPECTED_COUNTEREXAMPLE:InstallPreservesNormalState |
+| ce-profile-install-dispatch-unknown | 82 / 82 / 37 | 3 / 不适用 | 0.792 s / 107,741,184 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedUnknownNeverBecomesNone |

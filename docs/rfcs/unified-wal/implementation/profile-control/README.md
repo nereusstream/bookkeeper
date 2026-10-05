@@ -197,3 +197,30 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 定向开发运行`unified-wal-local-DW0FfPZX`的10项通过；其后扩展相关覆盖，并保留原运行输入。最终 `unified-wal-local-K2IDKqqY` tool exit0，985冻结source inputs，相关7类80/80通过、0 failure/error/skip；`unified-wal-reservation-style-aHMhoBh8` Spotless/Checkstyle exit0，source集精确一致，13份Java回执checksums已核验。最终模型 `unified-wal-model-2iaijevf` tool exit0，194配置为44正向完整PASS/150指定反例，425冻结inputs/584 checksums；183共享输入及1227去重union一致，五个designInputs绑定父提交 `2877d79cc2a4c61db1f9fae272c7b171592f4abe`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。
 
 本次仅创建不可覆盖PREPARING root和实际INSTALL冷读投影；真实all-E local install/receipts、标准metadata前置组合、READY/目标page及delete cut CAS、birth-bound mutation、activation/coordinator、orphan GC/retention、生产listener/startup/readiness、quorum、完整A/C/D组合、长期、掉电和性能仍未闭合。步骤12和生产Gate保持PARTIAL。
+
+
+## 步骤 12：PREPARING 接线真实 local inactive install
+
+2026-10-06，`SegmentProfileInstallStore`将原`ProtectedProfileStateStore`的INSTALL transition接到`SegmentBookieControlDriver`及真实Bookie控制文件；`IsolatedSegmentStorage.profileInstallStore(timeout)`借用本graph原driver和storage identity。原typed endpoint继续执行mTLS facts/static precheck、一次actual PREPARING root冷读、exact AuthZ和descriptor/credential检查。adapter再检查完整authority scope、INSTALL purpose/required engine及实际本地Bookie/storage incarnation，错target在提交前CONFLICT；ACTIVATE及尚未接线的query/其他控制操作UNSUPPORTED。不新增日志、executor、队列、retry或客户端所有权。
+
+实际提交沿用已有预留control owner/I/O：control task → 原log完整command验证及AES-GCM保护credential → write/force → 原owner按序apply → callback。只把对应实际durable结果映为APPLIED/ALREADY_APPLIED及local generation；CONDITION_FAILED/INCOMPATIBLE为CONFLICT，不覆盖route/credential。INSTALL保持原normal state，首次install为inactive；已active route的同内容INSTALL retry也不擅自deactivate。重复INSTALL当前仍经原durable-control路径写入重复记录后解析原结果，未提供无I/O status fast path或新的历史裁剪。
+
+caller只在有界冷路径同步等待，append owner调用立即拒绝，避免等自己的completion。成功晚于对应force和owner apply；driver忙/容量拒绝返回TRANSIENT_RECONCILING，不能清除早先UNKNOWN。提交后timeout/interruption返回DURABILITY_UNKNOWN且不cancel future/实际write，不归还driver的busy、control ticket、copy或writer isolation；它们由实际I/O/owner终结归还。adapter不拥有graph，也不为超时调用另建补偿执行器或自动重试。
+
+新6项验证使用实际FileChannel/force、原owner/IO和ZK server：force前response未完成且owner仍能处理control通知；200ms停止等待后原log不能关闭或由另一writer打开，实际force/apply结束后精确retry为ALREADY_APPLIED；barrier failure没有成功或normal admission；错误target/incarnation、未支持operation及owner wait在提交前拒绝；真实graph的borrowed factory可执行durable install。另将同一真实PREPARING root、原typed endpoint与3个独立Bookie控制文件组合，要求全部E进入各自force后才释放任何barrier，确认同phase并发安装、全部真实durable结果及normal-inactive。
+
+该组合使用typed transport facts和测试principal allowlist，没有实际TLS socket、INSTALL wire packing或生产listener；全E示例是隔离3/3/2配置，尚未实现全局创建coordinator、实际receipt retention/查询及标准metadata前置门槛。它不发布READY、不执行activation、不返回normal writer，也不把一次authority cold read当作跨store/local原子delete cut。
+
+复现：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInstallStoreTest,ZKProfileReservationStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,IsolatedProfileControlEndpointTest,TestLedgerMetadataSerDe,SegmentExecutionGroupTest,SegmentBookieControlLogTest#installAndActivationAreSeparateDurableGatesAcrossReopen+authorityMismatchIsRejectedBeforeWriteAndBatchOrderCannotActivateAbsentRoute+bookieControlDriverKeepsOwnerResponsiveAcrossFenceWaitAndForce'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
+
+首次定向`unified-wal-local-CoQA49Qf`6项通过；扩展`unified-wal-local-vqgILjtb`在ZK自带启动client将localhost解析到198.18.0.1后发生ConnectionLoss，进入all-E测试前失败，exit1不计完整PASS。新增fixture沿用已有固定127.0.0.1做法，修正后重新冻结源码；历史运行保留原绑定。修正后的`unified-wal-local-IuzY8kvk`已完成97通过/5平台跳过；首次style因未使用import exit1，移除后重新冻结验证。模型runner补齐新adapter/测试的输入，旧矩阵运行保留原输入。
+
+最终 `unified-wal-local-xzOtn4EW` tool exit0，987冻结source inputs，相关10类102项为97通过/5 macOS Linux-affinity跳过、0 failure/error；`unified-wal-install-style-mVFZelYE` Spotless/Checkstyle exit0，source集精确一致，16份Java回执checksums已核验。最终模型 `unified-wal-model-nbfk9uf2` tool exit0，201配置为45正向完整PASS/156指定反例，435冻结inputs/605 checksums；185共享输入及1237去重union一致，五个designInputs绑定父提交 `eb8408cb5cac686e0e7e9a72cd706877c067c1ce`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。
+
+有限[physical INSTALL投影](../models/README.md#physical-install-分发投影)检查exact admission、barrier/owner结果、停止等待后的实际ownership及normal-state保留。真实READY/有界target pages/delete cut与birth-bound CAS、global all-E receipt/coordinator及metadata前置组合、activation、INSTALL实际TLS/wire、生产startup/readiness、quorum、完整恢复/完整A/C/D组合、长期/掉电/性能仍未闭合。步骤12和生产Gate保持PARTIAL。

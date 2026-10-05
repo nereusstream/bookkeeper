@@ -63,6 +63,10 @@ final class SegmentBookieControlDriver {
         this.log = Objects.requireNonNull(log, "log");
     }
 
+    boolean isOwnerThread() {
+        return owner.isOwnerThread();
+    }
+
     boolean reserveMaintenance() {
         return busy.compareAndSet(false, true);
     }
