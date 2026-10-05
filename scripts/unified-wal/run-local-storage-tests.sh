@@ -22,6 +22,14 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/client'
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/client').glob('*.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/proto/profile').glob('*.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/proto/profile').glob('*.java'))
+paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/discover/profile').glob('*.java'))
+paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/discover/profile').glob('*.java'))
+paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/meta').glob('*.java'))
+paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning').glob('*.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/meta/TestLedgerMetadataSerDe.java'))
+paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
+             ('client/api/LedgerMetadata.java', 'client/api/DigestType.java',
+              'conf/AbstractConfiguration.java', 'conf/ClientConfiguration.java', 'meta/zk/ZKMetadataDriverBase.java'))
 paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile').rglob('*.java'))
 paths.update(Path('bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile').rglob('*.java'))
 paths.update(Path('bookkeeper-common/src/test/resources/profile-wire').rglob('*.bin'))

@@ -30,12 +30,14 @@ import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 import org.apache.zookeeper.AsyncCallback.DataCallback;
 import org.apache.zookeeper.AsyncCallback.MultiCallback;
+import org.apache.zookeeper.AsyncCallback.StringCallback;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.server.ServerCnxn.DisconnectReason;
 import org.junit.After;
 import org.junit.Before;
@@ -121,11 +123,40 @@ abstract class ProfileZKTestBase {
         final AtomicBoolean holdReadReply = new AtomicBoolean();
         final AtomicReference<Runnable> lateReadReply = new AtomicReference<>();
         final CountDownLatch readReplyHeld = new CountDownLatch(1);
+        final AtomicReference<String> loseCreateReplyPath = new AtomicReference<>();
+        final AtomicReference<Runnable> beforeLostCreateReply = new AtomicReference<>();
+        final AtomicReference<String> holdCreateReplyPath = new AtomicReference<>();
+        final AtomicReference<Runnable> lateCreateReply = new AtomicReference<>();
+        final CountDownLatch createReplyHeld = new CountDownLatch(1);
 
         private TestClient(String connect, ZooKeeperWatcherBase watcher, CountDownLatch expired) throws IOException {
             super(connect, 10000, watcher);
             this.expired = expired;
             watcherManager = watcher;
+        }
+
+        @Override
+        public void create(String path, byte[] bytes, List<ACL> acls, CreateMode mode,
+                StringCallback callback, Object context) {
+            super.create(path, bytes, acls, mode, (code, returnedPath, ignored, name) -> {
+                String lostPath = loseCreateReplyPath.get();
+                boolean lose = code == Code.OK.intValue() && path.equals(lostPath)
+                        && loseCreateReplyPath.compareAndSet(lostPath, null);
+                Runnable before = lose ? beforeLostCreateReply.getAndSet(null) : null;
+                if (before != null) {
+                    before.run();
+                }
+                Runnable reply = () -> callback.processResult(lose ? Code.CONNECTIONLOSS.intValue() : code,
+                        returnedPath, context, name);
+                String heldPath = holdCreateReplyPath.get();
+                if (code == Code.OK.intValue() && path.equals(heldPath)
+                        && holdCreateReplyPath.compareAndSet(heldPath, null)) {
+                    lateCreateReply.set(reply);
+                    createReplyHeld.countDown();
+                } else {
+                    reply.run();
+                }
+            }, context);
         }
 
         @Override

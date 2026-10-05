@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他与 Profile 普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 42 个完整正向配置、140 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 43 个完整正向配置、145 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,12 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-metadata-create` | 一次standard metadata create、一次resolving snapshot read及可选delete/recreate/update，检查完整instance/reference/初始内容和UNKNOWN |
+| `ce-profile-metadata-create-instance` | 忽略instance，须违反 `SuccessMatchesInstance` |
+| `ce-profile-metadata-create-sidecar` | 忽略opaque sidecar reference，须违反 `SuccessMatchesSidecar` |
+| `ce-profile-metadata-create-payload` | 忽略初始内容，须违反 `SuccessMatchesInitialPayload` |
+| `ce-profile-metadata-create-absence` | 将 resolving NONODE 当成无effect，须违反 `AbsenceDoesNotProveNoEffect` |
+| `ce-profile-metadata-create-ack` | 创建成功回调后跳过实际read，以提交对象形成成功，须违反 `SuccessHasActualMetadataSnapshot` |
 | `a-startup-data-exclusion` | 一次 graph restart 与可选 foreign DATA writer，恢复前排他和同锁移交，清理只释放自己已终结的资源 |
 | `ce-startup-data-exclusion-order` | 恢复先于 DATA 锁，须违反 `RecoveryStartsWithOwnExclusion` |
 | `ce-startup-data-exclusion-handoff` | 移交时释放 native 锁，须违反 `FileHandoffKeepsExclusion` |
@@ -895,3 +901,20 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 2026-10-06 [接收至存储源副本](../profile-wire/README.md#接收至存储源副本交接)沿用现有ProfileBackingBudget两个根的capacity/refcount/关闭投影及ordinary/recovery分发的I/O/owner终结投影重新验证。Java接线把源副本实际交给该allocator，所以第二根可以对应source；原模型仍不枚举source子额度、对齐池交接或完整组合，未新增性质或扩大有限模型声明。真实socket另验复制前后两份账本、断连与实际force/native锁的生命周期。
 
 当前源副本交接最终矩阵 `unified-wal-model-37pz7m69` tool exit0，42正向配置完整PASS/140指定反例，358冻结inputs/548 checksums；Java `unified-wal-local-1PlKPtbk`924 inputs、15类407项为402通过/5平台跳过，Spotless/Checkstyle `unified-wal-source-style-Thj6khH7`通过。118共享输入与1164去重union精确匹配，五个designInputs绑定父提交 `b61887fd56b2037b886114ef924c40cbf26460ad`；此前矩阵及统计保留各自原运行身份，未新增模型或性质，也不声明上述独立切片已经形成source/pool/TLS组合证明。
+
+## 标准 metadata backlink 创建投影
+
+2026-10-06 `ProfileMetadataCreate`仅建模一个ledger key的一次create-if-absent、创建成功或失败后的一次实际resolve read、可选删除/不同instance重建及初始内容更新。kind为absent、matching、other-instance、other-sidecar、other-initial-payload、corrupt、legacy或read-error八类；dataVersion仅0/1，重建再次为0。创建成功回调只进入read阶段，不能以提交对象形成成功；实际read取得的snapshot/version保留到结果判断。成功只陈述自身snapshot，read之后的删除或更新不使结果成为持续租约。
+
+五个mutation分别取消instance/reference/初始内容匹配、把resolving absence改为NONE，或创建成功后跳过实际read。正向完整遍历152 generated/137 distinct/queue0、search depth与diameter均8；五个mutation各命中指定性质。原子backend create/read和strict codec是输入，创建callback本身不提供完整snapshot证明；52-byte编码/CRC/ID/用户字段复制/真实client行为由Java验证。没有reservation/全E安装、READY或delete cut、后续mutation CAS、完整sidecar/retention、quorum、liveness、性能或完整A/C/D组合证明。
+
+最终 `unified-wal-local-asvuwC2b` tool exit0，981冻结source inputs，相关6类70/70通过、0 failure/error/skip；`unified-wal-metadata-style-RCI77e1E` Spotless/Checkstyle exit0，source集一致，12份Java回执checksums已核验。模型 `unified-wal-model-7mo2zzed` tool exit0，188配置为43正向完整PASS/145指定反例，414冻结inputs/566 checksums；179共享输入及1216去重union一致，五个designInputs绑定父提交 `ffc3e8cdea081280a8f21da8c63dea3c235dfbd7`。此前不存在的isOpen接口、初次style超长行与上述实际snapshot回归失败均不计PASS；最终验证在实际read修复之后，旧运行保留原输入。验证耗时不是性能前后对照。 官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；历史矩阵和Wave0回执保持原绑定。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-metadata-create | 152 / 137 / 0 | 8 / 8 | 0.829 s / 111,493,120 bytes | PASS |
+| ce-profile-metadata-create-instance | 48 / 41 / 17 | 4 / 不适用 | 0.859 s / 110,739,456 bytes | EXPECTED_COUNTEREXAMPLE:SuccessMatchesInstance |
+| ce-profile-metadata-create-sidecar | 50 / 43 / 18 | 4 / 不适用 | 0.803 s / 111,149,056 bytes | EXPECTED_COUNTEREXAMPLE:SuccessMatchesSidecar |
+| ce-profile-metadata-create-payload | 52 / 45 / 19 | 4 / 不适用 | 0.842 s / 110,460,928 bytes | EXPECTED_COUNTEREXAMPLE:SuccessMatchesInitialPayload |
+| ce-profile-metadata-create-absence | 84 / 73 / 22 | 6 / 不适用 | 0.858 s / 110,526,464 bytes | EXPECTED_COUNTEREXAMPLE:AbsenceDoesNotProveNoEffect |
+| ce-profile-metadata-create-ack | 17 / 17 / 7 | 3 / 不适用 | 0.810 s / 107,347,968 bytes | EXPECTED_COUNTEREXAMPLE:SuccessHasActualMetadataSnapshot |

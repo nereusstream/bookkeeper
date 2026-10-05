@@ -454,3 +454,15 @@ slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限
 | RecoveryFailure | `requiredRecoveryBarrierFailureAndSymbolicLinksAreRejected` 在新实例的文件/目录恢复同步失败时拒绝开放；`invalidAuthoritativeBytesAndWrongScopeFailClosedAndReleaseTheLock` 覆盖坏格式/大小/scope 及失败后 writer scope 释放 |
 
 固定字节向量独立检查字段及 CRC32C，真实跨进程 writer 拒绝在目录别名的失败第二打开后仍成立。`referenceStartupUsesRealFileReceiptAndBothZooKeeperStores` 组合真实 local receipt、persistent CAS 与 session-owned ephemeral，处理回复丢失和新 attempt；原恢复/设备/删除输入仍为 typed facts，没有服务级启动、DATA 恢复或掉电结论。
+
+## 标准 metadata 创建动作
+
+| 动作 | 真实实现与验证 |
+| --- | --- |
+| Create / CreateReply | `ProfileLedgerMetadataStore.createIfAbsent`借用原LedgerManager；创建回调只进入实际read，不以提交对象证明成功；`realMetadataCreatePreservesUserEntriesAndSameRequestResolvesWithoutAnotherVersion`验证真实create、SerDe和read的metadata/version/token |
+| LostReply / Read / Resolve | `actualCreateWithLostReplyResolvesSameInstanceAndDoesNotOverwriteConflict`在实际commit后丢reply，检查完整初始内容；双client竞争只有一个physical winner |
+| Remove / Recreate | `callbackDelayKeepsOwnedInitialPayloadAndDoesNotTreatRecreatedVersionAsSameInstance`验证输入复制与dataVersion重置；`deletionAfterRealCreateAndLostReplyCannotTurnAbsenceIntoProofOfNoEffect`验证已执行请求不能被NONODE清为NONE |
+| Update / Resolve | instance/sidecar/quorum/ensemble顺序/password/custom/显式ctime冲突拒绝覆盖；legacy与坏reference、closed client分别为conflict/quarantine/unknown |
+| CreateReply / Read / Update / Resolve | `acknowledgedCreateRechecksActualMetadataRatherThanItsSubmittedObject`在真实create成功回调延迟期间修改实际ack quorum，修复前APPLIED、修复后CONFLICT，验证成功必须来自实际read |
+
+原子metadata backend操作、严格字节解码是模型输入；真实测试使用既有server与两个client，并只改变实际操作之后的callback交付。该动作表不包含all-E安装、READY、后续membership/delete mutation CAS或初始writer完成。

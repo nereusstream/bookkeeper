@@ -419,3 +419,15 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 | ConfirmedReceiptSurvivesCrash | 成功文件和目录 barrier 后的 receipt 在抽象 crash 中保留；重开再次同步后才可读 | 实际两轮子进程退出覆盖 publish/reopen，不冒充掉电或整个 startup 的恢复证明 |
 
 五个指定反例分别取消文件同步、目录同步、隔离读门槛、采用 pending 或允许同代覆盖。CHECK_DEADLOCK FALSE 仅允许有限终态。compatibility/device/recovery/delete catch-up、ZK registration、持续准入、quorum、liveness、性能及完整 A/C/D 组合不由该投影证明。
+
+## 标准 metadata 创建
+
+| 性质 | 合同与实际实现 | 模型边界 |
+| --- | --- | --- |
+| SuccessMatchesInstance / SuccessMatchesSidecar | 同ledger/instance/opaque reference才解析既有create；dataVersion重建同值不替代identity | 固定marker的长度/CRC/非零ID由Java独立向量验证，尚无后续mutation CAS |
+| SuccessMatchesInitialPayload | E/W/A、ordered ensemble、digest/password、全部custom entries及显式持久ctime相同；随机creator token和backend推导ctime为观测 | 模型将所有不匹配初始内容投影为kind4，不枚举secret或全部metadata字节 |
+| SuccessfulSnapshotIsValid / SuccessKeepsCapturedVersion | 仅合法匹配snapshot形成APPLIED/ALREADY_APPLIED，实际read保持自己的metadata/version | 原子create/read是backend输入，不代表结果之后仍有authority |
+| SuccessHasActualMetadataSnapshot | 创建成功回调返回提交对象不足以证明成功，必须实际read；真实回调延迟期间修改quorum的回归先红后绿 | 模型显式区分创建回调与实际read，不枚举backend内部token比较逻辑 |
+| AbsenceDoesNotProveNoEffect | 创建reply丢失后，即使实际节点被删除且fresh read NONODE仍UNKNOWN | 不证明先前Add/其他operation outcome，也不引入自动重建或重试 |
+
+五个指定反例各取消一条instance/reference/content/unknown/实际snapshot边界。reservation、all-E durable receipts、sidecar READY及目标留存、delete cut、后续birth-bound mutation CAS、quorum、liveness和完整模型组合仍未覆盖。

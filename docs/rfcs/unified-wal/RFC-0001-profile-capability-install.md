@@ -258,6 +258,8 @@ ACK(normal profiled Add)
     && matching local durable normal ACTIVE existed before Add processing
 ```
 
+2026-10-06 [标准metadata backlink创建](implementation/profile-control/README.md#步骤-12标准-metadata-backlink-创建)已将固定52-byte instance/opaque sidecar reference写入原标准metadata custom entry，并经真实ZK LongHierarchicalLedgerManager create-if-absent及每次创建结果后的实际read解析同内容重试与回复丢失；instance/reference/初始内容冲突不覆盖，实际创建后删除并读到NONODE仍保持UNKNOWN。新9项真实server回归及相关验证见该记录。它只提供全E安装前置已验证之后的创建原语；真正sidecar/全E receipts/READY/activation、后续birth-bound mutation CAS与完整步骤12仍OPEN，未返回normal writer或提升生产Gate。
+
 ### 6.1 Sidecar reservation 与 authority boundary
 
 初始READY/写期activation authority及其target retention、RepairIntent admission，以及后续启用的RFC-0004 §14.1 strong-publication reference更新推进lifecycle记录的store version；只有真正的生命周期撤权cut推进delete/fencing generation。无关operation完成不能让既有grant或normal activation失效。domain progress不发布ledger-global head；上述与delete实际冲突的授权发布是operation级冷路径，root引用及retention必须有hard bound。增强strong completion首批仍不运行。

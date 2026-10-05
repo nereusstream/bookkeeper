@@ -19,6 +19,12 @@ import time
 
 
 MATRIX = {
+    'a-profile-metadata-create': None,
+    'ce-profile-metadata-create-instance': 'SuccessMatchesInstance',
+    'ce-profile-metadata-create-sidecar': 'SuccessMatchesSidecar',
+    'ce-profile-metadata-create-payload': 'SuccessMatchesInitialPayload',
+    'ce-profile-metadata-create-absence': 'AbsenceDoesNotProveNoEffect',
+    'ce-profile-metadata-create-ack': 'SuccessHasActualMetadataSnapshot',
     'a-profile-backing-budget': None,
     'ce-profile-backing-budget-allocation': 'BackingsKeepFullCredit',
     'ce-profile-backing-budget-resize': 'ResizeKeepsOldAndNewCredit',
@@ -251,6 +257,19 @@ def main():
     inputs.extend((root / "bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/control").glob("*.java"))
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/discover/profile").glob("*.java"))
     inputs.extend((root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/discover/profile").glob("*.java"))
+    inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/meta").glob("*.java"))
+    inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning").glob("*.java"))
+    inputs.extend(root / name for name in [
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerMetadataBuilder.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerMetadataImpl.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerMetadataUtils.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/BKException.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/api/LedgerMetadata.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/api/DigestType.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/conf/AbstractConfiguration.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/conf/ClientConfiguration.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/meta/zk/ZKMetadataDriverBase.java",
+        "bookkeeper-server/src/test/java/org/apache/bookkeeper/meta/TestLedgerMetadataSerDe.java"])
     inputs.extend(root / name for name in ["pom.xml", "bookkeeper-common/pom.xml", "bookkeeper-server/pom.xml",
                   "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/EngineProfile.java",
                   "bookkeeper-server/src/main/java/org/apache/bookkeeper/zookeeper/ZooKeeperClient.java",
@@ -271,7 +290,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
+        "scope": "Finite Model A standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -284,7 +303,8 @@ def main():
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
                    "-coverage", "1", "-config", str(run / "configs" / (name + ".cfg")),
-                   "-metadir", str(states), "ProfileBackingBudget.tla" if "profile-backing-budget" in name
+                   "-metadir", str(states), "ProfileMetadataCreate.tla" if "profile-metadata-create" in name
+                   else "ProfileBackingBudget.tla" if "profile-backing-budget" in name
                    else "ProfileRecoveryDispatch.tla" if "profile-recovery-dispatch" in name
                    else "ProfileFenceDispatch.tla" if "profile-fence-dispatch" in name
                    else "ProfileNormalDispatch.tla" if "profile-normal-dispatch" in name
