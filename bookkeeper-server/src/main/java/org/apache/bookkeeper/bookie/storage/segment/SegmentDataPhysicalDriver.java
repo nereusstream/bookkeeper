@@ -928,17 +928,7 @@ final class SegmentDataPhysicalDriver {
                 }
                 owner.inputs().claim(List.of(input));
                 claimed = true;
-                SegmentBatchFormat.Data data = input.data();
-                if (!bookie.matchesScope(files) || SegmentOwnerLoop.shardFor(data.context().ledgerId(),
-                        files.config().logicalShards()) != shard) {
-                    throw new IOException("Recovery entry input differs from its driver or Bookie admission");
-                }
-                SegmentBatchFormat.validateEntry(data, SegmentBatchFormat.maxPayload(files.config()));
-                SegmentEntryIdentity identity = SegmentEntryIdentity.parse(data.context(), data.entry().nioBuffer());
-                if (identity.entryId() != admission.entryId()) {
-                    throw new IOException("Recovery BK entry ID differs from its admission");
-                }
-                entry = new Entry(input, null, admission, null, request, arrived, data, identity);
+                entry = recoveryEntry(input, admission, request, arrived);
             } catch (IOException | RuntimeException | Error failure) {
                 try {
                     if (input != null) {
@@ -954,6 +944,47 @@ final class SegmentDataPhysicalDriver {
                 throw failure;
             }
             return submitEntry(entry);
+        }
+
+        /** Source bytes were charged before copying; both source and exact grant transfer to the actual owner. */
+        boolean submitRecovery(SegmentEntryInputs.Input input, SegmentBookieControlLog.RecoveryAdmission admission,
+                               RecoveryRequest request) throws IOException {
+            Objects.requireNonNull(request, "request");
+            long arrived = System.nanoTime();
+            owner.inputs().claim(List.of(input));
+            try {
+                bookie.claimRecoveryForDriver(List.of(admission));
+            } catch (IOException | RuntimeException | Error failure) {
+                input.releaseFromDriver();
+                throw failure;
+            }
+            Entry entry;
+            try {
+                entry = recoveryEntry(input, admission, request, arrived);
+            } catch (IOException | RuntimeException | Error failure) {
+                try {
+                    admission.driverTerminal();
+                } finally {
+                    input.releaseFromDriver();
+                }
+                throw failure;
+            }
+            return submitEntry(entry);
+        }
+
+        private Entry recoveryEntry(SegmentEntryInputs.Input input, SegmentBookieControlLog.RecoveryAdmission admission,
+                                    RecoveryRequest request, long arrived) throws IOException {
+            SegmentBatchFormat.Data data = input.data();
+            if (!bookie.matchesScope(files) || !data.context().equals(admission.context())
+                    || SegmentOwnerLoop.shardFor(data.context().ledgerId(), files.config().logicalShards()) != shard) {
+                throw new IOException("Recovery entry input differs from its driver or Bookie admission");
+            }
+            SegmentBatchFormat.validateEntry(data, SegmentBatchFormat.maxPayload(files.config()));
+            SegmentEntryIdentity identity = SegmentEntryIdentity.parse(data.context(), data.entry().nioBuffer());
+            if (identity.entryId() != admission.entryId()) {
+                throw new IOException("Recovery BK entry ID differs from its admission");
+            }
+            return new Entry(input, null, admission, null, request, arrived, data, identity);
         }
 
         private boolean submitEntry(Entry entry) {

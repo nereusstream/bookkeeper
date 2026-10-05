@@ -70,6 +70,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private final int connectionLimit;
     private final int connectionBaseBytes;
     private int maxNormalBodyBytes = ProfileFrameCodec.ABSOLUTE_FRAME_MAX;
+    private int maxRecoveryBodyBytes = ProfileFrameCodec.ABSOLUTE_FRAME_MAX;
     private final AtomicLong connectionBytes = new AtomicLong();
     private final byte[] fixedHeader = new byte[FIXED_HEADER_BYTES];
     private ChannelHandlerContext context;
@@ -135,6 +136,13 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             throw new IllegalArgumentException("Normal body bound must be set before installing the decoder");
         }
         maxNormalBodyBytes = bytes;
+    }
+
+    void limitRecoveryBody(int bytes) {
+        if (context != null || bytes < 144 || bytes > ProfileFrameCodec.ABSOLUTE_FRAME_MAX) {
+            throw new IllegalArgumentException("Recovery body bound must be set before installing the decoder");
+        }
+        maxRecoveryBodyBytes = bytes;
     }
 
     /** Called by the downstream operation handler after it validates and authorizes the first control request. */
@@ -314,6 +322,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 // The frozen fence request body is exactly 100 bytes; reject a larger claim before reserving it.
                 || (operation == ProfileOperation.FENCE_LEDGER && header.bodyLength() != 100)
                 || (operation == ProfileOperation.ADD_NORMAL && header.bodyLength() > maxNormalBodyBytes)
+                || (operation == ProfileOperation.ADD_RECOVERY && header.bodyLength() > maxRecoveryBodyBytes)
                 || (operation.isReservedDisabled() && header.bodyLength() != 0)) {
             throw new IOException("Invalid Profile request header");
         }

@@ -443,6 +443,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(), List.of());
             return ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
                     100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
+                    144 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                     new SegmentProfileAddHandler(this, tls, trustDomain, hello,
                             SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                             config.maxPendingEntries()));
@@ -522,6 +523,57 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 }
                 return accepted;
             } catch (IOException | RuntimeException | Error failure) {
+                admission.releaseUnclaimed();
+                throw failure;
+            }
+        }
+    }
+
+    /** The complete entry is borrowed only until its synchronous, precharged source copy finishes. */
+    SegmentBookieControlLog.NormalRejection submitProfileRecovery(ProfileOperationCodec.AddRecovery tuple,
+            ByteBuf entry, SegmentDataPhysicalDriver.RecoveryRequest response) throws IOException {
+        synchronized (gate) {
+            if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()
+                    || freeOperation != null || compaction != null || controlRotation != null
+                    || controlCapacityPaused() || dataCapacityPaused()) {
+                return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            }
+            SegmentBookieControlLog.NormalRejection rejection = bookie.recoveryRejection(tuple);
+            if (rejection != null) {
+                return rejection;
+            }
+            SegmentEntryIdentity parsed;
+            try {
+                parsed = SegmentEntryIdentity.parse(tuple.context(), entry.nioBuffer());
+            } catch (IOException invalid) {
+                throw new IllegalArgumentException("Invalid Profile recovery BK entry", invalid);
+            }
+            if (parsed.entryId() != tuple.entryId()) {
+                throw new IllegalArgumentException("Profile recovery coordinate differs from its BK entry");
+            }
+            SegmentBookieControlLog.RecoveryAdmission admission = bookie.admitRecoveryTuple(tuple).orElse(null);
+            if (admission == null) {
+                rejection = bookie.recoveryRejection(tuple);
+                return rejection != null ? rejection : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            }
+            SegmentEntryInputs.Input input = null;
+            try {
+                input = execution.inputs().acquire(tuple.context(), entry.readableBytes());
+                if (input == null) {
+                    admission.releaseUnclaimed();
+                    return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+                }
+                input.bytes().writeBytes(entry, entry.readerIndex(), entry.readableBytes());
+                boolean accepted = writes[SegmentOwnerLoop.shardFor(tuple.context().ledgerId(),
+                        config.logicalShards())].submitRecovery(input, admission, response);
+                if (!accepted) {
+                    controlCapacityPaused();
+                }
+                return accepted ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            } catch (IOException | RuntimeException | Error failure) {
+                if (input != null) {
+                    input.close();
+                }
                 admission.releaseUnclaimed();
                 throw failure;
             }

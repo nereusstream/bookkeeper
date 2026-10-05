@@ -70,7 +70,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     enum NormalRejection {
-        UNAVAILABLE, IDENTITY_CONFLICT, UNAUTHORIZED, TOMBSTONED, FENCED, NOT_ACTIVE
+        UNAVAILABLE, IDENTITY_CONFLICT, UNAUTHORIZED, TOMBSTONED, FENCED, NOT_ACTIVE, INVALID_GRANT
     }
 
     record Result(Status status, UUID operationId, long sequence, long localGeneration) { }
@@ -267,12 +267,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private boolean claimed;
 
         private RecoveryAdmission(SegmentBookieControlLog owner, LedgerState state, GrantState grant,
-                                  ProfileOperationCodec.AddRecovery request) {
+                                  ProfileOperationCodec.AddRecovery request, boolean snapshotPayload) {
             this.owner = owner;
             this.state = state;
             this.grant = grant;
             this.entryId = request.entryId();
-            this.entryPayload = request.entryPayload();
+            this.entryPayload = snapshotPayload ? request.entryPayload() : null;
         }
 
         ProfileLedgerContext context() {
@@ -1140,6 +1140,25 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     synchronized Optional<RecoveryAdmission> admitRecovery(ProfileOperationCodec.AddRecovery request) {
+        return admitRecovery(request, true);
+    }
+
+    /** The socket adapter supplies a separately charged source input, without a reference-codec payload copy. */
+    synchronized Optional<RecoveryAdmission> admitRecoveryTuple(ProfileOperationCodec.AddRecovery request) {
+        return admitRecovery(request, false);
+    }
+
+    synchronized NormalRejection recoveryRejection(ProfileOperationCodec.AddRecovery request) {
+        NormalRejection rejection = fenceRejection(request.context(), request.credential());
+        if (rejection != null) {
+            return rejection;
+        }
+        return matchingRecoveryGrant(ledgers.get(request.context().ledgerId()), request) != null
+                ? null : NormalRejection.INVALID_GRANT;
+    }
+
+    private Optional<RecoveryAdmission> admitRecovery(ProfileOperationCodec.AddRecovery request,
+                                                      boolean snapshotPayload) {
         Objects.requireNonNull(request, "request");
         ProfileLedgerContext context = request.context();
         LedgerState state = ledgers.get(context.ledgerId());
@@ -1150,6 +1169,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 || activeAdmissions == config.maxPendingEntries()) {
             return Optional.empty();
         }
+        GrantState grant = matchingRecoveryGrant(state, request);
+        if (grant == null) {
+            return Optional.empty();
+        }
+        RecoveryAdmission admission = new RecoveryAdmission(this, state, grant, request, snapshotPayload);
+        activeAdmissions++;
+        grant.inFlight++;
+        return Optional.of(admission);
+    }
+
+    private GrantState matchingRecoveryGrant(LedgerState state, ProfileOperationCodec.AddRecovery request) {
         for (GrantState grant : state.recoveryGrants.values()) {
             ProfileExactRange range = grant.command.scope.exactRange();
             if (grant.pendingClose == null && !grant.committedReadable
@@ -1160,12 +1190,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     && range.lastEntryId() == request.rangeEnd()
                     && request.entryId() >= range.firstEntryId()
                     && request.entryId() <= range.lastEntryId()) {
-                activeAdmissions++;
-                grant.inFlight++;
-                return Optional.of(new RecoveryAdmission(this, state, grant, request));
+                return grant;
             }
         }
-        return Optional.empty();
+        return null;
     }
 
     synchronized boolean canCompleteRecovery(RecoveryAdmission admission) {

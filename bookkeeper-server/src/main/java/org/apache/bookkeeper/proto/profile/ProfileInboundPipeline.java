@@ -44,6 +44,15 @@ public final class ProfileInboundPipeline {
     public static boolean install(ChannelPipeline pipeline, TLSContextFactory tls,
                            ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
                            int maxNormalBodyBytes, ChannelInboundHandler application) throws SecurityException {
+        return install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
+                maxNormalBodyBytes, ProfileFrameCodec.ABSOLUTE_FRAME_MAX, application);
+    }
+
+    /** Installed normal and recovery entry bounds precede body allocation and receive-lane transfer. */
+    public static boolean install(ChannelPipeline pipeline, TLSContextFactory tls,
+                           ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
+                           int maxNormalBodyBytes, int maxRecoveryBodyBytes,
+                           ChannelInboundHandler application) throws SecurityException {
         Objects.requireNonNull(pipeline, "pipeline");
         Objects.requireNonNull(tls, "tls");
         Objects.requireNonNull(budget, "budget");
@@ -57,6 +66,7 @@ public final class ProfileInboundPipeline {
             ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(
                     budget, permit, connectionLimit, connectionBaseBytes);
             decoder.limitNormalBody(maxNormalBodyBytes);
+            decoder.limitRecoveryBody(maxRecoveryBodyBytes);
             SslHandler ssl = tls.newProfileServerTLSHandler();
             ssl.setHandshakeTimeoutMillis(TLS_HANDSHAKE_TIMEOUT_MILLIS);
             pipeline.addLast("profileTls", ssl);

@@ -846,3 +846,26 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 最终 `unified-wal-model-g0cie706` tool exit 0，168配置为40正向完整PASS/128指定反例；冻结340 inputs/506 checksums，父提交 `66644a6021bf9e4ea2e6fdcbec4d5ceadd465daf`与五个designInputs绑定父提交，未改历史回执。Java `unified-wal-local-P3zaRCUQ`的922输入与模型116重合hash精确一致，union 1146核验；14类391项为386通过/5 macOS Linux-affinity跳过。官方tool 1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint；CHECK_DEADLOCK FALSE，不声称活性。
 
 首次 `unified-wal-model-t7u8k4qc`发现新模块语法错误后被明确终止，exit130且未产生完整最终回执，不能计PASS；修正后 scoped `unified-wal-model-c23rx1hb`七配置通过，再扩大为上述最终矩阵。统计是固定有限配置验证记录，不能替代 [真实socket与文件交错](../profile-wire/README.md#真实隔离-fence-与控制额度)，不证明TLS/socket/native/storage总量、fresh readiness、production listener、完整control-plane、quorum、时间、掉电或性能；步骤11及整体Gate仍未完成。
+
+
+## Profile ADD_RECOVERY 分发投影
+
+2026-10-06 `ProfileRecoveryDispatch`复用既有模型runner，检查一个已安装本地grant下的单条恢复写入：exact route/credential/intent及代际/range/BK坐标为输入，源可用额度为有限布尔条件；成功必须在实际I/O与owner结果判定之后且grant在判定时仍有效，恢复不得激活normal，已开始DATA的unknown不得变NONE，取消不得提前释放实际I/O保护。
+
+`submitted`抽象已开始的物理DATA尝试；已知未执行I/O的解析/owner拒绝统一压缩为Refuse，不枚举原队列全部中间状态。源复制与实际提交合为一个动作，CopyRequiresSourceCredit只检查先有源额度的前置条件，不证明allocator或TLS/socket实际总内存。排队completion/下游响应保护沿用ProfileNormalDispatch投影与真实socket回归。grant在owner结果判定后关闭不撤销已经判定的成功；模型分别保留grantAtResult与当前grantOpen。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-recovery-dispatch | 165 / 104 / 0 | 8 / 8 | 0.847 s / 110,444,544 bytes | PASS |
+| ce-profile-recovery-dispatch-auth | 12 / 12 / 8 | 2 / 不适用 | 1.010 s / 106,217,472 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedRequiresExactOpenGrant |
+| ce-profile-recovery-dispatch-source | 9 / 9 / 6 | 2 / 不适用 | 0.956 s / 107,986,944 bytes | EXPECTED_COUNTEREXAMPLE:CopyRequiresSourceCredit |
+| ce-profile-recovery-dispatch-close | 97 / 70 / 13 | 6 / 不适用 | 0.975 s / 107,118,592 bytes | EXPECTED_COUNTEREXAMPLE:SuccessRequiresCurrentGrantAtDecision |
+| ce-profile-recovery-dispatch-activate | 61 / 47 / 16 | 4 / 不适用 | 0.826 s / 109,740,032 bytes | EXPECTED_COUNTEREXAMPLE:RecoveryDoesNotActivateNormal |
+| ce-profile-recovery-dispatch-unknown | 91 / 66 / 16 | 5 / 不适用 | 0.906 s / 110,592,000 bytes | EXPECTED_COUNTEREXAMPLE:NoneIsNotSubmittedData |
+| ce-profile-recovery-dispatch-io | 38 / 32 / 17 | 3 / 不适用 | 0.793 s / 106,676,224 bytes | EXPECTED_COUNTEREXAMPLE:IoProtectionWaitsForActualTerminals |
+
+六个mutation分别跳过exact OPEN tuple、在没有源额度时复制、忽略close后的资格、恢复激活normal、把unknown/stale映成NONE、取消提前释放I/O资源，均命中指定性质。首次 scoped `unified-wal-model-9d0m0sbd`七配置通过，再执行最终既有矩阵；没有改变旧模型或重绑旧receipt。
+
+最终 `unified-wal-model-vuhtsh6x` tool exit0，175配置为41正向完整PASS/134指定反例；冻结348 source inputs/527 checksums，父提交 `6f44a97fc9c679cda0e0919663497c4dde1d4715`与五个designInputs保持父提交绑定。Java `unified-wal-local-WaFfvigz`922输入、14类398项为393通过/5 macOS Linux-affinity跳过；116共享hash精确匹配，1154去重union与20份Java回执checksum已核验，Spotless/Checkstyle通过。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint，CHECK_DEADLOCK FALSE，复现命令不变。
+
+[真实恢复socket与文件交错](../profile-wire/README.md#真实隔离-add_recovery-接线)另验CRC、固定头N、实际源占用、force、关闭grant、断连/native锁及restart重复点读。该有限投影不证明实际mTLS/密码学、fsync、确定missing、真实RepairIntent授权/CLOSED、coordinator/client quorum、生产listener/readiness、总内存、业务timer、公平性/活性、掉电或性能；完整A/C/D、组合、Block G及步骤11/14/Gate仍OPEN。

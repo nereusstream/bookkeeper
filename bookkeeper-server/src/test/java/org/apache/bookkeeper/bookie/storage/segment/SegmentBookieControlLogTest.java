@@ -63,8 +63,10 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -6408,6 +6410,329 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    @Test
+    public void profileSocketRecoveryWritesOnlyUnderExactGrantAndResolvesDuplicateAfterRestart() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 6)); // Deliberately no normal ACTIVATE.
+            grantStorage(storage);
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                socket.send(ProfileOperation.ADD_RECOVERY, 2, recoveryBody(2, (byte) 0, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, 2, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+                SegmentFileIo io = ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo;
+                int writes = io.writes;
+                assertTrue(writes > 0);
+                socket.send(ProfileOperation.ADD_RECOVERY, 3, recoveryBody(2, (byte) 0, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, 3, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+                assertEquals(writes, io.writes);
+                socket.send(ProfileOperation.ADD_RECOVERY, 4, recoveryBody(2, (byte) 9, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, 4, ProfileStatus.StatusClass.PROFILE_IDENTITY_CONFLICT,
+                        ProfileStatus.DurableResult.NONE);
+                assertEquals(writes, io.writes);
+                socket.add(5, context(), 3, (byte) 6, entry(context(), 3));
+                socket.status(5, ProfileStatus.StatusClass.PROFILE_NOT_READY_OR_STALE,
+                        ProfileStatus.DurableResult.NONE);
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 2).result()) {
+                    assertEquals(0, read.result().record().entry().get(36));
+                }
+            }
+        }
+        try (IsolatedSegmentStorage restarted = storage(config, 1, 6, 8, 16, 3)) {
+            restarted.restart();
+            try (ProfileSocket socket = new ProfileSocket(restarted)) {
+                socket.send(ProfileOperation.ADD_RECOVERY, 6, recoveryBody(2, (byte) 0, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, 6, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+                assertEquals(0, ((IsolatedSegmentFiles) storageField(restarted, "files")).dataIo.writes);
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketRecoveryRejectsWrongTupleAndMalformedEntryBeforeDataIo() throws Exception {
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 6));
+            grantStorage(storage);
+            SegmentFileIo io = ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo;
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                long requestId = 2;
+                byte[] body = recoveryBody(2, (byte) 0, 8);
+                body[120] ^= 1;
+                socket.send(ProfileOperation.ADD_RECOVERY, requestId, body);
+                socket.status(ProfileOperation.ADD_RECOVERY, requestId++, ProfileStatus.StatusClass.UNAUTHORIZED,
+                        ProfileStatus.DurableResult.NONE);
+                body = recoveryBody(2, (byte) 0, 8);
+                body[8] ^= 1;
+                socket.send(ProfileOperation.ADD_RECOVERY, requestId, body);
+                socket.status(ProfileOperation.ADD_RECOVERY, requestId++,
+                        ProfileStatus.StatusClass.PROFILE_IDENTITY_CONFLICT, ProfileStatus.DurableResult.NONE);
+                for (int offset : new int[] {75, 76, 84, 92, 100}) {
+                    body = recoveryBody(2, (byte) 0, 8);
+                    if (offset == 75) {
+                        body[offset] ^= 1;
+                    } else {
+                        ByteBuffer.wrap(body).putLong(offset, offset == 92 ? 1 : 99);
+                    }
+                    socket.send(ProfileOperation.ADD_RECOVERY, requestId, body);
+                    socket.status(ProfileOperation.ADD_RECOVERY, requestId++,
+                            ProfileStatus.StatusClass.RECOVERY_GRANT_INVALID, ProfileStatus.DurableResult.NONE);
+                }
+                for (int offset : new int[] {60, 116, 118, 140, 108, 176}) {
+                    body = recoveryBody(2, (byte) 0, 8);
+                    if (offset == 60) {
+                        Arrays.fill(body, 60, 76, (byte) 0);
+                    } else if (offset == 108) {
+                        ByteBuffer.wrap(body).putLong(offset, 3); // Outer coordinate differs from the CRC-valid entry.
+                    } else {
+                        body[offset] ^= 1;
+                    }
+                    socket.send(ProfileOperation.ADD_RECOVERY, requestId, body);
+                    socket.status(ProfileOperation.ADD_RECOVERY, requestId++, ProfileStatus.StatusClass.BAD_REQUEST,
+                            ProfileStatus.DurableResult.NONE);
+                }
+                installStorage(storage, tombstone(44, 3));
+                socket.send(ProfileOperation.ADD_RECOVERY, requestId, recoveryBody(2, (byte) 0, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, requestId,
+                        ProfileStatus.StatusClass.TOMBSTONED_OR_DELETED, ProfileStatus.DurableResult.NONE);
+                assertEquals(0, io.writes);
+                assertEquals(0, io.forces);
+                assertEquals(0, ((SegmentExecutionGroup) storageField(storage, "execution")).inputs().usedBytes());
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketRecoveryRejectsInstalledLimitBeforeReceivingBody() throws Exception {
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 6));
+            grantStorage(storage);
+            SegmentFileIo io = ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo;
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                byte[] bytes = ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.ADD_RECOVERY, 2,
+                        recoveryBody(2, (byte) 0, 1025)));
+                socket.client.writeAndFlush(Unpooled.wrappedBuffer(bytes, 0, 36)).sync();
+                assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                socket.assertBudgetZero();
+                assertNull(socket.responses.poll());
+                assertEquals(0, io.writes);
+                assertEquals(0, io.forces);
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketRecoverySourcePressureRefusesBeforeCopyAndResumes() throws Exception {
+        CountDownLatch blocked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (IsolatedSegmentStorage storage = new IsolatedSegmentStorage(config(), identity(), key((byte) 3), VALIDATOR,
+                new SegmentExecutionGroup.Settings(1, 3, 6, 2, 4096, 4096,
+                        2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                new IsolatedSegmentStorage.Limits(1024 * 1024, 16, 16, 1, 1,
+                        new SegmentDataPhysicalDriver.BatchLimits(4096, 3, Duration.ofSeconds(30))))) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 6));
+            grantStorage(storage);
+            SegmentExecutionGroup execution = (SegmentExecutionGroup) storageField(storage, "execution");
+            SegmentFileIo io = ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo;
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                assertTrue(execution.owner(0).control(() -> {
+                    blocked.countDown();
+                    await(release);
+                }));
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                for (int i = 2; i <= 4; i++) {
+                    socket.send(ProfileOperation.ADD_RECOVERY, i, recoveryBody(i, (byte) 0, 1024));
+                    // Isolate source pressure from a coalesced first TLS plaintext read exhausting UNCLASSIFIED.
+                    long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (execution.inputs().usedBytes() != (i - 1) * 1060) {
+                        assertTrue("Expected charged source input", System.nanoTime() < end);
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                }
+                socket.send(ProfileOperation.ADD_RECOVERY, 5, recoveryBody(2, (byte) 0, 1024));
+                socket.status(ProfileOperation.ADD_RECOVERY, 5, ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE,
+                        ProfileStatus.DurableResult.NONE);
+                assertEquals(3 * 1060, execution.inputs().usedBytes());
+                assertEquals(0, io.writes);
+                release.countDown();
+                Set<Long> awaiting = new HashSet<>(Set.of(2L, 3L, 4L));
+                for (int i = 0; i < 3; i++) {
+                    ProfileFrame reply = socket.response();
+                    assertTrue("Each accepted request completes once", awaiting.remove(reply.header().requestId()));
+                    socket.status(reply, ProfileOperation.ADD_RECOVERY, ProfileStatus.StatusClass.OK,
+                            ProfileStatus.RetryDisposition.NEVER,
+                            ProfileStatus.DurableResult.APPLIED);
+                }
+                assertTrue(awaiting.isEmpty());
+                ownerBarrier(execution.owner(0));
+                assertEquals(0, execution.inputs().usedBytes());
+                int writes = io.writes;
+                assertTrue(writes > 0);
+                socket.send(ProfileOperation.ADD_RECOVERY, 6, recoveryBody(2, (byte) 0, 1024));
+                socket.status(ProfileOperation.ADD_RECOVERY, 6, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+                assertEquals(writes, io.writes);
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketRecoveryGrantCloseAfterWriteReportsStaleUnknown() throws Exception {
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 6));
+            grantStorage(storage);
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo = io;
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                socket.send(ProfileOperation.ADD_RECOVERY, 2, recoveryBody(2, (byte) 0, 8));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertTrue(io.writes > 0);
+                assertEquals(0, io.forces);
+                assertNull(socket.responses.poll(100, TimeUnit.MILLISECONDS));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT, closeStorageGrant(storage));
+                release.countDown();
+                socket.status(ProfileOperation.ADD_RECOVERY, 2, ProfileStatus.StatusClass.RECOVERY_GRANT_INVALID,
+                        ProfileStatus.RetryDisposition.AFTER_CONTROL_RECONCILIATION,
+                        ProfileStatus.DurableResult.UNKNOWN);
+                ownerBarrier(((SegmentExecutionGroup) storageField(storage, "execution")).owner(0));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE, closeStorageGrant(storage));
+                int writes = io.writes;
+                socket.send(ProfileOperation.ADD_RECOVERY, 3, recoveryBody(2, (byte) 0, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, 3, ProfileStatus.StatusClass.RECOVERY_GRANT_INVALID,
+                        ProfileStatus.DurableResult.NONE);
+                assertEquals(writes, io.writes);
+                socket.add(4, context(), 3, (byte) 6, entry(context(), 3));
+                socket.status(4, ProfileStatus.StatusClass.PROFILE_NOT_READY_OR_STALE,
+                        ProfileStatus.DurableResult.NONE);
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 2).result()) {
+                    assertEquals(2, read.result().record().entryId());
+                }
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketRecoveryDisconnectKeepsActualIoAndWriterExclusion() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        IsolatedSegmentStorage storage = storage(config, 1, 6, 8, 16, 3);
+        try {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 6));
+            grantStorage(storage);
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo = io;
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                socket.send(ProfileOperation.ADD_RECOVERY, 2, recoveryBody(2, (byte) 0, 8));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertNull(socket.responses.poll(100, TimeUnit.MILLISECONDS));
+                assertFalse(storage.close(Duration.ofMillis(50)));
+                socket.disconnect();
+                socket.assertBudgetZero();
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                release.countDown();
+                assertTrue(storage.close(Duration.ofSeconds(5)));
+                assertEquals(1, io.forces);
+                assertNull(socket.responses.poll());
+            }
+        } finally {
+            release.countDown();
+            storage.close();
+        }
+        try (IsolatedSegmentStorage restarted = storage(config, 1, 6, 8, 16, 3)) {
+            restarted.restart();
+            try (ProfileSocket socket = new ProfileSocket(restarted)) {
+                socket.send(ProfileOperation.ADD_RECOVERY, 3, recoveryBody(2, (byte) 0, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, 3, ProfileStatus.StatusClass.OK,
+                        ProfileStatus.DurableResult.APPLIED);
+                assertEquals(0, ((IsolatedSegmentFiles) storageField(restarted, "files")).dataIo.writes);
+            }
+        }
+    }
+
+    @Test
+    public void profileSocketRecoveryForceFailureReportsUnknown() throws Exception {
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            installStorage(storage, install(44, 1, (byte) 6));
+            grantStorage(storage);
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            ((IsolatedSegmentFiles) storageField(storage, "files")).dataIo = io;
+            try (ProfileSocket socket = new ProfileSocket(storage)) {
+                socket.send(ProfileOperation.ADD_RECOVERY, 2, recoveryBody(2, (byte) 0, 8));
+                socket.status(ProfileOperation.ADD_RECOVERY, 2, ProfileStatus.StatusClass.DURABILITY_RESULT_UNKNOWN,
+                        ProfileStatus.DurableResult.UNKNOWN);
+                assertTrue(io.writes > 0);
+                assertEquals(1, io.forces);
+            }
+            IOException failed = assertThrows(IOException.class, storage::close);
+            assertTrue(failed.getMessage(), failed.getMessage().contains("Failed DATA session must remain unclosed"));
+        }
+    }
+
+    private static SegmentBookieControlLog.RecoveryCloseStatus closeStorageGrant(IsolatedSegmentStorage storage)
+            throws Exception {
+        CompletableFuture<SegmentBookieControlLog.RecoveryCloseStatus> ready = new CompletableFuture<>();
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!storage.controls().submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9), (result, cause) -> {
+            if (cause == null) {
+                ready.complete(result);
+            } else {
+                ready.completeExceptionally(cause);
+            }
+        })) {
+            assertTrue(System.nanoTime() < end);
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        return ready.get(5, TimeUnit.SECONDS);
+    }
+
+    private static void grantStorage(IsolatedSegmentStorage storage) throws Exception {
+        CompletableFuture<List<SegmentBookieControlLog.Result>> ready = new CompletableFuture<>();
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!storage.controls().submitRecoveryGrant(recoveryGrant(2, 3, 7, 9), (results, cause) -> {
+            if (cause == null) {
+                ready.complete(results);
+            } else {
+                ready.completeExceptionally(cause);
+            }
+        })) {
+            assertTrue(System.nanoTime() < end);
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                ready.get(5, TimeUnit.SECONDS).get(0).status());
+    }
+
+    private static byte[] recoveryBody(long entryId, byte payload, int payloadBytes) throws Exception {
+        ByteBuf entry = entry(context(), entryId, -1, payloadBytes, payload, payloadBytes);
+        try {
+            return ProfileOperationCodec.encode(ProfileOperation.ADD_RECOVERY,
+                    recoveryAddWithEntry(entryId, entry.nioBuffer()));
+        } finally {
+            entry.release();
+        }
+    }
+
     private static void replaceBookieIo(SegmentBookieControlLog bookie, SegmentFileIo io) throws Exception {
         var field = SegmentBookieControlLog.class.getDeclaredField("io");
         field.setAccessible(true);
@@ -6578,21 +6903,32 @@ public class SegmentBookieControlLogTest {
 
         private ProfileStatus status(ProfileOperation operation, long requestId, ProfileStatus.StatusClass status,
                                      ProfileStatus.DurableResult durable) throws Exception {
-            ProfileFrame frame = response();
-            assertEquals(requestId, frame.header().requestId());
-            assertEquals(operation, frame.header().operation());
-            assertTrue(frame.header().isResponse());
-            assertEquals(status != ProfileStatus.StatusClass.OK, frame.header().isError());
-            assertEquals(ProfileStatus.ENCODED_LENGTH, frame.body().length);
-            ProfileStatus result = ProfileStatus.decodePrefix(ByteBuffer.wrap(frame.body()));
-            assertEquals(status, result.statusClass());
-            assertEquals(durable, result.durableResult());
             ProfileStatus.RetryDisposition retry = switch (status) {
                 case PROFILE_NOT_READY_OR_STALE -> ProfileStatus.RetryDisposition.AFTER_CONTROL_RECONCILIATION;
                 case TRANSIENT_UNAVAILABLE, DURABILITY_RESULT_UNKNOWN ->
                         ProfileStatus.RetryDisposition.SAME_PROFILE_OPERATION;
                 default -> ProfileStatus.RetryDisposition.NEVER;
             };
+            return status(operation, requestId, status, retry, durable);
+        }
+
+        private ProfileStatus status(ProfileOperation operation, long requestId, ProfileStatus.StatusClass status,
+                                     ProfileStatus.RetryDisposition retry, ProfileStatus.DurableResult durable)
+                throws Exception {
+            ProfileFrame frame = response();
+            assertEquals(requestId, frame.header().requestId());
+            return status(frame, operation, status, retry, durable);
+        }
+
+        private ProfileStatus status(ProfileFrame frame, ProfileOperation operation, ProfileStatus.StatusClass status,
+                                     ProfileStatus.RetryDisposition retry, ProfileStatus.DurableResult durable) {
+            assertEquals(operation, frame.header().operation());
+            assertTrue(frame.header().isResponse());
+            assertEquals(ProfileStatus.ENCODED_LENGTH, frame.body().length);
+            ProfileStatus result = ProfileStatus.decodePrefix(ByteBuffer.wrap(frame.body()));
+            assertEquals(status, result.statusClass());
+            assertEquals(status != ProfileStatus.StatusClass.OK, frame.header().isError());
+            assertEquals(durable, result.durableResult());
             assertEquals(retry, result.retryDisposition());
             assertEquals(0, result.detailCode());
             return result;

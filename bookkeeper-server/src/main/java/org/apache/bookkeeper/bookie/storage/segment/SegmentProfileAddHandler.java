@@ -44,9 +44,10 @@ import org.apache.bookkeeper.proto.profile.ProfileInboundFrame;
 import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.tls.TLSContextFactory;
 
-/** Isolated normal-Add and credential-authorized fence; caller owns listener, event loops and storage lifetime. */
+/** Isolated normal/recovery Add and fence; caller owns listener, event loops and storage lifetime. */
 final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private static final int ADD_PREFIX_BYTES = 100;
+    private static final int RECOVERY_PREFIX_BYTES = 144;
     private static final int RESPONSE_BYTES = ProfileFrameCodec.OUTER_LENGTH_PREFIX
             + ProfileFrameHeader.ENCODED_LENGTH + ProfileStatus.ENCODED_LENGTH;
     private final IsolatedSegmentStorage storage;
@@ -86,7 +87,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             int bytes = frame.header().operation() == ProfileOperation.HELLO
                     ? 2 * (ProfileFrameHeader.ENCODED_LENGTH + ProfileFrameCodec.OUTER_LENGTH_PREFIX
                             + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES)
-                    : (frame.header().operation() == ProfileOperation.FENCE_LEDGER ? 200 : ADD_PREFIX_BYTES)
+                    : (frame.header().operation() == ProfileOperation.FENCE_LEDGER
+                            || frame.header().operation() == ProfileOperation.ADD_RECOVERY ? 200 : ADD_PREFIX_BYTES)
                             + RESPONSE_BYTES;
             credit = ProfileInboundPipeline.reserveResponse(ctx.pipeline(), bytes);
             request = new Pending(frame, credit);
@@ -100,7 +102,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             if (frame.header().operation() == ProfileOperation.HELLO) {
                 tls.authenticatedProfilePrincipal(ctx.pipeline().get(SslHandler.class), trustDomain);
                 // The decoder validated protocol range and the canonical client capability vector.
-                // This slice advertises no optional capabilities; it cannot enable install/recovery/range.
+                // No optional capabilities: install/grant control-plane and range remain disabled.
                 ProfileInboundPipeline.markEstablished(ctx.pipeline());
                 established = true;
                 byte[] body = hello.encode();
@@ -109,6 +111,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 ctx.close();
             } else if (frame.header().operation() == ProfileOperation.FENCE_LEDGER) {
                 fence(ctx, request);
+            } else if (frame.header().operation() == ProfileOperation.ADD_RECOVERY) {
+                recoveryAdd(ctx, request);
             } else if (frame.header().operation() != ProfileOperation.ADD_NORMAL) {
                 write(ctx, request, ProfileStatus.unsupported(), null);
             } else {
@@ -181,6 +185,54 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         } catch (IOException uncertain) {
             pendingRequest.storageRequest.stopWaiting();
             write(ctx, pendingRequest, unknown(), null);
+        }
+    }
+
+    private void recoveryAdd(ChannelHandlerContext ctx, Pending request) {
+        ProfileOperationCodec.AddRecovery tuple;
+        ByteBuf entry;
+        try {
+            ByteBuf body = request.frame.body();
+            int start = body.readerIndex();
+            int length = body.readableBytes();
+            if (length < RECOVERY_PREFIX_BYTES
+                    || body.getUnsignedShort(start + 116) != ProfileOperationCodec.CREDENTIAL_KIND
+                    || body.getUnsignedShort(start + 118) != ProfileOperationCodec.CREDENTIAL_LENGTH
+                    || body.getUnsignedInt(start + 140) != length - RECOVERY_PREFIX_BYTES
+                    || length - RECOVERY_PREFIX_BYTES < SegmentBatchFormat.ENTRY_OVERHEAD
+                    || length - RECOVERY_PREFIX_BYTES > maxEntryBytes) {
+                throw new IllegalArgumentException("Invalid Profile recovery Add body");
+            }
+            ProfileLedgerContext context = ProfileLedgerContext.decode(
+                    body.nioBuffer(start, ProfileLedgerContext.ENCODED_LENGTH));
+            byte[] intentId = new byte[ProfileOperationCodec.OPERATION_ID_LENGTH];
+            byte[] credential = new byte[ProfileOperationCodec.CREDENTIAL_LENGTH];
+            body.getBytes(start + 60, intentId);
+            body.getBytes(start + 120, credential);
+            // Only the small authorization tuple is copied. The reference codec must not clone the payload.
+            tuple = new ProfileOperationCodec.AddRecovery(context, intentId,
+                    body.getLong(start + 76), body.getLong(start + 84), body.getLong(start + 92),
+                    body.getLong(start + 100), body.getLong(start + 108), credential, new byte[0]);
+            entry = body.slice(start + RECOVERY_PREFIX_BYTES, length - RECOVERY_PREFIX_BYTES);
+        } catch (IllegalArgumentException invalid) {
+            write(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE), null);
+            return;
+        }
+        request.recoveryRequest = new SegmentDataPhysicalDriver.RecoveryRequest((result, failure) ->
+                complete(ctx, request, recoveryResultStatus(result, failure)));
+        try {
+            SegmentBookieControlLog.NormalRejection refused = storage.submitProfileRecovery(
+                    tuple, entry, request.recoveryRequest);
+            if (refused != null) {
+                request.recoveryRequest.stopWaiting();
+                write(ctx, request, rejectionStatus(refused), null);
+            }
+        } catch (IllegalArgumentException invalidEntry) {
+            request.recoveryRequest.stopWaiting();
+            write(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE), null);
+        } catch (IOException uncertain) {
+            request.recoveryRequest.stopWaiting();
+            write(ctx, request, unknown(), null);
         }
     }
 
@@ -292,6 +344,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             case TOMBSTONED -> status(StatusClass.TOMBSTONED_OR_DELETED,
                     RetryDisposition.NEVER, DurableResult.NONE);
             case FENCED -> status(StatusClass.FENCED, RetryDisposition.NEVER, DurableResult.NONE);
+            case INVALID_GRANT -> status(StatusClass.RECOVERY_GRANT_INVALID,
+                    RetryDisposition.NEVER, DurableResult.NONE);
         };
     }
 
@@ -307,6 +361,24 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     RetryDisposition.NEVER, DurableResult.NONE);
             // A stale admission can follow a durable physical write. Do not claim this attempt did no DATA I/O.
             case STALE_ADMISSION -> status(StatusClass.PROFILE_NOT_READY_OR_STALE,
+                    RetryDisposition.AFTER_CONTROL_RECONCILIATION, DurableResult.UNKNOWN);
+            case UNKNOWN -> unknown();
+        };
+    }
+
+    private static ProfileStatus recoveryResultStatus(SegmentDataPhysicalDriver.RecoveryResult result,
+                                                       Throwable failure) {
+        if (failure != null || result == null) {
+            return unknown();
+        }
+        return switch (result.status()) {
+            case LOCAL_DURABLE -> status(StatusClass.OK, RetryDisposition.NEVER, DurableResult.APPLIED);
+            case TRANSIENT_UNAVAILABLE -> status(StatusClass.TRANSIENT_UNAVAILABLE,
+                    RetryDisposition.SAME_PROFILE_OPERATION, DurableResult.NONE);
+            case CONFLICT -> status(StatusClass.PROFILE_IDENTITY_CONFLICT,
+                    RetryDisposition.NEVER, DurableResult.NONE);
+            // A close/tombstone cut after physical I/O cannot establish that this attempt did no DATA write.
+            case STALE_ADMISSION -> status(StatusClass.RECOVERY_GRANT_INVALID,
                     RetryDisposition.AFTER_CONTROL_RECONCILIATION, DurableResult.UNKNOWN);
             case UNKNOWN -> unknown();
         };
@@ -400,6 +472,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         private boolean closeAfterWrite;
         private ScheduledFuture<?> deadline;
         private SegmentDataPhysicalDriver.NormalRequest storageRequest;
+        private SegmentDataPhysicalDriver.RecoveryRequest recoveryRequest;
 
         private Pending(ProfileInboundFrame frame, ProfileInboundPipeline.ResponseCredit credit) {
             this.frame = frame;
@@ -435,6 +508,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 }
                 if (storageRequest != null) {
                     storageRequest.stopWaiting();
+                }
+                if (recoveryRequest != null) {
+                    recoveryRequest.stopWaiting();
                 }
             }
             returnResourcesIfTerminal();
