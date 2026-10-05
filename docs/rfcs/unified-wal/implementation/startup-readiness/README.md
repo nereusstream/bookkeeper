@@ -129,3 +129,37 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 模型 `unified-wal-model-s992kax7` 绑定同一父提交、234 source inputs/403 checksum，134 配置为 34 正向完整 PASS、100 指定反例；新 registration publication 投影 868 distinct states、12 动作 coverage 非零、4 指定反例，详见[模型结果](../models/README.md#session-绑定的-registration-publication-投影)。所有 source hash 与本轮实现一致，旧 receipt/source/design 绑定保持原样；上面 CAS 25 测试与 reference receipt 是历史增量，不改为本轮结果。冻结 Wave 0 scope guard 的历史 BLOCK 保持，脚本/allowlist 未修改，本轮不重复当作当前 backend 验收。
 
 本轮只完成独立实验 namespace 的真实发布协议。生产 BookieServiceInfo/现有 available registry、真实 startup/local receipt 与 delete catch-up、listener/placement/本地 admission 的持续连接事件接线、watcher 与失连立即降级、实际 ZooKeeper quorum/重启、BookKeeper wrapper 全自动重建/重投组合、ProfileControlStore/sidecar/安装激活仍未完成。会话自动过期清理不等于临时断连立即删除远端节点；一个 cold check 也不证明持续服务 readiness。没有 production authority、掉电、性能、长期工作集或完整 A/C/D 与组合结论，步骤 12/Gate 保持 PARTIAL。
+
+## 步骤 12：真实本地 readiness receipt
+
+2026-10-05，[`SegmentLocalReadinessStore`](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentLocalReadinessStore.java) 实现既有 `LocalReadinessStore`。调用方提供已创建、受保护的实验 Bookie 目录、BookieId 与 incarnation；复用 `SegmentDataFileLock` 的进程内 scope 保留及实际 OS writer 锁，并复用 `SegmentFileIo` 的完整短写、有限零进度与 force 路径。它只持久化已提供的结论，不读取或证明 compatibility、required-device、allocator/route recovery、delete assignment/cursor；这些仍须在每次 startup 新鲜验证，旧 receipt 不能代替恢复事实。
+
+目录只使用三个固定名字：`local-readiness.lock`、已发布的 `local-readiness`、未发布的 `local-readiness.pending`。相同完整记录返回 ALREADY_APPLIED；同 incarnation 的严格更高 readiness generation 才可替换，旧代或同代不同内容返回 CONFLICT。当前 payload 之外不保存历史，100 代真实替换后仍只有 receipt 与 lock 两个文件。此结论只涉及 receipt，不扩展到既有 Arena/Bookie 业务历史或整个存储工作集。
+
+发布顺序是完整 temp write → temp `force(true)` → 同目录 `ATOMIC_MOVE + REPLACE_EXISTING` → parent directory `force(true)` → APPLIED。没有原子替换能力时直接保留 UNKNOWN，不退化为普通 move。write、文件同步、替换或目录同步的 I/O 失败均永久隔离当前实例：后续 write 仍 DURABILITY_UNKNOWN，read 明确抛异常，不能把已可读的 renamed bytes 当作已持久成功，也不能当作 absent。调用方不得通过这种异常开放本地服务。
+
+新 cold attempt 在独占锁内严格解析已发布文件、核对 Bookie/incarnation、同步该文件及目录之后，才返回 receipt；缺少正式文件时返回 empty。未发布的 pending 永不用于恢复，后续明确的新 write 可在这个固定临时路径重写。此恢复同步只确认 receipt 文件，不能清除 DATA/control 的已知 I/O 错误、未 CLOSED 会话或未完成删除追赶。constructor 任一校验/同步失败均保持未开放，并尝试释放 writer scope；释放失败作为 suppressed exception 保留，不伪造清理成功。
+
+close 先关闭当前实例的读写资格，再释放实际 writer；即使释放抛异常，该实例也不再读写，后续 close 仍可重试资源清理。真实重复关闭与关闭后拒绝已验证；native lock/channel close 失败未实际注入。
+
+### 实验本地 envelope v1
+
+[`SegmentLocalReadinessCodec`](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentLocalReadinessCodec.java) 的 big-endian 格式总长度 `112 + nameBytes`，范围 113～367 bytes：8-byte magic `UWLRD001`、schema int32=1、total length int32、Bookie name int32 byte length/canonical UTF-8、incarnation16、manifest identity32、device/format/effective-delete/readiness 四个 int64 generation、status int32（1 READY/2 QUARANTINED）、durable flag int32（0/1）、前面全部字节的 CRC32C int32。READY 必须 durable=true，所有 generation 严格为正。未知 magic/schema/状态、非规范 UTF-8/NUL、零 identity/generation、错误长度/校验和及尾随字节均拒绝；先检查文件大小再分配。现有 control、DATA、image、wire 及冻结 reference 格式均未变化。
+
+### 本轮验证与边界
+
+Java `unified-wal-local-readiness-0bt45og9` 绑定父提交 `4f9c2c24151cbef9ddb8c7da9b6fc86e9ec10fc7` 和 47 source inputs：本地 store 10、ephemeral 13、persistent CAS 8、原 reference 17，共 48/48 通过，0 failure/error/skip；Spotless/Checkstyle 通过。真实覆盖短写及部分失败、文件/目录 barrier 失败后的不可解析成功、恢复 barrier 失败、unpublished temp、固定字节向量、损坏及大小/scope/符号链接拒绝、运行中损坏不覆盖、目录别名重复打开后跨进程 writer 仍互斥，以及三个发布边界退出后各再发布/退出/重开一轮。
+
+子进程退出点分别为 temp write 后/force 前、temp 已 force 且已 rename 后/directory force 前，以及完整发布返回 APPLIED 后；第二次退出后仍保留新 receipt，旧 generation 不再成功。它是进程退出与实际 FileChannel 证据，不是掉电或文件系统故障模型的实证。
+
+`referenceStartupUsesRealFileReceiptAndBothZooKeeperStores` 让原 harness 使用真实文件 receipt 和两个真实 ZK stores，处理 persistent reply loss，再 demote、重开 receipt、新 nonce 重跑九个阶段。原 typed recovery/compatibility/device/delete facts 未变成真实生产恢复；WRITABLE 仍只描述该组合测试的 reference 结果，普通 Add 冷操作计数保持 0。此前使用内存 local store 的历史场景与回执保留。
+
+```bash
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am \
+  -Dtest=SegmentLocalReadinessStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,StartupReadinessFactsTest,StartupReadinessHarnessTest \
+  -Dsurefire.failIfNoSpecifiedTests=false -DtestRetryCount=0 test
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+```
+
+本轮模型 `unified-wal-model-4h3zm7ae` 绑定同一父提交、245 source inputs/421 checksum；140 配置为 35 正向完整 PASS、105 指定反例。本地投影 56 distinct states、11 个 Next 动作 coverage 非零、5 个指定反例。有限 publication 投影及完整模型结果见[本地 receipt 模型](../models/README.md#本地-readiness-receipt-发布投影)。本轮不接入 EmbeddedServer 的 pre-replay fence、真实 recovery/delete catch-up、生产 BookieServiceInfo/available registry 或连续连接事件的本地 admission；ProfileControlStore、sidecar、安装激活、完整 A/C/D 组合、quorum、掉电和性能也仍未完成。步骤 12 与生产 Gate 保持 PARTIAL；原 scope guard/receipt/design source 绑定未改变。

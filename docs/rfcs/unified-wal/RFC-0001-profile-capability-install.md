@@ -910,7 +910,7 @@ RFC 进入 Accepted 前必须：
 - protected 20-byte credential、install control record与现有master-key persistence的物理整合；逻辑表示与non-disclosure已冻结；
 - 后续跨instance credential/KMS rotation只能直接修改当前协议并同步technical discriminator、迁移与兼容边界；当前同instance原地rotation不是OPEN；
 - create cancellation、orphan install tombstone 与 GC；
-- persistent readiness 已有隔离 [ZooKeeper CAS/path/schema 实验增量](implementation/startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)；另有 [session-owned info/ephemeral 发布实验](implementation/startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)；稳定 metadata 合同、真实启动、生产 BookieServiceInfo/registry 与持续失连降级仍开放；
+- persistent readiness 已有隔离 [ZooKeeper CAS/path/schema 实验增量](implementation/startup-readiness/README.md#步骤-12真实-zookeeper-readiness-cas-增量)；另有 [session-owned info/ephemeral 发布实验](implementation/startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)；另有 [有界真实文件 local readiness receipt](implementation/startup-readiness/README.md#步骤-12真实本地-readiness-receipt)，只持久化 supplied facts、未接真实 recovery/delete catch-up；稳定 metadata 合同、真实启动、生产 BookieServiceInfo/registry 与持续失连降级仍开放；
 - CAS→activation gap 的 exact error/retry/backoff、availability completion 与 partial-activation credential distribution；
 - write-time inactive orphan/possibly-activated target 的 GC state machine；
 - ledgerId reuse 最终策略，以及 instance 分配 authority；

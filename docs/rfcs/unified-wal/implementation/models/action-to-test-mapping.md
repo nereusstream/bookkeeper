@@ -442,3 +442,15 @@ slot/stream、成功 FREE、durable apply、framing/CRC 和物理同步是有限
 | Reply / Query | 实际提交后 lost/held callback，fresh owned exact read；lost info/writable/demote 与 `committedWritableWithHeldReplyRemainsUnknownUntilFreshRead` 不猜测成功 |
 
 `actualServerSessionExpiryRemovesAllEphemeralsAndKeepsPersistentRecord` 与 `actualSessionExpiryBeforeSuccessCallbackCannotReportApplied` 使用真实 server `closeSession`，不是模拟过期回调；foreign 相同字段不得被新 harness 认领，实际 ACL 拒绝/坏 envelope 不等于 absent。`referenceStartupUsesActualPersistentAndEphemeralStoresWithoutClaimingLocalRecovery` 只证明 reference 顺序与两个真实 ZK stores 的组合；local fsync/recovery/readiness 均未由 typed inputs 自动取得。
+
+## 本地 readiness receipt 动作
+
+| 动作 | 实现与真实文件验证 |
+| --- | --- |
+| Begin / WriteTemp | `realReceiptReopensAndKeepsOnlyTheCurrentGeneration` 验证等价重试、同代冲突、100 代固定文件工作集；`shortTransfersCompleteButPartialFailureCannotBeReadAsDurable` 使用实际短写与部分 write 失败 |
+| SyncFile / Rename / SyncDirectory / Reply | temp force→atomic replacement→directory force→APPLIED；`failedFileOrDirectoryBarrierPoisonsTheAttemptEvenWhenBytesAreReadable` 分别阻断两个 barrier，当前 attempt 不因正式文件可读而成功 |
+| Query | UNKNOWN 实例不能 read 或再次 write；`corruptionDuringAnOpenAttemptCannotBeHiddenOrOverwritten` 验证正式文件运行中损坏不被隐藏/重写 |
+| Crash / Reopen / ReadRecovered | `realProcessExitsAtPublicationBoundariesRecoverOnlyPublishedReceipts` 在三阶段 halt，各再发布/退出/重开一轮；未 published temp 保持旧 receipt，renamed receipt 经新同步读取，成功后的新代与冲突结果保持 |
+| RecoveryFailure | `requiredRecoveryBarrierFailureAndSymbolicLinksAreRejected` 在新实例的文件/目录恢复同步失败时拒绝开放；`invalidAuthoritativeBytesAndWrongScopeFailClosedAndReleaseTheLock` 覆盖坏格式/大小/scope 及失败后 writer scope 释放 |
+
+固定字节向量独立检查字段及 CRC32C，真实跨进程 writer 拒绝在目录别名的失败第二打开后仍成立。`referenceStartupUsesRealFileReceiptAndBothZooKeeperStores` 组合真实 local receipt、persistent CAS 与 session-owned ephemeral，处理回复丢失和新 attempt；原恢复/设备/删除输入仍为 typed facts，没有服务级启动、DATA 恢复或掉电结论。

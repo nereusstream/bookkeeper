@@ -718,3 +718,23 @@ CHECK_DEADLOCK FALSE 只允许有限终态；无 fairness/liveness、真实 quor
 最终回执 `unified-wal-model-s992kax7` 绑定父提交 `8e2d6668168e9983a270781d027f714159908c89`、234 source inputs 与 403 checksum；134 配置为 34 正向完整 PASS、100 指定反例，全部符合预期。官方 TLC 1.7.4、单 worker、固定 seed/fp、无状态约束或对称化；复现仍用 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`。全部 source/hash 校验已执行，5 份 designInputs 保持父提交绑定，旧结果不改绑。实际 server session expiration、ACL/codec 和发布交错另见[真实 registration 验证](../startup-readiness/README.md#步骤-12真实-ephemeral-发布增量)。
 
 CHECK_DEADLOCK FALSE 只允许有限终态。当前性质不要求一个以前成功的 ephemeral hint 在 authority 后续变化后仍有效；实际读取仍需 fresh authority/reference，持续服务准入必须单独接失连/降级事件。模型不证明 liveness/fairness、quorum、真实持久化或 local receipt、全部工作集、listener/placement、生产 registry、安装激活、完整 A/C/D/组合、Block G、掉电或性能。
+
+
+## 本地 readiness receipt 发布投影
+
+2026-10-05，`LocalReadinessPublication.tla` 描述既有 receipt 1、不同内容的目标 receipt 2、请求 generation 1/2、一次 write/rename/回复/退出/cold reopen。exclusive writer、严格 scope/codec、atomic rename 与成功文件/目录 barrier 的 crash 保留规则是输入。temp 不参与恢复；新实例在文件与目录恢复同步后才提供 receipt。对当前 UNKNOWN 实例的读则直接失败，不能因新文件已可读而解析成功。这里没有新建 recovery 状态或改变 DATA/control 的隔离合同。
+
+| 配置 | generated / distinct / queue | depth / diameter | wall / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-local-readiness-publication | 63 / 56 / 0 | 11 / 11 | 0.739 s / 109,740,032 bytes | PASS |
+| ce-local-readiness-publication-file | 39 / 34 / 5 | 7 / 不适用 | 0.737 s / 111,362,048 bytes | EXPECTED_COUNTEREXAMPLE: AppliedHasFileAndDirectoryBarriers |
+| ce-local-readiness-publication-directory | 39 / 34 / 5 | 7 / 不适用 | 0.735 s / 111,034,368 bytes | EXPECTED_COUNTEREXAMPLE: AppliedHasFileAndDirectoryBarriers |
+| ce-local-readiness-publication-unknown | 36 / 33 / 5 | 7 / 不适用 | 0.740 s / 109,772,800 bytes | EXPECTED_COUNTEREXAMPLE: UncertainInstanceNeverReturnsReceipt |
+| ce-local-readiness-publication-pending | 24 / 22 / 7 | 5 / 不适用 | 0.734 s / 108,691,456 bytes | EXPECTED_COUNTEREXAMPLE: UnpublishedTempNeverBecomesReceipt |
+| ce-local-readiness-publication-generation | 21 / 20 / 9 | 5 / 不适用 | 0.734 s / 110,231,552 bytes | EXPECTED_COUNTEREXAMPLE: OneGenerationBindsOneReceipt |
+
+11 个 Next 动作均有非零 coverage：Begin 2:2、WriteTemp 1:1、SyncFile 2:2、Rename 1:1、SyncDirectory 2:2、Reply 1:1、Query 5:5、Crash 10:17、Reopen 10:10、RecoveryFailure 10:10、ReadRecovered 10:10。五个错误规则分别跳过文件同步、目录同步、UNKNOWN 读隔离、采用未发布 pending、允许同代不同内容覆盖；均沿 Next 轨迹违反指定性质。真实文件、writer lock、codec 和子进程退出验证见[本地 receipt 实现](../startup-readiness/README.md#步骤-12真实本地-readiness-receipt)。
+
+最终回执 `unified-wal-model-4h3zm7ae` 绑定父提交 `4f9c2c24151cbef9ddb8c7da9b6fc86e9ec10fc7`、245 source inputs 和 421 checksum；140 配置为 35 正向完整 PASS、105 指定反例，全部符合预期。47 Java 输入均包含于该 source set，全部 source/checksum 及 5 个父提交 designInputs 已核对。复现命令保持 `python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar`，官方 TLC 1.7.4、单 worker、固定 seed/fp，无状态约束或对称化，旧回执不改绑定。
+
+CHECK_DEADLOCK FALSE 只允许有限终态。物理 FileChannel 和进程退出证据不等于掉电，输入的 fsync/atomic-rename 假设也不由 TLC 自证。真实 recovery/device/delete catch-up、生产 startup/registry、持续失连准入、quorum、长期工作集、性能、完整 A/C/D 与组合、Block G 和生产 Gate 均未由该 receipt 投影闭合。

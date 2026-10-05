@@ -406,3 +406,16 @@ cursor没有持久授权语义，重启从头不影响selector/T/generation；�
 | UnresolvedPublicationNeverReportsApplied | post-submit timeout/loss 仍 RESPONSE_LOST，owned exact read 才解析；demote unknown 不重新开放 nonce | 模型不证明实际网络、client deadline 或 watcher；真实回复故障由 server 事务后注入 |
 
 generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务准入必须重新匹配，不能把过往 publish PASS 视为 lease。当前有限投影不是 service lifecycle、安装/激活、quorum 或完整 A+C/D 证明。
+
+## 本地 readiness receipt
+
+| 性质 | 实现合同与实际验证 | 模型边界 |
+| --- | --- | --- |
+| TypeOK（LocalReadinessPublication） | 两份不同内容的 receipt、请求 generation 1/2、一次 publication/进程退出/cold reopen | 独占 writer、严格 scope/codec、原子 rename 和成功 barrier 的 crash 保留规则是输入 |
+| AppliedHasFileAndDirectoryBarriers | APPLIED 晚于 temp force、atomic rename 与 parent force；文件或目录 force 失败使实例 UNKNOWN | 真实 FileChannel 与有限故障点验证顺序，不证明文件系统或硬件 barrier 实现 |
+| UncertainInstanceNeverReturnsReceipt | UNKNOWN 后当前实例的 read 抛异常、write 继续 UNKNOWN；不能用可读 renamed bytes 解析成功 | cold reopen 可完成新的 receipt 文件/目录同步，但不解除 DATA/control 已知错误 |
+| UnpublishedTempNeverBecomesReceipt | load 只读取已发布名字，pending 从不成为恢复 authority | 不需要临时文件有有效 checksum；物理清理/覆盖仅针对该 scope 的固定 pending 路径 |
+| OneGenerationBindsOneReceipt | 同完整记录等价成功、严格更高 readiness generation 才可替换；同代冲突及旧代拒绝 | 不裁剪 Arena/Bookie 请求历史，不建立业务 requestEra |
+| ConfirmedReceiptSurvivesCrash | 成功文件和目录 barrier 后的 receipt 在抽象 crash 中保留；重开再次同步后才可读 | 实际两轮子进程退出覆盖 publish/reopen，不冒充掉电或整个 startup 的恢复证明 |
+
+五个指定反例分别取消文件同步、目录同步、隔离读门槛、采用 pending 或允许同代覆盖。CHECK_DEADLOCK FALSE 仅允许有限终态。compatibility/device/recovery/delete catch-up、ZK registration、持续准入、quorum、liveness、性能及完整 A/C/D 组合不由该投影证明。

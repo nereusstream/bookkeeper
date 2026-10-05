@@ -25,6 +25,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Base64;
@@ -33,6 +34,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentLocalReadinessStore;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore.PublicationStatus;
@@ -56,9 +58,14 @@ import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.data.Stat;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
+    @Rule
+    public final TemporaryFolder temporary = new TemporaryFolder();
+
     private ZKProfileRegistrationStore persistent(TestClient client) {
         return new ZKProfileRegistrationStore(client, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
     }
@@ -330,6 +337,32 @@ public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
         assertTrue(publisher.readWritable(BOOKIE).isPresent());
         assertEquals(StartupReadinessResult.Outcome.WRITABLE,
                 harness.run(input, StartupCrashPoint.NONE).outcome());
+    }
+
+    @Test
+    public void referenceStartupUsesRealFileReceiptAndBothZooKeeperStores() throws Exception {
+        StartupReadinessInput input = input();
+        Path directory = temporary.newFolder().toPath();
+        ZKProfileEphemeralRegistrationStore publisher = publisher(first);
+        try (SegmentLocalReadinessStore local = new SegmentLocalReadinessStore(directory, BOOKIE, storage(1))) {
+            StartupReadinessHarness harness = new StartupReadinessHarness(local, persistent(first), publisher);
+            first.loseReply.set(true);
+            assertEquals(StartupReadinessResult.Outcome.WRITABLE,
+                    harness.run(input, StartupCrashPoint.NONE).outcome());
+            assertEquals(input.targetReadinessGeneration(), local.read(BOOKIE).orElseThrow().readinessGeneration());
+            assertTrue(publisher.readWritable(BOOKIE).isPresent());
+        }
+        publisher.demote(BOOKIE);
+        publisher = publisher(second);
+        try (SegmentLocalReadinessStore local = new SegmentLocalReadinessStore(directory, BOOKIE, storage(1))) {
+            StartupReadinessHarness harness = new StartupReadinessHarness(local, persistent(second), publisher);
+            StartupReadinessResult result = harness.run(input, StartupCrashPoint.NONE);
+            assertEquals(StartupReadinessResult.Outcome.WRITABLE, result.outcome());
+            assertEquals(List.of(StartupReadinessResult.StartupPhase.values()), result.completedPhases());
+            assertTrue(result.metrics().normalAdd().isZero());
+            assertEquals(record(1), persistent(second).read(BOOKIE).versionedRecord().orElseThrow().record());
+            assertTrue(publisher.readWritable(BOOKIE).isPresent());
+        }
     }
 
     private static StartupReadinessInput input() {
