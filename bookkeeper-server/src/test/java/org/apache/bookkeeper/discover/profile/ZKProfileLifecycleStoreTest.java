@@ -143,11 +143,14 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
         var before = metadata.readMembership(44).snapshot();
         var old = before.metadata().getValue().getAllEnsembles().lastEntry().getValue();
         var next = List.of(old.get(0), old.get(1), BookieId.parse(target));
-        var changed = metadata.replaceEnsemble(before, 100, next);
-        assertEquals(ProfileLedgerMetadataStore.Outcome.APPLIED, changed.outcome());
         var installed = new ProfileControlScope(ProfileControlOperation.INSTALL,
                 ProfileControlOperation.INSTALL.purpose(), 44, bytes(16, 1), scope(target).descriptorIdentity(),
                 target, bytes(16, nonce), "d", 8, bytes(16, nonce), bytes(32, nonce), null);
+        var installation = ProfileReplacementInstallPage.from(source, before, 100, next, List.of(installed));
+        assertEquals(CreateStatus.APPLIED,
+                lifecycle.prepareReplacementInstall(source, installation, metadata).status());
+        var changed = metadata.replaceEnsemble(before, 100, next);
+        assertEquals(ProfileLedgerMetadataStore.Outcome.APPLIED, changed.outcome());
         var page = ProfileReplacementPage.from(source, initial,
                 new ProfileLedgerMetadataStore.MembershipSnapshot(before.birthZxid(), changed.metadata()), 100,
                 List.of(new ProfileInstallReceipt(installed, EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1)),
@@ -311,7 +314,7 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
             var source = store(first).read(44).snapshot();
             assertEquals(34, source.lifecycle().sequence());
             assertEquals(35, store(second).retainedActivationTargets(44).targets().size());
-            assertEquals(34, first.getChildren(store(first).path(44), false).size());
+            assertEquals(66, first.getChildren(store(first).path(44), false).size());
             var metadata = membership(first, manager).readMembership(44).snapshot();
             var initial = store(first).readPublishedPage(44).page();
             assertThrows(IllegalArgumentException.class, () -> ProfileReplacementPage.from(source, initial,
@@ -370,6 +373,118 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
         assertThrows(IllegalArgumentException.class,
                 () -> ProfileLifecycleCodec.decodeReplacement(
                         new byte[ProfileLifecycleCodec.REPLACEMENT_MAX_BYTES + 1]));
+    }
+
+    private ProfileReplacementInstallPage installationPlan(ZKProfileReservationStore.Snapshot source,
+            ProfileLedgerMetadataStore.MembershipSnapshot before) {
+        var target = "b4:3181";
+        var install = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                ProfileControlOperation.INSTALL.purpose(),
+                44, bytes(16, 1), scope(target).descriptorIdentity(), target, bytes(16, 10), "d", 8,
+                bytes(16, 10), bytes(32, 10), null);
+        return ProfileReplacementInstallPage.from(source, before, 100,
+                List.of(BookieId.parse("b1:3181"), BookieId.parse("b2:3181"), BookieId.parse(target)),
+                List.of(install));
+    }
+
+    @Test
+    public void installPreparationIsBoundedInactiveAndResolvesLostReplyWithoutAnotherVersion() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            var source = ready(manager);
+            var metadata = membership(first, manager);
+            var before = metadata.readMembership(44).snapshot();
+            var plan = installationPlan(source, before);
+            first.loseReply.set(true); // Metadata birth guard transaction can also lose a reply and reconcile.
+            var prepared = store(first).prepareReplacementInstall(source, plan, metadata);
+            assertTrue(prepared.status() == CreateStatus.APPLIED || prepared.status() == CreateStatus.ALREADY_APPLIED);
+            var retried = store(first).prepareReplacementInstall(source, plan, metadata);
+            assertEquals(CreateStatus.ALREADY_APPLIED, retried.status());
+            assertEquals(prepared.page().storeVersion(), retried.page().storeVersion());
+            var installed = plan.installs().get(0);
+            var authority = store(second).installAuthorityReader("b4:3181", membership(second, manager))
+                    .read(ProfileAuthorityKey.fromScope(installed));
+            assertEquals(ReadStatus.FOUND, authority.status());
+            assertEquals(installed, authority.authority().scope());
+            assertEquals(source, store(first).read(44).snapshot());
+            assertEquals(3, store(first).retainedActivationTargets(44).targets().size());
+            assertEquals(CreateStatus.APPLIED, store(first).cutDelete(source, bytes(16, 120), bytes(32, 120)).status());
+            assertEquals(ReadStatus.NOT_FOUND, store(first).installAuthorityReader("b4:3181", metadata)
+                    .read(ProfileAuthorityKey.fromScope(installed)).status());
+        }
+    }
+
+    @Test
+    public void installPreparationMetadataFreezeWinsAtomicallyBeforeAnyCandidateIsCreated() throws Exception {
+        try (LedgerManager manager = manager(first); LedgerManager other = manager(second)) {
+            var source = ready(manager);
+            var metadata = membership(first, manager);
+            var before = metadata.readMembership(44).snapshot();
+            metadata.ensureMembershipGuard(before, System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
+            var plan = installationPlan(source, before);
+            first.beforeMulti.set(() -> {
+                try {
+                    var custom = new HashMap<>(before.metadata().getValue().getCustomMetadata());
+                    custom.put(ProfileLedgerMetadataStore.MEMBERSHIP_FROZEN_KEY, new byte[]{1});
+                    other.writeLedgerMetadata(44, LedgerMetadataBuilder.from(before.metadata().getValue())
+                            .withCToken(before.metadata().getValue().getCToken()).withCustomMetadata(custom).build(),
+                            before.metadata().getVersion()).get(5, TimeUnit.SECONDS);
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(CreateStatus.CONFLICT,
+                    store(first).prepareReplacementInstall(source, plan, metadata).status());
+            assertEquals(null, first.exists(store(first).path(44) + "/replacement-install-3", false));
+            assertEquals(source, store(first).read(44).snapshot());
+        }
+    }
+
+    @Test
+    public void installPreparationCodecOwnsArraysAndRejectsKindLengthAndScopeCorruption() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            var source = ready(manager);
+            var plan = installationPlan(source, membership(first, manager).readMembership(44).snapshot());
+            var envelope = new ProfileLifecycleCodec.InstallPreparation(new UUID(0, 11), plan);
+            byte[] encoded = ProfileLifecycleCodec.encode(envelope);
+            assertEquals(3, ByteBuffer.wrap(encoded).getInt(12));
+            assertEquals(1, ByteBuffer.wrap(encoded).getInt(228));
+            assertEquals(plan, ProfileLifecycleCodec.decodeInstallPreparation(encoded).value());
+            plan.ensembleDigest()[0]++;
+            assertEquals(plan, ProfileLifecycleCodec.decodeInstallPreparation(encoded).value());
+            for (int offset : List.of(0, 4, 8, 12, 16, 228)) {
+                byte[] corrupt = encoded.clone();
+                ByteBuffer.wrap(corrupt).putInt(offset, -1);
+                checksum(corrupt);
+                assertThrows(IllegalArgumentException.class,
+                        () -> ProfileLifecycleCodec.decodeInstallPreparation(corrupt));
+            }
+            assertThrows(IllegalArgumentException.class, () -> ProfileLifecycleCodec.decodeInstallPreparation(
+                    new byte[ProfileLifecycleCodec.INSTALL_PREP_MAX_BYTES + 1]));
+            assertThrows(IllegalArgumentException.class, () -> ProfileLifecycleCodec.decodeReplacement(encoded));
+        }
+    }
+
+    @Test
+    public void installPreparationFixedIndependentVectorMatchesItsPublicSchema() {
+        byte[] expected = HexFormat.of().parseHex(
+                "5557415000000001000001a60000000300000000000000005557424c00000001000000000000002c0101010101"
+                + "010101010101010101010102020202020202020202020202020202b62a59210000000000000000000000000000"
+                + "00090000000000000000000000000000000b000000000000000800000000000000030000000000000015000000"
+                + "000000000000000000000000330000000000000000060606060606060606060606060606060606060606060606"
+                + "060606060606060600000000000000640707070707070707070707070707070707070707070707070707070707"
+                + "07070700000001000000b65557415500000001000000b600000001000000010000000100000001000000030000"
+                + "00000000002c010101010101010101010101010101010001000109090909090909090909090909090909090909"
+                + "090909090909090909090909090202020202020202020202020202020200000000000000080303030303030303"
+                + "030303030303030304040404040404040404040404040404040404040404040404040404040404040000000162"
+                + "000000016400000000731b2114ca293b1c");
+        var value = new ProfileReplacementInstallPage(reservation().backlink(), new UUID(0, 9), 3, 8,
+                21, 0, 51, 0, bytes(32, 6), 100, bytes(32, 7), List.of(scope("b")));
+        var envelope = new ProfileLifecycleCodec.InstallPreparation(new UUID(0, 11), value);
+        assertArrayEquals(expected, ProfileLifecycleCodec.encode(envelope));
+        assertEquals(value, ProfileLifecycleCodec.decodeInstallPreparation(expected).value());
+        assertEquals(21, ByteBuffer.wrap(expected).getLong(124));
+        assertEquals(100, ByteBuffer.wrap(expected).getLong(188));
+        assertEquals(1, ByteBuffer.wrap(expected).getInt(228));
     }
 
     private static void checksum(byte[] value) {

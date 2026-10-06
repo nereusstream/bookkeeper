@@ -69,6 +69,8 @@ import org.apache.bookkeeper.util.ByteBufList;
 final class ProfileSocketClient implements AutoCloseable {
     private static final ProfileHello.Capability CAPABILITY = new ProfileHello.Capability(
             ProfileInitialControlCodec.CAPABILITY_ID, ProfileInitialControlCodec.SCHEMA);
+    private static final ProfileHello.Capability REPLACEMENT_CAPABILITY = new ProfileHello.Capability(
+            ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID, ProfileInitialControlCodec.REPLACEMENT_SCHEMA);
     private static final int MAX_RESPONSE_FRAME = 36 + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES
             + 8 * ProfileHello.MAX_CAPABILITIES;
     private final boolean normalData;
@@ -158,6 +160,12 @@ final class ProfileSocketClient implements AutoCloseable {
     }
 
     public CompletableFuture<ProfileControlResult> activate(ProfileControlRequest request) {
+        if (request.scope().operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT) {
+            if (!hello().capabilities().contains(REPLACEMENT_CAPABILITY)) {
+                return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+            }
+            return send(request, ProfileControlOperation.ACTIVATE_REPLACEMENT, ProfileOperation.ACTIVATE_REPLACEMENT);
+        }
         return send(request, ProfileControlOperation.ACTIVATE_INITIAL, ProfileOperation.ACTIVATE_INITIAL);
     }
 
@@ -350,7 +358,8 @@ final class ProfileSocketClient implements AutoCloseable {
                         return;
                     }
                     ctx.writeAndFlush(encode(ProfileOperation.HELLO, 1,
-                            new ProfileHello.Client(normalData ? List.of() : List.of(CAPABILITY)).encode()))
+                            new ProfileHello.Client(normalData ? List.of()
+                                    : List.of(CAPABILITY, REPLACEMENT_CAPABILITY)).encode()))
                             .addListener(written -> {
                         if (!written.isSuccess()) {
                             close();

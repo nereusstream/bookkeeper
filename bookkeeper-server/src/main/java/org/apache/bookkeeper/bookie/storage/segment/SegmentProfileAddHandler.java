@@ -70,6 +70,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final SegmentProfileInstallStore physicalControl;
     private ProfileTransportContext transport;
     private boolean initialControlNegotiated;
+    private boolean replacementControlNegotiated;
     private boolean established;
     private boolean controlEstablished;
     private boolean closed;
@@ -134,6 +135,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     initialControlNegotiated = ProfileHello.decodeClient(offer).capabilities().contains(
                             new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
                                     ProfileInitialControlCodec.SCHEMA));
+                    replacementControlNegotiated = ProfileHello.decodeClient(offer).capabilities().contains(
+                            new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
+                                    ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
                 }
                 // Capability agreement grants neither principal permissions nor metadata authority.
                 ProfileInboundPipeline.markEstablished(ctx.pipeline());
@@ -171,7 +175,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void initialControl(ChannelHandlerContext ctx, Pending request) {
-        if (!initialControlNegotiated) {
+        if (request.frame.header().operation() == ProfileOperation.ACTIVATE_REPLACEMENT
+                ? !replacementControlNegotiated : !initialControlNegotiated) {
             request.closeAfterWrite = !controlEstablished;
             write(ctx, request, ProfileStatus.unsupported(), null);
             return;

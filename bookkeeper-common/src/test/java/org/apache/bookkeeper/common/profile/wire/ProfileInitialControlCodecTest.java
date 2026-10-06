@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import org.apache.bookkeeper.common.profile.DurabilityMode;
 import org.apache.bookkeeper.common.profile.EngineProfile;
@@ -73,6 +74,36 @@ public class ProfileInitialControlCodecTest {
                 .getResourceAsStream("profile-wire/initial-control/" + name + "-schema1.bin")) {
             return input.readAllBytes();
         }
+    }
+
+    @Test
+    public void replacementSchemaHasItsOwnFixedBytesAndCannotReplayInitialActivation() throws Exception {
+        var initial = scope(ProfileControlOperation.ACTIVATE_INITIAL);
+        var replacement = new ProfileControlScope(ProfileControlOperation.ACTIVATE_REPLACEMENT,
+                ProfileControlOperation.ACTIVATE_REPLACEMENT.purpose(), initial.ledgerId(), initial.ledgerInstanceId(),
+                initial.descriptorIdentity(), initial.targetBookie(), initial.targetStorageIncarnation(),
+                initial.authorityDomain(), initial.authorityGeneration(), initial.operationId(),
+                initial.publicSemanticPayloadIdentity(), null);
+        byte[] expected = vector("activate");
+        ByteBuffer.wrap(expected).putShort(64, (short) 2);
+        assertArrayEquals(expected,
+                ProfileInitialControlCodec.encodeRequest(ProfileControlRequest.operation(replacement)));
+        assertEquals(replacement, ProfileInitialControlCodec.decodeRequest(ProfileOperation.ACTIVATE_REPLACEMENT,
+                ByteBuffer.wrap(expected), HELLO).scope());
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.ACTIVATE_INITIAL, ByteBuffer.wrap(expected), HELLO));
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.ACTIVATE_REPLACEMENT, ByteBuffer.wrap(vector("activate")), HELLO));
+        var result = new ProfileControlResult(ProfileControlResult.Outcome.APPLIED,
+                ProfileControlOperation.ACTIVATE_REPLACEMENT, replacement.ledgerId(),
+                HexFormat.of().formatHex(replacement.operationId()), replacement.authorityGeneration(),
+                7, true);
+        byte[] reply = vector("applied");
+        ByteBuffer.wrap(reply).putShort(12, (short) 2);
+        assertArrayEquals(reply, ProfileInitialControlCodec.encodeReply(result));
+        assertEquals(result, ProfileInitialControlCodec.decodeReply(ProfileOperation.ACTIVATE_REPLACEMENT, reply));
+        assertThrows(IllegalArgumentException.class,
+                () -> ProfileInitialControlCodec.decodeReply(ProfileOperation.ACTIVATE_INITIAL, reply));
     }
 
     @Test

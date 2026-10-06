@@ -281,3 +281,7 @@ Spotless/Checkstyle exit0，回执 unified-wal-sdk-style-9mkj8q1k 的135个 serv
 ### Replacement publication 与当前 wire 边界
 
 2026-10-06，[replacement授权与目标留存](../profile-control/README.md#replacement-授权与目标留存)已接入真实ZK、标准metadata birth/version的同一publication multi及原reserved file driver的typed ACTIVATE_REPLACEMENT。当前latest authority与cleanup discovery分别查询，DELETE保留历史且停止新的远程授权；SDK故障路径仍本地停止。此增量没有更改initial-control UIC1协商/固定schema或ADD_NORMAL wire，不advertise replacement能力，也不把已发布metadata/authority投影为SDK完成。下一步仍需冻结并接actual replacement control wire/client，再完成原pending全局gate、旧incarnation响应过滤及受影响副本resend。stable/G1和production Gate不提升。
+
+### UIC2 replacement 控制链路
+
+2026-10-06，[new-peer准备与actual replacement wire](../profile-control/README.md#new-peer-inactive-install-与-replacement-wire)复用ProfileInitialControlClient/shared socket与original server control dispatch。UIC1/schema1保持，opcode ACTIVATE_REPLACEMENT使用独立UIC2 id0x55494332/version2及内层schema2；wrong purpose/schema不解析成功，未协商不提交。使用原实际TLS1.3/mTLS/HTTPS peer校验、principal/static role、cold exact authority、frame correlation、CONTROL budget/copy及write/wire终结；没有新增连接用途字段或普通Add协商。四节点真实new-peer inactive INSTALL、ZK membership/page/publication、ACTV、DATA及lost ACTV response同op解析已联通。shared transport仍无retry/reconnect；SDK映射整体切换/resend尚未接通。generic控制body与stable/G1/stock gate保留原BLOCKED/DEFERRED，不能称production writer已完成。

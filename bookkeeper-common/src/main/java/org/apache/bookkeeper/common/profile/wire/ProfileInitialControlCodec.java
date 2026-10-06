@@ -39,6 +39,8 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 public final class ProfileInitialControlCodec {
     public static final long CAPABILITY_ID = 0x55494331L;
     public static final int SCHEMA = 1;
+    public static final long REPLACEMENT_CAPABILITY_ID = 0x55494332L;
+    public static final int REPLACEMENT_SCHEMA = 2;
     public static final int COMMON_BYTES = 126;
     public static final int MIN_INSTALL_BYTES = COMMON_BYTES + 1 + 30 + ProfileDescriptorCodec.MIN_CANONICAL_LENGTH;
     public static final int MAX_ACTIVATE_BYTES = COMMON_BYTES + ProfileControlScope.MAX_AUTHORITY_DOMAIN_BYTES;
@@ -51,13 +53,15 @@ public final class ProfileInitialControlCodec {
     }
 
     public static boolean supported(ProfileOperation operation) {
-        return operation == ProfileOperation.INSTALL || operation == ProfileOperation.ACTIVATE_INITIAL;
+        return operation == ProfileOperation.INSTALL || operation == ProfileOperation.ACTIVATE_INITIAL
+                || operation == ProfileOperation.ACTIVATE_REPLACEMENT;
     }
 
     public static byte[] encodeRequest(ProfileControlRequest request) {
         ProfileControlScope scope = request.scope();
         if (scope.operation() != ProfileControlOperation.INSTALL
-                && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL) {
+                && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL
+                && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT) {
             throw invalid();
         }
         byte[] domain = text(scope.authorityDomain());
@@ -72,7 +76,9 @@ public final class ProfileInitialControlCodec {
         ByteBuffer out = ByteBuffer.allocate(size);
         out.put(new ProfileLedgerContext(scope.ledgerId(), scope.ledgerInstanceId(),
                 scope.descriptorIdentity().toBytes()).encode())
-                .putInt(REQUEST_MAGIC).putShort((short) SCHEMA).putShort((short) 0)
+                .putInt(REQUEST_MAGIC)
+                .putShort((short) (scope.operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT
+                        ? REPLACEMENT_SCHEMA : SCHEMA)).putShort((short) 0)
                 .put(scope.operationId()).put(scope.publicSemanticPayloadIdentity())
                 .putLong(scope.authorityGeneration())
                 .putShort((short) domain.length).put(domain);
@@ -98,7 +104,9 @@ public final class ProfileInitialControlCodec {
         contextBytes.limit(ProfileLedgerContext.ENCODED_LENGTH);
         ProfileLedgerContext context = ProfileLedgerContext.decode(contextBytes);
         in.position(ProfileLedgerContext.ENCODED_LENGTH);
-        if (in.getInt() != REQUEST_MAGIC || in.getShort() != SCHEMA || in.getShort() != 0) {
+        if (in.getInt() != REQUEST_MAGIC || in.getShort() != (operation == ProfileOperation.ACTIVATE_REPLACEMENT
+                ? REPLACEMENT_SCHEMA : SCHEMA)
+                || in.getShort() != 0) {
             throw invalid();
         }
         byte[] id = new byte[16];
@@ -117,13 +125,14 @@ public final class ProfileInitialControlCodec {
             throw invalid();
         }
         ProfileControlOperation purpose = operation == ProfileOperation.INSTALL
-                ? ProfileControlOperation.INSTALL : ProfileControlOperation.ACTIVATE_INITIAL;
+                ? ProfileControlOperation.INSTALL : operation == ProfileOperation.ACTIVATE_REPLACEMENT
+                    ? ProfileControlOperation.ACTIVATE_REPLACEMENT : ProfileControlOperation.ACTIVATE_INITIAL;
         ProfileControlScope scope = new ProfileControlScope(purpose, purpose.purpose(), context.ledgerId(),
                 context.ledgerInstanceId(), ProfileDescriptorIdentity.fromBytes(
                         context.descriptorIdentity()), verifiedLocalHello.bookieId(),
                 verifiedLocalHello.storageIncarnation(),
                 domain, generation, id, payload, null);
-        if (operation == ProfileOperation.ACTIVATE_INITIAL) {
+        if (operation != ProfileOperation.INSTALL) {
             if (in.hasRemaining()) {
                 throw invalid();
             }
@@ -157,7 +166,8 @@ public final class ProfileInitialControlCodec {
 
     public static byte[] encodeReply(ProfileControlResult result) {
         if ((result.operation() != ProfileControlOperation.INSTALL
-                && result.operation() != ProfileControlOperation.ACTIVATE_INITIAL)
+                && result.operation() != ProfileControlOperation.ACTIVATE_INITIAL
+                && result.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT)
                 || result.operationIdHex().length() != 32) {
             throw invalid();
         }
@@ -167,7 +177,9 @@ public final class ProfileInitialControlCodec {
                 && (!result.durable() || result.localGeneration() <= 0)) {
             throw invalid();
         }
-        return ByteBuffer.allocate(REPLY_BYTES).put(status.encode()).putInt(REPLY_MAGIC).putShort((short) SCHEMA)
+        return ByteBuffer.allocate(REPLY_BYTES).put(status.encode()).putInt(REPLY_MAGIC)
+                .putShort((short) (result.operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT
+                        ? REPLACEMENT_SCHEMA : SCHEMA))
                 .putShort((short) (outcomeCode(result.outcome()))).putLong(result.ledgerId())
                 .put(HexFormat.of().parseHex(result.operationIdHex())).putLong(result.authorityGeneration())
                 .putLong(result.localGeneration()).putInt(0).array();
@@ -181,7 +193,8 @@ public final class ProfileInitialControlCodec {
         byte[] prefix = new byte[ProfileStatus.ENCODED_LENGTH];
         in.get(prefix);
         ProfileStatus status = ProfileStatus.decode(prefix);
-        if (in.getInt() != REPLY_MAGIC || in.getShort() != SCHEMA) {
+        if (in.getInt() != REPLY_MAGIC || in.getShort() != (operation == ProfileOperation.ACTIVATE_REPLACEMENT
+                ? REPLACEMENT_SCHEMA : SCHEMA)) {
             throw invalid();
         }
         int kind = Short.toUnsignedInt(in.getShort());
@@ -213,7 +226,8 @@ public final class ProfileInitialControlCodec {
             throw invalid();
         }
         return new ProfileControlResult(outcome, operation == ProfileOperation.INSTALL
-                ? ProfileControlOperation.INSTALL : ProfileControlOperation.ACTIVATE_INITIAL,
+                ? ProfileControlOperation.INSTALL : operation == ProfileOperation.ACTIVATE_REPLACEMENT
+                    ? ProfileControlOperation.ACTIVATE_REPLACEMENT : ProfileControlOperation.ACTIVATE_INITIAL,
                 ledger, HexFormat.of().formatHex(id), generation, local, durable);
     }
 

@@ -523,3 +523,7 @@ ProfileMembershipCas 检查 NewPhysicalBirthIsNeverOverwritten、CapturedBirthIs
 ### Replacement lifecycle 性质
 
 ProfileReplacementLifecycle检查PublicationHasSameMetadataAndPageBirth、MutationUsesObservedRootBirth、DeleteCutNeverReopens、GrantedTargetsAreRetained、GrantRequiresCurrentPublishedAuthority、DiscoveryIncludesPublishedTargets及DiscoveryIsCompleteAtRead；两个sequential same-start目标、一个metadata freeze、两个root/page birth、完整保留prefix。八个变异分别信任inert candidate、忽略delete cut、跳过metadata条件、跳过page/root birth、丢弃前驱、仅发现当前target、接受旧authority。Grant/discovery均为采样时事实；已获本地权限不会被远程cut瞬间撤销。投影不证明codec/CRC/ACL、实际ZK quorum、force、replacement wire、SDK callback/resend、cleanup、clock/liveness或full A+C+D。
+
+### Replacement inactive INSTALL 与 schema 性质
+
+ProfileReplacementInstall检查InstallHasBoundLivePreparation、InstallNeverActivatesNormal、ActivationHasNegotiatedBoundSchema、AckHasActualForceAndOwnerApply。七个独立mutations对应跳过preparation、delete、metadata generation，INSTALL错误开放normal，UIC2/schema2忽略，以及force/apply前确认。一个冻结slot/一个ACTV、metadata predecessor/committed/changed三态、peer/capability/schema可用性；实时时钟/bytes/TLS/元数据quorum与whole memory由实际tests及其他slice负责。grants是读取时snapshot；远程cut不自动撤销已接纳的本地I/O，不证明liveness/fairness、SDK重发或完整A+C+D。

@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.discover.profile;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -137,6 +138,31 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public record InstallPreparationSnapshot(ProfileReplacementInstallPage page, UUID birthId,
+            long storeVersion, byte[] digest) {
+        public InstallPreparationSnapshot {
+            Objects.requireNonNull(page, "page");
+            Objects.requireNonNull(birthId, "birthId");
+            digest = ProfileLifecycleHead.fixed(digest, 32, false);
+            if (birthId.equals(new UUID(0, 0)) || storeVersion < 0) {
+                throw new IllegalArgumentException("Invalid replacement INSTALL snapshot");
+            }
+        }
+        @Override
+    public byte[] digest() {
+        return digest.clone();
+    }
+    }
+
+    public record InstallPreparationResult(CreateStatus status, InstallPreparationSnapshot page) {
+        public InstallPreparationResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == CreateStatus.APPLIED || status == CreateStatus.ALREADY_APPLIED) != (page != null)) {
+                throw new IllegalArgumentException("Only persisted preparation carries a snapshot");
+            }
+        }
+    }
+
     public record ReadResult(ReadStatus status, Snapshot snapshot) {
         public ReadResult {
             Objects.requireNonNull(status, "status");
@@ -211,6 +237,9 @@ public final class ZKProfileReservationStore {
     }
     private String replacementPath(long ledger, long sequence) {
         return path(ledger) + "/replacement-" + sequence;
+    }
+    private String installPreparationPath(long ledger, long sequence) {
+        return path(ledger) + "/replacement-install-" + sequence;
     }
     private static long replacementSequence(ProfileLifecycleHead head) {
         return head.state() == ProfileLifecycleHead.State.REPLACEMENT ? head.sequence()
@@ -525,6 +554,74 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    /** Reserve the next cold slot for inactive INSTALL, before any membership mutation. */
+    public InstallPreparationResult prepareReplacementInstall(Snapshot expected, ProfileReplacementInstallPage page,
+            ProfileLedgerMetadataStore metadata) {
+        long ledger = page.backlink().ledgerId();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var read = read(ledger, deadline);
+            if (read.status() != ReadStatus.FOUND) {
+                return new InstallPreparationResult(read.status() == ReadStatus.UNAVAILABLE
+                        ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.QUARANTINED, null);
+            }
+            var current = read.snapshot();
+            if (!current.lifecycle().birthId().equals(page.lifecycleBirth())
+                    || !current.reservation().equals(expected.reservation())) {
+                return new InstallPreparationResult(CreateStatus.CONFLICT, null);
+            }
+            var existing = installPreparation(current, page.sequence(), deadline);
+            if (existing != null) {
+                return new InstallPreparationResult(existing.page().equals(page)
+                        ? CreateStatus.ALREADY_APPLIED : CreateStatus.CONFLICT,
+                        existing.page().equals(page) ? existing : null);
+            }
+            var head = current.lifecycle();
+            if (!current.equals(expected) || head.state() != ProfileLifecycleHead.State.READY
+                    && head.state() != ProfileLifecycleHead.State.REPLACEMENT
+                    || page.sequence() != head.sequence() + 1) {
+                return new InstallPreparationResult(CreateStatus.CONFLICT, null);
+            }
+            var observed = metadata.readMembership(ledger, deadline);
+            if (observed.status() != ReadStatus.FOUND || !page.matchesBefore(observed.snapshot())
+                    || !page(current, deadline).page().matchesQuorum(observed.snapshot().metadata().getValue())) {
+                return new InstallPreparationResult(observed.status() == ReadStatus.UNAVAILABLE
+                        ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.CONFLICT, null);
+            }
+            var guarded = metadata.ensureMembershipGuard(observed.snapshot(), deadline);
+            if (guarded == null || !page.matchesBefore(guarded)) {
+                return new InstallPreparationResult(CreateStatus.CONFLICT, null);
+            }
+            var envelope = new ProfileLifecycleCodec.InstallPreparation(UUID.randomUUID(), page);
+            var ops = new ArrayList<Op>();
+            ops.add(Op.check(path(ledger), current.rootDataVersion()));
+            ops.add(Op.check(marker(headPath(ledger), head.birthId()), 0));
+            ops.add(Op.check(headPath(ledger), current.lifecycleDataVersion()));
+            ops.addAll(metadata.checksForMembership(guarded));
+            ops.add(Op.create(installPreparationPath(ledger, page.sequence()), ProfileLifecycleCodec.encode(envelope),
+                    pageAcls, CreateMode.PERSISTENT));
+            ops.add(Op.create(marker(installPreparationPath(ledger, page.sequence()), envelope.birthId()),
+                    new byte[0], immutableAcls, CreateMode.PERSISTENT));
+            int code = multi(ops, deadline);
+            var after = read(ledger, deadline);
+            if (after.status() != ReadStatus.FOUND) {
+                return new InstallPreparationResult(CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            var actual = installPreparation(after.snapshot(), page.sequence(), deadline);
+            boolean equal = actual != null && actual.page().equals(page);
+            return new InstallPreparationResult(equal ? code == Code.OK.intValue() ? CreateStatus.APPLIED
+                    : CreateStatus.ALREADY_APPLIED : conditionalFailure(code) ? CreateStatus.CONFLICT
+                    : CreateStatus.DURABILITY_UNKNOWN, equal ? actual : null);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new InstallPreparationResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new InstallPreparationResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (IOException | IllegalArgumentException invalid) {
+            return new InstallPreparationResult(CreateStatus.QUARANTINED, null);
+        }
+    }
+
     /** Persist one bounded post-CAS candidate. Its existence is never activation authority. */
     public ReplacementResult prepareReplacement(Snapshot expected, ProfileReplacementPage desired,
             ProfileLedgerMetadataStore metadata) {
@@ -792,6 +889,56 @@ public final class ZKProfileReservationStore {
         };
     }
 
+    public ProfileControlStore installAuthorityReader(String targetBookie, ProfileLedgerMetadataStore metadata) {
+        var initial = installAuthorityReader(targetBookie);
+        return key -> {
+            long deadline = System.nanoTime() + timeoutNanos;
+            try {
+                var read = read(key.ledgerId(), deadline);
+                if (read.status() != ReadStatus.FOUND) {
+                    return new ProfileControlStore.ReadResult(read.status(), null);
+                }
+                var current = read.snapshot();
+                var head = current.lifecycle();
+                if (head.state() == ProfileLifecycleHead.State.PREPARING) {
+                    return initial.read(key);
+                }
+                if (head.state() == ProfileLifecycleHead.State.DELETE_INTENT) {
+                    return ProfileControlStore.ReadResult.notFound();
+                }
+                InstallPreparationSnapshot plan = head.sequence() < 2 + ProfileReplacementPage.MAX_PUBLICATIONS
+                        ? installPreparation(current, head.sequence() + 1, deadline) : null;
+                if (plan == null && head.state() == ProfileLifecycleHead.State.REPLACEMENT) {
+                    plan = installPreparation(current, head.sequence(), deadline);
+                }
+                if (plan == null) {
+                    return ProfileControlStore.ReadResult.notFound();
+                }
+                var observed = metadata.readMembership(key.ledgerId(), deadline);
+                if (observed.status() != ReadStatus.FOUND) {
+                    return observed.status() == ReadStatus.NOT_FOUND ? ProfileControlStore.ReadResult.quarantined()
+                            : new ProfileControlStore.ReadResult(observed.status(), null);
+                }
+                if (!plan.page().matchesBefore(observed.snapshot())
+                        && !plan.page().matchesCommitted(observed.snapshot())) {
+                    return ProfileControlStore.ReadResult.notFound();
+                }
+                return plan.page().installs().stream().filter(scope -> scope.targetBookie().equals(targetBookie)
+                        && ProfileAuthorityKey.fromScope(scope).equals(key)).findFirst()
+                        .map(scope -> ProfileControlStore.ReadResult.found(new CommittedProfileAuthority(scope,
+                                CommittedProfileAuthority.State.PREPARING, EngineProfile.SEGMENT_WAL_ENGINE,
+                                current.lifecycleVersion(), true))).orElseGet(ProfileControlStore.ReadResult::notFound);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return ProfileControlStore.ReadResult.unavailable();
+            } catch (TimeoutException | IllegalStateException unavailable) {
+                return ProfileControlStore.ReadResult.unavailable();
+            } catch (IllegalArgumentException invalid) {
+                return ProfileControlStore.ReadResult.quarantined();
+            }
+        };
+    }
+
     public ProfileControlStore activationAuthorityReader(String targetBookie, LedgerManager manager) {
         ProfileAuthorityCodec.text(Objects.requireNonNull(targetBookie, "targetBookie"),
                 ProfileControlScope.MAX_TARGET_BOOKIE_BYTES);
@@ -851,6 +998,31 @@ public final class ZKProfileReservationStore {
                 ProfileLifecycleCodec.digest(node.bytes()));
     }
 
+    private InstallPreparationSnapshot installPreparation(Snapshot current, long sequence, long deadline)
+            throws InterruptedException, TimeoutException {
+        var node = reads.get(installPreparationPath(current.reservation().backlink().ledgerId(), sequence), deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(node);
+        requirePersistent(node, true);
+        var envelope = ProfileLifecycleCodec.decodeInstallPreparation(node.bytes());
+        var value = envelope.value();
+        var base = current.reservation().installs().get(0);
+        if (!value.backlink().equals(current.reservation().backlink())
+                || !value.lifecycleBirth().equals(current.lifecycle().birthId()) || value.sequence() != sequence
+                || value.controlGeneration() != base.authorityGeneration()
+                || value.installs().stream().anyMatch(scope ->
+                        !scope.descriptorIdentity().equals(base.descriptorIdentity())
+                        || !scope.authorityDomain().equals(base.authorityDomain()))) {
+            throw new IllegalArgumentException("Invalid replacement preparation identity/descriptor/domain");
+        }
+        String path = installPreparationPath(current.reservation().backlink().ledgerId(), sequence);
+        requireMarker(marker(path, envelope.birthId()), node.stat().getCzxid(), deadline);
+        return new InstallPreparationSnapshot(value, envelope.birthId(), node.stat().getMzxid(),
+                ProfileLifecycleCodec.digest(node.bytes()));
+    }
+
     private ReplacementSnapshot replacement(Snapshot current, long sequence, long deadline)
             throws InterruptedException, TimeoutException {
         long ledger = current.reservation().backlink().ledgerId();
@@ -905,7 +1077,19 @@ public final class ZKProfileReservationStore {
             previousMetadata = previous.page().metadataVersion();
         }
         var base = current.reservation().installs().get(0);
-        return desired.metadataVersion() == previousMetadata + 1 && desired.installs().stream().allMatch(value ->
+        var preparedInstall = installPreparation(current, desired.sequence(), deadline);
+        boolean installBound = preparedInstall == null
+                ? current.reservation().installs().containsAll(desired.installs().stream()
+                        .map(ProfileInstallReceipt::scope).toList())
+                : preparedInstall.page().metadataVersion() + 1 == desired.metadataVersion()
+                    && preparedInstall.page().metadataBirthZxid() == desired.metadataBirthZxid()
+                    && preparedInstall.page().creatorToken() == desired.creatorToken()
+                    && preparedInstall.page().fragmentStart() == desired.fragmentStart()
+                    && Arrays.equals(preparedInstall.page().ensembleDigest(), desired.ensembleDigest())
+                    && preparedInstall.page().installs().equals(desired.installs().stream()
+                            .map(ProfileInstallReceipt::scope).toList());
+        return installBound && desired.metadataVersion() == previousMetadata + 1
+                && desired.installs().stream().allMatch(value ->
                 value.scope().descriptorIdentity().equals(base.descriptorIdentity())
                         && value.scope().authorityDomain().equals(base.authorityDomain()));
     }

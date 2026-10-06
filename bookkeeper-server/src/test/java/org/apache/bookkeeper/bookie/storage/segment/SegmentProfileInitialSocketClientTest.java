@@ -96,10 +96,13 @@ import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
 import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
+import org.apache.bookkeeper.discover.profile.ProfileInstallReceipt;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementInstallPage;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementPage;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
@@ -187,8 +190,7 @@ public class SegmentProfileInitialSocketClientTest {
         final List<Runnable> heldReplies = new CopyOnWriteArrayList<>();
         final CountDownLatch firstReplies = new CountDownLatch(3);
         final CountDownLatch secondReplies = new CountDownLatch(3);
-        final List<List<Integer>> dataResults = List.of(new CopyOnWriteArrayList<>(),
-                new CopyOnWriteArrayList<>(), new CopyOnWriteArrayList<>());
+        final List<List<Integer>> dataResults = new ArrayList<>();
         volatile boolean holdFirstReplies;
         final AtomicInteger replyFault = new AtomicInteger();
         final AtomicInteger faultTarget = new AtomicInteger(2);
@@ -201,6 +203,10 @@ public class SegmentProfileInitialSocketClientTest {
         ProtectedProfileCredential credential;
 
         Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl) throws Exception {
+            this(blockInstall, blockActivate, enableControl, 3);
+        }
+
+        Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count) throws Exception {
             try {
                 cluster.startCluster();
                 ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
@@ -238,8 +244,9 @@ public class SegmentProfileInitialSocketClientTest {
                         cert.getIssuerX500Principal().getName(javax.security.auth.x500.X500Principal.CANONICAL),
                         cert.getSubjectX500Principal().getName(javax.security.auth.x500.X500Principal.CANONICAL));
                 Path fixtureDirectory = temporary.newFolder().toPath();
-                for (int index = 0; index < 3; index++) {
+                for (int index = 0; index < count; index++) {
                     final int target = index;
+                    dataResults.add(new CopyOnWriteArrayList<>());
                     SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(bytes(16, index + 5)),
                             new UUID(0, 9), BookieId.parse("socket" + index + ":3181"));
                     identities.add(identity);
@@ -276,17 +283,26 @@ public class SegmentProfileInitialSocketClientTest {
                             ProfileAuthorityPurpose.PREPARING_INSTALL, 44, bytes(16, 1),
                             ProfileDescriptorCodec.identityOf(DESCRIPTOR, VALIDATOR), identity.bookieId().toString(),
                             identity.incarnation().value(), "ledger-profile", 1, bytes(16, 3), bytes(32, 4), null);
-                    scopes.add(scope);
-                    var installReader = reservations.installAuthorityReader(scope.targetBookie());
+                    if (index < 3) {
+                        scopes.add(scope);
+                    }
+                    var metadataContext = new ProfileLedgerMetadataStore(zk, (AbstractZkLedgerManager) manager,
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var installReader = reservations.installAuthorityReader(scope.targetBookie(), metadataContext);
                     var activeReader = reservations.activationAuthorityReader(scope.targetBookie(), manager);
+                    var replacementReader = reservations.replacementAuthorityReader(
+                            scope.targetBookie(), metadataContext);
                     var control = new SegmentProfileControlConfig(VALIDATOR,
                             (caller, operation) -> caller.equals(principal)
                                     && (operation == ProfileControlOperation.INSTALL
-                                        || operation == ProfileControlOperation.ACTIVATE_INITIAL),
+                                        || operation == ProfileControlOperation.ACTIVATE_INITIAL
+                                        || operation == ProfileControlOperation.ACTIVATE_REPLACEMENT),
                             key -> {
                                 authorityReads.incrementAndGet();
                                 return key.purpose() == ProfileAuthorityPurpose.PREPARING_INSTALL
-                                        ? installReader.read(key) : activeReader.read(key);
+                                        ? installReader.read(key)
+                                        : key.purpose() == ProfileAuthorityPurpose.POST_MEMBERSHIP_REPLACEMENT
+                                            ? replacementReader.read(key) : activeReader.read(key);
                             },
                             (caller, requested, authority) -> caller.equals(principal)
                                     && requested.equals(authority.scope()) ? Decision.ALLOW : Decision.DENY,
@@ -311,7 +327,9 @@ public class SegmentProfileInitialSocketClientTest {
                                                     int op = frame.getUnsignedShort(frame.readerIndex() + 14);
                                                     int fault = target == faultTarget.get() ? replyFault.get() : 0;
                                                     if (fault == 1
-                                                            && op == ProfileOperation.ACTIVATE_INITIAL.wireValue()) {
+                                                            && (op == ProfileOperation.ACTIVATE_INITIAL.wireValue()
+                                                                || op == ProfileOperation.ACTIVATE_REPLACEMENT
+                                                                    .wireValue())) {
                                                         frame.release();
                                                         promise.setSuccess();
                                                         return;
@@ -714,6 +732,93 @@ public class SegmentProfileInitialSocketClientTest {
             } finally {
                 source.release();
             }
+        }
+    }
+
+    private record PreparedReplacement(ProfileReplacementPage page,
+            ZKProfileReservationStore.Snapshot source, ZKProfileReservationStore.ReplacementSnapshot candidate,
+            ProfileInitialControlClient control) { }
+
+    private PreparedReplacement replacementOverSocket(Fixture fixture) throws Exception {
+        var coordinator = fixture.reservations;
+        var source = coordinator.read(44).snapshot();
+        var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        var before = metadata.readMembership(44).snapshot();
+        var original = before.metadata().getValue().getAllEnsembles().lastEntry().getValue();
+        var replacement = fixture.identities.get(3);
+        var scope = new ProfileControlScope(ProfileControlOperation.INSTALL, ProfileControlOperation.INSTALL.purpose(),
+                44, bytes(16, 1), ProfileDescriptorCodec.identityOf(DESCRIPTOR, VALIDATOR),
+                replacement.bookieId().toString(), replacement.incarnation().value(), "ledger-profile", 1,
+                bytes(16, 10), bytes(32, 10), null);
+        var next = List.of(original.get(0), original.get(1), replacement.bookieId());
+        var plan = ProfileReplacementInstallPage.from(source, before, 100, next, List.of(scope));
+        assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                coordinator.prepareReplacementInstall(source, plan, metadata).status());
+        var control = fixture.connect(3, 4, Duration.ofSeconds(5));
+        var installed = control.install(ProfileControlRequest.install(scope, DESCRIPTOR_BYTES,
+                EngineProfile.SEGMENT_WAL_ENGINE, fixture.credential)).get(5, TimeUnit.SECONDS);
+        assertEquals(Outcome.APPLIED, installed.outcome());
+        assertFalse(fixture.normal(3));
+        var changed = metadata.replaceEnsemble(before, 100, next);
+        assertEquals(ProfileLedgerMetadataStore.Outcome.APPLIED, changed.outcome());
+        var receipt = ProfileInstallReceipt.from(scope, control.hello(), installed);
+        var page = ProfileReplacementPage.from(source, coordinator.readPublishedPage(44).page(),
+                new ProfileLedgerMetadataStore.MembershipSnapshot(before.birthZxid(), changed.metadata()), 100,
+                List.of(receipt), bytes(16, 11), bytes(32, 11));
+        var prepared = coordinator.prepareReplacement(source, page, metadata);
+        assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, prepared.status());
+        return new PreparedReplacement(page, source, prepared.page(), control);
+    }
+
+    @Test
+    public void newPeerInactiveInstallAndReplacementActivationUseActualTlsMetadataAndFileIo() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 4)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var prepared = replacementOverSocket(fixture);
+            var request = ProfileControlRequest.operation(prepared.page().activation("socket3:3181"));
+            assertEquals(Outcome.NOT_FOUND, prepared.control().activate(request).get(5, TimeUnit.SECONDS).outcome());
+            assertFalse(fixture.normal(3));
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, fixture.reservations.publishReplacement(
+                    prepared.source(), prepared.candidate(), metadata).status());
+            assertEquals(Outcome.APPLIED, prepared.control().activate(request).get(5, TimeUnit.SECONDS).outcome());
+            assertTrue(fixture.normal(3));
+            var client = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
+            var source = entry(fixture, 100, 16);
+            try {
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        client.addNormal(fixture.context(), fixture.credential, 100, source).get(5, TimeUnit.SECONDS)
+                                .durableResult());
+            } finally {
+                source.release();
+            }
+            assertEquals(4, fixture.reservations.retainedActivationTargets(44).targets().size());
+        }
+    }
+
+    @Test
+    public void lostReplacementSocketResponseReconcilesSamePublishedOperationWithNewControlClient() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 4)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var prepared = replacementOverSocket(fixture);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            fixture.reservations.publishReplacement(prepared.source(), prepared.candidate(), metadata);
+            prepared.control().close();
+            var failing = fixture.connect(3, 1, Duration.ofMillis(150));
+            fixture.faultTarget.set(3);
+            fixture.replyFault.set(1);
+            var request = ProfileControlRequest.operation(prepared.page().activation("socket3:3181"));
+            assertThrows(ExecutionException.class, () -> failing.activate(request).get(5, TimeUnit.SECONDS));
+            assertTrue(fixture.normal(3));
+            fixture.replyFault.set(0);
+            var retry = fixture.connect(3, 1, Duration.ofSeconds(5));
+            assertEquals(Outcome.ALREADY_APPLIED, retry.activate(request).get(5, TimeUnit.SECONDS).outcome());
+            assertEquals(4, fixture.reservations.retainedActivationTargets(44).targets().size());
         }
     }
 

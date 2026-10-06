@@ -25,6 +25,7 @@ import java.util.UUID;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
+import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 
 /** Fixed head and bounded immutable initial target page; all encoded fields are public. */
 final class ProfileLifecycleCodec {
@@ -35,6 +36,9 @@ final class ProfileLifecycleCodec {
     static final int REPLACEMENT_FIXED_BYTES = 324;
     static final int REPLACEMENT_MAX_BYTES = REPLACEMENT_FIXED_BYTES
             + ProfileReservation.MAX_INITIAL_TARGETS * (4 + ProfileAuthorityCodec.MAX_BYTES + 40);
+    static final int INSTALL_PREP_FIXED_BYTES = 236;
+    static final int INSTALL_PREP_MAX_BYTES = INSTALL_PREP_FIXED_BYTES
+            + ProfileReservation.MAX_INITIAL_TARGETS * (4 + ProfileAuthorityCodec.MAX_BYTES);
     private static final int HEAD_MAGIC = 0x55574c48;
     private static final int PAGE_MAGIC = 0x55574150;
 
@@ -50,6 +54,14 @@ final class ProfileLifecycleCodec {
         Replacement {
             if (birthId == null || birthId.equals(new UUID(0, 0)) || value == null) {
                 throw new IllegalArgumentException("Invalid replacement page birth");
+            }
+        }
+    }
+
+    record InstallPreparation(UUID birthId, ProfileReplacementInstallPage value) {
+        InstallPreparation {
+            if (birthId == null || birthId.equals(new UUID(0, 0)) || value == null) {
+                throw new IllegalArgumentException("Invalid replacement preparation birth");
             }
         }
     }
@@ -239,6 +251,71 @@ final class ProfileLifecycleCodec {
         return new Replacement(birth, new ProfileReplacementPage(backlink, lifecycleBirth, operation, payload,
                 generation, sequence, previous, previousDigest, metadataBirth, version, creator, start, ensemble,
                 initial, initialDigest, receipts));
+    }
+
+    static byte[] encode(InstallPreparation envelope) {
+        var page = envelope.value();
+        var scopes = page.installs().stream().map(scope -> ProfileAuthorityCodec.encode(
+                new CommittedProfileAuthority(scope, CommittedProfileAuthority.State.PREPARING,
+                        EngineProfile.SEGMENT_WAL_ENGINE, 0, true))).toList();
+        int size = INSTALL_PREP_FIXED_BYTES + scopes.stream().mapToInt(scope -> 4 + scope.length).sum();
+        ByteBuffer out = ByteBuffer.allocate(size);
+        out.putInt(PAGE_MAGIC).putInt(1).putInt(size).putInt(3).putLong(0).put(page.backlink().encode())
+                .putLong(page.lifecycleBirth().getMostSignificantBits())
+                .putLong(page.lifecycleBirth().getLeastSignificantBits())
+                .putLong(envelope.birthId().getMostSignificantBits())
+                .putLong(envelope.birthId().getLeastSignificantBits()).putLong(page.controlGeneration())
+                .putLong(page.sequence()).putLong(page.metadataBirthZxid()).putLong(page.metadataVersion())
+                .putLong(page.creatorToken()).putLong(page.previousFragmentStart()).put(page.previousEnsembleDigest())
+                .putLong(page.fragmentStart()).put(page.ensembleDigest()).putInt(scopes.size());
+        scopes.forEach(scope -> out.putInt(scope.length).put(scope));
+        finish(out);
+        return out.array();
+    }
+
+    static InstallPreparation decodeInstallPreparation(byte[] bytes) {
+        ByteBuffer in = check(bytes, PAGE_MAGIC, INSTALL_PREP_FIXED_BYTES, INSTALL_PREP_MAX_BYTES);
+        if (in.getInt() != 3 || in.getLong() != 0) {
+            throw new IllegalArgumentException("Unknown replacement INSTALL preparation kind/features");
+        }
+        var backlink = ProfileMetadataBacklink.decode(take(in, 52));
+        var lifecycleBirth = new UUID(in.getLong(), in.getLong());
+        var birth = new UUID(in.getLong(), in.getLong());
+        long generation = in.getLong();
+        long sequence = in.getLong();
+        long metadataBirth = in.getLong();
+        long version = in.getLong();
+        long creator = in.getLong();
+        long previousStart = in.getLong();
+        byte[] previous = take(in, 32);
+        long start = in.getLong();
+        byte[] ensemble = take(in, 32);
+        int count = in.getInt();
+        if (count < 1 || count > ProfileReservation.MAX_INITIAL_TARGETS) {
+            throw new IllegalArgumentException("Invalid replacement preparation count");
+        }
+        var scopes = new ArrayList<ProfileControlScope>(count);
+        for (int i = 0; i < count; i++) {
+            if (in.remaining() < 8) {
+                throw new IllegalArgumentException("Truncated replacement preparation scope");
+            }
+            int length = in.getInt();
+            if (length < ProfileAuthorityCodec.FIXED_BYTES || length > ProfileAuthorityCodec.MAX_BYTES
+                    || length > in.remaining() - 4) {
+                throw new IllegalArgumentException("Invalid replacement preparation scope length");
+            }
+            var authority = ProfileAuthorityCodec.decode(take(in, length), 0);
+            if (!authority.complete() || authority.state() != CommittedProfileAuthority.State.PREPARING
+                    || authority.requiredEngine() != EngineProfile.SEGMENT_WAL_ENGINE) {
+                throw new IllegalArgumentException("Invalid prepared INSTALL authority");
+            }
+            scopes.add(authority.scope());
+        }
+        if (in.remaining() != 4) {
+            throw new IllegalArgumentException("Trailing replacement preparation bytes");
+        }
+        return new InstallPreparation(birth, new ProfileReplacementInstallPage(backlink, lifecycleBirth, sequence,
+                generation, metadataBirth, version, creator, previousStart, previous, start, ensemble, scopes));
     }
 
     private static byte[] take(ByteBuffer in, int length) {

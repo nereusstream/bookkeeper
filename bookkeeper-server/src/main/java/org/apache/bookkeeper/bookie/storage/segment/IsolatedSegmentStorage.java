@@ -460,7 +460,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     control == null ? List.of() : List.of(
                             new ProfileHello.Capability(
                                     ProfileInitialControlCodec.CAPABILITY_ID,
-                                    ProfileInitialControlCodec.SCHEMA)));
+                                    ProfileInitialControlCodec.SCHEMA),
+                            new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
+                                    ProfileInitialControlCodec.REPLACEMENT_SCHEMA)));
             return ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
                     100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                     144 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),

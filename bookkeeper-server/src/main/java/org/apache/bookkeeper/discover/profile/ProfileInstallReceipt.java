@@ -71,7 +71,7 @@ public record ProfileInstallReceipt(ProfileControlScope scope, EngineProfile eng
                         || result.outcome() == ProfileControlResult.Outcome.ALREADY_APPLIED);
     }
 
-    static ProfileInstallReceipt from(ProfileControlScope scope, ProfileHello.Server hello,
+    public static ProfileInstallReceipt from(ProfileControlScope scope, ProfileHello.Server hello,
                                       ProfileControlResult result) {
         if (!matches(scope, hello, result)) {
             throw new IllegalArgumentException("Install result does not match the bound target and request");

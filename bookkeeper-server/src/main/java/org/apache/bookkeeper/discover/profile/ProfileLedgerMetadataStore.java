@@ -239,22 +239,7 @@ public final class ProfileLedgerMetadataStore {
             // A dataVersion alone cannot prevent delete/recreate ABA between the read and conditional write.
             String marker = path + "/profile-birth-" + Long.toHexString(before.birthZxid())
                     + "-" + Long.toHexString(base.getCToken());
-            byte[] markerBytes = ByteBuffer.allocate(76).putInt(0x55574d42).putInt(1)
-                    .putLong(before.birthZxid()).putLong(base.getCToken()).put(backlink.encode()).array();
-            ProfileZKReadClient.Node guarded = mutationReads.get(marker, deadline);
-            if (guarded.code() == Code.NONODE.intValue()) {
-                multi(List.of(Op.check(path, (int) version.getLongVersion()),
-                        Op.create(marker, markerBytes, markerAcls, CreateMode.PERSISTENT)), deadline);
-                guarded = mutationReads.get(marker, deadline);
-            }
-            if (guarded.code() != Code.OK.intValue()) {
-                return new Result(Outcome.DURABILITY_UNKNOWN, null);
-            }
-            if (guarded.stat().getEphemeralOwner() != 0 || guarded.stat().getVersion() != 0
-                    || !Arrays.equals(markerBytes, guarded.bytes())) {
-                return new Result(Outcome.QUARANTINED, null);
-            }
-            MembershipSnapshot checked = readMutationMetadata(path, input.getLedgerId(), deadline);
+            MembershipSnapshot checked = ensureMembershipGuard(before, deadline);
             if (checked == null) {
                 return new Result(Outcome.QUARANTINED, null);
             }
@@ -313,6 +298,37 @@ public final class ProfileLedgerMetadataStore {
         CompletableFuture<Integer> reply = new CompletableFuture<>();
         mutationClient.multi(operations, (code, ignored, context, results) -> reply.complete(code), null);
         return ProfileZKReadClient.await(reply, deadline);
+    }
+
+    /** Establish the same immutable physical-birth guard before a cold preparation/publication transaction. */
+    MembershipSnapshot ensureMembershipGuard(MembershipSnapshot expected, long deadline)
+            throws InterruptedException, TimeoutException, IOException {
+        var metadata = expected.metadata().getValue();
+        String path = ((AbstractZkLedgerManager) manager).getLedgerPath(metadata.getLedgerId());
+        var before = readMutationMetadata(path, metadata.getLedgerId(), deadline);
+        if (before == null || before.birthZxid() != expected.birthZxid()
+                || !before.metadata().getVersion().equals(expected.metadata().getVersion())
+                || !sameMetadata(metadata, before.metadata().getValue())) {
+            return before;
+        }
+        String marker = path + "/profile-birth-" + Long.toHexString(expected.birthZxid())
+                + "-" + Long.toHexString(metadata.getCToken());
+        byte[] bytes = ByteBuffer.allocate(76).putInt(0x55574d42).putInt(1).putLong(expected.birthZxid())
+                .putLong(metadata.getCToken()).put(ProfileMetadataBacklink.from(metadata).encode()).array();
+        var guarded = mutationReads.get(marker, deadline);
+        if (guarded.code() == Code.NONODE.intValue()) {
+            multi(List.of(Op.check(path, (int) ((LongVersion) expected.metadata().getVersion()).getLongVersion()),
+                    Op.create(marker, bytes, markerAcls, CreateMode.PERSISTENT)), deadline);
+            guarded = mutationReads.get(marker, deadline);
+        }
+        if (guarded.code() != Code.OK.intValue()) {
+            throw new IllegalStateException("Membership birth guard unavailable");
+        }
+        if (guarded.stat().getEphemeralOwner() != 0 || guarded.stat().getVersion() != 0
+                || !Arrays.equals(bytes, guarded.bytes())) {
+            throw new IllegalArgumentException("Invalid immutable metadata birth guard");
+        }
+        return readMutationMetadata(path, metadata.getLedgerId(), deadline);
     }
 
     /** Same namespace checks for lifecycle publication: metadata birth/version cannot change across that CAS. */
