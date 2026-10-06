@@ -357,3 +357,31 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 2026-10-06，实验 ProfileLedgerHandle 开始消费实际 all-E AVAILABLE 结果与对应 DATA clients；工厂再次校验 page/metadata、matching current activation、目标 engine/Bookie/incarnation，初始 snapshot 仍不是持续 authority lease。后续普通 Add 走原 SDK 的 digest/quorum/连续回调及有界 DATA 重试，不逐 entry 查询远端 authority。实际 driver 继续判断当前本地权限。[SDK 实现与验证](../profile-wire/README.md#固定初始-ensemble-的原-sdk-写入接线)给出资源和 UNKNOWN 的边界。
 
 该工厂仅接纳固定初始 ensemble；Profile membership replacement、RepairIntent、fenced-close、基础 recovery、完整删除及生产 registration/readiness 仍未闭合。本地 stop 不发布 CLOSED，不取消服务器已提交 I/O。规划会话只读检查已确认首个非 HELLO 操作分类方案：没有新增连接用途字段；已有实验 initial-control capability/schema 仍存在。CONTROL_PENDING 在真实授权前仍占 UNCLASSIFIED，额度/名额原子迁移，已有 buffer 随实际引用终结释放；UNCLASSIFIED 耗尽时新 CONTROL 连接仍可能被拒绝。此结论不替代统一总预算和生产 listener 验收。
+
+### 标准 membership 的出生绑定 CAS
+
+2026-10-06，步骤13冷路径增加原 ProfileLedgerMetadataStore 的显式 ZK context 构造形式。它借用与 AbstractZkLedgerManager 同一 client/namespace、调用方 ACL 与1 ms～1 min deadline；不创建线程、watcher、cache或重试框架。readMembership 是同步有界冷读，返回真实 czxid 与实际标准 metadata/version；FOUND 只是观察事实，不是 activation/availability lease。调用方在一次 replacement 开始时冻结该 MembershipSnapshot、fragment start=LAC+1 与新 mapping，所有 UNKNOWN 重试继续用同一物理出生身份和内容，不能刷新 snapshot 当作新请求。
+
+replaceEnsemble 只从原 snapshot 构造一个条件 membership 更新；首次起点高于最后起点时添加 fragment，同一起点时覆盖。保留全部既有片段、state、E/W/A、CRC32C/password、ctime语义、user/custom 与 immutable backlink，显式保留 creator token：原 LedgerMetadataBuilder.from 不保留这个 token，不能靠原 builder 默认行为维护 Profile 出生身份。成功必须有实际读取的 exact desired mapping、同 czxid/token/backlink 和 expected version+1；仅 predecessor、后续更高版本的同 mapping、缺失或读取不可用都不能成为成功事实。缺必需 record 返回 QUARANTINED；提交不确定/不可用保留 DURABILITY_UNKNOWN，不创建 metadata、不盲重试 write。
+
+只依赖 dataVersion 会出现真实 ABA：precheck 后删除并重建父记录，version 再为0，旧 conditional write 可以覆盖新 instance。冷路径因此在标准 metadata leaf 下建立只读 persistent birth child；创建时检查 parent version，再重读 parent 的 czxid和完整内容。最终 metadata setData 与 Op.check(birth child,0) 是同一次 multi。即使 marker 检查前已经读过正确 metadata，最终 write 时仍不可省略它；post-write 返回 CONFLICT 无法修复已经覆盖的新记录。正常 parent birth 只复用一个 marker，重复 CAS 不增加 child。
+
+实验 marker 路径为该标准 ledger path 下的 `profile-birth-CZXID_HEX-CTOKEN_HEX`（两个值为 lowercase hex），固定76 bytes、big-endian：
+
+| offset | bytes | 内容 |
+| --- | --- | --- |
+| 0 | 4 | magic UWMB / 0x55574d42 |
+| 4 | 4 | schema 1 |
+| 8 | 8 | captured parent czxid |
+| 16 | 8 | immutable creator token |
+| 24 | 52 | 原 UWBL backlink，保留其 schema/CRC |
+
+marker 只包含 public identity；读取必须 persistent、dataVersion0且与期望全部 bytes 相同。使用调用方 ACL 的 scheme/id，但权限仅 READ；parent 必须已有 CREATE 权限，不降级成 open ACL。元数据上已存在 bookkeeper.experimental.profile.membership-frozen、bookkeeper.experimental.profile.pending-publication 或任何未支持的 reserved key 时均拒绝变更，并保留原值；这里只检查 absence，没有实现 freeze/token payload、强能力、或 legacy mutation ACL。首版限制 E≤32、最多32个标准 fragments、序列化 metadata≤1 MiB；同起点覆盖不累积 fragment，达到上限不能丢弃历史来继续写。该预算不是完整 ZK/TLS/heap/kernel总账。
+
+child 改变了 Profile physical delete 的前置条件：标准 removeLedgerMetadata 单删 parent 得到 NONEMPTY，不能绕过 guard。未来 fenced-close/delete 必须在清理权限和义务闭合后原子移除 marker/parent；本轮不提供物理删除、marker GC或 namespace restore权限，也不擅自删除已有 marker。异步 ZK request 在本地 timeout 后仍可能完成，调用方继续保留原操作；不要在 ZK callback/event loop、ledger 或 DATA owner 上调用这些同步冷方法。借用 client/manager 的关闭仍由调用方负责。
+
+真实回归覆盖新 fragment及同起点连续覆盖、exact retry无第二次版本、fields/token/user保持、只读ACL与NONEMPTY、lost actual CAS reply、precheck后 version0 新instance ABA、相同bytes/token的父记录恢复及旧 snapshot再次重试、freeze先赢、recovery/CLOSED/publication拒绝、required-record缺失/不可用、两个client的唯一winner，以及更高版本相同mapping不能解析旧CAS。Bookie install/activation没有被这些 metadata tests伪造成功。此原语由后续 coordinator 在 verified inactive INSTALL之后、post-membership authority与目标留存之前使用；当前 SDK 未调用它，仍只支持初始固定ensemble。下一阶段须在同一 lifecycle/delete cut发布授权及历史目标，再接actual ACTIVATE和整体completion gate下的resend。
+
+最终 Java unified-wal-local-JohSldiz exit0，1009冻结输入，实际8类116项全部通过，零失败/错误/跳过；其中 ProfileLedgerMetadataStoreTest 共20项（新增9项membership）及原socket/PendingAddOp各19项通过。复现：scripts/unified-wal/run-local-storage-tests.sh 'ProfileLedgerMetadataStoreTest,ZKProfileReservationStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,ZKProfileLifecycleStoreTest,SegmentProfileInitialSocketClientTest,PendingAddOpTest'。定向 ORV66uCW 九项通过；初次 vRhl1pUh 暴露 builder.from 丢失creator token，修正后 osj8y5C5 六项、dv8CeCoC 七项通过。actual RED unified-wal-local-6xypv6C0 exit1 在取消最后marker检查后观察新metadata version从0被覆盖为1，脚本finally按SHA恢复源码；不能把最后CONFLICT投影为未破坏新记录。
+
+Spotless/Checkstyle exit0：unified-wal-membership-style-39jlinmh 的135个 server Java输入与源码union一致，14份Java/style checksums逐项核验。最终模型 unified-wal-model-q8ngbbve exit0：261配置为53正向完整PASS/208指定反例，530冻结输入、785 checksums；212共享输入、1327去重union一致，5个designInputsAtSourceCommit绑定父提交15017d22994f0d990bb4842e792f5c804778bade。新CAS正向为136 generated/94 distinct、queue0、depth/diameter10。首轮 mps2xdo9 的8个新配置因TLA括号parse错误为INCONCLUSIVE/总体exit1，修正后另建最终run，不改旧绑定。仍用官方tool1.7.4、单worker、heap512 MiB/direct64 MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。结果不代表真实多节点ZK durability/ACL隔离、schema字节兼容、时钟/活性、公平性、完整A/C/D、longrun/掉电/性能或生产authority；步骤13仅增加必要metadata冷原语，replacement仍未联通。

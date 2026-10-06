@@ -112,6 +112,8 @@ abstract class ProfileZKTestBase {
 
     static final class TestClient extends ZooKeeper {
         final AtomicBoolean loseReply = new AtomicBoolean();
+        final AtomicBoolean loseSetDataMultiReply = new AtomicBoolean();
+        final AtomicReference<Runnable> beforeSetDataMulti = new AtomicReference<>();
         final AtomicBoolean holdReply = new AtomicBoolean();
         final AtomicReference<Runnable> beforeMulti = new AtomicReference<>();
         final AtomicReference<Runnable> beforeLostMultiReply = new AtomicReference<>();
@@ -184,7 +186,13 @@ abstract class ProfileZKTestBase {
             if (before != null) {
                 before.run();
             }
-            boolean lose = loseReply.getAndSet(false);
+            boolean setsData = captured.stream().anyMatch(op -> op.getType() == ZooDefs.OpCode.setData);
+            Runnable beforeSet = setsData ? beforeSetDataMulti.getAndSet(null) : null;
+            if (beforeSet != null) {
+                beforeSet.run();
+            }
+            boolean lose = loseReply.getAndSet(false)
+                    || setsData && loseSetDataMultiReply.getAndSet(false);
             boolean hold = holdReply.getAndSet(false);
             super.multi(captured, (code, path, ignored, results) -> {
                 Runnable after = lose && code == Code.OK.intValue()

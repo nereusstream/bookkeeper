@@ -23,22 +23,31 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.client.LedgerMetadataBuilder;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore.MembershipSnapshot;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore.Outcome;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
 import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
 import org.apache.bookkeeper.meta.LongHierarchicalLedgerManagerFactory;
 import org.apache.bookkeeper.meta.ZkLayoutManager;
 import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs;
 import org.junit.Test;
 
@@ -241,6 +250,244 @@ public class ProfileLedgerMetadataStoreTest extends ProfileZKTestBase {
             });
             assertEquals(Outcome.DURABILITY_UNKNOWN, new ProfileLedgerMetadataStore(lm)
                     .createIfAbsent(metadata(), backlink(1, 2)).get(5, TimeUnit.SECONDS).outcome());
+        }
+    }
+
+    private ProfileLedgerMetadataStore membershipStore(TestClient client, LedgerManager lm) {
+        return new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) lm,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+    }
+
+    private static List<BookieId> replaced(String name) {
+        return List.of(BookieId.parse("b1:3181"), BookieId.parse("b2:3181"), BookieId.parse(name));
+    }
+
+    private void removeWithBirthMarker(LedgerManager lm, TestClient client) throws Exception {
+        String path = ((AbstractZkLedgerManager) lm).getLedgerPath(LEDGER);
+        // A Profile cold mutation owns a child guard. Removing only the parent must fail NONEMPTY.
+        for (String child : client.getChildren(path, false)) {
+            client.delete(path + "/" + child, -1);
+        }
+        var actual = lm.readLedgerMetadata(LEDGER).get(5, TimeUnit.SECONDS);
+        lm.removeLedgerMetadata(LEDGER, actual.getVersion()).get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void membershipCasPreservesFieldsAndSameStartOverwriteResolvesWithoutExtraVersion() throws Exception {
+        try (LedgerManager lm = manager(first); LedgerManager other = manager(second)) {
+            var initial = new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS).metadata();
+            var store = membershipStore(first, lm);
+            var snapshot = store.readMembership(LEDGER).snapshot();
+            var changed = store.replaceEnsemble(snapshot, 100, replaced("b4:3181"));
+            assertEquals(Outcome.APPLIED, changed.outcome());
+            var actual = other.readLedgerMetadata(LEDGER).get(5, TimeUnit.SECONDS);
+            assertEquals(List.of(0L, 100L), List.copyOf(actual.getValue().getAllEnsembles().keySet()));
+            assertEquals(replaced("b4:3181"), actual.getValue().getAllEnsembles().get(100L));
+            assertEquals(initial.getValue().getCToken(), actual.getValue().getCToken());
+            assertEquals(backlink(1, 2), ProfileMetadataBacklink.from(actual.getValue()));
+            assertArrayEquals(new byte[]{7}, actual.getValue().getCustomMetadata().get("user"));
+            var repeated = store.replaceEnsemble(snapshot, 100, replaced("b4:3181"));
+            assertEquals(Outcome.ALREADY_APPLIED, repeated.outcome());
+            assertEquals(actual.getVersion(), repeated.metadata().getVersion());
+            var overwritten = store.replaceEnsemble(store.readMembership(LEDGER).snapshot(), 100, replaced("b5:3181"));
+            assertEquals(Outcome.APPLIED, overwritten.outcome());
+            assertEquals(List.of(0L, 100L),
+                    List.copyOf(overwritten.metadata().getValue().getAllEnsembles().keySet()));
+            assertEquals(replaced("b5:3181"), overwritten.metadata().getValue().getAllEnsembles().get(100L));
+            assertEquals(Outcome.CONFLICT, store.replaceEnsemble(snapshot, 100, replaced("b4:3181")).outcome());
+            String path = ((AbstractZkLedgerManager) lm).getLedgerPath(LEDGER);
+            var children = second.getChildren(path, false);
+            assertEquals(1, children.size());
+            assertThrows(KeeperException.NoAuthException.class,
+                    () -> second.setData(path + "/" + children.get(0), new byte[0], 0));
+            assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> lm.removeLedgerMetadata(LEDGER, overwritten.metadata().getVersion())
+                            .get(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void membershipLostActualCasReplyResolvesOnlyExactMappingAndVersion() throws Exception {
+        try (LedgerManager lm = manager(first); LedgerManager other = manager(second)) {
+            var initial = new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS).metadata();
+            var snapshot = membershipStore(first, lm).readMembership(LEDGER).snapshot();
+            first.loseSetDataMultiReply.set(true);
+            var changed = membershipStore(first, lm).replaceEnsemble(snapshot, 0, replaced("b4:3181"));
+            assertEquals(Outcome.ALREADY_APPLIED, changed.outcome());
+            assertEquals(replaced("b4:3181"), other.readLedgerMetadata(LEDGER).get(5, TimeUnit.SECONDS)
+                    .getValue().getAllEnsembles().get(0L));
+            assertEquals(Outcome.CONFLICT,
+                    membershipStore(first, lm).replaceEnsemble(snapshot, 0, replaced("b5:3181")).outcome());
+        }
+    }
+
+    @Test
+    public void membershipCasCannotOverwriteRecreatedVersionZeroRecordAfterItsPrecheck() throws Exception {
+        try (LedgerManager lm = manager(first); LedgerManager other = manager(second)) {
+            var initial = new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS).metadata();
+            var snapshot = membershipStore(first, lm).readMembership(LEDGER).snapshot();
+            first.beforeSetDataMulti.set(() -> {
+                try {
+                    removeWithBirthMarker(other, second);
+                    other.createLedgerMetadata(LEDGER, backlink(3, 4).attachTo(metadata())).get(5, TimeUnit.SECONDS);
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(Outcome.CONFLICT,
+                    membershipStore(first, lm).replaceEnsemble(snapshot, 0, replaced("b4:3181")).outcome());
+            var actual = other.readLedgerMetadata(LEDGER).get(5, TimeUnit.SECONDS);
+            assertEquals(initial.getVersion(), actual.getVersion());
+            assertEquals(backlink(3, 4), ProfileMetadataBacklink.from(actual.getValue()));
+            assertEquals(metadata().getAllEnsembles(), actual.getValue().getAllEnsembles());
+        }
+    }
+
+    @Test
+    public void membershipFreezeBetweenPrecheckAndCasWinsWithoutRemovingItsMarker() throws Exception {
+        try (LedgerManager lm = manager(first); LedgerManager other = manager(second)) {
+            var initial = new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS).metadata();
+            var snapshot = membershipStore(first, lm).readMembership(LEDGER).snapshot();
+            first.beforeSetDataMulti.set(() -> {
+                try {
+                    var entries = new HashMap<>(initial.getValue().getCustomMetadata());
+                    entries.put(ProfileLedgerMetadataStore.MEMBERSHIP_FROZEN_KEY, new byte[]{1});
+                    other.writeLedgerMetadata(LEDGER, LedgerMetadataBuilder.from(initial.getValue())
+                            .withCToken(initial.getValue().getCToken())
+                            .withCustomMetadata(entries).build(), initial.getVersion()).get(5, TimeUnit.SECONDS);
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(Outcome.CONFLICT,
+                    membershipStore(first, lm).replaceEnsemble(snapshot, 0, replaced("b4:3181")).outcome());
+            var actual = other.readLedgerMetadata(LEDGER).get(5, TimeUnit.SECONDS);
+            assertTrue(actual.getValue().getCustomMetadata().containsKey(
+                    ProfileLedgerMetadataStore.MEMBERSHIP_FROZEN_KEY));
+            assertEquals(metadata().getAllEnsembles(), actual.getValue().getAllEnsembles());
+        }
+    }
+
+    @Test
+    public void membershipRecoveryClosedAndPublicationTokenRejectBeforeAnyGuardOrWrite() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            var initial = new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS).metadata();
+            var snapshot = membershipStore(first, lm).readMembership(LEDGER).snapshot();
+            String path = ((AbstractZkLedgerManager) lm).getLedgerPath(LEDGER);
+            for (var candidate : List.of(LedgerMetadataBuilder.from(initial.getValue())
+                    .withCToken(initial.getValue().getCToken()).withInRecoveryState().build(),
+                    LedgerMetadataBuilder.from(initial.getValue()).withCToken(initial.getValue().getCToken())
+                            .withClosedState().withLastEntryId(10)
+                            .withLength(20).build(),
+                    LedgerMetadataBuilder.from(initial.getValue()).withCToken(initial.getValue().getCToken())
+                            .withCustomMetadata(Map.of(
+                            ProfileMetadataBacklink.KEY, backlink(1, 2).encode(),
+                            ProfileLedgerMetadataStore.PENDING_PUBLICATION_KEY, new byte[]{1})).build())) {
+                assertEquals(Outcome.CONFLICT, membershipStore(first, lm).replaceEnsemble(
+                        new MembershipSnapshot(snapshot.birthZxid(), new Versioned<>(candidate, initial.getVersion())),
+                        0, replaced("b4:3181")).outcome());
+                assertTrue(first.getChildren(path, false).isEmpty());
+            }
+            assertThrows(IllegalStateException.class,
+                    () -> new ProfileLedgerMetadataStore(lm).replaceEnsemble(snapshot, 0, replaced("b4:3181")));
+            assertThrows(IllegalArgumentException.class,
+                    () -> membershipStore(first, lm).replaceEnsemble(snapshot, 0, List.of(
+                            BookieId.parse("b1:3181"), BookieId.parse("b1:3181"), BookieId.parse("b4:3181"))));
+        }
+    }
+
+    @Test
+    public void membershipMissingRequiredRecordAndUnavailableClientNeverRecreateOrAcknowledge() throws Exception {
+        try (LedgerManager lm = manager(first); LedgerManager other = manager(second)) {
+            var initial = new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS).metadata();
+            var snapshot = membershipStore(first, lm).readMembership(LEDGER).snapshot();
+            other.removeLedgerMetadata(LEDGER, initial.getVersion()).get(5, TimeUnit.SECONDS);
+            assertEquals(Outcome.QUARANTINED,
+                    membershipStore(first, lm).replaceEnsemble(snapshot, 0, replaced("b4:3181")).outcome());
+            String path = ((AbstractZkLedgerManager) lm).getLedgerPath(LEDGER);
+            assertEquals(null, second.exists(path, false));
+            first.close();
+            assertEquals(Outcome.DURABILITY_UNKNOWN,
+                    membershipStore(first, lm).replaceEnsemble(snapshot, 0, replaced("b4:3181")).outcome());
+        }
+    }
+
+    @Test
+    public void membershipRetryKeepsCapturedPhysicalBirthEvenWhenRestoredBytesAreIdentical() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2))
+                    .get(5, TimeUnit.SECONDS);
+            var store = membershipStore(first, lm);
+            var snapshot = store.readMembership(LEDGER).snapshot();
+            String path = ((AbstractZkLedgerManager) lm).getLedgerPath(LEDGER);
+            byte[] restored = new LedgerMetadataSerDe().serialize(snapshot.metadata().getValue());
+            first.beforeMulti.set(() -> {
+                try {
+                    second.delete(path, 0);
+                    second.create(path, restored, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(Outcome.CONFLICT, store.replaceEnsemble(snapshot, 0, replaced("b4:3181")).outcome());
+            assertEquals(Outcome.CONFLICT, store.replaceEnsemble(snapshot, 0, replaced("b4:3181")).outcome());
+            var actual = store.readMembership(LEDGER).snapshot();
+            assertTrue(snapshot.birthZxid() != actual.birthZxid());
+            assertEquals(snapshot.metadata().getVersion(), actual.metadata().getVersion());
+            assertEquals(snapshot.metadata().getValue().getCToken(), actual.metadata().getValue().getCToken());
+            assertEquals(snapshot.metadata().getValue().getAllEnsembles(),
+                    actual.metadata().getValue().getAllEnsembles());
+        }
+    }
+
+    @Test
+    public void membershipTwoActualCasClientsChooseOneMappingAndOneVersion() throws Exception {
+        try (LedgerManager lm = manager(first); LedgerManager other = manager(second)) {
+            new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2)).get(5, TimeUnit.SECONDS);
+            var a = membershipStore(first, lm);
+            var b = membershipStore(second, other);
+            var expected = a.readMembership(LEDGER).snapshot();
+            var firstCas = CompletableFuture.supplyAsync(() -> a.replaceEnsemble(expected, 0, replaced("b4:3181")));
+            var secondCas = CompletableFuture.supplyAsync(() -> b.replaceEnsemble(expected, 0, replaced("b5:3181")));
+            var outcomes = List.of(firstCas.get(5, TimeUnit.SECONDS).outcome(),
+                    secondCas.get(5, TimeUnit.SECONDS).outcome());
+            assertTrue(outcomes.contains(Outcome.APPLIED));
+            assertTrue(outcomes.contains(Outcome.CONFLICT));
+            var actual = b.readMembership(LEDGER).snapshot();
+            assertEquals(expected.birthZxid(), actual.birthZxid());
+            assertEquals(expected.metadata().getValue().getCToken(), actual.metadata().getValue().getCToken());
+            var mapping = actual.metadata().getValue().getAllEnsembles().get(0L);
+            assertTrue(mapping.equals(replaced("b4:3181")) || mapping.equals(replaced("b5:3181")));
+            assertEquals(1, ((LongVersion) actual.metadata().getVersion())
+                    .getLongVersion());
+        }
+    }
+
+    @Test
+    public void membershipLaterVersionWithSameMappingDoesNotResolveTheOldCasAsCurrentAuthority() throws Exception {
+        try (LedgerManager lm = manager(first); LedgerManager other = manager(second)) {
+            new ProfileLedgerMetadataStore(lm).createIfAbsent(metadata(), backlink(1, 2)).get(5, TimeUnit.SECONDS);
+            var store = membershipStore(first, lm);
+            var expected = store.readMembership(LEDGER).snapshot();
+            first.loseSetDataMultiReply.set(true);
+            first.beforeLostMultiReply.set(() -> {
+                try {
+                    var actual = other.readLedgerMetadata(LEDGER).get(5, TimeUnit.SECONDS);
+                    other.writeLedgerMetadata(LEDGER, actual.getValue(), actual.getVersion()).get(5, TimeUnit.SECONDS);
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(Outcome.CONFLICT, store.replaceEnsemble(expected, 0, replaced("b4:3181")).outcome());
+            var actual = other.readLedgerMetadata(LEDGER).get(5, TimeUnit.SECONDS);
+            assertEquals(replaced("b4:3181"), actual.getValue().getAllEnsembles().get(0L));
+            assertEquals(2, ((LongVersion) actual.getVersion()).getLongVersion());
         }
     }
 

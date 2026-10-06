@@ -515,3 +515,7 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 ### 固定初始 SDK bridge 性质
 
 ProfileSdkBridge 检查 KnownNoneNeverClearsUnknown、RetryKeepsSource、RetryKeepsCoordinate、OneOriginalCallback、SuccessRequiresOriginalQuorum、LocalStopNeverPublishesClosed；对应 ProfileBookieClient 的历史 UNKNOWN、保留打包字节/坐标、terminal CAS、原 AckSet 及 ProfileLedgerHandle 的本地停止。五个单独变异分别清除 UNKNOWN、提前释放 source、换 retry 坐标、重复 callback、发布 Classic CLOSED，必须给出指定性质反例。attempt 常量为2、target为3、entry为1，仅验证有限分类/控制状态；下层实际 TLS/write/wire 和 server force/owner 仍由已有切片及真实测试验证，不代表全系统 refinement、活性或完整 A+C+D。
+
+### 标准 metadata membership CAS 性质
+
+ProfileMembershipCas 检查 NewPhysicalBirthIsNeverOverwritten、CapturedBirthIsFrozen、FrozenMembershipIsNeverWritten、MetadataFieldsArePreserved、SuccessHasExactMappingAndVersion。七个变异分别取消最后marker检查、UNKNOWN后重捕获birth、忽略freeze、丢失creator token、丢失user字段、把未改变的predecessor提升为成功、接受更高version的同mapping。损坏新birth的不变量检查实际状态，不因最后返回CONFLICT而通过。有限范围是一次CAS/一次retry、两个parent birth、一个marker和一个额外version；成功是观测当时的snapshot，不是持续lease，不证明真实ACL、ZK多节点quorum、字节schema、clock/liveness、activation/cleanup或完整A+C+D。
