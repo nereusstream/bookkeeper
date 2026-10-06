@@ -51,12 +51,14 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorIdentity;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
 import org.apache.bookkeeper.common.profile.control.IsolatedProfileControlEndpoint;
+import org.apache.bookkeeper.common.profile.control.ProfileAuthorityKey;
 import org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer.Decision;
 import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult.Outcome;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
 import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.control.ProfileTransportContext;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
@@ -67,7 +69,9 @@ import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator.Status;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
+import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
+import org.apache.bookkeeper.discover.profile.ProfileReadyPage;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
@@ -294,12 +298,13 @@ public class SegmentProfileInstallStoreTest {
                     transition(scope("other:3181", 5), 6)).outcome());
             assertEquals(Outcome.CONFLICT, local.store.conditionalApply(transition(scope("b1:3181", 7), 6)).outcome());
             var old = scope("b1:3181", 5);
-            var activation = new ProfileControlScope(ProfileControlOperation.ACTIVATE_INITIAL,
-                    ProfileControlOperation.ACTIVATE_INITIAL.purpose(), old.ledgerId(), old.ledgerInstanceId(),
+            var activation = new ProfileControlScope(ProfileControlOperation.ACTIVATE_REPLACEMENT,
+                    ProfileControlOperation.ACTIVATE_REPLACEMENT.purpose(), old.ledgerId(), old.ledgerInstanceId(),
                     old.descriptorIdentity(), old.targetBookie(), old.targetStorageIncarnation(), old.authorityDomain(),
                     2, bytes(16, 9), old.publicSemanticPayloadIdentity(), null);
             var unsupported = new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(activation),
-                    new CommittedProfileAuthority(activation, CommittedProfileAuthority.State.READY_INITIAL,
+                    new CommittedProfileAuthority(activation,
+                            CommittedProfileAuthority.State.POST_MEMBERSHIP_REPLACEMENT,
                             EngineProfile.SEGMENT_WAL_ENGINE, 1, true), null);
             assertEquals(Outcome.UNSUPPORTED, local.store.conditionalApply(unsupported).outcome());
             assertEquals(Outcome.UNSUPPORTED, local.store.queryOperationResult(old).outcome());
@@ -698,6 +703,60 @@ public class SegmentProfileInstallStoreTest {
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
                 owner.stopAdmission();
                 assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
+    public void realInitialChainPublishesReadyActivatesAllEAndRetainsDeleteDiscovery() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var created = initial.create(initial.metadata()).get(5, TimeUnit.SECONDS);
+            assertEquals(Status.METADATA_CREATED, created.status());
+            var preparing = initial.reservations.read(44).snapshot();
+            var page = ProfileReadyPage.from(preparing, created, bytes(16, 4), bytes(32, 5));
+            var prepared = initial.reservations.prepareReady(preparing, page, initial.manager);
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, prepared.status());
+            var firstScope = page.activation(initial.scopes.get(0).targetBookie());
+            assertEquals(ReadStatus.NOT_FOUND,
+                    initial.reservations.activationAuthorityReader(firstScope.targetBookie(), initial.manager)
+                            .read(ProfileAuthorityKey.fromScope(firstScope)).status());
+            var ready = initial.reservations.publishReady(preparing, prepared.page(), initial.manager);
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, ready.status());
+            assertEquals(ProfileLifecycleHead.State.READY, ready.snapshot().lifecycle().state());
+            ProfilePrincipal principal = new ProfilePrincipal(
+                    ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                    "operators", "cn=test-ca", "cn=activation-controller");
+            ProfileTransportContext transport = new ProfileTransportContext("bookie-profile", "TLSv1.3",
+                    true, true, true, principal);
+            List<CompletableFuture<ProfileControlResult>> pending = new ArrayList<>();
+            for (Local local : initial.locals) {
+                ProfileControlScope scope = page.activation(local.identity.bookieId().toString());
+                var endpoint = new IsolatedProfileControlEndpoint(EngineProfile.SEGMENT_WAL_ENGINE, VALIDATOR,
+                        (caller, operation) -> caller.equals(principal)
+                                && operation == ProfileControlOperation.ACTIVATE_INITIAL,
+                        initial.reservations.activationAuthorityReader(scope.targetBookie(), initial.manager),
+                        (caller, requested, authority) -> caller.equals(principal)
+                                && requested.equals(authority.scope()) ? Decision.ALLOW : Decision.DENY, local.store);
+                pending.add(CompletableFuture.supplyAsync(() -> endpoint.handle(transport,
+                        ProfileControlRequest.operation(scope)), initial.cold));
+            }
+            for (var result : pending) {
+                assertEquals(Outcome.APPLIED, result.get(5, TimeUnit.SECONDS).outcome());
+                assertTrue(result.get().durable());
+                assertEquals(2, result.get().localGeneration());
+            }
+            for (Local local : initial.locals) {
+                assertTrue(local.log.normalAdmission(context(), DigestManager.generateMasterKey(initial.password)));
+            }
+            var cut = initial.reservations.cutDelete(ready.snapshot(), bytes(16, 5), bytes(32, 6));
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, cut.status());
+            assertEquals(3, initial.reservations.readPublishedPage(44).page().page().installs().size());
+            assertEquals(ReadStatus.NOT_FOUND,
+                    initial.reservations.activationAuthorityReader(firstScope.targetBookie(), initial.manager)
+                            .read(ProfileAuthorityKey.fromScope(firstScope)).status());
+            // Admission cut is not an instantaneous cross-store revocation or a physical delete.
+            for (Local local : initial.locals) {
+                assertTrue(local.log.normalAdmission(context(), DigestManager.generateMasterKey(initial.password)));
             }
         }
     }

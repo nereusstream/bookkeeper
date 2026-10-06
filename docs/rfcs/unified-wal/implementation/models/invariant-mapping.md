@@ -470,3 +470,17 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 | InstallReceiptKeepsBirthGeneration | current local generation推进不改变INSTALL birth；同op retry/文件replay恢复固定birth | generation取1/2，物理framing/schema由原控制log拥有 |
 
 六个coordinator mutation和一个generation mutation命中各自边界；receipt capability digest及redacted字符串由真实/独立vector Java回归覆盖。未证明cryptographic HELLO、persistent receipt retention、full lifecycle CAS、完整模型组合、活性及性能。
+
+
+## Initial READY / DELETE
+
+| 性质 | 合同与实际实现 | 模型边界 |
+| --- | --- | --- |
+| ActivationHasPublishedReady | candidate page只durable不grant，必须matching READY head/reference/metadata；DELETE后无新authority | 冷读snapshot不是跨store/local即时撤权，local fence/drain仍由后续协议负责 |
+| BirthChecksProtectTheCurrentRoot | Random lifecycle birth及只读marker同root创建，CAS不会只凭重置的dataVersion修改新root | marker/ACL/实际backend transaction由真实双client测试验证 |
+| ReadyReferencesActualPageBirth | page独立birth marker保护旧candidate CAS，Head的mzxid/content reference不能指向重建的新page | 只有initial固定slot，没有full page/history GC |
+| ReadyValidatedMetadataBirth | metadata version0还须matching creator token、instance/backlink、public ensemble digest | metadata read后可变化，后续ACTIVATE再次取证，非跨key原子事务 |
+| DeleteCutNeverRollsBack / PublishedTargetsSurviveDelete | DELETE与READY同lifecycle顺序，global generation只cut推进；published targets retained | 不证明全部targets已经fenced/tombstoned或data physically deleted |
+| ReadyRequiresAllEReceipts | 有序all-E scope/engine/capability digest/install birth facts在不可变page及head引用中retained | receipt crypto/actual local install由prior Java chain验证，不模型化untrusted caller/Byzantine admin |
+
+七个指定反例命中各自界限，full A/D/C组合、replacement/repair、actual control wire、writer availability、活性及性能仍未由该投影证明。

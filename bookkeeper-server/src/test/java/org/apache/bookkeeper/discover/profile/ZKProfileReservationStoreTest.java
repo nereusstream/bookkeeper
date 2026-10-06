@@ -194,7 +194,7 @@ public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
     @Test
     public void actualLostCreateReplyAndRetryResolveWithoutAnotherPhysicalWrite() throws Exception {
         var writer = store(first);
-        first.loseCreateReplyPath.set(writer.path(44));
+        first.loseReply.set(true);
         assertEquals(CreateStatus.ALREADY_APPLIED, writer.createIfAbsent(reservation()).status());
         assertEquals(CreateStatus.ALREADY_APPLIED, store(second).createIfAbsent(reservation()).status());
         assertEquals(0, second.exists(writer.path(44), false).getVersion());
@@ -203,22 +203,27 @@ public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
     @Test
     public void acknowledgedReplyStillRequiresMatchingActualRootRatherThanSubmittedBytes() throws Exception {
         var writer = store(first);
-        first.holdCreateReplyPath.set(writer.path(44));
+        first.holdReply.set(true);
         var pending = CompletableFuture.supplyAsync(() -> writer.createIfAbsent(reservation()));
-        assertTrue(first.createReplyHeld.await(5, TimeUnit.SECONDS));
+        assertTrue(first.replyHeld.await(5, TimeUnit.SECONDS));
         ProfileReservation other = new ProfileReservation(reservation().backlink(), List.of(scope("other", 2, 8)));
         second.setData(writer.path(44), ProfileReservationCodec.encode(other), 0);
-        first.lateCreateReply.get().run();
-        assertEquals(CreateStatus.CONFLICT, pending.get(5, TimeUnit.SECONDS).status());
-        assertEquals(other, store(second).read(44).snapshot().reservation());
+        first.lateReply.get().run();
+        assertEquals(CreateStatus.QUARANTINED, pending.get(5, TimeUnit.SECONDS).status());
+        assertEquals(ReadStatus.QUARANTINED, store(second).read(44).status());
     }
 
     @Test
     public void deletedCommittedReservationCannotBeResolvedAsNoEffect() throws Exception {
         var writer = store(first);
-        first.loseCreateReplyPath.set(writer.path(44));
-        first.beforeLostCreateReply.set(() -> {
+        first.loseReply.set(true);
+        first.beforeLostMultiReply.set(() -> {
             try {
+                String head = writer.path(44) + "/lifecycle";
+                for (String child : second.getChildren(head, false)) {
+                    second.delete(head + "/" + child, 0);
+                }
+                second.delete(head, 0);
                 second.delete(writer.path(44), 0);
             } catch (Exception failed) {
                 throw new AssertionError(failed);
@@ -231,12 +236,12 @@ public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
     @Test
     public void timeoutAfterRealCreateLeavesItsAuthorityQueryableWithoutCancellingTheWrite() throws Exception {
         var writer = new ZKProfileReservationStore(first, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofMillis(200));
-        first.holdCreateReplyPath.set(writer.path(44));
+        first.holdReply.set(true);
         var pending = CompletableFuture.supplyAsync(() -> writer.createIfAbsent(reservation()));
-        assertTrue(first.createReplyHeld.await(5, TimeUnit.SECONDS));
+        assertTrue(first.replyHeld.await(5, TimeUnit.SECONDS));
         assertEquals(CreateStatus.DURABILITY_UNKNOWN, pending.get(5, TimeUnit.SECONDS).status());
         assertEquals(reservation(), store(second).read(44).snapshot().reservation());
-        first.lateCreateReply.get().run();
+        first.lateReply.get().run();
         assertEquals(CreateStatus.ALREADY_APPLIED, store(first).createIfAbsent(reservation()).status());
         assertEquals(0, second.exists(writer.path(44), false).getVersion());
     }

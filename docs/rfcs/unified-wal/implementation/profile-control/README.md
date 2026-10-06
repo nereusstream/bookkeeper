@@ -253,3 +253,36 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 首次完整`unified-wal-local-IhkLzTlW`的351项为346通过/5平台跳过；首次style因新增测试import顺序/unused import exit1，只有import修正后重新冻结完整验证，旧运行保持原输入。
 
 最终 `unified-wal-local-CgLIZ88L` tool exit0，991冻结source inputs，相关10类351项为346通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-initial-style-E82C4Awl` Spotless/Checkstyle exit0，source集精确一致，16份Java回执checksums已核验。最终模型 `unified-wal-model-ufcpvr46` tool exit0，209配置为46正向完整PASS/163指定反例，448冻结inputs/629 checksums；189共享输入及1250去重union一致，五个designInputs绑定父提交 `60a0bab6e5793cff79216ea6c99de080bf60ae0f`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。READY/有界target page与persistent receipt retention、birth-bound lifecycle/delete cut CAS、full restart coordinator、actual INSTALL TLS/wire、全E activation/normal writer、生产startup/readiness、client quorum/CLOSED/完整恢复、完整A/C/D与组合、长期/掉电/性能仍未闭合，步骤12和生产Gate保持PARTIAL。
+
+
+## 步骤 12：initial READY、目标留存与 DELETE_INTENT CAS
+
+2026-10-06，原`ZKProfileReservationStore`保持UWPR/schema1 reservation bytes，增加同事务创建的`lifecycle` head及随机birth marker；原metadata coordinator的snapshot同时绑定parent payload/mzxid、head payload/mzxid/dataVersion与birth。缺失head/marker的旧实验namespace fail closed，不自动补写未知authority，不声称迁移/长期兼容。INSTALL reader仅在PREPARING返回authority，READY/DELETE之后不授予新INSTALL。
+
+当前initial lifecycle是单个有界head和一个固定`initial-activation`候选page：head先PREPARING(seq1, predecessor0)，READY推进semantic sequence/store version但不推进global control generation；DELETE_INTENT从PREPARING或READY推进sequence并将control generation加1，terminal且保留已发布page引用。没有per-entry progress、通用跨key事务、历史page列表或后台GC。固定candidate slot避免不同READY operation产生无界orphans；同operation/full内容冲突不覆盖。
+
+公开实验字节使用big-endian、schema1、mandatory features0及CRC32C：`UWLH` head固定240 bytes，含backlink52、reservation SHA-256 identity32、birth UUID16、state/semantic sequence/predecessor/control generation、operation16/public payload32、page mzxid/digest32。`UWAP` page固定部分220 bytes，含backlink、lifecycle birth与独立page birth、READY operation/public payload/control generation、实际standard metadata LongVersion、creator token、canonical ensemble digest和最多32份有序install receipts；复用原strict scope codec，另存public capability digest32/local install generation。decoder最大20,156 bytes，当前无range INSTALL实际最大19,644 bytes；独立head240/page446向量验证CRC、布局及negative discriminators。
+
+canonical ensemble digest为SHA-256，domain `BookKeeper/ProfileInitialEnsemble/v1`加NUL，再编码schema/E/W/A各u32及有序Bookie UTF-8 length:u32/name；不含password/credential，membership仍由standard metadata独占。creator token与instance/backlink同时绑定metadata出生身份；ZK metadata删除重建后的LongVersion0不能单独证明同一metadata。实际READY reader重读standard metadata，校验version/token/backlink与initial OPEN/CRC32C/ordered ensemble digest。这里提供真实单server snapshot证据，不声称metadata/root跨key原子性或多节点quorum。
+
+先实际create-if-absent page与birth child，再CAS发布head的page引用。候选存在仅证明page persistence，直到READY CAS之前保持inert。page数据ACL移除WRITE/ADMIN；依原namespace权限保留READ/CREATE/DELETE以创建或退役birth child，marker数据只READ。Root head、page都带独立不可变birth marker，CAS检查root dataVersion、head/page marker0及head expected dataVersion；校验opaque mzxid、semantic lineage和完整内容，禁止ANY。root/page删除重建后即使dataVersion再次0，旧marker检查仍使旧CAS失败。当前没有执行child退役/数据删除的API，namespace/ACL owner及非Byzantine约束未被模拟成生产auth证明。
+
+READY与DELETE使用同一head CAS。DELETE先赢则旧READY失败，candidate仍inert；READY先赢后DELETE保留page及全部E的Bookie/incarnation/activation授权和receipt，供delete discovery。READY response-loss后若已被DELETE吸收，可用保留的matching page/op/payload返回ALREADY_APPLIED，仍不授予新activation。page/root未知、缺失mandatory marker、坏format或referenced metadata真实NONODE隔离，不能把缺失当作EMPTY/default，也不自动修复。
+
+`activationAuthorityReader(localBookie, manager)`从actual READY head、matching immutable page与standard metadata snapshot生成原ProfileControlStore的READY_INITIAL scope，使用独立READY operation、精确instance/descriptor/target/incarnation/control generation。PREPARING/inert page、DELETE、错误key/target或stale metadata不授权；有权principal与exact AuthZ仍由原typed endpoint验证。原physical adapter现在支持INSTALL和ACTIVATE_INITIAL，复用reserved driver/write/force/owner apply；INSTALL报告稳定birth，activation报告current local generation，replacement/query仍UNSUPPORTED。
+
+新的真实组合为PREPARING → 3个control files/all-E install → actual standard metadata → immutable page → READY → 3个durable initial activation，证明在matching READY存在后原normal admission开放。全链仍是typed transport facts和测试allowlist，没有实际INSTALL/ACTIVATE socket/wire、client LedgerHandle或normal writer返回。DELETE_INTENT只是admission cut，不是跨store/local瞬时撤权；组合验证cut后新cold activation停止，但已active本地状态仍须后续fence/tombstone/drain，不能据此报告物理删除完成。
+
+新增12项真实backend/vector测试覆盖page inert/ACL、实际page/READY/DELETE lost reply、同operation冲突、READY/DELETE concurrent one winner、root/page/delete ABA、metadata recreate token mismatch、mandatory page marker/metadata missing及200ms提交后READY timeout。另有1项实际coordinator/files/READY/activation/discovery组合。receipt facts在backend单测为输入，实际all-E/metadata/file链另由组合验证，未用mock成功替代真实持久化。首次page ACL只有READ使同事务birth-child create被NOAUTH拒绝，修正权限后通过；SDK实际missing使用NoSuchLedgerExistsOnMetadataServerException，已按该code隔离。旧Raw parent改写使head immutable digest不匹配，原CONFLICT回归更新为更强QUARANTINED且无authority。`unified-wal-local-rNPff5GV`33项、随后`unified-wal-local-UeqikKpr`35项通过，各保持原输入。
+
+复现：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileLifecycleStoreTest,ZKProfileReservationStoreTest,SegmentProfileInstallStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,IsolatedProfileControlEndpointTest,TestLedgerMetadataSerDe,SegmentExecutionGroupTest,SegmentBookieControlLogTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
+
+首次完整`unified-wal-local-ZpyzxK8n`364项为359通过/5平台跳过；初次style仅因新增单行getter布局/unused import exit1，修正后重新冻结验证，旧结果保留原输入。
+
+最终 `unified-wal-local-qlSVYzAe` tool exit0，995冻结source inputs，相关11类364项为359通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-ready-style-j5vX2UG6` Spotless/Checkstyle exit0，source集精确一致，17份Java回执checksums已核验。最终模型 `unified-wal-model-2cqx367s` tool exit0，217配置为47正向完整PASS/170指定反例，461冻结inputs/653 checksums；193共享输入及1263去重union一致，五个designInputs绑定父提交 `9a48e6346453f85c5d02615ef9e4503f30ce13c6`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。有限[READY lifecycle投影](../models/README.md#initial-ready-lifecycle-投影)检查birth、inert/actual metadata、all-E、delete cut和retention，不能证明真实ACL/crypto/barrier/多节点quorum。physical delete、page/history GC、replacement/repair/full lifecycle、restart coordinator、actual INSTALL/ACTIVATE TLS/wire、normal writer availability、生产startup/readiness/client quorum/CLOSED恢复、完整A/C/D组合、长期/掉电/性能仍未闭合，步骤12及生产Gate保持PARTIAL。

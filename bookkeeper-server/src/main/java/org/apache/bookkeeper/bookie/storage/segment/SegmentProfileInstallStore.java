@@ -59,11 +59,12 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
             throw new IllegalStateException("A cold INSTALL wait cannot run on its append owner");
         }
         ProfileControlScope scope = transition.request().scope();
-        if (scope.operation() != ProfileControlOperation.INSTALL) {
+        if (scope.operation() != ProfileControlOperation.INSTALL
+                && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL) {
             return result(Outcome.UNSUPPORTED);
         }
         if (!transition.authority().scope().equals(scope)
-                || !transition.authority().permits(ProfileControlOperation.INSTALL)
+                || !transition.authority().permits(scope.operation())
                 || transition.authority().requiredEngine() != EngineProfile.SEGMENT_WAL_ENGINE
                 || !scope.targetBookie().equals(identity.bookieId().toString())
                 || !Arrays.equals(scope.targetStorageIncarnation(), identity.incarnation().value())) {
@@ -87,7 +88,8 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                 case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
                 case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
             };
-            reply.complete(new TransitionResult(outcome, applied.localInstallGeneration(),
+            reply.complete(new TransitionResult(outcome, scope.operation() == ProfileControlOperation.INSTALL
+                    ? applied.localInstallGeneration() : applied.localGeneration(),
                     outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED));
         });
         if (!accepted) {

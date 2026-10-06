@@ -114,6 +114,7 @@ abstract class ProfileZKTestBase {
         final AtomicBoolean loseReply = new AtomicBoolean();
         final AtomicBoolean holdReply = new AtomicBoolean();
         final AtomicReference<Runnable> beforeMulti = new AtomicReference<>();
+        final AtomicReference<Runnable> beforeLostMultiReply = new AtomicReference<>();
         final AtomicReference<Runnable> lateReply = new AtomicReference<>();
         final AtomicReference<List<Op>> lastOperations = new AtomicReference<>();
         final CountDownLatch replyHeld = new CountDownLatch(1);
@@ -186,6 +187,11 @@ abstract class ProfileZKTestBase {
             boolean lose = loseReply.getAndSet(false);
             boolean hold = holdReply.getAndSet(false);
             super.multi(captured, (code, path, ignored, results) -> {
+                Runnable after = lose && code == Code.OK.intValue()
+                        ? beforeLostMultiReply.getAndSet(null) : null;
+                if (after != null) {
+                    after.run();
+                }
                 Runnable reply = () -> callback.processResult(lose && code == Code.OK.intValue()
                         ? Code.CONNECTIONLOSS.intValue() : code, path, context, results);
                 if (hold) {

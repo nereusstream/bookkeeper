@@ -504,3 +504,16 @@ transport facts未替代实际TLS，driver的当前duplicate路径仍追加durab
 | Install birth / redaction | INSTALL返回原birth generation，真实activation/replay保持1；真实metadata result字符串password暴露先红后绿，coordinator结果不展开metadata/custom values |
 
 known拒绝或损坏response字段使用负向client控制；successful/unknown target与metadata persistence依靠真实FileChannel/ZK。实际TLS/wire、retention、READY/CAS和writer completion仍不在本动作范围。
+
+
+## Initial READY lifecycle 动作
+
+| 动作 | 实际实现与验证 |
+| --- | --- |
+| Initialize / Prepare | Root/head/birth marker同实际multi创建，candidate page及独立birth同事务create；独立240/446向量、page ACL及未发布不授权 |
+| ReadReady / ReadyCas | 完整root snapshot/metadata version+creator token+ensemble、all-E receipt与scope；actual READY reply loss解析same operation/page，无第二mutation |
+| ReadDelete / DeleteCas | 同一head的opaque version/semantic lineage/birth check，真实READY/delete只有一个winner；DELETE只cut admission并保留published targets |
+| RecreateRoot / RecreatePage / RecreateMetadata | beforeMulti真实删除/重建、version0旧CAS拒绝；metadata同version0但新creator token拒绝 |
+| ReadActivation | actual READY/page/metadata生成原接口scope；3个真实control files经原typed endpoint/driver force/apply后active；global cut后cold授权停止，不冒充local drain/物理删除 |
+
+超时只停止caller等待，actual committed READY仍可查询，晚callback不重开权限。旧格式missing mandatory lifecycle child隔离，无自动upgrade/GC。上述证据不证明production ACL/TLS或full lifecycle。
