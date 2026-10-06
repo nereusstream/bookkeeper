@@ -576,3 +576,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-06 [初始control的真实隔离socket](rfcs/unified-wal/implementation/profile-wire/README.md#真实隔离初始-control-接线)增量：显式 opt-in 实验 capability/schema1 已把 INSTALL/ACTIVATE_INITIAL 接到真实隔离 mTLS、原 endpoint 与physical driver；默认能力及通用control-body冻结状态不变。真实principal、cold authority与exact AuthZ通过后，event loop原子转账；cold timeout/UNKNOWN/断连和实际I/O终结分开，副本持续计费至最后使用。七项socket回归含实际ZK PREPARING/DELETE cut和迟到EL授权零写入。非阻塞实际client、完整READY/metadata reader与all-E coordinator经socket组合、生产listener/readiness和统一总预算仍待完成，步骤11/12与stable/G1/生产Gate保持PARTIAL/OPEN。 相关17类412通过/5平台跳过、style通过；有限矩阵49正向完整PASS/184指定反例，完整源码及receipt绑定见实现记录。
+
+
+2026-10-06 [初始all-E真实socket组合](rfcs/unified-wal/implementation/profile-control/README.md#可恢复初始协调器的真实-all-e-socket-组合)增量：实际非阻塞initial client借用已有event loops/TLS context，验证actual HELLO/target/incarnation及完整request/reply关联，pending quota在EL排队前取得并等wire/write两种终结，取消/断连不释放仍使用的副本；无自动重试或重连。可恢复初始coordinator现直接经3个mTLS socket与实际ZK PREPARING/READY/标准metadata/原Bookie文件driver完成全E两phase，再返回AVAILABLE snapshot；actual activation reply丢失后显式新client/新coordinator解析同一READY/metadata/op。缺必需metadata仍不重建。8项组合及输出额度RED/GREEN、18类420通过/5平台跳过、style、50正向完整PASS/191指定反例已验证。尚无LedgerHandle/生产writer、普通DATA quorum SDK、replacement/recovery/full delete、完整server-process启动/readiness、统一总预算或production authority，步骤11/12与stable/G1/生产Gate仍PARTIAL/OPEN。 源码与回执绑定见实现记录。

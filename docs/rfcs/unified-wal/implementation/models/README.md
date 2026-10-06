@@ -1080,3 +1080,25 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-initial-socket-barrier | 492/304/113 | 5 / 不适用 | 0.798 s / 111,591,424 bytes | EXPECTED_COUNTEREXAMPLE:SuccessRequiresActualForceAndOwner |
 | ce-profile-initial-socket-unknown | 491/303/112 | 5 / 不适用 | 0.851 s / 112,951,296 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedUnknownIsNeverNone |
 | ce-profile-initial-socket-late | 231/141/77 | 4 / 不适用 | 0.859 s / 110,592,000 bytes | EXPECTED_COUNTEREXAMPLE:TimedOutAdmissionNeverSubmits |
+
+
+## 初始 client 关联与 slot 投影
+
+2026-10-06 `ProfileInitialClientCorrelation`投影同一channel两个请求，quota为1或2；peer/binding覆盖TLS/HELLO Bookie/incarnation/engine/capability及完整frame/body字段的已验证输入。enqueue先持有quota，写入与wire未来分别终结，取消已发送future不会撤销server命令或复活future。correlated拒绝不会变durable成功，网络UNKNOWN不能映NONE，frame ID不重用。bad peer/binding、取消或reply先释放slot、重用frame ID、UNKNOWN映NONE及取消future复活七个mutation各命中指定性质。
+
+实际server成功的force/owner证据来自现有initial socket/physical INSTALL投影及[真实文件/ZK/mTLS组合](../profile-wire/README.md#非阻塞初始-control-client)，本projection只抽象已验证输入；不枚举byte/crypto、全部三目标/metadata生命周期、NIO内部队列/timer/DNS、统一总内存、所有failure交错、SDK/quorum、活性、公平性或完整A/C/D组合。caller提供resolved地址，client拒绝unresolved，不在EL新增解析层。
+
+最终 `unified-wal-local-4qDodbai` tool exit0，1004冻结inputs，相关18类425项为420通过/5 macOS Linux-affinity跳过、0 failure/error；包含8项真实initial client/ZK/file/socket组合。`unified-wal-client-final-style-tyd9etl4` Spotless/Checkstyle exit0，200冻结Java source与去重union精确一致；24份Java/style回执checksums已核验。最终模型 `unified-wal-model-e10jjm5g` tool exit0，241配置为50正向完整PASS/191指定反例、494冻结inputs/725 checksums；199共享inputs及1299去重union一致，五个designInputs绑定父提交 `57a614c304e72985d850033c36dcff3f7232cdd5`。官方tool1.7.4，单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；有限模型不替代实际crypto/fsync硬件、活性、公平性、整个内存总量、完整A/C/D、掉电、长期、性能或生产authority。历史source/config/run/receipt保持原绑定。
+
+新正向完整2775 generated/1281 distinct/queue0，depth与diameter均15。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-initial-client | 2775 / 1281 / 0 | 15 / 15 | 0.923 s / 134,070,272 bytes | PASS |
+| ce-profile-initial-client-peer | 22 / 22 / 11 | 4 / 不适用 | 0.905 s / 110,755,840 bytes | EXPECTED_COUNTEREXAMPLE:RequestRequiresVerifiedPeer |
+| ce-profile-initial-client-binding | 36 / 35 / 18 | 5 / 不适用 | 0.851 s / 111,591,424 bytes | EXPECTED_COUNTEREXAMPLE:SuccessHasBoundReply |
+| ce-profile-initial-client-cancel | 17 / 17 / 6 | 4 / 不适用 | 0.914 s / 108,560,384 bytes | EXPECTED_COUNTEREXAMPLE:SlotsWaitForBothTerminals |
+| ce-profile-initial-client-write | 36 / 35 / 18 | 5 / 不适用 | 0.801 s / 112,410,624 bytes | EXPECTED_COUNTEREXAMPLE:SlotsWaitForBothTerminals |
+| ce-profile-initial-client-id | 26 / 26 / 12 | 4 / 不适用 | 0.794 s / 108,331,008 bytes | EXPECTED_COUNTEREXAMPLE:FrameIdsNeverAlias |
+| ce-profile-initial-client-unknown | 32 / 31 / 15 | 5 / 不适用 | 0.854 s / 110,837,760 bytes | EXPECTED_COUNTEREXAMPLE:NetworkUncertaintyNeverMeansNone |
+| ce-profile-initial-client-revive | 95 / 80 / 46 | 6 / 不适用 | 0.866 s / 113,328,128 bytes | EXPECTED_COUNTEREXAMPLE:CancelledFutureIsNotRevived |

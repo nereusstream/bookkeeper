@@ -209,3 +209,26 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecT
 ~~~
 
 非阻塞实际 control client/请求关联及全 E socket coordinator、生产 listener/fresh readiness、完整 control-plane、JDK/native TLS 内部/kernel/metadata/object/对齐池的统一总账、步骤11/12和生产 Gate仍未完成。以上 workspace 保留只覆盖声明的已知解析副本与 response，不能作为整个进程或存储总内存上限。最终 `unified-wal-local-j9MoHs4Q` tool exit0：1002冻结输入，相关17类417项为412通过/5 macOS Linux-affinity跳过，0失败/错误；Bookie控制log完整252项包括七项新socket回归。`unified-wal-initial-socket-style-9ga4n66n` Spotless/Checkstyle exit0，142冻结Java source与test inputs一致；23份Java/style回执checksums已核验。最终模型 `unified-wal-model-0tgx4f8_` tool exit0：233配置为49正向完整PASS/184指定反例，483冻结输入/701 checksums，197共享输入及1288去重union一致；五个designInputs仍绑定运行父提交 `d7a68ffc03eb9a21bd91c1250fb6fb7b42d61f5e`。原始receipt/source/config/run不重绑定。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；有限PASS不代替实际TLS、fsync/掉电、内存、活性/公平性或完整A/C/D组合证据。
+
+
+## 非阻塞初始 control client
+
+2026-10-06 [ProfileInitialControlClient](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/discover/profile/ProfileInitialControlClient.java)直接实现现有 InstallClient/ActivationClient，只拥有一个隔离 NIO channel；SSL context、已解析远端地址与 event loops 由调用方提供。它不创建线程、executor、重试、重连、fallback 或第二套 metadata 框架。未解析 InetSocketAddress 在建 channel 前拒绝，避免当前 Netty 4.2.15.Final 默认 resolver 的同步解析进入 event loop；上层承担地址发现/解析，不为该实验 client 新建解析层。
+
+connect 的 future 只在实际 TLS 1.3/mTLS、HTTPS hostname verification，以及 actual HELLO engine=3、预期 Bookie/incarnation、UIC1/schema1 capability 都通过后成功。TLS/HELLO deadline 与每请求 deadline 使用借用的 event loop，TCP connect 也有 timeout；close 异步关闭自己拥有的 channel并停止新请求，不关闭借用资源。首个非HELLO仍决定连接接收用途，初始client随后复用CONTROL连接，不逐操作握手；普通DATA要使用相应DATA连接。
+
+每channel frame ID从2单调生成，耗尽前关闭而不重用；完整reply关联header operation/ID和body ledger/operation UUID/authority generation。原60-byte codec继续校验status/outcome、local generation及reserved。只有严格canonical的BAD_REQUEST/DENIED/TRANSIENT/UNSUPPORTED status-only 8-byte错误可形成当前尝试的无效果拒绝；8-byte成功、错binding、错flags、畸形/意外reply一律不能成为durable成功。断连/timeout令未完成future exceptional UNKNOWN，不把它变成NONE，也不更换逻辑operation/instance/generation；Caller显式重试仍用原scope。
+
+maxPending为1..32，quota在排入event loop前取得，覆盖已排队及实际pending；满额返回当前尝试correlated TRANSIENT、local generation0、durable=false。请求临时编码数组在复制进outbound后清理；client持有的序列化buffer保留到真实write promise结束，再清理并释放。wire逻辑终结与write终结都完成后才归还slot；future取消只停等待，已发送请求仍保留关联及输出资源，不取消server I/O。每个outbound的声明capacity最多828 bytes，client同时保留的数量受quota约束；这不是Netty pooled backing、TLS内部/native/kernel或整个进程内存的总量证明，也不声称JVM/TLS所有秘密副本已擦除。
+
+[真实三目标组合测试](../../../../../bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentProfileInitialSocketClientTest.java)使用实际FileChannel控制I/O、原storage/driver、三个真实mTLS listener、实际ZK PREPARING/READY与标准LedgerManager。两个phase分别让整个E进入force前阻塞，INSTALL未完成时不创建metadata，READY已发布但最后ACTIVATE未durable时不返回AVAILABLE；全部匹配完成后返回3/3/2初始availability snapshot。激活reply真实丢弃导致UNKNOWN，显式新client/新coordinator从同一READY/metadata/op恢复；必需metadata实际删除后QUARANTINED，不重建或写入控制日志。其余测试覆盖错HELLO/hostname/incarnation/未协商capability/未解析地址零control写入，五类reply关联/状态破坏不能成功，取消等待的quota保留，冷队列拒绝的8-byte status，以及实际reply已到而output promise仍持有时的slot/序列化副本生命周期。
+
+输出生命周期的实际RED `unified-wal-local-czs6SjrT`仅临时取消write-terminal条件，预期TRANSIENT却得到ALREADY_APPLIED，tool exit1；脚本finally恢复原client。随后focused `unified-wal-local-vNtlhvEA`八项通过，扩大 `unified-wal-local-sieOW1ad`相关18类通过；其后增加已解析地址约束，最终另行冻结，不重绑原结果。[有限client投影](../models/README.md#初始-client-关联与-slot-投影)检查peer/binding、唯一frame ID、两种terminal、取消及UNKNOWN。
+
+尚无LedgerHandle/生产writer、普通Add quorum SDK、replacement/recovery/full delete/catch-up、production listener/fresh startup-readiness或完整process-level重启；该组合不证明持续authority lease、跨key原子撤权、完整A/C/D、统一TLS/socket/storage总账、长期/掉电/性能或stable wire/G1。调用方需排空已接纳任务/channel输出后关闭借用资源。步骤11/12及生产Gate仍PARTIAL/OPEN。最终 `unified-wal-local-4qDodbai` tool exit0，1004冻结inputs，相关18类425项为420通过/5 macOS Linux-affinity跳过、0 failure/error；包含8项真实initial client/ZK/file/socket组合。`unified-wal-client-final-style-tyd9etl4` Spotless/Checkstyle exit0，200冻结Java source与去重union精确一致；24份Java/style回执checksums已核验。最终模型 `unified-wal-model-e10jjm5g` tool exit0，241配置为50正向完整PASS/191指定反例、494冻结inputs/725 checksums；199共享inputs及1299去重union一致，五个designInputs绑定父提交 `57a614c304e72985d850033c36dcff3f7232cdd5`。官方tool1.7.4，单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；有限模型不替代实际crypto/fsync硬件、活性、公平性、整个内存总量、完整A/C/D、掉电、长期、性能或生产authority。历史source/config/run/receipt保持原绑定。
+
+复现最小组合范围：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest'
+~~~

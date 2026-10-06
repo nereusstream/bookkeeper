@@ -328,3 +328,19 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInstallStoreT
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+
+## 可恢复初始协调器的真实 all-E socket 组合
+
+2026-10-06 现有初始coordinator开始直接借用[非阻塞实际client](../profile-wire/README.md#非阻塞初始-control-client)的verified HELLO及request-correlated futures，而非构造transport facts。实际TLS principal、PREPARING/READY/metadata cold reader、原physical INSTALL/ACTIVATE、两phase全E发送及最后metadata/READY取证共同验证；没有另建coordinator、MetadataStore、driver或writer。3/3/2只是初始E=3门槛，两个local ACTIVATE完成不能代替整个E，也不是普通DATA A-quorum SDK证明。
+
+实际response-loss后，新client和新coordinator显式解析同一READY/page birth、metadata version/creator token/backlink、scope/op，原instance/generation不变；metadata必需record消失时不重建。实验listener仍返回readiness generation0，AVAILABLE仍只是当前事实snapshot，不是continuing lease，不返回LedgerHandle或production writer。本轮没有完整server process/ZK进程重启或production startup/readiness证据；此前typed file/session replay记录保持原绑定，不能把分开的测试自动拼成完整process-level证据。详见wire实现范围、源码和回执。最终 `unified-wal-local-4qDodbai` tool exit0，1004冻结inputs，相关18类425项为420通过/5 macOS Linux-affinity跳过、0 failure/error；包含8项真实initial client/ZK/file/socket组合。`unified-wal-client-final-style-tyd9etl4` Spotless/Checkstyle exit0，200冻结Java source与去重union精确一致；24份Java/style回执checksums已核验。最终模型 `unified-wal-model-e10jjm5g` tool exit0，241配置为50正向完整PASS/191指定反例、494冻结inputs/725 checksums；199共享inputs及1299去重union一致，五个designInputs绑定父提交 `57a614c304e72985d850033c36dcff3f7232cdd5`。官方tool1.7.4，单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；有限模型不替代实际crypto/fsync硬件、活性、公平性、整个内存总量、完整A/C/D、掉电、长期、性能或生产authority。历史source/config/run/receipt保持原绑定。
+
+
+复现最终相关范围：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,SegmentProfileInstallStoreTest,ZKProfileLifecycleStoreTest,ZKProfileReservationStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,IsolatedProfileControlEndpointTest,TestLedgerMetadataSerDe,SegmentExecutionGroupTest,SegmentBookieControlLogTest,ProfileInitialControlCodecTest,ProfileOperationCodecTest,ProfileReceiveDecoderTest,ProfileByteBufAllocatorTest,ProfileInboundPipelineSocketTest,ProfileTlsContextFactoryTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

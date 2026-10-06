@@ -19,6 +19,14 @@ import time
 
 
 MATRIX = {
+    'a-profile-initial-client': None,
+    'ce-profile-initial-client-peer': 'RequestRequiresVerifiedPeer',
+    'ce-profile-initial-client-binding': 'SuccessHasBoundReply',
+    'ce-profile-initial-client-cancel': 'SlotsWaitForBothTerminals',
+    'ce-profile-initial-client-write': 'SlotsWaitForBothTerminals',
+    'ce-profile-initial-client-id': 'FrameIdsNeverAlias',
+    'ce-profile-initial-client-unknown': 'NetworkUncertaintyNeverMeansNone',
+    'ce-profile-initial-client-revive': 'CancelledFutureIsNotRevived',
     'a-profile-initial-socket': None,
     'ce-profile-initial-socket-capability': 'ControlRequiresNegotiation',
     'ce-profile-initial-socket-authority': 'ControlRequiresExactAuthority',
@@ -295,6 +303,7 @@ def main():
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentLocalReadinessStoreTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBookieControlLogTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentProfileInstallStoreTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentProfileInitialSocketClientTest.java")
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/zookeeper/ZooKeeperWatcherBase.java")
     inputs.extend((root / "bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/startup").glob("*.java"))
     inputs.extend((root / "bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/startup").glob("*.java"))
@@ -338,7 +347,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A resumable-initial-all-E-availability and initial-READY-lifecycle-birth-CAS-retention and initial-metadata-all-E-gate physical-INSTALL-dispatch PREPARING-reservation-authority and standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
+        "scope": "Finite Model A initial-client-correlation-slot-custody and initial-socket-dispatch and resumable-initial-all-E-availability and initial-READY-lifecycle-birth-CAS-retention and initial-metadata-all-E-gate physical-INSTALL-dispatch PREPARING-reservation-authority and standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -354,6 +363,7 @@ def main():
                    "-metadir", str(states), "ProfileInitialAvailability.tla" if "profile-initial-availability" in name
                    else "ProfileReadyLifecycle.tla" if "profile-ready-lifecycle" in name
                    else "ProfileInitialMetadata.tla" if "profile-initial-metadata" in name
+                   else "ProfileInitialClientCorrelation.tla" if "profile-initial-client" in name
                    else "ProfileInitialSocketDispatch.tla" if "profile-initial-socket" in name
                    else "ProfileInstallDispatch.tla" if "profile-install-dispatch" in name
                    else "ProfileReservationAuthority.tla" if "profile-reservation-authority" in name

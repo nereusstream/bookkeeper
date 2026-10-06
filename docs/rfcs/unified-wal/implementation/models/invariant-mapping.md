@@ -501,3 +501,8 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 ## 初始 socket control 身份与所有权
 
 新增`ControlRequiresNegotiation`、`ControlRequiresExactAuthority`、`WorkspaceMovesWithControl`、`ColdAndIoCopiesRemainCharged`、`SuccessRequiresActualForceAndOwner`、`SubmittedUnknownIsNeverNone`及`TimedOutAdmissionNeverSubmits`；七个mutation分别取消capability/授权/工作区转账、终结等待即释放、force前回复、UNKNOWN映NONE及允许迟到EL提交。新正向1054 generated/546 distinct/queue0完整PASS；当前矩阵49正向/184指定反例，不以有限输入证明实际TLS、fsync硬件、SDK/quorum或全系统总预算。[映射与最终绑定](README.md#初始-control-socket-分发投影)。
+
+
+## Initial client 的 peer、关联与输出 ownership
+
+新增`RequestRequiresVerifiedPeer`、`SuccessHasBoundReply`、`SlotsWaitForBothTerminals`、`FrameIdsNeverAlias`、`NetworkUncertaintyNeverMeansNone`、`CancelledFutureIsNotRevived`及`CapacityIsBounded`；peer验证及server成功的physical证据是外部已验证输入。正向2775 generated/1281 distinct/queue0完整PASS，七个mutations命中指定性质；实际mTLS/NIO/FileChannel/ZK和schema字节由声明范围Java测试分别支持，不证明完整系统、TLS内部/kernel总账或可持续性能。[投影范围及source/run](README.md#初始-client-关联与-slot-投影)。
