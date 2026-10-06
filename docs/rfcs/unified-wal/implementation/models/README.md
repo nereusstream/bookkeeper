@@ -1102,3 +1102,21 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-initial-client-id | 26 / 26 / 12 | 4 / 不适用 | 0.794 s / 108,331,008 bytes | EXPECTED_COUNTEREXAMPLE:FrameIdsNeverAlias |
 | ce-profile-initial-client-unknown | 32 / 31 / 15 | 5 / 不适用 | 0.854 s / 110,837,760 bytes | EXPECTED_COUNTEREXAMPLE:NetworkUncertaintyNeverMeansNone |
 | ce-profile-initial-client-revive | 95 / 80 / 46 | 6 / 不适用 | 0.866 s / 113,328,128 bytes | EXPECTED_COUNTEREXAMPLE:CancelledFutureIsNotRevived |
+
+
+## 普通 client 的 source 与 output 投影
+
+2026-10-06 ProfileNormalClientSource区分caller source snapshot、outbound、write promise、wire等待和quota。quota在retain/clone前取得，queued source等实际EL任务决定encode或abort；copy完成即可归还source，output只在write终结后归还，slot同时等write/wire；cancel不复活future，NONE/UNKNOWN不能成为durable ACK。bound/capacity/server outcome为有限输入，TLS/完整关联/server force/owner依赖既有切片和[当前实际回归](../profile-wire/README.md#普通-data-client-与-sdk-接线边界)。不展开byte/pool/crypto/kernel、原SDK callback/replacement/close、全部timer交错、真实总预算、quorum算法、活性、公平性或完整A/C/D。
+
+最终 unified-wal-local-yMsEARYx tool exit0：1007冻结inputs，相关18类431项为426通过/5 macOS Linux-affinity跳过，0 failure/error；原8项initial及新增6项ordinary DATA组合通过。unified-wal-normal-client-style-n2bhqnuh Spotless/Checkstyle exit0，203冻结Java source与union一致；24份Java/style回执checksums已核验。模型 unified-wal-model-5720ce65 tool exit0：247配置为51正向完整PASS/196指定反例，506冻结inputs/743 checksums，204共享及1309去重union一致，5个designInputs绑定父提交8f6bf6f9501741ca98d968ae2efc2ea8b8563fc5。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不证明crypto/fsync硬件、活性、公平性、整个内存、完整A/C/D、长期/掉电/性能或production authority。历史source/config/run/receipt不重绑定。
+
+正向完整85 generated/66 distinct/queue0，depth与diameter均7；5个mutation命中指定性质。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-normal-client-source | 85 / 66 / 0 | 7 / 7 | 0.998 s / 111,476,736 bytes | PASS |
+| ce-profile-normal-client-source-quota | 16 / 16 / 11 | 2 / 不适用 | 0.962 s / 101,335,040 bytes | EXPECTED_COUNTEREXAMPLE:SourceSnapshotRequiresQuota |
+| ce-profile-normal-client-source-cancel | 25 / 25 / 8 | 3 / 不适用 | 0.865 s / 107,347,968 bytes | EXPECTED_COUNTEREXAMPLE:QueuedSourceWaitsForTaskDecision |
+| ce-profile-normal-client-source-bound | 26 / 26 / 10 | 3 / 不适用 | 0.892 s / 105,529,344 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedEntryFitsInstalledBound |
+| ce-profile-normal-client-source-status | 39 / 39 / 10 | 4 / 不适用 | 0.777 s / 103,841,792 bytes | EXPECTED_COUNTEREXAMPLE:SuccessRequiresDurableStatus |
+| ce-profile-normal-client-source-write | 34 / 34 / 7 | 4 / 不适用 | 0.774 s / 106,577,920 bytes | EXPECTED_COUNTEREXAMPLE:OutputWaitsForActualWrite |

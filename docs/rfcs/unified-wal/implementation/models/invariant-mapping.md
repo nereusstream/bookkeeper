@@ -506,3 +506,8 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 ## Initial client 的 peer、关联与输出 ownership
 
 新增`RequestRequiresVerifiedPeer`、`SuccessHasBoundReply`、`SlotsWaitForBothTerminals`、`FrameIdsNeverAlias`、`NetworkUncertaintyNeverMeansNone`、`CancelledFutureIsNotRevived`及`CapacityIsBounded`；peer验证及server成功的physical证据是外部已验证输入。正向2775 generated/1281 distinct/queue0完整PASS，七个mutations命中指定性质；实际mTLS/NIO/FileChannel/ZK和schema字节由声明范围Java测试分别支持，不证明完整系统、TLS内部/kernel总账或可持续性能。[投影范围及source/run](README.md#初始-client-关联与-slot-投影)。
+
+
+## Ordinary source/output ownership
+
+新增SourceSnapshotRequiresQuota、QueuedSourceWaitsForTaskDecision、SubmittedEntryFitsInstalledBound、SuccessRequiresDurableStatus、OutputWaitsForActualWrite和SlotWaitsForWriteAndWire。5个mutation取消quota、queued source持有、entry bound、将NONE/UNKNOWN当成功和reply先归还output quota，命中指定性质；正向85 generated/66 distinct/queue0。实际digest/buffers/TLS/force与原AckSet由当前声明范围测试支持，不证明整个SDK、总内存或完整A/C/D。[范围及绑定](README.md#普通-client-的-source-与-output-投影)。

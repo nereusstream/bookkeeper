@@ -540,3 +540,8 @@ AVAILABLE只返回bounded completion facts，未创建writer/handle或稳定wire
 ## 实际 initial client 与 all-E socket 组合
 
 `ProfileInitialClientCorrelation`的Hello/Enqueue/Write/Reply对应`actualAllESocketsWaitForBothPhasesAndReturnSameReadyAvailability`及`verifiedHelloRejectsWrongPeerIncarnationHostnameAndMissingCapabilityBeforeControl`；`wrongReplyCorrelationScopeGenerationAndErrorFlagsNeverProduceSuccess`用实际持久化后的reply破坏验证关联。Cancel/AbortQueued/Reply/Release由`cancelledWaitingRetainsBoundedPendingUntilOriginalWireTerminal`和`validatedReplyDoesNotReleaseSerializedSlotBeforeActualWritePromise`验证，后者临时移除write-terminal条件得到实际RED，恢复后GREEN。Refuse/FailClosed与`correlatedStatusOnlyColdRefusalIsKnownNoneAndNeverFakeDurability`、`lostActivationResponseReconcilesSameReadyAndMetadataViaNewClient`对应；必需metadata丢失不重建由真实组合独立验证。all-E/READY/required metadata仍由既有lifecycle/availability有限切片共同提供声明范围证据，不把独立PASS提升成完整A/C/D组合。[源码、指标与绑定](../profile-wire/README.md#非阻塞初始-control-client)。
+
+
+## Ordinary sender 的 source、status 与原AckSet
+
+ProfileNormalClientSource的Admit/Encode/WriteTerminal/Reply对应ordinaryDataClientUsesRealDigestAndDurableResponsesInOriginalAckSet；Cancel/Release对应ordinarySourceQuotaAndCancellationKeepLogicalUnknownSeparateFromCurrentNone与原output-promise回归。bound/拒绝、UNKNOWN/same-coordinate等待/force失败和wrong ID/OK-NONE/flags由独立ordinary socket回归验证。COPY后ingress合法归还不等于aligned I/O已终结。沿用prior correlation/dispatch/availability切片，独立PASS不提升为完整SDK或A/C/D组合。[源码及绑定](../profile-wire/README.md#普通-data-client-与-sdk-接线边界)。

@@ -1,0 +1,73 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to you under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.discover.profile;
+
+import io.netty.channel.EventLoopGroup;
+import io.netty.handler.ssl.SslContext;
+import io.netty.util.ReferenceCounted;
+import java.net.InetSocketAddress;
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
+import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
+
+/** Actual frozen ADD_NORMAL transport; preserves the full status before any SDK failure handling. */
+public final class ProfileNormalDataClient implements AutoCloseable {
+    private final ProfileSocketClient socket;
+
+    private ProfileNormalDataClient(ProfileSocketClient socket) {
+        this.socket = socket;
+    }
+
+    public static CompletableFuture<ProfileNormalDataClient> connect(EventLoopGroup group, SslContext tls,
+            InetSocketAddress remote, String peerHostname, String expectedBookie, byte[] expectedIncarnation,
+            int maxPending, int maxEntryBytes, Duration timeout) {
+        CompletableFuture<ProfileNormalDataClient> result = new CompletableFuture<>();
+        var pending = ProfileSocketClient.connect(group, tls, remote, peerHostname, expectedBookie,
+                expectedIncarnation, maxPending, timeout, true, maxEntryBytes);
+        pending.whenComplete((socket, failure) -> {
+            if (failure != null) {
+                result.completeExceptionally(failure);
+            } else if (!result.complete(new ProfileNormalDataClient(socket))) {
+                socket.close();
+            }
+        });
+        result.whenComplete((client, failure) -> {
+            if (result.isCancelled()) {
+                pending.cancel(false);
+            }
+        });
+        return result;
+    }
+
+    public ProfileHello.Server hello() {
+        return socket.hello();
+    }
+
+    /** Borrow CRC32C/v3 BookKeeper entry bytes. Caller may release but must not modify them until the future ends. */
+    public CompletableFuture<ProfileStatus> addNormal(ProfileLedgerContext context,
+            ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {
+        return socket.addNormal(context, credential, entryId, entry);
+    }
+
+    @Override
+    public void close() {
+        socket.close();
+    }
+}

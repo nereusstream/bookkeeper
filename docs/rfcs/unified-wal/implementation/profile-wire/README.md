@@ -232,3 +232,26 @@ maxPending为1..32，quota在排入event loop前取得，覆盖已排队及实�
 ~~~bash
 bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest'
 ~~~
+
+
+## 普通 DATA client 与 SDK 接线边界
+
+2026-10-06 [ProfileNormalDataClient](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/discover/profile/ProfileNormalDataClient.java)接入原frozen ADD_NORMAL与status-only reply；[ProfileSocketClient](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/discover/profile/ProfileSocketClient.java)复用CONTROL/DATA当前两种实际用途的TLS/HELLO、bounded pending、单调frame ID、reply关联、deadline及write/wire终结。原ProfileInitialControlClient公共connect/install/activate/hello/close接口不变，成为薄封装；没有复制另一套TLS生命周期或增加可插拔backend、retry/reconnect、线程/executor。DATA HELLO不要求实验UIC1，但仍验证实际TLS13、host、engine3、Bookie/incarnation；CONTROL保留原UIC1 requirement。
+
+调用方给出installed完整entry上限36..1MiB+36；输入为原CRC32C/v3 BookKeeper entry的ByteBuf或至多两段ByteBufList。大小用long累计，在取得quota、clone/retain之前检查；满额返回当前尝试TRANSIENT/SAME_PROFILE_OPERATION/NONE。持有quota后才创建retained index snapshots，不改变caller readerIndex；caller可在方法返回后释放，future完成前不得修改共享内容。source只在event loop复制一次进定长outbound，随后归还borrow；不经reference整包克隆或先coalesce再复制。100-byte context/entry ID/flags0/kind1/credential20/length prefix不变，无新wire schema。
+
+普通pending将ledger context/entry ID绑定唯一header ID。wrong ID/opcode/flags、非8-byte body及OK却无APPLIED/ALREADY_APPLIED不能成为成功。三元status完整交付，server force UNKNOWN保留UNKNOWN；网络断连/timeout令future exceptional UNKNOWN，当前NONE及caller取消不将旧future复活。用途连接分开，deadline关闭client channel不取消server DATA I/O；借用资源需由caller排空后关闭，副本清理不代表TLS/JVM全秘密擦除或统一总内存证明。
+
+[六项DATA组合](../../../../../bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentProfileInitialSocketClientTest.java)在actual all-E initial activation后：原DigestManager/v3 ByteBufList经3个mTLS DATA连接达到actual FileChannel force，matching durable status交给原RoundRobinDistributionSchedule AckSet；第一个和重复第一个不达A=2，第二个达到A，第三个未force时仍pending。这只证明transport与原AckSet计数，不是LedgerHandle/PendingAddOp连续callback或完整SDK。authority-read计数在ordinary请求前后不变，正常路径无远端authority读取或逐entry handshake。
+
+其余actual回归覆盖source quota/N/context/credential拒绝及cancel等待、提交后timeout同coordinate解析与文件writer isolation、actual force UNKNOWN及失败DATA session不能标记clean CLOSED、wrong ID/OK-NONE/ERROR flags不能ACK。首轮错误地要求disconnect后receive/source仍计费，但原storage已复制进对齐池，合法归还ingress；现验证force尚未结束、writer lock及same-coordinate原I/O解析，保留原交接合同。重复coordinate未解析时可以等待，不能伪称确定无效果，未跳过或弱化有效合同测试。
+
+最终 unified-wal-local-yMsEARYx tool exit0：1007冻结inputs，相关18类431项为426通过/5 macOS Linux-affinity跳过，0 failure/error；原8项initial及新增6项ordinary DATA组合通过。unified-wal-normal-client-style-n2bhqnuh Spotless/Checkstyle exit0，203冻结Java source与union一致；24份Java/style回执checksums已核验。模型 unified-wal-model-5720ce65 tool exit0：247配置为51正向完整PASS/196指定反例，506冻结inputs/743 checksums，204共享及1309去重union一致，5个designInputs绑定父提交8f6bf6f9501741ca98d968ae2efc2ea8b8563fc5。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不证明crypto/fsync硬件、活性、公平性、整个内存、完整A/C/D、长期/掉电/性能或production authority。历史source/config/run/receipt不重绑定。
+
+复现最小范围：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#ordinary*'
+~~~
+
+原PendingAddOp只接scalar BK rc，失败会进入Classic ensemble mutation或metadata close。不能将Profile transient/UNKNOWN压成int就宣称SDK接通；有界退避和UNKNOWN累积、Profile install→membership→activation换组、fenced-close/recovery和连续callback仍需接入原SDK。尚无LedgerHandle/生产writer，步骤11/13、生产listener/readiness、统一总账、SDK quorum/完整恢复/删除、stable/G1及生产Gate仍PARTIAL/OPEN。

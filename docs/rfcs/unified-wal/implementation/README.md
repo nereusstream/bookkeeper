@@ -515,3 +515,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-06 [初始all-E真实socket组合](profile-control/README.md#可恢复初始协调器的真实-all-e-socket-组合)增量：实际非阻塞initial client借用已有event loops/TLS context，验证actual HELLO/target/incarnation及完整request/reply关联，pending quota在EL排队前取得并等wire/write两种终结，取消/断连不释放仍使用的副本；无自动重试或重连。可恢复初始coordinator现直接经3个mTLS socket与实际ZK PREPARING/READY/标准metadata/原Bookie文件driver完成全E两phase，再返回AVAILABLE snapshot；actual activation reply丢失后显式新client/新coordinator解析同一READY/metadata/op。缺必需metadata仍不重建。8项组合及输出额度RED/GREEN、18类420通过/5平台跳过、style、50正向完整PASS/191指定反例已验证。尚无LedgerHandle/生产writer、普通DATA quorum SDK、replacement/recovery/full delete、完整server-process启动/readiness、统一总预算或production authority，步骤11/12与stable/G1/生产Gate仍PARTIAL/OPEN。 源码与回执绑定见实现记录。
+
+
+2026-10-06 [普通DATA client](profile-wire/README.md#普通-data-client-与-sdk-接线边界)增量：actual ordinary DATA client复用shared TLS/HELLO/correlation及write/wire quota，借用原DigestManager/v3 ByteBuf/ByteBufList并保留完整status，initial-control公共API不变。真实三目标force后的status进入原AckSet，A=2不计重复target，ordinary路径无authority cold-read。取消、quota/N/context/credential、timeout同坐标解析、force UNKNOWN和reply破坏通过；这是transport/AckSet组合，尚无完整LedgerHandle/PendingAddOp SDK、有界退避/UNKNOWN累积、Profile换组或fenced-close。步骤11/13及stable/G1/生产Gate不关闭。 18类426通过/5平台跳过、style及51正向完整PASS/196指定反例，绑定见实现记录。

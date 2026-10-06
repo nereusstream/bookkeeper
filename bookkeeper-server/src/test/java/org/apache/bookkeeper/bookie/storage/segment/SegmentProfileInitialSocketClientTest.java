@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -39,6 +40,7 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
+import io.netty.util.ReferenceCounted;
 import java.io.File;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -64,6 +66,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.client.LedgerMetadataBuilder;
+import org.apache.bookkeeper.client.RoundRobinDistributionSchedule;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.profile.DurabilityMode;
@@ -84,6 +87,7 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
+import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
@@ -92,6 +96,7 @@ import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
+import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
@@ -168,6 +173,9 @@ public class SegmentProfileInitialSocketClientTest {
         final List<Channel> listeners = new ArrayList<>();
         final List<Channel> accepted = new CopyOnWriteArrayList<>();
         final Map<String, ProfileInitialControlClient> clients = new HashMap<>();
+        final java.util.Set<Integer> expectedFailedDataSessions = new java.util.HashSet<>();
+        final List<ProfileNormalDataClient> dataClients = new ArrayList<>();
+        final AtomicInteger authorityReads = new AtomicInteger();
         final List<ProfileControlScope> scopes = new ArrayList<>();
         final List<CountDownLatch> installRelease = new ArrayList<>();
         final List<CountDownLatch> activateRelease = new ArrayList<>();
@@ -266,8 +274,11 @@ public class SegmentProfileInitialSocketClientTest {
                             (caller, operation) -> caller.equals(principal)
                                     && (operation == ProfileControlOperation.INSTALL
                                         || operation == ProfileControlOperation.ACTIVATE_INITIAL),
-                            key -> key.purpose() == ProfileAuthorityPurpose.PREPARING_INSTALL
-                                    ? installReader.read(key) : activeReader.read(key),
+                            key -> {
+                                authorityReads.incrementAndGet();
+                                return key.purpose() == ProfileAuthorityPurpose.PREPARING_INSTALL
+                                        ? installReader.read(key) : activeReader.read(key);
+                            },
                             (caller, requested, authority) -> caller.equals(principal)
                                     && requested.equals(authority.scope()) ? Decision.ALLOW : Decision.DENY,
                             cold, Duration.ofSeconds(5));
@@ -295,6 +306,15 @@ public class SegmentProfileInitialSocketClientTest {
                                                         frame.release();
                                                         promise.setSuccess();
                                                         return;
+                                                    }
+                                                    if (op == ProfileOperation.ADD_NORMAL.wireValue()) {
+                                                        if (fault == 7) {
+                                                            frame.setLong(frame.readerIndex() + 20, 99);
+                                                        } else if (fault == 8) {
+                                                            frame.setByte(frame.readerIndex() + 39, 0);
+                                                        } else if (fault == 9) {
+                                                            frame.setInt(frame.readerIndex() + 16, 3);
+                                                        }
                                                     }
                                                     if (op == ProfileOperation.INSTALL.wireValue()) {
                                                         if (fault == 2) {
@@ -384,14 +404,20 @@ public class SegmentProfileInitialSocketClientTest {
             installRelease.forEach(CountDownLatch::countDown);
             activateRelease.forEach(CountDownLatch::countDown);
             clients.values().forEach(ProfileInitialControlClient::close);
+            dataClients.forEach(ProfileNormalDataClient::close);
             for (Channel channel : accepted) {
                 channel.close().syncUninterruptibly();
             }
             for (Channel channel : listeners) {
                 channel.close().syncUninterruptibly();
             }
-            for (IsolatedSegmentStorage storage : nodes) {
-                assertTrue(storage.close(Duration.ofSeconds(5)));
+            for (int target = 0; target < nodes.size(); target++) {
+                IsolatedSegmentStorage storage = nodes.get(target);
+                if (expectedFailedDataSessions.contains(target)) {
+                    assertThrows(java.io.IOException.class, () -> storage.close(Duration.ofSeconds(5)));
+                } else {
+                    assertTrue(storage.close(Duration.ofSeconds(5)));
+                }
             }
             cold.shutdown();
             assertTrue(cold.awaitTermination(5, TimeUnit.SECONDS));
@@ -410,6 +436,255 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(0, budget.used(lane));
                     assertEquals(0, budget.usedConnections(lane));
                 }
+            }
+        }
+    }
+
+    private static ReferenceCounted entry(Fixture fixture, long entryId, int payloadBytes) throws Exception {
+        var digest = DigestManager.instantiate(44, fixture.password,
+                org.apache.bookkeeper.client.BookKeeper.DigestType.toProtoDigestType(
+                        org.apache.bookkeeper.client.BookKeeper.DigestType.CRC32C),
+                UnpooledByteBufAllocator.DEFAULT, false);
+        return digest.computeDigestAndPackageForSending(entryId, -1, payloadBytes,
+                Unpooled.wrappedBuffer(bytes(payloadBytes, 8)), DigestManager.generateMasterKey(fixture.password), 0);
+    }
+
+    private static ProfileNormalDataClient dataClient(Fixture fixture, int target, int pending, Duration timeout)
+            throws Exception {
+        var identity = fixture.identities.get(target);
+        var client = ProfileNormalDataClient.connect(fixture.clientGroup, fixture.peerTls,
+                (InetSocketAddress) fixture.listeners.get(target).localAddress(), "apache.bookkeeper.org",
+                identity.bookieId().toString(), identity.incarnation().value(), pending, 1060, timeout)
+                .get(5, TimeUnit.SECONDS);
+        fixture.dataClients.add(client);
+        return client;
+    }
+
+    private static IsolatedSegmentFiles files(IsolatedSegmentStorage storage) throws Exception {
+        var field = IsolatedSegmentStorage.class.getDeclaredField("files");
+        field.setAccessible(true);
+        return (IsolatedSegmentFiles) field.get(storage);
+    }
+
+    @Test
+    public void ordinaryDataClientUsesRealDigestAndDurableResponsesInOriginalAckSet() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    fixture.initialize().get(5, TimeUnit.SECONDS).status());
+            int reads = fixture.authorityReads.get();
+            List<CountDownLatch> release = new ArrayList<>();
+            CountDownLatch allForcing = new CountDownLatch(3);
+            List<CompletableFuture<ProfileStatus>> replies = new ArrayList<>();
+            for (int target = 0; target < 3; target++) {
+                CountDownLatch gate = new CountDownLatch(1);
+                release.add(gate);
+                files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    allForcing.countDown();
+                    await(gate);
+                });
+                var client = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                ReferenceCounted source = entry(fixture, 0, 16);
+                try {
+                    replies.add(client.addNormal(fixture.context(), fixture.credential, 0, source));
+                } finally {
+                    source.release(); // Client owns a stable retained view until its real output copy.
+                }
+            }
+            try {
+                assertTrue(allForcing.await(5, TimeUnit.SECONDS));
+                assertTrue(replies.stream().noneMatch(CompletableFuture::isDone));
+                var acks = new RoundRobinDistributionSchedule(3, 2, 3).getAckSet();
+                release.get(0).countDown();
+                ProfileStatus first = replies.get(0).get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileStatus.StatusClass.OK, first.statusClass());
+                assertEquals(ProfileStatus.DurableResult.APPLIED, first.durableResult());
+                assertFalse(acks.completeBookieAndCheck(0));
+                assertFalse(acks.completeBookieAndCheck(0)); // Duplicate target is not another durable replica.
+                release.get(1).countDown();
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        replies.get(1).get(5, TimeUnit.SECONDS).durableResult());
+                assertTrue(acks.completeBookieAndCheck(1));
+                assertFalse(replies.get(2).isDone());
+                release.get(2).countDown();
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        replies.get(2).get(5, TimeUnit.SECONDS).durableResult());
+                assertEquals(reads, fixture.authorityReads.get());
+            } finally {
+                release.forEach(CountDownLatch::countDown);
+            }
+        }
+    }
+
+    @Test
+    public void ordinarySourceQuotaAndCancellationKeepLogicalUnknownSeparateFromCurrentNone() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    fixture.initialize().get(5, TimeUnit.SECONDS).status());
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            files(fixture.nodes.get(0)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            var client = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+            ReferenceCounted source = entry(fixture, 0, 16);
+            try {
+                var pending = client.addNormal(fixture.context(), fixture.credential, 0, source);
+                source.release();
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertTrue(pending.cancel(true));
+                ReferenceCounted refusedSource = entry(fixture, 0, 16);
+                try {
+                    ProfileStatus current = client.addNormal(fixture.context(), fixture.credential, 0,
+                            refusedSource).get();
+                    assertEquals(ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE, current.statusClass());
+                    assertEquals(ProfileStatus.DurableResult.NONE, current.durableResult());
+                    assertEquals(1, refusedSource.refCnt());
+                } finally {
+                    refusedSource.release();
+                }
+                release.countDown();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                ProfileStatus reconciled;
+                do {
+                    ReferenceCounted retry = entry(fixture, 0, 16);
+                    try {
+                        reconciled = client.addNormal(fixture.context(), fixture.credential, 0, retry)
+                                .get(5, TimeUnit.SECONDS);
+                    } finally {
+                        retry.release();
+                    }
+                    if (reconciled.statusClass() == ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE) {
+                        assertTrue(System.nanoTime() < deadline);
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                } while (reconciled.statusClass() == ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE);
+                assertEquals(ProfileStatus.DurableResult.APPLIED, reconciled.durableResult());
+                assertTrue(pending.isCancelled());
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void ordinaryDataRejectionAndEntryBoundNeverBecomeSuccessfulWrites() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    fixture.initialize().get(5, TimeUnit.SECONDS).status());
+            var client = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+            ReferenceCounted source = entry(fixture, 0, 16);
+            try {
+                ProfileStatus denied = client.addNormal(fixture.context(), ProtectedProfileCredential.of(1,
+                        bytes(20, 99)), 0, source).get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileStatus.StatusClass.UNAUTHORIZED, denied.statusClass());
+                assertEquals(ProfileStatus.DurableResult.NONE, denied.durableResult());
+                assertEquals(1, source.refCnt());
+                var wrong = new ProfileLedgerContext(44, bytes(16, 9), fixture.context().descriptorIdentity());
+                ProfileStatus conflict = client.addNormal(wrong, fixture.credential, 0, source)
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileStatus.StatusClass.PROFILE_IDENTITY_CONFLICT, conflict.statusClass());
+                assertEquals(ProfileStatus.DurableResult.NONE, conflict.durableResult());
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        client.addNormal(fixture.context(), fixture.credential, 0, source)
+                                .get(5, TimeUnit.SECONDS).durableResult());
+            } finally {
+                source.release();
+            }
+            ReferenceCounted oversized = entry(fixture, 1, 1025);
+            try {
+                assertThrows(IllegalArgumentException.class,
+                        () -> client.addNormal(fixture.context(), fixture.credential, 1, oversized));
+                assertEquals(1, oversized.refCnt());
+            } finally {
+                oversized.release();
+            }
+        }
+    }
+
+    @Test
+    public void ordinaryTimeoutAfterSubmissionKeepsServerIoAliveAndSameCoordinateCanReconcile() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    fixture.initialize().get(5, TimeUnit.SECONDS).status());
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            files(fixture.nodes.get(0)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            var client = dataClient(fixture, 0, 1, Duration.ofMillis(100));
+            ReferenceCounted source = entry(fixture, 0, 16);
+            try {
+                var unknown = client.addNormal(fixture.context(), fixture.credential, 0, source);
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertThrows(ExecutionException.class, () -> unknown.get(5, TimeUnit.SECONDS));
+                assertEquals(0, files(fixture.nodes.get(0)).dataIo.forces);
+                var configField = IsolatedSegmentStorage.class.getDeclaredField("config");
+                configField.setAccessible(true);
+                Path ownedDirectory = ((IsolatedSegmentConfig) configField.get(fixture.nodes.get(0))).directory();
+                assertThrows(java.io.IOException.class, () -> SegmentDataFileLock.open(ownedDirectory));
+                var retrying = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+                var originalCoordinate = retrying.addNormal(fixture.context(), fixture.credential, 0, source);
+                ProfileStatus currentNone = retrying.addNormal(fixture.context(), fixture.credential, 0, source).get();
+                assertEquals(ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE, currentNone.statusClass());
+                assertEquals(ProfileStatus.DurableResult.NONE, currentNone.durableResult());
+                assertTrue(unknown.isCompletedExceptionally());
+                release.countDown();
+                ProfileStatus resolved = originalCoordinate.get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileStatus.DurableResult.APPLIED, resolved.durableResult());
+                assertTrue(unknown.isCompletedExceptionally());
+            } finally {
+                release.countDown();
+                source.release();
+            }
+        }
+    }
+
+    @Test
+    public void ordinaryServerForceFailureKeepsFullUnknownStatusAndNeverAcks() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    fixture.initialize().get(5, TimeUnit.SECONDS).status());
+            fixture.expectedFailedDataSessions.add(0);
+            files(fixture.nodes.get(0)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            var client = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+            ReferenceCounted source = entry(fixture, 0, 16);
+            try {
+                ProfileStatus unknown = client.addNormal(fixture.context(), fixture.credential, 0, source)
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileStatus.StatusClass.DURABILITY_RESULT_UNKNOWN, unknown.statusClass());
+                assertEquals(ProfileStatus.DurableResult.UNKNOWN, unknown.durableResult());
+                assertEquals(ProfileStatus.RetryDisposition.SAME_PROFILE_OPERATION, unknown.retryDisposition());
+                assertEquals(1, source.refCnt());
+            } finally {
+                source.release();
+            }
+        }
+    }
+
+    @Test
+    public void ordinaryReplyWrongIdFakeOkNoneAndFlagsCannotBecomeAcknowledgments() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    fixture.initialize().get(5, TimeUnit.SECONDS).status());
+            fixture.faultTarget.set(0);
+            ReferenceCounted source = entry(fixture, 0, 16);
+            try {
+                for (int fault = 7; fault <= 9; fault++) {
+                    fixture.replyFault.set(fault);
+                    var client = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+                    assertThrows(ExecutionException.class, () -> client.addNormal(fixture.context(),
+                            fixture.credential, 0, source).get(5, TimeUnit.SECONDS));
+                }
+            } finally {
+                source.release();
             }
         }
     }
@@ -579,9 +854,12 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
                     fixture.reservations.createIfAbsent(fixture.reservation).status());
             var client = fixture.connect(0, 1, Duration.ofSeconds(5));
-            var field = ProfileInitialControlClient.class.getDeclaredField("channel");
+            var ownerField = ProfileInitialControlClient.class.getDeclaredField("socket");
+            ownerField.setAccessible(true);
+            Object owner = ownerField.get(client);
+            var field = owner.getClass().getDeclaredField("channel");
             field.setAccessible(true);
-            Channel channel = (Channel) field.get(client);
+            Channel channel = (Channel) field.get(owner);
             AtomicReference<ChannelPromise> held = new AtomicReference<>();
             AtomicReference<ByteBuf> observed = new AtomicReference<>();
             CountDownLatch actualWrite = new CountDownLatch(1);
