@@ -351,3 +351,9 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 2026-10-06 actual all-E initial flow后可用独立DATA连接发原CRC32C/v3 entry，initial-control公共API保留；TLS/HELLO/correlation/output custody共用有界实现。原authority reader不进入ordinary热路径，三元status不压成Classic rc。[DATA与SDK边界](../profile-wire/README.md#普通-data-client-与-sdk-接线边界)明确这是sender与原AckSet组合，未接通LedgerHandle writer、连续callback、换组或fenced-close/recovery。
 
 最终 unified-wal-local-yMsEARYx tool exit0：1007冻结inputs，相关18类431项为426通过/5 macOS Linux-affinity跳过，0 failure/error；原8项initial及新增6项ordinary DATA组合通过。unified-wal-normal-client-style-n2bhqnuh Spotless/Checkstyle exit0，203冻结Java source与union一致；24份Java/style回执checksums已核验。模型 unified-wal-model-5720ce65 tool exit0：247配置为51正向完整PASS/196指定反例，506冻结inputs/743 checksums，204共享及1309去重union一致，5个designInputs绑定父提交8f6bf6f9501741ca98d968ae2efc2ea8b8563fc5。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不证明crypto/fsync硬件、活性、公平性、整个内存、完整A/C/D、长期/掉电/性能或production authority。历史source/config/run/receipt不重绑定。
+
+### AVAILABLE snapshot 的首个 SDK 消费者
+
+2026-10-06，实验 ProfileLedgerHandle 开始消费实际 all-E AVAILABLE 结果与对应 DATA clients；工厂再次校验 page/metadata、matching current activation、目标 engine/Bookie/incarnation，初始 snapshot 仍不是持续 authority lease。后续普通 Add 走原 SDK 的 digest/quorum/连续回调及有界 DATA 重试，不逐 entry 查询远端 authority。实际 driver 继续判断当前本地权限。[SDK 实现与验证](../profile-wire/README.md#固定初始-ensemble-的原-sdk-写入接线)给出资源和 UNKNOWN 的边界。
+
+该工厂仅接纳固定初始 ensemble；Profile membership replacement、RepairIntent、fenced-close、基础 recovery、完整删除及生产 registration/readiness 仍未闭合。本地 stop 不发布 CLOSED，不取消服务器已提交 I/O。规划会话只读检查已确认首个非 HELLO 操作分类方案：没有新增连接用途字段；已有实验 initial-control capability/schema 仍存在。CONTROL_PENDING 在真实授权前仍占 UNCLASSIFIED，额度/名额原子迁移，已有 buffer 随实际引用终结释放；UNCLASSIFIED 耗尽时新 CONTROL 连接仍可能被拒绝。此结论不替代统一总预算和生产 listener 验收。

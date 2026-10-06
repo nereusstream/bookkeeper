@@ -255,3 +255,21 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ~~~
 
 原PendingAddOp只接scalar BK rc，失败会进入Classic ensemble mutation或metadata close。不能将Profile transient/UNKNOWN压成int就宣称SDK接通；有界退避和UNKNOWN累积、Profile install→membership→activation换组、fenced-close/recovery和连续callback仍需接入原SDK。尚无LedgerHandle/生产writer，步骤11/13、生产listener/readiness、统一总账、SDK quorum/完整恢复/删除、stable/G1及生产Gate仍PARTIAL/OPEN。
+
+### 固定初始 ensemble 的原 SDK 写入接线
+
+2026-10-06，步骤 13 增加 ProfileLedgerHandle 与 package-private ProfileBookieClient。前者消费实际 all-E AVAILABLE snapshot 和精确目标 DATA clients，复用原 LedgerHandle/PendingAddOp 分配坐标、打包 CRC32C/v3、按不同 target 计 quorum、保持连续回调和 LAC/length。没有另建 quorum 或 pending-op 框架。初始事实再次校验 metadata/page、当前 activation 的 scope/local generation 及 actual HELLO 的 engine/Bookie/incarnation；snapshot 不成为持续权限 lease，服务器仍按当前本地权限判断 Add。
+
+当前配置明确要求 v3、explicit LAC interval=0、delayEnsembleChange=true、关闭 fault-domain write gate。每目标保留原打包字节与 ledger/entry 坐标，用原 OrderedScheduler/OrderedExecutor 做 1～16 次尝试、1 ms～1 min deadline 及有界 backoff；原 SDK quorum timeout 仍有效。只有完整 durable APPLIED/ALREADY_APPLIED 进入原 OK callback；可重试资源 NONE 和 UNKNOWN 先分类，退避阶段不直接触发换组。无隐式重连、身份改变或坐标重用。耗尽后交回原 quorum 故障逻辑；当前 Profile 换组尚未实现，因此 quorum 不可达时停止本地写入，既不替换 membership 也不发布 Classic CLOSED。
+
+hasUncertainWrites() 是该 handle 的历史不确定性观察：后续 NONE 或成功不会清除它，不等同于已有恢复证明或最终未决清单。网络失败、在途 deadline 及在途本地停止均可能留下远端 DATA。原 scalar SDK failure 可以表现为 WriteException，调用方须保留该观察并经后续 Profile recovery/close 解析。当前没有把逻辑失败解释为远端 NONE，也不取消服务器文件 I/O。
+
+前台最多 1～256 个待回调 entry，payload 硬上限 1 MiB；额外 entry/oversize 在分配坐标前拒绝。每目标另有同规模逻辑投递上限，使 A 已完成后的迟到投递仍受限制。下层 DATA client 的 source/output/write/wire 配额继续独立保护实际引用。transport 借用 DATA clients/TLS/event loops；stopLocalWrites() 等待本地逻辑投递关闭和引用归还，之后调用方关闭下层 clients 并排空 channel，再关闭 SDK context。它不等待远端物理终结，不证明 ledger 已 fenced/closed。read/LAC/force transport 和 Profile recovery 未实现；closeAsync 明确失败，metadata 仍 OPEN。此隔离工厂不接入普通 BookKeeper createLedger 或生产启动入口。 现有 OPEN ledger 的 writer 重建没有实现；不得把再次取得 AVAILABLE snapshot 或再次调用 initial 工厂当作重启 writer 的资格。持久 writer 暴露与恢复后 start coordinate 的闭合仍属后续步骤13/14，不由本轮成功路径证明。
+
+已有真实 mTLS/ZK/文件 fixture 增加五项 SDK 组合：三个首 entry 的真实 reply/write promise 被保留，后 entry 先获得 quorum 仍不能越过回调空洞；实际 DATA slots 满时原坐标有限退避，额外前台 entry 不占坐标；deadline 失败后实际 force 仍继续且 metadata 版本/state 未改变；真实 force UNKNOWN 后的已知 NONE 不会清除历史观察；scheduler 拒绝时已接纳逻辑写入和 stop 都终结。原八项 initial-control 与六项 DATA tests 保留。不是长期、掉电、全内存、完整 A/C/D 或生产可用性证据。
+
+复现新增定向用例：scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#originalSdk*+sdk*'。模型及完整实际回执见下一段；中间编译错误和未通过的 style 检查不计作通过。
+
+最终 Java 回执 unified-wal-local-lHxRMIwp exit0，1009 冻结输入；实际执行13类418项，413通过、5项 macOS 上 Linux-affinity 跳过、0 failure/error，其中 socket 19项及原 PendingAddOp 19项均通过。原 selector 含未存在的测试类名，不能计为已执行；复现实际范围为 scripts/unified-wal/run-local-storage-tests.sh 'IsolatedSegmentConfigTest,SegmentBatchFormatTest,SegmentControlFormatTest,SegmentArenaControlLogTest,SegmentBookieControlLogTest,SegmentOwnerLoopTest,SegmentExecutionGroupTest,SegmentProfileInitialSocketClientTest,ZKProfileReservationStoreTest,ProfileLedgerMetadataStoreTest,ProfileTlsContextFactoryTest,ProfileOperationCodecTest,PendingAddOpTest'。定向 unified-wal-local-qju9ohzO 五项通过；随后在途 stop 不确定性与格式修正进入上述最终快照。首次编译 unified-wal-local-CM2qHlj9 失败及 initial style 行长错误保留为非通过结果。
+
+Spotless/Checkstyle exit0，回执 unified-wal-sdk-style-9mkj8q1k 的135个 server Java 输入与源码 union 一致；19份 Java/style checksums 已逐项核对。模型 unified-wal-model-5b1j8vic exit0：253配置为52正向完整PASS/201指定反例，521冻结输入、761 checksums；212共享输入、1318去重 union 一致，5个 designInputsAtSourceCommit 绑定父提交6df172fb5e664fe12ba642ebd85960acee84343b。新 SDK projection 为9613 generated/2476 distinct/queue0、depth/diameter12；五个变异均违反预期性质。工具仍为官方1.7.4、单worker、heap512 MiB/direct64 MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。未替代真实掉电/crypto/fsync硬件、全内存、活性、公平性、全部 quorum 配置、replacement/recovery/close、完整A/C/D、长期/性能或生产 authority；步骤13保持PARTIAL。

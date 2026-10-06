@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 48 个完整正向配置、177 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 52 个完整正向配置、201 个指定性质反例，并包含固定初始 SDK bridge 投影；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -1120,3 +1120,11 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-normal-client-source-bound | 26 / 26 / 10 | 3 / 不适用 | 0.892 s / 105,529,344 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedEntryFitsInstalledBound |
 | ce-profile-normal-client-source-status | 39 / 39 / 10 | 4 / 不适用 | 0.777 s / 103,841,792 bytes | EXPECTED_COUNTEREXAMPLE:SuccessRequiresDurableStatus |
 | ce-profile-normal-client-source-write | 34 / 34 / 7 | 4 / 不适用 | 0.774 s / 106,577,920 bytes | EXPECTED_COUNTEREXAMPLE:OutputWaitsForActualWrite |
+
+### 固定初始 SDK bridge 与当前验证
+
+2026-10-06，ProfileSdkBridge 在已有 DATA client/source/dispatch 切片之上验证一个原 SDK entry、三个目标、A=2 和最多两次尝试；NONE/UNKNOWN、backoff、deadline、原 quorum、单次 callback、本地 stop 和 metadata OPEN 分开建模。五个单独变异分别覆盖遗忘 UNKNOWN、丢失重试字节、改变坐标、重复回调与错误发布 Classic CLOSED。原 LedgerHandle/PendingAddOp 及新 adapter/context/config/stats 的源码纳入当前 source hash；乱序双 entry 连续回调由真实 socket test 与原 PendingAddOp regressions 检验，未将一 entry 模型扩大成两 entry 的证明。
+
+当前 unified-wal-model-5b1j8vic exit0，253配置为52个完整正向PASS/201个指定反例；521实际输入、761回执checksum逐项一致。新正向为9613 generated/2476 distinct、queue0、depth/diameter12，elapsed约0.875s、peak RSS158597120 bytes；这只是有限检查器成本。Java unified-wal-local-lHxRMIwp 实际13类418项、413通过/5 macOS Linux-affinity跳过、零失败/错误，包含19项真实 socket及19项原 PendingAddOp。135个 server Java 的 style快照匹配，19份 Java/style checksums核验；212共享输入、1318去重union一致，5个designInputs绑定父提交6df172fb5e664fe12ba642ebd85960acee84343b，历史回执不重绑。完整实际命令见[SDK实现记录](../profile-wire/README.md#固定初始-ensemble-的原-sdk-写入接线)。
+
+运行仍用官方 tool1.7.4、单worker、heap512 MiB/direct64 MiB、seed1/fp0、无symmetry/state constraint，CHECK_DEADLOCK FALSE。模型没有展开真实时钟/网络、byte/kernel总量、持续 metadata lease、换组/恢复/close、liveness/fairness、完整A+C+D或生产Gate；模型PASS不替代TLS/fsync/掉电/长期和性能证据。

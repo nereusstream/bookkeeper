@@ -511,3 +511,7 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 ## Ordinary source/output ownership
 
 新增SourceSnapshotRequiresQuota、QueuedSourceWaitsForTaskDecision、SubmittedEntryFitsInstalledBound、SuccessRequiresDurableStatus、OutputWaitsForActualWrite和SlotWaitsForWriteAndWire。5个mutation取消quota、queued source持有、entry bound、将NONE/UNKNOWN当成功和reply先归还output quota，命中指定性质；正向85 generated/66 distinct/queue0。实际digest/buffers/TLS/force与原AckSet由当前声明范围测试支持，不证明整个SDK、总内存或完整A/C/D。[范围及绑定](README.md#普通-client-的-source-与-output-投影)。
+
+### 固定初始 SDK bridge 性质
+
+ProfileSdkBridge 检查 KnownNoneNeverClearsUnknown、RetryKeepsSource、RetryKeepsCoordinate、OneOriginalCallback、SuccessRequiresOriginalQuorum、LocalStopNeverPublishesClosed；对应 ProfileBookieClient 的历史 UNKNOWN、保留打包字节/坐标、terminal CAS、原 AckSet 及 ProfileLedgerHandle 的本地停止。五个单独变异分别清除 UNKNOWN、提前释放 source、换 retry 坐标、重复 callback、发布 Classic CLOSED，必须给出指定性质反例。attempt 常量为2、target为3、entry为1，仅验证有限分类/控制状态；下层实际 TLS/write/wire 和 server force/owner 仍由已有切片及真实测试验证，不代表全系统 refinement、活性或完整 A+C+D。

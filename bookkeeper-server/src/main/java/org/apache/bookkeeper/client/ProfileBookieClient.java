@@ -1,0 +1,355 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import io.netty.util.ReferenceCounted;
+import java.time.Duration;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.bookkeeper.client.api.WriteFlag;
+import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
+import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookieClient;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.BatchedReadEntryCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.ForceLedgerCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GetBookieInfoCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.ReadEntryCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.ReadLacCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.WriteCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.WriteLacCallback;
+import org.apache.bookkeeper.util.AvailabilityOfEntriesOfLedger;
+import org.apache.bookkeeper.util.ByteBufList;
+
+/** Fixed initial ensemble adapter: classify full status and retry same bytes before the original scalar callback. */
+final class ProfileBookieClient implements BookieClient {
+    record Retry(int attempts, Duration deadline, Duration backoff) {
+        Retry {
+            if (attempts < 1 || attempts > 16 || deadline.compareTo(Duration.ofMillis(1)) < 0
+                    || deadline.compareTo(Duration.ofMinutes(1)) > 0 || backoff.compareTo(Duration.ofMillis(1)) < 0
+                    || backoff.compareTo(deadline) > 0) {
+                throw new IllegalArgumentException("Invalid bounded Profile retry settings");
+            }
+        }
+    }
+    private final ClientContext base;
+    private final ProfileLedgerContext ledger;
+    private final ProtectedProfileCredential credential;
+    private final Map<BookieId, ProfileNormalDataClient> clients;
+    private final Retry retry;
+    private final int perTargetLimit;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean uncertain = new AtomicBoolean();
+    private final Map<BookieId, Integer> counts = new ConcurrentHashMap<>();
+    // Original ledger executor owns delivery state; shutdown completion uses a terminal CAS.
+    private final Set<Delivery> pending = ConcurrentHashMap.newKeySet();
+    private final CompletableFuture<Void> closeCompletion = new CompletableFuture<>();
+
+    ProfileBookieClient(ClientContext base, ProfileLedgerContext ledger, ProtectedProfileCredential credential,
+            Map<BookieId, ProfileNormalDataClient> clients, int perTargetLimit, Retry retry) {
+        this.base = base;
+        this.ledger = ledger;
+        this.credential = credential;
+        this.clients = Map.copyOf(clients);
+        this.retry = retry;
+        if (perTargetLimit < 1 || perTargetLimit > 256) {
+            throw new IllegalArgumentException("Invalid per-target logical delivery bound");
+        }
+        this.perTargetLimit = perTargetLimit;
+    }
+
+    private void ordered(Runnable task) {
+        base.getMainWorkerPool().executeOrdered(ledger.ledgerId(), task);
+    }
+
+    @Override
+    public void addEntry(BookieId address, long ledgerId, byte[] key, long entryId, ReferenceCounted bytes,
+            WriteCallback callback, Object context, int options, boolean failFast, EnumSet<WriteFlag> flags) {
+        int rejected = closed.get() ? BKException.Code.ClientClosedException
+                : ledgerId != ledger.ledgerId() || !clients.containsKey(address) || options != 0 || !flags.isEmpty()
+                    ? BKException.Code.IllegalOpException
+                    : !credential.matchesWireVerifier(key) ? BKException.Code.UnauthorizedAccessException : 0;
+        if (rejected != 0) {
+            ordered(() -> callback.writeComplete(rejected, ledgerId, entryId, address, context));
+            return;
+        }
+        bytes.retain(); // Original PendingAddOp may complete at A before this target resolves.
+        try {
+            ordered(() -> {
+                if (closed.get() || counts.getOrDefault(address, 0) >= perTargetLimit) {
+                    bytes.release();
+                    callback.writeComplete(closed.get() ? BKException.Code.ClientClosedException
+                            : BKException.Code.TooManyRequestsException, ledgerId, entryId, address, context);
+                    return;
+                }
+                Delivery delivery = new Delivery(address, entryId, bytes, callback, context);
+                counts.merge(address, 1, Integer::sum);
+                pending.add(delivery);
+                try {
+                    delivery.expiryTask = base.getScheduler().scheduleOrdered(ledger.ledgerId(), () -> {
+                        try {
+                            ordered(() -> {
+                                if (delivery.terminal.get()) {
+                                    return;
+                                }
+                                if (delivery.inFlight) {
+                                    delivery.unknown = true;
+                                    uncertain.set(true);
+                                }
+                                delivery.finish(delivery.unknown ? BKException.Code.TimeoutException
+                                        : BKException.Code.TooManyRequestsException);
+                            });
+                        } catch (RejectedExecutionException shutdown) {
+                            delivery.finishAfterExecutorShutdown();
+                        }
+                    }, retry.deadline().toNanos(), TimeUnit.NANOSECONDS);
+                    delivery.send();
+                } catch (RejectedExecutionException shutdown) {
+                    delivery.finishAfterExecutorShutdown();
+                }
+            });
+        } catch (RejectedExecutionException unavailable) {
+            bytes.release();
+            throw unavailable;
+        }
+    }
+
+    private final class Delivery {
+        final BookieId target;
+        final long entryId;
+        final ReferenceCounted bytes;
+        final WriteCallback callback;
+        final Object context;
+        final long deadline = System.nanoTime() + retry.deadline().toNanos();
+        int attempts;
+        boolean unknown;
+        final AtomicBoolean terminal = new AtomicBoolean();
+        ScheduledFuture<?> retryTask;
+        ScheduledFuture<?> expiryTask;
+        volatile boolean inFlight;
+
+        Delivery(BookieId target, long entryId, ReferenceCounted bytes, WriteCallback callback, Object context) {
+            this.target = target;
+            this.entryId = entryId;
+            this.bytes = bytes;
+            this.callback = callback;
+            this.context = context;
+        }
+
+        void send() {
+            if (terminal.get()) {
+                return;
+            }
+            if (closed.get() || base.isClientClosed()) {
+                finish(BKException.Code.ClientClosedException);
+                return;
+            }
+            if (++attempts > retry.attempts() || System.nanoTime() >= deadline) {
+                finish(unknown ? BKException.Code.TimeoutException : BKException.Code.TooManyRequestsException);
+                return;
+            }
+            try {
+                inFlight = true;
+                clients.get(target).addNormal(ledger, credential, entryId, bytes).whenComplete((status, failure) -> {
+                    try {
+                        ordered(() -> classify(status, failure));
+                    } catch (RejectedExecutionException shutdown) {
+                        // Caller must stop this adapter and drain its original executor before closing the context.
+                        finishAfterExecutorShutdown();
+                    }
+                });
+            } catch (RuntimeException refused) {
+                classify(null, refused);
+            }
+        }
+
+        void classify(ProfileStatus status, Throwable failure) {
+            if (terminal.get()) {
+                return;
+            }
+            inFlight = false;
+            if (failure != null || status == null) {
+                unknown = true;
+                uncertain.set(true);
+                finish(BKException.Code.TimeoutException); // No implicit reconnect or identity change.
+                return;
+            }
+            unknown |= status.durableResult() == ProfileStatus.DurableResult.UNKNOWN;
+            if (unknown) {
+                uncertain.set(true);
+            }
+            if (status.statusClass() == ProfileStatus.StatusClass.OK
+                    && (status.durableResult() == ProfileStatus.DurableResult.APPLIED
+                        || status.durableResult() == ProfileStatus.DurableResult.ALREADY_APPLIED)) {
+                finish(BKException.Code.OK);
+                return;
+            }
+            if ((status.statusClass() == ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE
+                    || status.statusClass() == ProfileStatus.StatusClass.DURABILITY_RESULT_UNKNOWN)
+                    && status.retryDisposition() == ProfileStatus.RetryDisposition.SAME_PROFILE_OPERATION) {
+                if (attempts >= retry.attempts() || System.nanoTime() + retry.backoff().toNanos() >= deadline) {
+                    finish(unknown ? BKException.Code.TimeoutException : BKException.Code.TooManyRequestsException);
+                    return;
+                }
+                try {
+                    retryTask = base.getScheduler().scheduleOrdered(ledger.ledgerId(), () -> {
+                        try {
+                            ordered(this::send);
+                        } catch (RejectedExecutionException shutdown) {
+                            finishAfterExecutorShutdown();
+                        }
+                    }, retry.backoff().toNanos(), TimeUnit.NANOSECONDS);
+                } catch (RejectedExecutionException shutdown) {
+                    finishAfterExecutorShutdown();
+                }
+                return;
+            }
+            int result = switch (status.statusClass()) {
+                case FENCED -> BKException.Code.LedgerFencedException;
+                case UNAUTHORIZED -> BKException.Code.UnauthorizedAccessException;
+                case BAD_REQUEST, UNSUPPORTED_PROTOCOL_OPCODE_CAPABILITY_ENGINE -> BKException.Code.IllegalOpException;
+                default -> BKException.Code.WriteException;
+            };
+            finish(unknown ? BKException.Code.TimeoutException : result);
+        }
+
+        void finish(int code) {
+            if (!terminal.compareAndSet(false, true)) {
+                return;
+            }
+            if (code != BKException.Code.OK && inFlight) {
+                unknown = true;
+                uncertain.set(true);
+            }
+            if (retryTask != null) {
+                retryTask.cancel(false);
+            }
+            if (expiryTask != null) {
+                expiryTask.cancel(false);
+            }
+            pending.remove(this);
+            counts.compute(target, (key, count) -> count == null || count == 1 ? null : count - 1);
+            try {
+                callback.writeComplete(code, ledger.ledgerId(), entryId, target, context);
+            } finally {
+                bytes.release();
+            }
+        }
+
+        void finishAfterExecutorShutdown() {
+            finish(BKException.Code.InterruptedException);
+        }
+    }
+
+    boolean hasUncertainWrites() {
+        return uncertain.get();
+    }
+
+    @Override
+    public List<BookieId> getFaultyBookies() {
+        return List.of();
+    }
+    @Override
+    public boolean isWritable(BookieId address, long ledgerId) {
+        return !closed.get() && ledgerId == ledger.ledgerId() && clients.containsKey(address)
+                && counts.getOrDefault(address, 0) < perTargetLimit;
+    }
+    @Override
+    public long getNumPendingRequests(BookieId address, long ledgerId) {
+        long count = counts.getOrDefault(address, 0);
+        return isWritable(address, ledgerId) ? count : count | PENDINGREQ_NOTWRITABLE_MASK;
+    }
+    @Override
+    public boolean isClosed() {
+        return closed.get();
+    }
+    CompletableFuture<Void> closeCompletion() {
+        return closeCompletion;
+    }
+
+    @Override
+    public void close() {
+        if (closed.compareAndSet(false, true)) {
+            Runnable drain = () -> {
+                try {
+                    for (Delivery delivery : List.copyOf(pending)) {
+                        delivery.finish(BKException.Code.ClientClosedException);
+                    }
+                    closeCompletion.complete(null);
+                } catch (RuntimeException failure) {
+                    closeCompletion.completeExceptionally(failure);
+                }
+            };
+            try {
+                ordered(drain);
+            } catch (RejectedExecutionException shutdown) {
+                drain.run();
+            }
+        }
+    }
+    @Override
+    public void forceLedger(BookieId address, long ledgerId, ForceLedgerCallback cb, Object ctx) {
+        ordered(() -> cb.forceLedgerComplete(BKException.Code.IllegalOpException, ledgerId, address, ctx));
+    }
+    @Override
+    public void readLac(BookieId address, long ledgerId, ReadLacCallback cb, Object ctx) {
+        ordered(() -> cb.readLacComplete(BKException.Code.IllegalOpException, ledgerId, null, null, ctx));
+    }
+    @Override
+    public void writeLac(BookieId address, long ledgerId, byte[] key, long lac, ByteBufList bytes,
+            WriteLacCallback cb, Object ctx) {
+        ordered(() -> cb.writeLacComplete(BKException.Code.IllegalOpException, ledgerId, address, ctx));
+    }
+    @Override
+    public void readEntry(BookieId address, long ledgerId, long entryId, ReadEntryCallback cb, Object ctx,
+            int flags, byte[] key, boolean failFast) {
+        ordered(() -> cb.readEntryComplete(BKException.Code.IllegalOpException, ledgerId, entryId, null, ctx));
+    }
+    @Override
+    public void batchReadEntries(BookieId address, long ledgerId, long entryId, int maxCount, long maxSize,
+            BatchedReadEntryCallback cb, Object ctx, int flags, byte[] key, boolean failFast) {
+        ordered(() -> cb.readEntriesComplete(BKException.Code.IllegalOpException, ledgerId, entryId, null, ctx));
+    }
+    @Override
+    public void readEntryWaitForLACUpdate(BookieId address, long ledgerId, long entryId, long previousLac,
+            long timeout, boolean entry, ReadEntryCallback cb, Object ctx) {
+        ordered(() -> cb.readEntryComplete(BKException.Code.IllegalOpException, ledgerId, entryId, null, ctx));
+    }
+    @Override
+    public void getBookieInfo(BookieId address, long requested, GetBookieInfoCallback cb, Object ctx) {
+        ordered(() -> cb.getBookieInfoComplete(BKException.Code.IllegalOpException, null, ctx));
+    }
+    @Override
+    public CompletableFuture<AvailabilityOfEntriesOfLedger> getListOfEntriesOfLedger(BookieId address,
+            long ledgerId) {
+        return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
+    }
+}

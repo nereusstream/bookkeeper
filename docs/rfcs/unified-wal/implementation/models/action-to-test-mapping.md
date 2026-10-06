@@ -545,3 +545,7 @@ AVAILABLE只返回bounded completion facts，未创建writer/handle或稳定wire
 ## Ordinary sender 的 source、status 与原AckSet
 
 ProfileNormalClientSource的Admit/Encode/WriteTerminal/Reply对应ordinaryDataClientUsesRealDigestAndDurableResponsesInOriginalAckSet；Cancel/Release对应ordinarySourceQuotaAndCancellationKeepLogicalUnknownSeparateFromCurrentNone与原output-promise回归。bound/拒绝、UNKNOWN/same-coordinate等待/force失败和wrong ID/OK-NONE/flags由独立ordinary socket回归验证。COPY后ingress合法归还不等于aligned I/O已终结。沿用prior correlation/dispatch/availability切片，独立PASS不提升为完整SDK或A/C/D组合。[源码及绑定](../profile-wire/README.md#普通-data-client-与-sdk-接线边界)。
+
+### 固定初始 SDK bridge 投影
+
+ProfileSdkBridge 的 Durable/Refused/Retry/Expire/Quorum/Stop 映射到 ProfileBookieClient 的 full-status 分类、同坐标/字节重试、deadline/close 和原 PendingAddOp AckSet。真实 SegmentProfileInitialSocketClientTest 中 originalSdkAllocatesEntriesQuorumAndContiguousCallbacksOverActualProfileSockets 验证后 entry 的实际 quorum 先到仍保持连续回调；sdkResourceBackoffReusesCoordinateAndRejectsFrontQuotaBeforeAllocation、sdkDeadlineKeepsUnknownRemoteIoAndNeverPublishesClassicClosedMetadata、sdkForceUnknownSurvivesSubsequentKnownNoneAndCannotBecomeAnAck、sdkRejectedSchedulerCompletesAcceptedSourcesAndLocalStop 分别验证资源、deadline、UNKNOWN→NONE 及拒绝终结。模型是一个 entry、三个目标、A=2、最多两次尝试；乱序连续 entry 由原 SDK 及真实 socket 用例检验，不声称该模型已覆盖两个 entry。

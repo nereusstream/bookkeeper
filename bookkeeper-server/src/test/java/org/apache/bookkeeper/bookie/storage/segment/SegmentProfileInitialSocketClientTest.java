@@ -65,7 +65,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import javax.crypto.spec.SecretKeySpec;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.LedgerMetadataBuilder;
+import org.apache.bookkeeper.client.ProfileLedgerHandle;
 import org.apache.bookkeeper.client.RoundRobinDistributionSchedule;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
@@ -181,6 +184,12 @@ public class SegmentProfileInitialSocketClientTest {
         final List<CountDownLatch> activateRelease = new ArrayList<>();
         final CountDownLatch installing = new CountDownLatch(3);
         final CountDownLatch activating = new CountDownLatch(3);
+        final List<Runnable> heldReplies = new CopyOnWriteArrayList<>();
+        final CountDownLatch firstReplies = new CountDownLatch(3);
+        final CountDownLatch secondReplies = new CountDownLatch(3);
+        final List<List<Integer>> dataResults = List.of(new CopyOnWriteArrayList<>(),
+                new CopyOnWriteArrayList<>(), new CopyOnWriteArrayList<>());
+        volatile boolean holdFirstReplies;
         final AtomicInteger replyFault = new AtomicInteger();
         final AtomicInteger faultTarget = new AtomicInteger(2);
         ZooKeeper zk;
@@ -308,6 +317,18 @@ public class SegmentProfileInitialSocketClientTest {
                                                         return;
                                                     }
                                                     if (op == ProfileOperation.ADD_NORMAL.wireValue()) {
+                                                        dataResults.get(target).add(
+                                                                (int) frame.getUnsignedByte(frame.readerIndex() + 39));
+                                                        long request = frame.getLong(frame.readerIndex() + 20);
+                                                        if (holdFirstReplies && request == 2) {
+                                                            heldReplies.add(() -> ctx.executor().execute(
+                                                                    () -> ctx.writeAndFlush(frame, promise)));
+                                                            firstReplies.countDown();
+                                                            return;
+                                                        }
+                                                        if (request == 3) {
+                                                            secondReplies.countDown();
+                                                        }
                                                         if (fault == 7) {
                                                             frame.setLong(frame.readerIndex() + 20, 99);
                                                         } else if (fault == 8) {
@@ -399,8 +420,15 @@ public class SegmentProfileInitialSocketClientTest {
             return bookie(nodes.get(target)).normalAdmission(context(), DigestManager.generateMasterKey(password));
         }
 
+        void releaseReplies() {
+            holdFirstReplies = false;
+            heldReplies.forEach(Runnable::run);
+            heldReplies.clear();
+        }
+
         @Override
         public void close() throws Exception {
+            releaseReplies();
             installRelease.forEach(CountDownLatch::countDown);
             activateRelease.forEach(CountDownLatch::countDown);
             clients.values().forEach(ProfileInitialControlClient::close);
@@ -685,6 +713,281 @@ public class SegmentProfileInitialSocketClientTest {
                 }
             } finally {
                 source.release();
+            }
+        }
+    }
+
+    private static BookKeeper sdk(Fixture fixture) throws Exception {
+        if (fixture.zk.exists("/socket-ledgers/available", false) == null) {
+            fixture.zk.create("/socket-ledgers/available", new byte[0],
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            fixture.zk.create("/socket-ledgers/available/readonly", new byte[0],
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        }
+        ClientConfiguration config = new ClientConfiguration();
+        config.setMetadataServiceUri("zk+longhierarchical://" + fixture.cluster.getZooKeeperConnectString()
+                + "/socket-ledgers");
+        config.setUseV2WireProtocol(false);
+        config.setExplictLacInterval(0);
+        config.setDelayEnsembleChange(true);
+        config.setAddEntryQuorumTimeout(5);
+        return BookKeeper.forConfig(config).zk(fixture.zk).eventLoopGroup(fixture.clientGroup).build();
+    }
+
+    private static ProfileLedgerHandle writer(Fixture fixture, BookKeeper sdk,
+            org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator.Result available,
+            int entries, int attempts, Duration deadline, Duration backoff) throws Exception {
+        Map<BookieId, ProfileNormalDataClient> data = new HashMap<>();
+        for (int target = 0; target < 3; target++) {
+            data.put(fixture.identities.get(target).bookieId(), dataClient(fixture, target, 8, Duration.ofSeconds(5)));
+        }
+        return ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, entries,
+                1024, attempts, deadline, backoff);
+    }
+
+    @Test
+    public void originalSdkAllocatesEntriesQuorumAndContiguousCallbacksOverActualProfileSockets() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            fixture.holdFirstReplies = true;
+            CountDownLatch force = new CountDownLatch(3);
+            CountDownLatch release = new CountDownLatch(1);
+            for (int target = 0; target < 3; target++) {
+                files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    force.countDown();
+                    await(release);
+                });
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(3), Duration.ofMillis(5));
+                List<Long> callbacks = new CopyOnWriteArrayList<>();
+                CompletableFuture<Long> first = new CompletableFuture<>();
+                CompletableFuture<Long> second = new CompletableFuture<>();
+                handle.asyncAddEntry(bytes(16, 8), (code, ledger, entryId, ctx) -> {
+                    callbacks.add(entryId);
+                    if (code == 0) {
+                        first.complete(entryId);
+                    } else {
+                        first.completeExceptionally(org.apache.bookkeeper.client.BKException.create(code));
+                    }
+                }, null);
+                assertTrue(force.await(5, TimeUnit.SECONDS));
+                handle.asyncAddEntry(bytes(16, 9), (code, ledger, entryId, ctx) -> {
+                    callbacks.add(entryId);
+                    if (code == 0) {
+                        second.complete(entryId);
+                    } else {
+                        second.completeExceptionally(org.apache.bookkeeper.client.BKException.create(code));
+                    }
+                }, null);
+                try {
+                    assertFalse(first.isDone());
+                    assertFalse(second.isDone());
+                    release.countDown();
+                    assertTrue(fixture.firstReplies.await(5, TimeUnit.SECONDS));
+                    assertTrue(fixture.secondReplies.await(5, TimeUnit.SECONDS));
+                    Object later = handle.getPendingAddOps().stream().skip(1).findFirst().orElseThrow();
+                    var completed = later.getClass().getDeclaredField("completed");
+                    completed.setAccessible(true);
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    boolean laterHasQuorum;
+                    do {
+                        synchronized (later) {
+                            laterHasQuorum = completed.getBoolean(later);
+                        }
+                        if (!laterHasQuorum) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                    } while (!laterHasQuorum && System.nanoTime() < deadline);
+                    assertTrue(laterHasQuorum);
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    assertFalse(first.isDone());
+                    assertFalse(second.isDone());
+                    fixture.releaseReplies();
+                    assertEquals(0, first.get(5, TimeUnit.SECONDS).longValue());
+                    assertEquals(1, second.get(5, TimeUnit.SECONDS).longValue());
+                    assertEquals(List.of(0L, 1L), callbacks);
+                    assertEquals(1, handle.getLastAddConfirmed());
+                    assertEquals(32, handle.getLength());
+                    var actual = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+                    assertEquals(LedgerMetadata.State.OPEN, actual.getValue().getState());
+                    assertEquals(available.metadata().getVersion(), actual.getVersion());
+                    assertThrows(ExecutionException.class, () -> handle.closeAsync().get(5, TimeUnit.SECONDS));
+                    assertEquals(LedgerMetadata.State.OPEN,
+                            fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+                } finally {
+                    release.countDown();
+                    fixture.releaseReplies();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    private static CompletableFuture<Long> sdkAdd(ProfileLedgerHandle handle, byte[] payload) {
+        CompletableFuture<Long> result = new CompletableFuture<>();
+        handle.asyncAddEntry(payload, (code, ledger, entryId, ctx) -> {
+            if (code == BKException.Code.OK) {
+                result.complete(entryId);
+            } else {
+                result.completeExceptionally(BKException.create(code));
+            }
+        }, null);
+        return result;
+    }
+
+    @Test
+    public void sdkResourceBackoffReusesCoordinateAndRejectsFrontQuotaBeforeAllocation() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            CountDownLatch forcing = new CountDownLatch(3);
+            CountDownLatch release = new CountDownLatch(1);
+            for (var storage : fixture.nodes) {
+                files(storage).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    forcing.countDown();
+                    await(release);
+                });
+            }
+            Map<BookieId, ProfileNormalDataClient> data = new HashMap<>();
+            List<CompletableFuture<ProfileStatus>> occupied = new ArrayList<>();
+            for (int target = 0; target < 3; target++) {
+                var client = dataClient(fixture, target, 1, Duration.ofSeconds(5));
+                data.put(fixture.identities.get(target).bookieId(), client);
+                var source = entry(fixture, 9, 16);
+                try {
+                    occupied.add(client.addNormal(fixture.context(), fixture.credential, 9, source));
+                } finally {
+                    source.release();
+                }
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data,
+                        1, 1024, 16, Duration.ofSeconds(3), Duration.ofMillis(25));
+                try {
+                    assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                    var first = sdkAdd(handle, bytes(16, 8));
+                    var refused = assertThrows(ExecutionException.class,
+                            () -> sdkAdd(handle, bytes(16, 9)).get(5, TimeUnit.SECONDS));
+                    assertEquals(BKException.Code.TooManyRequestsException,
+                            ((BKException) refused.getCause()).getCode());
+                    // Keep every actual DATA-client slot occupied across several bounded retry periods.
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
+                    assertFalse(first.isDone());
+                    assertFalse(handle.hasUncertainWrites());
+                    release.countDown();
+                    for (var request : occupied) {
+                        assertEquals(ProfileStatus.DurableResult.APPLIED, request.get(5, TimeUnit.SECONDS)
+                                .durableResult());
+                    }
+                    assertEquals(0, first.get(5, TimeUnit.SECONDS).longValue());
+                    assertEquals(1, sdkAdd(handle, bytes(16, 9)).get(5, TimeUnit.SECONDS).longValue());
+                    assertEquals(1, handle.getLastAddConfirmed());
+                    assertEquals(32, handle.getLength());
+                    assertEquals(available.metadata().getVersion(),
+                            fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getVersion());
+                } finally {
+                    release.countDown();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkDeadlineKeepsUnknownRemoteIoAndNeverPublishesClassicClosedMetadata() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            CountDownLatch forcing = new CountDownLatch(3);
+            CountDownLatch release = new CountDownLatch(1);
+            for (var storage : fixture.nodes) {
+                files(storage).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    forcing.countDown();
+                    await(release);
+                });
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofMillis(250), Duration.ofMillis(5));
+                try {
+                    var request = sdkAdd(handle, bytes(16, 8));
+                    assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                    assertThrows(ExecutionException.class, () -> request.get(5, TimeUnit.SECONDS));
+                    assertTrue(handle.hasUncertainWrites());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    for (var storage : fixture.nodes) {
+                        assertEquals(0, files(storage).dataIo.forces);
+                    }
+                    var actual = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+                    assertEquals(LedgerMetadata.State.OPEN, actual.getValue().getState());
+                    assertEquals(available.metadata().getVersion(), actual.getVersion());
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    release.countDown();
+                    for (var storage : fixture.nodes) {
+                        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (files(storage).dataIo.forces == 0 && System.nanoTime() < end) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                        assertEquals(1, files(storage).dataIo.forces);
+                    }
+                    assertTrue(request.isCompletedExceptionally());
+                } finally {
+                    release.countDown();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkForceUnknownSurvivesSubsequentKnownNoneAndCannotBecomeAnAck() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            for (int target = 0; target < 3; target++) {
+                fixture.expectedFailedDataSessions.add(target);
+                files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(3), Duration.ofMillis(25));
+                try {
+                    assertThrows(ExecutionException.class,
+                            () -> sdkAdd(handle, bytes(16, 8)).get(5, TimeUnit.SECONDS));
+                    assertTrue(handle.hasUncertainWrites());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    assertTrue(fixture.dataResults.stream().anyMatch(results ->
+                            results.contains(ProfileStatus.DurableResult.UNKNOWN.wireValue())
+                                    && results.contains(ProfileStatus.DurableResult.NONE.wireValue())));
+                    var actual = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+                    assertEquals(LedgerMetadata.State.OPEN, actual.getValue().getState());
+                    assertEquals(available.metadata().getVersion(), actual.getVersion());
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkRejectedSchedulerCompletesAcceptedSourcesAndLocalStop() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(3), Duration.ofMillis(5));
+                sdk.getClientCtx().getScheduler().shutdown();
+                try {
+                    assertThrows(ExecutionException.class,
+                            () -> sdkAdd(handle, bytes(16, 8)).get(5, TimeUnit.SECONDS));
+                    assertFalse(handle.hasUncertainWrites());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    assertTrue(fixture.dataResults.stream().allMatch(List::isEmpty));
+                    assertEquals(available.metadata().getVersion(),
+                            fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getVersion());
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
             }
         }
     }
