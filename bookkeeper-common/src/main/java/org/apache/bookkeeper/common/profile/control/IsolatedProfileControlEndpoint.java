@@ -28,8 +28,8 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 /**
  * Typed reference endpoint for the isolated {@code bookie-profile} control path.
  *
- * <p>This class consumes transport facts from a future listener adapter. It opens no socket, terminates no TLS
- * connection, and has no production storage, registration, or ACK authority.
+ * <p>The isolated listener supplies authenticated transport facts to this endpoint. This class owns no socket,
+ * TLS connection or executor, and has no production registration or ACK authority.
  */
 public final class IsolatedProfileControlEndpoint {
 

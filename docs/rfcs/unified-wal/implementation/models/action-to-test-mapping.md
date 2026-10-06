@@ -530,3 +530,8 @@ known拒绝或损坏response字段使用负向client控制；successful/unknown 
 | Restart（模型输入/Java组合） | 新coordinator和ZK session、一个Bookie真实file replay使用同page/op/metadata version与token，无新instance/metadata或reinstallation |
 
 AVAILABLE只返回bounded completion facts，未创建writer/handle或稳定wire，后续失连/fence按正常协议处理。
+
+
+## 初始 socket control 的 cold 与 actual terminal
+
+`ProfileInitialSocketDispatch`的ColdRead/Admit/Submit/Force/OwnerTerminal由`profileSocketInitialControlUsesActualTlsAndPhysicalDriver`及`profileSocketInitialInstallReadsActualZkPreparingRoot`提供声明范围内的实际路径证据；后者只验证一个实际计划target和DELETE cut。ColdAdmissionTimeout/LateEl对应`profileSocketInitialLateEventLoopAuthorizationAfterColdTimeoutHasNoEffect`；PhysicalTimeout/Disconnect/Release对应`profileSocketInitialUnknownThenDisconnectRetainsCopiesUntilActualIoTerminal`。首请求capability/AuthZ拒绝、超长header和cold队列满额分别由三个独立socket回归验证，原DATA/FENCE/allocator回归仍覆盖共享路径。ACTIVATE成功socket使用committed-authority fixture，完整实际READY/all-E socket协调未执行。[范围及最终源码回执](../profile-wire/README.md#真实隔离初始-control-接线)。

@@ -174,3 +174,38 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest
 ```
 
 原[有限backing投影](../models/README.md#profile-backing-额度投影)检查两个根的分配/最终引用/关闭计费，原ordinary/recovery分发模型检查实际I/O/owner终结；这些是分开的有限切片，不声明完整pipeline/source/pool组合或总内存证明。JDK/native TLS内部对象、kernel buffers、metadata/index/object工作集、对齐池与接收资源的统一配置及总账、生产listener/readiness、READ_ENTRY成功/确定missing、真正RepairIntent/grant控制面、client quorum、完整A/C/D、掉电、长期及性能Gate仍OPEN；步骤6/11继续PARTIAL。
+
+
+## 真实隔离初始 control 接线
+
+2026-10-06：显式 `SegmentProfileControlConfig` 开启隔离 INSTALL/ACTIVATE_INITIAL；默认连接仍保持原空 capability。双方 HELLO 必须包含实验 capability `0x55494331`、semantic version 1，才接受该 body。它是可丢弃 prototype schema，通用 `ProfileOperationCodec` 对 control body 的 `BLOCKED_UNFROZEN_CONTROL_BODY` 不变，stable wire/G1、old-decoder 与 stock-binary 状态不提升。实际 server identity/incarnation 来自本地 header，principal 来自 TLS 1.3 REQUIRED mTLS 的真实叶证书；接收用途仍按首个非 HELLO 操作识别，不增加 HELLO 用途字段。
+
+[独立初始 codec](../../../../../bookkeeper-common/src/main/java/org/apache/bookkeeper/common/profile/wire/ProfileInitialControlCodec.java)使用 big endian，request 公共布局如下。目标 Bookie/incarnation 仅从实际本地 HELLO facts 绑定，不接受网络侧任意 MetadataStore path。
+
+| offset | 字段 | 约束 |
+| --- | --- | --- |
+| 0 | 原 ProfileLedgerContext，60 bytes | ledger、instance、descriptor identity |
+| 60 | UWIC magic u32、schema u16、reserved u16 | schema=1、reserved=0 |
+| 68 | operation ID 16 bytes、public semantic identity 32 bytes | 原 operation 身份，不重生成 |
+| 116 | authority generation i64、domain length u16 | generation 正、domain UTF-8 1..128 bytes，无 NUL、非法编码或空白 |
+| 126 | authority domain | ACTIVATE_INITIAL 到此精确结束，127..254 bytes |
+| 126+d | INSTALL descriptor length u32、engine u16、credential kind/length 各 u16 | engine=3、kind=1、length=20 |
+| 136+d | 合成/真实 protected credential 20 bytes，然后 canonical descriptor | descriptor 124..508 bytes；INSTALL 总长 281..792 bytes |
+
+opt-in decoder 从固定 header 检查这些 body 上下界，再保留 body。codec 检查 magic/schema/reserved、严格 UTF-8、实际尾长、engine/kind/length；原 endpoint 校验 canonical descriptor、digest 及语义。60-byte reply 为原 status 8 bytes、UWIR magic u32、schema u16、显式 outcome code u16、ledger i64、operation ID 16 bytes、authority generation i64、local generation i64、reserved u32=0。outcome 1..11 依次为 APPLIED、ALREADY_APPLIED、CONFLICT、DURABILITY_UNKNOWN、NOT_FOUND、STALE_OR_COMPACTED、DENIED、TRANSIENT_RECONCILING、QUARANTINED、BAD_REQUEST、UNSUPPORTED；code 不依赖 enum ordinal。成功必须 durable 且 local generation 正，status/outcome 一致；历史 stale 和 UNKNOWN 不伪造成无效果。无法形成完整请求身份的 malformed/未协商/cold 队列拒绝仍使用原 correlated status-only 8-byte 错误回复。
+
+三份[合成固定向量](../../../../../bookkeeper-common/src/test/resources/profile-wire/initial-control)由独立 Python struct/hashlib 编码构造，包含公开测试 credential、非生产密钥；测试精确比较整个 request/reply，并独立检查 offset。INSTALL 294 bytes SHA-256 `be79a077ab97f0bf6a6bb1e7f864cb4a0619480839e473a9596a0c4c878c75c6`，ACTIVATE 140 bytes `69c125978ee8068509c550d5df4c05c113d4634dc5852807fd9a36f06331b9e4`，APPLIED reply 60 bytes `7055579940c0c45b5f9bf5bf8c84fba2f2df2e4771ef13399bf6e5beee54e08d`。vector 不进入旧 decoder 的 stable corpus/Gate。
+
+[原 handler](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentProfileAddHandler.java)在现有连接 pending 上限内，先保留 `8 * bodyLength + 2 * 60 + 44` 的解析/响应 workspace，再在调用方拥有的有界 cold ThreadPoolExecutor 执行原 endpoint：actual principal → static permission → authority cold read → exact AuthZ → descriptor 校验。只有此顺序通过，才在 event loop 原子把 connection/base/frame/workspace 转 CONTROL，随后提交原 physical driver。后续逐次鉴权；Executor 使用有限线程/队列及 AbortPolicy，不能把阻塞任务退回 event loop，调用方保持这些边界并排空已接纳任务后关闭 executor。没有新 executor、重试层、日志或 MetadataStore 框架。
+
+cold task、实际 control I/O/owner、排队 response 和输出 backing 分别保留原 pending。原 facade 的 actual-terminal observer 在未提交的确定拒绝时立即调用，在已提交时仅于实际 owner callback finally 调用；cold timeout/interrupt 只返回 UNKNOWN。UNKNOWN 已回复或断连仍不能归还尚在使用的 frame/解析副本额度。event-loop admission 的 future 已超时后不再允许迟到提交；实际授权转账失败也无 control effect。
+
+七个真实 mTLS socket 回归覆盖：INSTALL/相同 generation 重试/ACTIVATE 与后续拒绝、未协商 capability 与首请求权限拒绝、force 被阻塞时 UNKNOWN 后断连仍保留控制副本/文件锁、实际 ZK PREPARING 冷读与 DELETE cut 后零写入、cold timeout 后迟到 event-loop 授权零写入、超上限固定 header 不读 body/authority、有界 cold 队列耗尽不在 event loop 执行。ACTIVATE 成功 socket 用例使用 committed-authority fixture；完整实际 READY/metadata reader、三个目标和可恢复协调器经真实 client/socket 组合仍待接线验证。实际 ZK socket 用例只验证一个已规划 INSTALL target，不冒充全 E 创建。
+
+复现最小新行为：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,SegmentBookieControlLogTest#profileSocketInitial*'
+~~~
+
+非阻塞实际 control client/请求关联及全 E socket coordinator、生产 listener/fresh readiness、完整 control-plane、JDK/native TLS 内部/kernel/metadata/object/对齐池的统一总账、步骤11/12和生产 Gate仍未完成。以上 workspace 保留只覆盖声明的已知解析副本与 response，不能作为整个进程或存储总内存上限。最终 `unified-wal-local-j9MoHs4Q` tool exit0：1002冻结输入，相关17类417项为412通过/5 macOS Linux-affinity跳过，0失败/错误；Bookie控制log完整252项包括七项新socket回归。`unified-wal-initial-socket-style-9ga4n66n` Spotless/Checkstyle exit0，142冻结Java source与test inputs一致；23份Java/style回执checksums已核验。最终模型 `unified-wal-model-0tgx4f8_` tool exit0：233配置为49正向完整PASS/184指定反例，483冻结输入/701 checksums，197共享输入及1288去重union一致；五个designInputs仍绑定运行父提交 `d7a68ffc03eb9a21bd91c1250fb6fb7b42d61f5e`。原始receipt/source/config/run不重绑定。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；有限PASS不代替实际TLS、fsync/掉电、内存、活性/公平性或完整A/C/D组合证据。

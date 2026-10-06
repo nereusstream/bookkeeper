@@ -35,9 +35,9 @@ import java.util.function.BiConsumer;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
-import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
@@ -374,7 +374,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     /** Borrow the original control driver for a bounded, synchronous cold INSTALL endpoint. */
-    ProtectedProfileStateStore profileInstallStore(Duration timeout) {
+    SegmentProfileInstallStore profileInstallStore(Duration timeout) {
         return new SegmentProfileInstallStore(controls(), identity, timeout);
     }
 
@@ -440,6 +440,15 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                                      ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
                                      String trustDomain, long readinessGeneration)
             throws org.apache.bookkeeper.tls.SecurityException {
+        return installProfileConnection(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
+                trustDomain, readinessGeneration, null);
+    }
+
+    /** Explicit opt-in for the disposable initial-control schema; generic control wire remains blocked. */
+    boolean installProfileConnection(io.netty.channel.ChannelPipeline pipeline, TLSContextFactory tls,
+                                     ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
+                                     String trustDomain, long readinessGeneration, SegmentProfileControlConfig control)
+            throws org.apache.bookkeeper.tls.SecurityException {
         synchronized (gate) {
             if (!accepting) {
                 pipeline.channel().close();
@@ -447,13 +456,17 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             ProfileHello.Server hello = new ProfileHello.Server(
                     EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
-                    identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(), List.of());
+                    identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(),
+                    control == null ? List.of() : List.of(
+                            new ProfileHello.Capability(
+                                    ProfileInitialControlCodec.CAPABILITY_ID,
+                                    ProfileInitialControlCodec.SCHEMA)));
             return ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
                     100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                     144 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                     new SegmentProfileAddHandler(this, tls, trustDomain, hello,
                             SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
-                            config.maxPendingEntries()));
+                            config.maxPendingEntries(), control), control != null);
         }
     }
 

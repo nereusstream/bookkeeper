@@ -21,6 +21,7 @@ package org.apache.bookkeeper.common.profile.control;
 
 import static org.apache.bookkeeper.common.profile.control.ProfileControlValidationException.Reason.INVALID_CREDENTIAL;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -93,6 +94,11 @@ public final class ProtectedProfileCredential {
     /** Returns a protected wrapper copy without exposing the credential bytes. */
     public ProtectedProfileCredential copy() {
         return new ProtectedProfileCredential(kind, credential);
+    }
+
+    /** Serialize only into an authenticated outbound wire buffer; callers must never log this destination. */
+    public void writeWireCredential(ByteBuffer destination) {
+        Objects.requireNonNull(destination, "destination").put(credential);
     }
 
     /** Constant-time comparison used by protected local state implementations. */

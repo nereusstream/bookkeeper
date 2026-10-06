@@ -56,6 +56,16 @@ public final class ProfileInboundPipeline {
                            ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
                            int maxNormalBodyBytes, int maxRecoveryBodyBytes,
                            ChannelInboundHandler application) throws SecurityException {
+        return install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
+                maxNormalBodyBytes, maxRecoveryBodyBytes, application, false);
+    }
+
+    /** Initial-control body caps are enabled only by an explicitly opted-in application. */
+    public static boolean install(ChannelPipeline pipeline, TLSContextFactory tls,
+                           ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
+                           int maxNormalBodyBytes, int maxRecoveryBodyBytes,
+                           ChannelInboundHandler application, boolean initialControl)
+            throws SecurityException {
         Objects.requireNonNull(pipeline, "pipeline");
         Objects.requireNonNull(tls, "tls");
         Objects.requireNonNull(budget, "budget");
@@ -70,6 +80,9 @@ public final class ProfileInboundPipeline {
                     budget, permit, connectionLimit, connectionBaseBytes);
             decoder.limitNormalBody(maxNormalBodyBytes);
             decoder.limitRecoveryBody(maxRecoveryBodyBytes);
+            if (initialControl) {
+                decoder.limitInitialControlBodies();
+            }
             pipeline.channel().config().setAllocator(new ProfileByteBufAllocator(permit));
             pipeline.channel().closeFuture().addListener(closed -> permit.close());
             SslHandler ssl = tls.newProfileServerTLSHandler();

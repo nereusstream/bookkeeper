@@ -54,59 +54,76 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
 
     @Override
     public TransitionResult conditionalApply(Transition transition) {
-        Objects.requireNonNull(transition, "transition");
-        if (driver.isOwnerThread()) {
-            throw new IllegalStateException("A cold INSTALL wait cannot run on its append owner");
-        }
-        ProfileControlScope scope = transition.request().scope();
-        if (scope.operation() != ProfileControlOperation.INSTALL
-                && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL) {
-            return result(Outcome.UNSUPPORTED);
-        }
-        if (!transition.authority().scope().equals(scope)
-                || !transition.authority().permits(scope.operation())
-                || transition.authority().requiredEngine() != EngineProfile.SEGMENT_WAL_ENGINE
-                || !scope.targetBookie().equals(identity.bookieId().toString())
-                || !Arrays.equals(scope.targetStorageIncarnation(), identity.incarnation().value())) {
-            return result(Outcome.CONFLICT);
-        }
-        long deadline = System.nanoTime() + timeoutNanos;
-        CompletableFuture<TransitionResult> reply = new CompletableFuture<>();
-        boolean accepted = driver.submitBatch(List.of(transition), (results, failure) -> {
-            if (failure != null || results == null || results.size() != 1) {
-                reply.complete(result(Outcome.DURABILITY_UNKNOWN));
-                return;
-            }
-            SegmentBookieControlLog.Result applied = results.get(0);
-            ByteBuffer operation = ByteBuffer.wrap(scope.operationId());
-            if (!applied.operationId().equals(new UUID(operation.getLong(), operation.getLong()))) {
-                reply.complete(result(Outcome.DURABILITY_UNKNOWN));
-                return;
-            }
-            Outcome outcome = switch (applied.status()) {
-                case APPLIED_DURABLE -> Outcome.APPLIED;
-                case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
-                case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
-            };
-            if (scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
-                    && (outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED)
-                    && driver.initialActiveGeneration(scope) == 0) {
-                outcome = Outcome.STALE_OR_COMPACTED;
-            }
-            reply.complete(new TransitionResult(outcome, scope.operation() == ProfileControlOperation.INSTALL
-                    ? applied.localInstallGeneration() : applied.localGeneration(),
-                    outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED));
-        });
-        if (!accepted) {
-            return result(Outcome.TRANSIENT_RECONCILING);
-        }
+        return conditionalApply(transition, () -> { });
+    }
+
+    /** Actual terminal, independent of this cold caller's timeout/interrupt; observer must not throw. */
+    TransitionResult conditionalApply(Transition transition, Runnable actualTerminal) {
+        Objects.requireNonNull(actualTerminal, "actualTerminal");
+        boolean accepted = false;
         try {
-            return reply.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            return result(Outcome.DURABILITY_UNKNOWN);
-        } catch (TimeoutException | ExecutionException unknown) {
-            return result(Outcome.DURABILITY_UNKNOWN);
+            Objects.requireNonNull(transition, "transition");
+            if (driver.isOwnerThread()) {
+                throw new IllegalStateException("A cold INSTALL wait cannot run on its append owner");
+            }
+            ProfileControlScope scope = transition.request().scope();
+            if (scope.operation() != ProfileControlOperation.INSTALL
+                    && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL) {
+                return result(Outcome.UNSUPPORTED);
+            }
+            if (!transition.authority().scope().equals(scope)
+                    || !transition.authority().permits(scope.operation())
+                    || transition.authority().requiredEngine() != EngineProfile.SEGMENT_WAL_ENGINE
+                    || !scope.targetBookie().equals(identity.bookieId().toString())
+                    || !Arrays.equals(scope.targetStorageIncarnation(), identity.incarnation().value())) {
+                return result(Outcome.CONFLICT);
+            }
+            long deadline = System.nanoTime() + timeoutNanos;
+            CompletableFuture<TransitionResult> reply = new CompletableFuture<>();
+            accepted = driver.submitBatch(List.of(transition), (results, failure) -> {
+                try {
+                    if (failure != null || results == null || results.size() != 1) {
+                        reply.complete(result(Outcome.DURABILITY_UNKNOWN));
+                        return;
+                    }
+                    SegmentBookieControlLog.Result applied = results.get(0);
+                    ByteBuffer operation = ByteBuffer.wrap(scope.operationId());
+                    if (!applied.operationId().equals(new UUID(operation.getLong(), operation.getLong()))) {
+                        reply.complete(result(Outcome.DURABILITY_UNKNOWN));
+                        return;
+                    }
+                    Outcome outcome = switch (applied.status()) {
+                        case APPLIED_DURABLE -> Outcome.APPLIED;
+                        case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
+                        case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
+                    };
+                    if (scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
+                            && (outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED)
+                            && driver.initialActiveGeneration(scope) == 0) {
+                        outcome = Outcome.STALE_OR_COMPACTED;
+                    }
+                    reply.complete(new TransitionResult(outcome, scope.operation() == ProfileControlOperation.INSTALL
+                            ? applied.localInstallGeneration() : applied.localGeneration(),
+                            outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED));
+                } finally {
+                    actualTerminal.run();
+                }
+            });
+            if (!accepted) {
+                return result(Outcome.TRANSIENT_RECONCILING);
+            }
+            try {
+                return reply.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return result(Outcome.DURABILITY_UNKNOWN);
+            } catch (TimeoutException | ExecutionException unknown) {
+                return result(Outcome.DURABILITY_UNKNOWN);
+            }
+        } finally {
+            if (!accepted) {
+                actualTerminal.run();
+            }
         }
     }
 

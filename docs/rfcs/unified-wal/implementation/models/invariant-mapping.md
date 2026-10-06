@@ -496,3 +496,8 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 | AvailabilityHasMatchingMetadataFact / AvailabilityObservesReadyNotDelete | 全回复后actual metadata/page及最后READY reference/birth取证，DELETE阻止报告availability | 非cross-key/cross-target atomic lease，没有writer authority/canary证明 |
 
 七个敏感性反例分别命中上述all-E/binding/known/current/rebuild/metadata/delete边界，full client/recovery/delete/GC、完整模型组合、活性/性能仍未覆盖。
+
+
+## 初始 socket control 身份与所有权
+
+新增`ControlRequiresNegotiation`、`ControlRequiresExactAuthority`、`WorkspaceMovesWithControl`、`ColdAndIoCopiesRemainCharged`、`SuccessRequiresActualForceAndOwner`、`SubmittedUnknownIsNeverNone`及`TimedOutAdmissionNeverSubmits`；七个mutation分别取消capability/授权/工作区转账、终结等待即释放、force前回复、UNKNOWN映NONE及允许迟到EL提交。新正向1054 generated/546 distinct/queue0完整PASS；当前矩阵49正向/184指定反例，不以有限输入证明实际TLS、fsync硬件、SDK/quorum或全系统总预算。[映射与最终绑定](README.md#初始-control-socket-分发投影)。

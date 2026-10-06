@@ -77,6 +77,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -92,10 +93,14 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorCodec;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorIdentity;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
+import org.apache.bookkeeper.common.profile.control.ProfileAuthorityKey;
 import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
+import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore.PublicationStatus;
@@ -108,14 +113,19 @@ import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrame;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
+import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.LedgerMetadataFormat.DigestType;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
@@ -6878,6 +6888,321 @@ public class SegmentBookieControlLogTest {
         return (SegmentFileIo) field.get(bookie);
     }
 
+    private static ThreadPoolExecutor controlExecutor() {
+        return new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2));
+    }
+
+    private static ProfilePrincipal clientPrincipal() throws Exception {
+        try (InputStream input = Files.newInputStream(Path.of(ProfileSocket.certificate("client-cert.pem")))) {
+            var leaf = (java.security.cert.X509Certificate)
+                    java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(input);
+            return new ProfilePrincipal(ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                    "test-domain",
+                    leaf.getIssuerX500Principal().getName(javax.security.auth.x500.X500Principal.CANONICAL),
+                    leaf.getSubjectX500Principal().getName(javax.security.auth.x500.X500Principal.CANONICAL));
+        }
+    }
+
+    private static SegmentProfileControlConfig initialConfig(ThreadPoolExecutor executor, Duration timeout,
+            java.util.concurrent.atomic.AtomicBoolean authorized, java.util.concurrent.atomic.AtomicInteger reads)
+            throws Exception {
+        ProfilePrincipal expected = clientPrincipal();
+        return new SegmentProfileControlConfig(VALIDATOR, (principal, operation) -> principal.equals(expected),
+                key -> {
+                    reads.incrementAndGet();
+                    var transition = key.equals(ProfileAuthorityKey.fromScope(install(1, (byte) 5).request().scope()))
+                            ? install(1, (byte) 5) : activate(2);
+                    return ProfileControlStore.ReadResult.found(transition.authority());
+                }, (principal, requested, authority) -> principal.equals(expected) && authorized.get()
+                        && requested.equals(authority.scope())
+                        ? org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer.Decision.ALLOW
+                        : org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer.Decision.DENY,
+                executor, timeout);
+    }
+
+    private static ProfileReceiveBudget initialBudget() {
+        return new ProfileReceiveBudget(524288, 131072, 262144, 2, 2, 1);
+    }
+
+    private static ProfileControlResult initialResponse(ProfileSocket socket, ProfileOperation operation,
+                                                       long requestId) throws Exception {
+        ProfileFrame response = socket.response();
+        assertEquals(operation, response.header().operation());
+        assertEquals(requestId, response.header().requestId());
+        assertTrue(response.header().isResponse());
+        return ProfileInitialControlCodec.decodeReply(operation, response.body());
+    }
+
+    @Test
+    public void profileSocketInitialControlUsesActualTlsAndPhysicalDriver() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        AtomicInteger reads = new AtomicInteger();
+        AtomicBoolean allowed = new AtomicBoolean(true);
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            var control = initialConfig(executor, Duration.ofSeconds(5), allowed, reads);
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                byte[] body = ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request());
+                socket.send(ProfileOperation.INSTALL, 2, body);
+                ProfileControlResult installed = initialResponse(socket, ProfileOperation.INSTALL, 2);
+                assertEquals(ProfileControlResult.Outcome.APPLIED, installed.outcome());
+                assertTrue(installed.durable());
+                assertFalse(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                socket.send(ProfileOperation.INSTALL, 3, body);
+                ProfileControlResult repeated = initialResponse(socket, ProfileOperation.INSTALL, 3);
+                assertEquals(ProfileControlResult.Outcome.ALREADY_APPLIED, repeated.outcome());
+                assertEquals(installed.localGeneration(), repeated.localGeneration());
+                socket.send(ProfileOperation.ACTIVATE_INITIAL, 4,
+                        ProfileInitialControlCodec.encodeRequest(activate(2).request()));
+                assertEquals(ProfileControlResult.Outcome.APPLIED,
+                        initialResponse(socket, ProfileOperation.ACTIVATE_INITIAL, 4).outcome());
+                assertTrue(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                int writes = bookieIo(bookie).writes;
+                allowed.set(false);
+                socket.send(ProfileOperation.ACTIVATE_INITIAL, 5,
+                        ProfileInitialControlCodec.encodeRequest(activate(2).request()));
+                assertEquals(ProfileControlResult.Outcome.DENIED,
+                        initialResponse(socket, ProfileOperation.ACTIVATE_INITIAL, 5).outcome());
+                assertEquals(writes, bookieIo(bookie).writes);
+                assertEquals(4, reads.get());
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void profileSocketInitialControlRejectsMissingCapabilityAndUnauthorizedFirstRequest() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        AtomicInteger reads = new AtomicInteger();
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            var control = initialConfig(executor, Duration.ofSeconds(5), new AtomicBoolean(false), reads);
+            int writes = bookieIo(bookie).writes;
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, false)) {
+                socket.send(ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                socket.status(ProfileOperation.INSTALL, 2,
+                        ProfileStatus.StatusClass.UNSUPPORTED_PROTOCOL_OPCODE_CAPABILITY_ENGINE,
+                        ProfileStatus.DurableResult.NONE);
+                assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                assertEquals(0, reads.get());
+            }
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                socket.send(ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                assertEquals(ProfileControlResult.Outcome.DENIED,
+                        initialResponse(socket, ProfileOperation.INSTALL, 2).outcome());
+                assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+            }
+            assertEquals(writes, bookieIo(bookie).writes);
+            assertFalse(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void profileSocketInitialUnknownThenDisconnectRetainsCopiesUntilActualIoTerminal() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            replaceBookieIo(bookie, io);
+            var control = initialConfig(executor, Duration.ofMillis(100), new AtomicBoolean(true), new AtomicInteger());
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                socket.send(ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(0, io.forces);
+                assertEquals(ProfileControlResult.Outcome.DURABILITY_UNKNOWN,
+                        initialResponse(socket, ProfileOperation.INSTALL, 2).outcome());
+                socket.disconnect();
+                assertTrue(socket.budget.used(ProfileReceiveBudget.Lane.CONTROL) > 64);
+                assertFalse(storage.close(Duration.ofMillis(5)));
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(
+                        ((IsolatedSegmentConfig) storageField(storage, "config")).directory()));
+                release.countDown();
+                assertTrue(storage.close(Duration.ofSeconds(5)));
+                socket.assertBudgetZero();
+                assertEquals(1, io.forces);
+            } finally {
+                release.countDown();
+            }
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void profileSocketInitialInstallReadsActualZkPreparingRoot() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        ZooKeeperUtil cluster = new ZooKeeperUtil() {
+            @Override
+            public String getZooKeeperConnectString() {
+                String address = super.getZooKeeperConnectString();
+                return "127.0.0.1" + address.substring(address.lastIndexOf(':'));
+            }
+        };
+        ZooKeeper zk = null;
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            cluster.startCluster();
+            ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
+            zk = new ZooKeeper(cluster.getZooKeeperConnectString(), 10000, watcher);
+            watcher.waitForConnection();
+            String root = "/profile-socket-initial";
+            zk.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            var reservations = new ZKProfileReservationStore(zk, root, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, reservations.createIfAbsent(
+                    new ProfileReservation(new ProfileMetadataBacklink(44, filled(16, (byte) 1),
+                            filled(16, (byte) 2)), List.of(install(1, (byte) 5).request().scope()))).status());
+            ProfilePrincipal expected = clientPrincipal();
+            var control = new SegmentProfileControlConfig(VALIDATOR,
+                    (principal, operation) -> principal.equals(expected),
+                    reservations.installAuthorityReader(identity().bookieId().toString()),
+                    (principal, requested, authority) -> principal.equals(expected)
+                            && requested.equals(authority.scope())
+                            ? org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer.Decision.ALLOW
+                            : org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer.Decision.DENY,
+                    executor, Duration.ofSeconds(5));
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                socket.send(ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                assertEquals(ProfileControlResult.Outcome.APPLIED,
+                        initialResponse(socket, ProfileOperation.INSTALL, 2).outcome());
+                assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                        reservations.cutDelete(reservations.read(44).snapshot(), filled(16, (byte) 9),
+                                filled(32, (byte) 10)).status());
+                int writes = bookieIo((SegmentBookieControlLog) storageField(storage, "bookie")).writes;
+                socket.send(ProfileOperation.INSTALL, 3,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                assertEquals(ProfileControlResult.Outcome.NOT_FOUND,
+                        initialResponse(socket, ProfileOperation.INSTALL, 3).outcome());
+                assertEquals(writes, bookieIo((SegmentBookieControlLog) storageField(storage, "bookie")).writes);
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            if (zk != null) {
+                zk.close();
+            }
+            cluster.stopCluster();
+        }
+    }
+
+    @Test
+    public void profileSocketInitialLateEventLoopAuthorizationAfterColdTimeoutHasNoEffect() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        CountDownLatch reading = new CountDownLatch(1);
+        CountDownLatch releaseRead = new CountDownLatch(1);
+        CountDownLatch blocked = new CountDownLatch(1);
+        CountDownLatch releaseLoop = new CountDownLatch(1);
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            var base = initialConfig(executor, Duration.ofMillis(100), new AtomicBoolean(true), new AtomicInteger());
+            var control = new SegmentProfileControlConfig(base.validator(), base.staticAuthorizer(), key -> {
+                reading.countDown();
+                await(releaseRead);
+                return base.controlStore().read(key);
+            }, base.exactAuthorizer(), executor, base.timeout());
+            int writes = bookieIo((SegmentBookieControlLog) storageField(storage, "bookie")).writes;
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                socket.send(ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                assertTrue(reading.await(5, TimeUnit.SECONDS));
+                socket.accepted.get().eventLoop().execute(() -> {
+                    blocked.countDown();
+                    await(releaseLoop);
+                });
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                releaseRead.countDown();
+                executor.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                releaseLoop.countDown();
+                assertEquals(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
+                        initialResponse(socket, ProfileOperation.INSTALL, 2).outcome());
+                assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                assertEquals(writes, bookieIo((SegmentBookieControlLog) storageField(storage, "bookie")).writes);
+            }
+        } finally {
+            releaseRead.countDown();
+            releaseLoop.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void profileSocketInitialOversizeHeaderRefusesBeforeBodyAndColdRead() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        AtomicInteger reads = new AtomicInteger();
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            var control = initialConfig(executor, Duration.ofSeconds(5), new AtomicBoolean(true), reads);
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                byte[] frame = ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.INSTALL, 2,
+                        new byte[ProfileInitialControlCodec.MAX_INSTALL_BYTES + 1]));
+                socket.client.writeAndFlush(Unpooled.wrappedBuffer(frame, 0,
+                        ProfileFrameCodec.OUTER_LENGTH_PREFIX + ProfileFrameHeader.ENCODED_LENGTH)).sync();
+                assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                assertEquals(0, reads.get());
+                assertNull(socket.responses.poll());
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void profileSocketInitialColdQueueExhaustionDoesNotRunOnEventLoopOrWriteControl() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        CountDownLatch busy = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger reads = new AtomicInteger();
+        executor.execute(() -> {
+            busy.countDown();
+            await(release);
+        });
+        assertTrue(busy.await(5, TimeUnit.SECONDS));
+        executor.execute(() -> { });
+        executor.execute(() -> { });
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            var control = initialConfig(executor, Duration.ofSeconds(5), new AtomicBoolean(true), reads);
+            int writes = bookieIo((SegmentBookieControlLog) storageField(storage, "bookie")).writes;
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                socket.send(ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                socket.status(ProfileOperation.INSTALL, 2, ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE,
+                        ProfileStatus.DurableResult.NONE);
+                assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
+                assertEquals(0, reads.get());
+                assertEquals(writes, bookieIo((SegmentBookieControlLog) storageField(storage, "bookie")).writes);
+                assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+            }
+        } finally {
+            release.countDown();
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     private final class ProfileSocket implements AutoCloseable {
         private final EventLoopGroup acceptor = new NioEventLoopGroup(1);
         private final EventLoopGroup worker = new NioEventLoopGroup(1);
@@ -6899,6 +7224,11 @@ public class SegmentBookieControlLogTest {
         }
 
         private ProfileSocket(IsolatedSegmentStorage storage, ProfileReceiveBudget budget) throws Exception {
+            this(storage, budget, null, false);
+        }
+
+        private ProfileSocket(IsolatedSegmentStorage storage, ProfileReceiveBudget budget,
+                              SegmentProfileControlConfig control, boolean offerControl) throws Exception {
             this.budget = budget;
             try {
                 ServerConfiguration conf = new ServerConfiguration();
@@ -6919,7 +7249,7 @@ public class SegmentBookieControlLogTest {
                                 accepted.set(channel);
                                 acceptedChannels.add(channel);
                                 if (!storage.installProfileConnection(channel.pipeline(), serverTls, budget,
-                                        131072, 64, "test-domain", 0)) {
+                                        131072, 64, "test-domain", 0, control)) {
                                     return;
                                 }
                                 channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
@@ -6936,8 +7266,11 @@ public class SegmentBookieControlLogTest {
                         .handler(new ChannelInitializer<SocketChannel>() {
                             @Override
                             protected void initChannel(SocketChannel channel) {
-                                channel.pipeline().addLast(clientTls.newHandler(
-                                        channel.alloc(), "apache.bookkeeper.org", port));
+                                SslHandler ssl = clientTls.newHandler(channel.alloc(), "apache.bookkeeper.org", port);
+                                javax.net.ssl.SSLParameters parameters = ssl.engine().getSSLParameters();
+                                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                                ssl.engine().setSSLParameters(parameters);
+                                channel.pipeline().addLast(ssl);
                                 channel.pipeline().addLast(new LengthFieldBasedFrameDecoder(8192, 0, 4, 0, 0));
                                 channel.pipeline().addLast(new SimpleChannelInboundHandler<ByteBuf>() {
                                     private boolean first = true;
@@ -6963,7 +7296,9 @@ public class SegmentBookieControlLogTest {
                         });
                 client = clientBootstrap.connect("127.0.0.1", port).sync().channel();
                 client.pipeline().get(SslHandler.class).handshakeFuture().sync();
-                send(ProfileOperation.HELLO, 1, new ProfileHello.Client(List.of()).encode());
+                send(ProfileOperation.HELLO, 1, new ProfileHello.Client(offerControl ? List.of(
+                        new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1))
+                        : List.of()).encode());
                 ProfileFrame frame = response();
                 assertEquals(ProfileOperation.HELLO, frame.header().operation());
                 assertEquals(1, frame.header().requestId());
@@ -6974,7 +7309,9 @@ public class SegmentBookieControlLogTest {
                 assertArrayEquals(identity().incarnation().value(), hello.storageIncarnation());
                 assertEquals(EngineProfile.SEGMENT_WAL_ENGINE.wireValue(), hello.activeEngine());
                 assertEquals(0, hello.readinessGeneration()); // Explicitly no actual startup-readiness claim.
-                assertTrue(hello.capabilities().isEmpty());
+                assertEquals(control == null ? List.of() : List.of(
+                        new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1)),
+                        hello.capabilities());
             } catch (Exception | Error cause) {
                 close();
                 throw cause;

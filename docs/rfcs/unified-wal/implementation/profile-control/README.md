@@ -313,3 +313,18 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 首次扩大`unified-wal-local-xKFGBFnc`373项为368通过/5平台跳过；其后只有coordinator链式调用换行，style当前源通过，最终重新冻结完整相关范围，旧结果保留原输入。
 
 最终 `unified-wal-local-v7KaiG3E` tool exit0，996冻结source inputs，相关11类373项为368通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-availability-style-p5JRNimT` Spotless/Checkstyle exit0，source集精确一致，17份Java回执checksums已核验。最终模型 `unified-wal-model-bf63gmga` tool exit0，225配置为48正向完整PASS/177指定反例，471冻结inputs/677 checksums；194共享输入及1273去重union一致，五个designInputs绑定父提交 `54f47dbd4ced724587fc9e8fadf91e1e054ef575`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。[有限initial availability投影](../models/README.md#initial-availability-恢复投影)检查必需metadata不重建、all-E/current/bound/known activation与最终READY/metadata事实；不证明crypto、actual control TLS/wire、process-level complete restart、生产writer/client SDK、replacement/repair/full delete/drain/GC、service startup/readiness、client quorum/CLOSED/full recovery、full A/C/D与组合、长期/掉电/性能。步骤12及生产Gate保持PARTIAL。
+
+
+## 初始 control 的真实隔离 socket
+
+2026-10-06：显式 opt-in 实验 capability/schema1 已把 INSTALL/ACTIVATE_INITIAL 接到真实隔离 mTLS、原 endpoint 与physical driver；默认能力及通用control-body冻结状态不变。真实principal、cold authority与exact AuthZ通过后，event loop原子转账；cold timeout/UNKNOWN/断连和实际I/O终结分开，副本持续计费至最后使用。七项socket回归含实际ZK PREPARING/DELETE cut和迟到EL授权零写入。非阻塞实际client、完整READY/metadata reader与all-E coordinator经socket组合、生产listener/readiness和统一总预算仍待完成，步骤11/12与stable/G1/生产Gate保持PARTIAL/OPEN。 详见[wire布局、固定向量与所有权](../profile-wire/README.md#真实隔离初始-control-接线)。ACTIVATE socket成功用例使用committed-authority fixture；实际READY/metadata reader和3-target可恢复协调器此前仍经typed facts验证，本增量没有将两份分开的证据合并成真实all-E socket成功声明。
+
+最终 `unified-wal-local-j9MoHs4Q` tool exit0：1002冻结输入，相关17类417项为412通过/5 macOS Linux-affinity跳过，0失败/错误；Bookie控制log完整252项包括七项新socket回归。`unified-wal-initial-socket-style-9ga4n66n` Spotless/Checkstyle exit0，142冻结Java source与test inputs一致；23份Java/style回执checksums已核验。最终模型 `unified-wal-model-0tgx4f8_` tool exit0：233配置为49正向完整PASS/184指定反例，483冻结输入/701 checksums，197共享输入及1288去重union一致；五个designInputs仍绑定运行父提交 `d7a68ffc03eb9a21bd91c1250fb6fb7b42d61f5e`。原始receipt/source/config/run不重绑定。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；有限PASS不代替实际TLS、fsync/掉电、内存、活性/公平性或完整A/C/D组合证据。
+
+复现最终相关范围：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInstallStoreTest,ZKProfileLifecycleStoreTest,ZKProfileReservationStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,IsolatedProfileControlEndpointTest,TestLedgerMetadataSerDe,SegmentExecutionGroupTest,SegmentBookieControlLogTest,ProfileInitialControlCodecTest,ProfileOperationCodecTest,ProfileReceiveDecoderTest,ProfileByteBufAllocatorTest,ProfileInboundPipelineSocketTest,ProfileTlsContextFactoryTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

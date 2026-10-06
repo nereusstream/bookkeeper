@@ -1058,3 +1058,25 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-initial-availability-rebuild | 1002 / 1002 / 999 | 2 / 不适用 | 0.883 s / 113,868,800 bytes | EXPECTED_COUNTEREXAMPLE:RequiredMetadataIsNeverRebuilt |
 | ce-profile-initial-availability-delete | 49001 / 21876 / 2373 | 9 / 不适用 | 1.306 s / 219,578,368 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityObservesReadyNotDelete |
 | ce-profile-initial-availability-metadata | 49006 / 21880 / 2374 | 9 / 不适用 | 1.189 s / 225,804,288 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityHasMatchingMetadataFact |
+
+
+## 初始 control socket 分发投影
+
+2026-10-06 `ProfileInitialSocketDispatch`投影一个有界初始control请求的cold任务、actual capability/权限与容量输入、event-loop原子转账、实际force/owner终结、cold等待超时、回复write及断连。等待EL的future已超时就不能迟到提交；已提交physical UNKNOWN仍保留原副本/I/O custody，回复完成也不是I/O完成。capability不授予权限，workspace与CONTROL同账移动。实际证书/字节/crypto/完整ZK READY及all-E coordinator不在该有限状态中展开，由[声明范围内的真实socket回归](../profile-wire/README.md#真实隔离初始-control-接线)分别验证；不证明SDK/quorum、完整A/C/D组合、活性/公平性、总内存、fsync硬件、长期/掉电/性能或生产authority。
+
+首轮 `unified-wal-model-2b4n23xf` exit1：原投影允许cold timeout已回复终结后再次Reject排队，违反ColdAndIoCopiesRemainCharged；修正为单次cold拒绝/owner不重复发送原已返回结果，未删除或弱化性质。其余旧输入、反例和原结果目录保留。focused `unified-wal-initial-model-focused-j6hz734t`正向完整PASS。
+
+最终 `unified-wal-local-j9MoHs4Q` tool exit0：1002冻结输入，相关17类417项为412通过/5 macOS Linux-affinity跳过，0失败/错误；Bookie控制log完整252项包括七项新socket回归。`unified-wal-initial-socket-style-9ga4n66n` Spotless/Checkstyle exit0，142冻结Java source与test inputs一致；23份Java/style回执checksums已核验。最终模型 `unified-wal-model-0tgx4f8_` tool exit0：233配置为49正向完整PASS/184指定反例，483冻结输入/701 checksums，197共享输入及1288去重union一致；五个designInputs仍绑定运行父提交 `d7a68ffc03eb9a21bd91c1250fb6fb7b42d61f5e`。原始receipt/source/config/run不重绑定。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；有限PASS不代替实际TLS、fsync/掉电、内存、活性/公平性或完整A/C/D组合证据。
+
+新正向完整1054 generated/546 distinct/queue0，depth与diameter均11；七个mutation各命中指定性质。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-initial-socket | 1054/546/0 | 11 / 11 | 0.858 s / 119,390,208 bytes | PASS |
+| ce-profile-initial-socket-capability | 123/91/55 | 3 / 不适用 | 0.856 s / 110,444,544 bytes | EXPECTED_COUNTEREXAMPLE:ControlRequiresNegotiation |
+| ce-profile-initial-socket-authority | 114/86/53 | 3 / 不适用 | 0.816 s / 111,329,280 bytes | EXPECTED_COUNTEREXAMPLE:ControlRequiresExactAuthority |
+| ce-profile-initial-socket-workspace | 146/98/59 | 3 / 不适用 | 0.918 s / 108,118,016 bytes | EXPECTED_COUNTEREXAMPLE:WorkspaceMovesWithControl |
+| ce-profile-initial-socket-terminal | 21/19/17 | 2 / 不适用 | 0.827 s / 107,839,488 bytes | EXPECTED_COUNTEREXAMPLE:ColdAndIoCopiesRemainCharged |
+| ce-profile-initial-socket-barrier | 492/304/113 | 5 / 不适用 | 0.798 s / 111,591,424 bytes | EXPECTED_COUNTEREXAMPLE:SuccessRequiresActualForceAndOwner |
+| ce-profile-initial-socket-unknown | 491/303/112 | 5 / 不适用 | 0.851 s / 112,951,296 bytes | EXPECTED_COUNTEREXAMPLE:SubmittedUnknownIsNeverNone |
+| ce-profile-initial-socket-late | 231/141/77 | 4 / 不适用 | 0.859 s / 110,592,000 bytes | EXPECTED_COUNTEREXAMPLE:TimedOutAdmissionNeverSubmits |

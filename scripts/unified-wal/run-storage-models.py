@@ -19,6 +19,14 @@ import time
 
 
 MATRIX = {
+    'a-profile-initial-socket': None,
+    'ce-profile-initial-socket-capability': 'ControlRequiresNegotiation',
+    'ce-profile-initial-socket-authority': 'ControlRequiresExactAuthority',
+    'ce-profile-initial-socket-workspace': 'WorkspaceMovesWithControl',
+    'ce-profile-initial-socket-terminal': 'ColdAndIoCopiesRemainCharged',
+    'ce-profile-initial-socket-barrier': 'SuccessRequiresActualForceAndOwner',
+    'ce-profile-initial-socket-unknown': 'SubmittedUnknownIsNeverNone',
+    'ce-profile-initial-socket-late': 'TimedOutAdmissionNeverSubmits',
     'a-profile-initial-availability': None,
     'ce-profile-initial-availability-ack': 'AvailabilityWaitsForAllE',
     'ce-profile-initial-availability-binding': 'AvailabilityHasCurrentBoundResults',
@@ -280,7 +288,7 @@ def main():
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
                   "SegmentControlRotation.java", "SegmentDataFileLock.java", "SegmentDerivedIndex.java",
                   "SegmentDataRecovery.java", "SegmentOwnerLoop.java", "SegmentIoExecutor.java", "SegmentPointRead.java",
-                  "SegmentArenaControlDriver.java", "SegmentBookieControlDriver.java", "SegmentProfileInstallStore.java",
+                  "SegmentArenaControlDriver.java", "SegmentBookieControlDriver.java", "SegmentProfileInstallStore.java", "SegmentProfileControlConfig.java",
                   "SegmentArenaMove.java", "SegmentDuplicateCheck.java",
                   "SegmentEntryInputs.java", "SegmentBufferPool.java", "SegmentBatchFormat.java",
                   "SegmentLocalReadinessStore.java", "SegmentLocalReadinessCodec.java", "SegmentFileIo.java"])
@@ -346,6 +354,7 @@ def main():
                    "-metadir", str(states), "ProfileInitialAvailability.tla" if "profile-initial-availability" in name
                    else "ProfileReadyLifecycle.tla" if "profile-ready-lifecycle" in name
                    else "ProfileInitialMetadata.tla" if "profile-initial-metadata" in name
+                   else "ProfileInitialSocketDispatch.tla" if "profile-initial-socket" in name
                    else "ProfileInstallDispatch.tla" if "profile-install-dispatch" in name
                    else "ProfileReservationAuthority.tla" if "profile-reservation-authority" in name
                    else "ProfileMetadataCreate.tla" if "profile-metadata-create" in name

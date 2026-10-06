@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 
 /** Charged plaintext framing after TLS, sharing the connection ledger with its backing allocator. */
@@ -76,6 +77,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private ByteBuf frame;
     private ProfileFrameHeader frameHeader;
     private int headerRead;
+    private boolean initialControlBounds;
     private boolean helloDelivered;
     private boolean firstRequestDelivered;
     private boolean terminated;
@@ -140,6 +142,13 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             backing.close();
             throw failure;
         }
+    }
+
+    void limitInitialControlBodies() {
+        if (context != null) {
+            throw new IllegalStateException("Control bounds must precede decoder installation");
+        }
+        initialControlBounds = true;
     }
 
     void limitNormalBody(int bytes) {
@@ -341,6 +350,13 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 || (operation == ProfileOperation.FENCE_LEDGER && header.bodyLength() != 100)
                 || (operation == ProfileOperation.ADD_NORMAL && header.bodyLength() > maxNormalBodyBytes)
                 || (operation == ProfileOperation.ADD_RECOVERY && header.bodyLength() > maxRecoveryBodyBytes)
+                || (initialControlBounds && ProfileInitialControlCodec.supported(operation)
+                    && (header.bodyLength() < (operation == ProfileOperation.INSTALL
+                            ? ProfileInitialControlCodec.MIN_INSTALL_BYTES
+                            : ProfileInitialControlCodec.COMMON_BYTES + 1)
+                        || header.bodyLength() > (operation == ProfileOperation.INSTALL
+                            ? ProfileInitialControlCodec.MAX_INSTALL_BYTES
+                            : ProfileInitialControlCodec.MAX_ACTIVATE_BYTES)))
                 || (operation.isReservedDisabled() && header.bodyLength() != 0)) {
             throw new IOException("Invalid Profile request header");
         }

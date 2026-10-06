@@ -26,13 +26,22 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.bookkeeper.common.profile.EngineProfile;
+import org.apache.bookkeeper.common.profile.control.IsolatedProfileControlEndpoint;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
+import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfileTransportContext;
+import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
@@ -57,12 +66,24 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final int maxEntryBytes;
     private final int maxPending;
     private final Set<Pending> pending = new HashSet<>();
+    private final SegmentProfileControlConfig control;
+    private final SegmentProfileInstallStore physicalControl;
+    private ProfileTransportContext transport;
+    private boolean initialControlNegotiated;
     private boolean established;
     private boolean controlEstablished;
     private boolean closed;
 
     SegmentProfileAddHandler(IsolatedSegmentStorage storage, TLSContextFactory tls, String trustDomain,
                              ProfileHello.Server hello, int maxEntryBytes, int maxPending) {
+        this(storage, tls, trustDomain, hello, maxEntryBytes, maxPending, null);
+    }
+
+    SegmentProfileAddHandler(IsolatedSegmentStorage storage, TLSContextFactory tls, String trustDomain,
+                             ProfileHello.Server hello, int maxEntryBytes, int maxPending,
+                             SegmentProfileControlConfig control) {
+        this.control = control;
+        physicalControl = control == null ? null : storage.profileInstallStore(control.timeout());
         this.storage = Objects.requireNonNull(storage, "storage");
         this.tls = Objects.requireNonNull(tls, "tls");
         this.trustDomain = Objects.requireNonNull(trustDomain, "trustDomain");
@@ -86,8 +107,11 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             // Add has only its fixed context/credential parse copies and one fixed status response.
             int bytes = frame.header().operation() == ProfileOperation.HELLO
                     ? 2 * (ProfileFrameHeader.ENCODED_LENGTH + ProfileFrameCodec.OUTER_LENGTH_PREFIX
-                            + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES)
-                    : (frame.header().operation() == ProfileOperation.FENCE_LEDGER
+                            + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES
+                            + (control == null ? 0 : 8 * ProfileHello.MAX_CAPABILITIES))
+                    : (control != null && ProfileInitialControlCodec.supported(frame.header().operation())
+                            ? 8 * (int) frame.header().bodyLength() + 2 * ProfileInitialControlCodec.REPLY_BYTES
+                            : frame.header().operation() == ProfileOperation.FENCE_LEDGER
                             || frame.header().operation() == ProfileOperation.ADD_RECOVERY ? 200 : ADD_PREFIX_BYTES)
                             + RESPONSE_BYTES;
             credit = ProfileInboundPipeline.reserveResponse(ctx.pipeline(), bytes);
@@ -100,15 +124,26 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 }
             }, 30, TimeUnit.SECONDS);
             if (frame.header().operation() == ProfileOperation.HELLO) {
-                tls.authenticatedProfilePrincipal(ctx.pipeline().get(SslHandler.class), trustDomain);
-                // The decoder validated protocol range and the canonical client capability vector.
-                // No optional capabilities: install/grant control-plane and range remain disabled.
+                SslHandler ssl = ctx.pipeline().get(SslHandler.class);
+                transport = new ProfileTransportContext(ProfileTransportContext.PROFILE_ENDPOINT,
+                        ssl.engine().getSession().getProtocol(), true, true, true,
+                        tls.authenticatedProfilePrincipal(ssl, trustDomain));
+                if (control != null) {
+                    byte[] offer = new byte[frame.body().readableBytes()];
+                    frame.body().getBytes(frame.body().readerIndex(), offer);
+                    initialControlNegotiated = ProfileHello.decodeClient(offer).capabilities().contains(
+                            new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
+                                    ProfileInitialControlCodec.SCHEMA));
+                }
+                // Capability agreement grants neither principal permissions nor metadata authority.
                 ProfileInboundPipeline.markEstablished(ctx.pipeline());
                 established = true;
                 byte[] body = hello.encode();
                 write(ctx, request, null, body);
             } else if (!established) {
                 ctx.close();
+            } else if (ProfileInitialControlCodec.supported(frame.header().operation())) {
+                initialControl(ctx, request);
             } else if (frame.header().operation() == ProfileOperation.FENCE_LEDGER) {
                 fence(ctx, request);
             } else if (frame.header().operation() == ProfileOperation.ADD_RECOVERY) {
@@ -132,6 +167,100 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             }
             ctx.close();
             throw failure;
+        }
+    }
+
+    private void initialControl(ChannelHandlerContext ctx, Pending request) {
+        if (!initialControlNegotiated) {
+            request.closeAfterWrite = !controlEstablished;
+            write(ctx, request, ProfileStatus.unsupported(), null);
+            return;
+        }
+        request.beginCold();
+        try {
+            control.executor().execute(() -> {
+                try {
+                    if (request.finished.get()) {
+                        return;
+                    }
+                    ProfileControlRequest parsed;
+                    try {
+                        ByteBuf body = request.frame.body();
+                        parsed = ProfileInitialControlCodec.decodeRequest(request.frame.header().operation(),
+                                body.nioBuffer(body.readerIndex(), body.readableBytes()), hello);
+                    } catch (IllegalArgumentException invalid) {
+                        complete(ctx, request, status(StatusClass.BAD_REQUEST,
+                                RetryDisposition.NEVER, DurableResult.NONE));
+                        return;
+                    }
+                    ProtectedProfileStateStore admittedStore = new ProtectedProfileStateStore() {
+                        @Override
+                        public TransitionResult conditionalApply(Transition transition) {
+                            CompletableFuture<Boolean> admitted = new CompletableFuture<>();
+                            try {
+                                ctx.executor().execute(() -> {
+                                    try {
+                                        if (admitted.isDone() || request.finished.get() || !ctx.channel().isActive()) {
+                                            admitted.complete(false);
+                                            return;
+                                        }
+                                        if (!controlEstablished) {
+                                            ProfileInboundPipeline.markControlAuthorized(
+                                                    ctx.pipeline(), request.frame, request.credit);
+                                            controlEstablished = true;
+                                        }
+                                        request.beginControl();
+                                        if (!admitted.complete(true)) {
+                                            request.endControl();
+                                        }
+                                    } catch (Exception failedAdmission) {
+                                        admitted.complete(false);
+                                    }
+                                });
+                                // No effects before this actual event-loop budget transfer. A timed-out task
+                                // cannot later authorize: release stops it and the EL checks finished again.
+                                if (!admitted.get(control.timeout().toNanos(), TimeUnit.NANOSECONDS)) {
+                                    return new TransitionResult(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
+                                            0, false);
+                                }
+                            } catch (Exception unavailable) {
+                                if (unavailable instanceof InterruptedException) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                if (!admitted.complete(false) && admitted.getNow(false)) {
+                                    request.endControl();
+                                }
+                                return new TransitionResult(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
+                                        0, false);
+                            }
+                            if (request.finished.get()) {
+                                request.endControl();
+                                return new TransitionResult(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
+                                        0, false);
+                            }
+                            return physicalControl.conditionalApply(transition, request::endControl);
+                        }
+
+                        @Override
+                        public TransitionResult queryOperationResult(
+                                ProfileControlScope scope) {
+                            return new TransitionResult(ProfileControlResult.Outcome.UNSUPPORTED, 0, false);
+                        }
+                    };
+                    ProfileControlResult result = new IsolatedProfileControlEndpoint(
+                            EngineProfile.SEGMENT_WAL_ENGINE, control.validator(), control.staticAuthorizer(),
+                            control.controlStore(), control.exactAuthorizer(), admittedStore).handle(transport, parsed);
+                    complete(ctx, request, ProfileInitialControlCodec.status(result.outcome()),
+                            ProfileInitialControlCodec.encodeReply(result));
+                } finally {
+                    request.endCold();
+                }
+            });
+        } catch (RejectedExecutionException exhausted) {
+            request.endCold();
+            request.closeAfterWrite = !controlEstablished;
+            write(ctx, request, status(StatusClass.TRANSIENT_UNAVAILABLE,
+                    RetryDisposition.SAME_PROFILE_OPERATION, DurableResult.NONE), null);
         }
     }
 
@@ -308,6 +437,10 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void complete(ChannelHandlerContext ctx, Pending request, ProfileStatus response) {
+        complete(ctx, request, response, null);
+    }
+
+    private void complete(ChannelHandlerContext ctx, Pending request, ProfileStatus response, byte[] body) {
         if (!request.beginDelivery()) {
             return;
         }
@@ -315,7 +448,10 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             ctx.executor().execute(() -> {
                 try {
                     if (!request.finished.get()) {
-                        write(ctx, request, response, null);
+                        if (ProfileInitialControlCodec.supported(request.frame.header().operation())) {
+                            request.closeAfterWrite = !controlEstablished;
+                        }
+                        write(ctx, request, response, body);
                     }
                 } catch (RuntimeException | Error failedResponse) {
                     finish(request);
@@ -469,6 +605,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         private volatile boolean writing;
         private boolean delivering;
         private boolean controlInFlight;
+        private boolean coldInFlight;
         private boolean closeAfterWrite;
         private ScheduledFuture<?> deadline;
         private SegmentDataPhysicalDriver.NormalRequest storageRequest;
@@ -477,6 +614,15 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         private Pending(ProfileInboundFrame frame, ProfileInboundPipeline.ResponseCredit credit) {
             this.frame = frame;
             this.credit = credit;
+        }
+
+        private synchronized void beginCold() {
+            coldInFlight = true;
+        }
+
+        private synchronized void endCold() {
+            coldInFlight = false;
+            returnResourcesIfTerminal();
         }
 
         private synchronized void beginControl() {
@@ -520,7 +666,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             // Removing the application handler can precede the downstream write's actual completion.
             // A submitted fence also retains its charged immutable request until the actual owner terminal.
             // Cancellation stops responses, but the write promise still owns the charged response workspace.
-            if (finished.get() && !writing && !delivering && !controlInFlight
+            if (finished.get() && !writing && !delivering && !controlInFlight && !coldInFlight
                     && resourcesReturned.compareAndSet(false, true)) {
                 try {
                     frame.close();
