@@ -142,7 +142,12 @@ public final class ProfileLedgerMetadataStore {
         if (mutationClient == null || ledger < 0) {
             throw new IllegalArgumentException("Membership read requires an explicit ZK context and ledger");
         }
-        long deadline = System.nanoTime() + mutationTimeoutNanos;
+        return readMembership(ledger, System.nanoTime() + mutationTimeoutNanos);
+    }
+
+    MembershipRead readMembership(long ledger, long callerDeadline) {
+        long now = System.nanoTime();
+        long deadline = now + Math.min(callerDeadline - now, mutationTimeoutNanos);
         String path = ((AbstractZkLedgerManager) manager).getLedgerPath(ledger);
         try {
             if (mutationReads.sync(path, deadline) != Code.OK.intValue()) {
@@ -308,6 +313,19 @@ public final class ProfileLedgerMetadataStore {
         CompletableFuture<Integer> reply = new CompletableFuture<>();
         mutationClient.multi(operations, (code, ignored, context, results) -> reply.complete(code), null);
         return ProfileZKReadClient.await(reply, deadline);
+    }
+
+    /** Same namespace checks for lifecycle publication: metadata birth/version cannot change across that CAS. */
+    List<Op> checksForMembership(MembershipSnapshot snapshot) {
+        if (mutationClient == null || !(snapshot.metadata().getVersion() instanceof LongVersion version)
+                || version.getLongVersion() < 0 || version.getLongVersion() > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Lifecycle publication requires the guarded metadata context");
+        }
+        var metadata = snapshot.metadata().getValue();
+        String path = ((AbstractZkLedgerManager) manager).getLedgerPath(metadata.getLedgerId());
+        String marker = path + "/profile-birth-" + Long.toHexString(snapshot.birthZxid())
+                + "-" + Long.toHexString(metadata.getCToken());
+        return List.of(Op.check(marker, 0), Op.check(path, (int) version.getLongVersion()));
     }
 
     private static boolean mutableMembership(LedgerMetadata metadata) {

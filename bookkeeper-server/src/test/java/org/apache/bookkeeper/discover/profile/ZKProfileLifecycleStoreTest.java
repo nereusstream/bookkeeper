@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -45,11 +46,14 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStat
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead.State;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore.CreateStatus;
+import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LongHierarchicalLedgerManagerFactory;
 import org.apache.bookkeeper.meta.ZkLayoutManager;
 import org.apache.bookkeeper.net.BookieId;
+import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Op;
 import org.apache.zookeeper.ZooDefs;
 import org.junit.Test;
 
@@ -116,6 +120,256 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
         var prepared = store(first).prepareReady(root, desired, lm);
         assertEquals(losePageReply ? CreateStatus.ALREADY_APPLIED : CreateStatus.APPLIED, prepared.status());
         return new Prepared(root, desired, prepared.page());
+    }
+
+    private record Replaced(ZKProfileReservationStore.Snapshot source, ProfileReplacementPage desired,
+                            ZKProfileReservationStore.ReplacementSnapshot candidate) { }
+
+    private ProfileLedgerMetadataStore membership(TestClient client, LedgerManager manager) {
+        return new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) manager,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+    }
+
+    private ZKProfileReservationStore.Snapshot ready(LedgerManager manager) throws Exception {
+        var prepared = prepare(manager);
+        return store(first).publishReady(prepared.root(), prepared.page(), manager).snapshot();
+    }
+
+    private Replaced replacement(LedgerManager manager, String target, int nonce) {
+        var lifecycle = store(first);
+        var source = lifecycle.read(44).snapshot();
+        var initial = lifecycle.readPublishedPage(44).page();
+        var metadata = membership(first, manager);
+        var before = metadata.readMembership(44).snapshot();
+        var old = before.metadata().getValue().getAllEnsembles().lastEntry().getValue();
+        var next = List.of(old.get(0), old.get(1), BookieId.parse(target));
+        var changed = metadata.replaceEnsemble(before, 100, next);
+        assertEquals(ProfileLedgerMetadataStore.Outcome.APPLIED, changed.outcome());
+        var installed = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                ProfileControlOperation.INSTALL.purpose(), 44, bytes(16, 1), scope(target).descriptorIdentity(),
+                target, bytes(16, nonce), "d", 8, bytes(16, nonce), bytes(32, nonce), null);
+        var page = ProfileReplacementPage.from(source, initial,
+                new ProfileLedgerMetadataStore.MembershipSnapshot(before.birthZxid(), changed.metadata()), 100,
+                List.of(new ProfileInstallReceipt(installed, EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1)),
+                bytes(16, nonce + 80), bytes(32, nonce + 80));
+        var prepared = lifecycle.prepareReplacement(source, page, metadata);
+        assertEquals(CreateStatus.APPLIED, prepared.status());
+        return new Replaced(source, page, prepared.page());
+    }
+
+    @Test
+    public void replacementSameStartHistorySurvivesOverwriteAndDeleteCutWithoutAuthorizingOldTargets()
+            throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var firstReplacement = replacement(manager, "b4:3181", 10);
+            var metadata = membership(first, manager);
+            var lifecycle = store(first);
+            assertEquals(CreateStatus.APPLIED, lifecycle.publishReplacement(firstReplacement.source(),
+                    firstReplacement.candidate(), metadata).status());
+            var oldKey = ProfileAuthorityKey.fromScope(firstReplacement.desired().activation("b4:3181"));
+            assertEquals(ReadStatus.FOUND, store(second).replacementAuthorityReader("b4:3181",
+                    membership(second, manager)).read(oldKey).status());
+            var secondReplacement = replacement(manager, "b5:3181", 11);
+            assertEquals(CreateStatus.APPLIED, lifecycle.publishReplacement(secondReplacement.source(),
+                    secondReplacement.candidate(), metadata).status());
+            var current = manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            assertEquals(List.of("b1:3181", "b2:3181", "b5:3181"),
+                    current.getValue().getAllEnsembles().get(100L).stream().map(Object::toString).toList());
+            assertEquals(ReadStatus.NOT_FOUND, lifecycle.replacementAuthorityReader("b4:3181", metadata)
+                    .read(oldKey).status());
+            var beforeDelete = lifecycle.read(44).snapshot();
+            assertEquals(CreateStatus.APPLIED, lifecycle.cutDelete(beforeDelete, bytes(16, 120),
+                    bytes(32, 120)).status());
+            var retained = store(second).retainedActivationTargets(44);
+            assertEquals(ReadStatus.FOUND, retained.status());
+            assertEquals(List.of("b1:3181", "b2:3181", "b3:3181", "b4:3181", "b5:3181"),
+                    retained.targets().stream().map(value -> value.scope().targetBookie()).toList());
+            assertEquals(ReadStatus.NOT_FOUND, lifecycle.replacementAuthorityReader("b5:3181", metadata).read(
+                    ProfileAuthorityKey.fromScope(secondReplacement.desired().activation("b5:3181"))).status());
+            assertEquals(CreateStatus.ALREADY_APPLIED, lifecycle.readPublishedPage(44).status());
+        }
+    }
+
+    @Test
+    public void replacementCandidateIsInertAndDeleteFirstPreventsPublicationAndTargetRetention() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var candidate = replacement(manager, "b4:3181", 10);
+            var lifecycle = store(first);
+            var metadata = membership(first, manager);
+            var key = ProfileAuthorityKey.fromScope(candidate.desired().activation("b4:3181"));
+            assertEquals(ReadStatus.NOT_FOUND, lifecycle.replacementAuthorityReader("b4:3181", metadata)
+                    .read(key).status());
+            assertEquals(CreateStatus.APPLIED, lifecycle.cutDelete(candidate.source(), bytes(16, 120),
+                    bytes(32, 120)).status());
+            assertEquals(CreateStatus.CONFLICT, lifecycle.publishReplacement(candidate.source(),
+                    candidate.candidate(), metadata).status());
+            assertEquals(3, lifecycle.retainedActivationTargets(44).targets().size());
+            assertEquals(ReadStatus.NOT_FOUND, lifecycle.replacementAuthorityReader("b4:3181", metadata)
+                    .read(key).status());
+        }
+    }
+
+    @Test
+    public void replacementLostPublicationReplyAfterDeleteReportsHistoryWithoutCurrentActivation() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var candidate = replacement(manager, "b4:3181", 10);
+            var lifecycle = store(first);
+            first.loseReply.set(true);
+            first.beforeLostMultiReply.set(() -> {
+                var other = store(second);
+                assertEquals(CreateStatus.APPLIED, other.cutDelete(other.read(44).snapshot(), bytes(16, 120),
+                        bytes(32, 120)).status());
+            });
+            var result = lifecycle.publishReplacement(candidate.source(), candidate.candidate(),
+                    membership(first, manager));
+            assertEquals(CreateStatus.ALREADY_APPLIED, result.status());
+            assertEquals(State.DELETE_INTENT, result.snapshot().lifecycle().state());
+            assertEquals(4, lifecycle.retainedActivationTargets(44).targets().size());
+            assertEquals(ReadStatus.NOT_FOUND, lifecycle.replacementAuthorityReader("b4:3181",
+                    membership(first, manager)).read(ProfileAuthorityKey.fromScope(
+                            candidate.desired().activation("b4:3181"))).status());
+        }
+    }
+
+    @Test
+    public void replacementMetadataFreezeAfterReadFailsTheSamePublicationMulti() throws Exception {
+        try (LedgerManager manager = manager(first); LedgerManager other = manager(second)) {
+            ready(manager);
+            var candidate = replacement(manager, "b4:3181", 10);
+            first.beforeMulti.set(() -> {
+                try {
+                    var actual = other.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+                    var custom = new HashMap<>(actual.getValue().getCustomMetadata());
+                    custom.put(ProfileLedgerMetadataStore.MEMBERSHIP_FROZEN_KEY, new byte[]{1});
+                    other.writeLedgerMetadata(44, LedgerMetadataBuilder.from(actual.getValue())
+                            .withCToken(actual.getValue().getCToken()).withCustomMetadata(custom).build(),
+                            actual.getVersion()).get(5, TimeUnit.SECONDS);
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(CreateStatus.CONFLICT, store(first).publishReplacement(candidate.source(),
+                    candidate.candidate(), membership(first, manager)).status());
+            assertEquals(State.READY, store(second).read(44).snapshot().lifecycle().state());
+            assertEquals(3, store(second).retainedActivationTargets(44).targets().size());
+        }
+    }
+
+    @Test
+    public void replacementPageRecreatedAtVersionZeroCannotPassThePublicationBirthCheck() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var candidate = replacement(manager, "b4:3181", 10);
+            String pagePath = store(first).path(44) + "/replacement-3";
+            first.beforeMulti.set(() -> {
+                try {
+                    second.delete(pagePath + "/birth-" + candidate.candidate().birthId(), 0);
+                    second.delete(pagePath, 0);
+                    var envelope = new ProfileLifecycleCodec.Replacement(UUID.randomUUID(), candidate.desired());
+                    second.multi(List.of(Op.create(pagePath, ProfileLifecycleCodec.encode(envelope),
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT), Op.create(pagePath + "/birth-"
+                            + envelope.birthId(), new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT)));
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(CreateStatus.CONFLICT, store(first).publishReplacement(candidate.source(),
+                    candidate.candidate(), membership(first, manager)).status());
+            assertEquals(State.READY, store(second).read(44).snapshot().lifecycle().state());
+        }
+    }
+
+    @Test
+    public void replacementMissingHistoryNeverReturnsPartialCleanupTargets() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var firstPage = replacement(manager, "b4:3181", 10);
+            store(first).publishReplacement(firstPage.source(), firstPage.candidate(), membership(first, manager));
+            var secondPage = replacement(manager, "b5:3181", 11);
+            store(first).publishReplacement(secondPage.source(), secondPage.candidate(), membership(first, manager));
+            String path = store(first).path(44) + "/replacement-3";
+            second.delete(path + "/birth-" + firstPage.candidate().birthId(), 0);
+            second.delete(path, 0);
+            var retained = store(second).retainedActivationTargets(44);
+            assertEquals(ReadStatus.QUARANTINED, retained.status());
+            assertTrue(retained.targets().isEmpty());
+        }
+    }
+
+    @Test
+    public void replacementPublicationBudgetKeepsAllTargetsAndStopsBeforeTheNextPage() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            for (int index = 0; index < ProfileReplacementPage.MAX_PUBLICATIONS; index++) {
+                var candidate = replacement(manager, "target" + index + ":3181", 10 + index);
+                assertEquals(CreateStatus.APPLIED, store(first).publishReplacement(candidate.source(),
+                        candidate.candidate(), membership(first, manager)).status());
+            }
+            var source = store(first).read(44).snapshot();
+            assertEquals(34, source.lifecycle().sequence());
+            assertEquals(35, store(second).retainedActivationTargets(44).targets().size());
+            assertEquals(34, first.getChildren(store(first).path(44), false).size());
+            var metadata = membership(first, manager).readMembership(44).snapshot();
+            var initial = store(first).readPublishedPage(44).page();
+            assertThrows(IllegalArgumentException.class, () -> ProfileReplacementPage.from(source, initial,
+                    metadata, 100, List.of(new ProfileInstallReceipt(scope("one-more:3181"),
+                            EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1)), bytes(16, 120), bytes(32, 120)));
+            assertEquals(source, store(first).read(44).snapshot());
+        }
+    }
+
+    @Test
+    public void replacementFixedVectorAndIndependentFieldsRejectKindScopeAndLengthCorruption() {
+        byte[] vector = HexFormat.of().parseHex(
+                "5557415000000001000002260000000200000000000000005557424c00000001000000000000002c01010101010101010101"
+                + "01010101010102020202020202020202020202020202b62a5921000000000000000000000000000000090000000000000000"
+                + "000000000000000a040404040404040404040404040404040505050505050505050505050505050505050505050505050505"
+                + "0505050505050000000000000008000000000000000300000000000000110606060606060606060606060606060606060606"
+                + "0606060606060606060606060000000000000015000000000000000100000000000000330000000000000064070707070707"
+                + "0707070707070707070707070707070707070707070707070707000000000000001208080808080808080808080808080808"
+                + "0808080808080808080808080808080800000001000000b65557415500000001000000b60000000100000001000000010000"
+                + "000100000003000000000000002c010101010101010101010101010101010001000109090909090909090909090909090909"
+                + "0909090909090909090909090909090902020202020202020202020202020202000000000000000803030303030303030303"
+                + "0303030303030404040404040404040404040404040404040404040404040404040404040404000000016200000001640000"
+                + "0000731b211407070707070707070707070707070707070707070707070707070707070707070000000000000001"
+                + "e6ef3b19");
+        var value = new ProfileReplacementPage(reservation().backlink(), new UUID(0, 9), bytes(16, 4),
+                bytes(32, 5), 8, 3, 17, bytes(32, 6), 21, 1, 51, 100, bytes(32, 7), 18, bytes(32, 8),
+                List.of(new ProfileInstallReceipt(scope("b"), EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1)));
+        var envelope = new ProfileLifecycleCodec.Replacement(new UUID(0, 10), value);
+        assertArrayEquals(vector, ProfileLifecycleCodec.encode(envelope));
+        assertEquals(envelope, ProfileLifecycleCodec.decodeReplacement(vector));
+        ByteBuffer fields = ByteBuffer.wrap(vector);
+        assertEquals(2, fields.getInt(12));
+        assertEquals(3, fields.getLong(164));
+        assertEquals(21, fields.getLong(212));
+        assertEquals(100, fields.getLong(236));
+        assertEquals(1, fields.getInt(316));
+        assertThrows(IllegalArgumentException.class, () -> ProfileLifecycleCodec.decodePage(vector));
+        for (int offset : List.of(0, 4, 8, 12, 16, 316)) {
+            byte[] wrong = vector.clone();
+            ByteBuffer.wrap(wrong).putInt(offset, -1);
+            checksum(wrong);
+            assertThrows(IllegalArgumentException.class, () -> ProfileLifecycleCodec.decodeReplacement(wrong));
+        }
+        for (int offset : List.of(164, 212, 220, 236)) {
+            byte[] wrong = vector.clone();
+            ByteBuffer.wrap(wrong).putLong(offset, -1);
+            checksum(wrong);
+            assertThrows(IllegalArgumentException.class, () -> ProfileLifecycleCodec.decodeReplacement(wrong));
+        }
+        byte[] trailing = Arrays.copyOf(vector, vector.length + 1);
+        ByteBuffer.wrap(trailing).putInt(8, trailing.length);
+        checksum(trailing);
+        assertThrows(IllegalArgumentException.class, () -> ProfileLifecycleCodec.decodeReplacement(trailing));
+        assertThrows(IllegalArgumentException.class,
+                () -> ProfileLifecycleCodec.decodeReplacement(new byte[323]));
+        assertThrows(IllegalArgumentException.class,
+                () -> ProfileLifecycleCodec.decodeReplacement(
+                        new byte[ProfileLifecycleCodec.REPLACEMENT_MAX_BYTES + 1]));
     }
 
     private static void checksum(byte[] value) {

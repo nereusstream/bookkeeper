@@ -74,6 +74,7 @@ import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileReadyPage;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementPage;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
@@ -307,13 +308,13 @@ public class SegmentProfileInstallStoreTest {
                     transition(scope("other:3181", 5), 6)).outcome());
             assertEquals(Outcome.CONFLICT, local.store.conditionalApply(transition(scope("b1:3181", 7), 6)).outcome());
             var old = scope("b1:3181", 5);
-            var activation = new ProfileControlScope(ProfileControlOperation.ACTIVATE_REPLACEMENT,
-                    ProfileControlOperation.ACTIVATE_REPLACEMENT.purpose(), old.ledgerId(), old.ledgerInstanceId(),
+            var activation = new ProfileControlScope(ProfileControlOperation.STATUS_QUERY,
+                    ProfileControlOperation.STATUS_QUERY.purpose(), old.ledgerId(), old.ledgerInstanceId(),
                     old.descriptorIdentity(), old.targetBookie(), old.targetStorageIncarnation(), old.authorityDomain(),
                     2, bytes(16, 9), old.publicSemanticPayloadIdentity(), null);
             var unsupported = new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(activation),
                     new CommittedProfileAuthority(activation,
-                            CommittedProfileAuthority.State.POST_MEMBERSHIP_REPLACEMENT,
+                            CommittedProfileAuthority.State.STATUS_QUERYABLE,
                             EngineProfile.SEGMENT_WAL_ENGINE, 1, true), null);
             assertEquals(Outcome.UNSUPPORTED, local.store.conditionalApply(unsupported).outcome());
             assertEquals(Outcome.UNSUPPORTED, local.store.queryOperationResult(old).outcome());
@@ -840,6 +841,58 @@ public class SegmentProfileInstallStoreTest {
         var root = initial.reservations.read(44).snapshot();
         var page = ProfileReadyPage.from(root, created, bytes(16, 4), bytes(32, 5));
         return initial.reservations.prepareReady(root, page, initial.manager).page();
+    }
+
+    @Test
+    public void publishedReplacementAuthorityActivatesActualInstalledFileAndRetainsItAfterDelete() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var created = initial.create(initial.metadata()).get(5, TimeUnit.SECONDS);
+            assertEquals(Status.METADATA_CREATED, created.status());
+            var preparing = initial.reservations.read(44).snapshot();
+            var readyPage = ProfileReadyPage.from(preparing, created, bytes(16, 4), bytes(32, 5));
+            var prepared = initial.reservations.prepareReady(preparing, readyPage, initial.manager).page();
+            var ready = initial.reservations.publishReady(preparing, prepared, initial.manager).snapshot();
+            var metadata = new ProfileLedgerMetadataStore(initial.zk, (AbstractZkLedgerManager) initial.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var before = metadata.readMembership(44).snapshot();
+            var changed = metadata.replaceEnsemble(before, 0, List.of(BookieId.parse("c2:3181"),
+                    BookieId.parse("c1:3181"), BookieId.parse("c3:3181")));
+            assertEquals(ProfileLedgerMetadataStore.Outcome.APPLIED, changed.outcome());
+            var receipt = created.installs().stream().filter(value -> value.scope().targetBookie().equals("c1:3181"))
+                    .findFirst().orElseThrow();
+            var page = ProfileReplacementPage.from(ready, prepared,
+                    new ProfileLedgerMetadataStore.MembershipSnapshot(before.birthZxid(), changed.metadata()),
+                    0, List.of(receipt), bytes(16, 9), bytes(32, 9));
+            var candidate = initial.reservations.prepareReplacement(ready, page, metadata).page();
+            var local = initial.locals.get(0);
+            byte[] key = DigestManager.generateMasterKey(initial.password);
+            assertFalse(local.log.normalAdmission(context(), key));
+            var principal = new ProfilePrincipal(ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                    "operators", "cn=test-ca", "cn=replacement-controller");
+            var transport = new ProfileTransportContext("bookie-profile", "TLSv1.3", true, true, true, principal);
+            var endpoint = new IsolatedProfileControlEndpoint(EngineProfile.SEGMENT_WAL_ENGINE, VALIDATOR,
+                    (caller, operation) -> caller.equals(principal)
+                            && operation == ProfileControlOperation.ACTIVATE_REPLACEMENT,
+                    initial.reservations.replacementAuthorityReader("c1:3181", metadata),
+                    (caller, requested, authority) -> caller.equals(principal)
+                            && requested.equals(authority.scope()) ? Decision.ALLOW : Decision.DENY, local.store);
+            var request = ProfileControlRequest.operation(page.activation("c1:3181"));
+            assertEquals(Outcome.NOT_FOUND, endpoint.handle(transport, request).outcome());
+            assertFalse(local.log.normalAdmission(context(), key));
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                    initial.reservations.publishReplacement(ready, candidate, metadata).status());
+            var active = endpoint.handle(transport, request);
+            assertEquals(Outcome.APPLIED, active.outcome());
+            assertEquals(2, active.localGeneration());
+            assertTrue(local.log.normalAdmission(context(), key));
+            assertEquals(Outcome.ALREADY_APPLIED, endpoint.handle(transport, request).outcome());
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, initial.reservations.cutDelete(
+                    initial.reservations.read(44).snapshot(), bytes(16, 10), bytes(32, 10)).status());
+            assertEquals(Outcome.NOT_FOUND, endpoint.handle(transport, request).outcome());
+            // Remote DELETE_INTENT is admission closure, not a local fence/tombstone or physical delete.
+            assertTrue(local.log.normalAdmission(context(), key));
+            assertEquals(3, initial.reservations.retainedActivationTargets(44).targets().size());
+        }
     }
 
     @Test

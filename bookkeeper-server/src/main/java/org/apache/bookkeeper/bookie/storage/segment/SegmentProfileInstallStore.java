@@ -68,7 +68,8 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
             }
             ProfileControlScope scope = transition.request().scope();
             if (scope.operation() != ProfileControlOperation.INSTALL
-                    && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL) {
+                    && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL
+                    && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT) {
                 return result(Outcome.UNSUPPORTED);
             }
             if (!transition.authority().scope().equals(scope)
@@ -97,7 +98,8 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                         case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
                         case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
                     };
-                    if (scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
+                    if ((scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
+                            || scope.operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT)
                             && (outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED)
                             && driver.initialActiveGeneration(scope) == 0) {
                         outcome = Outcome.STALE_OR_COMPACTED;

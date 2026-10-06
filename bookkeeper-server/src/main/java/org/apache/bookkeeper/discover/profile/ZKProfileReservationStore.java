@@ -17,7 +17,10 @@
 package org.apache.bookkeeper.discover.profile;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -87,6 +90,50 @@ public final class ZKProfileReservationStore {
         @Override
         public int hashCode() {
             return Objects.hash(page, birthId, storeVersion, Arrays.hashCode(digest));
+        }
+    }
+
+    public record ReplacementSnapshot(ProfileReplacementPage page, UUID birthId, long storeVersion, byte[] digest) {
+        public ReplacementSnapshot {
+            Objects.requireNonNull(page, "page");
+            Objects.requireNonNull(birthId, "birthId");
+            digest = ProfileLifecycleHead.fixed(digest, 32, false);
+            if (birthId.equals(new UUID(0, 0)) || storeVersion < 0) {
+                throw new IllegalArgumentException("Invalid replacement page snapshot");
+            }
+        }
+        @Override
+        public byte[] digest() {
+            return digest.clone();
+        }
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof ReplacementSnapshot value && page.equals(value.page)
+                    && birthId.equals(value.birthId) && storeVersion == value.storeVersion
+                    && Arrays.equals(digest, value.digest);
+        }
+        @Override
+        public int hashCode() {
+            return Objects.hash(page, birthId, storeVersion, Arrays.hashCode(digest));
+        }
+    }
+
+    public record ReplacementResult(CreateStatus status, ReplacementSnapshot page) {
+        public ReplacementResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == CreateStatus.APPLIED || status == CreateStatus.ALREADY_APPLIED) != (page != null)) {
+                throw new IllegalArgumentException("Only persisted replacement carries a page");
+            }
+        }
+    }
+
+    public record RetainedTargets(ReadStatus status, List<ProfileInstallReceipt> targets) {
+        public RetainedTargets {
+            Objects.requireNonNull(status, "status");
+            targets = List.copyOf(targets);
+            if (status != ReadStatus.FOUND && !targets.isEmpty()) {
+                throw new IllegalArgumentException("Only verified history carries retained targets");
+            }
         }
     }
 
@@ -162,6 +209,15 @@ public final class ZKProfileReservationStore {
     private String pagePath(long ledger) {
         return path(ledger) + "/initial-activation";
     }
+    private String replacementPath(long ledger, long sequence) {
+        return path(ledger) + "/replacement-" + sequence;
+    }
+    private static long replacementSequence(ProfileLifecycleHead head) {
+        return head.state() == ProfileLifecycleHead.State.REPLACEMENT ? head.sequence()
+                : head.state() == ProfileLifecycleHead.State.DELETE_INTENT && head.sequence() >= 4
+                    ? head.predecessor() : -1;
+    }
+
     private static String marker(String parent, UUID birth) {
         return parent + "/birth-" + birth;
     }
@@ -455,7 +511,7 @@ public final class ZKProfileReservationStore {
                 return new PageResult(CreateStatus.CONFLICT, null);
             }
             ReadySnapshot page = page(snapshot, deadline);
-            if (page == null || !published(snapshot.lifecycle(), page)) {
+            if (page == null || !initialPublished(snapshot, page, deadline)) {
                 return new PageResult(CreateStatus.QUARANTINED, null);
             }
             return new PageResult(CreateStatus.ALREADY_APPLIED, page);
@@ -467,6 +523,252 @@ public final class ZKProfileReservationStore {
         } catch (IllegalArgumentException invalid) {
             return new PageResult(CreateStatus.QUARANTINED, null);
         }
+    }
+
+    /** Persist one bounded post-CAS candidate. Its existence is never activation authority. */
+    public ReplacementResult prepareReplacement(Snapshot expected, ProfileReplacementPage desired,
+            ProfileLedgerMetadataStore metadata) {
+        long ledger = desired.backlink().ledgerId();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            ReadResult read = read(ledger, deadline);
+            if (read.status() != ReadStatus.FOUND) {
+                return replacementFailure(read.status());
+            }
+            Snapshot current = read.snapshot();
+            if (!expected.lifecycle().birthId().equals(current.lifecycle().birthId())
+                    || !expected.reservation().equals(current.reservation())) {
+                return new ReplacementResult(CreateStatus.CONFLICT, null);
+            }
+            ReplacementSnapshot existing = replacement(current, desired.sequence(), deadline);
+            if (existing != null) {
+                return new ReplacementResult(existing.page().equals(desired)
+                        ? CreateStatus.ALREADY_APPLIED : CreateStatus.CONFLICT,
+                        existing.page().equals(desired) ? existing : null);
+            }
+            if (!expected.equals(current) || !liveReplacementPredecessor(current, desired, deadline)) {
+                return new ReplacementResult(CreateStatus.CONFLICT, null);
+            }
+            var actual = metadata.readMembership(ledger, deadline);
+            if (actual.status() != ReadStatus.FOUND) {
+                return replacementFailure(actual.status());
+            }
+            if (!desired.matchesMetadata(actual.snapshot())
+                    || !page(current, deadline).page().matchesQuorum(actual.snapshot().metadata().getValue())) {
+                return new ReplacementResult(CreateStatus.CONFLICT, null);
+            }
+            var envelope = new ProfileLifecycleCodec.Replacement(UUID.randomUUID(), desired);
+            var ops = new ArrayList<Op>();
+            ops.add(Op.check(path(ledger), current.rootDataVersion()));
+            ops.add(Op.check(marker(headPath(ledger), current.lifecycle().birthId()), 0));
+            ops.add(Op.check(headPath(ledger), current.lifecycleDataVersion()));
+            ops.addAll(metadata.checksForMembership(actual.snapshot()));
+            ops.add(Op.create(replacementPath(ledger, desired.sequence()), ProfileLifecycleCodec.encode(envelope),
+                    pageAcls, CreateMode.PERSISTENT));
+            ops.add(Op.create(marker(replacementPath(ledger, desired.sequence()), envelope.birthId()),
+                    new byte[0], immutableAcls, CreateMode.PERSISTENT));
+            int code = multi(ops, deadline);
+            var after = read(ledger, deadline);
+            if (after.status() != ReadStatus.FOUND) {
+                return replacementFailure(after.status());
+            }
+            var page = replacement(after.snapshot(), desired.sequence(), deadline);
+            boolean equal = page != null && page.page().equals(desired);
+            return new ReplacementResult(equal ? code == Code.OK.intValue() ? CreateStatus.APPLIED
+                    : CreateStatus.ALREADY_APPLIED : conditionalFailure(code) ? CreateStatus.CONFLICT
+                    : CreateStatus.DURABILITY_UNKNOWN, equal ? page : null);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new ReplacementResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new ReplacementResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (IllegalArgumentException invalid) {
+            return new ReplacementResult(CreateStatus.QUARANTINED, null);
+        }
+    }
+
+    /** Publish authority and its cleanup targets at the same cut as DELETE_INTENT. */
+    public CreateResult publishReplacement(Snapshot expected, ReplacementSnapshot prepared,
+            ProfileLedgerMetadataStore metadata) {
+        long ledger = prepared.page().backlink().ledgerId();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            ReadResult read = read(ledger, deadline);
+            if (read.status() != ReadStatus.FOUND) {
+                return new CreateResult(read.status() == ReadStatus.QUARANTINED
+                        ? CreateStatus.QUARANTINED : CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            Snapshot current = read.snapshot();
+            var actual = replacement(current, prepared.page().sequence(), deadline);
+            if (actual == null || !sameReplacement(actual, prepared)) {
+                return new CreateResult(CreateStatus.CONFLICT, null);
+            }
+            if (replacementPublished(current.lifecycle(), actual)) {
+                return new CreateResult(CreateStatus.ALREADY_APPLIED, current);
+            }
+            if (!expected.equals(current) || !liveReplacementPredecessor(current, prepared.page(), deadline)) {
+                return new CreateResult(CreateStatus.CONFLICT, null);
+            }
+            var observed = metadata.readMembership(ledger, deadline);
+            if (observed.status() != ReadStatus.FOUND) {
+                return new CreateResult(observed.status() == ReadStatus.QUARANTINED
+                        || observed.status() == ReadStatus.NOT_FOUND ? CreateStatus.QUARANTINED
+                        : CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            if (!prepared.page().matchesMetadata(observed.snapshot())
+                    || !page(current, deadline).page().matchesQuorum(observed.snapshot().metadata().getValue())) {
+                return new CreateResult(CreateStatus.CONFLICT, null);
+            }
+            var head = current.lifecycle();
+            var next = new ProfileLifecycleHead(head.backlink(), head.reservationDigest(), head.birthId(),
+                    ProfileLifecycleHead.State.REPLACEMENT, head.sequence() + 1, head.sequence(),
+                    head.controlGeneration(), prepared.page().operationId(), prepared.page().payloadIdentity(),
+                    prepared.storeVersion(), prepared.digest());
+            var ops = new ArrayList<Op>();
+            ops.add(Op.check(path(ledger), current.rootDataVersion()));
+            ops.add(Op.check(marker(headPath(ledger), head.birthId()), 0));
+            ops.add(Op.check(marker(replacementPath(ledger, actual.page().sequence()), actual.birthId()), 0));
+            ops.add(Op.check(replacementPath(ledger, actual.page().sequence()), 0));
+            ops.addAll(metadata.checksForMembership(observed.snapshot()));
+            ops.add(Op.setData(headPath(ledger), ProfileLifecycleCodec.encode(next), current.lifecycleDataVersion()));
+            int code = multi(ops, deadline);
+            var after = read(ledger, deadline);
+            if (after.status() != ReadStatus.FOUND) {
+                return new CreateResult(after.status() == ReadStatus.QUARANTINED
+                        ? CreateStatus.QUARANTINED : CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            boolean published = replacementPublished(after.snapshot().lifecycle(), actual);
+            return new CreateResult(published ? code == Code.OK.intValue() ? CreateStatus.APPLIED
+                    : CreateStatus.ALREADY_APPLIED : conditionalFailure(code) ? CreateStatus.CONFLICT
+                    : CreateStatus.DURABILITY_UNKNOWN, published ? after.snapshot() : null);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new CreateResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new CreateResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (IllegalArgumentException invalid) {
+            return new CreateResult(CreateStatus.QUARANTINED, null);
+        }
+    }
+
+    public ReplacementResult readReplacement(long ledger, long sequence) {
+        if (sequence < 3 || sequence > 2 + ProfileReplacementPage.MAX_PUBLICATIONS) {
+            throw new IllegalArgumentException("Invalid replacement page sequence");
+        }
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var source = read(ledger, deadline);
+            if (source.status() != ReadStatus.FOUND) {
+                return replacementFailure(source.status());
+            }
+            var value = replacement(source.snapshot(), sequence, deadline);
+            return new ReplacementResult(value == null ? CreateStatus.CONFLICT : CreateStatus.ALREADY_APPLIED, value);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new ReplacementResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new ReplacementResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (IllegalArgumentException invalid) {
+            return new ReplacementResult(CreateStatus.QUARANTINED, null);
+        }
+    }
+
+    public ProfileControlStore replacementAuthorityReader(String targetBookie, ProfileLedgerMetadataStore metadata) {
+        ProfileAuthorityCodec.text(targetBookie, ProfileControlScope.MAX_TARGET_BOOKIE_BYTES);
+        return key -> {
+            long deadline = System.nanoTime() + timeoutNanos;
+            try {
+                var read = read(key.ledgerId(), deadline);
+                if (read.status() != ReadStatus.FOUND) {
+                    return new ProfileControlStore.ReadResult(read.status(), null);
+                }
+                var current = read.snapshot();
+                if (current.lifecycle().state() != ProfileLifecycleHead.State.REPLACEMENT) {
+                    return ProfileControlStore.ReadResult.notFound();
+                }
+                var page = replacement(current, current.lifecycle().sequence(), deadline);
+                if (page == null || !replacementPublished(current.lifecycle(), page)) {
+                    return ProfileControlStore.ReadResult.quarantined();
+                }
+                var observed = metadata.readMembership(key.ledgerId(), deadline);
+                if (observed.status() != ReadStatus.FOUND) {
+                    return observed.status() == ReadStatus.NOT_FOUND ? ProfileControlStore.ReadResult.quarantined()
+                            : new ProfileControlStore.ReadResult(observed.status(), null);
+                }
+                if (!page.page().matchesMetadata(observed.snapshot()) || page.page().installs().stream()
+                        .noneMatch(value -> value.scope().targetBookie().equals(targetBookie))) {
+                    return ProfileControlStore.ReadResult.notFound();
+                }
+                var scope = page.page().activation(targetBookie);
+                return ProfileAuthorityKey.fromScope(scope).equals(key)
+                        ? ProfileControlStore.ReadResult.found(new CommittedProfileAuthority(scope,
+                                CommittedProfileAuthority.State.POST_MEMBERSHIP_REPLACEMENT,
+                                EngineProfile.SEGMENT_WAL_ENGINE, current.lifecycleVersion(), true))
+                        : ProfileControlStore.ReadResult.notFound();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return ProfileControlStore.ReadResult.unavailable();
+            } catch (TimeoutException | IllegalStateException unavailable) {
+                return ProfileControlStore.ReadResult.unavailable();
+            } catch (IllegalArgumentException invalid) {
+                return ProfileControlStore.ReadResult.quarantined();
+            }
+        };
+    }
+
+    /** Bounded discovery only: it grants neither activation nor delete/physical completion. */
+    public RetainedTargets retainedActivationTargets(long ledger) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var read = read(ledger, deadline);
+            if (read.status() != ReadStatus.FOUND) {
+                return new RetainedTargets(read.status(), List.of());
+            }
+            var current = read.snapshot();
+            var initial = page(current, deadline);
+            if (initial == null || !initialPublished(current, initial, deadline)) {
+                return new RetainedTargets(ReadStatus.QUARANTINED, List.of());
+            }
+            var targets = new LinkedHashMap<String, ProfileInstallReceipt>();
+            initial.page().installs().forEach(value -> retain(targets, value));
+            long last = replacementSequence(current.lifecycle());
+            long previousVersion = initial.storeVersion();
+            byte[] previousDigest = initial.digest();
+            for (long sequence = 3; sequence <= last; sequence++) {
+                var next = replacement(current, sequence, deadline);
+                if (next == null || next.page().previousPageVersion() != previousVersion
+                        || !Arrays.equals(next.page().previousPageDigest(), previousDigest)
+                        || next.page().initialPageVersion() != initial.storeVersion()
+                        || !Arrays.equals(next.page().initialPageDigest(), initial.digest())) {
+                    return new RetainedTargets(ReadStatus.QUARANTINED, List.of());
+                }
+                next.page().installs().forEach(value -> retain(targets, value));
+                previousVersion = next.storeVersion();
+                previousDigest = next.digest();
+            }
+            if (last >= 3 && (previousVersion != current.lifecycle().readyPageVersion()
+                    || !Arrays.equals(previousDigest, current.lifecycle().readyPageDigest()))) {
+                return new RetainedTargets(ReadStatus.QUARANTINED, List.of());
+            }
+            return new RetainedTargets(ReadStatus.FOUND, List.copyOf(targets.values()));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new RetainedTargets(ReadStatus.UNAVAILABLE, List.of());
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new RetainedTargets(ReadStatus.UNAVAILABLE, List.of());
+        } catch (IllegalArgumentException invalid) {
+            return new RetainedTargets(ReadStatus.QUARANTINED, List.of());
+        }
+    }
+
+    private static void retain(LinkedHashMap<String, ProfileInstallReceipt> targets, ProfileInstallReceipt value) {
+        targets.putIfAbsent(value.scope().targetBookie() + "/"
+                + HexFormat.of().formatHex(value.scope().targetStorageIncarnation()), value);
+    }
+
+    private static ReplacementResult replacementFailure(ReadStatus status) {
+        return new ReplacementResult(status == ReadStatus.QUARANTINED || status == ReadStatus.NOT_FOUND
+                ? CreateStatus.QUARANTINED : CreateStatus.DURABILITY_UNKNOWN, null);
     }
 
     public ProfileControlStore installAuthorityReader(String targetBookie) {
@@ -547,6 +849,98 @@ public final class ZKProfileReservationStore {
         requireMarker(marker(pagePath(ledger), envelope.birthId()), node.stat().getCzxid(), deadline);
         return new ReadySnapshot(envelope.value(), envelope.birthId(), node.stat().getMzxid(),
                 ProfileLifecycleCodec.digest(node.bytes()));
+    }
+
+    private ReplacementSnapshot replacement(Snapshot current, long sequence, long deadline)
+            throws InterruptedException, TimeoutException {
+        long ledger = current.reservation().backlink().ledgerId();
+        var node = reads.get(replacementPath(ledger, sequence), deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(node);
+        requirePersistent(node, true);
+        var envelope = ProfileLifecycleCodec.decodeReplacement(node.bytes());
+        var value = envelope.value();
+        var base = current.reservation().installs().get(0);
+        if (!value.backlink().equals(current.reservation().backlink())
+                || !value.lifecycleBirth().equals(current.lifecycle().birthId()) || value.sequence() != sequence
+                || value.controlGeneration() != base.authorityGeneration()
+                || value.installs().stream().anyMatch(receipt ->
+                        !receipt.scope().descriptorIdentity().equals(base.descriptorIdentity())
+                        || !receipt.scope().authorityDomain().equals(base.authorityDomain()))) {
+            throw new IllegalArgumentException("Replacement page does not match this lifecycle identity");
+        }
+        requireMarker(marker(replacementPath(ledger, sequence), envelope.birthId()), node.stat().getCzxid(), deadline);
+        return new ReplacementSnapshot(value, envelope.birthId(), node.stat().getMzxid(),
+                ProfileLifecycleCodec.digest(node.bytes()));
+    }
+
+    private boolean liveReplacementPredecessor(Snapshot current, ProfileReplacementPage desired, long deadline)
+            throws InterruptedException, TimeoutException {
+        var head = current.lifecycle();
+        if (head.state() != ProfileLifecycleHead.State.READY && head.state() != ProfileLifecycleHead.State.REPLACEMENT
+                || desired.sequence() != head.sequence() + 1 || !desired.lifecycleBirth().equals(head.birthId())
+                || !desired.backlink().equals(head.backlink())
+                || desired.controlGeneration() != head.controlGeneration()
+                || desired.previousPageVersion() != head.readyPageVersion()
+                || !Arrays.equals(desired.previousPageDigest(), head.readyPageDigest())
+                || Arrays.equals(desired.operationId(), head.operationId())
+                || Arrays.equals(desired.operationId(), current.reservation().installs().get(0).operationId())) {
+            return false;
+        }
+        var initial = page(current, deadline);
+        if (initial == null || !initialPublished(current, initial, deadline)
+                || desired.initialPageVersion() != initial.storeVersion()
+                || !Arrays.equals(desired.initialPageDigest(), initial.digest())
+                || desired.creatorToken() != initial.page().creatorToken()) {
+            return false;
+        }
+        long previousMetadata = initial.page().metadataVersion();
+        if (head.state() == ProfileLifecycleHead.State.REPLACEMENT) {
+            var previous = replacement(current, head.sequence(), deadline);
+            if (previous == null || !replacementPublished(head, previous)) {
+                return false;
+            }
+            previousMetadata = previous.page().metadataVersion();
+        }
+        var base = current.reservation().installs().get(0);
+        return desired.metadataVersion() == previousMetadata + 1 && desired.installs().stream().allMatch(value ->
+                value.scope().descriptorIdentity().equals(base.descriptorIdentity())
+                        && value.scope().authorityDomain().equals(base.authorityDomain()));
+    }
+
+    private boolean initialPublished(Snapshot source, ReadySnapshot initial, long deadline)
+            throws InterruptedException, TimeoutException {
+        if (published(source.lifecycle(), initial)) {
+            return true;
+        }
+        long sequence = replacementSequence(source.lifecycle());
+        if (sequence < 3) {
+            return false;
+        }
+        var latest = replacement(source, sequence, deadline);
+        return latest != null && replacementPublished(source.lifecycle(), latest)
+                && latest.page().initialPageVersion() == initial.storeVersion()
+                && Arrays.equals(latest.page().initialPageDigest(), initial.digest());
+    }
+
+    private static boolean replacementPublished(ProfileLifecycleHead head, ReplacementSnapshot page) {
+        return replacementSequence(head) == page.page().sequence()
+                && head.birthId().equals(page.page().lifecycleBirth())
+                && head.backlink().equals(page.page().backlink())
+                && head.readyPageVersion() == page.storeVersion()
+                && Arrays.equals(head.readyPageDigest(), page.digest())
+                && (head.state() == ProfileLifecycleHead.State.DELETE_INTENT
+                        ? head.controlGeneration() == page.page().controlGeneration() + 1
+                        : head.controlGeneration() == page.page().controlGeneration()
+                            && Arrays.equals(head.operationId(), page.page().operationId())
+                            && Arrays.equals(head.payloadIdentity(), page.page().payloadIdentity()));
+    }
+
+    private static boolean sameReplacement(ReplacementSnapshot a, ReplacementSnapshot b) {
+        return a.page().equals(b.page()) && a.birthId().equals(b.birthId()) && a.storeVersion() == b.storeVersion()
+                && Arrays.equals(a.digest(), b.digest());
     }
 
     private static void validatePage(Snapshot current, ProfileReadyPage page) {

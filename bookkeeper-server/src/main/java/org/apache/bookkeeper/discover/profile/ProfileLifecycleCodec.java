@@ -32,6 +32,9 @@ final class ProfileLifecycleCodec {
     static final int PAGE_FIXED_BYTES = 220;
     static final int PAGE_MAX_BYTES = PAGE_FIXED_BYTES
             + ProfileReservation.MAX_INITIAL_TARGETS * (4 + ProfileAuthorityCodec.MAX_BYTES + 40);
+    static final int REPLACEMENT_FIXED_BYTES = 324;
+    static final int REPLACEMENT_MAX_BYTES = REPLACEMENT_FIXED_BYTES
+            + ProfileReservation.MAX_INITIAL_TARGETS * (4 + ProfileAuthorityCodec.MAX_BYTES + 40);
     private static final int HEAD_MAGIC = 0x55574c48;
     private static final int PAGE_MAGIC = 0x55574150;
 
@@ -39,6 +42,14 @@ final class ProfileLifecycleCodec {
         Page {
             if (birthId == null || birthId.equals(new UUID(0, 0)) || value == null) {
                 throw new IllegalArgumentException("Invalid immutable page birth");
+            }
+        }
+    }
+
+    record Replacement(UUID birthId, ProfileReplacementPage value) {
+        Replacement {
+            if (birthId == null || birthId.equals(new UUID(0, 0)) || value == null) {
+                throw new IllegalArgumentException("Invalid replacement page birth");
             }
         }
     }
@@ -68,7 +79,7 @@ final class ProfileLifecycleCodec {
     static ProfileLifecycleHead decodeHead(byte[] bytes) {
         ByteBuffer in = check(bytes, HEAD_MAGIC, HEAD_BYTES, HEAD_BYTES);
         int state = in.getInt();
-        if (state < 1 || state > 3 || in.getLong() != 0) {
+        if (state < 1 || state > 4 || in.getLong() != 0) {
             throw new IllegalArgumentException("Unknown lifecycle head kind or mandatory feature");
         }
         ProfileMetadataBacklink backlink = ProfileMetadataBacklink.decode(take(in, 52));
@@ -151,6 +162,83 @@ final class ProfileLifecycleCodec {
         }
         return new Page(pageBirth, new ProfileReadyPage(backlink, birth, operation, payload, generation,
                 metadataVersion, creator, ensemble, receipts));
+    }
+
+    static byte[] encode(Replacement envelope) {
+        var page = envelope.value();
+        List<byte[]> scopes = page.installs().stream().map(receipt -> ProfileAuthorityCodec.encode(
+                new CommittedProfileAuthority(receipt.scope(), CommittedProfileAuthority.State.PREPARING,
+                        receipt.engine(), 0, true))).toList();
+        int length = REPLACEMENT_FIXED_BYTES + scopes.stream().mapToInt(bytes -> 4 + bytes.length + 40).sum();
+        ByteBuffer out = ByteBuffer.allocate(length);
+        out.putInt(PAGE_MAGIC).putInt(1).putInt(length).putInt(2).putLong(0).put(page.backlink().encode())
+                .putLong(page.lifecycleBirth().getMostSignificantBits())
+                .putLong(page.lifecycleBirth().getLeastSignificantBits())
+                .putLong(envelope.birthId().getMostSignificantBits())
+                .putLong(envelope.birthId().getLeastSignificantBits()).put(page.operationId())
+                .put(page.payloadIdentity())
+                .putLong(page.controlGeneration()).putLong(page.sequence()).putLong(page.previousPageVersion())
+                .put(page.previousPageDigest()).putLong(page.metadataBirthZxid()).putLong(page.metadataVersion())
+                .putLong(page.creatorToken()).putLong(page.fragmentStart()).put(page.ensembleDigest())
+                .putLong(page.initialPageVersion()).put(page.initialPageDigest()).putInt(scopes.size());
+        for (int index = 0; index < scopes.size(); index++) {
+            out.putInt(scopes.get(index).length).put(scopes.get(index))
+                    .put(page.installs().get(index).capabilityDigest())
+                    .putLong(page.installs().get(index).localInstallGeneration());
+        }
+        finish(out);
+        return out.array();
+    }
+
+    static Replacement decodeReplacement(byte[] bytes) {
+        ByteBuffer in = check(bytes, PAGE_MAGIC, REPLACEMENT_FIXED_BYTES, REPLACEMENT_MAX_BYTES);
+        if (in.getInt() != 2 || in.getLong() != 0) {
+            throw new IllegalArgumentException("Unknown replacement page kind or mandatory feature");
+        }
+        var backlink = ProfileMetadataBacklink.decode(take(in, 52));
+        var lifecycleBirth = new UUID(in.getLong(), in.getLong());
+        var birth = new UUID(in.getLong(), in.getLong());
+        byte[] operation = take(in, 16);
+        byte[] payload = take(in, 32);
+        long generation = in.getLong();
+        long sequence = in.getLong();
+        long previous = in.getLong();
+        byte[] previousDigest = take(in, 32);
+        long metadataBirth = in.getLong();
+        long version = in.getLong();
+        long creator = in.getLong();
+        long start = in.getLong();
+        byte[] ensemble = take(in, 32);
+        long initial = in.getLong();
+        byte[] initialDigest = take(in, 32);
+        int count = in.getInt();
+        if (count < 1 || count > ProfileReservation.MAX_INITIAL_TARGETS) {
+            throw new IllegalArgumentException("Invalid replacement target count");
+        }
+        List<ProfileInstallReceipt> receipts = new ArrayList<>(count);
+        for (int index = 0; index < count; index++) {
+            if (in.remaining() < 48) {
+                throw new IllegalArgumentException("Truncated replacement receipt");
+            }
+            int length = in.getInt();
+            if (length < ProfileAuthorityCodec.FIXED_BYTES || length > ProfileAuthorityCodec.MAX_BYTES
+                    || length > in.remaining() - 44) {
+                throw new IllegalArgumentException("Invalid replacement scope length");
+            }
+            var authority = ProfileAuthorityCodec.decode(take(in, length), 0);
+            if (!authority.complete() || authority.state() != CommittedProfileAuthority.State.PREPARING
+                    || authority.requiredEngine() != EngineProfile.SEGMENT_WAL_ENGINE) {
+                throw new IllegalArgumentException("Invalid replacement install receipt");
+            }
+            receipts.add(new ProfileInstallReceipt(authority.scope(), authority.requiredEngine(),
+                    take(in, 32), in.getLong()));
+        }
+        if (in.remaining() != 4) {
+            throw new IllegalArgumentException("Trailing replacement page bytes");
+        }
+        return new Replacement(birth, new ProfileReplacementPage(backlink, lifecycleBirth, operation, payload,
+                generation, sequence, previous, previousDigest, metadataBirth, version, creator, start, ensemble,
+                initial, initialDigest, receipts));
     }
 
     private static byte[] take(ByteBuffer in, int length) {

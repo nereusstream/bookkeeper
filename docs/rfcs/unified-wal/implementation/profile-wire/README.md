@@ -277,3 +277,7 @@ Spotless/Checkstyle exit0，回执 unified-wal-sdk-style-9mkj8q1k 的135个 serv
 ### Replacement 冷路径的标准 metadata 前置
 
 2026-10-06，[出生绑定 membership CAS](../profile-control/README.md#标准-membership-的出生绑定-cas)已使用实际 ZK metadata parent及只读 birth marker，冻结物理出生身份/完整snapshot/mapping，保留creator token，并拒绝freeze/recovery/CLOSED/publication。它不增加 wire字段、逐entry控制或新的DATA retry机制，也不提供remote inactive INSTALL/ACTIVATE_REPLACEMENT、post-CAS history authority或SDK mapping切换。当前 ProfileLedgerHandle 仍在故障时本地停止，不能把CAS成功直接投影成替换目标可写。步骤13保持PARTIAL；下游消费必须补齐目标留存和whole pending ACK gate。
+
+### Replacement publication 与当前 wire 边界
+
+2026-10-06，[replacement授权与目标留存](../profile-control/README.md#replacement-授权与目标留存)已接入真实ZK、标准metadata birth/version的同一publication multi及原reserved file driver的typed ACTIVATE_REPLACEMENT。当前latest authority与cleanup discovery分别查询，DELETE保留历史且停止新的远程授权；SDK故障路径仍本地停止。此增量没有更改initial-control UIC1协商/固定schema或ADD_NORMAL wire，不advertise replacement能力，也不把已发布metadata/authority投影为SDK完成。下一步仍需冻结并接actual replacement control wire/client，再完成原pending全局gate、旧incarnation响应过滤及受影响副本resend。stable/G1和production Gate不提升。

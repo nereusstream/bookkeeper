@@ -519,3 +519,7 @@ ProfileSdkBridge 检查 KnownNoneNeverClearsUnknown、RetryKeepsSource、RetryKe
 ### 标准 metadata membership CAS 性质
 
 ProfileMembershipCas 检查 NewPhysicalBirthIsNeverOverwritten、CapturedBirthIsFrozen、FrozenMembershipIsNeverWritten、MetadataFieldsArePreserved、SuccessHasExactMappingAndVersion。七个变异分别取消最后marker检查、UNKNOWN后重捕获birth、忽略freeze、丢失creator token、丢失user字段、把未改变的predecessor提升为成功、接受更高version的同mapping。损坏新birth的不变量检查实际状态，不因最后返回CONFLICT而通过。有限范围是一次CAS/一次retry、两个parent birth、一个marker和一个额外version；成功是观测当时的snapshot，不是持续lease，不证明真实ACL、ZK多节点quorum、字节schema、clock/liveness、activation/cleanup或完整A+C+D。
+
+### Replacement lifecycle 性质
+
+ProfileReplacementLifecycle检查PublicationHasSameMetadataAndPageBirth、MutationUsesObservedRootBirth、DeleteCutNeverReopens、GrantedTargetsAreRetained、GrantRequiresCurrentPublishedAuthority、DiscoveryIncludesPublishedTargets及DiscoveryIsCompleteAtRead；两个sequential same-start目标、一个metadata freeze、两个root/page birth、完整保留prefix。八个变异分别信任inert candidate、忽略delete cut、跳过metadata条件、跳过page/root birth、丢弃前驱、仅发现当前target、接受旧authority。Grant/discovery均为采样时事实；已获本地权限不会被远程cut瞬间撤销。投影不证明codec/CRC/ACL、实际ZK quorum、force、replacement wire、SDK callback/resend、cleanup、clock/liveness或full A+C+D。

@@ -20,11 +20,11 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Bounded initial lifecycle head; only DELETE_INTENT advances the global control generation. */
+/** Bounded lifecycle head; only DELETE_INTENT advances the global control generation. */
 public record ProfileLifecycleHead(ProfileMetadataBacklink backlink, byte[] reservationDigest, UUID birthId,
         State state, long sequence, long predecessor, long controlGeneration, byte[] operationId,
         byte[] payloadIdentity, long readyPageVersion, byte[] readyPageDigest) {
-    public enum State { PREPARING, READY, DELETE_INTENT }
+    public enum State { PREPARING, READY, DELETE_INTENT, REPLACEMENT }
 
     public ProfileLifecycleHead {
         Objects.requireNonNull(backlink, "backlink");
@@ -34,14 +34,17 @@ public record ProfileLifecycleHead(ProfileMetadataBacklink backlink, byte[] rese
         operationId = fixed(operationId, 16, true);
         payloadIdentity = fixed(payloadIdentity, 32, false);
         readyPageDigest = fixed(readyPageDigest, 32, false);
-        if (birthId.equals(new UUID(0, 0)) || sequence < 1 || sequence > 3 || predecessor != sequence - 1
+        if (birthId.equals(new UUID(0, 0)) || sequence < 1
+                || sequence > 3 + ProfileReplacementPage.MAX_PUBLICATIONS || predecessor != sequence - 1
                 || controlGeneration <= 0 || readyPageVersion < -1
                 || state == State.PREPARING && (sequence != 1 || readyPageVersion != -1)
                 || state == State.READY && (sequence != 2 || readyPageVersion < 0)
+                || state == State.REPLACEMENT && (sequence < 3 || readyPageVersion < 0
+                        || sequence > 2 + ProfileReplacementPage.MAX_PUBLICATIONS)
                 || state == State.DELETE_INTENT && (sequence == 1
-                        || sequence == 2 && readyPageVersion != -1 || sequence == 3 && readyPageVersion < 0)
+                        || sequence == 2 && readyPageVersion != -1 || sequence >= 3 && readyPageVersion < 0)
                 || readyPageVersion == -1 && !Arrays.equals(readyPageDigest, new byte[32])) {
-            throw new IllegalArgumentException("Invalid initial Profile lifecycle head");
+            throw new IllegalArgumentException("Invalid Profile lifecycle head");
         }
     }
 

@@ -94,6 +94,12 @@ public record ProfileReadyPage(ProfileMetadataBacklink backlink, UUID lifecycleB
                 controlGeneration, operationId, payloadIdentity, null);
     }
 
+    boolean matchesQuorum(LedgerMetadata metadata) {
+        return metadata.getEnsembleSize() == installs.size() && metadata.getDigestType() == DigestType.CRC32C
+                && Arrays.equals(ensembleDigest, hashEnsemble(metadata,
+                        installs.stream().map(receipt -> receipt.scope().targetBookie()).toList()));
+    }
+
     static byte[] ensembleDigest(LedgerMetadata metadata) {
         if (metadata.getState() != LedgerMetadata.State.OPEN || metadata.getDigestType() != DigestType.CRC32C
                 || metadata.getAllEnsembles().size() != 1 || metadata.getAllEnsembles().firstKey() != 0
@@ -101,13 +107,18 @@ public record ProfileReadyPage(ProfileMetadataBacklink backlink, UUID lifecycleB
                 || metadata.getEnsembleSize() > ProfileReservation.MAX_INITIAL_TARGETS) {
             throw new IllegalArgumentException("READY requires initial OPEN Profile membership");
         }
+        return hashEnsemble(metadata, metadata.getAllEnsembles().firstEntry().getValue().stream()
+                .map(Object::toString).toList());
+    }
+
+    private static byte[] hashEnsemble(LedgerMetadata metadata, List<String> names) {
         try {
             MessageDigest hash = MessageDigest.getInstance("SHA-256");
             hash.update("BookKeeper/ProfileInitialEnsemble/v1\0".getBytes(StandardCharsets.US_ASCII));
             hash.update(ByteBuffer.allocate(16).putInt(1).putInt(metadata.getEnsembleSize())
                     .putInt(metadata.getWriteQuorumSize()).putInt(metadata.getAckQuorumSize()).array());
-            for (var bookie : metadata.getAllEnsembles().firstEntry().getValue()) {
-                byte[] name = ProfileAuthorityCodec.text(bookie.toString(), 255);
+            for (String bookie : names) {
+                byte[] name = ProfileAuthorityCodec.text(bookie, 255);
                 hash.update(ByteBuffer.allocate(4).putInt(name.length).array());
                 hash.update(name);
             }
