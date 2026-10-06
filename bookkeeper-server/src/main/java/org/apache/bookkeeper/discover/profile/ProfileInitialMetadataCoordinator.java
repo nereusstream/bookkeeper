@@ -82,6 +82,14 @@ public final class ProfileInitialMetadataCoordinator {
         }
     }
 
+    record Plan(LedgerMetadata frozen, ProfileReservation reservation, ProfileDescriptor descriptor,
+                Map<String, Target> targets, List<ProfileControlRequest> requests) {
+        @Override
+        public String toString() {
+            return "InitialPlan{ledgerId=" + reservation.backlink().ledgerId() + ", targets=" + targets.size() + '}';
+        }
+    }
+
     private record Attempt(ProfileInstallReceipt receipt, boolean uncertain) { }
 
     private final ZKProfileReservationStore reservations;
@@ -100,6 +108,11 @@ public final class ProfileInitialMetadataCoordinator {
 
     public CompletableFuture<Result> create(LedgerMetadata initial, ProfileReservation reservation,
             byte[] canonicalDescriptor, ProtectedProfileCredential credential, Map<String, Target> suppliedTargets) {
+        return create(freeze(initial, reservation, canonicalDescriptor, credential, suppliedTargets));
+    }
+
+    Plan freeze(LedgerMetadata initial, ProfileReservation reservation, byte[] canonicalDescriptor,
+            ProtectedProfileCredential credential, Map<String, Target> suppliedTargets) {
         Objects.requireNonNull(reservation, "reservation");
         Objects.requireNonNull(credential, "credential");
         LedgerMetadata frozen = ProfileLedgerMetadataStore.snapshotInitial(initial, reservation.backlink());
@@ -140,9 +153,24 @@ public final class ProfileInitialMetadataCoordinator {
             requests.add(ProfileControlRequest.install(scope, descriptorBytes, EngineProfile.SEGMENT_WAL_ENGINE,
                     credential));
         }
+        return new Plan(frozen, reservation, descriptor, targets, List.copyOf(requests));
+    }
+
+    CompletableFuture<Result> create(Plan plan) {
+        return create(plan, null);
+    }
+
+    CompletableFuture<Result> create(Plan plan, ZKProfileReservationStore.Snapshot expected) {
+        LedgerMetadata frozen = plan.frozen();
+        ProfileReservation reservation = plan.reservation();
+        Map<String, Target> targets = plan.targets();
+        List<ProfileControlRequest> requests = plan.requests();
         return cold(() -> reservations.createIfAbsent(reservation)).handle((created, failed) -> {
             if (failed != null) {
                 return CompletableFuture.completedFuture(result(Status.RESERVATION_UNKNOWN, List.of()));
+            }
+            if (expected != null && created.snapshot() != null && !expected.equals(created.snapshot())) {
+                return CompletableFuture.completedFuture(result(Status.RESERVATION_CONFLICT, List.of()));
             }
             return switch (created.status()) {
                 case APPLIED, ALREADY_APPLIED -> installAll(frozen, reservation, created.snapshot(), targets, requests);

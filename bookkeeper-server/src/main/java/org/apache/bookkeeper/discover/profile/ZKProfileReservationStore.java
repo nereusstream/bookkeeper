@@ -421,6 +421,27 @@ public final class ZKProfileReservationStore {
                 ? CreateStatus.CONFLICT : CreateStatus.DURABILITY_UNKNOWN, null);
     }
 
+    /** Resolve the persisted initial candidate for recovery. Presence is not a READY/availability fact. */
+    public PageResult readCandidate(long ledger) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            ReadResult read = read(ledger, deadline);
+            if (read.status() != ReadStatus.FOUND) {
+                return new PageResult(read.status() == ReadStatus.QUARANTINED
+                        ? CreateStatus.QUARANTINED : CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            ReadySnapshot candidate = page(read.snapshot(), deadline);
+            return new PageResult(candidate == null ? CreateStatus.CONFLICT : CreateStatus.ALREADY_APPLIED, candidate);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new PageResult(CreateStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new PageResult(CreateStatus.UNAVAILABLE, null);
+        } catch (IllegalArgumentException invalid) {
+            return new PageResult(CreateStatus.QUARANTINED, null);
+        }
+    }
+
     public PageResult readPublishedPage(long ledger) {
         long deadline = System.nanoTime() + timeoutNanos;
         try {

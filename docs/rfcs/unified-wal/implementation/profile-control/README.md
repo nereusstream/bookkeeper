@@ -286,3 +286,30 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 首次完整`unified-wal-local-ZpyzxK8n`364项为359通过/5平台跳过；初次style仅因新增单行getter布局/unused import exit1，修正后重新冻结验证，旧结果保留原输入。
 
 最终 `unified-wal-local-qlSVYzAe` tool exit0，995冻结source inputs，相关11类364项为359通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-ready-style-j5vX2UG6` Spotless/Checkstyle exit0，source集精确一致，17份Java回执checksums已核验。最终模型 `unified-wal-model-2cqx367s` tool exit0，217配置为47正向完整PASS/170指定反例，461冻结inputs/653 checksums；193共享输入及1263去重union一致，五个designInputs绑定父提交 `9a48e6346453f85c5d02615ef9e4503f30ce13c6`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。有限[READY lifecycle投影](../models/README.md#initial-ready-lifecycle-投影)检查birth、inert/actual metadata、all-E、delete cut和retention，不能证明真实ACL/crypto/barrier/多节点quorum。physical delete、page/history GC、replacement/repair/full lifecycle、restart coordinator、actual INSTALL/ACTIVATE TLS/wire、normal writer availability、生产startup/readiness/client quorum/CLOSED恢复、完整A/C/D组合、长期/掉电/性能仍未闭合，步骤12及生产Gate保持PARTIAL。
+
+
+## 步骤 12：可恢复初始协调与 all-E availability snapshot
+
+2026-10-06，`ProfileInitialLifecycleCoordinator.initialize`复用原initial metadata plan/验证、PREPARING、candidate/READY page与physical adapter，完成初始冷路径到all-E activation及最后availability snapshot。它借用有界cold executor和nonblocking、verified HELLO/request-correlated INSTALL/ACTIVATE clients，不拥有线程、client、retry或timer。输入metadata/descriptor/credential、E集合和peer binding在开始前冻结；READY operation/public payload固定，和INSTALL operation不同，不能在retry中换identity或blind新instance。
+
+恢复按actual durable事实区分：fresh/PREPARING且没有candidate时执行原all-E install→standard metadata gate；已有candidate或READY时读取原immutable page，并只读匹配已存在metadata，不走create-if-absent。candidate/READY证明metadata曾存在，actual NONODE隔离且保持absent，不用新metadata掩盖旧UNKNOWN。page的lifecycle birth、READY operation/payload、metadata version/creator token/backlink/ordered digest和调用方完整initial metadata都须匹配；root出生身份改变或DELETE时停止。首次metadata阶段也绑定最初root snapshot，不能把其all-E结果接到另一个root birth。
+
+PREPARING candidate通过原READY CAS后继续，READY恢复查询保留同一page/op，再发出全部E的ACTIVATE_INITIAL，不能串行等单target或用A/W代替E。每个回复须matching operation/ledger/opId/control generation、durable及local generation晚于该target的install birth；wrong binding/null/exception/UNKNOWN保持UNCERTAIN，known拒绝为NOT_READY。全部matching completion后只读再验metadata/page binding，再cold-read matching READY reference/control birth；观察到DELETE返回DELETED。AVAILABLE仅是metadata及all-E activation完成事实的组合snapshot，不是持续lease，不创建LedgerHandle/normal writer，不证明各节点随后仍在线/未fenced，也不把跨key/cross-target读取变成原子事务。
+
+原物理控制log保存historical operation result；仅ALREADY_DURABLE不能证明当前normal-active。新增owner上的`initialActiveGeneration`读取matching context/activation generation、active、非fenced/tombstoned/pending cut及healthy事实，typed ACTIVATE回复在该事实消失时返回STALE_OR_COMPACTED而非success。原install结果和其他control语义保留，normal Add仍无metadata读。真实回归`unified-wal-local-BSwooi19`重现fence后expected STALE/actual ALREADY，exit1；修复后`unified-wal-local-1kSuG2vh`通过，未deactivate或取消其他实际I/O。
+
+新增9项真实flow/regression覆盖：首次full initialize；新的coordinator/ZK session与一台Bookie实际control file replay从READY恢复；持久candidate不重新INSTALL；candidate/READY引用metadata缺失时不重建；A=2 activation不足和wrong bound response；actual ACTIVATE force超时保留writer/IO，exact retry同READY operation完成；全部回复后actual DELETE cut拒绝AVAILABLE；fenced target的historical activation不被计数；READY operation/payload冲突拒绝。negative客户端只控制拒绝/错response字段，positive/UNKNOWN与metadata/READY持久事实依实际ZK/FileChannel/driver。定向`unified-wal-local-yJ8M1cQK`当时43项通过，旧运行保持原scope。
+
+`AVAILABLE`对象只展示status/metadata presence/activation count，metadata password/custom values及credential不会在结果字符串展开。Root/SDK不可用保留uncertainty；borrowed executor拒绝不创建后台补偿，unexpected async编程错误保留exceptional future，不伪造成功。调用方停止等待不取消实际target/root/metadata操作，previous UNKNOWN仍由逻辑请求保持；本接口不提供caller deadline或新loss-window/strong-publication机制。
+
+复现：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInstallStoreTest,ZKProfileLifecycleStoreTest,ZKProfileReservationStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,IsolatedProfileControlEndpointTest,TestLedgerMetadataSerDe,SegmentExecutionGroupTest,SegmentBookieControlLogTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
+
+首次扩大`unified-wal-local-xKFGBFnc`373项为368通过/5平台跳过；其后只有coordinator链式调用换行，style当前源通过，最终重新冻结完整相关范围，旧结果保留原输入。
+
+最终 `unified-wal-local-v7KaiG3E` tool exit0，996冻结source inputs，相关11类373项为368通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-availability-style-p5JRNimT` Spotless/Checkstyle exit0，source集精确一致，17份Java回执checksums已核验。最终模型 `unified-wal-model-bf63gmga` tool exit0，225配置为48正向完整PASS/177指定反例，471冻结inputs/677 checksums；194共享输入及1273去重union一致，五个designInputs绑定父提交 `54f47dbd4ced724587fc9e8fadf91e1e054ef575`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。[有限initial availability投影](../models/README.md#initial-availability-恢复投影)检查必需metadata不重建、all-E/current/bound/known activation与最终READY/metadata事实；不证明crypto、actual control TLS/wire、process-level complete restart、生产writer/client SDK、replacement/repair/full delete/drain/GC、service startup/readiness、client quorum/CLOSED/full recovery、full A/C/D与组合、长期/掉电/性能。步骤12及生产Gate保持PARTIAL。

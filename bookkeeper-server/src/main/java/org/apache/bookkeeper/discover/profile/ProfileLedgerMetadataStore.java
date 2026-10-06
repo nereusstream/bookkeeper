@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.LedgerMetadataUtils;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
@@ -62,6 +63,23 @@ public final class ProfileLedgerMetadataStore {
                         readFailure == null ? classify(desired, backlink, current,
                                 failure == null ? Outcome.APPLIED : Outcome.ALREADY_APPLIED)
                                 : new Result(Outcome.DURABILITY_UNKNOWN, null))).thenCompose(result -> result);
+    }
+
+    LedgerManager manager() {
+        return manager;
+    }
+
+    /** Read an already-required metadata record. It never rebuilds a missing record during lifecycle recovery. */
+    CompletableFuture<Result> readMatching(LedgerMetadata initial, ProfileMetadataBacklink backlink) {
+        LedgerMetadata desired = snapshotInitial(initial, backlink);
+        return manager.readLedgerMetadata(desired.getLedgerId()).handle((current, failed) -> {
+            if (failed == null) {
+                return classify(desired, backlink, current, Outcome.ALREADY_APPLIED);
+            }
+            return new Result(BKException.getExceptionCode(failed)
+                    == BKException.Code.NoSuchLedgerExistsOnMetadataServerException
+                    ? Outcome.QUARANTINED : Outcome.DURABILITY_UNKNOWN, null);
+        });
     }
 
     static LedgerMetadata snapshotInitial(LedgerMetadata initial, ProfileMetadataBacklink backlink) {

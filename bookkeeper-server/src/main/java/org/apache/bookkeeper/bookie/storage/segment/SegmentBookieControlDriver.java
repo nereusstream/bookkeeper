@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 
@@ -65,6 +66,11 @@ final class SegmentBookieControlDriver {
 
     boolean isOwnerThread() {
         return owner.isOwnerThread();
+    }
+
+    long initialActiveGeneration(ProfileControlScope scope) {
+        owner.requireOwner();
+        return log.initialActiveGeneration(scope);
     }
 
     boolean reserveMaintenance() {

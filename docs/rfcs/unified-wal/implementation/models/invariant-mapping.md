@@ -484,3 +484,15 @@ generation 变化后既有 ephemeral hints 可以成为 stale；新读取/服务
 | ReadyRequiresAllEReceipts | 有序all-E scope/engine/capability digest/install birth facts在不可变page及head引用中retained | receipt crypto/actual local install由prior Java chain验证，不模型化untrusted caller/Byzantine admin |
 
 七个指定反例命中各自界限，full A/D/C组合、replacement/repair、actual control wire、writer availability、活性及性能仍未由该投影证明。
+
+
+## Initial availability
+
+| 性质 | 合同与实际实现 | 模型边界 |
+| --- | --- | --- |
+| RequiredMetadataIsNeverRebuilt | candidate/READY已有durable metadata reference，actual metadata-server NONODE隔离且不create | page/ref/birth/codec验证为prior inputs，不替代full cleanup/rejoin |
+| AvailabilityWaitsForAllE / AvailabilityHasCurrentBoundResults | 全E matching ACTIVATE/ledger/op/control generation/positive current result才能initial available；A不足、错binding拒绝 | exact peer、actual RPC/current state及local I/O由Java/prior slices拥有 |
+| AvailabilityDoesNotCountUnknown / AvailabilityDoesNotCountHistoricalFence | UNKNOWN不升级；historical APPLIED在已fenced时仅STALE，不证明当前active | owner观测是snapshot，不能承诺以后不会fenced或offline |
+| AvailabilityHasMatchingMetadataFact / AvailabilityObservesReadyNotDelete | 全回复后actual metadata/page及最后READY reference/birth取证，DELETE阻止报告availability | 非cross-key/cross-target atomic lease，没有writer authority/canary证明 |
+
+七个敏感性反例分别命中上述all-E/binding/known/current/rebuild/metadata/delete边界，full client/recovery/delete/GC、完整模型组合、活性/性能仍未覆盖。

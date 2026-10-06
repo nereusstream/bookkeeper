@@ -65,7 +65,9 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator.Status;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
@@ -140,11 +142,16 @@ public class SegmentProfileInstallStoreTest {
         final SegmentProfileInstallStore store;
 
         Local(String name, int incarnation, SegmentFileIo faultIo, Duration timeout) throws Exception {
+            this(name, incarnation, faultIo, timeout, true);
+        }
+
+        Local(String name, int incarnation, SegmentFileIo faultIo, Duration timeout,
+                boolean createFiles) throws Exception {
             config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve(name), 1, 1, 1,
                     4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
             identity = new SegmentFileHeader(new org.apache.bookkeeper.common.profile.startup.StorageIncarnation(
                     bytes(16, incarnation)), new UUID(0, 9), BookieId.parse(name + ":3181"));
-            files = IsolatedSegmentFiles.create(config, identity);
+            files = createFiles ? IsolatedSegmentFiles.create(config, identity) : null;
             log = SegmentBookieControlLog.open(config, identity, 1024 * 1024,
                     new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, faultIo);
             driver = new SegmentBookieControlDriver(owner, io, log);
@@ -161,7 +168,9 @@ public class SegmentProfileInstallStoreTest {
             try {
                 log.close();
             } finally {
-                files.close();
+                if (files != null) {
+                    files.close();
+                }
             }
         }
     }
@@ -758,6 +767,247 @@ public class SegmentProfileInstallStoreTest {
             for (Local local : initial.locals) {
                 assertTrue(local.log.normalAdmission(context(), DigestManager.generateMasterKey(initial.password)));
             }
+        }
+    }
+
+    @Test
+    public void historicalActivationAfterFenceIsNotCurrentAvailability() throws Exception {
+        try (Local local = new Local("b1", 5, new SegmentFileIo(), Duration.ofSeconds(5))) {
+            var install = transition(scope("b1:3181", 5), 6);
+            assertEquals(Outcome.APPLIED, retry(local, install).outcome());
+            var old = install.request().scope();
+            var active = new ProfileControlScope(ProfileControlOperation.ACTIVATE_INITIAL,
+                    ProfileControlOperation.ACTIVATE_INITIAL.purpose(), 44, old.ledgerInstanceId(), DESCRIPTOR_ID,
+                    old.targetBookie(), old.targetStorageIncarnation(), old.authorityDomain(), 2,
+                    bytes(16, 9), old.publicSemanticPayloadIdentity(), null);
+            var activation = new ProtectedProfileStateStore.Transition(ProfileControlRequest.operation(active),
+                    new CommittedProfileAuthority(active, CommittedProfileAuthority.State.READY_INITIAL,
+                            EngineProfile.SEGMENT_WAL_ENGINE, 1, true), null);
+            var first = local.store.conditionalApply(activation);
+            if (first.outcome() == Outcome.TRANSIENT_RECONCILING) {
+                CountDownLatch settled = new CountDownLatch(1);
+                assertTrue(local.owner.control(settled::countDown));
+                assertTrue(settled.await(5, TimeUnit.SECONDS));
+                first = local.store.conditionalApply(activation);
+            }
+            assertEquals(Outcome.APPLIED, first.outcome());
+            assertTrue(local.log.normalAdmission(context(), bytes(20, 6)));
+            var fence = new ProfileOperationCodec.FenceLedger(context(), bytes(16, 10), bytes(20, 6));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, local.log.submitFence(fence).status());
+            assertFalse(local.log.normalAdmission(context(), bytes(20, 6)));
+            var replayed = local.store.conditionalApply(activation);
+            assertEquals(Outcome.STALE_OR_COMPACTED, replayed.outcome());
+            assertFalse(replayed.durable());
+            assertFalse(local.log.normalAdmission(context(), bytes(20, 6)));
+        }
+    }
+
+    private Map<String, ProfileInitialLifecycleCoordinator.Target> activators(InitialCreate initial) {
+        Map<String, ProfileInitialLifecycleCoordinator.Target> result = new HashMap<>();
+        ProfilePrincipal principal = new ProfilePrincipal(ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                "operators", "cn=test-ca", "cn=resuming-controller");
+        ProfileTransportContext transport = new ProfileTransportContext("bookie-profile", "TLSv1.3",
+                true, true, true, principal);
+        for (Local local : initial.locals) {
+            String bookie = local.identity.bookieId().toString();
+            var endpoint = new IsolatedProfileControlEndpoint(EngineProfile.SEGMENT_WAL_ENGINE, VALIDATOR,
+                    (caller, operation) -> caller.equals(principal)
+                            && operation == ProfileControlOperation.ACTIVATE_INITIAL,
+                    initial.reservations.activationAuthorityReader(bookie, initial.manager),
+                    (caller, requested, authority) -> caller.equals(principal)
+                            && requested.equals(authority.scope()) ? Decision.ALLOW : Decision.DENY, local.store);
+            result.put(bookie, new ProfileInitialLifecycleCoordinator.Target(initial.targets.get(bookie).hello(),
+                    request -> CompletableFuture.supplyAsync(() -> endpoint.handle(transport, request), initial.cold)));
+        }
+        return result;
+    }
+
+    private ProfileInitialLifecycleCoordinator lifecycle(InitialCreate initial) {
+        return new ProfileInitialLifecycleCoordinator(initial.reservations,
+                new ProfileLedgerMetadataStore(initial.manager), VALIDATOR, initial.cold);
+    }
+
+    private CompletableFuture<ProfileInitialLifecycleCoordinator.Result> initialize(InitialCreate initial,
+            ProfileInitialLifecycleCoordinator coordinator, Map<String,
+                    ProfileInitialLifecycleCoordinator.Target> targets) {
+        return coordinator.initialize(initial.metadata(), initial.reservation, DESCRIPTOR_BYTES, initial.credential,
+                initial.targets, targets, bytes(16, 4), bytes(32, 5));
+    }
+
+    private ZKProfileReservationStore.ReadySnapshot candidate(InitialCreate initial) throws Exception {
+        var created = initial.create(initial.metadata()).get(5, TimeUnit.SECONDS);
+        assertEquals(Status.METADATA_CREATED, created.status());
+        var root = initial.reservations.read(44).snapshot();
+        var page = ProfileReadyPage.from(root, created, bytes(16, 4), bytes(32, 5));
+        return initial.reservations.prepareReady(root, page, initial.manager).page();
+    }
+
+    @Test
+    public void fullInitialLifecycleResumesReadyWithNewCoordinatorAndReplayedTarget() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var first = initialize(initial, lifecycle(initial), activators(initial)).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE, first.status());
+            assertEquals(3, first.activations().size());
+            assertEquals(2, first.activations().get(0).localGeneration());
+            var version = initial.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            Local old = initial.locals.get(2);
+            old.close();
+            Local reopened = new Local("c3", 7, new SegmentFileIo(), Duration.ofSeconds(5), false);
+            initial.locals.set(2, reopened);
+            assertTrue(reopened.log.normalAdmission(context(), DigestManager.generateMasterKey(initial.password)));
+            ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
+            try (ZooKeeper freshClient = new ZooKeeper(initial.cluster.getZooKeeperConnectString(), 10000, watcher)) {
+                watcher.waitForConnection();
+                var freshStore = new ZKProfileReservationStore(freshClient, initial.root,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var restart = new ProfileInitialLifecycleCoordinator(freshStore,
+                        new ProfileLedgerMetadataStore(initial.manager), VALIDATOR, initial.cold);
+                var again = initialize(initial, restart, activators(initial)).get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE, again.status());
+                assertEquals(first.ready(), again.ready());
+                assertEquals(first.activations(), again.activations());
+                assertEquals(version.getVersion(), again.metadata().getVersion());
+                assertEquals(version.getValue().getCToken(), again.metadata().getValue().getCToken());
+                assertFalse(again.toString().contains("password"));
+            }
+        }
+    }
+
+    @Test
+    public void persistedCandidateRecoveryUsesItsReceiptsWithoutReinstalling() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var prepared = candidate(initial);
+            initial.targets.replaceAll((bookie, target) -> new ProfileInitialMetadataCoordinator.Target(target.hello(),
+                    request -> CompletableFuture.failedFuture(new IllegalStateException("Unexpected reinstallation"))));
+            var completed = initialize(initial, lifecycle(initial), activators(initial)).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE, completed.status());
+            assertEquals(prepared, completed.ready());
+            assertEquals(3, completed.activations().size());
+        }
+    }
+
+    @Test
+    public void persistedCandidateDoesNotRebuildMissingRequiredMetadata() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            candidate(initial);
+            var stored = initial.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            initial.manager.removeLedgerMetadata(44, stored.getVersion()).get(5, TimeUnit.SECONDS);
+            var stopped = initialize(initial, lifecycle(initial), activators(initial)).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.QUARANTINED, stopped.status());
+            assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
+            assertEquals(ProfileLifecycleHead.State.PREPARING,
+                    initial.reservations.read(44).snapshot().lifecycle().state());
+        }
+    }
+
+    @Test
+    public void initialAvailabilityRequiresAllCurrentBoundActivationsInsteadOfAckQuorum() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var targets = activators(initial);
+            var last = targets.get("c3:3181");
+            targets.put("c3:3181", new ProfileInitialLifecycleCoordinator.Target(last.hello(), request ->
+                    CompletableFuture.completedFuture(new ProfileControlResult(Outcome.TRANSIENT_RECONCILING,
+                            request.scope().operation(), 44, HexFormat.of().formatHex(request.scope().operationId()),
+                            1, 0, false))));
+            var partial = initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.NOT_READY, partial.status());
+            assertEquals(2, partial.activations().size());
+            targets.put("c3:3181", new ProfileInitialLifecycleCoordinator.Target(last.hello(), request ->
+                    last.client().activate(request).thenApply(result -> new ProfileControlResult(result.outcome(),
+                            result.operation(), 45, result.operationIdHex(), result.authorityGeneration(),
+                            result.localGeneration(), result.durable()))));
+            var misbound = initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.UNCERTAIN, misbound.status());
+            targets.put("c3:3181", last);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS).status());
+        }
+    }
+
+    @Test
+    public void submittedActivationUnknownKeepsOwnershipAndResumesTheSameReadyOperation() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofMillis(200))) {
+            var prepared = candidate(initial);
+            var root = initial.reservations.read(44).snapshot();
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                    initial.reservations.publishReady(root, prepared, initial.manager).status());
+            long[] before = initial.locals.stream().mapToLong(local -> local.log.appliedThrough()).toArray();
+            initial.armed.set(true);
+            var pending = initialize(initial, lifecycle(initial), activators(initial));
+            try {
+                assertTrue(initial.allForces.await(5, TimeUnit.SECONDS));
+                assertEquals(ProfileInitialLifecycleCoordinator.Status.UNCERTAIN,
+                        pending.get(5, TimeUnit.SECONDS).status());
+                for (Local local : initial.locals) {
+                    assertThrows(IOException.class, local.log::close);
+                }
+            } finally {
+                initial.armed.set(false);
+                initial.release.countDown();
+            }
+            for (int index = 0; index < 3; index++) {
+                awaitApplied(initial.locals.get(index).log, before[index]);
+            }
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    initialize(initial, lifecycle(initial), activators(initial)).get(5, TimeUnit.SECONDS).status());
+            assertEquals(prepared, initial.reservations.readPublishedPage(44).page());
+        }
+    }
+
+    @Test
+    public void initialAvailabilityRechecksTheDeleteCutAfterAllActivationReplies() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var targets = activators(initial);
+            var last = targets.get("c3:3181");
+            targets.put("c3:3181", new ProfileInitialLifecycleCoordinator.Target(last.hello(), request ->
+                    last.client().activate(request).thenApply(result -> {
+                        var ready = initial.reservations.read(44).snapshot();
+                        assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                                initial.reservations.cutDelete(ready, bytes(16, 5), bytes(32, 6)).status());
+                        return result;
+                    })));
+            var cut = initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.DELETED, cut.status());
+            assertEquals(null, cut.metadata());
+            assertEquals(3, initial.reservations.readPublishedPage(44).page().page().installs().size());
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.DELETED,
+                    initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS).status());
+        }
+    }
+
+    @Test
+    public void initialAvailabilityCannotCountHistoricalActivationAfterOneTargetIsFenced() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var targets = activators(initial);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS).status());
+            Local last = initial.locals.get(2);
+            var fence = new ProfileOperationCodec.FenceLedger(context(), bytes(16, 10),
+                    DigestManager.generateMasterKey(initial.password));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, last.log.submitFence(fence).status());
+            assertFalse(last.log.normalAdmission(context(), DigestManager.generateMasterKey(initial.password)));
+            var stopped = initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.NOT_READY, stopped.status());
+            assertEquals(2, stopped.activations().size());
+            assertEquals(null, stopped.metadata());
+        }
+    }
+
+    @Test
+    public void readyRecoveryRejectsConflictingOperationAndDoesNotRebuildMissingMetadata() throws Exception {
+        try (InitialCreate initial = new InitialCreate(Duration.ofSeconds(5))) {
+            var targets = activators(initial);
+            var coordinator = lifecycle(initial);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.AVAILABLE,
+                    initialize(initial, coordinator, targets).get(5, TimeUnit.SECONDS).status());
+            var conflict = coordinator.initialize(initial.metadata(), initial.reservation, DESCRIPTOR_BYTES,
+                    initial.credential, initial.targets, targets, bytes(16, 4), bytes(32, 9)).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.CONFLICT, conflict.status());
+            var stored = initial.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            initial.manager.removeLedgerMetadata(44, stored.getVersion()).get(5, TimeUnit.SECONDS);
+            var stopped = initialize(initial, lifecycle(initial), targets).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileInitialLifecycleCoordinator.Status.QUARANTINED, stopped.status());
+            assertEquals(null, initial.zk.exists(initial.metadataPath(), false));
         }
     }
 

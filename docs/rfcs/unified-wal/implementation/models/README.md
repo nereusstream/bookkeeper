@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 47 个完整正向配置、170 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 48 个完整正向配置、177 个指定性质反例；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,14 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-initial-availability` | persistent PREPARING/candidate/READY/DELETE、target五类结果、required metadata及最后authority事实；all-E当前结果才AVAILABLE |
+| `ce-profile-initial-availability-ack` | A代替E，须违反 `AvailabilityWaitsForAllE` |
+| `ce-profile-initial-availability-binding` | 接受wrong binding，须违反 `AvailabilityHasCurrentBoundResults` |
+| `ce-profile-initial-availability-unknown` | 把UNKNOWN当完成，须违反 `AvailabilityDoesNotCountUnknown` |
+| `ce-profile-initial-availability-history` | 把已fenced的historical activation当当前active，须违反 `AvailabilityDoesNotCountHistoricalFence` |
+| `ce-profile-initial-availability-rebuild` | 既有page引用的metadata缺失时重建，须违反 `RequiredMetadataIsNeverRebuilt` |
+| `ce-profile-initial-availability-delete` | 忽略最后DELETE事实，须违反 `AvailabilityObservesReadyNotDelete` |
+| `ce-profile-initial-availability-metadata` | 忽略最后metadata事实，须违反 `AvailabilityHasMatchingMetadataFact` |
 | `a-profile-ready-lifecycle` | 一个head和page、READY/DELETE publisher read/CAS、root/page重建与metadata出生身份，published reference后才授予activation，delete后保留targets |
 | `ce-profile-ready-lifecycle-inert` | 信任inert page，须违反 `ActivationHasPublishedReady` |
 | `ce-profile-ready-lifecycle-head-birth` | CAS仅比较重置的version，须违反 `BirthChecksProtectTheCurrentRoot` |
@@ -1030,3 +1038,23 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 | ce-profile-ready-lifecycle-delete | 135 / 87 / 35 | 6 / 不适用 | 0.831 s / 110,821,376 bytes | EXPECTED_COUNTEREXAMPLE:DeleteCutNeverRollsBack |
 | ce-profile-ready-lifecycle-retention | 140 / 93 / 37 | 6 / 不适用 | 0.806 s / 110,870,528 bytes | EXPECTED_COUNTEREXAMPLE:PublishedTargetsSurviveDelete |
 | ce-profile-ready-lifecycle-all-e | 46 / 32 / 20 | 4 / 不适用 | 0.765 s / 106,217,472 bytes | EXPECTED_COUNTEREXAMPLE:ReadyRequiresAllEReceipts |
+
+
+## Initial availability 恢复投影
+
+2026-10-06 `ProfileInitialAvailability`投影一次fresh/PREPARING/candidate/READY/DELETE恢复round、E=3及A=2，每target current active/known refusal/UNKNOWN/wrong binding/historical fenced五类结果。既有candidate/READY代表metadata曾存在，missing required record不能重建；提交整个E、收集结果、metadata取证和最后root取证分别推进。Delete/metadata移除可与round交错；final metadata和root是各自读取时的facts，不是continuing lease或cross-key/target atomic snapshot。
+
+七个mutation各取消all-E、bound、known、current active、required metadata不重建、final delete及final metadata边界。strict codec/peer/correlation、actual barrier/current local state、metadata/root出生身份和前序publication为inputs，由既有模型及[实际resume/replay测试](../profile-control/README.md#步骤-12可恢复初始协调与-all-e-availability-snapshot)分别验证。不是actual control TLS/wire、SDK writer、complete process restart/repair/replacement/full delete/GC、公平性/活性/quorum/powerloss/performance或full A/C/D组合证明；旧run/source/统计不改绑，最终 `unified-wal-local-v7KaiG3E` tool exit0，996冻结source inputs，相关11类373项为368通过/5 macOS Linux-affinity跳过、0 failure/error，含完整Bookie控制log 245项；`unified-wal-availability-style-p5JRNimT` Spotless/Checkstyle exit0，source集精确一致，17份Java回执checksums已核验。最终模型 `unified-wal-model-bf63gmga` tool exit0，225配置为48正向完整PASS/177指定反例，471冻结inputs/677 checksums；194共享输入及1273去重union一致，五个designInputs绑定父提交 `54f47dbd4ced724587fc9e8fadf91e1e054ef575`。官方tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，不声称活性、性能或生产authority。
+
+新正向availability投影完整遍历53500 generated/24750 distinct/queue0，search depth/diameter均10；七个mutation命中各自指定性质。
+
+| 配置 | generated / distinct / queue | depth / diameter | elapsed / peak RSS | 结果 |
+| --- | --- | --- | --- | --- |
+| a-profile-initial-availability | 53500 / 24750 / 0 | 10 / 10 | 1.185 s / 220,348,416 bytes | PASS |
+| ce-profile-initial-availability-ack | 35006 / 18004 / 6501 | 7 / 不适用 | 1.176 s / 203,587,584 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityWaitsForAllE |
+| ce-profile-initial-availability-binding | 44121 / 19558 / 2984 | 8 / 不适用 | 1.151 s / 200,704,000 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityHasCurrentBoundResults |
+| ce-profile-initial-availability-unknown | 44081 / 19539 / 2989 | 8 / 不适用 | 1.185 s / 198,721,536 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityDoesNotCountUnknown |
+| ce-profile-initial-availability-history | 44161 / 19577 / 2979 | 8 / 不适用 | 1.152 s / 207,126,528 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityDoesNotCountHistoricalFence |
+| ce-profile-initial-availability-rebuild | 1002 / 1002 / 999 | 2 / 不适用 | 0.883 s / 113,868,800 bytes | EXPECTED_COUNTEREXAMPLE:RequiredMetadataIsNeverRebuilt |
+| ce-profile-initial-availability-delete | 49001 / 21876 / 2373 | 9 / 不适用 | 1.306 s / 219,578,368 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityObservesReadyNotDelete |
+| ce-profile-initial-availability-metadata | 49006 / 21880 / 2374 | 9 / 不适用 | 1.189 s / 225,804,288 bytes | EXPECTED_COUNTEREXAMPLE:AvailabilityHasMatchingMetadataFact |

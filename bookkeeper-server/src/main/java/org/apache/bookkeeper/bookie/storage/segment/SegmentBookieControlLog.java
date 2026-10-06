@@ -1097,6 +1097,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 && state.credential.matchesWireVerifier(wireVerifier);
     }
 
+    /** Current initial activation completion only; it is a snapshot, never a new DATA admission. */
+    synchronized long initialActiveGeneration(ProfileControlScope scope) {
+        LedgerState state = ledgers.get(scope.ledgerId());
+        return !closed && !failed && state != null && state.active && !state.fenced
+                && !state.pendingTombstone && !tombstones.containsKey(scope.ledgerId()) && state.pendingFence == null
+                && state.context.equals(context(scope)) && state.activationGeneration == scope.authorityGeneration()
+                ? state.localGeneration : 0;
+    }
+
     /** Explains a refused, unsubmitted request; this snapshot never grants DATA admission. */
     synchronized NormalRejection normalRejection(ProfileLedgerContext context, byte[] wireVerifier) {
         NormalRejection rejection = fenceRejection(context, wireVerifier);

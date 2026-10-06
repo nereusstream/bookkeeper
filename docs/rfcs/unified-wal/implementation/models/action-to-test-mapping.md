@@ -517,3 +517,16 @@ known拒绝或损坏response字段使用负向client控制；successful/unknown 
 | ReadActivation | actual READY/page/metadata生成原接口scope；3个真实control files经原typed endpoint/driver force/apply后active；global cut后cold授权停止，不冒充local drain/物理删除 |
 
 超时只停止caller等待，actual committed READY仍可查询，晚callback不重开权限。旧格式missing mandatory lifecycle child隔离，无自动upgrade/GC。上述证据不证明production ACL/TLS或full lifecycle。
+
+
+## 初始恢复 / availability 动作
+
+| 动作 | 实际实现与验证 |
+| --- | --- |
+| Freeze / Recover | 原plan冻结并验证descriptor/E/pwd-credential/HELLO，fresh与persisted candidate/READY分支；missing referenced metadata只读隔离，actual SDK node保持absent |
+| Dispatch / Receive | 整个E的nonblocking ACTIVATE；A=2不足、UNKNOWN/错绑定不计数，actual force timeout保留原driver/writer custody，same-op retry恢复 |
+| Current active completion | driver在原owner读取context/generation与非fenced/tombstone/pending cut事实；历史activation在实际fence后先红后绿，不能作为current availability |
+| Final metadata / root facts | actual metadata/page重新匹配，最后READY head/reference/birth核对；actual DELETE后拒绝AVAILABLE，不宣称instant local revocation |
+| Restart（模型输入/Java组合） | 新coordinator和ZK session、一个Bookie真实file replay使用同page/op/metadata version与token，无新instance/metadata或reinstallation |
+
+AVAILABLE只返回bounded completion facts，未创建writer/handle或稳定wire，后续失连/fence按正常协议处理。

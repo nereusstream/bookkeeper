@@ -88,6 +88,11 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                 case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
                 case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
             };
+            if (scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
+                    && (outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED)
+                    && driver.initialActiveGeneration(scope) == 0) {
+                outcome = Outcome.STALE_OR_COMPACTED;
+            }
             reply.complete(new TransitionResult(outcome, scope.operation() == ProfileControlOperation.INSTALL
                     ? applied.localInstallGeneration() : applied.localGeneration(),
                     outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED));

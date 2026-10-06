@@ -352,6 +352,8 @@ ACTIVATE 是幂等冷路径操作。Bookie 只有在 READY authority 匹配本�
 
 同一install或initial activation phase内对E个target的请求可有界并发，不逐Bookie串行往返；跨phase仍等待相应全部durable结果，response loss重试同operation。验证须覆盖CLOSED ledger部分副本离线仍可只读打开、recovery/readable不授予normal写，以及全E尚未安装/激活时初始writer不返回成功。
 
+2026-10-06 [可恢复初始协调与all-E availability](implementation/profile-control/README.md#步骤-12可恢复初始协调与-all-e-availability-snapshot)已从fresh/PREPARING/candidate/READY恢复同一初始操作；持久page证明metadata曾存在，恢复只读校验并隔离缺失，不重建未知record。全部E当前matching durable activation及最后metadata/READY取证后返回AVAILABLE snapshot，历史fenced activation返回STALE不计数。实际新coordinator/ZK session及Bookie文件replay、partial/UNKNOWN/DELETE门槛已验证；无actual control TLS/wire、LedgerHandle/writer或production authority，步骤12仍PARTIAL。
+
 ### 6.5 Child publication、snapshot 与 unknown version
 
 child/page 在 owning family head/root CAS 引用前只是 inert orphan，不授权 activation、recovery、delete 或 loss reset。可 compact domain 的 authority 固定为：
