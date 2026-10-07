@@ -36,6 +36,7 @@ import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
 import org.apache.bookkeeper.discover.profile.ProfileInstallReceipt;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryContext;
+import org.apache.bookkeeper.discover.profile.ProfileRepairCommit;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
@@ -50,12 +51,14 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         private final long entryId;
         private final long length;
         private final byte[] bytes;
+        private final Object owner;
 
-        private Probe(ProbeOutcome outcome, long entryId, long length, byte[] bytes) {
+        private Probe(ProbeOutcome outcome, long entryId, long length, byte[] bytes, Object owner) {
             this.outcome = outcome;
             this.entryId = entryId;
             this.length = length;
             this.bytes = bytes;
+            this.owner = owner;
         }
 
         public ProbeOutcome outcome() {
@@ -75,6 +78,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
     private final ProfileBookieClient transport;
     private final ProfileRecoveryContext recovery;
     private final AtomicBoolean active = new AtomicBoolean();
+    private final Object probeOwner = new Object();
 
     private ProfileRecoveryReadHandle(ProfileLedgerHandle.ProfileContext context,
             ZKProfileReservationStore.RecoveryResult accepted) throws GeneralSecurityException {
@@ -100,6 +104,9 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         if (value.getState() != LedgerMetadata.State.IN_RECOVERY
                 || !(metadata.getVersion() instanceof LongVersion version)
                 || version.getLongVersion() != context.generation()
+                    + ProfileRepairCommit.head(
+                            value.getCustomMetadata().get(ProfileRepairCommit.KEY))
+                        .size()
                 || accepted.metadata().birthZxid() != context.metadataBirth()
                 || !context.equals(ProfileRecoveryContext.decode(
                         value.getCustomMetadata().get(ProfileRecoveryContext.KEY)))
@@ -147,9 +154,9 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
                     (code, handle, entry, ignored) -> {
                         if (code == BKException.Code.OK) {
                             actual.complete(new Probe(ProbeOutcome.CANDIDATE,
-                                    entryId, entry.getLength(), entry.getEntry()));
+                                    entryId, entry.getLength(), entry.getEntry(), probeOwner));
                         } else if (code == BKException.Code.NoSuchEntryException) {
-                            actual.complete(new Probe(ProbeOutcome.ABSENT, entryId, 0, new byte[0]));
+                            actual.complete(new Probe(ProbeOutcome.ABSENT, entryId, 0, new byte[0], probeOwner));
                         } else {
                             actual.completeExceptionally(BKException.create(code));
                         }
@@ -162,6 +169,16 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
             actual.completeExceptionally(BKException.create(BKException.Code.InterruptedException));
         }
         return actual.whenComplete((result, failure) -> active.set(false)).copy();
+    }
+
+    /** Original SDK recovery packing of this handle's validated probe. Serialization performs no Add or activation. */
+    public io.netty.util.ReferenceCounted packageRecoveryEntry(Probe probe) {
+        if (probe.owner != probeOwner || probe.outcome() != ProbeOutcome.CANDIDATE) {
+            throw new IllegalArgumentException("Recovery packing requires this handle's candidate");
+        }
+        return getDigestManager().computeDigestAndPackageForSending(probe.entryId(), getLastAddConfirmed(),
+                probe.length(), io.netty.buffer.Unpooled.wrappedBuffer(probe.bytes).asReadOnly(), getLedgerKey(),
+                org.apache.bookkeeper.proto.BookieProtocol.FLAG_RECOVERY_ADD);
     }
 
     @Override

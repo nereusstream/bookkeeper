@@ -545,3 +545,21 @@ exact close authority由实际current metadata、完整head/receipt proof、inte
 定向`unified-wal-local-j1KsEcBj`为9项通过（ZK7/socket2），同UUID重建`unified-wal-local-w4PrZv71`的1项测试通过，之后的长行style失败已修正；早期delete方法名和private path引用属于测试编译错误，不作为实现RED。为避免与UWRC context混淆，新receipt改为独立UWRM，最终Java/model已按最终格式重新冻结。
 
 重现使用上一节UIC4的Java/style/model三条命令。最后fragment/frontier与matching CLOSED、完整copy coordinator/AutoRecovery worker、CLOSED后的独立readonly open、distributed delete/rejoin/GC、full A+C+D、总预算、活性、掉电/长期/性能及生产authority仍OPEN，步骤14保持PARTIAL。
+
+## 历史fragment完整copy协调与同操作恢复
+
+2026-10-08，ProfileRecoveryCoordinator.repairHistorical复用现有cold executor、同一attempt permit、verified DATA/CONTROL池与固定RepairIntent。冻结descriptor、credential和metadata custom/password输入，busy请求在深复制前拒绝；只接受有下一fragment边界的完整历史range。流程为fresh context/快照检查、最新E的durable fence、actual inactive INSTALL、admission、grant、copy、同一copied-at snapshot的membership publication与UIC4 close。没有新线程、队列、自动retry/reconnect或per-entry metadata更新。
+
+copy复用原SDK recovery probe、write-set选择、digest验证及W-A+1 missing分类；Probe owner token禁止用其他reader的样本封装。读取handle只做原DigestManager恢复entry序列化，normal Add和metadata close仍拒绝。协调器每次只持有一个source entry/target RPC，按实际durable APPLIED/ALREADY推进计数；UNKNOWN/NONE、absence或读取失败不推进membership。通过迭代callback和原SDK ordered executor读取下一entry，不保留按range长度增长的future链或payload列表。reader和packed entry在对应实际使用终结后释放；server实际IO/owner与client write/wire custody继续由原组件持有，RPC timeout不证明它们已取消。
+
+caller只取得copy future，取消仅设置stop：当前entry RPC继续终结并保留attempt permit，之后停止新entry及尚未开始的publication；已经提交的metadata结果仍解析并close，不回滚目标历史。异常future保留原cause，不把实现异常伪装为成功或无effect。copy失败保留admitted target/grant与同一操作供显式恢复。若fresh head已引用该intent的同birth/version，则解析原copied-at snapshot/close ID并直接close，不再读取/写回payload；新coordinator与显式reconnect也不换target或operation。
+
+回归定位并修复换组后的fence来源选择：原recoveryCurrentTargets只返回最新replacement新增节点，导致未变成员无法计fencing coverage。现在校验activation历史并按BookieId采用最近的activation incarnation，完整保留未变当前成员；repair-only admission不覆盖普通activation身份。readonly recovery handle可接受backend已验证的generation+bounded commit-head-count metadata版本，仍要求同physical metadata birth和原UWRC context。
+
+四个实际mTLS/ZK/files场景覆盖3条cumulative-length entry完整copy、发布后重复/新coordinator及lost-close-reply解析无recopy、持有DATA force时caller取消/busy/排空后沿用同操作，以及DATA force失败时不发布mapping/close/normal。所有场景使用原read/digest及actual DATA；metadata保持IN_RECOVERY，history保留，新target normal-inactive。该入口是历史fragment协调能力，尚未接underreplication worker/lock/scheduling，也不完成最后开放fragment、required frontier或matching CLOSED。独立readonly-open、完整AutoRecovery/delete/rejoin、full A+C+D、总memory、活性、掉电/长期/性能与production authority仍OPEN。
+
+最终Java `unified-wal-local-ZDl8kEhW` exit0：9类171项全部通过，common10/server161（socket56、lifecycle38、metadata19、PendingAddOp19、decoder22、Bookie7），1034冻结输入。Spotless/Checkstyle实际session88830完成chunk c3b000/exit0/空输出，归档`unified-wal-repair-copy-style-83zwqmp9`的380 Java输入匹配/224与模型共享，Java/style15 checksums核验。最终模型`unified-wal-model-0_bda69p` exit0：372配置70完整正向PASS/302指定反例、667 inputs/1113 checksums；226共享/1475去重union匹配，五个designInputs保持父提交`21081423bcf778c450452089a63e86cc17e53a8b`绑定。新增投影67 generated/51 distinct、queue0/depth10，九个mutation命中指定性质；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。历史回执不重绑。
+
+定向实际RED `unified-wal-local-dkQjCsWD`不能完成换组后的fence/copy；修复未变成员身份选择后`unified-wal-local-6TQ1I7UZ`的2项通过，四场景`unified-wal-local-ycHlB6RT`全部通过。model首轮zn7yy2kd是TLA运算符括号解析错误，无性质通过声明；修正后subset `unified-wal-model-0vf4skai`为1正向/9指定反例，再运行上述完整矩阵。
+
+重现沿用UIC4小节的Java/style/model三条命令；模型消费source/fence/grant及RPC实际终结事实，不生产crypto/TLS/force或完整跨组件预算证据。

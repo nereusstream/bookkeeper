@@ -431,6 +431,14 @@ public class SegmentProfileInitialSocketClientTest {
                                                             return;
                                                         }
                                                     }
+                                                    if (fault == 18
+                                                            && op == ProfileOperation.RECOVERY_GRANT_CLOSE
+                                                                .wireValue()) {
+                                                        frame.release();
+                                                        promise.setSuccess();
+                                                        ctx.close();
+                                                        return;
+                                                    }
                                                     if (op == ProfileOperation.INSTALL.wireValue()) {
                                                         if (fault == 2) {
                                                             frame.setLong(frame.readerIndex() + 20, 99);
@@ -1418,6 +1426,172 @@ public class SegmentProfileInitialSocketClientTest {
                         fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
             } finally {
                 copied.release();
+            }
+        }
+    }
+
+    @Test
+    public void historicalRepairCoordinatorCopiesMultipleEntriesAndResumesPublishedCloseWithoutRecopy()
+            throws Exception {
+        coordinatedHistoricalRepair(0);
+    }
+
+    @Test
+    public void historicalRepairCoordinatorCallerCancelKeepsPermitUntilActualEntryRpcEnds() throws Exception {
+        coordinatedHistoricalRepair(1);
+    }
+
+    @Test
+    public void historicalRepairCoordinatorCopyFailureNeverPublishesMembershipOrNormalAuthority() throws Exception {
+        coordinatedHistoricalRepair(2);
+    }
+
+    @Test
+    public void historicalRepairCoordinatorNewInstanceResolvesLostCloseReplyWithoutRecopy() throws Exception {
+        coordinatedHistoricalRepair(3);
+    }
+
+    private void coordinatedHistoricalRepair(int fault) throws Exception {
+        boolean cancel = fault == 1;
+        try (Fixture fixture = new Fixture(false, false, true, 5, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 5; node++) {
+                data.put(fixture.identities.get(node).bookieId(), dataClient(fixture, node, 4, Duration.ofSeconds(5)));
+            }
+            for (long entryId = 0; entryId < 3; entryId++) {
+                for (int node : List.of(0, 1, 2)) {
+                    evidenceEntry(fixture, data.get(fixture.identities.get(node).bookieId()), entryId,
+                            entryId - 1, (entryId + 1) * 16, 16);
+                }
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var replacement = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                    fixture.cold);
+            var peer = new ProfileReplacementCoordinator.Target(fixture.connect(3, 4, Duration.ofSeconds(5)),
+                    data.get(fixture.identities.get(3).bookieId()));
+            var operation = replacement.begin(available.metadata(), 3, Map.of(2, peer), DESCRIPTOR_BYTES,
+                    fixture.credential, bytes(16, 20), bytes(16, 21)).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileReplacementCoordinator.Status.AVAILABLE,
+                    replacement.execute(operation).get(5, TimeUnit.SECONDS).status());
+            var entered = fixture.reservations.beginRecovery(metadata,
+                    fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan());
+            var identity = fixture.identities.get(4);
+            var install = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                    ProfileAuthorityPurpose.PREPARING_INSTALL, 44, fixture.context().ledgerInstanceId(),
+                    ProfileDescriptorCodec.identityOf(fixture.descriptor, VALIDATOR), identity.bookieId().toString(),
+                    identity.incarnation().value(), "ledger-profile", entered.context().controlGeneration(),
+                    bytes(16, 40), bytes(32, 40), null);
+            var intent = new org.apache.bookkeeper.discover.profile.ProfileRepairIntent(entered.context(), 0,
+                    bytes(16, 41), 0, 1, ZKProfileReservationStore.repairEnsembleDigest(
+                            entered.metadata().metadata().getValue(), 0), install, bytes(16, 42),
+                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 2));
+            var prepared = fixture.reservations.prepareRepair(metadata, intent).snapshot();
+            fixture.connect(4, 4, Duration.ofSeconds(5));
+            var coordinator = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
+                    fixture.reservations, metadata, fixture.cold);
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(cancel ? 1 : 0);
+            if (cancel) {
+                files(fixture.nodes.get(4)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    forcing.countDown();
+                    await(release);
+                });
+            }
+            if (fault == 2) {
+                files(fixture.nodes.get(4)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                fixture.expectedFailedDataSessions.add(4);
+            } else if (fault == 3) {
+                fixture.faultTarget.set(4);
+                fixture.replyFault.set(18);
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var pending = coordinator.repairHistorical(entered, prepared, sdk.getClientCtx(), DESCRIPTOR_BYTES,
+                        fixture.credential, data, fixture.clients, bytes(16, 43));
+                if (cancel) {
+                    assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                    assertTrue(pending.cancel(false));
+                    assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.RepairStatus
+                            .DEFERRED,
+                            coordinator.repairHistorical(entered, prepared, sdk.getClientCtx(), DESCRIPTOR_BYTES,
+                                    fixture.credential, data, fixture.clients, bytes(16, 43)).get().status());
+                    assertEquals(entered.metadata().metadata().getVersion(), metadata.readMembership(44)
+                            .snapshot().metadata().getVersion());
+                    release.countDown();
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    do {
+                        var attempted = coordinator.repairHistorical(entered, prepared, sdk.getClientCtx(),
+                                DESCRIPTOR_BYTES, fixture.credential, data, fixture.clients, bytes(16, 43));
+                        if (!attempted.isDone()) {
+                            pending = attempted;
+                            break;
+                        }
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+                    } while (System.nanoTime() < deadline);
+                }
+                var complete = pending.get(10, TimeUnit.SECONDS);
+                if (fault == 2) {
+                    assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.RepairStatus
+                            .DEFERRED,
+                            complete.status());
+                    assertEquals(0, complete.copiedEntries());
+                    assertEquals(entered.metadata().metadata().getVersion(),
+                            metadata.readMembership(44).snapshot().metadata().getVersion());
+                    assertFalse(fixture.normal(4));
+                    assertEquals(5, fixture.reservations.retainedActivationTargets(44).targets().size());
+                    return;
+                }
+                if (fault == 3) {
+                    assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.RepairStatus
+                            .DEFERRED,
+                            complete.status());
+                    assertEquals(3, complete.copiedEntries());
+                    assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, complete.publication().status());
+                    fixture.replyFault.set(0);
+                    fixture.connect(4, 4, Duration.ofSeconds(5));
+                    int forces = files(fixture.nodes.get(4)).dataIo.forces;
+                    var reloaded = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
+                            fixture.reservations, metadata, fixture.cold);
+                    var resolved = reloaded.repairHistorical(entered, prepared, sdk.getClientCtx(), DESCRIPTOR_BYTES,
+                            fixture.credential, data, fixture.clients, bytes(16, 43)).get(5, TimeUnit.SECONDS);
+                    assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.RepairStatus
+                            .REPAIRED_HISTORICAL_FRAGMENT, resolved.status());
+                    assertEquals(0, resolved.copiedEntries());
+                    assertEquals(forces, files(fixture.nodes.get(4)).dataIo.forces);
+                    assertFalse(fixture.normal(4));
+                    return;
+                }
+                assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.RepairStatus
+                        .REPAIRED_HISTORICAL_FRAGMENT, complete.status());
+                assertEquals(3, complete.copiedEntries());
+                assertEquals(identity.bookieId(), complete.publication().metadata().metadata().getValue()
+                        .getAllEnsembles().get(0L).get(1));
+                assertFalse(fixture.normal(4));
+                int before = files(fixture.nodes.get(4)).dataIo.forces;
+                var resumed = coordinator.repairHistorical(entered, prepared, sdk.getClientCtx(), DESCRIPTOR_BYTES,
+                        fixture.credential, data, fixture.clients, bytes(16, 43)).get(5, TimeUnit.SECONDS);
+                assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.RepairStatus
+                        .REPAIRED_HISTORICAL_FRAGMENT, resumed.status());
+                assertEquals(0, resumed.copiedEntries());
+                assertEquals(before, files(fixture.nodes.get(4)).dataIo.forces);
+                var adopted = fixture.reservations.readRecovery(metadata, 44);
+                assertEquals(entered.context(), adopted.context());
+                var controls = new HashMap<BookieId, ProfileInitialControlClient>();
+                fixture.clients.forEach((name, client) -> controls.put(BookieId.parse(name), client));
+                var reader = org.apache.bookkeeper.client.ProfileRecoveryReadHandle.fromContext(sdk.getClientCtx(),
+                        adopted, fixture.reservations.retainedActivationTargets(44).targets(), data, controls);
+                try {
+                    assertEquals(org.apache.bookkeeper.client.ProfileRecoveryReadHandle.ProbeOutcome.CANDIDATE,
+                            reader.probe(0).get(5, TimeUnit.SECONDS).outcome());
+                } finally {
+                    reader.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                        fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+            } finally {
+                release.countDown();
             }
         }
     }

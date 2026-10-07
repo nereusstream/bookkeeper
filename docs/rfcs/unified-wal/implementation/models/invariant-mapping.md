@@ -571,3 +571,7 @@ ProfileRecoveryCloseWire检查CutHasCapability、CutHasAuthority、CutHasExactBi
 ### 历史repair membership性质
 
 ProfileRepairMembership检查PublicationHasMetaBirth、PublicationHasIntentBirth、DeletePreventsPublication、PublicationHasAdmission、PublicationIsAtomic、PublicationUsesPlannedSlot、ContextIsPreserved、HistoryIsRetained、AdoptionRequiresProof和PublicationHasBoundedFragment。十个mutation分别违反这些性质。范围是两次caller-completed历史fragment提交，byte/crypto/真实copy/force、last-fragment required frontier、CLOSED、strong reset、full A+C+D、总预算与活性仍不在此投影。
+
+### 历史fragment copy性质
+
+ProfileRepairCopy检查CopyHasSources、CopyHasGrant、PublicationHasAllCopies、OnlyDurableCounts、InFlightHasPermit、PublishedResumeNeverCopies、OnlyOneEntryInFlight、CancelStopsFutureEntries及NormalNeverActivates。九个mutation分别违反这些性质；scope是两个entry/RPC和已有published history，真实source/digest/force、worker scheduling、last-fragment frontier/CLOSED、full A+C+D、总memory与活性仍须后续验证。

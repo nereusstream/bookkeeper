@@ -631,10 +631,18 @@ public final class ZKProfileReservationStore {
         if (root.status() != ReadStatus.FOUND || !context.matchesRoot(root.snapshot())) {
             throw new IllegalArgumentException("Recovery lifecycle changed before selecting fence targets");
         }
-        if (root.snapshot().lifecycle().state() == ProfileLifecycleHead.State.READY) {
-            return page(root.snapshot(), deadline).page().installs();
+        var retained = retainedActivationTargets(context.ledger().ledgerId());
+        if (retained.status() != ReadStatus.FOUND) {
+            throw new IllegalArgumentException("Required activation history is unavailable");
         }
-        return replacement(root.snapshot(), context.lifecycleSequence(), deadline).page().installs();
+        var activated = new java.util.LinkedHashMap<String, ProfileInstallReceipt>();
+        page(root.snapshot(), deadline).page().installs().forEach(receipt ->
+                activated.put(receipt.scope().targetBookie(), receipt));
+        for (long sequence = 3; sequence <= context.lifecycleSequence(); sequence++) {
+            replacement(root.snapshot(), sequence, deadline).page().installs().forEach(receipt ->
+                    activated.put(receipt.scope().targetBookie(), receipt));
+        }
+        return List.copyOf(activated.values());
     }
 
     private void requireRecoveryClient(ProfileLedgerMetadataStore metadata) {
