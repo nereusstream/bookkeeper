@@ -1294,6 +1294,35 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 && !state.pendingTombstone && !tombstones.containsKey(context.ledgerId());
     }
 
+    /** Ordinary network reads cannot expose an uncommitted recovery range. */
+    synchronized boolean networkReadable(ProfileLedgerContext context, long entryId) {
+        if (!locallyReadableContext(context)) {
+            return false;
+        }
+        for (GrantState grant : ledgers.get(context.ledgerId()).recoveryGrants.values()) {
+            ProfileExactRange range = grant.command.scope.exactRange();
+            if (entryId >= range.firstEntryId() && entryId <= range.lastEntryId() && !grant.committedReadable) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** A local absence sample is stable only after durable fence and with no other admitted work. */
+    synchronized boolean canProveReadAbsence(ReadAdmission admission, long entryId) {
+        if (!canCompleteRead(admission) || !admission.state.fenced || admission.state.pendingFence != null
+                || activeAdmissions != 1) {
+            return false;
+        }
+        for (GrantState grant : admission.state.recoveryGrants.values()) {
+            ProfileExactRange range = grant.command.scope.exactRange();
+            if (entryId >= range.firstEntryId() && entryId <= range.lastEntryId() && !grant.committedReadable) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** Local replayed value only; a Profile read still needs its own authorization and visibility boundary. */
     synchronized Optional<ExplicitLac> explicitLac(ProfileLedgerContext context) {
         if (!locallyReadableContext(context)) {

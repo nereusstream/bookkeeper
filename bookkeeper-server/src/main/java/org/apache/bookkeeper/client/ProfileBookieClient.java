@@ -20,6 +20,7 @@
  */
 package org.apache.bookkeeper.client;
 
+import io.netty.buffer.Unpooled;
 import io.netty.util.ReferenceCounted;
 import java.time.Duration;
 import java.util.Arrays;
@@ -65,6 +66,7 @@ final class ProfileBookieClient implements BookieClient {
     private final ProfileLedgerContext ledger;
     private final ProtectedProfileCredential credential;
     private volatile Map<BookieId, ProfileNormalDataClient> clients;
+    private volatile Map<BookieId, ProfileNormalDataClient> readPeers;
     private final Retry retry;
     private final int perTargetLimit;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -80,6 +82,7 @@ final class ProfileBookieClient implements BookieClient {
         this.ledger = ledger;
         this.credential = credential;
         this.clients = Map.copyOf(clients);
+        this.readPeers = this.clients;
         this.retry = retry;
         if (perTargetLimit < 1 || perTargetLimit > 256) {
             throw new IllegalArgumentException("Invalid per-target logical delivery bound");
@@ -290,6 +293,12 @@ final class ProfileBookieClient implements BookieClient {
 
     /** Called only under the original ledger completion gate on its executor. Wire I/O keeps its own custody. */
     void switchClients(Map<BookieId, ProfileNormalDataClient> current) {
+        var retained = new java.util.HashMap<>(readPeers);
+        retained.putAll(current);
+        if (retained.size() > 64) {
+            throw new IllegalArgumentException("Historical read peers exceed initial plus replacement pool bound");
+        }
+        readPeers = Map.copyOf(retained);
         clients = Map.copyOf(current);
         for (Delivery delivery : List.copyOf(pending)) {
             var peer = clients.get(delivery.target);
@@ -365,7 +374,37 @@ final class ProfileBookieClient implements BookieClient {
     @Override
     public void readEntry(BookieId address, long ledgerId, long entryId, ReadEntryCallback cb, Object ctx,
             int flags, byte[] key, boolean failFast) {
-        ordered(() -> cb.readEntryComplete(BKException.Code.IllegalOpException, ledgerId, entryId, null, ctx));
+        ProfileNormalDataClient peer = readPeers.get(address);
+        if (flags != 0 || ledgerId != ledger.ledgerId() || entryId < 0 || peer == null || closed.get()) {
+            ordered(() -> cb.readEntryComplete(closed.get() ? BKException.Code.ClientClosedException
+                    : BKException.Code.IllegalOpException, ledgerId, entryId, null, ctx));
+            return;
+        }
+        peer.readEntry(ledger, entryId).whenComplete((reply, failure) -> {
+            Runnable completed = () -> {
+                var current = readPeers.get(address);
+                if (failure != null || reply == null || current == null
+                        || !Arrays.equals(peer.hello().storageIncarnation(), current.hello().storageIncarnation())) {
+                    cb.readEntryComplete(BKException.Code.ReadException, ledgerId, entryId, null, ctx);
+                    return;
+                }
+                switch (reply.outcome()) {
+                    case FOUND -> cb.readEntryComplete(BKException.Code.OK, ledgerId, entryId,
+                            Unpooled.wrappedBuffer(reply.entry()), ctx);
+                    case MISSING -> cb.readEntryComplete(BKException.Code.NoSuchEntryException,
+                            ledgerId, entryId, null, ctx);
+                    case REFUSED -> cb.readEntryComplete(reply.status().statusClass()
+                            == ProfileStatus.StatusClass.UNAUTHORIZED ? BKException.Code.UnauthorizedAccessException
+                                : BKException.Code.ReadException, ledgerId, entryId, null, ctx);
+                    default -> throw new IllegalStateException("Unknown Profile point-read result");
+                }
+            };
+            try {
+                ordered(completed);
+            } catch (RejectedExecutionException shutdown) {
+                cb.readEntryComplete(BKException.Code.InterruptedException, ledgerId, entryId, null, ctx);
+            }
+        });
     }
     @Override
     public void batchReadEntries(BookieId address, long ledgerId, long entryId, int maxCount, long maxSize,

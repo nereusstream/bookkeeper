@@ -449,26 +449,40 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                                      ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
                                      String trustDomain, long readinessGeneration, SegmentProfileControlConfig control)
             throws org.apache.bookkeeper.tls.SecurityException {
+        return installProfileConnection(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
+                trustDomain, readinessGeneration, control, null);
+    }
+
+    boolean installProfileConnection(io.netty.channel.ChannelPipeline pipeline, TLSContextFactory tls,
+                                     ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
+                                     String trustDomain, long readinessGeneration, SegmentProfileControlConfig control,
+                                     SegmentProfileReadConfig read)
+            throws org.apache.bookkeeper.tls.SecurityException {
         synchronized (gate) {
             if (!accepting) {
                 pipeline.channel().close();
                 return false;
             }
+            List<ProfileHello.Capability> capabilities = new java.util.ArrayList<>();
+            if (control != null) {
+                capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
+                        ProfileInitialControlCodec.SCHEMA));
+                capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
+                        ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
+            }
+            if (read != null) {
+                capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY);
+            }
             ProfileHello.Server hello = new ProfileHello.Server(
                     EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
                     identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(),
-                    control == null ? List.of() : List.of(
-                            new ProfileHello.Capability(
-                                    ProfileInitialControlCodec.CAPABILITY_ID,
-                                    ProfileInitialControlCodec.SCHEMA),
-                            new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
-                                    ProfileInitialControlCodec.REPLACEMENT_SCHEMA)));
+                    capabilities);
             return ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
                     100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                     144 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                     new SegmentProfileAddHandler(this, tls, trustDomain, hello,
                             SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
-                            config.maxPendingEntries(), control), control != null);
+                            config.maxPendingEntries(), control, read), control != null);
         }
     }
 
@@ -600,6 +614,12 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 admission.releaseUnclaimed();
                 throw failure;
             }
+        }
+    }
+
+    boolean profileReadVisible(ProfileLedgerContext context, long entryId) {
+        synchronized (gate) {
+            return accepting && bookie.networkReadable(context, entryId);
         }
     }
 

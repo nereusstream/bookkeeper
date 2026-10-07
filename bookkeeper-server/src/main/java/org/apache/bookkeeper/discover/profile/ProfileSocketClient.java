@@ -58,6 +58,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
+import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.util.ByteBufList;
 
@@ -133,7 +135,19 @@ final class ProfileSocketClient implements AutoCloseable {
                         ssl.engine().setSSLParameters(parameters);
                         ssl.setHandshakeTimeoutMillis(timeout.toMillis());
                         socket.pipeline().addLast(ssl);
-                        socket.pipeline().addLast(new LengthFieldBasedFrameDecoder(MAX_RESPONSE_FRAME, 0, 4, 0, 0));
+                        socket.pipeline().addLast(new LengthFieldBasedFrameDecoder(normalData
+                                ? Math.max(MAX_RESPONSE_FRAME, 36 + ProfileReadEntryReplyCodec.PREFIX_BYTES
+                                    + maxEntryBytes) : MAX_RESPONSE_FRAME, 0, 4, 0, 0) {
+                            @Override
+                            protected long getUnadjustedFrameLength(ByteBuf buffer, int offset, int length,
+                                    java.nio.ByteOrder order) {
+                                long value = super.getUnadjustedFrameLength(buffer, offset, length, order);
+                                if (client.hello == null && value + 4 > MAX_RESPONSE_FRAME) {
+                                    throw new io.netty.handler.codec.TooLongFrameException("Oversized pre-HELLO reply");
+                                }
+                                return value;
+                            }
+                        });
                         socket.pipeline().addLast(client.new Responses());
                         if (client.closed.get()) {
                             socket.close();
@@ -230,6 +244,25 @@ final class ProfileSocketClient implements AutoCloseable {
         return held.dataReply;
     }
 
+    CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
+        Objects.requireNonNull(context, "context");
+        if (!normalData || entryId < 0) {
+            throw new IllegalArgumentException("Point read requires DATA and a nonnegative coordinate");
+        }
+        if (!hello().capabilities().contains(ProfileReadEntryReplyCodec.CAPABILITY)) {
+            return CompletableFuture.completedFuture(ProfileReadEntryReplyCodec.refused(ProfileStatus.unsupported()));
+        }
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(unknown());
+        }
+        if (!slots.tryAcquire()) {
+            return CompletableFuture.completedFuture(ProfileReadEntryReplyCodec.refused(transientNone()));
+        }
+        Pending held = new Pending(context, entryId);
+        enqueue(held);
+        return held.readReply;
+    }
+
     private ByteBuf encodeNormal(Pending held, long id) {
         int bodyBytes = 100 + held.entryBytes;
         ByteBuf bytes = channel.alloc().buffer(36 + bodyBytes, 36 + bodyBytes);
@@ -287,6 +320,9 @@ final class ProfileSocketClient implements AutoCloseable {
                     ByteBuf bytes;
                     try {
                         bytes = held.operation == ProfileOperation.ADD_NORMAL ? encodeNormal(held, id)
+                                : held.operation == ProfileOperation.READ_ENTRY ? encode(held.operation, id,
+                                        ProfileOperationCodec.encode(ProfileOperation.READ_ENTRY,
+                                                new ProfileOperationCodec.ReadEntry(held.context, held.entryId, 0)))
                                 : encode(held.operation, id,
                                         ProfileInitialControlCodec.encodeRequest(held.controlRequest));
                     } finally {
@@ -358,7 +394,7 @@ final class ProfileSocketClient implements AutoCloseable {
                         return;
                     }
                     ctx.writeAndFlush(encode(ProfileOperation.HELLO, 1,
-                            new ProfileHello.Client(normalData ? List.of()
+                            new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY)
                                     : List.of(CAPABILITY, REPLACEMENT_CAPABILITY)).encode()))
                             .addListener(written -> {
                         if (!written.isSuccess()) {
@@ -375,6 +411,32 @@ final class ProfileSocketClient implements AutoCloseable {
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, ByteBuf bytes) {
             try {
+                byte[] fixed = new byte[36];
+                bytes.getBytes(bytes.readerIndex(), fixed);
+                var inspected = ProfileFrameCodec.inspectHeader(fixed, hello == null
+                        ? ProfileFrameCodec.DecodePhase.PRE_HELLO : ProfileFrameCodec.DecodePhase.ESTABLISHED);
+                if (inspected.frameBytes() != bytes.readableBytes()) {
+                    throw invalidReply();
+                }
+                var readHeader = inspected.header();
+                if (hello != null && readHeader.operation() == ProfileOperation.READ_ENTRY) {
+                    Pending held = pending.get(readHeader.requestId());
+                    if (held == null || held.operation != ProfileOperation.READ_ENTRY || !readHeader.isResponse()
+                            || (readHeader.flags() & ProfileFrameHeader.END_OF_STREAM) != 0) {
+                        throw invalidReply();
+                    }
+                    var received = ProfileReadEntryReplyCodec.decode(bytes.nioBuffer(bytes.readerIndex() + 36,
+                            readHeader.bodyLength()), held.context, held.entryId, maxEntryBytes);
+                    if (readHeader.isError() != (received.status().statusClass() != ProfileStatus.StatusClass.OK)) {
+                        throw invalidReply();
+                    }
+                    pending.remove(readHeader.requestId());
+                    held.wireDone = true;
+                    held.deadline.cancel(false);
+                    held.releaseIfTerminal();
+                    held.readReply.complete(received);
+                    return;
+                }
                 byte[] frameBytes = new byte[bytes.readableBytes()];
                 bytes.getBytes(bytes.readerIndex(), frameBytes);
                 ProfileFrame frame = ProfileFrameCodec.decode(frameBytes, hello == null
@@ -478,6 +540,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private final ProfileOperation operation;
         private final CompletableFuture<ProfileControlResult> reply;
         private final CompletableFuture<ProfileStatus> dataReply;
+        private final CompletableFuture<ProfileReadEntryReplyCodec.Reply> readReply;
         private ProfileControlRequest controlRequest;
         private ProfileLedgerContext context;
         private ProtectedProfileCredential credential;
@@ -495,6 +558,7 @@ final class ProfileSocketClient implements AutoCloseable {
             this.operation = operation;
             reply = new CompletableFuture<>();
             dataReply = null;
+            readReply = null;
         }
 
         private Pending(ProfileLedgerContext context, ProtectedProfileCredential credential,
@@ -503,14 +567,26 @@ final class ProfileSocketClient implements AutoCloseable {
             operation = ProfileOperation.ADD_NORMAL;
             reply = null;
             dataReply = new CompletableFuture<>();
+            readReply = null;
             this.context = context;
             this.credential = credential;
             this.entryId = entryId;
             this.entryBytes = entryBytes;
         }
 
+        private Pending(ProfileLedgerContext context, long entryId) {
+            scope = null;
+            operation = ProfileOperation.READ_ENTRY;
+            reply = null;
+            dataReply = null;
+            readReply = new CompletableFuture<>();
+            this.context = context;
+            this.entryId = entryId;
+        }
+
         private boolean cancelled() {
-            return dataReply == null ? reply.isCancelled() : dataReply.isCancelled();
+            return readReply != null ? readReply.isCancelled()
+                    : dataReply == null ? reply.isCancelled() : dataReply.isCancelled();
         }
 
         private void discardSource() {
@@ -529,7 +605,9 @@ final class ProfileSocketClient implements AutoCloseable {
             }
             discardSource();
             releaseIfTerminal();
-            if (dataReply == null) {
+            if (readReply != null) {
+                readReply.completeExceptionally(failure);
+            } else if (dataReply == null) {
                 reply.completeExceptionally(failure);
             } else {
                 dataReply.completeExceptionally(failure);

@@ -182,6 +182,15 @@ final class SegmentHotDirectory {
         });
     }
 
+    /** Called after a fresh miss; pending/uncertain coordinates or failed coverage never prove absence. */
+    boolean provesAbsent(ProfileLedgerContext context, long entryId) {
+        owner.requireOwner();
+        return owner.failure() == null && indexFailure == null && prefix != null && !prefix.failed()
+                && prefix.pending() == 0 && !occupied(context, entryId)
+                && !pendingKeys.containsKey(new Key(context, entryId))
+                && (arena == null || arena.currentMoveLocation(context, entryId).isEmpty());
+    }
+
     boolean isCurrentDurable(SegmentPointRead.Location location) {
         owner.requireOwner();
         if (location == null || arena != null && !arena.resolveLocation(location).equals(location)) {

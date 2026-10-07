@@ -348,6 +348,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 && operation == ProfileOperation.HELLO)
                 // The frozen fence request body is exactly 100 bytes; reject a larger claim before reserving it.
                 || (operation == ProfileOperation.FENCE_LEDGER && header.bodyLength() != 100)
+                || (operation == ProfileOperation.READ_ENTRY && header.bodyLength() != 72)
                 || (operation == ProfileOperation.ADD_NORMAL && header.bodyLength() > maxNormalBodyBytes)
                 || (operation == ProfileOperation.ADD_RECOVERY && header.bodyLength() > maxRecoveryBodyBytes)
                 || (initialControlBounds && ProfileInitialControlCodec.supported(operation)

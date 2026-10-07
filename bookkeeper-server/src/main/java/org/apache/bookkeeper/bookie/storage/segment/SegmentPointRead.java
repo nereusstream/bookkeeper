@@ -38,7 +38,7 @@ final class SegmentPointRead {
     record Result(SegmentBatchParser.Record record, long bytesRead) { }
 
     enum ReadStatus {
-        FOUND, NOT_READY, TRANSIENT_UNAVAILABLE, STALE_ADMISSION, UNKNOWN
+        FOUND, MISSING, NOT_READY, TRANSIENT_UNAVAILABLE, STALE_ADMISSION, UNKNOWN
     }
 
     @FunctionalInterface
@@ -75,13 +75,27 @@ final class SegmentPointRead {
     /** Cancelling response delivery leaves the actual read, file pin and buffer obligation intact. */
     static final class ReadRequest {
         private final AtomicReference<ReadCompletion> response;
+        private final Runnable actualTerminal;
+        private final AtomicBoolean terminalNotified = new AtomicBoolean();
 
         ReadRequest(ReadCompletion completion) {
+            this(completion, () -> { });
+        }
+
+        ReadRequest(ReadCompletion completion, Runnable actualTerminal) {
             response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+            this.actualTerminal = Objects.requireNonNull(actualTerminal, "actualTerminal");
         }
 
         boolean stopWaiting() {
             return response.getAndSet(null) != null;
+        }
+
+        /** Actual admitted I/O and owner cleanup have ended; a delivered LeasedResult still belongs to its consumer. */
+        private void actualTerminal() {
+            if (terminalNotified.compareAndSet(false, true)) {
+                actualTerminal.run();
+            }
         }
 
         private void complete(ReadStatus status, LeasedResult result, Throwable failure) {
@@ -173,6 +187,7 @@ final class SegmentPointRead {
             private SegmentBufferPool.Lease buffer;
             private Location selected;
             private Result result;
+            private boolean freshMiss;
             private boolean physicalTerminal;
             private boolean ownerTerminal;
 
@@ -193,13 +208,18 @@ final class SegmentPointRead {
                     if (hot == null) {
                         IsolatedSegmentFiles.StartupInventoryLease startup = files.pinStartupInventory();
                         pin = startup;
-                        selected = startup.inventory().uniqueLocation(arena, context, entryId);
+                        if (startup.inventory().provesAbsent(arena, context, entryId)) {
+                            freshMiss = true;
+                        } else {
+                            selected = startup.inventory().uniqueLocation(arena, context, entryId);
+                        }
                     } else {
                         pin = files.pinDataRead();
                         selected = hot.liveDurableCandidate(context, entryId).orElse(null);
                         if (selected == null) {
                             hot.freshGet(ticket, context, entryId, (location, failure) -> {
                                 selected = location;
+                                freshMiss = failure == null && location == null;
                                 if (failure != null) {
                                     refuse(ticket, ReadStatus.UNKNOWN, failure);
                                 } else {
@@ -253,7 +273,9 @@ final class SegmentPointRead {
 
             private ReadStatus prepareBuffer() throws IOException {
                 if (selected == null) {
-                    return ReadStatus.NOT_READY;
+                    return freshMiss && bookie.canProveReadAbsence(admission, entryId)
+                            && (hot == null || hot.provesAbsent(context, entryId))
+                            ? ReadStatus.MISSING : ReadStatus.NOT_READY;
                 }
                 if (!arena.dataFileAvailable(selected.address().fileIndex())) {
                     return ReadStatus.NOT_READY;
@@ -272,6 +294,11 @@ final class SegmentPointRead {
                     if (failure == null && owner.failure() != null) {
                         status = ReadStatus.UNKNOWN;
                         failure = owner.failure();
+                    }
+                    if (status == ReadStatus.MISSING && failure == null
+                            && (!bookie.canProveReadAbsence(admission, entryId)
+                                || hot != null && !hot.provesAbsent(context, entryId))) {
+                        status = ReadStatus.NOT_READY;
                     }
                     if (status == ReadStatus.FOUND && failure == null) {
                         if (!arena.dataFileAvailable(selected.address().fileIndex())) {
@@ -335,9 +362,13 @@ final class SegmentPointRead {
                                 pin = null;
                             }
                         } finally {
-                            if (admission != null) {
-                                admission.finish();
-                                admission = null;
+                            try {
+                                if (admission != null) {
+                                    admission.finish();
+                                    admission = null;
+                                }
+                            } finally {
+                                request.actualTerminal();
                             }
                         }
                     }

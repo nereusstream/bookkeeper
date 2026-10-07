@@ -339,3 +339,37 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+## READ_ENTRY 接线与验收范围
+
+当前已接通显式URD1读配置、真实mTLS/file/ZK、DATA client与原SDK flags0普通读。fenced完整覆盖缺失、权限拒绝、六类malformed reply及取消后实际资源寿命已有局部证据；最后一段是当前最终回执，下面的工作区记录保留当时范围。READ_LAC、fencing read、独立readonly open、恢复/CLOSED与生产权限仍OPEN。
+
+2026-10-07，当前工作区已增加点读实际终结observer：取消仅停止response等待，observer在实际I/O及owner清理后恰好一次触发；成功的LeasedResult仍归consumer，不能借observer提前归还它的pool lease。六种已有真实文件场景覆盖取消、撤权、I/O错误、I/O拒绝、consumer异常和owner失败；另检查成功结果在observer之后仍可访问且仍占用pool。
+
+工作区新增独立experimental READ_ENTRY reply codec与三份Python struct生成的合成固定向量。候选capability为URD1（0x55524431/version1），body状态前缀沿用8字节，成功尾为UWRD magic/schema1/FOUND或MISSING tag/context60/entryId8/length4/entry，固定prefix88；非OK拒绝仍只有8字节、durableResult=NONE。FOUND要求完整BK entry为36..installed bound（绝对最大1MiB+36），MISSING只允许零entry，decode先核验scope、coordinate、精确尾长和BK entry身份再分配一次owned copy。getter仅暴露readonly view，frame关闭不改变已解码内容。这些向量只证明语法和字段，不证明真实缺失、权限或持久化。
+
+该codec尚未由HELLO广告、server或client调用；READ_ENTRY仍未接通，服务端尚无MISSING产生路径。需要继续闭合显式网络scope权限、local candidate/visibility、完整覆盖的缺失证明、响应credit与实际读loan的交接，以及原SDK读取。现有point read找不到location仍为NOT_READY，不能映成NoSuchEntry；恢复控制面、fenced-close和完整步骤14保持OPEN。当前是未提交的接线工作，既有历史model/source/receipt不重绑，也没有新增model PASS或stable/G1权限。
+
+已执行 `unified-wal-local-Exx4vzKf`（exit0），实际common/server共2类5项，零failure/error/skip；其中点读失败路径方法内部覆盖六种模式，另含成功loan和restart原回归。命令为 `bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileReadEntryReplyCodecTest,SegmentBookieControlLogTest#livePointRead*+pointReadPins*+restartedPointRead*'`。`mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q` exit0，`git diff --check`通过。这些局部结果不验证socket、网络权限、MISSING语义或整个恢复协议。
+
+2026-10-07后续工作区已把URD1接到显式read配置、实际server/共享socket/DATA client及原ProfileBookieClient.readEntry：无read配置不广告；DATA client明确offer，未协商不发读请求，固定header早拒绝非72字节body。TLS principal与完整query scope经本地nonblocking policy校验，回复前再检查权限与本地read visibility；OPEN recovery range不向普通读暴露。原SDK按已有LAC范围与digest校验读取，flags0/非负point ID启用，READ_LAC、fencing read、独立readonly open和恢复控制面仍未接通。historical read peer留存上限为initial32+pool32，不因换组移除旧fragment仍需的已验证连接。
+
+MISSING仅是fenced read cut上的本地缺失事实，不表示旧写未执行。Bookie必须durable fenced、无pending fence、当前read是唯一admitted工作且范围无uncommitted recovery grant；live lookup须fresh miss、没有occupied/pending coordinate或失败/未完成prefix。restart的缺失依据只接受与当前Arena cut匹配、完整stream prefix的全物理scan；index seed/跳过body不证明missing。没有这些依据仍NOT_READY，读refusal不映成NoSuchEntry。
+
+实际terminal observer、Pending.readInFlight与delivery/write状态共同持有原frame/parse/response credit。native Get也算在途read；断连只停等待，真正reader owner/I/O终结后才归还。成功lease由排队EL callback持有，复制一次到精确计费output后close，output仍等write promise；client直接检验固定header/88字节prefix后做一次bounded entry copy，pre-HELLO超长reply在length阶段拒绝。完整TLS/kernel/object/storage统一预算仍未证明。
+
+三项真实组合 `unified-wal-local-194rs4la` 已通过：SDK普通读原payload且无control-read/force增量，actual FILE fence前UNKNOWN与fence后完整coverage MISSING分离且权限撤销拒绝，300ms客户端read超时后frame额度/file pin继续保留到native Get及actual read终结。fence由真实storage driver提交（尚非网络fencing客户端），未伪造成功事实。两次超时夹具失败TH1d7wgl/NJ08tFg4因要求native Get前已有scratch lease；现按实际阶段检查file pin，未放宽原point read scratch/cancel验证。当前仍未提交，扩大回归/style和模型待闭合；完整恢复、fenced-close与步骤14保持OPEN。
+
+本次扩大相关回归 `unified-wal-local-5aQPUGLc` exit0，实际common/server共5类75项全通过（common2/server73，socket30、原PendingAddOp19、decoder21、point read3）；冻结源码hash仍与当前工作区一致。命令为 `bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileReadEntryReplyCodecTest,SegmentProfileInitialSocketClientTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#livePointRead*+pointReadPins*+restartedPointRead*'`，common/server Spotless/Checkstyle exit0，`git diff --check`通过。READ新性质模型、全部必要失败路径与最终source/receipt绑定尚未完成，当前改动保持未提交；不把上述局部回归提升为完整步骤14或生产验收。
+
+最终相关Java `unified-wal-local-cl29WO9o` exit0：实际5类77项全部通过（common2/server75，socket32、PendingAddOp19、decoder21、point read3），1018冻结输入。新增readCapabilityAndExactScopeAreRequiredBeforeReturningAnyEntry与readMalformedRepliesNeverBecomeEntrySuccessOrMissing分别覆盖未广告URD1/错instance零成功，以及实际回复的magic、instance、entryId、BK payload ledger、error flags和长度6种篡改；每种均client future异常，不是NoSuchEntry。common/server style `unified-wal-point-read-style-9fvz6x6v` exit0，216个共享Java源码匹配，Java/style共11份checksums核验。
+
+最终Model A有限读取分发 `unified-wal-model-p92naucz` exit0：296配置为59完整正向PASS/237指定反例，575输入/888 checksums；218共享输入与1375去重union均匹配当前源码，5个designInputs保持父提交4868ff4d64对应完整SHA绑定。新投影896 generated/704 distinct、queue0、depth7，检查权限、fenced/stable complete missing、取消credit、实际terminal、queued loan、output write及reply binding；7个单独mutation命中指定性质。tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不是完整A/C/D、时钟/活性、公平性、真实crypto/byte proof、总内存、掉电/长期/性能或生产权限。MISSING是采样时本地事实，不表示早先操作没有执行，也不是持续lease。
+
+三份合成向量长度/SHA256：found128/f029beaa86b4de6e069a4068dcad5804bdc64012131b4aa2a7a6ad4ce3010288，missing88/c278bdc5cede8009174eaa07e320324ef615810a15adbae73bd13f22c353e752，not-ready8/3335583813fb042858b1555c50ceb447dc49753a17a72971776262ef365dbc08。它们不改变既有initial-control与stable旧decoder corpus的绑定。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileReadEntryReplyCodecTest,SegmentProfileInitialSocketClientTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#livePointRead*+pointReadPins*+restartedPointRead*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

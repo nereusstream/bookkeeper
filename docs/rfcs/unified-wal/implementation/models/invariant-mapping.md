@@ -535,3 +535,7 @@ ProfileSdkReplacement 检查 AvailabilityIncludesActivation、GateRequiresWholeT
 ### SDK A=3 与第二次Start的性质
 
 既有AvailabilityIncludesActivation、GateRequiresWholeTransition、RetiredReplicaCannotAck、ResendKeepsSource/Coordinate、OnlyAffectedSlotsResent、OneOriginalCallback、CallbacksStayContiguous、SuccessHasCurrentQuorum延伸到AckQuorum3、MaxChanges2。每次Start清除本次control完成事实，但保留未变ACK；回调仍pending才允许下一次变更，旧请求terminal独立推进。仅有限两entry/最多两次两slot变更；不涵盖任意长链、时钟/重试活性、实际内存、same-ID incarnation或full A+C+D。
+
+### READ_ENTRY性质
+
+ProfilePointReadDispatch检查AdmissionRequiresPermission、MissingRequiresCompleteStableFence、InFlightKeepsCredit、ObserverWaitsForActualTerminal、QueuedConsumerOwnsLoan、OutputWaitsForWrite、ReplyRequiresBinding。MISSING的coverage/stability是实现中真实producer需满足的输入事实，不是模型制造的durability证明；权限与缺失是采样切点，非持续lease。七个独立mutation各违反指定性质。单query有限投影不包括full recovery/readonly open、schema/CRC/crypto、clock、真实总预算、活性、公平性或full A+C+D。

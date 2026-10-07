@@ -1050,3 +1050,9 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 2026-10-07 [原 SDK 写期换组与整体回调门](implementation/profile-wire/README.md#原-sdk-写期换组与整体回调门)接通预连接 bounded pool 的真实 inactive INSTALL、membership CAS、retained authority、全新目标 activation 和原 PendingAddOp 多 slot ACK 撤销/必要重发。五节点、两个 pending entry、响应丢失及停止窗口已有真实定向证据；跳过 activation 不能报告 AVAILABLE，UNKNOWN 只能解析原操作，不复活失败 writer。同 ID/incarnation rejoin、registration discovery、controller restart、恢复/删除/GC、生产和完整验收仍待完成，步骤13保持 PARTIAL；本段为当前增量，前述日期回执保留当时范围。
 
 2026-10-07 [3/3/3及同起点连续换组](implementation/profile-wire/README.md#333-与同起点连续换组验证)新增实际SDK证据：普通写必须等第三个durable副本，两个pending entry在起点0经历socket1→socket3→socket4两次实际失败/换组后连续回调；未变副本ACK保留、不重发，两个replacement页及全部历史目标留存。仍是隔离有限范围，更多故障交错、同ID incarnation/rejoin、恢复/删除和生产验收保持OPEN。
+
+2026-10-07，[READ_ENTRY工作区进展](implementation/profile-wire/README.md#read_entry-接线与验收范围)补齐实际点读terminal observer及候选reply codec/独立向量；网络授权、缺失证明、socket/client/原SDK接线尚未完成，不能把NOT_READY当确定missing，步骤14仍OPEN。当前未提交的工作不改变历史回执或生产权限。
+
+2026-10-07当前[READ_ENTRY接线工作区](implementation/profile-wire/README.md#read_entry-接线与验收范围)已接实际TLS server/client、显式scope权限、fenced完整覆盖的MISSING以及原SDK flags0普通读；三项真实组合通过，native Get/读的取消资源保留已验证。仍未提交，扩大回归/模型、READ_LAC、独立readonly open、fencing read及完整恢复/fenced-close尚未闭合。
+
+2026-10-07 [READ_ENTRY接线与验收范围](implementation/profile-wire/README.md#read_entry-接线与验收范围)已接显式读scope权限、URD1/schema1、实际Get/read/pin/loan/response ownership、fenced完整覆盖的MISSING和原SDK flags0普通读。77项相关Java和新增有限读取分发模型通过；没有normal activation或逐entry控制持久化增量。READ_LAC/fencing read/独立readonly open、完整恢复/CLOSED/AutoRecovery/删除及生产验收仍OPEN，步骤11/14保持PARTIAL，历史回执不重绑。

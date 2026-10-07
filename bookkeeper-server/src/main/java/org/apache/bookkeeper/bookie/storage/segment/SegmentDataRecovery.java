@@ -648,6 +648,24 @@ final class SegmentDataRecovery {
             return grantedHighWatermarks;
         }
 
+        /** Full physical scans can prove a coordinate absent; a derived-index seed alone cannot. */
+        boolean provesAbsent(SegmentArenaControlLog authority, ProfileLedgerContext context, long entryId)
+                throws IOException {
+            requireCurrentArena(authority);
+            if (usesIndexCoverage || scan.skippedBodyBytes() != 0) {
+                return false;
+            }
+            for (Map.Entry<StreamKey, StreamPrefix> stream : streamPrefixes.entrySet()) {
+                if (!stream.getValue().contiguous()
+                        || authority.streamFirstSequence(stream.getKey().shard(),
+                                stream.getKey().generation().value()).orElse(-1) != stream.getValue().firstSequence()) {
+                    return false;
+                }
+            }
+            return entries.stream().noneMatch(location -> location.context().equals(context)
+                    && location.entryId() == entryId);
+        }
+
         /** Applied control selectors plus a complete scan select a unique current coordinate. */
         SegmentPointRead.Location uniqueLocation(SegmentArenaControlLog authority,
                                                  ProfileLedgerContext context, long entryId) throws IOException {

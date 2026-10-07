@@ -184,6 +184,8 @@ public class SegmentProfileInitialSocketClientTest {
         final java.util.Set<Integer> expectedFailedDataSessions = new java.util.HashSet<>();
         final List<ProfileNormalDataClient> dataClients = new ArrayList<>();
         final AtomicInteger authorityReads = new AtomicInteger();
+        final java.util.concurrent.atomic.AtomicBoolean readAllowed =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
         final List<ProfileControlScope> scopes = new ArrayList<>();
         final List<CountDownLatch> installRelease = new ArrayList<>();
         final List<CountDownLatch> activateRelease = new ArrayList<>();
@@ -216,6 +218,11 @@ public class SegmentProfileInitialSocketClientTest {
 
         Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum)
                 throws Exception {
+            this(blockInstall, blockActivate, enableControl, count, ackQuorum, false);
+        }
+
+        Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum,
+                boolean enableRead) throws Exception {
             descriptor = new ProfileDescriptor(EngineProfile.SEGMENT_WAL_ENGINE,
                     PayloadFormat.OPAQUE_LEDGER, DurabilityMode.SYNC_ON_ACK, 3, 3, ackQuorum, 0, 7, 11, List.of());
             descriptorBytes = ProfileDescriptorCodec.encode(descriptor, VALIDATOR);
@@ -327,7 +334,10 @@ public class SegmentProfileInitialSocketClientTest {
                                 protected void initChannel(SocketChannel socket) throws Exception {
                                     accepted.add(socket);
                                     if (!storage.installProfileConnection(socket.pipeline(), serverTls, budget,
-                                            131072, 64, "socket-test", 0, enableControl ? control : null)) {
+                                            131072, 64, "socket-test", 0, enableControl ? control : null,
+                                            enableRead ? new SegmentProfileReadConfig((caller, query) ->
+                                                readAllowed.get() && caller.equals(principal)
+                                                    && query.context().equals(context())) : null)) {
                                         return;
                                     }
                                     socket.pipeline().addBefore("profileApplication", "responseFault",
@@ -365,6 +375,21 @@ public class SegmentProfileInitialSocketClientTest {
                                                             frame.setByte(frame.readerIndex() + 39, 0);
                                                         } else if (fault == 9) {
                                                             frame.setInt(frame.readerIndex() + 16, 3);
+                                                        }
+                                                    }
+                                                    if (op == ProfileOperation.READ_ENTRY.wireValue()) {
+                                                        if (fault == 10) {
+                                                            frame.setInt(frame.readerIndex() + 44, 0);
+                                                        } else if (fault == 11) {
+                                                            frame.setByte(frame.readerIndex() + 60, 99);
+                                                        } else if (fault == 12) {
+                                                            frame.setLong(frame.readerIndex() + 112, 99);
+                                                        } else if (fault == 13) {
+                                                            frame.setLong(frame.readerIndex() + 124, 99);
+                                                        } else if (fault == 14) {
+                                                            frame.setInt(frame.readerIndex() + 16, 3);
+                                                        } else if (fault == 15) {
+                                                            frame.setInt(frame.readerIndex() + 120, 1024 * 1024 + 37);
                                                         }
                                                     }
                                                     if (op == ProfileOperation.INSTALL.wireValue()) {
@@ -939,6 +964,200 @@ public class SegmentProfileInitialSocketClientTest {
                     fixture.releaseReplies();
                     handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 }
+            }
+        }
+    }
+
+    @Test
+    public void actualProfilePointReadReturnsStoredBytesThroughTheOriginalSdkWithoutControlIo() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                try {
+                    assertEquals(0, sdkAdd(handle, bytes(16, 8)).get(5, TimeUnit.SECONDS).longValue());
+                    int reads = fixture.authorityReads.get();
+                    List<Integer> forces = fixture.nodeIo.stream().map(io -> io.forces).toList();
+                    var entries = handle.readEntries(0, 0);
+                    var first = entries.nextElement();
+                    assertEquals(0, first.getEntryId());
+                    assertTrue(Arrays.equals(bytes(16, 8), first.getEntry()));
+                    assertFalse(entries.hasMoreElements());
+                    assertEquals(reads, fixture.authorityReads.get());
+                    assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void actualPointReadSeparatesUnknownFencedMissingAndScopeDenial() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var client = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+            var source = entry(fixture, 0, 16);
+            try {
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        client.addNormal(fixture.context(), fixture.credential, 0, source)
+                                .get(5, TimeUnit.SECONDS).durableResult());
+            } finally {
+                source.release();
+            }
+            var found = client.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                    found.outcome());
+            assertEquals(44, found.entry().getLong(0));
+            assertEquals(0, found.entry().getLong(8));
+            var uncertain = client.readEntry(fixture.context(), 99).get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED,
+                    uncertain.outcome());
+            assertEquals(ProfileStatus.StatusClass.PROFILE_NOT_READY_OR_STALE, uncertain.status().statusClass());
+            CountDownLatch fenced = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AtomicReference<SegmentBookieControlLog.FenceResult> fenceResult = new AtomicReference<>();
+            assertEquals(null, fixture.nodes.get(0).submitProfileFence(new org.apache.bookkeeper.common.profile.wire
+                    .ProfileOperationCodec.FenceLedger(fixture.context(), bytes(16, 12),
+                            DigestManager.generateMasterKey(fixture.password)), (result, cause) -> {
+                        failure.set(cause);
+                        fenceResult.set(result);
+                        fenced.countDown();
+                    }));
+            assertTrue(fenced.await(5, TimeUnit.SECONDS));
+            assertEquals(null, failure.get());
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, fenceResult.get().status());
+            int force = fixture.nodeIo.get(0).forces;
+            var missing = client.readEntry(fixture.context(), 99).get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.MISSING,
+                    missing.outcome());
+            assertEquals(0, missing.entry().remaining());
+            assertEquals(force, fixture.nodeIo.get(0).forces);
+            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                    client.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
+            fixture.readAllowed.set(false);
+            assertEquals(ProfileStatus.StatusClass.UNAUTHORIZED,
+                    client.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).status().statusClass());
+        }
+    }
+
+    @Test
+    public void readCapabilityAndExactScopeAreRequiredBeforeReturningAnyEntry() throws Exception {
+        for (boolean enabled : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, enabled)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var client = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+                int force = fixture.nodeIo.get(0).forces;
+                int authorities = fixture.authorityReads.get();
+                ProfileLedgerContext requested = enabled
+                        ? new ProfileLedgerContext(44, bytes(16, 22), fixture.context().descriptorIdentity())
+                        : fixture.context();
+                var reply = client.readEntry(requested, 0).get(5, TimeUnit.SECONDS);
+                assertEquals(enabled ? ProfileStatus.StatusClass.UNAUTHORIZED
+                        : ProfileStatus.StatusClass.UNSUPPORTED_PROTOCOL_OPCODE_CAPABILITY_ENGINE,
+                        reply.status().statusClass());
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED,
+                        reply.outcome());
+                assertEquals(0, reply.entry().remaining());
+                assertEquals(force, fixture.nodeIo.get(0).forces);
+                assertEquals(authorities, fixture.authorityReads.get());
+            }
+        }
+    }
+
+    @Test
+    public void readMalformedRepliesNeverBecomeEntrySuccessOrMissing() throws Exception {
+        for (int fault : List.of(10, 11, 12, 13, 14, 15)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var client = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+                var source = entry(fixture, 0, 16);
+                try {
+                    assertEquals(ProfileStatus.DurableResult.APPLIED, client.addNormal(fixture.context(),
+                            fixture.credential, 0, source).get(5, TimeUnit.SECONDS).durableResult());
+                } finally {
+                    source.release();
+                }
+                fixture.faultTarget.set(0);
+                fixture.replyFault.set(fault);
+                assertThrows(ExecutionException.class,
+                        () -> client.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    @Test
+    public void readTimeoutKeepsFrameAndFilePinThroughNativeGetUntilActualReadTerminates() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var client = dataClient(fixture, 0, 4, Duration.ofMillis(300));
+            var source = entry(fixture, 0, 16);
+            try {
+                assertEquals(ProfileStatus.DurableResult.APPLIED, client.addNormal(fixture.context(),
+                        fixture.credential, 0, source).get(5, TimeUnit.SECONDS).durableResult());
+            } finally {
+                source.release();
+            }
+            var field = IsolatedSegmentStorage.class.getDeclaredField("execution");
+            field.setAccessible(true);
+            SegmentExecutionGroup execution = (SegmentExecutionGroup) field.get(fixture.nodes.get(0));
+            SegmentOwnerLoop owner = execution.owner(0);
+            CountDownLatch blocked = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    execution.io().submit(ticket, () -> {
+                        blocked.countDown();
+                        await(release);
+                    }, cause -> failure.set(cause));
+                }
+
+                @Override
+                public void failed(Throwable cause) {
+                    failure.set(cause);
+                }
+            }));
+            try {
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                var pending = client.readEntry(fixture.context(), 0);
+                var ioField = IsolatedSegmentFiles.class.getDeclaredField("activeIo");
+                ioField.setAccessible(true);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                int pins;
+                do {
+                    var sampled = new java.util.concurrent.FutureTask<Integer>(() -> {
+                        var actualFiles = files(fixture.nodes.get(0));
+                        synchronized (actualFiles) {
+                            return ioField.getInt(actualFiles);
+                        }
+                    });
+                    assertTrue(owner.control(sampled::run));
+                    pins = sampled.get(5, TimeUnit.SECONDS);
+                    if (pins == 0) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                } while (pins == 0 && System.nanoTime() < until);
+                assertEquals(1, pins);
+                assertThrows(ExecutionException.class, () -> pending.get(5, TimeUnit.SECONDS));
+                assertTrue(fixture.budgets.get(0).used(ProfileReceiveBudget.Lane.DATA) > 0);
+                assertThrows(java.io.IOException.class, files(fixture.nodes.get(0))::close);
+                release.countDown();
+                until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.budgets.get(0).used(ProfileReceiveBudget.Lane.DATA) != 0
+                        && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(0, fixture.budgets.get(0).used(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(null, failure.get());
+            } finally {
+                release.countDown();
             }
         }
     }

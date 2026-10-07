@@ -439,9 +439,14 @@ public class SegmentBookieControlLogTest {
 
     private static ReadReply pointRead(SegmentPointRead.Reader reader, ProfileLedgerContext context, long entryId)
             throws Exception {
+        return pointRead(reader, context, entryId, () -> { });
+    }
+
+    private static ReadReply pointRead(SegmentPointRead.Reader reader, ProfileLedgerContext context, long entryId,
+            Runnable terminal) throws Exception {
         CompletableFuture<ReadReply> reply = new CompletableFuture<>();
         assertTrue(reader.submit(context, entryId, new SegmentPointRead.ReadRequest(
-                (status, result, failure) -> reply.complete(new ReadReply(status, result, failure)))));
+                (status, result, failure) -> reply.complete(new ReadReply(status, result, failure)), terminal)));
         return reply.get(5, TimeUnit.SECONDS);
     }
 
@@ -1857,7 +1862,10 @@ public class SegmentBookieControlLogTest {
                 ownerBarrier(owner);
                 assertNull(failure.get());
                 SegmentPointRead.Reader reader = pointReader(group, files, arena, bookie, hot);
-                ReadReply first = pointRead(reader, context(), 1);
+                AtomicInteger actualTerminals = new AtomicInteger();
+                ReadReply first = pointRead(reader, context(), 1, actualTerminals::incrementAndGet);
+                ownerBarrier(owner);
+                assertEquals(1, actualTerminals.get());
                 assertEquals(SegmentPointRead.ReadStatus.FOUND, first.status());
                 assertNull(first.failure());
                 held = first.result();
@@ -1917,6 +1925,7 @@ public class SegmentBookieControlLogTest {
             CountDownLatch blocked = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
             CountDownLatch delivered = new CountDownLatch(1);
+            AtomicInteger actualTerminals = new AtomicInteger();
             AtomicReference<ReadReply> reply = new AtomicReference<>();
             AtomicReference<Throwable> failure = new AtomicReference<>();
             RuntimeException callbackFailure = new RuntimeException("Read consumer failed");
@@ -1972,7 +1981,7 @@ public class SegmentBookieControlLogTest {
                         if (result != null) {
                             result.close();
                         }
-                    });
+                    }, actualTerminals::incrementAndGet);
                     assertTrue(reader.submit(context(), 1, request));
                     if (mode != 3) {
                         ownerBarrier(owner);
@@ -1980,6 +1989,7 @@ public class SegmentBookieControlLogTest {
                         assertTrue(owner.control(leases::run));
                         assertEquals(1, leases.get(5, TimeUnit.SECONDS).intValue());
                         assertThrows(IOException.class, files::close);
+                        assertEquals(0, actualTerminals.get());
                         assertThrows(IOException.class, bookie::close);
                         if (mode == 0) {
                             assertTrue(request.stopWaiting());
@@ -2006,6 +2016,7 @@ public class SegmentBookieControlLogTest {
                         release.countDown();
                     }
                     assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                    assertEquals(1, actualTerminals.get());
                     assertNull(failure.get());
                     assertEquals(8192, files.nextOffset(0));
                     assertEquals(1, files.dataIo.forces);

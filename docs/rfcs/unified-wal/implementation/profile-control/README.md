@@ -431,3 +431,5 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 2026-10-07，[原 SDK 写期换组](../profile-wire/README.md#原-sdk-写期换组与整体回调门)已把当前 preparation、实际 CONTROL INSTALL、membership、authority/目标留存及 ACTIVATE_REPLACEMENT 接进 ProfileLedgerHandle 的整体 completion gate。Operation 一次捕获，UNKNOWN 后显式 reconnect 只更换同目标/incarnation的连接；停止接纳不返回未完成 activation 的 AVAILABLE，也不回滚已提交的标准 metadata。借用 cold executor 必须有界并拒绝溢出，不能 CallerRuns 到 event loop；调用方排空实际任务后关闭借用资源。最终可用是检查时的 snapshot，不是持续 authority lease。详细验证、真实 RED/GREEN及剩余范围以该实现记录为准；完整 restart controller、恢复/删除/GC和生产权限尚未闭合。
 
 2026-10-07，[3/3/3及同起点连续换组](../profile-wire/README.md#333-与同起点连续换组验证)通过原冷协调器实际执行两次INSTALL→membership→retained authority→ACTV。LAC仍为-1时，标准fragment起点0被连续替换，两个sidecar页均保留；UNKNOWN不会被后续NONE清除。当前是五节点、一个slot的两次变更证据，不能扩展为controller进程恢复、rejoin或步骤13整体验收。
+
+2026-10-07，[显式READ_ENTRY](../profile-wire/README.md#read_entry-接线与验收范围)使用独立nonblocking principal+query-scope policy；认证和capability不授予读权限。普通读不暴露OPEN recovery范围，已closed grant的本地readable事实仍不替代客户端membership/confirmed范围选择。缺失须有durable fence、稳定Bookie及完整覆盖，UNKNOWN/NOT_READY不算absence。原SDK ordinary读保持LAC/digest合同，不为读取激活normal writer；完整恢复授权、fenced-close与生产权限尚未完成。

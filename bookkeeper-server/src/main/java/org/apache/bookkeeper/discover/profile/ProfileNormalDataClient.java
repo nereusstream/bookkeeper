@@ -25,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 
 /** Actual frozen ADD_NORMAL transport; preserves the full status before any SDK failure handling. */
@@ -64,6 +65,11 @@ public final class ProfileNormalDataClient implements AutoCloseable {
     public CompletableFuture<ProfileStatus> addNormal(ProfileLedgerContext context,
             ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {
         return socket.addNormal(context, credential, entryId, entry);
+    }
+
+    /** Explicit point read; NOT_READY/UNKNOWN refusals are not missing evidence and never cause activation. */
+    public CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
+        return socket.readEntry(context, entryId);
     }
 
     @Override
