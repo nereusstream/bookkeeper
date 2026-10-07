@@ -19,6 +19,14 @@ import time
 
 
 MATRIX = {
+    'a-profile-sdk-replacement': None,
+    'ce-profile-sdk-replacement-activation': 'AvailabilityIncludesActivation',
+    'ce-profile-sdk-replacement-gate': 'GateRequiresWholeTransition',
+    'ce-profile-sdk-replacement-old': 'RetiredReplicaCannotAck',
+    'ce-profile-sdk-replacement-source': 'ResendKeepsSource',
+    'ce-profile-sdk-replacement-coordinate': 'ResendKeepsCoordinate',
+    'ce-profile-sdk-replacement-resend': 'OnlyAffectedSlotsResent',
+    'ce-profile-sdk-replacement-callback': 'OneOriginalCallback',
     'a-profile-replacement-install': None,
     'ce-profile-replacement-install-prepare': 'InstallHasBoundLivePreparation',
     'ce-profile-replacement-install-delete': 'InstallHasBoundLivePreparation',
@@ -395,7 +403,7 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A replacement-preparation-inactive-install-UIC2-schema-force-owner and replacement-lifecycle-page-birth-metadata-atomic-cut-retained-prefix-current-authority and guarded-standard-metadata-physical-birth-CAS-exact-version-immutable-fields and fixed-initial-sdk-bounded-retry-sticky-unknown-source-coordinate-original-A2-callback-local-stop and normal-client-source-quota-cancel-encoding-write-wire and initial-client-correlation-slot-custody and initial-socket-dispatch and resumable-initial-all-E-availability and initial-READY-lifecycle-birth-CAS-retention and initial-metadata-all-E-gate physical-INSTALL-dispatch PREPARING-reservation-authority and standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
+        "scope": "Finite Model A original-sdk-two-entry-two-slot-completion-gate-replacement-activation-retired-replica-contiguous-callback and replacement-preparation-inactive-install-UIC2-schema-force-owner and replacement-lifecycle-page-birth-metadata-atomic-cut-retained-prefix-current-authority and guarded-standard-metadata-physical-birth-CAS-exact-version-immutable-fields and fixed-initial-sdk-bounded-retry-sticky-unknown-source-coordinate-original-A2-callback-local-stop and normal-client-source-quota-cancel-encoding-write-wire and initial-client-correlation-slot-custody and initial-socket-dispatch and resumable-initial-all-E-availability and initial-READY-lifecycle-birth-CAS-retention and initial-metadata-all-E-gate physical-INSTALL-dispatch PREPARING-reservation-authority and standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "matrix": MATRIX, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
@@ -414,6 +422,7 @@ def main():
                    else "ProfileReplacementInstall.tla" if "profile-replacement-install" in name
                    else "ProfileReplacementLifecycle.tla" if "profile-replacement-lifecycle" in name
                    else "ProfileMembershipCas.tla" if "profile-membership-cas" in name
+                   else "ProfileSdkReplacement.tla" if "profile-sdk-replacement" in name
                    else "ProfileSdkBridge.tla" if "profile-sdk-bridge" in name
                    else "ProfileNormalClientSource.tla" if "profile-normal-client-source" in name
                    else "ProfileInitialClientCorrelation.tla" if "profile-initial-client" in name

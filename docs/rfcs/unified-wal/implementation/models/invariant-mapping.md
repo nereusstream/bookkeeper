@@ -527,3 +527,7 @@ ProfileReplacementLifecycle检查PublicationHasSameMetadataAndPageBirth、Mutati
 ### Replacement inactive INSTALL 与 schema 性质
 
 ProfileReplacementInstall检查InstallHasBoundLivePreparation、InstallNeverActivatesNormal、ActivationHasNegotiatedBoundSchema、AckHasActualForceAndOwnerApply。七个独立mutations对应跳过preparation、delete、metadata generation，INSTALL错误开放normal，UIC2/schema2忽略，以及force/apply前确认。一个冻结slot/一个ACTV、metadata predecessor/committed/changed三态、peer/capability/schema可用性；实时时钟/bytes/TLS/元数据quorum与whole memory由实际tests及其他slice负责。grants是读取时snapshot；远程cut不自动撤销已接纳的本地I/O，不证明liveness/fairness、SDK重发或完整A+C+D。
+
+### 原 SDK replacement gate 性质
+
+ProfileSdkReplacement 检查 AvailabilityIncludesActivation、GateRequiresWholeTransition、RetiredReplicaCannotAck、ResendKeepsSource、ResendKeepsCoordinate、OnlyAffectedSlotsResent、OneOriginalCallback、CallbacksStayContiguous 和 SuccessHasCurrentQuorum。七个 mutation 各命中指定性质；两个 pending entry 和两 slot 是有限边界，控制阶段依赖既有 receipt 投影，不是完整系统 refinement。同 ID rejoin、真实 refcount/crypto/fsync、timer 交错、全 quorum、controller restart、活性/公平性及 full A+C+D 仍未证明。

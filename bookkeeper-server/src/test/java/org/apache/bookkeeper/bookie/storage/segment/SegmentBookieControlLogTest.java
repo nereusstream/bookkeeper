@@ -7310,7 +7310,9 @@ public class SegmentBookieControlLogTest {
                 assertEquals(EngineProfile.SEGMENT_WAL_ENGINE.wireValue(), hello.activeEngine());
                 assertEquals(0, hello.readinessGeneration()); // Explicitly no actual startup-readiness claim.
                 assertEquals(control == null ? List.of() : List.of(
-                        new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1)),
+                        new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1),
+                        new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
+                                ProfileInitialControlCodec.REPLACEMENT_SCHEMA)),
                         hello.capabilities());
             } catch (Exception | Error cause) {
                 close();

@@ -373,7 +373,7 @@ public final class ProfileLedgerMetadataStore {
         }
     }
 
-    private static boolean sameMetadata(LedgerMetadata desired, LedgerMetadata actual) {
+    static boolean sameMetadata(LedgerMetadata desired, LedgerMetadata actual) {
         return actual.getLedgerId() == desired.getLedgerId()
                 && actual.getCToken() == desired.getCToken()
                 && actual.getMetadataFormatVersion() == desired.getMetadataFormatVersion()

@@ -270,6 +270,17 @@ class PendingAddOp implements WriteCallback {
         }
     }
 
+    /** Profile callbacks carry a verified incarnation; retired attempts still own a request count. */
+    synchronized void profileWriteComplete(int rc, long ledgerId, long entryId, BookieId address, Object context,
+            boolean currentReplica) {
+        if (currentReplica) {
+            writeComplete(rc, ledgerId, entryId, address, context);
+        } else {
+            --pendingWriteRequests;
+            maybeRecycle();
+        }
+    }
+
     @Override
     public synchronized void writeComplete(int rc, long ledgerId, long entryId, BookieId addr, Object ctx) {
         int bookieIndex = (Integer) ctx;

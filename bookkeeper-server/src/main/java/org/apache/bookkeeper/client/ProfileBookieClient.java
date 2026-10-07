@@ -22,6 +22,7 @@ package org.apache.bookkeeper.client;
 
 import io.netty.util.ReferenceCounted;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +50,7 @@ import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.WriteLacCallback;
 import org.apache.bookkeeper.util.AvailabilityOfEntriesOfLedger;
 import org.apache.bookkeeper.util.ByteBufList;
 
-/** Fixed initial ensemble adapter: classify full status and retry same bytes before the original scalar callback. */
+/** Classify full status and retry same bytes before the original scalar callback, bound to verified peers. */
 final class ProfileBookieClient implements BookieClient {
     record Retry(int attempts, Duration deadline, Duration backoff) {
         Retry {
@@ -63,7 +64,7 @@ final class ProfileBookieClient implements BookieClient {
     private final ClientContext base;
     private final ProfileLedgerContext ledger;
     private final ProtectedProfileCredential credential;
-    private final Map<BookieId, ProfileNormalDataClient> clients;
+    private volatile Map<BookieId, ProfileNormalDataClient> clients;
     private final Retry retry;
     private final int perTargetLimit;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -93,8 +94,9 @@ final class ProfileBookieClient implements BookieClient {
     @Override
     public void addEntry(BookieId address, long ledgerId, byte[] key, long entryId, ReferenceCounted bytes,
             WriteCallback callback, Object context, int options, boolean failFast, EnumSet<WriteFlag> flags) {
+        ProfileNormalDataClient peer = clients.get(address);
         int rejected = closed.get() ? BKException.Code.ClientClosedException
-                : ledgerId != ledger.ledgerId() || !clients.containsKey(address) || options != 0 || !flags.isEmpty()
+                : ledgerId != ledger.ledgerId() || peer == null || options != 0 || !flags.isEmpty()
                     ? BKException.Code.IllegalOpException
                     : !credential.matchesWireVerifier(key) ? BKException.Code.UnauthorizedAccessException : 0;
         if (rejected != 0) {
@@ -110,9 +112,14 @@ final class ProfileBookieClient implements BookieClient {
                             : BKException.Code.TooManyRequestsException, ledgerId, entryId, address, context);
                     return;
                 }
-                Delivery delivery = new Delivery(address, entryId, bytes, callback, context);
+                Delivery delivery = new Delivery(address, peer, entryId, bytes, callback, context);
                 counts.merge(address, 1, Integer::sum);
                 pending.add(delivery);
+                var current = clients.get(address);
+                if (current == null || !Arrays.equals(delivery.incarnation, current.hello().storageIncarnation())) {
+                    delivery.finish(BKException.Code.WriteException);
+                    return;
+                }
                 try {
                     delivery.expiryTask = base.getScheduler().scheduleOrdered(ledger.ledgerId(), () -> {
                         try {
@@ -144,6 +151,8 @@ final class ProfileBookieClient implements BookieClient {
 
     private final class Delivery {
         final BookieId target;
+        final ProfileNormalDataClient client;
+        final byte[] incarnation;
         final long entryId;
         final ReferenceCounted bytes;
         final WriteCallback callback;
@@ -156,8 +165,11 @@ final class ProfileBookieClient implements BookieClient {
         ScheduledFuture<?> expiryTask;
         volatile boolean inFlight;
 
-        Delivery(BookieId target, long entryId, ReferenceCounted bytes, WriteCallback callback, Object context) {
+        Delivery(BookieId target, ProfileNormalDataClient client, long entryId, ReferenceCounted bytes,
+                WriteCallback callback, Object context) {
             this.target = target;
+            this.client = client;
+            this.incarnation = client.hello().storageIncarnation();
             this.entryId = entryId;
             this.bytes = bytes;
             this.callback = callback;
@@ -178,7 +190,7 @@ final class ProfileBookieClient implements BookieClient {
             }
             try {
                 inFlight = true;
-                clients.get(target).addNormal(ledger, credential, entryId, bytes).whenComplete((status, failure) -> {
+                client.addNormal(ledger, credential, entryId, bytes).whenComplete((status, failure) -> {
                     try {
                         ordered(() -> classify(status, failure));
                     } catch (RejectedExecutionException shutdown) {
@@ -258,7 +270,14 @@ final class ProfileBookieClient implements BookieClient {
             pending.remove(this);
             counts.compute(target, (key, count) -> count == null || count == 1 ? null : count - 1);
             try {
-                callback.writeComplete(code, ledger.ledgerId(), entryId, target, context);
+                var current = clients.get(target);
+                boolean currentReplica = current != null
+                        && Arrays.equals(incarnation, current.hello().storageIncarnation());
+                if (callback instanceof PendingAddOp op) {
+                    op.profileWriteComplete(code, ledger.ledgerId(), entryId, target, context, currentReplica);
+                } else {
+                    callback.writeComplete(code, ledger.ledgerId(), entryId, target, context);
+                }
             } finally {
                 bytes.release();
             }
@@ -267,6 +286,21 @@ final class ProfileBookieClient implements BookieClient {
         void finishAfterExecutorShutdown() {
             finish(BKException.Code.InterruptedException);
         }
+    }
+
+    /** Called only under the original ledger completion gate on its executor. Wire I/O keeps its own custody. */
+    void switchClients(Map<BookieId, ProfileNormalDataClient> current) {
+        clients = Map.copyOf(current);
+        for (Delivery delivery : List.copyOf(pending)) {
+            var peer = clients.get(delivery.target);
+            if (peer == null || !Arrays.equals(delivery.incarnation, peer.hello().storageIncarnation())) {
+                delivery.finish(BKException.Code.WriteException);
+            }
+        }
+    }
+
+    Map<BookieId, ProfileNormalDataClient> clients() {
+        return clients;
     }
 
     boolean hasUncertainWrites() {

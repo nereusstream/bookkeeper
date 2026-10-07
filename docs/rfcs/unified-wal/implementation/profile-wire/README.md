@@ -285,3 +285,31 @@ Spotless/Checkstyle exit0，回执 unified-wal-sdk-style-9mkj8q1k 的135个 serv
 ### UIC2 replacement 控制链路
 
 2026-10-06，[new-peer准备与actual replacement wire](../profile-control/README.md#new-peer-inactive-install-与-replacement-wire)复用ProfileInitialControlClient/shared socket与original server control dispatch。UIC1/schema1保持，opcode ACTIVATE_REPLACEMENT使用独立UIC2 id0x55494332/version2及内层schema2；wrong purpose/schema不解析成功，未协商不提交。使用原实际TLS1.3/mTLS/HTTPS peer校验、principal/static role、cold exact authority、frame correlation、CONTROL budget/copy及write/wire终结；没有新增连接用途字段或普通Add协商。四节点真实new-peer inactive INSTALL、ZK membership/page/publication、ACTV、DATA及lost ACTV response同op解析已联通。shared transport仍无retry/reconnect；SDK映射整体切换/resend尚未接通。generic控制body与stable/G1/stock gate保留原BLOCKED/DEFERRED，不能称production writer已完成。
+
+## 原 SDK 写期换组与整体回调门
+
+2026-10-07，实验 `ProfileLedgerHandle.enableReplacement` 在首个 append 前接纳调用方给出的 verified CONTROL/DATA target pool；pool 与变更次数分别最多32，不自动发现、注册或连接目标。失败 slot 在原 ledger executor 串行处理，固定 LAC+1、当前 metadata snapshot 和唯一 INSTALL/ACTV 身份，调用 [ProfileReplacementCoordinator](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/discover/profile/ProfileReplacementCoordinator.java) 完成真实 inactive INSTALL → guarded membership CAS → retained authority → 全部新目标 local activation。借用现有 bounded cold executor、连接及 SDK scheduler，不另建线程、quorum 算法或 retry 框架。
+
+AVAILABLE 只在匹配的 durable activation、generation 及最终实际 authority/metadata 检查后返回；membership 已提交但停止接纳时返回 CONFLICT，不能把跳过 activation 的中间结果当作可用。已接纳的物理/冷任务可能继续完成，停止不撤销其效果；未确定的 Operation 留存，显式 reconnect 必须保留原 slot、Bookie/incarnation 和所有身份字段。解析成功不复活已失败的 SDK writer。
+
+整体 completion gate 贯穿冷流程及原 CLIENT-1 pending 更新。先切换 verified client mapping，再条件更新原 metadata、撤销全部受影响 pending slot 的旧 ACK，最后只重发受影响副本；未变副本的有效 ACK 保留，恢复原连续回调。Delivery 捕获实际 peer/incarnation、原 packaged bytes 与 entry coordinate；排队期间 mapping 改变也归还旧 request count，避免查找已移除 peer。旧 delivery 的 logical terminal 不取消实际 write/wire/I/O custody。Profile 专用 PendingAddOp 入口过滤已退役 incarnation 的 ACK，同时保留 CLIENT-2 计数与回收；Classic 普通入口不增加该判断。
+
+实际五节点组合以失败的旧 slot1/2、成功的新 slot3/4 和两个 pending entry 验证：INSTALL/ACTV force 分别被阻塞时不回调；完成后回调0、1、LAC1、length32，未变 slot0 没有重发，标准 metadata 保持 OPEN，initial 与 replacement 共5个目标留存。丢失 ACTV response 会停止 writer，显式新连接只解析原 Operation；另验证准入前停止无准备/metadata效果、membership 提交后停止不报告 AVAILABLE且可同操作解析。提交后停止的真实 RED 为 `unified-wal-local-rRh6Wdw7`（预期 CONFLICT，实际 AVAILABLE）；修复后定向 `unified-wal-local-5s6oLW8f` 四项通过。最初 `clwnI27R` 是测试缺少 import 的编译失败，不计为 RED 或 PASS。
+
+当前范围为预连接、有界 target pool、不同 BookieId 的 3/3/2 隔离写期换组。当前 slot 替换为同 BookieId 新 incarnation 仍拒绝；rejoin/离线追赶尚未实现，过滤代码不代表这些场景已端到端验证。registration discovery、controller 进程重启、全配置/连续多轮实际换组、read/recovery/fenced-close、AutoRecovery、delete/catch-up/GC、生产 listener/readiness/完整预算、长期/掉电/性能及 stable G1 仍未验收；步骤11～16保持 PARTIAL/OPEN。
+
+复现本增量的最小范围：
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#sdkReplaces*+sdkControlUnknown*+coordinatorCancelled*+coordinatorStopped*'
+~~~
+
+最终相关回归 `unified-wal-local-QcOf8k2C` exit0：实际8类373项全部通过，1012冻结输入；包含25项实际 socket组合、19项原 PendingAddOp 以及252项 Bookie control测试。扩大运行 `unified-wal-local-UaFKpS8N` 的7项失败是旧 HELLO 精确集合只期望UIC1，按已实现的 UIC1+UIC2 广告合同更新共享fixture后重跑通过，未跳过或弱化权限/force/timeout/资源断言。最终 style `unified-wal-sdk-replacement-final-style-6mriyfc3` exit0，213个共享 Java 输入一致；Java/style共14份checksums核验。
+
+最终模型 `unified-wal-model-_ugmmp39` exit0：286配置为56个完整正向PASS、230个指定反例，561输入/860份checksums核验；215共享输入及1358去重union与当前源码一致，5个designInputs保持父提交 `78135bdd2efbbca2e13e54c5f5b2c6fe9e04daaa`。新gate投影31889 generated/8488 distinct、queue0、depth27。工具1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry或state constraint，CHECK_DEADLOCK FALSE。仅有限模型及当前隔离测试范围，不提升完整A/C/D、活性、长期/掉电/性能或生产权限；历史回执不重绑。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,PendingAddOpTest,ZKProfileReservationStoreTest,ProfileLedgerMetadataStoreTest,ProfileInitialControlCodecTest,SegmentProfileInstallStoreTest,SegmentBookieControlLogTest,ProfileReceiveDecoderTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

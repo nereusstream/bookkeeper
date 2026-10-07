@@ -19,6 +19,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -101,6 +102,7 @@ import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementInstallPage;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementPage;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
@@ -927,6 +929,210 @@ public class SegmentProfileInitialSocketClientTest {
                     handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 }
             }
+        }
+    }
+
+    @Test
+    public void sdkReplacesTwoFailedTargetsOverRealControlChainAndResendsTheSamePendingEntry() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 5)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var pool = new ArrayList<ProfileReplacementCoordinator.Target>();
+            for (int target = 3; target < 5; target++) {
+                pool.add(new ProfileReplacementCoordinator.Target(fixture.connect(target, 4, Duration.ofSeconds(5)),
+                        dataClient(fixture, target, 8, Duration.ofSeconds(5))));
+            }
+            for (int target : List.of(1, 2)) {
+                fixture.expectedFailedDataSessions.add(target);
+                files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            }
+            CountDownLatch installs = new CountDownLatch(2);
+            CountDownLatch activations = new CountDownLatch(2);
+            CountDownLatch releaseInstall = new CountDownLatch(1);
+            CountDownLatch releaseActivation = new CountDownLatch(1);
+            for (int target : List.of(3, 4)) {
+                AtomicInteger phase = new AtomicInteger();
+                var ioField = SegmentBookieControlLog.class.getDeclaredField("io");
+                ioField.setAccessible(true);
+                ioField.set(bookie(fixture.nodes.get(target)), new SegmentFileIo(Integer.MAX_VALUE, -1, -1,
+                        false, () -> {
+                            if (phase.incrementAndGet() == 1) {
+                                installs.countDown();
+                                await(releaseInstall);
+                            } else {
+                                activations.countDown();
+                                await(releaseActivation);
+                            }
+                        }));
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(3), Duration.ofMillis(5));
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var coordinator = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                        fixture.cold);
+                handle.enableReplacement(coordinator, pool, DESCRIPTOR_BYTES, 4).get(5, TimeUnit.SECONDS);
+                try {
+                    List<Long> callbacks = new CopyOnWriteArrayList<>();
+                    var first = new CompletableFuture<Long>();
+                    handle.asyncAddEntry(bytes(16, 8), (code, ledger, id, ctx) -> {
+                        callbacks.add(id);
+                        if (code == 0) {
+                            first.complete(id);
+                        } else {
+                            first.completeExceptionally(BKException.create(code));
+                        }
+                    }, null);
+                    assertTrue(installs.await(5, TimeUnit.SECONDS));
+                    var second = new CompletableFuture<Long>();
+                    handle.asyncAddEntry(bytes(16, 9), (code, ledger, id, ctx) -> {
+                        callbacks.add(id);
+                        if (code == 0) {
+                            second.complete(id);
+                        } else {
+                            second.completeExceptionally(BKException.create(code));
+                        }
+                    }, null);
+                    assertFalse(first.isDone());
+                    assertFalse(second.isDone());
+                    assertEquals(available.metadata().getVersion(), fixture.manager.readLedgerMetadata(44)
+                            .get(5, TimeUnit.SECONDS).getVersion());
+                    releaseInstall.countDown();
+                    assertTrue(activations.await(5, TimeUnit.SECONDS));
+                    assertFalse(fixture.normal(3));
+                    assertFalse(fixture.normal(4));
+                    assertFalse(first.isDone());
+                    assertFalse(second.isDone());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    releaseActivation.countDown();
+                    assertEquals(0, first.get(10, TimeUnit.SECONDS).longValue());
+                    assertEquals(1, second.get(10, TimeUnit.SECONDS).longValue());
+                    assertEquals(List.of(0L, 1L), callbacks);
+                    assertEquals(1, handle.getLastAddConfirmed());
+                    assertEquals(32, handle.getLength());
+                    assertTrue(handle.hasUncertainWrites());
+                    assertEquals(2, fixture.dataResults.get(0).size()); // Unchanged target was never resent.
+                    var actual = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+                    assertEquals(LedgerMetadata.State.OPEN, actual.getValue().getState());
+                    assertEquals(List.of("socket0:3181", "socket3:3181", "socket4:3181"),
+                            actual.getValue().getAllEnsembles().lastEntry().getValue().stream()
+                                    .map(Object::toString).toList());
+                    assertEquals(5, fixture.reservations.retainedActivationTargets(44).targets().size());
+                    assertTrue(fixture.normal(3));
+                    assertTrue(fixture.normal(4));
+                    assertEquals(2, handle.getLength() / 16);
+                } finally {
+                    releaseInstall.countDown();
+                    releaseActivation.countDown();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkControlUnknownStopsWriterAndReconcilesOnlyTheOriginalFrozenOperation() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 5)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var pool = new ArrayList<ProfileReplacementCoordinator.Target>();
+            for (int target : List.of(3, 4)) {
+                pool.add(new ProfileReplacementCoordinator.Target(fixture.connect(target, 4,
+                        target == 4 ? Duration.ofMillis(250) : Duration.ofSeconds(5)),
+                        dataClient(fixture, target, 8, Duration.ofSeconds(5))));
+            }
+            fixture.faultTarget.set(4);
+            fixture.replyFault.set(1); // Drop only actual ACTV; INSTALL and physical operations remain real.
+            for (int target : List.of(1, 2)) {
+                fixture.expectedFailedDataSessions.add(target);
+                files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(3), Duration.ofMillis(5));
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var coordinator = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                        fixture.cold);
+                handle.enableReplacement(coordinator, pool, DESCRIPTOR_BYTES, 4).get(5, TimeUnit.SECONDS);
+                try {
+                    var entry = sdkAdd(handle, bytes(16, 8));
+                    assertThrows(ExecutionException.class, () -> entry.get(10, TimeUnit.SECONDS));
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    assertTrue(handle.hasUncertainWrites());
+                    var operation = handle.unresolvedReplacement();
+                    assertNotNull(operation);
+                    var version = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getVersion();
+                    fixture.replyFault.set(0);
+                    var peers = new HashMap<Integer, ProfileReplacementCoordinator.Target>();
+                    for (var original : operation.targets().entrySet()) {
+                        int target = original.getValue().bookie().toString().equals("socket3:3181") ? 3 : 4;
+                        peers.put(original.getKey(), new ProfileReplacementCoordinator.Target(
+                                fixture.connect(target, 4, Duration.ofSeconds(5)),
+                                dataClient(fixture, target, 8, Duration.ofSeconds(5))));
+                    }
+                    var resumed = coordinator.reconnect(operation, peers);
+                    assertEquals(operation.plan(), resumed.plan());
+                    var resolved = coordinator.execute(resumed).get(10, TimeUnit.SECONDS);
+                    assertEquals(ProfileReplacementCoordinator.Status.AVAILABLE, resolved.status());
+                    assertEquals(version, resolved.metadata().getVersion());
+                    assertTrue(entry.isCompletedExceptionally());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    assertThrows(ExecutionException.class, () -> sdkAdd(handle, bytes(16, 9)).get(5, TimeUnit.SECONDS));
+                    assertEquals(5, fixture.reservations.retainedActivationTargets(44).targets().size());
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void coordinatorCancelledAdmissionCreatesNoPreparationOrMembershipChange() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 4)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                    fixture.cold);
+            var target = new ProfileReplacementCoordinator.Target(fixture.connect(3, 4, Duration.ofSeconds(5)),
+                    dataClient(fixture, 3, 8, Duration.ofSeconds(5)));
+            var operation = coordinator.begin(available.metadata(), 0, Map.of(2, target), DESCRIPTOR_BYTES,
+                    fixture.credential, bytes(16, 10), bytes(16, 11)).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileReplacementCoordinator.Status.CONFLICT,
+                    coordinator.execute(operation, () -> false).get(5, TimeUnit.SECONDS).status());
+            assertEquals(available.metadata().getVersion(),
+                    fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getVersion());
+            assertFalse(fixture.normal(3));
+            assertEquals(3, fixture.reservations.retainedActivationTargets(44).targets().size());
+            assertEquals(null, fixture.zk.exists("/socket-initial/2c/replacement-install-3", false));
+        }
+    }
+
+    @Test
+    public void coordinatorStoppedAfterMembershipCannotReportAvailabilityBeforeActivation() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 4)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                    fixture.cold);
+            var target = new ProfileReplacementCoordinator.Target(fixture.connect(3, 4, Duration.ofSeconds(5)),
+                    dataClient(fixture, 3, 8, Duration.ofSeconds(5)));
+            var operation = coordinator.begin(available.metadata(), 0, Map.of(2, target), DESCRIPTOR_BYTES,
+                    fixture.credential, bytes(16, 12), bytes(16, 13)).get(5, TimeUnit.SECONDS);
+            var stopped = coordinator.execute(operation, () -> metadata.readMembership(44).snapshot().metadata()
+                    .getVersion().equals(available.metadata().getVersion())).get(10, TimeUnit.SECONDS);
+            assertEquals(ProfileReplacementCoordinator.Status.CONFLICT, stopped.status());
+            assertFalse(fixture.normal(3));
+            var committed = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            assertNotEquals(available.metadata().getVersion(), committed.getVersion());
+            assertEquals(4, fixture.reservations.retainedActivationTargets(44).targets().size());
+            var resolved = coordinator.execute(operation).get(10, TimeUnit.SECONDS);
+            assertEquals(ProfileReplacementCoordinator.Status.AVAILABLE, resolved.status());
+            assertEquals(committed.getVersion(), resolved.metadata().getVersion());
+            assertTrue(fixture.normal(3));
         }
     }
 

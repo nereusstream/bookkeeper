@@ -21,13 +21,17 @@
 package org.apache.bookkeeper.client;
 
 import io.netty.buffer.ByteBufAllocator;
+import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
@@ -37,20 +41,24 @@ import org.apache.bookkeeper.client.AsyncCallback.CloseCallback;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.client.api.WriteFlag;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorCodec;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.common.util.OrderedScheduler;
 import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementCoordinator;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.BookieClient;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.versioning.Versioned;
 
 /**
- * Experimental fixed initial Profile ensemble, using the original LedgerHandle/PendingAddOp write engine.
- * Borrows the SDK context and verified DATA clients. Replacement/read/recovery/close publication stay disabled.
+ * Experimental Profile writer, using the original LedgerHandle/PendingAddOp write engine.
+ * Borrows the SDK context and verified clients; replacement requires an explicitly configured bounded pool.
+ * Read/recovery/close publication stay disabled.
  * Local stop is never a metadata CLOSED receipt or cancellation of remote I/O.
  */
 public final class ProfileLedgerHandle extends LedgerHandle {
@@ -58,6 +66,11 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     private final Semaphore entries;
     private final int maxPayloadBytes;
     private final AtomicBoolean stopped = new AtomicBoolean();
+    private ProfileReplacementCoordinator replacement;
+    private List<ProfileReplacementCoordinator.Target> candidates = List.of();
+    private byte[] replacementDescriptor;
+    private int replacementLimit;
+    private volatile ProfileReplacementCoordinator.Operation currentReplacement;
 
     private ProfileLedgerHandle(ProfileContext context, ProfileInitialLifecycleCoordinator.Result initial,
             int maxPendingEntries, int maxPayloadBytes) throws GeneralSecurityException {
@@ -116,6 +129,40 @@ public final class ProfileLedgerHandle extends LedgerHandle {
                 maxPendingEntries, maxPayloadBytes);
     }
 
+    /** Configure a bounded verified pool before issuing entries; no registration/connection is synthesized. */
+    public CompletableFuture<Void> enableReplacement(ProfileReplacementCoordinator coordinator,
+            List<ProfileReplacementCoordinator.Target> targets, byte[] descriptor, int maxChanges) {
+        List<ProfileReplacementCoordinator.Target> pool = List.copyOf(targets);
+        if (descriptor.length > ProfileDescriptorCodec.MAX_CANONICAL_LENGTH) {
+            throw new IllegalArgumentException("Replacement descriptor exceeds the canonical bound");
+        }
+        byte[] ownedDescriptor = descriptor.clone();
+        if (pool.isEmpty() || pool.size() > 32 || maxChanges < 1 || maxChanges > 32
+                || pool.stream().map(ProfileReplacementCoordinator.Target::bookie).distinct().count() != pool.size()) {
+            throw new IllegalArgumentException("Invalid bounded Profile replacement pool");
+        }
+        CompletableFuture<Void> configured = new CompletableFuture<>();
+        executeOrdered(() -> {
+            synchronized (this) {
+                if (lastAddPushed != INVALID_ENTRY_ID || stopped.get() || replacement != null) {
+                    configured.completeExceptionally(new IllegalStateException("Configure before first append"));
+                    return;
+                }
+                replacement = Objects.requireNonNull(coordinator, "coordinator");
+                candidates = pool;
+                replacementDescriptor = ownedDescriptor;
+                replacementLimit = maxChanges;
+            }
+            configured.complete(null);
+        });
+        return configured;
+    }
+
+    /** An unresolved control operation can be explicitly reconciled; this is not permission to reopen a writer. */
+    public ProfileReplacementCoordinator.Operation unresolvedReplacement() {
+        return currentReplacement;
+    }
+
     /** Logical failure can still leave remote DATA; a later NONE never clears this observation. */
     public boolean hasUncertainWrites() {
         return transport.hasUncertainWrites();
@@ -168,7 +215,115 @@ public final class ProfileLedgerHandle extends LedgerHandle {
 
     @Override
     void handleBookieFailure(Map<Integer, BookieId> failed) {
-        handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+        if (replacement == null || stopped.get()) {
+            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+            return;
+        }
+        synchronized (metadataLock) {
+            delayedWriteFailedBookies.putAll(failed);
+            if (changingEnsemble) {
+                return;
+            }
+            changingEnsemble = true;
+        }
+        try {
+            executeOrdered(this::replaceNext);
+        } catch (RejectedExecutionException unavailable) {
+            handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
+        }
+    }
+
+    private void replaceNext() {
+        if (stopped.get()) {
+            return;
+        }
+        Map<Integer, BookieId> failed;
+        synchronized (metadataLock) {
+            failed = new HashMap<>(delayedWriteFailedBookies);
+            delayedWriteFailedBookies.clear();
+        }
+        Versioned<LedgerMetadata> expected = getVersionedLedgerMetadata();
+        List<BookieId> ensemble = getCurrentEnsemble();
+        failed.entrySet().removeIf(entry -> !ensemble.get(entry.getKey()).equals(entry.getValue()));
+        if (failed.isEmpty()) {
+            synchronized (metadataLock) {
+                changingEnsemble = false;
+            }
+            sendAddSuccessCallbacks();
+            return;
+        }
+        if (numEnsembleChanges.incrementAndGet() > replacementLimit) {
+            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+            return;
+        }
+        ensembleChangeCounter.inc();
+        Map<Integer, ProfileReplacementCoordinator.Target> selected = new HashMap<>();
+        var available = candidates.stream().filter(target -> !ensemble.contains(target.bookie())).iterator();
+        for (int slot : failed.keySet().stream().sorted().toList()) {
+            if (!available.hasNext()) {
+                handleUnrecoverableErrorDuringAdd(BKException.Code.NotEnoughBookiesException);
+                return;
+            }
+            selected.put(slot, available.next());
+        }
+        long start = getLastAddConfirmed() + 1;
+        var credential = ProtectedProfileCredential.of(1, ledgerKey);
+        CompletableFuture<ProfileReplacementCoordinator.Operation> begun;
+        try {
+            begun = replacement.begin(expected, start, selected, replacementDescriptor, credential,
+                    identity(), identity());
+        } catch (RuntimeException refused) {
+            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+            return;
+        }
+        begun.thenCompose(operation -> {
+                    currentReplacement = operation;
+                    return replacement.execute(operation, () -> !stopped.get());
+                }).whenComplete((result, failure) -> {
+                    Runnable completed = () -> {
+                        if (stopped.get()) {
+                            return;
+                        }
+                        if (failure != null || result == null
+                                || result.status() != ProfileReplacementCoordinator.Status.AVAILABLE) {
+                            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+                            return;
+                        }
+                        Map<BookieId, ProfileNormalDataClient> current = new HashMap<>(transport.clients());
+                        failed.values().forEach(current::remove);
+                        current.putAll(result.clients());
+                        transport.switchClients(current);
+                        if (!setLedgerMetadata(expected, result.metadata())) {
+                            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+                            return;
+                        }
+                        unsetSuccessAndSendWriteRequest(getCurrentEnsemble(), selected.keySet());
+                        currentReplacement = null;
+                        synchronized (metadataLock) {
+                            delayedWriteFailedBookies.entrySet().removeIf(entry ->
+                                    !getCurrentEnsemble().get(entry.getKey()).equals(entry.getValue()));
+                            if (delayedWriteFailedBookies.isEmpty()) {
+                                changingEnsemble = false;
+                            }
+                        }
+                        if (changingEnsemble) {
+                            replaceNext();
+                        } else {
+                            sendAddSuccessCallbacks();
+                        }
+                    };
+                    try {
+                        executeOrdered(completed);
+                    } catch (RejectedExecutionException unavailable) {
+                        handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
+                    }
+                });
+    }
+
+    private static byte[] identity() {
+        UUID value = UUID.randomUUID();
+        return ByteBuffer.allocate(16).putLong(value.getMostSignificantBits()).putLong(value.getLeastSignificantBits())
+                .array();
     }
 
     @Override
