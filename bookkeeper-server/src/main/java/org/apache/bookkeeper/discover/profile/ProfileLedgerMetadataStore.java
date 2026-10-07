@@ -49,7 +49,7 @@ import org.apache.zookeeper.data.Id;
 
 /**
  * Experimental standard-metadata creation after the coordinator has verified reservation and all-E install.
- * Borrows the existing manager; its explicit ZK context also enables one guarded cold membership CAS.
+ * Borrows the manager; its explicit ZK context enables guarded cold membership and recovery transitions.
  * It neither retries writes nor publishes READY, activation or a writer.
  */
 public final class ProfileLedgerMetadataStore {
@@ -63,7 +63,7 @@ public final class ProfileLedgerMetadataStore {
         public Result {
             Objects.requireNonNull(outcome, "outcome");
             if ((outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED) != (metadata != null)) {
-                throw new IllegalArgumentException("Only a proved creation or membership result carries metadata");
+                throw new IllegalArgumentException("Only a proved metadata transition carries metadata");
             }
         }
 
@@ -193,6 +193,8 @@ public final class ProfileLedgerMetadataStore {
                 || firstEntry < input.getAllEnsembles().lastKey() || ensemble.size() != input.getEnsembleSize()
                 || new HashSet<>(ensemble).size() != ensemble.size()
                 || ensemble.equals(input.getAllEnsembles().lastEntry().getValue())
+                || input.getMetadataFormatVersion() != 3 || input.getDigestType() != DigestType.CRC32C
+                || input.getAllEnsembles().isEmpty() || input.getAllEnsembles().firstKey() != 0
                 || input.getAllEnsembles().size() > MAX_EXPERIMENTAL_FRAGMENTS
                 || firstEntry > input.getAllEnsembles().lastKey()
                     && input.getAllEnsembles().size() == MAX_EXPERIMENTAL_FRAGMENTS) {
@@ -274,6 +276,71 @@ public final class ProfileLedgerMetadataStore {
         }
     }
 
+    boolean usesMutationClient(ZooKeeper client) {
+        return mutationClient == client;
+    }
+
+    /** Same-record OPEN -> IN_RECOVERY, guarded by both observed physical births. No fence/grant is implied. */
+    Result enterRecovery(MembershipSnapshot expected, ProfileRecoveryContext context,
+            List<Op> lifecycleChecks, long deadline) throws InterruptedException, TimeoutException, IOException {
+        var input = expected.metadata().getValue();
+        if (mutationClient == null || !mutableMembership(input)
+                || !(expected.metadata().getVersion() instanceof LongVersion version)
+                || version.getLongVersion() != context.predecessorVersion()
+                || expected.birthZxid() != context.metadataBirth() || input.getCToken() != context.creatorToken()
+                || input.getAllEnsembles().size() > MAX_EXPERIMENTAL_FRAGMENTS
+                || input.getEnsembleSize() > ProfileReservation.MAX_INITIAL_TARGETS
+                || !Arrays.equals(ProfileRecoveryContext.metadataDigest(input), context.predecessorDigest())) {
+            return new Result(Outcome.CONFLICT, null);
+        }
+        var base = ProfileRecoveryContext.predecessorProjection(input);
+        var custom = new java.util.TreeMap<>(base.getCustomMetadata());
+        custom.put(ProfileRecoveryContext.KEY, context.encode());
+        var desired = LedgerMetadataBuilder.from(base).withCToken(base.getCToken())
+                .withCustomMetadata(custom).withInRecoveryState().build();
+        byte[] encoded = new LedgerMetadataSerDe().serialize(desired);
+        if (encoded.length > 1024 * 1024) {
+            throw new IllegalArgumentException("Profile recovery metadata exceeds its fixed bound");
+        }
+        var before = readMembership(input.getLedgerId(), deadline);
+        if (before.status() != ReadStatus.FOUND) {
+            return new Result(before.status() == ReadStatus.QUARANTINED || before.status() == ReadStatus.NOT_FOUND
+                    ? Outcome.QUARANTINED : Outcome.DURABILITY_UNKNOWN, null);
+        }
+        if (context.matchesRecovery(before.snapshot())) {
+            return new Result(Outcome.ALREADY_APPLIED, before.snapshot().metadata());
+        }
+        if (before.snapshot().birthZxid() != expected.birthZxid()
+                || !before.snapshot().metadata().getVersion().equals(expected.metadata().getVersion())
+                || !sameMetadata(base, before.snapshot().metadata().getValue())) {
+            return new Result(Outcome.CONFLICT, null);
+        }
+        var guarded = ensureMembershipGuard(before.snapshot(), deadline);
+        if (guarded == null || guarded.birthZxid() != expected.birthZxid()
+                || !guarded.metadata().getVersion().equals(expected.metadata().getVersion())
+                || !sameMetadata(base, guarded.metadata().getValue())) {
+            return new Result(Outcome.CONFLICT, null);
+        }
+        var checks = new java.util.ArrayList<>(lifecycleChecks);
+        checks.addAll(checksForMembership(expected));
+        String path = ((AbstractZkLedgerManager) manager).getLedgerPath(input.getLedgerId());
+        checks.add(Op.setData(path, encoded, (int) version.getLongVersion()));
+        int code = multi(checks, deadline);
+        var after = readMembership(input.getLedgerId(), deadline);
+        if (after.status() != ReadStatus.FOUND) {
+            return new Result(after.status() == ReadStatus.QUARANTINED || after.status() == ReadStatus.NOT_FOUND
+                    ? Outcome.QUARANTINED : Outcome.DURABILITY_UNKNOWN, null);
+        }
+        if (context.matchesRecovery(after.snapshot())) {
+            return new Result(code == Code.OK.intValue() ? Outcome.APPLIED : Outcome.ALREADY_APPLIED,
+                    after.snapshot().metadata());
+        }
+        return new Result(code == Code.BADVERSION.intValue() || code == Code.NONODE.intValue()
+                || after.snapshot().birthZxid() != expected.birthZxid()
+                || !sameMetadata(base, after.snapshot().metadata().getValue())
+                ? Outcome.CONFLICT : Outcome.DURABILITY_UNKNOWN, null);
+    }
+
     private MembershipSnapshot readMutationMetadata(String path, long ledger, long deadline)
             throws InterruptedException, TimeoutException, IOException {
         ProfileZKReadClient.Node node = mutationReads.get(path, deadline);
@@ -329,6 +396,22 @@ public final class ProfileLedgerMetadataStore {
             throw new IllegalArgumentException("Invalid immutable metadata birth guard");
         }
         return readMutationMetadata(path, metadata.getLedgerId(), deadline);
+    }
+
+    /** Required guard lookup during recovery adoption; never rebuild missing authority after restart. */
+    void verifyRecoveryGuard(MembershipSnapshot current, long deadline)
+            throws InterruptedException, TimeoutException {
+        var value = current.metadata().getValue();
+        String path = ((AbstractZkLedgerManager) manager).getLedgerPath(value.getLedgerId());
+        String marker = path + "/profile-birth-" + Long.toHexString(current.birthZxid())
+                + "-" + Long.toHexString(value.getCToken());
+        byte[] expected = ByteBuffer.allocate(76).putInt(0x55574d42).putInt(1).putLong(current.birthZxid())
+                .putLong(value.getCToken()).put(ProfileMetadataBacklink.from(value).encode()).array();
+        var guard = mutationReads.get(marker, deadline);
+        if (guard.code() != Code.OK.intValue() || guard.stat().getEphemeralOwner() != 0
+                || guard.stat().getVersion() != 0 || !Arrays.equals(expected, guard.bytes())) {
+            throw new IllegalArgumentException("Required recovery metadata birth guard is missing or corrupt");
+        }
     }
 
     /** Same namespace checks for lifecycle publication: metadata birth/version cannot change across that CAS. */

@@ -551,3 +551,7 @@ ProfileLacSource检查ReplyRequiresPermission、EmptyRequiresWholeLedgerProof、
 ### SDK LAC覆盖与length锚点性质
 
 ProfileLacEvidence检查CoverageCountsOnlyVerified、SuccessHasMatchingLength、SuccessHasCorrectAnchor、SuccessHasNoLengthConflict、SuccessKeepsMetadata、InFlightOwnsReservation；六个mutation分别在digest前计覆盖、复用源length、忽略锚点坐标/length矛盾、caller取消后释放名额或忽略metadata变化。E=W=3的A2/A3有限投影不证明一般E>W、crypto producer、最大/explicit LAC、fresh远端birth/context、逐来源fencing/required frontier、CLOSED、总预算或活性。
+
+### 恢复context/fencing前置性质
+
+ProfileRecoveryPrelude检查WrittenContextHasObservedBirth、WrittenContextHasPublishedAuthority、CreatorFieldsArePreserved、OperationIsFrozen、FenceCoverageHasDurableVerifiedSources、FenceScopeIsCurrent、PreludeNeverPublishesClosed。九个mutation分别删除metadata/lifecycle birth guard、跳过published authority、丢creator、更换operation、计UNKNOWN、忽略peer/scope或把fencing当作close。只投影E=W=3、A2/A3的一次开始与fence fan-in；完整grant/frontier/close、crypto/bytes、全局memory、clock/活性及general E>W不在此投影。

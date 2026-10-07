@@ -383,6 +383,8 @@ DATA durable → hot locator → local result
 
 2026-10-07 [原SDK的LAC覆盖与length锚定](profile-wire/README.md#原sdk的lac覆盖与length锚定)新增显式readLacEvidence：原coverage/write-set与digest校验收集source样本，再取得同一handle metadata快照下的prefix边界length；源length不冒充prefix length，缺锚点或矛盾返回non-OK，不改writer状态。它不是fresh远端RecoveryContext、fencing coverage或CLOSED事实；完整恢复/AutoRecovery及步骤14保持OPEN。
 
+2026-10-07 [恢复上下文与fencing前置](profile-wire/README.md#恢复上下文与fencing前置)已实现真实ZK同记录OPEN→IN_RECOVERY、固定UWRC184恢复token、metadata/lifecycle物理birth guard和同操作重试/重开；显式coordinator复用已验证CONTROL peers及原coverage，只计durable FENCE并重新核对同一上下文。FENCED_CONTEXT不是RECOVERED_AND_CLOSED，完整frontier、恢复Add/close及步骤14仍OPEN。
+
 #### 15. 实现集群删除、离线投递与rejoin
 
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：

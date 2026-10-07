@@ -429,6 +429,215 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public record RecoveryPlan(ProfileLedgerMetadataStore.MembershipSnapshot predecessor, Snapshot lifecycle,
+                               ProfileRecoveryContext context) { }
+
+    public record RecoveryCapture(ReadStatus status, RecoveryPlan plan) {
+        public RecoveryCapture {
+            Objects.requireNonNull(status, "status");
+            if ((status == ReadStatus.FOUND) != (plan != null)) {
+                throw new IllegalArgumentException("Only FOUND carries a frozen recovery plan");
+            }
+        }
+    }
+
+    public record RecoveryResult(ProfileLedgerMetadataStore.Outcome outcome, ProfileRecoveryContext context,
+                                 ProfileLedgerMetadataStore.MembershipSnapshot metadata) {
+        public RecoveryResult {
+            Objects.requireNonNull(outcome, "outcome");
+            boolean success = outcome == ProfileLedgerMetadataStore.Outcome.APPLIED
+                    || outcome == ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED;
+            if (success ? context == null || metadata == null : context != null || metadata != null) {
+                throw new IllegalArgumentException("Only proved IN_RECOVERY carries its context/metadata");
+            }
+        }
+    }
+
+    /** Freeze once. An UNKNOWN caller must reuse this plan, not silently recapture another birth or version. */
+    public RecoveryCapture captureRecovery(ProfileLedgerMetadataStore metadata, long ledger, byte[] operation) {
+        requireRecoveryClient(metadata);
+        operation = ProfileLifecycleHead.fixed(operation, 16, true);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var root = read(ledger, deadline);
+            var member = metadata.readMembership(ledger, deadline);
+            if (root.status() != ReadStatus.FOUND || member.status() != ReadStatus.FOUND) {
+                return new RecoveryCapture(root.status() == ReadStatus.QUARANTINED
+                        || member.status() == ReadStatus.QUARANTINED ? ReadStatus.QUARANTINED
+                        : ReadStatus.UNAVAILABLE, null);
+            }
+            if (member.snapshot().metadata().getValue().getState() != LedgerMetadata.State.OPEN
+                    || !recoveryPublicationMatches(root.snapshot(), member.snapshot(), deadline)) {
+                return new RecoveryCapture(ReadStatus.QUARANTINED, null);
+            }
+            var context = ProfileRecoveryContext.capture(member.snapshot(), root.snapshot(), operation);
+            return new RecoveryCapture(ReadStatus.FOUND, new RecoveryPlan(member.snapshot(), root.snapshot(), context));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new RecoveryCapture(ReadStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new RecoveryCapture(ReadStatus.UNAVAILABLE, null);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return new RecoveryCapture(ReadStatus.QUARANTINED, null);
+        }
+    }
+
+    public RecoveryResult beginRecovery(ProfileLedgerMetadataStore metadata, RecoveryPlan frozen) {
+        requireRecoveryClient(metadata);
+        var context = frozen.context();
+        long ledger = context.ledger().ledgerId();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var root = read(ledger, deadline);
+            if (root.status() != ReadStatus.FOUND) {
+                return recoveryFailure(root.status() == ReadStatus.QUARANTINED || root.status() == ReadStatus.NOT_FOUND
+                        ? ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                        : ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN);
+            }
+            if (!context.matchesRoot(root.snapshot()) || !root.snapshot().equals(frozen.lifecycle())
+                    || !recoveryPublicationMatches(root.snapshot(), frozen.predecessor(), deadline)) {
+                return recoveryFailure(ProfileLedgerMetadataStore.Outcome.CONFLICT);
+            }
+            var checks = recoveryRootChecks(root.snapshot(), deadline);
+            var committed = metadata.enterRecovery(frozen.predecessor(), context, checks, deadline);
+            if (committed.metadata() == null) {
+                return recoveryFailure(committed.outcome());
+            }
+            var resolved = readRecovery(metadata, ledger);
+            return resolved.context() != null && resolved.context().equals(context)
+                    ? new RecoveryResult(committed.outcome(), context, resolved.metadata()) : resolved;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return recoveryFailure(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return recoveryFailure(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return recoveryFailure(ProfileLedgerMetadataStore.Outcome.QUARANTINED);
+        }
+    }
+
+    /** Adopt only the existing durable operation, preserving its generation and identity after restart. */
+    public RecoveryResult readRecovery(ProfileLedgerMetadataStore metadata, long ledger) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var root = read(ledger, deadline);
+            var member = metadata.readMembership(ledger, deadline);
+            if (root.status() != ReadStatus.FOUND || member.status() != ReadStatus.FOUND) {
+                return recoveryFailure(root.status() == ReadStatus.QUARANTINED || root.status() == ReadStatus.NOT_FOUND
+                        || member.status() == ReadStatus.QUARANTINED || member.status() == ReadStatus.NOT_FOUND
+                        ? ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                        : ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN);
+            }
+            var context = ProfileRecoveryContext.decode(
+                    member.snapshot().metadata().getValue().getCustomMetadata().get(ProfileRecoveryContext.KEY));
+            var predecessor = new ProfileLedgerMetadataStore.MembershipSnapshot(context.metadataBirth(),
+                    new org.apache.bookkeeper.versioning.Versioned<>(ProfileRecoveryContext.predecessorProjection(
+                            member.snapshot().metadata().getValue()),
+                            new org.apache.bookkeeper.versioning.LongVersion(context.predecessorVersion())));
+            if (!context.matchesRoot(root.snapshot()) || !context.matchesRecovery(member.snapshot())
+                    || !recoveryPublicationMatches(root.snapshot(), predecessor, deadline)) {
+                return recoveryFailure(ProfileLedgerMetadataStore.Outcome.CONFLICT);
+            }
+            metadata.verifyRecoveryGuard(member.snapshot(), deadline);
+            verifyRecoveryRootGuard(root.snapshot(), deadline);
+            return new RecoveryResult(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, context, member.snapshot());
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return recoveryFailure(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return recoveryFailure(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return recoveryFailure(ProfileLedgerMetadataStore.Outcome.QUARANTINED);
+        }
+    }
+
+    List<ProfileInstallReceipt> recoveryCurrentTargets(ProfileRecoveryContext context, long deadline)
+            throws InterruptedException, TimeoutException {
+        long now = System.nanoTime();
+        deadline = now + Math.min(deadline - now, timeoutNanos);
+        var root = read(context.ledger().ledgerId(), deadline);
+        if (root.status() != ReadStatus.FOUND || !context.matchesRoot(root.snapshot())) {
+            throw new IllegalArgumentException("Recovery lifecycle changed before selecting fence targets");
+        }
+        if (root.snapshot().lifecycle().state() == ProfileLifecycleHead.State.READY) {
+            return page(root.snapshot(), deadline).page().installs();
+        }
+        return replacement(root.snapshot(), context.lifecycleSequence(), deadline).page().installs();
+    }
+
+    private void requireRecoveryClient(ProfileLedgerMetadataStore metadata) {
+        if (!metadata.usesMutationClient(zk)) {
+            throw new IllegalArgumentException("Recovery requires the same borrowed ZK mutation context");
+        }
+    }
+
+    private boolean recoveryPublicationMatches(Snapshot current,
+            ProfileLedgerMetadataStore.MembershipSnapshot predecessor, long deadline)
+            throws InterruptedException, TimeoutException {
+        if (current.lifecycle().state() == ProfileLifecycleHead.State.READY) {
+            var page = page(current, deadline);
+            return page != null && page.storeVersion() == current.lifecycle().readyPageVersion()
+                    && Arrays.equals(page.digest(), current.lifecycle().readyPageDigest())
+                    && page.page().matchesMetadata(predecessor.metadata());
+        }
+        if (current.lifecycle().state() == ProfileLifecycleHead.State.REPLACEMENT) {
+            var page = replacement(current, current.lifecycle().sequence(), deadline);
+            return page != null && page.storeVersion() == current.lifecycle().readyPageVersion()
+                    && Arrays.equals(page.digest(), current.lifecycle().readyPageDigest())
+                    && page.page().matchesMetadata(predecessor);
+        }
+        return false;
+    }
+
+    private void verifyRecoveryRootGuard(Snapshot current, long deadline)
+            throws InterruptedException, TimeoutException {
+        String guard = headPath(current.reservation().backlink().ledgerId())
+                + "/recovery-birth-" + Long.toHexString(current.birthZxid());
+        var observed = reads.get(guard, deadline);
+        if (observed.code() == Code.NONODE.intValue()) {
+            throw new IllegalArgumentException("Required recovery lifecycle birth guard is missing");
+        }
+        requireFound(observed);
+        if (observed.stat().getEphemeralOwner() != 0 || observed.stat().getVersion() != 0
+                || !Arrays.equals(recoveryRootGuardBytes(current), observed.bytes())) {
+            throw new IllegalArgumentException("Required recovery lifecycle birth guard is missing or corrupt");
+        }
+    }
+
+    private static byte[] recoveryRootGuardBytes(Snapshot current) {
+        return java.nio.ByteBuffer.allocate(84).putInt(0x55575247).putInt(1)
+                .putLong(current.birthZxid()).putLong(current.lifecycle().birthId().getMostSignificantBits())
+                .putLong(current.lifecycle().birthId().getLeastSignificantBits())
+                .put(current.reservation().backlink().encode()).array();
+    }
+
+    private List<Op> recoveryRootChecks(Snapshot current, long deadline)
+            throws InterruptedException, TimeoutException {
+        long ledger = current.reservation().backlink().ledgerId();
+        String guard = headPath(ledger) + "/recovery-birth-" + Long.toHexString(current.birthZxid());
+        byte[] bytes = recoveryRootGuardBytes(current);
+        var observed = reads.get(guard, deadline);
+        if (observed.code() == Code.NONODE.intValue()) {
+            multi(List.of(Op.check(headPath(ledger), current.lifecycleDataVersion()),
+                    Op.check(marker(headPath(ledger), current.lifecycle().birthId()), 0),
+                    Op.create(guard, bytes, immutableAcls, CreateMode.PERSISTENT)), deadline);
+            observed = reads.get(guard, deadline);
+        }
+        requireFound(observed);
+        if (observed.stat().getEphemeralOwner() != 0 || observed.stat().getVersion() != 0
+                || !Arrays.equals(bytes, observed.bytes())) {
+            throw new IllegalArgumentException("Invalid immutable recovery lifecycle birth guard");
+        }
+        return List.of(Op.check(path(ledger), current.rootDataVersion()), Op.check(guard, 0),
+                Op.check(marker(headPath(ledger), current.lifecycle().birthId()), 0),
+                Op.check(headPath(ledger), current.lifecycleDataVersion()));
+    }
+
+    private static RecoveryResult recoveryFailure(ProfileLedgerMetadataStore.Outcome outcome) {
+        return new RecoveryResult(outcome, null, null);
+    }
+
     /** Admission cut only. It retains published targets; it neither fences Bookies nor deletes/GCs any data. */
     public CreateResult cutDelete(Snapshot expected, byte[] operationId, byte[] payloadIdentity) {
         operationId = ProfileLifecycleHead.fixed(operationId, 16, true);

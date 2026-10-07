@@ -1194,3 +1194,11 @@ ProfileLacEvidence投影E=W=3、A=2/3、一个源fan-in与一个必要边界读�
 最终Java `unified-wal-local-ciPAMd31` exit0，实际7类92项全部通过（common8/server84：socket41、PendingAddOp19、decoder21、Bookie3），1023冻结输入；common/server Spotless/Checkstyle实际exit0，记录`unified-wal-lac-evidence-style-b6jl_1qq`保留完成chunk c52c45及空输出，375个Java输入与Java回执一致、其中219与模型共享，Java/style14份checksums已核验。最终模型`unified-wal-model-n_xpb0fl` exit0：311配置为62完整正向PASS/249指定反例，595 inputs/932 checksums；221共享/1397去重union与当前源码一致，五个designInputs保持父提交`a72a48394392cb390735e6d5d4c17d96a854de54`绑定。新增A2为4328 generated/3872 distinct、A3为4808/4256，均queue0/depth6；六个mutation命中指定性质。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。最初5qu67oxn因新模块TLA语法优先级错误INCONCLUSIVE并停止，修正及独立检查后才生成本最终回执；不把语法失败算实现RED或模型PASS，历史回执不重绑。
 
 真实场景与重现命令见[实现记录](../profile-wire/README.md#原sdk的lac覆盖与length锚定)。full A+C+D、fencing/required frontier与生产Gate保持OPEN。
+
+### 恢复context与fencing前置的有限投影
+
+ProfileRecoveryPrelude消费一份OPEN predecessor、published authority、两种物理birth及E=W=3 A2/A3的durable peer-bound fence fan-in；metadata/lifecycle的version和UUID相同不代表同一physical birth。一次同记录CAS保留creator/operation；UNKNOWN不投有效fence票，scope变更不能得到FENCED_CONTEXT，prelude不发布CLOSED。九个指定mutation分别违反这些性质。byte/CRC/SHA、真实ZK及实际force由Java生产，full recovery/close、总预算和活性不在此投影。
+
+最终Java `unified-wal-local-ZluCKxGo` exit0，实际9类143项全部通过（common8/server135：socket43、lifecycle30、metadata19、PendingAddOp19、decoder21、Bookie3），1026冻结输入；common/server style `unified-wal-recovery-context-style-uudk7s_c` exit0，377个Java输入匹配，其中221与模型共享，Java/style15份checksums核验。模型`unified-wal-model-3b4kjjzo` exit0：322配置为64完整正向PASS/258指定反例，609 inputs/964 checksums；223共享/1412去重union均匹配，五个designInputs保持父提交`6661b7049db2482b063731ef2aebcc4543e3be6c`绑定。新A2/A3各12744 generated/9072 distinct、queue0/depth7，九个mutation违反指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry或state constraint，CHECK_DEADLOCK FALSE；不是crypto/byte producer、general E>W、frontier/grant/close、full A+C+D、clock/活性、总memory、掉电/长期/性能或生产权限。历史source/design/run回执不重绑。
+
+实际用例、固定向量及命令见[实现记录](../profile-wire/README.md#恢复上下文与fencing前置)。步骤14、full A+C+D及生产Gate保持OPEN。

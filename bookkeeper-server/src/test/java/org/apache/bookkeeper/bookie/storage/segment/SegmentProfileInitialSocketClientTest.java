@@ -1002,6 +1002,94 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void recoveryContextIsRealSameRecordCasAndResumesItsExactOperation() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var capture = fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31));
+            assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND,
+                    capture.status());
+            var plan = capture.plan();
+            var entered = fixture.reservations.beginRecovery(metadata, plan);
+            assertEquals(ProfileLedgerMetadataStore.Outcome.APPLIED, entered.outcome());
+            assertEquals(plan.context(), entered.context());
+            assertEquals(fixture.context(), entered.context().ledger());
+            var actual = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            assertEquals(LedgerMetadata.State.IN_RECOVERY, actual.getValue().getState());
+            assertEquals(available.metadata().getValue().getAllEnsembles(), actual.getValue().getAllEnsembles());
+            assertEquals(available.metadata().getValue().getCToken(), actual.getValue().getCToken());
+            assertEquals(184, actual.getValue().getCustomMetadata().get(
+                    org.apache.bookkeeper.discover.profile.ProfileRecoveryContext.KEY).length);
+            assertTrue(fixture.normal(0)); // Metadata is not a physical fence or grant.
+            var again = fixture.reservations.beginRecovery(metadata, plan);
+            assertEquals(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, again.outcome());
+            assertEquals(actual.getVersion(), again.metadata().metadata().getVersion());
+            var resumed = new ZKProfileReservationStore(fixture.zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5)).readRecovery(metadata, 44);
+            assertEquals(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, resumed.outcome());
+            assertEquals(entered.context(), resumed.context());
+            assertEquals(actual.getVersion(), resumed.metadata().metadata().getVersion());
+            var fencing = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
+                    fixture.reservations, metadata, fixture.cold);
+            var fenced = fencing.fence(resumed, fixture.clients, fixture.credential).get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.Status.FENCED_CONTEXT,
+                    fenced.status());
+            assertEquals(3, fenced.fences().size());
+            assertFalse(fixture.normal(0));
+            assertFalse(fixture.normal(1));
+            assertFalse(fixture.normal(2));
+            var forces = fixture.nodeIo.stream().map(io -> io.forces).toList();
+            var repeated = fencing.fence(resumed, fixture.clients, fixture.credential).get(5, TimeUnit.SECONDS);
+            assertEquals(fenced, repeated);
+            assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+            assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                    fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+        }
+    }
+
+    @Test
+    public void recoveryFencingCountsOnlyCurrentVerifiedPeersAndNeverClaimsAnUnfencedSource() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var plan = fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan();
+            var entered = fixture.reservations.beginRecovery(metadata, plan);
+            var fencing = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
+                    fixture.reservations, metadata, fixture.cold);
+            var supplied = new HashMap<>(fixture.clients);
+            supplied.put("socket0:3181", fixture.clients.get("socket1:3181"));
+            var enough = fencing.fence(entered, supplied, fixture.credential).get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.Status.FENCED_CONTEXT,
+                    enough.status());
+            assertEquals(List.of("socket1:3181", "socket2:3181"),
+                    enough.fences().stream().map(value -> value.bookie()).toList());
+            assertTrue(fixture.normal(0));
+            assertFalse(fixture.normal(1));
+            assertFalse(fixture.normal(2));
+            var forces = fixture.nodeIo.stream().map(io -> io.forces).toList();
+            var missing = fencing.fence(entered, Map.of("socket0:3181", fixture.clients.get("socket1:3181")),
+                    fixture.credential).get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.Status.DEFERRED,
+                    missing.status());
+            assertTrue(missing.fences().isEmpty());
+            {
+                var wrong = ProtectedProfileCredential.of(1, bytes(20, 99));
+                var denied = fencing.fence(entered, fixture.clients, wrong).get(5, TimeUnit.SECONDS);
+                assertEquals(org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.Status.DEFERRED,
+                        denied.status());
+                assertTrue(denied.fences().isEmpty());
+            }
+            assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+            assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                    fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+        }
+    }
+
+    @Test
     public void sdkLacEvidenceUsesQuorumAndMatchingPrefixLengthWithoutChangingWriterState() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
             fixture.connectAll(Duration.ofSeconds(5));

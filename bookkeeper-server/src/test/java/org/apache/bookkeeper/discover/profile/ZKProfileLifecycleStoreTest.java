@@ -161,6 +161,160 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
     }
 
     @Test
+    public void recoveryContextVectorOwnsItsFieldsAndRejectsMalformedIdentity() throws Exception {
+        byte[] vector = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/recovery-context.bin").toURI()));
+        var context = ProfileRecoveryContext.decode(vector);
+        assertEquals(184, vector.length);
+        ByteBuffer raw = ByteBuffer.wrap(vector);
+        assertEquals(0x55575243, raw.getInt(0));
+        assertEquals(17, raw.getLong(84));
+        assertEquals(29, raw.getLong(96));
+        assertEquals(31, raw.getLong(136));
+        assertEquals(2, raw.getLong(160));
+        assertEquals(1, context.generation());
+        assertEquals(new java.util.UUID(0, 37), context.lifecycleBirth());
+        assertArrayEquals(vector, context.encode());
+        context.operationId()[0] = 0;
+        context.predecessorDigest()[0] = 0;
+        assertArrayEquals(vector, context.encode());
+        for (int offset : new int[]{0, 4, 6, 92, 140}) {
+            byte[] bad = vector.clone();
+            if (offset == 92) {
+                ByteBuffer.wrap(bad).putInt(offset, -1);
+            } else if (offset == 140) {
+                ByteBuffer.wrap(bad).putLong(136, 0);
+            } else {
+                bad[offset] ^= 1;
+            }
+            CRC32C crc = new CRC32C();
+            crc.update(bad, 0, bad.length - 4);
+            ByteBuffer.wrap(bad).putInt(bad.length - 4, (int) crc.getValue());
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryContext.decode(bad));
+        }
+    }
+
+    @Test
+    public void recoveryLostCasReplyResumesOneFrozenOperationWithoutChangingFields() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var lifecycle = store(first);
+            var captured = lifecycle.captureRecovery(metadata, 44, bytes(16, 11)).plan();
+            first.loseSetDataMultiReply.set(true);
+            var entered = lifecycle.beginRecovery(metadata, captured);
+            assertEquals(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, entered.outcome());
+            var current = lm.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            assertEquals(LedgerMetadata.State.IN_RECOVERY, current.getValue().getState());
+            assertEquals(captured.predecessor().metadata().getValue().getCToken(), current.getValue().getCToken());
+            assertEquals(captured.predecessor().metadata().getValue().getAllEnsembles(),
+                    current.getValue().getAllEnsembles());
+            assertEquals(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED,
+                    store(first).readRecovery(metadata, 44).outcome());
+            var different = new ZKProfileReservationStore.RecoveryPlan(captured.predecessor(), captured.lifecycle(),
+                    ProfileRecoveryContext.capture(captured.predecessor(), captured.lifecycle(), bytes(16, 12)));
+            assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
+                    lifecycle.beginRecovery(metadata, different).outcome());
+            assertEquals(current.getVersion(), lm.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getVersion());
+        }
+    }
+
+    @Test
+    public void recoveryDeleteCutWinsAgainstTheSameRecordTransition() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var captured = store(first).captureRecovery(metadata, 44, bytes(16, 11)).plan();
+            first.beforeSetDataMulti.set(() -> assertEquals(CreateStatus.APPLIED,
+                    store(second).cutDelete(captured.lifecycle(), bytes(16, 12), bytes(32, 12)).status()));
+            assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
+                    store(first).beginRecovery(metadata, captured).outcome());
+            var current = lm.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            assertEquals(LedgerMetadata.State.OPEN, current.getValue().getState());
+            assertEquals(captured.predecessor().metadata().getVersion(), current.getVersion());
+        }
+    }
+
+    @Test
+    public void recoveryMetadataRecreationCannotReuseTheCapturedBirth() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var captured = store(first).captureRecovery(metadata, 44, bytes(16, 11)).plan();
+            String path = ((AbstractZkLedgerManager) lm).getLedgerPath(44);
+            byte[] original = second.getData(path, false, null);
+            first.beforeSetDataMulti.set(() -> {
+                try {
+                    removeTree(path);
+                    second.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
+                    store(first).beginRecovery(metadata, captured).outcome());
+            assertEquals(LedgerMetadata.State.OPEN,
+                    lm.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+            assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
+                    store(first).beginRecovery(metadata, captured).outcome());
+        }
+    }
+
+    @Test
+    public void recoveryLifecycleRecreationCannotReuseItsUuidAndVersionAfterThePrecheck() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var captured = store(first).captureRecovery(metadata, 44, bytes(16, 11)).plan();
+            String root = ROOT + "/2c";
+            String head = root + "/lifecycle";
+            byte[] parentBytes = second.getData(root, false, null);
+            byte[] headBytes = second.getData(head, false, null);
+            first.beforeSetDataMulti.set(() -> {
+                try {
+                    removeRecoveryTree(root);
+                    second.multi(List.of(Op.create(root, parentBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            CreateMode.PERSISTENT), Op.create(head, headBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            CreateMode.PERSISTENT), Op.create(head + "/birth-" + captured.context().lifecycleBirth(),
+                            new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                            Op.setData(head, headBytes, 0)));
+                } catch (Exception failed) {
+                    throw new AssertionError(failed);
+                }
+            });
+            assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
+                    store(first).beginRecovery(metadata, captured).outcome());
+            var current = lm.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            assertEquals(LedgerMetadata.State.OPEN, current.getValue().getState());
+            assertEquals(captured.predecessor().metadata().getVersion(), current.getVersion());
+        }
+    }
+
+    private void removeRecoveryTree(String path) throws Exception {
+        for (String child : second.getChildren(path, false)) {
+            removeRecoveryTree(path + "/" + child);
+        }
+        second.delete(path, second.exists(path, false).getVersion());
+    }
+
+    @Test
+    public void recoveryMissingRequiredGuardIsNotRebuiltDuringAdoption() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var captured = store(first).captureRecovery(metadata, 44, bytes(16, 11)).plan();
+            assertEquals(ProfileLedgerMetadataStore.Outcome.APPLIED,
+                    store(first).beginRecovery(metadata, captured).outcome());
+            String path = ((AbstractZkLedgerManager) lm).getLedgerPath(44);
+            String child = second.getChildren(path, false).get(0);
+            second.delete(path + "/" + child, 0);
+            assertEquals(ProfileLedgerMetadataStore.Outcome.QUARANTINED,
+                    store(first).readRecovery(metadata, 44).outcome());
+            assertTrue(second.getChildren(path, false).isEmpty());
+        }
+    }
+
+    @Test
     public void replacementSameStartHistorySurvivesOverwriteAndDeleteCutWithoutAuthorizingOldTargets()
             throws Exception {
         try (LedgerManager manager = manager(first)) {

@@ -433,3 +433,29 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecT
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+## 恢复上下文与fencing前置
+
+2026-10-07，原ZKProfileReservationStore和ProfileLedgerMetadataStore增加captureRecovery→beginRecovery/readRecovery。一次capture冻结OPEN metadata物理CZXID/version/creator token、完整metadata的canonical SHA256、对应已发布READY/REPLACEMENT lifecycle birth/CZXID/sequence/version/control generation、instance/descriptor及非零operation ID。UNKNOWN保留原plan；重开只采用已持久化的同一token/generation，不产生新operation，也不重建缺少的必要guard。
+
+beginRecovery在同一标准metadata记录写IN_RECOVERY与唯一custom key `bookkeeper.experimental.profile.recovery-context`，保持ensemble历史/E/W/A、password、ctime、用户custom及creator token。原metadata birth guard与新增readonly lifecycle physical-birth guard一同进入最终multi，检查同一head/root版本及未被冻结/有pending token的标准记录。恢复开始后，原membership replacement因状态及reserved token被拒绝。删除、换组或重建竞争不能被version/UUID相同掩盖；提交后scope变化返回non-OK并保留历史效果。IN_RECOVERY本身不证明Bookie已fenced，也不授予恢复Add或close。
+
+UWRC/schema1固定184字节：magic4/schema2/reserved2、context60、operation16、metadata CZXID8/predecessorVersion4/creatorToken8/canonical predecessor digest32、lifecycle CZXID8/UUID16/sequence8/dataVersion4/controlGeneration8、CRC32C4。generation是predecessorVersion+1；digest对去除recovery key的canonical OPEN投影计算，该投影只用于hash和published predecessor校验，永不写回OPEN。一个token及一个lifecycle guard有固定上限，无每entry metadata写入或无限retry ID。独立Python struct向量校验字段和CRC，不能作为真实authority事实。
+
+ProfileRecoveryCoordinator借用显式ArrayBlockingQueue/AbortPolicy cold executor和最多64个已验证CONTROL peers；每次最多对最后ensemble的32个节点并行调用原100字节FENCE。只允许当前已发布目标的Bookie/incarnation；OK且APPLIED/ALREADY才计原RoundRobin coverage，UNKNOWN/NONE或peer不匹配不投票。全部RPC futures终结后重读同一恢复context；coverage满足仅返回FENCED_CONTEXT。fences列表只记录实际durable来源，未fenced来源的missing仍不能使用；后续取证须针对该来源完成现有fence。每coordinator一项在途，caller只取消copy future，无新增线程/重试/自动reconnect，child socket与实际远端I/O仍按原资源寿命排空。
+
+真实ZK/socket/files验证实际初始化后的ledger由OPEN转IN_RECOVERY，原creator/history保持，同plan重复及新store重开均同token/version；三个实际FENCE后normal拒绝，重复不增加force。错peer映射只得到另外两份fence proof且未fenced节点仍normal；coverage不足或错误credential均non-OK，已有实际fences不回退。六个ZK/codec方法覆盖固定向量、真实CAS reply loss、delete cut竞争、相同version的metadata重建、同UUID/version的lifecycle重建、缺少必要guard不重建。生命周期ZK测试的install receipt是该后端已有输入事实，真实Bookie链由socket用例验证；未把typed fixture当作file durability。
+
+初次ak6S0i4o/eMQuYduh为新测试编译错误（ReadStatus引用、非AutoCloseable credential误用）；tIp0g0kR的重建夹具错误地用version0删除READY head。已按实际version修正新夹具，保留生产guard与零effect断言，不算实现RED。定向unified-wal-local-SpGKe2r2 exit0，实际2类8项通过。最终扩大回归/style/模型绑定见下文。
+
+当前只闭合恢复开始与fencing前置。fresh-context LAC/required frontier串联、合法单entry恢复grant/Add、同context CLOSED(P,length)与lost-close解析、独立readonly open、AutoRecovery/delete/rejoin、legacy mutation ACL与完整生产Gate仍OPEN。prototype允许正常Profile读取仍由显式scope policy决定；尚未实现的恢复终态可见性cut不能当作已有语义。无legacy recovered success、full A+C+D、连续lease或生产authority。
+
+最终Java `unified-wal-local-ZluCKxGo` exit0，实际9类143项全部通过（common8/server135：socket43、lifecycle30、metadata19、PendingAddOp19、decoder21、Bookie3），1026冻结输入；common/server style `unified-wal-recovery-context-style-uudk7s_c` exit0，377个Java输入匹配，其中221与模型共享，Java/style15份checksums核验。模型`unified-wal-model-3b4kjjzo` exit0：322配置为64完整正向PASS/258指定反例，609 inputs/964 checksums；223共享/1412去重union均匹配，五个designInputs保持父提交`6661b7049db2482b063731ef2aebcc4543e3be6c`绑定。新A2/A3各12744 generated/9072 distinct、queue0/depth7，九个mutation违反指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry或state constraint，CHECK_DEADLOCK FALSE；不是crypto/byte producer、general E>W、frontier/grant/close、full A+C+D、clock/活性、总memory、掉电/长期/性能或生产权限。历史source/design/run回执不重绑。
+
+合成UWRC向量184字节/SHA256 `df404b1fba7db9215bc91a7b9861f3212f3b567c408148ab0efef8a412a968b7`；Python struct/独立bitwise CRC32C生成，ledger44/instance0x01/descriptor0x02/operation0x03、metadata birth17/version0/creator29/digest0x04、lifecycle birth31/UUID(0,37)/sequence2/version1/generation1。其synthetic digest不声称对应真实metadata；真实上下文另由实际ZK计算及验证。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
