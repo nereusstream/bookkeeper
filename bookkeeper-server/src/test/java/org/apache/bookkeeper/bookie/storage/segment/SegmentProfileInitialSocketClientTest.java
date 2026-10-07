@@ -399,6 +399,14 @@ public class SegmentProfileInitialSocketClientTest {
                                                             frame.setInt(frame.readerIndex() + 16, 3);
                                                         } else if (fault == 15) {
                                                             frame.setInt(frame.readerIndex() + 120, 1024 * 1024 + 37);
+                                                        } else if (fault == 16) {
+                                                            int last = frame.writerIndex() - 1;
+                                                            frame.setByte(last, frame.getByte(last) ^ 1);
+                                                        } else if (fault == 17
+                                                                && op == ProfileOperation.READ_LAC.wireValue()) {
+                                                            heldReplies.add(() -> ctx.executor().execute(
+                                                                    () -> ctx.writeAndFlush(frame, promise)));
+                                                            return;
                                                         }
                                                     }
                                                     if (op == ProfileOperation.INSTALL.wireValue()) {
@@ -970,6 +978,181 @@ public class SegmentProfileInitialSocketClientTest {
                             fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
                 } finally {
                     release.countDown();
+                    fixture.releaseReplies();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    private static void evidenceEntry(Fixture fixture, ProfileNormalDataClient client,
+            long id, long lac, long length, int payload) throws Exception {
+        var digest = DigestManager.instantiate(44, fixture.password,
+                org.apache.bookkeeper.client.BookKeeper.DigestType.toProtoDigestType(
+                        org.apache.bookkeeper.client.BookKeeper.DigestType.CRC32C),
+                UnpooledByteBufAllocator.DEFAULT, false);
+        var source = digest.computeDigestAndPackageForSending(id, lac, length,
+                Unpooled.wrappedBuffer(bytes(payload, 8)), DigestManager.generateMasterKey(fixture.password), 0);
+        try {
+            assertEquals(ProfileStatus.DurableResult.APPLIED, client.addNormal(fixture.context(), fixture.credential,
+                    id, source).get(5, TimeUnit.SECONDS).durableResult());
+        } finally {
+            source.release();
+        }
+    }
+
+    @Test
+    public void sdkLacEvidenceUsesQuorumAndMatchingPrefixLengthWithoutChangingWriterState() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            for (int target : List.of(0, 1)) {
+                var data = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                evidenceEntry(fixture, data, 99, 98, 1000, 16);
+                evidenceEntry(fixture, data, 100, 99, 1100, 100);
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                try {
+                    int authorities = fixture.authorityReads.get();
+                    var before = fixture.nodeIo.stream().map(io -> io.forces).toList();
+                    var evidence = handle.readLacEvidence().get(5, TimeUnit.SECONDS);
+                    assertEquals(available.metadata(), evidence.metadata());
+                    assertEquals(99, evidence.maxObservedLac());
+                    assertEquals(99, evidence.prefixEntryId());
+                    assertEquals(1000, evidence.prefixLength());
+                    assertEquals(2, evidence.sources().size());
+                    for (var source : evidence.sources()) {
+                        assertEquals(100, source.sourceEntryId());
+                        assertEquals(99, source.piggybackLac());
+                        assertEquals(1100, source.sourceLength());
+                        assertEquals(100, source.payloadBytes());
+                    }
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    assertEquals(0, handle.getLength());
+                    assertEquals(authorities, fixture.authorityReads.get());
+                    assertEquals(before, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkLacEvidenceRejectsIncompleteCoverageMissingAnchorDigestOrLengthConflict() throws Exception {
+        for (int mode = 0; mode < 5; mode++) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                for (int target : mode == 0 ? List.of(0) : List.of(0, 1)) {
+                    var data = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                    if (mode != 1) {
+                        evidenceEntry(fixture, data, 99, 98, mode == 3 && target == 1 ? 1001 : 1000, 16);
+                    }
+                    evidenceEntry(fixture, data, 100, 99, mode == 4 && target == 1 ? 1101 : 1100, 100);
+                }
+                if (mode == 2) {
+                    fixture.faultTarget.set(1);
+                    fixture.replyFault.set(16);
+                }
+                try (BookKeeper sdk = sdk(fixture)) {
+                    var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                    try {
+                        ExecutionException failed = assertThrows(ExecutionException.class,
+                                () -> handle.readLacEvidence().get(5, TimeUnit.SECONDS));
+                        Throwable cause = failed.getCause();
+                        while (cause.getCause() != null) {
+                            cause = cause.getCause();
+                        }
+                        assertTrue(cause instanceof org.apache.bookkeeper.client.BKException);
+                        assertEquals(mode < 2 ? org.apache.bookkeeper.client.BKException.Code.ReadException
+                                : org.apache.bookkeeper.client.BKException.Code.DigestMatchException,
+                                ((org.apache.bookkeeper.client.BKException) cause).getCode());
+                        assertEquals(-1, handle.getLastAddConfirmed());
+                        assertEquals(0, handle.getLength());
+                    } finally {
+                        handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkLacEvidenceEmptyCoverageUsesTheOriginalA2AndA3Thresholds() throws Exception {
+        for (int ack : List.of(2, 3)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, ack, true, true)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                for (int target = 0; target < 4 - ack; target++) {
+                    var fenced = fixture.clients.get("socket" + target + ":3181")
+                            .fence(fixture.context(), bytes(16, 24), fixture.credential).get(5, TimeUnit.SECONDS);
+                    assertEquals(ProfileStatus.DurableResult.APPLIED, fenced.durableResult());
+                }
+                try (BookKeeper sdk = sdk(fixture)) {
+                    var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                    try {
+                        var evidence = handle.readLacEvidence().get(5, TimeUnit.SECONDS);
+                        assertEquals(-1, evidence.maxObservedLac());
+                        assertEquals(-1, evidence.prefixEntryId());
+                        assertEquals(0, evidence.prefixLength());
+                        assertEquals(4 - ack, evidence.sources().size());
+                        assertEquals(LedgerMetadata.State.OPEN,
+                                fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+                    } finally {
+                        handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkLacEvidenceCallerCancellationKeepsItsSingleQueryReservationUntilWireDrain() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            for (int target : List.of(0, 1)) {
+                var data = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                evidenceEntry(fixture, data, 99, 98, 1000, 16);
+                evidenceEntry(fixture, data, 100, 99, 1100, 100);
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                try {
+                    fixture.faultTarget.set(0);
+                    fixture.replyFault.set(17);
+                    var caller = handle.readLacEvidence();
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertEquals(1, fixture.heldReplies.size());
+                    assertTrue(caller.cancel(true));
+                    ExecutionException refused = assertThrows(ExecutionException.class,
+                            () -> handle.readLacEvidence().get(5, TimeUnit.SECONDS));
+                    assertEquals(org.apache.bookkeeper.client.BKException.Code.TooManyRequestsException,
+                            ((org.apache.bookkeeper.client.BKException) refused.getCause()).getCode());
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    ProfileLedgerHandle.LacEvidence next = null;
+                    until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    do {
+                        try {
+                            next = handle.readLacEvidence().get(5, TimeUnit.SECONDS);
+                        } catch (ExecutionException busy) {
+                            assertEquals(org.apache.bookkeeper.client.BKException.Code.TooManyRequestsException,
+                                    ((org.apache.bookkeeper.client.BKException) busy.getCause()).getCode());
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                    } while (next == null && System.nanoTime() < until);
+                    assertNotNull(next);
+                    assertEquals(99, next.prefixEntryId());
+                    assertEquals(1000, next.prefixLength());
+                    assertTrue(caller.isCancelled());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                } finally {
                     fixture.releaseReplies();
                     handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 }

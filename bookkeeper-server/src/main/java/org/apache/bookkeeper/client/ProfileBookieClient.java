@@ -312,6 +312,14 @@ final class ProfileBookieClient implements BookieClient {
         return clients;
     }
 
+    ProfileLedgerContext ledgerContext() {
+        return ledger;
+    }
+
+    Map<BookieId, ProfileNormalDataClient> readPeers() {
+        return readPeers;
+    }
+
     boolean hasUncertainWrites() {
         return uncertain.get();
     }

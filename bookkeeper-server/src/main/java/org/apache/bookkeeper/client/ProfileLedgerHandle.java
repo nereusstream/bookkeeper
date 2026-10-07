@@ -58,7 +58,7 @@ import org.apache.bookkeeper.versioning.Versioned;
 /**
  * Experimental Profile writer, using the original LedgerHandle/PendingAddOp write engine.
  * Borrows the SDK context and verified clients; replacement requires an explicitly configured bounded pool.
- * Read/recovery/close publication stay disabled.
+ * Ordinary point reads and explicit source/anchor evidence are opt-in; recovery/close publication stay disabled.
  * Local stop is never a metadata CLOSED receipt or cancellation of remote I/O.
  */
 public final class ProfileLedgerHandle extends LedgerHandle {
@@ -66,6 +66,7 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     private final Semaphore entries;
     private final int maxPayloadBytes;
     private final AtomicBoolean stopped = new AtomicBoolean();
+    private final AtomicBoolean lacInFlight = new AtomicBoolean();
     private ProfileReplacementCoordinator replacement;
     private List<ProfileReplacementCoordinator.Target> candidates = List.of();
     private byte[] replacementDescriptor;
@@ -166,6 +167,28 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     /** Logical failure can still leave remote DATA; a later NONE never clears this observation. */
     public boolean hasUncertainWrites() {
         return transport.hasUncertainWrites();
+    }
+
+
+    /** A verified source sample; sourceLength belongs to sourceEntryId, not to its piggyback LAC. */
+    public record LacSource(BookieId bookie, String storageIncarnation, long sourceEntryId,
+                            long piggybackLac, long sourceLength, int payloadBytes) { }
+
+    /** Snapshot evidence only: no writer LAC/length mutation, fencing coverage or CLOSED authority. */
+    public record LacEvidence(Versioned<LedgerMetadata> metadata, long maxObservedLac, long prefixEntryId,
+                              long prefixLength, List<LacSource> sources) {
+        public LacEvidence {
+            sources = List.copyOf(sources);
+        }
+    }
+
+    /** One bounded query per handle; cancellation stops caller waiting while actual socket work drains. */
+    public CompletableFuture<LacEvidence> readLacEvidence() {
+        if (!lacInFlight.compareAndSet(false, true)) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.TooManyRequestsException));
+        }
+        var actual = new ProfileLacEvidenceRead(this, transport).start();
+        return actual.whenComplete((result, failure) -> lacInFlight.set(false)).copy();
     }
 
     /** Local resource stop only. Metadata remains OPEN and needs the proper Profile close/recovery protocol. */

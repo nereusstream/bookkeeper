@@ -411,3 +411,25 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecT
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+## 原SDK的LAC覆盖与length锚定
+
+2026-10-07，ProfileLedgerHandle.readLacEvidence增加一个显式取证入口，借用原SDK ledger executor、已验证且最多64个historical DATA peers与原DigestManager。一个handle同一时刻只有一项取证；每phase并行但单次最多32个源RPC及32个必要边界RPC，等待对应future全部终结后分析，无新线程、重试或MetadataStore调用。取消caller只取消copy future，仍保留聚合查询名额；child socket与远端I/O继续按原quota、frame/pin/loan寿命排空，RPC timeout不证明远端I/O已结束。
+
+先冻结本handle的Versioned<LedgerMetadata>和readPeers snapshot，在最后fragment的E个已验证来源查询URL1源。只有原DigestManager同时通过ledger/source entryId与digest校验，SOURCE才以OK计入原RoundRobinDistributionSchedule.QuorumCoverageSet；只有协议的完整fenced EMPTY以NoSuchEntry计入。UNKNOWN/refusal/坏digest不投有效票，无Classic fallback；UNAUTHORIZED整体拒绝。保留每个有效源的Bookie/incarnation、entryId、piggyback LAC、sourceLength与应用payload bytes，求这些样本的maxObservedLac；这不是所有历史源或explicit LAC的最大值证明。
+
+prefix边界取max(maxObservedLac,lastFragmentStart-1)，固定metadata历史选择该entry的原write set。已读到且属于合法write set的精确同坐标源可复用；其余按必要点读并行读取，原digest校验后只使用该entry的累计length。-1边界为0；没有合法锚点拒绝。已验证锚点之间length不一致，或已取得相邻source与prefix的应用bytes加法不匹配/溢出，均DigestMatchException，不能修统计值制造成功。结果前再检查metadata对象与peer snapshot；变化即拒绝，后续调用重新取证。返回的是同一局部handle快照证据，不能代替fresh远端metadata/birth/RecoveryContext或当前authority校验。
+
+真实socket/ZK/files用entry99 length1000、entry100 LAC99/length1100/payload100确认返回prefix99/length1000，保留两份源100/1100且无control-force/authority-read增量；writer仍LAC=-1/length0。五种故障分别验证覆盖不足、边界缺失、坏CRC不计票、合法digest下的锚点length矛盾和相邻length矛盾。真实EMPTY验证原3/3/2需要两个有效来源、3/3/3需要一个；其余未fenced来源拒绝，metadata仍OPEN。真实response被持有时取消caller，第二次请求被TooManyRequests拒绝；释放wire后新查询成功，旧caller不复活。
+
+定向unified-wal-local-qaShFLEX实际4项通过（方法内部五种故障、A2/A3两配置）。最终扩大回归、style与模型绑定见下文。旧source/receipt不重绑；本API不更新writer的LAC、lastAddPushed或length，不暴露成功close。原通用asyncReadLastConfirmed/BookieClient.readLac/fencing read仍未接通；explicit/最大LAC、fresh recovery metadata、逐来源fencing coverage、required-frontier推进、合法恢复写回、CLOSED、AutoRecovery与生产Gate仍OPEN。
+
+最终Java `unified-wal-local-ciPAMd31` exit0，实际7类92项全部通过（common8/server84：socket41、PendingAddOp19、decoder21、Bookie3），1023冻结输入；common/server Spotless/Checkstyle实际exit0，记录`unified-wal-lac-evidence-style-b6jl_1qq`保留完成chunk c52c45及空输出，375个Java输入与Java回执一致、其中219与模型共享，Java/style14份checksums已核验。最终模型`unified-wal-model-n_xpb0fl` exit0：311配置为62完整正向PASS/249指定反例，595 inputs/932 checksums；221共享/1397去重union与当前源码一致，五个designInputs保持父提交`a72a48394392cb390735e6d5d4c17d96a854de54`绑定。新增A2为4328 generated/3872 distinct、A3为4808/4256，均queue0/depth6；六个mutation命中指定性质。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。最初5qu67oxn因新模块TLA语法优先级错误INCONCLUSIVE并停止，修正及独立检查后才生成本最终回执；不把语法失败算实现RED或模型PASS，历史回执不重绑。
+
+这只验证样本coverage与length锚点，不证明整个前缀连续性、所有副本payload一致性、fresh recovery authority、一般E>W组合、fencing/repair/close、full A+C+D、总内存、时钟/活性、长期/掉电/性能或生产权限。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

@@ -1186,3 +1186,11 @@ ProfileLacSource使用1024组有限输入与单次回复，检查源样本身份
 最终源码回执：Java `unified-wal-local-CQpzBTsP` exit0，实际7类88项全部通过（common8/server80：socket37、PendingAddOp19、decoder21、Bookie读/explicit LAC3），1022冻结输入；common/server style `unified-wal-lac-source-style-ge08g8nc` exit0，374个Java输入与Java回执匹配，其中218与模型共享，Java/style13份checksums核验。模型 `unified-wal-model-a9lunm3r` exit0：303配置为60完整正向PASS/243指定反例、585 inputs/909 checksums；220共享/1387去重union与当前源码一致，五个designInputs保持父提交`4eca18453bfbaf1a34f69ff66f9669eb384fb0c8`绑定。新增LAC投影2048 generated/2048 distinct、queue0、depth2，六个mutation命中指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry或state constraint，CHECK_DEADLOCK FALSE；有限结果不证明最大LAC、CRC/crypto、完整A/C/D、时钟/活性/总内存、掉电或生产权限。
 
 实际路径、固定向量与重现命令见[实现记录](../profile-wire/README.md#read_lac-源取证)。历史source/design/run回执保持原绑定；步骤14/full A+C+D和生产Gate仍OPEN。
+
+### SDK LAC覆盖与length锚定的有限投影
+
+ProfileLacEvidence投影E=W=3、A=2/3、一个源fan-in与一个必要边界读取。SOURCE在digest之后才计coverage；源100/LAC99/length1100不能替代entry99/length1000锚点。坏digest/UNKNOWN不算有效，缺锚点、错坐标、矛盾或本handle metadata变化不成功。caller取消保留当前聚合查询名额，child socket/实际远端I/O的独立custody仍由既有切片负责。只输出快照证据，不改变writer状态或发布CLOSED，不证明完整前缀、payload一致性、fresh远端birth/context或基础恢复关闭。
+
+最终Java `unified-wal-local-ciPAMd31` exit0，实际7类92项全部通过（common8/server84：socket41、PendingAddOp19、decoder21、Bookie3），1023冻结输入；common/server Spotless/Checkstyle实际exit0，记录`unified-wal-lac-evidence-style-b6jl_1qq`保留完成chunk c52c45及空输出，375个Java输入与Java回执一致、其中219与模型共享，Java/style14份checksums已核验。最终模型`unified-wal-model-n_xpb0fl` exit0：311配置为62完整正向PASS/249指定反例，595 inputs/932 checksums；221共享/1397去重union与当前源码一致，五个designInputs保持父提交`a72a48394392cb390735e6d5d4c17d96a854de54`绑定。新增A2为4328 generated/3872 distinct、A3为4808/4256，均queue0/depth6；六个mutation命中指定性质。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。最初5qu67oxn因新模块TLA语法优先级错误INCONCLUSIVE并停止，修正及独立检查后才生成本最终回执；不把语法失败算实现RED或模型PASS，历史回执不重绑。
+
+真实场景与重现命令见[实现记录](../profile-wire/README.md#原sdk的lac覆盖与length锚定)。full A+C+D、fencing/required frontier与生产Gate保持OPEN。

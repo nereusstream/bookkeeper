@@ -381,6 +381,8 @@ DATA durable → hot locator → local result
 
 2026-10-07 [READ_LAC源取证](profile-wire/README.md#read_lac-源取证)已接独立URL1/schema1、完整source entryId/piggyback LAC/sourceLength与真实Get/read/loan路径；EMPTY要求整ledger完整稳定fenced proof且无explicit LAC。源length不授权CLOSED前缀；原SDK LAST_ADD_CONFIRMED/quorum、explicit LAC、length锚点、fencing read与matching CLOSED仍OPEN，步骤14保持PARTIAL。
 
+2026-10-07 [原SDK的LAC覆盖与length锚定](profile-wire/README.md#原sdk的lac覆盖与length锚定)新增显式readLacEvidence：原coverage/write-set与digest校验收集source样本，再取得同一handle metadata快照下的prefix边界length；源length不冒充prefix length，缺锚点或矛盾返回non-OK，不改writer状态。它不是fresh远端RecoveryContext、fencing coverage或CLOSED事实；完整恢复/AutoRecovery及步骤14保持OPEN。
+
 #### 15. 实现集群删除、离线投递与rejoin
 
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
