@@ -376,7 +376,7 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         executeOrdered(() -> callback.closeComplete(BKException.Code.IllegalOpException, this, ctx));
     }
 
-    private record ProfileContext(ClientContext base, ProfileBookieClient transport) implements ClientContext {
+    record ProfileContext(ClientContext base, ProfileBookieClient transport) implements ClientContext {
         @Override
         public ClientInternalConf getConf() {
             return base.getConf();

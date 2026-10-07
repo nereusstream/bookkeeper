@@ -1202,3 +1202,11 @@ ProfileRecoveryPrelude消费一份OPEN predecessor、published authority、两�
 最终Java `unified-wal-local-ZluCKxGo` exit0，实际9类143项全部通过（common8/server135：socket43、lifecycle30、metadata19、PendingAddOp19、decoder21、Bookie3），1026冻结输入；common/server style `unified-wal-recovery-context-style-uudk7s_c` exit0，377个Java输入匹配，其中221与模型共享，Java/style15份checksums核验。模型`unified-wal-model-3b4kjjzo` exit0：322配置为64完整正向PASS/258指定反例，609 inputs/964 checksums；223共享/1412去重union均匹配，五个designInputs保持父提交`6661b7049db2482b063731ef2aebcc4543e3be6c`绑定。新A2/A3各12744 generated/9072 distinct、queue0/depth7，九个mutation违反指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry或state constraint，CHECK_DEADLOCK FALSE；不是crypto/byte producer、general E>W、frontier/grant/close、full A+C+D、clock/活性、总memory、掉电/长期/性能或生产权限。历史source/design/run回执不重绑。
 
 实际用例、固定向量及命令见[实现记录](../profile-wire/README.md#恢复上下文与fencing前置)。步骤14、full A+C+D及生产Gate保持OPEN。
+
+### fresh-context readonly recovery observation
+
+ProfileRecoveryObservation投影同一上下文的一次readonly point probe，E=W=3 A2/A3。definitive missing必须有对应source的durable fence和identity binding；UNKNOWN不能投票，预算不是tail，context变化不能报告有效样本；禁止Add、caller取消时放permit，以及把观察当close。七个指定mutation分别违反这些性质。Java原recovery读算法仍负责实际write-set聚合，此投影不替代byte/CRC/force、完整required authority/frontier/close或总预算验证。
+
+最终Java `unified-wal-local-E2Od7BZC` exit0，实际9类146项全部通过（common8/server138：socket46、lifecycle30、metadata19、PendingAddOp19、decoder21、Bookie3），1027冻结输入；common/server Spotless/Checkstyle实际exit0，记录`unified-wal-recovery-observation-style-23phd7ct`保留完成chunk177207与空输出，378个Java输入匹配/222与模型共享，Java/style16 checksums核验。最终模型`unified-wal-model-jfaltg9m` exit0：331配置66完整正向PASS/265指定反例、620 inputs/990 checksums；224共享/1423去重union匹配，五个designInputs保持父提交`62aef445dd57cd5df6f0b05531cddcd733319f1d`绑定。新增A2/A3各58752 generated/27648 distinct、queue0/depth4，七个mutation命中指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不是full A+C+D、完整required frontier/explicit LAC/grant/close、general E>W、crypto producer、clock/活性、总memory、掉电/长期/性能或生产权限。历史回执不重绑。
+
+真实fixture和命令见[实现记录](../profile-wire/README.md#fresh-context只读取证)，步骤14和生产Gate仍OPEN。

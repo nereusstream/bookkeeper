@@ -68,6 +68,9 @@ final class ProfileBookieClient implements BookieClient {
     private volatile Map<BookieId, ProfileNormalDataClient> clients;
     private volatile Map<BookieId, ProfileNormalDataClient> readPeers;
     private final Retry retry;
+    private final org.apache.bookkeeper.discover.profile.ProfileRecoveryContext recoveryContext;
+    private final Map<BookieId, org.apache.bookkeeper.discover.profile.ProfileInitialControlClient> controlPeers;
+    private final Map<BookieId, CompletableFuture<ProfileStatus>> readFences = new ConcurrentHashMap<>();
     private final int perTargetLimit;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean uncertain = new AtomicBoolean();
@@ -78,6 +81,15 @@ final class ProfileBookieClient implements BookieClient {
 
     ProfileBookieClient(ClientContext base, ProfileLedgerContext ledger, ProtectedProfileCredential credential,
             Map<BookieId, ProfileNormalDataClient> clients, int perTargetLimit, Retry retry) {
+        this(base, ledger, credential, clients, perTargetLimit, retry, null, Map.of());
+    }
+
+    ProfileBookieClient(ClientContext base, ProfileLedgerContext ledger, ProtectedProfileCredential credential,
+            Map<BookieId, ProfileNormalDataClient> clients, int perTargetLimit, Retry retry,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryContext recovery,
+            Map<BookieId, org.apache.bookkeeper.discover.profile.ProfileInitialControlClient> controls) {
+        recoveryContext = recovery;
+        controlPeers = Map.copyOf(controls);
         this.base = base;
         this.ledger = ledger;
         this.credential = credential;
@@ -99,6 +111,7 @@ final class ProfileBookieClient implements BookieClient {
             WriteCallback callback, Object context, int options, boolean failFast, EnumSet<WriteFlag> flags) {
         ProfileNormalDataClient peer = clients.get(address);
         int rejected = closed.get() ? BKException.Code.ClientClosedException
+                : recoveryContext != null ? BKException.Code.IllegalOpException
                 : ledgerId != ledger.ledgerId() || peer == null || options != 0 || !flags.isEmpty()
                     ? BKException.Code.IllegalOpException
                     : !credential.matchesWireVerifier(key) ? BKException.Code.UnauthorizedAccessException : 0;
@@ -312,6 +325,10 @@ final class ProfileBookieClient implements BookieClient {
         return clients;
     }
 
+    boolean isRecoveryReader() {
+        return recoveryContext != null;
+    }
+
     ProfileLedgerContext ledgerContext() {
         return ledger;
     }
@@ -383,22 +400,46 @@ final class ProfileBookieClient implements BookieClient {
     public void readEntry(BookieId address, long ledgerId, long entryId, ReadEntryCallback cb, Object ctx,
             int flags, byte[] key, boolean failFast) {
         ProfileNormalDataClient peer = readPeers.get(address);
-        if (flags != 0 || ledgerId != ledger.ledgerId() || entryId < 0 || peer == null || closed.get()) {
+        int recoveryFlags = org.apache.bookkeeper.proto.BookieProtocol.FLAG_HIGH_PRIORITY
+                | org.apache.bookkeeper.proto.BookieProtocol.FLAG_DO_FENCING;
+        boolean fencing = recoveryContext != null && flags == recoveryFlags;
+        if ((!fencing && flags != 0) || fencing && !credential.matchesWireVerifier(key)
+                || ledgerId != ledger.ledgerId() || entryId < 0 || peer == null || closed.get()) {
             ordered(() -> cb.readEntryComplete(closed.get() ? BKException.Code.ClientClosedException
                     : BKException.Code.IllegalOpException, ledgerId, entryId, null, ctx));
             return;
         }
-        peer.readEntry(ledger, entryId).whenComplete((reply, failure) -> {
+        CompletableFuture<ProfileStatus> fence = fencing ? fenceSource(address)
+                : CompletableFuture.completedFuture(null);
+        fence.thenCompose(status -> {
+            if (fencing && (status == null || status.statusClass() != ProfileStatus.StatusClass.OK
+                    || status.durableResult() != ProfileStatus.DurableResult.APPLIED
+                        && status.durableResult() != ProfileStatus.DurableResult.ALREADY_APPLIED)) {
+                return CompletableFuture.failedFuture(BKException.create(
+                        status != null && status.statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED
+                            ? BKException.Code.UnauthorizedAccessException : BKException.Code.ReadException));
+            }
+            return peer.readEntry(ledger, entryId);
+        }).whenComplete((reply, failure) -> {
             Runnable completed = () -> {
                 var current = readPeers.get(address);
                 if (failure != null || reply == null || current == null
                         || !Arrays.equals(peer.hello().storageIncarnation(), current.hello().storageIncarnation())) {
-                    cb.readEntryComplete(BKException.Code.ReadException, ledgerId, entryId, null, ctx);
+                    cb.readEntryComplete(BKException.getExceptionCode(failure)
+                            == BKException.Code.UnauthorizedAccessException
+                            ? BKException.Code.UnauthorizedAccessException : BKException.Code.ReadException,
+                            ledgerId, entryId, null, ctx);
                     return;
                 }
                 switch (reply.outcome()) {
-                    case FOUND -> cb.readEntryComplete(BKException.Code.OK, ledgerId, entryId,
-                            Unpooled.wrappedBuffer(reply.entry()), ctx);
+                    case FOUND -> {
+                        var bytes = Unpooled.wrappedBuffer(reply.entry());
+                        try {
+                            cb.readEntryComplete(BKException.Code.OK, ledgerId, entryId, bytes, ctx);
+                        } finally {
+                            bytes.release();
+                        }
+                    }
                     case MISSING -> cb.readEntryComplete(BKException.Code.NoSuchEntryException,
                             ledgerId, entryId, null, ctx);
                     case REFUSED -> cb.readEntryComplete(reply.status().statusClass()
@@ -414,6 +455,18 @@ final class ProfileBookieClient implements BookieClient {
             }
         });
     }
+    private CompletableFuture<ProfileStatus> fenceSource(BookieId source) {
+        return readFences.computeIfAbsent(source, bookie -> {
+            var control = controlPeers.get(bookie);
+            var data = readPeers.get(bookie);
+            if (control == null || data == null || !Arrays.equals(control.hello().storageIncarnation(),
+                    data.hello().storageIncarnation()) || !control.hello().bookieId().equals(bookie.toString())) {
+                return CompletableFuture.failedFuture(BKException.create(BKException.Code.ReadException));
+            }
+            return control.fence(ledger, recoveryContext.operationId(), credential);
+        });
+    }
+
     @Override
     public void batchReadEntries(BookieId address, long ledgerId, long entryId, int maxCount, long maxSize,
             BatchedReadEntryCallback cb, Object ctx, int flags, byte[] key, boolean failFast) {

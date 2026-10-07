@@ -66,15 +66,28 @@ public final class ProfileRecoveryCoordinator {
 
     public CompletableFuture<Result> fence(ZKProfileReservationStore.RecoveryResult accepted,
             Map<String, ProfileInitialControlClient> supplied, ProtectedProfileCredential credential) {
+        if (accepted.context() == null) {
+            throw new IllegalArgumentException("Fencing requires its accepted recovery context");
+        }
+        if (!active.tryAcquire()) {
+            return CompletableFuture.completedFuture(new Result(Status.DEFERRED, accepted.context(), List.of()));
+        }
+        try {
+            return fenceOnce(accepted, supplied, credential).whenComplete((value, failure) -> active.release()).copy();
+        } catch (RuntimeException invalid) {
+            active.release();
+            throw invalid;
+        }
+    }
+
+    private CompletableFuture<Result> fenceOnce(ZKProfileReservationStore.RecoveryResult accepted,
+            Map<String, ProfileInitialControlClient> supplied, ProtectedProfileCredential credential) {
         if (accepted.context() == null || supplied.size() > 64) {
             throw new IllegalArgumentException("Fencing requires a proved recovery context and bounded peer pool");
         }
         var context = accepted.context();
         var peers = Map.copyOf(supplied);
         Objects.requireNonNull(credential, "credential");
-        if (!active.tryAcquire()) {
-            return CompletableFuture.completedFuture(new Result(Status.DEFERRED, context, List.of()));
-        }
         CompletableFuture<Result> actual;
         try {
             actual = CompletableFuture.supplyAsync(() -> prepare(context), cold).thenCompose(prepared -> {
@@ -135,10 +148,131 @@ public final class ProfileRecoveryCoordinator {
                 });
             });
         } catch (RejectedExecutionException rejected) {
-            active.release();
             return CompletableFuture.completedFuture(new Result(Status.DEFERRED, context, List.of()));
         }
-        return actual.whenComplete((result, failure) -> active.release()).copy();
+        return actual;
+    }
+
+    public enum ObservationStatus { OBSERVED_BOUNDARY, DEFERRED, CONFLICT, QUARANTINED }
+
+    /** Read-only observations. Missing above the hint is not a final normal-tail or CLOSED authority. */
+    public record Observation(ObservationStatus status, ProfileRecoveryContext context,
+            org.apache.bookkeeper.client.ProfileLedgerHandle.LacEvidence lac,
+            List<org.apache.bookkeeper.client.ProfileRecoveryReadHandle.Probe> candidates, long missingEntry) {
+        public Observation {
+            candidates = List.copyOf(candidates);
+        }
+    }
+
+    private record Readers(ZKProfileReservationStore.RecoveryResult recovery, List<ProfileInstallReceipt> permitted) { }
+
+    public CompletableFuture<Observation> observe(ZKProfileReservationStore.RecoveryResult accepted,
+            org.apache.bookkeeper.client.ClientContext sdk,
+            Map<org.apache.bookkeeper.net.BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, ProtectedProfileCredential credential,
+            int maxCandidates) {
+        if (accepted.context() == null) {
+            throw new IllegalArgumentException("Observation requires its accepted recovery context");
+        }
+        if (!active.tryAcquire()) {
+            return CompletableFuture.completedFuture(new Observation(ObservationStatus.DEFERRED,
+                    accepted.context(), null, List.of(), -1));
+        }
+        try {
+            return observeOnce(accepted, sdk, suppliedData, suppliedControl, credential, maxCandidates)
+                    .whenComplete((value, failure) -> active.release()).copy();
+        } catch (RuntimeException invalid) {
+            active.release();
+            throw invalid;
+        }
+    }
+
+    private CompletableFuture<Observation> observeOnce(ZKProfileReservationStore.RecoveryResult accepted,
+            org.apache.bookkeeper.client.ClientContext sdk,
+            Map<org.apache.bookkeeper.net.BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, ProtectedProfileCredential credential,
+            int maxCandidates) {
+        if (maxCandidates < 1 || maxCandidates > 32 || suppliedData.size() > 64) {
+            throw new IllegalArgumentException("Recovery observation requires a bounded candidate window and peers");
+        }
+        var data = Map.copyOf(suppliedData);
+        var control = Map.copyOf(suppliedControl);
+        var context = accepted.context();
+        return fenceOnce(accepted, control, credential).thenCompose(fenced -> {
+            if (fenced.status() != Status.FENCED_CONTEXT) {
+                return CompletableFuture.completedFuture(new Observation(
+                        observationStatus(fenced.status()), context, null, List.of(), -1));
+            }
+            return CompletableFuture.supplyAsync(() -> {
+                var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
+                if (current.context() == null || !context.equals(current.context())) {
+                    return new Readers(current, List.of());
+                }
+                var retained = reservations.retainedActivationTargets(context.ledger().ledgerId());
+                if (retained.status()
+                        != org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND) {
+                    throw new IllegalStateException("Required retained recovery source history is unavailable");
+                }
+                var currentTargets = prepare(context).targets();
+                var permitted = new java.util.LinkedHashMap<String, ProfileInstallReceipt>();
+                retained.targets().forEach(receipt -> permitted.put(receipt.scope().targetBookie(), receipt));
+                currentTargets.forEach(receipt -> permitted.put(receipt.scope().targetBookie(), receipt));
+                return new Readers(current, List.copyOf(permitted.values()));
+            }, cold).thenCompose(readers -> {
+                if (readers.recovery().context() == null || !context.equals(readers.recovery().context())) {
+                    return CompletableFuture.completedFuture(new Observation(observationStatus(
+                            failureStatus(readers.recovery().outcome())), context, null, List.of(), -1));
+                }
+                var controls = new java.util.HashMap<org.apache.bookkeeper.net.BookieId, ProfileInitialControlClient>();
+                control.forEach((name, peer) -> controls.put(org.apache.bookkeeper.net.BookieId.parse(name), peer));
+                org.apache.bookkeeper.client.ProfileRecoveryReadHandle reader;
+                try {
+                    reader = org.apache.bookkeeper.client.ProfileRecoveryReadHandle.fromContext(sdk,
+                            readers.recovery(), readers.permitted(), data, controls);
+                } catch (java.security.GeneralSecurityException invalid) {
+                    return CompletableFuture.failedFuture(invalid);
+                }
+                return reader.readLacEvidence().thenCompose(lac -> scan(reader, context, lac,
+                        new ArrayList<>(), lac.prefixEntryId(), lac.prefixLength(), maxCandidates))
+                        .thenCompose(observation -> CompletableFuture.supplyAsync(() -> {
+                            var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
+                            return current.context() != null && context.equals(current.context()) ? observation
+                                    : new Observation(observationStatus(failureStatus(current.outcome())), context,
+                                            observation.lac(), observation.candidates(), -1);
+                        }, cold)).whenComplete((value, failure) -> reader.closeAsync());
+            });
+        });
+    }
+
+    private CompletableFuture<Observation> scan(org.apache.bookkeeper.client.ProfileRecoveryReadHandle reader,
+            ProfileRecoveryContext context, org.apache.bookkeeper.client.ProfileLedgerHandle.LacEvidence lac,
+            List<org.apache.bookkeeper.client.ProfileRecoveryReadHandle.Probe> candidates,
+            long prefix, long length, int remaining) {
+        if (remaining == 0 || prefix == Long.MAX_VALUE) {
+            return CompletableFuture.completedFuture(new Observation(ObservationStatus.DEFERRED,
+                    context, lac, candidates, -1));
+        }
+        return reader.probe(prefix + 1).thenCompose(probe -> {
+            if (probe.outcome() == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.ProbeOutcome.ABSENT) {
+                return CompletableFuture.completedFuture(new Observation(ObservationStatus.OBSERVED_BOUNDARY,
+                        context, lac, candidates, prefix + 1));
+            }
+            int payload = probe.payload().remaining();
+            if (length > Long.MAX_VALUE - payload || probe.length() != length + payload) {
+                return CompletableFuture.completedFuture(new Observation(ObservationStatus.QUARANTINED,
+                        context, lac, candidates, -1));
+            }
+            candidates.add(probe);
+            return scan(reader, context, lac, candidates, prefix + 1, probe.length(), remaining - 1);
+        });
+    }
+
+    private static ObservationStatus observationStatus(Status status) {
+        return switch (status) {
+            case CONFLICT -> ObservationStatus.CONFLICT;
+            case QUARANTINED -> ObservationStatus.QUARANTINED;
+            default -> ObservationStatus.DEFERRED;
+        };
     }
 
     private Prepared prepare(ProfileRecoveryContext context) {

@@ -41,7 +41,7 @@ import org.apache.bookkeeper.versioning.Versioned;
 /** Bounded source coverage and a matching boundary point read; never publishes writer state or CLOSED. */
 final class ProfileLacEvidenceRead {
     private record Sample<T>(BookieId bookie, T reply, Throwable failure) { }
-    private final ProfileLedgerHandle handle;
+    private final LedgerHandle handle;
     private final ProfileBookieClient transport;
     private final CompletableFuture<ProfileLedgerHandle.LacEvidence> result = new CompletableFuture<>();
     private Versioned<LedgerMetadata> expected;
@@ -51,7 +51,7 @@ final class ProfileLacEvidenceRead {
     private long prefix;
     private final List<ProfileLedgerHandle.LacSource> sources = new ArrayList<>();
 
-    ProfileLacEvidenceRead(ProfileLedgerHandle handle, ProfileBookieClient transport) {
+    ProfileLacEvidenceRead(LedgerHandle handle, ProfileBookieClient transport) {
         this.handle = handle;
         this.transport = transport;
     }
@@ -80,7 +80,9 @@ final class ProfileLacEvidenceRead {
         context = transport.ledgerContext();
         peers = transport.readPeers();
         LedgerMetadata metadata = expected.getValue();
-        if (transport.isClosed() || metadata.getState() != LedgerMetadata.State.OPEN
+        if (transport.isClosed()
+                || metadata.getState() != (transport.isRecoveryReader()
+                        ? LedgerMetadata.State.IN_RECOVERY : LedgerMetadata.State.OPEN)
                 || metadata.getEnsembleSize() > 32 || metadata.getAllEnsembles().size() > 32) {
             throw error(BKException.Code.IllegalOpException);
         }

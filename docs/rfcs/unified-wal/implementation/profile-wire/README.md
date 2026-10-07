@@ -459,3 +459,25 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecT
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+## fresh-context只读取证
+
+2026-10-07，ProfileRecoveryCoordinator.observe借用原cold executor/SDK context/verified DATA+CONTROL clients，把已有fence前置、fresh readRecovery及retained history与只读session串联。冻结同一operation/generation和metadata snapshot，按已发布current targets覆盖历史incarnation后验证source池；返回前重读同一durable context。一次coordinator permit覆盖整个fence→LAC→point window→post-check，不在fence结束时提前放开；caller只获得copy future。无新线程、重试、自动reconnect或逐entryMetadataStore请求。
+
+ProfileRecoveryReadHandle复用原LedgerHandle的digest/distribution、既有ProfileContext和LAC/source/length实现，在IN_RECOVERY metadata下创建只读取证角色。原SDK ListenerBasedPendingReadOp/PendingReadOp以recovery flag发起合法write set的point read、digest校验及W-A+1 missing聚合。ProfileBookieClient为该角色把fencing flag适配成原CONTROL FENCE→DATA READ_ENTRY；每来源先核验DATA/CONTROL identity/incarnation并完成同instance/同operation durable fence，UNKNOWN/NONE拒绝该来源读取而非missing。每个session最多64个固定source与fence future，已有positive/pending/error future不隐式换operation重试；后续点读复用来源fence，不产生逐entry控制force。normal Add在transport及handle角色两层拒绝，close仅关闭本地session，不更新标准metadata。
+
+LAC保留源provenance并使用正确boundary length；只读window从该boundary后的坐标按序读取最多32个candidate。候选payload与累计length相邻不符/溢出则QUARANTINED；达到window上限返回DEFERRED/missing=-1，不能把预算当作absence。原recovery读聚合definitive missing后，只返回OBSERVED_BOUNDARY样本。最大/explicit LAC、其他accepted ACK/AQ/repair required authority及完整prefix尚未收齐，因此这个样本不命名为normal-tail proof，不能发布CLOSED或legacy recovered success。candidate可能是speculative，后续仍需合法grant/恢复写回与required-frontier判定。
+
+点读FOUND callback现在按原BookieClient借用buffer合同执行：adapter在callback后release自己的wrapper；PendingReadOp保留consumer引用，不提前释放payload。readonly probe通过原LedgerEntry.getEntry取得owned应用bytes，结果只暴露readonly view。source socket/output及远端native IO仍各自保留原quota/pin/loan到实际终结，session/caller停止不证明远端IO已取消。总TLS/kernel/native/对象/存储工作集尚未证明。
+
+真实fixture把entry99/length1000、entry100/LAC99/length1100/payload100读为LAC boundary99/1000、candidate100/1100和missing101；window=1返回DEFERRED，并保持writer状态和metadata IN_RECOVERY。只有一个来源有CONTROL fence时不能把其他两个empty来源计missing；合法digest下entry101/length1300与应用bytes矛盾返回QUARANTINED；LAC reply被实际持有期间第二observe被拒绝，delete cut后释放则返回CONFLICT并保留历史candidate。Add拒绝、local close不写CLOSED及无逐entryforce已验证。定向unified-wal-local-XPYKddKi exit0，实际4项通过；YN9e3BwQ是新测试漏ByteBuffer引用的编译失败，风格长行修复不算实现RED。最终扩大回归/model/style见下文。
+
+fresh-context基础读取已接通，单entry recovery grant/Add、所有required authority/frontier与最大/explicit LAC、恢复终态可见性cut、matching CLOSED(P,length,context)/lost-close、独立readonly open、AutoRecovery/delete/rejoin及生产Gate仍OPEN。
+
+最终Java `unified-wal-local-E2Od7BZC` exit0，实际9类146项全部通过（common8/server138：socket46、lifecycle30、metadata19、PendingAddOp19、decoder21、Bookie3），1027冻结输入；common/server Spotless/Checkstyle实际exit0，记录`unified-wal-recovery-observation-style-23phd7ct`保留完成chunk177207与空输出，378个Java输入匹配/222与模型共享，Java/style16 checksums核验。最终模型`unified-wal-model-jfaltg9m` exit0：331配置66完整正向PASS/265指定反例、620 inputs/990 checksums；224共享/1423去重union匹配，五个designInputs保持父提交`62aef445dd57cd5df6f0b05531cddcd733319f1d`绑定。新增A2/A3各58752 generated/27648 distinct、queue0/depth4，七个mutation命中指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不是full A+C+D、完整required frontier/explicit LAC/grant/close、general E>W、crypto producer、clock/活性、总memory、掉电/长期/性能或生产权限。历史回执不重绑。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

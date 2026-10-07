@@ -555,3 +555,7 @@ ProfileLacEvidence检查CoverageCountsOnlyVerified、SuccessHasMatchingLength、
 ### 恢复context/fencing前置性质
 
 ProfileRecoveryPrelude检查WrittenContextHasObservedBirth、WrittenContextHasPublishedAuthority、CreatorFieldsArePreserved、OperationIsFrozen、FenceCoverageHasDurableVerifiedSources、FenceScopeIsCurrent、PreludeNeverPublishesClosed。九个mutation分别删除metadata/lifecycle birth guard、跳过published authority、丢creator、更换operation、计UNKNOWN、忽略peer/scope或把fencing当作close。只投影E=W=3、A2/A3的一次开始与fence fan-in；完整grant/frontier/close、crypto/bytes、全局memory、clock/活性及general E>W不在此投影。
+
+### recovery observation性质
+
+ProfileRecoveryObservation检查AbsenceHasFencedBoundCoverage、EvidenceHasCurrentContext、BudgetNeverMeansAbsence、ReadonlyNeverAdds、CallerCancelKeepsReservation、ObservationNeverCloses。七个mutation分别计入未fenced/UNKNOWN missing、忽略context、把预算当tail、允许Add、取消时放permit或把观察当close。有限E=W=3 A2/A3只检查一次readonly probe；实际digest/bytes、总预算、完整required authority/frontier/grant/close、时钟/活性和general E>W仍未证明。
