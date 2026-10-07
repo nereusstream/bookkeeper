@@ -451,3 +451,5 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 实际control mTLS、Bookie force/apply与单entry DATA写回、独立字节向量及最终回执见[实现记录](../profile-wire/README.md#repairintent-admission与实际恢复写回)。typed receipt是metadata后端输入，physical安装链由实际socket用例验证。grant close、replica-readable/membership publication、matching CLOSED和完整AutoRecovery仍OPEN。
 
 2026-10-08 [UIC4 recovery grant close接线](../profile-wire/README.md#uic4-recovery-grant-close接线)已将独立exact close authority接到实际CONTROL write/force/owner apply，pre-cut DATA未终结不发布readable；timeout保留UNKNOWN并可显式重连解析同操作，重复close无额外force，不激活normal writer。现有ZK repair reader仍拒绝仅凭admission/grant授权close；membership/copy结果与真实close-authority发布器、matching CLOSED和完整AutoRecovery仍OPEN。
+
+2026-10-08 [历史fragment repair membership与close授权](../profile-wire/README.md#历史fragment-repair-membership与close授权)已用同一ZK事务发布标准membership和immutable repair结果，实际close authority随后接入UIC4；bounded head/digest/inverse校验继续采用同一恢复token，physical admission guard防止同UUID/version0重建通过旧cut。真实copy/socket/files与ZK连续commit/reply-loss/delete竞争已有定向验证。最后开放fragment仍需terminal/frontier proof；完整copy coordinator、AutoRecovery和matching CLOSED保持OPEN，不授予normal或strong loss reset。

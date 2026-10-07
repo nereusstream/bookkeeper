@@ -171,6 +171,199 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
                 install, bytes(16, 40 + id), new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 4));
     }
 
+    private ProfileRepairIntent historicalRepair(ZKProfileReservationStore.RecoveryResult entered, int slot,
+            int member, String target, int id) {
+        var template = scope(target);
+        var install = new ProfileControlScope(template.operation(), template.purpose(), 44,
+                template.ledgerInstanceId(), template.descriptorIdentity(), target,
+                template.targetStorageIncarnation(), template.authorityDomain(), entered.context().controlGeneration(),
+                bytes(16, id), bytes(32, id), null);
+        return new ProfileRepairIntent(entered.context(), slot, bytes(16, id + 1), 0, member,
+                ZKProfileReservationStore.repairEnsembleDigest(entered.metadata().metadata().getValue(), 0),
+                install, bytes(16, id + 2), new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 99));
+    }
+
+    @Test
+    public void historicalRepairCommitAtomicallyPublishesMembershipAndCloseAuthorityAndAdoptsSameContext()
+            throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var replacement = replacement(manager, "b4:3181", 10);
+            var metadata = membership(first, manager);
+            assertEquals(CreateStatus.APPLIED, store(first).publishReplacement(replacement.source(),
+                    replacement.candidate(), metadata).status());
+            var lifecycle = store(first);
+            var plan = lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan();
+            var entered = lifecycle.beginRecovery(metadata, plan);
+            var current = entered;
+            for (int slot = 0; slot < 2; slot++) {
+                var intent = historicalRepair(current, slot, 1 - slot, "b" + (slot + 5) + ":3181", 60 + slot * 5);
+                var prepared = lifecycle.prepareRepair(metadata, intent);
+                var receipt = new ProfileInstallReceipt(intent.install(), EngineProfile.SEGMENT_WAL_ENGINE,
+                        bytes(32, 7), 1);
+                assertEquals(CreateStatus.APPLIED,
+                        lifecycle.admitRepair(metadata, prepared.snapshot(), receipt).status());
+                var closeId = bytes(16, 80 + slot);
+                var closeScope = intent.closeScope(closeId, intent.grantGeneration() + slot + 1);
+                var reader = lifecycle.repairAuthorityReader(intent.install().targetBookie(), metadata);
+                assertEquals(ReadStatus.NOT_FOUND, reader.read(ProfileAuthorityKey.fromScope(closeScope)).status());
+                first.loseReply.set(true);
+                var committed = lifecycle.commitRepair(metadata, prepared.snapshot(), current.metadata(), closeId);
+                assertEquals(CreateStatus.ALREADY_APPLIED, committed.status());
+                assertEquals(closeScope, committed.closeScope());
+                assertEquals(intent.install().targetBookie(), committed.metadata().metadata().getValue()
+                        .getAllEnsembles().get(0L).get(intent.replacedMemberSlot()).toString());
+                assertEquals(CreateStatus.ALREADY_APPLIED, lifecycle.commitRepair(
+                        metadata, prepared.snapshot(), current.metadata(), closeId).status());
+                assertEquals(CreateStatus.CONFLICT, lifecycle.commitRepair(
+                        metadata, prepared.snapshot(), current.metadata(), bytes(16, 90 + slot)).status());
+                assertEquals(ReadStatus.FOUND, reader.read(ProfileAuthorityKey.fromScope(closeScope)).status());
+                assertEquals(ReadStatus.NOT_FOUND,
+                        reader.read(ProfileAuthorityKey.fromScope(intent.grantScope())).status());
+                current = store(second).readRecovery(membership(second, manager), 44);
+                assertEquals(entered.context(), current.context());
+                assertEquals(entered.metadata().birthZxid(), current.metadata().birthZxid());
+            }
+            assertEquals(6, lifecycle.retainedActivationTargets(44).targets().size());
+            assertEquals(2, ProfileRepairCommit.head(current.metadata().metadata().getValue().getCustomMetadata()
+                    .get(ProfileRepairCommit.KEY)).size());
+            first.delete(ROOT + "/2c/repair-0/committed", 0);
+            assertEquals(ProfileLedgerMetadataStore.Outcome.QUARANTINED,
+                    lifecycle.readRecovery(metadata, 44).outcome());
+            assertEquals(6, lifecycle.retainedActivationTargets(44).targets().size());
+            assertEquals(CreateStatus.APPLIED, lifecycle.cutDelete(lifecycle.read(44).snapshot(),
+                    bytes(16, 100), bytes(32, 100)).status());
+            assertEquals(6, lifecycle.retainedActivationTargets(44).targets().size());
+            assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT, lifecycle.readRecovery(metadata, 44).outcome());
+        }
+    }
+
+    @Test
+    public void historicalRepairDeleteBeforePublicationLeavesMembershipUnchanged() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var replacement = replacement(manager, "b4:3181", 10);
+            var metadata = membership(first, manager);
+            var lifecycle = store(first);
+            lifecycle.publishReplacement(replacement.source(), replacement.candidate(), metadata);
+            var entered = lifecycle.beginRecovery(metadata,
+                    lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan());
+            var intent = historicalRepair(entered, 0, 1, "b5:3181", 60);
+            var prepared = lifecycle.prepareRepair(metadata, intent).snapshot();
+            lifecycle.admitRepair(metadata, prepared, new ProfileInstallReceipt(intent.install(),
+                    EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1));
+            first.beforeMulti.set(() -> assertEquals(CreateStatus.APPLIED,
+                    store(second).cutDelete(store(second).read(44).snapshot(),
+                            bytes(16, 100), bytes(32, 100)).status()));
+            assertEquals(CreateStatus.CONFLICT,
+                    lifecycle.commitRepair(metadata, prepared, entered.metadata(), bytes(16, 80)).status());
+            assertEquals(entered.metadata().metadata().getVersion(), metadata.readMembership(44)
+                    .snapshot().metadata().getVersion());
+            assertEquals(5, lifecycle.retainedActivationTargets(44).targets().size());
+        }
+    }
+
+    @Test
+    public void historicalRepairRecreatedSameIntentUuidCannotPassTheOldPublicationCut() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var replacement = replacement(manager, "b4:3181", 10);
+            var metadata = membership(first, manager);
+            var lifecycle = store(first);
+            lifecycle.publishReplacement(replacement.source(), replacement.candidate(), metadata);
+            var entered = lifecycle.beginRecovery(metadata,
+                    lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan());
+            var intent = historicalRepair(entered, 0, 1, "b5:3181", 60);
+            var prepared = lifecycle.prepareRepair(metadata, intent).snapshot();
+            var receipt = new ProfileInstallReceipt(intent.install(), EngineProfile.SEGMENT_WAL_ENGINE,
+                    bytes(32, 7), 1);
+            lifecycle.admitRepair(metadata, prepared, receipt);
+            String path = ROOT + "/2c/repair-0";
+            byte[] original = second.getData(path, false, null);
+            first.beforeMulti.set(() -> {
+                try {
+                    removeTree(path);
+                    second.multi(List.of(Op.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                            Op.create(path + "/birth-" + prepared.birth(), new byte[0],
+                                    ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT)),
+                            (code, ignored, context, results) -> assertEquals(0, code), null);
+                    var recreated = store(second).prepareRepair(membership(second, manager), intent).snapshot();
+                    assertEquals(prepared.birth(), recreated.birth());
+                    assertTrue(prepared.storeVersion() != recreated.storeVersion());
+                    assertEquals(CreateStatus.APPLIED,
+                            store(second).admitRepair(membership(second, manager), recreated, receipt).status());
+                } catch (Exception failure) {
+                    throw new AssertionError(failure);
+                }
+            });
+            assertEquals(CreateStatus.CONFLICT,
+                    lifecycle.commitRepair(metadata, prepared, entered.metadata(), bytes(16, 80)).status());
+            assertEquals(entered.metadata().metadata().getVersion(),
+                    metadata.readMembership(44).snapshot().metadata().getVersion());
+            assertEquals(null, second.exists(path + "/committed", false));
+        }
+    }
+
+    @Test
+    public void repairCommitVectorsRejectMalformedAndOversizeProofs() throws Exception {
+        byte[] vector = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/repair-commit.bin").toURI()));
+        byte[] head = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/repair-commit-head.bin").toURI()));
+        assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryContext.decode(vector));
+        byte[] recovery = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/recovery-context.bin").toURI()));
+        assertThrows(IllegalArgumentException.class, () -> ProfileRepairCommit.decode(recovery));
+        var commit = ProfileRepairCommit.decode(vector);
+        assertEquals(2, commit.beforeVersion());
+        assertEquals("b2:3181", commit.oldBookie());
+        assertArrayEquals(vector, commit.encode());
+        var references = ProfileRepairCommit.head(head);
+        assertEquals(new UUID(0, 7), references.get(0).intentBirth());
+        assertEquals(11, references.get(0).intentStoreVersion());
+        assertArrayEquals(head, ProfileRepairCommit.head(references));
+        commit.beforeDigest()[0] = 0;
+        references.get(0).digest()[0] = 0;
+        assertArrayEquals(vector, commit.encode());
+        assertArrayEquals(head, ProfileRepairCommit.head(references));
+        for (int offset : List.of(0, 4, 8, 100)) {
+            byte[] bad = vector.clone();
+            ByteBuffer.wrap(bad).putInt(offset, -1);
+            checksum(bad);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRepairCommit.decode(bad));
+        }
+        for (int count : List.of(0, 33)) {
+            byte[] bad = head.clone();
+            ByteBuffer.wrap(bad).putInt(8, count);
+            checksum(bad);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRepairCommit.head(bad));
+        }
+        assertThrows(IllegalArgumentException.class, () -> ProfileRepairCommit.head(
+                List.of(references.get(0), references.get(0))));
+        assertThrows(IllegalArgumentException.class,
+                () -> ProfileRepairCommit.decode(Arrays.copyOf(vector, ProfileRepairCommit.MAX_BYTES + 1)));
+    }
+
+    @Test
+    public void repairOfUnboundedLastFragmentCannotPublishMembershipOrClose() throws Exception {
+        try (LedgerManager manager = manager(first)) {
+            ready(manager);
+            var metadata = membership(first, manager);
+            var lifecycle = store(first);
+            var entered = lifecycle.beginRecovery(metadata,
+                    lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan());
+            var intent = repairIntent(entered, 0, 60);
+            var prepared = lifecycle.prepareRepair(metadata, intent).snapshot();
+            lifecycle.admitRepair(metadata, prepared, new ProfileInstallReceipt(intent.install(),
+                    EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1));
+            assertEquals(CreateStatus.CONFLICT, lifecycle.commitRepair(metadata, prepared, entered.metadata(),
+                    bytes(16, 80)).status());
+            assertEquals(entered.context(), lifecycle.readRecovery(metadata, 44).context());
+            assertEquals(entered.metadata().metadata().getVersion(),
+                    metadata.readMembership(44).snapshot().metadata().getVersion());
+        }
+    }
+
     @Test
     public void repairIntentVectorRejectsMalformedLengthsAndOwnsItsFields() throws Exception {
         byte[] vector = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(

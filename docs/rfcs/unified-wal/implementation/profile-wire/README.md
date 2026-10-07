@@ -525,3 +525,23 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 定向`unified-wal-local-yK1Xo7mB`为common6/socket3共9项通过，新增force失败与接收头边界的`unified-wal-local-3trdrvbh`为2项通过。首轮4d820fXb是测试漏ByteBuffer引用的编译失败，两处长行修正不作为实现RED。首次完整回归/model的输入随后因补充两项风险验证变化，最终回执已重新冻结，旧source/design/result未重绑。有限模型消费独立close authority，不证明其metadata发布器或实际crypto/bytes/force本身。
 
 实际membership/copy result与ZK close-authority publication、完整required frontier/最大和explicit LAC、matching CLOSED及lost-close、完整AutoRecovery/独立readonly open/delete/rejoin、full A+C+D、总预算、活性、掉电/长期/性能和production authority仍OPEN，步骤14保持PARTIAL。
+
+## 历史fragment repair membership与close授权
+
+2026-10-08，commitRepair是完成copy后的cold发布原语：caller保留同一intent、copied-at标准metadata snapshot与close ID。只允许range完整覆盖有下一fragment起点的历史fragment；最后开放fragment没有terminal/frontier proof时返回CONFLICT。copy完成是调用前提，原语本身不生成copy/required-frontier/strong reset证据，也没有接入完整AutoRecovery worker。
+
+最终ZK multi同时检查metadata physical birth/version、原lifecycle/delete cut、intent birth与admission physical guard，再写唯一标准ensemble mapping及immutable committed receipt。response loss读取同slot/operation的实际结果，不重新选择target；冲突不覆盖。admission现在同时持久化24字节physical guard，路径包含实际intent节点的出生版本。commit head也保存该版本，所以同UUID/version0重建不能通过旧cut；缺失guard不隐式重建。旧实验admission缺少guard时不再提供authority，尚无稳定格式/迁移承诺。
+
+UWRC恢复context及其operation不变；标准metadata增加单个bounded commit-head key，最多32条slot/intent UUID/physical version/content digest引用。每次提交保存before version、before/after canonical metadata SHA、旧member和固定close ID/generation。fresh readRecovery按引用逆演最多32次mapping变化，核对每步digest、birth、admission及版本，再校验原published predecessor；逆演仅用于验证，永不写回OPEN。缺失/损坏必需proof、修改其他metadata内容或错误mapping均fail closed。membership权威仍只有标准metadata，receipt不复制第二份ensemble map。
+
+UWRC/schema1字节不变。新repair commit receipt magic为`0x5557524d`（UWRM，区别于恢复context的UWRC），schema1/reserved0，106字节固定部分加1～255字节旧Bookie，总107～361字节，CRC32C。UWRH head为16+60*n字节，n=1～32，总上限1936；每项slot4/intent UUID16/physical version8/receipt SHA32。独立Python struct/CRC32C向量repair-commit.bin113字节，SHA-256 `b11289617d0600b18713ad16966dc52a77e93488c62c1754855b18f13b530d31`；repair-commit-head.bin76字节，SHA-256 `20ffa767b856426e3bfbba6d1dcd0a781978d92e2dab51e80fe2f7a412ad010f`。这些向量只验证格式，不制造commit或copy事实。
+
+exact close authority由实际current metadata、完整head/receipt proof、intent admission及最后context recheck导出RECOVERY_CLOSE_AUTHORIZED；已提交intent不再授予fresh RECOVERY_GRANT。old结果仍在history中，后续mapping变化不把旧target重新授权。UIC4 close沿用native public SHA、pre-cut DATA排空、write/force/owner apply和本地committed-readable，不激活normal writer。DELETE后的admitted目标与旧/新member清理历史继续留存，不删除intent/receipt或执行GC。
+
+实际mTLS/ZK/files场景先全E确认entry0，再通过既有replacement协调器建立从entry1开始的新fragment；最新E实际FENCE后读survivor entry0，inactive安装/admit新target、grant及actual recovery Add，随后真实membership/close-authority发布和UIC4 close，最后READ_ENTRY。测试没有注入close authority；metadata保持IN_RECOVERY、新target仍normal-inactive，完整恢复/CLOSED没有被伪造。ZK场景覆盖两次连续commit/new store采用同token、实际CAS reply loss、delete抢先、同UUID/version0 intent重建、缺失必需proof和unbounded last fragment拒绝；codec独立向量覆盖字段所有权、CRC/长度/schema/重复slot/上限。
+
+最终Java `unified-wal-local-BEO0Fee6` exit0：9类167项全部通过，common10/server157（socket52、lifecycle38、metadata19、PendingAddOp19、decoder22、Bookie7），1034冻结输入。Spotless/Checkstyle实际session54772完成chunk d7c59d/exit0/空输出，归档`unified-wal-repair-membership-style-tbaqb0r0`的380 Java输入匹配/224与模型共享，Java/style15 checksums核验。最终模型`unified-wal-model-lfhel3f9` exit0：362配置69完整正向PASS/293指定反例、656 inputs/1083 checksums；226共享/1464去重union匹配，五个designInputs保持父提交`9ec110346f3bb9c210b3819db4968b9ea4503064`绑定。新增投影121 generated/94 distinct、queue0/depth8，十个mutation命中指定性质；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。历史回执不重绑。
+
+定向`unified-wal-local-j1KsEcBj`为9项通过（ZK7/socket2），同UUID重建`unified-wal-local-w4PrZv71`的1项测试通过，之后的长行style失败已修正；早期delete方法名和private path引用属于测试编译错误，不作为实现RED。为避免与UWRC context混淆，新receipt改为独立UWRM，最终Java/model已按最终格式重新冻结。
+
+重现使用上一节UIC4的Java/style/model三条命令。最后fragment/frontier与matching CLOSED、完整copy coordinator/AutoRecovery worker、CLOSED后的独立readonly open、distributed delete/rejoin/GC、full A+C+D、总预算、活性、掉电/长期/性能及生产authority仍OPEN，步骤14保持PARTIAL。

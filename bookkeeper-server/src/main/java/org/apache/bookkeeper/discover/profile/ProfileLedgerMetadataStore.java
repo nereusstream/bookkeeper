@@ -427,6 +427,22 @@ public final class ProfileLedgerMetadataStore {
         return List.of(Op.check(marker, 0), Op.check(path, (int) version.getLongVersion()));
     }
 
+    Op repairMetadataWrite(MembershipSnapshot expected, LedgerMetadata desired) throws IOException {
+        if (!(expected.metadata().getVersion() instanceof LongVersion version)
+                || version.getLongVersion() < 0 || version.getLongVersion() >= Integer.MAX_VALUE
+                || desired.getLedgerId() != expected.metadata().getValue().getLedgerId()
+                || desired.getState() != LedgerMetadata.State.IN_RECOVERY
+                || desired.getCToken() != expected.metadata().getValue().getCToken()) {
+            throw new IllegalArgumentException("Invalid guarded repair metadata write");
+        }
+        byte[] encoded = new LedgerMetadataSerDe().serialize(desired);
+        if (encoded.length > 1024 * 1024) {
+            throw new IllegalArgumentException("Repair metadata exceeds its fixed byte bound");
+        }
+        return Op.setData(((AbstractZkLedgerManager) manager).getLedgerPath(desired.getLedgerId()), encoded,
+                Math.toIntExact(version.getLongVersion()));
+    }
+
     private static boolean mutableMembership(LedgerMetadata metadata) {
         return metadata.getState() == LedgerMetadata.State.OPEN
                 && !metadata.getCustomMetadata().containsKey(MEMBERSHIP_FROZEN_KEY)

@@ -89,14 +89,39 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
                 unbound.operationId(), grantPayloadIdentity(unbound), range);
     }
 
+    public ProfileControlScope closeScope(byte[] operationId, long generation) {
+        operationId = ProfileLifecycleHead.fixed(operationId, 16, true);
+        if (Arrays.equals(operationId, grantOperationId) || Arrays.equals(operationId, recovery.operationId())) {
+            throw new IllegalArgumentException("Repair close needs its own operation identity");
+        }
+        var scope = new ProfileControlScope(ProfileControlOperation.RECOVERY_GRANT_CLOSE,
+                ProfileControlOperation.RECOVERY_GRANT_CLOSE.purpose(), install.ledgerId(),
+                install.ledgerInstanceId(), install.descriptorIdentity(), install.targetBookie(),
+                install.targetStorageIncarnation(), install.authorityDomain(), generation, operationId,
+                new byte[32], range);
+        return new ProfileControlScope(scope.operation(), scope.purpose(), scope.ledgerId(), scope.ledgerInstanceId(),
+                scope.descriptorIdentity(), scope.targetBookie(), scope.targetStorageIncarnation(),
+                scope.authorityDomain(), scope.authorityGeneration(), scope.operationId(), bindingPayload(scope, true),
+                range);
+    }
+
     private byte[] grantPayloadIdentity(ProfileControlScope scope) {
-        byte[] prefix = "UW-RECOVERY-GRANT-V1".getBytes(StandardCharsets.US_ASCII);
+        return bindingPayload(scope, false);
+    }
+
+    private byte[] bindingPayload(ProfileControlScope scope, boolean close) {
+        byte[] prefix = (close ? "UW-RECOVERY-CLOSE-V1" : "UW-RECOVERY-GRANT-V1")
+                .getBytes(StandardCharsets.US_ASCII);
         byte[] target = scope.targetBookie().getBytes(StandardCharsets.UTF_8);
         byte[] domain = scope.authorityDomain().getBytes(StandardCharsets.UTF_8);
-        ByteBuffer bytes = ByteBuffer.allocate(prefix.length + 60 + 2 + target.length + 16 + 2 + domain.length + 48);
+        ByteBuffer bytes = ByteBuffer.allocate(prefix.length + 60 + 2 + target.length + 16 + 2 + domain.length
+                + 48 + (close ? 16 : 0));
         bytes.put(prefix).put(recovery.ledger().encode()).putShort((short) target.length).put(target)
-                .put(scope.targetStorageIncarnation()).putShort((short) domain.length).put(domain)
-                .put(intentId).putLong(intentGeneration()).putLong(grantGeneration())
+                .put(scope.targetStorageIncarnation()).putShort((short) domain.length).put(domain);
+        if (close) {
+            bytes.put(grantOperationId);
+        }
+        bytes.put(intentId).putLong(intentGeneration()).putLong(grantGeneration())
                 .putLong(range.firstEntryId()).putLong(range.lastEntryId());
         return digest(bytes.array());
     }
