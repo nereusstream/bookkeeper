@@ -203,6 +203,44 @@ final class ProfileSocketClient implements AutoCloseable {
         return held.reply;
     }
 
+    CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
+            ProtectedProfileCredential credential) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(credential, "credential");
+        byte[] owned = ProfileLifecycleHead.fixed(operationId, 16, true);
+        if (normalData) {
+            throw new IllegalArgumentException("Fence requires a verified CONTROL connection");
+        }
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(unknown());
+        }
+        if (!slots.tryAcquire()) {
+            return CompletableFuture.completedFuture(transientNone());
+        }
+        Pending held = new Pending(context, owned, credential);
+        enqueue(held);
+        return held.dataReply;
+    }
+
+    private ByteBuf encodeFence(Pending held, long id) {
+        ByteBuf bytes = channel.alloc().buffer(136, 136);
+        try {
+            bytes.writeInt(132).writeInt(ProfileFrameHeader.MAGIC)
+                    .writeShort(ProfileFrameHeader.PROTOCOL_MAJOR).writeShort(ProfileFrameHeader.PROTOCOL_MINOR)
+                    .writeShort(ProfileFrameHeader.ENCODED_LENGTH).writeShort(ProfileOperation.FENCE_LEDGER.wireValue())
+                    .writeInt(0).writeLong(id).writeInt(100).writeInt(0)
+                    .writeBytes(held.context.encode()).writeBytes(held.fenceId).writeShort(1).writeShort(20);
+            int keyPosition = bytes.writerIndex();
+            bytes.writeZero(20);
+            held.credential.writeWireCredential(bytes.nioBuffer(keyPosition, 20));
+            return bytes;
+        } catch (RuntimeException | Error failedEncoding) {
+            bytes.setZero(0, bytes.capacity());
+            bytes.release();
+            throw failedEncoding;
+        }
+    }
+
     CompletableFuture<ProfileStatus> addNormal(ProfileLedgerContext context, ProtectedProfileCredential credential,
             long entryId, ReferenceCounted entry) {
         Objects.requireNonNull(context, "context");
@@ -320,6 +358,7 @@ final class ProfileSocketClient implements AutoCloseable {
                     ByteBuf bytes;
                     try {
                         bytes = held.operation == ProfileOperation.ADD_NORMAL ? encodeNormal(held, id)
+                                : held.operation == ProfileOperation.FENCE_LEDGER ? encodeFence(held, id)
                                 : held.operation == ProfileOperation.READ_ENTRY ? encode(held.operation, id,
                                         ProfileOperationCodec.encode(ProfileOperation.READ_ENTRY,
                                                 new ProfileOperationCodec.ReadEntry(held.context, held.entryId, 0)))
@@ -465,7 +504,8 @@ final class ProfileSocketClient implements AutoCloseable {
                 if (held == null || held.operation != header.operation()) {
                     throw invalidReply();
                 }
-                if (held.operation == ProfileOperation.ADD_NORMAL) {
+                if (held.operation == ProfileOperation.ADD_NORMAL
+                        || held.operation == ProfileOperation.FENCE_LEDGER) {
                     ProfileStatus status = ProfileStatus.decode(body);
                     if (header.isError() != (status.statusClass() != ProfileStatus.StatusClass.OK)
                             || status.statusClass() == ProfileStatus.StatusClass.OK
@@ -542,6 +582,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private final CompletableFuture<ProfileStatus> dataReply;
         private final CompletableFuture<ProfileReadEntryReplyCodec.Reply> readReply;
         private ProfileControlRequest controlRequest;
+        private byte[] fenceId;
         private ProfileLedgerContext context;
         private ProtectedProfileCredential credential;
         private long entryId;
@@ -574,6 +615,17 @@ final class ProfileSocketClient implements AutoCloseable {
             this.entryBytes = entryBytes;
         }
 
+        private Pending(ProfileLedgerContext context, byte[] fenceId, ProtectedProfileCredential credential) {
+            scope = null;
+            operation = ProfileOperation.FENCE_LEDGER;
+            reply = null;
+            dataReply = new CompletableFuture<>();
+            readReply = null;
+            this.context = context;
+            this.fenceId = fenceId;
+            this.credential = credential;
+        }
+
         private Pending(ProfileLedgerContext context, long entryId) {
             scope = null;
             operation = ProfileOperation.READ_ENTRY;
@@ -595,6 +647,7 @@ final class ProfileSocketClient implements AutoCloseable {
                 entry = null;
             }
             credential = null;
+            fenceId = null;
             controlRequest = null;
         }
 

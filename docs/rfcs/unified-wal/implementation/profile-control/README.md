@@ -433,3 +433,5 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 2026-10-07，[3/3/3及同起点连续换组](../profile-wire/README.md#333-与同起点连续换组验证)通过原冷协调器实际执行两次INSTALL→membership→retained authority→ACTV。LAC仍为-1时，标准fragment起点0被连续替换，两个sidecar页均保留；UNKNOWN不会被后续NONE清除。当前是五节点、一个slot的两次变更证据，不能扩展为controller进程恢复、rejoin或步骤13整体验收。
 
 2026-10-07，[显式READ_ENTRY](../profile-wire/README.md#read_entry-接线与验收范围)使用独立nonblocking principal+query-scope policy；认证和capability不授予读权限。普通读不暴露OPEN recovery范围，已closed grant的本地readable事实仍不替代客户端membership/confirmed范围选择。缺失须有durable fence、稳定Bookie及完整覆盖，UNKNOWN/NOT_READY不算absence。原SDK ordinary读保持LAC/digest合同，不为读取激活normal writer；完整恢复授权、fenced-close与生产权限尚未完成。
+
+2026-10-07 [CONTROL客户端FENCE前置](../profile-wire/README.md#真实control客户端fence前置)复用冻结100字节body/8字节status、verified peer与原quota/write/wire custody，实际force/同ID ALREADY/credential拒绝及UNKNOWN后同ID重连解析通过。相关59项Java和既有296配置模型矩阵通过；LAC/source/length、fencing read及matching CLOSED仍未接通，步骤14保持PARTIAL/OPEN。

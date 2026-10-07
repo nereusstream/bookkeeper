@@ -539,3 +539,7 @@ ProfileSdkReplacement 检查 AvailabilityIncludesActivation、GateRequiresWholeT
 ### READ_ENTRY性质
 
 ProfilePointReadDispatch检查AdmissionRequiresPermission、MissingRequiresCompleteStableFence、InFlightKeepsCredit、ObserverWaitsForActualTerminal、QueuedConsumerOwnsLoan、OutputWaitsForWrite、ReplyRequiresBinding。MISSING的coverage/stability是实现中真实producer需满足的输入事实，不是模型制造的durability证明；权限与缺失是采样切点，非持续lease。七个独立mutation各违反指定性质。单query有限投影不包括full recovery/readonly open、schema/CRC/crypto、clock、真实总预算、活性、公平性或full A+C+D。
+
+### 网络FENCE客户端证据边界
+
+复用已有的exact local fence/precut wait/force-owner及socket frame关联、source/output custody性质；本增量没有新操作body或durability算法。实际UNKNOWN不会撤销force，同operation重试不改变上下文或恢复旧future。模型与socket测试不能替代每write-set的集群coverage、逐missing来源fenced、LAC/source/length锚点和matching durable CLOSED，后续基础恢复仍须闭合。

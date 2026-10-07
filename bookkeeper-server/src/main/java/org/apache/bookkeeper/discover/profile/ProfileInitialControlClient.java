@@ -23,7 +23,10 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
+import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 
 /** Existing experimental initial-control API backed by one bounded, authenticated CONTROL connection. */
 public final class ProfileInitialControlClient implements ProfileInitialMetadataCoordinator.InstallClient,
@@ -67,6 +70,12 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
     @Override
     public CompletableFuture<ProfileControlResult> activate(ProfileControlRequest request) {
         return socket.activate(request);
+    }
+
+    /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */
+    public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
+            ProtectedProfileCredential credential) {
+        return socket.fence(context, operationId, credential);
     }
 
     @Override

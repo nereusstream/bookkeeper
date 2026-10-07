@@ -373,3 +373,19 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileReadEntryReplyCodecT
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+## 真实CONTROL客户端FENCE前置
+
+2026-10-07，当前工作区的ProfileInitialControlClient.fence复用原verified CONTROL socket、frozen100字节FENCE_LEDGER body和8字节status；按原slot、frame ID、actual write/wire终结与plaintext擦除路径运行。调用方保留operation ID，在TRANSIENT/UNKNOWN后显式重连/重试同operation；没有新wire值、body schema、线程或自动reconnect。DATA连接拒绝fence入口。
+
+定向unified-wal-local-O31gUpe6实际3项通过：原pointRead缺失用例已改为真实网络FENCE；错误credential不成功，第一次APPLIED实际force一次、同ID重复ALREADY且不新增force；实际force阻塞导致300ms客户端UNKNOWN后Bookie仍不能close，释放并新CONTROL连接解析同ID得到ALREADY，原future不复活且只force一次。READ_LAC、fencing read与原quorum取证尚未接通，不能把单副本fence或本地missing提升为集群恢复完成。
+
+LAC/length取证仍需保留source entryId。源entry100携带LAC99和累计length1100，并不授权CLOSED(99,1100)；后续适配须读或验证同一context的length锚点，不直接把现有DigestManager返回的源entry length当作LAC前缀length。本增量的最终回执见下文；历史source/receipt不重绑，完整步骤14仍OPEN。
+
+最终相关Java unified-wal-local-LewZ3Uap exit0：实际3类59项全部通过（common4/server55，socket34/decoder21），1018冻结inputs；common/server style unified-wal-fence-client-style-ka3l54th exit0，216共享Java匹配，Java/style9 checksums核验。当前模型矩阵unified-wal-model-j95f2rfy exit0：296配置59完整正向PASS/237指定反例、575 inputs/888 checksums；218共享/1375去重union与当前源码一致，5个designInputs保持父提交e1e6d4e704的完整SHA绑定。复用既有fence-dispatch、socket correlation/source/output及point-read投影，不把这些投影扩展成LAC/quorum/恢复CLOSED证明。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry或state constraint；历史回执保持原绑定。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,ProfileReceiveDecoderTest,ProfileInitialControlCodecTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

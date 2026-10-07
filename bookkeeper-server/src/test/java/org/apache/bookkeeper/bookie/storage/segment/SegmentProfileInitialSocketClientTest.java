@@ -1016,19 +1016,11 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED,
                     uncertain.outcome());
             assertEquals(ProfileStatus.StatusClass.PROFILE_NOT_READY_OR_STALE, uncertain.status().statusClass());
-            CountDownLatch fenced = new CountDownLatch(1);
-            AtomicReference<Throwable> failure = new AtomicReference<>();
-            AtomicReference<SegmentBookieControlLog.FenceResult> fenceResult = new AtomicReference<>();
-            assertEquals(null, fixture.nodes.get(0).submitProfileFence(new org.apache.bookkeeper.common.profile.wire
-                    .ProfileOperationCodec.FenceLedger(fixture.context(), bytes(16, 12),
-                            DigestManager.generateMasterKey(fixture.password)), (result, cause) -> {
-                        failure.set(cause);
-                        fenceResult.set(result);
-                        fenced.countDown();
-                    }));
-            assertTrue(fenced.await(5, TimeUnit.SECONDS));
-            assertEquals(null, failure.get());
-            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, fenceResult.get().status());
+            byte[] fenceId = bytes(16, 12);
+            var fenced = fixture.clients.get("socket0:3181").fence(fixture.context(), fenceId, fixture.credential)
+                    .get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileStatus.StatusClass.OK, fenced.statusClass());
+            assertEquals(ProfileStatus.DurableResult.APPLIED, fenced.durableResult());
             int force = fixture.nodeIo.get(0).forces;
             var missing = client.readEntry(fixture.context(), 99).get(5, TimeUnit.SECONDS);
             assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.MISSING,
@@ -1086,6 +1078,71 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.replyFault.set(fault);
                 assertThrows(ExecutionException.class,
                         () -> client.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    @Test
+    public void actualControlFenceUsesOneOperationAndDoesNotAcceptWrongCredential() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var control = fixture.clients.get("socket0:3181");
+            var denied = control.fence(fixture.context(), bytes(16, 19),
+                    ProtectedProfileCredential.of(1, bytes(20, 20))).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileStatus.StatusClass.UNAUTHORIZED, denied.statusClass());
+            int before = fixture.nodeIo.get(0).forces;
+            byte[] operation = bytes(16, 21);
+            var fenced = control.fence(fixture.context(), operation, fixture.credential).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileStatus.DurableResult.APPLIED, fenced.durableResult());
+            assertEquals(before + 1, fixture.nodeIo.get(0).forces);
+            var repeated = control.fence(fixture.context(), operation, fixture.credential).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileStatus.DurableResult.ALREADY_APPLIED, repeated.durableResult());
+            assertEquals(before + 1, fixture.nodeIo.get(0).forces);
+            assertFalse(fixture.normal(0));
+            assertTrue(fixture.normal(1));
+        }
+    }
+
+    @Test
+    public void fenceSocketUnknownRetainsPhysicalControlAndResolvesTheSameOperation() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var control = fixture.connect(0, 4, Duration.ofMillis(300));
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            var field = SegmentBookieControlLog.class.getDeclaredField("io");
+            field.setAccessible(true);
+            var actualIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            field.set(bookie(fixture.nodes.get(0)), actualIo);
+            byte[] operation = bytes(16, 23);
+            try {
+                var pending = control.fence(fixture.context(), operation, fixture.credential);
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertThrows(ExecutionException.class, () -> pending.get(5, TimeUnit.SECONDS));
+                assertEquals(0, actualIo.forces);
+                assertThrows(java.io.IOException.class, bookie(fixture.nodes.get(0))::close);
+                release.countDown();
+                var reconnected = fixture.connect(0, 4, Duration.ofSeconds(5));
+                ProfileStatus resolved;
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                do {
+                    resolved = reconnected.fence(fixture.context(), operation, fixture.credential)
+                            .get(5, TimeUnit.SECONDS);
+                    if (resolved.statusClass() != ProfileStatus.StatusClass.OK) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+                    }
+                } while (resolved.statusClass() != ProfileStatus.StatusClass.OK && System.nanoTime() < until);
+                assertEquals(ProfileStatus.DurableResult.ALREADY_APPLIED, resolved.durableResult());
+                assertEquals(1, actualIo.forces);
+                assertTrue(pending.isCompletedExceptionally());
+                assertFalse(fixture.normal(0));
+            } finally {
+                release.countDown();
             }
         }
     }

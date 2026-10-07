@@ -538,3 +538,7 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-07当前[READ_ENTRY接线工作区](profile-wire/README.md#read_entry-接线与验收范围)已接实际TLS server/client、显式scope权限、fenced完整覆盖的MISSING以及原SDK flags0普通读；三项真实组合通过，native Get/读的取消资源保留已验证。仍未提交，扩大回归/模型、READ_LAC、独立readonly open、fencing read及完整恢复/fenced-close尚未闭合。
 
 2026-10-07 [READ_ENTRY接线与验收范围](profile-wire/README.md#read_entry-接线与验收范围)已接显式读scope权限、URD1/schema1、实际Get/read/pin/loan/response ownership、fenced完整覆盖的MISSING和原SDK flags0普通读。77项相关Java和新增有限读取分发模型通过；没有normal activation或逐entry控制持久化增量。READ_LAC/fencing read/独立readonly open、完整恢复/CLOSED/AutoRecovery/删除及生产验收仍OPEN，步骤11/14保持PARTIAL，历史回执不重绑。
+
+2026-10-07当前[CONTROL客户端FENCE前置](profile-wire/README.md#真实control客户端fence前置)已接真实网络FENCE/同operation幂等/UNKNOWN解析，3项定向通过。原LAC/quorum取证和fencing read仍未接通，source entryId与prefix length锚点必须保留；步骤14保持OPEN。
+
+2026-10-07 [CONTROL客户端FENCE前置](profile-wire/README.md#真实control客户端fence前置)复用冻结100字节body/8字节status、verified peer与原quota/write/wire custody，实际force/同ID ALREADY/credential拒绝及UNKNOWN后同ID重连解析通过。相关59项Java和既有296配置模型矩阵通过；LAC/source/length、fencing read及matching CLOSED仍未接通，步骤14保持PARTIAL/OPEN。

@@ -1174,3 +1174,7 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 2026-10-07 ProfilePointReadDispatch投影一个固定query、一个native Get/read和128组有限输入：协商/权限/binding、found、coverage/fenced/stable。OwnerEnd只能在IO终结后生成结果，取消只停等待，queued成功loan保留到消费，output保留到实际write终结；UNKNOWN不提升为MISSING。7个mutation独立取消auth、missing proof、cancel credit、terminal等待、queued loan、output write或reply binding。实际proof生产、bytes/codec/TLS/CRC、clock/完整budget、其他读API/恢复和活性不在此投影。
 
 最终unified-wal-model-p92naucz exit0：296配置为59正向完整PASS/237指定反例，575 inputs/888 checksums；新896 generated/704 distinct、queue0、depth7。Java unified-wal-local-cl29WO9o 实际5类77项全部通过，1018 inputs；style匹配216共享Java，Java/style11 checksums。218共享/1375去重union一致，5个designInputs保持父提交4868ff4d64的完整SHA。实际命令、malformed/权限及timeout证据见[当前实现记录](../profile-wire/README.md#read_entry-接线与验收范围)；历史source/run/config/receipt不重绑，不提升full A+C+D或生产权限。
+
+### 网络FENCE客户端当前绑定
+
+2026-10-07，unified-wal-model-j95f2rfy exit0保持296配置（59完整正向/237指定反例），575 inputs/888 checksums；复用既有ProfileFenceDispatch与ProfileInitialClientCorrelation/PointReadDispatch等切片，不新增或伪称quorum、LAC/length锚点、fencing read和CLOSED模型。Java unified-wal-local-LewZ3Uap实际3类59项通过，1018 inputs；style匹配216共享Java、Java/style9 checksums；218共享/1375union一致，5个designInputs保持父提交e1e6d4e704完整SHA。真实UNKNOWN/幂等及命令见[实现记录](../profile-wire/README.md#真实control客户端fence前置)；历史回执不重绑，full A+C+D/生产权限仍未获得。
