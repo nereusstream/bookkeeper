@@ -565,3 +565,7 @@ ProfileReplacementInstall的Prepare/Install/Membership/Publish/SubmitActivation/
 ### 原 SDK replacement gate 动作映射
 
 ProfileSdkReplacement 的 Start/Install/Membership/Publish/Activate/ControlReady 对应冻结 Operation 与真实冷协调器；Switch/Revoke/Resend/Open 对应 original metadata mapping、CLIENT-1 整体 gate 和只重发受影响 slot；Late/Callback/Stop 对应退役 replica 计数、连续回调及本地停止。SegmentProfileInitialSocketClientTest 的 sdkReplacesTwoFailedTargetsOverRealControlChainAndResendsTheSamePendingEntry、sdkControlUnknownStopsWriterAndReconcilesOnlyTheOriginalFrozenOperation、coordinatorCancelledAdmissionCreatesNoPreparationOrMembershipChange、coordinatorStoppedAfterMembershipCannotReportAvailabilityBeforeActivation 使用真实五/四节点 mTLS、ZK 和文件路径。原 PendingAddOpTest 保留 Classic CLIENT-1/2 回归；同 ID incarnation/rejoin实际组合尚未覆盖，不能由模型替代。
+
+### SDK 3/3/3 与同起点连续变更
+
+ProfileSdkReplacement的AckQuorum=3与MaxChanges=1/2配置复用Start、ACK、Switch/Revoke/Resend/Open和原连续Callback；第二次Start保持原坐标与未变ACK。实际sdkThreeOfThreeRequiresTheThirdActualDurableReplica在第三force前完成前两logical请求再做否定检查；sdkThreeOfThreeReplacesTwiceAtTheSameStartWithoutResendingUnchangedReplicas通过socket1/3真实force失败与3/4 ACTV barrier，检查metadata起点0、head4、两页/5目标、连续回调及未变副本无重发。模型两slot、实际单slot的范围分别说明，不替代rejoin、controller进程恢复或活性验证。

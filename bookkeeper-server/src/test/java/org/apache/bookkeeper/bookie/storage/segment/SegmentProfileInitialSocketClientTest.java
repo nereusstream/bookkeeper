@@ -125,7 +125,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-/** Actual 3/3/2 file/ZK/TLS composition; no transport facts or successful authority fixtures are injected. */
+/** Actual 3/3/2 and 3/3/3 file/ZK/TLS composition; no transport facts or successful authority fixtures are injected. */
 public class SegmentProfileInitialSocketClientTest {
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
@@ -203,12 +203,22 @@ public class SegmentProfileInitialSocketClientTest {
         SslContext peerTls;
         final byte[] password = "socket-initial-password".getBytes(StandardCharsets.UTF_8);
         ProtectedProfileCredential credential;
+        final ProfileDescriptor descriptor;
+        final byte[] descriptorBytes;
 
         Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl) throws Exception {
             this(blockInstall, blockActivate, enableControl, 3);
         }
 
         Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count) throws Exception {
+            this(blockInstall, blockActivate, enableControl, count, 2);
+        }
+
+        Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum)
+                throws Exception {
+            descriptor = new ProfileDescriptor(EngineProfile.SEGMENT_WAL_ENGINE,
+                    PayloadFormat.OPAQUE_LEDGER, DurabilityMode.SYNC_ON_ACK, 3, 3, ackQuorum, 0, 7, 11, List.of());
+            descriptorBytes = ProfileDescriptorCodec.encode(descriptor, VALIDATOR);
             try {
                 cluster.startCluster();
                 ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
@@ -283,7 +293,7 @@ public class SegmentProfileInitialSocketClientTest {
                     field.set(bookie(storage), io);
                     ProfileControlScope scope = new ProfileControlScope(ProfileControlOperation.INSTALL,
                             ProfileAuthorityPurpose.PREPARING_INSTALL, 44, bytes(16, 1),
-                            ProfileDescriptorCodec.identityOf(DESCRIPTOR, VALIDATOR), identity.bookieId().toString(),
+                            ProfileDescriptorCodec.identityOf(descriptor, VALIDATOR), identity.bookieId().toString(),
                             identity.incarnation().value(), "ledger-profile", 1, bytes(16, 3), bytes(32, 4), null);
                     if (index < 3) {
                         scopes.add(scope);
@@ -409,13 +419,14 @@ public class SegmentProfileInitialSocketClientTest {
         }
 
         ProfileControlRequest install(int target) {
-            return ProfileControlRequest.install(scopes.get(target), DESCRIPTOR_BYTES,
+            return ProfileControlRequest.install(scopes.get(target), descriptorBytes,
                     EngineProfile.SEGMENT_WAL_ENGINE, credential);
         }
 
         LedgerMetadata metadata() {
             return LedgerMetadataBuilder.create().withId(44).withEnsembleSize(3).withWriteQuorumSize(3)
-                    .withAckQuorumSize(2).withDigestType(DigestType.CRC32C).withPassword(password)
+                    .withAckQuorumSize(descriptor.ackQuorumSize()).withDigestType(DigestType.CRC32C)
+                    .withPassword(password)
                     .newEnsembleEntry(0, scopes.stream().map(s -> BookieId.parse(s.targetBookie())).toList()).build();
         }
 
@@ -427,13 +438,13 @@ public class SegmentProfileInitialSocketClientTest {
                 activations.put(bookie, new ProfileInitialLifecycleCoordinator.Target(client.hello(), client));
             });
             return new ProfileInitialLifecycleCoordinator(reservations, new ProfileLedgerMetadataStore(manager),
-                    VALIDATOR, cold).initialize(metadata(), reservation, DESCRIPTOR_BYTES, credential, installs,
+                    VALIDATOR, cold).initialize(metadata(), reservation, descriptorBytes, credential, installs,
                     activations, bytes(16, 4), bytes(32, 5));
         }
 
         ProfileLedgerContext context() {
             return new ProfileLedgerContext(44, bytes(16, 1),
-                    ProfileDescriptorCodec.identityOf(DESCRIPTOR, VALIDATOR).toBytes());
+                    ProfileDescriptorCodec.identityOf(descriptor, VALIDATOR).toBytes());
         }
 
         boolean normal(int target) throws Exception {
@@ -933,6 +944,145 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void sdkThreeOfThreeRequiresTheThirdActualDurableReplica() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 3)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            CountDownLatch thirdForcing = new CountDownLatch(1);
+            CountDownLatch releaseThird = new CountDownLatch(1);
+            files(fixture.nodes.get(2)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                thirdForcing.countDown();
+                await(releaseThird);
+            });
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                try {
+                    var first = sdkAdd(handle, bytes(16, 8));
+                    assertTrue(thirdForcing.await(5, TimeUnit.SECONDS));
+                    var transportField = ProfileLedgerHandle.class.getDeclaredField("transport");
+                    transportField.setAccessible(true);
+                    var transport = (org.apache.bookkeeper.proto.BookieClient) transportField.get(handle);
+                    // Both wire responses and original logical requests must terminate before the negative check.
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while ((fixture.dataResults.get(0).isEmpty() || fixture.dataResults.get(1).isEmpty()
+                            || transport.getNumPendingRequests(fixture.identities.get(0).bookieId(), 44) != 0
+                            || transport.getNumPendingRequests(fixture.identities.get(1).bookieId(), 44) != 0)
+                            && System.nanoTime() < deadline) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertEquals(1, fixture.dataResults.get(0).size());
+                    assertEquals(1, fixture.dataResults.get(1).size());
+                    assertEquals(0, transport.getNumPendingRequests(fixture.identities.get(0).bookieId(), 44));
+                    assertEquals(0, transport.getNumPendingRequests(fixture.identities.get(1).bookieId(), 44));
+                    sdk.getClientCtx().getMainWorkerPool().submitOrdered(44, () -> null).get(5, TimeUnit.SECONDS);
+                    assertFalse(first.isDone());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    releaseThird.countDown();
+                    assertEquals(0, first.get(5, TimeUnit.SECONDS).longValue());
+                    assertEquals(0, handle.getLastAddConfirmed());
+                    assertEquals(16, handle.getLength());
+                    assertEquals(3, handle.getLedgerMetadata().getAckQuorumSize());
+                } finally {
+                    releaseThird.countDown();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkThreeOfThreeReplacesTwiceAtTheSameStartWithoutResendingUnchangedReplicas() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 5, 3)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var pool = new ArrayList<ProfileReplacementCoordinator.Target>();
+            for (int target : List.of(3, 4)) {
+                pool.add(new ProfileReplacementCoordinator.Target(fixture.connect(target, 4, Duration.ofSeconds(5)),
+                        dataClient(fixture, target, 8, Duration.ofSeconds(5))));
+            }
+            for (int target : List.of(1, 3)) {
+                fixture.expectedFailedDataSessions.add(target);
+                files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            }
+            CountDownLatch firstActivation = new CountDownLatch(1);
+            CountDownLatch secondActivation = new CountDownLatch(1);
+            CountDownLatch releaseFirst = new CountDownLatch(1);
+            CountDownLatch releaseSecond = new CountDownLatch(1);
+            for (int target : List.of(3, 4)) {
+                AtomicInteger phase = new AtomicInteger();
+                var ioField = SegmentBookieControlLog.class.getDeclaredField("io");
+                ioField.setAccessible(true);
+                CountDownLatch entered = target == 3 ? firstActivation : secondActivation;
+                CountDownLatch release = target == 3 ? releaseFirst : releaseSecond;
+                ioField.set(bookie(fixture.nodes.get(target)), new SegmentFileIo(Integer.MAX_VALUE, -1, -1,
+                        false, () -> {
+                            if (phase.incrementAndGet() == 2) {
+                                entered.countDown();
+                                await(release);
+                            }
+                        }));
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var coordinator = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                        fixture.cold);
+                handle.enableReplacement(coordinator, pool, fixture.descriptorBytes, 2).get(5, TimeUnit.SECONDS);
+                try {
+                    List<Long> callbacks = new CopyOnWriteArrayList<>();
+                    var first = sdkAdd(handle, bytes(16, 8), callbacks);
+                    assertTrue(firstActivation.await(5, TimeUnit.SECONDS));
+                    var second = sdkAdd(handle, bytes(16, 9), callbacks);
+                    assertFalse(first.isDone());
+                    assertFalse(second.isDone());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    releaseFirst.countDown();
+                    assertTrue(secondActivation.await(5, TimeUnit.SECONDS));
+                    assertFalse(first.isDone());
+                    assertFalse(second.isDone());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                    var actual = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+                    assertEquals(1, actual.getValue().getAllEnsembles().size());
+                    assertEquals(0, actual.getValue().getAllEnsembles().lastKey().longValue());
+                    assertEquals(List.of("socket0:3181", "socket4:3181", "socket2:3181"),
+                            actual.getValue().getAllEnsembles().lastEntry().getValue().stream()
+                                    .map(Object::toString).toList());
+                    assertEquals(4, fixture.reservations.read(44).snapshot().lifecycle().sequence());
+                    assertNotNull(fixture.zk.exists("/socket-initial/2c/replacement-3", false));
+                    assertNotNull(fixture.zk.exists("/socket-initial/2c/replacement-4", false));
+                    assertEquals(5, fixture.reservations.retainedActivationTargets(44).targets().size());
+                    assertEquals(2, fixture.dataResults.get(0).size());
+                    assertEquals(2, fixture.dataResults.get(2).size());
+                    releaseSecond.countDown();
+                    assertEquals(0, first.get(10, TimeUnit.SECONDS).longValue());
+                    assertEquals(1, second.get(10, TimeUnit.SECONDS).longValue());
+                    assertEquals(List.of(0L, 1L), callbacks);
+                    assertEquals(1, handle.getLastAddConfirmed());
+                    assertEquals(32, handle.getLength());
+                    var changedReplies = fixture.dataResults.get(4);
+                    assertEquals(changedReplies.toString(), 2, changedReplies.stream().filter(value ->
+                            value == ProfileStatus.DurableResult.APPLIED.wireValue()
+                                    || value == ProfileStatus.DurableResult.ALREADY_APPLIED.wireValue()).count());
+                    assertTrue(changedReplies.toString(), changedReplies.size() <= 6);
+                    assertTrue(changedReplies.toString(), changedReplies.stream().allMatch(value ->
+                            value == ProfileStatus.DurableResult.NONE.wireValue()
+                                    || value == ProfileStatus.DurableResult.APPLIED.wireValue()
+                                    || value == ProfileStatus.DurableResult.ALREADY_APPLIED.wireValue()));
+                    assertEquals(2, fixture.dataResults.get(0).size());
+                    assertEquals(2, fixture.dataResults.get(2).size());
+                    assertTrue(handle.hasUncertainWrites());
+                    assertEquals(LedgerMetadata.State.OPEN, actual.getValue().getState());
+                } finally {
+                    releaseFirst.countDown();
+                    releaseSecond.countDown();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
     public void sdkReplacesTwoFailedTargetsOverRealControlChainAndResendsTheSamePendingEntry() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 5)) {
             fixture.connectAll(Duration.ofSeconds(5));
@@ -1137,8 +1287,15 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private static CompletableFuture<Long> sdkAdd(ProfileLedgerHandle handle, byte[] payload) {
+        return sdkAdd(handle, payload, null);
+    }
+
+    private static CompletableFuture<Long> sdkAdd(ProfileLedgerHandle handle, byte[] payload, List<Long> callbacks) {
         CompletableFuture<Long> result = new CompletableFuture<>();
         handle.asyncAddEntry(payload, (code, ledger, entryId, ctx) -> {
+            if (callbacks != null) {
+                callbacks.add(entryId);
+            }
             if (code == BKException.Code.OK) {
                 result.complete(entryId);
             } else {

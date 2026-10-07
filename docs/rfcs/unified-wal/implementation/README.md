@@ -367,7 +367,7 @@ DATA durable → hot locator → local result
 
 **完成条件：** 迟到/重复ACK、旧incarnation、同起点连续换组、多slot更新和响应丢失不提前成功；保留未变副本有效ACK；无无限请求副本、无限退避或跳过逻辑空洞。保留一般E>W的客户端兼容回归，其通过不代表首批Segment全配置性能已验证。
 
-当前隔离增量见[原 SDK 写期换组与整体回调门](profile-wire/README.md#原-sdk-写期换组与整体回调门)：预连接 bounded pool、3/3/2 两 slot 换组已接线；同 ID rejoin、controller restart、全配置及生产验收保持 OPEN。
+当前隔离增量见[原 SDK 写期换组与整体回调门](profile-wire/README.md#原-sdk-写期换组与整体回调门)：预连接 bounded pool、3/3/2 两 slot 换组及3/3/3普通写/同起点连续两次换组已有实际验证；同 ID rejoin、controller restart、其他配置及生产验收保持 OPEN。
 
 #### 14. 实现基础ledger recovery与AutoRecovery
 
@@ -530,3 +530,5 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-06 [new-peer inactive INSTALL与replacement wire](profile-control/README.md#new-peer-inactive-install-与-replacement-wire)增量：same sidecar持久化bounded next-slot准备页，绑定frozen metadata physical birth/version、旧/新fragment digest、完整INSTALL scope；原metadata birth guard用于准备事务，DELETE/freeze竞争不扩大授权。verified初始或匹配prepare的receipt才能发布replacement。UIC1/schema1原bytes保留，ACTIVATE_REPLACEMENT新增独立experimental UIC2/schema2协商，复用CONTROL连接/TLS/HELLO/correlation/实际write与wire终结。四节点真实ZK、mTLS、文件driver已完成new peer inactive INSTALL→membership CAS→目标留存/授权→replacement activation→durable DATA；lost ACTV response用显式新client解析同operation。普通Add没有逐entrymetadata。SDK自动replacement、whole-pending gate/resend、recovery/fenced-close/delete/GC/legacy ACL与生产Gate仍OPEN，步骤13仍PARTIAL，实际回执见实现记录。
 
 2026-10-07 [原 SDK 写期换组与整体回调门](profile-wire/README.md#原-sdk-写期换组与整体回调门)接通预连接 bounded pool 的真实 inactive INSTALL、membership CAS、retained authority、全新目标 activation 和原 PendingAddOp 多 slot ACK 撤销/必要重发。五节点、两个 pending entry、响应丢失及停止窗口已有真实定向证据；跳过 activation 不能报告 AVAILABLE，UNKNOWN 只能解析原操作，不复活失败 writer。同 ID/incarnation rejoin、registration discovery、controller restart、恢复/删除/GC、生产和完整验收仍待完成，步骤13保持 PARTIAL；本段为当前增量，前述日期回执保留当时范围。
+
+2026-10-07 [3/3/3及同起点连续换组](profile-wire/README.md#333-与同起点连续换组验证)新增实际SDK证据：普通写必须等第三个durable副本，两个pending entry在起点0经历socket1→socket3→socket4两次实际失败/换组后连续回调；未变副本ACK保留、不重发，两个replacement页及全部历史目标留存。仍是隔离有限范围，更多故障交错、同ID incarnation/rejoin、恢复/删除和生产验收保持OPEN。

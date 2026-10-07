@@ -531,3 +531,7 @@ ProfileReplacementInstall检查InstallHasBoundLivePreparation、InstallNeverActi
 ### 原 SDK replacement gate 性质
 
 ProfileSdkReplacement 检查 AvailabilityIncludesActivation、GateRequiresWholeTransition、RetiredReplicaCannotAck、ResendKeepsSource、ResendKeepsCoordinate、OnlyAffectedSlotsResent、OneOriginalCallback、CallbacksStayContiguous 和 SuccessHasCurrentQuorum。七个 mutation 各命中指定性质；两个 pending entry 和两 slot 是有限边界，控制阶段依赖既有 receipt 投影，不是完整系统 refinement。同 ID rejoin、真实 refcount/crypto/fsync、timer 交错、全 quorum、controller restart、活性/公平性及 full A+C+D 仍未证明。
+
+### SDK A=3 与第二次Start的性质
+
+既有AvailabilityIncludesActivation、GateRequiresWholeTransition、RetiredReplicaCannotAck、ResendKeepsSource/Coordinate、OnlyAffectedSlotsResent、OneOriginalCallback、CallbacksStayContiguous、SuccessHasCurrentQuorum延伸到AckQuorum3、MaxChanges2。每次Start清除本次control完成事实，但保留未变ACK；回调仍pending才允许下一次变更，旧请求terminal独立推进。仅有限两entry/最多两次两slot变更；不涵盖任意长链、时钟/重试活性、实际内存、same-ID incarnation或full A+C+D。

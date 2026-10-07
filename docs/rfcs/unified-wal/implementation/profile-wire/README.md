@@ -313,3 +313,29 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+## 3/3/3 与同起点连续换组验证
+
+2026-10-07，现有真实 fixture 支持每个实例冻结 A=2 或3的 descriptor/metadata/context，默认3/3/2用例继续使用原 bytes；增加两项实际 SDK 回归。生产 writer、cold coordinator、wire及持久化格式沿用上一增量。
+
+3/3/3 普通写在第三副本 DATA force 被阻塞时，等待前两副本实际响应、BookieClient logical request 终结并排空原 ledger executor，再确认 future 未完成、LAC=-1；第三副本 durable 后才回调 entry0，length16。该门槛不只依赖 server 发送响应的时点。
+
+五节点连续换组先令旧slot1实际 force失败，替换为socket3；socket3也实际 force失败，随后替换为socket4。两次 ACTV force分别阻塞，第二个 entry在第一次 ACTV尚未完成时进入原SDK pending队列。两个 future在第二次 ACTV前均不完成，LAC保持-1；标准metadata始终只有起点0的fragment，最终mapping为socket0/socket4/socket2，sidecar head序号4，replacement-3/4两页均保留，initial与两次目标共5个。最终回调0、1，LAC1、length32，原UNKNOWN观察保留，metadata保持OPEN。未变socket0/2各只收到两次DATA响应；新socket4要求两份durable结果，其他响应只能是NONE，且最多6次（两条entry各最多3次attempt）。源bytes与entry coordinate沿用原 pending，不把资源拒绝后的有界重试当作新的逻辑写。
+
+首轮 `unified-wal-local-G2HmYEjG` 普通3/3/3通过、连续换组因把新目标响应数固定为2而失败（实际3）；这是测试未区分资源重试的限制，不能计为生产bug RED。后续 `unified-wal-local-OaTw5Lyu` 两项通过，再加强logical request终结、callback记录顺序和其他结果必须为NONE的检查。未变副本精确次数、两份durable、回调/metadata/留存及上界断言均保留。最终回执见后文。
+
+当前仅证明这些隔离场景及既有有限模型；更多连续变更/故障交错、同BookieId新incarnation、registration发现、controller进程恢复、read/recovery/fenced-close、AutoRecovery、delete/catch-up/GC、生产listener/readiness/完整预算、长期/掉电/性能与stable G1仍OPEN，步骤13保持PARTIAL。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#sdkThreeOfThree*'
+~~~
+
+最终 `unified-wal-local-w7DpFvzI` exit0：实际2类46项全部通过（27 socket组合/19原PendingAddOp），1012冻结输入；common/server style `unified-wal-sdk-sequential-style-sf7rs8mz` exit0，213个共享Java匹配，Java/style共8份checksums核验。此次只运行相关范围，上轮373项回执保持原source绑定。首轮style因fixture一行123字符失败，断行后通过；没有修改生产实现或通过删减有效断言获得通过。
+
+最终 `unified-wal-model-nd4nuuor` exit0：288配置为58个完整正向PASS/230个指定反例、563输入/864份checksums；215共享输入/1360去重union与当前源码一致，5个designInputs保持父提交 `903f2bd8dccf239b272b107e6c42206d8116d390`。A=3一次变更完整26639 generated/7162 distinct、queue0、depth27；A=3两次变更完整672783 generated/119418 distinct、queue0、depth44。tool1.7.4、单worker、heap512MiB/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；这是有限检查器成本与有限性质证据，不是系统性能、活性、完整A/C/D或生产权限。历史run/config/receipt不重绑。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,PendingAddOpTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~

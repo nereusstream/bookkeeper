@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 56 个完整正向配置、230 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。当前 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 58 个完整正向配置、230 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；当前回执见末节。不是完整 Model A/C/D、A+C 或 Block G 验收，历史回执保留当时范围。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -1160,3 +1160,11 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 实际控制 barrier、TLS/HELLO/关联、ZK birth/CAS 与资源 custody 复用既有投影及[当前真实组合测试](../profile-wire/README.md#原-sdk-写期换组与整体回调门)。该模型不展开同 ID rejoin、真实时钟/timer、全部 quorum 配置、物理字节/refcount、进程恢复、活性/公平性、完整 A+C+D 或生产权限。最终完整检查31889 generated/8488 distinct、queue0、depth27。
 
 最终 `unified-wal-model-_ugmmp39` exit0：286配置为56完整正向PASS/230指定反例、561输入/860 checksums；Java `unified-wal-local-QcOf8k2C` 实际8类373项全部通过，1012输入；style匹配213共享Java，Java/style共14 checksums。215共享/1358去重union与最终源码一致，5个designInputs保持父提交78135bdd2efbbca2e13e54c5f5b2c6fe9e04daaa。具体命令、真实RED、旧 capability测试合同更新和剩余范围见[当前实现记录](../profile-wire/README.md#原-sdk-写期换组与整体回调门)，历史回执不重绑。
+
+### SDK A=3 与连续两次同起点变更
+
+2026-10-07，复用ProfileSdkReplacement，AckQuorum参数为2或3、MaxChanges为1或2。第二次Start只允许两个entry仍pending，保留未变slot0的ACK与原source/coordinate，重置本次install/authority/activation事实，在整体gate下撤销当前被替换slot，再重发；首次及更早退役请求均可独立终结，不计入新mapping。新增正向仅为A=3一次变更、A=3连续两次变更，既有七个独立mutation保持；不是完整quorum、timer/clock、byte/refcount、进程恢复、同ID rejoin、活性/公平性或full A+C+D。
+
+实际五节点回归只变更一个slot两次；有限模型变更两个slot两次，使用最多七个逻辑目标。模型和实际测试是各自明确范围的证据，不声称整体系统refinement，控制barrier及ZK/birth条件依赖既有切片与[当前实际测试](../profile-wire/README.md#333-与同起点连续换组验证)。最终回执见后文。
+
+最终 `unified-wal-model-nd4nuuor` exit0：288配置为58完整正向PASS/230指定反例、563 inputs/864 checksums。新增A=3一次为26639 generated/7162 distinct、depth27；两次为672783 generated/119418 distinct、depth44，均queue0。Java `unified-wal-local-w7DpFvzI` 实际2类46项全通过，1012输入；style匹配213共享Java，Java/style共8 checksums。215共享/1360去重union一致，5个designInputs绑定父提交903f2bd8dccf239b272b107e6c42206d8116d390；命令、测试断言依据与剩余范围见[当前实际记录](../profile-wire/README.md#333-与同起点连续换组验证)。历史回执不重绑。
