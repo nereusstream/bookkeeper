@@ -559,3 +559,7 @@ ProfileRecoveryPrelude检查WrittenContextHasObservedBirth、WrittenContextHasPu
 ### recovery observation性质
 
 ProfileRecoveryObservation检查AbsenceHasFencedBoundCoverage、EvidenceHasCurrentContext、BudgetNeverMeansAbsence、ReadonlyNeverAdds、CallerCancelKeepsReservation、ObservationNeverCloses。七个mutation分别计入未fenced/UNKNOWN missing、忽略context、把预算当tail、允许Add、取消时放permit或把观察当close。有限E=W=3 A2/A3只检查一次readonly probe；实际digest/bytes、总预算、完整required authority/frontier/grant/close、时钟/活性和general E>W仍未证明。
+
+### RepairIntent与grant性质
+
+ProfileRepairGrant检查AdmissionHasInstallAndBirth、GrantHasAdmissionAndInstall、GrantHasAuthAndExactTuple、GrantHasActualForce、AdmittedTargetIsRetained、RecoveryDoesNotActivateNormal、DataHasRecoveryAuthority及DeletePreventsFreshGrant。九个指定mutation覆盖admission/install/delete/birth/auth/tuple/force/retention/normal。有限投影只消费一次cold授权与实际force事实，不证明全部delete/grant竞态、完整required frontier、membership/replica-readable publication、grant close/CLOSED、full A+C+D、总memory或活性。

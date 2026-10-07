@@ -443,3 +443,9 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 2026-10-07 [恢复上下文与fencing前置](../profile-wire/README.md#恢复上下文与fencing前置)已实现真实ZK同记录OPEN→IN_RECOVERY、固定UWRC184恢复token、metadata/lifecycle物理birth guard和同操作重试/重开；显式coordinator复用已验证CONTROL peers及原coverage，只计durable FENCE并重新核对同一上下文。FENCED_CONTEXT不是RECOVERED_AND_CLOSED，完整frontier、恢复Add/close及步骤14仍OPEN。
 
 2026-10-07 [fresh-context只读取证](../profile-wire/README.md#fresh-context只读取证)将同一IN_RECOVERY token下的fence/LAC/length与原SDK recovery点读串联；每个missing来源先完成本instance的durable fence，预算终止不等于tail。readonly session与coordinator不写Add/CLOSED，observed boundary不替代完整required authority或恢复完成；步骤14仍OPEN。
+
+## RepairIntent admission与目标留存
+
+2026-10-07，固定32个immutable repair槽沿用标准IN_RECOVERY记录与UWRC context；prepare/admit的实际ZK multi检查metadata/root/intent physical birth和版本，reply loss只解析同槽同计划。inert intent提供inactive INSTALL authority，matching durable receipt产生readonly admission后才提供exact RECOVERY_GRANT authority。admission保存local install generation、capability digest及intent/context SHA，已admit目标由同一持久记录留存，DELETE之后仍可枚举；未admit目标不加入清理历史。没有额外membership权威或normal activation。
+
+实际control mTLS、Bookie force/apply与单entry DATA写回、独立字节向量及最终回执见[实现记录](../profile-wire/README.md#repairintent-admission与实际恢复写回)。typed receipt是metadata后端输入，physical安装链由实际socket用例验证。grant close、replica-readable/membership publication、matching CLOSED和完整AutoRecovery仍OPEN。

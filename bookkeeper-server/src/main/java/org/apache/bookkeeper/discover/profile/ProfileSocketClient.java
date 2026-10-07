@@ -72,6 +72,8 @@ import org.apache.bookkeeper.util.ByteBufList;
 final class ProfileSocketClient implements AutoCloseable {
     private static final ProfileHello.Capability CAPABILITY = new ProfileHello.Capability(
             ProfileInitialControlCodec.CAPABILITY_ID, ProfileInitialControlCodec.SCHEMA);
+    private static final ProfileHello.Capability RECOVERY_CAPABILITY = new ProfileHello.Capability(
+            ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID, ProfileInitialControlCodec.RECOVERY_SCHEMA);
     private static final ProfileHello.Capability REPLACEMENT_CAPABILITY = new ProfileHello.Capability(
             ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID, ProfileInitialControlCodec.REPLACEMENT_SCHEMA);
     private static final int MAX_RESPONSE_FRAME = 36 + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES
@@ -184,6 +186,13 @@ final class ProfileSocketClient implements AutoCloseable {
         return send(request, ProfileControlOperation.ACTIVATE_INITIAL, ProfileOperation.ACTIVATE_INITIAL);
     }
 
+    CompletableFuture<ProfileControlResult> recoveryGrant(ProfileControlRequest request) {
+        if (!hello().capabilities().contains(RECOVERY_CAPABILITY)) {
+            return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+        }
+        return send(request, ProfileControlOperation.RECOVERY_GRANT, ProfileOperation.RECOVERY_GRANT);
+    }
+
     private CompletableFuture<ProfileControlResult> send(ProfileControlRequest request,
             ProfileControlOperation expectedOperation, ProfileOperation operation) {
         Objects.requireNonNull(request, "request");
@@ -244,6 +253,20 @@ final class ProfileSocketClient implements AutoCloseable {
 
     CompletableFuture<ProfileStatus> addNormal(ProfileLedgerContext context, ProtectedProfileCredential credential,
             long entryId, ReferenceCounted entry) {
+        return sendEntry(context, credential, entryId, entry, null);
+    }
+
+    CompletableFuture<ProfileStatus> addRecovery(ProfileRepairIntent intent, ProtectedProfileCredential credential,
+            long entryId, ReferenceCounted entry) {
+        Objects.requireNonNull(intent, "intent");
+        if (entryId < intent.range().firstEntryId() || entryId > intent.range().lastEntryId()) {
+            throw new IllegalArgumentException("Recovery entry lies outside its frozen intent range");
+        }
+        return sendEntry(intent.recovery().ledger(), credential, entryId, entry, intent);
+    }
+
+    private CompletableFuture<ProfileStatus> sendEntry(ProfileLedgerContext context,
+            ProtectedProfileCredential credential, long entryId, ReferenceCounted entry, ProfileRepairIntent intent) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(credential, "credential");
         Objects.requireNonNull(entry, "entry");
@@ -270,7 +293,7 @@ final class ProfileSocketClient implements AutoCloseable {
         if (!slots.tryAcquire()) {
             return CompletableFuture.completedFuture(transientNone());
         }
-        Pending held = new Pending(context, credential, entryId, (int) size);
+        Pending held = new Pending(context, credential, entryId, (int) size, intent);
         try {
             held.entry = entry instanceof ByteBuf buffer
                     ? buffer.retainedSlice(buffer.readerIndex(), buffer.readableBytes())
@@ -322,15 +345,22 @@ final class ProfileSocketClient implements AutoCloseable {
     }
 
     private ByteBuf encodeNormal(Pending held, long id) {
-        int bodyBytes = 100 + held.entryBytes;
+        int bodyBytes = (held.repair == null ? 100 : 144) + held.entryBytes;
         ByteBuf bytes = channel.alloc().buffer(36 + bodyBytes, 36 + bodyBytes);
         try {
             bytes.writeInt(32 + bodyBytes).writeInt(ProfileFrameHeader.MAGIC)
                     .writeShort(ProfileFrameHeader.PROTOCOL_MAJOR).writeShort(ProfileFrameHeader.PROTOCOL_MINOR)
-                    .writeShort(ProfileFrameHeader.ENCODED_LENGTH).writeShort(ProfileOperation.ADD_NORMAL.wireValue())
+                    .writeShort(ProfileFrameHeader.ENCODED_LENGTH).writeShort(held.operation.wireValue())
                     .writeInt(0).writeLong(id).writeInt(bodyBytes).writeInt(0)
-                    .writeBytes(held.context.encode()).writeLong(held.entryId).writeInt(0)
-                    .writeShort(1).writeShort(20);
+                    .writeBytes(held.context.encode());
+            if (held.repair == null) {
+                bytes.writeLong(held.entryId).writeInt(0);
+            } else {
+                bytes.writeBytes(held.repair.intentId()).writeLong(held.repair.intentGeneration())
+                        .writeLong(held.repair.grantGeneration()).writeLong(held.repair.range().firstEntryId())
+                        .writeLong(held.repair.range().lastEntryId()).writeLong(held.entryId);
+            }
+            bytes.writeShort(1).writeShort(20);
             int keyPosition = bytes.writerIndex();
             bytes.writeZero(20);
             held.credential.writeWireCredential(bytes.nioBuffer(keyPosition, 20));
@@ -377,7 +407,9 @@ final class ProfileSocketClient implements AutoCloseable {
                     held.deadline = channel.eventLoop().schedule(this::close, timeoutNanos, TimeUnit.NANOSECONDS);
                     ByteBuf bytes;
                     try {
-                        bytes = held.operation == ProfileOperation.ADD_NORMAL ? encodeNormal(held, id)
+                        bytes = held.operation == ProfileOperation.ADD_NORMAL
+                                || held.operation == ProfileOperation.ADD_RECOVERY
+                                ? encodeNormal(held, id)
                                 : held.operation == ProfileOperation.FENCE_LEDGER ? encodeFence(held, id)
                                 : held.operation == ProfileOperation.READ_ENTRY ? encode(held.operation, id,
                                         ProfileOperationCodec.encode(ProfileOperation.READ_ENTRY,
@@ -458,7 +490,7 @@ final class ProfileSocketClient implements AutoCloseable {
                     ctx.writeAndFlush(encode(ProfileOperation.HELLO, 1,
                             new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY,
                                     ProfileLacReplyCodec.CAPABILITY)
-                                    : List.of(CAPABILITY, REPLACEMENT_CAPABILITY)).encode()))
+                                    : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY)).encode()))
                             .addListener(written -> {
                         if (!written.isSuccess()) {
                             close();
@@ -546,7 +578,7 @@ final class ProfileSocketClient implements AutoCloseable {
                 if (held == null || held.operation != header.operation()) {
                     throw invalidReply();
                 }
-                if (held.operation == ProfileOperation.ADD_NORMAL
+                if (held.operation == ProfileOperation.ADD_NORMAL || held.operation == ProfileOperation.ADD_RECOVERY
                         || held.operation == ProfileOperation.FENCE_LEDGER) {
                     ProfileStatus status = ProfileStatus.decode(body);
                     if (header.isError() != (status.statusClass() != ProfileStatus.StatusClass.OK)
@@ -625,6 +657,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private final CompletableFuture<ProfileReadEntryReplyCodec.Reply> readReply;
         private final CompletableFuture<ProfileLacReplyCodec.Reply> lacReply;
         private ProfileControlRequest controlRequest;
+        private ProfileRepairIntent repair;
         private byte[] fenceId;
         private ProfileLedgerContext context;
         private ProtectedProfileCredential credential;
@@ -647,9 +680,10 @@ final class ProfileSocketClient implements AutoCloseable {
         }
 
         private Pending(ProfileLedgerContext context, ProtectedProfileCredential credential,
-                        long entryId, int entryBytes) {
+                        long entryId, int entryBytes, ProfileRepairIntent intent) {
             scope = null;
-            operation = ProfileOperation.ADD_NORMAL;
+            repair = intent;
+            operation = intent == null ? ProfileOperation.ADD_NORMAL : ProfileOperation.ADD_RECOVERY;
             reply = null;
             dataReply = new CompletableFuture<>();
             readReply = null;

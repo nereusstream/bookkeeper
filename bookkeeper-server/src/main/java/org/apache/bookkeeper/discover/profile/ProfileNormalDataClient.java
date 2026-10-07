@@ -68,6 +68,12 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         return socket.addNormal(context, credential, entryId, entry);
     }
 
+    /** Borrow the original entry for the existing single-entry Profile recovery operation. */
+    public CompletableFuture<ProfileStatus> addRecovery(ProfileRepairIntent intent,
+            ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {
+        return socket.addRecovery(intent, credential, entryId, entry);
+    }
+
     /** Explicit point read; NOT_READY/UNKNOWN refusals are not missing evidence and never cause activation. */
     public CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
         return socket.readEntry(context, entryId);

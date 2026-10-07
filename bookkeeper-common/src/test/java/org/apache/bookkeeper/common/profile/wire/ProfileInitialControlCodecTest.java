@@ -77,6 +77,33 @@ public class ProfileInitialControlCodecTest {
     }
 
     @Test
+    public void recoveryGrantUsesIndependentSchemaThreeVectorAndBoundedIntentFields() throws Exception {
+        byte[] bytes;
+        try (var in = getClass().getResourceAsStream("/profile-wire/recovery-grant.bin")) {
+            bytes = in.readAllBytes();
+        }
+        var request = ProfileInitialControlCodec.decodeRequest(ProfileOperation.RECOVERY_GRANT,
+                ByteBuffer.wrap(bytes), HELLO);
+        assertEquals(175, bytes.length);
+        assertEquals(ProfileControlOperation.RECOVERY_GRANT, request.scope().operation());
+        assertEquals(0, request.scope().exactRange().firstEntryId());
+        assertEquals(4, request.scope().exactRange().lastEntryId());
+        assertEquals(1, request.recoveryBinding().orElseThrow().intentGeneration());
+        assertArrayEquals(bytes, ProfileInitialControlCodec.encodeRequest(request));
+        byte[] altered = bytes.clone();
+        ByteBuffer.wrap(altered).putShort(64, (short) 1);
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.RECOVERY_GRANT, ByteBuffer.wrap(altered), HELLO));
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.ACTIVATE_INITIAL, ByteBuffer.wrap(bytes), HELLO));
+        var result = new ProfileControlResult(ProfileControlResult.Outcome.APPLIED, request.scope().operation(),
+                request.scope().ledgerId(), HexFormat.of().formatHex(request.scope().operationId()),
+                request.scope().authorityGeneration(), 2, true);
+        assertEquals(result, ProfileInitialControlCodec.decodeReply(ProfileOperation.RECOVERY_GRANT,
+                ProfileInitialControlCodec.encodeReply(result)));
+    }
+
+    @Test
     public void replacementSchemaHasItsOwnFixedBytesAndCannotReplayInitialActivation() throws Exception {
         var initial = scope(ProfileControlOperation.ACTIVATE_INITIAL);
         var replacement = new ProfileControlScope(ProfileControlOperation.ACTIVATE_REPLACEMENT,

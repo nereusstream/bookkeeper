@@ -1210,3 +1210,11 @@ ProfileRecoveryObservation投影同一上下文的一次readonly point probe，E
 最终Java `unified-wal-local-E2Od7BZC` exit0，实际9类146项全部通过（common8/server138：socket46、lifecycle30、metadata19、PendingAddOp19、decoder21、Bookie3），1027冻结输入；common/server Spotless/Checkstyle实际exit0，记录`unified-wal-recovery-observation-style-23phd7ct`保留完成chunk177207与空输出，378个Java输入匹配/222与模型共享，Java/style16 checksums核验。最终模型`unified-wal-model-jfaltg9m` exit0：331配置66完整正向PASS/265指定反例、620 inputs/990 checksums；224共享/1423去重union匹配，五个designInputs保持父提交`62aef445dd57cd5df6f0b05531cddcd733319f1d`绑定。新增A2/A3各58752 generated/27648 distinct、queue0/depth4，七个mutation命中指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不是full A+C+D、完整required frontier/explicit LAC/grant/close、general E>W、crypto producer、clock/活性、总memory、掉电/长期/性能或生产权限。历史回执不重绑。
 
 真实fixture和命令见[实现记录](../profile-wire/README.md#fresh-context只读取证)，步骤14和生产Gate仍OPEN。
+
+### RepairIntent admission与recovery grant有限投影
+
+ProfileRepairGrant投影一个固定inert槽的inactive INSTALL、birth/delete检查、admission及目标留存、exact授权、actual force后的grant与恢复DATA；不发布membership、grant close或CLOSED。九个mutation分别跳过admission/install/delete/birth/auth/tuple/force/retention或激活normal权限，并违反指定性质。cold读观察到的delete与grant之间的有限次序不证明全部真实竞态线性化；byte/CRC/SHA、TLS及实际持久化由Java路径生产，模型消费这些事实。
+
+最终`unified-wal-model-k2fr4zox` exit0：341配置67完整正向PASS/274指定反例，632 inputs/1020 checksums；新增173 generated/109 distinct、queue0/depth4。Java `unified-wal-local-656ohwXB`为9类151项通过/1030 inputs，style `unified-wal-repair-grant-style-h6yxeece` exit0/379 Java输入，Java/style15 checksums；225共享/1437去重union匹配，style/model223共享。五个designInputs保持父提交`7a1f8bb1239a55eb1df667bfa53e20d0319db154`绑定，tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。
+
+真实场景、向量与命令见[实现记录](../profile-wire/README.md#repairintent-admission与实际恢复写回)。required frontier、grant close/membership/replica-readable/CLOSED、full A+C+D、总预算、活性、crypto、长期/掉电/性能与生产Gate仍OPEN，历史回执不重绑。

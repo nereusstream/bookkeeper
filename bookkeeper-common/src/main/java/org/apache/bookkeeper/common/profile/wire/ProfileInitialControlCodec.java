@@ -41,7 +41,12 @@ public final class ProfileInitialControlCodec {
     public static final int SCHEMA = 1;
     public static final long REPLACEMENT_CAPABILITY_ID = 0x55494332L;
     public static final int REPLACEMENT_SCHEMA = 2;
+    public static final long RECOVERY_CAPABILITY_ID = 0x55494333L;
+    public static final int RECOVERY_SCHEMA = 3;
     public static final int COMMON_BYTES = 126;
+    public static final int RECOVERY_BINDING_BYTES = 48;
+    public static final int MAX_GRANT_BYTES = COMMON_BYTES + ProfileControlScope.MAX_AUTHORITY_DOMAIN_BYTES
+            + RECOVERY_BINDING_BYTES;
     public static final int MIN_INSTALL_BYTES = COMMON_BYTES + 1 + 30 + ProfileDescriptorCodec.MIN_CANONICAL_LENGTH;
     public static final int MAX_ACTIVATE_BYTES = COMMON_BYTES + ProfileControlScope.MAX_AUTHORITY_DOMAIN_BYTES;
     public static final int MAX_INSTALL_BYTES = MAX_ACTIVATE_BYTES + 30 + ProfileDescriptorCodec.MAX_CANONICAL_LENGTH;
@@ -49,19 +54,29 @@ public final class ProfileInitialControlCodec {
     private static final int REQUEST_MAGIC = 0x55574943;
     private static final int REPLY_MAGIC = 0x55574952;
 
+    private static int schema(ProfileControlOperation operation) {
+        return operation == ProfileControlOperation.RECOVERY_GRANT ? RECOVERY_SCHEMA
+                : operation == ProfileControlOperation.ACTIVATE_REPLACEMENT ? REPLACEMENT_SCHEMA : SCHEMA;
+    }
+    private static int schema(ProfileOperation operation) {
+        return operation == ProfileOperation.RECOVERY_GRANT ? RECOVERY_SCHEMA
+                : operation == ProfileOperation.ACTIVATE_REPLACEMENT ? REPLACEMENT_SCHEMA : SCHEMA;
+    }
+
     private ProfileInitialControlCodec() {
     }
 
     public static boolean supported(ProfileOperation operation) {
         return operation == ProfileOperation.INSTALL || operation == ProfileOperation.ACTIVATE_INITIAL
-                || operation == ProfileOperation.ACTIVATE_REPLACEMENT;
+                || operation == ProfileOperation.ACTIVATE_REPLACEMENT || operation == ProfileOperation.RECOVERY_GRANT;
     }
 
     public static byte[] encodeRequest(ProfileControlRequest request) {
         ProfileControlScope scope = request.scope();
         if (scope.operation() != ProfileControlOperation.INSTALL
                 && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL
-                && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT) {
+                && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT
+                && scope.operation() != ProfileControlOperation.RECOVERY_GRANT) {
             throw invalid();
         }
         byte[] domain = text(scope.authorityDomain());
@@ -72,16 +87,22 @@ public final class ProfileInitialControlCodec {
                 || request.expectedEngine().orElse(null) != EngineProfile.SEGMENT_WAL_ENGINE)) {
             throw invalid();
         }
-        int size = COMMON_BYTES + domain.length + (descriptor == null ? 0 : 30 + descriptor.length);
+        boolean recovery = scope.operation() == ProfileControlOperation.RECOVERY_GRANT;
+        int size = COMMON_BYTES + domain.length + (descriptor == null ? 0 : 30 + descriptor.length)
+                + (recovery ? RECOVERY_BINDING_BYTES : 0);
         ByteBuffer out = ByteBuffer.allocate(size);
         out.put(new ProfileLedgerContext(scope.ledgerId(), scope.ledgerInstanceId(),
                 scope.descriptorIdentity().toBytes()).encode())
                 .putInt(REQUEST_MAGIC)
-                .putShort((short) (scope.operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT
-                        ? REPLACEMENT_SCHEMA : SCHEMA)).putShort((short) 0)
+                .putShort((short) schema(scope.operation())).putShort((short) 0)
                 .put(scope.operationId()).put(scope.publicSemanticPayloadIdentity())
                 .putLong(scope.authorityGeneration())
                 .putShort((short) domain.length).put(domain);
+        if (recovery) {
+            var binding = request.recoveryBinding().orElseThrow();
+            out.putLong(scope.exactRange().firstEntryId()).putLong(scope.exactRange().lastEntryId())
+                    .put(binding.intentId()).putLong(binding.intentGeneration()).putLong(binding.grantGeneration());
+        }
         if (descriptor != null) {
             ProtectedProfileCredential credential = request.protectedCredential().orElseThrow();
             out.putInt(descriptor.length).putShort((short) EngineProfile.SEGMENT_WAL_ENGINE.wireValue())
@@ -94,8 +115,10 @@ public final class ProfileInitialControlCodec {
 
     public static ProfileControlRequest decodeRequest(ProfileOperation operation, ByteBuffer body,
             ProfileHello.Server verifiedLocalHello) {
-        int minimum = operation == ProfileOperation.INSTALL ? MIN_INSTALL_BYTES : COMMON_BYTES + 1;
-        int maximum = operation == ProfileOperation.INSTALL ? MAX_INSTALL_BYTES : MAX_ACTIVATE_BYTES;
+        int minimum = operation == ProfileOperation.INSTALL ? MIN_INSTALL_BYTES : COMMON_BYTES + 1
+                + (operation == ProfileOperation.RECOVERY_GRANT ? RECOVERY_BINDING_BYTES : 0);
+        int maximum = operation == ProfileOperation.INSTALL ? MAX_INSTALL_BYTES
+                : operation == ProfileOperation.RECOVERY_GRANT ? MAX_GRANT_BYTES : MAX_ACTIVATE_BYTES;
         if (!supported(operation) || body.remaining() < minimum || body.remaining() > maximum) {
             throw invalid();
         }
@@ -104,8 +127,7 @@ public final class ProfileInitialControlCodec {
         contextBytes.limit(ProfileLedgerContext.ENCODED_LENGTH);
         ProfileLedgerContext context = ProfileLedgerContext.decode(contextBytes);
         in.position(ProfileLedgerContext.ENCODED_LENGTH);
-        if (in.getInt() != REQUEST_MAGIC || in.getShort() != (operation == ProfileOperation.ACTIVATE_REPLACEMENT
-                ? REPLACEMENT_SCHEMA : SCHEMA)
+        if (in.getInt() != REQUEST_MAGIC || in.getShort() != schema(operation)
                 || in.getShort() != 0) {
             throw invalid();
         }
@@ -126,17 +148,30 @@ public final class ProfileInitialControlCodec {
         }
         ProfileControlOperation purpose = operation == ProfileOperation.INSTALL
                 ? ProfileControlOperation.INSTALL : operation == ProfileOperation.ACTIVATE_REPLACEMENT
-                    ? ProfileControlOperation.ACTIVATE_REPLACEMENT : ProfileControlOperation.ACTIVATE_INITIAL;
+                    ? ProfileControlOperation.ACTIVATE_REPLACEMENT : operation == ProfileOperation.RECOVERY_GRANT
+                        ? ProfileControlOperation.RECOVERY_GRANT : ProfileControlOperation.ACTIVATE_INITIAL;
+        org.apache.bookkeeper.common.profile.control.ProfileExactRange range = null;
+        ProfileControlRequest.RecoveryBinding binding = null;
+        if (operation == ProfileOperation.RECOVERY_GRANT) {
+            if (in.remaining() != RECOVERY_BINDING_BYTES) {
+                throw invalid();
+            }
+            range = new org.apache.bookkeeper.common.profile.control.ProfileExactRange(in.getLong(), in.getLong());
+            byte[] intent = new byte[16];
+            in.get(intent);
+            binding = new ProfileControlRequest.RecoveryBinding(intent, in.getLong(), in.getLong());
+        }
         ProfileControlScope scope = new ProfileControlScope(purpose, purpose.purpose(), context.ledgerId(),
                 context.ledgerInstanceId(), ProfileDescriptorIdentity.fromBytes(
                         context.descriptorIdentity()), verifiedLocalHello.bookieId(),
                 verifiedLocalHello.storageIncarnation(),
-                domain, generation, id, payload, null);
+                domain, generation, id, payload, range);
         if (operation != ProfileOperation.INSTALL) {
             if (in.hasRemaining()) {
                 throw invalid();
             }
-            return ProfileControlRequest.operation(scope);
+            return binding == null ? ProfileControlRequest.operation(scope)
+                    : ProfileControlRequest.recoveryGrant(scope, binding);
         }
         if (in.remaining() < 31) {
             throw invalid();
@@ -167,7 +202,8 @@ public final class ProfileInitialControlCodec {
     public static byte[] encodeReply(ProfileControlResult result) {
         if ((result.operation() != ProfileControlOperation.INSTALL
                 && result.operation() != ProfileControlOperation.ACTIVATE_INITIAL
-                && result.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT)
+                && result.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT
+                && result.operation() != ProfileControlOperation.RECOVERY_GRANT)
                 || result.operationIdHex().length() != 32) {
             throw invalid();
         }
@@ -178,8 +214,7 @@ public final class ProfileInitialControlCodec {
             throw invalid();
         }
         return ByteBuffer.allocate(REPLY_BYTES).put(status.encode()).putInt(REPLY_MAGIC)
-                .putShort((short) (result.operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT
-                        ? REPLACEMENT_SCHEMA : SCHEMA))
+                .putShort((short) schema(result.operation()))
                 .putShort((short) (outcomeCode(result.outcome()))).putLong(result.ledgerId())
                 .put(HexFormat.of().parseHex(result.operationIdHex())).putLong(result.authorityGeneration())
                 .putLong(result.localGeneration()).putInt(0).array();
@@ -193,8 +228,7 @@ public final class ProfileInitialControlCodec {
         byte[] prefix = new byte[ProfileStatus.ENCODED_LENGTH];
         in.get(prefix);
         ProfileStatus status = ProfileStatus.decode(prefix);
-        if (in.getInt() != REPLY_MAGIC || in.getShort() != (operation == ProfileOperation.ACTIVATE_REPLACEMENT
-                ? REPLACEMENT_SCHEMA : SCHEMA)) {
+        if (in.getInt() != REPLY_MAGIC || in.getShort() != schema(operation)) {
             throw invalid();
         }
         int kind = Short.toUnsignedInt(in.getShort());
@@ -227,7 +261,8 @@ public final class ProfileInitialControlCodec {
         }
         return new ProfileControlResult(outcome, operation == ProfileOperation.INSTALL
                 ? ProfileControlOperation.INSTALL : operation == ProfileOperation.ACTIVATE_REPLACEMENT
-                    ? ProfileControlOperation.ACTIVATE_REPLACEMENT : ProfileControlOperation.ACTIVATE_INITIAL,
+                    ? ProfileControlOperation.ACTIVATE_REPLACEMENT : operation == ProfileOperation.RECOVERY_GRANT
+                        ? ProfileControlOperation.RECOVERY_GRANT : ProfileControlOperation.ACTIVATE_INITIAL,
                 ledger, HexFormat.of().formatHex(id), generation, local, durable);
     }
 

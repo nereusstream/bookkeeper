@@ -355,10 +355,14 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 || (initialControlBounds && ProfileInitialControlCodec.supported(operation)
                     && (header.bodyLength() < (operation == ProfileOperation.INSTALL
                             ? ProfileInitialControlCodec.MIN_INSTALL_BYTES
-                            : ProfileInitialControlCodec.COMMON_BYTES + 1)
+                            : ProfileInitialControlCodec.COMMON_BYTES + 1
+                                + (operation == ProfileOperation.RECOVERY_GRANT
+                                    ? ProfileInitialControlCodec.RECOVERY_BINDING_BYTES : 0))
                         || header.bodyLength() > (operation == ProfileOperation.INSTALL
                             ? ProfileInitialControlCodec.MAX_INSTALL_BYTES
-                            : ProfileInitialControlCodec.MAX_ACTIVATE_BYTES)))
+                            : operation == ProfileOperation.RECOVERY_GRANT
+                                ? ProfileInitialControlCodec.MAX_GRANT_BYTES
+                                : ProfileInitialControlCodec.MAX_ACTIVATE_BYTES)))
                 || (operation.isReservedDisabled() && header.bodyLength() != 0)) {
             throw new IOException("Invalid Profile request header");
         }

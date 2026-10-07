@@ -481,3 +481,21 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecT
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~
+
+## RepairIntent admission与实际恢复写回
+
+2026-10-07，新增固定32槽的ProfileRepairIntent，沿用同一UWRC恢复上下文。每个immutable inert计划绑定fragment起点、被替换slot、原ensemble digest、目标Bookie/incarnation、INSTALL/grant operation、intent/grant generation和exact range；不复制标准metadata的membership权威。prepare/admit的最终ZK multi检查标准metadata与lifecycle physical birth、版本及intent birth，UNKNOWN只解析同槽同计划，冲突不覆盖或另建操作。inert计划只允许inactive INSTALL；取得matching durable INSTALL receipt后才发布readonly admission。admission与目标留存是同一持久事实，DELETE_INTENT之后仍可枚举已admit目标，但fresh grant冷读拒绝已删除或变化的context。
+
+UWRP/schema1固定部分352字节，加bounded target/incarnation/domain与CRC32C，总上限759；其中嵌入完整UWRC184。readonly UWRA admission112字节保存实际local install generation、capability digest及intent/context SHA-256。独立struct/CRC32C向量为repair-intent.bin384字节，SHA-256 `abb56fb985f4c7f9cd927d2c8dbbe421540c90ed8d2f645700b6e837e167c6fb`；字段及hash向量不制造真实安装或authority事实。
+
+RECOVERY_GRANT采用独立UIC3 capability `0x55494333`/schema3/opcode0x0104：原126字节control prefix、1～128字节domain，再加exact range16、intentId16及两代各8字节，body175～302字节；reply仍60字节并核对原操作、authority/local generation。UIC1/UIC2旧向量不变，旧schema不能解释grant；HELLO没有新增连接用途字段。独立recovery-grant.bin175字节向量SHA-256为`6b28e56dd3cf0e030e286ac195ba64fe1da40673fe6a5309b9b1212322d905a2`。public payload SHA沿用native `UW-RECOVERY-GRANT-V1`字节合同，无本地持久格式变更。
+
+真实mTLS endpoint先完成principal、逐操作权限及一次exact fresh authority冷读，后转CONTROL额度并调用既有Bookie控制driver；已安装route及实际write/force/owner apply共同约束durable grant，不激活normal writer。重复grant返回同local generation的ALREADY；现有driver可能再次写/force控制记录，不能宣称零控制force。DELETE前已授权的历史效果不因后续冷读拒绝而回滚，保留目标清理义务。
+
+ProfileNormalDataClient.addRecovery使用原DATA socket、source quota、borrow/copy/write/wire及scalar completion路径，发送已有144字节ADD_RECOVERY prefix和原DigestManager封装entry。grant/context/range绑定不允许普通Add；caller取消不提前释放实际使用中的source或I/O资源。单条重复恢复Add按既有合同返回本地durable APPLIED且不增加DATA force。此入口没有新线程、隐式retry/reconnect、逐entry metadata写入或normal activation。
+
+真实ZK/socket/files用例依次验证unadmitted grant拒绝、显式重连后的inactive INSTALL、actual HELLO/result receipt、admission、UIC3 grant和单entry恢复Add；目标仍normal-inactive，metadata仍IN_RECOVERY。ZK测试覆盖admission实际提交后的reply loss解析、delete/同槽重建竞争、冲突不覆盖、bounded槽及删除后目标留存。typed install receipt仅作为metadata后端输入，实际安装/force链由socket用例验证。
+
+最终Java `unified-wal-local-656ohwXB` exit0：9类151项全部通过，common9/server142（socket47、lifecycle33、metadata19、PendingAddOp19、decoder21、Bookie3），1030冻结输入。Spotless/Checkstyle `unified-wal-repair-grant-style-h6yxeece` exit0，379个Java输入匹配/223与模型共享，Java/style15 checksums核验。模型`unified-wal-model-k2fr4zox` exit0：341配置67完整正向PASS/274指定反例、632 inputs/1020 checksums；225共享/1437去重union匹配，五个designInputs保持父提交`7a1f8bb1239a55eb1df667bfa53e20d0319db154`绑定。新增ProfileRepairGrant为173 generated/109 distinct、queue0/depth4，九个mutation命中指定性质；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。历史回执不重绑。
+
+重现使用上一节fresh-context只读取证的同一Java/style/model三条命令。有限投影只消费inert/install/admission、观察到的delete/birth、exact auth、实际force及目标留存事实，不证明真实TLS/CRC/持久化本身或全竞态线性化。grant close、membership/replica-readable publication、required frontier/最大与explicit LAC、匹配CLOSED及lost-close、完整AutoRecovery/独立readonly open/delete/rejoin、full A+C+D、总内存、活性、掉电/长期/性能和生产权限仍OPEN，步骤14保持PARTIAL。

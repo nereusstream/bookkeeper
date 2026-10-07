@@ -72,6 +72,11 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return socket.activate(request);
     }
 
+    /** Distinct UIC3 grant; body fields do not themselves authorize recovery payload. */
+    public CompletableFuture<ProfileControlResult> recoveryGrant(ProfileControlRequest request) {
+        return socket.recoveryGrant(request);
+    }
+
     /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */
     public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {

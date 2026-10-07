@@ -69,7 +69,8 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
             ProfileControlScope scope = transition.request().scope();
             if (scope.operation() != ProfileControlOperation.INSTALL
                     && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL
-                    && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT) {
+                    && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT
+                    && scope.operation() != ProfileControlOperation.RECOVERY_GRANT) {
                 return result(Outcome.UNSUPPORTED);
             }
             if (!transition.authority().scope().equals(scope)
@@ -81,7 +82,7 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
             }
             long deadline = System.nanoTime() + timeoutNanos;
             CompletableFuture<TransitionResult> reply = new CompletableFuture<>();
-            accepted = driver.submitBatch(List.of(transition), (results, failure) -> {
+            SegmentBookieControlDriver.BatchCompletion completion = (results, failure) -> {
                 try {
                     if (failure != null || results == null || results.size() != 1) {
                         reply.complete(result(Outcome.DURABILITY_UNKNOWN));
@@ -110,7 +111,14 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                 } finally {
                     actualTerminal.run();
                 }
-            });
+            };
+            if (scope.operation() == ProfileControlOperation.RECOVERY_GRANT) {
+                var binding = transition.request().recoveryBinding().orElseThrow();
+                accepted = driver.submitRecoveryGrant(new SegmentBookieControlLog.RecoveryGrant(transition,
+                        binding.intentId(), binding.intentGeneration(), binding.grantGeneration()), completion);
+            } else {
+                accepted = driver.submitBatch(List.of(transition), completion);
+            }
             if (!accepted) {
                 return result(Outcome.TRANSIENT_RECONCILING);
             }

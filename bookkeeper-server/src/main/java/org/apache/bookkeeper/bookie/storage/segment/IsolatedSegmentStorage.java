@@ -469,6 +469,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                         ProfileInitialControlCodec.SCHEMA));
                 capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
                         ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
+                capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
+                        ProfileInitialControlCodec.RECOVERY_SCHEMA));
             }
             if (read != null) {
                 capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY);

@@ -29,6 +29,21 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorCodec;
 /** Bounded typed request; physical control-tail packing remains deliberately unfrozen. */
 public final class ProfileControlRequest {
 
+    public record RecoveryBinding(byte[] intentId, long intentGeneration, long grantGeneration) {
+        public RecoveryBinding {
+            intentId = Objects.requireNonNull(intentId, "intentId").clone();
+            if (intentId.length != 16 || java.util.Arrays.equals(intentId, new byte[16])
+                    || intentGeneration <= 0 || grantGeneration <= 0) {
+                throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+            }
+        }
+        @Override
+        public byte[] intentId() {
+            return intentId.clone();
+        }
+    }
+
+    private final RecoveryBinding recoveryBinding;
     private final ProfileControlScope scope;
     private final byte[] canonicalDescriptor;
     private final EngineProfile expectedEngine;
@@ -39,6 +54,12 @@ public final class ProfileControlRequest {
             byte[] canonicalDescriptor,
             EngineProfile expectedEngine,
             ProtectedProfileCredential protectedCredential) {
+        this(scope, canonicalDescriptor, expectedEngine, protectedCredential, null);
+    }
+
+    private ProfileControlRequest(ProfileControlScope scope, byte[] canonicalDescriptor, EngineProfile expectedEngine,
+            ProtectedProfileCredential protectedCredential, RecoveryBinding recovery) {
+        recoveryBinding = recovery;
         this.scope = Objects.requireNonNull(scope, "scope");
         this.canonicalDescriptor = canonicalDescriptor == null ? null : canonicalDescriptor.clone();
         this.expectedEngine = expectedEngine;
@@ -67,6 +88,18 @@ public final class ProfileControlRequest {
             throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
         }
         return new ProfileControlRequest(scope, null, null, null);
+    }
+
+    public static ProfileControlRequest recoveryGrant(ProfileControlScope scope, RecoveryBinding binding) {
+        if (scope == null || scope.operation() != ProfileControlOperation.RECOVERY_GRANT || binding == null
+                || scope.authorityGeneration() != binding.grantGeneration() || scope.exactRange() == null) {
+            throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+        }
+        return new ProfileControlRequest(scope, null, null, null, binding);
+    }
+
+    public Optional<RecoveryBinding> recoveryBinding() {
+        return Optional.ofNullable(recoveryBinding);
     }
 
     public ProfileControlScope scope() {

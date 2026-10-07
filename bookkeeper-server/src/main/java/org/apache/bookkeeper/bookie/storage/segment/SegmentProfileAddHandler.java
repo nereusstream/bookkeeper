@@ -76,6 +76,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private ProfileTransportContext transport;
     private boolean initialControlNegotiated;
     private boolean replacementControlNegotiated;
+    private boolean recoveryControlNegotiated;
     private boolean established;
     private boolean controlEstablished;
     private boolean closed;
@@ -152,6 +153,10 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                                     ProfileLacReplyCodec.CAPABILITY);
                     readNegotiated = read != null && ProfileHello.decodeClient(offer).capabilities().contains(
                             ProfileReadEntryReplyCodec.CAPABILITY);
+                    recoveryControlNegotiated = control != null
+                            && ProfileHello.decodeClient(offer).capabilities().contains(new ProfileHello.Capability(
+                                    ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
+                                    ProfileInitialControlCodec.RECOVERY_SCHEMA));
                     initialControlNegotiated = control != null
                             && ProfileHello.decodeClient(offer).capabilities().contains(
                             new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
@@ -363,8 +368,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void initialControl(ChannelHandlerContext ctx, Pending request) {
-        if (request.frame.header().operation() == ProfileOperation.ACTIVATE_REPLACEMENT
-                ? !replacementControlNegotiated : !initialControlNegotiated) {
+        if (request.frame.header().operation() == ProfileOperation.RECOVERY_GRANT ? !recoveryControlNegotiated
+                : request.frame.header().operation() == ProfileOperation.ACTIVATE_REPLACEMENT
+                    ? !replacementControlNegotiated : !initialControlNegotiated) {
             request.closeAfterWrite = !controlEstablished;
             write(ctx, request, ProfileStatus.unsupported(), null);
             return;

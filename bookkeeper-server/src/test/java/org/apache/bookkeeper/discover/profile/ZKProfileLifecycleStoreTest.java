@@ -160,6 +160,111 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
         return new Replaced(source, page, prepared.page());
     }
 
+    private ProfileRepairIntent repairIntent(ZKProfileReservationStore.RecoveryResult entered, int slot, int id) {
+        var template = scope("b4:3181");
+        var install = new ProfileControlScope(template.operation(), template.purpose(), template.ledgerId(),
+                template.ledgerInstanceId(), template.descriptorIdentity(), template.targetBookie(),
+                template.targetStorageIncarnation(), template.authorityDomain(), entered.context().controlGeneration(),
+                bytes(16, 20 + id), template.publicSemanticPayloadIdentity(), null);
+        return new ProfileRepairIntent(entered.context(), slot, bytes(16, id), 0, 1,
+                ZKProfileReservationStore.repairEnsembleDigest(entered.metadata().metadata().getValue(), 0),
+                install, bytes(16, 40 + id), new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 4));
+    }
+
+    @Test
+    public void repairIntentVectorRejectsMalformedLengthsAndOwnsItsFields() throws Exception {
+        byte[] vector = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/repair-intent.bin").toURI()));
+        var intent = ProfileRepairIntent.decode(vector);
+        assertEquals(384, vector.length);
+        assertEquals(0, intent.slot());
+        assertEquals("b4:3181", intent.install().targetBookie());
+        assertEquals(4, intent.range().lastEntryId());
+        assertArrayEquals(vector, intent.encode());
+        intent.intentId()[0] = 0;
+        assertArrayEquals(vector, intent.encode());
+        for (int offset : new int[]{0, 4, 6, 352}) {
+            byte[] bad = vector.clone();
+            bad[offset] ^= 1;
+            CRC32C crc = new CRC32C();
+            crc.update(bad, 0, bad.length - 4);
+            ByteBuffer.wrap(bad).putInt(bad.length - 4, (int) crc.getValue());
+            assertThrows(IllegalArgumentException.class, () -> ProfileRepairIntent.decode(bad));
+        }
+    }
+
+    @Test
+    public void repairIntentIsInertThenAdmittedAndRetainedAfterDelete() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var plan = store(first).captureRecovery(metadata, 44, bytes(16, 11)).plan();
+            var entered = store(first).beginRecovery(metadata, plan);
+            var desired = repairIntent(entered, 0, 12);
+            var prepared = store(first).prepareRepair(metadata, desired);
+            assertEquals(CreateStatus.APPLIED, prepared.status());
+            assertEquals(desired, ProfileRepairIntent.decode(desired.encode()));
+            var authority = store(first).repairAuthorityReader("b4:3181", metadata);
+            assertEquals(ReadStatus.FOUND, authority.read(ProfileAuthorityKey.fromScope(desired.install())).status());
+            assertEquals(ReadStatus.NOT_FOUND,
+                    authority.read(ProfileAuthorityKey.fromScope(desired.grantScope())).status());
+            assertEquals(3, store(first).retainedActivationTargets(44).targets().size());
+            var receipt = new ProfileInstallReceipt(desired.install(), EngineProfile.SEGMENT_WAL_ENGINE,
+                    bytes(32, 7), 1);
+            first.loseReply.set(true);
+            assertEquals(CreateStatus.ALREADY_APPLIED,
+                    store(first).admitRepair(metadata, prepared.snapshot(), receipt).status());
+            assertEquals(ReadStatus.FOUND,
+                    authority.read(ProfileAuthorityKey.fromScope(desired.grantScope())).status());
+            assertEquals(4, store(first).retainedActivationTargets(44).targets().size());
+            assertEquals(CreateStatus.CONFLICT,
+                    store(first).prepareRepair(metadata, repairIntent(entered, 0, 13)).status());
+            assertEquals(CreateStatus.APPLIED,
+                    store(first).cutDelete(plan.lifecycle(), bytes(16, 14), bytes(32, 14)).status());
+            assertEquals(ReadStatus.QUARANTINED,
+                    authority.read(ProfileAuthorityKey.fromScope(desired.grantScope())).status());
+            assertEquals(4, store(first).retainedActivationTargets(44).targets().size());
+            assertThrows(IllegalArgumentException.class, () -> repairIntent(entered, 32, 15));
+        }
+    }
+
+    @Test
+    public void repairAdmissionDeleteOrIntentRecreationLeavesPreparedTargetInert() throws Exception {
+        for (boolean recreate : List.of(false, true)) {
+            try (LedgerManager lm = manager(first)) {
+                ready(lm);
+                var metadata = membership(first, lm);
+                var plan = store(first).captureRecovery(metadata, 44, bytes(16, 11)).plan();
+                var entered = store(first).beginRecovery(metadata, plan);
+                var desired = repairIntent(entered, 0, 12);
+                var prepared = store(first).prepareRepair(metadata, desired).snapshot();
+                var receipt = new ProfileInstallReceipt(desired.install(), EngineProfile.SEGMENT_WAL_ENGINE,
+                        bytes(32, 7), 1);
+                if (recreate) {
+                    first.beforeMulti.set(() -> {
+                        try {
+                            removeTree(ROOT + "/2c/repair-0");
+                            assertEquals(CreateStatus.APPLIED, store(second).prepareRepair(
+                                    membership(second, lm), desired).status());
+                        } catch (Exception failed) {
+                            throw new AssertionError(failed);
+                        }
+                    });
+                } else {
+                    assertEquals(CreateStatus.APPLIED,
+                            store(first).cutDelete(plan.lifecycle(), bytes(16, 13), bytes(32, 13)).status());
+                }
+                assertEquals(CreateStatus.CONFLICT, store(first).admitRepair(metadata, prepared, receipt).status());
+                assertEquals(null, second.exists(ROOT + "/2c/repair-0/admitted", false));
+            }
+            // Each branch uses an independent real namespace/metadata setup.
+            if (!recreate) {
+                removeRecoveryTree(ROOT + "/2c");
+                removeRecoveryTree(ROOT + "/ledgers");
+            }
+        }
+    }
+
     @Test
     public void recoveryContextVectorOwnsItsFieldsAndRejectsMalformedIdentity() throws Exception {
         byte[] vector = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
