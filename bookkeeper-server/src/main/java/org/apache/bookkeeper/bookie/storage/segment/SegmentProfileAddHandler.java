@@ -77,6 +77,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private boolean initialControlNegotiated;
     private boolean replacementControlNegotiated;
     private boolean recoveryControlNegotiated;
+    private boolean recoveryCloseNegotiated;
     private boolean established;
     private boolean controlEstablished;
     private boolean closed;
@@ -153,6 +154,10 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                                     ProfileLacReplyCodec.CAPABILITY);
                     readNegotiated = read != null && ProfileHello.decodeClient(offer).capabilities().contains(
                             ProfileReadEntryReplyCodec.CAPABILITY);
+                    recoveryCloseNegotiated = control != null
+                            && ProfileHello.decodeClient(offer).capabilities().contains(new ProfileHello.Capability(
+                                    ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
+                                    ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA));
                     recoveryControlNegotiated = control != null
                             && ProfileHello.decodeClient(offer).capabilities().contains(new ProfileHello.Capability(
                                     ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
@@ -368,7 +373,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void initialControl(ChannelHandlerContext ctx, Pending request) {
-        if (request.frame.header().operation() == ProfileOperation.RECOVERY_GRANT ? !recoveryControlNegotiated
+        if (request.frame.header().operation() == ProfileOperation.RECOVERY_GRANT_CLOSE ? !recoveryCloseNegotiated
+                : request.frame.header().operation() == ProfileOperation.RECOVERY_GRANT ? !recoveryControlNegotiated
                 : request.frame.header().operation() == ProfileOperation.ACTIVATE_REPLACEMENT
                     ? !replacementControlNegotiated : !initialControlNegotiated) {
             request.closeAfterWrite = !controlEstablished;

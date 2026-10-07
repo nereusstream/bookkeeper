@@ -1106,6 +1106,22 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 ? state.localGeneration : 0;
     }
 
+    /** Matching durable close result only; this snapshot neither grants DATA nor proves cluster membership. */
+    synchronized long recoveryClosedGeneration(ProfileControlScope scope) {
+        ByteBuffer id = ByteBuffer.wrap(scope.operationId());
+        AppliedOperation applied = operations.get(new UUID(id.getLong(), id.getLong()));
+        LedgerState state = ledgers.get(scope.ledgerId());
+        if (closed || failed || state == null || state.pendingTombstone || tombstones.containsKey(scope.ledgerId())
+                || !state.context.equals(context(scope)) || applied == null
+                || applied.status() != Status.APPLIED_DURABLE
+                || applied.command().type != SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE
+                || !applied.command().scope.equals(scope)) {
+            return 0;
+        }
+        GrantState grant = state.recoveryGrants.get(applied.command().closedGrantId);
+        return grant != null && grant.committedReadable ? state.localGeneration : 0;
+    }
+
     /** Explains a refused, unsubmitted request; this snapshot never grants DATA admission. */
     synchronized NormalRejection normalRejection(ProfileLedgerContext context, byte[] wireVerifier) {
         NormalRejection rejection = fenceRejection(context, wireVerifier);

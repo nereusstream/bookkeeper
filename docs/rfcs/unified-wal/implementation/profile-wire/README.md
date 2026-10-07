@@ -499,3 +499,29 @@ ProfileNormalDataClient.addRecovery使用原DATA socket、source quota、borrow/
 最终Java `unified-wal-local-656ohwXB` exit0：9类151项全部通过，common9/server142（socket47、lifecycle33、metadata19、PendingAddOp19、decoder21、Bookie3），1030冻结输入。Spotless/Checkstyle `unified-wal-repair-grant-style-h6yxeece` exit0，379个Java输入匹配/223与模型共享，Java/style15 checksums核验。模型`unified-wal-model-k2fr4zox` exit0：341配置67完整正向PASS/274指定反例、632 inputs/1020 checksums；225共享/1437去重union匹配，五个designInputs保持父提交`7a1f8bb1239a55eb1df667bfa53e20d0319db154`绑定。新增ProfileRepairGrant为173 generated/109 distinct、queue0/depth4，九个mutation命中指定性质；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。历史回执不重绑。
 
 重现使用上一节fresh-context只读取证的同一Java/style/model三条命令。有限投影只消费inert/install/admission、观察到的delete/birth、exact auth、实际force及目标留存事实，不证明真实TLS/CRC/持久化本身或全竞态线性化。grant close、membership/replica-readable publication、required frontier/最大与explicit LAC、匹配CLOSED及lost-close、完整AutoRecovery/独立readonly open/delete/rejoin、full A+C+D、总内存、活性、掉电/长期/性能和生产权限仍OPEN，步骤14保持PARTIAL。
+
+## UIC4 recovery grant close接线
+
+2026-10-08，真实隔离CONTROL路径新增RECOVERY_GRANT_CLOSE，仍要求mTLS principal、静态operation权限、一次exact cold authority和RECOVERY_CLOSE_AUTHORIZED状态。inert/admitted intent、RECOVERY_OPEN grant、credential或HELLO capability均不授予close；现有ZK repair reader仍不发布close authority。membership/copy结果与close-authority的真实metadata发布器尚未实现，本节验收物理wire/driver消费独立授权输入的行为，不宣称其cluster authority已闭合。
+
+独立UIC4 capability `0x55494334`/schema4/opcode0x0105沿用control126字节prefix与1～128字节domain，追加range16、intentId16、intent/grant generation各8和被关闭grant operationId16，body191～318字节；reply仍60字节，关联本次close operation、authority/local generation。UIC1/UIC2/UIC3旧schema和向量保持，UIC3不能解释close请求或reply。接收固定头在body额度及接收前检查上下限；合法首个close仍占UNCLASSIFIED，真实授权后才原子转CONTROL。HELLO无用途字段，无新线程/重试/自动重连机制。
+
+独立Python struct与SHA-256向量recovery-close.bin为191字节，SHA-256 `30a5877745b3d71407656e902c0219522cdfa6d49f747c09e9a81a6a1e2b3342`；public payload沿用native `UW-RECOVERY-CLOSE-V1`，绑定context、target/incarnation、domain、grant operation、intent/generations和range，未改变本地持久格式或加入credential。typed request复制grant operationId，并拒绝与close operation相同的ID。
+
+SegmentProfileInstallStore调用既有submitRecoveryClose：先建立grant admission cut，pre-cut ticket未终结时返回TRANSIENT_RECONCILING/NONE且不写close记录；DATA已写但cut后失去eligibility仍返回UNKNOWN。实际write/force/owner apply终结后才返回durable APPLIED/ALREADY，以同scope的本地已提交close事实核对positive local generation。重复同close返回同generation并不增加控制force。关闭恢复权限后才发布本地committed-readable，normal writer保持inactive；本地readable不替代客户端的标准membership/confirmed范围选择或完整range coverage proof。
+
+caller timeout/断连只停止等待，actual close I/O/owner与对应request额度继续持有至实际终结，原操作ID保留用于显式重连解析。force或apply失败返回UNKNOWN，不伪造durable success，不重新开放恢复准入；原native restart回归检查matching close重放。没有STATUS_QUERY授权、metadata CLOSED或新的retry operation。
+
+四个真实mTLS/files测试消费明确声明的独立close-authority输入，验证真实ZK repair reader缺少close authority、RECOVERY_OPEN状态拒绝、实际单entry写回及close、重复无额外force、close后的实际READ_ENTRY、pre-cut DATA force持有、close force持有与timeout后同ID解析，以及force失败UNKNOWN。metadata仍IN_RECOVERY且ensemble未变，admitted目标仍在history中；这些测试没有制造membership/copy publication事实。固定头边界测试验证190/319字节在body接收前拒绝，191/318半包在授权前仍计UNCLASSIFIED；codec验证独立向量、ID所有权、跨schema/operation拒绝及reply关联。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*+recoveryCloseWaitsForPrecutTicket*+uncertainRecoveryCloseForce*+profileSocketRecoveryGrantClose*+recoveredRecoveryCandidateLosesEligibility*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
+
+最终Java `unified-wal-local-cs02h4mj` exit0：9类161项全部通过，common10/server151（socket51、lifecycle33、metadata19、PendingAddOp19、decoder22、Bookie7），1031冻结输入。Spotless/Checkstyle实际session1107完成chunk d22dc9/exit0/空输出，归档`unified-wal-recovery-close-style-9xx5ba13`的379 Java输入匹配/223与模型共享，Java/style15 checksums核验。最终模型`unified-wal-model-1_ferwu3` exit0：351配置68完整正向PASS/283指定反例、643 inputs/1050 checksums；225共享/1449去重union匹配，五个designInputs保持父提交`d6d78ded151c21987908f02d3f7164fe4eafd41b`绑定。新增close投影179 generated/138 distinct、queue0/depth6，九个mutation命中指定性质；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。
+
+定向`unified-wal-local-yK1Xo7mB`为common6/socket3共9项通过，新增force失败与接收头边界的`unified-wal-local-3trdrvbh`为2项通过。首轮4d820fXb是测试漏ByteBuffer引用的编译失败，两处长行修正不作为实现RED。首次完整回归/model的输入随后因补充两项风险验证变化，最终回执已重新冻结，旧source/design/result未重绑。有限模型消费独立close authority，不证明其metadata发布器或实际crypto/bytes/force本身。
+
+实际membership/copy result与ZK close-authority publication、完整required frontier/最大和explicit LAC、matching CLOSED及lost-close、完整AutoRecovery/独立readonly open/delete/rejoin、full A+C+D、总预算、活性、掉电/长期/性能和production authority仍OPEN，步骤14保持PARTIAL。

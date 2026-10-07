@@ -77,6 +77,42 @@ public class ProfileInitialControlCodecTest {
     }
 
     @Test
+    public void recoveryCloseUsesIndependentSchemaFourAndCannotReplayAsGrant() throws Exception {
+        byte[] bytes;
+        try (var in = getClass().getResourceAsStream("/profile-wire/recovery-close.bin")) {
+            bytes = in.readAllBytes();
+        }
+        var request = ProfileInitialControlCodec.decodeRequest(ProfileOperation.RECOVERY_GRANT_CLOSE,
+                ByteBuffer.wrap(bytes), HELLO);
+        assertEquals(191, bytes.length);
+        assertEquals(ProfileControlOperation.RECOVERY_GRANT_CLOSE, request.scope().operation());
+        assertEquals(2, request.scope().authorityGeneration());
+        assertArrayEquals(bytes(16, 8), request.closedGrantOperationId().orElseThrow());
+        byte[] borrowed = request.closedGrantOperationId().orElseThrow();
+        borrowed[0] = 0;
+        assertArrayEquals(bytes(16, 8), request.closedGrantOperationId().orElseThrow());
+        assertArrayEquals(bytes, ProfileInitialControlCodec.encodeRequest(request));
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.RECOVERY_GRANT, ByteBuffer.wrap(bytes), HELLO));
+        for (int length : List.of(190, 319)) {
+            assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                    ProfileOperation.RECOVERY_GRANT_CLOSE, ByteBuffer.wrap(Arrays.copyOf(bytes, length)), HELLO));
+        }
+        byte[] oldSchema = bytes.clone();
+        ByteBuffer.wrap(oldSchema).putShort(64, (short) 3);
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.RECOVERY_GRANT_CLOSE, ByteBuffer.wrap(oldSchema), HELLO));
+        assertThrows(IllegalArgumentException.class, () -> ProfileControlRequest.recoveryClose(request.scope(),
+                request.recoveryBinding().orElseThrow(), request.scope().operationId()));
+        var result = new ProfileControlResult(ProfileControlResult.Outcome.APPLIED, request.scope().operation(),
+                44, HexFormat.of().formatHex(request.scope().operationId()), 2, 1, true);
+        byte[] reply = ProfileInitialControlCodec.encodeReply(result);
+        assertEquals(result, ProfileInitialControlCodec.decodeReply(ProfileOperation.RECOVERY_GRANT_CLOSE, reply));
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeReply(
+                ProfileOperation.RECOVERY_GRANT, reply));
+    }
+
+    @Test
     public void recoveryGrantUsesIndependentSchemaThreeVectorAndBoundedIntentFields() throws Exception {
         byte[] bytes;
         try (var in = getClass().getResourceAsStream("/profile-wire/recovery-grant.bin")) {

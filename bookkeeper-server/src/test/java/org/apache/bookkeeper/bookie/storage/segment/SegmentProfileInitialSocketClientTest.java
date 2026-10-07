@@ -184,6 +184,8 @@ public class SegmentProfileInitialSocketClientTest {
         final java.util.Set<Integer> expectedFailedDataSessions = new java.util.HashSet<>();
         final List<ProfileNormalDataClient> dataClients = new ArrayList<>();
         final AtomicInteger authorityReads = new AtomicInteger();
+        // A supplied close-authority input for physical wire/driver tests; no metadata publication is inferred.
+        volatile org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority closeAuthority;
         final java.util.concurrent.atomic.AtomicBoolean readAllowed =
                 new java.util.concurrent.atomic.AtomicBoolean(true);
         final List<ProfileControlScope> scopes = new ArrayList<>();
@@ -322,9 +324,20 @@ public class SegmentProfileInitialSocketClientTest {
                                     && (operation == ProfileControlOperation.INSTALL
                                         || operation == ProfileControlOperation.ACTIVATE_INITIAL
                                         || operation == ProfileControlOperation.ACTIVATE_REPLACEMENT
-                                        || operation == ProfileControlOperation.RECOVERY_GRANT),
+                                        || operation == ProfileControlOperation.RECOVERY_GRANT
+                                        || operation == ProfileControlOperation.RECOVERY_GRANT_CLOSE),
                             key -> {
                                 authorityReads.incrementAndGet();
+                                if (key.purpose() == ProfileAuthorityPurpose.RECOVERY_GRANT_CLOSE) {
+                                    var supplied = closeAuthority;
+                                    return supplied != null && key.equals(
+                                            org.apache.bookkeeper.common.profile.control.ProfileAuthorityKey
+                                                    .fromScope(supplied.scope()))
+                                            ? new org.apache.bookkeeper.common.profile.control.ProfileControlStore
+                                                .ReadResult(org.apache.bookkeeper.common.profile.control
+                                                    .ProfileControlStore.ReadStatus.FOUND, supplied)
+                                            : repairReader.read(key);
+                                }
                                 if (key.purpose() == ProfileAuthorityPurpose.RECOVERY_GRANT) {
                                     return repairReader.read(key);
                                 }
@@ -1320,6 +1333,173 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(4, fixture.reservations.retainedActivationTargets(44).targets().size());
             assertEquals(LedgerMetadata.State.IN_RECOVERY,
                     fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+        }
+    }
+
+    @Test
+    public void recoveryCloseRequiresIndependentAuthorityAndReplaysItsDurableResult() throws Exception {
+        recoveryCloseOverSocket(0);
+    }
+
+    @Test
+    public void recoveryCloseWaitsForActualPrecutDataAndDoesNotPublishEarlyReadable() throws Exception {
+        recoveryCloseOverSocket(1);
+    }
+
+    @Test
+    public void recoveryCloseTimeoutKeepsActualControlIoAndResolvesTheSameOperation() throws Exception {
+        recoveryCloseOverSocket(2);
+    }
+
+    @Test
+    public void recoveryCloseForceFailureNeverReturnsDurableSuccessOrReopensRecovery() throws Exception {
+        recoveryCloseOverSocket(3);
+    }
+
+    private void recoveryCloseOverSocket(int fault) throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 4, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var plan = fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan();
+            var entered = fixture.reservations.beginRecovery(metadata, plan);
+            var identity = fixture.identities.get(3);
+            var scope = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                    ProfileAuthorityPurpose.PREPARING_INSTALL, 44, fixture.context().ledgerInstanceId(),
+                    ProfileDescriptorCodec.identityOf(DESCRIPTOR, VALIDATOR), identity.bookieId().toString(),
+                    identity.incarnation().value(), "ledger-profile", entered.context().controlGeneration(),
+                    bytes(16, 40), bytes(32, 40), null);
+            var intent = new org.apache.bookkeeper.discover.profile.ProfileRepairIntent(entered.context(), 0,
+                    bytes(16, 41), 0, 1, ZKProfileReservationStore.repairEnsembleDigest(
+                            entered.metadata().metadata().getValue(), 0), scope, bytes(16, 42),
+                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 0));
+            var prepared = fixture.reservations.prepareRepair(metadata, intent);
+            var control = fixture.connect(3, 4, Duration.ofSeconds(5));
+            var installed = control.install(ProfileControlRequest.install(scope, DESCRIPTOR_BYTES,
+                    EngineProfile.SEGMENT_WAL_ENGINE, fixture.credential)).get(5, TimeUnit.SECONDS);
+            fixture.reservations.admitRepair(metadata, prepared.snapshot(),
+                    org.apache.bookkeeper.discover.profile.ProfileInstallReceipt.from(
+                            scope, control.hello(), installed));
+            assertTrue(control.recoveryGrant(ProfileControlRequest.recoveryGrant(intent.grantScope(),
+                    new ProfileControlRequest.RecoveryBinding(intent.intentId(), intent.intentGeneration(),
+                            intent.grantGeneration()))).get(5, TimeUnit.SECONDS).durable());
+            var grantId = java.nio.ByteBuffer.wrap(intent.grantOperationId());
+            UUID grantOperation = new UUID(grantId.getLong(), grantId.getLong());
+            var unbound = new ProfileControlScope(ProfileControlOperation.RECOVERY_GRANT_CLOSE,
+                    ProfileAuthorityPurpose.RECOVERY_GRANT_CLOSE, 44, scope.ledgerInstanceId(),
+                    scope.descriptorIdentity(), scope.targetBookie(), scope.targetStorageIncarnation(),
+                    scope.authorityDomain(), scope.authorityGeneration() + 1,
+                    bytes(16, 43), bytes(32, 0), intent.range());
+            var closeScope = new ProfileControlScope(unbound.operation(), unbound.purpose(), unbound.ledgerId(),
+                    unbound.ledgerInstanceId(), unbound.descriptorIdentity(), unbound.targetBookie(),
+                    unbound.targetStorageIncarnation(), unbound.authorityDomain(), unbound.authorityGeneration(),
+                    unbound.operationId(), SegmentBookieControlLog.recoveryClosePayloadIdentity(unbound,
+                            grantOperation, intent.intentId(), intent.intentGeneration(), intent.grantGeneration()),
+                    intent.range());
+            var close = ProfileControlRequest.recoveryClose(closeScope, new ProfileControlRequest.RecoveryBinding(
+                    intent.intentId(), intent.intentGeneration(), intent.grantGeneration()), intent.grantOperationId());
+            int before = fixture.nodeIo.get(3).forces;
+            assertFalse(control.recoveryClose(close).get(5, TimeUnit.SECONDS).durable());
+            assertEquals(before, fixture.nodeIo.get(3).forces);
+            fixture.closeAuthority = new org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority(
+                    closeScope, org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority.State
+                            .RECOVERY_OPEN, EngineProfile.SEGMENT_WAL_ENGINE, 1, true);
+            assertFalse(control.recoveryClose(close).get(5, TimeUnit.SECONDS).durable());
+            assertEquals(before, fixture.nodeIo.get(3).forces);
+            fixture.closeAuthority = new org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority(
+                    closeScope, org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority.State
+                            .RECOVERY_CLOSE_AUTHORIZED, EngineProfile.SEGMENT_WAL_ENGINE, 1, true);
+            var data = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
+            CountDownLatch forcing = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            var source = entry(fixture, 0, 16);
+            try {
+                if (fault == 1) {
+                    files(fixture.nodes.get(3)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                        forcing.countDown();
+                        await(release);
+                    });
+                }
+                var copied = data.addRecovery(intent, fixture.credential, 0, source);
+                if (fault == 1) {
+                    assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                    var waiting = control.recoveryClose(close).get(5, TimeUnit.SECONDS);
+                    assertEquals(ProfileControlResult.Outcome.TRANSIENT_RECONCILING, waiting.outcome());
+                    assertFalse(waiting.durable());
+                    assertFalse(bookie(fixture.nodes.get(3)).locallyCommittedReadable(fixture.context(), 0));
+                    assertEquals(before, fixture.nodeIo.get(3).forces);
+                    release.countDown();
+                    assertEquals(ProfileStatus.DurableResult.UNKNOWN,
+                            copied.get(5, TimeUnit.SECONDS).durableResult());
+                } else {
+                    assertEquals(ProfileStatus.DurableResult.APPLIED,
+                            copied.get(5, TimeUnit.SECONDS).durableResult());
+                }
+                if (fault == 3) {
+                    var field = SegmentBookieControlLog.class.getDeclaredField("io");
+                    field.setAccessible(true);
+                    var failedIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                    field.set(bookie(fixture.nodes.get(3)), failedIo);
+                    var uncertain = control.recoveryClose(close).get(5, TimeUnit.SECONDS);
+                    assertEquals(ProfileControlResult.Outcome.DURABILITY_UNKNOWN, uncertain.outcome());
+                    assertFalse(uncertain.durable());
+                    assertEquals(1, failedIo.forces);
+                    assertFalse(bookie(fixture.nodes.get(3)).locallyCommittedReadable(fixture.context(), 0));
+                    assertFalse(fixture.normal(3));
+                    return;
+                }
+                if (fault == 2) {
+                    control = fixture.connect(3, 4, Duration.ofMillis(300));
+                    var field = SegmentBookieControlLog.class.getDeclaredField("io");
+                    field.setAccessible(true);
+                    var actualIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                        forcing.countDown();
+                        await(release);
+                    });
+                    field.set(bookie(fixture.nodes.get(3)), actualIo);
+                    var unknown = control.recoveryClose(close);
+                    assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                    assertThrows(ExecutionException.class, () -> unknown.get(5, TimeUnit.SECONDS));
+                    assertEquals(0, actualIo.forces);
+                    assertThrows(java.io.IOException.class, bookie(fixture.nodes.get(3))::close);
+                    assertFalse(bookie(fixture.nodes.get(3)).locallyCommittedReadable(fixture.context(), 0));
+                    release.countDown();
+                    control = fixture.connect(3, 4, Duration.ofSeconds(5));
+                }
+                ProfileControlResult closed;
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                do {
+                    closed = control.recoveryClose(close).get(5, TimeUnit.SECONDS);
+                    if (!closed.durable()) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+                    }
+                } while (!closed.durable() && System.nanoTime() < deadline);
+                assertTrue(closed.durable());
+                assertEquals(fault == 2 ? ProfileControlResult.Outcome.ALREADY_APPLIED
+                        : ProfileControlResult.Outcome.APPLIED, closed.outcome());
+                var actualField = SegmentBookieControlLog.class.getDeclaredField("io");
+                actualField.setAccessible(true);
+                var actualControlIo = (SegmentFileIo) actualField.get(bookie(fixture.nodes.get(3)));
+                int closedForces = actualControlIo.forces;
+                var repeated = control.recoveryClose(close).get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileControlResult.Outcome.ALREADY_APPLIED, repeated.outcome());
+                assertEquals(closedForces, actualControlIo.forces);
+                assertEquals(closed.localGeneration(), repeated.localGeneration());
+                assertTrue(bookie(fixture.nodes.get(3)).locallyCommittedReadable(fixture.context(), 0));
+                assertFalse(fixture.normal(3));
+                assertEquals(ProfileStatus.DurableResult.NONE,
+                        data.addRecovery(intent, fixture.credential, 0, source)
+                                .get(5, TimeUnit.SECONDS).durableResult());
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                        data.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
+                assertEquals(4, fixture.reservations.retainedActivationTargets(44).targets().size());
+                assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                        fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+            } finally {
+                release.countDown();
+                source.release();
+            }
         }
     }
 

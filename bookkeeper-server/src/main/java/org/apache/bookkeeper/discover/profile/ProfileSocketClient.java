@@ -74,6 +74,8 @@ final class ProfileSocketClient implements AutoCloseable {
             ProfileInitialControlCodec.CAPABILITY_ID, ProfileInitialControlCodec.SCHEMA);
     private static final ProfileHello.Capability RECOVERY_CAPABILITY = new ProfileHello.Capability(
             ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID, ProfileInitialControlCodec.RECOVERY_SCHEMA);
+    private static final ProfileHello.Capability RECOVERY_CLOSE_CAPABILITY = new ProfileHello.Capability(
+            ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID, ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA);
     private static final ProfileHello.Capability REPLACEMENT_CAPABILITY = new ProfileHello.Capability(
             ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID, ProfileInitialControlCodec.REPLACEMENT_SCHEMA);
     private static final int MAX_RESPONSE_FRAME = 36 + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES
@@ -191,6 +193,13 @@ final class ProfileSocketClient implements AutoCloseable {
             return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
         }
         return send(request, ProfileControlOperation.RECOVERY_GRANT, ProfileOperation.RECOVERY_GRANT);
+    }
+
+    CompletableFuture<ProfileControlResult> recoveryClose(ProfileControlRequest request) {
+        if (!hello().capabilities().contains(RECOVERY_CLOSE_CAPABILITY)) {
+            return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+        }
+        return send(request, ProfileControlOperation.RECOVERY_GRANT_CLOSE, ProfileOperation.RECOVERY_GRANT_CLOSE);
     }
 
     private CompletableFuture<ProfileControlResult> send(ProfileControlRequest request,
@@ -490,7 +499,8 @@ final class ProfileSocketClient implements AutoCloseable {
                     ctx.writeAndFlush(encode(ProfileOperation.HELLO, 1,
                             new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY,
                                     ProfileLacReplyCodec.CAPABILITY)
-                                    : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY)).encode()))
+                                    : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY,
+                                            RECOVERY_CLOSE_CAPABILITY)).encode()))
                             .addListener(written -> {
                         if (!written.isSuccess()) {
                             close();

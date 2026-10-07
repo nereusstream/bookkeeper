@@ -203,6 +203,33 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void recoveryCloseHeaderBoundsPrecedeBodyAndControlAuthorization() {
+        for (int bodyBytes : List.of(190, 191, 318, 319)) {
+            ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 4_096, 2_048, 8, 8, 4);
+            ProfileReceiveDecoder decoder = decoder(budget, 4_000, 64);
+            decoder.limitInitialControlBodies();
+            EmbeddedChannel channel = new EmbeddedChannel(decoder);
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+            ProfileInboundFrame greeting = channel.readInbound();
+            greeting.close();
+            decoder.markEstablished();
+            byte[] header = Arrays.copyOf(frame(ProfileOperation.RECOVERY_GRANT_CLOSE, bodyBytes), 36);
+            if (bodyBytes == 190 || bodyBytes == 319) {
+                assertThrows(IOException.class, () -> channel.writeInbound(Unpooled.wrappedBuffer(header)));
+                assertFalse(channel.isActive());
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            } else {
+                assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(header)));
+                assertEquals(64 + 36 + bodyBytes, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            }
+            channel.finishAndReleaseAll();
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        }
+    }
+
+    @Test
     public void rejectsFenceOnDataConnectionBeforeReceivingBody() {
         ProfileReceiveBudget budget = new ProfileReceiveBudget(4_096, 1_024, 512, 8, 8, 4);
         ProfileReceiveDecoder decoder = decoder(budget, 2_000, 64);

@@ -449,3 +449,5 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 2026-10-07，固定32个immutable repair槽沿用标准IN_RECOVERY记录与UWRC context；prepare/admit的实际ZK multi检查metadata/root/intent physical birth和版本，reply loss只解析同槽同计划。inert intent提供inactive INSTALL authority，matching durable receipt产生readonly admission后才提供exact RECOVERY_GRANT authority。admission保存local install generation、capability digest及intent/context SHA，已admit目标由同一持久记录留存，DELETE之后仍可枚举；未admit目标不加入清理历史。没有额外membership权威或normal activation。
 
 实际control mTLS、Bookie force/apply与单entry DATA写回、独立字节向量及最终回执见[实现记录](../profile-wire/README.md#repairintent-admission与实际恢复写回)。typed receipt是metadata后端输入，physical安装链由实际socket用例验证。grant close、replica-readable/membership publication、matching CLOSED和完整AutoRecovery仍OPEN。
+
+2026-10-08 [UIC4 recovery grant close接线](../profile-wire/README.md#uic4-recovery-grant-close接线)已将独立exact close authority接到实际CONTROL write/force/owner apply，pre-cut DATA未终结不发布readable；timeout保留UNKNOWN并可显式重连解析同操作，重复close无额外force，不激活normal writer。现有ZK repair reader仍拒绝仅凭admission/grant授权close；membership/copy结果与真实close-authority发布器、matching CLOSED和完整AutoRecovery仍OPEN。

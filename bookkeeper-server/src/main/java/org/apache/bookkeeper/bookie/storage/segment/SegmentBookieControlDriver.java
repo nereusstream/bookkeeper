@@ -73,6 +73,11 @@ final class SegmentBookieControlDriver {
         return log.initialActiveGeneration(scope);
     }
 
+    long recoveryClosedGeneration(ProfileControlScope scope) {
+        owner.requireOwner();
+        return log.recoveryClosedGeneration(scope);
+    }
+
     boolean reserveMaintenance() {
         return busy.compareAndSet(false, true);
     }

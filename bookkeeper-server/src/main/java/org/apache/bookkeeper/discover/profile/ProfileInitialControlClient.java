@@ -77,6 +77,11 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return socket.recoveryGrant(request);
     }
 
+    /** Independent UIC4 close; the target must cold-read exact committed close authority. */
+    public CompletableFuture<ProfileControlResult> recoveryClose(ProfileControlRequest request) {
+        return socket.recoveryClose(request);
+    }
+
     /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */
     public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {

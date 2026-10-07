@@ -44,6 +44,7 @@ public final class ProfileControlRequest {
     }
 
     private final RecoveryBinding recoveryBinding;
+    private final byte[] closedGrantOperationId;
     private final ProfileControlScope scope;
     private final byte[] canonicalDescriptor;
     private final EngineProfile expectedEngine;
@@ -59,7 +60,13 @@ public final class ProfileControlRequest {
 
     private ProfileControlRequest(ProfileControlScope scope, byte[] canonicalDescriptor, EngineProfile expectedEngine,
             ProtectedProfileCredential protectedCredential, RecoveryBinding recovery) {
+        this(scope, canonicalDescriptor, expectedEngine, protectedCredential, recovery, null);
+    }
+
+    private ProfileControlRequest(ProfileControlScope scope, byte[] canonicalDescriptor, EngineProfile expectedEngine,
+            ProtectedProfileCredential protectedCredential, RecoveryBinding recovery, byte[] closedGrant) {
         recoveryBinding = recovery;
+        closedGrantOperationId = closedGrant == null ? null : closedGrant.clone();
         this.scope = Objects.requireNonNull(scope, "scope");
         this.canonicalDescriptor = canonicalDescriptor == null ? null : canonicalDescriptor.clone();
         this.expectedEngine = expectedEngine;
@@ -100,6 +107,21 @@ public final class ProfileControlRequest {
 
     public Optional<RecoveryBinding> recoveryBinding() {
         return Optional.ofNullable(recoveryBinding);
+    }
+
+    public static ProfileControlRequest recoveryClose(ProfileControlScope scope, RecoveryBinding binding,
+            byte[] grantOperationId) {
+        if (scope == null || scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE || binding == null
+                || scope.exactRange() == null || grantOperationId == null || grantOperationId.length != 16
+                || java.util.Arrays.equals(grantOperationId, new byte[16])
+                || java.util.Arrays.equals(grantOperationId, scope.operationId())) {
+            throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+        }
+        return new ProfileControlRequest(scope, null, null, null, binding, grantOperationId);
+    }
+
+    public Optional<byte[]> closedGrantOperationId() {
+        return closedGrantOperationId == null ? Optional.empty() : Optional.of(closedGrantOperationId.clone());
     }
 
     public ProfileControlScope scope() {

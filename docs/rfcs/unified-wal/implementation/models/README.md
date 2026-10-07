@@ -1218,3 +1218,11 @@ ProfileRepairGrant投影一个固定inert槽的inactive INSTALL、birth/delete�
 最终`unified-wal-model-k2fr4zox` exit0：341配置67完整正向PASS/274指定反例，632 inputs/1020 checksums；新增173 generated/109 distinct、queue0/depth4。Java `unified-wal-local-656ohwXB`为9类151项通过/1030 inputs，style `unified-wal-repair-grant-style-h6yxeece` exit0/379 Java输入，Java/style15 checksums；225共享/1437去重union匹配，style/model223共享。五个designInputs保持父提交`7a1f8bb1239a55eb1df667bfa53e20d0319db154`绑定，tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。
 
 真实场景、向量与命令见[实现记录](../profile-wire/README.md#repairintent-admission与实际恢复写回)。required frontier、grant close/membership/replica-readable/CLOSED、full A+C+D、总预算、活性、crypto、长期/掉电/性能与生产Gate仍OPEN，历史回执不重绑。
+
+### UIC4 recovery close的有限消费投影
+
+ProfileRecoveryCloseWire以独立committed close authority为输入，投影capability/principal/exact授权、grant binding、pre-cut ticket、控制force、actual terminal及caller取消的custody。九个mutation分别跳过capability/authority/binding/pre-cut/force、取消时释放custody、激活normal、允许cut后恢复Add或提前发送durable reply。它不证明close-authority/membership发布器、真实byte/crypto/force本身、matching CLOSED、全局预算或活性。
+
+最终Java `unified-wal-local-cs02h4mj` exit0：9类161项全部通过，common10/server151（socket51、lifecycle33、metadata19、PendingAddOp19、decoder22、Bookie7），1031冻结输入。Spotless/Checkstyle实际session1107完成chunk d22dc9/exit0/空输出，归档`unified-wal-recovery-close-style-9xx5ba13`的379 Java输入匹配/223与模型共享，Java/style15 checksums核验。最终模型`unified-wal-model-1_ferwu3` exit0：351配置68完整正向PASS/283指定反例、643 inputs/1050 checksums；225共享/1449去重union匹配，五个designInputs保持父提交`d6d78ded151c21987908f02d3f7164fe4eafd41b`绑定。新增close投影179 generated/138 distinct、queue0/depth6，九个mutation命中指定性质；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。 历史回执不重绑。
+
+实际socket/file/固定头验证与命令见[实现记录](../profile-wire/README.md#uic4-recovery-grant-close接线)，步骤14和生产Gate保持OPEN。
