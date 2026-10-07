@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
@@ -70,6 +71,11 @@ public final class ProfileNormalDataClient implements AutoCloseable {
     /** Explicit point read; NOT_READY/UNKNOWN refusals are not missing evidence and never cause activation. */
     public CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
         return socket.readEntry(context, entryId);
+    }
+
+    /** Return source provenance; sourceLength is not permission to close a prefix at piggybackLac. */
+    public CompletableFuture<ProfileLacReplyCodec.Reply> readLac(ProfileLedgerContext context) {
+        return socket.readLac(context);
     }
 
     @Override

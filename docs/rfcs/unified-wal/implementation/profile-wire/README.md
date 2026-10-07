@@ -342,7 +342,7 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 ## READ_ENTRY 接线与验收范围
 
-当前已接通显式URD1读配置、真实mTLS/file/ZK、DATA client与原SDK flags0普通读。fenced完整覆盖缺失、权限拒绝、六类malformed reply及取消后实际资源寿命已有局部证据；最后一段是当前最终回执，下面的工作区记录保留当时范围。READ_LAC、fencing read、独立readonly open、恢复/CLOSED与生产权限仍OPEN。
+当前已接通显式URD1读配置、真实mTLS/file/ZK、DATA client与原SDK flags0普通读；后续READ_LAC源取证见[最新增量](#read_lac-源取证)。fenced完整覆盖缺失、权限拒绝、六类malformed reply及取消后实际资源寿命已有局部证据；下文保留该切片历史回执；完整READ_LAC/quorum、fencing read、独立readonly open、恢复/CLOSED与生产权限仍OPEN。
 
 2026-10-07，当前工作区已增加点读实际终结observer：取消仅停止response等待，observer在实际I/O及owner清理后恰好一次触发；成功的LeasedResult仍归consumer，不能借observer提前归还它的pool lease。六种已有真实文件场景覆盖取消、撤权、I/O错误、I/O拒绝、consumer异常和owner失败；另检查成功结果在observer之后仍可访问且仍占用pool。
 
@@ -386,6 +386,28 @@ LAC/length取证仍需保留source entryId。源entry100携带LAC99和累计leng
 
 ~~~bash
 bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,ProfileReceiveDecoderTest,ProfileInitialControlCodecTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
+~~~
+
+## READ_LAC 源取证
+
+2026-10-07，READ_LAC继续使用既有opcode0x0205和60字节context请求，固定头早拒绝其他body长度。独立experimental capability URL1（0x55524c31/version1）仅在配置独立nonblocking principal+context授权时广告；URD1点读权限不会自动开启URL1。DATA客户端显式协商，两端按完整scope与请求ID关联，服务端回复前重验权限和本地visibility。任一OPEN recovery range阻止这一整ledger查询。
+
+成功body为status8、UWLQ magic、schema1、SOURCE=1/EMPTY=2、context60、sourceEntryId8、entryLength4及完整BK entry，固定prefix88；非OK拒绝只携带status8/durable NONE。SOURCE保留原entry及其sourceEntryId、piggyback LAC、sourceLength；它是验证过的源样本，不承诺全ledger最大LAC，也不把源累计length当成LAC-prefix length。codec先校验scope、exact tail、安装上限、BK ledger/source身份和数值范围，再做一次owned copy；原SDK的CRC/quorum/length锚定适配仍待接入。
+
+选择源复用有界occupied坐标或重启inventory，最高占用坐标未就绪则拒绝，不能绕过UNKNOWN选另一个源并声称最新。实际读取沿用point reader的fresh Get、current selector、文件pin、owner pool loan及终结observer，没有新增线程、逐Add缓存、MetadataStore查询或控制force。EMPTY只允许durable fenced、稳定唯一read admission、无OPEN recovery range、无explicit LAC且全ledger完整覆盖/无坐标的本地切点；重启index seed不证明EMPTY。explicit LAC当前不通过本源协议返回，存在时不得伪报EMPTY。
+
+真实mTLS/ZK/files测试以entry100/LAC99/sourceLength1100验证原字节一致且无远端authority/control-force增量；空目标在fence前拒绝、实际网络fence后EMPTY，撤权拒绝。六类真实reply篡改均future异常；300ms timeout后原frame额度与file pin保留至native Get/read真正终结。原多stream重启测试新增latest源及Arena cut变化拒绝；真实explicit LAC重放后阻止整ledgerEMPTY。定向unified-wal-local-QZS96qxa exit0，实际3类11项通过。最终扩大回归、style与模型绑定见下一段。
+
+SOURCE与EMPTY均不授权CLOSED，EMPTY不表示先前操作未执行，也不是持续absence lease。原ProfileBookieClient的LAST_ADD_CONFIRMED/fencing read仍明确拒绝，独立readonly open、最大/explicit LAC与quorum取证、正确prefix length锚点、基础恢复/CLOSED、AutoRecovery与生产Gate仍OPEN；步骤14保持PARTIAL。
+
+最终源码回执：Java `unified-wal-local-CQpzBTsP` exit0，实际7类88项全部通过（common8/server80：socket37、PendingAddOp19、decoder21、Bookie读/explicit LAC3），1022冻结输入；common/server style `unified-wal-lac-source-style-ge08g8nc` exit0，374个Java输入与Java回执匹配，其中218与模型共享，Java/style13份checksums核验。模型 `unified-wal-model-a9lunm3r` exit0：303配置为60完整正向PASS/243指定反例、585 inputs/909 checksums；220共享/1387去重union与当前源码一致，五个designInputs保持父提交`4eca18453bfbaf1a34f69ff66f9669eb384fb0c8`绑定。新增LAC投影2048 generated/2048 distinct、queue0、depth2，六个mutation命中指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry或state constraint，CHECK_DEADLOCK FALSE；有限结果不证明最大LAC、CRC/crypto、完整A/C/D、时钟/活性/总内存、掉电或生产权限。
+
+两份独立Python struct合成向量：SOURCE128/SHA256 `34f963ad35433d6d875ab7db7315f02dd9c9246c99d628ebeff408d088b6071c`，EMPTY88/SHA256 `baaf074b1b24bea032bbce1cb82429157b708fa99d25dd444e9f943808e001f0`。context为ledger44/instance16个0x01/descriptor36个0x02；SOURCE附带ledger44、entry100、LAC99、length1100、合成CRC字段0x12345678及payload0x09080706。向量的CRC只是格式字段，不是有效digest证明；真实文件测试另用原DigestManager生成数据。既有实验UIC1/UIC2与stable旧decoder向量不重绑。
+
+~~~bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*'
 mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
 python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2tools-174.jar
 ~~~

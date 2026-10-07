@@ -1178,3 +1178,11 @@ CHECK_DEADLOCK FALSE 只允许有限终态，无 fairness/liveness 结论。FOUN
 ### 网络FENCE客户端当前绑定
 
 2026-10-07，unified-wal-model-j95f2rfy exit0保持296配置（59完整正向/237指定反例），575 inputs/888 checksums；复用既有ProfileFenceDispatch与ProfileInitialClientCorrelation/PointReadDispatch等切片，不新增或伪称quorum、LAC/length锚点、fencing read和CLOSED模型。Java unified-wal-local-LewZ3Uap实际3类59项通过，1018 inputs；style匹配216共享Java、Java/style9 checksums；218共享/1375union一致，5个designInputs保持父提交e1e6d4e704完整SHA。真实UNKNOWN/幂等及命令见[实现记录](../profile-wire/README.md#真实control客户端fence前置)；历史回执不重绑，full A+C+D/生产权限仍未获得。
+
+### READ_LAC源取证的有限投影
+
+ProfileLacSource使用1024组有限输入与单次回复，检查源样本身份/实际验证、独立权限、整ledgerEMPTY及explicit LAC排除、sourceLength不变成prefixLength；Get/read/loan/output的职责复用ProfilePointReadDispatch。六个单独mutation违反指定性质。LAC/source metadata只代表一份已验证原entry，不承诺maximum/explicit LAC、quorum覆盖、length锚点或matching CLOSED。
+
+最终源码回执：Java `unified-wal-local-CQpzBTsP` exit0，实际7类88项全部通过（common8/server80：socket37、PendingAddOp19、decoder21、Bookie读/explicit LAC3），1022冻结输入；common/server style `unified-wal-lac-source-style-ge08g8nc` exit0，374个Java输入与Java回执匹配，其中218与模型共享，Java/style13份checksums核验。模型 `unified-wal-model-a9lunm3r` exit0：303配置为60完整正向PASS/243指定反例、585 inputs/909 checksums；220共享/1387去重union与当前源码一致，五个designInputs保持父提交`4eca18453bfbaf1a34f69ff66f9669eb384fb0c8`绑定。新增LAC投影2048 generated/2048 distinct、queue0、depth2，六个mutation命中指定性质。tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry或state constraint，CHECK_DEADLOCK FALSE；有限结果不证明最大LAC、CRC/crypto、完整A/C/D、时钟/活性/总内存、掉电或生产权限。
+
+实际路径、固定向量与重现命令见[实现记录](../profile-wire/README.md#read_lac-源取证)。历史source/design/run回执保持原绑定；步骤14/full A+C+D和生产Gate仍OPEN。

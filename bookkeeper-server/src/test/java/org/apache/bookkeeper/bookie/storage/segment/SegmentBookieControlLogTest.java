@@ -445,8 +445,9 @@ public class SegmentBookieControlLogTest {
     private static ReadReply pointRead(SegmentPointRead.Reader reader, ProfileLedgerContext context, long entryId,
             Runnable terminal) throws Exception {
         CompletableFuture<ReadReply> reply = new CompletableFuture<>();
-        assertTrue(reader.submit(context, entryId, new SegmentPointRead.ReadRequest(
-                (status, result, failure) -> reply.complete(new ReadReply(status, result, failure)), terminal)));
+        var request = new SegmentPointRead.ReadRequest(
+                (status, result, failure) -> reply.complete(new ReadReply(status, result, failure)), terminal);
+        assertTrue(entryId == -1 ? reader.submitLatest(context, request) : reader.submit(context, entryId, request));
         return reply.get(5, TimeUnit.SECONDS);
     }
 
@@ -785,6 +786,13 @@ public class SegmentBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
                     replay.submitExplicitLac(writeLac(11, (byte) 5, (byte) 4)));
             assertEquals(10, replay.explicitLac(context()).orElseThrow().lac());
+            var admission = replay.admitRead(context()).orElseThrow();
+            try {
+                assertTrue(replay.canProveReadAbsence(admission, 99));
+                assertFalse(replay.canProveReadAbsence(admission, -1));
+            } finally {
+                admission.finish();
+            }
             assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
                     replay.submitBatch(List.of(tombstone(44, 20))).get(0).status());
             assertTrue(replay.explicitLac(context()).isEmpty());
@@ -1891,7 +1899,7 @@ public class SegmentBookieControlLogTest {
                         bookie.submitFence(fence(3, (byte) 5)).status());
                 held.close();
                 assertThrows(IllegalStateException.class, first.result()::result);
-                ReadReply afterFence = pointRead(reader, context(), 1);
+                ReadReply afterFence = pointRead(reader, context(), -1);
                 assertEquals(SegmentPointRead.ReadStatus.FOUND, afterFence.status());
                 assertNull(afterFence.failure());
                 held = afterFence.result();
@@ -2111,11 +2119,18 @@ public class SegmentBookieControlLogTest {
                         assertEquals(entryId == 1 ? 44 : 6036, result.result().record().entry().remaining());
                     }
                 }
+                ReadReply latest = pointRead(reader, context(), -1);
+                assertEquals(SegmentPointRead.ReadStatus.FOUND, latest.status());
+                assertNull(latest.failure());
+                try (SegmentPointRead.LeasedResult result = latest.result()) {
+                    assertEquals(20, result.result().record().entryId());
+                    assertEquals(6036, result.result().record().entry().remaining());
+                }
                 assertEquals(SegmentPointRead.ReadStatus.NOT_READY, pointRead(reader, context(), 99).status());
                 arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
                         new UUID(0, 7), new Generation(1), 0, 0, 0, new Generation(3),
                         7, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES, 1, 30)));
-                ReadReply stale = pointRead(reader, context(), 1);
+                ReadReply stale = pointRead(reader, context(), -1);
                 assertEquals(SegmentPointRead.ReadStatus.NOT_READY, stale.status());
                 assertNull(stale.result());
                 assertTrue(stale.failure() instanceof IOException);

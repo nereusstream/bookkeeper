@@ -174,12 +174,21 @@ final class SegmentPointRead {
                 throw new IllegalArgumentException("Point-read entry ID must be nonnegative");
             }
             int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), files.config().logicalShards());
-            return owner.submit(shard, new ReadCommand(context, entryId, request));
+            return owner.submit(shard, new ReadCommand(context, entryId, request, false));
+        }
+
+        /** Query the latest occupied source through the same physical validation and loan path. */
+        boolean submitLatest(ProfileLedgerContext context, ReadRequest request) {
+            Objects.requireNonNull(context, "context");
+            Objects.requireNonNull(request, "request");
+            return owner.submit(SegmentOwnerLoop.shardFor(context.ledgerId(), files.config().logicalShards()),
+                    new ReadCommand(context, -1, request, true));
         }
 
         private final class ReadCommand implements SegmentOwnerLoop.Command {
             private final ProfileLedgerContext context;
-            private final long entryId;
+            private long entryId;
+            private final boolean latest;
             private final ReadRequest request;
             private final AtomicBoolean started = new AtomicBoolean();
             private SegmentBookieControlLog.ReadAdmission admission;
@@ -191,9 +200,10 @@ final class SegmentPointRead {
             private boolean physicalTerminal;
             private boolean ownerTerminal;
 
-            private ReadCommand(ProfileLedgerContext context, long entryId, ReadRequest request) {
+            private ReadCommand(ProfileLedgerContext context, long entryId, ReadRequest request, boolean latest) {
                 this.context = context;
                 this.entryId = entryId;
+                this.latest = latest;
                 this.request = request;
             }
 
@@ -208,6 +218,9 @@ final class SegmentPointRead {
                     if (hot == null) {
                         IsolatedSegmentFiles.StartupInventoryLease startup = files.pinStartupInventory();
                         pin = startup;
+                        if (latest) {
+                            entryId = startup.inventory().latestCoordinate(arena, context);
+                        }
                         if (startup.inventory().provesAbsent(arena, context, entryId)) {
                             freshMiss = true;
                         } else {
@@ -215,6 +228,14 @@ final class SegmentPointRead {
                         }
                     } else {
                         pin = files.pinDataRead();
+                        if (latest) {
+                            entryId = hot.latestCoordinate(context);
+                            if (entryId < 0) {
+                                freshMiss = true;
+                                readSelected(ticket);
+                                return;
+                            }
+                        }
                         selected = hot.liveDurableCandidate(context, entryId).orElse(null);
                         if (selected == null) {
                             hot.freshGet(ticket, context, entryId, (location, failure) -> {

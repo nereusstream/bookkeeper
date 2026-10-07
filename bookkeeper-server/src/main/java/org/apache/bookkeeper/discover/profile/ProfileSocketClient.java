@@ -56,6 +56,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
@@ -301,6 +302,25 @@ final class ProfileSocketClient implements AutoCloseable {
         return held.readReply;
     }
 
+    CompletableFuture<ProfileLacReplyCodec.Reply> readLac(ProfileLedgerContext context) {
+        Objects.requireNonNull(context, "context");
+        if (!normalData) {
+            throw new IllegalArgumentException("LAC source query requires DATA");
+        }
+        if (!hello().capabilities().contains(ProfileLacReplyCodec.CAPABILITY)) {
+            return CompletableFuture.completedFuture(ProfileLacReplyCodec.refused(ProfileStatus.unsupported()));
+        }
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(unknown());
+        }
+        if (!slots.tryAcquire()) {
+            return CompletableFuture.completedFuture(ProfileLacReplyCodec.refused(transientNone()));
+        }
+        Pending held = new Pending(context);
+        enqueue(held);
+        return held.lacReply;
+    }
+
     private ByteBuf encodeNormal(Pending held, long id) {
         int bodyBytes = 100 + held.entryBytes;
         ByteBuf bytes = channel.alloc().buffer(36 + bodyBytes, 36 + bodyBytes);
@@ -362,6 +382,9 @@ final class ProfileSocketClient implements AutoCloseable {
                                 : held.operation == ProfileOperation.READ_ENTRY ? encode(held.operation, id,
                                         ProfileOperationCodec.encode(ProfileOperation.READ_ENTRY,
                                                 new ProfileOperationCodec.ReadEntry(held.context, held.entryId, 0)))
+                                : held.operation == ProfileOperation.READ_LAC ? encode(held.operation, id,
+                                        ProfileOperationCodec.encode(ProfileOperation.READ_LAC,
+                                                new ProfileOperationCodec.ReadLac(held.context)))
                                 : encode(held.operation, id,
                                         ProfileInitialControlCodec.encodeRequest(held.controlRequest));
                     } finally {
@@ -433,7 +456,8 @@ final class ProfileSocketClient implements AutoCloseable {
                         return;
                     }
                     ctx.writeAndFlush(encode(ProfileOperation.HELLO, 1,
-                            new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY)
+                            new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY,
+                                    ProfileLacReplyCodec.CAPABILITY)
                                     : List.of(CAPABILITY, REPLACEMENT_CAPABILITY)).encode()))
                             .addListener(written -> {
                         if (!written.isSuccess()) {
@@ -458,6 +482,24 @@ final class ProfileSocketClient implements AutoCloseable {
                     throw invalidReply();
                 }
                 var readHeader = inspected.header();
+                if (hello != null && readHeader.operation() == ProfileOperation.READ_LAC) {
+                    Pending held = pending.get(readHeader.requestId());
+                    if (held == null || held.operation != ProfileOperation.READ_LAC || !readHeader.isResponse()
+                            || (readHeader.flags() & ProfileFrameHeader.END_OF_STREAM) != 0) {
+                        throw invalidReply();
+                    }
+                    var received = ProfileLacReplyCodec.decode(bytes.nioBuffer(bytes.readerIndex() + 36,
+                            readHeader.bodyLength()), held.context, maxEntryBytes);
+                    if (readHeader.isError() != (received.status().statusClass() != ProfileStatus.StatusClass.OK)) {
+                        throw invalidReply();
+                    }
+                    pending.remove(readHeader.requestId());
+                    held.wireDone = true;
+                    held.deadline.cancel(false);
+                    held.releaseIfTerminal();
+                    held.lacReply.complete(received);
+                    return;
+                }
                 if (hello != null && readHeader.operation() == ProfileOperation.READ_ENTRY) {
                     Pending held = pending.get(readHeader.requestId());
                     if (held == null || held.operation != ProfileOperation.READ_ENTRY || !readHeader.isResponse()
@@ -581,6 +623,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private final CompletableFuture<ProfileControlResult> reply;
         private final CompletableFuture<ProfileStatus> dataReply;
         private final CompletableFuture<ProfileReadEntryReplyCodec.Reply> readReply;
+        private final CompletableFuture<ProfileLacReplyCodec.Reply> lacReply;
         private ProfileControlRequest controlRequest;
         private byte[] fenceId;
         private ProfileLedgerContext context;
@@ -600,6 +643,7 @@ final class ProfileSocketClient implements AutoCloseable {
             reply = new CompletableFuture<>();
             dataReply = null;
             readReply = null;
+            lacReply = null;
         }
 
         private Pending(ProfileLedgerContext context, ProtectedProfileCredential credential,
@@ -609,6 +653,7 @@ final class ProfileSocketClient implements AutoCloseable {
             reply = null;
             dataReply = new CompletableFuture<>();
             readReply = null;
+            lacReply = null;
             this.context = context;
             this.credential = credential;
             this.entryId = entryId;
@@ -621,6 +666,7 @@ final class ProfileSocketClient implements AutoCloseable {
             reply = null;
             dataReply = new CompletableFuture<>();
             readReply = null;
+            lacReply = null;
             this.context = context;
             this.fenceId = fenceId;
             this.credential = credential;
@@ -632,12 +678,23 @@ final class ProfileSocketClient implements AutoCloseable {
             reply = null;
             dataReply = null;
             readReply = new CompletableFuture<>();
+            lacReply = null;
             this.context = context;
             this.entryId = entryId;
         }
 
+        private Pending(ProfileLedgerContext context) {
+            scope = null;
+            operation = ProfileOperation.READ_LAC;
+            reply = null;
+            dataReply = null;
+            readReply = null;
+            lacReply = new CompletableFuture<>();
+            this.context = context;
+        }
+
         private boolean cancelled() {
-            return readReply != null ? readReply.isCancelled()
+            return lacReply != null ? lacReply.isCancelled() : readReply != null ? readReply.isCancelled()
                     : dataReply == null ? reply.isCancelled() : dataReply.isCancelled();
         }
 
@@ -658,7 +715,9 @@ final class ProfileSocketClient implements AutoCloseable {
             }
             discardSource();
             releaseIfTerminal();
-            if (readReply != null) {
+            if (lacReply != null) {
+                lacReply.completeExceptionally(failure);
+            } else if (readReply != null) {
                 readReply.completeExceptionally(failure);
             } else if (dataReply == null) {
                 reply.completeExceptionally(failure);

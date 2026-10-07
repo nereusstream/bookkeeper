@@ -182,9 +182,27 @@ final class SegmentHotDirectory {
         });
     }
 
+    /** Bounded occupancy includes uncertain coordinates; selecting one does not itself prove a readable hint. */
+    long latestCoordinate(ProfileLedgerContext context) {
+        owner.requireOwner();
+        long latest = -1;
+        for (Key key : occupied) {
+            if (key.context().equals(context)) {
+                latest = Math.max(latest, key.entryId());
+            }
+        }
+        return latest;
+    }
+
     /** Called after a fresh miss; pending/uncertain coordinates or failed coverage never prove absence. */
     boolean provesAbsent(ProfileLedgerContext context, long entryId) {
         owner.requireOwner();
+        if (entryId < 0 && (latestCoordinate(context) >= 0
+                || pendingKeys.keySet().stream().anyMatch(key -> key.context().equals(context))
+                || arena != null && arena.currentMoveLocations().stream()
+                        .anyMatch(location -> location.context().equals(context)))) {
+            return false;
+        }
         return owner.failure() == null && indexFailure == null && prefix != null && !prefix.failed()
                 && prefix.pending() == 0 && !occupied(context, entryId)
                 && !pendingKeys.containsKey(new Key(context, entryId))

@@ -1301,7 +1301,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         for (GrantState grant : ledgers.get(context.ledgerId()).recoveryGrants.values()) {
             ProfileExactRange range = grant.command.scope.exactRange();
-            if (entryId >= range.firstEntryId() && entryId <= range.lastEntryId() && !grant.committedReadable) {
+            if ((entryId < 0 || entryId >= range.firstEntryId() && entryId <= range.lastEntryId())
+                    && !grant.committedReadable) {
                 return false;
             }
         }
@@ -1311,12 +1312,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
     /** A local absence sample is stable only after durable fence and with no other admitted work. */
     synchronized boolean canProveReadAbsence(ReadAdmission admission, long entryId) {
         if (!canCompleteRead(admission) || !admission.state.fenced || admission.state.pendingFence != null
-                || activeAdmissions != 1) {
+                || activeAdmissions != 1
+                || entryId < 0 && admission.state.explicitLac != null) {
             return false;
         }
         for (GrantState grant : admission.state.recoveryGrants.values()) {
             ProfileExactRange range = grant.command.scope.exactRange();
-            if (entryId >= range.firstEntryId() && entryId <= range.lastEntryId() && !grant.committedReadable) {
+            if ((entryId < 0 || entryId >= range.firstEntryId() && entryId <= range.lastEntryId())
+                    && !grant.committedReadable) {
                 return false;
             }
         }

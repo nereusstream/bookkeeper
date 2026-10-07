@@ -543,3 +543,7 @@ ProfilePointReadDispatch检查AdmissionRequiresPermission、MissingRequiresCompl
 ### 网络FENCE客户端证据边界
 
 复用已有的exact local fence/precut wait/force-owner及socket frame关联、source/output custody性质；本增量没有新操作body或durability算法。实际UNKNOWN不会撤销force，同operation重试不改变上下文或恢复旧future。模型与socket测试不能替代每write-set的集群coverage、逐missing来源fenced、LAC/source/length锚点和matching durable CLOSED，后续基础恢复仍须闭合。
+
+### READ_LAC源取证性质
+
+ProfileLacSource检查ReplyRequiresPermission、EmptyRequiresWholeLedgerProof、SourceHasValidatedData、ReplyRequiresSourceBinding、SourceLengthIsNeverPrefixLength。六个独立mutation分别跳过权限、仅凭坐标-1缺失声称EMPTY、忽略explicit LAC、把sourceLength标为prefixLength、忽略binding或接受未验证源，并违反指定性质。它只约束单次源样本与全ledgerEMPTY的回复；完整最大/explicit LAC、来源fenced coverage、原SDK quorum及matching CLOSED仍需后续模型和真实验证。

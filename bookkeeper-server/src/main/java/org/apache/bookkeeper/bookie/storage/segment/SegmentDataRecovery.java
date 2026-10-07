@@ -648,6 +648,17 @@ final class SegmentDataRecovery {
             return grantedHighWatermarks;
         }
 
+        long latestCoordinate(SegmentArenaControlLog authority, ProfileLedgerContext context) throws IOException {
+            requireCurrentArena(authority);
+            long latest = -1;
+            for (SegmentPointRead.Location location : entries) {
+                if (location.context().equals(context)) {
+                    latest = Math.max(latest, location.entryId());
+                }
+            }
+            return latest;
+        }
+
         /** Full physical scans can prove a coordinate absent; a derived-index seed alone cannot. */
         boolean provesAbsent(SegmentArenaControlLog authority, ProfileLedgerContext context, long entryId)
                 throws IOException {
@@ -663,7 +674,7 @@ final class SegmentDataRecovery {
                 }
             }
             return entries.stream().noneMatch(location -> location.context().equals(context)
-                    && location.entryId() == entryId);
+                    && (entryId < 0 || location.entryId() == entryId));
         }
 
         /** Applied control selectors plus a complete scan select a unique current coordinate. */

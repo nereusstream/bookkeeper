@@ -23,7 +23,12 @@ import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 
 /** Explicit local, nonblocking read-scope policy; transport authentication alone grants no read permission. */
-record SegmentProfileReadConfig(BiPredicate<ProfilePrincipal, ProfileOperationCodec.ReadEntry> authorization) {
+record SegmentProfileReadConfig(BiPredicate<ProfilePrincipal, ProfileOperationCodec.ReadEntry> authorization,
+        BiPredicate<ProfilePrincipal, ProfileOperationCodec.ReadLac> lacAuthorization) {
+    SegmentProfileReadConfig(BiPredicate<ProfilePrincipal, ProfileOperationCodec.ReadEntry> authorization) {
+        this(authorization, null);
+    }
+
     SegmentProfileReadConfig {
         Objects.requireNonNull(authorization, "authorization");
     }

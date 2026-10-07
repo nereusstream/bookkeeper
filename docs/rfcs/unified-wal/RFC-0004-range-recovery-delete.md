@@ -1060,3 +1060,5 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 2026-10-07 [真实CONTROL客户端FENCE前置](implementation/profile-wire/README.md#真实control客户端fence前置)复用冻结body和既有physical fence owner；客户端UNKNOWN不取消force，仅沿用原ID查询同一结果。尚无集群fencing coverage、LAC/source/length取证、恢复写回或matching CLOSED，此局部前置不是基础恢复验收。
 
 2026-10-07 [CONTROL客户端FENCE前置](implementation/profile-wire/README.md#真实control客户端fence前置)复用冻结100字节body/8字节status、verified peer与原quota/write/wire custody，实际force/同ID ALREADY/credential拒绝及UNKNOWN后同ID重连解析通过。相关59项Java和既有296配置模型矩阵通过；LAC/source/length、fencing read及matching CLOSED仍未接通，步骤14保持PARTIAL/OPEN。
+
+2026-10-07 [READ_LAC源取证](implementation/profile-wire/README.md#read_lac-源取证)已接独立URL1/schema1、完整source entryId/piggyback LAC/sourceLength与真实Get/read/loan路径；EMPTY要求整ledger完整稳定fenced proof且无explicit LAC。源length不授权CLOSED前缀；原SDK LAST_ADD_CONFIRMED/quorum、explicit LAC、length锚点、fencing read与matching CLOSED仍OPEN，步骤14保持PARTIAL。

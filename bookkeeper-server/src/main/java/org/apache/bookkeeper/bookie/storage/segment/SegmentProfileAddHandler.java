@@ -42,6 +42,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
@@ -71,6 +72,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final SegmentProfileInstallStore physicalControl;
     private final SegmentProfileReadConfig read;
     private boolean readNegotiated;
+    private boolean lacNegotiated;
     private ProfileTransportContext transport;
     private boolean initialControlNegotiated;
     private boolean replacementControlNegotiated;
@@ -121,6 +123,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                             + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES
                             + (control == null && read == null ? 0 : 8 * ProfileHello.MAX_CAPABILITIES))
                     : frame.header().operation() == ProfileOperation.READ_ENTRY
+                            || frame.header().operation() == ProfileOperation.READ_LAC
                             ? 4 * 72 + ProfileReadEntryReplyCodec.PREFIX_BYTES + maxEntryBytes + 36
                     : (control != null && ProfileInitialControlCodec.supported(frame.header().operation())
                             ? 8 * (int) frame.header().bodyLength() + 2 * ProfileInitialControlCodec.REPLY_BYTES
@@ -144,6 +147,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 if (control != null || read != null) {
                     byte[] offer = new byte[frame.body().readableBytes()];
                     frame.body().getBytes(frame.body().readerIndex(), offer);
+                    lacNegotiated = read != null && read.lacAuthorization() != null
+                            && ProfileHello.decodeClient(offer).capabilities().contains(
+                                    ProfileLacReplyCodec.CAPABILITY);
                     readNegotiated = read != null && ProfileHello.decodeClient(offer).capabilities().contains(
                             ProfileReadEntryReplyCodec.CAPABILITY);
                     initialControlNegotiated = control != null
@@ -168,7 +174,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 fence(ctx, request);
             } else if (frame.header().operation() == ProfileOperation.ADD_RECOVERY) {
                 recoveryAdd(ctx, request);
-            } else if (frame.header().operation() == ProfileOperation.READ_ENTRY) {
+            } else if (frame.header().operation() == ProfileOperation.READ_ENTRY
+                    || frame.header().operation() == ProfileOperation.READ_LAC) {
                 readEntry(ctx, request);
             } else if (frame.header().operation() != ProfileOperation.ADD_NORMAL) {
                 write(ctx, request, ProfileStatus.unsupported(), null);
@@ -193,23 +200,27 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void readEntry(ChannelHandlerContext ctx, Pending request) {
-        if (!readNegotiated) {
+        boolean latest = request.frame.header().operation() == ProfileOperation.READ_LAC;
+        if (latest ? !lacNegotiated : !readNegotiated) {
             write(ctx, request, ProfileStatus.unsupported(), null);
             return;
         }
         ProfileOperationCodec.ReadEntry query;
         try {
-            byte[] fixed = new byte[72];
+            byte[] fixed = new byte[latest ? 60 : 72];
             request.frame.body().getBytes(request.frame.body().readerIndex(), fixed);
-            query = (ProfileOperationCodec.ReadEntry) ProfileOperationCodec.decode(ProfileOperation.READ_ENTRY, fixed);
-            if (query.entryId() < 0 || query.readFlags() != 0) {
+            query = latest ? new ProfileOperationCodec.ReadEntry(((ProfileOperationCodec.ReadLac)
+                    ProfileOperationCodec.decode(ProfileOperation.READ_LAC, fixed)).context(), -1, 0)
+                    : (ProfileOperationCodec.ReadEntry) ProfileOperationCodec.decode(
+                            ProfileOperation.READ_ENTRY, fixed);
+            if (!latest && (query.entryId() < 0 || query.readFlags() != 0)) {
                 throw new IllegalArgumentException("Only nonnegative point reads with flags0 are enabled");
             }
         } catch (IllegalArgumentException invalid) {
             write(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE), null);
             return;
         }
-        if (!read.authorization().test(transport.principal(), query)) {
+        if (!readAuthorized(query, latest)) {
             write(ctx, request, status(StatusClass.UNAUTHORIZED, RetryDisposition.NEVER, DurableResult.NONE), null);
             return;
         }
@@ -220,11 +231,12 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         }
         request.beginRead();
         var stored = new SegmentPointRead.ReadRequest((status, lease, failure) ->
-                completeRead(ctx, request, query, status, lease, failure), request::endRead);
+                completeRead(ctx, request, query, status, lease, failure, latest), request::endRead);
         request.readRequest = stored;
         boolean submitted = false;
         try {
-            submitted = storage.submitRead(query.context(), query.entryId(), stored);
+            submitted = latest ? storage.submitLatestRead(query.context(), stored)
+                    : storage.submitRead(query.context(), query.entryId(), stored);
             if (!submitted) {
                 write(ctx, request, status(StatusClass.TRANSIENT_UNAVAILABLE,
                         RetryDisposition.SAME_PROFILE_OPERATION, DurableResult.NONE), null);
@@ -236,8 +248,15 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
+    private boolean readAuthorized(ProfileOperationCodec.ReadEntry query, boolean latest) {
+        return latest ? read.lacAuthorization().test(transport.principal(),
+                        new ProfileOperationCodec.ReadLac(query.context()))
+                : read.authorization().test(transport.principal(), query);
+    }
+
     private void completeRead(ChannelHandlerContext ctx, Pending request, ProfileOperationCodec.ReadEntry query,
-            SegmentPointRead.ReadStatus result, SegmentPointRead.LeasedResult lease, Throwable failure) {
+            SegmentPointRead.ReadStatus result, SegmentPointRead.LeasedResult lease, Throwable failure,
+            boolean latest) {
         if (!request.beginDelivery()) {
             if (lease != null) {
                 lease.close();
@@ -250,7 +269,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     if (request.finished.get()) {
                         return;
                     }
-                    if (!read.authorization().test(transport.principal(), query)) {
+                    if (!readAuthorized(query, latest)) {
                         write(ctx, request, status(StatusClass.UNAUTHORIZED,
                                 RetryDisposition.NEVER, DurableResult.NONE), null);
                     } else if (!storage.profileReadVisible(query.context(), query.entryId())) {
@@ -258,12 +277,15 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                                 RetryDisposition.AFTER_CONTROL_RECONCILIATION, DurableResult.NONE), null);
                     } else if (failure == null && result == SegmentPointRead.ReadStatus.FOUND && lease != null) {
                         var record = lease.result().record();
-                        if (!record.context().equals(query.context()) || record.entryId() != query.entryId()) {
+                        if (!record.context().equals(query.context())
+                                || !latest && record.entryId() != query.entryId()) {
                             throw new IllegalArgumentException("Point-read result changed its coordinate");
                         }
-                        writeRead(ctx, request, query, ProfileReadEntryReplyCodec.Outcome.FOUND, record.entry());
+                        writeRead(ctx, request, query, ProfileReadEntryReplyCodec.Outcome.FOUND,
+                                record.entry(), latest, record.entryId());
                     } else if (failure == null && result == SegmentPointRead.ReadStatus.MISSING) {
-                        writeRead(ctx, request, query, ProfileReadEntryReplyCodec.Outcome.MISSING, null);
+                        writeRead(ctx, request, query, ProfileReadEntryReplyCodec.Outcome.MISSING,
+                                null, latest, -1);
                     } else {
                         ProfileStatus refused = result == SegmentPointRead.ReadStatus.TRANSIENT_UNAVAILABLE
                                 ? status(StatusClass.TRANSIENT_UNAVAILABLE,
@@ -296,7 +318,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void writeRead(ChannelHandlerContext ctx, Pending request, ProfileOperationCodec.ReadEntry query,
-            ProfileReadEntryReplyCodec.Outcome outcome, java.nio.ByteBuffer entry) {
+            ProfileReadEntryReplyCodec.Outcome outcome, java.nio.ByteBuffer entry, boolean latest, long sourceId) {
         if (closed || !ctx.channel().isActive()) {
             finish(request);
             return;
@@ -308,12 +330,20 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         try {
             response.writeInt(frameLength - 4).writeInt(ProfileFrameHeader.MAGIC)
                     .writeShort(ProfileFrameHeader.PROTOCOL_MAJOR).writeShort(ProfileFrameHeader.PROTOCOL_MINOR)
-                    .writeShort(ProfileFrameHeader.ENCODED_LENGTH).writeShort(ProfileOperation.READ_ENTRY.wireValue())
+                    .writeShort(ProfileFrameHeader.ENCODED_LENGTH)
+                    .writeShort(request.frame.header().operation().wireValue())
                     .writeInt(ProfileFrameHeader.RESPONSE).writeLong(request.frame.header().requestId())
                     .writeInt(bodyLength).writeInt(0);
-            ProfileReadEntryReplyCodec.writePrefix(response.nioBuffer(response.writerIndex(),
-                    ProfileReadEntryReplyCodec.PREFIX_BYTES), query.context(), query.entryId(), outcome,
-                    length, maxEntryBytes);
+            if (latest) {
+                ProfileLacReplyCodec.writePrefix(response.nioBuffer(response.writerIndex(),
+                        ProfileLacReplyCodec.PREFIX_BYTES), query.context(), sourceId,
+                        outcome == ProfileReadEntryReplyCodec.Outcome.FOUND ? ProfileLacReplyCodec.Outcome.SOURCE
+                                : ProfileLacReplyCodec.Outcome.EMPTY, length, maxEntryBytes);
+            } else {
+                ProfileReadEntryReplyCodec.writePrefix(response.nioBuffer(response.writerIndex(),
+                        ProfileReadEntryReplyCodec.PREFIX_BYTES), query.context(), query.entryId(), outcome,
+                        length, maxEntryBytes);
+            }
             response.writerIndex(response.writerIndex() + ProfileReadEntryReplyCodec.PREFIX_BYTES);
             if (entry != null) {
                 response.writeBytes(entry);

@@ -472,6 +472,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             if (read != null) {
                 capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY);
+                if (read.lacAuthorization() != null) {
+                    capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.CAPABILITY);
+                }
             }
             ProfileHello.Server hello = new ProfileHello.Server(
                     EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
@@ -620,6 +623,15 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean profileReadVisible(ProfileLedgerContext context, long entryId) {
         synchronized (gate) {
             return accepting && bookie.networkReadable(context, entryId);
+        }
+    }
+
+    boolean submitLatestRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
+        synchronized (gate) {
+            return accepting && execution.accepting() && freeOperation == null
+                    && compaction == null && controlRotation == null && !controlCapacityPaused()
+                    && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
+                            .submitLatest(context, request);
         }
     }
 
