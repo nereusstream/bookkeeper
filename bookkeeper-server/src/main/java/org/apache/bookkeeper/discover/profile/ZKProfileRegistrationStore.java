@@ -20,6 +20,7 @@ package org.apache.bookkeeper.discover.profile;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
@@ -29,6 +30,7 @@ import java.util.concurrent.TimeoutException;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
 import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore;
+import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.Op;
@@ -42,7 +44,7 @@ import org.apache.zookeeper.data.Stat;
 /**
  * Experimental ZooKeeper persistent readiness CAS. The caller owns the client and provisioned namespace/ACLs.
  * Invoke on a bounded cold-path caller, never on the ZooKeeper event thread or a DATA append owner.
- * No service-info, ephemeral writable registration, automatic readiness, or adapter retry is supplied here.
+ * No service-info publication, ephemeral writable mutation, automatic readiness, or adapter retry is supplied here.
  */
 public final class ZKProfileRegistrationStore implements ProfileRegistrationStore {
     private final ZooKeeper zk;
@@ -78,6 +80,155 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
             throw new IllegalStateException("Readiness birth read unavailable");
         }
         return new Snapshot(current.path(), current.envelope(), node.stat());
+    }
+
+    /** Cold discovery observation, never transport authentication or ledger mutation authority. */
+    public static final class RegisteredPeer {
+        private final ProfileServiceInfoProjection projection;
+        private final ProfileReadinessRecord readiness;
+        private final PeerIdentity identity;
+
+        private RegisteredPeer(ProfileServiceInfoProjection projection, ProfileReadinessRecord readiness,
+                PeerIdentity identity) {
+            this.projection = projection;
+            this.readiness = readiness;
+            this.identity = identity;
+        }
+
+        public ProfileServiceInfoProjection projection() {
+            return projection;
+        }
+
+        public ProfileReadinessRecord readiness() {
+            return readiness;
+        }
+
+        public long publisherSession() {
+            return identity.service().owner();
+        }
+    }
+
+    public record PeerReadResult(ReadStatus status, RegisteredPeer peer) {
+        public PeerReadResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == ReadStatus.FOUND) != (peer != null)) {
+                throw new IllegalArgumentException("Only a verified registration observation carries a peer");
+            }
+        }
+    }
+
+    private record NodeIdentity(long birth, long modified, int version, long owner) {
+        private static NodeIdentity of(Stat stat) {
+            return new NodeIdentity(stat.getCzxid(), stat.getMzxid(), stat.getVersion(), stat.getEphemeralOwner());
+        }
+    }
+
+    private record PeerIdentity(UUID readinessBirth, NodeIdentity readiness, UUID nonce,
+            NodeIdentity service, NodeIdentity writable, NodeIdentity marker) { }
+
+    /** Observe another publisher through this reader's client, with a final cold identity check.
+     * No enumeration, mutation, watch, automatic retry or same-ID rejoin is performed. */
+    public PeerReadResult readPeer(String bookieId) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        long readerSession = zk.getSessionId();
+        try {
+            if (readerSession == 0 || zk.getState() != ZooKeeper.States.CONNECTED) {
+                return new PeerReadResult(ReadStatus.UNAVAILABLE, null);
+            }
+            var authority = snapshot(bookieId, deadline);
+            if (authority == null || authority.envelope().record().state() != ProfileReadinessRecord.State.READY) {
+                return new PeerReadResult(ReadStatus.NOT_FOUND, null);
+            }
+            var service = get(authority.path() + "/service-info", deadline);
+            var writable = get(authority.path() + "/writable", deadline);
+            if (service.code() == Code.NONODE.intValue() || writable.code() == Code.NONODE.intValue()) {
+                return new PeerReadResult(ReadStatus.NOT_FOUND, null);
+            }
+            var envelope = peerEnvelope(service, bookieId);
+            var registered = peerEnvelope(writable, bookieId);
+            if (!envelope.equals(registered) || !matchesPeer(authority, envelope.projection())) {
+                return new PeerReadResult(ReadStatus.UNAVAILABLE, null);
+            }
+            String markerPath = authority.path() + "/session-" + envelope.nonce();
+            var marker = get(markerPath, deadline);
+            if (marker.code() == Code.NONODE.intValue()) {
+                return new PeerReadResult(ReadStatus.NOT_FOUND, null);
+            }
+            requirePeerMarker(marker, envelope.sessionId());
+            var after = snapshot(bookieId, deadline);
+            if (after == null || !authority.envelope().equals(after.envelope())
+                    || !NodeIdentity.of(authority.stat()).equals(NodeIdentity.of(after.stat()))
+                    || !samePeerNode(service, get(authority.path() + "/service-info", deadline))
+                    || !samePeerNode(writable, get(authority.path() + "/writable", deadline))
+                    || !samePeerNode(marker, get(markerPath, deadline))
+                    || zk.getState() != ZooKeeper.States.CONNECTED || zk.getSessionId() != readerSession) {
+                return new PeerReadResult(ReadStatus.UNAVAILABLE, null);
+            }
+            var identity = new PeerIdentity(authority.envelope().birthId(), NodeIdentity.of(authority.stat()),
+                    envelope.nonce(), NodeIdentity.of(service.stat()), NodeIdentity.of(writable.stat()),
+                    NodeIdentity.of(marker.stat()));
+            return new PeerReadResult(ReadStatus.FOUND,
+                    new RegisteredPeer(envelope.projection(), authority.envelope().record(), identity));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new PeerReadResult(ReadStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new PeerReadResult(ReadStatus.UNAVAILABLE, null);
+        } catch (IllegalArgumentException corrupt) {
+            return new PeerReadResult(ReadStatus.CORRUPT, null);
+        }
+    }
+
+    /** Reconcile after an external handshake. A replacement observation never silently adopts a new peer. */
+    public PeerReadResult revalidatePeer(RegisteredPeer expected) {
+        Objects.requireNonNull(expected, "expected");
+        var current = readPeer(expected.projection().bookieId());
+        if (current.peer() != null && (!expected.identity.equals(current.peer().identity)
+                || !expected.projection().equals(current.peer().projection())
+                || !expected.readiness().equals(current.peer().readiness()))) {
+            return new PeerReadResult(ReadStatus.NOT_FOUND, null);
+        }
+        return current;
+    }
+
+    private static boolean matchesPeer(Snapshot authority, ProfileServiceInfoProjection projection) {
+        var record = authority.envelope().record();
+        return record.bookieId().equals(projection.bookieId())
+                && record.storageIncarnation().equals(projection.storageIncarnation())
+                && record.localReadinessGeneration().equals(projection.readinessGeneration())
+                && authority.stat().getMzxid() == projection.persistentStoreVersion()
+                && record.capabilityHints().equals(projection.capabilityHints());
+    }
+
+    private static ProfileEphemeralCodec.Envelope peerEnvelope(Node node, String bookieId) {
+        if (node.code() != Code.OK.intValue()) {
+            throw new IllegalStateException("Peer registration unavailable");
+        }
+        if (node.stat() == null || node.stat().getVersion() < 0 || node.stat().getEphemeralOwner() == 0) {
+            throw new IllegalArgumentException("Peer registration must be ephemeral");
+        }
+        var envelope = ProfileEphemeralCodec.decode(node.bytes());
+        if (!envelope.projection().bookieId().equals(bookieId)
+                || envelope.sessionId() != node.stat().getEphemeralOwner()) {
+            throw new IllegalArgumentException("Peer registration publisher or scope mismatch");
+        }
+        return envelope;
+    }
+
+    private static void requirePeerMarker(Node marker, long owner) {
+        if (marker.code() != Code.OK.intValue()) {
+            throw new IllegalStateException("Peer session marker unavailable");
+        }
+        if (marker.stat() == null || marker.stat().getVersion() != 0 || marker.stat().getEphemeralOwner() != owner
+                || marker.bytes() == null || marker.bytes().length != 0) {
+            throw new IllegalArgumentException("Peer session marker changed or belongs to another publisher");
+        }
+    }
+
+    private static boolean samePeerNode(Node before, Node after) {
+        return after.code() == Code.OK.intValue() && after.stat() != null
+                && NodeIdentity.of(before.stat()).equals(NodeIdentity.of(after.stat()))
+                && Arrays.equals(before.bytes(), after.bytes());
     }
 
     List<ACL> publicationAcls() {

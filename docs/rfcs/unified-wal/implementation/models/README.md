@@ -1297,3 +1297,7 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 模型广度 `unified-wal-model-mdoft16o`194配置28正向/166指定反例、819 inputs/946 checksums；之后仅实现注释/accessor格式/测试换行。最后 `unified-wal-model-ybw2p3z1`12配置1正向/11指定反例、819当前inputs/609 checksums；全部artifact checksums核对。EMPTY正向106/64 generated/distinct、queue0、depth/diameter9、0.792秒/peak RSS106070016 bytes（广度run），非存储性能。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。完整508及完整A+C+D未运行，source/config/run身份与历史回执保持原绑定。
 
 最终Java与模型232共享/1639去重current inputs及五个父HEAD designInputs全部核验；Java279广度在最后格式调整前，最终7定向PASS，model12与最终输入一致，详见实现记录。
+
+2026-10-09新增ProfilePeerDiscovery有限消费者投影：1正向/6指定反例检查READY、owner、paired envelope、session marker及generation/birth末次一致性。publisher/strict codec/guard事实是输入，模型不生产ZK、TLS、crypto、HELLO或mutation authority。当前catalog515未全量运行，真实consumer范围由[startup-readiness](../startup-readiness/README.md#消费者发现与再次复核)拥有；相关producer/readiness/admission切片继续单独验证，不提升完整组合Gate。
+
+消费者相关广度i3w2dufn 21配置4正向/17指定反例、827 inputs/632 checksums；最终8z5elnia 7配置1正向/6反例、827当前inputs/607 checksums，与最终Java共享232/去重1647 inputs及五个父HEAD designInputs核验。消费者正向97/81 generated/distinct、queue0、depth/diameter4、0.775秒/peak RSS104448000 bytes（广度run），非性能结论。Java42相关回归在import排序前、最终5消费者PASS，scope与测量由startup-readiness记录拥有；catalog515未全量或完整组合验收。

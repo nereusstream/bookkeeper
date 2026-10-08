@@ -74,6 +74,113 @@ public class ZKProfileRegistrationStoreTest extends ProfileZKTestBase {
         return ROOT + "/" + children.get(0);
     }
 
+    private ZKProfileEphemeralRegistrationStore publishPeer() {
+        var initial = create();
+        var projection = new org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection(BOOKIE,
+                initial.record().storageIncarnation(), initial.record().localReadinessGeneration(),
+                initial.storeVersion(), "tls://localhost:3181", initial.record().capabilityHints());
+        var publisher = new ZKProfileEphemeralRegistrationStore(first, ROOT, BOOKIE,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                .PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+        assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                .PublicationStatus.APPLIED, publisher.registerWritable(
+                    new org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                        .WritableRegistration(BOOKIE, projection.storageIncarnation(), projection.readinessGeneration(),
+                                projection.persistentStoreVersion())).status());
+        return publisher;
+    }
+
+    @Test
+    public void consumerReadsAnotherPublishersPeerWithoutOwningOrMutatingItsSession() throws Exception {
+        var publisher = publishPeer();
+        var reader = store(second);
+        var before = first.exists(path() + "/service-info", false);
+        var peer = reader.readPeer(BOOKIE);
+        assertEquals(ReadStatus.FOUND, peer.status());
+        assertEquals(first.getSessionId(), peer.peer().publisherSession());
+        assertNotEquals(second.getSessionId(), peer.peer().publisherSession());
+        assertEquals(record(1), peer.peer().readiness());
+        assertEquals("tls://localhost:3181", peer.peer().projection().endpoint());
+        assertEquals(ReadStatus.FOUND, reader.revalidatePeer(peer.peer()).status());
+        assertEquals(before, first.exists(path() + "/service-info", false));
+        assertThrows(IllegalStateException.class, () -> new ZKProfileEphemeralRegistrationStore(second,
+                ROOT, BOOKIE, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5)).readWritable(BOOKIE));
+        publisher.demote(BOOKIE);
+        assertEquals(ReadStatus.NOT_FOUND, reader.revalidatePeer(peer.peer()).status());
+    }
+
+    @Test
+    public void consumerRejectsStaleReadinessAndSameBytesRecreatedRegistration() throws Exception {
+        publishPeer();
+        var reader = store(second);
+        var peer = reader.readPeer(BOOKIE).peer();
+        String writable = path() + "/writable";
+        byte[] bytes = first.getData(writable, false, null);
+        first.delete(writable, -1);
+        first.create(writable, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+        assertEquals(ReadStatus.FOUND, reader.readPeer(BOOKIE).status());
+        assertEquals(ReadStatus.NOT_FOUND, reader.revalidatePeer(peer).status());
+        var current = reader.read(BOOKIE).versionedRecord().orElseThrow();
+        assertEquals(CasStatus.APPLIED, store(first).compareAndSet(BOOKIE,
+                current.storeVersion(), 1, record(2)).status());
+        assertEquals(ReadStatus.UNAVAILABLE, reader.readPeer(BOOKIE).status());
+    }
+
+    @Test
+    public void consumerRejectsWrongEnvelopeOwnerMalformedAndMissingSessionMarker() throws Exception {
+        for (int fault : List.of(0, 1, 2, 3)) {
+            // Restore just the fixture root between independent actual publisher episodes.
+            if (fault != 0) {
+                for (String child : first.getChildren(path(), false)) {
+                    first.delete(path() + "/" + child, -1);
+                }
+                first.delete(path(), -1);
+            }
+            publishPeer();
+            String service = path() + "/service-info";
+            var envelope = ProfileEphemeralCodec.decode(first.getData(service, false, null));
+            if (fault == 0) {
+                first.setData(service, ProfileEphemeralCodec.encode(new ProfileEphemeralCodec.Envelope(
+                        envelope.nonce(), second.getSessionId(), envelope.projection())), -1);
+            } else if (fault == 1) {
+                first.setData(service, new byte[2], -1);
+            } else if (fault == 2) {
+                first.delete(path() + "/session-" + envelope.nonce(), -1);
+            } else {
+                byte[] bytes = first.getData(service, false, null);
+                first.delete(service, -1);
+                first.create(service, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            }
+            assertEquals(fault == 2 ? ReadStatus.NOT_FOUND : ReadStatus.CORRUPT,
+                    store(second).readPeer(BOOKIE).status());
+        }
+    }
+
+    @Test
+    public void consumerDropsAnExpiredPublishersOriginalObservation() throws Exception {
+        publishPeer();
+        var reader = store(second);
+        var original = reader.readPeer(BOOKIE).peer();
+        cluster.expire(first.getSessionId());
+        assertTrue(first.expired.await(5, TimeUnit.SECONDS));
+        assertEquals(ReadStatus.NOT_FOUND, reader.revalidatePeer(original).status());
+        assertEquals(ReadStatus.FOUND, reader.read(BOOKIE).status());
+    }
+
+    @Test
+    public void consumerFinalReadRejectsReadinessChangedWhileItsFirstReplyIsHeld() throws Exception {
+        publishPeer();
+        var reader = store(second);
+        second.holdReadReply.set(true);
+        var future = CompletableFuture.supplyAsync(() -> reader.readPeer(BOOKIE));
+        assertTrue(second.readReplyHeld.await(5, TimeUnit.SECONDS));
+        var current = store(first).read(BOOKIE).versionedRecord().orElseThrow();
+        store(first).compareAndSet(BOOKIE, current.storeVersion(), 1, record(2));
+        second.lateReadReply.get().run();
+        assertEquals(ReadStatus.UNAVAILABLE, future.get(5, TimeUnit.SECONDS).status());
+    }
+
     @Test
     public void realStorePreservesEveryFieldAndChecksBothVersions() throws Exception {
         assertEquals(ReadStatus.NOT_FOUND, store(first).read(BOOKIE).status());

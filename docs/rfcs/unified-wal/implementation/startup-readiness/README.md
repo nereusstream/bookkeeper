@@ -198,3 +198,27 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 这一步接上隔离 graph 的 session 事件与本地 DATA gate，没有接入真实 Bookie listener、生产 BookieServiceInfo/available registry、fresh recovery/compatibility/device/delete facts 或 pre-replay startup。远端 authority 持续变化、完整 sidecar/backlink/安装激活、真实 quorum、掉电/性能、完整 A/C/D 及组合、Block G 与步骤 12/生产 Gate 仍未完成。
 
 2026-10-05 启动排他增量：[restart DATA 排他前置](../local-storage/README.md#restart-的-data-排他与控制恢复顺序)先取得真实 DATA 目录 writer lock，再恢复控制及 index，把同一 native lock 交给 files，保留原全部 header 校验/恢复同步与 CLOSED 限制。实际子进程外部锁红绿、控制打开/DATA 恢复失败清理及成功移交/读回验证完成；340 项中 335 通过、5 项 macOS 上的 Linux 亲和性跳过，style 通过。有限矩阵 38 正向完整 PASS/117 指定反例。只补本地 ownership 前置，compatibility/device/delete 权威、真实 startup/readiness、生产接线及完整模型仍待完成。
+
+## 消费者发现与再次复核
+
+2026-10-09，AutoRecovery动态pool接线前补齐既有ZK registration的真正消费者读取。原ZKProfileEphemeralRegistrationStore仍是publisher adapter，只接受自身session/nonce；不能用它发现其他进程。ZKProfileRegistrationStore新增readPeer，允许独立reader session观察另一个publisher，不改变发布、demote或本地admission语义，不新增metadata格式、namespace、watch/retry或工作项日志。
+
+一次冷读取有同一个最多一分钟deadline：先sync并读取持久READY及其birth anchor，再读取service-info/writable两份严格UWEP envelope；两份必须完整相同，实际Stat owner必须非零且等于envelope的publisher session，scope/incarnation/readiness generation/persistent mzxid/capability hints与READY一致，session-nonce marker必须同owner、version0和empty bytes。末次再次sync并读取READY、两份projection及marker，比较全部czxid/mzxid/version/owner和字节，reader本身也必须保持原connected session。NOT_FOUND用于缺注册或非READY；合法更新窗口/不可读返回UNAVAILABLE；损坏、persistent假注册或owner错配返回CORRUPT，均不携带peer。
+
+RegisteredPeer只有私有构造，持有不可变projection/readiness和出生身份，属于发现观察结果，不是transport认证或ledger mutation authority。revalidatePeer重新执行真实冷读取；同内容重建、publisher episode/READY/endpoint改变时不会静默换成新peer。之后仍须按既有TLS1.3+mTLS/HELLO校验expected BookieId/incarnation/实际capability，再做冷复核；新reader不能凭capability hints授予normal/recovery/ACK。该观察cut不保证之后的瞬时强撤权，也不实现same-ID rejoin。
+
+真实ZK双session测试验证消费者读取、只读不修改Stat、原publisher-only adapter仍拒绝foreign caller、demote和实际session expiry、stale READY、同字节writable重建、错误owner/坏codec/persistent注册/缺marker，以及持有第一条真实READY回复期间发生更新时末次复核拒绝。ProfilePeerDiscovery有限投影检查READY/owner/pair/marker和generation/birth一致性；这些guard事实由Java生产，模型不生产ZK、TLS、crypto或HELLO。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileRegistrationStoreTest,ZKProfileEphemeralRegistrationStoreTest,ZKProfileControlStoreTest'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-peer-discovery --config-prefix ce-profile-peer-discovery --config-prefix a-readiness-cas --config-prefix ce-readiness-cas --config-prefix a-registration-publication --config-prefix ce-registration-publication --config-prefix a-registration-admission --config-prefix ce-registration-admission
+```
+
+当前只实现消费者发现与再次复核这一必要前置。AutoRecoveryMain默认仍不启用Profile；服务bootstrap、动态TLS连接/重连/总pool预算及pool与原task实际drain的资源所有权继续OPEN。生产Bookie listener、完整startup/pre-replay权威、离线追赶/rejoin/delete/GC与综合Gate仍未完成，步骤12/14保持PARTIAL，不提升生产权限或历史receipt。
+
+Java `unified-wal-local-GDbVx4DD` exit0：3类42项全部通过（persistent consumer/codec/CAS13、ephemeral publisher17、control store12），1052冻结inputs/6 artifact checksums；随后只修正import排序。最终 `unified-wal-local-Jh70Lafn` exit0：5项消费者定向PASS、1052当前inputs/4 checksums。最终style `unified-wal-peer-final-style-lFNGo2TX` exit0/2 checksums；root RAT `unified-wal-peer-checks-IT8HTN1T` exit1/443 unapproved路径，全部属于父HEAD且与上一里程碑集合相同，5 checksums保留首次ImportOrder格式失败；没有新增许可失败、不改规则、不计CI全绿。
+
+模型相关广度 `unified-wal-model-i3w2dufn` exit0：21配置4完整正向/17指定反例、827 inputs/632 checksums；在增加expiry测试及最后import/scope说明前。最终 `unified-wal-model-8z5elnia` exit0：7配置1完整正向/6指定反例、827当前inputs/607 checksums；Java/model共享232/去重1647 inputs与五个父HEAD designInputs全部核对。新正向97 generated/81 distinct、queue0、depth/diameter4、0.775秒/peak RSS104448000 bytes（广度run），是有限模型消耗，非服务或存储性能。官方tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog515和完整A+C+D未全跑，历史source/config/run及回执不重绑。
