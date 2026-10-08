@@ -1252,3 +1252,10 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-08，ProfileRecoveryPrefix投影一个坐标及已检查前缀，E=W=3/A2或3、三份source callback、missing/corrupt/unknown/两种有效payload、required与长度/context/source gate、caller停止和actual permit终结。11个独立mutation命中指定性质。实际序列控制、CRC/TLS/fence物理事实、总预算/时钟与CLOSED不由此model生产；来源逐身份保护/读取与copy生命周期另复用本轮point/observation/copy切片。
 
 最终`unified-wal-model-p48elju2`：57配置9完整正向PASS/48指定反例、683 source hashes/560 checksums已核对，sourceCommit/designInputs保持父提交f4d7c893fa52472d5710717d5a02ea3faddf1220。新A2/A3各340000/144000 generated/distinct、queue0/depth7，单worker/固定seed与fp/无symmetry或state constraint；未重跑整个387配置目录。真实180项广度/最终4方法及当前覆盖边界见[实现记录](../profile-wire/README.md#required-prefix-与-normal-tail-只读取证)。历史完整矩阵和input/run结果不重绑，full A+C+D、recovery write-back/terminal visibility/matching CLOSED/AutoRecovery与生产Gate仍OPEN。
+
+
+### 固定selection与last-fragment权限的有限验证
+
+2026-10-08，ProfileRecoverySelection消费已验证read predicate、metadata/marker物理birth与origin事实，验证reference publication、marker restore后的当前adoption失效、单次version offset、selected range不改选及selection不授予CLOSED。ProfileRepairMembership复用原guard/admission/atomic publication/history，另外要求last fragment有matching selected authority；同成员的membership逻辑结果仍存在，copy/close权限与标准CLOSED分开。新9个selection及1个last authority mutation命中指定性质。
+
+最终n9mm5ud3：79配置11完整正向PASS/68指定反例、696 source hashes/614 checksums核对，sourceCommit/designInputs保持父提交1c7379ba08398cee9fdf23a5db31a685991c2066。selection正向70/50 generated/distinct、membership857/662，均queue0；未重跑全398配置，不生产CRC/TLS/实际fsync、整体quorum/terminal visibility/CLOSED/AutoRecovery或production证据。实际189项广度/10项最终验证、早期model read-cut修正和范围见[实现记录](../profile-wire/README.md#固定最后-prefix-与真实-last-fragment-写回)，历史回执不重绑。

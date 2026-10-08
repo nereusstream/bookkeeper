@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～14在本目录记录隔离真实 TLS/socket/storage/SDK/恢复接线的独立增量，最新为 [required prefix 与 normal-tail 取证](#required-prefix-与-normal-tail-只读取证)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～14在本目录记录隔离真实 TLS/socket/storage/SDK/恢复接线的独立增量，最新为 [固定prefix与last-fragment写回](#固定最后-prefix-与真实-last-fragment-写回)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -632,3 +632,33 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 ```
 
 VERIFIED_NORMAL_TAIL 只证明这次读取判据。后续恢复 Add 的 quorum/write-back、最后开放 fragment 的终态权限/visibility cut、同上下文 matching durable CLOSED 与响应丢失/restart解析仍须接通；读到候选或 P/L 不能替代这些事实。完整额外 ACK/AQ/closed authority producer、长期重验成本/大ledger策略、网络 WRITE_LAC、AutoRecovery/marker lifecycle、独立readonly-open、delete/rejoin、完整 A+C+D、总预算、掉电/可持续性能及 production Gate 继续 OPEN。步骤14仍 PARTIAL。
+
+
+## 固定最后 prefix 与真实 last-fragment 写回
+
+2026-10-08，原只读取证之后增加单份 immutable prefix selection；标准 metadata 的出生绑定引用固定该节点，最后开放 fragment 的 RepairIntent 才能取得有限终点。`selectPrefix`是cold publication primitive，消费调用方已完成的 VERIFIED_NORMAL_TAIL predicate；真实socket测试使用原verifyPrefix生产该输入，ZK后端测试的predicate是显式输入，不冒充读/crypto/fsync证明。选择不授予AQ、CLOSED、normal或strong-reset权限。
+
+新实验UWRF/schema1固定256字节：header8、原UWRC context184、beforeVersion4、对应canonical metadata SHA32、required frontier8、P8、应用length8、CRC32C4。UWRS/schema1引用固定56字节：header8、publicationBeforeVersion4、实际node birthZxid8、完整UWRF SHA32、CRC32C4。decode严格拒绝错shape/magic/schema/reserved/CRC、负边界、P<required、empty长度非0及溢出；数组owned-copy。原UWRC184、UWRP、UWRM/UWRH和UIC1～4字节不变。
+
+首次选择先创建fixed node，再建立不可写birth guard，最后以同一metadata physical-birth/version与lifecycle/delete cut CAS发布标准引用。节点data使用原page ACL保持不可写并允许birth child；guard不可写。publication检查准确guard路径，precheck后删除重建version0不能通过旧cut；已引用节点丢失/重建/digest不匹配时隔离，不重建authority。不同P/length不覆盖旧选择。回复丢失读取实际引用解析同一选择；inert node尚未引用时仍不授权last-fragment，history并发先赢可在新read predicate下验证原immutable选择的完整origin后发布，保留原P/length。
+
+标准metadata多一次selection版本递增。既有repair head仍独立累计，每份UWRM保留实际beforeVersion；恢复按reference的publication cut分别验证其前后的版本，并逆演到选择原metadata origin和原UWRC predecessor。SELF write-back只在已selected的last fragment允许：标准membership保持原成员，仍原子追加bounded copy receipt及其close authority；普通历史SELF不放开。没有新的entry级metadata、线程、Maven模块或控制框架。
+
+新repairLastFragment复用原inactive INSTALL/receipt/admission、UIC3 grant、原SDK完整来源/digest、单entry实际ADD_RECOVERY、同snapshot publication和UIC4 close。current成员复用matching install semantic identity；fenced后recovery Add可以幂等确认原durable DATA，LAC封装变化不会改应用数据或新增不必要DATA force。新target真实复制完整selected range。cancel保留actual child/attempt permit，停止未来copy；已published intent在显式reconnect/新coordinator后按原close ID解析，不recopy。REPAIRED_LAST_FRAGMENT仍不是RECOVERED_AND_CLOSED，metadata保持IN_RECOVERY。
+
+实际回归覆盖三entry/length48的new-peer copy、同起点标准mapping publication、lost-close回复/new coordinator零recopy、DATA force持有时caller取消/busy/同操作继续，以及3/3/3全部current成员SELF recovery Add/close、membership不变和零额外DATA force。真实ZK另覆盖selection回复丢失、不同P拒绝、相同bytes/version0重建、physical guard阻止pre-CAS重建、history穿插selection和随后last-fragment commit的版本/逆演、DELETE/外部metadata变更及未selected最后fragment仍拒绝。
+
+两个独立Python struct/CRC32C向量：recovery-prefix.bin256字节，SHA256 `72b6248f70c0e2d77e99d5acbfd7393d605c3be015711175060605ce9ac34653`；recovery-prefix-reference.bin56字节，SHA256 `e0ca486ff55a30630532644c5989660b010590b7bcfc489f04ab6e5570b547cf`。Java逐字节对照、所有截断、alias/非法边界与ownership验证通过，向量不制造selection事实。
+
+广度`unified-wal-local-xQFIniuq` exit0：9类189项全通过（common12/server177：socket66、lifecycle44、metadata19、PendingAddOp19、decoder22、Bookie7）。随后只修两处测试长行格式，最终`unified-wal-local-pvUAsJ6V`的10项相关测试通过；1040当前source hashes核对，旧广度回执不重绑。最终Spotless/Checkstyle `unified-wal-selection-final-style-admRVXDG` exit0。root RAT `unified-wal-last-fragment-checks-8KEzrSnF`仍exit1/443个HEAD已有未批准文件，无本次新增失败；不改规则绕过。最初pRf6vSSM的真实ACL反例已保留：用完全read-only节点创建birth child会被拒绝，改复用既有page ACL后通过；不通过弱化权限或断言解决。早期import遗漏/fixture把未admit peer放进source pool属于接线错误，不算协议RED。
+
+最终模型`unified-wal-model-n9mm5ud3` exit0：79配置11完整正向PASS/68指定反例，696源码hash/614 checksums核对。selection投影70 generated/50 distinct，queue0；membership扩展857/662，queue0。新9个selection与1个last-fragment authority反例均命中指定性质。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint；只执行变化与关联切片，未宣称全398配置本轮通过。首轮sezfgn31把历史read adoption错误当成持续有效lease而失败，修正当前adoption在marker restore后失效，再实际重跑；不是实现PASS。所有historical source/design/run保持父绑定，新回执sourceCommit为`1c7379ba08398cee9fdf23a5db31a685991c2066`。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*+recoveryCloseWaitsForPrecutTicket*+uncertainRecoveryCloseForce*+profileSocketRecoveryGrantClose*+recoveredRecoveryCandidateLosesEligibility*'
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileLifecycleStoreTest#prefixSelection*+selectedPrefix*+repairOfUnbounded*,SegmentProfileInitialSocketClientTest#selectedLastFragment*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar --config-prefix a-profile-recovery-selection --config-prefix ce-profile-recovery-selection --config-prefix a-profile-repair-membership --config-prefix ce-profile-repair-membership --config-prefix a-profile-recovery-prefix --config-prefix ce-profile-recovery-prefix --config-prefix a-profile-lac- --config-prefix ce-profile-lac- --config-prefix a-profile-point-read --config-prefix ce-profile-point-read --config-prefix a-profile-recovery-observation --config-prefix ce-profile-recovery-observation --config-prefix a-profile-repair-copy --config-prefix ce-profile-repair-copy
+```
+
+当前显式入口完成每个target的range写回/close，没有整体quorum orchestrator、标准ledger CLOSED(P,length,context) publication/resolution或正常DATA的terminal visibility cut。extra required authority producer、empty-last-fragment的整体close流程、AutoRecovery/marker lifecycle、readonly-open、delete/rejoin、全A+C+D、总预算、掉电/长期性能与production Gate仍OPEN；步骤14仍PARTIAL。

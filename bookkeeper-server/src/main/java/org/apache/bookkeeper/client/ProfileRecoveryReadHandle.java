@@ -145,6 +145,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
                     + ProfileRepairCommit.head(
                             value.getCustomMetadata().get(ProfileRepairCommit.KEY))
                         .size()
+                    + org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.versionOffset(value)
                 || accepted.metadata().birthZxid() != context.metadataBirth()
                 || !context.equals(ProfileRecoveryContext.decode(
                         value.getCustomMetadata().get(ProfileRecoveryContext.KEY)))

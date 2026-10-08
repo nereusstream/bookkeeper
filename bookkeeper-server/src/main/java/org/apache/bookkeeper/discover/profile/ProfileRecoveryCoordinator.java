@@ -534,7 +534,9 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
-    public enum RepairStatus { REPAIRED_HISTORICAL_FRAGMENT, DEFERRED, CONFLICT, QUARANTINED, DATA_LOSS }
+    public enum RepairStatus {
+        REPAIRED_HISTORICAL_FRAGMENT, REPAIRED_LAST_FRAGMENT, DEFERRED, CONFLICT, QUARANTINED, DATA_LOSS
+    }
 
     public record RepairResult(RepairStatus status, long copiedEntries,
             ZKProfileReservationStore.RepairCommitResult publication) { }
@@ -546,6 +548,25 @@ public final class ProfileRecoveryCoordinator {
             byte[] canonicalDescriptor, ProtectedProfileCredential credential,
             Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId) {
+        return repairFragment(accepted, prepared, sdk, canonicalDescriptor, credential,
+                suppliedData, suppliedControl, closeOperationId, false);
+    }
+
+    /** The published prefix selection fixes the last fragment; this does not publish ledger CLOSED. */
+    public CompletableFuture<RepairResult> repairLastFragment(ZKProfileReservationStore.RecoveryResult accepted,
+            ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk,
+            byte[] canonicalDescriptor, ProtectedProfileCredential credential,
+            Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId) {
+        return repairFragment(accepted, prepared, sdk, canonicalDescriptor, credential,
+                suppliedData, suppliedControl, closeOperationId, true);
+    }
+
+    private CompletableFuture<RepairResult> repairFragment(ZKProfileReservationStore.RecoveryResult accepted,
+            ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk,
+            byte[] canonicalDescriptor, ProtectedProfileCredential credential,
+            Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId, boolean last) {
         if (accepted.context() == null || !accepted.context().equals(prepared.intent().recovery())
                 || suppliedData.size() > 64 || suppliedControl.size() > 64) {
             throw new IllegalArgumentException("Historical repair requires its frozen context and bounded peers");
@@ -595,6 +616,18 @@ public final class ProfileRecoveryCoordinator {
                     }
                     var current = source.recovery();
                     var value = current.metadata().metadata().getValue();
+                    Long end = value.getAllEnsembles().higherKey(intent.fragmentStart());
+                    if (last != (end == null && intent.fragmentStart() == value.getAllEnsembles().lastKey())) {
+                        return CompletableFuture.completedFuture(new RepairResult(RepairStatus.CONFLICT, 0, null));
+                    }
+                    if (last) {
+                        var boundary = reservations.readSelectedPrefix(metadata, current.context());
+                        if (boundary.snapshot() == null
+                                || intent.range().lastEntryId() != boundary.snapshot().boundary().prefixEntryId()) {
+                            return CompletableFuture.completedFuture(new RepairResult(RepairStatus.CONFLICT, 0, null));
+                        }
+                        end = boundary.snapshot().boundary().prefixEntryId() + 1;
+                    }
                     boolean published = ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY))
                             .stream().anyMatch(ref -> ref.slot() == intent.slot()
                                 && ref.intentBirth().equals(prepared.birth())
@@ -604,14 +637,16 @@ public final class ProfileRecoveryCoordinator {
                                 frozen.metadata(), closeId), cold).thenCompose(result -> closeRepair(result, intent,
                                         control, 0));
                     }
-                    Long end = value.getAllEnsembles().higherKey(intent.fragmentStart());
                     boolean sameContent;
                     try {
                         sameContent = Arrays.equals(ProfileRecoveryContext.metadataDigest(value),
                                 ProfileRecoveryContext.metadataDigest(frozen.metadata().metadata().getValue()))
                                 && Arrays.equals(value.getCustomMetadata().get(ProfileRepairCommit.KEY),
                                     frozen.metadata().metadata().getValue().getCustomMetadata()
-                                        .get(ProfileRepairCommit.KEY));
+                                        .get(ProfileRepairCommit.KEY))
+                                && Arrays.equals(value.getCustomMetadata().get(ProfileRecoveryBoundary.KEY),
+                                    frozen.metadata().metadata().getValue().getCustomMetadata()
+                                        .get(ProfileRecoveryBoundary.KEY));
                     } catch (java.io.IOException invalid) {
                         return CompletableFuture.completedFuture(new RepairResult(RepairStatus.QUARANTINED, 0, null));
                     }
@@ -661,6 +696,11 @@ public final class ProfileRecoveryCoordinator {
                         });
                     });
                 });
+            if (last) {
+                actual = actual.thenApply(result -> result.status() == RepairStatus.REPAIRED_HISTORICAL_FRAGMENT
+                        ? new RepairResult(RepairStatus.REPAIRED_LAST_FRAGMENT, result.copiedEntries(),
+                                result.publication()) : result);
+            }
             var caller = actual.whenComplete((value, failure) -> active.release()).copy();
             caller.whenComplete((value, failure) -> {
                 if (caller.isCancelled()) {

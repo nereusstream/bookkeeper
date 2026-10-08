@@ -18,6 +18,7 @@ package org.apache.bookkeeper.discover.profile;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -342,6 +343,223 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
                 List.of(references.get(0), references.get(0))));
         assertThrows(IllegalArgumentException.class,
                 () -> ProfileRepairCommit.decode(Arrays.copyOf(vector, ProfileRepairCommit.MAX_BYTES + 1)));
+    }
+
+    private static ProfileRecoveryCoordinator.PrefixResult prefixProof(
+            ZKProfileReservationStore.RecoveryResult entered, long p, long length) {
+        return new ProfileRecoveryCoordinator.PrefixResult(
+                ProfileRecoveryCoordinator.PrefixStatus.VERIFIED_NORMAL_TAIL,
+                ProfileRecoveryCoordinator.PrefixReason.NORMAL_TAIL, entered.context(), entered.metadata(),
+                Math.min(1, p), p, length, p + 1, List.of());
+    }
+
+    @Test
+    public void prefixSelectionVectorsOwnBytesAndRejectAliasTruncationAndBadBounds() throws Exception {
+        byte[] vector = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(getClass().getResource(
+                "/unified-wal-segment/recovery-prefix.bin").toURI()));
+        byte[] reference = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(getClass().getResource(
+                "/unified-wal-segment/recovery-prefix-reference.bin").toURI()));
+        var decoded = ProfileRecoveryBoundary.decode(vector);
+        assertEquals(2, decoded.prefixEntryId());
+        assertEquals(48, decoded.prefixLength());
+        assertArrayEquals(vector, decoded.encode());
+        var ref = ProfileRecoveryBoundary.reference(reference);
+        assertEquals(999, ref.birthZxid());
+        assertArrayEquals(reference, ref.encode());
+        decoded.metadataDigest()[0] = 0;
+        ref.digest()[0] = 0;
+        assertArrayEquals(vector, decoded.encode());
+        assertArrayEquals(reference, ref.encode());
+        for (int size = 0; size < vector.length; size++) {
+            byte[] shortVector = Arrays.copyOf(vector, size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.decode(shortVector));
+        }
+        assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryContext.decode(vector));
+        assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.decode(reference));
+        for (int offset : List.of(0, 4, 192, 228, 236, 244)) {
+            byte[] bad = vector.clone();
+            ByteBuffer.wrap(bad).putInt(offset, -1);
+            checksum(bad);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.decode(bad));
+        }
+        for (int offset : List.of(0, 4, 8, 12)) {
+            byte[] bad = reference.clone();
+            ByteBuffer.wrap(bad).putInt(offset, -1);
+            checksum(bad);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.reference(bad));
+        }
+    }
+
+    @Test
+    public void selectedPrefixFixesOriginAndAllowsLastFragmentCommitAndContextRestart() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var lifecycle = store(first);
+            var entered = lifecycle.beginRecovery(metadata,
+                    lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan());
+            var proof = prefixProof(entered, 2, 48);
+            first.loseSetDataMultiReply.set(true);
+            var chosen = lifecycle.selectPrefix(metadata, proof);
+            assertEquals(CreateStatus.ALREADY_APPLIED, chosen.status());
+            var current = lifecycle.readRecovery(metadata, 44);
+            assertEquals(entered.context(), current.context());
+            assertEquals(((org.apache.bookkeeper.versioning.LongVersion) entered.metadata().metadata().getVersion())
+                    .getLongVersion() + 1, ((org.apache.bookkeeper.versioning.LongVersion)
+                        current.metadata().metadata().getVersion()).getLongVersion());
+            assertEquals(chosen.snapshot(), store(second).readSelectedPrefix(membership(second, lm),
+                    entered.context()).snapshot());
+            assertEquals(CreateStatus.ALREADY_APPLIED, lifecycle.selectPrefix(metadata, proof).status());
+            assertEquals(CreateStatus.CONFLICT, lifecycle.selectPrefix(metadata, prefixProof(entered, 1, 32)).status());
+            var base = repairIntent(current, 0, 60);
+            var intent = new ProfileRepairIntent(base.recovery(), base.slot(), base.intentId(), base.fragmentStart(),
+                    base.replacedMemberSlot(), base.oldEnsembleDigest(), base.install(), base.grantOperationId(),
+                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 2));
+            var prepared = lifecycle.prepareRepair(metadata, intent).snapshot();
+            lifecycle.admitRepair(metadata, prepared, new ProfileInstallReceipt(intent.install(),
+                    EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1));
+            var committed = lifecycle.commitRepair(metadata, prepared, current.metadata(), bytes(16, 80));
+            assertEquals(CreateStatus.APPLIED, committed.status());
+            assertEquals(entered.context(), store(second).readRecovery(membership(second, lm), 44).context());
+            assertEquals(chosen.snapshot(), lifecycle.readSelectedPrefix(metadata, entered.context()).snapshot());
+            assertEquals(CreateStatus.ALREADY_APPLIED,
+                    lifecycle.commitRepair(metadata, prepared, current.metadata(), bytes(16, 80)).status());
+            assertEquals(LedgerMetadata.State.IN_RECOVERY, lm.readLedgerMetadata(44).get().getValue().getState());
+        }
+    }
+
+    @Test
+    public void selectedPrefixNodeRecreationCannotReuseItsIdenticalBytesOrVersionZero() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var lifecycle = store(first);
+            var entered = lifecycle.beginRecovery(metadata,
+                    lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan());
+            var chosen = lifecycle.selectPrefix(metadata, prefixProof(entered, 2, 48));
+            assertEquals(CreateStatus.APPLIED, chosen.status());
+            String path = ROOT + "/2c/recovery-prefix";
+            byte[] exact = second.getData(path, false, null);
+            removeRecoveryTree(path);
+            second.create(path, exact, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            assertEquals(0, second.exists(path, false).getVersion());
+            assertEquals(ProfileLedgerMetadataStore.Outcome.QUARANTINED,
+                    lifecycle.readRecovery(metadata, 44).outcome());
+            assertEquals(CreateStatus.QUARANTINED,
+                    lifecycle.readSelectedPrefix(metadata, entered.context()).status());
+        }
+    }
+
+    @Test
+    public void prefixSelectionPhysicalGuardRejectsRecreateBeforeMetadataCasAndResolvesSameChoice() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var lifecycle = store(first);
+            var entered = lifecycle.beginRecovery(metadata,
+                    lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan());
+            var proof = prefixProof(entered, 2, 48);
+            first.beforeSetDataMulti.set(() -> {
+                try {
+                    String path = ROOT + "/2c/recovery-prefix";
+                    byte[] same = second.getData(path, false, null);
+                    removeRecoveryTree(path);
+                    second.create(path, same, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                } catch (Exception failure) {
+                    throw new RuntimeException(failure);
+                }
+            });
+            assertEquals(CreateStatus.CONFLICT, lifecycle.selectPrefix(metadata, proof).status());
+            assertFalse(lm.readLedgerMetadata(44).get().getValue().getCustomMetadata()
+                    .containsKey(ProfileRecoveryBoundary.KEY));
+            assertEquals(CreateStatus.APPLIED, lifecycle.selectPrefix(metadata, proof).status());
+            assertEquals(entered.context(), lifecycle.readRecovery(metadata, 44).context());
+        }
+    }
+
+    @Test
+    public void selectedPrefixBetweenHistoricalAndLastCopiesKeepsTheirOriginalVersions() throws Exception {
+        try (LedgerManager lm = manager(first)) {
+            ready(lm);
+            var metadata = membership(first, lm);
+            var lifecycle = store(first);
+            var replacement = replacement(lm, "b4:3181", 10);
+            lifecycle.publishReplacement(replacement.source(), replacement.candidate(), metadata);
+            var entered = lifecycle.beginRecovery(metadata,
+                    lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan());
+            var history = historicalRepair(entered, 0, 1, "b5:3181", 60);
+            var preparedHistory = lifecycle.prepareRepair(metadata, history).snapshot();
+            lifecycle.admitRepair(metadata, preparedHistory, new ProfileInstallReceipt(history.install(),
+                    EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1));
+            var earlyProof = new ProfileRecoveryCoordinator.PrefixResult(
+                    ProfileRecoveryCoordinator.PrefixStatus.VERIFIED_NORMAL_TAIL,
+                    ProfileRecoveryCoordinator.PrefixReason.NORMAL_TAIL, entered.context(), entered.metadata(),
+                    99, 105, 1696, 106, List.of());
+            first.beforeSetDataMulti.set(() -> assertEquals(CreateStatus.APPLIED,
+                    store(second).commitRepair(membership(second, lm), preparedHistory,
+                            entered.metadata(), bytes(16, 80)).status()));
+            assertEquals(CreateStatus.CONFLICT, lifecycle.selectPrefix(metadata, earlyProof).status());
+            var afterHistory = lifecycle.readRecovery(metadata, 44);
+            var proof = new ProfileRecoveryCoordinator.PrefixResult(
+                    ProfileRecoveryCoordinator.PrefixStatus.VERIFIED_NORMAL_TAIL,
+                    ProfileRecoveryCoordinator.PrefixReason.NORMAL_TAIL,
+                    afterHistory.context(), afterHistory.metadata(),
+                    99, 105, 1696, 106, List.of());
+            assertEquals(CreateStatus.APPLIED, lifecycle.selectPrefix(metadata, proof).status());
+            var afterSelection = lifecycle.readRecovery(metadata, 44);
+            var template = historicalRepair(afterSelection, 1, 2, "b6:3181", 70);
+            var tail = new ProfileRepairIntent(template.recovery(), template.slot(), template.intentId(),
+                    100, 2, ZKProfileReservationStore.repairEnsembleDigest(
+                            afterSelection.metadata().metadata().getValue(), 100), template.install(),
+                    template.grantOperationId(), new org.apache.bookkeeper.common.profile.control.ProfileExactRange(
+                            100, 105));
+            var preparedTail = lifecycle.prepareRepair(metadata, tail).snapshot();
+            lifecycle.admitRepair(metadata, preparedTail, new ProfileInstallReceipt(tail.install(),
+                    EngineProfile.SEGMENT_WAL_ENGINE, bytes(32, 7), 1));
+            assertEquals(CreateStatus.APPLIED, lifecycle.commitRepair(metadata, preparedTail,
+                    afterSelection.metadata(), bytes(16, 90)).status());
+            assertEquals(entered.context(), store(second).readRecovery(membership(second, lm), 44).context());
+            assertEquals(CreateStatus.ALREADY_APPLIED, lifecycle.commitRepair(metadata, preparedHistory,
+                    entered.metadata(), bytes(16, 80)).status());
+            assertEquals(CreateStatus.ALREADY_APPLIED, lifecycle.commitRepair(metadata, preparedTail,
+                    afterSelection.metadata(), bytes(16, 90)).status());
+        }
+    }
+
+    @Test
+    public void prefixSelectionDeleteAndMetadataChangeWinWithoutFalsePublication() throws Exception {
+        for (boolean deleted : List.of(false, true)) {
+            try (LedgerManager lm = manager(first)) {
+                ready(lm);
+                var metadata = membership(first, lm);
+                var lifecycle = store(first);
+                var plan = lifecycle.captureRecovery(metadata, 44, bytes(16, 50)).plan();
+                var entered = lifecycle.beginRecovery(metadata, plan);
+                first.beforeMulti.set(() -> {
+                    if (deleted) {
+                        assertEquals(CreateStatus.APPLIED, store(second).cutDelete(
+                                store(second).read(44).snapshot(), bytes(16, 90), bytes(32, 90)).status());
+                    } else {
+                        try {
+                            var actual = lm.readLedgerMetadata(44).get();
+                            var custom = new java.util.HashMap<>(actual.getValue().getCustomMetadata());
+                            custom.put("changed", bytes(4, 91));
+                            lm.writeLedgerMetadata(44, LedgerMetadataBuilder.from(actual.getValue())
+                                    .withCustomMetadata(custom).build(), actual.getVersion()).get();
+                        } catch (Exception failure) {
+                            throw new RuntimeException(failure);
+                        }
+                    }
+                });
+                assertTrue(lifecycle.selectPrefix(metadata, prefixProof(entered, 2, 48)).snapshot() == null);
+                assertFalse(lm.readLedgerMetadata(44).get().getValue().getCustomMetadata()
+                        .containsKey(ProfileRecoveryBoundary.KEY));
+            }
+            if (!deleted) {
+                removeRecoveryTree(ROOT + "/2c");
+                removeRecoveryTree(ROOT + "/ledgers");
+            }
+        }
     }
 
     @Test

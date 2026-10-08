@@ -19,6 +19,17 @@ import time
 
 
 MATRIX = {
+    'a-profile-recovery-selection': None,
+    'ce-profile-recovery-selection-meta': 'PublicationHasMetaBirth',
+    'ce-profile-recovery-selection-marker': 'PublicationHasMarkerGuard',
+    'ce-profile-recovery-selection-origin': 'PublicationHasVerifiedOrigin',
+    'ce-profile-recovery-selection-birth': 'AdoptionHasPhysicalBirth',
+    'ce-profile-recovery-selection-reference': 'SelectionHasReference',
+    'ce-profile-recovery-selection-offset': 'VersionHasSingleSelectionOffset',
+    'ce-profile-recovery-selection-range': 'CopyUsesSelectedRange',
+    'ce-profile-recovery-selection-fixed': 'SelectionIsFixed',
+    'ce-profile-recovery-selection-close': 'SelectionNeverCloses',
+    'ce-profile-repair-membership-selection': 'LastFragmentHasSelection',
     'a-profile-recovery-prefix': None,
     'a-profile-recovery-prefix-threeofthree': None,
     'ce-profile-recovery-prefix-early': 'AllSourcesEnded',
@@ -536,6 +547,7 @@ def main():
                    else "ProfileRepairCopy.tla" if "profile-repair-copy" in name
                    else "ProfileRepairMembership.tla" if "profile-repair-membership" in name
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
+                   else "ProfileRecoverySelection.tla" if "profile-recovery-selection" in name
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name

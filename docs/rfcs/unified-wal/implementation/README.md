@@ -18,7 +18,7 @@
 
 ## 下一阶段实施清单
 
-规划基线为 `e8b162076fd8cfa84a11351a82caac8c5ac1f939`，规划提交 `e75c67f3514d1627ea790d052e2c9226e593aa3c`；它们是历史输入锁，不表示当前 HEAD。当前仍在原 `turbo-bk` 分支持续实施16步，步骤1隔离配置、步骤2 CLIENT-1/2独立Classic红绿补丁、步骤3实验格式及真实FileChannel基础已交付。固定owner/安全binding/属地池、真实DATA—点读—restart、控制checkpoint/派生索引/MOVE/FREE/有界回收、ZK安装激活与原SDK写入/换组均有下文的隔离局部证据；各步骤的剩余验收以对应最新小节为准。当前步骤14已接历史fragment copy/close、URL2双LAC证据和已知required prefix/normal-tail只读验证；额外required authority producer、最后开放fragment恢复write-back/visibility、matching CLOSED/AutoRecovery尚未闭合。[本地存储](local-storage/README.md)、[协议/SDK](profile-wire/README.md)、[控制面](profile-control/README.md)分别拥有最新范围、命令和证据；所有生产/稳定Gate保持原未闭合状态。
+规划基线为 `e8b162076fd8cfa84a11351a82caac8c5ac1f939`，规划提交 `e75c67f3514d1627ea790d052e2c9226e593aa3c`；它们是历史输入锁，不表示当前 HEAD。当前仍在原 `turbo-bk` 分支持续实施16步，步骤1隔离配置、步骤2 CLIENT-1/2独立Classic红绿补丁、步骤3实验格式及真实FileChannel基础已交付。固定owner/安全binding/属地池、真实DATA—点读—restart、控制checkpoint/派生索引/MOVE/FREE/有界回收、ZK安装激活与原SDK写入/换组均有下文的隔离局部证据；各步骤的剩余验收以对应最新小节为准。当前步骤14已接历史fragment copy/close、URL2双LAC证据和已知required prefix/normal-tail只读验证；最后fragment固定选择与逐target恢复写回/close也已接通；额外required authority producer、整体quorum/terminal visibility、matching CLOSED/AutoRecovery尚未闭合。[本地存储](local-storage/README.md)、[协议/SDK](profile-wire/README.md)、[控制面](profile-control/README.md)分别拥有最新范围、命令和证据；所有生产/稳定Gate保持原未闭合状态。
 
 继续复用已有ProfileDescriptor、Profile control/auth、startup/readiness reference implementation及experimental wire codec/corpus。它们提供接口、字节合同和测试依据，不能替代真实文件持久化、网络或MetadataStore。固定owner、安全显式绑核、NUMA池与独立等待策略沿用RFC-0005 §10.2—10.5、RFC-0003 §6.2；默认仍为OFF/SYSTEM/PARK。
 
@@ -398,6 +398,8 @@ DATA durable → hot locator → local result
 2026-10-08 [URL2 explicit LAC 双证据](profile-wire/README.md#url2-explicit-lac-双证据与前缀锚点)已在 opt-in schema2 中分别返回原 DATA source 与 durable explicit LAC digest，SDK 校验两份证据后沿用原 coverage，并重新锚定 exact P 的应用 length；损坏 endpoint 排除，timeout/unknown不计 absence。真实 mTLS/ZK/files/SDK、9类176项Java、Spotless/Checkstyle及相关34配置有限模型通过；URL1字节与历史回执保持原绑定。网络 WRITE_LAC、完整 required-frontier/normal-tail oracle、最后开放fragment恢复/CLOSED与AutoRecovery仍OPEN，步骤14及生产Gate不提升。
 
 2026-10-08 [required prefix 与 normal-tail 只读取证](profile-wire/README.md#required-prefix-与-normal-tail-只读取证)已复用原SDK write-set/AckSet/fencing transport，对 required 坐标收齐来源、检查连续性/有效冲突并区分有限exhaustion与unknown；empty、未提交suffix、count/deadline/cancel与context变化已有真实验证。历史copy同步消费完整来源且保留rich失败分类。广度180项与最终4方法、style及相关57配置有限模型通过；root RAT仍有443个既有问题。VERIFIED_NORMAL_TAIL尚不授予CLOSED，最后开放fragment write-back/visibility/匹配关闭、AutoRecovery与生产Gate保持OPEN。
+
+2026-10-08 [固定prefix与真实last-fragment写回](profile-wire/README.md#固定最后-prefix-与真实-last-fragment-写回)已将原读predicate固定为单份UWRF节点及标准metadata的出生绑定UWRS引用；原RepairIntent/UIC3/UIC4支持selected last range的新target复制和current成员SELF recovery Add/close，history穿插/重建/回复丢失/取消已有真实验证。189项广度与最终10项、style及相关79模型配置通过，旧run不重绑；root RAT仍443个既有问题。整体quorum、正常DATA终态visibility、标准matching CLOSED与AutoRecovery仍OPEN，步骤14及生产Gate不提升。
 
 #### 15. 实现集群删除、离线投递与rejoin
 

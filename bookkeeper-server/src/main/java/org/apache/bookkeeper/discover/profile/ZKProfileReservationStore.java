@@ -561,14 +561,28 @@ public final class ZKProfileReservationStore {
     private ProfileLedgerMetadataStore.MembershipSnapshot recoveryRepairProjection(ProfileRecoveryContext context,
             ProfileLedgerMetadataStore.MembershipSnapshot current, long deadline)
             throws InterruptedException, TimeoutException, java.io.IOException {
+        return recoveryRepairProjection(context, current, deadline, null);
+    }
+
+    private ProfileLedgerMetadataStore.MembershipSnapshot recoveryRepairProjection(ProfileRecoveryContext context,
+            ProfileLedgerMetadataStore.MembershipSnapshot current, long deadline, ProfileRecoveryBoundary candidate)
+            throws InterruptedException, TimeoutException, java.io.IOException {
         var value = current.metadata().getValue();
         var head = ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY));
+        var selected = selectedBoundary(context, value, deadline);
+        var boundary = selected == null ? candidate : selected.boundary();
+        int publicationIndex = selected == null ? Integer.MAX_VALUE
+                : Math.toIntExact(selected.reference().publicationBeforeVersion() - context.generation());
+        boolean origin = boundary == null;
         if (current.birthZxid() != context.metadataBirth() || value.getCToken() != context.creatorToken()
                 || value.getState() != LedgerMetadata.State.IN_RECOVERY
                 || !Arrays.equals(value.getCustomMetadata().get(ProfileRecoveryContext.KEY), context.encode())
                 || !(current.metadata().getVersion() instanceof org.apache.bookkeeper.versioning.LongVersion version)
-                || version.getLongVersion() != context.generation() + head.size()) {
+                || version.getLongVersion() != context.generation() + head.size() + (selected == null ? 0 : 1)) {
             throw new IllegalArgumentException("Repair commit head no longer matches its recovery context/version");
+        }
+        if (boundary != null && boundary.beforeVersion() == context.generation() + head.size()) {
+            origin = Arrays.equals(boundary.metadataDigest(), ProfileRecoveryContext.metadataDigest(value));
         }
         for (int i = head.size() - 1; i >= 0; i--) {
             var reference = head.get(i);
@@ -586,7 +600,7 @@ public final class ZKProfileReservationStore {
             var node = reads.get(repairPath(value.getLedgerId(), reference.slot()) + "/committed", deadline);
             var commit = repairCommit(node);
             if (!Arrays.equals(reference.digest(), ProfileRepairIntent.digest(node.bytes()))
-                    || commit.beforeVersion() != context.generation() + i
+                    || commit.beforeVersion() != context.generation() + i + (i >= publicationIndex ? 1 : 0)
                     || !Arrays.equals(commit.afterDigest(), ProfileRecoveryContext.metadataDigest(value))
                     || !value.getAllEnsembles().get(repair.intent().fragmentStart())
                         .get(repair.intent().replacedMemberSlot()).toString().equals(repair.intent().install()
@@ -594,14 +608,21 @@ public final class ZKProfileReservationStore {
                 throw new IllegalArgumentException("Committed repair no longer matches the standard membership");
             }
             value = ProfileRepairCommit.replace(value, repair.intent(), commit.oldBookie());
-            if (!boundedRepairFragment(repair.intent(), value)
+            if (!boundedRepairFragment(repair.intent(), value, boundary)
                     || !repairMatchesMetadata(repair.intent(), value)
                     || !Arrays.equals(commit.beforeDigest(), ProfileRecoveryContext.metadataDigest(value))) {
                 throw new IllegalArgumentException("Invalid repair predecessor or unbounded fragment");
             }
+            if (boundary != null && boundary.beforeVersion() == context.generation() + i) {
+                origin = Arrays.equals(boundary.metadataDigest(), ProfileRecoveryContext.metadataDigest(value));
+            }
+        }
+        if (!origin || boundary != null && !context.equals(boundary.context())) {
+            throw new IllegalArgumentException("Required prefix selection lost its exact metadata origin");
         }
         var custom = new java.util.TreeMap<>(value.getCustomMetadata());
         custom.remove(ProfileRepairCommit.KEY);
+        custom.remove(ProfileRecoveryBoundary.KEY);
         value = org.apache.bookkeeper.client.LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
                 .withCustomMetadata(custom).build();
         return new ProfileLedgerMetadataStore.MembershipSnapshot(current.birthZxid(),
@@ -617,10 +638,193 @@ public final class ZKProfileReservationStore {
         return ProfileRepairCommit.decode(node.bytes());
     }
 
-    private static boolean boundedRepairFragment(ProfileRepairIntent intent, LedgerMetadata metadata) {
+    private static boolean boundedRepairFragment(ProfileRepairIntent intent, LedgerMetadata metadata,
+            ProfileRecoveryBoundary boundary) {
         Long end = metadata.getAllEnsembles().higherKey(intent.fragmentStart());
-        return end != null && intent.range().firstEntryId() == intent.fragmentStart()
-                && intent.range().lastEntryId() == end - 1;
+        return intent.range().firstEntryId() == intent.fragmentStart()
+                && (end != null ? intent.range().lastEntryId() == end - 1
+                    : boundary != null && boundary.context().equals(intent.recovery())
+                        && intent.fragmentStart() == metadata.getAllEnsembles().lastKey()
+                        && intent.range().lastEntryId() == boundary.prefixEntryId());
+    }
+
+    public record BoundarySnapshot(ProfileRecoveryBoundary boundary, long birthZxid,
+            ProfileRecoveryBoundary.Reference reference) { }
+
+    public record BoundaryResult(CreateStatus status, BoundarySnapshot snapshot) { }
+
+    public BoundaryResult readSelectedPrefix(ProfileLedgerMetadataStore metadata, ProfileRecoveryContext context) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var current = readRecovery(metadata, context.ledger().ledgerId());
+            if (current.context() == null || !context.equals(current.context())) {
+                return new BoundaryResult(current.outcome() == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                        ? CreateStatus.DURABILITY_UNKNOWN : current.outcome()
+                            == ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                                ? CreateStatus.QUARANTINED : CreateStatus.CONFLICT, null);
+            }
+            var selected = selectedBoundary(context, current.metadata().metadata().getValue(), deadline);
+            return new BoundaryResult(selected == null ? CreateStatus.CONFLICT
+                    : CreateStatus.ALREADY_APPLIED, selected);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new BoundaryResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new BoundaryResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (IllegalArgumentException invalid) {
+            return new BoundaryResult(CreateStatus.QUARANTINED, null);
+        }
+    }
+
+    private String boundaryPath(long ledger) {
+        return path(ledger) + "/recovery-prefix";
+    }
+
+    private BoundarySnapshot selectedBoundary(ProfileRecoveryContext context, LedgerMetadata value, long deadline)
+            throws InterruptedException, TimeoutException {
+        byte[] bytes = value.getCustomMetadata().get(ProfileRecoveryBoundary.KEY);
+        if (bytes == null) {
+            return null;
+        }
+        var reference = ProfileRecoveryBoundary.reference(bytes);
+        var node = reads.get(boundaryPath(context.ledger().ledgerId()), deadline);
+        requireFound(node);
+        requirePersistent(node, true);
+        var boundary = ProfileRecoveryBoundary.decode(node.bytes());
+        var guard = reads.get(boundaryBirthGuard(context.ledger().ledgerId(), node.stat().getCzxid()), deadline);
+        requireFound(guard);
+        requirePersistent(guard, true);
+        if (node.stat().getCzxid() != reference.birthZxid() || !boundary.context().equals(context)
+                || !Arrays.equals(guard.bytes(), boundaryGuardBytes(node))
+                || !Arrays.equals(reference.digest(), ProfileRepairIntent.digest(node.bytes()))
+                || reference.publicationBeforeVersion() < boundary.beforeVersion()
+                || reference.publicationBeforeVersion() > context.generation()
+                    + ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY)).size()) {
+            throw new IllegalArgumentException("Required recovery prefix is missing, recreated or mismatched");
+        }
+        return new BoundarySnapshot(boundary, node.stat().getCzxid(), reference);
+    }
+
+    private String boundaryBirthGuard(long ledger, long birth) {
+        return boundaryPath(ledger) + "/birth-" + Long.toHexString(birth);
+    }
+
+    private static byte[] boundaryGuardBytes(ProfileZKReadClient.Node node) {
+        return java.nio.ByteBuffer.allocate(40).putLong(node.stat().getCzxid())
+                .put(ProfileRepairIntent.digest(node.bytes())).array();
+    }
+
+    /** One verified caller read proof, fixed once. It neither produces AQ nor closes standard metadata. */
+    public BoundaryResult selectPrefix(ProfileLedgerMetadataStore metadata,
+            ProfileRecoveryCoordinator.PrefixResult proof) {
+        requireRecoveryClient(metadata);
+        if (proof.status() != ProfileRecoveryCoordinator.PrefixStatus.VERIFIED_NORMAL_TAIL
+                || proof.metadata() == null) {
+            throw new IllegalArgumentException("Prefix selection requires the verified read predicate");
+        }
+        var context = proof.context();
+        long ledger = context.ledger().ledgerId();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var current = readRecovery(metadata, ledger);
+            if (current.context() == null || !context.equals(current.context())) {
+                return new BoundaryResult(current.outcome() == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                        ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.CONFLICT, null);
+            }
+            var selected = selectedBoundary(context, current.metadata().metadata().getValue(), deadline);
+            if (selected != null) {
+                return new BoundaryResult(selected.boundary().prefixEntryId() == proof.prefixEntryId()
+                        && selected.boundary().prefixLength() == proof.prefixLength()
+                            ? CreateStatus.ALREADY_APPLIED : CreateStatus.CONFLICT,
+                        selected.boundary().prefixEntryId() == proof.prefixEntryId()
+                            && selected.boundary().prefixLength() == proof.prefixLength() ? selected : null);
+            }
+            if (proof.metadata().birthZxid() != current.metadata().birthZxid()
+                    || !proof.metadata().metadata().getVersion().equals(current.metadata().metadata().getVersion())
+                    || !ProfileLedgerMetadataStore.sameMetadata(proof.metadata().metadata().getValue(),
+                            current.metadata().metadata().getValue())) {
+                return new BoundaryResult(CreateStatus.CONFLICT, null);
+            }
+            if (proof.requiredFrontier() < current.metadata().metadata().getValue().getAllEnsembles().lastKey() - 1) {
+                return new BoundaryResult(CreateStatus.CONFLICT, null);
+            }
+            var boundary = new ProfileRecoveryBoundary(context, Math.toIntExact(((org.apache.bookkeeper.versioning
+                    .LongVersion) proof.metadata().metadata().getVersion()).getLongVersion()),
+                    ProfileRecoveryContext.metadataDigest(proof.metadata().metadata().getValue()),
+                    proof.requiredFrontier(), proof.prefixEntryId(), proof.prefixLength());
+            var root = read(ledger, deadline);
+            if (root.status() != ReadStatus.FOUND || !context.matchesRoot(root.snapshot())) {
+                return new BoundaryResult(CreateStatus.CONFLICT, null);
+            }
+            String target = boundaryPath(ledger);
+            var before = reads.get(target, deadline);
+            if (before.code() == Code.NONODE.intValue()) {
+                var checks = new java.util.ArrayList<>(recoveryRootChecks(root.snapshot(), deadline));
+                checks.addAll(metadata.checksForMembership(current.metadata()));
+                checks.add(Op.create(target, boundary.encode(), pageAcls, CreateMode.PERSISTENT));
+                multi(checks, deadline);
+            } else if (before.code() != Code.OK.intValue()) {
+                throw new IllegalStateException("Prefix candidate unavailable");
+            }
+            var candidate = reads.get(target, deadline);
+            requireFound(candidate);
+            requirePersistent(candidate, true);
+            var candidateBoundary = ProfileRecoveryBoundary.decode(candidate.bytes());
+            if (!candidateBoundary.context().equals(context)
+                    || candidateBoundary.prefixEntryId() != boundary.prefixEntryId()
+                    || candidateBoundary.prefixLength() != boundary.prefixLength()) {
+                return new BoundaryResult(CreateStatus.CONFLICT, null);
+            }
+            boundary = candidateBoundary;
+            recoveryRepairProjection(context, current.metadata(), deadline, boundary);
+            var reference = new ProfileRecoveryBoundary.Reference(Math.toIntExact(((org.apache.bookkeeper.versioning
+                    .LongVersion) current.metadata().metadata().getVersion()).getLongVersion()),
+                    candidate.stat().getCzxid(), ProfileRepairIntent.digest(candidate.bytes()));
+            String guardPath = boundaryBirthGuard(ledger, candidate.stat().getCzxid());
+            var guard = reads.get(guardPath, deadline);
+            if (guard.code() == Code.NONODE.intValue()) {
+                var birthChecks = new java.util.ArrayList<>(recoveryRootChecks(root.snapshot(), deadline));
+                birthChecks.addAll(metadata.checksForMembership(current.metadata()));
+                birthChecks.add(Op.check(target, 0));
+                birthChecks.add(Op.create(guardPath, boundaryGuardBytes(candidate), immutableAcls,
+                        CreateMode.PERSISTENT));
+                multi(birthChecks, deadline);
+                guard = reads.get(guardPath, deadline);
+            }
+            requireFound(guard);
+            requirePersistent(guard, true);
+            if (!Arrays.equals(guard.bytes(), boundaryGuardBytes(candidate))) {
+                return new BoundaryResult(CreateStatus.QUARANTINED, null);
+            }
+            var desired = org.apache.bookkeeper.client.LedgerMetadataBuilder.from(
+                    current.metadata().metadata().getValue()).withCToken(context.creatorToken());
+            var custom = new java.util.TreeMap<>(current.metadata().metadata().getValue().getCustomMetadata());
+            custom.put(ProfileRecoveryBoundary.KEY, reference.encode());
+            var checks = new java.util.ArrayList<>(recoveryRootChecks(root.snapshot(), deadline));
+            checks.addAll(metadata.checksForMembership(current.metadata()));
+            checks.add(Op.check(target, 0));
+            checks.add(Op.check(guardPath, 0));
+            checks.add(metadata.repairMetadataWrite(current.metadata(), desired.withCustomMetadata(custom).build()));
+            int code = multi(checks, deadline);
+            var after = readRecovery(metadata, ledger);
+            if (after.context() != null && context.equals(after.context())) {
+                var actual = selectedBoundary(context, after.metadata().metadata().getValue(), deadline);
+                if (actual != null && actual.boundary().equals(boundary)) {
+                    return new BoundaryResult(code == Code.OK.intValue() ? CreateStatus.APPLIED
+                            : CreateStatus.ALREADY_APPLIED, actual);
+                }
+            }
+            return new BoundaryResult(conditionalFailure(code) ? CreateStatus.CONFLICT
+                    : CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new BoundaryResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new BoundaryResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return new BoundaryResult(CreateStatus.QUARANTINED, null);
+        }
     }
 
     List<ProfileInstallReceipt> recoveryCurrentTargets(ProfileRecoveryContext context, long deadline)
@@ -881,19 +1085,27 @@ public final class ZKProfileReservationStore {
             var before = current.metadata();
             var head = ProfileRepairCommit.head(before.metadata().getValue().getCustomMetadata()
                     .get(ProfileRepairCommit.KEY));
+            var selection = selectedBoundary(current.context(), before.metadata().getValue(), deadline);
             if (prior.code() == Code.OK.intValue()) {
                 var commit = repairCommit(prior);
+                int index = -1;
+                for (int i = 0; i < head.size(); i++) {
+                    var ref = head.get(i);
+                    if (ref.slot() == intent.slot() && ref.intentBirth().equals(expected.birth())
+                            && ref.intentStoreVersion() == expected.storeVersion()
+                            && Arrays.equals(ref.digest(), ProfileRepairIntent.digest(prior.bytes()))) {
+                        index = i;
+                    }
+                }
                 boolean matching = Arrays.equals(commit.closeOperationId(), closeOperationId)
                         && commit.beforeVersion() == ((org.apache.bookkeeper.versioning.LongVersion)
                             copiedAt.metadata().getVersion()).getLongVersion()
                         && Arrays.equals(commit.beforeDigest(), ProfileRecoveryContext.metadataDigest(
                             copiedAt.metadata().getValue()))
                         && copiedAt.birthZxid() == current.context().metadataBirth()
-                        && Arrays.equals(copiedAt.metadata().getValue().getCustomMetadata()
+                        && index >= 0 && Arrays.equals(copiedAt.metadata().getValue().getCustomMetadata()
                             .get(ProfileRepairCommit.KEY),
-                            commit.beforeVersion() == current.context().generation() ? null
-                                : ProfileRepairCommit.head(head.subList(0,
-                                    Math.toIntExact(commit.beforeVersion() - current.context().generation()))))
+                            index == 0 ? null : ProfileRepairCommit.head(head.subList(0, index)))
                         && head.stream().anyMatch(ref -> ref.slot() == intent.slot()
                             && ref.intentBirth().equals(expected.birth())
                             && ref.intentStoreVersion() == expected.storeVersion()
@@ -910,9 +1122,12 @@ public final class ZKProfileReservationStore {
                     || !before.metadata().getVersion().equals(copiedAt.metadata().getVersion())
                     || !Arrays.equals(value.getCustomMetadata().get(ProfileRepairCommit.KEY),
                             copiedAt.metadata().getValue().getCustomMetadata().get(ProfileRepairCommit.KEY))
+                    || !Arrays.equals(value.getCustomMetadata().get(ProfileRecoveryBoundary.KEY),
+                            copiedAt.metadata().getValue().getCustomMetadata().get(ProfileRecoveryBoundary.KEY))
                     || !Arrays.equals(ProfileRecoveryContext.metadataDigest(value),
                         ProfileRecoveryContext.metadataDigest(copiedAt.metadata().getValue()))
-                    || !boundedRepairFragment(intent, value) || !repairMatchesMetadata(intent, value)
+                    || !boundedRepairFragment(intent, value, selection == null ? null : selection.boundary())
+                    || !repairMatchesMetadata(intent, value)
                     || value.getCustomMetadata().containsKey(ProfileLedgerMetadataStore.MEMBERSHIP_FROZEN_KEY)
                     || value.getCustomMetadata().containsKey(ProfileLedgerMetadataStore.PENDING_PUBLICATION_KEY)
                     || head.size() == ProfileRepairIntent.MAX_INTENTS) {
@@ -925,7 +1140,8 @@ public final class ZKProfileReservationStore {
             validateRepairAdmission(actual, admitted, deadline);
             String old = value.getAllEnsembles().get(intent.fragmentStart())
                     .get(intent.replacedMemberSlot()).toString();
-            if (old.equals(intent.install().targetBookie())) {
+            if (old.equals(intent.install().targetBookie()) && (selection == null
+                    || value.getAllEnsembles().higherKey(intent.fragmentStart()) != null)) {
                 return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
             }
             var desired = ProfileRepairCommit.replace(value, intent, intent.install().targetBookie());
