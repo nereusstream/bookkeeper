@@ -1277,6 +1277,11 @@ public final class ZKProfileReservationStore {
         return List.copyOf(activated.values());
     }
 
+    boolean supportsWorker(ProfileLedgerMetadataStore metadata,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker) {
+        return metadata.usesMutationClient(zk) && worker.usesMutationClient(zk);
+    }
+
     ProfileRecoveryCoordinator.MarkerCleanupStatus completeReplicaMarker(ProfileLedgerMetadataStore metadata,
             ReadOnlySnapshot closed, org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker,
             org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task) {
@@ -1519,6 +1524,123 @@ public final class ZKProfileReservationStore {
             return new SelfRepairSelection(CreateStatus.DURABILITY_UNKNOWN, null, null, null);
         } catch (IllegalArgumentException invalid) {
             return new SelfRepairSelection(CreateStatus.QUARANTINED, null, null, null);
+        }
+    }
+
+    record WorkerRepairPlan(CreateStatus status, RecoveryResult recovery, RepairSnapshot prepared,
+            byte[] closeId, boolean published) { }
+
+    /** Reuse this worker's retained COPY operation before allocating another fixed intent slot. */
+    WorkerRepairPlan resumeWorkerRepair(ProfileLedgerMetadataStore metadata, ProfileRecoveryContext context,
+            java.util.Set<Integer> resolved, java.util.Set<String> suppliedTargets) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var current = readRepairable(metadata, context.ledger().ledgerId());
+            if (current.context() == null || !context.equals(current.context())) {
+                return new WorkerRepairPlan(CreateStatus.CONFLICT, null, null, null, false);
+            }
+            var value = current.metadata().metadata().getValue();
+            var head = ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY));
+            for (int slot = 0; slot < ProfileRepairIntent.MAX_INTENTS; slot++) {
+                var repair = readRepair(value.getLedgerId(), slot, deadline);
+                if (repair == null || resolved.contains(slot) || !repair.intent().recovery().equals(context)
+                        || !repair.intent().install().authorityDomain().equals("worker-repair")) {
+                    continue;
+                }
+                var committed = reads.get(repairPath(value.getLedgerId(), slot) + "/committed", deadline);
+                if (committed.code() == Code.NONODE.intValue()) {
+                    return new WorkerRepairPlan(CreateStatus.ALREADY_APPLIED, current, repair,
+                            selfOperation("worker-close", repair.intent().encode()), false);
+                }
+                var commit = repairCommit(committed);
+                var ensemble = value.getAllEnsembles().get(repair.intent().fragmentStart());
+                if (ensemble == null || !ensemble.get(repair.intent().replacedMemberSlot()).toString()
+                        .equals(repair.intent().install().targetBookie())) {
+                    continue; // Obsolete targets remain in history for cleanup, never counted as current replicas.
+                }
+                if (head.stream().noneMatch(ref -> ref.slot() == repair.intent().slot()
+                        && ref.intentBirth().equals(repair.birth()) && ref.intentStoreVersion() == repair.storeVersion()
+                        && Arrays.equals(ref.digest(), ProfileRepairIntent.digest(committed.bytes())))) {
+                    return new WorkerRepairPlan(CreateStatus.QUARANTINED, null, null, null, false);
+                }
+                if (!suppliedTargets.contains(repair.intent().install().targetBookie())) {
+                    continue; // A later loss of an already published target is a new replica repair, not intent reset.
+                }
+                return new WorkerRepairPlan(CreateStatus.ALREADY_APPLIED, current, repair,
+                        commit.closeOperationId(), true);
+            }
+            return new WorkerRepairPlan(CreateStatus.ALREADY_APPLIED, current, null, null, false);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new WorkerRepairPlan(CreateStatus.DURABILITY_UNKNOWN, null, null, null, false);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new WorkerRepairPlan(CreateStatus.DURABILITY_UNKNOWN, null, null, null, false);
+        } catch (IllegalArgumentException invalid) {
+            return new WorkerRepairPlan(CreateStatus.QUARANTINED, null, null, null, false);
+        }
+    }
+
+    WorkerRepairPlan prepareWorkerRepair(ProfileLedgerMetadataStore metadata, ProfileRecoveryContext context,
+            long entry, int member, String target, byte[] incarnation) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var current = readRepairable(metadata, context.ledger().ledgerId());
+            if (current.context() == null || !context.equals(current.context())) {
+                return new WorkerRepairPlan(CreateStatus.CONFLICT, null, null, null, false);
+            }
+            var value = current.metadata().metadata().getValue();
+            var selected = selectedBoundary(context, value, deadline);
+            var fragment = value.getAllEnsembles().floorEntry(entry);
+            if (selected == null || fragment == null || member < 0 || member >= value.getEnsembleSize()
+                    || value.getAllEnsembles().values().stream().anyMatch(ensemble ->
+                        ensemble.stream().anyMatch(bookie -> bookie.toString().equals(target)))) {
+                return new WorkerRepairPlan(CreateStatus.CONFLICT, null, null, null, false);
+            }
+            Long next = value.getAllEnsembles().higherKey(fragment.getKey());
+            long last = next == null ? selected.boundary().prefixEntryId() : next - 1;
+            if (last < fragment.getKey()) {
+                return new WorkerRepairPlan(CreateStatus.UNAVAILABLE, current, null, null, false);
+            }
+            int free = -1;
+            for (int slot = 0; slot < ProfileRepairIntent.MAX_INTENTS; slot++) {
+                if (readRepair(value.getLedgerId(), slot, deadline) == null) {
+                    free = slot;
+                    break;
+                }
+            }
+            if (free < 0) {
+                return new WorkerRepairPlan(CreateStatus.UNAVAILABLE, current, null, null, false);
+            }
+            var root = read(value.getLedgerId(), deadline);
+            if (root.status() != ReadStatus.FOUND || !context.matchesRoot(root.snapshot())) {
+                return new WorkerRepairPlan(CreateStatus.CONFLICT, null, null, null, false);
+            }
+            byte[] name = target.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] binding = java.nio.ByteBuffer.allocate(ProfileRecoveryContext.ENCODED_BYTES + 32 + 8 + 4 + 8
+                    + name.length + 16).put(context.encode()).put(ProfileRecoveryContext.metadataDigest(value))
+                    .putLong(fragment.getKey()).putInt(member).putLong(last).put(name)
+                    .put(ProfileLifecycleHead.fixed(incarnation, 16, true)).array();
+            var install = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                    ProfileAuthorityPurpose.PREPARING_INSTALL, value.getLedgerId(), context.ledger().ledgerInstanceId(),
+                    root.snapshot().reservation().installs().get(0).descriptorIdentity(), target, incarnation,
+                    "worker-repair", context.controlGeneration(), selfOperation("worker-install", binding),
+                    ProfileRepairIntent.digest(binding), null);
+            var intent = new ProfileRepairIntent(context, free, selfOperation("worker-intent", binding),
+                    fragment.getKey(), member, repairEnsembleDigest(value, fragment.getKey()), install,
+                    selfOperation("worker-grant", binding),
+                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(fragment.getKey(), last));
+            var prepared = prepareRepair(metadata, intent);
+            return new WorkerRepairPlan(prepared.status(), current, prepared.snapshot(),
+                    prepared.snapshot() == null ? null : selfOperation("worker-close", intent.encode()), false);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new WorkerRepairPlan(CreateStatus.DURABILITY_UNKNOWN, null, null, null, false);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new WorkerRepairPlan(CreateStatus.DURABILITY_UNKNOWN, null, null, null, false);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return new WorkerRepairPlan(CreateStatus.QUARANTINED, null, null, null, false);
         }
     }
 

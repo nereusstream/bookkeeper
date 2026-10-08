@@ -118,8 +118,9 @@ public class ZooKeeperUtil implements ZooKeeperCluster {
 
         if (0 == zooKeeperPort) {
             zooKeeperPort = serverFactory.getLocalPort();
-            zkaddr = new InetSocketAddress(zkaddr.getHostName(), zooKeeperPort);
-            connectString = zkaddr.getHostName() + ":" + zooKeeperPort;
+            String loopback = zkaddr.getAddress().getHostAddress();
+            zkaddr = new InetSocketAddress(loopback, zooKeeperPort);
+            connectString = loopback + ":" + zooKeeperPort;
         }
 
         boolean b = ClientBase.waitForServerUp(getZooKeeperConnectString(),

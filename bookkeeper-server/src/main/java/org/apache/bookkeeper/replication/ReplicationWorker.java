@@ -110,6 +110,8 @@ public class ReplicationWorker implements Runnable {
     private final long baseBackoffForLockReleaseOfFailedLedger;
     private final BiConsumer<Long, Long> onReadEntryFailureCallback;
     private final LedgerManager ledgerManager;
+    private final org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator profileRecovery;
+    private final org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions profileOptions;
 
     // Expose Stats
     private final StatsLogger statsLogger;
@@ -183,11 +185,40 @@ public class ReplicationWorker implements Runnable {
                       boolean ownBkc,
                       StatsLogger statsLogger)
             throws CompatibilityException, InterruptedException, UnavailableException {
+        this(conf, bkc, ownBkc, statsLogger, null, null);
+    }
+
+    /** Explicit isolated Profile cohort. SDK, coordinator and verified pools remain borrowed. */
+    public ReplicationWorker(ServerConfiguration conf, BookKeeper bkc, StatsLogger statsLogger,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator coordinator,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions options)
+            throws CompatibilityException, InterruptedException, UnavailableException {
+        this(conf, bkc, false, statsLogger, java.util.Objects.requireNonNull(coordinator),
+                java.util.Objects.requireNonNull(options));
+    }
+
+    private ReplicationWorker(ServerConfiguration conf, BookKeeper bkc, boolean ownBkc, StatsLogger statsLogger,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator coordinator,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions options)
+            throws CompatibilityException, InterruptedException, UnavailableException {
         this.conf = conf;
         this.bkc = bkc;
         this.ownBkc = ownBkc;
+        this.profileRecovery = coordinator;
+        this.profileOptions = options;
+        if (coordinator != null) {
+            org.apache.bookkeeper.client.ProfileRecoveryReadHandle.requireCompatibleSdk(bkc.getClientCtx());
+        }
 
         this.underreplicationManager = bkc.getLedgerManagerFactory().newLedgerUnderreplicationManager();
+        if (coordinator != null) {
+            if (!(underreplicationManager instanceof org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager zk)
+                    || !coordinator.supportsWorker(zk)) {
+                underreplicationManager.close();
+                throw new IllegalArgumentException("Profile worker requires its same borrowed ZK authority context");
+            }
+            zk.enableProfileCleanupGuards();
+        }
         this.ledgerManager = bkc.getLedgerManagerFactory().newLedgerManager();
         this.admin = new BookKeeperAdmin(bkc, statsLogger, new ClientConfiguration(conf));
         this.ledgerChecker = new LedgerChecker(bkc);
@@ -440,8 +471,74 @@ public class ReplicationWorker implements Runnable {
         return placementNotAdheringFragments;
     }
 
-    @SuppressFBWarnings("RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE")
     private boolean rereplicate(long ledgerIdToReplicate) throws InterruptedException, BKException,
+            UnavailableException {
+        Versioned<LedgerMetadata> actual;
+        try {
+            actual = FutureUtils.result(ledgerManager.readLedgerMetadata(ledgerIdToReplicate),
+                    BKException.HANDLER);
+        } catch (BKException unavailable) {
+            if (profileRecovery == null && unavailable instanceof BKNoSuchLedgerExistsOnMetadataServerException) {
+                return rereplicateClassic(ledgerIdToReplicate);
+            }
+            underreplicationManager.releaseUnderreplicatedLedger(ledgerIdToReplicate);
+            if (profileRecovery != null) {
+                getExceptionCounter("ProfileMetadataUnavailable").inc();
+            }
+            throw unavailable;
+        }
+        if (!actual.getValue().getCustomMetadata().containsKey(
+                org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink.KEY)) {
+            return rereplicateClassic(ledgerIdToReplicate);
+        }
+        if (profileRecovery == null) {
+            underreplicationManager.releaseUnderreplicatedLedger(ledgerIdToReplicate);
+            getExceptionCounter("ProfileWorkerDisabled").inc();
+            return false;
+        }
+        var manager = (org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager) underreplicationManager;
+        var original = manager.captureProfileTask(ledgerIdToReplicate);
+        org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerAttempt attempt;
+        try {
+            attempt = profileRecovery.beginWorker(ledgerIdToReplicate, bkc.getClientCtx(), profileOptions, manager);
+        } catch (RuntimeException rejected) {
+            manager.releaseProfileTask(original);
+            getExceptionCounter("ProfileAttemptRejected").inc();
+            return false;
+        }
+        var completion = attempt.completion();
+        boolean interrupted = false;
+        try {
+            for (;;) {
+                try {
+                    var result = completion.get();
+                    if (result.status() == org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator
+                            .WorkerStatus.REPLICATED) {
+                        numLedgersReplicated.inc();
+                        return true;
+                    }
+                    getExceptionCounter("Profile" + result.status()).inc();
+                    return false;
+                } catch (InterruptedException stopping) {
+                    interrupted = true;
+                    attempt.stop(); // Await the actual child before releasing this task or closing the SDK.
+                } catch (java.util.concurrent.ExecutionException failed) {
+                    log.warn().attr("ledgerId", ledgerIdToReplicate).exception(failed.getCause())
+                            .log("Profile replication attempt failed; retaining marker");
+                    getExceptionCounter("ProfileAttemptFailure").inc();
+                    return false;
+                }
+            }
+        } finally {
+            attempt.releaseTask();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    @SuppressFBWarnings("RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE")
+    private boolean rereplicateClassic(long ledgerIdToReplicate) throws InterruptedException, BKException,
             UnavailableException {
         log.debug().attr("ledgerId", ledgerIdToReplicate).log("Going to replicate the fragments of the ledger");
 

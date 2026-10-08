@@ -72,6 +72,380 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
+    public record WorkerOptions(byte[] descriptor,
+            org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
+            Map<BookieId, ProfileNormalDataClient> data, Map<String, ProfileInitialControlClient> controls,
+            int maxCoordinates, int maxRepairs, Duration maxDuration) {
+        public WorkerOptions {
+            if (descriptor.length > org.apache.bookkeeper.common.profile.ProfileDescriptorCodec.MAX_CANONICAL_LENGTH
+                    || data.size() > 64 || controls.size() > 64 || maxCoordinates < 1 || maxRepairs < 1
+                    || maxRepairs > ProfileRepairIntent.MAX_INTENTS || maxDuration.isZero() || maxDuration.isNegative()
+                    || maxDuration.compareTo(Duration.ofMinutes(1)) > 0) {
+                throw new IllegalArgumentException("Profile worker requires bounded descriptor, pools and work");
+            }
+            descriptor = descriptor.clone();
+            org.apache.bookkeeper.common.profile.ProfileDescriptorCodec.decode(descriptor, validator);
+            data = Map.copyOf(data);
+            controls = Map.copyOf(controls);
+        }
+
+        @Override
+        public byte[] descriptor() {
+            return descriptor.clone();
+        }
+    }
+
+    public enum WorkerStatus { REPLICATED, DEFERRED, CONFLICT, QUARANTINED, DATA_LOSS, DELETED }
+    public record WorkerResult(WorkerStatus status, int repairs, long copiedEntries) { }
+
+    /** Terminal means actual child drain, including a stopped/deadline attempt; never an early caller timeout. */
+    public static final class WorkerAttempt {
+        private final CompletableFuture<WorkerResult> terminal;
+        private final AtomicBoolean stopped;
+        private final org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager;
+        private final org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task;
+
+        private WorkerAttempt(CompletableFuture<WorkerResult> terminal, AtomicBoolean stopped,
+                org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager,
+                org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task) {
+            this.terminal = terminal;
+            this.stopped = stopped;
+            this.manager = manager;
+            this.task = task;
+        }
+
+        public CompletableFuture<WorkerResult> completion() {
+            return terminal.copy();
+        }
+
+        public void stop() {
+            stopped.set(true);
+        }
+
+        public void releaseTask() throws org.apache.bookkeeper.replication.ReplicationException.UnavailableException {
+            if (!terminal.isDone()) {
+                throw new IllegalStateException("Original Profile task remains held until actual child drain");
+            }
+            manager.releaseProfileTask(task);
+        }
+    }
+
+    public WorkerAttempt beginWorker(long ledger, ClientContext sdk, WorkerOptions options,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager) {
+        ProfileRecoveryReadHandle.requireCompatibleSdk(sdk);
+        var task = manager.captureProfileTask(ledger);
+        var stopped = new AtomicBoolean();
+        if (ledger < 0 || task == null || sdk.isClientClosed() || !supportsWorker(manager) || !active.tryAcquire()) {
+            return new WorkerAttempt(CompletableFuture.completedFuture(
+                    new WorkerResult(WorkerStatus.DEFERRED, 0, 0)), stopped, manager, task);
+        }
+        var terminal = new CompletableFuture<WorkerResult>();
+        var attempt = new WorkerAttempt(terminal, stopped, manager, task);
+        var flow = new WorkerFlow(ledger, sdk, options, manager, task, stopped);
+        var timer = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
+        flow.done.whenComplete((result, failure) -> {
+            var scheduled = timer.get();
+            if (scheduled != null) {
+                scheduled.cancel(false);
+            }
+            active.release();
+            if (failure != null) {
+                terminal.completeExceptionally(failure);
+            } else {
+                terminal.complete(result);
+            }
+        });
+        try {
+            var scheduled = sdk.getScheduler().schedule(() -> stopped.set(true), options.maxDuration().toNanos(),
+                    java.util.concurrent.TimeUnit.NANOSECONDS);
+            timer.set(scheduled);
+            flow.step();
+            if (flow.done.isDone()) {
+                scheduled.cancel(false);
+            }
+        } catch (RuntimeException unavailable) {
+            stopped.set(true);
+            flow.done.completeExceptionally(unavailable);
+        }
+        return attempt;
+    }
+
+    public boolean supportsWorker(org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager) {
+        return reservations.supportsWorker(metadata, manager);
+    }
+
+    private final class WorkerFlow {
+        private final long ledger;
+        private final ClientContext sdk;
+        private final WorkerOptions options;
+        private final org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager;
+        private final org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task;
+        private final AtomicBoolean stopped;
+        private final long deadline;
+        private final CompletableFuture<WorkerResult> done = new CompletableFuture<>();
+        private final java.util.Set<Integer> resolved = new java.util.HashSet<>();
+        private int repairs;
+        private long copied;
+
+        WorkerFlow(long ledger, ClientContext sdk, WorkerOptions options,
+                org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager,
+                org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task, AtomicBoolean stopped) {
+            this.ledger = ledger;
+            this.sdk = sdk;
+            this.options = options;
+            this.manager = manager;
+            this.task = task;
+            this.stopped = stopped;
+            deadline = System.nanoTime() + options.maxDuration().toNanos();
+        }
+
+        void finish(WorkerStatus status) {
+            done.complete(new WorkerResult(stopped.get() ? WorkerStatus.DEFERRED : status, repairs, copied));
+        }
+
+        void step() {
+            if (stopped.get() || sdk.isClientClosed()) {
+                finish(WorkerStatus.DEFERRED);
+                return;
+            }
+            CompletableFuture.supplyAsync(() -> metadata.readMembership(ledger, deadline), cold).thenCompose(read -> {
+                if (read.snapshot() == null) {
+                    finish(read.status() == org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus
+                            .UNAVAILABLE ? WorkerStatus.DEFERRED : WorkerStatus.QUARANTINED);
+                    return CompletableFuture.<RecoveryResult>completedFuture(null);
+                }
+                ProtectedProfileCredential key;
+                try {
+                    key = ProtectedProfileCredential.of(1, org.apache.bookkeeper.proto.checksum.DigestManager
+                            .generateMasterKey(read.snapshot().metadata().getValue().getPassword()));
+                } catch (java.security.NoSuchAlgorithmException impossible) {
+                    return CompletableFuture.failedFuture(impossible);
+                }
+                byte[] descriptor = options.descriptor();
+                var decoded = org.apache.bookkeeper.common.profile.ProfileDescriptorCodec.decode(descriptor,
+                        options.validator());
+                byte[] identity = org.apache.bookkeeper.common.profile.ProfileDescriptorCodec.identityOf(decoded,
+                        options.validator()).toBytes();
+                var progress = new java.util.concurrent.atomic.AtomicReference<>(new RecoveryResult(ledger,
+                        RecoveryStatus.DEFERRED, PrefixReason.SOURCE_UNAVAILABLE, null, -1, 0, null, null));
+                var id = java.util.UUID.randomUUID();
+                byte[] operation = java.nio.ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())
+                        .putLong(id.getLeastSignificantBits()).array();
+                return recoverOnce(ledger, operation, sdk, descriptor, decoded, identity, key,
+                        workerData(read.snapshot().metadata().getValue(), null), options.controls(),
+                        options.maxCoordinates(), stopped, progress).thenCompose(recovered -> {
+                    if (recovered.context() == null || stopped.get()) {
+                        finish(workerStatus(recovered.status()));
+                        return CompletableFuture.completedFuture(recovered);
+                    }
+                    if (recovered.status() != RecoveryStatus.RECOVERED_AND_CLOSED
+                            && recovered.status() != RecoveryStatus.DEFERRED) {
+                        finish(workerStatus(recovered.status()));
+                        return CompletableFuture.completedFuture(recovered);
+                    }
+                    return workCurrent(recovered.context(), key).thenApply(ignored -> recovered);
+                });
+            }).whenComplete((ignored, failure) -> {
+                if (failure != null) {
+                    done.completeExceptionally(failure);
+                }
+            });
+        }
+
+        private CompletableFuture<Void> workCurrent(ProfileRecoveryContext context, ProtectedProfileCredential key) {
+            var supplied = new java.util.HashSet<String>();
+            options.data().keySet().forEach(name -> {
+                if (options.controls().containsKey(name.toString())) {
+                    supplied.add(name.toString());
+                }
+            });
+            return CompletableFuture.supplyAsync(
+                    () -> reservations.resumeWorkerRepair(metadata, context, resolved, supplied), cold)
+                    .thenCompose(plan -> {
+                if (stopped.get() || plan.recovery() == null) {
+                    finish(plan.status() == ZKProfileReservationStore.CreateStatus.QUARANTINED
+                            ? WorkerStatus.QUARANTINED : WorkerStatus.DEFERRED);
+                    return CompletableFuture.completedFuture(null);
+                }
+                if (plan.prepared() != null) {
+                    return runRepair(plan, key);
+                }
+                var value = plan.recovery().metadata().metadata().getValue();
+                if (value.getState() == org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED) {
+                    return CompletableFuture.supplyAsync(() -> reservations.readClosedForOpen(metadata, ledger), cold)
+                            .thenCompose(closed -> {
+                    if (closed.snapshot() == null) {
+                        finish(closed.status() == ZKProfileReservationStore.ReadOnlyStatus.DELETED
+                                ? WorkerStatus.DELETED : WorkerStatus.DEFERRED);
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return verifyClosedReplicasOnce(closed.snapshot(), sdk, key, options.data(), options.controls(),
+                            options.maxCoordinates(), stopped, deadline, task).thenCompose(health -> {
+                        if (health.proof() != null && !stopped.get()) {
+                            return CompletableFuture.supplyAsync(
+                                    () -> completeReplicationOnce(health.proof(), manager, stopped), cold)
+                                        .thenAccept(status -> finish(status == MarkerCleanupStatus.CLEARED
+                                                ? WorkerStatus.REPLICATED : status == MarkerCleanupStatus.DELETED
+                                                    ? WorkerStatus.DELETED : WorkerStatus.DEFERRED));
+                        }
+                        if (health.status() == ReplicaHealthStatus.UNDERREPLICATED
+                                || health.status() == ReplicaHealthStatus.DEFERRED) {
+                            return selectRepair(plan.recovery(), health.unresolvedEntry(), health.sources(), key);
+                        }
+                        finish(health.status() == ReplicaHealthStatus.DELETED ? WorkerStatus.DELETED
+                                : health.status() == ReplicaHealthStatus.CONFLICT ? WorkerStatus.CONFLICT
+                                    : WorkerStatus.QUARANTINED);
+                        return CompletableFuture.completedFuture(null);
+                    });
+                    });
+                }
+                return probeLast(plan.recovery()).thenCompose(evidence -> {
+                    if (evidence == null || evidence.conflict()) {
+                        finish(evidence == null ? WorkerStatus.DEFERRED : WorkerStatus.QUARANTINED);
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return selectRepair(plan.recovery(), value.getAllEnsembles().lastKey(), evidence.sources(), key);
+                });
+            });
+        }
+
+        private CompletableFuture<ProfileRecoveryReadHandle.PointEvidence> probeLast(
+                ZKProfileReservationStore.RecoveryResult accepted) {
+            return CompletableFuture.supplyAsync(() -> {
+                var selected = reservations.readSelectedPrefix(metadata, accepted.context());
+                long first = accepted.metadata().metadata().getValue().getAllEnsembles().lastKey();
+                return selected.snapshot() == null || selected.snapshot().boundary().prefixEntryId() < first
+                        ? null : readers(accepted.context());
+            }, cold).thenCompose(ready -> {
+                if (ready == null || ready.recovery().context() == null || stopped.get()) {
+                    return CompletableFuture.completedFuture(null);
+                }
+                var controls = new java.util.HashMap<BookieId, ProfileInitialControlClient>();
+                options.controls().forEach((name, peer) -> controls.put(BookieId.parse(name), peer));
+                try {
+                    var value = ready.recovery().metadata().metadata().getValue();
+                    var reader = ProfileRecoveryReadHandle.fromContext(sdk, ready.recovery(), ready.permitted(),
+                            workerData(value, null), controls);
+                    return reader.probeEvidence(value.getAllEnsembles().lastKey())
+                            .whenComplete((result, failure) -> reader.closeAsync());
+                } catch (java.security.GeneralSecurityException invalid) {
+                    return CompletableFuture.failedFuture(invalid);
+                }
+            });
+        }
+
+        private CompletableFuture<Void> selectRepair(ZKProfileReservationStore.RecoveryResult accepted, long entry,
+                List<ProfileRecoveryReadHandle.SourceEvidence> sources, ProtectedProfileCredential key) {
+            if (stopped.get() || repairs >= options.maxRepairs() || entry < 0) {
+                finish(WorkerStatus.DEFERRED);
+                return CompletableFuture.completedFuture(null);
+            }
+            if (sources.stream().anyMatch(source -> source.outcome()
+                    == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                finish(WorkerStatus.CONFLICT);
+                return CompletableFuture.completedFuture(null);
+            }
+            var bad = sources.stream().filter(source -> source.outcome()
+                    != ProfileRecoveryReadHandle.SourceOutcome.FOUND).findFirst().orElse(null);
+            if (bad == null) {
+                finish(WorkerStatus.DEFERRED);
+                return CompletableFuture.completedFuture(null);
+            }
+            var value = accepted.metadata().metadata().getValue();
+            int member = value.getAllEnsembles().floorEntry(entry).getValue().indexOf(bad.bookie());
+            return CompletableFuture.supplyAsync(() -> {
+                var retained = reservations.retainedActivationTargets(ledger);
+                if (retained.status() != org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus
+                        .FOUND) {
+                    return null;
+                }
+                var used = new java.util.HashSet<String>();
+                retained.targets().forEach(receipt -> used.add(receipt.scope().targetBookie()));
+                value.getAllEnsembles().values().forEach(ensemble ->
+                        ensemble.forEach(bookie -> used.add(bookie.toString())));
+                for (var candidate : options.data().keySet().stream()
+                        .sorted(java.util.Comparator.comparing(BookieId::toString)).toList()) {
+                    var peer = options.data().get(candidate);
+                    var control = options.controls().get(candidate.toString());
+                    if (used.contains(candidate.toString()) || control == null || peer.hello().activeEngine() != 3
+                            || control.hello().activeEngine() != 3
+                            || !peer.hello().bookieId().equals(candidate.toString())
+                            || !control.hello().bookieId().equals(candidate.toString())
+                            || !Arrays.equals(peer.hello().storageIncarnation(),
+                                    control.hello().storageIncarnation())) {
+                        continue;
+                    }
+                    return reservations.prepareWorkerRepair(metadata, accepted.context(), entry, member,
+                            candidate.toString(), peer.hello().storageIncarnation());
+                }
+                return null;
+            }, cold).thenCompose(plan -> {
+                if (plan == null || plan.prepared() == null) {
+                    finish(WorkerStatus.DEFERRED);
+                    return CompletableFuture.completedFuture(null);
+                }
+                return runRepair(plan, key);
+            });
+        }
+
+        private CompletableFuture<Void> runRepair(ZKProfileReservationStore.WorkerRepairPlan plan,
+                ProtectedProfileCredential key) {
+            var target = BookieId.parse(plan.prepared().intent().install().targetBookie());
+            if (stopped.get() || (!plan.published() && repairs >= options.maxRepairs())
+                    || !options.data().containsKey(target)
+                    || !options.controls().containsKey(target.toString())) {
+                finish(WorkerStatus.DEFERRED);
+                return CompletableFuture.completedFuture(null);
+            }
+            var value = plan.recovery().metadata().metadata().getValue();
+            boolean last = value.getAllEnsembles().higherKey(plan.prepared().intent().fragmentStart()) == null;
+            return repairFragmentOnce(plan.recovery(), plan.prepared(), sdk, options.descriptor(), key,
+                    workerData(value, target), options.controls(), plan.closeId(), last, stopped).thenAccept(result -> {
+                copied += result.copiedEntries();
+                if (result.status() == RepairStatus.REPAIRED_HISTORICAL_FRAGMENT
+                        || result.status() == RepairStatus.REPAIRED_LAST_FRAGMENT) {
+                    if (!plan.published()) {
+                        repairs++;
+                    }
+                    resolved.add(plan.prepared().intent().slot());
+                    step();
+                } else {
+                    finish(result.status() == RepairStatus.DATA_LOSS ? WorkerStatus.DATA_LOSS
+                            : result.status() == RepairStatus.QUARANTINED ? WorkerStatus.QUARANTINED
+                                : result.status() == RepairStatus.CONFLICT ? WorkerStatus.CONFLICT
+                                    : WorkerStatus.DEFERRED);
+                }
+            });
+        }
+
+        private Map<BookieId, ProfileNormalDataClient> workerData(
+                org.apache.bookkeeper.client.api.LedgerMetadata value, BookieId extra) {
+            var names = new java.util.HashSet<BookieId>();
+            value.getAllEnsembles().values().forEach(names::addAll);
+            if (extra != null) {
+                names.add(extra);
+            }
+            var selected = new java.util.HashMap<BookieId, ProfileNormalDataClient>();
+            names.forEach(name -> {
+                var peer = options.data().get(name);
+                if (peer != null) {
+                    selected.put(name, peer);
+                }
+            });
+            return selected;
+        }
+    }
+
+    private static WorkerStatus workerStatus(RecoveryStatus status) {
+        return switch (status) {
+            case DELETED -> WorkerStatus.DELETED;
+            case DATA_LOSS -> WorkerStatus.DATA_LOSS;
+            case CONFLICT -> WorkerStatus.CONFLICT;
+            case QUARANTINED -> WorkerStatus.QUARANTINED;
+            default -> WorkerStatus.DEFERRED;
+        };
+    }
+
     public CompletableFuture<Result> fence(ZKProfileReservationStore.RecoveryResult accepted,
             Map<String, ProfileInitialControlClient> supplied, ProtectedProfileCredential credential) {
         if (accepted.context() == null) {
@@ -617,64 +991,8 @@ public final class ProfileRecoveryCoordinator {
             var key = credential.copy();
             var data = Map.copyOf(suppliedData);
             var controls = Map.copyOf(suppliedControl);
-            var actual = CompletableFuture.supplyAsync(
-                    () -> startRecovery(ledger, operation, decoded, identity, key, stopped), cold)
-                    .thenCompose(start -> {
-                if (start.closed() != null) {
-                    return CompletableFuture.completedFuture(new RecoveryResult(ledger,
-                            RecoveryStatus.RECOVERED_AND_CLOSED, PrefixReason.NORMAL_TAIL,
-                            start.accepted().context(),
-                            start.closed().metadata().metadata().getValue().getLastEntryId(),
-                            start.closed().metadata().metadata().getValue().getLength(), null, start.closed()));
-                }
-                if (start.accepted() == null || start.accepted().context() == null) {
-                    return CompletableFuture.completedFuture(new RecoveryResult(ledger, start.failure(),
-                            start.reason(), null, -1, 0, null, null));
-                }
-                var accepted = start.accepted();
-                var context = accepted.context();
-                progress.set(new RecoveryResult(ledger, RecoveryStatus.DEFERRED, PrefixReason.SOURCE_UNAVAILABLE,
-                        context, -1, 0, null, null));
-                return CompletableFuture.supplyAsync(() -> reservations.readSelectedPrefix(metadata, context), cold)
-                        .thenCompose(selected -> {
-                    if (stopped.get()) {
-                        return CompletableFuture.completedFuture(progress.get());
-                    }
-                    if (selected.snapshot() != null) {
-                        return recoverSelected(accepted, selected.snapshot(), null, sdk, descriptor, key, data,
-                                controls, stopped, progress);
-                    }
-                    if (selected.status() != ZKProfileReservationStore.CreateStatus.CONFLICT) {
-                        return CompletableFuture.completedFuture(recoveryFailure(ledger, context,
-                                completionStatus(selected.status()), null));
-                    }
-                    if (data.values().stream().anyMatch(peer -> !peer.hello().capabilities().contains(
-                            org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.EXPLICIT_CAPABILITY))) {
-                        return CompletableFuture.completedFuture(progress.get());
-                    }
-                    return verifyPrefixOnce(accepted, sdk, data, controls, key, maxCoordinates, stopped)
-                            .thenCompose(proof -> {
-                        if (proof.status() != PrefixStatus.VERIFIED_NORMAL_TAIL || stopped.get()) {
-                            return CompletableFuture.completedFuture(new RecoveryResult(ledger,
-                                    stopped.get() || proof.status() == PrefixStatus.DEFERRED ? RecoveryStatus.DEFERRED
-                                        : proof.status() == PrefixStatus.DATA_LOSS ? RecoveryStatus.DATA_LOSS
-                                            : proof.status() == PrefixStatus.QUARANTINED ? RecoveryStatus.QUARANTINED
-                                                : RecoveryStatus.CONFLICT,
-                                    proof.reason(), context, proof.prefixEntryId(), proof.prefixLength(), proof, null));
-                        }
-                        return CompletableFuture.supplyAsync(() -> stopped.get() ? null
-                                : reservations.selectPrefix(metadata, proof), cold).thenCompose(published -> {
-                            if (published == null || published.snapshot() == null) {
-                                return CompletableFuture.completedFuture(recoveryFailure(ledger, context,
-                                        published == null ? CompletionStatus.DEFERRED
-                                            : completionStatus(published.status()), proof));
-                            }
-                            return recoverSelected(accepted, published.snapshot(), proof, sdk, descriptor, key, data,
-                                    controls, stopped, progress);
-                        });
-                    });
-                });
-            });
+            var actual = recoverOnce(ledger, operation, sdk, descriptor, decoded, identity, key, data,
+                    controls, maxCoordinates, stopped, progress);
             var timer = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
             actual.whenComplete((result, failure) -> {
                 var scheduled = timer.get();
@@ -714,6 +1032,71 @@ public final class ProfileRecoveryCoordinator {
             active.release();
             throw invalid;
         }
+    }
+
+    private CompletableFuture<RecoveryResult> recoverOnce(long ledger, byte[] operation, ClientContext sdk,
+            byte[] descriptor, org.apache.bookkeeper.common.profile.ProfileDescriptor decoded, byte[] identity,
+            ProtectedProfileCredential key, Map<BookieId, ProfileNormalDataClient> data,
+            Map<String, ProfileInitialControlClient> controls, int maxCoordinates, AtomicBoolean stopped,
+            java.util.concurrent.atomic.AtomicReference<RecoveryResult> progress) {
+        return CompletableFuture.supplyAsync(
+                () -> startRecovery(ledger, operation, decoded, identity, key, stopped), cold)
+                .thenCompose(start -> {
+            if (start.closed() != null) {
+                return CompletableFuture.completedFuture(new RecoveryResult(ledger,
+                        RecoveryStatus.RECOVERED_AND_CLOSED, PrefixReason.NORMAL_TAIL,
+                        start.accepted().context(),
+                        start.closed().metadata().metadata().getValue().getLastEntryId(),
+                        start.closed().metadata().metadata().getValue().getLength(), null, start.closed()));
+            }
+            if (start.accepted() == null || start.accepted().context() == null) {
+                return CompletableFuture.completedFuture(new RecoveryResult(ledger, start.failure(),
+                        start.reason(), null, -1, 0, null, null));
+            }
+            var accepted = start.accepted();
+            var context = accepted.context();
+            progress.set(new RecoveryResult(ledger, RecoveryStatus.DEFERRED, PrefixReason.SOURCE_UNAVAILABLE,
+                    context, -1, 0, null, null));
+            return CompletableFuture.supplyAsync(() -> reservations.readSelectedPrefix(metadata, context), cold)
+                    .thenCompose(selected -> {
+                if (stopped.get()) {
+                    return CompletableFuture.completedFuture(progress.get());
+                }
+                if (selected.snapshot() != null) {
+                    return recoverSelected(accepted, selected.snapshot(), null, sdk, descriptor, key, data,
+                            controls, stopped, progress);
+                }
+                if (selected.status() != ZKProfileReservationStore.CreateStatus.CONFLICT) {
+                    return CompletableFuture.completedFuture(recoveryFailure(ledger, context,
+                            completionStatus(selected.status()), null));
+                }
+                if (data.values().stream().anyMatch(peer -> !peer.hello().capabilities().contains(
+                        org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.EXPLICIT_CAPABILITY))) {
+                    return CompletableFuture.completedFuture(progress.get());
+                }
+                return verifyPrefixOnce(accepted, sdk, data, controls, key, maxCoordinates, stopped)
+                        .thenCompose(proof -> {
+                    if (proof.status() != PrefixStatus.VERIFIED_NORMAL_TAIL || stopped.get()) {
+                        return CompletableFuture.completedFuture(new RecoveryResult(ledger,
+                                stopped.get() || proof.status() == PrefixStatus.DEFERRED ? RecoveryStatus.DEFERRED
+                                    : proof.status() == PrefixStatus.DATA_LOSS ? RecoveryStatus.DATA_LOSS
+                                        : proof.status() == PrefixStatus.QUARANTINED ? RecoveryStatus.QUARANTINED
+                                            : RecoveryStatus.CONFLICT,
+                                proof.reason(), context, proof.prefixEntryId(), proof.prefixLength(), proof, null));
+                    }
+                    return CompletableFuture.supplyAsync(() -> stopped.get() ? null
+                            : reservations.selectPrefix(metadata, proof), cold).thenCompose(published -> {
+                        if (published == null || published.snapshot() == null) {
+                            return CompletableFuture.completedFuture(recoveryFailure(ledger, context,
+                                    published == null ? CompletionStatus.DEFERRED
+                                        : completionStatus(published.status()), proof));
+                        }
+                        return recoverSelected(accepted, published.snapshot(), proof, sdk, descriptor, key, data,
+                                controls, stopped, progress);
+                    });
+                });
+            });
+        });
     }
 
     private RecoveryStart startRecovery(long ledger, byte[] operation,
@@ -1222,11 +1605,23 @@ public final class ProfileRecoveryCoordinator {
         return fenceOnce(accepted, controls, credential).thenCompose(fenced -> {
             // Includes a possibly empty final fragment: all its current targets must answer, not merely A of E.
             var last = value.getAllEnsembles().lastEntry().getValue();
-            if (stopped.get() || fenced.status() != Status.FENCED_CONTEXT
-                    || !last.stream().allMatch(bookie -> data.containsKey(bookie) && fenced.fences().stream()
-                        .anyMatch(fence -> fence.bookie().equals(bookie.toString())))) {
+            if (stopped.get()) {
                 return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED,
-                        stopped.get() ? PrefixReason.CANCELLED : PrefixReason.SOURCE_UNAVAILABLE));
+                        PrefixReason.CANCELLED));
+            }
+            if (fenced.status() == Status.CONFLICT || fenced.status() == Status.QUARANTINED) {
+                return CompletableFuture.completedFuture(replicaFailure(fenced.status() == Status.CONFLICT
+                        ? ReplicaHealthStatus.CONFLICT : ReplicaHealthStatus.QUARANTINED,
+                        PrefixReason.AUTHORITY_CHANGED));
+            }
+            var unavailable = last.stream().filter(bookie -> !data.containsKey(bookie) || fenced.fences().stream()
+                    .noneMatch(fence -> fence.bookie().equals(bookie.toString()))).map(bookie ->
+                        new ProfileRecoveryReadHandle.SourceEvidence(bookie, data.containsKey(bookie)
+                            ? HexFormat.of().formatHex(data.get(bookie).hello().storageIncarnation()) : "",
+                            ProfileRecoveryReadHandle.SourceOutcome.UNAVAILABLE)).toList();
+            if (fenced.status() != Status.FENCED_CONTEXT || !unavailable.isEmpty()) {
+                return CompletableFuture.completedFuture(new ReplicaHealthResult(ReplicaHealthStatus.DEFERRED,
+                        PrefixReason.SOURCE_UNAVAILABLE, value.getAllEnsembles().lastKey(), unavailable, null));
             }
             var controlPeers = new java.util.HashMap<BookieId, ProfileInitialControlClient>();
             controls.forEach((name, peer) -> controlPeers.put(BookieId.parse(name), peer));
@@ -1285,28 +1680,8 @@ public final class ProfileRecoveryCoordinator {
         var caller = new CompletableFuture<MarkerCleanupStatus>();
         var stopped = new AtomicBoolean();
         try {
-            CompletableFuture.supplyAsync(() -> {
-                if (stopped.get() || proof.deadline - System.nanoTime() <= 0) {
-                    return MarkerCleanupStatus.DEFERRED;
-                }
-                if (!proof.consumed.compareAndSet(false, true)) {
-                    return MarkerCleanupStatus.CONFLICT;
-                }
-                var current = reservations.readClosedForOpen(metadata, proof.snapshot.context().ledger().ledgerId());
-                if (current.snapshot() == null) {
-                    return switch (current.status()) {
-                        case DELETED -> MarkerCleanupStatus.DELETED;
-                        case UNAVAILABLE -> MarkerCleanupStatus.DEFERRED;
-                        case QUARANTINED -> MarkerCleanupStatus.QUARANTINED;
-                        default -> MarkerCleanupStatus.CONFLICT;
-                    };
-                }
-                if (!sameClosedSnapshot(proof.snapshot, current.snapshot())) {
-                    return MarkerCleanupStatus.CONFLICT;
-                }
-                return stopped.get() || proof.deadline - System.nanoTime() <= 0 ? MarkerCleanupStatus.DEFERRED
-                        : reservations.completeReplicaMarker(metadata, current.snapshot(), worker, proof.task);
-            }, cold).whenComplete((result, failure) -> {
+            CompletableFuture.supplyAsync(() -> completeReplicationOnce(proof, worker, stopped), cold)
+                    .whenComplete((result, failure) -> {
                 active.release();
                 if (failure != null) {
                     caller.completeExceptionally(failure);
@@ -1324,6 +1699,30 @@ public final class ProfileRecoveryCoordinator {
             active.release();
             throw rejected;
         }
+    }
+
+    private MarkerCleanupStatus completeReplicationOnce(ReplicaHealthProof proof,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker, AtomicBoolean stopped) {
+        if (stopped.get() || proof.deadline - System.nanoTime() <= 0) {
+            return MarkerCleanupStatus.DEFERRED;
+        }
+        if (!proof.consumed.compareAndSet(false, true)) {
+            return MarkerCleanupStatus.CONFLICT;
+        }
+        var current = reservations.readClosedForOpen(metadata, proof.snapshot.context().ledger().ledgerId());
+        if (current.snapshot() == null) {
+            return switch (current.status()) {
+                case DELETED -> MarkerCleanupStatus.DELETED;
+                case UNAVAILABLE -> MarkerCleanupStatus.DEFERRED;
+                case QUARANTINED -> MarkerCleanupStatus.QUARANTINED;
+                default -> MarkerCleanupStatus.CONFLICT;
+            };
+        }
+        if (!sameClosedSnapshot(proof.snapshot, current.snapshot())) {
+            return MarkerCleanupStatus.CONFLICT;
+        }
+        return stopped.get() || proof.deadline - System.nanoTime() <= 0 ? MarkerCleanupStatus.DEFERRED
+                : reservations.completeReplicaMarker(metadata, current.snapshot(), worker, proof.task);
     }
 
     private static ReplicaHealthResult replicaFailure(ReplicaHealthStatus status, PrefixReason reason) {

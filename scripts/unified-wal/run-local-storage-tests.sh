@@ -29,6 +29,9 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/version
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/meta/TestLedgerMetadataSerDe.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestLedgerUnderreplicationManager.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationException.java'))
+paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationWorker.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestReplicationWorker.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/test/ZooKeeperUtil.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/util/ByteBufList.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
              ('client/api/LedgerMetadata.java', 'client/api/DigestType.java',

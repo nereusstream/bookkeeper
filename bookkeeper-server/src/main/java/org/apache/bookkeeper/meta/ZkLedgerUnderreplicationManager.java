@@ -143,6 +143,12 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
         return captured == null || captured.profileGuard == null || captured.lockBirth == 0
                 || captured.ledgerZNodeVersion.isEmpty() ? null : new ProfileTask(this, ledger, captured);
     }
+
+    public void releaseProfileTask(ProfileTask task) throws UnavailableException {
+        if (task != null && task.issuer == this) {
+            releaseProfileLock(task.ledger, task.captured);
+        }
+    }
     private final Pattern idExtractionPattern;
 
     private final String rootPath;

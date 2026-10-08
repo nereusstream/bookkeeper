@@ -874,3 +874,37 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 最终模型 `unified-wal-model-lh5o9ekm` exit0：166配置25完整正向PASS/141指定反例，787当前source inputs/863 artifact checksums；Java与模型229重合/1604去重输入及父HEAD五个designInputs全部核对，历史回执不重绑。新marker正向12908 generated/2944 distinct、queue0、depth/diameter13、0.923秒/peak RSS155844608 bytes；此为有限模型消耗，非存储性能。tool1.7.4，单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整480配置未运行。
 
 前期`unified-wal-local-n4zJtscr`是SessionExpiredException构造签名的编译错误，不计协议RED；`unified-wal-local-X8Lawqnp`四项因localhost外部DNS解析而在fixture初始化失败，未执行协议检查。改用literal loopback后`unified-wal-local-l030ANhc`5项通过；增加pending acquire/release串行与其测试后`unified-wal-local-uJrqepQq`8项通过。原较早广度`unified-wal-local-xp3muzcq`268项/model `unified-wal-model-1ujvitem`165配置在补原task绑定前通过，仅作原切片历史记录；发现旧proof可能消费同manager新task后，改为起点绑定私有receipt并扩大到上述最终269项/166配置，不以旧结果代替修复后验证。初次模型`unified-wal-model-0w41kl25`因TLA运算符括号解析失败为INCONCLUSIVE；修正后的`unified-wal-model-ud9f5ly1`12配置及较早`unified-wal-model-q91ev34v`12配置不包含最终task反例，均不替代当前13配置。
+
+## 原 ReplicationWorker 的 Profile 自动循环
+
+2026-10-09，第14步增加原 `ReplicationWorker` 的显式 Profile constructor，使用原 SDK/factory/worker thread/backoff/stats，借用已有 coordinator、一个 canonical descriptor、已验证 DATA/control pools。默认 production constructor 不启用 Profile；实际 metadata 只要含 backlink key（包括损坏值），便不进入 Classic open/copy。显式 Profile cohort 中 metadata 丢失/不可用也保留 marker，不能用 NoSuchLedger 当删除事实；未启用 cohort 时原 Classic NoSuch 语义保留。
+
+`WorkerOptions` 固定 pool各最多64、coordinate上限、每attempt至多32个新复制及至多一分钟stop deadline；descriptor按现有validator解码、每ledger按实际metadata password派生protected credential，不逐entry访问远端MetadataStore或handshake。新constructor要求同借用ZK mutation context与兼容SDK scope，并在poll前启用原manager的task guards。默认服务启动/bootstrap、registry发现pool及动态重连/多descriptor配置仍未接线，当前仅显式隔离cohort。
+
+一次 `WorkerAttempt` 从原poll task捕获私有receipt，在同一个coordinator实际permit下串起原private恢复核心：OPEN进入现有fenced point recovery，IN_RECOVERY按已存context/selection/SELF/head续接，matching CLOSED直接验证；再处理worker已持久化的COPY intent、实际inactive INSTALL/admission/grant/原SDK单entry copy、同snapshot membership publication与原close ID。A3缺当前接收者时，在已固定selection下复制/更换last fragment再重入原恢复，不能把A2结果当A3 close。已发布目标的close续接不recopy、不消耗新复制预算；当该目标随后丢失，可保留历史并修复新的当前副本。
+
+worker的inert计划仍使用原固定32槽UWRP及admission/commit receipt，不另建工作项日志。`worker-repair` authority domain隔离原normal/SELF operation；install/intent/grant IDs由原context、当前metadata digest、fragment/member/last与实际target incarnation确定，close ID在计划创建时固定，published时读取原receipt。重启先查原目标与ID再选择新target；不会因reply丢失换ID或覆写旧意图。候选来自提供的verified pools，按BookieId稳定顺序选择，排除全部当前及留存activation/repair目标，不复用旧BookieId/incarnation，不做rack/AZ或strong loss reset。
+
+CLOSED从0..P沿原exact write-set复核完整W份合法DATA和累积length，末次重读metadata/DELETE后，以原task/lock/marker条件化清理。最后fragment的FENCE失败仅给UNAVAILABLE诊断用于有界复制选择，不当DATA absence/FOUND；有冲突/权限/required loss时保留相应错误与marker。成功只有REPLICATED且guarded removal实际返回成功；numLedgersReplicated及原rereplicate stats按这一结果统计，失败使用原exception counter。
+
+deadline/stop只停止未来阶段，不提前终结实际attempt。worker被interrupt/shutdown时设置stop，等待已发RPC、buffer custody及cold command实际终结，才release原task receipt；不走Classic的延迟release timer，不关闭借用SDK/peer pools。已经提交的持久化或CAS不回滚，UNKNOWN仍按原intent/close identity续接，不释放DATA坐标。实际I/O/网络始终不终结时不能声称drain已完成；无liveness或瞬时强撤权保证。
+
+真实worker在原线程循环中验证A2/A3：健康CLOSED、OPEN缺一个成员后COPY/close、CLOSED缺成员、OPEN空ledger全副本健康，以及历史fragment的第三副本缺DATA后COPY/全副本复核。另验证默认OFF、损坏backlink、缺metadata、空CLOSED缺成员都保留marker；持有三条实际READ回复时shutdown保持lock与permit，排空后借用SDK/pools可用，新worker接原marker。UIC4实际force后丢回复/断连，新coordinator沿published intent零recopy，再在maxRepairs=1下替换损坏目标及之后丢失的修复目标，保留P/L、原UWCF与完整head。Classic实际bookie的replication stats/empty open两项回归也执行；ZooKeeperUtil保留服务器numeric loopback，不反解到外部DNS，不更改主机DNS或生产网络设置。
+
+当前空ledger/empty-last缺成员的grantless membership repair尚无合同实现，明确DEFERRED且不制造DATA/grant；这项仍必须补齐。candidate耗尽/32槽满额保留任务，不自行强reset；worker仅自动续接本路径的worker-repair intent，其他人工intent/更复杂并发协调仍需对应合同与验证。原AutoRecoveryMain服务bootstrap、动态pool、sameBookieId rejoin/离线catch-up、hierarchy/page GC、distributed delete、完整A/C/D组合/总预算/兼容/掉电/长期性能仍OPEN，步骤14保持PARTIAL，生产Gate不提升。
+
+有限 `ProfileReplicationWorker.tla` 投影已启用worker的route/recovery/plan/copy/publication/close/health/marker/stop ownership组合。2正向（A2/A3）/14指定反例覆盖已识别Profile不得Classic fallback、全部W才能清marker、durable copy前置、normal禁用、intent固定、published不recopy、child留lock、原task/DELETE、descriptor、UNKNOWN、空缺副本拒绝、work bound和P固定。point selection、force/guard/reply是输入，非fsync/TLS/crypto生产者；无Profile证据且未启用cohort的Classic路径不在该Profile保证内。
+
+重现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#replicationWorker*,TestReplicationWorker#testReplicationStats+testReplicateEmptyOpenStateLedger'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker
+```
+
+Java广度 `unified-wal-local-LBkcGJJv` exit0：15类275项（common37/server238，socket80、URmanager24、Classic worker2、lifecycle45、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1049冻结输入/18 artifact checksums；它在最后预算修复及historical场景扩展前运行，历史绑定不改。预算修复/扩展后 `unified-wal-local-XZ89GbCr`8项通过（含两项Classic），1049 inputs/5 checksums；最后仅WorkerRepairPlan record长行换行，当前 `unified-wal-local-bNb7w4QU`2项worker主线通过，1049当前输入/4 checksums。最终style `unified-wal-worker-final-checks-eUiTDc42` exit0；root RAT exit1/443 unapproved全部在父HEAD，新增model/cfg未增加失败，checks目录6项。无CI全绿或性能改善声明。
+
+模型广度 `unified-wal-model-kwjihg5e` exit0：182配置27完整正向PASS/155指定反例，806输入/910 artifact checksums；之后仅两处生产代码的新复制预算/对应测试和最终record换行，TLA/配置未改变。最后预算后的定向 `unified-wal-model-6t30rm5u`16配置符合预期；最终 `unified-wal-model-kq_twh8v`16配置2正向/14指定反例、806当前输入/603 checksums。最终Java与模型232重合/1623去重当前inputs及父HEAD五个designInputs逐项核验；历史run不重绑。A2正向2445 generated/1350 distinct、queue0、depth/diameter12、0.919秒/peak RSS132579328 bytes；A3为2508/1402/0、13/13、0.877秒/129728512 bytes，是有限模型消耗，非存储性能。官方tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。完整496配置未运行。
+
+早期 `unified-wal-local-Wcz1OWTH`/`GxO6EURv`/`iQSkfu35` 分别是metadataDigest的IOException声明、FutureUtils包装interrupt后的无效catch、配置setter返回void的编译错误，不计协议RED。`unified-wal-local-TSSTFkXD`5项及`QIKDmWUt`6项先验证worker/Classic切片，再进入广度；发现published close续接错误消耗新copy预算后补上述maxRepairs=1覆盖。初次模型 `unified-wal-model-ncyqftoa`为括号解析失败INCONCLUSIVE，不计PASS，修正后才执行定向与广度。

@@ -19,6 +19,22 @@ import time
 
 
 MATRIX = {
+    'a-profile-replication-worker': None,
+    'a-profile-replication-worker-threeofthree': None,
+    'ce-profile-replication-worker-classic': 'NoClassicForProfile',
+    'ce-profile-replication-worker-quorum': 'ClearRequiresAllCopies',
+    'ce-profile-replication-worker-data': 'PublicationRequiresDurableData',
+    'ce-profile-replication-worker-normal': 'NoNormalActivation',
+    'ce-profile-replication-worker-intent': 'SameIntentOnResume',
+    'ce-profile-replication-worker-recopy': 'PublishedResumeDoesNotRecopy',
+    'ce-profile-replication-worker-drain': 'ActualChildRetainsTask',
+    'ce-profile-replication-worker-task': 'OriginalTaskAtClear',
+    'ce-profile-replication-worker-delete': 'DeletePreventsCompletion',
+    'ce-profile-replication-worker-descriptor': 'DescriptorRequired',
+    'ce-profile-replication-worker-unknown': 'UnknownDoesNotPublish',
+    'ce-profile-replication-worker-empty': 'EmptyMissingRemainsPending',
+    'ce-profile-replication-worker-bound': 'WorkIsBounded',
+    'ce-profile-replication-worker-prefix': 'PrefixIsFixed',
     'a-profile-marker-cleanup': None,
     'ce-profile-marker-cleanup-birth': 'OriginalMarkerBirth',
     'ce-profile-marker-cleanup-version': 'OriginalMarkerVersion',
@@ -561,6 +577,9 @@ def main():
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/meta").glob("*.java"))
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestLedgerUnderreplicationManager.java")
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationException.java")
+    inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationWorker.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestReplicationWorker.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/test/ZooKeeperUtil.java")
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning").glob("*.java"))
     inputs.extend(root / name for name in [
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileBookieClient.java",
@@ -634,6 +653,7 @@ def main():
                    else "ProfileClosedRepair.tla" if "profile-closed-repair" in name
                    else "ProfileReplicaHealth.tla" if "profile-replica-health" in name
                    else "ProfileMarkerCleanup.tla" if "profile-marker-cleanup" in name
+                   else "ProfileReplicationWorker.tla" if "profile-replication-worker" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name

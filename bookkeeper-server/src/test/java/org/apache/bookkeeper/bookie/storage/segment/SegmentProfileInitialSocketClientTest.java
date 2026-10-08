@@ -2324,6 +2324,368 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    @Test
+    public void replicationWorkerUsesActualProfileRecoveryCopyHealthAndGuardedMarkerRemoval() throws Exception {
+        for (int ack : List.of(2, 3)) {
+            for (int mode : List.of(0, 1, 2, 3, 4)) {
+                try (Fixture fixture = new Fixture(false, false, true, mode == 4 ? 5 : 4, ack, true, true);
+                        BookKeeper sdk = sdk(fixture)) {
+                    fixture.connectAll(Duration.ofSeconds(5));
+                    var initialized = fixture.initialize().get(5, TimeUnit.SECONDS);
+                    var all = new HashMap<BookieId, ProfileNormalDataClient>();
+                    for (int node = 0; node < 3; node++) {
+                        var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                        all.put(fixture.identities.get(node).bookieId(), peer);
+                        for (long entry = 0; mode != 3 && !(mode == 4 && node == 2) && entry < 3; entry++) {
+                            evidenceEntry(fixture, peer, entry, entry - 1, (entry + 1) * 16, 16);
+                        }
+                    }
+                    var metadata = new ProfileLedgerMetadataStore(fixture.zk,
+                            (AbstractZkLedgerManager) fixture.manager, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            Duration.ofSeconds(5));
+                    var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                    if (mode == 4) {
+                        var control = fixture.connect(3, 4, Duration.ofSeconds(5));
+                        var peer = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
+                        all.put(fixture.identities.get(3).bookieId(), peer);
+                        var replacement = new ProfileReplacementCoordinator(fixture.reservations, metadata,
+                                VALIDATOR, fixture.cold);
+                        var plan = replacement.begin(initialized.metadata(), 3,
+                                Map.of(2, new ProfileReplacementCoordinator.Target(control, peer)),
+                                fixture.descriptorBytes, fixture.credential, bytes(16, 20), bytes(16, 21))
+                                    .get(5, TimeUnit.SECONDS);
+                        assertEquals(ProfileReplacementCoordinator.Status.AVAILABLE,
+                                replacement.execute(plan).get(5, TimeUnit.SECONDS).status());
+                        for (int member : List.of(0, 1, 3)) {
+                            evidenceEntry(fixture, all.get(fixture.identities.get(member).bookieId()), 3, 2, 64, 16);
+                        }
+                    }
+                    if (mode == 0 || mode == 2 || mode == 4) {
+                        assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
+                                coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes,
+                                        VALIDATOR, fixture.credential, all, fixture.clients, 6, Duration.ofSeconds(30))
+                                    .get(30, TimeUnit.SECONDS).status());
+                    }
+                    var controls = new HashMap<>(fixture.clients);
+                    if (mode == 1 || mode == 2) {
+                        all.remove(fixture.identities.get(2).bookieId());
+                        controls.remove(fixture.identities.get(2).bookieId().toString());
+                        fixture.connect(3, 4, Duration.ofSeconds(5));
+                        controls.put(fixture.identities.get(3).bookieId().toString(),
+                                fixture.clients.get("socket3:3181"));
+                        all.put(fixture.identities.get(3).bookieId(), dataClient(fixture, 3, 4, Duration.ofSeconds(5)));
+                    }
+                    if (mode == 4) {
+                        controls.put("socket4:3181", fixture.connect(4, 4, Duration.ofSeconds(5)));
+                        all.put(fixture.identities.get(4).bookieId(), dataClient(fixture, 4, 4, Duration.ofSeconds(5)));
+                    }
+                    var conf = profileWorkerConfiguration(fixture);
+                    var options = new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                            all, controls, 6, 8, Duration.ofSeconds(30));
+                    try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                        monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                        var worker = new org.apache.bookkeeper.replication.ReplicationWorker(conf, sdk,
+                                org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, coordinator, options);
+                        worker.start();
+                        try {
+                            awaitProfileWorkerStarted(worker);
+                            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                            while (monitor.getLedgerUnreplicationInfo(44) != null && System.nanoTime() < until) {
+                                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                            }
+                            assertNull("ack=" + ack + " mode=" + mode, monitor.getLedgerUnreplicationInfo(44));
+                            var value = fixture.manager.readLedgerMetadata(44).get().getValue();
+                            assertEquals(LedgerMetadata.State.CLOSED, value.getState());
+                            assertEquals(mode == 3 ? -1 : mode == 4 ? 3 : 2, value.getLastEntryId());
+                            assertEquals(mode == 3 ? 0 : mode == 4 ? 64 : 48, value.getLength());
+                            if (mode == 1 || mode == 2 || mode == 4) {
+                                int target = mode == 4 ? 4 : 3;
+                                assertEquals(fixture.identities.get(target).bookieId(),
+                                        value.getAllEnsembles().get(0L).get(2));
+                                assertFalse(fixture.normal(target));
+                                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec
+                                        .Outcome.FOUND, all.get(fixture.identities.get(target).bookieId())
+                                            .readEntry(fixture.context(), 2).get(5, TimeUnit.SECONDS).outcome());
+                            }
+                        } finally {
+                            worker.shutdown();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void replicationWorkerRetainsDisabledMalformedMissingMetadataAndUnsupportedEmptyTasks() throws Exception {
+        for (int mode : List.of(0, 1, 2, 3)) {
+            try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    data.put(fixture.identities.get(node).bookieId(),
+                            dataClient(fixture, node, 4, Duration.ofSeconds(5)));
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                if (mode == 3) {
+                    assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
+                            coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes,
+                                    VALIDATOR, fixture.credential, data, fixture.clients, 3, Duration.ofSeconds(30))
+                                .get(30, TimeUnit.SECONDS).status());
+                    data.remove(fixture.identities.get(2).bookieId());
+                    fixture.connect(3, 4, Duration.ofSeconds(5));
+                    data.put(fixture.identities.get(3).bookieId(), dataClient(fixture, 3, 4, Duration.ofSeconds(5)));
+                }
+                var controls = new HashMap<>(fixture.clients);
+                if (mode == 3) {
+                    controls.remove("socket2:3181");
+                }
+                if (mode == 1) {
+                    var before = fixture.manager.readLedgerMetadata(44).get();
+                    var custom = new java.util.TreeMap<>(before.getValue().getCustomMetadata());
+                    custom.put(org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink.KEY, new byte[] {1});
+                    fixture.manager.writeLedgerMetadata(44, LedgerMetadataBuilder.from(before.getValue())
+                            .withCToken(before.getValue().getCToken()).withCustomMetadata(custom).build(),
+                            before.getVersion()).get();
+                } else if (mode == 2) {
+                    org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk,
+                            ((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44));
+                }
+                var stats = new org.apache.bookkeeper.test.TestStatsProvider().getStatsLogger("worker");
+                var conf = profileWorkerConfiguration(fixture);
+                try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                    monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                    var worker = mode == 0 ? new org.apache.bookkeeper.replication.ReplicationWorker(conf, stats)
+                            : new org.apache.bookkeeper.replication.ReplicationWorker(conf, sdk, stats, coordinator,
+                                new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                                        data, controls, 3, 8, Duration.ofSeconds(30)));
+                    worker.start();
+                    try {
+                        awaitProfileWorkerStarted(worker);
+                        String counter = mode == 0 ? "ProfileWorkerDisabled" : mode == 1 ? "ProfileQUARANTINED"
+                                : mode == 2 ? "ProfileMetadataUnavailable" : "ProfileDEFERRED";
+                        var errors = stats.scope(org.apache.bookkeeper.replication.ReplicationStats.REPLICATE_EXCEPTION)
+                                .getCounter(counter);
+                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (errors.get() == 0 && System.nanoTime() < until) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                        assertTrue("mode=" + mode, errors.get() > 0);
+                        assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                        if (mode == 3) {
+                            assertEquals(0, fixture.nodeIo.get(3).forces);
+                        }
+                    } finally {
+                        worker.shutdown();
+                    }
+                    assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void replicationWorkerShutdownWaitsForActualReadDrainAndLeavesBorrowedPoolsUsable() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                data.put(fixture.identities.get(node).bookieId(), peer);
+                evidenceEntry(fixture, peer, 0, -1, 16, 16);
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                    fixture.credential, data, fixture.clients, 3, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            var options = new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                    data, fixture.clients, 3, 8, Duration.ofSeconds(30));
+            var stopper = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                fixture.replyFault.set(21);
+                var worker = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture),
+                        sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, coordinator, options);
+                worker.start();
+                awaitProfileWorkerStarted(worker);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(3, fixture.heldReplies.size());
+                var stopping = stopper.submit(worker::shutdown);
+                try {
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                    assertTrue(monitor.isLedgerBeingReplicated(44));
+                    assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                } finally {
+                    fixture.replyFault.set(0);
+                    fixture.heldReplies.forEach(Runnable::run);
+                }
+                stopping.get(5, TimeUnit.SECONDS);
+                assertFalse(monitor.isLedgerBeingReplicated(44));
+                assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                assertFalse(sdk.getClientCtx().isClientClosed());
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                        data.values().iterator().next().readEntry(fixture.context(), 0)
+                            .get(5, TimeUnit.SECONDS).outcome());
+                var resumed = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture),
+                        sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, coordinator, options);
+                resumed.start();
+                try {
+                    awaitProfileWorkerStarted(resumed);
+                    until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (monitor.getLedgerUnreplicationInfo(44) != null && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertNull(monitor.getLedgerUnreplicationInfo(44));
+                } finally {
+                    resumed.shutdown();
+                }
+            } finally {
+                stopper.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    public void replicationWorkerNewCoordinatorResumesPublishedCloseWithoutRecopyAndRepairsLaterLoss()
+            throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 6, 2, true, true);
+                BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                data.put(fixture.identities.get(node).bookieId(), peer);
+                for (long entry = 0; entry < 3; entry++) {
+                    evidenceEntry(fixture, peer, entry, entry - 1, (entry + 1) * 16, 16);
+                }
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var initial = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold)
+                    .recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                            fixture.credential, data, fixture.clients, 6, Duration.ofSeconds(30))
+                        .get(30, TimeUnit.SECONDS);
+            assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED, initial.status());
+            var original = fixture.manager.readLedgerMetadata(44).get().getValue();
+            data.remove(fixture.identities.get(2).bookieId());
+            for (int target : List.of(3, 4, 5)) {
+                fixture.connect(target, 4, Duration.ofSeconds(5));
+                data.put(fixture.identities.get(target).bookieId(),
+                        dataClient(fixture, target, 4, Duration.ofSeconds(5)));
+            }
+            var controls = new HashMap<>(fixture.clients);
+            controls.remove("socket2:3181");
+            fixture.faultTarget.set(3);
+            fixture.replyFault.set(18);
+            try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                var worker = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture),
+                        sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE,
+                        new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold),
+                        new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                                data, controls, 6, 1, Duration.ofSeconds(30)));
+                worker.start();
+                int forces;
+                try {
+                    awaitProfileWorkerStarted(worker);
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (!fixture.manager.readLedgerMetadata(44).get().getValue().getAllEnsembles().get(0L)
+                            .get(2).equals(fixture.identities.get(3).bookieId()) && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertEquals(fixture.identities.get(3).bookieId(),
+                            fixture.manager.readLedgerMetadata(44).get().getValue().getAllEnsembles().get(0L).get(2));
+                    assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                    forces = files(fixture.nodes.get(3)).dataIo.forces;
+                } finally {
+                    worker.shutdown();
+                }
+                fixture.replyFault.set(16); // A published close resume must not consume the new-copy budget.
+                controls.put("socket3:3181", fixture.connect(3, 4, Duration.ofSeconds(5)));
+                var resumed = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture),
+                        sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE,
+                        new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold),
+                        new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                                data, controls, 6, 1, Duration.ofSeconds(30)));
+                resumed.start();
+                try {
+                    awaitProfileWorkerStarted(resumed);
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (monitor.getLedgerUnreplicationInfo(44) != null && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertNull(monitor.getLedgerUnreplicationInfo(44));
+                    assertEquals(forces, files(fixture.nodes.get(3)).dataIo.forces);
+                } finally {
+                    resumed.shutdown();
+                }
+                fixture.replyFault.set(0);
+                data.remove(fixture.identities.get(4).bookieId());
+                controls.remove("socket4:3181");
+                monitor.markLedgerUnderreplicated(44, "socket4:3181");
+                var replacement = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture), sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE,
+                        new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold),
+                        new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                                data, controls, 6, 1, Duration.ofSeconds(30)));
+                replacement.start();
+                try {
+                    awaitProfileWorkerStarted(replacement);
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (monitor.getLedgerUnreplicationInfo(44) != null && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertNull(monitor.getLedgerUnreplicationInfo(44));
+                    var value = fixture.manager.readLedgerMetadata(44).get().getValue();
+                    assertEquals(fixture.identities.get(5).bookieId(), value.getAllEnsembles().get(0L).get(2));
+                    assertEquals(original.getLastEntryId(), value.getLastEntryId());
+                    assertEquals(original.getLength(), value.getLength());
+                    assertArrayEquals(original.getCustomMetadata().get(
+                            org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.CLOSE_KEY),
+                            value.getCustomMetadata().get(
+                                org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.CLOSE_KEY));
+                    assertEquals(6, org.apache.bookkeeper.discover.profile.ProfileRepairCommit.head(
+                            value.getCustomMetadata().get(
+                                org.apache.bookkeeper.discover.profile.ProfileRepairCommit.KEY))
+                                .size());
+                } finally {
+                    replacement.shutdown();
+                }
+            }
+        }
+    }
+
+    private static ServerConfiguration profileWorkerConfiguration(Fixture fixture) {
+        var conf = new ServerConfiguration().setMetadataServiceUri("zk+longhierarchical://"
+                + fixture.cluster.getZooKeeperConnectString() + "/socket-ledgers");
+        conf.setRwRereplicateBackoffMs(20);
+        return conf;
+    }
+
+    private static void awaitProfileWorkerStarted(org.apache.bookkeeper.replication.ReplicationWorker worker) {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!worker.isRunning() && System.nanoTime() < until) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        assertTrue(worker.isRunning());
+    }
+
     private static final class HoldReadonlyMetadataClient extends org.apache.zookeeper.ZooKeeper {
         final java.util.concurrent.atomic.AtomicInteger observations = new java.util.concurrent.atomic.AtomicInteger();
         final CountDownLatch held = new CountDownLatch(1);
