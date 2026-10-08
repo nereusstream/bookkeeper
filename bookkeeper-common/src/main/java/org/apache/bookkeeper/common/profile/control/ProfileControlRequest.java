@@ -29,6 +29,31 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorCodec;
 /** Bounded typed request; physical control-tail packing remains deliberately unfrozen. */
 public final class ProfileControlRequest {
 
+    /** Selected boundary only; carries neither an exact DATA range nor a recovery grant. */
+    public record TerminalBinding(long prefixEntryId, long prefixLength, byte[] selectionDigest) {
+        public TerminalBinding {
+            selectionDigest = Objects.requireNonNull(selectionDigest, "selectionDigest").clone();
+            if (prefixEntryId < -1 || prefixEntryId == Long.MAX_VALUE || prefixLength < 0
+                    || prefixEntryId == -1 && prefixLength != 0 || selectionDigest.length != 32) {
+                throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+            }
+        }
+        @Override
+        public byte[] selectionDigest() {
+            return selectionDigest.clone();
+        }
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof TerminalBinding that && prefixEntryId == that.prefixEntryId
+                    && prefixLength == that.prefixLength
+                    && java.util.Arrays.equals(selectionDigest, that.selectionDigest);
+        }
+        @Override
+        public int hashCode() {
+            return Objects.hash(prefixEntryId, prefixLength, java.util.Arrays.hashCode(selectionDigest));
+        }
+    }
+
     public record RecoveryBinding(byte[] intentId, long intentGeneration, long grantGeneration) {
         public RecoveryBinding {
             intentId = Objects.requireNonNull(intentId, "intentId").clone();
@@ -44,6 +69,7 @@ public final class ProfileControlRequest {
     }
 
     private final RecoveryBinding recoveryBinding;
+    private final TerminalBinding terminalBinding;
     private final byte[] closedGrantOperationId;
     private final ProfileControlScope scope;
     private final byte[] canonicalDescriptor;
@@ -65,6 +91,13 @@ public final class ProfileControlRequest {
 
     private ProfileControlRequest(ProfileControlScope scope, byte[] canonicalDescriptor, EngineProfile expectedEngine,
             ProtectedProfileCredential protectedCredential, RecoveryBinding recovery, byte[] closedGrant) {
+        this(scope, canonicalDescriptor, expectedEngine, protectedCredential, recovery, closedGrant, null);
+    }
+
+    private ProfileControlRequest(ProfileControlScope scope, byte[] canonicalDescriptor, EngineProfile expectedEngine,
+            ProtectedProfileCredential protectedCredential, RecoveryBinding recovery, byte[] closedGrant,
+            TerminalBinding terminal) {
+        terminalBinding = terminal;
         recoveryBinding = recovery;
         closedGrantOperationId = closedGrant == null ? null : closedGrant.clone();
         this.scope = Objects.requireNonNull(scope, "scope");
@@ -91,7 +124,8 @@ public final class ProfileControlRequest {
     }
 
     public static ProfileControlRequest operation(ProfileControlScope scope) {
-        if (scope == null || scope.operation() == ProfileControlOperation.INSTALL) {
+        if (scope == null || scope.operation() == ProfileControlOperation.INSTALL
+                || scope.operation() == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE) {
             throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
         }
         return new ProfileControlRequest(scope, null, null, null);
@@ -122,6 +156,37 @@ public final class ProfileControlRequest {
 
     public Optional<byte[]> closedGrantOperationId() {
         return closedGrantOperationId == null ? Optional.empty() : Optional.of(closedGrantOperationId.clone());
+    }
+
+    public static ProfileControlRequest terminalClose(ProfileControlScope scope, TerminalBinding binding) {
+        if (scope == null || scope.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
+                || scope.exactRange() != null || binding == null
+                || !java.util.Arrays.equals(scope.publicSemanticPayloadIdentity(),
+                    terminalPayloadIdentity(scope, binding))) {
+            throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+        }
+        return new ProfileControlRequest(scope, null, null, null, null, null, binding);
+    }
+
+    public Optional<TerminalBinding> terminalBinding() {
+        return Optional.ofNullable(terminalBinding);
+    }
+
+    public static byte[] terminalPayloadIdentity(ProfileControlScope scope, TerminalBinding binding) {
+        byte[] target = scope.targetBookie().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] domain = scope.authorityDomain().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] separator = "UW-RECOVERY-TERMINAL-V1".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        var bytes = java.nio.ByteBuffer.allocate(separator.length + 8 + 16 + 36 + 16 + 8 + 48
+                + 4 + target.length + 4 + domain.length).put(separator).putLong(scope.ledgerId())
+                .put(scope.ledgerInstanceId()).put(scope.descriptorIdentity().toBytes())
+                .put(scope.targetStorageIncarnation()).putLong(scope.authorityGeneration())
+                .putLong(binding.prefixEntryId()).putLong(binding.prefixLength()).put(binding.selectionDigest())
+                .putInt(target.length).put(target).putInt(domain.length).put(domain).array();
+        try {
+            return java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
     }
 
     public ProfileControlScope scope() {

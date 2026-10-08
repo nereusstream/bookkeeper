@@ -657,7 +657,20 @@ public final class ZKProfileReservationStore {
                         && intent.range().lastEntryId() == boundary.prefixEntryId());
     }
 
-    public record CloseTarget(int member, ProfileRepairIntent intent, ProfileControlScope scope) { }
+    public record CloseTarget(int member, ProfileRepairIntent intent, ProfileControlScope scope,
+            org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding terminal) {
+        public CloseTarget(int member, ProfileRepairIntent intent, ProfileControlScope scope) {
+            this(member, intent, scope, null);
+        }
+        public org.apache.bookkeeper.common.profile.control.ProfileControlRequest request() {
+            return terminal != null ? org.apache.bookkeeper.common.profile.control.ProfileControlRequest
+                    .terminalClose(scope, terminal)
+                    : org.apache.bookkeeper.common.profile.control.ProfileControlRequest.recoveryClose(scope,
+                        new org.apache.bookkeeper.common.profile.control.ProfileControlRequest.RecoveryBinding(
+                            intent.intentId(), intent.intentGeneration(), intent.grantGeneration()),
+                        intent.grantOperationId());
+        }
+    }
 
     public record ClosingPlan(ProfileRecoveryContext context,
             ProfileLedgerMetadataStore.MembershipSnapshot metadata, BoundarySnapshot selection,
@@ -685,8 +698,13 @@ public final class ZKProfileReservationStore {
             var selected = selectedBoundary(context, value, deadline);
             if (selected == null || value.getEnsembleSize() != 3 || value.getWriteQuorumSize() != 3
                     || value.getAckQuorumSize() < 2 || value.getAckQuorumSize() > 3
-                    || selected.boundary().prefixEntryId() < value.getAllEnsembles().lastKey()) {
+                    || selected.boundary().prefixEntryId() < value.getAllEnsembles().lastKey() - 1) {
                 return new ClosingPlanResult(CreateStatus.CONFLICT, null);
+            }
+            if (selected.boundary().prefixEntryId() < value.getAllEnsembles().lastKey()) {
+                return new ClosingPlanResult(CreateStatus.ALREADY_APPLIED,
+                        new ClosingPlan(context, current.metadata(), selected,
+                                emptyClosingTargets(context, value, selected, deadline)));
             }
             var targets = new java.util.TreeMap<Integer, CloseTarget>();
             for (var ref : ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY))) {
@@ -713,6 +731,58 @@ public final class ZKProfileReservationStore {
         } catch (IllegalArgumentException invalid) {
             return new ClosingPlanResult(CreateStatus.QUARANTINED, null);
         }
+    }
+
+    /** Existing activated targets only. Empty selected last range authorizes no copy, grant or new member. */
+    private List<CloseTarget> emptyClosingTargets(ProfileRecoveryContext context,
+            org.apache.bookkeeper.client.api.LedgerMetadata metadata, BoundarySnapshot selected, long deadline)
+            throws InterruptedException, TimeoutException {
+        var installs = new java.util.HashMap<String, ProfileControlScope>();
+        recoveryCurrentTargets(context, deadline).forEach(receipt ->
+                installs.put(receipt.scope().targetBookie(), receipt.scope()));
+        var targets = new java.util.ArrayList<CloseTarget>();
+        var members = metadata.getAllEnsembles().lastEntry().getValue();
+        var boundary = selected.boundary();
+        var binding = new org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding(
+                boundary.prefixEntryId(), boundary.prefixLength(), selected.reference().digest());
+        for (int slot = 0; slot < members.size(); slot++) {
+            var install = installs.get(members.get(slot).toString());
+            if (install == null) {
+                throw new IllegalArgumentException("Empty last fragment has no retained activated target");
+            }
+            byte[] bookie = install.targetBookie().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] operation = Arrays.copyOf(ProfileRepairIntent.digest(java.nio.ByteBuffer.allocate(
+                    ProfileRecoveryContext.ENCODED_BYTES + 52 + bookie.length).put(context.encode())
+                    .put(selected.reference().digest()).putInt(slot).put(install.targetStorageIncarnation())
+                    .put(bookie).array()), 16);
+            var base = new ProfileControlScope(ProfileControlOperation.RECOVERY_TERMINAL_CLOSE,
+                    ProfileAuthorityPurpose.RECOVERY_TERMINAL_CLOSE, context.ledger().ledgerId(),
+                    context.ledger().ledgerInstanceId(), install.descriptorIdentity(), install.targetBookie(),
+                    install.targetStorageIncarnation(), "recovery-terminal", context.generation(),
+                    operation, new byte[32], null);
+            var scope = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(),
+                    base.ledgerInstanceId(), base.descriptorIdentity(), base.targetBookie(),
+                    base.targetStorageIncarnation(), base.authorityDomain(), base.authorityGeneration(),
+                    base.operationId(), org.apache.bookkeeper.common.profile.control.ProfileControlRequest
+                        .terminalPayloadIdentity(base, binding), null);
+            targets.add(new CloseTarget(slot, null, scope, binding));
+        }
+        return List.copyOf(targets);
+    }
+
+    private static boolean closingTargetMatches(CloseTarget target, ClosingPlan plan) {
+        var value = plan.metadata().metadata().getValue();
+        if (target.intent() != null) {
+            return target.terminal() == null && target.intent().recovery().equals(plan.context())
+                    && boundedRepairFragment(target.intent(), value, plan.selection().boundary());
+        }
+        var selected = plan.selection();
+        return target.terminal() != null && selected.boundary().prefixEntryId() < value.getAllEnsembles().lastKey()
+                && target.scope().operation() == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
+                && target.scope().authorityGeneration() == plan.context().generation()
+                && target.terminal().prefixEntryId() == selected.boundary().prefixEntryId()
+                && target.terminal().prefixLength() == selected.boundary().prefixLength()
+                && Arrays.equals(target.terminal().selectionDigest(), selected.reference().digest());
     }
 
     public record TerminalAck(CloseTarget target, org.apache.bookkeeper.common.profile.wire.ProfileHello.Server hello,
@@ -814,15 +884,15 @@ public final class ZKProfileReservationStore {
                         || target.member() >= value.getEnsembleSize()
                         || !value.getAllEnsembles().lastEntry().getValue().get(target.member()).toString()
                             .equals(target.scope().targetBookie())
-                        || !target.intent().recovery().equals(plan.context())
-                        || !boundedRepairFragment(target.intent(), value, plan.selection().boundary())
+                        || !closingTargetMatches(target, plan)
                         || !evidence.hello().bookieId().equals(target.scope().targetBookie())
                         || !Arrays.equals(evidence.hello().storageIncarnation(),
                             target.scope().targetStorageIncarnation())
                         || evidence.hello().activeEngine() != 3 || !evidence.hello().capabilities().contains(
                             org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec
-                                .TERMINAL_CLOSE_CAPABILITY) || !reply.durable() || reply.localGeneration() <= 0
-                        || reply.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
+                                .terminalCapability(target.terminal() != null))
+                        || !reply.durable() || reply.localGeneration() <= 0
+                        || reply.operation() != target.scope().operation()
                         || reply.ledgerId() != value.getLedgerId()
                         || reply.authorityGeneration() != target.scope().authorityGeneration()
                         || !reply.operationIdHex().equals(java.util.HexFormat.of().formatHex(
@@ -863,6 +933,10 @@ public final class ZKProfileReservationStore {
             }
             var selected = selectedBoundary(context, value, deadline);
             if (selected == null || !selected.equals(plan.selection())) {
+                return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
+            }
+            if (selected.boundary().prefixEntryId() < value.getAllEnsembles().lastKey()
+                    && !plan.targets().equals(emptyClosingTargets(context, value, selected, deadline))) {
                 return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
             }
             var checks = new java.util.ArrayList<>(recoveryRootChecks(root.snapshot(), deadline));
@@ -1438,6 +1512,22 @@ public final class ZKProfileReservationStore {
                             == ProfileLedgerMetadataStore.Outcome.CONFLICT
                             || current.outcome() == ProfileLedgerMetadataStore.Outcome.QUARANTINED
                                 ? ReadStatus.QUARANTINED : ReadStatus.UNAVAILABLE, null);
+                }
+                if (key.purpose() == ProfileAuthorityPurpose.RECOVERY_TERMINAL_CLOSE) {
+                    var prepared = closingPlan(metadata, current.context());
+                    if (prepared.plan() == null) {
+                        return new ProfileControlStore.ReadResult(prepared.status() == CreateStatus.DURABILITY_UNKNOWN
+                                ? ReadStatus.UNAVAILABLE : ReadStatus.QUARANTINED, null);
+                    }
+                    return prepared.plan().targets().stream().filter(target -> target.terminal() != null
+                            && target.scope().targetBookie().equals(localBookie)
+                            && ProfileAuthorityKey.fromScope(target.scope()).equals(key))
+                            .findFirst().map(target -> ProfileControlStore.ReadResult.found(
+                                new CommittedProfileAuthority(target.scope(),
+                                        CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED,
+                                        EngineProfile.SEGMENT_WAL_ENGINE,
+                                        prepared.plan().selection().birthZxid(), true)))
+                            .orElseGet(() -> new ProfileControlStore.ReadResult(ReadStatus.NOT_FOUND, null));
                 }
                 for (int slot = 0; slot < ProfileRepairIntent.MAX_INTENTS; slot++) {
                     var repair = readRepair(key.ledgerId(), slot, deadline);

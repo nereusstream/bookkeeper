@@ -227,6 +227,16 @@ final class SegmentBookieControlDriver {
     boolean submitRecoveryClose(SegmentBookieControlLog.RecoveryGrantClose request,
                                 RecoveryCloseCompletion completion) {
         Objects.requireNonNull(request, "request");
+        return submitClose(() -> log.prepareRecoveryClose(request), completion);
+    }
+
+    boolean submitTerminalClose(ProtectedProfileStateStore.Transition request, RecoveryCloseCompletion completion) {
+        Objects.requireNonNull(request, "request");
+        return submitClose(() -> log.prepareTerminalClose(request), completion);
+    }
+
+    private boolean submitClose(java.util.concurrent.Callable<SegmentBookieControlLog.RecoveryCloseAttempt> prepare,
+            RecoveryCloseCompletion completion) {
         Objects.requireNonNull(completion, "completion");
         if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
             return false;
@@ -241,7 +251,7 @@ final class SegmentBookieControlDriver {
                 public void run(SegmentOwnerLoop.Ticket ticket) {
                     SegmentBookieControlLog.RecoveryCloseAttempt attempt;
                     try {
-                        attempt = log.prepareRecoveryClose(request);
+                        attempt = prepare.call();
                     } catch (Throwable failure) {
                         ticket.complete(() -> deliver(completion, null, failure));
                         return;

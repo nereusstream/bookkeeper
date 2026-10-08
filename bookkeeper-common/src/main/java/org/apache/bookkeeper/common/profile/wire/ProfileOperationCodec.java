@@ -268,6 +268,7 @@ public final class ProfileOperationCodec {
                     ACTIVATE_REPLACEMENT,
                     RECOVERY_GRANT,
                     RECOVERY_GRANT_CLOSE,
+                    RECOVERY_TERMINAL_CLOSE,
                     TOMBSTONE_OR_DELETE_APPLY,
                     OPERATION_STATUS -> throw failure(
                     ProfileWireValidationException.Reason.BLOCKED_UNFROZEN_CONTROL_BODY);
@@ -298,6 +299,7 @@ public final class ProfileOperationCodec {
                     ACTIVATE_REPLACEMENT,
                     RECOVERY_GRANT,
                     RECOVERY_GRANT_CLOSE,
+                    RECOVERY_TERMINAL_CLOSE,
                     TOMBSTONE_OR_DELETE_APPLY,
                     OPERATION_STATUS -> throw failure(
                     ProfileWireValidationException.Reason.BLOCKED_UNFROZEN_CONTROL_BODY);

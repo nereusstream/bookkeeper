@@ -81,6 +81,7 @@ public class ZKProfileControlStoreTest extends ProfileZKTestBase {
             case ACTIVATE_REPLACEMENT -> CommittedProfileAuthority.State.POST_MEMBERSHIP_REPLACEMENT;
             case RECOVERY_GRANT -> CommittedProfileAuthority.State.RECOVERY_OPEN;
             case RECOVERY_GRANT_CLOSE -> CommittedProfileAuthority.State.RECOVERY_CLOSE_AUTHORIZED;
+            case RECOVERY_TERMINAL_CLOSE -> CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED;
             case TOMBSTONE_OR_DELETE_APPLY -> CommittedProfileAuthority.State.DELETE_AUTHORIZED;
             case STATUS_QUERY -> CommittedProfileAuthority.State.STATUS_QUERYABLE;
         };

@@ -27,7 +27,8 @@ public enum ProfileControlOperation {
     RECOVERY_GRANT(ProfileAuthorityPurpose.RECOVERY_GRANT, true),
     RECOVERY_GRANT_CLOSE(ProfileAuthorityPurpose.RECOVERY_GRANT_CLOSE, true),
     TOMBSTONE_OR_DELETE_APPLY(ProfileAuthorityPurpose.TOMBSTONE_OR_DELETE, false),
-    STATUS_QUERY(ProfileAuthorityPurpose.STATUS_QUERY, false);
+    STATUS_QUERY(ProfileAuthorityPurpose.STATUS_QUERY, false),
+    RECOVERY_TERMINAL_CLOSE(ProfileAuthorityPurpose.RECOVERY_TERMINAL_CLOSE, false);
 
     private final ProfileAuthorityPurpose purpose;
     private final boolean rangeAllowed;

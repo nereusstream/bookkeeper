@@ -45,6 +45,7 @@ final class ProfileAuthorityCodec {
             case RECOVERY_GRANT_CLOSE -> 5;
             case TOMBSTONE_OR_DELETE -> 6;
             case STATUS_QUERY -> 7;
+            case RECOVERY_TERMINAL_CLOSE -> 8;
         };
     }
 
@@ -109,8 +110,8 @@ final class ProfileAuthorityCodec {
         int operation = in.getInt();
         int purpose = in.getInt();
         int state = in.getInt();
-        if ((complete != 0 && complete != 1) || operation < 1 || operation > 7
-                || purpose != operation || state < 1 || state > 7) {
+        if ((complete != 0 && complete != 1) || operation < 1 || operation > 8
+                || purpose != operation || state < 1 || state > 8) {
             throw new IllegalArgumentException("Unknown authority discriminator");
         }
         EngineProfile engine = switch (in.getInt()) {
@@ -143,6 +144,7 @@ final class ProfileAuthorityCodec {
             case 5 -> ProfileControlOperation.RECOVERY_GRANT_CLOSE;
             case 6 -> ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY;
             case 7 -> ProfileControlOperation.STATUS_QUERY;
+            case 8 -> ProfileControlOperation.RECOVERY_TERMINAL_CLOSE;
             default -> throw new IllegalArgumentException("Unknown authority operation");
         };
         CommittedProfileAuthority.State authorityState = switch (state) {

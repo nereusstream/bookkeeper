@@ -71,7 +71,8 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                     && scope.operation() != ProfileControlOperation.ACTIVATE_INITIAL
                     && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT
                     && scope.operation() != ProfileControlOperation.RECOVERY_GRANT
-                    && scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE) {
+                    && scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
+                    && scope.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE) {
                 return result(Outcome.UNSUPPORTED);
             }
             if (!transition.authority().scope().equals(scope)
@@ -113,23 +114,21 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                     actualTerminal.run();
                 }
             };
-            if (scope.operation() == ProfileControlOperation.RECOVERY_GRANT_CLOSE) {
-                var binding = transition.request().recoveryBinding().orElseThrow();
-                ByteBuffer grantId = ByteBuffer.wrap(transition.request().closedGrantOperationId().orElseThrow());
-                accepted = driver.submitRecoveryClose(new SegmentBookieControlLog.RecoveryGrantClose(transition,
-                        new UUID(grantId.getLong(), grantId.getLong()), binding.intentId(),
-                        binding.intentGeneration(), binding.grantGeneration()), (closed, failure) -> {
-                            try {
-                                if (failure != null || closed == null) {
-                                    reply.complete(result(Outcome.DURABILITY_UNKNOWN));
-                                    return;
-                                }
-                                Outcome outcome = switch (closed) {
-                                    case APPLIED_DURABLE -> Outcome.APPLIED;
-                                    case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
-                                    case WAITING_PRECUT -> Outcome.TRANSIENT_RECONCILING;
-                                    case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
-                                };
+            if (scope.operation() == ProfileControlOperation.RECOVERY_GRANT_CLOSE
+                    || scope.operation() == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE) {
+                SegmentBookieControlDriver.RecoveryCloseCompletion closedReply = (closed, failure) -> {
+                    try {
+                        if (failure != null || closed == null) {
+                            reply.complete(result(Outcome.DURABILITY_UNKNOWN));
+                            return;
+                        }
+                        Outcome outcome = switch (closed) {
+                            case APPLIED_DURABLE -> Outcome.APPLIED;
+                            case ALREADY_DURABLE -> Outcome.ALREADY_APPLIED;
+                            case WAITING_PRECUT -> Outcome.TRANSIENT_RECONCILING;
+                            case CONDITION_FAILED, INCOMPATIBLE -> Outcome.CONFLICT;
+
+                };
                                 long generation = outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED
                                         ? driver.recoveryClosedGeneration(scope) : 0;
                                 if ((outcome == Outcome.APPLIED || outcome == Outcome.ALREADY_APPLIED)
@@ -141,7 +140,16 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                             } finally {
                                 actualTerminal.run();
                             }
-                        });
+                };
+                if (scope.operation() == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE) {
+                    accepted = driver.submitTerminalClose(transition, closedReply);
+                } else {
+                    var binding = transition.request().recoveryBinding().orElseThrow();
+                    ByteBuffer grantId = ByteBuffer.wrap(transition.request().closedGrantOperationId().orElseThrow());
+                    accepted = driver.submitRecoveryClose(new SegmentBookieControlLog.RecoveryGrantClose(transition,
+                            new UUID(grantId.getLong(), grantId.getLong()), binding.intentId(),
+                            binding.intentGeneration(), binding.grantGeneration()), closedReply);
+                }
             } else if (scope.operation() == ProfileControlOperation.RECOVERY_GRANT) {
                 var binding = transition.request().recoveryBinding().orElseThrow();
                 accepted = driver.submitRecoveryGrant(new SegmentBookieControlLog.RecoveryGrant(transition,

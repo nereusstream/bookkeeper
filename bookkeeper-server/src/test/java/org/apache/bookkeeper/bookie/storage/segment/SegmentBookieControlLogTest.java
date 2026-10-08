@@ -770,6 +770,112 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void standaloneTerminalBoundaryMatchesIndependentNativeFramingVector() throws Exception {
+        byte[] fixed = java.nio.file.Files.readAllBytes(Path.of(getClass().getResource(
+                "/unified-wal-segment/bookie-terminal-boundary.bin").toURI()));
+        assertEquals(344, fixed.length);
+        ByteBuffer bytes = ByteBuffer.wrap(fixed);
+        ByteBuffer encoded = SegmentControlFormat.encode(SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY,
+                new Generation(1), 0, new UUID(bytes.getLong(32), bytes.getLong(40)),
+                new Generation(2), 0, bytes.slice(128, 199));
+        byte[] output = new byte[encoded.remaining()];
+        encoded.get(output);
+        assertArrayEquals(fixed, output);
+        var parsed = SegmentControlParser.parse(bytes, SegmentControlFormat.Owner.BOOKIE, new Generation(1), 0);
+        assertEquals(SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY, parsed.type());
+        assertEquals(199, parsed.body().remaining());
+    }
+
+    private static ProtectedProfileStateStore.Transition terminalBoundary(int operation, long prefix, long length) {
+        var base = scope(ProfileControlOperation.RECOVERY_TERMINAL_CLOSE, operation, 3);
+        var binding = new ProfileControlRequest.TerminalBinding(prefix, length, filled(32, (byte) 9));
+        var exact = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(),
+                base.ledgerInstanceId(), base.descriptorIdentity(), base.targetBookie(),
+                base.targetStorageIncarnation(), base.authorityDomain(), base.authorityGeneration(),
+                base.operationId(), ProfileControlRequest.terminalPayloadIdentity(base, binding), null);
+        return new ProtectedProfileStateStore.Transition(ProfileControlRequest.terminalClose(exact, binding),
+                new CommittedProfileAuthority(exact, CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED,
+                        EngineProfile.SEGMENT_WAL_ENGINE, 4, true), null);
+    }
+
+    @Test
+    public void standaloneTerminalBoundaryDrainsBothKindsOfIoAndRetainsCutAcrossRotation() throws Exception {
+        for (long prefix : List.of(-1L, 4L)) {
+            var config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("boundary-" + prefix),
+                    1, 4, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var identity = identity();
+            var close = terminalBoundary(20, prefix, prefix == -1 ? 0 : 80);
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                    SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                            1024 * 1024, key((byte) 8), VALIDATOR)) {
+                log.submitBatch(List.of(install(1, (byte) 6), activate(44, 4)));
+                assertThrows(IllegalArgumentException.class, () -> log.appendDurably(List.of(close)));
+                var normal = log.admitNormal(context(), filled(20, (byte) 6)).orElseThrow();
+                log.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+                var recovery = log.admitRecovery(recoveryAdd(3, 7, 9, 3, (byte) 6)).orElseThrow();
+                var read = log.admitRead(context()).orElseThrow();
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT,
+                        log.prepareTerminalClose(close).immediate());
+                assertFalse(log.normalAdmission(context(), filled(20, (byte) 6)));
+                assertFalse(log.admitRecovery(recoveryAdd(3, 7, 9, 4, (byte) 6)).isPresent());
+                assertFalse(log.canCompleteRead(read, 9));
+                assertFalse(log.hasTerminalExclusion(context(), 9));
+                normal.physicalTerminal();
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT,
+                        log.prepareTerminalClose(close).immediate());
+                recovery.finish();
+                var pending = log.prepareTerminalClose(close);
+                assertNull(pending.immediate());
+                log.writeRecoveryCloseDurably(pending.write());
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        log.applyRecoveryCloseDurable(pending.write()));
+                assertTrue(log.hasTerminalExclusion(context(), 9));
+                assertFalse(log.hasTerminalExclusion(context(48), 9));
+                assertEquals(prefix == -1, log.hasTerminalExclusion(context(), 0));
+                assertTrue(log.recoveryClosedGeneration(close.request().scope()) > 0);
+                read.finish();
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                        log.prepareTerminalClose(close).immediate());
+                log.checkpoint();
+                log.checkpoint();
+                log.rotate();
+            }
+            try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                    1024 * 1024, key((byte) 8), VALIDATOR)) {
+                assertTrue(replay.hasTerminalExclusion(context(), 9));
+                assertEquals(prefix == -1, replay.hasTerminalExclusion(context(), 0));
+                assertFalse(replay.normalAdmission(context(), filled(20, (byte) 6)));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                        replay.prepareTerminalClose(close).immediate());
+            }
+        }
+    }
+
+    @Test
+    public void standaloneTerminalBoundaryForceFailureCannotPublishDurabilityOrFreeAuthority() throws Exception {
+        var config = config();
+        var identity = identity();
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false);
+        var close = terminalBoundary(20, -1, 0);
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 8), VALIDATOR, io)) {
+            log.submitBatch(List.of(install(1, (byte) 6), activate(44, 4)));
+            var pending = log.prepareTerminalClose(close);
+            assertThrows(IOException.class, () -> log.writeRecoveryCloseDurably(pending.write()));
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 6)));
+            assertFalse(log.hasTerminalExclusion(context(), 0));
+            assertEquals(0, log.recoveryClosedGeneration(close.request().scope()));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                1024 * 1024, key((byte) 8), VALIDATOR)) {
+            assertTrue(replay.hasTerminalExclusion(context(), 0));
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                    replay.prepareTerminalClose(close).immediate());
+        }
+    }
+
+    @Test
     public void uncertainRecoveryCloseForceNeverReopensAdmissionInCurrentProcess() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

@@ -572,16 +572,15 @@ public final class ProfileRecoveryCoordinator {
                         var peer = peers.get(target.scope().targetBookie());
                         if (peer == null || !peer.hello().capabilities().contains(
                                 org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec
-                                    .TERMINAL_CLOSE_CAPABILITY)
+                                    .terminalCapability(target.terminal() != null))
                                 || !Arrays.equals(peer.hello().storageIncarnation(),
                                 target.scope().targetStorageIncarnation())) {
                             continue;
                         }
                         try {
-                            replies.add(peer.recoveryClose(ProfileControlRequest.recoveryClose(target.scope(),
-                                    new ProfileControlRequest.RecoveryBinding(target.intent().intentId(),
-                                            target.intent().intentGeneration(), target.intent().grantGeneration()),
-                                    target.intent().grantOperationId())).handle((reply, failure) ->
+                            var requested = target.terminal() != null ? peer.terminalClose(target.request())
+                                    : peer.recoveryClose(target.request());
+                            replies.add(requested.handle((reply, failure) ->
                                             failure == null && reply != null && reply.durable()
                                                 && (reply.outcome() == org.apache.bookkeeper.common.profile.control
                                                     .ProfileControlResult.Outcome.APPLIED

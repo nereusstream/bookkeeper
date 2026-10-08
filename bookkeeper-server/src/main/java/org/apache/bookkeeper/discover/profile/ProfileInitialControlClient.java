@@ -82,6 +82,11 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return socket.recoveryClose(request);
     }
 
+    /** Standalone selected-boundary close, including (-1, 0); never creates a DATA grant. */
+    public CompletableFuture<ProfileControlResult> terminalClose(ProfileControlRequest request) {
+        return socket.terminalClose(request);
+    }
+
     /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */
     public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {

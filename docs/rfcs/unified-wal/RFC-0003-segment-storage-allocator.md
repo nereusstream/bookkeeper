@@ -946,3 +946,5 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 2026-10-06 [接收至存储源副本交接](implementation/profile-wire/README.md#接收至存储源副本交接)使隔离normal/recovery同步entry复制在原source子上限之外，复用借用frame连接的exact heap backing额度；frame/workspace/source共存均计费，断连后源保留至owner实际用完，复制到预分配对齐池后才归还源，实际I/O仍持有原pool lease。明确credit拒绝回滚source并沿用原未接纳结果；其他分配错误传播，手动/pooled调用者保留独立unpooled副本合同。两条真实socket路径及额度拒绝/恢复单测通过，未改wire或存储格式。完整TLS/kernel/object/index/storage总账、生产listener/readiness、READ_ENTRY及步骤6/11/Gate仍未闭合。
 
 2026-10-08 [恢复terminal读上界](implementation/profile-wire/README.md#非空恢复-terminal-cut-与-matching-closed)沿用Bookie控制owner新增实验type11；pending cut停新normal/recovery准入并等待全部旧DATA终结，实际force/apply后保存P且checkpoint/replay保留同操作升级。点读/READ_LAC/restart inventory过滤e>P，compaction将其视为已排除尾部并保留必要prefix；共享DATA文件不截短。该边界仅在已处理terminal命令的节点成立，离线追赶/全局读撤权未完成，不提升存储或生产Gate。
+
+2026-10-08 [空最后fragment terminal boundary](implementation/profile-wire/README.md#空最后-fragment-的独立终态关闭)沿用原控制I/O/owner/pre-cut排空路径新增Bookie type12，固定P/L/selection digest且无grant字段；generic batch拒绝绕过，pending/force失败不授权FREE。checkpoint/rotation/replay与实际尾部节点restart保留上界，不截短shared DATA；该局部实现不代表掉电、离线catch-up或生产接受。

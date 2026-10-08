@@ -59,6 +59,7 @@ public record CommittedProfileAuthority(
                     case RECOVERY_GRANT -> state == State.RECOVERY_OPEN;
                     case RECOVERY_GRANT_CLOSE -> state == State.RECOVERY_CLOSE_AUTHORIZED
                             || state == State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED;
+                    case RECOVERY_TERMINAL_CLOSE -> state == State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED;
                     case TOMBSTONE_OR_DELETE_APPLY -> state == State.DELETE_AUTHORIZED;
                     case STATUS_QUERY -> state == State.STATUS_QUERYABLE;
                 };

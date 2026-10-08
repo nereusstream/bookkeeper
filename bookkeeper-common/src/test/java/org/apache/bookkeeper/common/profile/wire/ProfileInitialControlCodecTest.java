@@ -77,6 +77,47 @@ public class ProfileInitialControlCodecTest {
     }
 
     @Test
+    public void standaloneBoundaryCloseOwnsEmptyPrefixAndCannotReplayAsGrantClose() throws Exception {
+        byte[] vector;
+        try (var in = getClass().getResourceAsStream("/profile-wire/terminal-boundary-close.bin")) {
+            vector = in.readAllBytes();
+        }
+        var request = ProfileInitialControlCodec.decodeRequest(ProfileOperation.RECOVERY_TERMINAL_CLOSE,
+                ByteBuffer.wrap(vector), HELLO);
+        assertEquals(188, vector.length);
+        assertEquals(-1, request.terminalBinding().orElseThrow().prefixEntryId());
+        assertEquals(0, request.terminalBinding().orElseThrow().prefixLength());
+        assertTrue(request.recoveryBinding().isEmpty());
+        assertTrue(request.closedGrantOperationId().isEmpty());
+        assertEquals(null, request.scope().exactRange());
+        assertArrayEquals(vector, ProfileInitialControlCodec.encodeRequest(request));
+        byte[] owned = request.terminalBinding().orElseThrow().selectionDigest();
+        owned[0] = 0;
+        assertArrayEquals(bytes(32, 9), request.terminalBinding().orElseThrow().selectionDigest());
+        for (int size = 0; size < vector.length; size++) {
+            byte[] cut = Arrays.copyOf(vector, size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                    ProfileOperation.RECOVERY_TERMINAL_CLOSE, ByteBuffer.wrap(cut), HELLO));
+        }
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.RECOVERY_GRANT_CLOSE, ByteBuffer.wrap(vector), HELLO));
+        byte[] changed = vector.clone();
+        ByteBuffer.wrap(changed).putLong(vector.length - 48, 0);
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.RECOVERY_TERMINAL_CLOSE, ByteBuffer.wrap(changed), HELLO));
+        assertThrows(IllegalArgumentException.class, () -> new ProfileControlRequest.TerminalBinding(-1, 1,
+                bytes(32, 9)));
+        assertThrows(IllegalArgumentException.class, () -> new ProfileControlRequest.TerminalBinding(Long.MAX_VALUE,
+                0, bytes(32, 9)));
+        var result = new ProfileControlResult(ProfileControlResult.Outcome.APPLIED, request.scope().operation(),
+                44, HexFormat.of().formatHex(request.scope().operationId()), 2, 1, true);
+        byte[] reply = ProfileInitialControlCodec.encodeReply(result);
+        assertEquals(result, ProfileInitialControlCodec.decodeReply(ProfileOperation.RECOVERY_TERMINAL_CLOSE, reply));
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeReply(
+                ProfileOperation.RECOVERY_GRANT_CLOSE, reply));
+    }
+
+    @Test
     public void recoveryCloseUsesIndependentSchemaFourAndCannotReplayAsGrant() throws Exception {
         byte[] bytes;
         try (var in = getClass().getResourceAsStream("/profile-wire/recovery-close.bin")) {
