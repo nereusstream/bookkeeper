@@ -1271,3 +1271,7 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-09新增ProfileReadonlyOpen有限投影：cold最终live gate、metadata birth、peer incarnation、caller cancel、actual open/read permit、固定CLOSED边界、suffix与只读mutation拒绝。delete发生在已验证live cut之后可有迟到response，模型不声明强撤权；crypto/TLS/实际read completion是输入，不由模型生产。一个正向和九个指定反例，当前catalog436，未宣称全量或完整A+C+D接受。真实SDK/metadata范围见[实现记录](../profile-wire/README.md#独立-closed-readonly-open-与原-sdk-读取)。
 
 最终相关7iag1mq5：122配置20正向/102反例，737源码hash/732 checksums已核对；readonly192/112 generated/distinct、queue0。全436未运行；上述实现记录拥有真实I/O、SDK与Gate范围。
+
+2026-10-09新增ProfileWholeRecovery，检查verified predicate才select、固定context/selection/target IDs、actual child持有gate、cancel后不开始未来工作、UNKNOWN不计durable target、matching close先于成功及cleanup history保留。A2/A3两个正向和九个指定反例；metadata/point proof/target实际结果为输入，不生成crypto/TLS/fsync、AutoRecovery marker或strong reset，catalog447未宣称全量或生产接受。真实范围见[实现记录](../profile-wire/README.md#整体-fenced-point-recovery-入口与持久身份续接)。
+
+最终相关9iavbptf：133配置22正向/111指定反例，749源码hash/764 checksums核对。whole A2 990/716、A3 1029/715 generated/distinct，queue0；完整447及全组合未运行，不生成AutoRecovery或生产authority。

@@ -28,6 +28,17 @@ MATRIX = {
     'ce-profile-terminal-cut-replay': 'ReplayKeepsCut',
     'ce-profile-terminal-cut-pending-free': 'SuffixFreeHasDurableCut',
     'ce-profile-terminal-cut-prefix-free': 'RequiredPrefixIsNotDead',
+    'a-profile-whole-recovery': None,
+    'a-profile-whole-recovery-threeofthree': None,
+    'ce-profile-whole-recovery-proof': 'SelectionHasVerifiedProof',
+    'ce-profile-whole-recovery-selection': 'SelectionIsFixed',
+    'ce-profile-whole-recovery-context': 'ContextIsAdopted',
+    'ce-profile-whole-recovery-intent': 'TargetIdentityIsStable',
+    'ce-profile-whole-recovery-stop': 'StoppedDoesNotStartWork',
+    'ce-profile-whole-recovery-gate': 'ActualChildOwnsGate',
+    'ce-profile-whole-recovery-close': 'SuccessHasMatchingClosed',
+    'ce-profile-whole-recovery-unknown': 'QuorumCountsActualDurable',
+    'ce-profile-whole-recovery-history': 'ClosedKeepsCleanupHistory',
     'a-profile-readonly-open': None,
     'ce-profile-readonly-delete': 'OpenHadLiveAdoption',
     'ce-profile-readonly-birth': 'OpenHadSameBirth',
@@ -585,6 +596,7 @@ def main():
                    else "ProfileRepairCopy.tla" if "profile-repair-copy" in name
                    else "ProfileRepairMembership.tla" if "profile-repair-membership" in name
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
+                   else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name
                    else "ProfileRecoveryCompletion.tla" if "profile-recovery-completion" in name

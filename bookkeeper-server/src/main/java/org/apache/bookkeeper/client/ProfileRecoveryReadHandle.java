@@ -127,6 +127,12 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         recovery = accepted.context();
     }
 
+    public static void requireCompatibleSdk(ClientContext base) {
+        if (base.getConf().useV2WireProtocol || base.getConf().explicitLacInterval != 0) {
+            throw new IllegalArgumentException("Profile recovery requires the enabled SDK wire scope");
+        }
+    }
+
     /** Supplied receipts are the retained published sources, with current targets overriding old incarnations. */
     public static ProfileRecoveryReadHandle fromContext(ClientContext base,
             ZKProfileReservationStore.RecoveryResult accepted, List<ProfileInstallReceipt> permitted,

@@ -1353,6 +1353,117 @@ public final class ZKProfileReservationStore {
         return path(ledger) + "/repair-" + slot;
     }
 
+    record SelfRepairSelection(CreateStatus status, RecoveryResult recovery, RepairSnapshot prepared,
+            byte[] closeOperationId, RepairCommitResult committed) {
+        SelfRepairSelection(CreateStatus status, RecoveryResult recovery, RepairSnapshot prepared, byte[] closeId) {
+            this(status, recovery, prepared, closeId, null);
+        }
+    }
+
+    /** Find the durable target operation first; creating a new SELF intent never replaces unresolved history. */
+    SelfRepairSelection prepareLastSelfRepair(ProfileLedgerMetadataStore metadata, ProfileRecoveryContext context,
+            int member) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var current = readRecovery(metadata, context.ledger().ledgerId());
+            if (current.context() == null || !context.equals(current.context())) {
+                return new SelfRepairSelection(current.outcome()
+                        == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                        ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.CONFLICT, null, null, null);
+            }
+            var value = current.metadata().metadata().getValue();
+            var selected = selectedBoundary(context, value, deadline);
+            var ensemble = value.getAllEnsembles().lastEntry().getValue();
+            long first = value.getAllEnsembles().lastKey();
+            if (selected == null || member < 0 || member >= ensemble.size()
+                    || selected.boundary().prefixEntryId() < first) {
+                return new SelfRepairSelection(CreateStatus.CONFLICT, null, null, null);
+            }
+            String name = ensemble.get(member).toString();
+            RepairSnapshot published = null;
+            byte[] publishedClose = null;
+            long publishedGeneration = 0;
+            for (var reference : ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY))) {
+                var repair = readRepair(value.getLedgerId(), reference.slot(), deadline);
+                if (selfTarget(repair, context, first, member, name, selected.boundary().prefixEntryId())) {
+                    var node = reads.get(repairPath(value.getLedgerId(), reference.slot()) + "/committed", deadline);
+                    if (!repair.birth().equals(reference.intentBirth())
+                            || repair.storeVersion() != reference.intentStoreVersion()
+                            || !Arrays.equals(reference.digest(), ProfileRepairIntent.digest(node.bytes()))) {
+                        return new SelfRepairSelection(CreateStatus.QUARANTINED, null, null, null);
+                    }
+                    var commit = repairCommit(node);
+                    published = repair;
+                    publishedClose = commit.closeOperationId();
+                    publishedGeneration = commit.closeGeneration();
+                }
+            }
+            if (published != null) {
+                return new SelfRepairSelection(CreateStatus.ALREADY_APPLIED, current, published, publishedClose,
+                        new RepairCommitResult(CreateStatus.ALREADY_APPLIED, current.metadata(),
+                                published.intent().closeScope(publishedClose, publishedGeneration)));
+            }
+            int free = -1;
+            for (int slot = 0; slot < ProfileRepairIntent.MAX_INTENTS; slot++) {
+                var repair = readRepair(value.getLedgerId(), slot, deadline);
+                if (repair == null) {
+                    if (free < 0) {
+                        free = slot;
+                    }
+                } else if (selfTarget(repair, context, first, member, name, selected.boundary().prefixEntryId())) {
+                    return new SelfRepairSelection(CreateStatus.ALREADY_APPLIED, current, repair,
+                            selfOperation("close", repair.intent().encode()));
+                }
+            }
+            if (free < 0) {
+                return new SelfRepairSelection(CreateStatus.DURABILITY_UNKNOWN, null, null, null);
+            }
+            var installed = recoveryCurrentTargets(context, deadline).stream()
+                    .filter(receipt -> receipt.scope().targetBookie().equals(name)).findFirst().orElse(null);
+            if (installed == null) {
+                return new SelfRepairSelection(CreateStatus.CONFLICT, null, null, null);
+            }
+            var old = installed.scope();
+            byte[] binding = java.nio.ByteBuffer.allocate(ProfileRecoveryContext.ENCODED_BYTES + 32 + 4 + 16)
+                    .put(context.encode()).put(selected.reference().digest()).putInt(member)
+                    .put(old.targetStorageIncarnation()).array();
+            var install = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                    ProfileAuthorityPurpose.PREPARING_INSTALL, old.ledgerId(), old.ledgerInstanceId(),
+                    old.descriptorIdentity(), old.targetBookie(),
+                    old.targetStorageIncarnation(), "recovery-self", context.controlGeneration(),
+                    selfOperation("install", binding), old.publicSemanticPayloadIdentity(), null);
+            var desired = new ProfileRepairIntent(context, free, selfOperation("intent", binding), first, member,
+                    repairEnsembleDigest(value, first), install, selfOperation("grant", binding),
+                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(first,
+                            selected.boundary().prefixEntryId()));
+            var result = prepareRepair(metadata, desired);
+            return new SelfRepairSelection(result.status(), result.snapshot() == null ? null : current,
+                    result.snapshot(), result.snapshot() == null ? null : selfOperation("close", desired.encode()));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new SelfRepairSelection(CreateStatus.DURABILITY_UNKNOWN, null, null, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new SelfRepairSelection(CreateStatus.DURABILITY_UNKNOWN, null, null, null);
+        } catch (IllegalArgumentException invalid) {
+            return new SelfRepairSelection(CreateStatus.QUARANTINED, null, null, null);
+        }
+    }
+
+    private static boolean selfTarget(RepairSnapshot repair, ProfileRecoveryContext context, long first,
+            int member, String bookie, long prefix) {
+        return repair != null && repair.intent().recovery().equals(context)
+                && repair.intent().fragmentStart() == first && repair.intent().replacedMemberSlot() == member
+                && repair.intent().install().targetBookie().equals(bookie)
+                && repair.intent().range().firstEntryId() == first && repair.intent().range().lastEntryId() == prefix;
+    }
+
+    private static byte[] selfOperation(String kind, byte[] binding) {
+        byte[] domain = ("UW-SELF-" + kind + "-V1").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        return Arrays.copyOf(ProfileRepairIntent.digest(java.nio.ByteBuffer.allocate(domain.length + binding.length)
+                .put(domain).put(binding).array()), 16);
+    }
+
     public RepairResult prepareRepair(ProfileLedgerMetadataStore metadata, ProfileRepairIntent desired) {
         requireRecoveryClient(metadata);
         long deadline = System.nanoTime() + timeoutNanos;
