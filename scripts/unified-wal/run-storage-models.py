@@ -19,6 +19,19 @@ import time
 
 
 MATRIX = {
+    'a-profile-marker-cleanup': None,
+    'ce-profile-marker-cleanup-birth': 'OriginalMarkerBirth',
+    'ce-profile-marker-cleanup-version': 'OriginalMarkerVersion',
+    'ce-profile-marker-cleanup-metadata': 'MatchingMetadata',
+    'ce-profile-marker-cleanup-delete': 'DeleteKeepsTask',
+    'ce-profile-marker-cleanup-lock': 'OriginalWorkerLock',
+    'ce-profile-marker-cleanup-task': 'OriginalAcquiredTask',
+    'ce-profile-marker-cleanup-issuer': 'OriginalIssuer',
+    'ce-profile-marker-cleanup-expiry': 'LiveProofAtClaim',
+    'ce-profile-marker-cleanup-reuse': 'ProofUsedOnce',
+    'ce-profile-marker-cleanup-stop': 'StopBeforeSubmissionKeepsTask',
+    'ce-profile-marker-cleanup-gate': 'ActualCommandOwnsGate',
+    'ce-profile-marker-cleanup-release': 'UnknownReleaseKeepsForeignLock',
     'a-profile-replica-health': None,
     'ce-profile-replica-health-all': 'AllRequiredCopiesFound',
     'ce-profile-replica-health-unknown': 'UnknownNeverHealthy',
@@ -546,6 +559,8 @@ def main():
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/discover/profile").glob("*.java"))
     inputs.extend((root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/discover/profile").glob("*.java"))
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/meta").glob("*.java"))
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestLedgerUnderreplicationManager.java")
+    inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationException.java")
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning").glob("*.java"))
     inputs.extend(root / name for name in [
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileBookieClient.java",
@@ -618,6 +633,7 @@ def main():
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
                    else "ProfileClosedRepair.tla" if "profile-closed-repair" in name
                    else "ProfileReplicaHealth.tla" if "profile-replica-health" in name
+                   else "ProfileMarkerCleanup.tla" if "profile-marker-cleanup" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name

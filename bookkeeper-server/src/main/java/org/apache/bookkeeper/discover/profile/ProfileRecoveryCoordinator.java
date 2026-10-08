@@ -1061,9 +1061,18 @@ public final class ProfileRecoveryCoordinator {
      */
     public static final class ReplicaHealthProof {
         private final ZKProfileReservationStore.ReadOnlySnapshot snapshot;
+        private final ProfileRecoveryCoordinator issuer;
+        private final long deadline;
+        private final org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task;
+        private final AtomicBoolean consumed = new AtomicBoolean();
 
-        private ReplicaHealthProof(ZKProfileReservationStore.ReadOnlySnapshot snapshot) {
+        private ReplicaHealthProof(ZKProfileReservationStore.ReadOnlySnapshot snapshot,
+                ProfileRecoveryCoordinator issuer, long deadline,
+                org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task) {
             this.snapshot = snapshot;
+            this.issuer = issuer;
+            this.deadline = deadline;
+            this.task = task;
         }
 
         public ZKProfileReservationStore.ReadOnlySnapshot snapshot() {
@@ -1087,6 +1096,15 @@ public final class ProfileRecoveryCoordinator {
     public CompletableFuture<ReplicaHealthResult> verifyClosedReplicas(long ledger, ClientContext sdk,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration) {
+        return verifyClosedReplicas(ledger, sdk, credential, suppliedData, suppliedControl,
+                maxCoordinates, maxDuration, null);
+    }
+
+    /** Capture the original acquired task before any health read; an unbound observation cannot clear a marker. */
+    public CompletableFuture<ReplicaHealthResult> verifyClosedReplicas(long ledger, ClientContext sdk,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker) {
         long duration = maxDuration.toNanos();
         if (ledger < 0 || maxCoordinates < 1 || suppliedData.size() > 64 || suppliedControl.size() > 64
                 || duration <= 0 || maxDuration.compareTo(Duration.ofMinutes(1)) > 0) {
@@ -1101,16 +1119,24 @@ public final class ProfileRecoveryCoordinator {
         }
         var stopped = new AtomicBoolean();
         var caller = new CompletableFuture<ReplicaHealthResult>();
+        long deadline = System.nanoTime() + duration;
         try {
             var data = Map.copyOf(suppliedData);
             var controls = Map.copyOf(suppliedControl);
             var key = credential.copy();
+            var task = worker == null ? null : worker.captureProfileTask(ledger);
+            if (worker != null && task == null) {
+                active.release();
+                return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
+                        PrefixReason.AUTHORITY_CHANGED));
+            }
             var actual = CompletableFuture.supplyAsync(() -> reservations.readClosedForOpen(metadata, ledger), cold)
                     .thenCompose(read -> {
                 if (read.snapshot() == null) {
                     return CompletableFuture.completedFuture(replicaReadFailure(read.status()));
                 }
-                return verifyClosedReplicasOnce(read.snapshot(), sdk, key, data, controls, maxCoordinates, stopped);
+                return verifyClosedReplicasOnce(read.snapshot(), sdk, key, data, controls, maxCoordinates,
+                        stopped, deadline, task);
             });
             var timer = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
             actual.whenComplete((result, failure) -> {
@@ -1153,7 +1179,8 @@ public final class ProfileRecoveryCoordinator {
     private CompletableFuture<ReplicaHealthResult> verifyClosedReplicasOnce(
             ZKProfileReservationStore.ReadOnlySnapshot snapshot, ClientContext sdk,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
-            Map<String, ProfileInitialControlClient> controls, int maxCoordinates, AtomicBoolean stopped) {
+            Map<String, ProfileInitialControlClient> controls, int maxCoordinates, AtomicBoolean stopped,
+            long deadline, org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task) {
         var member = snapshot.closed().metadata();
         var value = member.metadata().getValue();
         if (value.getEnsembleSize() != 3 || value.getWriteQuorumSize() != 3
@@ -1225,7 +1252,7 @@ public final class ProfileRecoveryCoordinator {
                 }
                 return result.status() == ReplicaHealthStatus.FULLY_REPLICATED
                         ? new ReplicaHealthResult(result.status(), result.reason(), -1, List.of(),
-                                new ReplicaHealthProof(fresh.snapshot()))
+                                new ReplicaHealthProof(fresh.snapshot(), this, deadline, task))
                         : new ReplicaHealthResult(result.status(), result.reason(), result.unresolvedEntry(),
                                 result.sources(), null);
             }, cold)).whenComplete((result, failure) -> reader.closeAsync());
@@ -1240,6 +1267,63 @@ public final class ProfileRecoveryCoordinator {
                     .equals(after.closed().metadata().metadata().getVersion())
                 && ProfileLedgerMetadataStore.sameMetadata(before.closed().metadata().metadata().getValue(),
                     after.closed().metadata().metadata().getValue()) && before.sources().equals(after.sources());
+    }
+
+    public enum MarkerCleanupStatus { CLEARED, DEFERRED, CONFLICT, QUARANTINED, DELETED }
+
+    /** Consume this attempt's health proof only with fresh cold authority and the original scoped worker lock. */
+    public CompletableFuture<MarkerCleanupStatus> completeReplication(ReplicaHealthProof proof,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker) {
+        Objects.requireNonNull(proof, "proof");
+        Objects.requireNonNull(worker, "worker");
+        if (proof.task == null || proof.issuer != this || proof.deadline - System.nanoTime() <= 0) {
+            return CompletableFuture.completedFuture(MarkerCleanupStatus.CONFLICT);
+        }
+        if (!active.tryAcquire()) {
+            return CompletableFuture.completedFuture(MarkerCleanupStatus.DEFERRED);
+        }
+        var caller = new CompletableFuture<MarkerCleanupStatus>();
+        var stopped = new AtomicBoolean();
+        try {
+            CompletableFuture.supplyAsync(() -> {
+                if (stopped.get() || proof.deadline - System.nanoTime() <= 0) {
+                    return MarkerCleanupStatus.DEFERRED;
+                }
+                if (!proof.consumed.compareAndSet(false, true)) {
+                    return MarkerCleanupStatus.CONFLICT;
+                }
+                var current = reservations.readClosedForOpen(metadata, proof.snapshot.context().ledger().ledgerId());
+                if (current.snapshot() == null) {
+                    return switch (current.status()) {
+                        case DELETED -> MarkerCleanupStatus.DELETED;
+                        case UNAVAILABLE -> MarkerCleanupStatus.DEFERRED;
+                        case QUARANTINED -> MarkerCleanupStatus.QUARANTINED;
+                        default -> MarkerCleanupStatus.CONFLICT;
+                    };
+                }
+                if (!sameClosedSnapshot(proof.snapshot, current.snapshot())) {
+                    return MarkerCleanupStatus.CONFLICT;
+                }
+                return stopped.get() || proof.deadline - System.nanoTime() <= 0 ? MarkerCleanupStatus.DEFERRED
+                        : reservations.completeReplicaMarker(metadata, current.snapshot(), worker, proof.task);
+            }, cold).whenComplete((result, failure) -> {
+                active.release();
+                if (failure != null) {
+                    caller.completeExceptionally(failure);
+                } else {
+                    caller.complete(result);
+                }
+            });
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return caller;
+        } catch (RuntimeException rejected) {
+            active.release();
+            throw rejected;
+        }
     }
 
     private static ReplicaHealthResult replicaFailure(ReplicaHealthStatus status, PrefixReason reason) {

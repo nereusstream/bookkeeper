@@ -2252,6 +2252,78 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    @Test
+    public void closedHealthProofClearsOnlyMatchingMarkerThroughItsIssuerAndOriginalLock() throws Exception {
+        for (int mode : List.of(0, 1, 2, 3, 4, 5, 6, 7, 8)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                    data.put(fixture.identities.get(node).bookieId(), peer);
+                    evidenceEntry(fixture, peer, 0, -1, 16, 16);
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
+                        coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                                fixture.credential, data, fixture.clients, 3, Duration.ofSeconds(30))
+                            .get(30, TimeUnit.SECONDS).status());
+                var conf = new ServerConfiguration().setMetadataServiceUri("zk+longhierarchical://"
+                        + fixture.cluster.getZooKeeperConnectString() + "/socket-ledgers");
+                try (var foreign = mode == 4 ? new org.apache.zookeeper.ZooKeeper(
+                            fixture.cluster.getZooKeeperConnectString(), 10000, ignored -> { }) : null;
+                        var tasks = new org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager(conf,
+                            mode == 4 ? foreign : fixture.zk)) {
+                    tasks.enableProfileCleanupGuards();
+                    tasks.markLedgerUnderreplicated(44, "missing:3181");
+                    assertEquals(44, tasks.pollLedgerToRereplicate());
+                    var proof = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                            fixture.clients, 2, mode == 6 ? Duration.ofSeconds(2) : Duration.ofSeconds(30),
+                            mode == 8 ? null : tasks)
+                                .get(5, TimeUnit.SECONDS).proof();
+                    assertNotNull(proof);
+                    if (mode == 1) {
+                        tasks.markLedgerUnderreplicated(44, "additional:3181");
+                    } else if (mode == 2) {
+                        assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                                fixture.reservations.cutDelete(fixture.reservations.read(44).snapshot(),
+                                        bytes(16, 101), bytes(32, 102)).status());
+                    } else if (mode == 5) {
+                        String path = ((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44);
+                        byte[] bytes = fixture.zk.getData(path, false, null);
+                        org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, path);
+                        fixture.zk.create(path, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                    } else if (mode == 6) {
+                        LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(2));
+                    } else if (mode == 7) {
+                        tasks.releaseUnderreplicatedLedger(44);
+                        assertEquals(44, tasks.pollLedgerToRereplicate());
+                    }
+                    var consumer = mode == 3
+                            ? new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold)
+                            : coordinator;
+                    var result = consumer.completeReplication(proof, tasks).get(5, TimeUnit.SECONDS);
+                    assertEquals(mode == 0 ? ProfileRecoveryCoordinator.MarkerCleanupStatus.CLEARED
+                            : mode == 2 ? ProfileRecoveryCoordinator.MarkerCleanupStatus.DELETED
+                                : mode == 5 ? ProfileRecoveryCoordinator.MarkerCleanupStatus.QUARANTINED
+                                    : ProfileRecoveryCoordinator.MarkerCleanupStatus.CONFLICT, result);
+                    if (mode == 0) {
+                        assertEquals(-1, tasks.pollLedgerToRereplicate());
+                        assertFalse(tasks.isLedgerBeingReplicated(44));
+                        assertEquals(ProfileRecoveryCoordinator.MarkerCleanupStatus.CONFLICT,
+                                coordinator.completeReplication(proof, tasks).get(5, TimeUnit.SECONDS));
+                    } else {
+                        assertTrue(tasks.isLedgerBeingReplicated(44));
+                    }
+                }
+            }
+        }
+    }
+
     private static final class HoldReadonlyMetadataClient extends org.apache.zookeeper.ZooKeeper {
         final java.util.concurrent.atomic.AtomicInteger observations = new java.util.concurrent.atomic.AtomicInteger();
         final CountDownLatch held = new CountDownLatch(1);

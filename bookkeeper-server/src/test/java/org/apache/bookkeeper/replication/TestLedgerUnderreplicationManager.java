@@ -91,11 +91,17 @@ public class TestLedgerUnderreplicationManager {
 
     @Before
     public void setupZooKeeper() throws Exception {
-        zkUtil = new ZooKeeperUtil();
+        zkUtil = new ZooKeeperUtil() {
+            @Override
+            public String getZooKeeperConnectString() {
+                String address = super.getZooKeeperConnectString();
+                return "127.0.0.1" + address.substring(address.lastIndexOf(':'));
+            }
+        };
         zkUtil.startCluster();
 
         conf = TestBKConfiguration.newServerConfiguration();
-        conf.setMetadataServiceUri(zkUtil.getMetadataServiceUri());
+        conf.setMetadataServiceUri("zk://" + zkUtil.getZooKeeperConnectString() + "/ledgers");
 
         executor = Executors.newCachedThreadPool();
 
@@ -860,6 +866,268 @@ public class TestLedgerUnderreplicationManager {
 
     private String getUrLedgerZnode(long ledgerId) {
         return ZkLedgerUnderreplicationManager.getUrLedgerZnode(urLedgerPath, ledgerId);
+    }
+
+    private static final class CleanupRaceZooKeeper extends ZooKeeper {
+        volatile Runnable beforeDelete;
+        volatile Runnable beforeBirth;
+        volatile String marker;
+        volatile boolean dropDeleteReply;
+        volatile boolean dropCreateReply;
+        volatile CountDownLatch createEntered;
+        volatile CountDownLatch releaseCreate;
+
+        CleanupRaceZooKeeper(String connect, org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase watcher)
+                throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public List<org.apache.zookeeper.OpResult> multi(Iterable<org.apache.zookeeper.Op> operations)
+                throws KeeperException, InterruptedException {
+            var ops = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(ops::add);
+            boolean cleanup = ops.stream().anyMatch(op -> op.getType() == org.apache.zookeeper.ZooDefs.OpCode.delete
+                    && op.getPath().equals(marker));
+            boolean acquire = ops.stream().anyMatch(op -> op.getType() == org.apache.zookeeper.ZooDefs.OpCode.create
+                    && op.getPath().contains("-profile-"));
+            if (acquire && createEntered != null) {
+                createEntered.countDown();
+                if (!releaseCreate.await(5, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Held lock pair creation was not released");
+                }
+            }
+            if (beforeBirth != null && ops.stream().anyMatch(op ->
+                    op.getType() == org.apache.zookeeper.ZooDefs.OpCode.create
+                        && op.getPath().contains("/profile-birth-"))) {
+                var action = beforeBirth;
+                beforeBirth = null;
+                action.run();
+            }
+            if (cleanup && beforeDelete != null) {
+                var action = beforeDelete;
+                beforeDelete = null;
+                action.run();
+            }
+            var results = super.multi(ops);
+            if (cleanup && dropDeleteReply || acquire && dropCreateReply) {
+                dropDeleteReply = dropCreateReply = false;
+                throw new KeeperException.ConnectionLossException();
+            }
+            return results;
+        }
+    }
+
+    @Test
+    public void profileMarkerChecksAreOptInAndConsumedAtomically() throws Exception {
+        try (var first = new ZkLedgerUnderreplicationManager(conf, zkc1)) {
+            first.markLedgerUnderreplicated(44, "missing:3181");
+            assertEquals(44, first.pollLedgerToRereplicate());
+            var checks = List.of(org.apache.zookeeper.Op.check(basePath + "/LAYOUT", 0));
+            assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44), checks));
+            org.junit.Assert.assertThrows(IllegalStateException.class, first::enableProfileCleanupGuards);
+            first.markLedgerReplicated(44);
+            assertEquals(-1, first.pollLedgerToRereplicate());
+            first.enableProfileCleanupGuards();
+            first.markLedgerUnderreplicated(44, "missing:3181");
+            assertEquals(44, first.pollLedgerToRereplicate());
+            org.junit.Assert.assertThrows(IllegalArgumentException.class,
+                    () -> first.markProfileLedgerReplicated(first.captureProfileTask(44), List.of()));
+            assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44),
+                    List.of(org.apache.zookeeper.Op.check(basePath + "/LAYOUT", 1))));
+            assertTrue(first.isLedgerBeingReplicated(44));
+            assertTrue(first.markProfileLedgerReplicated(first.captureProfileTask(44), checks));
+            assertFalse(first.isLedgerBeingReplicated(44));
+            assertEquals(-1, first.pollLedgerToRereplicate());
+            assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44), checks));
+            first.acquireUnderreplicatedLedger(44); // A manual lock never captured a marker identity.
+            assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44), checks));
+            first.releaseUnderreplicatedLedger(44);
+        }
+    }
+
+    @Test
+    public void profileMarkerUpdateAndPhysicalRecreationDoNotConsumeOldTask() throws Exception {
+        for (boolean recreate : List.of(false, true)) {
+            try (var first = new ZkLedgerUnderreplicationManager(conf, zkc1);
+                    var second = new ZkLedgerUnderreplicationManager(conf, zkc2)) {
+                first.enableProfileCleanupGuards();
+                first.markLedgerUnderreplicated(44, "missing:3181");
+                assertEquals(44, first.pollLedgerToRereplicate());
+                String marker = getUrLedgerZnode(44);
+                if (recreate) {
+                    byte[] data = zkc2.getData(marker, false, null);
+                    org.apache.zookeeper.ZKUtil.deleteRecursive(zkc2, marker);
+                    zkc2.create(marker, data, org.apache.zookeeper.ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            org.apache.zookeeper.CreateMode.PERSISTENT);
+                } else {
+                    second.markLedgerUnderreplicated(44, "additional:3181");
+                }
+                assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44),
+                        List.of(org.apache.zookeeper.Op.check(basePath + "/LAYOUT", 0))));
+                assertTrue(first.isLedgerBeingReplicated(44));
+                first.releaseUnderreplicatedLedger(44);
+                assertEquals(44, second.pollLedgerToRereplicate());
+                second.markLedgerReplicated(44);
+            }
+        }
+    }
+
+    @Test
+    public void profileMarkerFinalTransactionRejectsConcurrentRecreationAndAuthorityUpdate() throws Exception {
+        for (int race : List.of(0, 1, 2)) {
+            var watcher = new org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase(10000, false);
+            try (var client = new CleanupRaceZooKeeper(zkUtil.getZooKeeperConnectString(), watcher);
+                    var first = new ZkLedgerUnderreplicationManager(conf, client)) {
+                first.enableProfileCleanupGuards();
+                first.markLedgerUnderreplicated(44, "missing:3181");
+                assertEquals(44, first.pollLedgerToRereplicate());
+                String condition = basePath + "/health-proof";
+                zkc2.create(condition, new byte[0], org.apache.zookeeper.ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        org.apache.zookeeper.CreateMode.PERSISTENT);
+                client.marker = getUrLedgerZnode(44);
+                client.beforeDelete = () -> {
+                    try {
+                        if (race == 0) {
+                            byte[] bytes = zkc2.getData(client.marker, false, null);
+                            org.apache.zookeeper.ZKUtil.deleteRecursive(zkc2, client.marker);
+                            zkc2.create(client.marker, bytes, org.apache.zookeeper.ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                                    org.apache.zookeeper.CreateMode.PERSISTENT);
+                        } else if (race == 1) {
+                            zkc2.setData(condition, new byte[] {1}, 0);
+                        } else {
+                            // A controlled release removes the old unique witness with the lock in one transaction.
+                            first.releaseUnderreplicatedLedger(44);
+                            try (var replacement = new ZkLedgerUnderreplicationManager(conf, zkc2)) {
+                                replacement.acquireUnderreplicatedLedger(44);
+                                assertTrue(replacement.isLedgerBeingReplicated(44));
+                            }
+                        }
+                    } catch (Exception unexpected) {
+                        throw new AssertionError(unexpected);
+                    }
+                };
+                // This isolated manager test supplies a check fact, not a Profile DATA health proof.
+                assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44),
+                        List.of(org.apache.zookeeper.Op.check(condition, 0))));
+                assertTrue(zkc2.exists(client.marker, false) != null);
+                first.releaseUnderreplicatedLedger(44);
+                org.apache.zookeeper.ZKUtil.deleteRecursive(zkc2, client.marker);
+                zkc2.delete(condition, -1);
+            }
+        }
+    }
+
+    @Test
+    public void profileUnknownCreateAndCleanupRepliesRetainOnlyTheirOwnObligations() throws Exception {
+        for (boolean create : List.of(false, true)) {
+            var watcher = new org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase(10000, false);
+            try (var client = new CleanupRaceZooKeeper(zkUtil.getZooKeeperConnectString(), watcher);
+                    var first = new ZkLedgerUnderreplicationManager(conf, client);
+                    var second = new ZkLedgerUnderreplicationManager(conf, zkc2)) {
+                first.enableProfileCleanupGuards();
+                first.markLedgerUnderreplicated(44, "missing:3181");
+                if (create) {
+                    client.dropCreateReply = true;
+                    org.junit.Assert.assertThrows(UnavailableException.class, first::pollLedgerToRereplicate);
+                    assertTrue(first.isLedgerBeingReplicated(44));
+                    first.releaseUnderreplicatedLedger(44);
+                    assertEquals(44, second.pollLedgerToRereplicate());
+                } else {
+                    assertEquals(44, first.pollLedgerToRereplicate());
+                    client.marker = getUrLedgerZnode(44);
+                    client.dropDeleteReply = true;
+                    org.junit.Assert.assertThrows(UnavailableException.class,
+                            () -> first.markProfileLedgerReplicated(first.captureProfileTask(44),
+                                    List.of(org.apache.zookeeper.Op.check(basePath + "/LAYOUT", 0))));
+                    assertTrue(zkc2.exists(client.marker, false) == null);
+                    second.markLedgerUnderreplicated(44, "new-missing:3181");
+                    assertEquals(44, second.pollLedgerToRereplicate());
+                    first.releaseUnderreplicatedLedger(44);
+                    assertTrue(second.isLedgerBeingReplicated(44));
+                }
+                second.markLedgerReplicated(44);
+            }
+        }
+    }
+
+    @Test
+    public void profileMarkerRecreatedDuringWitnessCreationCanBeReacquiredWithoutStrayChildren() throws Exception {
+        var watcher = new org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase(10000, false);
+        try (var client = new CleanupRaceZooKeeper(zkUtil.getZooKeeperConnectString(), watcher);
+                var first = new ZkLedgerUnderreplicationManager(conf, client)) {
+            first.enableProfileCleanupGuards();
+            first.markLedgerUnderreplicated(44, "missing:3181");
+            assertEquals(44, first.pollLedgerToRereplicate());
+            String marker = getUrLedgerZnode(44);
+            client.beforeBirth = () -> {
+                try {
+                    byte[] bytes = zkc2.getData(marker, false, null);
+                    org.apache.zookeeper.ZKUtil.deleteRecursive(zkc2, marker);
+                    zkc2.create(marker, bytes, org.apache.zookeeper.ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            org.apache.zookeeper.CreateMode.PERSISTENT);
+                } catch (Exception unexpected) {
+                    throw new AssertionError(unexpected);
+                }
+            };
+            var checks = List.of(org.apache.zookeeper.Op.check(basePath + "/LAYOUT", 0));
+            assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44), checks));
+            assertEquals(List.of(), zkc2.getChildren(marker, false));
+            first.releaseUnderreplicatedLedger(44);
+            assertEquals(44, first.pollLedgerToRereplicate());
+            assertTrue(first.markProfileLedgerReplicated(first.captureProfileTask(44), checks));
+        }
+    }
+
+    @Test
+    public void profileTerminatedSessionCannotClearTaskOrDeleteReplacementLock() throws Exception {
+        try (var first = new ZkLedgerUnderreplicationManager(conf, zkc1);
+                var second = new ZkLedgerUnderreplicationManager(conf, zkc2)) {
+            first.enableProfileCleanupGuards();
+            first.markLedgerUnderreplicated(44, "missing:3181");
+            assertEquals(44, first.pollLedgerToRereplicate());
+            zkc1.close();
+            zkc1 = null;
+            assertEquals(44, second.pollLedgerToRereplicate());
+            assertFalse(first.markProfileLedgerReplicated(first.captureProfileTask(44),
+                    List.of(org.apache.zookeeper.Op.check(basePath + "/LAYOUT", 0))));
+            first.releaseUnderreplicatedLedger(44);
+            assertTrue(second.isLedgerBeingReplicated(44));
+            second.markLedgerReplicated(44);
+        }
+    }
+
+    @Test
+    public void profileReleaseWaitsForActualPendingPairCreation() throws Exception {
+        var watcher = new org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase(10000, false);
+        try (var client = new CleanupRaceZooKeeper(zkUtil.getZooKeeperConnectString(), watcher);
+                var first = new ZkLedgerUnderreplicationManager(conf, client);
+                var second = new ZkLedgerUnderreplicationManager(conf, zkc2)) {
+            first.enableProfileCleanupGuards();
+            first.markLedgerUnderreplicated(44, "missing:3181");
+            client.createEntered = new CountDownLatch(1);
+            client.releaseCreate = new CountDownLatch(1);
+            Future<Long> acquire = executor.submit(first::pollLedgerToRereplicate);
+            assertTrue(client.createEntered.await(5, TimeUnit.SECONDS));
+            var releasing = new CountDownLatch(1);
+            var release = executor.submit(() -> {
+                releasing.countDown();
+                first.releaseUnderreplicatedLedger(44);
+                return null;
+            });
+            assertTrue(releasing.await(5, TimeUnit.SECONDS));
+            try {
+                org.junit.Assert.assertThrows(TimeoutException.class, () -> release.get(150, TimeUnit.MILLISECONDS));
+            } finally {
+                client.releaseCreate.countDown();
+            }
+            assertEquals(Long.valueOf(44), acquire.get(5, TimeUnit.SECONDS));
+            release.get(5, TimeUnit.SECONDS);
+            assertFalse(first.isLedgerBeingReplicated(44));
+            assertEquals(44, second.pollLedgerToRereplicate());
+            second.markLedgerReplicated(44);
+        }
     }
 
     private void takeLedgerAndRelease(final LedgerUnderreplicationManager m,

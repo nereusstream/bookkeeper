@@ -1283,3 +1283,7 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-09新增ProfileReplicaHealth：两坐标/三副本与空 ledger，只在全部 required DATA来源合法、累计length匹配和最终 birth/version/delete freshness 成立时生成snapshot proof；caller cancel/deadline不提前释放actual read permit。1正向/9指定反例，FENCE/digest/reply为有限输入，不产生worker lock/marker清理或fsync/TLS事实。catalog467配置，完整目录未运行。真实结果及重现见[实现记录](../profile-wire/README.md#closed-全副本健康复核)。
 
 模型广度 `unified-wal-model-e1zy0v_3` exit0：153配置24完整正向PASS/129指定反例，771 source inputs/824 artifact checksums；之后仅测试调用长行换行。最终 `unified-wal-model-o60l_nvd`10配置1正向/9指定反例，771当前输入/561 checksums；Java与最终模型227重合/1588去重当前输入及父HEAD五个designInputs全部核对，历史广度不重绑。新正向38116 generated/19380 distinct、queue0、depth/diameter12、1.044秒/peak RSS186744832 bytes；这是有限模型检查消耗，非存储性能。tool1.7.4，单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整467配置未运行。
+
+2026-10-09新增ProfileMarkerCleanup：有限proof/cold submission/guarded cleanup与lost reply后release投影，1正向/12指定反例；health、session、metadata/marker guard与事务回执是输入，不生成TLS/DATA/fsync或worker scheduling，不覆盖强管理reset/revoke。记录clear cut避免晚于完成的故障倒写历史结果，caller stop不释放实际command permit。catalog480配置未全量运行，实际范围见[实现记录](../profile-wire/README.md#profile-marker-条件化清理)。
+
+最终模型 `unified-wal-model-lh5o9ekm` exit0：166配置25完整正向PASS/141指定反例，787当前source inputs/863 artifact checksums；Java与模型229重合/1604去重输入及父HEAD五个designInputs全部核对，历史回执不重绑。新marker正向12908 generated/2944 distinct、queue0、depth/diameter13、0.923秒/peak RSS155844608 bytes；此为有限模型消耗，非存储性能。tool1.7.4，单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整480配置未运行。

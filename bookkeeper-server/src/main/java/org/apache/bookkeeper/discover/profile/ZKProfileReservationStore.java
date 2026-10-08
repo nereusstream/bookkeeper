@@ -1277,6 +1277,43 @@ public final class ZKProfileReservationStore {
         return List.copyOf(activated.values());
     }
 
+    ProfileRecoveryCoordinator.MarkerCleanupStatus completeReplicaMarker(ProfileLedgerMetadataStore metadata,
+            ReadOnlySnapshot closed, org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task) {
+        requireRecoveryClient(metadata);
+        if (!worker.usesMutationClient(zk)) {
+            return ProfileRecoveryCoordinator.MarkerCleanupStatus.CONFLICT;
+        }
+        long deadline = System.nanoTime() + timeoutNanos;
+        long ledger = closed.context().ledger().ledgerId();
+        try {
+            var root = read(ledger, deadline);
+            if (root.status() != ReadStatus.FOUND) {
+                return root.status() == ReadStatus.UNAVAILABLE ? ProfileRecoveryCoordinator.MarkerCleanupStatus.DEFERRED
+                        : ProfileRecoveryCoordinator.MarkerCleanupStatus.QUARANTINED;
+            }
+            if (root.snapshot().lifecycle().state() == ProfileLifecycleHead.State.DELETE_INTENT) {
+                return ProfileRecoveryCoordinator.MarkerCleanupStatus.DELETED;
+            }
+            if (!closed.context().matchesRoot(root.snapshot())) {
+                return ProfileRecoveryCoordinator.MarkerCleanupStatus.CONFLICT;
+            }
+            var checks = new java.util.ArrayList<>(recoveryRootChecks(root.snapshot(), deadline));
+            checks.addAll(metadata.checksForMembership(closed.closed().metadata()));
+            return worker.markProfileLedgerReplicated(task, checks)
+                    ? ProfileRecoveryCoordinator.MarkerCleanupStatus.CLEARED
+                    : ProfileRecoveryCoordinator.MarkerCleanupStatus.CONFLICT;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return ProfileRecoveryCoordinator.MarkerCleanupStatus.DEFERRED;
+        } catch (TimeoutException | IllegalStateException
+                | org.apache.bookkeeper.replication.ReplicationException.UnavailableException unavailable) {
+            return ProfileRecoveryCoordinator.MarkerCleanupStatus.DEFERRED;
+        } catch (IllegalArgumentException invalid) {
+            return ProfileRecoveryCoordinator.MarkerCleanupStatus.QUARANTINED;
+        }
+    }
+
     private void requireRecoveryClient(ProfileLedgerMetadataStore metadata) {
         if (!metadata.usesMutationClient(zk)) {
             throw new IllegalArgumentException("Recovery requires the same borrowed ZK mutation context");

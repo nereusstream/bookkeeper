@@ -842,3 +842,35 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 模型广度 `unified-wal-model-e1zy0v_3` exit0：153配置24完整正向PASS/129指定反例，771 source inputs/824 artifact checksums；之后仅测试调用长行换行。最终 `unified-wal-model-o60l_nvd`10配置1正向/9指定反例，771当前输入/561 checksums；Java与最终模型227重合/1588去重当前输入及父HEAD五个designInputs全部核对，历史广度不重绑。新正向38116 generated/19380 distinct、queue0、depth/diameter12、1.044秒/peak RSS186744832 bytes；这是有限模型检查消耗，非存储性能。tool1.7.4，单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整467配置未运行。
 
 初次 Java `unified-wal-local-AtyTfrTH`暴露closed新target未纳入fence的实际DEFERRED，修复完整source选择后`unified-wal-local-toiVa5rq`该场景及两项新故障场景通过；其唯一失败是A3此前已经全部fenced却仍期待额外force的测试计数，按真实A2缺receiver条件修正后运行上述最终广度。初次模型 `unified-wal-model-8yc1i5m1` 缺FiniteSets导入，INCONCLUSIVE不计PASS；补齐后定向 `unified-wal-model-k0v55ha_`10配置符合预期，再执行上述广度/最终检查。style首轮一处122字符行失败，换行后最终检查通过。
+
+## Profile marker 条件化清理
+
+2026-10-09，第14步的显式清理入口 `ProfileRecoveryCoordinator.completeReplication` 接通上节真实全副本健康 proof 与 `ZkLedgerUnderreplicationManager`。proof 绑定原签发 coordinator、原 health attempt deadline、exact CLOSED snapshot，以及开始任何 health read 前捕获的私有 ProfileTask（原 manager/lock 对象及 nonce），且只消费一次；新 coordinator/过期/已使用 proof、busy gate 或 caller 在 cold submission 前取消都不能清理。观察用的无 worker overload 不携带 task，明确拒绝清理；同 manager release/reacquire 后的新 lock 也不能被旧 proof 消费。失败或 UNKNOWN 后需要实际重新复核，不复用旧 healthy 位。所有能力仍是隔离 opt-in，未接原 ReplicationWorker 自动循环。
+
+消费前再次独立验证 matching CLOSED 的 context/P/L、physical metadata birth/version、selection、完整 head/sources 与 DELETE。清理同时检查标准 metadata birth child/version、原 lifecycle physical birth/UUID/root/head version；它们与 marker 和 worker witness 的删除放在同一次 ZK multi。仅原 coordinator 与 underreplication manager 使用同一个借用 ZK mutation client 才支持这一路径；其他后端/不同 client 显式拒绝。ROOT/metadata/DELETE 在最终事务前改变，不因历史健康观察放行。
+
+manager 的 `enableProfileCleanupGuards` 必须在取得 task 前显式启用；默认 OFF 的 Classic 路径保持原行为。opt-in poll/get 以同一个 multi 创建原路径的 ephemeral lock 和随机、session 专属的不可改写 ephemeral witness，捕获原 marker version/czxid、原 session 及 lock physical birth；回复丢失也保留本地 pending obligation；actual pair创建与release在同一captured lock monitor下串行，不能提前忘记pending创建。手工 acquire 没有捕获 marker 身份，不能据它清 marker。原 lock data/UnderreplicatedLedgerFormat/布局版本不改变，新 witness 是实验 namespace 扩展；取得 task 前捕获的私有 receipt 固定这一个 lock 对象，清理不能改取同 ledger 的新 held lock。
+
+清理只接受非空、最多256个 exact-version `Op.check`。marker 使用只读 persistent `profile-birth-<czxid>` 子节点，8字节BE physical birth；创建后重读 marker/child 验证，防止 version0 ABA。若父 marker 在 witness 创建窗口重建，拒绝清理并去掉本次误写入的新父节点中的旧 birth child，使新任务能再取得。最终一个 multi 检查 cold authority、原 session witness、lock version、marker birth witness/version，并删除 witness、marker、lock；失败保持 marker/lock。CLEARED 仅表示此 guarded removal 实际返回成功。
+
+正常 opt-in release/close 先验原 session、实际 lock birth/owner/version 和唯一 witness，再在同一 multi 去掉 pair；不存在原 witness 时不删除新 holder 的 lock。失败保留本地义务供重试；实际 create 或 cleanup 事务完成后丢回复不伪造成功，后续 release 不删除其他 manager 的新 lock。session 终止/更新撤销旧 witness。此协议覆盖受控 worker release/close/session 终止；管理者在检查后强制删除并重建 lock 却保留旧 witness 的强 reset/revoke 并发协议仍 disabled，不能拿 pre-read+version 检查宣称已支持它。
+
+proof 领取/清理持有同一个实际 coordinator gate，caller cancel 不提前释放已经开始的 cold command；已经提交的 guarded mutation 可以在 caller 取消后终结，不回滚持久事实。ZK 不可用/中断返回 DEFERRED，marker/authority 身份变化返回 CONFLICT，DELETE/invalid authority 分别为 DELETED/QUARANTINED。空 hierarchy 与 marker/page retention GC 尚未作为该入口的完成事实；候选选择、持久 RepairIntent 续接、worker 分支与实际 attempt 排空、同BookieId rejoin/离线 catch-up、集群 delete 及完整预算/组合/兼容/性能验收仍 OPEN，步骤14保持 PARTIAL。
+
+真实验证分别生产不同事实：原 TLS/文件/SDK 全副本复核产生 proof，真实 ZK manager 检验清理与 marker/lock 行为。前者覆盖成功、marker更新、DELETE、错误签发者、不同 ZK client、同 bytes metadata 重建、proof 过期、原 task release/reacquire及无task observation；后者覆盖默认OFF、错误/空checks、手工lock、marker update/相同version重建、最终multi前竞争、witness创建时重建、create/cleanup实际提交后丢回复及session终止后的新holder保留。测试 fixture 显式使用127.0.0.1，避免当前localhost被外部DNS代理解析到198.18.0.1；未修改主机DNS或生产配置。
+
+有限 `ProfileMarkerCleanup.tla` 以已经完成的 health/guard/reply 为输入，记录清理时的 cut，检查原 marker birth/version、metadata/DELETE、原 lock witness、原acquired task、issuer/deadline/once、cold submission前stop、actual gate及UNKNOWN后的foreign lock保留。1正向/12指定反例；不生产 DATA/digest/fsync/TLS、完整 worker 调度或强 reset/liveness。晚于清理的重建/故障不会倒写历史 CLEARED。
+
+重现使用既有 runner：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'TestLedgerUnderreplicationManager,SegmentProfileInitialSocketClientTest#closedHealthProofClearsOnlyMatchingMarkerThroughItsIssuerAndOriginalLock+closedReplicaHealthFindsHistoricalHoleAndRequiresAllCopiesAfterRepair+closedReplicaHealthCancellationAndAuthorityChangesNeverDeliverProof'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-marker-cleanup --config-prefix ce-profile-marker-cleanup
+```
+
+最终Java `unified-wal-local-RXp8VfLD` exit0：14类269项全部通过，common37/server232（socket76、URmanager24、lifecycle45、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1046当前冻结输入/17 artifact checksums。最终style `unified-wal-marker-final-checks-dSfgcejv` exit0；root RAT exit1/443 unapproved路径，全部在父HEAD，新增model/cfg未增加失败；checks目录6个checksums，不改RAT规则、不计CI全绿。
+
+最终模型 `unified-wal-model-lh5o9ekm` exit0：166配置25完整正向PASS/141指定反例，787当前source inputs/863 artifact checksums；Java与模型229重合/1604去重输入及父HEAD五个designInputs全部核对，历史回执不重绑。新marker正向12908 generated/2944 distinct、queue0、depth/diameter13、0.923秒/peak RSS155844608 bytes；此为有限模型消耗，非存储性能。tool1.7.4，单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整480配置未运行。
+
+前期`unified-wal-local-n4zJtscr`是SessionExpiredException构造签名的编译错误，不计协议RED；`unified-wal-local-X8Lawqnp`四项因localhost外部DNS解析而在fixture初始化失败，未执行协议检查。改用literal loopback后`unified-wal-local-l030ANhc`5项通过；增加pending acquire/release串行与其测试后`unified-wal-local-uJrqepQq`8项通过。原较早广度`unified-wal-local-xp3muzcq`268项/model `unified-wal-model-1ujvitem`165配置在补原task绑定前通过，仅作原切片历史记录；发现旧proof可能消费同manager新task后，改为起点绑定私有receipt并扩大到上述最终269项/166配置，不以旧结果代替修复后验证。初次模型`unified-wal-model-0w41kl25`因TLA运算符括号解析失败为INCONCLUSIVE；修正后的`unified-wal-model-ud9f5ly1`12配置及较早`unified-wal-model-q91ev34v`12配置不包含最终task反例，均不替代当前13配置。

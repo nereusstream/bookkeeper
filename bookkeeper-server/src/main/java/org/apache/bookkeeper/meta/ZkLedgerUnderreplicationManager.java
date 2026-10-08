@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -60,8 +61,10 @@ import org.apache.zookeeper.AddWatchMode;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.KeeperException.Code;
+import org.apache.zookeeper.Op;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooDefs.Ids;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.ACL;
@@ -92,10 +95,22 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
     private static class Lock {
         private final String lockZNode;
         private final Optional<Integer> ledgerZNodeVersion;
+        private final String profileGuard;
+        private final long session;
+        private final long markerBirth;
+        private volatile long lockBirth;
 
         Lock(String lockZNode, Optional<Integer> ledgerZNodeVersion) {
+            this(lockZNode, ledgerZNodeVersion, null, 0, 0);
+        }
+
+        Lock(String lockZNode, Optional<Integer> ledgerZNodeVersion, String profileGuard, long session,
+                long markerBirth) {
             this.lockZNode = lockZNode;
             this.ledgerZNodeVersion = ledgerZNodeVersion;
+            this.profileGuard = profileGuard;
+            this.session = session;
+            this.markerBirth = markerBirth;
         }
 
         String getLockZNode() {
@@ -107,6 +122,27 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
         }
     }
     private final Map<Long, Lock> heldLocks = new ConcurrentHashMap<Long, Lock>();
+    private volatile boolean profileCleanupGuards;
+    private boolean profileClosing;
+
+    /** Opaque local receipt for one acquired task; a later lock for the same ledger is a different task. */
+    public static final class ProfileTask {
+        private final ZkLedgerUnderreplicationManager issuer;
+        private final long ledger;
+        private final Lock captured;
+
+        private ProfileTask(ZkLedgerUnderreplicationManager issuer, long ledger, Lock captured) {
+            this.issuer = issuer;
+            this.ledger = ledger;
+            this.captured = captured;
+        }
+    }
+
+    public ProfileTask captureProfileTask(long ledger) {
+        Lock captured = heldLocks.get(ledger);
+        return captured == null || captured.profileGuard == null || captured.lockBirth == 0
+                || captured.ledgerZNodeVersion.isEmpty() ? null : new ProfileTask(this, ledger, captured);
+    }
     private final Pattern idExtractionPattern;
 
     private final String rootPath;
@@ -122,6 +158,18 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
     private final ZooKeeper zkc;
     private final SubTreeCache subTreeCache;
     private final RateLimiter rateLimiter;
+
+    /** Explicit isolated Profile opt-in, before acquiring any task. Default Classic behavior is unchanged. */
+    public synchronized void enableProfileCleanupGuards() {
+        if (!heldLocks.isEmpty() || profileClosing) {
+            throw new IllegalStateException("Profile cleanup guards must be enabled before acquiring tasks");
+        }
+        profileCleanupGuards = true;
+    }
+
+    public boolean usesMutationClient(ZooKeeper client) {
+        return zkc == client;
+    }
 
     public ZkLedgerUnderreplicationManager(AbstractConfiguration conf, ZooKeeper zkc)
             throws UnavailableException, InterruptedException, ReplicationException.CompatibilityException {
@@ -393,6 +441,15 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
     @Override
     public void markLedgerReplicated(long ledgerId) throws ReplicationException.UnavailableException {
         log.debug().attr("ledgerId", ledgerId).log("markLedgerReplicated");
+        Lock captured = heldLocks.get(ledgerId);
+        if (captured != null && captured.profileGuard != null) {
+            try {
+                markGuardedLedgerReplicated(ledgerId, captured, List.of());
+            } finally {
+                releaseUnderreplicatedLedger(ledgerId);
+            }
+            return;
+        }
         try {
             Lock l = heldLocks.get(ledgerId);
             if (l != null) {
@@ -433,6 +490,166 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
             throw new ReplicationException.UnavailableException("Interrupted while contacting zookeeper", ie);
         } finally {
             releaseUnderreplicatedLedger(ledgerId);
+        }
+    }
+
+    /** Consume checks produced by the Profile cold authority path in the same marker/lock removal transaction.
+     * A false result leaves the task pending; unknown I/O throws and retains the local lock obligation.
+     * Direct administrative lock reset/recreation is outside this opt-in protocol.
+     */
+    public boolean markProfileLedgerReplicated(ProfileTask task, List<Op> authorityChecks) throws UnavailableException {
+        var checks = List.copyOf(authorityChecks);
+        if (checks.isEmpty() || checks.size() > 256 || checks.stream().anyMatch(check ->
+                check.getType() != ZooDefs.OpCode.check
+                    || ((org.apache.zookeeper.proto.CheckVersionRequest) check.toRequestRecord()).getVersion() < 0)) {
+            throw new IllegalArgumentException("Profile completion requires bounded exact-version authority checks");
+        }
+        return task != null && task.issuer == this
+                && markGuardedLedgerReplicated(task.ledger, task.captured, checks);
+    }
+
+    private synchronized void acquireProfileLock(long ledgerId, String lockPath, Optional<Integer> version,
+            long markerBirth) throws KeeperException, InterruptedException {
+        if (profileClosing) {
+            throw new IllegalStateException("Profile replication manager is closing");
+        }
+        if (heldLocks.containsKey(ledgerId)) {
+            throw new KeeperException.NodeExistsException(lockPath);
+        }
+        var captured = new Lock(lockPath, version, lockPath + "-profile-" + UUID.randomUUID(),
+                zkc.getSessionId(), markerBirth);
+        // Serialize release with the actual acquire, including an unknown create reply.
+        synchronized (captured) {
+            heldLocks.put(ledgerId, captured);
+            try {
+                zkc.multi(List.of(Op.create(lockPath, LOCK_DATA, ZkUtils.getACLs(conf), CreateMode.EPHEMERAL),
+                        Op.create(captured.profileGuard, profileLockBytes(captured), immutableProfileAcls(),
+                                CreateMode.EPHEMERAL)));
+                if (!ownsProfileLock(captured)) {
+                    throw KeeperException.create(Code.SESSIONEXPIRED, lockPath);
+                }
+                var created = zkc.exists(lockPath, false);
+                if (created == null || created.getEphemeralOwner() != captured.session) {
+                    throw KeeperException.create(Code.SESSIONEXPIRED, lockPath);
+                }
+                captured.lockBirth = created.getCzxid();
+            } catch (KeeperException.NodeExistsException occupied) {
+                heldLocks.remove(ledgerId, captured);
+                throw occupied;
+            }
+        }
+    }
+
+    private List<ACL> immutableProfileAcls() {
+        var acls = ZkUtils.getACLs(conf).stream().filter(acl -> (acl.getPerms() & ZooDefs.Perms.READ) != 0)
+                .map(acl -> new ACL(ZooDefs.Perms.READ, acl.getId())).toList();
+        if (acls.isEmpty()) {
+            throw new IllegalArgumentException("Profile replication witnesses require readable ACLs");
+        }
+        return acls;
+    }
+
+    private static byte[] profileLockBytes(Lock captured) {
+        return (captured.lockZNode + ":" + Long.toHexString(captured.session)).getBytes(UTF_8);
+    }
+
+    private boolean ownsProfileLock(Lock captured) throws KeeperException, InterruptedException {
+        if (!zkc.getState().isAlive() || zkc.getSessionId() != captured.session) {
+            return false;
+        }
+        var guard = new Stat();
+        byte[] witness;
+        try {
+            witness = zkc.getData(captured.profileGuard, false, guard);
+        } catch (KeeperException.NoNodeException absent) {
+            return false;
+        }
+        var lock = zkc.exists(captured.lockZNode, false);
+        return lock != null && lock.getVersion() == 0 && lock.getEphemeralOwner() == captured.session
+                && (captured.lockBirth == 0 || lock.getCzxid() == captured.lockBirth)
+                && guard.getVersion() == 0 && guard.getEphemeralOwner() == captured.session
+                && Arrays.equals(witness, profileLockBytes(captured));
+    }
+
+    private boolean markGuardedLedgerReplicated(long ledgerId, Lock captured, List<Op> checks)
+            throws UnavailableException {
+        synchronized (captured) {
+            try {
+                if (heldLocks.get(ledgerId) != captured || captured.ledgerZNodeVersion.isEmpty()
+                        || captured.lockBirth == 0 || !ownsProfileLock(captured)) {
+                    return false;
+                }
+                String marker = getUrLedgerZnode(ledgerId);
+                var before = zkc.exists(marker, false);
+                if (before == null || before.getCzxid() != captured.markerBirth
+                        || before.getVersion() != captured.ledgerZNodeVersion.get()) {
+                    return false;
+                }
+                String birth = marker + "/profile-birth-" + Long.toHexString(captured.markerBirth);
+                byte[] expected = java.nio.ByteBuffer.allocate(8).putLong(captured.markerBirth).array();
+                try {
+                    zkc.multi(List.of(Op.check(captured.profileGuard, 0), Op.check(captured.lockZNode, 0),
+                            Op.check(marker, captured.ledgerZNodeVersion.get()),
+                            Op.create(birth, expected, immutableProfileAcls(), CreateMode.PERSISTENT)));
+                } catch (KeeperException.NodeExistsException retained) {
+                    // The immutable physical-birth witness is shared by retries of this marker only.
+                }
+                var identity = new Stat();
+                byte[] actual = zkc.getData(birth, false, identity);
+                var after = zkc.exists(marker, false);
+                if (after != null && after.getCzxid() != captured.markerBirth
+                        && identity.getVersion() == 0 && identity.getEphemeralOwner() == 0
+                        && Arrays.equals(actual, expected)) {
+                    // A replacement between the pre-read and witness creation must not retain our stale child.
+                    zkc.multi(List.of(Op.check(marker, after.getVersion()), Op.check(birth, 0), Op.delete(birth, 0)));
+                    return false;
+                }
+                if (after == null || after.getCzxid() != captured.markerBirth
+                        || after.getVersion() != captured.ledgerZNodeVersion.get()
+                        || identity.getVersion() != 0 || identity.getEphemeralOwner() != 0
+                        || !Arrays.equals(actual, expected) || !ownsProfileLock(captured)) {
+                    return false;
+                }
+                var operations = new java.util.ArrayList<>(checks);
+                operations.add(Op.check(captured.profileGuard, 0));
+                operations.add(Op.check(captured.lockZNode, 0));
+                operations.add(Op.check(birth, 0));
+                operations.add(Op.check(marker, captured.ledgerZNodeVersion.get()));
+                operations.add(Op.delete(birth, 0));
+                operations.add(Op.delete(marker, captured.ledgerZNodeVersion.get()));
+                operations.add(Op.delete(captured.lockZNode, 0));
+                operations.add(Op.delete(captured.profileGuard, 0));
+                zkc.multi(operations);
+                heldLocks.remove(ledgerId, captured);
+                return true;
+            } catch (KeeperException.NoNodeException | KeeperException.BadVersionException
+                    | KeeperException.NotEmptyException changed) {
+                return false;
+            } catch (KeeperException unavailable) {
+                throw ReplicationException.fromKeeperException("Profile marker cleanup outcome unknown", unavailable);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new UnavailableException("Interrupted during Profile marker cleanup", interrupted);
+            }
+        }
+    }
+
+    private void releaseProfileLock(long ledgerId, Lock captured) throws UnavailableException {
+        synchronized (captured) {
+            try {
+                if (heldLocks.get(ledgerId) == captured && ownsProfileLock(captured)) {
+                    zkc.multi(List.of(Op.check(captured.profileGuard, 0), Op.check(captured.lockZNode, 0),
+                            Op.delete(captured.lockZNode, 0), Op.delete(captured.profileGuard, 0)));
+                }
+                heldLocks.remove(ledgerId, captured);
+            } catch (KeeperException.NoNodeException | KeeperException.BadVersionException lost) {
+                heldLocks.remove(ledgerId, captured);
+            } catch (KeeperException unavailable) {
+                throw ReplicationException.fromKeeperException("Profile lock release outcome unknown", unavailable);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new UnavailableException("Interrupted during Profile lock release", interrupted);
+            }
         }
     }
 
@@ -538,8 +755,12 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
 
                     String lockPath = urLockPath + "/" + tryChild;
                     long ledgerId = getLedgerId(tryChild);
-                    zkc.create(lockPath, LOCK_DATA, zkAcls, CreateMode.EPHEMERAL);
-                    heldLocks.put(ledgerId, new Lock(lockPath, Optional.of(stat.getVersion())));
+                    if (profileCleanupGuards) {
+                        acquireProfileLock(ledgerId, lockPath, Optional.of(stat.getVersion()), stat.getCzxid());
+                    } else {
+                        zkc.create(lockPath, LOCK_DATA, zkAcls, CreateMode.EPHEMERAL);
+                        heldLocks.put(ledgerId, new Lock(lockPath, Optional.of(stat.getVersion())));
+                    }
                     return ledgerId;
                 } catch (KeeperException.NodeExistsException nee) {
                     children.remove(tryChild);
@@ -631,6 +852,11 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
     @Override
     public void releaseUnderreplicatedLedger(long ledgerId) throws ReplicationException.UnavailableException {
         log.debug().attr("ledgerId", ledgerId).log("releaseLedger");
+        Lock captured = heldLocks.get(ledgerId);
+        if (captured != null && captured.profileGuard != null) {
+            releaseProfileLock(ledgerId, captured);
+            return;
+        }
         try {
             Lock l = heldLocks.get(ledgerId);
             if (l != null) {
@@ -651,6 +877,15 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
     @Override
     public void close() throws ReplicationException.UnavailableException {
         log.debug("close()");
+        if (profileCleanupGuards) {
+            synchronized (this) {
+                profileClosing = true;
+            }
+            for (var entry : heldLocks.entrySet()) {
+                releaseProfileLock(entry.getKey(), entry.getValue());
+            }
+            return;
+        }
         try {
             for (Map.Entry<Long, Lock> e : heldLocks.entrySet()) {
                 zkc.delete(e.getValue().getLockZNode(), -1);
@@ -790,6 +1025,10 @@ public class ZkLedgerUnderreplicationManager implements LedgerUnderreplicationMa
     public void acquireUnderreplicatedLedger(long ledgerId)
             throws ReplicationException  {
         try {
+            if (profileCleanupGuards) {
+                acquireProfileLock(ledgerId, getUrLedgerLockZnode(urLockPath, ledgerId), Optional.empty(), 0);
+                return;
+            }
             final String lockPath = acquireUnderreplicatedLedgerLock(zkc, rootPath, ledgerId, ZkUtils.getACLs(conf));
             heldLocks.put(ledgerId, new Lock(lockPath, Optional.empty()));
         } catch (Exception e) {
