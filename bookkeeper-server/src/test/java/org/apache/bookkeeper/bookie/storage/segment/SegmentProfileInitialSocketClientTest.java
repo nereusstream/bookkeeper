@@ -1851,6 +1851,20 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED, again.status());
                     assertEquals(recovered.context(), again.context());
                     assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                    var health = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential,
+                            data, controls, 6, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                    assertEquals(mode == 2 ? ProfileRecoveryCoordinator.ReplicaHealthStatus.DEFERRED
+                            : ProfileRecoveryCoordinator.ReplicaHealthStatus.FULLY_REPLICATED, health.status());
+                    assertEquals(mode != 2, health.proof() != null);
+                    var allHealth = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential,
+                            allData, fixture.clients, 6, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                    assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.FULLY_REPLICATED, allHealth.status());
+                    assertNotNull(allHealth.proof());
+                    assertEquals(closed.getLastEntryId(), allHealth.proof().snapshot().closed().metadata()
+                            .metadata().getValue().getLastEntryId());
+                    assertEquals(ack == 2 && mode == 2
+                            ? List.of(forces.get(0), forces.get(1), forces.get(2) + 1) : forces,
+                            fixture.nodeIo.stream().map(io -> io.forces).toList());
                 }
             }
         }
@@ -2047,6 +2061,11 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(context, fixture.reservations.readClosedForOpen(metadata, 44).snapshot().context());
                     assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
                             fixture.reservations.readRecovery(metadata, 44).outcome());
+                    var health = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential,
+                            data, fixture.clients, 3, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                    assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.FULLY_REPLICATED, health.status());
+                    assertNotNull(health.proof());
+                    assertEquals(context, health.proof().snapshot().context());
                 }
                 var config = files(fixture.nodes.get(4)).config();
                 fixture.nodes.get(4).close();
@@ -2060,6 +2079,174 @@ public class SegmentProfileInitialSocketClientTest {
                     assertTrue(replay.profileReadVisible(fixture.context(), 2));
                     assertFalse(replay.profileReadVisible(fixture.context(), 3));
                     assertEquals(config.bytesPerFile(), java.nio.file.Files.size(config.directory().resolve("data-0")));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void closedReplicaHealthFindsHistoricalHoleAndRequiresAllCopiesAfterRepair() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 5, 2, true, true);
+                BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var initial = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 4; node++) {
+                data.put(fixture.identities.get(node).bookieId(), dataClient(fixture, node, 4, Duration.ofSeconds(5)));
+                if (node < 2) {
+                    for (long entry = 0; entry < 3; entry++) {
+                        evidenceEntry(fixture, data.get(fixture.identities.get(node).bookieId()), entry,
+                                entry - 1, (entry + 1) * 16, 16);
+                    }
+                }
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var replacement = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                    fixture.cold);
+            var nextControl = fixture.connect(3, 4, Duration.ofSeconds(5));
+            var operation = replacement.begin(initial.metadata(), 3,
+                    Map.of(2, new ProfileReplacementCoordinator.Target(nextControl,
+                            data.get(fixture.identities.get(3).bookieId()))), fixture.descriptorBytes,
+                    fixture.credential, bytes(16, 20), bytes(16, 21)).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileReplacementCoordinator.Status.AVAILABLE,
+                    replacement.execute(operation).get(5, TimeUnit.SECONDS).status());
+            for (int node : List.of(0, 1, 3)) {
+                evidenceEntry(fixture, data.get(fixture.identities.get(node).bookieId()), 3, 2, 64, 16);
+            }
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
+                    coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                            fixture.credential, data, fixture.clients, 6, Duration.ofSeconds(30))
+                        .get(30, TimeUnit.SECONDS).status());
+            var health = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                    fixture.clients, 4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.UNDERREPLICATED, health.status());
+            assertEquals(0, health.unresolvedEntry());
+            assertNull(health.proof());
+            assertEquals(3, health.sources().size());
+            assertEquals(1, health.sources().stream().filter(source -> source.outcome()
+                    == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.SourceOutcome.MISSING).count());
+            var missing = new HashMap<>(data);
+            missing.remove(fixture.identities.get(2).bookieId());
+            assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.DEFERRED,
+                    coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, missing,
+                            fixture.clients, 4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS).status());
+            assertEquals(ProfileRecoveryCoordinator.PrefixReason.LIMIT,
+                    coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                            fixture.clients, 3, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS).reason());
+            assertEquals(ProfileRecoveryCoordinator.PrefixReason.PERMISSION,
+                    coordinator.verifyClosedReplicas(44, sdk.getClientCtx(),
+                            ProtectedProfileCredential.of(1, bytes(20, 99)), data, fixture.clients, 4,
+                            Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS).reason());
+            var accepted = fixture.reservations.readClosedForOpen(metadata, 44).snapshot();
+            var context = accepted.context();
+            fixture.connect(4, 4, Duration.ofSeconds(5));
+            var identity = fixture.identities.get(4);
+            data.put(identity.bookieId(), dataClient(fixture, 4, 4, Duration.ofSeconds(5)));
+            var install = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                    ProfileAuthorityPurpose.PREPARING_INSTALL, 44, context.ledger().ledgerInstanceId(),
+                    ProfileDescriptorCodec.identityOf(fixture.descriptor, VALIDATOR), identity.bookieId().toString(),
+                    identity.incarnation().value(), "closed-repair", context.controlGeneration(),
+                    bytes(16, 44), bytes(32, 44), null);
+            var intent = new org.apache.bookkeeper.discover.profile.ProfileRepairIntent(context, 4,
+                    bytes(16, 54), 0, 2, ZKProfileReservationStore.repairEnsembleDigest(
+                            accepted.closed().metadata().metadata().getValue(), 0), install, bytes(16, 64),
+                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 2));
+            var prepared = fixture.reservations.prepareRepair(metadata, intent).snapshot();
+            assertNotNull(prepared);
+            assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_HISTORICAL_FRAGMENT,
+                    coordinator.repairClosedFragment(accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes,
+                            fixture.credential, data, fixture.clients, bytes(16, 74))
+                        .get(30, TimeUnit.SECONDS).status());
+            health = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                    fixture.clients, 4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.FULLY_REPLICATED, health.status());
+            assertNotNull(health.proof());
+            assertEquals(3, health.proof().snapshot().closed().metadata().metadata().getValue().getLastEntryId());
+            fixture.faultTarget.set(4);
+            fixture.replyFault.set(16); // One actual TLS reply has a corrupt SDK entry digest.
+            var corrupt = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                    fixture.clients, 4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.UNDERREPLICATED, corrupt.status());
+            assertNull(corrupt.proof());
+            fixture.replyFault.set(0);
+            fixture.readAllowed.set(false);
+            var denied = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                    fixture.clients, 4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.CONFLICT, denied.status());
+            assertEquals(ProfileRecoveryCoordinator.PrefixReason.PERMISSION, denied.reason());
+        }
+    }
+
+    @Test
+    public void closedReplicaHealthCancellationAndAuthorityChangesNeverDeliverProof() throws Exception {
+        for (int mode : List.of(0, 1, 2, 3)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                    data.put(fixture.identities.get(node).bookieId(), peer);
+                    evidenceEntry(fixture, peer, 0, -1, 16, 16);
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
+                        coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                                fixture.credential, data, fixture.clients, 3, Duration.ofSeconds(30))
+                            .get(30, TimeUnit.SECONDS).status());
+                fixture.replyFault.set(21);
+                var pending = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                        fixture.clients, 2, mode == 1 ? Duration.ofSeconds(2) : Duration.ofSeconds(30));
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(3, fixture.heldReplies.size());
+                if (mode == 0) {
+                    assertTrue(pending.cancel(false));
+                } else if (mode == 1) {
+                    var timed = pending.get(5, TimeUnit.SECONDS);
+                    assertEquals(ProfileRecoveryCoordinator.PrefixReason.DEADLINE, timed.reason());
+                    assertNull(timed.proof());
+                } else if (mode == 2) {
+                    assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                            fixture.reservations.cutDelete(fixture.reservations.read(44).snapshot(),
+                                    bytes(16, 101), bytes(32, 102)).status());
+                } else {
+                    String path = ((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44);
+                    byte[] original = fixture.zk.getData(path, false, null);
+                    org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, path);
+                    fixture.zk.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                }
+                assertEquals(ProfileRecoveryCoordinator.PrefixReason.LIMIT,
+                        coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                                fixture.clients, 2, Duration.ofSeconds(30)).get(5, TimeUnit.SECONDS).reason());
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                if (mode >= 2) {
+                    var rejected = pending.get(5, TimeUnit.SECONDS);
+                    assertEquals(mode == 2 ? ProfileRecoveryCoordinator.ReplicaHealthStatus.DELETED
+                            : ProfileRecoveryCoordinator.ReplicaHealthStatus.QUARANTINED, rejected.status());
+                    assertNull(rejected.proof());
+                } else {
+                    ProfileRecoveryCoordinator.ReplicaHealthResult resumed = null;
+                    until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (System.nanoTime() < until) {
+                        resumed = coordinator.verifyClosedReplicas(44, sdk.getClientCtx(), fixture.credential, data,
+                                fixture.clients, 2, Duration.ofSeconds(30)).get(5, TimeUnit.SECONDS);
+                        if (resumed.proof() != null) {
+                            break;
+                        }
+                        assertEquals(ProfileRecoveryCoordinator.PrefixReason.LIMIT, resumed.reason());
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertNotNull(resumed);
+                    assertNotNull(resumed.proof());
                 }
             }
         }

@@ -1279,3 +1279,7 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-09新增ProfileClosedRepair：原state/P/L/close cut保持、copy实际durable前置、metadata birth/delete publication cut、close一次offset、target-readable晚于grant close与published resume不recopy；publication之后删除/重建不否定历史完成事实，模型记录发布时观察，不宣称strong revoke。1正向/9指定反例；metadata/copy/force为输入、不生产worker marker或crypto/fsync，catalog457未全量运行。真实范围见[实现记录](../profile-wire/README.md#closed-fragment-repair-与固定-close-history-cut)。
 
 最终相关ajwhad2c：143配置23正向/120指定反例，760源码hash/794 checksums；closed repair29/20 generated/distinct、queue0。最后format-only _8bwlaae10配置1正向9反例/760当前hash/550 checksums，广度回执不重绑；全457及完整组合未运行。
+
+2026-10-09新增ProfileReplicaHealth：两坐标/三副本与空 ledger，只在全部 required DATA来源合法、累计length匹配和最终 birth/version/delete freshness 成立时生成snapshot proof；caller cancel/deadline不提前释放actual read permit。1正向/9指定反例，FENCE/digest/reply为有限输入，不产生worker lock/marker清理或fsync/TLS事实。catalog467配置，完整目录未运行。真实结果及重现见[实现记录](../profile-wire/README.md#closed-全副本健康复核)。
+
+模型广度 `unified-wal-model-e1zy0v_3` exit0：153配置24完整正向PASS/129指定反例，771 source inputs/824 artifact checksums；之后仅测试调用长行换行。最终 `unified-wal-model-o60l_nvd`10配置1正向/9指定反例，771当前输入/561 checksums；Java与最终模型227重合/1588去重当前输入及父HEAD五个designInputs全部核对，历史广度不重绑。新正向38116 generated/19380 distinct、queue0、depth/diameter12、1.044秒/peak RSS186744832 bytes；这是有限模型检查消耗，非存储性能。tool1.7.4，单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整467配置未运行。

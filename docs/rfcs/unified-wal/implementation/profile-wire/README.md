@@ -812,3 +812,33 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 ```
 
 最终Spotless/Checkstyle `unified-wal-closed-final-style-Rk5caHaK` exit0；root RAT `2myvSAgJ` exit1仍443个父HEAD已有未批准路径，无新增失败、不改规则绕过。relative links、manifest JSON/historical values及git diff检查通过；未push、不接生产目录。
+
+## CLOSED 全副本健康复核
+
+2026-10-09，第14步 AutoRecovery 的清理前置新增 `ProfileRecoveryCoordinator.verifyClosedReplicas`。它独立读取实际 matching CLOSED，沿用原 context/P/L、birth、selection、完整 repair head、activation/repair 来源与 DELETE gate；不接受调用者给出的 healthy 布尔值。范围固定 CRC32C、E=W=3、A2/A3，预连接 DATA/control pool 各最多64、最多一个实际 attempt、显式 coordinate 上限与至多一分钟 deadline。旧可丢弃 CLOSED 缺 UWCF 不获得此 proof，也不做升级。
+
+当前末段所有目标须有匹配的 DATA/control incarnation 及 durable FENCE，空 ledger/empty-last 也执行这一检查。closed fence 来源现从完整 fresh CLOSED sources 取得，包含 inactive INSTALL 后已发布的 repair 目标；原 activation-only 选择会漏掉这些目标。首次复核此前没有参加 A2 recovery 的合法副本时，可以新增一次真实 FENCE force；重复 fence 不另造写入。没有 normal activation、普通 Add 逐 entry cold read 或新线程/队列。
+
+随后逐坐标检查 `0..P`：复用原 SDK exact write-set 的 fencing `probeEvidence`、digest、payload 比较与累计应用 length。全部 W 个来源均为 FOUND、无 payload/length 冲突且最终 length 等于 CLOSED L，才算完整；A 份 FOUND 不足。MISSING/CORRUPT 返回 UNDERREPLICATED 和首个未满足坐标的完整 source outcomes；UNKNOWN/不可达返回 DEFERRED，权限失败返回 CONFLICT，合法副本 payload/length 冲突进入 QUARANTINED。只持有一份 payload/一个 source set，一个坐标实际终结后才进入下一个，不读 P+1、不使用 Range，不保留与 ledger 长度成比例的 future 或 entry 图。
+
+实际 scan 完成后再次独立 cold read，要求同 context、metadata physical birth/version/全部内容和 exact source receipts，并重新消费 DELETE gate。只有这一末次检查通过，私有构造器才生成 `ReplicaHealthProof`，绑定最后的完整 CLOSED snapshot。检查期间取消/deadline 可先终结 caller，但 actual child 和 cold recheck 终结前仍持有原 attempt permit；取消不生成 proof，不提前释放正在使用的借用连接/buffer，结束时关闭本地 reader，原 SDK/peer pools 仍由调用者持有。
+
+该 proof 是一次有限观察。它尚未包含 worker 自身 lock、underreplication marker 版本/physical birth、同事务清理条件，因此不能直接授权 `markLedgerReplicated`；检查之后发生的媒体故障也不被这份观察预测。当前未修改原 `ReplicationWorker` 或 marker 清理路径，默认服务路由保持 OFF，步骤14及生产 Gate 仍 PARTIAL/OPEN。下一实际接线是 worker 的 Profile 分支、持久 intent 续接，以及同一清理 cut 下的 fresh proof/lock/marker 条件消费；同BookieId rejoin、离线 catch-up、完整 delete 和稳定兼容仍未交付。
+
+真实验证覆盖 A2/A3 空/非空 ledger、历史末段/empty-last、两次 CLOSED 目标替换，以及 A2 仍可恢复但历史第三副本缺 `e0`：复核明确 UNDERREPLICATED，完成原 CLOSED historical copy 后才得到 proof；缺失 peer 为 DEFERRED。实际 TLS 回复 digest 破坏不能成为 FOUND，错误 credential、读取拒绝、coordinate 限额不生成 proof。三个 actual READ_ENTRY 回复被持有时，cancel/deadline 后第二 attempt 仍被拒绝；释放实际回复后可重新完成。持有回复期间真实 DELETE 或相同 bytes 的 metadata 删除重建均阻断最终 proof，且 metadata 没有被重新开放。
+
+有限 `ProfileReplicaHealth.tla` 检查两坐标、三副本及空 ledger：完整副本、UNKNOWN、length、empty targets、birth/version/delete freshness、caller stop 与 actual read permit，1正向/9指定反例。reply/digest/FENCE outcome 是输入，不生产 fsync/TLS/crypto/worker lock/marker 事实，不证明检查后的物理媒体稳定性、完整 A/C/D 组合或 liveness。
+
+重现使用既有 runner：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#closedReplicaHealthFindsHistoricalHoleAndRequiresAllCopiesAfterRepair+closedReplicaHealthCancellationAndAuthorityChangesNeverDeliverProof+wholePointRecoveryClosesEmptyAndNonemptyFromOpenWithOriginalSdkAndQuorum+closedRepairCopiesToNewTargetsPreservingOriginalCloseAcrossRepeatedMembershipChanges'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-replica-health --config-prefix ce-profile-replica-health
+```
+
+最终Java `unified-wal-local-mD0mQuck` exit0：13类244项全部通过，common37/server207（socket75、lifecycle45、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1044当前输入，16 artifact checksums。最终style `unified-wal-replica-health-checks-rsXuD6Qm` exit0；root RAT exit1，443个unapproved路径全部在父HEAD，新增model/cfg不增加失败，原RAT规则不绕过。checks目录6个artifact checksums。
+
+模型广度 `unified-wal-model-e1zy0v_3` exit0：153配置24完整正向PASS/129指定反例，771 source inputs/824 artifact checksums；之后仅测试调用长行换行。最终 `unified-wal-model-o60l_nvd`10配置1正向/9指定反例，771当前输入/561 checksums；Java与最终模型227重合/1588去重当前输入及父HEAD五个designInputs全部核对，历史广度不重绑。新正向38116 generated/19380 distinct、queue0、depth/diameter12、1.044秒/peak RSS186744832 bytes；这是有限模型检查消耗，非存储性能。tool1.7.4，单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整467配置未运行。
+
+初次 Java `unified-wal-local-AtyTfrTH`暴露closed新target未纳入fence的实际DEFERRED，修复完整source选择后`unified-wal-local-toiVa5rq`该场景及两项新故障场景通过；其唯一失败是A3此前已经全部fenced却仍期待额外force的测试计数，按真实A2缺receiver条件修正后运行上述最终广度。初次模型 `unified-wal-model-8yc1i5m1` 缺FiniteSets导入，INCONCLUSIVE不计PASS；补齐后定向 `unified-wal-model-k0v55ha_`10配置符合预期，再执行上述广度/最终检查。style首轮一处122字符行失败，换行后最终检查通过。

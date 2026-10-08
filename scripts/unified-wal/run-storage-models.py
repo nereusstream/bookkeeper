@@ -19,6 +19,16 @@ import time
 
 
 MATRIX = {
+    'a-profile-replica-health': None,
+    'ce-profile-replica-health-all': 'AllRequiredCopiesFound',
+    'ce-profile-replica-health-unknown': 'UnknownNeverHealthy',
+    'ce-profile-replica-health-length': 'MatchingLength',
+    'ce-profile-replica-health-empty': 'EmptyRequiresAllTargets',
+    'ce-profile-replica-health-birth': 'FreshBirth',
+    'ce-profile-replica-health-version': 'FreshVersion',
+    'ce-profile-replica-health-delete': 'DeletePreventsProof',
+    'ce-profile-replica-health-stop': 'StoppedNeverGetsProof',
+    'ce-profile-replica-health-gate': 'ActualReadOwnsGate',
     'c-profile-terminal-cut': None,
     'ce-profile-terminal-cut-force': 'CutHasForce',
     'ce-profile-terminal-cut-precut': 'CutWaitsForPrecut',
@@ -607,6 +617,7 @@ def main():
                    else "ProfileRepairMembership.tla" if "profile-repair-membership" in name
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
                    else "ProfileClosedRepair.tla" if "profile-closed-repair" in name
+                   else "ProfileReplicaHealth.tla" if "profile-replica-health" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name

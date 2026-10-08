@@ -540,8 +540,20 @@ public final class ProfileRecoveryCoordinator {
     }
 
     private Prepared prepare(ProfileRecoveryContext context, boolean closedRepair) {
-        var current = closedRepair ? reservations.readRepairable(metadata, context.ledger().ledgerId())
-                : reservations.readRecovery(metadata, context.ledger().ledgerId());
+        if (closedRepair) {
+            var closed = reservations.readClosedForOpen(metadata, context.ledger().ledgerId());
+            if (closed.snapshot() == null || !context.equals(closed.snapshot().context())) {
+                return new Prepared(new ZKProfileReservationStore.RecoveryResult(closed.status()
+                        == ZKProfileReservationStore.ReadOnlyStatus.UNAVAILABLE
+                            ? ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                            : ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null), List.of());
+            }
+            // Include committed repair targets, which were installed inactive and have no normal activation page.
+            return new Prepared(new ZKProfileReservationStore.RecoveryResult(
+                    ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, context, closed.snapshot().closed().metadata()),
+                    closed.snapshot().sources());
+        }
+        var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
         if (current.context() == null || !context.equals(current.context())) {
             return new Prepared(current, List.of());
         }
@@ -1038,6 +1050,283 @@ public final class ProfileRecoveryCoordinator {
             case QUARANTINED -> CompletionStatus.QUARANTINED;
             default -> CompletionStatus.DEFERRED;
         };
+    }
+
+    public enum ReplicaHealthStatus {
+        FULLY_REPLICATED, UNDERREPLICATED, DEFERRED, CONFLICT, QUARANTINED, DELETED
+    }
+
+    /** Produced only after all required write-set copies and the final cold metadata recheck succeed.
+     * This is an observation tied to one snapshot, not authority to clear an underreplication marker.
+     */
+    public static final class ReplicaHealthProof {
+        private final ZKProfileReservationStore.ReadOnlySnapshot snapshot;
+
+        private ReplicaHealthProof(ZKProfileReservationStore.ReadOnlySnapshot snapshot) {
+            this.snapshot = snapshot;
+        }
+
+        public ZKProfileReservationStore.ReadOnlySnapshot snapshot() {
+            return snapshot;
+        }
+    }
+
+    public record ReplicaHealthResult(ReplicaHealthStatus status, PrefixReason reason, long unresolvedEntry,
+            List<ProfileRecoveryReadHandle.SourceEvidence> sources, ReplicaHealthProof proof) {
+        public ReplicaHealthResult {
+            Objects.requireNonNull(status, "status");
+            Objects.requireNonNull(reason, "reason");
+            sources = List.copyOf(sources);
+            if ((status == ReplicaHealthStatus.FULLY_REPLICATED) != (proof != null)) {
+                throw new IllegalArgumentException("Only a complete replica health observation carries its proof");
+            }
+        }
+    }
+
+    /** Bounded, one-coordinate-at-a-time health scan of matching CLOSED; quorum success is insufficient. */
+    public CompletableFuture<ReplicaHealthResult> verifyClosedReplicas(long ledger, ClientContext sdk,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration) {
+        long duration = maxDuration.toNanos();
+        if (ledger < 0 || maxCoordinates < 1 || suppliedData.size() > 64 || suppliedControl.size() > 64
+                || duration <= 0 || maxDuration.compareTo(Duration.ofMinutes(1)) > 0) {
+            throw new IllegalArgumentException("Replica health requires bounded coordinates, duration and peer pools");
+        }
+        ProfileRecoveryReadHandle.requireCompatibleSdk(sdk);
+        if (sdk.isClientClosed()) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+        }
+        if (!active.tryAcquire()) {
+            return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.LIMIT));
+        }
+        var stopped = new AtomicBoolean();
+        var caller = new CompletableFuture<ReplicaHealthResult>();
+        try {
+            var data = Map.copyOf(suppliedData);
+            var controls = Map.copyOf(suppliedControl);
+            var key = credential.copy();
+            var actual = CompletableFuture.supplyAsync(() -> reservations.readClosedForOpen(metadata, ledger), cold)
+                    .thenCompose(read -> {
+                if (read.snapshot() == null) {
+                    return CompletableFuture.completedFuture(replicaReadFailure(read.status()));
+                }
+                return verifyClosedReplicasOnce(read.snapshot(), sdk, key, data, controls, maxCoordinates, stopped);
+            });
+            var timer = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
+            actual.whenComplete((result, failure) -> {
+                var scheduled = timer.get();
+                if (scheduled != null) {
+                    scheduled.cancel(false);
+                }
+                active.release();
+                if (failure != null) {
+                    caller.completeExceptionally(failure);
+                } else {
+                    caller.complete(result);
+                }
+            });
+            try {
+                var scheduled = sdk.getScheduler().schedule(() -> {
+                    stopped.set(true);
+                    caller.complete(replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.DEADLINE));
+                }, duration, java.util.concurrent.TimeUnit.NANOSECONDS);
+                timer.set(scheduled);
+                if (actual.isDone()) {
+                    scheduled.cancel(false);
+                }
+            } catch (RejectedExecutionException unavailable) {
+                stopped.set(true);
+                caller.complete(replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.LIMIT));
+            }
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return caller;
+        } catch (RuntimeException failedAdmission) {
+            active.release();
+            throw failedAdmission;
+        }
+    }
+
+    private CompletableFuture<ReplicaHealthResult> verifyClosedReplicasOnce(
+            ZKProfileReservationStore.ReadOnlySnapshot snapshot, ClientContext sdk,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> controls, int maxCoordinates, AtomicBoolean stopped) {
+        var member = snapshot.closed().metadata();
+        var value = member.metadata().getValue();
+        if (value.getEnsembleSize() != 3 || value.getWriteQuorumSize() != 3
+                || value.getAckQuorumSize() < 2 || value.getAckQuorumSize() > 3
+                || value.getDigestType() != org.apache.bookkeeper.client.api.DigestType.CRC32C
+                || !value.getCustomMetadata().containsKey(ProfileRecoveryBoundary.CLOSE_KEY)) {
+            return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
+                    PrefixReason.AUTHORITY_CHANGED));
+        }
+        try {
+            if (!credential.matchesWireVerifier(org.apache.bookkeeper.proto.checksum.DigestManager
+                    .generateMasterKey(value.getPassword()))) {
+                return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
+                        PrefixReason.PERMISSION));
+            }
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            return CompletableFuture.failedFuture(impossible);
+        }
+        if (stopped.get() || value.getLastEntryId() >= maxCoordinates) {
+            return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED,
+                    stopped.get() ? PrefixReason.CANCELLED : PrefixReason.LIMIT));
+        }
+        var data = new java.util.HashMap<BookieId, ProfileNormalDataClient>();
+        for (var receipt : snapshot.sources()) {
+            String name = receipt.scope().targetBookie();
+            var peer = suppliedData.get(BookieId.parse(name));
+            if (peer == null) {
+                continue;
+            }
+            if (peer.hello().activeEngine() != 3 || !peer.hello().bookieId().equals(name)
+                    || !Arrays.equals(peer.hello().storageIncarnation(), receipt.scope().targetStorageIncarnation())) {
+                return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
+                        PrefixReason.AUTHORITY_CHANGED));
+            }
+            data.put(BookieId.parse(name), peer);
+        }
+        var accepted = new ZKProfileReservationStore.RecoveryResult(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED,
+                snapshot.context(), member);
+        return fenceOnce(accepted, controls, credential).thenCompose(fenced -> {
+            // Includes a possibly empty final fragment: all its current targets must answer, not merely A of E.
+            var last = value.getAllEnsembles().lastEntry().getValue();
+            if (stopped.get() || fenced.status() != Status.FENCED_CONTEXT
+                    || !last.stream().allMatch(bookie -> data.containsKey(bookie) && fenced.fences().stream()
+                        .anyMatch(fence -> fence.bookie().equals(bookie.toString())))) {
+                return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED,
+                        stopped.get() ? PrefixReason.CANCELLED : PrefixReason.SOURCE_UNAVAILABLE));
+            }
+            var controlPeers = new java.util.HashMap<BookieId, ProfileInitialControlClient>();
+            controls.forEach((name, peer) -> controlPeers.put(BookieId.parse(name), peer));
+            ProfileRecoveryReadHandle reader;
+            try {
+                reader = ProfileRecoveryReadHandle.fromClosedRepairContext(sdk, accepted, snapshot.sources(),
+                        data, controlPeers);
+            } catch (java.security.GeneralSecurityException invalid) {
+                return CompletableFuture.failedFuture(invalid);
+            }
+            var scan = new ReplicaScan(reader, snapshot, stopped);
+            scan.step();
+            return scan.done.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
+                if (stopped.get()) {
+                    return replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.CANCELLED);
+                }
+                var fresh = reservations.readClosedForOpen(metadata, value.getLedgerId());
+                if (fresh.snapshot() == null) {
+                    return replicaReadFailure(fresh.status());
+                }
+                if (!sameClosedSnapshot(snapshot, fresh.snapshot())) {
+                    return replicaFailure(ReplicaHealthStatus.CONFLICT, PrefixReason.AUTHORITY_CHANGED);
+                }
+                return result.status() == ReplicaHealthStatus.FULLY_REPLICATED
+                        ? new ReplicaHealthResult(result.status(), result.reason(), -1, List.of(),
+                                new ReplicaHealthProof(fresh.snapshot()))
+                        : new ReplicaHealthResult(result.status(), result.reason(), result.unresolvedEntry(),
+                                result.sources(), null);
+            }, cold)).whenComplete((result, failure) -> reader.closeAsync());
+        });
+    }
+
+    private static boolean sameClosedSnapshot(ZKProfileReservationStore.ReadOnlySnapshot before,
+            ZKProfileReservationStore.ReadOnlySnapshot after) {
+        return before.context().equals(after.context())
+                && before.closed().metadata().birthZxid() == after.closed().metadata().birthZxid()
+                && before.closed().metadata().metadata().getVersion()
+                    .equals(after.closed().metadata().metadata().getVersion())
+                && ProfileLedgerMetadataStore.sameMetadata(before.closed().metadata().metadata().getValue(),
+                    after.closed().metadata().metadata().getValue()) && before.sources().equals(after.sources());
+    }
+
+    private static ReplicaHealthResult replicaFailure(ReplicaHealthStatus status, PrefixReason reason) {
+        return new ReplicaHealthResult(status, reason, -1, List.of(), null);
+    }
+
+    private static ReplicaHealthResult replicaReadFailure(ZKProfileReservationStore.ReadOnlyStatus status) {
+        return replicaFailure(switch (status) {
+            case DELETED -> ReplicaHealthStatus.DELETED;
+            case UNAVAILABLE, NOT_CLOSED -> ReplicaHealthStatus.DEFERRED;
+            case CONFLICT -> ReplicaHealthStatus.CONFLICT;
+            default -> ReplicaHealthStatus.QUARANTINED;
+        }, status == ZKProfileReservationStore.ReadOnlyStatus.UNAVAILABLE ? PrefixReason.AUTHORITY_UNAVAILABLE
+                : PrefixReason.AUTHORITY_CHANGED);
+    }
+
+    private record ReplicaScanResult(ReplicaHealthStatus status, PrefixReason reason, long unresolvedEntry,
+            List<ProfileRecoveryReadHandle.SourceEvidence> sources) { }
+
+    private static final class ReplicaScan {
+        private final ProfileRecoveryReadHandle reader;
+        private final ZKProfileReservationStore.ReadOnlySnapshot snapshot;
+        private final AtomicBoolean stopped;
+        private final CompletableFuture<ReplicaScanResult> done = new CompletableFuture<>();
+        private long next;
+        private long length;
+
+        ReplicaScan(ProfileRecoveryReadHandle reader, ZKProfileReservationStore.ReadOnlySnapshot snapshot,
+                AtomicBoolean stopped) {
+            this.reader = reader;
+            this.snapshot = snapshot;
+            this.stopped = stopped;
+        }
+
+        void step() {
+            var value = snapshot.closed().metadata().metadata().getValue();
+            if (stopped.get()) {
+                done.complete(new ReplicaScanResult(ReplicaHealthStatus.DEFERRED,
+                        PrefixReason.CANCELLED, next, List.of()));
+            } else if (next > value.getLastEntryId()) {
+                done.complete(length == value.getLength()
+                        ? new ReplicaScanResult(ReplicaHealthStatus.FULLY_REPLICATED,
+                                PrefixReason.NORMAL_TAIL, -1, List.of())
+                        : new ReplicaScanResult(ReplicaHealthStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT,
+                                next, List.of()));
+            } else {
+                reader.probeEvidence(next).whenComplete((evidence, failure) -> {
+                    if (failure != null) {
+                        if (cause(failure) instanceof BKException) {
+                            done.complete(new ReplicaScanResult(ReplicaHealthStatus.DEFERRED,
+                                    PrefixReason.SOURCE_UNAVAILABLE, next, List.of()));
+                        } else {
+                            done.completeExceptionally(failure);
+                        }
+                    } else if (stopped.get()) {
+                        done.complete(new ReplicaScanResult(ReplicaHealthStatus.DEFERRED,
+                        PrefixReason.CANCELLED, next, List.of()));
+                    } else if (evidence.conflict()) {
+                        finish(ReplicaHealthStatus.QUARANTINED, PrefixReason.PAYLOAD_CONFLICT, evidence);
+                    } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                            == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                        finish(ReplicaHealthStatus.CONFLICT, PrefixReason.PERMISSION, evidence);
+                    } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                            == ProfileRecoveryReadHandle.SourceOutcome.MISSING || source.outcome()
+                                == ProfileRecoveryReadHandle.SourceOutcome.CORRUPT)) {
+                        finish(ReplicaHealthStatus.UNDERREPLICATED, PrefixReason.REQUIRED_HOLE, evidence);
+                    } else if (evidence.candidate() == null || evidence.sources().stream().anyMatch(source ->
+                            source.outcome() != ProfileRecoveryReadHandle.SourceOutcome.FOUND)) {
+                        finish(ReplicaHealthStatus.DEFERRED, PrefixReason.SOURCE_UNAVAILABLE, evidence);
+                    } else {
+                        var candidate = evidence.candidate();
+                        int bytes = candidate.payload().remaining();
+                        if (length > Long.MAX_VALUE - bytes || candidate.length() != length + bytes) {
+                            finish(ReplicaHealthStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT, evidence);
+                        } else {
+                            length = candidate.length();
+                            next++;
+                            step();
+                        }
+                    }
+                });
+            }
+        }
+
+        void finish(ReplicaHealthStatus status, PrefixReason reason, ProfileRecoveryReadHandle.PointEvidence evidence) {
+            done.complete(new ReplicaScanResult(status, reason, next, evidence.sources()));
+        }
     }
 
     public enum RepairStatus {
