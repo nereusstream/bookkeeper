@@ -1275,3 +1275,7 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-09新增ProfileWholeRecovery，检查verified predicate才select、固定context/selection/target IDs、actual child持有gate、cancel后不开始未来工作、UNKNOWN不计durable target、matching close先于成功及cleanup history保留。A2/A3两个正向和九个指定反例；metadata/point proof/target实际结果为输入，不生成crypto/TLS/fsync、AutoRecovery marker或strong reset，catalog447未宣称全量或生产接受。真实范围见[实现记录](../profile-wire/README.md#整体-fenced-point-recovery-入口与持久身份续接)。
 
 最终相关9iavbptf：133配置22正向/111指定反例，749源码hash/764 checksums核对。whole A2 990/716、A3 1029/715 generated/distinct，queue0；完整447及全组合未运行，不生成AutoRecovery或生产authority。
+
+2026-10-09新增ProfileClosedRepair：原state/P/L/close cut保持、copy实际durable前置、metadata birth/delete publication cut、close一次offset、target-readable晚于grant close与published resume不recopy；publication之后删除/重建不否定历史完成事实，模型记录发布时观察，不宣称strong revoke。1正向/9指定反例；metadata/copy/force为输入、不生产worker marker或crypto/fsync，catalog457未全量运行。真实范围见[实现记录](../profile-wire/README.md#closed-fragment-repair-与固定-close-history-cut)。
+
+最终相关ajwhad2c：143配置23正向/120指定反例，760源码hash/794 checksums；closed repair29/20 generated/distinct、queue0。最后format-only _8bwlaae10配置1正向9反例/760当前hash/550 checksums，广度回执不重绑；全457及完整组合未运行。

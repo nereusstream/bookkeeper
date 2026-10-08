@@ -354,6 +354,38 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
     }
 
     @Test
+    public void closeHistoryReferenceMatchesIndependentVectorAndOwnsBytes() throws Exception {
+        byte[] prefix = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(getClass().getResource(
+                "/unified-wal-segment/recovery-prefix.bin").toURI()));
+        byte[] fixed = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(getClass().getResource(
+                "/unified-wal-segment/recovery-close-cut.bin").toURI()));
+        var boundary = ProfileRecoveryBoundary.decode(prefix);
+        var decoded = ProfileRecoveryBoundary.CloseReference.decode(fixed);
+        assertEquals(80, fixed.length);
+        assertEquals(0, decoded.headCount());
+        assertEquals(2, decoded.prefixEntryId());
+        assertEquals(48, decoded.prefixLength());
+        assertTrue(decoded.matchesContext(boundary.context()));
+        assertArrayEquals(fixed, decoded.encode());
+        byte[] borrowed = decoded.contextDigest();
+        borrowed[0] ^= 1;
+        assertArrayEquals(fixed, decoded.encode());
+        for (int count = 0; count < fixed.length; count++) {
+            byte[] cut = java.util.Arrays.copyOf(fixed, count);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.CloseReference.decode(cut));
+        }
+        byte[] corrupt = fixed.clone();
+        corrupt[72] = 1;
+        assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.CloseReference.decode(corrupt));
+        assertThrows(IllegalArgumentException.class, () -> new ProfileRecoveryBoundary.CloseReference(
+                Integer.MAX_VALUE, 0, 1, 2, 48, new byte[32]));
+        assertThrows(IllegalArgumentException.class, () -> new ProfileRecoveryBoundary.CloseReference(
+                1, 33, 1, 2, 48, new byte[32]));
+        assertThrows(IllegalArgumentException.class, () -> new ProfileRecoveryBoundary.CloseReference(
+                1, 0, 1, -1, 48, new byte[32]));
+    }
+
+    @Test
     public void prefixSelectionVectorsOwnBytesAndRejectAliasTruncationAndBadBounds() throws Exception {
         byte[] vector = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(getClass().getResource(
                 "/unified-wal-segment/recovery-prefix.bin").toURI()));

@@ -94,11 +94,13 @@ public final class ProfileRecoveryCoordinator {
             throw new IllegalArgumentException("Fencing requires a proved recovery context and bounded peer pool");
         }
         var context = accepted.context();
+        boolean closedRepair = accepted.metadata().metadata().getValue().getState()
+                == org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED;
         var peers = Map.copyOf(supplied);
         Objects.requireNonNull(credential, "credential");
         CompletableFuture<Result> actual;
         try {
-            actual = CompletableFuture.supplyAsync(() -> prepare(context), cold).thenCompose(prepared -> {
+            actual = CompletableFuture.supplyAsync(() -> prepare(context, closedRepair), cold).thenCompose(prepared -> {
                 if (prepared.recovery().context() == null
                         || !context.equals(prepared.recovery().context())) {
                     return CompletableFuture.completedFuture(new Result(
@@ -146,7 +148,8 @@ public final class ProfileRecoveryCoordinator {
                                         HexFormat.of().formatHex(reply.peer().hello().storageIncarnation())));
                             }
                         }
-                        var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
+                        var current = closedRepair ? reservations.readRepairable(metadata, context.ledger().ledgerId())
+                                : reservations.readRecovery(metadata, context.ledger().ledgerId());
                         if (current.context() == null || !context.equals(current.context())) {
                             return new Result(failureStatus(current.outcome()), context, proofs);
                         }
@@ -238,7 +241,12 @@ public final class ProfileRecoveryCoordinator {
     }
 
     private Readers readers(ProfileRecoveryContext context) {
-        var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
+        return readers(context, false);
+    }
+
+    private Readers readers(ProfileRecoveryContext context, boolean closedRepair) {
+        var current = closedRepair ? reservations.readRepairable(metadata, context.ledger().ledgerId())
+                : reservations.readRecovery(metadata, context.ledger().ledgerId());
         if (current.context() == null || !context.equals(current.context())) {
             return new Readers(current, List.of());
         }
@@ -250,7 +258,7 @@ public final class ProfileRecoveryCoordinator {
                         ? ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
                         : ProfileLedgerMetadataStore.Outcome.QUARANTINED, null, null), List.of());
         }
-        var currentTargets = prepare(context).targets();
+        var currentTargets = prepare(context, closedRepair).targets();
         var permitted = new java.util.LinkedHashMap<String, ProfileInstallReceipt>();
         for (var receipt : retained.targets()) {
             var old = permitted.put(receipt.scope().targetBookie(), receipt);
@@ -528,7 +536,12 @@ public final class ProfileRecoveryCoordinator {
     }
 
     private Prepared prepare(ProfileRecoveryContext context) {
-        var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
+        return prepare(context, false);
+    }
+
+    private Prepared prepare(ProfileRecoveryContext context, boolean closedRepair) {
+        var current = closedRepair ? reservations.readRepairable(metadata, context.ledger().ledgerId())
+                : reservations.readRecovery(metadata, context.ledger().ledgerId());
         if (current.context() == null || !context.equals(current.context())) {
             return new Prepared(current, List.of());
         }
@@ -1055,6 +1068,21 @@ public final class ProfileRecoveryCoordinator {
                 suppliedData, suppliedControl, closeOperationId, true);
     }
 
+    /** Replicate a CLOSED fragment while retaining the original close P/L/context; no reopen or marker clear. */
+    public CompletableFuture<RepairResult> repairClosedFragment(ZKProfileReservationStore.ReadOnlySnapshot accepted,
+            ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk, byte[] descriptor,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> data,
+            Map<String, ProfileInitialControlClient> controls, byte[] closeId) {
+        var value = accepted.closed().metadata().metadata().getValue();
+        if (value.getState() != org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED) {
+            throw new IllegalArgumentException("Closed repair requires its durable closed snapshot");
+        }
+        return repairFragment(new ZKProfileReservationStore.RecoveryResult(
+                ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, accepted.context(), accepted.closed().metadata()),
+                prepared, sdk, descriptor, credential, data, controls, closeId,
+                value.getAllEnsembles().higherKey(prepared.intent().fragmentStart()) == null);
+    }
+
     private CompletableFuture<RepairResult> repairFragment(ZKProfileReservationStore.RecoveryResult accepted,
             ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk,
             byte[] canonicalDescriptor, ProtectedProfileCredential credential,
@@ -1094,6 +1122,7 @@ public final class ProfileRecoveryCoordinator {
             Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId, boolean last,
             AtomicBoolean stopped) {
         var input = accepted.metadata().metadata().getValue();
+        boolean closedRepair = input.getState() == org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED;
         var custom = new java.util.TreeMap<String, byte[]>();
         input.getCustomMetadata().forEach((name, bytes) -> custom.put(name, bytes.clone()));
         var builder = org.apache.bookkeeper.client.LedgerMetadataBuilder.from(input).withCToken(input.getCToken())
@@ -1123,7 +1152,8 @@ public final class ProfileRecoveryCoordinator {
         byte[] closeId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
         var key = credential.copy();
         CompletableFuture<RepairResult> actual;
-            actual = CompletableFuture.supplyAsync(() -> readers(frozen.context()), cold).thenCompose(source -> {
+            actual = CompletableFuture.supplyAsync(() -> readers(frozen.context(), closedRepair), cold)
+                    .thenCompose(source -> {
                 if (source.recovery().context() == null) {
                     return CompletableFuture.completedFuture(repairFailure(source.recovery().outcome()));
                 }
@@ -1146,8 +1176,8 @@ public final class ProfileRecoveryCoordinator {
                             && ref.intentBirth().equals(prepared.birth())
                             && ref.intentStoreVersion() == prepared.storeVersion());
                 if (published) {
-                    return CompletableFuture.supplyAsync(() -> reservations.commitRepair(metadata, prepared,
-                            frozen.metadata(), closeId), cold).thenCompose(result -> closeRepair(result, intent,
+                    return CompletableFuture.supplyAsync(() -> reservations.resolveRepairClose(metadata, prepared,
+                            closeId), cold).thenCompose(result -> closeRepair(result, intent,
                                     control, 0));
                 }
                 boolean sameContent;
@@ -1201,7 +1231,8 @@ public final class ProfileRecoveryCoordinator {
                                     return CompletableFuture.completedFuture(new RepairResult(
                                             RepairStatus.DEFERRED, 0, null));
                                 }
-                                return CompletableFuture.supplyAsync(() -> readers(frozen.context()), cold)
+                                return CompletableFuture.supplyAsync(
+                                        () -> readers(frozen.context(), closedRepair), cold)
                                         .thenCompose(ready -> copyRepair(frozen, prepared, sdk, data, controls,
                                                 target, control, key, closeId, stopped, ready));
                             });
@@ -1232,8 +1263,12 @@ public final class ProfileRecoveryCoordinator {
         controls.forEach((name, peer) -> boundControls.put(BookieId.parse(name), peer));
         ProfileRecoveryReadHandle reader;
         try {
-            reader = ProfileRecoveryReadHandle.fromContext(sdk, ready.recovery(),
-                    ready.permitted(), data, boundControls);
+            reader = accepted.metadata().metadata().getValue().getState()
+                    == org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED
+                        ? ProfileRecoveryReadHandle.fromClosedRepairContext(sdk, ready.recovery(), ready.permitted(),
+                            data, boundControls)
+                        : ProfileRecoveryReadHandle.fromContext(sdk, ready.recovery(), ready.permitted(),
+                            data, boundControls);
         } catch (java.security.GeneralSecurityException invalid) {
             return CompletableFuture.failedFuture(invalid);
         }

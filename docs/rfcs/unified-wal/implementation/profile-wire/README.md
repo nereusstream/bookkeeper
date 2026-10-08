@@ -782,3 +782,33 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 ```
 
 广度后仅一处constructor长行换行；最终`unified-wal-local-5QbrOF4R`3项整体恢复定向全通过、1043当前hash核对。最终`unified-wal-model-wroy_j4v`11配置2正向/9指定反例、749当前hash/540 checksums核对；广度133配置run的唯一source差异是该换行，models/configs/runner不变，历史广度回执不重绑。最终Spotless/Checkstyle`unified-wal-whole-final-style-O9PC3jXu` exit0。root RAT `Kxvonn3R` exit1仍443个父HEAD已有未批准路径、无新增失败，不改规则绕过。relative links/manifest历史字段/git diff检查通过，未push。
+
+
+## CLOSED fragment repair 与固定 close history cut
+
+2026-10-09，接 AutoRecovery 前补齐必要的closed复制前置：`repairClosedFragment`复用原RepairIntent/admission、UIC3、原SDK point/digest、单entry实际DATA、membership+immutable receipt同事务和UIC4。整个metadata保持CLOSED；不重新OPEN或IN_RECOVERY，不重选P/L/context，不清underreplication marker或重置loss budget。原public readRecovery仍拒绝CLOSED，新的repair-only cold view要求matching live closed事实及close reference。
+
+标准CLOSED publication在同一次birth/version/lifecycle/selection条件化CAS中增加UWCF/schema1固定80字节reference：header8、close前metadata version4、当时repair head count4、metadata birth8、P8、应用length8、UWRC完整SHA256 32、reserved4、CRC32C4。它标识原close在同一standard metadata history中的位置，只校验原CLOSED事实，不另建membership/close authority。后续closed repair追加head/version时保留原reference/P/L/CToken；inverse按selection与close各一次offset校验每个receipt，再恢复原UWRC/predecessor。OPEN digest投影只排除该reserved key，不发布OPEN投影。
+
+旧可丢弃experimental CLOSED缺UWCF仍可按原末尾close规则解析；closed repair明确拒绝缺reference，未实现升级/migration、不提升stable兼容。新reference不改变UWRC/UWRF/UWRS/UWRP/UWRM/UWRH、UIC1～6或native DATA/control旧字节布局。独立Python struct/SHA256/CRC32C `recovery-close-cut.bin`80字节，SHA256 `f5614cd99868b41de35c924f5c397de98960913d891d13bb40f2173958a04c6a`；codec逐字节、全部截断、字段ownership/reserved/边界验证。向量只生产字节，不生产quorum或持久化事实。
+
+readRepairable先独立验证matching CLOSED、metadata physical birth/version、原selection/完整head/activation与live delete gate。prepare/admit/publish及cold grant/close reader共用它，legacy recovery API不获得重新开写权限。closed membership CAS与原CopiedAt完整snapshot比较，保留原close bytes/P/L；copy后DELETE或metadata变化阻断publication。actual DATA copy完成但UIC4未durable时新grant range仍不可读；close late/UNKNOWN按原操作解析。
+
+copy reader从同一已验证closed snapshot沿用原exact source set/FENCE、digest/应用length验证，上界固定P，unavailable不计absence。新目标仍inactive，first durable payload前有admitted RepairIntent；不会normal activation。resume已published目标通过新增cold resolveRepairClose重验head digest/intent birth/version/current membership及原close ID，直接解析close，不拿current metadata假装CopiedAt、不重写receipt或recopy。原commitRepair的条件保留。
+
+真实A2/A3场景从整体恢复得到CLOSED(2,48)，向两个新Bookie连续复制/换组；每次state/P/L/context/CToken及原UWCF保持，fresh closed reader重验完整inverse，新target实际点读可见且normal禁用。第一UIC4 actual force后丢回复/断连，新coordinator与fresh snapshot按原close ID零recopy、零新增DATA force；第二target重启保留e2可读/e3拒绝和预创建容量。所有路径复用原pool/owner/I/O，未建新Maven模块或worker框架。
+
+这补上worker复制CLOSED fragment的必要存储/控制面能力；真实ReplicationWorker Profile route、typed健康复核/marker清理、同BookieId rejoin、离线catch-up、完整delete/cleanup、额外required authority、normal writer CLOSED adoption、默认SDK routing、全预算/组合/掉电/长期性能与production Gate仍OPEN。步骤14保持PARTIAL，历史source/design/run字段不重绑。
+
+
+广度`unified-wal-local-NKyQyO4H` exit0：13类242项全部通过（common37/server205：socket73、lifecycle45、metadata19、control store12、PendingAddOp19、decoder22、Bookie15）。最后仅一处callback长行换行；最终`unified-wal-local-FLahjd4o`3项相关测试通过，1044当前source hashes核对，旧广度不重绑。早期访问package-private digest的编译错误不计协议RED。
+
+模型广度`unified-wal-model-ajwhad2c` exit0：143配置23完整正向PASS/120指定反例，760源码hash/794 artifact checksums；closed repair正向29 generated/20 distinct、queue0，九个指定反例分别命中birth、delete、reopen、P/L、原close cut、close version offset、copy barrier、readable和recopy。最终format-only`unified-wal-model-_8bwlaae`10配置1正向9反例，760当前hash/550 checksums核对；models/configs/runner不变，广度唯一source差异是callback换行。固定tool1.7.4/worker1/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint；全457或完整A+C+D未运行，模型不产生crypto/TLS/实际I/O/worker清理证明，父绑定7bd5f86c59179492991ed1750e8f3fd76ae7cc63。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileOperationCodecTest,ProfileFrameCodecTest,IsolatedProfileControlEndpointTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*+recoveryCloseWaitsForPrecutTicket*+uncertainRecoveryCloseForce*+profileSocketRecoveryGrantClose*+recoveredRecoveryCandidateLosesEligibility*+terminalClose*+terminalControlFraming*+standaloneTerminalBoundary*+graphCompactionSkipsTerminalSuffixAndPreservesRequiredPrefix+graphCompactionTerminalGroupNeedsNoCopyAllocation+graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar --config-prefix a-profile-closed-repair --config-prefix ce-profile-closed-repair --config-prefix a-profile-whole-recovery --config-prefix ce-profile-whole-recovery --config-prefix a-profile-readonly --config-prefix ce-profile-readonly --config-prefix a-profile-recovery-completion --config-prefix ce-profile-recovery-completion --config-prefix c-profile-terminal-cut --config-prefix ce-profile-terminal-cut --config-prefix a-profile-recovery-selection --config-prefix ce-profile-recovery-selection --config-prefix a-profile-repair-membership --config-prefix ce-profile-repair-membership --config-prefix a-profile-recovery-prefix --config-prefix ce-profile-recovery-prefix --config-prefix a-profile-lac- --config-prefix ce-profile-lac- --config-prefix a-profile-point-read --config-prefix ce-profile-point-read --config-prefix a-profile-recovery-observation --config-prefix ce-profile-recovery-observation --config-prefix a-profile-repair-copy --config-prefix ce-profile-repair-copy --config-prefix c-whole-free --config-prefix ce-whole-free
+```
+
+最终Spotless/Checkstyle `unified-wal-closed-final-style-Rk5caHaK` exit0；root RAT `2myvSAgJ` exit1仍443个父HEAD已有未批准路径，无新增失败、不改规则绕过。relative links、manifest JSON/historical values及git diff检查通过；未push、不接生产目录。

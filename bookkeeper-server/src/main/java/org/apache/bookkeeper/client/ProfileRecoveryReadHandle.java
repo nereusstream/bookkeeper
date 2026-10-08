@@ -138,6 +138,20 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
             ZKProfileReservationStore.RecoveryResult accepted, List<ProfileInstallReceipt> permitted,
             Map<BookieId, ProfileNormalDataClient> data, Map<BookieId, ProfileInitialControlClient> controls)
             throws GeneralSecurityException {
+        return build(base, accepted, permitted, data, controls, false);
+    }
+
+    public static ProfileRecoveryReadHandle fromClosedRepairContext(ClientContext base,
+            ZKProfileReservationStore.RecoveryResult accepted, List<ProfileInstallReceipt> permitted,
+            Map<BookieId, ProfileNormalDataClient> data, Map<BookieId, ProfileInitialControlClient> controls)
+            throws GeneralSecurityException {
+        return build(base, accepted, permitted, data, controls, true);
+    }
+
+    private static ProfileRecoveryReadHandle build(ClientContext base,
+            ZKProfileReservationStore.RecoveryResult accepted,
+            List<ProfileInstallReceipt> permitted, Map<BookieId, ProfileNormalDataClient> data,
+            Map<BookieId, ProfileInitialControlClient> controls, boolean closedRepair) throws GeneralSecurityException {
         if (accepted.context() == null || data.isEmpty() || data.size() > 64 || controls.size() > 64
                 || base.getConf().useV2WireProtocol || base.getConf().explicitLacInterval != 0) {
             throw new IllegalArgumentException("Readonly recovery requires the frozen context and bounded V3 peers");
@@ -145,18 +159,28 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         var context = accepted.context();
         var metadata = accepted.metadata().metadata();
         var value = metadata.getValue();
-        if (value.getState() != LedgerMetadata.State.IN_RECOVERY
+        if (value.getState() != (closedRepair ? LedgerMetadata.State.CLOSED : LedgerMetadata.State.IN_RECOVERY)
                 || !(metadata.getVersion() instanceof LongVersion version)
                 || version.getLongVersion() != context.generation()
                     + ProfileRepairCommit.head(
                             value.getCustomMetadata().get(ProfileRepairCommit.KEY))
                         .size()
                     + org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.versionOffset(value)
+                    + (closedRepair ? 1 : 0)
                 || accepted.metadata().birthZxid() != context.metadataBirth()
                 || !context.equals(ProfileRecoveryContext.decode(
                         value.getCustomMetadata().get(ProfileRecoveryContext.KEY)))
                 || value.getEnsembleSize() > 32 || value.getAllEnsembles().size() > 32) {
             throw new IllegalArgumentException("Recovery metadata does not carry the exact accepted context");
+        }
+        if (closedRepair) {
+            var cut = org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.CloseReference.decode(
+                    value.getCustomMetadata().get(
+                            org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.CLOSE_KEY));
+            if (cut.metadataBirth() != context.metadataBirth() || cut.prefixEntryId() != value.getLastEntryId()
+                    || cut.prefixLength() != value.getLength() || !cut.matchesContext(context)) {
+                throw new IllegalArgumentException("Closed copy requires its unchanged boundary/context cut");
+            }
         }
         for (var entry : data.entrySet()) {
             var peer = entry.getValue();
@@ -173,7 +197,8 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         }
         var credential = ProtectedProfileCredential.of(1, DigestManager.generateMasterKey(value.getPassword()));
         var transport = new ProfileBookieClient(base, context.ledger(), credential, data, 1,
-                new ProfileBookieClient.Retry(1, Duration.ofSeconds(5), Duration.ofMillis(1)), context, controls);
+                new ProfileBookieClient.Retry(1, Duration.ofSeconds(5), Duration.ofMillis(1)), context, controls,
+                closedRepair ? value.getLastEntryId() : Long.MAX_VALUE);
         return new ProfileRecoveryReadHandle(new ProfileLedgerHandle.ProfileContext(base, transport), accepted);
     }
 

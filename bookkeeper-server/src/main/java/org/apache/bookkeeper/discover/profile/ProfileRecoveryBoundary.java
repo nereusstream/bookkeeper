@@ -63,6 +63,56 @@ public record ProfileRecoveryBoundary(ProfileRecoveryContext context, int before
                 in.getLong(), in.getLong(), in.getLong());
     }
 
+    public static final String CLOSE_KEY = "bookkeeper.experimental.profile.closed-cut";
+    public static final int CLOSE_REFERENCE_BYTES = 80;
+
+    /** Immutable close position in the same standard-metadata history; never a second CLOSED authority. */
+    public record CloseReference(int beforeVersion, int headCount, long metadataBirth, long prefixEntryId,
+            long prefixLength, byte[] contextDigest) {
+        public CloseReference {
+            contextDigest = ProfileLifecycleHead.fixed(contextDigest, 32, false);
+            if (beforeVersion < 0 || beforeVersion == Integer.MAX_VALUE || headCount < 0
+                    || headCount > ProfileRepairIntent.MAX_INTENTS || metadataBirth <= 0 || prefixEntryId < -1
+                    || prefixEntryId == Long.MAX_VALUE || prefixLength < 0
+                    || prefixEntryId == -1 && prefixLength != 0) {
+                throw new IllegalArgumentException("Invalid fixed close history reference");
+            }
+        }
+        @Override
+        public byte[] contextDigest() {
+            return contextDigest.clone();
+        }
+        public byte[] encode() {
+            return finish(ByteBuffer.allocate(CLOSE_REFERENCE_BYTES).putInt(0x55574346)
+                    .putShort((short) 1).putShort((short) 0).putInt(beforeVersion).putInt(headCount)
+                    .putLong(metadataBirth).putLong(prefixEntryId).putLong(prefixLength).put(contextDigest).putInt(0));
+        }
+        public static CloseReference decode(byte[] bytes) {
+            var input = checked(bytes, CLOSE_REFERENCE_BYTES, 0x55574346);
+            int version = input.getInt();
+            int head = input.getInt();
+            long birth = input.getLong();
+            long prefix = input.getLong();
+            long length = input.getLong();
+            byte[] digest = new byte[32];
+            input.get(digest);
+            if (input.getInt() != 0) {
+                throw new IllegalArgumentException("Invalid close reference reserved bytes");
+            }
+            return new CloseReference(version, head, birth, prefix, length, digest);
+        }
+        public boolean matchesContext(ProfileRecoveryContext context) {
+            return metadataBirth == context.metadataBirth() && beforeVersion == context.generation() + headCount + 1
+                    && java.util.Arrays.equals(contextDigest, ProfileRepairIntent.digest(context.encode()));
+        }
+        boolean matches(ProfileRecoveryBoundary boundary) {
+            return metadataBirth == boundary.context().metadataBirth()
+                    && prefixEntryId == boundary.prefixEntryId() && prefixLength == boundary.prefixLength()
+                    && beforeVersion == boundary.context().generation() + headCount + 1
+                    && java.util.Arrays.equals(contextDigest, ProfileRepairIntent.digest(boundary.context().encode()));
+        }
+    }
+
     public record Reference(int publicationBeforeVersion, long birthZxid, byte[] digest) {
         public Reference {
             digest = ProfileLifecycleHead.fixed(digest, 32, false);

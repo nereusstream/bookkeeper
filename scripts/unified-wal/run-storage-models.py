@@ -28,6 +28,16 @@ MATRIX = {
     'ce-profile-terminal-cut-replay': 'ReplayKeepsCut',
     'ce-profile-terminal-cut-pending-free': 'SuffixFreeHasDurableCut',
     'ce-profile-terminal-cut-prefix-free': 'RequiredPrefixIsNotDead',
+    'a-profile-closed-repair': None,
+    'ce-profile-closed-repair-birth': 'PublicationHasSameBirth',
+    'ce-profile-closed-repair-delete': 'PublicationBeforeDelete',
+    'ce-profile-closed-repair-reopen': 'ClosedNeverReopens',
+    'ce-profile-closed-repair-boundary': 'ClosedBoundaryIsPreserved',
+    'ce-profile-closed-repair-cut': 'OriginalCloseCutIsPreserved',
+    'ce-profile-closed-repair-version': 'RepairVersionIncludesCloseOffset',
+    'ce-profile-closed-repair-copy': 'PublicationHasDurableCopy',
+    'ce-profile-closed-repair-readable': 'TargetReadableAfterGrantClose',
+    'ce-profile-closed-repair-recopy': 'PublishedResumeDoesNotRecopy',
     'a-profile-whole-recovery': None,
     'a-profile-whole-recovery-threeofthree': None,
     'ce-profile-whole-recovery-proof': 'SelectionHasVerifiedProof',
@@ -596,6 +606,7 @@ def main():
                    else "ProfileRepairCopy.tla" if "profile-repair-copy" in name
                    else "ProfileRepairMembership.tla" if "profile-repair-membership" in name
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
+                   else "ProfileClosedRepair.tla" if "profile-closed-repair" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name

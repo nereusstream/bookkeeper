@@ -577,6 +577,16 @@ public final class ZKProfileReservationStore {
         var boundary = selected == null ? candidate : selected.boundary();
         int publicationIndex = selected == null ? Integer.MAX_VALUE
                 : Math.toIntExact(selected.reference().publicationBeforeVersion() - context.generation());
+        int closeIndex = head.size();
+        if (value.getCustomMetadata().containsKey(ProfileRecoveryBoundary.CLOSE_KEY)) {
+            var close = ProfileRecoveryBoundary.CloseReference.decode(value.getCustomMetadata()
+                    .get(ProfileRecoveryBoundary.CLOSE_KEY));
+            if (!closed || boundary == null || !close.matches(boundary) || close.headCount() > head.size()
+                    || publicationIndex > close.headCount()) {
+                throw new IllegalArgumentException("Required close history cut no longer matches its boundary");
+            }
+            closeIndex = close.headCount();
+        }
         boolean origin = boundary == null;
         if (current.birthZxid() != context.metadataBirth() || value.getCToken() != context.creatorToken()
                 || value.getState() != LedgerMetadata.State.IN_RECOVERY && !closed
@@ -608,6 +618,7 @@ public final class ZKProfileReservationStore {
             var commit = repairCommit(node);
             if (!Arrays.equals(reference.digest(), ProfileRepairIntent.digest(node.bytes()))
                     || commit.beforeVersion() != context.generation() + i + (i >= publicationIndex ? 1 : 0)
+                        + (closed && i >= closeIndex ? 1 : 0)
                     || !Arrays.equals(commit.afterDigest(), ProfileRecoveryContext.metadataDigest(value))
                     || !value.getAllEnsembles().get(repair.intent().fragmentStart())
                         .get(repair.intent().replacedMemberSlot()).toString().equals(repair.intent().install()
@@ -630,6 +641,7 @@ public final class ZKProfileReservationStore {
         var custom = new java.util.TreeMap<>(value.getCustomMetadata());
         custom.remove(ProfileRepairCommit.KEY);
         custom.remove(ProfileRecoveryBoundary.KEY);
+        custom.remove(ProfileRecoveryBoundary.CLOSE_KEY);
         value = org.apache.bookkeeper.client.LedgerMetadataBuilder.from(
                 ProfileRecoveryContext.predecessorProjection(value))
                 .withCToken(value.getCToken())
@@ -1073,7 +1085,7 @@ public final class ZKProfileReservationStore {
         requireRecoveryClient(metadata);
         long deadline = System.nanoTime() + timeoutNanos;
         try {
-            var current = readRecovery(metadata, context.ledger().ledgerId());
+            var current = readRepairable(metadata, context.ledger().ledgerId());
             if (current.context() == null || !context.equals(current.context())) {
                 return new BoundaryResult(current.outcome() == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
                         ? CreateStatus.DURABILITY_UNKNOWN : current.outcome()
@@ -1337,6 +1349,29 @@ public final class ZKProfileReservationStore {
         return new RecoveryResult(outcome, null, null);
     }
 
+    /** Repair-only view. CLOSED stays CLOSED and its original close reference remains required. */
+    RecoveryResult readRepairable(ProfileLedgerMetadataStore metadata, long ledger) {
+        var current = metadata.readMembership(ledger);
+        if (current.status() != ReadStatus.FOUND) {
+            return recoveryFailure(current.status() == ReadStatus.UNAVAILABLE
+                    ? ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                    : ProfileLedgerMetadataStore.Outcome.QUARANTINED);
+        }
+        if (current.snapshot().metadata().getValue().getState() != LedgerMetadata.State.CLOSED) {
+            return readRecovery(metadata, ledger);
+        }
+        var opened = readClosedForOpen(metadata, ledger);
+        if (opened.snapshot() == null || !opened.snapshot().closed().metadata().metadata().getValue()
+                .getCustomMetadata().containsKey(ProfileRecoveryBoundary.CLOSE_KEY)) {
+            return recoveryFailure(opened.status() == ReadOnlyStatus.UNAVAILABLE
+                    ? ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                    : opened.status() == ReadOnlyStatus.QUARANTINED ? ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                        : ProfileLedgerMetadataStore.Outcome.CONFLICT);
+        }
+        return new RecoveryResult(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, opened.snapshot().context(),
+                opened.snapshot().closed().metadata());
+    }
+
     public record RepairSnapshot(ProfileRepairIntent intent, UUID birth, long storeVersion) { }
     public record RepairResult(CreateStatus status, RepairSnapshot snapshot) {
         public RepairResult {
@@ -1468,7 +1503,7 @@ public final class ZKProfileReservationStore {
         requireRecoveryClient(metadata);
         long deadline = System.nanoTime() + timeoutNanos;
         try {
-            var current = readRecovery(metadata, desired.recovery().ledger().ledgerId());
+            var current = readRepairable(metadata, desired.recovery().ledger().ledgerId());
             if (current.context() == null || !desired.recovery().equals(current.context())) {
                 return new RepairResult(CreateStatus.CONFLICT, null);
             }
@@ -1522,7 +1557,7 @@ public final class ZKProfileReservationStore {
         long ledger = intent.recovery().ledger().ledgerId();
         long deadline = System.nanoTime() + timeoutNanos;
         try {
-            var current = readRecovery(metadata, ledger);
+            var current = readRepairable(metadata, ledger);
             var root = read(ledger, deadline);
             var actual = readRepair(ledger, intent.slot(), deadline);
             if (current.context() == null || !intent.recovery().equals(current.context())
@@ -1574,6 +1609,47 @@ public final class ZKProfileReservationStore {
     public record RepairCommitResult(CreateStatus status,
             ProfileLedgerMetadataStore.MembershipSnapshot metadata, ProfileControlScope closeScope) { }
 
+    /** Cold adoption of an already published result; no copied-at claim, recopy or metadata write is made. */
+    public RepairCommitResult resolveRepairClose(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
+            byte[] closeOperationId) {
+        requireRecoveryClient(metadata);
+        closeOperationId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
+        var intent = expected.intent();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var current = readRepairable(metadata, intent.recovery().ledger().ledgerId());
+            if (current.context() == null || !intent.recovery().equals(current.context())) {
+                return new RepairCommitResult(current.outcome() == ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                        ? CreateStatus.QUARANTINED : current.outcome() == ProfileLedgerMetadataStore.Outcome.CONFLICT
+                            ? CreateStatus.CONFLICT : CreateStatus.DURABILITY_UNKNOWN, null, null);
+            }
+            var actual = readRepair(intent.recovery().ledger().ledgerId(), intent.slot(), deadline);
+            var node = reads.get(repairPath(intent.recovery().ledger().ledgerId(), intent.slot()) + "/committed",
+                    deadline);
+            var commit = repairCommit(node);
+            var value = current.metadata().metadata().getValue();
+            if (actual == null || !actual.equals(expected)
+                    || !Arrays.equals(commit.closeOperationId(), closeOperationId)
+                    || !value.getAllEnsembles().get(intent.fragmentStart()).get(intent.replacedMemberSlot())
+                        .toString().equals(intent.install().targetBookie())
+                    || ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY)).stream()
+                        .noneMatch(ref -> ref.slot() == intent.slot() && ref.intentBirth().equals(expected.birth())
+                            && ref.intentStoreVersion() == expected.storeVersion()
+                            && Arrays.equals(ref.digest(), ProfileRepairIntent.digest(node.bytes())))) {
+                return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
+            }
+            return new RepairCommitResult(CreateStatus.ALREADY_APPLIED, current.metadata(),
+                    intent.closeScope(closeOperationId, commit.closeGeneration()));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new RepairCommitResult(CreateStatus.DURABILITY_UNKNOWN, null, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new RepairCommitResult(CreateStatus.DURABILITY_UNKNOWN, null, null);
+        } catch (IllegalArgumentException invalid) {
+            return new RepairCommitResult(CreateStatus.QUARANTINED, null, null);
+        }
+    }
+
     /** Cold publication primitive after the caller completed the full bounded historical-fragment copy.
      * This is not a copy producer, required-frontier proof or strong loss-budget reset.
      * Reuse the same intent, copied-at metadata snapshot and close ID after UNKNOWN. */
@@ -1585,7 +1661,7 @@ public final class ZKProfileReservationStore {
         long ledger = intent.recovery().ledger().ledgerId();
         long deadline = System.nanoTime() + timeoutNanos;
         try {
-            var current = readRecovery(metadata, ledger);
+            var current = readRepairable(metadata, ledger);
             var root = read(ledger, deadline);
             var actual = readRepair(ledger, intent.slot(), deadline);
             if (current.context() == null) {
@@ -1603,7 +1679,7 @@ public final class ZKProfileReservationStore {
             }
             String path = repairPath(ledger, intent.slot());
             if (!(copiedAt.metadata().getVersion() instanceof org.apache.bookkeeper.versioning.LongVersion)
-                    || copiedAt.metadata().getValue().getState() != LedgerMetadata.State.IN_RECOVERY
+                    || copiedAt.metadata().getValue().getState() != current.metadata().metadata().getValue().getState()
                     || !Arrays.equals(copiedAt.metadata().getValue().getCustomMetadata()
                             .get(ProfileRecoveryContext.KEY), intent.recovery().encode())) {
                 return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
@@ -1651,6 +1727,8 @@ public final class ZKProfileReservationStore {
                             copiedAt.metadata().getValue().getCustomMetadata().get(ProfileRepairCommit.KEY))
                     || !Arrays.equals(value.getCustomMetadata().get(ProfileRecoveryBoundary.KEY),
                             copiedAt.metadata().getValue().getCustomMetadata().get(ProfileRecoveryBoundary.KEY))
+                    || !Arrays.equals(value.getCustomMetadata().get(ProfileRecoveryBoundary.CLOSE_KEY),
+                            copiedAt.metadata().getValue().getCustomMetadata().get(ProfileRecoveryBoundary.CLOSE_KEY))
                     || !Arrays.equals(ProfileRecoveryContext.metadataDigest(value),
                         ProfileRecoveryContext.metadataDigest(copiedAt.metadata().getValue()))
                     || !boundedRepairFragment(intent, value, selection == null ? null : selection.boundary())
@@ -1693,7 +1771,7 @@ public final class ZKProfileReservationStore {
             checks.add(metadata.repairMetadataWrite(before, desired));
             checks.add(Op.create(path + "/committed", commit.encode(), immutableAcls, CreateMode.PERSISTENT));
             int code = multi(checks, deadline);
-            var after = readRecovery(metadata, ledger);
+            var after = readRepairable(metadata, ledger);
             var result = reads.get(path + "/committed", deadline);
             boolean matching = after.context() != null && after.context().equals(intent.recovery())
                     && result.code() == Code.OK.intValue() && Arrays.equals(result.bytes(), commit.encode());
@@ -1717,7 +1795,7 @@ public final class ZKProfileReservationStore {
         return key -> {
             long deadline = System.nanoTime() + timeoutNanos;
             try {
-                var current = readRecovery(metadata, key.ledgerId());
+                var current = readRepairable(metadata, key.ledgerId());
                 if (current.context() == null) {
                     return new ProfileControlStore.ReadResult(current.outcome()
                             == ProfileLedgerMetadataStore.Outcome.CONFLICT
@@ -1793,7 +1871,7 @@ public final class ZKProfileReservationStore {
                                 ? ReadStatus.NOT_FOUND : ReadStatus.UNAVAILABLE, null);
                     }
                     validateRepairAdmission(repair, admission, deadline);
-                    var after = readRecovery(metadata, key.ledgerId());
+                    var after = readRepairable(metadata, key.ledgerId());
                     if (after.context() == null || !after.context().equals(current.context())) {
                         return new ProfileControlStore.ReadResult(ReadStatus.QUARANTINED, null);
                     }

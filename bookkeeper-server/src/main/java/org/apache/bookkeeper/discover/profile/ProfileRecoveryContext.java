@@ -141,7 +141,8 @@ public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operati
     static LedgerMetadata predecessorProjection(LedgerMetadata value) {
         var custom = new TreeMap<String, byte[]>();
         value.getCustomMetadata().forEach((key, bytes) -> {
-            if (!key.equals(KEY) && !key.equals(ProfileRepairCommit.KEY) && !key.equals(ProfileRecoveryBoundary.KEY)) {
+            if (!key.equals(KEY) && !key.equals(ProfileRepairCommit.KEY) && !key.equals(ProfileRecoveryBoundary.KEY)
+                    && !key.equals(ProfileRecoveryBoundary.CLOSE_KEY)) {
                 custom.put(key, bytes.clone());
             }
         });

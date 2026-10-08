@@ -428,7 +428,18 @@ public final class ProfileLedgerMetadataStore {
     }
 
     Op repairMetadataWrite(MembershipSnapshot expected, LedgerMetadata desired) throws IOException {
-        return recoveryMetadataWrite(expected, desired, false);
+        boolean closed = expected.metadata().getValue().getState() == LedgerMetadata.State.CLOSED;
+        if (closed) {
+            var before = expected.metadata().getValue();
+            if (desired.getState() != LedgerMetadata.State.CLOSED || desired.getLastEntryId() != before.getLastEntryId()
+                    || desired.getLength() != before.getLength() || !before.getCustomMetadata()
+                        .containsKey(ProfileRecoveryBoundary.CLOSE_KEY) || !Arrays.equals(before.getCustomMetadata()
+                            .get(ProfileRecoveryBoundary.CLOSE_KEY), desired.getCustomMetadata()
+                                .get(ProfileRecoveryBoundary.CLOSE_KEY))) {
+                throw new IllegalArgumentException("Closed repair must preserve its exact durable close cut");
+            }
+        }
+        return recoveryMetadataWrite(expected, desired, closed);
     }
 
     Op closedMetadataWrite(MembershipSnapshot expected, ProfileRecoveryBoundary boundary) throws IOException {
@@ -438,9 +449,17 @@ public final class ProfileLedgerMetadataStore {
                     .get(ProfileRecoveryContext.KEY), boundary.context().encode())) {
             throw new IllegalArgumentException("Closed metadata requires its exact recovery instance");
         }
+        if (!(expected.metadata().getVersion() instanceof LongVersion version)) {
+            throw new IllegalArgumentException("Closed publication requires a concrete metadata version");
+        }
+        var custom = new java.util.TreeMap<>(value.getCustomMetadata());
+        custom.put(ProfileRecoveryBoundary.CLOSE_KEY, new ProfileRecoveryBoundary.CloseReference(
+                Math.toIntExact(version.getLongVersion()), ProfileRepairCommit.head(custom.get(ProfileRepairCommit.KEY))
+                    .size(), expected.birthZxid(), boundary.prefixEntryId(), boundary.prefixLength(),
+                ProfileRepairIntent.digest(boundary.context().encode())).encode());
         return recoveryMetadataWrite(expected, LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
-                .withClosedState().withLastEntryId(boundary.prefixEntryId()).withLength(boundary.prefixLength())
-                .build(), true);
+                .withCustomMetadata(custom).withClosedState().withLastEntryId(boundary.prefixEntryId())
+                .withLength(boundary.prefixLength()).build(), true);
     }
 
     private Op recoveryMetadataWrite(MembershipSnapshot expected, LedgerMetadata desired, boolean closed)
