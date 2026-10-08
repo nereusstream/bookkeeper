@@ -884,3 +884,5 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 ## Profile 单条恢复写入的真实接线
 
 2026-10-06 恢复写入增量：[真实隔离ADD_RECOVERY](../profile-wire/README.md#真实隔离-add_recovery-接线)沿用144字节固定prefix、精确本地OPEN grant与原DATA驱动，按实际源额度先预留再复制完整BK entry；reference网络整包克隆不进入server路径。恢复成功/重复校验不激活normal writer，grant close晚于DATA写入的过期结果与force失败保持UNKNOWN；断连仅停等待，实际I/O/owner排空及native锁保留。七个真实socket用例已通过；最终相关14类398项为393通过/5平台跳过，style及41正向/134指定反例通过，详细源码绑定见上述实现记录。READ_ENTRY响应/确定missing、真实RepairIntent及grant控制面、客户端quorum/完整恢复、生产listener/readiness与TLS/socket/storage总预算尚未闭合，步骤11/14和生产Gate保持OPEN。
+
+2026-10-08 [非空恢复terminal cut](../profile-wire/README.md#非空恢复-terminal-cut-与-matching-closed)新增Bookie type11与同操作type9升级：pending cut阻止新normal/recovery请求，等全部pre-cut DATA实际终结再force/apply，durable P进入checkpoint/replay。点读与READ_LAC结果终结时重验上界，restart/coverage inventory不发布e>P；compaction跳过已排除suffix、保留必要prefix，不截短shared DATA文件。实际checkpoint/rotation/restart与真实compaction回归范围由上述协议实现记录拥有；这不是离线节点即时读撤权或掉电验证。

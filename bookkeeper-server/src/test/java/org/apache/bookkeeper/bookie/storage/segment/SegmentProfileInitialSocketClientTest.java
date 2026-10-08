@@ -1665,9 +1665,38 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static final class LostCloseReplyClient extends ZooKeeper {
+        private boolean lose = true;
+
+        LostCloseReplyClient(String connect, ZooKeeperWatcherBase watcher) throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
+            var ops = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(ops::add);
+            boolean drop = lose && ops.stream().anyMatch(op -> op.getType() == ZooDefs.OpCode.setData);
+            if (drop) {
+                lose = false;
+            }
+            super.multi(ops, (code, path, ignored, results) -> callback.processResult(
+                    drop && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()
+                        ? org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue() : code,
+                    path, context, results), context);
+        }
+    }
+
     @Test
     public void selectedLastFragmentWritesBackToTheExistingMembersWithoutChangingMembership() throws Exception {
-        try (Fixture fixture = new Fixture(false, false, true, 3, 3, true, true)) {
+        closeExistingMembers(2);
+        closeExistingMembers(3);
+    }
+
+    private void closeExistingMembers(int ack) throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, ack, true, true)) {
             fixture.connectAll(Duration.ofSeconds(5));
             fixture.initialize().get(5, TimeUnit.SECONDS);
             var data = new HashMap<BookieId, ProfileNormalDataClient>();
@@ -1676,6 +1705,12 @@ public class SegmentProfileInitialSocketClientTest {
                 data.put(fixture.identities.get(node).bookieId(), peer);
                 for (int entry = 0; entry < 3; entry++) {
                     evidenceEntry(fixture, peer, entry, entry - 1, (entry + 1) * 16, 16);
+                }
+                if (node == 2) {
+                    // Physical entry4 after hole3 is an unrequired suffix, never part of selected P2.
+                    evidenceEntry(fixture, peer, 4, 1, 80, 16);
+                    assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                            peer.readEntry(fixture.context(), 4).get().outcome());
                 }
             }
             var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
@@ -1718,7 +1753,101 @@ public class SegmentProfileInitialSocketClientTest {
                         fixture.manager.readLedgerMetadata(44).get().getValue().getCustomMetadata()
                             .get(org.apache.bookkeeper.discover.profile.ProfileRepairCommit.KEY)).size());
                 assertEquals(entered.context(), fixture.reservations.readRecovery(metadata, 44).context());
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED,
+                        data.get(fixture.identities.get(2).bookieId()).readEntry(fixture.context(), 4).get().outcome());
+                assertEquals(2, data.get(fixture.identities.get(2).bookieId())
+                        .readLac(fixture.context()).get().sourceEntryId());
+                var closing = fixture.reservations.closingPlan(metadata, entered.context()).plan();
+                assertNotNull(closing);
+                var acknowledgments = new ArrayList<ZKProfileReservationStore.TerminalAck>();
+                for (var target : closing.targets().subList(0, 2)) {
+                    var peer = fixture.clients.get(target.scope().targetBookie());
+                    var result = peer.recoveryClose(ProfileControlRequest.recoveryClose(target.scope(),
+                            new ProfileControlRequest.RecoveryBinding(target.intent().intentId(),
+                                    target.intent().intentGeneration(), target.intent().grantGeneration()),
+                            target.intent().grantOperationId())).get();
+                    assertTrue(result.durable());
+                    acknowledgments.add(new ZKProfileReservationStore.TerminalAck(target, peer.hello(), result));
+                }
+                assertEquals(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN,
+                        fixture.reservations.closeRecovery(metadata, closing, ack == 3
+                                ? List.of(acknowledgments.get(0), acknowledgments.get(0), acknowledgments.get(1))
+                                : List.of(acknowledgments.get(0), acknowledgments.get(0))).outcome());
+                var legacy = acknowledgments.stream().map(evidence -> {
+                    var hello = evidence.hello();
+                    var caps = hello.capabilities().stream().filter(capability -> !capability.equals(
+                            org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec
+                                .TERMINAL_CLOSE_CAPABILITY)).toList();
+                    return new ZKProfileReservationStore.TerminalAck(evidence.target(),
+                            new org.apache.bookkeeper.common.profile.wire.ProfileHello.Server(hello.activeEngine(),
+                                    hello.storageIncarnation(), hello.readinessGeneration(), hello.bookieId(), caps),
+                            evidence.result());
+                }).toList();
+                assertEquals(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN,
+                        fixture.reservations.closeRecovery(metadata, closing, legacy).outcome());
                 assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                var insufficient = new HashMap<>(fixture.clients);
+                insufficient.remove(fixture.identities.get(2).bookieId().toString());
+                if (ack == 2) {
+                    insufficient.remove(fixture.identities.get(1).bookieId().toString());
+                }
+                assertEquals(ProfileRecoveryCoordinator.CompletionStatus.DEFERRED,
+                        coordinator.finishRecovery(entered.context(), insufficient).get(5, TimeUnit.SECONDS).status());
+                assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                var closingPeers = new HashMap<>(fixture.clients);
+                if (ack == 2) {
+                    closingPeers.remove(fixture.identities.get(2).bookieId().toString());
+                }
+                ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
+                ProfileRecoveryCoordinator.CompletionResult closed;
+                try (LostCloseReplyClient lost = new LostCloseReplyClient(fixture.cluster.getZooKeeperConnectString(),
+                        watcher)) {
+                    var lostMetadata = new ProfileLedgerMetadataStore(lost, (AbstractZkLedgerManager) fixture.manager,
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var lostReservations = new ZKProfileReservationStore(lost, "/socket-initial",
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    closed = new ProfileRecoveryCoordinator(lostReservations, lostMetadata, fixture.cold)
+                            .finishRecovery(entered.context(), closingPeers).get(5, TimeUnit.SECONDS);
+                }
+                assertEquals(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, closed.publication().outcome());
+                assertEquals(ProfileRecoveryCoordinator.CompletionStatus.CLOSED_METADATA_DURABLE, closed.status());
+                assertEquals(ack, closed.terminalMembers());
+                var finalMetadata = fixture.manager.readLedgerMetadata(44).get().getValue();
+                assertEquals(LedgerMetadata.State.CLOSED, finalMetadata.getState());
+                assertEquals(2, finalMetadata.getLastEntryId());
+                assertEquals(48, finalMetadata.getLength());
+                var forces = fixture.nodeIo.stream().map(io -> io.forces).toList();
+                var again = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold)
+                        .finishRecovery(entered.context(), fixture.clients).get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileRecoveryCoordinator.CompletionStatus.CLOSED_METADATA_DURABLE, again.status());
+                assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
+                        fixture.reservations.readRecovery(metadata, 44).outcome());
+                var restartConfig = files(fixture.nodes.get(2)).config();
+                fixture.nodes.get(2).close();
+                try (var replay = new IsolatedSegmentStorage(restartConfig, fixture.identities.get(2),
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                        new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                                2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                        new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                                new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                    replay.restart();
+                    assertFalse(replay.profileReadVisible(fixture.context(), 4));
+                    assertTrue(replay.profileReadVisible(fixture.context(), 2));
+                    assertEquals(restartConfig.bytesPerFile(), java.nio.file.Files.size(
+                            restartConfig.directory().resolve("data-0")));
+                }
+                assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                        fixture.reservations.cutDelete(fixture.reservations.read(44).snapshot(),
+                                bytes(16, 101), bytes(32, 102)).status());
+                var historical = coordinator.finishRecovery(entered.context(), fixture.clients)
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileRecoveryCoordinator.CompletionStatus.CLOSED_METADATA_DURABLE, historical.status());
+                assertEquals(0, historical.terminalMembers());
+                assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                assertEquals(LedgerMetadata.State.CLOSED,
                         fixture.manager.readLedgerMetadata(44).get().getValue().getState());
             }
         }

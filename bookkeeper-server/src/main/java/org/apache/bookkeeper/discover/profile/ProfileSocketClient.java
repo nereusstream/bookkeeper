@@ -502,7 +502,8 @@ final class ProfileSocketClient implements AutoCloseable {
                             new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY,
                                     ProfileLacReplyCodec.CAPABILITY, ProfileLacReplyCodec.EXPLICIT_CAPABILITY)
                                     : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY,
-                                            RECOVERY_CLOSE_CAPABILITY)).encode()))
+                                            RECOVERY_CLOSE_CAPABILITY,
+                                            ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY)).encode()))
                             .addListener(written -> {
                         if (!written.isSuccess()) {
                             close();

@@ -39,7 +39,7 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.net.BookieId;
 
-/** Borrowed bounded recovery coordination. Historical copy/close never publishes ledger CLOSED or normal authority. */
+/** Borrowed bounded recovery coordination. Write-back, terminal cut and matching metadata close are distinct facts. */
 public final class ProfileRecoveryCoordinator {
     public enum Status { FENCED_CONTEXT, DEFERRED, CONFLICT, QUARANTINED }
 
@@ -532,6 +532,106 @@ public final class ProfileRecoveryCoordinator {
         } catch (java.util.concurrent.TimeoutException unavailable) {
             throw new java.util.concurrent.CompletionException(unavailable);
         }
+    }
+
+    public enum CompletionStatus { CLOSED_METADATA_DURABLE, DEFERRED, CONFLICT, QUARANTINED }
+
+    /** Standard CLOSED fact only; not a production readiness or a globally revoked read lease. */
+    public record CompletionResult(CompletionStatus status, ProfileRecoveryContext context,
+            ZKProfileReservationStore.ClosedRecoveryResult publication, int terminalMembers) { }
+
+    /** Resolve each current full-copy target through actual UIC4, count distinct original quorum slots, then CAS. */
+    public CompletableFuture<CompletionResult> finishRecovery(ProfileRecoveryContext context,
+            Map<String, ProfileInitialControlClient> supplied) {
+        if (supplied.size() > 64) {
+            throw new IllegalArgumentException("Recovery close peer pool exceeds its bound");
+        }
+        if (!active.tryAcquire()) {
+            return CompletableFuture.completedFuture(new CompletionResult(CompletionStatus.DEFERRED,
+                    context, null, 0));
+        }
+        var stopped = new AtomicBoolean();
+        try {
+            var peers = Map.copyOf(supplied);
+            var actual = CompletableFuture.supplyAsync(() -> reservations.readClosedRecovery(metadata, context), cold)
+                    .thenCompose(existing -> {
+                if (existing.metadata() != null) {
+                    return CompletableFuture.completedFuture(new CompletionResult(
+                            CompletionStatus.CLOSED_METADATA_DURABLE, context, existing, 0));
+                }
+                return CompletableFuture.supplyAsync(() -> reservations.closingPlan(metadata, context), cold)
+                        .thenCompose(prepared -> {
+                    if (stopped.get() || prepared.plan() == null) {
+                        return CompletableFuture.completedFuture(new CompletionResult(
+                                stopped.get() ? CompletionStatus.DEFERRED : completionStatus(prepared.status()),
+                                context, null, 0));
+                    }
+                    var plan = prepared.plan();
+                    var replies = new ArrayList<CompletableFuture<ZKProfileReservationStore.TerminalAck>>();
+                    for (var target : plan.targets()) {
+                        var peer = peers.get(target.scope().targetBookie());
+                        if (peer == null || !peer.hello().capabilities().contains(
+                                org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec
+                                    .TERMINAL_CLOSE_CAPABILITY)
+                                || !Arrays.equals(peer.hello().storageIncarnation(),
+                                target.scope().targetStorageIncarnation())) {
+                            continue;
+                        }
+                        try {
+                            replies.add(peer.recoveryClose(ProfileControlRequest.recoveryClose(target.scope(),
+                                    new ProfileControlRequest.RecoveryBinding(target.intent().intentId(),
+                                            target.intent().intentGeneration(), target.intent().grantGeneration()),
+                                    target.intent().grantOperationId())).handle((reply, failure) ->
+                                            failure == null && reply != null && reply.durable()
+                                                && (reply.outcome() == org.apache.bookkeeper.common.profile.control
+                                                    .ProfileControlResult.Outcome.APPLIED
+                                                    || reply.outcome() == org.apache.bookkeeper.common.profile.control
+                                                        .ProfileControlResult.Outcome.ALREADY_APPLIED)
+                                                ? new ZKProfileReservationStore.TerminalAck(
+                                                    target, peer.hello(), reply) : null));
+                        } catch (RuntimeException rejected) {
+                            replies.add(CompletableFuture.failedFuture(rejected));
+                        }
+                    }
+                    return CompletableFuture.allOf(replies.toArray(CompletableFuture[]::new)).thenCompose(unused -> {
+                        var acknowledgments = replies.stream().map(CompletableFuture::join)
+                                .filter(Objects::nonNull).toList();
+                        if (stopped.get()) {
+                            return CompletableFuture.completedFuture(new CompletionResult(
+                                    CompletionStatus.DEFERRED, context, null, acknowledgments.size()));
+                        }
+                        return CompletableFuture.supplyAsync(() -> stopped.get() ? null
+                                : reservations.closeRecovery(metadata, plan, acknowledgments), cold)
+                                    .thenApply(published -> new CompletionResult(published == null
+                                            ? CompletionStatus.DEFERRED : published.metadata() != null
+                                                ? CompletionStatus.CLOSED_METADATA_DURABLE
+                                                : published.outcome() == ProfileLedgerMetadataStore.Outcome.CONFLICT
+                                                    ? CompletionStatus.CONFLICT : published.outcome()
+                                                        == ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                                                            ? CompletionStatus.QUARANTINED : CompletionStatus.DEFERRED,
+                                            context, published, acknowledgments.size()));
+                    });
+                });
+            });
+            var caller = actual.whenComplete((result, failure) -> active.release()).copy();
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return caller;
+        } catch (RuntimeException failure) {
+            active.release();
+            throw failure;
+        }
+    }
+
+    private static CompletionStatus completionStatus(ZKProfileReservationStore.CreateStatus status) {
+        return switch (status) {
+            case CONFLICT -> CompletionStatus.CONFLICT;
+            case QUARANTINED -> CompletionStatus.QUARANTINED;
+            default -> CompletionStatus.DEFERRED;
+        };
     }
 
     public enum RepairStatus {

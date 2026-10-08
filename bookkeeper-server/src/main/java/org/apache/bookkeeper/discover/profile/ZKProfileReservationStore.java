@@ -531,6 +531,9 @@ public final class ZKProfileReservationStore {
                         ? ProfileLedgerMetadataStore.Outcome.QUARANTINED
                         : ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN);
             }
+            if (member.snapshot().metadata().getValue().getState() != LedgerMetadata.State.IN_RECOVERY) {
+                return recoveryFailure(ProfileLedgerMetadataStore.Outcome.CONFLICT);
+            }
             var context = ProfileRecoveryContext.decode(
                     member.snapshot().metadata().getValue().getCustomMetadata().get(ProfileRecoveryContext.KEY));
             if (!context.matchesRoot(root.snapshot())) {
@@ -569,16 +572,20 @@ public final class ZKProfileReservationStore {
             throws InterruptedException, TimeoutException, java.io.IOException {
         var value = current.metadata().getValue();
         var head = ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY));
+        boolean closed = value.getState() == LedgerMetadata.State.CLOSED;
         var selected = selectedBoundary(context, value, deadline);
         var boundary = selected == null ? candidate : selected.boundary();
         int publicationIndex = selected == null ? Integer.MAX_VALUE
                 : Math.toIntExact(selected.reference().publicationBeforeVersion() - context.generation());
         boolean origin = boundary == null;
         if (current.birthZxid() != context.metadataBirth() || value.getCToken() != context.creatorToken()
-                || value.getState() != LedgerMetadata.State.IN_RECOVERY
+                || value.getState() != LedgerMetadata.State.IN_RECOVERY && !closed
                 || !Arrays.equals(value.getCustomMetadata().get(ProfileRecoveryContext.KEY), context.encode())
                 || !(current.metadata().getVersion() instanceof org.apache.bookkeeper.versioning.LongVersion version)
-                || version.getLongVersion() != context.generation() + head.size() + (selected == null ? 0 : 1)) {
+                || version.getLongVersion() != context.generation() + head.size()
+                    + (selected == null ? 0 : 1) + (closed ? 1 : 0)
+                || closed && (selected == null || value.getLastEntryId() != selected.boundary().prefixEntryId()
+                    || value.getLength() != selected.boundary().prefixLength())) {
             throw new IllegalArgumentException("Repair commit head no longer matches its recovery context/version");
         }
         if (boundary != null && boundary.beforeVersion() == context.generation() + head.size()) {
@@ -623,8 +630,10 @@ public final class ZKProfileReservationStore {
         var custom = new java.util.TreeMap<>(value.getCustomMetadata());
         custom.remove(ProfileRepairCommit.KEY);
         custom.remove(ProfileRecoveryBoundary.KEY);
-        value = org.apache.bookkeeper.client.LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
-                .withCustomMetadata(custom).build();
+        value = org.apache.bookkeeper.client.LedgerMetadataBuilder.from(
+                ProfileRecoveryContext.predecessorProjection(value))
+                .withCToken(value.getCToken())
+                .withCustomMetadata(custom).withInRecoveryState().build();
         return new ProfileLedgerMetadataStore.MembershipSnapshot(current.birthZxid(),
                 new org.apache.bookkeeper.versioning.Versioned<>(value,
                         new org.apache.bookkeeper.versioning.LongVersion(context.generation())));
@@ -646,6 +655,239 @@ public final class ZKProfileReservationStore {
                     : boundary != null && boundary.context().equals(intent.recovery())
                         && intent.fragmentStart() == metadata.getAllEnsembles().lastKey()
                         && intent.range().lastEntryId() == boundary.prefixEntryId());
+    }
+
+    public record CloseTarget(int member, ProfileRepairIntent intent, ProfileControlScope scope) { }
+
+    public record ClosingPlan(ProfileRecoveryContext context,
+            ProfileLedgerMetadataStore.MembershipSnapshot metadata, BoundarySnapshot selection,
+            List<CloseTarget> targets) {
+        public ClosingPlan {
+            targets = List.copyOf(targets);
+        }
+    }
+
+    public record ClosingPlanResult(CreateStatus status, ClosingPlan plan) { }
+
+    /** Only actual current-member full-copy results can enter the final quorum; this read produces no ACK. */
+    public ClosingPlanResult closingPlan(ProfileLedgerMetadataStore metadata, ProfileRecoveryContext context) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var current = readRecovery(metadata, context.ledger().ledgerId());
+            if (current.context() == null || !context.equals(current.context())) {
+                return new ClosingPlanResult(current.outcome() == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                        ? CreateStatus.DURABILITY_UNKNOWN : current.outcome()
+                            == ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                                ? CreateStatus.QUARANTINED : CreateStatus.CONFLICT, null);
+            }
+            var value = current.metadata().metadata().getValue();
+            var selected = selectedBoundary(context, value, deadline);
+            if (selected == null || value.getEnsembleSize() != 3 || value.getWriteQuorumSize() != 3
+                    || value.getAckQuorumSize() < 2 || value.getAckQuorumSize() > 3
+                    || selected.boundary().prefixEntryId() < value.getAllEnsembles().lastKey()) {
+                return new ClosingPlanResult(CreateStatus.CONFLICT, null);
+            }
+            var targets = new java.util.TreeMap<Integer, CloseTarget>();
+            for (var ref : ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY))) {
+                var repair = readRepair(value.getLedgerId(), ref.slot(), deadline);
+                var intent = repair.intent();
+                if (intent.fragmentStart() != value.getAllEnsembles().lastKey()
+                        || !boundedRepairFragment(intent, value, selected.boundary())
+                        || !value.getAllEnsembles().lastEntry().getValue().get(intent.replacedMemberSlot()).toString()
+                            .equals(intent.install().targetBookie())) {
+                    continue;
+                }
+                var committed = repairCommit(reads.get(repairPath(value.getLedgerId(), ref.slot()) + "/committed",
+                        deadline));
+                targets.put(intent.replacedMemberSlot(), new CloseTarget(intent.replacedMemberSlot(), intent,
+                        intent.closeScope(committed.closeOperationId(), committed.closeGeneration())));
+            }
+            return new ClosingPlanResult(CreateStatus.ALREADY_APPLIED,
+                    new ClosingPlan(context, current.metadata(), selected, List.copyOf(targets.values())));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new ClosingPlanResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new ClosingPlanResult(CreateStatus.DURABILITY_UNKNOWN, null);
+        } catch (IllegalArgumentException invalid) {
+            return new ClosingPlanResult(CreateStatus.QUARANTINED, null);
+        }
+    }
+
+    public record TerminalAck(CloseTarget target, org.apache.bookkeeper.common.profile.wire.ProfileHello.Server hello,
+            org.apache.bookkeeper.common.profile.control.ProfileControlResult result) { }
+
+    public record ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome outcome,
+            ProfileLedgerMetadataStore.MembershipSnapshot metadata, BoundarySnapshot selection) { }
+
+    /** Resolve only matching standard CLOSED, including its complete retained recovery origin. Never reopen. */
+    public ClosedRecoveryResult readClosedRecovery(ProfileLedgerMetadataStore metadata,
+            ProfileRecoveryContext context) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var root = read(context.ledger().ledgerId(), deadline);
+            var member = metadata.readMembership(context.ledger().ledgerId(), deadline);
+            if (root.status() != ReadStatus.FOUND || member.status() != ReadStatus.FOUND) {
+                return new ClosedRecoveryResult(root.status() == ReadStatus.UNAVAILABLE
+                        || member.status() == ReadStatus.UNAVAILABLE
+                            ? ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                            : ProfileLedgerMetadataStore.Outcome.QUARANTINED, null, null);
+            }
+            var value = member.snapshot().metadata().getValue();
+            if (value.getState() != LedgerMetadata.State.CLOSED) {
+                return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
+            }
+            boolean deleted = closedAfterDelete(context, root.snapshot());
+            if (!context.matchesRoot(root.snapshot()) && !deleted) {
+                return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
+            }
+            var projection = recoveryRepairProjection(context, member.snapshot(), deadline);
+            var predecessor = new ProfileLedgerMetadataStore.MembershipSnapshot(context.metadataBirth(),
+                    new org.apache.bookkeeper.versioning.Versioned<>(ProfileRecoveryContext.predecessorProjection(
+                            projection.metadata().getValue()),
+                            new org.apache.bookkeeper.versioning.LongVersion(context.predecessorVersion())));
+            boolean publicationMatches;
+            if (deleted && context.lifecycleSequence() == 2) {
+                var page = page(root.snapshot(), deadline);
+                publicationMatches = page != null
+                        && page.storeVersion() == root.snapshot().lifecycle().readyPageVersion()
+                        && Arrays.equals(page.digest(), root.snapshot().lifecycle().readyPageDigest())
+                        && page.page().matchesMetadata(predecessor.metadata());
+            } else if (deleted) {
+                var page = replacement(root.snapshot(), context.lifecycleSequence(), deadline);
+                publicationMatches = page != null
+                        && page.storeVersion() == root.snapshot().lifecycle().readyPageVersion()
+                        && Arrays.equals(page.digest(), root.snapshot().lifecycle().readyPageDigest())
+                        && page.page().matchesMetadata(predecessor);
+            } else {
+                publicationMatches = recoveryPublicationMatches(root.snapshot(), predecessor, deadline);
+            }
+            if (!context.matchesRecovery(projection) || !publicationMatches) {
+                return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
+            }
+            metadata.verifyRecoveryGuard(member.snapshot(), deadline);
+            verifyRecoveryRootGuard(root.snapshot(), deadline);
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, member.snapshot(),
+                    selectedBoundary(context, value, deadline));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN, null, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN, null, null);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.QUARANTINED, null, null);
+        }
+    }
+
+    private static boolean closedAfterDelete(ProfileRecoveryContext context, Snapshot root) {
+        return root.lifecycle().state() == ProfileLifecycleHead.State.DELETE_INTENT
+                && root.birthZxid() == context.lifecycleBirthZxid()
+                && root.lifecycle().birthId().equals(context.lifecycleBirth())
+                && root.lifecycle().sequence() == context.lifecycleSequence() + 1
+                && root.lifecycle().predecessor() == context.lifecycleSequence()
+                && root.lifecycleDataVersion() == context.lifecycleVersion() + 1
+                && root.lifecycle().controlGeneration() == context.controlGeneration() + 1
+                && root.reservation().backlink().ledgerId() == context.ledger().ledgerId()
+                && Arrays.equals(root.reservation().backlink().instanceId(), context.ledger().ledgerInstanceId())
+                && Arrays.equals(root.reservation().installs().get(0).descriptorIdentity().toBytes(),
+                        context.ledger().descriptorIdentity());
+    }
+
+    /** ACKs are caller inputs from actual UIC4 RPCs; metadata guards do not manufacture remote durability. */
+    public ClosedRecoveryResult closeRecovery(ProfileLedgerMetadataStore metadata, ClosingPlan plan,
+            List<TerminalAck> acknowledgments) {
+        requireRecoveryClient(metadata);
+        if (acknowledgments.size() > 3) {
+            throw new IllegalArgumentException("Closing acknowledgments exceed the supported ensemble");
+        }
+        var value = plan.metadata().metadata().getValue();
+        var ack = new org.apache.bookkeeper.client.RoundRobinDistributionSchedule(value.getWriteQuorumSize(),
+                value.getAckQuorumSize(), value.getEnsembleSize()).getAckSet();
+        boolean quorum = false;
+        try {
+            for (var evidence : acknowledgments) {
+                var target = evidence.target();
+                var reply = evidence.result();
+                if (!plan.targets().contains(target) || target.member() < 0
+                        || target.member() >= value.getEnsembleSize()
+                        || !value.getAllEnsembles().lastEntry().getValue().get(target.member()).toString()
+                            .equals(target.scope().targetBookie())
+                        || !target.intent().recovery().equals(plan.context())
+                        || !boundedRepairFragment(target.intent(), value, plan.selection().boundary())
+                        || !evidence.hello().bookieId().equals(target.scope().targetBookie())
+                        || !Arrays.equals(evidence.hello().storageIncarnation(),
+                            target.scope().targetStorageIncarnation())
+                        || evidence.hello().activeEngine() != 3 || !evidence.hello().capabilities().contains(
+                            org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec
+                                .TERMINAL_CLOSE_CAPABILITY) || !reply.durable() || reply.localGeneration() <= 0
+                        || reply.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
+                        || reply.ledgerId() != value.getLedgerId()
+                        || reply.authorityGeneration() != target.scope().authorityGeneration()
+                        || !reply.operationIdHex().equals(java.util.HexFormat.of().formatHex(
+                            target.scope().operationId()))
+                        || reply.outcome() != org.apache.bookkeeper.common.profile.control.ProfileControlResult
+                            .Outcome.APPLIED && reply.outcome() != org.apache.bookkeeper.common.profile.control
+                                .ProfileControlResult.Outcome.ALREADY_APPLIED) {
+                    continue;
+                }
+                quorum |= ack.completeBookieAndCheck(target.member());
+            }
+        } finally {
+            ack.recycle();
+        }
+        if (!quorum) {
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN, null, null);
+        }
+        var context = plan.context();
+        long ledger = context.ledger().ledgerId();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var existing = readClosedRecovery(metadata, context);
+            if (existing.metadata() != null) {
+                return existing;
+            }
+            var current = readRecovery(metadata, ledger);
+            if (current.context() == null || !context.equals(current.context())) {
+                return new ClosedRecoveryResult(current.outcome(), null, null);
+            }
+            if (current.metadata().birthZxid() != plan.metadata().birthZxid()
+                    || !current.metadata().metadata().getVersion().equals(plan.metadata().metadata().getVersion())
+                    || !ProfileLedgerMetadataStore.sameMetadata(value, current.metadata().metadata().getValue())) {
+                return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
+            }
+            var root = read(ledger, deadline);
+            if (root.status() != ReadStatus.FOUND || !context.matchesRoot(root.snapshot())) {
+                return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
+            }
+            var selected = selectedBoundary(context, value, deadline);
+            if (selected == null || !selected.equals(plan.selection())) {
+                return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
+            }
+            var checks = new java.util.ArrayList<>(recoveryRootChecks(root.snapshot(), deadline));
+            checks.addAll(metadata.checksForMembership(current.metadata()));
+            checks.add(Op.check(boundaryPath(ledger), 0));
+            checks.add(Op.check(boundaryBirthGuard(ledger, selected.birthZxid()), 0));
+            checks.add(metadata.closedMetadataWrite(current.metadata(), selected.boundary()));
+            int code = multi(checks, deadline);
+            var resolved = readClosedRecovery(metadata, context);
+            if (resolved.metadata() != null) {
+                return new ClosedRecoveryResult(code == Code.OK.intValue() ? ProfileLedgerMetadataStore.Outcome.APPLIED
+                        : ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED,
+                        resolved.metadata(), resolved.selection());
+            }
+            return new ClosedRecoveryResult(conditionalFailure(code) ? ProfileLedgerMetadataStore.Outcome.CONFLICT
+                    : resolved.outcome() == ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                        ? resolved.outcome() : ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN, null, null);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN, null, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN, null, null);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.QUARANTINED, null, null);
+        }
     }
 
     public record BoundarySnapshot(ProfileRecoveryBoundary boundary, long birthZxid,
@@ -1257,7 +1499,10 @@ public final class ZKProfileReservationStore {
                     return new ProfileControlStore.ReadResult(ReadStatus.FOUND,
                             new CommittedProfileAuthority(scope,
                                     scope.operation() == ProfileControlOperation.RECOVERY_GRANT_CLOSE
-                                            ? CommittedProfileAuthority.State.RECOVERY_CLOSE_AUTHORIZED
+                                            ? current.metadata().metadata().getValue().getAllEnsembles()
+                                                .higherKey(intent.fragmentStart()) == null
+                                                ? CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED
+                                                : CommittedProfileAuthority.State.RECOVERY_CLOSE_AUTHORIZED
                                             : CommittedProfileAuthority.State.RECOVERY_OPEN,
                                     EngineProfile.SEGMENT_WAL_ENGINE,
                                     scope.operation() == ProfileControlOperation.RECOVERY_GRANT_CLOSE

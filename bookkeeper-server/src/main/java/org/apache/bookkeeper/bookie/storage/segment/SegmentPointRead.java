@@ -241,7 +241,8 @@ final class SegmentPointRead {
                         IsolatedSegmentFiles.StartupInventoryLease startup = files.pinStartupInventory();
                         pin = startup;
                         if (latest) {
-                            entryId = startup.inventory().latestCoordinate(arena, context);
+                            entryId = startup.inventory().latestCoordinate(arena, context,
+                                    bookie.readUpperBound(admission));
                         }
                         if (startup.inventory().provesAbsent(arena, context, entryId)) {
                             freshMiss = true;
@@ -251,7 +252,7 @@ final class SegmentPointRead {
                     } else {
                         pin = files.pinDataRead();
                         if (latest) {
-                            entryId = hot.latestCoordinate(context);
+                            entryId = hot.latestCoordinate(context, bookie.readUpperBound(admission));
                             if (entryId < 0) {
                                 freshMiss = true;
                                 readSelected(ticket);
@@ -351,7 +352,7 @@ final class SegmentPointRead {
                     if (status == ReadStatus.FOUND && failure == null) {
                         if (!arena.dataFileAvailable(selected.address().fileIndex())) {
                             status = ReadStatus.NOT_READY;
-                        } else if (!bookie.canCompleteRead(admission)) {
+                        } else if (!bookie.canCompleteRead(admission, entryId)) {
                             status = ReadStatus.STALE_ADMISSION;
                         } else if (hot != null && !hot.isCurrentDurable(selected)) {
                             status = ReadStatus.NOT_READY;
@@ -535,10 +536,13 @@ final class SegmentPointRead {
         SegmentBookieControlLog.ReadAdmission admission = bookie.admitRead(location.context())
                 .orElseThrow(() -> new IOException("Bookie read route is unavailable"));
         try {
+            if (!bookie.canCompleteRead(admission, location.entryId())) {
+                throw new IOException("Bookie terminal prefix excludes this coordinate");
+            }
             Location selected = arena.resolveLocation(location);
             Result result = read(config, identity, arena, selected);
             arena.validateSelectedRecord(selected, result.record());
-            if (!bookie.canCompleteRead(admission)) {
+            if (!bookie.canCompleteRead(admission, location.entryId())) {
                 throw new IOException("Bookie read route changed before completion");
             }
             return result;
@@ -559,7 +563,7 @@ final class SegmentPointRead {
                     syncIo, context, entryId, maxBatches, maxEntries, selected -> {
                         Result result = read(config, identity, arena, selected.location());
                         arena.validateSelectedRecord(selected.location(), result.record());
-                        if (!bookie.canCompleteRead(admission)) {
+                        if (!bookie.canCompleteRead(admission, entryId)) {
                             throw new IOException("Bookie read route changed before completion");
                         }
                         int shard = selected.location().address().shard();
@@ -590,7 +594,7 @@ final class SegmentPointRead {
                 Result result = read(config, identity, arena, selected);
                 arena.validateSelectedRecord(selected, result.record());
                 lease.inventory().requireCurrentArena(arena);
-                if (!bookie.canCompleteRead(admission)) {
+                if (!bookie.canCompleteRead(admission, entryId)) {
                     throw new IOException("Recovered read authority changed before completion");
                 }
                 return result;

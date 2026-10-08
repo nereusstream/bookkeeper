@@ -44,6 +44,10 @@ public final class ProfileInitialControlCodec {
     public static final long RECOVERY_CAPABILITY_ID = 0x55494333L;
     public static final int RECOVERY_SCHEMA = 3;
     public static final long RECOVERY_CLOSE_CAPABILITY_ID = 0x55494334L;
+    public static final long TERMINAL_CLOSE_CAPABILITY_ID = 0x55494335L;
+    public static final int TERMINAL_CLOSE_CAPABILITY_VERSION = 1;
+    public static final ProfileHello.Capability TERMINAL_CLOSE_CAPABILITY = new ProfileHello.Capability(
+            TERMINAL_CLOSE_CAPABILITY_ID, TERMINAL_CLOSE_CAPABILITY_VERSION);
     public static final int RECOVERY_CLOSE_SCHEMA = 4;
     public static final int COMMON_BYTES = 126;
     public static final int RECOVERY_BINDING_BYTES = 48;

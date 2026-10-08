@@ -691,6 +691,84 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private static SegmentBookieControlLog.RecoveryGrantClose terminalClose(int operation, int grant) {
+        var old = recoveryClose(operation, grant, 3, 7, 9);
+        var scope = old.transition().request().scope();
+        return new SegmentBookieControlLog.RecoveryGrantClose(new ProtectedProfileStateStore.Transition(
+                old.transition().request(), new CommittedProfileAuthority(scope,
+                        CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED,
+                        EngineProfile.SEGMENT_WAL_ENGINE, 4, true), null), old.grantOperationId(),
+                old.repairIntentId(), old.repairIntentGeneration(), old.grantGeneration());
+    }
+
+    @Test
+    public void terminalControlFramingMatchesIndependentVectorWithoutClaimingGrantAuthority() throws Exception {
+        byte[] fixed = java.nio.file.Files.readAllBytes(Path.of(getClass().getResource(
+                "/unified-wal-segment/bookie-terminal-framing.bin").toURI()));
+        ByteBuffer encoded = SegmentControlFormat.encode(SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE,
+                new Generation(1), 0, new UUID(0, 1), new Generation(1), 0,
+                ByteBuffer.wrap(new byte[] {1, 2, 3, 4}));
+        byte[] output = new byte[encoded.remaining()];
+        encoded.get(output);
+        assertArrayEquals(fixed, output);
+        var parsed = SegmentControlParser.parse(ByteBuffer.wrap(fixed), SegmentControlFormat.Owner.BOOKIE,
+                new Generation(1), 0);
+        assertEquals(SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE, parsed.type());
+        assertEquals(4, parsed.body().remaining());
+    }
+
+    @Test
+    public void terminalCloseUpgradesGrantCloseAndPersistsReadLimitAcrossCheckpointAndReplay() throws Exception {
+        for (boolean checkpoint : List.of(false, true)) {
+            var config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("bookie-" + checkpoint),
+                    1, 4, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var identity = identity();
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                    SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
+                            1024 * 1024, key((byte) 8), VALIDATOR)) {
+                log.submitBatch(List.of(install(1, (byte) 6), activate(44, 4)));
+                log.submitRecoveryGrant(recoveryGrant(2, 3, 7, 9));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        log.submitRecoveryClose(recoveryClose(3, 2, 3, 7, 9)));
+                var late = log.admitRead(context()).orElseThrow();
+                assertTrue(log.canCompleteRead(late, 9));
+                var precut = log.admitNormal(context(), filled(20, (byte) 6)).orElseThrow();
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.WAITING_PRECUT,
+                        log.prepareRecoveryClose(terminalClose(3, 2)).immediate());
+                assertFalse(log.admitNormal(context(), filled(20, (byte) 6)).isPresent());
+                precut.physicalTerminal();
+                var cut = log.prepareRecoveryClose(terminalClose(3, 2));
+                assertNull(cut.immediate());
+                assertFalse(log.canCompleteRead(late, 9));
+                log.writeRecoveryCloseDurably(cut.write());
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        log.applyRecoveryCloseDurable(cut.write()));
+                assertFalse(log.networkReadable(context(), 9));
+                assertTrue(log.networkReadable(context(), 4));
+                assertFalse(log.locallyReadableCoordinate(context(), 9));
+                late.finish();
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                        log.submitRecoveryClose(terminalClose(3, 2)));
+                assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                        log.submitRecoveryGrant(recoveryGrant(45, 4, 1, 10)).status());
+                assertTrue(log.networkReadable(context(), 4));
+                if (checkpoint) {
+                    log.checkpoint();
+                    log.checkpoint();
+                    log.rotate();
+                }
+            }
+            try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
+                    1024 * 1024, key((byte) 8), VALIDATOR)) {
+                assertFalse(replay.networkReadable(context(), 9));
+                assertTrue(replay.networkReadable(context(), 4));
+                assertFalse(replay.normalAdmission(context(), filled(20, (byte) 6)));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                        replay.submitRecoveryClose(terminalClose(3, 2)));
+            }
+        }
+    }
+
     @Test
     public void uncertainRecoveryCloseForceNeverReopensAdmissionInCurrentProcess() throws Exception {
         IsolatedSegmentConfig config = config();
@@ -13478,6 +13556,39 @@ public class SegmentBookieControlLogTest {
                             storageWrite(storage, context(), entryId).candidate().address().allocation());
                 }
                 assertEquals(2, storageWrite(storage, context(), 4).candidate().address().generation().value());
+            }
+        }
+    }
+
+    @Test
+    public void graphCompactionSkipsTerminalSuffixAndPreservesRequiredPrefix() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("terminal-suffix-compaction");
+        try (MoveFixture fixture = new MoveFixture(config, new SegmentFileIo())) {
+            long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;
+            fixture.arena.submitBatch(List.of(reclaimableAllocation(6, upper)));
+            ByteBuf suffix = entry(context(), 9);
+            try {
+                fixture.files.writeAuthorized(SegmentBatchFormat.encode(config,
+                        new SegmentBatchFormat.Address(0, 0, 6, new Generation(1), new Generation(1), 2, upper),
+                        List.of(SegmentBatchFormat.entry(context(), suffix))), fixture.arena);
+            } finally {
+                suffix.release();
+            }
+            fixture.bookie.submitRecoveryGrant(recoveryGrant(100, 3, 7, 9));
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    fixture.bookie.submitRecoveryClose(terminalClose(101, 100)));
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4, 16, 3)) {
+            storage.restart();
+            IsolatedSegmentStorage.CompactionResult result = compactStorage(storage, 913, List.of(5L, 6L));
+            assertEquals(IsolatedSegmentStorage.CompactionStatus.RECLAIMED, result.status());
+            assertEquals(2, result.movedEntries());
+            assertEquals(SegmentArenaControlLog.BLOCK_BYTES, result.netFreedBytes());
+            assertFalse(storage.profileReadVisible(context(), 9));
+            for (long entryId : List.of(1L, 2L)) {
+                try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), entryId).result()) {
+                    assertEquals(entryId, read.result().record().entryId());
+                }
             }
         }
     }

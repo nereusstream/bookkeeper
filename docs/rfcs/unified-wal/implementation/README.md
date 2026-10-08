@@ -18,7 +18,7 @@
 
 ## 下一阶段实施清单
 
-规划基线为 `e8b162076fd8cfa84a11351a82caac8c5ac1f939`，规划提交 `e75c67f3514d1627ea790d052e2c9226e593aa3c`；它们是历史输入锁，不表示当前 HEAD。当前仍在原 `turbo-bk` 分支持续实施16步，步骤1隔离配置、步骤2 CLIENT-1/2独立Classic红绿补丁、步骤3实验格式及真实FileChannel基础已交付。固定owner/安全binding/属地池、真实DATA—点读—restart、控制checkpoint/派生索引/MOVE/FREE/有界回收、ZK安装激活与原SDK写入/换组均有下文的隔离局部证据；各步骤的剩余验收以对应最新小节为准。当前步骤14已接历史fragment copy/close、URL2双LAC证据和已知required prefix/normal-tail只读验证；最后fragment固定选择与逐target恢复写回/close也已接通；额外required authority producer、整体quorum/terminal visibility、matching CLOSED/AutoRecovery尚未闭合。[本地存储](local-storage/README.md)、[协议/SDK](profile-wire/README.md)、[控制面](profile-control/README.md)分别拥有最新范围、命令和证据；所有生产/稳定Gate保持原未闭合状态。
+规划基线为 `e8b162076fd8cfa84a11351a82caac8c5ac1f939`，规划提交 `e75c67f3514d1627ea790d052e2c9226e593aa3c`；它们是历史输入锁，不表示当前 HEAD。当前仍在原 `turbo-bk` 分支持续实施16步，步骤1隔离配置、步骤2 CLIENT-1/2独立Classic红绿补丁、步骤3实验格式及真实FileChannel基础已交付。固定owner/安全binding/属地池、真实DATA—点读—restart、控制checkpoint/派生索引/MOVE/FREE/有界回收、ZK安装激活与原SDK写入/换组均有下文的隔离局部证据；各步骤的剩余验收以对应最新小节为准。当前步骤14已接历史fragment copy/close、URL2双LAC证据和已知required prefix/normal-tail只读验证；最后fragment固定选择与逐target恢复写回/close也已接通；非空selected最后fragment已增加3/3/2、3/3/3 distinct terminal ACK协调、接收端持久读上界与matching标准CLOSED解析；empty-last close、额外required authority producer、完整AutoRecovery与离线可见性追赶尚未闭合。[本地存储](local-storage/README.md)、[协议/SDK](profile-wire/README.md)、[控制面](profile-control/README.md)分别拥有最新范围、命令和证据；所有生产/稳定Gate保持原未闭合状态。
 
 继续复用已有ProfileDescriptor、Profile control/auth、startup/readiness reference implementation及experimental wire codec/corpus。它们提供接口、字节合同和测试依据，不能替代真实文件持久化、网络或MetadataStore。固定owner、安全显式绑核、NUMA池与独立等待策略沿用RFC-0005 §10.2—10.5、RFC-0003 §6.2；默认仍为OFF/SYSTEM/PARK。
 
@@ -564,3 +564,5 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-07当前[CONTROL客户端FENCE前置](profile-wire/README.md#真实control客户端fence前置)已接真实网络FENCE/同operation幂等/UNKNOWN解析，3项定向通过。原LAC/quorum取证和fencing read仍未接通，source entryId与prefix length锚点必须保留；步骤14保持OPEN。
 
 2026-10-07 [CONTROL客户端FENCE前置](profile-wire/README.md#真实control客户端fence前置)复用冻结100字节body/8字节status、verified peer与原quota/write/wire custody，实际force/同ID ALREADY/credential拒绝及UNKNOWN后同ID重连解析通过。相关59项Java和既有296配置模型矩阵通过；LAC/source/length、fencing read及matching CLOSED仍未接通，步骤14保持PARTIAL/OPEN。
+
+2026-10-08 [非空恢复terminal cut与matching CLOSED](profile-wire/README.md#非空恢复-terminal-cut-与-matching-closed)已接原UIC4语义能力UIC5、接收端native type11持久P上界、全部pre-cut normal/recovery I/O排空、distinct原quorum ACK及标准CLOSED(P,length)同出生/版本/lifecycle/selection CAS。旧type9同操作升级在checkpoint/rotation后仍保留cut；真实回复丢失/new coordinator/restart、3/3/2和3/3/3已有验证。当前完成状态只代表matching CLOSED元数据事实与已接收节点的本地cut；empty-last close、独立readonly-open、离线追赶/rejoin、AutoRecovery和完整步骤14/生产Gate仍OPEN，历史回执不重绑。

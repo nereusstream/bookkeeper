@@ -19,6 +19,26 @@ import time
 
 
 MATRIX = {
+    'c-profile-terminal-cut': None,
+    'ce-profile-terminal-cut-force': 'CutHasForce',
+    'ce-profile-terminal-cut-precut': 'CutWaitsForPrecut',
+    'ce-profile-terminal-cut-admission': 'NoNewAdmission',
+    'ce-profile-terminal-cut-read': 'NoExcludedRead',
+    'ce-profile-terminal-cut-checkpoint': 'CheckpointRetainsUpgrade',
+    'ce-profile-terminal-cut-replay': 'ReplayKeepsCut',
+    'ce-profile-terminal-cut-pending-free': 'SuffixFreeHasDurableCut',
+    'ce-profile-terminal-cut-prefix-free': 'RequiredPrefixIsNotDead',
+    'a-profile-recovery-completion': None,
+    'a-profile-recovery-completion-threeofthree': None,
+    'ce-profile-recovery-completion-unknown': 'ClosedHasActualTerminal',
+    'ce-profile-recovery-completion-duplicate': 'ClosedHasDistinctQuorum',
+    'ce-profile-recovery-completion-capability': 'ClosedHasCapability',
+    'ce-profile-recovery-completion-birth': 'ClosedHasSameBirth',
+    'ce-profile-recovery-completion-length': 'ClosedHasMatchingLength',
+    'ce-profile-recovery-completion-context': 'ClosedHasMatchingContext',
+    'ce-profile-recovery-completion-reopen': 'MatchingClosedNeverReopens',
+    'ce-profile-recovery-completion-cancel': 'ActualAttemptOwnsPermit',
+    'ce-profile-recovery-completion-terminal': 'ClosedHasActualTerminal',
     'a-profile-recovery-selection': None,
     'ce-profile-recovery-selection-meta': 'PublicationHasMetaBirth',
     'ce-profile-recovery-selection-marker': 'PublicationHasMarkerGuard',
@@ -547,6 +567,8 @@ def main():
                    else "ProfileRepairCopy.tla" if "profile-repair-copy" in name
                    else "ProfileRepairMembership.tla" if "profile-repair-membership" in name
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
+                   else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name
+                   else "ProfileRecoveryCompletion.tla" if "profile-recovery-completion" in name
                    else "ProfileRecoverySelection.tla" if "profile-recovery-selection" in name
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name

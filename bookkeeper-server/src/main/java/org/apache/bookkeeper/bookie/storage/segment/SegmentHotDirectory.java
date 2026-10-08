@@ -184,10 +184,14 @@ final class SegmentHotDirectory {
 
     /** Bounded occupancy includes uncertain coordinates; selecting one does not itself prove a readable hint. */
     long latestCoordinate(ProfileLedgerContext context) {
+        return latestCoordinate(context, Long.MAX_VALUE);
+    }
+
+    long latestCoordinate(ProfileLedgerContext context, long upperBound) {
         owner.requireOwner();
         long latest = -1;
         for (Key key : occupied) {
-            if (key.context().equals(context)) {
+            if (key.context().equals(context) && key.entryId() <= upperBound) {
                 latest = Math.max(latest, key.entryId());
             }
         }

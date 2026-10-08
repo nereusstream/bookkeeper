@@ -662,3 +662,34 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 ```
 
 当前显式入口完成每个target的range写回/close，没有整体quorum orchestrator、标准ledger CLOSED(P,length,context) publication/resolution或正常DATA的terminal visibility cut。extra required authority producer、empty-last-fragment的整体close流程、AutoRecovery/marker lifecycle、readonly-open、delete/rejoin、全A+C+D、总预算、掉电/长期性能与production Gate仍OPEN；步骤14仍PARTIAL。
+
+
+## 非空恢复 terminal cut 与 matching CLOSED
+
+2026-10-08，`finishRecovery(context, peers)`在逐target恢复写回之后聚合当前最后fragment的完整copy结果。先读取matching标准CLOSED；仍IN_RECOVERY时构造cold closingPlan，经实际UIC4 close取得不同原ensemble slot的durable结果，再用原RoundRobinDistributionSchedule ACK集合核验A。当前只支持E=W=3、A=2或3和非空selected最后range；不足、重复、UNKNOWN、错Bookie/incarnation/operation/context及缺语义能力的结果不授权close。当前结果`CLOSED_METADATA_DURABLE`只表示matching CLOSED元数据事实，不宣称整个AutoRecovery或生产readiness完成。
+
+UIC4请求/响应字节不变。新增HELLO实验语义能力UIC5（id `0x55494335`、version1）表示接收端实现terminal cut；真实CONTROL客户端提出该能力，服务端在控制接线存在时广告。旧实验UIC4-only节点即使返回普通grant close的APPLIED，也不能计入terminal quorum。native Bookie控制新增type11 `RECOVERY_TERMINAL_CLOSE`，body沿用type9的exact scope/grant/intent绑定；cold authority仅对已selected的最后fragment、已发布完整copy receipt授予terminal状态，historical fragment仍用type9。
+
+terminal prepare停新normal/recovery准入并等待所有pre-cut normal和recovery DATA实际终结，再走原控制I/O force与owner apply；不增加普通Add的远端metadata/日志/handshake。pending和durable P限制旧点读结果完成及READ_LAC最新来源选择；durable P还限制restart/coverage inventory。已排除的suffix参与compaction时跳过，必要prefix继续搬迁和读取；whole-allocation FREE仅消费匹配context的durable P排除证据并保持原reclamation/cut复核，pending或未知context不授权FREE；shared预创建DATA文件不截短。同close operation的已durable type9可升级type11，checkpoint必须保留成功升级的最新记录，rotation/replay恢复同一个cut；后到的旧recovery grant不能改变terminal读资格。
+
+标准metadata CAS保留原CLOSED以外的context、CToken、membership及custom/history，把P与同一选择的应用length一起发布。multi同时检查metadata physical birth/version、原lifecycle/delete cut及selection节点/birth guard；matching resolver重验UWRC起点、selection origin和完整retained repair head，按单次close版本偏移逆演。CLOSED不进入readRecovery、不重新OPEN；提交回复丢失或new coordinator优先解析实际matching结果，无recopy或额外control force。紧随后续DELETE_INTENT的matching历史close可以被解析；它保留历史完成事实，不授予新的访问权限。
+
+独立Python struct/CRC32C的152字节`bookie-terminal-framing.bin`，SHA256 `2df309b9733b02bce56266b7809356dacd11ac17fa8e7be29512619d6cdeee0b`，仅检验native type11 framing。fixture body是4字节示例，独立parser与writer逐字节相符不构成合法grant、copy或terminal authority。
+
+真实回归包括3/3/2与3/3/3完整SELF写回、未被required的洞后physical suffix、重复slot/旧能力/不足A拒绝、实际ZK multi提交但CONNECTIONLOSS的matching解析、新coordinator零force、CLOSED拒绝重新recovery、节点restart与预创建容量保持，以及紧随delete的历史完成解析。native测试另覆盖旧type9同ID升级、pre-cut normal请求等待、旧读票据终结重验、双checkpoint/rotation/replay及必要prefix/suffix混合compaction。checkpoint丢失升级的真实RED `unified-wal-local-ktFmWhwK`已保留；修复成功type11替换checkpointState中的旧type9，而其他first-result规则不变。
+
+当前仅已处理type11的接收节点具有持久P上界；离线节点尚需catch-up/rejoin。空ledger(-1,0)、有历史数据但最后fragment为空的整体close、额外accepted required authority producer、独立readonly-open、完整RepairIntent/underreplication worker/AutoRecovery、全A+C+D、总预算、掉电/长期性能与生产Gate仍OPEN；步骤14保持PARTIAL。历史source/design/receipt不重绑。
+
+
+关联模型`unified-wal-model-5z2ychc3` exit0：104配置15完整正向PASS/89指定反例，718当前源码hash及682 artifact checksums全部核对。completion的A2/A3各55,856 generated/32,040 distinct、queue0；terminal-cut为18/11、queue0；WholeAllocationFree为217/68、queue0。固定tool1.7.4（恢复官方jar并校验既有SHA1/SHA256）、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint；catalog418未全量重跑。早期缺工具/terminal模型语法错误不算PASS；历史97配置run在后续grant/FREE修复前完成，最终104配置独立冻结，sourceCommit仍为本批父提交`36fb485823979fb8b939d96857fa96a25a055bf3`，不重绑旧run。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*+recoveryCloseWaitsForPrecutTicket*+uncertainRecoveryCloseForce*+profileSocketRecoveryGrantClose*+recoveredRecoveryCandidateLosesEligibility*+terminalClose*+terminalControlFraming*+graphCompactionSkipsTerminalSuffixAndPreservesRequiredPrefix+graphCompactionTerminalGroupNeedsNoCopyAllocation+graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar --config-prefix a-profile-recovery-completion --config-prefix ce-profile-recovery-completion --config-prefix c-profile-terminal-cut --config-prefix ce-profile-terminal-cut --config-prefix a-profile-recovery-selection --config-prefix ce-profile-recovery-selection --config-prefix a-profile-repair-membership --config-prefix ce-profile-repair-membership --config-prefix a-profile-recovery-prefix --config-prefix ce-profile-recovery-prefix --config-prefix a-profile-lac- --config-prefix ce-profile-lac- --config-prefix a-profile-point-read --config-prefix ce-profile-point-read --config-prefix a-profile-recovery-observation --config-prefix ce-profile-recovery-observation --config-prefix a-profile-repair-copy --config-prefix ce-profile-repair-copy --config-prefix c-whole-free --config-prefix ce-whole-free
+```
+
+
+最终Java `unified-wal-local-HgWxojIU` exit0：10类206项全部通过（common12/server194：socket66、lifecycle44、metadata19、control store12、PendingAddOp19、decoder22、Bookie12），1041当前source hashes核对。修复前`unified-wal-local-PdEapG9C`确实把晚到grant判APPLIED、`unified-wal-local-bGqdfrdF`的FREE确实拒绝已排除suffix；后者其余205项通过但该run整体失败。两项修复后的`unified-wal-local-vxCGt2ms`6项定向与最终206项通过，RED保留。早期测试API/import/路径遗漏是接线错误；`heIdWeQA`与已停止的`YZ5i3xlR`曾并发共享Maven target，类缺失使该轮无效，不算实现RED或PASS，最终验证已串行完成。
+
+最终Spotless/Checkstyle `unified-wal-terminal-checks-zEv642N7` exit0；root RAT exit1仍为443个既有未批准文件，无新增失败，不改license规则绕过。文档相对链接、manifest JSON、历史字段保留及git diff检查通过；本批不push、不接生产路径。

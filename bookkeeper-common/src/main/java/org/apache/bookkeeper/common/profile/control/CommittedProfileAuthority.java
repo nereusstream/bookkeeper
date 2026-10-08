@@ -36,6 +36,7 @@ public record CommittedProfileAuthority(
         POST_MEMBERSHIP_REPLACEMENT,
         RECOVERY_OPEN,
         RECOVERY_CLOSE_AUTHORIZED,
+        RECOVERY_TERMINAL_CLOSE_AUTHORIZED,
         DELETE_AUTHORIZED,
         STATUS_QUERYABLE
     }
@@ -56,7 +57,8 @@ public record CommittedProfileAuthority(
                     case ACTIVATE_INITIAL -> state == State.READY_INITIAL;
                     case ACTIVATE_REPLACEMENT -> state == State.POST_MEMBERSHIP_REPLACEMENT;
                     case RECOVERY_GRANT -> state == State.RECOVERY_OPEN;
-                    case RECOVERY_GRANT_CLOSE -> state == State.RECOVERY_CLOSE_AUTHORIZED;
+                    case RECOVERY_GRANT_CLOSE -> state == State.RECOVERY_CLOSE_AUTHORIZED
+                            || state == State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED;
                     case TOMBSTONE_OR_DELETE_APPLY -> state == State.DELETE_AUTHORIZED;
                     case STATUS_QUERY -> state == State.STATUS_QUERYABLE;
                 };

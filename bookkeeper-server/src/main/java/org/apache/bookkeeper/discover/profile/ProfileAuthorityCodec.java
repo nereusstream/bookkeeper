@@ -57,6 +57,7 @@ final class ProfileAuthorityCodec {
             case RECOVERY_CLOSE_AUTHORIZED -> 5;
             case DELETE_AUTHORIZED -> 6;
             case STATUS_QUERYABLE -> 7;
+            case RECOVERY_TERMINAL_CLOSE_AUTHORIZED -> 8;
         };
     }
 
@@ -150,6 +151,7 @@ final class ProfileAuthorityCodec {
             case 3 -> CommittedProfileAuthority.State.POST_MEMBERSHIP_REPLACEMENT;
             case 4 -> CommittedProfileAuthority.State.RECOVERY_OPEN;
             case 5 -> CommittedProfileAuthority.State.RECOVERY_CLOSE_AUTHORIZED;
+            case 8 -> CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED;
             case 6 -> CommittedProfileAuthority.State.DELETE_AUTHORIZED;
             case 7 -> CommittedProfileAuthority.State.STATUS_QUERYABLE;
             default -> throw new IllegalArgumentException("Unknown authority state");

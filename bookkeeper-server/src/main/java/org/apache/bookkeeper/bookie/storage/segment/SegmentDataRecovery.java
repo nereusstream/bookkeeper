@@ -213,7 +213,8 @@ final class SegmentDataRecovery {
         for (CompactionEntry entry : batch.entries()) {
             SegmentArenaMove.Source source = entry.source();
             SegmentPointRead.Location location = source.location();
-            if (bookie.hasTerminalTombstone(location.context()) || !bookie.locallyReadableContext(location.context())
+            if (bookie.hasTerminalTombstone(location.context())
+                    || !bookie.locallyReadableCoordinate(location.context(), location.entryId())
                     || arena.currentSelectorSequence(location.context(), location.entryId())
                             != source.expectedSelector()) {
                 throw new IOException("Compaction source authority changed before chunk capture");
@@ -336,6 +337,9 @@ final class SegmentDataRecovery {
                 if (!bookie.locallyReadableContext(record.context())) {
                     throw new IOException("Compaction source has no locally readable Bookie context");
                 }
+                if (!bookie.locallyReadableCoordinate(record.context(), record.entryId())) {
+                    continue;
+                }
                 SegmentArenaMove.Source source = new SegmentArenaMove.Source(location,
                         arena.currentSelectorSequence(record.context(), record.entryId()));
                 visitor.accept(source, record);
@@ -405,7 +409,7 @@ final class SegmentDataRecovery {
                         != allocation.ownerShard()) {
                     throw new IOException("Whole-allocation FREE record belongs to another shard");
                 }
-                boolean terminal = bookie.hasTerminalTombstone(record.context());
+                boolean terminal = bookie.hasTerminalExclusion(record.context(), record.entryId());
                 usesSelector |= record.origin() == SegmentBatchFormat.RELOCATION_COPY;
                 if (!terminal) {
                     Optional<SegmentPointRead.Location> successor = authority.retirementSuccessor(
@@ -417,7 +421,7 @@ final class SegmentDataRecovery {
                             || authority.currentMoveLocation(record.context(), record.entryId())
                                     .filter(locations.get(i)::equals).isPresent()) {
                         throw new IOException("Whole-allocation FREE has a live record"
-                                + " without an exact terminal tombstone"
+                                + " without an exact terminal exclusion"
                                 + " or applied successor");
                     }
                 }
@@ -649,10 +653,15 @@ final class SegmentDataRecovery {
         }
 
         long latestCoordinate(SegmentArenaControlLog authority, ProfileLedgerContext context) throws IOException {
+            return latestCoordinate(authority, context, Long.MAX_VALUE);
+        }
+
+        long latestCoordinate(SegmentArenaControlLog authority, ProfileLedgerContext context, long upperBound)
+                throws IOException {
             requireCurrentArena(authority);
             long latest = -1;
             for (SegmentPointRead.Location location : entries) {
-                if (location.context().equals(context)) {
+                if (location.context().equals(context) && location.entryId() <= upperBound) {
                     latest = Math.max(latest, location.entryId());
                 }
             }
@@ -984,7 +993,7 @@ final class SegmentDataRecovery {
                 if (old != null && old != location.batchLength()) {
                     throw new IOException("Covered locators disagree on batch extent");
                 }
-                if (bookie.locallyReadableContext(location.context())) {
+                if (bookie.locallyReadableCoordinate(location.context(), location.entryId())) {
                     if (authority.currentSelectorSequence(location.context(), location.entryId()) >= 0) {
                         SegmentPointRead.Result verified = SegmentPointRead.read(config, identity, authority, location);
                         authority.validateSelectedRecord(location, verified.record());
@@ -1121,7 +1130,8 @@ final class SegmentDataRecovery {
                             SegmentBatchParser.Record record = parsed.records().get(i);
                             if (authority.isSelectedRecord(locations.get(i), record)
                                     && (stream == null || stream.matches(address))
-                                    && (bookie == null || bookie.locallyReadableContext(record.context()))) {
+                                    && (bookie == null || bookie.locallyReadableCoordinate(
+                                        record.context(), record.entryId()))) {
                                 if (entries.size() == maxEntries) {
                                     throw new IOException("Physical recovery inventory capacity exhausted");
                                 }
@@ -1150,7 +1160,7 @@ final class SegmentDataRecovery {
         }
         for (SegmentPointRead.Location selected : authority.currentMoveLocations()) {
             if ((stream == null || stream.matches(selected.address()))
-                    && (bookie == null || bookie.locallyReadableContext(selected.context()))
+                    && (bookie == null || bookie.locallyReadableCoordinate(selected.context(), selected.entryId()))
                     && !foundMoves.contains(selected)) {
                 throw new IOException("Current MOVE target is missing from required DATA");
             }

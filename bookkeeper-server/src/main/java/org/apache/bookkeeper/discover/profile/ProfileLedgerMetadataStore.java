@@ -428,10 +428,27 @@ public final class ProfileLedgerMetadataStore {
     }
 
     Op repairMetadataWrite(MembershipSnapshot expected, LedgerMetadata desired) throws IOException {
+        return recoveryMetadataWrite(expected, desired, false);
+    }
+
+    Op closedMetadataWrite(MembershipSnapshot expected, ProfileRecoveryBoundary boundary) throws IOException {
+        var value = expected.metadata().getValue();
+        if (value.getState() != LedgerMetadata.State.IN_RECOVERY || expected.birthZxid()
+                != boundary.context().metadataBirth() || !Arrays.equals(value.getCustomMetadata()
+                    .get(ProfileRecoveryContext.KEY), boundary.context().encode())) {
+            throw new IllegalArgumentException("Closed metadata requires its exact recovery instance");
+        }
+        return recoveryMetadataWrite(expected, LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
+                .withClosedState().withLastEntryId(boundary.prefixEntryId()).withLength(boundary.prefixLength())
+                .build(), true);
+    }
+
+    private Op recoveryMetadataWrite(MembershipSnapshot expected, LedgerMetadata desired, boolean closed)
+            throws IOException {
         if (!(expected.metadata().getVersion() instanceof LongVersion version)
                 || version.getLongVersion() < 0 || version.getLongVersion() >= Integer.MAX_VALUE
                 || desired.getLedgerId() != expected.metadata().getValue().getLedgerId()
-                || desired.getState() != LedgerMetadata.State.IN_RECOVERY
+                || desired.getState() != (closed ? LedgerMetadata.State.CLOSED : LedgerMetadata.State.IN_RECOVERY)
                 || desired.getCToken() != expected.metadata().getValue().getCToken()) {
             throw new IllegalArgumentException("Invalid guarded repair metadata write");
         }
