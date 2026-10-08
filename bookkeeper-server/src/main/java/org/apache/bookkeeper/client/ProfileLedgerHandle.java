@@ -175,10 +175,17 @@ public final class ProfileLedgerHandle extends LedgerHandle {
                             long piggybackLac, long sourceLength, int payloadBytes) { }
 
     /** Snapshot evidence only: no writer LAC/length mutation, fencing coverage or CLOSED authority. */
+    public record ExplicitLacSource(BookieId bookie, String storageIncarnation, long lac) { }
+
     public record LacEvidence(Versioned<LedgerMetadata> metadata, long maxObservedLac, long prefixEntryId,
-                              long prefixLength, List<LacSource> sources) {
+                              long prefixLength, List<LacSource> sources, List<ExplicitLacSource> explicitSources) {
+        public LacEvidence(Versioned<LedgerMetadata> metadata, long maxObservedLac, long prefixEntryId,
+                long prefixLength, List<LacSource> sources) {
+            this(metadata, maxObservedLac, prefixEntryId, prefixLength, sources, List.of());
+        }
         public LacEvidence {
             sources = List.copyOf(sources);
+            explicitSources = List.copyOf(explicitSources);
         }
     }
 

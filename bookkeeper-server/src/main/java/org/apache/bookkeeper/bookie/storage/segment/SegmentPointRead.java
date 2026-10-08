@@ -50,11 +50,21 @@ final class SegmentPointRead {
     static final class LeasedResult implements AutoCloseable {
         private final Result result;
         private final SegmentBufferPool.Lease buffer;
+        private final SegmentBookieControlLog.ExplicitLac explicit;
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        private LeasedResult(Result result, SegmentBufferPool.Lease buffer) {
+        private LeasedResult(Result result, SegmentBufferPool.Lease buffer,
+                SegmentBookieControlLog.ExplicitLac explicit) {
             this.result = result;
             this.buffer = buffer;
+            this.explicit = explicit;
+        }
+
+        SegmentBookieControlLog.ExplicitLac explicitLac() {
+            if (closed.get()) {
+                throw new IllegalStateException("LAC result is closed");
+            }
+            return explicit;
         }
 
         Result result() {
@@ -67,7 +77,9 @@ final class SegmentPointRead {
         @Override
         public void close() {
             if (closed.compareAndSet(false, true)) {
-                buffer.close();
+                if (buffer != null) {
+                    buffer.close();
+                }
             }
         }
     }
@@ -174,7 +186,7 @@ final class SegmentPointRead {
                 throw new IllegalArgumentException("Point-read entry ID must be nonnegative");
             }
             int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), files.config().logicalShards());
-            return owner.submit(shard, new ReadCommand(context, entryId, request, false));
+            return owner.submit(shard, new ReadCommand(context, entryId, request, false, false));
         }
 
         /** Query the latest occupied source through the same physical validation and loan path. */
@@ -182,13 +194,21 @@ final class SegmentPointRead {
             Objects.requireNonNull(context, "context");
             Objects.requireNonNull(request, "request");
             return owner.submit(SegmentOwnerLoop.shardFor(context.ledgerId(), files.config().logicalShards()),
-                    new ReadCommand(context, -1, request, true));
+                    new ReadCommand(context, -1, request, true, false));
+        }
+
+        boolean submitLac(ProfileLedgerContext context, ReadRequest request) {
+            Objects.requireNonNull(context, "context");
+            Objects.requireNonNull(request, "request");
+            return owner.submit(SegmentOwnerLoop.shardFor(context.ledgerId(), files.config().logicalShards()),
+                    new ReadCommand(context, -1, request, true, true));
         }
 
         private final class ReadCommand implements SegmentOwnerLoop.Command {
             private final ProfileLedgerContext context;
             private long entryId;
             private final boolean latest;
+            private final boolean explicitComponent;
             private final ReadRequest request;
             private final AtomicBoolean started = new AtomicBoolean();
             private SegmentBookieControlLog.ReadAdmission admission;
@@ -200,10 +220,12 @@ final class SegmentPointRead {
             private boolean physicalTerminal;
             private boolean ownerTerminal;
 
-            private ReadCommand(ProfileLedgerContext context, long entryId, ReadRequest request, boolean latest) {
+            private ReadCommand(ProfileLedgerContext context, long entryId, ReadRequest request, boolean latest,
+                    boolean explicitComponent) {
                 this.context = context;
                 this.entryId = entryId;
                 this.latest = latest;
+                this.explicitComponent = explicitComponent;
                 this.request = request;
             }
 
@@ -292,9 +314,14 @@ final class SegmentPointRead {
                 });
             }
 
+            private boolean canProveAbsence() {
+                return explicitComponent ? bookie.canProveLacDataAbsence(admission, entryId)
+                        : bookie.canProveReadAbsence(admission, entryId);
+            }
+
             private ReadStatus prepareBuffer() throws IOException {
                 if (selected == null) {
-                    return freshMiss && bookie.canProveReadAbsence(admission, entryId)
+                    return freshMiss && canProveAbsence()
                             && (hot == null || hot.provesAbsent(context, entryId))
                             ? ReadStatus.MISSING : ReadStatus.NOT_READY;
                 }
@@ -317,7 +344,7 @@ final class SegmentPointRead {
                         failure = owner.failure();
                     }
                     if (status == ReadStatus.MISSING && failure == null
-                            && (!bookie.canProveReadAbsence(admission, entryId)
+                            && (!canProveAbsence()
                                 || hot != null && !hot.provesAbsent(context, entryId))) {
                         status = ReadStatus.NOT_READY;
                     }
@@ -336,8 +363,9 @@ final class SegmentPointRead {
                         status = ReadStatus.UNKNOWN;
                     }
                     LeasedResult response = null;
-                    if (status == ReadStatus.FOUND) {
-                        response = new LeasedResult(result, buffer);
+                    if (status == ReadStatus.FOUND || status == ReadStatus.MISSING && explicitComponent) {
+                        response = new LeasedResult(result, buffer, explicitComponent
+                                ? bookie.explicitLac(context).orElse(null) : null);
                         buffer = null;
                     }
                     request.complete(status, response, failure);

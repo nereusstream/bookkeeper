@@ -1327,9 +1327,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     /** A local absence sample is stable only after durable fence and with no other admitted work. */
     synchronized boolean canProveReadAbsence(ReadAdmission admission, long entryId) {
+        return canProveReadAbsence(admission, entryId, false);
+    }
+
+    synchronized boolean canProveLacDataAbsence(ReadAdmission admission, long entryId) {
+        return canProveReadAbsence(admission, entryId, true);
+    }
+
+    private boolean canProveReadAbsence(ReadAdmission admission, long entryId, boolean explicitComponent) {
         if (!canCompleteRead(admission) || !admission.state.fenced || admission.state.pendingFence != null
                 || activeAdmissions != 1
-                || entryId < 0 && admission.state.explicitLac != null) {
+                || entryId < 0 && admission.state.explicitLac != null && !explicitComponent) {
             return false;
         }
         for (GrantState grant : admission.state.recoveryGrants.values()) {

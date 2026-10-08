@@ -29,21 +29,35 @@ public final class ProfileLacReplyCodec {
     public static final int SCHEMA = 1;
     public static final int MAGIC = 0x55574c51; // UWLQ
     public static final int PREFIX_BYTES = 88;
+    public static final int EXPLICIT_CAPABILITY_ID = 0x55524c32; // URL2
+    public static final int EXPLICIT_SCHEMA = 2;
+    public static final int EXPLICIT_PREFIX_BYTES = PREFIX_BYTES + 12;
+    public static final int EXPLICIT_BYTES = 20; // original CRC32C ledger/LAC digest, no prefix length
+    public static final ProfileHello.Capability EXPLICIT_CAPABILITY = new ProfileHello.Capability(
+            EXPLICIT_CAPABILITY_ID, EXPLICIT_SCHEMA);
     public static final ProfileHello.Capability CAPABILITY = new ProfileHello.Capability(CAPABILITY_ID, SCHEMA);
     private static final ProfileStatus QUERY_OK = new ProfileStatus(ProfileStatus.StatusClass.OK,
             ProfileStatus.RetryDisposition.NEVER, ProfileStatus.DurableResult.NONE, 0);
 
-    public enum Outcome { SOURCE, EMPTY, REFUSED }
+    public enum Outcome { SOURCE, EMPTY, EXPLICIT, REFUSED }
 
     public static final class Reply {
         private final ProfileStatus status;
         private final Outcome outcome;
         private final byte[] entry;
+        private final byte[] explicit;
+        private final long explicitLac;
 
         private Reply(ProfileStatus status, Outcome outcome, byte[] entry) {
+            this(status, outcome, entry, new byte[0], -1);
+        }
+
+        private Reply(ProfileStatus status, Outcome outcome, byte[] entry, byte[] explicit, long explicitLac) {
             this.status = status;
             this.outcome = outcome;
             this.entry = entry;
+            this.explicit = explicit;
+            this.explicitLac = explicitLac;
         }
 
         public ProfileStatus status() {
@@ -55,6 +69,18 @@ public final class ProfileLacReplyCodec {
         public ByteBuffer entry() {
             return ByteBuffer.wrap(entry).asReadOnlyBuffer();
         }
+        public boolean hasExplicitLac() {
+            return explicit.length != 0;
+        }
+
+        public long explicitLac() {
+            return explicitLac;
+        }
+
+        public ByteBuffer explicitBody() {
+            return ByteBuffer.wrap(explicit).asReadOnlyBuffer();
+        }
+
         public long sourceEntryId() {
             return outcome == Outcome.SOURCE ? entry().getLong(8) : -1;
         }
@@ -133,9 +159,75 @@ public final class ProfileLacReplyCodec {
         return new Reply(status, outcome, entry);
     }
 
+    public static void writeExplicitPrefix(ByteBuffer output, ProfileLedgerContext context, long sourceEntryId,
+            int entryBytes, long explicitLac, int explicitBytes, int bound) {
+        requireExplicitShape(sourceEntryId, entryBytes, explicitLac, explicitBytes, bound);
+        if (output.remaining() != EXPLICIT_PREFIX_BYTES) {
+            throw new IllegalArgumentException("Explicit READ_LAC prefix needs exactly 100 bytes");
+        }
+        int tag = entryBytes != 0 ? explicitBytes != 0 ? 4 : 1 : explicitBytes != 0 ? 3 : 2;
+        output.order(ByteOrder.BIG_ENDIAN).put(QUERY_OK.encode()).putInt(MAGIC).putShort((short) EXPLICIT_SCHEMA)
+                .putShort((short) tag).put(context.encode()).putLong(sourceEntryId).putInt(entryBytes)
+                .putLong(explicitLac).putInt(explicitBytes);
+    }
+
+    public static Reply decodeExplicit(ByteBuffer input, ProfileLedgerContext expected, int bound) {
+        ByteBuffer in = input.asReadOnlyBuffer().order(ByteOrder.BIG_ENDIAN);
+        if (in.remaining() < 8) {
+            throw new IllegalArgumentException("Truncated explicit READ_LAC reply");
+        }
+        byte[] statusBytes = new byte[8];
+        in.get(statusBytes);
+        var status = ProfileStatus.decode(statusBytes);
+        if (status.statusClass() != ProfileStatus.StatusClass.OK) {
+            if (in.hasRemaining()) {
+                throw new IllegalArgumentException("Explicit READ_LAC refusal carries body");
+            }
+            return refused(status);
+        }
+        if (!status.equals(QUERY_OK) || in.remaining() < EXPLICIT_PREFIX_BYTES - 8 || in.getInt() != MAGIC
+                || Short.toUnsignedInt(in.getShort()) != EXPLICIT_SCHEMA) {
+            throw new IllegalArgumentException("Invalid explicit READ_LAC schema/status");
+        }
+        int tag = Short.toUnsignedInt(in.getShort());
+        var context = ProfileLedgerContext.decode(in);
+        long source = in.getLong();
+        long entryBytes = Integer.toUnsignedLong(in.getInt());
+        long lac = in.getLong();
+        long explicitBytes = Integer.toUnsignedLong(in.getInt());
+        if (!context.equals(expected) || entryBytes > Integer.MAX_VALUE || explicitBytes > Integer.MAX_VALUE
+                || entryBytes + explicitBytes != in.remaining()) {
+            throw new IllegalArgumentException("Explicit READ_LAC scope/length mismatch");
+        }
+        requireExplicitShape(source, (int) entryBytes, lac, (int) explicitBytes, bound);
+        int expectedTag = entryBytes != 0 ? explicitBytes != 0 ? 4 : 1 : explicitBytes != 0 ? 3 : 2;
+        if (tag != expectedTag || entryBytes != 0 && (in.getLong(in.position()) != expected.ledgerId()
+                || in.getLong(in.position() + 8) != source || in.getLong(in.position() + 16) < -1
+                || in.getLong(in.position() + 24) < 0)) {
+            throw new IllegalArgumentException("Explicit READ_LAC tags/source disagree");
+        }
+        byte[] entry = new byte[(int) entryBytes];
+        byte[] explicit = new byte[(int) explicitBytes];
+        in.get(entry).get(explicit);
+        if (explicit.length != 0 && (ByteBuffer.wrap(explicit).getLong() != expected.ledgerId()
+                || ByteBuffer.wrap(explicit).getLong(8) != lac)) {
+            throw new IllegalArgumentException("Explicit LAC body does not bind ledger/value");
+        }
+        return new Reply(status, entry.length != 0 ? Outcome.SOURCE : explicit.length != 0 ? Outcome.EXPLICIT
+                : Outcome.EMPTY, entry, explicit, lac);
+    }
+
+    private static void requireExplicitShape(long source, int size, long lac, int explicit, int bound) {
+        if (bound < 36 || bound > ProfileReadEntryReplyCodec.MAX_ENTRY_BYTES
+                || (size == 0 ? source != -1 : source < 0 || size < 36 || size > bound)
+                || (explicit == 0 ? lac != -1 : explicit != EXPLICIT_BYTES || lac < -1)) {
+            throw new IllegalArgumentException("Invalid bounded explicit LAC shape");
+        }
+    }
+
     private static void requireShape(long source, Outcome outcome, int size, int bound) {
         if (bound < 36 || bound > ProfileReadEntryReplyCodec.MAX_ENTRY_BYTES
-                || outcome == null || outcome == Outcome.REFUSED
+                || outcome == null || outcome != Outcome.SOURCE && outcome != Outcome.EMPTY
                 || (outcome == Outcome.SOURCE ? source < 0 || size < 36 || size > bound : source != -1 || size != 0)) {
             throw new IllegalArgumentException("Invalid bounded READ_LAC result");
         }

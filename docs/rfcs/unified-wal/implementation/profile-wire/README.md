@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录拥有 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与保留但不再执行的 compatibility harness。Block D 只实现纯字节 codec；不实现 listener、endpoint、TLS 服务，不接入生产启动、Bookie Add/ACK、storage、registration、recovery 或 delete authority。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～14在本目录记录隔离真实 TLS/socket/storage/SDK/恢复接线的独立增量，最新为 [URL2 双证据](#url2-explicit-lac-双证据与前缀锚点)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -392,6 +392,8 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 ## READ_LAC 源取证
 
+本节记录 URL1 的历史切片；当前 explicit LAC 能力见 [URL2 增量](#url2-explicit-lac-双证据与前缀锚点)，旧 URL1 合同及回执不重绑。
+
 2026-10-07，READ_LAC继续使用既有opcode0x0205和60字节context请求，固定头早拒绝其他body长度。独立experimental capability URL1（0x55524c31/version1）仅在配置独立nonblocking principal+context授权时广告；URD1点读权限不会自动开启URL1。DATA客户端显式协商，两端按完整scope与请求ID关联，服务端回复前重验权限和本地visibility。任一OPEN recovery range阻止这一整ledger查询。
 
 成功body为status8、UWLQ magic、schema1、SOURCE=1/EMPTY=2、context60、sourceEntryId8、entryLength4及完整BK entry，固定prefix88；非OK拒绝只携带status8/durable NONE。SOURCE保留原entry及其sourceEntryId、piggyback LAC、sourceLength；它是验证过的源样本，不承诺全ledger最大LAC，也不把源累计length当成LAC-prefix length。codec先校验scope、exact tail、安装上限、BK ledger/source身份和数值范围，再做一次owned copy；原SDK的CRC/quorum/length锚定适配仍待接入。
@@ -563,3 +565,35 @@ caller只取得copy future，取消仅设置stop：当前entry RPC继续终结�
 定向实际RED `unified-wal-local-dkQjCsWD`不能完成换组后的fence/copy；修复未变成员身份选择后`unified-wal-local-6TQ1I7UZ`的2项通过，四场景`unified-wal-local-ycHlB6RT`全部通过。model首轮zn7yy2kd是TLA运算符括号解析错误，无性质通过声明；修正后subset `unified-wal-model-0vf4skai`为1正向/9指定反例，再运行上述完整矩阵。
 
 重现沿用UIC4小节的Java/style/model三条命令；模型消费source/fence/grant及RPC实际终结事实，不生产crypto/TLS/force或完整跨组件预算证据。
+
+## URL2 explicit LAC 双证据与前缀锚点
+
+2026-10-08，继承上轮未提交改动并完成验证。URL1/schema1 字节、拒绝和 EMPTY 合同保持原样；已有独立 LAC 授权的隔离 listener 另外广告 opt-in URL2（`0x55524c32`/schema2）。DATA client 同时 offer URL1/URL2，按实际 server capability 选择 schema2 或旧 schema1；URL2 自身可协商 READ_LAC，不要求另外 offer URL1。capability 不授予读权限，仍执行原 mTLS principal/context 授权及回复前 visibility 检查，没有新 opcode、请求 body 或普通 Add 热路径开销。
+
+URL2 成功 body 的固定 prefix 为100字节：沿用 status8/UWLQ magic/schema/tag/context60/sourceEntryId8/entryLength4，再加 explicitLac8/explicitLength4；尾部先完整原 BK entry，再独立20字节 CRC32C ledger/LAC digest。tag1/2/3/4分别为 SOURCE/EMPTY/EXPLICIT/SOURCE+EXPLICIT。各组件缺失有唯一形状，explicit 缺失为(-1,0)，存在时长度必须20，允许实际 LAC=-1。严格拒绝错 scope/ledger/value/tag、截断、额外尾部、unsigned overflow、超安装上限及错 schema；非OK仍仅 status8。源码只启用既有 CRC32C Profile 子集，不新增其他 digest 模式。
+
+实际 owner read 继续使用 fresh Get/current selector/file pin/池 loan，终结时连同本地 durable control 中的 explicit LAC 取得同一 admission 下的回复。无 DATA 时，只有完整稳定 fenced absence proof 才能返回 EXPLICIT 或 EMPTY；有 explicit 的 EXPLICIT 不等于整 ledger EMPTY。旧 URL1 不忽略 explicit 后伪报 EMPTY。超时/取消后的 frame、loan、response credit 和实际 I/O 终结合同沿用既有路径；回复增加的固定字节纳入原 response/workspace 额度。
+
+SDK 分别使用原 DigestManager 校验 entry 与 explicit digest，整份双证据合法后才计原 coverage 并保留来源 identity/incarnation。任一组件损坏排除该 endpoint 的两份贡献，继续其他副本；剩余覆盖不足才失败，不因 valid-looking source 而忽略同 endpoint 的坏 explicit。最大有效 piggyback/explicit 提示与最后 fragment 起点共同决定待锚定 P；explicit 本身没有 length，仍读/复用 exact P 的原 entry 累计应用 length，缺锚点或长度矛盾 non-OK，不更新 writer LAC/length或发布 CLOSED。此 API 是已取回来源的证据，尚不宣称完整 required-frontier authority。
+
+三个独立固定向量已经通过 Python struct 逐字段校验，Java writer/parser 逐字节对照与全截断边界拒绝验证：
+
+| 向量 | 字节 | SHA-256 |
+| --- | --- | --- |
+| explicit-source.bin | 160 | `d67e2054466c1be5f71eadb0f3d9f839affbd8e1b81849c51753aeb5b743f223` |
+| explicit-only.bin | 120 | `f3ebb34ecd304e1ae374260a0ddb1efe69127aa8df7dbee6f5bcc4141ef1e90a` |
+| explicit-empty.bin | 100 | `f18e7731cb7c95070977caf07a7fc839276a1df237600ea88aeb0fd7497929b8` |
+
+真实 mTLS/ZK/files/原 SDK 场景验证 source100/piggyback98/length1100 + explicit99 → P99/length1000；仅 explicit99 而缺 entry99 时不给成功前缀；一个 explicit digest 损坏且余下两副本有效可取 P100/length1100，两坏副本则覆盖不足。writer LAC 始终未被取证修改。既有读/恢复/换组/UNKNOWN/资源寿命回归保留。
+
+最终 Java `unified-wal-local-4ZBc2KWT` exit0：9类176项全部通过，common12/server164，零失败/错误/跳过；1037冻结输入 SHA-256 与最终源码一致。common/server Spotless/Checkstyle `unified-wal-explicit-lac-style-2crF7Oih` exit0。相关模型 `unified-wal-model-xr861fp7` exit0：34配置为6个完整正向 PASS/28个指定反例，669源码输入与503结果 checksums 全部核对；其中 A2/A3 explicit frontier 投影各25756/22800及28996/25392 generated/distinct，queue0/depth6，source投影4096/4096，queue0/depth2。工具1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint。只运行变化及关联读取/readonly recovery 切片，未重跑整个374配置目录；此前完整矩阵及所有 historical source/design/run 保持原绑定。runner 的可选 config-prefix 只选择已声明配置，未知 prefix 拒绝，默认仍执行完整矩阵。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*+recoveryCloseWaitsForPrecutTicket*+uncertainRecoveryCloseForce*+profileSocketRecoveryGrantClose*+recoveredRecoveryCandidateLosesEligibility*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar --config-prefix a-profile-lac- --config-prefix ce-profile-lac- --config-prefix a-profile-point-read --config-prefix ce-profile-point-read --config-prefix a-profile-recovery-observation --config-prefix ce-profile-recovery-observation
+```
+
+额外 RAT 检查：common 模块0个未知许可证；server 模块失败于16个既有 unified-wal-segment `.hex`向量。根目录首次失败445项，补齐本次两个新cfg的完整ASF许可证头后仍失败443项，全部对应HEAD已有文件；未改RAT设置或扩大本次修复范围。最终模型回执在许可证头变更后独立重跑同一34配置并重新冻结；早期 aur5sicf 回执不改绑定。根目录/服务器RAT未通过，不能据此声称完整仓库检查通过；相关可复现命令为 `mvn -o -P '!cargo-zigbuild' -pl bookkeeper-common,bookkeeper-server -DskipTests apache-rat:check -q` 与 `mvn -o -N -P '!cargo-zigbuild' -DskipTests apache-rat:check -q`。
+
+本增量不新增网络 WRITE_LAC；该写路径仍明确 unsupported，测试通过原 reserved durable control driver 写入 explicit 事实。完整最大提示/required authority、最后开放 fragment 的 normal-tail oracle、恢复 write-back/matching CLOSED/lost-close、AutoRecovery、独立 readonly-open、delete/rejoin、完整 A+C+D、总预算、掉电/长期/性能及生产权限仍 OPEN。步骤14仍 PARTIAL，不把模型或进程可读当成 fsync/掉电、TLS 总内存或可保留数据生产验收。

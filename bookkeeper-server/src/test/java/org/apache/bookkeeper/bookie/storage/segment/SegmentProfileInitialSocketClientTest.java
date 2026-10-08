@@ -1763,6 +1763,138 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static void persistExplicitLac(Fixture fixture, int node, long value, boolean corrupt) throws Exception {
+        var digest = DigestManager.instantiate(44, fixture.password,
+                org.apache.bookkeeper.client.BookKeeper.DigestType.toProtoDigestType(
+                        org.apache.bookkeeper.client.BookKeeper.DigestType.CRC32C),
+                UnpooledByteBufAllocator.DEFAULT, false);
+        var packed = digest.computeDigestAndPackageForSendingLac(value);
+        byte[] body = new byte[packed.readableBytes()];
+        try {
+            packed.getBuffer(0).getBytes(packed.getBuffer(0).readerIndex(), body);
+        } finally {
+            packed.release();
+        }
+        if (corrupt) {
+            body[body.length - 1] ^= 1;
+        }
+        CompletableFuture<SegmentBookieControlLog.Status> applied = new CompletableFuture<>();
+        assertTrue(fixture.nodes.get(node).controls().submitExplicitLac(
+                new org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec.WriteLac(fixture.context(), value,
+                        DigestManager.generateMasterKey(fixture.password), body),
+                (status, failure) -> {
+                    if (failure == null) {
+                        applied.complete(status);
+                    } else {
+                        applied.completeExceptionally(failure);
+                    }
+                }));
+        assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, applied.get(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    public void explicitLacWireAndSdkKeepSeparateWitnessesAndUseMatchingPointLength() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new ArrayList<ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                data.add(peer);
+                evidenceEntry(fixture, peer, 99, 98, 1000, 16);
+                evidenceEntry(fixture, peer, 100, 98, 1100, 100);
+                persistExplicitLac(fixture, node, 99, false);
+            }
+            var raw = data.get(0).readLac(fixture.context()).get(5, TimeUnit.SECONDS);
+            assertEquals(100, raw.sourceEntryId());
+            assertEquals(98, raw.piggybackLac());
+            assertEquals(1100, raw.sourceLength());
+            assertTrue(raw.hasExplicitLac());
+            assertEquals(99, raw.explicitLac());
+            assertEquals(20, raw.explicitBody().remaining());
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                try {
+                    var proof = handle.readLacEvidence().get(5, TimeUnit.SECONDS);
+                    assertEquals(99, proof.maxObservedLac());
+                    assertEquals(99, proof.prefixEntryId());
+                    assertEquals(1000, proof.prefixLength());
+                    assertEquals(3, proof.explicitSources().size());
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void explicitOnlyLacDoesNotBecomeWholeLedgerEmptyOrInventPrefixLength() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            for (int node = 0; node < 3; node++) {
+                persistExplicitLac(fixture, node, 99, false);
+                assertEquals(ProfileStatus.StatusClass.OK, fixture.clients.get("socket" + node + ":3181")
+                        .fence(fixture.context(), bytes(16, 25), fixture.credential)
+                        .get(5, TimeUnit.SECONDS).statusClass());
+            }
+            var data = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+            var reply = data.readLac(fixture.context()).get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.Outcome.EXPLICIT,
+                    reply.outcome());
+            assertEquals(-1, reply.sourceEntryId());
+            assertEquals(99, reply.explicitLac());
+            assertEquals(0, reply.sourceLength());
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                try {
+                    assertThrows(ExecutionException.class, () -> handle.readLacEvidence().get(5, TimeUnit.SECONDS));
+                    assertEquals(-1, handle.getLastAddConfirmed());
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void corruptExplicitLacExcludesTheEndpointAndRequiresRemainingCoverage() throws Exception {
+        for (int corrupt = 1; corrupt <= 2; corrupt++) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                for (int node = 0; node < 3; node++) {
+                    var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                    evidenceEntry(fixture, peer, 99, 98, 1000, 16);
+                    evidenceEntry(fixture, peer, 100, 99, 1100, 100);
+                    persistExplicitLac(fixture, node, 100, node < corrupt);
+                }
+                try (BookKeeper sdk = sdk(fixture)) {
+                    var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                    try {
+                        if (corrupt == 1) {
+                            var proof = handle.readLacEvidence().get(5, TimeUnit.SECONDS);
+                            assertEquals(100, proof.maxObservedLac());
+                            assertEquals(100, proof.prefixEntryId());
+                            assertEquals(1100, proof.prefixLength());
+                            assertEquals(2, proof.sources().size());
+                            assertEquals(2, proof.explicitSources().size());
+                            assertTrue(proof.sources().stream().noneMatch(source -> source.bookie().toString()
+                                    .equals("socket0:3181")));
+                        } else {
+                            assertThrows(ExecutionException.class,
+                                    () -> handle.readLacEvidence().get(5, TimeUnit.SECONDS));
+                        }
+                        assertEquals(-1, handle.getLastAddConfirmed());
+                    } finally {
+                        handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                }
+            }
+        }
+    }
+
     @Test
     public void sdkLacEvidenceUsesQuorumAndMatchingPrefixLengthWithoutChangingWriterState() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {

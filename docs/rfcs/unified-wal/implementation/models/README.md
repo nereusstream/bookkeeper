@@ -1238,3 +1238,10 @@ ProfileRepairMembership消费caller完成copy的输入，有限投影两次历�
 ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有限投影两个entry、一个attempt permit、caller停止、durable计数、全部copy后publication与published-history resume无recopy。九个mutation分别跳过source/grant、提前publish、计UNKNOWN、取消时放permit、published recopy、并发多entry、取消后继续或激活normal。单模型不生产crypto/TLS/force、underreplication scheduling、last-fragment frontier/CLOSED、full A+C+D、总预算或活性证据。真实路径及命令见[实现记录](../profile-wire/README.md#历史fragment完整copy协调与同操作恢复)。
 
 最终Java `unified-wal-local-ZDl8kEhW` exit0：9类171项全部通过，common10/server161（socket56、lifecycle38、metadata19、PendingAddOp19、decoder22、Bookie7），1034冻结输入。Spotless/Checkstyle实际session88830完成chunk c3b000/exit0/空输出，归档`unified-wal-repair-copy-style-83zwqmp9`的380 Java输入匹配/224与模型共享，Java/style15 checksums核验。最终模型`unified-wal-model-0_bda69p` exit0：372配置70完整正向PASS/302指定反例、667 inputs/1113 checksums；226共享/1475去重union匹配，五个designInputs保持父提交`21081423bcf778c450452089a63e86cc17e53a8b`绑定。新增投影67 generated/51 distinct、queue0/depth10，九个mutation命中指定性质；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。历史回执不重绑。
+
+
+### URL2 双LAC证据的当前有限验证
+
+2026-10-08，复用 ProfileLacSource/ProfileLacEvidence：URL2返回独立explicit witness，EXPLICIT需要稳定完整DATA absence，EMPTY仍排除explicit；SDK投影将坏explicit视为整endpoint不可计票，valid source/explicit分别参与最大提示，exact边界length重新取得。新增两个mutation分别忽略explicit digest和丢弃explicit frontier；A2/A3以及原metadata、cancel、anchor、conflict、source/auth/absence性质保持。
+
+本次 `unified-wal-model-xr861fp7` 只执行LAC、point-read及readonly recovery observation相关34配置，6完整正向PASS/28指定反例；669源码hash/503结果checksums均核对，源码父提交为`76527fd442fba4c3d832223ae33ed5c5220a8b0e`。未重跑完整目录，历史372配置回执保持原绑定；runner新增可选重复config-prefix，默认仍运行完整目录，unknown prefix fail closed。实际命令与Java176项/Spotless/Checkstyle证据见[URL2实现记录](../profile-wire/README.md#url2-explicit-lac-双证据与前缀锚点)。这些有限投影不生产CRC/TLS/fsync、完整required-frontier/CLOSED、总预算、活性、掉电或生产权限证据。

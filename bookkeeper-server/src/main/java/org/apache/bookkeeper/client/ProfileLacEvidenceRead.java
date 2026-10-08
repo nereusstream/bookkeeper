@@ -50,6 +50,7 @@ final class ProfileLacEvidenceRead {
     private long lac = -1;
     private long prefix;
     private final List<ProfileLedgerHandle.LacSource> sources = new ArrayList<>();
+    private final List<ProfileLedgerHandle.ExplicitLacSource> explicitSources = new ArrayList<>();
 
     ProfileLacEvidenceRead(LedgerHandle handle, ProfileBookieClient transport) {
         this.handle = handle;
@@ -118,22 +119,53 @@ final class ProfileLacEvidenceRead {
                 if (reply.status().statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED) {
                     throw error(BKException.Code.UnauthorizedAccessException);
                 }
-                if (reply.outcome() == ProfileLacReplyCodec.Outcome.EMPTY) {
+                long explicitValue = -1;
+                boolean valid = true;
+                if (reply.hasExplicitLac()) {
+                    ByteBuf raw = Unpooled.wrappedBuffer(reply.explicitBody());
+                    try {
+                        long value = handle.macManager.verifyDigestAndReturnLac(raw);
+                        if (value != reply.explicitLac()) {
+                            throw error(BKException.Code.DigestMatchException);
+                        }
+                        explicitValue = value;
+                    } catch (BKException.BKDigestMatchException invalid) {
+                        valid = false;
+                        lastError = BKException.Code.DigestMatchException;
+                    } finally {
+                        raw.release();
+                    }
+                }
+                ProfileLedgerHandle.LacSource verifiedSource = null;
+                if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.EMPTY) {
                     sources.add(source(sample.bookie, -1, -1, 0, 0));
                     code = BKException.Code.NoSuchEntryException;
-                } else if (reply.outcome() == ProfileLacReplyCodec.Outcome.SOURCE) {
+                } else if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.EXPLICIT) {
+                    code = BKException.Code.OK;
+                } else if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.SOURCE) {
                     ByteBuf raw = Unpooled.wrappedBuffer(reply.entry());
                     try {
                         int payload = handle.macManager.verifyDigestAndReturnData(reply.sourceEntryId(), raw)
                                 .readableBytes();
-                        sources.add(source(sample.bookie, reply.sourceEntryId(), reply.piggybackLac(),
-                                reply.sourceLength(), payload));
-                        lac = Math.max(lac, reply.piggybackLac());
+                        verifiedSource = source(sample.bookie, reply.sourceEntryId(), reply.piggybackLac(),
+                                reply.sourceLength(), payload);
                         code = BKException.Code.OK;
                     } catch (BKException.BKDigestMatchException invalid) {
                         lastError = BKException.Code.DigestMatchException;
                     } finally {
                         raw.release();
+                    }
+                }
+                if (code == BKException.Code.OK) {
+                    if (verifiedSource != null) {
+                        sources.add(verifiedSource);
+                        lac = Math.max(lac, verifiedSource.piggybackLac());
+                    }
+                    if (reply.hasExplicitLac()) {
+                        explicitSources.add(new ProfileLedgerHandle.ExplicitLacSource(sample.bookie,
+                                HexFormat.of().formatHex(peers.get(sample.bookie).hello().storageIncarnation()),
+                                explicitValue));
+                        lac = Math.max(lac, explicitValue);
                     }
                 }
             }
@@ -236,7 +268,7 @@ final class ProfileLacEvidenceRead {
 
     private void finish(long length) {
         requireCurrent();
-        result.complete(new ProfileLedgerHandle.LacEvidence(expected, lac, prefix, length, sources));
+        result.complete(new ProfileLedgerHandle.LacEvidence(expected, lac, prefix, length, sources, explicitSources));
     }
 
     private void requireCurrent() {

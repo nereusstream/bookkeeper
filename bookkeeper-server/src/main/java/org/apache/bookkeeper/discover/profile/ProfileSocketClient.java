@@ -141,8 +141,9 @@ final class ProfileSocketClient implements AutoCloseable {
                         ssl.setHandshakeTimeoutMillis(timeout.toMillis());
                         socket.pipeline().addLast(ssl);
                         socket.pipeline().addLast(new LengthFieldBasedFrameDecoder(normalData
-                                ? Math.max(MAX_RESPONSE_FRAME, 36 + ProfileReadEntryReplyCodec.PREFIX_BYTES
-                                    + maxEntryBytes) : MAX_RESPONSE_FRAME, 0, 4, 0, 0) {
+                                ? Math.max(MAX_RESPONSE_FRAME, 36 + ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES
+                                    + ProfileLacReplyCodec.EXPLICIT_BYTES + maxEntryBytes)
+                                        : MAX_RESPONSE_FRAME, 0, 4, 0, 0) {
                             @Override
                             protected long getUnadjustedFrameLength(ByteBuf buffer, int offset, int length,
                                     java.nio.ByteOrder order) {
@@ -339,7 +340,8 @@ final class ProfileSocketClient implements AutoCloseable {
         if (!normalData) {
             throw new IllegalArgumentException("LAC source query requires DATA");
         }
-        if (!hello().capabilities().contains(ProfileLacReplyCodec.CAPABILITY)) {
+        if (!hello().capabilities().contains(ProfileLacReplyCodec.CAPABILITY)
+                && !hello().capabilities().contains(ProfileLacReplyCodec.EXPLICIT_CAPABILITY)) {
             return CompletableFuture.completedFuture(ProfileLacReplyCodec.refused(ProfileStatus.unsupported()));
         }
         if (closed.get()) {
@@ -498,7 +500,7 @@ final class ProfileSocketClient implements AutoCloseable {
                     }
                     ctx.writeAndFlush(encode(ProfileOperation.HELLO, 1,
                             new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY,
-                                    ProfileLacReplyCodec.CAPABILITY)
+                                    ProfileLacReplyCodec.CAPABILITY, ProfileLacReplyCodec.EXPLICIT_CAPABILITY)
                                     : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY,
                                             RECOVERY_CLOSE_CAPABILITY)).encode()))
                             .addListener(written -> {
@@ -530,8 +532,10 @@ final class ProfileSocketClient implements AutoCloseable {
                             || (readHeader.flags() & ProfileFrameHeader.END_OF_STREAM) != 0) {
                         throw invalidReply();
                     }
-                    var received = ProfileLacReplyCodec.decode(bytes.nioBuffer(bytes.readerIndex() + 36,
-                            readHeader.bodyLength()), held.context, maxEntryBytes);
+                    var payload = bytes.nioBuffer(bytes.readerIndex() + 36, readHeader.bodyLength());
+                    var received = hello.capabilities().contains(ProfileLacReplyCodec.EXPLICIT_CAPABILITY)
+                            ? ProfileLacReplyCodec.decodeExplicit(payload, held.context, maxEntryBytes)
+                            : ProfileLacReplyCodec.decode(payload, held.context, maxEntryBytes);
                     if (readHeader.isError() != (received.status().statusClass() != ProfileStatus.StatusClass.OK)) {
                         throw invalidReply();
                     }

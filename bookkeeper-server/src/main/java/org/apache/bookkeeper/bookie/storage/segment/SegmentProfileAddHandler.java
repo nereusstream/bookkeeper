@@ -73,6 +73,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final SegmentProfileReadConfig read;
     private boolean readNegotiated;
     private boolean lacNegotiated;
+    private boolean explicitLacNegotiated;
     private ProfileTransportContext transport;
     private boolean initialControlNegotiated;
     private boolean replacementControlNegotiated;
@@ -126,7 +127,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                             + (control == null && read == null ? 0 : 8 * ProfileHello.MAX_CAPABILITIES))
                     : frame.header().operation() == ProfileOperation.READ_ENTRY
                             || frame.header().operation() == ProfileOperation.READ_LAC
-                            ? 4 * 72 + ProfileReadEntryReplyCodec.PREFIX_BYTES + maxEntryBytes + 36
+                            ? 4 * 72 + ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES
+                                + ProfileLacReplyCodec.EXPLICIT_BYTES + maxEntryBytes + 36
                     : (control != null && ProfileInitialControlCodec.supported(frame.header().operation())
                             ? 8 * (int) frame.header().bodyLength() + 2 * ProfileInitialControlCodec.REPLY_BYTES
                             : frame.header().operation() == ProfileOperation.FENCE_LEDGER
@@ -149,6 +151,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 if (control != null || read != null) {
                     byte[] offer = new byte[frame.body().readableBytes()];
                     frame.body().getBytes(frame.body().readerIndex(), offer);
+                    explicitLacNegotiated = read != null && read.lacAuthorization() != null
+                            && ProfileHello.decodeClient(offer).capabilities().contains(
+                                    ProfileLacReplyCodec.EXPLICIT_CAPABILITY);
                     lacNegotiated = read != null && read.lacAuthorization() != null
                             && ProfileHello.decodeClient(offer).capabilities().contains(
                                     ProfileLacReplyCodec.CAPABILITY);
@@ -211,7 +216,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
 
     private void readEntry(ChannelHandlerContext ctx, Pending request) {
         boolean latest = request.frame.header().operation() == ProfileOperation.READ_LAC;
-        if (latest ? !lacNegotiated : !readNegotiated) {
+        if (latest ? !lacNegotiated && !explicitLacNegotiated : !readNegotiated) {
             write(ctx, request, ProfileStatus.unsupported(), null);
             return;
         }
@@ -245,7 +250,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         request.readRequest = stored;
         boolean submitted = false;
         try {
-            submitted = latest ? storage.submitLatestRead(query.context(), stored)
+            submitted = latest ? explicitLacNegotiated ? storage.submitLacRead(query.context(), stored)
+                    : storage.submitLatestRead(query.context(), stored)
                     : storage.submitRead(query.context(), query.entryId(), stored);
             if (!submitted) {
                 write(ctx, request, status(StatusClass.TRANSIENT_UNAVAILABLE,
@@ -292,10 +298,10 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                             throw new IllegalArgumentException("Point-read result changed its coordinate");
                         }
                         writeRead(ctx, request, query, ProfileReadEntryReplyCodec.Outcome.FOUND,
-                                record.entry(), latest, record.entryId());
+                                record.entry(), latest, record.entryId(), lease.explicitLac());
                     } else if (failure == null && result == SegmentPointRead.ReadStatus.MISSING) {
                         writeRead(ctx, request, query, ProfileReadEntryReplyCodec.Outcome.MISSING,
-                                null, latest, -1);
+                                null, latest, -1, lease == null ? null : lease.explicitLac());
                     } else {
                         ProfileStatus refused = result == SegmentPointRead.ReadStatus.TRANSIENT_UNAVAILABLE
                                 ? status(StatusClass.TRANSIENT_UNAVAILABLE,
@@ -328,13 +334,24 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void writeRead(ChannelHandlerContext ctx, Pending request, ProfileOperationCodec.ReadEntry query,
-            ProfileReadEntryReplyCodec.Outcome outcome, java.nio.ByteBuffer entry, boolean latest, long sourceId) {
+            ProfileReadEntryReplyCodec.Outcome outcome, java.nio.ByteBuffer entry, boolean latest, long sourceId,
+            SegmentBookieControlLog.ExplicitLac explicit) {
         if (closed || !ctx.channel().isActive()) {
             finish(request);
             return;
         }
+        boolean extended = latest && explicitLacNegotiated;
+        if (extended && explicit != null && (explicit.body().length != ProfileLacReplyCodec.EXPLICIT_BYTES
+                || java.nio.ByteBuffer.wrap(explicit.body()).getLong() != query.context().ledgerId()
+                || java.nio.ByteBuffer.wrap(explicit.body()).getLong(8) != explicit.lac())) {
+            write(ctx, request, status(StatusClass.QUARANTINED_OR_UNKNOWN_MANDATORY,
+                    RetryDisposition.AFTER_CONTROL_RECONCILIATION, DurableResult.NONE), null);
+            return;
+        }
         int length = entry == null ? 0 : entry.remaining();
-        int bodyLength = ProfileReadEntryReplyCodec.PREFIX_BYTES + length;
+        int prefix = extended ? ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES : ProfileReadEntryReplyCodec.PREFIX_BYTES;
+        int explicitBytes = extended && explicit != null ? ProfileLacReplyCodec.EXPLICIT_BYTES : 0;
+        int bodyLength = prefix + length + explicitBytes;
         int frameLength = 36 + bodyLength;
         ByteBuf response = ProfileInboundPipeline.allocateResponse(ctx.pipeline(), request.credit, frameLength);
         try {
@@ -344,7 +361,11 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     .writeShort(request.frame.header().operation().wireValue())
                     .writeInt(ProfileFrameHeader.RESPONSE).writeLong(request.frame.header().requestId())
                     .writeInt(bodyLength).writeInt(0);
-            if (latest) {
+            if (extended) {
+                ProfileLacReplyCodec.writeExplicitPrefix(response.nioBuffer(response.writerIndex(), prefix),
+                        query.context(), sourceId, length, explicit == null ? -1 : explicit.lac(),
+                        explicitBytes, maxEntryBytes);
+            } else if (latest) {
                 ProfileLacReplyCodec.writePrefix(response.nioBuffer(response.writerIndex(),
                         ProfileLacReplyCodec.PREFIX_BYTES), query.context(), sourceId,
                         outcome == ProfileReadEntryReplyCodec.Outcome.FOUND ? ProfileLacReplyCodec.Outcome.SOURCE
@@ -354,9 +375,12 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                         ProfileReadEntryReplyCodec.PREFIX_BYTES), query.context(), query.entryId(), outcome,
                         length, maxEntryBytes);
             }
-            response.writerIndex(response.writerIndex() + ProfileReadEntryReplyCodec.PREFIX_BYTES);
+            response.writerIndex(response.writerIndex() + prefix);
             if (entry != null) {
                 response.writeBytes(entry);
+            }
+            if (explicitBytes != 0) {
+                response.writeBytes(explicit.body());
             }
         } catch (RuntimeException | Error failedEncoding) {
             response.release();

@@ -81,6 +81,8 @@ MATRIX = {
     'ce-profile-recovery-prelude-scope': 'FenceScopeIsCurrent',
     'ce-profile-recovery-prelude-close': 'PreludeNeverPublishesClosed',
     'a-profile-lac-evidence': None,
+    'ce-profile-lac-evidence-explicit-digest': 'CoverageCountsOnlyVerified',
+    'ce-profile-lac-evidence-explicit-frontier': 'SuccessHasMatchingLength',
     'a-profile-lac-evidence-threeofthree': None,
     'ce-profile-lac-evidence-digest': 'CoverageCountsOnlyVerified',
     'ce-profile-lac-evidence-length': 'SuccessHasMatchingLength',
@@ -402,7 +404,14 @@ def sha256(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tool", required=True, type=Path, help="Official tla2tools.jar from release 1.7.4")
+    parser.add_argument("--config-prefix", action="append", default=[],
+                        help="Run declared configurations matching this prefix; repeat for related slices")
     args = parser.parse_args()
+    for prefix in args.config_prefix:
+        if not any(name.startswith(prefix) for name in MATRIX):
+            parser.error(f"No declared configuration matches {prefix!r}")
+    selected = {name: expected for name, expected in MATRIX.items()
+                if not args.config_prefix or any(name.startswith(p) for p in args.config_prefix)}
     tool = args.tool.resolve()
     if hashlib.sha1(tool.read_bytes()).hexdigest() != TOOL_SHA1:
         parser.error("TLA+ tools must match the official 1.7.4 release SHA-1")
@@ -491,15 +500,15 @@ def main():
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
         "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
-        "scope": "Finite Model A historical-repair-copy-two-entry-source-grant-one-inflight-full-copy-before-publication-sticky-unknown-caller-cancel-permit-published-close-resume-no-normal and bounded-historical-repair-membership-atomic-CAS-birth-admission-head-inverse-context-retention-close-authority and independent-close-authority-UIC4-precut-cut-force-terminal-custody-no-normal and fixed-repair-slot-inert-installed-admitted-retained-delete-birth-exact-auth-local-force-recovery-data-no-normal and readonly-fresh-context-recovery-observation-per-source-fenced-bound-missing-budget-reservation-no-add-close and recovery-same-record-context-physical-birth-guards-published-authority-frozen-operation-and-verified-durable-fence-coverage-not-CLOSED and LAC-evidence-A2-A3-verified-coverage-matching-boundary-length-conflict-metadata-snapshot-and-caller-cancel-reservation and LAC-source-entryId-piggyback-LAC-source-length-provenance-whole-ledger-empty-not-explicit-LAC-or-prefix-anchor and point-read-permission-complete-stable-fenced-missing-native-get-io-owner-terminal-queued-loan-output-write-reply-binding and original-sdk-two-entry-two-slot-A2-A3-one-two-same-start-completion-gate-replacement-activation-retired-replica-contiguous-callback and replacement-preparation-inactive-install-UIC2-schema-force-owner and replacement-lifecycle-page-birth-metadata-atomic-cut-retained-prefix-current-authority and guarded-standard-metadata-physical-birth-CAS-exact-version-immutable-fields and fixed-initial-sdk-bounded-retry-sticky-unknown-source-coordinate-original-A2-callback-local-stop and normal-client-source-quota-cancel-encoding-write-wire and initial-client-correlation-slot-custody and initial-socket-dispatch and resumable-initial-all-E-availability and initial-READY-lifecycle-birth-CAS-retention and initial-metadata-all-E-gate physical-INSTALL-dispatch PREPARING-reservation-authority and standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
+        "scope": "Finite Model A historical-repair-copy-two-entry-source-grant-one-inflight-full-copy-before-publication-sticky-unknown-caller-cancel-permit-published-close-resume-no-normal and bounded-historical-repair-membership-atomic-CAS-birth-admission-head-inverse-context-retention-close-authority and independent-close-authority-UIC4-precut-cut-force-terminal-custody-no-normal and fixed-repair-slot-inert-installed-admitted-retained-delete-birth-exact-auth-local-force-recovery-data-no-normal and readonly-fresh-context-recovery-observation-per-source-fenced-bound-missing-budget-reservation-no-add-close and recovery-same-record-context-physical-birth-guards-published-authority-frozen-operation-and-verified-durable-fence-coverage-not-CLOSED and LAC-evidence-A2-A3-URL2-independent-explicit-digest-entire-endpoint-exclusion-max-frontier-verified-coverage-matching-boundary-length-conflict-metadata-snapshot-and-caller-cancel-reservation and LAC-source-entryId-piggyback-LAC-source-length-provenance-URL1-URL2-explicit-separate-whole-ledger-empty-not-prefix-anchor and point-read-permission-complete-stable-fenced-missing-native-get-io-owner-terminal-queued-loan-output-write-reply-binding and original-sdk-two-entry-two-slot-A2-A3-one-two-same-start-completion-gate-replacement-activation-retired-replica-contiguous-callback and replacement-preparation-inactive-install-UIC2-schema-force-owner and replacement-lifecycle-page-birth-metadata-atomic-cut-retained-prefix-current-authority and guarded-standard-metadata-physical-birth-CAS-exact-version-immutable-fields and fixed-initial-sdk-bounded-retry-sticky-unknown-source-coordinate-original-A2-callback-local-stop and normal-client-source-quota-cancel-encoding-write-wire and initial-client-correlation-slot-custody and initial-socket-dispatch and resumable-initial-all-E-availability and initial-READY-lifecycle-birth-CAS-retention and initial-metadata-all-E-gate physical-INSTALL-dispatch PREPARING-reservation-authority and standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
-        "matrix": MATRIX, "productionAuthority": False,
+        "matrix": selected, "selectedConfigPrefixes": args.config_prefix, "productionAuthority": False,
         "deferred": ["full Model A", "Model D", "full A+C", "C+D", "full MOVE/FREE native coverage and reused DATA recovery", "fresh Get/read pin model and full MOVE/FREE coverage recovery", "runtime worker freeze/credits",
                      "full online control rotation", "partial/corrupt framing", "quorum", "liveness"],
     }
     (run / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     results = {}
-    for name, expected in MATRIX.items():
+    for name, expected in selected.items():
         states = run / (name + "-states")
         command = ["java", "-Xmx512m", "-XX:MaxDirectMemorySize=64m", "-XX:+UseParallelGC",
                    "-cp", str(tool), "tlc2.TLC", "-workers", "1", "-fp", "0", "-seed", "1",
@@ -609,7 +618,7 @@ def main():
         if states.exists():
             shutil.rmtree(states)
         print(name, status, counts, flush=True)
-    good = all(r["status"] == ("PASS" if MATRIX[name] is None else "EXPECTED_COUNTEREXAMPLE")
+    good = all(r["status"] == ("PASS" if selected[name] is None else "EXPECTED_COUNTEREXAMPLE")
                for name, r in results.items())
     (run / "exit-code").write_text("0\n" if good else "1\n")
     files = [p for p in run.rglob("*") if p.is_file()]
