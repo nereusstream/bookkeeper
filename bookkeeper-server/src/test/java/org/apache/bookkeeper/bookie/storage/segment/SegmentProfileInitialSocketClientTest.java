@@ -17,6 +17,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -382,13 +383,19 @@ public class SegmentProfileInitialSocketClientTest {
                                                                   ChannelPromise promise) {
                                                     ByteBuf frame = (ByteBuf) message;
                                                     int op = frame.getUnsignedShort(frame.readerIndex() + 14);
-                                                    int fault = target == faultTarget.get() ? replyFault.get() : 0;
+                                                    int fault = replyFault.get() == 21 ? 21
+                                                            : target == faultTarget.get() ? replyFault.get() : 0;
                                                     if (fault == 1
                                                             && (op == ProfileOperation.ACTIVATE_INITIAL.wireValue()
                                                                 || op == ProfileOperation.ACTIVATE_REPLACEMENT
                                                                     .wireValue())) {
                                                         frame.release();
                                                         promise.setSuccess();
+                                                        return;
+                                                    }
+                                                    if (fault == 21 && op == ProfileOperation.READ_ENTRY.wireValue()) {
+                                                        heldReplies.add(() -> ctx.executor().execute(
+                                                                () -> ctx.writeAndFlush(frame, promise)));
                                                         return;
                                                     }
                                                     if (fault == 20 && op == ProfileOperation.RECOVERY_TERMINAL_CLOSE
@@ -1752,6 +1759,200 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static final class HoldReadonlyMetadataClient extends org.apache.zookeeper.ZooKeeper {
+        final java.util.concurrent.atomic.AtomicInteger observations = new java.util.concurrent.atomic.AtomicInteger();
+        final CountDownLatch held = new CountDownLatch(1);
+        volatile String metadataPath;
+        volatile Runnable release;
+
+        HoldReadonlyMetadataClient(String connect, ZooKeeperWatcherBase watcher) throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public void getData(String path, boolean watch, org.apache.zookeeper.AsyncCallback.DataCallback callback,
+                Object context) {
+            super.getData(path, watch, (code, name, ignored, data, stat) -> {
+                if (path.equals(metadataPath) && observations.incrementAndGet() == 4) {
+                    release = () -> callback.processResult(code, name, context, data, stat);
+                    held.countDown();
+                } else {
+                    callback.processResult(code, name, context, data, stat);
+                }
+            }, context);
+        }
+    }
+
+    @Test
+    public void readonlyOpenRechecksDeleteAfterHandleConstructionAndRejectsMetadataRecreation() throws Exception {
+        for (int mode : List.of(0, 1, 2)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    data.put(fixture.identities.get(node).bookieId(),
+                            dataClient(fixture, node, 4, Duration.ofSeconds(5)));
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var accepted = fixture.reservations.beginRecovery(metadata,
+                        fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan());
+                var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                var proof = coordinator.verifyPrefix(accepted, sdk.getClientCtx(), data, fixture.clients,
+                        fixture.credential, 4, Duration.ofSeconds(5)).get(5, TimeUnit.SECONDS);
+                assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                        fixture.reservations.selectPrefix(metadata, proof).status());
+                assertEquals(ProfileRecoveryCoordinator.CompletionStatus.CLOSED_METADATA_DURABLE,
+                        coordinator.finishRecovery(accepted.context(), fixture.clients)
+                            .get(5, TimeUnit.SECONDS).status());
+                var forces = fixture.nodeIo.stream().map(io -> io.forces).toList();
+                String path = ((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44);
+                if (mode == 1) {
+                    byte[] original = fixture.zk.getData(path, false, null);
+                    org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, path);
+                    fixture.zk.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            org.apache.zookeeper.CreateMode.PERSISTENT);
+                    assertEquals(ZKProfileReservationStore.ReadOnlyStatus.QUARANTINED,
+                            fixture.reservations.readClosedForOpen(metadata, 44).status());
+                    assertEquals(BKException.Code.MetadataVersionException, BKException.getExceptionCode(assertThrows(
+                            java.util.concurrent.ExecutionException.class, () -> coordinator.openReadOnly(44,
+                                    sdk.getClientCtx(), fixture.password, data, 3).get(5, TimeUnit.SECONDS))));
+                } else {
+                    var watcher = new ZooKeeperWatcherBase(10000, false);
+                    try (var held = new HoldReadonlyMetadataClient(
+                            fixture.cluster.getZooKeeperConnectString(), watcher)) {
+                        held.metadataPath = path;
+                        var heldMetadata = new ProfileLedgerMetadataStore(held,
+                                (AbstractZkLedgerManager) fixture.manager,
+                                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                        var heldStore = new ZKProfileReservationStore(held, "/socket-initial",
+                                ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                                Duration.ofSeconds(5));
+                        var heldCoordinator = new ProfileRecoveryCoordinator(heldStore, heldMetadata, fixture.cold);
+                        var pending = heldCoordinator.openReadOnly(44, sdk.getClientCtx(), fixture.password, data, 3);
+                        assertTrue(held.held.await(5, TimeUnit.SECONDS));
+                        if (mode == 0) {
+                            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                                    fixture.reservations.cutDelete(fixture.reservations.read(44).snapshot(),
+                                            bytes(16, 101), bytes(32, 102)).status());
+                            held.release.run();
+                            assertEquals(BKException.Code.NoSuchLedgerExistsException,
+                                    BKException.getExceptionCode(assertThrows(
+                                    java.util.concurrent.ExecutionException.class,
+                                            () -> pending.get(5, TimeUnit.SECONDS))));
+                        } else {
+                            assertTrue(pending.cancel(false));
+                            assertEquals(BKException.Code.TooManyRequestsException,
+                                    BKException.getExceptionCode(assertThrows(
+                                    java.util.concurrent.ExecutionException.class,
+                                        () -> heldCoordinator.openReadOnly(44, sdk.getClientCtx(),
+                                                fixture.password, data, 3)
+                                            .get(5, TimeUnit.SECONDS))));
+                            held.release.run();
+                            boolean reopened = false;
+                            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                            while (!reopened && System.nanoTime() < until) {
+                                try (var reader = heldCoordinator.openReadOnly(44, sdk.getClientCtx(), fixture.password,
+                                        data, 3).get(5, TimeUnit.SECONDS)) {
+                                    assertEquals(-1, reader.getLastAddConfirmed());
+                                    reopened = true;
+                                } catch (java.util.concurrent.ExecutionException busy) {
+                                    if (BKException.getExceptionCode(busy)
+                                            != BKException.Code.TooManyRequestsException) {
+                                        throw busy;
+                                    }
+                                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                                }
+                            }
+                            assertTrue(reopened);
+                        }
+                    }
+                }
+                assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                assertEquals(LedgerMetadata.State.CLOSED,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+            }
+        }
+    }
+
+    private static void verifyClosedReadonly(Fixture fixture, ProfileLedgerMetadataStore metadata,
+            Map<BookieId, ProfileNormalDataClient> data, long prefix, long length) throws Exception {
+        try (BookKeeper reopened = sdk(fixture)) {
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            assertEquals(BKException.Code.UnauthorizedAccessException, BKException.getExceptionCode(assertThrows(
+                    java.util.concurrent.ExecutionException.class, () -> coordinator.openReadOnly(44,
+                            reopened.getClientCtx(), bytes(8, 99), data, 3).get(5, TimeUnit.SECONDS))));
+            var controlForces = fixture.nodeIo.stream().map(io -> io.forces).toList();
+            var stored = fixture.manager.readLedgerMetadata(44).get();
+            try (var reader = coordinator.openReadOnly(44, reopened.getClientCtx(), fixture.password, data, 3)
+                    .get(5, TimeUnit.SECONDS)) {
+                assertEquals(prefix, reader.getLastAddConfirmed());
+                assertEquals(length, reader.getLength());
+                assertEquals(prefix, reader.readLastConfirmed());
+                if (prefix >= 0) {
+                    try (var entries = reader.readAsync(0, prefix).get(5, TimeUnit.SECONDS)) {
+                        for (long entry = 0; entry <= prefix; entry++) {
+                            assertArrayEquals(bytes(16, 8), entries.getEntry(entry).getEntryBytes());
+                        }
+                    }
+                    var legacy = reader.readUnconfirmedEntries(0, prefix);
+                    while (legacy.hasMoreElements()) {
+                        assertArrayEquals(bytes(16, 8), legacy.nextElement().getEntry());
+                    }
+                }
+                assertEquals(BKException.Code.ReadException, BKException.getExceptionCode(assertThrows(
+                        java.util.concurrent.ExecutionException.class,
+                        () -> reader.readUnconfirmedAsync(prefix + 1, prefix + 2).get(5, TimeUnit.SECONDS))));
+                assertEquals(BKException.Code.IllegalOpException, BKException.getExceptionCode(assertThrows(
+                        java.util.concurrent.ExecutionException.class,
+                        () -> reader.batchReadAsync(0, 10, 1024).get(5, TimeUnit.SECONDS))));
+                assertEquals(BKException.Code.IllegalOpException, assertThrows(BKException.class,
+                        () -> reader.addEntry(bytes(16, 8))).getCode());
+                assertEquals(prefix, reader.getLastAddConfirmed());
+                assertEquals(length, reader.getLength());
+            }
+            if (prefix >= 0) {
+                try (var reader = coordinator.openReadOnly(44, reopened.getClientCtx(), fixture.password, data, 1)
+                        .get(5, TimeUnit.SECONDS)) {
+                    fixture.replyFault.set(21);
+                    var pending = reader.readAsync(0, 0);
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertFalse(fixture.heldReplies.isEmpty());
+                    assertTrue(pending.cancel(false));
+                    assertEquals(BKException.Code.TooManyRequestsException, BKException.getExceptionCode(assertThrows(
+                            java.util.concurrent.ExecutionException.class,
+                            () -> reader.readAsync(0, 0).get(5, TimeUnit.SECONDS))));
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    boolean completed = false;
+                    while (!completed && System.nanoTime() < until) {
+                        try (var entries = reader.readAsync(0, 0).get(5, TimeUnit.SECONDS)) {
+                            assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+                            completed = true;
+                        } catch (java.util.concurrent.ExecutionException busy) {
+                            if (BKException.getExceptionCode(busy) != BKException.Code.TooManyRequestsException) {
+                                throw busy;
+                            }
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                    }
+                    assertTrue(completed);
+                } finally {
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                }
+            }
+            assertEquals(stored.getVersion(), fixture.manager.readLedgerMetadata(44).get().getVersion());
+            assertEquals(controlForces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+        }
+    }
+
     @Test
     public void emptyLastFragmentClosesMatchingBoundaryWithoutGrantOrCopy() throws Exception {
         for (int ack : List.of(2, 3)) {
@@ -1876,6 +2077,7 @@ public class SegmentProfileInitialSocketClientTest {
                         new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold)
                             .finishRecovery(entered.context(), fixture.clients).get(5, TimeUnit.SECONDS).status());
                 assertEquals(controlForces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                verifyClosedReadonly(fixture, metadata, data, prefix, length);
                 var restartConfig = files(fixture.nodes.get(suffixNode)).config();
                 fixture.nodes.get(suffixNode).close();
                 try (var replay = new IsolatedSegmentStorage(restartConfig, fixture.identities.get(suffixNode),
@@ -2029,6 +2231,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
                 assertEquals(ProfileLedgerMetadataStore.Outcome.CONFLICT,
                         fixture.reservations.readRecovery(metadata, 44).outcome());
+                verifyClosedReadonly(fixture, metadata, data, 2, 48);
                 var restartConfig = files(fixture.nodes.get(2)).config();
                 fixture.nodes.get(2).close();
                 try (var replay = new IsolatedSegmentStorage(restartConfig, fixture.identities.get(2),
@@ -2049,6 +2252,12 @@ public class SegmentProfileInitialSocketClientTest {
                 var historical = coordinator.finishRecovery(entered.context(), fixture.clients)
                         .get(5, TimeUnit.SECONDS);
                 assertEquals(ProfileRecoveryCoordinator.CompletionStatus.CLOSED_METADATA_DURABLE, historical.status());
+                assertEquals(ZKProfileReservationStore.ReadOnlyStatus.DELETED,
+                        fixture.reservations.readClosedForOpen(metadata, 44).status());
+                assertEquals(BKException.Code.NoSuchLedgerExistsException,
+                        BKException.getExceptionCode(assertThrows(java.util.concurrent.ExecutionException.class,
+                            () -> coordinator.openReadOnly(44, sdk.getClientCtx(), fixture.password, data, 3)
+                                .get(5, TimeUnit.SECONDS))));
                 assertEquals(0, historical.terminalMembers());
                 assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
                 assertEquals(LedgerMetadata.State.CLOSED,

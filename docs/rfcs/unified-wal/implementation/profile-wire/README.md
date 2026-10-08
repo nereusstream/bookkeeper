@@ -724,3 +724,29 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 ```
 
 最终Spotless/Checkstyle `unified-wal-empty-final-checks-biXBRrhZ` exit0；root RAT exit1仍443个全部在父HEAD已有的未批准文件，无新增失败。历史manifest字段、相对链接及git diff检查通过；未push、不接生产listener/目录。
+
+
+## 独立 CLOSED readonly-open 与原 SDK 读取
+
+2026-10-09，新增显式`ProfileRecoveryCoordinator.openReadOnly(ledgerId, sdk, password, verifiedDataPool, maxReadEntries)`，从实际标准CLOSED独立导出UWRC/selection并打开原SDK `ReadOnlyLedgerHandle`。它不依赖调用方保留原恢复context，不执行recovery/grant/fence/Add，也不注册未验证的metadata listener。当前匹配已经实现的E=W=3、A2/A3 recovery-CLOSED；普通writer close、无UWRC的外来CLOSED及默认`BookKeeper.openLedger`自动Profile routing未接入，不据此宣称通用open或完整recovery完成。
+
+cold `readClosedForOpen`重验matching CLOSED的P/L/context、physical metadata birth/version、完整selection/repair head与activation/admission历史。成员来源覆盖当前metadata的全部historical ensembles，按Bookie/incarnation核对verified HELLO；同BookieId出现多个retained incarnation时拒绝歧义，不推测rejoin。DELETE_INTENT不沿用historical-close查询的迟到成功作为新访问权限。handle构造后再读一次完整cold事实，root/metadata/context/sources改变、失去权限或SDK关闭时关闭未交付handle并返回non-OK；caller cancel保留actual cold attempt的permit，实际终结后清理未交付handle。
+
+现有ProfileLedgerHandle内的小型ClosedReader复用原ReadOnlyLedgerHandle、ProfileContext和ProfileBookieClient。P/L固定于matching metadata，忽略来源LAC提示及未经新cold open验证的metadata更新；confirmed/unconfirmed、legacy/future都在请求分配前检查范围和P上界，transport再次拒绝e>P。maxReadEntries为1～256，aggregate读额度不足返回TooManyRequests，不建立新队列；future取消不会撤销actual SDK read，预算随实际read operation终结归还，未交付LedgerEntries关闭。legacy完成/同步抛错用同一释放门保证一次归还。wire batch read APIs仍明确IllegalOp，基础多entry读取使用原point read调度、digest与historical membership映射。
+
+password在DATA前按原metadata核验；ordinary read及本地close均无额外MetadataStore写入、FENCE或control force。close停止本地transport，借用的SDK、DATA clients和底层在途请求仍由原owner管理；这不是全网络I/O排空或强访问撤销。caller继续负责正常交付的LedgerEntries生命周期，完整TLS/socket/SDK总预算仍待闭合。
+
+真实验证覆盖新SDK打开A2/A3的(-1,0)、selected非空CLOSED(2,48)、历史prefix后empty-last CLOSED(2,48)，完整payload读取和legacy unconfirmed读取、local LAC/length、suffix拒绝、batch/Add拒绝、wrong password以及metadata版本/control force保持。held READ_ENTRY reply下caller cancel不提前释放额度，原operation结束后可继续读取；未交付entries关闭。actual ZK第四次metadata读取持有最终open检查，DELETE先赢后拒绝返回已构造handle；同一切点caller cancel/busy/实际结束后重开通过。标准metadata删除再按相同bytes/version0重建仍拒绝physical birth/guard丢失，不重建authority。实验测试只操作独立fixture namespace/目录。
+
+当前为显式预连接池的readonly增量；自动发现/连接、普通writer CLOSED的fenced-close adoption、额外required authority producer、完整RepairIntent/AutoRecovery、离线catch-up/rejoin/delete/GC、全A+C+D、完整预算/掉电/长期性能及生产Gate仍OPEN，步骤14保持PARTIAL。历史源码/合同/run/manifest字段不重绑。
+
+最终相关模型`unified-wal-model-7iag1mq5` exit0：122配置20完整正向PASS/102指定反例；737当前source hashes及732 artifact checksums核对。readonly投影192 generated/112 distinct、queue0，九个指定反例分别命中live delete、metadata birth、peer incarnation、最后gate、cancelled open返回、actual read permit、固定P/L、suffix和mutation性质。worker1、heap512/direct64MiB、tool1.7.4、seed1/fp0，无symmetry/state constraint；catalog436未全量运行。metadata/crypto/TLS/read completion是输入，模型不替代真实验证；父绑定d605fa384d33a668c3cd77941285cfb9b96a4282，historical source/design/run不重绑。
+
+
+最终Java`unified-wal-local-HfnDRrIB` exit0：13类237项全通过（common37/server200；socket69、lifecycle44、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1043当前source hashes核对；源码/测试在最终广度后未变。早期checked-exception/import遗漏与model runner注册脚本定位错误属于接线错误，不计协议RED。最终Spotless/Checkstyle`unified-wal-readonly-checks-UpXB9CV8` exit0；root RAT exit1仍443个父HEAD已有路径，无新增失败，不改规则绕过。relative links、manifest JSON/historical values及git diff检查通过；不push、不接生产路径。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileOperationCodecTest,ProfileFrameCodecTest,IsolatedProfileControlEndpointTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,ZKProfileControlStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*+recoveryCloseWaitsForPrecutTicket*+uncertainRecoveryCloseForce*+profileSocketRecoveryGrantClose*+recoveredRecoveryCandidateLosesEligibility*+terminalClose*+terminalControlFraming*+standaloneTerminalBoundary*+graphCompactionSkipsTerminalSuffixAndPreservesRequiredPrefix+graphCompactionTerminalGroupNeedsNoCopyAllocation+graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar --config-prefix a-profile-readonly --config-prefix ce-profile-readonly --config-prefix a-profile-recovery-completion --config-prefix ce-profile-recovery-completion --config-prefix c-profile-terminal-cut --config-prefix ce-profile-terminal-cut --config-prefix a-profile-recovery-selection --config-prefix ce-profile-recovery-selection --config-prefix a-profile-repair-membership --config-prefix ce-profile-repair-membership --config-prefix a-profile-recovery-prefix --config-prefix ce-profile-recovery-prefix --config-prefix a-profile-lac- --config-prefix ce-profile-lac- --config-prefix a-profile-point-read --config-prefix ce-profile-point-read --config-prefix a-profile-recovery-observation --config-prefix ce-profile-recovery-observation --config-prefix a-profile-repair-copy --config-prefix ce-profile-repair-copy --config-prefix c-whole-free --config-prefix ce-whole-free
+```

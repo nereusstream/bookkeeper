@@ -72,6 +72,7 @@ final class ProfileBookieClient implements BookieClient {
     private final Map<BookieId, org.apache.bookkeeper.discover.profile.ProfileInitialControlClient> controlPeers;
     private final Map<BookieId, CompletableFuture<ProfileStatus>> readFences = new ConcurrentHashMap<>();
     private final int perTargetLimit;
+    private final long readUpperBound;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean uncertain = new AtomicBoolean();
     private final Map<BookieId, Integer> counts = new ConcurrentHashMap<>();
@@ -88,6 +89,15 @@ final class ProfileBookieClient implements BookieClient {
             Map<BookieId, ProfileNormalDataClient> clients, int perTargetLimit, Retry retry,
             org.apache.bookkeeper.discover.profile.ProfileRecoveryContext recovery,
             Map<BookieId, org.apache.bookkeeper.discover.profile.ProfileInitialControlClient> controls) {
+        this(base, ledger, credential, clients, perTargetLimit, retry, recovery, controls, Long.MAX_VALUE);
+    }
+
+    ProfileBookieClient(ClientContext base, ProfileLedgerContext ledger, ProtectedProfileCredential credential,
+            Map<BookieId, ProfileNormalDataClient> clients, int perTargetLimit, Retry retry,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryContext recovery,
+            Map<BookieId, org.apache.bookkeeper.discover.profile.ProfileInitialControlClient> controls,
+            long readUpperBound) {
+        this.readUpperBound = readUpperBound;
         recoveryContext = recovery;
         controlPeers = Map.copyOf(controls);
         this.base = base;
@@ -407,6 +417,10 @@ final class ProfileBookieClient implements BookieClient {
                 || ledgerId != ledger.ledgerId() || entryId < 0 || peer == null || closed.get()) {
             ordered(() -> cb.readEntryComplete(closed.get() ? BKException.Code.ClientClosedException
                     : BKException.Code.IllegalOpException, ledgerId, entryId, null, ctx));
+            return;
+        }
+        if (entryId > readUpperBound) {
+            ordered(() -> cb.readEntryComplete(BKException.Code.ReadException, ledgerId, entryId, null, ctx));
             return;
         }
         CompletableFuture<ProfileStatus> fence = fencing ? fenceSource(address)

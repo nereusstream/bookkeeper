@@ -1267,3 +1267,7 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 
 
 2026-10-08 completion增加empty ledger/historical empty-last两种模式，各A2/A3，明确selected P、output P/L、历史floor及无synthetic grant。四个新指定反例分别是wrong empty length/prefix、虚构grant、跳过冻结历史floor；终态/capability、metadata出生身份、取消permit等原性质继续检查。最终`unified-wal-model-1r60su1w`112配置19正向/93反例、726源码hash/702 checksums已核对，空ledger55,856/32,040、历史empty-last111,712/64,080 generated/distinct，正向queue0。Init违例缺探索统计的初轮保持INCONCLUSIVE；错误grant改为独立admission action后以原性质得到实际反例。catalog426未全量运行，不提升完整组合或生产Gate；[字节/真实I/O/复现范围](../profile-wire/README.md#空最后-fragment-的独立终态关闭)由实现记录拥有，historical source/run不重绑。
+
+2026-10-09新增ProfileReadonlyOpen有限投影：cold最终live gate、metadata birth、peer incarnation、caller cancel、actual open/read permit、固定CLOSED边界、suffix与只读mutation拒绝。delete发生在已验证live cut之后可有迟到response，模型不声明强撤权；crypto/TLS/实际read completion是输入，不由模型生产。一个正向和九个指定反例，当前catalog436，未宣称全量或完整A+C+D接受。真实SDK/metadata范围见[实现记录](../profile-wire/README.md#独立-closed-readonly-open-与原-sdk-读取)。
+
+最终相关7iag1mq5：122配置20正向/102反例，737源码hash/732 checksums已核对；readonly192/112 generated/distinct、queue0。全436未运行；上述实现记录拥有真实I/O、SDK与Gate范围。

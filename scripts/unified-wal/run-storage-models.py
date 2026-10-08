@@ -28,6 +28,16 @@ MATRIX = {
     'ce-profile-terminal-cut-replay': 'ReplayKeepsCut',
     'ce-profile-terminal-cut-pending-free': 'SuffixFreeHasDurableCut',
     'ce-profile-terminal-cut-prefix-free': 'RequiredPrefixIsNotDead',
+    'a-profile-readonly-open': None,
+    'ce-profile-readonly-delete': 'OpenHadLiveAdoption',
+    'ce-profile-readonly-birth': 'OpenHadSameBirth',
+    'ce-profile-readonly-incarnation': 'OpenHadExpectedIncarnation',
+    'ce-profile-readonly-gate': 'OpenHadFinalGate',
+    'ce-profile-readonly-cancel-open': 'CancelledOpenNotReturned',
+    'ce-profile-readonly-cancel-read': 'ActualReadOwnsPermit',
+    'ce-profile-readonly-boundary': 'ReadonlyHasFixedBoundary',
+    'ce-profile-readonly-suffix': 'ReadonlyDoesNotExposeSuffix',
+    'ce-profile-readonly-mutation': 'ReadonlyDoesNotMutate',
     'a-profile-recovery-completion': None,
     'a-profile-recovery-completion-empty': None,
     'a-profile-recovery-completion-empty-threeofthree': None,
@@ -575,6 +585,7 @@ def main():
                    else "ProfileRepairCopy.tla" if "profile-repair-copy" in name
                    else "ProfileRepairMembership.tla" if "profile-repair-membership" in name
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
+                   else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name
                    else "ProfileRecoveryCompletion.tla" if "profile-recovery-completion" in name
                    else "ProfileRecoverySelection.tla" if "profile-recovery-selection" in name

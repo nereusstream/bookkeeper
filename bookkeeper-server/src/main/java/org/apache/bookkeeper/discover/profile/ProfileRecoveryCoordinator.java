@@ -625,6 +625,82 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
+    /** Independent closed open; supplied clients remain borrowed. Cancellation closes an undelivered handle. */
+    public CompletableFuture<org.apache.bookkeeper.client.LedgerHandle> openReadOnly(long ledger, ClientContext sdk,
+            byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries) {
+        if (supplied.size() > 64 || maxReadEntries < 1 || maxReadEntries > 256) {
+            throw new IllegalArgumentException("Readonly pool or request bound is invalid");
+        }
+        if (sdk.isClientClosed()) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+        }
+        if (!active.tryAcquire()) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.TooManyRequestsException));
+        }
+        var caller = new CompletableFuture<org.apache.bookkeeper.client.LedgerHandle>();
+        try {
+            byte[] owned = password.clone();
+            var peers = Map.copyOf(supplied);
+            CompletableFuture.supplyAsync(() -> {
+                var read = reservations.readClosedForOpen(metadata, ledger);
+                if (read.snapshot() == null) {
+                    throw new java.util.concurrent.CompletionException(readOnlyFailure(read.status()));
+                }
+                org.apache.bookkeeper.client.LedgerHandle handle = null;
+                try {
+                    handle = org.apache.bookkeeper.client.ProfileLedgerHandle.fromClosedRead(sdk, read.snapshot(),
+                            owned, peers, maxReadEntries);
+                    var after = reservations.readClosedForOpen(metadata, ledger);
+                    if (after.snapshot() == null) {
+                        throw readOnlyFailure(after.status());
+                    }
+                    var before = read.snapshot();
+                    var next = after.snapshot();
+                    if (!before.context().equals(next.context()) || before.closed().metadata().birthZxid()
+                            != next.closed().metadata().birthZxid()
+                            || !before.closed().metadata().metadata().getVersion()
+                                .equals(next.closed().metadata().metadata().getVersion())
+                            || !ProfileLedgerMetadataStore.sameMetadata(
+                                before.closed().metadata().metadata().getValue(),
+                                next.closed().metadata().metadata().getValue())
+                            || !before.sources().equals(next.sources())) {
+                        throw BKException.create(BKException.Code.MetadataVersionException);
+                    }
+                    if (sdk.isClientClosed()) {
+                        throw BKException.create(BKException.Code.ClientClosedException);
+                    }
+                    return handle;
+                } catch (Exception rejected) {
+                    if (handle != null) {
+                        handle.asyncClose((code, ignored, ctx) -> { }, null);
+                    }
+                    throw new java.util.concurrent.CompletionException(rejected);
+                }
+            }, cold).whenComplete((handle, failure) -> {
+                active.release();
+                if (failure != null) {
+                    caller.completeExceptionally(failure);
+                } else if (!caller.complete(handle)) {
+                    handle.asyncClose((code, ignored, ctx) -> { }, null);
+                }
+            });
+            return caller;
+        } catch (RuntimeException failedAdmission) {
+            active.release();
+            throw failedAdmission;
+        }
+    }
+
+    private static BKException readOnlyFailure(ZKProfileReservationStore.ReadOnlyStatus status) {
+        return BKException.create(switch (status) {
+            case DELETED -> BKException.Code.NoSuchLedgerExistsException;
+            case NOT_CLOSED -> BKException.Code.IllegalOpException;
+            case UNAVAILABLE -> BKException.Code.ReadException;
+            case CONFLICT, QUARANTINED -> BKException.Code.MetadataVersionException;
+            case READABLE_CLOSED -> throw new IllegalArgumentException("Readonly admission was successful");
+        });
+    }
+
     private static CompletionStatus completionStatus(ZKProfileReservationStore.CreateStatus status) {
         return switch (status) {
             case CONFLICT -> CompletionStatus.CONFLICT;

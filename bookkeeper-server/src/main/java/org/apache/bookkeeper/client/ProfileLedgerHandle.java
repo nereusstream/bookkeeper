@@ -130,6 +130,187 @@ public final class ProfileLedgerHandle extends LedgerHandle {
                 maxPendingEntries, maxPayloadBytes);
     }
 
+    /** Cold snapshot input only; the coordinator validates live authority before publishing the handle. */
+    public static LedgerHandle fromClosedRead(ClientContext base,
+            org.apache.bookkeeper.discover.profile.ZKProfileReservationStore.ReadOnlySnapshot snapshot,
+            byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries)
+            throws GeneralSecurityException, BKException {
+        var context = snapshot.context();
+        var member = snapshot.closed().metadata();
+        var metadata = member.metadata().getValue();
+        var boundary = snapshot.closed().selection().boundary();
+        if (maxReadEntries < 1 || maxReadEntries > 256 || supplied.size() > 64 || base.getConf().useV2WireProtocol
+                || metadata.getState() != LedgerMetadata.State.CLOSED || metadata.getDigestType() != DigestType.CRC32C
+                || member.birthZxid() != context.metadataBirth() || !boundary.context().equals(context)
+                || metadata.getLastEntryId() != boundary.prefixEntryId()
+                || metadata.getLength() != boundary.prefixLength()
+                || metadata.getCToken() != context.creatorToken() || !Arrays.equals(metadata.getCustomMetadata()
+                    .get(org.apache.bookkeeper.discover.profile.ProfileRecoveryContext.KEY), context.encode())) {
+            throw new IllegalArgumentException("Readonly Profile handle requires matching bounded CLOSED facts");
+        }
+        if (!java.security.MessageDigest.isEqual(password, metadata.getPassword())) {
+            throw BKException.create(BKException.Code.UnauthorizedAccessException);
+        }
+        var clients = Map.copyOf(supplied);
+        for (var entry : clients.entrySet()) {
+            var hello = entry.getValue().hello();
+            if (!entry.getKey().toString().equals(hello.bookieId()) || hello.activeEngine() != 3
+                    || snapshot.sources().stream().noneMatch(receipt ->
+                        receipt.scope().targetBookie().equals(hello.bookieId())
+                        && Arrays.equals(receipt.scope().targetStorageIncarnation(), hello.storageIncarnation())
+                        && receipt.scope().ledgerId() == context.ledger().ledgerId()
+                        && Arrays.equals(receipt.scope().ledgerInstanceId(), context.ledger().ledgerInstanceId())
+                        && Arrays.equals(receipt.scope().descriptorIdentity().toBytes(),
+                            context.ledger().descriptorIdentity()))) {
+                throw new IllegalArgumentException("Readonly DATA peer is not the retained member incarnation");
+            }
+        }
+        var credential = ProtectedProfileCredential.of(1, DigestManager.generateMasterKey(metadata.getPassword()));
+        var transport = new ProfileBookieClient(base, context.ledger(), credential, clients, maxReadEntries,
+                new ProfileBookieClient.Retry(1, Duration.ofSeconds(5), Duration.ofMillis(1)),
+                null, Map.of(), metadata.getLastEntryId());
+        return new ClosedReader(new ProfileContext(base, transport), member.metadata(), maxReadEntries);
+    }
+
+    /** Original SDK readonly engine, frozen metadata, no writer tasks, fencing, grant or metadata listener. */
+    private static final class ClosedReader extends ReadOnlyLedgerHandle {
+        private final ProfileBookieClient transport;
+        private final Semaphore reads;
+        private final int maxReadEntries;
+        private final long prefix;
+
+        ClosedReader(ProfileContext context, Versioned<LedgerMetadata> metadata, int maxReadEntries)
+                throws GeneralSecurityException {
+            super(context, metadata.getValue().getLedgerId(), metadata, BookKeeper.DigestType.CRC32C,
+                    metadata.getValue().getPassword(), false);
+            transport = context.transport();
+            reads = new Semaphore(maxReadEntries);
+            this.maxReadEntries = maxReadEntries;
+            prefix = metadata.getValue().getLastEntryId();
+        }
+
+        private int admission(long first, long last) {
+            return transport.isClosed() ? BKException.Code.ClientClosedException
+                    : first < 0 || last < first ? BKException.Code.IncorrectParameterException
+                    : last > prefix ? BKException.Code.ReadException
+                    : last - first >= maxReadEntries || !reads.tryAcquire((int) (last - first + 1))
+                        ? BKException.Code.TooManyRequestsException : BKException.Code.OK;
+        }
+
+        private CompletableFuture<org.apache.bookkeeper.client.api.LedgerEntries> read(long first, long last,
+                boolean unconfirmed) {
+            int code = admission(first, last);
+            if (code != BKException.Code.OK) {
+                return CompletableFuture.failedFuture(BKException.create(code));
+            }
+            int count = (int) (last - first + 1);
+            var caller = new CompletableFuture<org.apache.bookkeeper.client.api.LedgerEntries>();
+            try {
+                var actual = unconfirmed ? super.readUnconfirmedAsync(first, last) : super.readAsync(first, last);
+                actual.whenComplete((entries, failure) -> {
+                    reads.release(count);
+                    if (failure != null) {
+                        caller.completeExceptionally(failure);
+                    } else if (!caller.complete(entries)) {
+                        entries.close();
+                    }
+                });
+            } catch (RuntimeException failure) {
+                reads.release(count);
+                caller.completeExceptionally(failure);
+            }
+            return caller;
+        }
+
+        @Override
+        public CompletableFuture<org.apache.bookkeeper.client.api.LedgerEntries> readAsync(long first, long last) {
+            return read(first, last, false);
+        }
+
+        @Override
+        public CompletableFuture<org.apache.bookkeeper.client.api.LedgerEntries> readUnconfirmedAsync(long first,
+                long last) {
+            return read(first, last, true);
+        }
+
+        @Override
+        void asyncReadEntriesInternal(long first, long last, AsyncCallback.ReadCallback callback, Object ctx,
+                boolean recovery) {
+            int code = recovery ? BKException.Code.IllegalOpException : admission(first, last);
+            if (code != BKException.Code.OK) {
+                callback.readComplete(code, this, null, ctx);
+                return;
+            }
+            int count = (int) (last - first + 1);
+            var released = new AtomicBoolean();
+            Runnable release = () -> {
+                if (released.compareAndSet(false, true)) {
+                    reads.release(count);
+                }
+            };
+            try {
+                super.asyncReadEntriesInternal(first, last, (result, handle, entries, ignored) -> {
+                    release.run();
+                    callback.readComplete(result, handle, entries, ctx);
+                }, null, false);
+            } catch (RuntimeException failure) {
+                release.run();
+                throw failure;
+            }
+        }
+
+        @Override
+        public void onChanged(long ledger, Versioned<LedgerMetadata> metadata) {
+            // A new cold open must validate any replacement snapshot; this handle keeps its exact CLOSED fact.
+        }
+
+        @Override
+        synchronized void updateLastConfirmed(long lac, long length) {
+            // CLOSED P/L are immutable; source hints cannot change this handle's confirmed window.
+        }
+
+        @Override
+        public CompletableFuture<org.apache.bookkeeper.client.api.LedgerEntries> batchReadAsync(long start,
+                int count, long bytes) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
+        }
+
+        @Override
+        public CompletableFuture<org.apache.bookkeeper.client.api.LedgerEntries> batchReadUnconfirmedAsync(long start,
+                int count, long bytes) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
+        }
+
+        @Override
+        public void asyncBatchReadEntries(long start, int count, long bytes, AsyncCallback.ReadCallback callback,
+                Object ctx) {
+            callback.readComplete(BKException.Code.IllegalOpException, this, null, ctx);
+        }
+
+        @Override
+        public void asyncBatchReadUnconfirmedEntries(long start, int count, long bytes,
+                AsyncCallback.ReadCallback callback, Object ctx) {
+            callback.readComplete(BKException.Code.IllegalOpException, this, null, ctx);
+        }
+
+        @Override
+        public void close() throws InterruptedException, BKException {
+            transport.close();
+            try {
+                transport.closeCompletion().get();
+            } catch (java.util.concurrent.ExecutionException failed) {
+                throw BKException.create(BKException.getExceptionCode(failed));
+            }
+        }
+
+        @Override
+        public void asyncClose(CloseCallback callback, Object ctx) {
+            transport.close();
+            transport.closeCompletion().whenComplete((unused, failure) -> callback.closeComplete(
+                    failure == null ? BKException.Code.OK : BKException.getExceptionCode(failure), this, ctx));
+        }
+    }
+
     /** Configure a bounded verified pool before issuing entries; no registration/connection is synthesized. */
     public CompletableFuture<Void> enableReplacement(ProfileReplacementCoordinator coordinator,
             List<ProfileReplacementCoordinator.Target> targets, byte[] descriptor, int maxChanges) {

@@ -851,6 +851,106 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public enum ReadOnlyStatus { READABLE_CLOSED, NOT_CLOSED, DELETED, CONFLICT, QUARANTINED, UNAVAILABLE }
+
+    public record ReadOnlySnapshot(ProfileRecoveryContext context, ClosedRecoveryResult closed,
+            List<ProfileInstallReceipt> sources) {
+        public ReadOnlySnapshot {
+            sources = List.copyOf(sources);
+        }
+    }
+
+    public record ReadOnlyRead(ReadOnlyStatus status, ReadOnlySnapshot snapshot) {
+        public ReadOnlyRead {
+            Objects.requireNonNull(status, "status");
+            if ((status == ReadOnlyStatus.READABLE_CLOSED) != (snapshot != null)) {
+                throw new IllegalArgumentException("Only proved readonly admission carries its snapshot");
+            }
+        }
+    }
+
+    /** Independent open: derive the token from actual CLOSED, never adopt a historical close after DELETE. */
+    public ReadOnlyRead readClosedForOpen(ProfileLedgerMetadataStore metadata, long ledger) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var first = metadata.readMembership(ledger, deadline);
+            if (first.status() != ReadStatus.FOUND) {
+                return new ReadOnlyRead(first.status() == ReadStatus.UNAVAILABLE
+                        ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.QUARANTINED, null);
+            }
+            if (first.snapshot().metadata().getValue().getState() != LedgerMetadata.State.CLOSED) {
+                return new ReadOnlyRead(ReadOnlyStatus.NOT_CLOSED, null);
+            }
+            var context = ProfileRecoveryContext.decode(first.snapshot().metadata().getValue()
+                    .getCustomMetadata().get(ProfileRecoveryContext.KEY));
+            var root = read(ledger, deadline);
+            if (root.status() != ReadStatus.FOUND) {
+                return new ReadOnlyRead(root.status() == ReadStatus.UNAVAILABLE
+                        ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.QUARANTINED, null);
+            }
+            if (root.snapshot().lifecycle().state() == ProfileLifecycleHead.State.DELETE_INTENT) {
+                return new ReadOnlyRead(ReadOnlyStatus.DELETED, null);
+            }
+            if (!context.matchesRoot(root.snapshot())) {
+                return new ReadOnlyRead(ReadOnlyStatus.CONFLICT, null);
+            }
+            var closed = readClosedRecovery(metadata, context);
+            if (closed.metadata() == null) {
+                return new ReadOnlyRead(closed.outcome() == ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                        ? ReadOnlyStatus.QUARANTINED : closed.outcome()
+                            == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                                ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.CONFLICT, null);
+            }
+            var retained = retainedActivationTargets(ledger);
+            if (retained.status() != ReadStatus.FOUND) {
+                return new ReadOnlyRead(retained.status() == ReadStatus.UNAVAILABLE
+                        ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.QUARANTINED, null);
+            }
+            var members = new java.util.HashSet<String>();
+            closed.metadata().metadata().getValue().getAllEnsembles().values().forEach(ensemble ->
+                    ensemble.forEach(bookie -> members.add(bookie.toString())));
+            var sources = new java.util.LinkedHashMap<String, ProfileInstallReceipt>();
+            for (var receipt : retained.targets()) {
+                String name = receipt.scope().targetBookie();
+                if (!members.contains(name)) {
+                    continue;
+                }
+                var prior = sources.putIfAbsent(name, receipt);
+                if (prior != null && !Arrays.equals(prior.scope().targetStorageIncarnation(),
+                        receipt.scope().targetStorageIncarnation())) {
+                    return new ReadOnlyRead(ReadOnlyStatus.QUARANTINED, null);
+                }
+            }
+            if (!sources.keySet().containsAll(members)) {
+                return new ReadOnlyRead(ReadOnlyStatus.QUARANTINED, null);
+            }
+            var afterRoot = read(ledger, deadline);
+            var after = metadata.readMembership(ledger, deadline);
+            if (afterRoot.status() != ReadStatus.FOUND || after.status() != ReadStatus.FOUND) {
+                return new ReadOnlyRead(afterRoot.status() == ReadStatus.UNAVAILABLE
+                        || after.status() == ReadStatus.UNAVAILABLE
+                            ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.QUARANTINED, null);
+            }
+            if (afterRoot.snapshot().lifecycle().state() == ProfileLifecycleHead.State.DELETE_INTENT) {
+                return new ReadOnlyRead(ReadOnlyStatus.DELETED, null);
+            }
+            if (!context.matchesRoot(afterRoot.snapshot()) || after.snapshot().birthZxid()
+                    != closed.metadata().birthZxid() || !after.snapshot().metadata().getVersion()
+                        .equals(closed.metadata().metadata().getVersion())
+                    || !ProfileLedgerMetadataStore.sameMetadata(after.snapshot().metadata().getValue(),
+                        closed.metadata().metadata().getValue())) {
+                return new ReadOnlyRead(ReadOnlyStatus.CONFLICT, null);
+            }
+            return new ReadOnlyRead(ReadOnlyStatus.READABLE_CLOSED,
+                    new ReadOnlySnapshot(context, closed, List.copyOf(sources.values())));
+        } catch (IllegalStateException unavailable) {
+            return new ReadOnlyRead(ReadOnlyStatus.UNAVAILABLE, null);
+        } catch (IllegalArgumentException invalid) {
+            return new ReadOnlyRead(ReadOnlyStatus.QUARANTINED, null);
+        }
+    }
+
     private static boolean closedAfterDelete(ProfileRecoveryContext context, Snapshot root) {
         return root.lifecycle().state() == ProfileLifecycleHead.State.DELETE_INTENT
                 && root.birthZxid() == context.lifecycleBirthZxid()
