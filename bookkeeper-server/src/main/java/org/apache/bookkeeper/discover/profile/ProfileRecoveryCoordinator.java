@@ -17,6 +17,7 @@
 package org.apache.bookkeeper.discover.profile;
 
 import io.netty.util.ReferenceCounted;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -244,11 +245,21 @@ public final class ProfileRecoveryCoordinator {
         var retained = reservations.retainedActivationTargets(context.ledger().ledgerId());
         if (retained.status()
                 != org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND) {
-            throw new IllegalStateException("Required retained recovery source history is unavailable");
+            return new Readers(new ZKProfileReservationStore.RecoveryResult(retained.status()
+                    == org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.UNAVAILABLE
+                        ? ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                        : ProfileLedgerMetadataStore.Outcome.QUARANTINED, null, null), List.of());
         }
         var currentTargets = prepare(context).targets();
         var permitted = new java.util.LinkedHashMap<String, ProfileInstallReceipt>();
-        retained.targets().forEach(receipt -> permitted.put(receipt.scope().targetBookie(), receipt));
+        for (var receipt : retained.targets()) {
+            var old = permitted.put(receipt.scope().targetBookie(), receipt);
+            if (old != null && !Arrays.equals(old.scope().targetStorageIncarnation(),
+                    receipt.scope().targetStorageIncarnation())) {
+                return new Readers(new ZKProfileReservationStore.RecoveryResult(
+                        ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null), List.of());
+            }
+        }
         currentTargets.forEach(receipt -> permitted.put(receipt.scope().targetBookie(), receipt));
         return new Readers(current, List.copyOf(permitted.values()));
     }
@@ -284,6 +295,229 @@ public final class ProfileRecoveryCoordinator {
         };
     }
 
+    public enum PrefixStatus { VERIFIED_NORMAL_TAIL, DEFERRED, CONFLICT, QUARANTINED, DATA_LOSS }
+
+    public enum PrefixReason {
+        NORMAL_TAIL, LIMIT, CANCELLED, DEADLINE, LAC_UNAVAILABLE, SOURCE_UNAVAILABLE, REQUIRED_HOLE,
+        PAYLOAD_CONFLICT, LENGTH_CONFLICT, PERMISSION, AUTHORITY_CHANGED,
+        AUTHORITY_UNAVAILABLE, AUTHORITY_UNRECOVERABLE
+    }
+
+    /** Read evidence only. Required recovery Adds and matching durable CLOSED still precede recovery success. */
+    public record PrefixResult(PrefixStatus status, PrefixReason reason, ProfileRecoveryContext context,
+            ProfileLedgerMetadataStore.MembershipSnapshot metadata, long requiredFrontier,
+            long prefixEntryId, long prefixLength, long unresolvedEntry,
+            List<ProfileRecoveryReadHandle.SourceEvidence> sources) {
+        public PrefixResult {
+            sources = List.copyOf(sources);
+        }
+    }
+
+    /** Check the complete required prefix and then the open tail, holding one payload and one exact source set. */
+    public CompletableFuture<PrefixResult> verifyPrefix(ZKProfileReservationStore.RecoveryResult accepted,
+            ClientContext sdk, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, ProtectedProfileCredential credential,
+            int maxCoordinates, Duration maxDuration) {
+        long durationNanos = maxDuration.toNanos();
+        if (accepted.context() == null || maxCoordinates < 1
+                || suppliedData.size() > 64 || suppliedControl.size() > 64 || durationNanos <= 0) {
+            throw new IllegalArgumentException("Prefix verification requires its frozen context and finite bounds");
+        }
+        var context = accepted.context();
+        if (suppliedData.values().stream().anyMatch(peer -> !peer.hello().capabilities().contains(
+                org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.EXPLICIT_CAPABILITY))) {
+            return CompletableFuture.completedFuture(new PrefixResult(PrefixStatus.DEFERRED,
+                    PrefixReason.LAC_UNAVAILABLE, context, null, -1, -1, 0, 0, List.of()));
+        }
+        if (!active.tryAcquire()) {
+            return CompletableFuture.completedFuture(new PrefixResult(PrefixStatus.DEFERRED, PrefixReason.LIMIT,
+                    context, null, -1, -1, 0, 0, List.of()));
+        }
+        var stopped = new AtomicBoolean();
+        try {
+            var data = Map.copyOf(suppliedData);
+            var control = Map.copyOf(suppliedControl);
+            var actual = fenceOnce(accepted, control, credential).thenCompose(fenced -> {
+                if (stopped.get() || fenced.status() != Status.FENCED_CONTEXT) {
+                    return CompletableFuture.completedFuture(new PrefixResult(stopped.get()
+                            ? PrefixStatus.DEFERRED : prefixStatus(fenced.status()), stopped.get()
+                                ? PrefixReason.CANCELLED : PrefixReason.SOURCE_UNAVAILABLE,
+                            context, null, -1, -1, 0, 0, List.of()));
+                }
+                return CompletableFuture.supplyAsync(() -> readers(context), cold).thenCompose(ready -> {
+                    if (ready.recovery().context() == null || !context.equals(ready.recovery().context())) {
+                        return CompletableFuture.completedFuture(new PrefixResult(
+                                prefixStatus(failureStatus(ready.recovery().outcome())),
+                                authorityReason(ready.recovery().outcome()), context, null, -1, -1, 0, 0, List.of()));
+                    }
+                    var controls = new java.util.HashMap<BookieId, ProfileInitialControlClient>();
+                    control.forEach((name, peer) -> controls.put(BookieId.parse(name), peer));
+                    ProfileRecoveryReadHandle reader;
+                    try {
+                        reader = ProfileRecoveryReadHandle.fromContext(sdk, ready.recovery(), ready.permitted(),
+                                data, controls);
+                    } catch (java.security.GeneralSecurityException invalid) {
+                        return CompletableFuture.failedFuture(invalid);
+                    }
+                    var verify = new PrefixVerification(reader, context, ready.recovery().metadata(),
+                            stopped, maxCoordinates);
+                    var checked = reader.readLacEvidence().handle((lac, failure) -> {
+                        if (failure != null) {
+                            if (!(cause(failure) instanceof BKException)) {
+                                verify.done.completeExceptionally(failure);
+                                return verify.done;
+                            }
+                            boolean conflict = cause(failure)
+                                    instanceof org.apache.bookkeeper.client.ProfileLedgerHandle
+                                        .LacLengthConflictException;
+                            boolean unauthorized = BKException.getExceptionCode(cause(failure))
+                                    == BKException.Code.UnauthorizedAccessException;
+                            verify.finish(conflict ? PrefixStatus.QUARANTINED : unauthorized
+                                    ? PrefixStatus.CONFLICT : PrefixStatus.DEFERRED,
+                                    conflict ? PrefixReason.LENGTH_CONFLICT : unauthorized
+                                        ? PrefixReason.PERMISSION : PrefixReason.LAC_UNAVAILABLE, List.of());
+                        } else {
+                            verify.required = lac.prefixEntryId();
+                            verify.start();
+                        }
+                        return verify.done;
+                    }).thenCompose(value -> value);
+                    return checked.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
+                        var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
+                        if (current.context() == null || !context.equals(current.context())
+                                || current.metadata().birthZxid() != result.metadata().birthZxid()
+                                || !current.metadata().metadata().getVersion()
+                                    .equals(result.metadata().metadata().getVersion())
+                                || !ProfileLedgerMetadataStore.sameMetadata(
+                                        result.metadata().metadata().getValue(),
+                                        current.metadata().metadata().getValue())) {
+                            return new PrefixResult(current.outcome() == ProfileLedgerMetadataStore.Outcome.QUARANTINED
+                                    ? PrefixStatus.QUARANTINED : current.outcome()
+                                        == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                                            ? PrefixStatus.DEFERRED : PrefixStatus.CONFLICT,
+                                    authorityReason(current.outcome()), context, result.metadata(),
+                                    result.requiredFrontier(),
+                                    result.prefixEntryId(), result.prefixLength(), result.unresolvedEntry(),
+                                    result.sources());
+                        }
+                        return result;
+                    }, cold)).whenComplete((result, failure) -> reader.closeAsync());
+                });
+            });
+            var caller = actual.whenComplete((result, failure) -> active.release()).copy();
+            java.util.concurrent.ScheduledFuture<?> deadline;
+            try {
+                deadline = sdk.getScheduler().schedule(() -> {
+                    stopped.set(true);
+                    caller.complete(new PrefixResult(PrefixStatus.DEFERRED, PrefixReason.DEADLINE,
+                            context, null, -1, -1, 0, 0, List.of()));
+                }, durationNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
+            } catch (RejectedExecutionException unavailable) {
+                stopped.set(true);
+                caller.complete(new PrefixResult(PrefixStatus.DEFERRED, PrefixReason.LIMIT,
+                        context, null, -1, -1, 0, 0, List.of()));
+                return caller;
+            }
+            actual.whenComplete((result, failure) -> deadline.cancel(false));
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return caller;
+        } catch (RuntimeException failure) {
+            active.release();
+            throw failure;
+        }
+    }
+
+    private static PrefixStatus prefixStatus(Status status) {
+        return switch (status) {
+            case CONFLICT -> PrefixStatus.CONFLICT;
+            case QUARANTINED -> PrefixStatus.QUARANTINED;
+            default -> PrefixStatus.DEFERRED;
+        };
+    }
+
+    private static PrefixReason authorityReason(ProfileLedgerMetadataStore.Outcome outcome) {
+        return switch (outcome) {
+            case DURABILITY_UNKNOWN -> PrefixReason.AUTHORITY_UNAVAILABLE;
+            case QUARANTINED -> PrefixReason.AUTHORITY_UNRECOVERABLE;
+            default -> PrefixReason.AUTHORITY_CHANGED;
+        };
+    }
+
+    private static Throwable cause(Throwable failure) {
+        while ((failure instanceof java.util.concurrent.CompletionException
+                || failure instanceof java.util.concurrent.ExecutionException) && failure.getCause() != null) {
+            failure = failure.getCause();
+        }
+        return failure;
+    }
+
+    private static final class PrefixVerification {
+        private final ProfileRecoveryReadHandle reader;
+        private final ProfileRecoveryContext context;
+        private final ProfileLedgerMetadataStore.MembershipSnapshot metadata;
+        private final AtomicBoolean stopped;
+        private int remaining;
+        private long required = -1;
+        private long next;
+        private long length;
+        private final CompletableFuture<PrefixResult> done = new CompletableFuture<>();
+
+        PrefixVerification(ProfileRecoveryReadHandle reader, ProfileRecoveryContext context,
+                ProfileLedgerMetadataStore.MembershipSnapshot metadata, AtomicBoolean stopped, int bound) {
+            this.reader = reader;
+            this.context = context;
+            this.metadata = metadata;
+            this.stopped = stopped;
+            remaining = bound;
+        }
+
+        void start() {
+            if (stopped.get() || remaining-- == 0 || next == Long.MAX_VALUE) {
+                finish(PrefixStatus.DEFERRED, stopped.get() ? PrefixReason.CANCELLED : PrefixReason.LIMIT, List.of());
+                return;
+            }
+            reader.probeEvidence(next).whenComplete((evidence, failure) -> {
+                if (failure != null && !(cause(failure) instanceof BKException)) {
+                    done.completeExceptionally(failure);
+                } else if (failure != null || stopped.get()) {
+                    finish(PrefixStatus.DEFERRED, stopped.get() ? PrefixReason.CANCELLED
+                            : PrefixReason.SOURCE_UNAVAILABLE, List.of());
+                } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                        == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                    finish(PrefixStatus.CONFLICT, PrefixReason.PERMISSION, evidence.sources());
+                } else if (evidence.conflict()) {
+                    finish(PrefixStatus.QUARANTINED, PrefixReason.PAYLOAD_CONFLICT, evidence.sources());
+                } else if (evidence.candidate() != null) {
+                    var candidate = evidence.candidate();
+                    int bytes = candidate.payload().remaining();
+                    if (length > Long.MAX_VALUE - bytes || candidate.length() != length + bytes) {
+                        finish(PrefixStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT, evidence.sources());
+                    } else {
+                        length = candidate.length();
+                        next++;
+                        start(); // Each probe uses the original ordered executor; no range-sized future chain.
+                    }
+                } else if (next <= required) {
+                    finish(evidence.exhausted() ? PrefixStatus.DATA_LOSS : PrefixStatus.DEFERRED,
+                            PrefixReason.REQUIRED_HOLE, evidence.sources());
+                } else {
+                    finish(evidence.absenceCovered() ? PrefixStatus.VERIFIED_NORMAL_TAIL : PrefixStatus.DEFERRED,
+                            evidence.absenceCovered() ? PrefixReason.NORMAL_TAIL : PrefixReason.SOURCE_UNAVAILABLE,
+                            evidence.sources());
+                }
+            });
+        }
+
+        void finish(PrefixStatus status, PrefixReason reason, List<ProfileRecoveryReadHandle.SourceEvidence> sources) {
+            done.complete(new PrefixResult(status, reason, context, metadata, required,
+                    next - 1, length, next, sources));
+        }
+    }
+
     private Prepared prepare(ProfileRecoveryContext context) {
         var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
         if (current.context() == null || !context.equals(current.context())) {
@@ -300,7 +534,7 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
-    public enum RepairStatus { REPAIRED_HISTORICAL_FRAGMENT, DEFERRED, CONFLICT, QUARANTINED }
+    public enum RepairStatus { REPAIRED_HISTORICAL_FRAGMENT, DEFERRED, CONFLICT, QUARANTINED, DATA_LOSS }
 
     public record RepairResult(RepairStatus status, long copiedEntries,
             ZKProfileReservationStore.RepairCommitResult publication) { }
@@ -464,8 +698,8 @@ public final class ProfileRecoveryCoordinator {
         copy.step();
         return copy.done.thenCompose(result -> {
             if (result.status() != RepairStatus.REPAIRED_HISTORICAL_FRAGMENT || stopped.get()) {
-                return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED,
-                        result.copiedEntries(), null));
+                return CompletableFuture.completedFuture(stopped.get()
+                        ? new RepairResult(RepairStatus.DEFERRED, result.copiedEntries(), null) : result);
             }
             return CompletableFuture.supplyAsync(() -> stopped.get() ? null : reservations.commitRepair(metadata,
                     prepared, accepted.metadata(), closeId), cold).thenCompose(published -> published == null
@@ -524,11 +758,28 @@ public final class ProfileRecoveryCoordinator {
                 done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
                 return;
             }
-            reader.probe(next).whenComplete((probe, readFailure) -> {
-                if (readFailure != null || probe.outcome()
-                        != ProfileRecoveryReadHandle.ProbeOutcome.CANDIDATE
-                        || stopped.get()) {
+            reader.probeEvidence(next).whenComplete((evidence, readFailure) -> {
+                if (readFailure != null && !(cause(readFailure) instanceof BKException)) {
+                    done.completeExceptionally(readFailure);
+                    return;
+                }
+                if (readFailure != null || stopped.get()) {
                     done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+                    return;
+                }
+                if (evidence.conflict()) {
+                    done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
+                    return;
+                }
+                if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                        == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                    done.complete(new RepairResult(RepairStatus.CONFLICT, copied, null));
+                    return;
+                }
+                var probe = evidence.candidate();
+                if (probe == null) {
+                    done.complete(new RepairResult(evidence.exhausted() ? RepairStatus.DATA_LOSS
+                            : RepairStatus.DEFERRED, copied, null));
                     return;
                 }
                 ReferenceCounted packed;

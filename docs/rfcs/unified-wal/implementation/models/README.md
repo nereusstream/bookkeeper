@@ -1245,3 +1245,10 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-08，复用 ProfileLacSource/ProfileLacEvidence：URL2返回独立explicit witness，EXPLICIT需要稳定完整DATA absence，EMPTY仍排除explicit；SDK投影将坏explicit视为整endpoint不可计票，valid source/explicit分别参与最大提示，exact边界length重新取得。新增两个mutation分别忽略explicit digest和丢弃explicit frontier；A2/A3以及原metadata、cancel、anchor、conflict、source/auth/absence性质保持。
 
 本次 `unified-wal-model-xr861fp7` 只执行LAC、point-read及readonly recovery observation相关34配置，6完整正向PASS/28指定反例；669源码hash/503结果checksums均核对，源码父提交为`76527fd442fba4c3d832223ae33ed5c5220a8b0e`。未重跑完整目录，历史372配置回执保持原绑定；runner新增可选重复config-prefix，默认仍运行完整目录，unknown prefix fail closed。实际命令与Java176项/Spotless/Checkstyle证据见[URL2实现记录](../profile-wire/README.md#url2-explicit-lac-双证据与前缀锚点)。这些有限投影不生产CRC/TLS/fsync、完整required-frontier/CLOSED、总预算、活性、掉电或生产权限证据。
+
+
+### Required-prefix 的逐来源有限验证
+
+2026-10-08，ProfileRecoveryPrefix投影一个坐标及已检查前缀，E=W=3/A2或3、三份source callback、missing/corrupt/unknown/两种有效payload、required与长度/context/source gate、caller停止和actual permit终结。11个独立mutation命中指定性质。实际序列控制、CRC/TLS/fence物理事实、总预算/时钟与CLOSED不由此model生产；来源逐身份保护/读取与copy生命周期另复用本轮point/observation/copy切片。
+
+最终`unified-wal-model-p48elju2`：57配置9完整正向PASS/48指定反例、683 source hashes/560 checksums已核对，sourceCommit/designInputs保持父提交f4d7c893fa52472d5710717d5a02ea3faddf1220。新A2/A3各340000/144000 generated/distinct、queue0/depth7，单worker/固定seed与fp/无symmetry或state constraint；未重跑整个387配置目录。真实180项广度/最终4方法及当前覆盖边界见[实现记录](../profile-wire/README.md#required-prefix-与-normal-tail-只读取证)。历史完整矩阵和input/run结果不重绑，full A+C+D、recovery write-back/terminal visibility/matching CLOSED/AutoRecovery与生产Gate仍OPEN。

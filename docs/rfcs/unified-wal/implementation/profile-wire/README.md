@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～14在本目录记录隔离真实 TLS/socket/storage/SDK/恢复接线的独立增量，最新为 [URL2 双证据](#url2-explicit-lac-双证据与前缀锚点)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～14在本目录记录隔离真实 TLS/socket/storage/SDK/恢复接线的独立增量，最新为 [required prefix 与 normal-tail 取证](#required-prefix-与-normal-tail-只读取证)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -597,3 +597,38 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 额外 RAT 检查：common 模块0个未知许可证；server 模块失败于16个既有 unified-wal-segment `.hex`向量。根目录首次失败445项，补齐本次两个新cfg的完整ASF许可证头后仍失败443项，全部对应HEAD已有文件；未改RAT设置或扩大本次修复范围。最终模型回执在许可证头变更后独立重跑同一34配置并重新冻结；早期 aur5sicf 回执不改绑定。根目录/服务器RAT未通过，不能据此声称完整仓库检查通过；相关可复现命令为 `mvn -o -P '!cargo-zigbuild' -pl bookkeeper-common,bookkeeper-server -DskipTests apache-rat:check -q` 与 `mvn -o -N -P '!cargo-zigbuild' -DskipTests apache-rat:check -q`。
 
 本增量不新增网络 WRITE_LAC；该写路径仍明确 unsupported，测试通过原 reserved durable control driver 写入 explicit 事实。完整最大提示/required authority、最后开放 fragment 的 normal-tail oracle、恢复 write-back/matching CLOSED/lost-close、AutoRecovery、独立 readonly-open、delete/rejoin、完整 A+C+D、总预算、掉电/长期/性能及生产权限仍 OPEN。步骤14仍 PARTIAL，不把模型或进程可读当成 fsync/掉电、TLS 总内存或可保留数据生产验收。
+
+
+## Required prefix 与 normal-tail 只读取证
+
+2026-10-08，新增原 `ProfileRecoveryReadHandle.probeEvidence` 和 `ProfileRecoveryCoordinator.verifyPrefix`。普通 `probe` 保留原 Classic recovery read 行为；required-hole 检查则不能把达到 `W-A+1` 的聚合 missing 当成全部合法来源耗尽。新入口复用原 distribution write-set、AckSet、fencing DATA transport 和 DigestManager，对 exact write set 的每个来源等本次 callback 终结，分别保存已验证 Bookie/incarnation 及 FOUND/MISSING/CORRUPT/UNAVAILABLE/UNAUTHORIZED。超时、失败和不匹配来源不成为 missing；只保留一份已校验应用 payload，逐回复比较 payload 与累计 length，允许原封装 LAC/digest 的合法差异。
+
+verifyPrefix 要求实际 URL2 证据能力、同一已接受 IN_RECOVERY token 和有限正数坐标/时间预算，先沿原算法取得当前 write-set fencing coverage，再 cold-read 固定 metadata/来源历史与 LAC/explicit/边界 length。当前 required producer 为覆盖验证的提示与冻结最后 fragment 起点；新入口从 entry0 检查连续性，按 exact source set 推进至 required frontier 和后续 tail。每条的累计 length 取原 entry，并检查相邻应用 bytes；没有从零累加一个替代 length、逐entry metadata、持久进度或新线程。一个 payload/RPC source set 在途，future graph 不随 ledger 长度增长；坐标预算可到正 int 上限，空 ledger 的最大预算测试不会分配对应长度的数组。
+
+| 当前坐标事实 | 结果 |
+| --- | --- |
+| 合法来源存在 payload，且无有效内容/长度矛盾 | 继续连续前缀取证；单份候选仍不证明 AQ |
+| required 坐标无候选，全部来源 definitive missing 或 digest-invalid | DATA_LOSS / 有限来源 evidence exhausted，保存 unresolved coordinate |
+| required 坐标仍有 unknown/unavailable | DEFERRED，即使已有 `W-A+1` 个 missing |
+| frontier 之后无候选，exact write-set 有 definitive absence coverage | VERIFIED_NORMAL_TAIL，P=x-1；空 ledger 为(-1,0) |
+| 无 required authority 的早期 hole，后面存在 speculative payload | 在 hole 处终止并排除该后缀，不制造 DATA_LOSS |
+| 两份有效 payload 或 length 矛盾 | QUARANTINED；普通损坏 endpoint 排除后继续其他来源 |
+
+返回的 bounded rich result 包含 context、实际 metadata snapshot、required frontier、P/L、first unresolved coordinate、来源分类和 reason。读后再次核对实际 metadata birth/version/完整内容与原 lifecycle/context；变化、暂不可用和 required authority 不可恢复分开报告。已有同 BookieId 的不同 retained incarnation 在 rejoin 合同接通前明确拒绝，不能使用最新 incarnation 的 missing 否定历史副本。LAC 边界的有效 length 矛盾使用附加 typed exception 区分，legacy 仍投影为既有 DigestMatch code，无新 wire error code。
+
+caller cancel/deadline 只停止未来扫描或等待。deadline 使用借用 SDK scheduler；在途 cold/socket/source work 保留单次 attempt permit，直到实际本地 child 终结后归还；迟到结果不复活 caller。unexpected implementation exception 保留原 cause。历史 fragment copy 现也使用完整来源取证，保留 CONFLICT/QUARANTINED/DATA_LOSS，而不在 publication 前全部压成 DEFERRED；失败或取消仍不发布 membership/close/normal authority。
+
+四个新真实 mTLS/ZK/files/SDK 测试方法内部覆盖 A2/A3 三entry连续前缀、count budget、required hole 与两missing+unknown、最后来源上的 required payload、更晚未提交 suffix、有效 payload/相邻长度/锚点长度冲突、单损坏源继续、空 ledger、cancel/busy/drain、整attempt deadline、DELETE cut 和无 URL2 的零新增 control force 拒绝。metadata 保持 IN_RECOVERY。新 independent point oracle 按 required/finite-source 条件计算结果，不借用生产 status classifier。
+
+广度回归 `unified-wal-local-V5tIMQrS` exit0：9类180项全部通过，common12/server168（socket63），零失败/错误/跳过。随后去掉无合同依据的一百万坐标硬上限，仅保留 caller 的正 int/Duration budget，并用 `Integer.MAX_VALUE` 空 ledger 验证固定工作集；最终定向 `unified-wal-local-BFOEqVzV` 的4方法通过，1037个源码 hash 与最终工作区一致。未把广度回执重绑定为修改后的源码，也未因两行参数/test-budget变动无目的重复全量测试。最终 Spotless/Checkstyle `unified-wal-prefix-final-checks-B88zVIs6` style exit0；同目录 root RAT仍 exit1/443个HEAD已有未批准路径，本次新 model/cfg 均有完整ASF许可证头，无新许可证失败，RAT设置未改。
+
+最终模型 `unified-wal-model-p48elju2` exit0：相关57配置9完整正向 PASS/48指定反例，683源码hash/560结果checksums均核对；sourceCommit及五个designInputs保持父提交 `f4d7c893fa52472d5710717d5a02ea3faddf1220`。新 `ProfileRecoveryPrefix` A2/A3 各340000 generated/144000 distinct、queue0/depth7，11个 mutation分别覆盖提前完成、unknown计absence/exhaustion、忽略required/conflict/prior/length、取消提前放permit、context/source gate及错误CLOSED。checker1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint；一次检查约1.89s/RSS312049664 bytes只是检查器成本。只执行变化及关联LAC/point/readonly/copy切片，未宣称整个387配置目录本轮通过；历史回执保留原绑定。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,PendingAddOpTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#restartedPointRead*+livePointRead*+explicitLacIs*+recoveryCloseWaitsForPrecutTicket*+uncertainRecoveryCloseForce*+profileSocketRecoveryGrantClose*+recoveredRecoveryCandidateLosesEligibility*'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#prefixVerifier*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar --config-prefix a-profile-recovery-prefix --config-prefix ce-profile-recovery-prefix --config-prefix a-profile-lac- --config-prefix ce-profile-lac- --config-prefix a-profile-point-read --config-prefix ce-profile-point-read --config-prefix a-profile-recovery-observation --config-prefix ce-profile-recovery-observation --config-prefix a-profile-repair-copy --config-prefix ce-profile-repair-copy
+```
+
+VERIFIED_NORMAL_TAIL 只证明这次读取判据。后续恢复 Add 的 quorum/write-back、最后开放 fragment 的终态权限/visibility cut、同上下文 matching durable CLOSED 与响应丢失/restart解析仍须接通；读到候选或 P/L 不能替代这些事实。完整额外 ACK/AQ/closed authority producer、长期重验成本/大ledger策略、网络 WRITE_LAC、AutoRecovery/marker lifecycle、独立readonly-open、delete/rejoin、完整 A+C+D、总预算、掉电/可持续性能及 production Gate 继续 OPEN。步骤14仍 PARTIAL。

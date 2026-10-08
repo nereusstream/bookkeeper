@@ -23,6 +23,7 @@ package org.apache.bookkeeper.client;
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
@@ -79,6 +80,43 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
     private final ProfileRecoveryContext recovery;
     private final AtomicBoolean active = new AtomicBoolean();
     private final Object probeOwner = new Object();
+
+    public enum SourceOutcome { FOUND, MISSING, CORRUPT, UNAVAILABLE, UNAUTHORIZED }
+
+    public record SourceEvidence(BookieId bookie, String storageIncarnation, SourceOutcome outcome) { }
+
+    /** All exact write-set sources terminated. Absence coverage and finite exhaustion are separate facts. */
+    public static final class PointEvidence {
+        private final Probe candidate;
+        private final List<SourceEvidence> sources;
+        private final boolean absenceCovered;
+        private final boolean conflict;
+
+        private PointEvidence(Probe candidate, List<SourceEvidence> sources, boolean absenceCovered,
+                boolean conflict) {
+            this.candidate = candidate;
+            this.sources = List.copyOf(sources);
+            this.absenceCovered = absenceCovered;
+            this.conflict = conflict;
+        }
+
+        public Probe candidate() {
+            return candidate;
+        }
+        public List<SourceEvidence> sources() {
+            return sources;
+        }
+        public boolean absenceCovered() {
+            return absenceCovered;
+        }
+        public boolean conflict() {
+            return conflict;
+        }
+        public boolean exhausted() {
+            return sources.stream().allMatch(source -> source.outcome() == SourceOutcome.MISSING
+                    || source.outcome() == SourceOutcome.CORRUPT);
+        }
+    }
 
     private ProfileRecoveryReadHandle(ProfileLedgerHandle.ProfileContext context,
             ZKProfileReservationStore.RecoveryResult accepted) throws GeneralSecurityException {
@@ -169,6 +207,127 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
             actual.completeExceptionally(BKException.create(BKException.Code.InterruptedException));
         }
         return actual.whenComplete((result, failure) -> active.set(false)).copy();
+    }
+
+    /** Required-hole verification cannot stop at the normal-tail missing threshold or the first valid payload. */
+    public CompletableFuture<PointEvidence> probeEvidence(long entryId) {
+        if (entryId < 0 || !active.compareAndSet(false, true)) {
+            return CompletableFuture.failedFuture(BKException.create(entryId < 0 ? BKException.Code.IllegalOpException
+                    : BKException.Code.TooManyRequestsException));
+        }
+        CompletableFuture<PointEvidence> actual = new CompletableFuture<>();
+        try {
+            executeOrdered(() -> {
+                try {
+                    new EvidenceRead(entryId, actual).start();
+                } catch (RuntimeException failure) {
+                    actual.completeExceptionally(failure);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException shutdown) {
+            actual.completeExceptionally(BKException.create(BKException.Code.InterruptedException));
+        }
+        return actual.whenComplete((value, failure) -> active.set(false)).copy();
+    }
+
+    private final class EvidenceRead {
+        private final long entryId;
+        private final CompletableFuture<PointEvidence> done;
+        private final org.apache.bookkeeper.versioning.Versioned<LedgerMetadata> expected;
+        private final Map<BookieId, ProfileNormalDataClient> peers;
+        private final List<SourceEvidence> sources = new ArrayList<>();
+        private final DistributionSchedule.AckSet absent;
+        private Probe candidate;
+        private boolean covered;
+        private boolean conflict;
+        private Throwable failure;
+        private int remaining;
+
+        EvidenceRead(long entryId, CompletableFuture<PointEvidence> done) {
+            this.entryId = entryId;
+            this.done = done;
+            expected = getVersionedLedgerMetadata();
+            peers = transport.readPeers();
+            var value = expected.getValue();
+            absent = new RoundRobinDistributionSchedule(value.getWriteQuorumSize(),
+                    value.getWriteQuorumSize() - value.getAckQuorumSize() + 1, value.getEnsembleSize()).getAckSet();
+        }
+
+        void start() {
+            var ensemble = expected.getValue().getAllEnsembles().floorEntry(entryId).getValue();
+            var writeSet = distributionSchedule.getWriteSet(entryId);
+            remaining = writeSet.size();
+            for (int i = 0; i < remaining; i++) {
+                sources.add(null);
+            }
+            try {
+                for (int i = 0; i < writeSet.size(); i++) {
+                    int slot = i;
+                    int member = writeSet.get(i);
+                    BookieId bookie = ensemble.get(member);
+                    int flags = org.apache.bookkeeper.proto.BookieProtocol.FLAG_HIGH_PRIORITY
+                            | org.apache.bookkeeper.proto.BookieProtocol.FLAG_DO_FENCING;
+                    try {
+                        transport.readEntry(bookie, getId(), entryId,
+                                (code, ledger, entry, bytes, ignored) -> receive(slot, member, bookie, code, bytes),
+                                null, flags, getLedgerKey(), false);
+                    } catch (RuntimeException rejected) {
+                        synchronized (this) {
+                            failure = rejected;
+                            receive(slot, member, bookie, BKException.Code.ReadException, null);
+                        }
+                    }
+                }
+            } finally {
+                writeSet.recycle();
+            }
+        }
+
+        private synchronized void receive(int slot, int member, BookieId bookie, int code,
+                io.netty.buffer.ByteBuf raw) {
+            if (sources.get(slot) != null) {
+                return;
+            }
+            SourceOutcome outcome = SourceOutcome.UNAVAILABLE;
+            var peer = peers.get(bookie);
+            if (code == BKException.Code.OK && peer != null) {
+                try {
+                    var payload = getDigestManager().verifyDigestAndReturnData(entryId, raw);
+                    long length = raw.getLong(24);
+                    if (candidate == null) {
+                        byte[] bytes = new byte[payload.readableBytes()];
+                        payload.getBytes(payload.readerIndex(), bytes);
+                        candidate = new Probe(ProbeOutcome.CANDIDATE, entryId, length, bytes, probeOwner);
+                    } else if (candidate.length() != length || !candidate.payload().equals(
+                            payload.nioBuffer(payload.readerIndex(), payload.readableBytes()))) {
+                        conflict = true;
+                    }
+                    outcome = SourceOutcome.FOUND;
+                } catch (BKException.BKDigestMatchException invalid) {
+                    outcome = SourceOutcome.CORRUPT;
+                } catch (RuntimeException invalid) {
+                    failure = invalid;
+                }
+            } else if (code == BKException.Code.NoSuchEntryException && peer != null) {
+                outcome = SourceOutcome.MISSING;
+                covered |= absent.completeBookieAndCheck(member);
+            } else if (code == BKException.Code.UnauthorizedAccessException) {
+                outcome = SourceOutcome.UNAUTHORIZED;
+            }
+            sources.set(slot, new SourceEvidence(bookie, peer == null ? ""
+                    : java.util.HexFormat.of().formatHex(peer.hello().storageIncarnation()), outcome));
+            if (--remaining == 0) {
+                absent.recycle();
+                if (failure != null) {
+                    done.completeExceptionally(failure);
+                } else if (transport.isClosed() || getVersionedLedgerMetadata() != expected
+                        || transport.readPeers() != peers) {
+                    done.completeExceptionally(BKException.create(BKException.Code.ReadException));
+                } else {
+                    done.complete(new PointEvidence(candidate, sources, covered, conflict));
+                }
+            }
+        }
     }
 
     /** Original SDK recovery packing of this handle's validated probe. Serialization performs no Add or activation. */

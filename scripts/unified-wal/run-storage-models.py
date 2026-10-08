@@ -19,6 +19,19 @@ import time
 
 
 MATRIX = {
+    'a-profile-recovery-prefix': None,
+    'a-profile-recovery-prefix-threeofthree': None,
+    'ce-profile-recovery-prefix-early': 'AllSourcesEnded',
+    'ce-profile-recovery-prefix-unknown-missing': 'TailHasDefinitiveCoverage',
+    'ce-profile-recovery-prefix-unknown-loss': 'LossHasRequiredFiniteSet',
+    'ce-profile-recovery-prefix-required': 'TailIsAfterRequired',
+    'ce-profile-recovery-prefix-conflict': 'ConflictsQuarantine',
+    'ce-profile-recovery-prefix-prior': 'ProgressHasContiguousPrefix',
+    'ce-profile-recovery-prefix-length': 'CandidateHasMatchingLength',
+    'ce-profile-recovery-prefix-cancel': 'InFlightOwnsReservation',
+    'ce-profile-recovery-prefix-context': 'EvidenceHasCurrentContext',
+    'ce-profile-recovery-prefix-source': 'EvidenceHasBoundFencedSources',
+    'ce-profile-recovery-prefix-close': 'NoClosedPublication',
     'a-profile-repair-copy': None,
     'ce-profile-repair-copy-sources': 'CopyHasSources',
     'ce-profile-repair-copy-grant': 'CopyHasGrant',
@@ -523,6 +536,7 @@ def main():
                    else "ProfileRepairCopy.tla" if "profile-repair-copy" in name
                    else "ProfileRepairMembership.tla" if "profile-repair-membership" in name
                    else "ProfileRepairGrant.tla" if "profile-repair-grant" in name
+                   else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
                    else "ProfileLacEvidence.tla" if "profile-lac-evidence" in name

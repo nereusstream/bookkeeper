@@ -252,7 +252,8 @@ final class ProfileLacEvidenceRead {
         long length = anchors.values().iterator().next().sourceLength();
         for (var anchor : anchors.values()) {
             if (anchor.sourceLength() != length) {
-                throw error(BKException.Code.DigestMatchException);
+                throw new java.util.concurrent.CompletionException(
+                        new ProfileLedgerHandle.LacLengthConflictException());
             }
         }
         for (var source : sources) {
@@ -260,7 +261,8 @@ final class ProfileLacEvidenceRead {
                     || prefix != Long.MAX_VALUE && source.sourceEntryId() == prefix + 1
                         && (length > Long.MAX_VALUE - source.payloadBytes()
                             || source.sourceLength() != length + source.payloadBytes())) {
-                throw error(BKException.Code.DigestMatchException);
+                throw new java.util.concurrent.CompletionException(
+                        new ProfileLedgerHandle.LacLengthConflictException());
             }
         }
         finish(length);

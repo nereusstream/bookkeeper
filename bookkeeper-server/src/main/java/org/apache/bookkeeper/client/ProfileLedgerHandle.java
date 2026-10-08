@@ -177,6 +177,11 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     /** Snapshot evidence only: no writer LAC/length mutation, fencing coverage or CLOSED authority. */
     public record ExplicitLacSource(BookieId bookie, String storageIncarnation, long lac) { }
 
+    /** Verified boundary lengths disagree; retains the existing legacy digest-error projection. */
+    public static final class LacLengthConflictException extends BKException.BKDigestMatchException {
+        private static final long serialVersionUID = 1L;
+    }
+
     public record LacEvidence(Versioned<LedgerMetadata> metadata, long maxObservedLac, long prefixEntryId,
                               long prefixLength, List<LacSource> sources, List<ExplicitLacSource> explicitSources) {
         public LacEvidence(Versioned<LedgerMetadata> metadata, long maxObservedLac, long prefixEntryId,
