@@ -31,21 +31,26 @@ import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
 /** One bounded inert repair plan. Admission, local installation and recovery grant remain distinct facts. */
 public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byte[] intentId,
         long fragmentStart, int replacedMemberSlot, byte[] oldEnsembleDigest,
-        ProfileControlScope install, byte[] grantOperationId, ProfileExactRange range) {
+        ProfileControlScope install, byte[] grantOperationId, ProfileExactRange range, byte[] terminalOperationId) {
     public static final int MAX_INTENTS = 32;
     public static final int FIXED_BYTES = 352;
-    public static final int MAX_BYTES = FIXED_BYTES + 2 + 255 + 16 + 2 + 128 + 4;
+    public static final int MAX_BYTES = FIXED_BYTES + 2 + 255 + 16 + 2 + 128 + 4 + 16;
     private static final int MAGIC = 0x55575250;
     // UWRP
 
     public ProfileRepairIntent {
         Objects.requireNonNull(recovery, "recovery");
         Objects.requireNonNull(install, "install");
-        Objects.requireNonNull(range, "range");
         intentId = ProfileLifecycleHead.fixed(intentId, 16, true);
         oldEnsembleDigest = ProfileLifecycleHead.fixed(oldEnsembleDigest, 32, false);
-        grantOperationId = ProfileLifecycleHead.fixed(grantOperationId, 16, true);
-        if (slot < 0 || slot >= MAX_INTENTS || fragmentStart < 0 || range.firstEntryId() < fragmentStart
+        grantOperationId = ProfileLifecycleHead.fixed(grantOperationId, 16, range != null);
+        if (range != null && terminalOperationId != null) {
+            throw new IllegalArgumentException("DATA repair cannot carry an EMPTY terminal operation");
+        }
+        terminalOperationId = range == null ? ProfileLifecycleHead.fixed(terminalOperationId, 16, true) : null;
+        if (slot < 0 || slot >= MAX_INTENTS || fragmentStart < 0
+                || (range == null ? !Arrays.equals(grantOperationId, new byte[16])
+                    : range.firstEntryId() < fragmentStart)
                 || replacedMemberSlot < 0 || replacedMemberSlot >= 32
                 || install.operation() != ProfileControlOperation.INSTALL
                 || install.ledgerId() != recovery.ledger().ledgerId()
@@ -56,6 +61,18 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
                 || Arrays.equals(recovery.operationId(), grantOperationId)) {
             throw new IllegalArgumentException("Invalid bounded repair intent scope");
         }
+    }
+
+    public ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byte[] intentId,
+            long fragmentStart, int replacedMemberSlot, byte[] oldEnsembleDigest,
+            ProfileControlScope install, byte[] grantOperationId, ProfileExactRange range) {
+        this(recovery, slot, intentId, fragmentStart, replacedMemberSlot, oldEnsembleDigest,
+                install, grantOperationId, Objects.requireNonNull(range, "DATA range"), null);
+    }
+
+    @Override
+    public byte[] terminalOperationId() {
+        return terminalOperationId == null ? null : terminalOperationId.clone();
     }
 
     @Override
@@ -78,7 +95,15 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
         return recovery.controlGeneration();
     }
 
+    /** UWRP schema2 EMPTY has an explicit zero grant ID and no DATA range; schema1 DATA is unchanged. */
+    public boolean empty() {
+        return range == null;
+    }
+
     public ProfileControlScope grantScope() {
+        if (empty()) {
+            throw new IllegalStateException("Empty repair never authorizes a DATA grant");
+        }
         var unbound = new ProfileControlScope(ProfileControlOperation.RECOVERY_GRANT,
                 ProfileControlOperation.RECOVERY_GRANT.purpose(), install.ledgerId(), install.ledgerInstanceId(),
                 install.descriptorIdentity(), install.targetBookie(), install.targetStorageIncarnation(),
@@ -90,6 +115,9 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
     }
 
     public ProfileControlScope closeScope(byte[] operationId, long generation) {
+        if (empty()) {
+            throw new IllegalStateException("Empty repair closes its standalone boundary, never a grant");
+        }
         operationId = ProfileLifecycleHead.fixed(operationId, 16, true);
         if (Arrays.equals(operationId, grantOperationId) || Arrays.equals(operationId, recovery.operationId())) {
             throw new IllegalArgumentException("Repair close needs its own operation identity");
@@ -103,6 +131,28 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
                 scope.descriptorIdentity(), scope.targetBookie(), scope.targetStorageIncarnation(),
                 scope.authorityDomain(), scope.authorityGeneration(), scope.operationId(), bindingPayload(scope, true),
                 range);
+    }
+
+    public ProfileControlScope terminalScope(byte[] operationId, long generation,
+            org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding binding) {
+        operationId = ProfileLifecycleHead.fixed(operationId, 16, true);
+        if (!empty() || generation != grantGeneration() || binding.prefixEntryId() != fragmentStart - 1
+                || !Arrays.equals(operationId, terminalOperationId)
+                || Arrays.equals(operationId, install.operationId())
+                || Arrays.equals(operationId, recovery.operationId())) {
+            throw new IllegalArgumentException("Empty boundary must retain its own scope and fixed predecessor cut");
+        }
+        var scope = new ProfileControlScope(ProfileControlOperation.RECOVERY_TERMINAL_CLOSE,
+                ProfileControlOperation.RECOVERY_TERMINAL_CLOSE.purpose(), install.ledgerId(),
+                install.ledgerInstanceId(), install.descriptorIdentity(), install.targetBookie(),
+                install.targetStorageIncarnation(), install.authorityDomain(), generation, operationId,
+                new byte[32], null);
+        return new ProfileControlScope(scope.operation(), scope.purpose(), scope.ledgerId(), scope.ledgerInstanceId(),
+                scope.descriptorIdentity(), scope.targetBookie(), scope.targetStorageIncarnation(),
+                scope.authorityDomain(), scope.authorityGeneration(), scope.operationId(),
+                org.apache.bookkeeper.common.profile.control.ProfileControlRequest
+                        .terminalPayloadIdentity(scope, binding),
+                null);
     }
 
     private byte[] grantPayloadIdentity(ProfileControlScope scope) {
@@ -129,12 +179,18 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
     public byte[] encode() {
         byte[] target = ProfileAuthorityCodec.text(install.targetBookie(), 255);
         byte[] domain = ProfileAuthorityCodec.text(install.authorityDomain(), 128);
-        ByteBuffer out = ByteBuffer.allocate(FIXED_BYTES + 2 + target.length + 16 + 2 + domain.length + 4);
-        out.putInt(MAGIC).putShort((short) 1).putShort((short) 0).put(recovery.encode()).putInt(slot)
+        ByteBuffer out = ByteBuffer.allocate(FIXED_BYTES + 2 + target.length + 16 + 2 + domain.length + 4
+                + (empty() ? 16 : 0));
+        out.putInt(MAGIC).putShort((short) (empty() ? 2 : 1)).putShort((short) (empty() ? 1 : 0))
+                .put(recovery.encode()).putInt(slot)
                 .put(intentId).putLong(intentGeneration()).putLong(grantGeneration()).putLong(fragmentStart)
-                .putInt(replacedMemberSlot).putLong(range.firstEntryId()).putLong(range.lastEntryId())
-                .put(oldEnsembleDigest).put(install.operationId()).put(grantOperationId)
-                .put(install.publicSemanticPayloadIdentity()).putShort((short) target.length).put(target)
+                .putInt(replacedMemberSlot).putLong(empty() ? fragmentStart : range.firstEntryId())
+                .putLong(empty() ? fragmentStart - 1 : range.lastEntryId())
+                .put(oldEnsembleDigest).put(install.operationId()).put(grantOperationId);
+        if (empty()) {
+            out.put(terminalOperationId);
+        }
+        out.put(install.publicSemanticPayloadIdentity()).putShort((short) target.length).put(target)
                 .put(install.targetStorageIncarnation()).putShort((short) domain.length).put(domain);
         CRC32C crc = new CRC32C();
         crc.update(out.array(), 0, out.capacity() - 4);
@@ -148,9 +204,17 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
         CRC32C crc = new CRC32C();
         crc.update(bytes, 0, bytes.length - 4);
         ByteBuffer in = ByteBuffer.wrap(bytes);
-        if (in.getInt(bytes.length - 4) != (int) crc.getValue() || in.getInt() != MAGIC
-                || in.getShort() != 1 || in.getShort() != 0) {
+        if (in.getInt(bytes.length - 4) != (int) crc.getValue() || in.getInt() != MAGIC) {
             throw new IllegalArgumentException("Invalid repair intent schema or CRC");
+        }
+        int schema = Short.toUnsignedInt(in.getShort());
+        int kind = Short.toUnsignedInt(in.getShort());
+        boolean empty = schema == 2 && kind == 1;
+        if (!empty && (schema != 1 || kind != 0)) {
+            throw new IllegalArgumentException("Unknown repair intent schema/kind");
+        }
+        if (!empty && bytes.length > MAX_BYTES - 16) {
+            throw new IllegalArgumentException("DATA repair exceeds schema1 byte bound");
         }
         byte[] context = new byte[184];
         in.get(context);
@@ -162,13 +226,25 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
         long grantGeneration = in.getLong();
         long start = in.getLong();
         int member = in.getInt();
-        var range = new ProfileExactRange(in.getLong(), in.getLong());
+        long first = in.getLong();
+        long last = in.getLong();
+        if (empty && (first != start || last != start - 1)) {
+            throw new IllegalArgumentException("Empty repair encoded a nonempty or displaced range");
+        }
+        var range = empty ? null : new ProfileExactRange(first, last);
         byte[] old = new byte[32];
         in.get(old);
         byte[] installId = new byte[16];
         in.get(installId);
         byte[] grantId = new byte[16];
         in.get(grantId);
+        byte[] terminalId = empty ? new byte[16] : null;
+        if (empty) {
+            if (in.remaining() < 58) {
+                throw new IllegalArgumentException("Truncated EMPTY terminal operation");
+            }
+            in.get(terminalId);
+        }
         byte[] payload = new byte[32];
         in.get(payload);
         String target = text(in, 255, 23);
@@ -184,7 +260,7 @@ public record ProfileRepairIntent(ProfileRecoveryContext recovery, int slot, byt
                 recovery.ledger().ledgerId(), recovery.ledger().ledgerInstanceId(),
                 ProfileDescriptorIdentity.fromBytes(recovery.ledger().descriptorIdentity()), target, incarnation,
                 domain, grantGeneration, installId, payload, null);
-        return new ProfileRepairIntent(recovery, slot, id, start, member, old, install, grantId, range);
+        return new ProfileRepairIntent(recovery, slot, id, start, member, old, install, grantId, range, terminalId);
     }
 
     private static String text(ByteBuffer in, int max, int tail) {

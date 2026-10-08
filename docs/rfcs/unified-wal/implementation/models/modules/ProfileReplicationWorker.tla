@@ -17,6 +17,8 @@
  specific language governing permissions and limitations
  under the License.
 *)
+(* DATA-copy worker projection. EmptyMissing mutation forbids a fake DATA copy;
+   the separate ProfileEmptyRepair module covers the enabled grantless EMPTY route. *)
 EXTENDS Integers
 CONSTANTS Ack, FallBackClassic, ClearAfterQuorum, PublishBeforeData, ActivateNormal,
           NewIntentOnRetry, RecopyPublished, ReleaseOnStop, ChangeTask, IgnoreDelete,

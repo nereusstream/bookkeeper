@@ -20,6 +20,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -633,6 +634,68 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
             crc.update(bad, 0, bad.length - 4);
             ByteBuffer.wrap(bad).putInt(bad.length - 4, (int) crc.getValue());
             assertThrows(IllegalArgumentException.class, () -> ProfileRepairIntent.decode(bad));
+        }
+    }
+
+    @Test
+    public void emptyRepairVectorsExplicitlyForbidDataAndBindTheirBoundaryReceipt() throws Exception {
+        byte[] intentBytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/repair-empty-intent.bin").toURI()));
+        byte[] boundaryBytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/repair-empty-boundary.bin").toURI()));
+        byte[] commitBytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(
+                getClass().getResource("/unified-wal-segment/repair-empty-commit.bin").toURI()));
+        var intent = ProfileRepairIntent.decode(intentBytes);
+        assertEquals(400, intentBytes.length);
+        assertTrue(intent.empty());
+        assertNull(intent.range());
+        assertArrayEquals(new byte[16], intent.grantOperationId());
+        assertArrayEquals(intentBytes, intent.encode());
+        assertThrows(IllegalStateException.class, intent::grantScope);
+        assertThrows(IllegalStateException.class, () -> intent.closeScope(bytes(16, 91), 7));
+        var boundary = ProfileRepairCommit.EmptyBoundary.decode(boundaryBytes);
+        assertEquals(124, boundaryBytes.length);
+        assertArrayEquals(boundaryBytes, boundary.encode());
+        assertEquals(-1, boundary.binding().prefixEntryId());
+        assertEquals(0, boundary.binding().prefixLength());
+        assertArrayEquals(ProfileRepairIntent.digest(intentBytes), boundary.intentDigest());
+        var scope = intent.terminalScope(intent.terminalOperationId(), intent.grantGeneration(), boundary.binding());
+        assertNull(scope.exactRange());
+        var commit = ProfileRepairCommit.decode(commitBytes);
+        assertArrayEquals(commitBytes, commit.encode());
+        assertArrayEquals(ProfileRepairIntent.digest(boundaryBytes), commit.emptyBoundaryDigest());
+        intent.terminalOperationId()[0] = 0;
+        boundary.operationId()[0] = 0;
+        commit.emptyBoundaryDigest()[0] = 0;
+        assertArrayEquals(intentBytes, intent.encode());
+        assertArrayEquals(boundaryBytes, boundary.encode());
+        assertArrayEquals(commitBytes, commit.encode());
+        for (int size = 0; size < intentBytes.length; size++) {
+            byte[] truncated = Arrays.copyOf(intentBytes, size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRepairIntent.decode(truncated));
+        }
+        for (int size = 0; size < boundaryBytes.length; size++) {
+            byte[] truncated = Arrays.copyOf(boundaryBytes, size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRepairCommit.EmptyBoundary.decode(truncated));
+        }
+        for (int size = 0; size < commitBytes.length; size++) {
+            byte[] truncated = Arrays.copyOf(commitBytes, size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRepairCommit.decode(truncated));
+        }
+        for (int offset : new int[] {4, 6, 248, 304, 320}) {
+            byte[] bad = intentBytes.clone();
+            bad[offset] ^= 1;
+            CRC32C crc = new CRC32C();
+            crc.update(bad, 0, bad.length - 4);
+            ByteBuffer.wrap(bad).putInt(bad.length - 4, (int) crc.getValue());
+            if (offset != 320) {
+                assertThrows(IllegalArgumentException.class, () -> ProfileRepairIntent.decode(bad));
+            } else {
+                var changed = ProfileRepairIntent.decode(bad);
+                assertThrows(IllegalArgumentException.class,
+                        () -> changed.terminalScope(intent.terminalOperationId(),
+                                changed.grantGeneration(), boundary.binding()));
+            }
         }
     }
 

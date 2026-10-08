@@ -30,20 +30,91 @@ import org.apache.bookkeeper.net.BookieId;
 
 /** Immutable inverse/digest receipt for one guarded repair membership CAS, never a second membership authority. */
 public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[] afterDigest,
-        String oldBookie, byte[] closeOperationId, long closeGeneration) {
+        String oldBookie, byte[] closeOperationId, long closeGeneration, byte[] emptyBoundaryDigest) {
     public static final String KEY = "bookkeeper.experimental.profile.repair-commits";
-    public static final int MAX_BYTES = 361;
+    public static final int MAX_BYTES = 393;
     private static final int MAGIC = 0x5557524d; // UWRM, distinct from the UWRC recovery context
     private static final int HEAD_MAGIC = 0x55575248;
+
+    /** Immutable evidence attached to an EMPTY membership CAS, not a DATA copy receipt. */
+    public record EmptyBoundary(byte[] intentDigest, byte[] operationId, long generation,
+            org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding binding,
+            long localGeneration) {
+        public static final int ENCODED_BYTES = 124;
+
+        public EmptyBoundary {
+            intentDigest = ProfileLifecycleHead.fixed(intentDigest, 32, false);
+            operationId = ProfileLifecycleHead.fixed(operationId, 16, true);
+            java.util.Objects.requireNonNull(binding, "binding");
+            if (generation <= 0 || localGeneration <= 0) {
+                throw new IllegalArgumentException("Empty boundary requires actual positive applied generations");
+            }
+        }
+
+        @Override
+        public byte[] intentDigest() {
+            return intentDigest.clone();
+        }
+
+        @Override
+        public byte[] operationId() {
+            return operationId.clone();
+        }
+
+        public byte[] encode() {
+            var out = ByteBuffer.allocate(ENCODED_BYTES).putInt(0x55574542).putShort((short) 1).putShort((short) 0)
+                    .put(intentDigest).put(operationId).putLong(generation).putLong(binding.prefixEntryId())
+                    .putLong(binding.prefixLength()).put(binding.selectionDigest()).putLong(localGeneration);
+            CRC32C crc = new CRC32C();
+            crc.update(out.array(), 0, ENCODED_BYTES - 4);
+            return out.putInt((int) crc.getValue()).array();
+        }
+
+        public static EmptyBoundary decode(byte[] bytes) {
+            if (bytes == null || bytes.length != ENCODED_BYTES) {
+                throw new IllegalArgumentException("Invalid EMPTY boundary receipt length");
+            }
+            var crc = new CRC32C();
+            crc.update(bytes, 0, bytes.length - 4);
+            var in = ByteBuffer.wrap(bytes);
+            if (in.getInt(bytes.length - 4) != (int) crc.getValue() || in.getInt() != 0x55574542
+                    || in.getShort() != 1 || in.getShort() != 0) {
+                throw new IllegalArgumentException("Invalid EMPTY boundary receipt header/CRC");
+            }
+            byte[] intent = new byte[32];
+            byte[] operation = new byte[16];
+            byte[] selection = new byte[32];
+            in.get(intent).get(operation);
+            long generation = in.getLong();
+            long prefix = in.getLong();
+            long length = in.getLong();
+            in.get(selection);
+            return new EmptyBoundary(intent, operation, generation,
+                    new org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding(
+                            prefix, length, selection), in.getLong());
+        }
+    }
 
     public ProfileRepairCommit {
         beforeDigest = ProfileLifecycleHead.fixed(beforeDigest, 32, false);
         afterDigest = ProfileLifecycleHead.fixed(afterDigest, 32, false);
         closeOperationId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
+        emptyBoundaryDigest = emptyBoundaryDigest == null ? null
+                : ProfileLifecycleHead.fixed(emptyBoundaryDigest, 32, false);
         ProfileAuthorityCodec.text(oldBookie, 255);
         if (beforeVersion < 0 || beforeVersion == Integer.MAX_VALUE || closeGeneration <= 0) {
             throw new IllegalArgumentException("Invalid repair commit version/generation");
         }
+    }
+
+    public ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[] afterDigest,
+            String oldBookie, byte[] closeOperationId, long closeGeneration) {
+        this(beforeVersion, beforeDigest, afterDigest, oldBookie, closeOperationId, closeGeneration, null);
+    }
+
+    @Override
+    public byte[] emptyBoundaryDigest() {
+        return emptyBoundaryDigest == null ? null : emptyBoundaryDigest.clone();
     }
 
     @Override
@@ -75,20 +146,34 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
 
     public byte[] encode() {
         byte[] old = ProfileAuthorityCodec.text(oldBookie, 255);
-        var out = ByteBuffer.allocate(106 + old.length).putInt(MAGIC).putShort((short) 1).putShort((short) 0)
+        var out = ByteBuffer.allocate(106 + old.length + (emptyBoundaryDigest == null ? 0 : 32))
+                .putInt(MAGIC).putShort((short) (emptyBoundaryDigest == null ? 1 : 2))
+                .putShort((short) (emptyBoundaryDigest == null ? 0 : 1))
                 .putInt(beforeVersion).put(beforeDigest).put(afterDigest).put(closeOperationId)
-                .putLong(closeGeneration).putShort((short) old.length).put(old);
+                .putLong(closeGeneration);
+        if (emptyBoundaryDigest != null) {
+            out.put(emptyBoundaryDigest);
+        }
+        out.putShort((short) old.length).put(old);
         return finish(out);
     }
 
     public static ProfileRepairCommit decode(byte[] bytes) {
-        var in = checked(bytes, 107, MAX_BYTES, MAGIC);
+        var in = checked(bytes, 107, MAX_BYTES, MAGIC, true);
+        boolean empty = ByteBuffer.wrap(bytes).getShort(4) == 2;
         int version = in.getInt();
         byte[] before = new byte[32];
         byte[] after = new byte[32];
         byte[] operation = new byte[16];
         in.get(before).get(after).get(operation);
         long generation = in.getLong();
+        byte[] emptyDigest = empty ? new byte[32] : null;
+        if (empty) {
+            if (in.remaining() < 39) {
+                throw new IllegalArgumentException("Truncated EMPTY commit binding");
+            }
+            in.get(emptyDigest);
+        }
         int size = Short.toUnsignedInt(in.getShort());
         if (size < 1 || size > 255 || size != in.remaining() - 4) {
             throw new IllegalArgumentException("Invalid repair commit old member length");
@@ -99,7 +184,7 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
         if (!Arrays.equals(old, ProfileAuthorityCodec.text(member, 255))) {
             throw new IllegalArgumentException("Noncanonical repair commit member");
         }
-        return new ProfileRepairCommit(version, before, after, member, operation, generation);
+        return new ProfileRepairCommit(version, before, after, member, operation, generation, emptyDigest);
     }
 
     public static List<Reference> head(byte[] bytes) {
@@ -156,15 +241,23 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
     }
 
     private static ByteBuffer checked(byte[] bytes, int minimum, int maximum, int magic) {
+        return checked(bytes, minimum, maximum, magic, false);
+    }
+
+    private static ByteBuffer checked(byte[] bytes, int minimum, int maximum, int magic, boolean allowEmpty) {
         if (bytes == null || bytes.length < minimum || bytes.length > maximum) {
             throw new IllegalArgumentException("Invalid repair commit byte bound");
         }
         var in = ByteBuffer.wrap(bytes);
         CRC32C crc = new CRC32C();
         crc.update(bytes, 0, bytes.length - 4);
-        if (in.getInt(bytes.length - 4) != (int) crc.getValue() || in.getInt() != magic
-                || in.getShort() != 1 || in.getShort() != 0) {
+        if (in.getInt(bytes.length - 4) != (int) crc.getValue() || in.getInt() != magic) {
             throw new IllegalArgumentException("Invalid repair commit schema/CRC");
+        }
+        int schema = Short.toUnsignedInt(in.getShort());
+        int kind = Short.toUnsignedInt(in.getShort());
+        if (!(schema == 1 && kind == 0) && !(allowEmpty && schema == 2 && kind == 1)) {
+            throw new IllegalArgumentException("Unknown repair commit schema/kind");
         }
         return in;
     }

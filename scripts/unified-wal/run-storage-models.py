@@ -19,6 +19,18 @@ import time
 
 
 MATRIX = {
+    'a-profile-empty-repair': None,
+    'ce-profile-empty-repair-admission': 'BoundaryRequiresAdmission',
+    'ce-profile-empty-repair-boundary': 'PublicationRequiresBoundary',
+    'ce-profile-empty-repair-data': 'NoFakeData',
+    'ce-profile-empty-repair-grant': 'NoDataGrant',
+    'ce-profile-empty-repair-normal': 'NoNormalActivation',
+    'ce-profile-empty-repair-cut': 'OriginalCutIsPreserved',
+    'ce-profile-empty-repair-delete': 'DeleteBlocksPublication',
+    'ce-profile-empty-repair-birth': 'OriginalBirthAtPublication',
+    'ce-profile-empty-repair-receipt': 'PublicationRetainsReceipt',
+    'ce-profile-empty-repair-retry': 'RetryRetainsOperation',
+    'ce-profile-empty-repair-permit': 'ActualBoundaryOwnsPermit',
     'a-profile-replication-worker': None,
     'a-profile-replication-worker-threeofthree': None,
     'ce-profile-replication-worker-classic': 'NoClassicForProfile',
@@ -654,6 +666,7 @@ def main():
                    else "ProfileReplicaHealth.tla" if "profile-replica-health" in name
                    else "ProfileMarkerCleanup.tla" if "profile-marker-cleanup" in name
                    else "ProfileReplicationWorker.tla" if "profile-replication-worker" in name
+                   else "ProfileEmptyRepair.tla" if "profile-empty-repair" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name

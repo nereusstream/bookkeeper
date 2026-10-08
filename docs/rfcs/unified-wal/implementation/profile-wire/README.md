@@ -889,11 +889,11 @@ CLOSED从0..P沿原exact write-set复核完整W份合法DATA和累积length，�
 
 deadline/stop只停止未来阶段，不提前终结实际attempt。worker被interrupt/shutdown时设置stop，等待已发RPC、buffer custody及cold command实际终结，才release原task receipt；不走Classic的延迟release timer，不关闭借用SDK/peer pools。已经提交的持久化或CAS不回滚，UNKNOWN仍按原intent/close identity续接，不释放DATA坐标。实际I/O/网络始终不终结时不能声称drain已完成；无liveness或瞬时强撤权保证。
 
-真实worker在原线程循环中验证A2/A3：健康CLOSED、OPEN缺一个成员后COPY/close、CLOSED缺成员、OPEN空ledger全副本健康，以及历史fragment的第三副本缺DATA后COPY/全副本复核。另验证默认OFF、损坏backlink、缺metadata、空CLOSED缺成员都保留marker；持有三条实际READ回复时shutdown保持lock与permit，排空后借用SDK/pools可用，新worker接原marker。UIC4实际force后丢回复/断连，新coordinator沿published intent零recopy，再在maxRepairs=1下替换损坏目标及之后丢失的修复目标，保留P/L、原UWCF与完整head。Classic实际bookie的replication stats/empty open两项回归也执行；ZooKeeperUtil保留服务器numeric loopback，不反解到外部DNS，不更改主机DNS或生产网络设置。
+真实worker在原线程循环中验证A2/A3：健康CLOSED、OPEN缺一个成员后COPY/close、CLOSED缺成员、OPEN空ledger全副本健康，以及历史fragment的第三副本缺DATA后COPY/全副本复核。另验证默认OFF、损坏backlink、缺metadata、没有unused候选的空CLOSED缺成员都保留marker；持有三条实际READ回复时shutdown保持lock与permit，排空后借用SDK/pools可用，新worker接原marker。UIC4实际force后丢回复/断连，新coordinator沿published intent零recopy，再在maxRepairs=1下替换损坏目标及之后丢失的修复目标，保留P/L、原UWCF与完整head。Classic实际bookie的replication stats/empty open两项回归也执行；ZooKeeperUtil保留服务器numeric loopback，不反解到外部DNS，不更改主机DNS或生产网络设置。
 
-当前空ledger/empty-last缺成员的grantless membership repair尚无合同实现，明确DEFERRED且不制造DATA/grant；这项仍必须补齐。candidate耗尽/32槽满额保留任务，不自行强reset；worker仅自动续接本路径的worker-repair intent，其他人工intent/更复杂并发协调仍需对应合同与验证。原AutoRecoveryMain服务bootstrap、动态pool、sameBookieId rejoin/离线catch-up、hierarchy/page GC、distributed delete、完整A/C/D组合/总预算/兼容/掉电/长期性能仍OPEN，步骤14保持PARTIAL，生产Gate不提升。
+该worker里程碑当时未实现空ledger/empty-last缺成员的grantless membership repair；最新实现见下节。candidate耗尽/32槽满额保留任务，不自行强reset；worker仅自动续接本路径的worker-repair intent，其他人工intent/更复杂并发协调仍需对应合同与验证。原AutoRecoveryMain服务bootstrap、动态pool、sameBookieId rejoin/离线catch-up、hierarchy/page GC、distributed delete、完整A/C/D组合/总预算/兼容/掉电/长期性能仍OPEN，步骤14保持PARTIAL，生产Gate不提升。
 
-有限 `ProfileReplicationWorker.tla` 投影已启用worker的route/recovery/plan/copy/publication/close/health/marker/stop ownership组合。2正向（A2/A3）/14指定反例覆盖已识别Profile不得Classic fallback、全部W才能清marker、durable copy前置、normal禁用、intent固定、published不recopy、child留lock、原task/DELETE、descriptor、UNKNOWN、空缺副本拒绝、work bound和P固定。point selection、force/guard/reply是输入，非fsync/TLS/crypto生产者；无Profile证据且未启用cohort的Classic路径不在该Profile保证内。
+有限 `ProfileReplicationWorker.tla` 投影已启用worker的route/recovery/plan/copy/publication/close/health/marker/stop ownership组合。2正向（A2/A3）/14指定反例覆盖已识别Profile不得Classic fallback、全部W才能清marker、durable copy前置、normal禁用、intent固定、published不recopy、child留lock、原task/DELETE、descriptor、UNKNOWN、EMPTY不得使用DATA copy、work bound和P固定。该模块投影DATA-copy路径，最新grantless EMPTY协议由下节独立模型拥有。point selection、force/guard/reply是输入，非fsync/TLS/crypto生产者；无Profile证据且未启用cohort的Classic路径不在该Profile保证内。
 
 重现：
 
@@ -908,3 +908,32 @@ Java广度 `unified-wal-local-LBkcGJJv` exit0：15类275项（common37/server238
 模型广度 `unified-wal-model-kwjihg5e` exit0：182配置27完整正向PASS/155指定反例，806输入/910 artifact checksums；之后仅两处生产代码的新复制预算/对应测试和最终record换行，TLA/配置未改变。最后预算后的定向 `unified-wal-model-6t30rm5u`16配置符合预期；最终 `unified-wal-model-kq_twh8v`16配置2正向/14指定反例、806当前输入/603 checksums。最终Java与模型232重合/1623去重当前inputs及父HEAD五个designInputs逐项核验；历史run不重绑。A2正向2445 generated/1350 distinct、queue0、depth/diameter12、0.919秒/peak RSS132579328 bytes；A3为2508/1402/0、13/13、0.877秒/129728512 bytes，是有限模型消耗，非存储性能。官方tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。完整496配置未运行。
 
 早期 `unified-wal-local-Wcz1OWTH`/`GxO6EURv`/`iQSkfu35` 分别是metadataDigest的IOException声明、FutureUtils包装interrupt后的无效catch、配置setter返回void的编译错误，不计协议RED。`unified-wal-local-TSSTFkXD`5项及`QIKDmWUt`6项先验证worker/Classic切片，再进入广度；发现published close续接错误消耗新copy预算后补上述maxRepairs=1覆盖。初次模型 `unified-wal-model-ncyqftoa`为括号解析失败INCONCLUSIVE，不计PASS，修正后才执行定向与广度。
+
+## 空副本的 grantless membership repair
+
+2026-10-09，第14步在原 worker-repair 固定32槽、admission、membership CAS及guarded marker completion中补齐空ledger／历史空末片段缺成员。只允许冻结selection的P=lastStart-1，保留原P/L/context、metadata出生与UWCF close-history；历史DATA仍须通过原point恢复与全部W健康复核。新目标复用已验证pool与原INSTALL driver，保持inactive，不获取DATA坐标、RECOVERY_GRANT或normal activation。
+
+顺序为 inert EMPTY intent → 实际inactive INSTALL/receipt → 原admission → 原UIC6 terminalClose实际force/apply成功 → 同一ZK multi发布标准membership、UWRM/head及hash绑定的immutable empty-boundary receipt。CLOSED adoption和terminal冷authority reader都验证receipt；缺失、损坏、scope/hash/P/L/selection不匹配进入QUARANTINED。receipt只记录已完成边界，不成为第二份membership authority。私有构造的EmptyRepairProof仅由实际terminalClose客户端完成产生；公开DATA copied-at入口拒绝EMPTY，调用者不能用任意snapshot或伪造copy数量发布空修复。
+
+UWRP现有DATA schema1/kind0和UWRM DATA schema1/kind0字节保持不变；新增EMPTY使用schema2/kind1。EMPTY UWRP编码first=fragmentStart、last=fragmentStart-1、zero grant ID，在offset320插入独立terminal operation ID16，逻辑range为null，DATA grant/close API明确拒绝。EMPTY UWRM在offset100追加empty-boundary SHA-25632；原UWRH仍schema1。UWEB/schema1固定124字节：header8、intent SHA-25632、terminal ID16、authority generation8、P8、L8、selection digest32、实际local generation8、CRC32C4。当前MAX UWRP775、UWRM393；旧DATA长度上界与固定向量仍有效。这些是实验存储codec扩展，不声明stock binary/old decoder或stable兼容。
+
+三个独立Python struct/SHA-256/CRC32C生成的固定向量由Java strict parser验证并逐字节往返：repair-empty-intent.bin400（64397a5b9a05df146695678855e0a20706d8d4697f52de800c16602d93f1d73d）、repair-empty-boundary.bin124（ece2f51a18a4d880baaf1bb062d38d88bac493c9a347773b49d2aa4ebc63b12a）、repair-empty-commit.bin145（704207f5209be53f55ef7e58b0b01eb1ba51ff2c5a7a5787fe2d581d14ca6357）。测试覆盖全部截断、重算CRC后的schema/kind/sentinel/grant/operation错配及数组ownership；没有重生成旧DATA向量。
+
+UNKNOWN或stop后沿原intent birth/terminal ID续接；已admitted不重做INSTALL，避免改变原admission local generation。目标terminal持久成功但reply未交付时，保留原task/permit，排空后新coordinator按原操作幂等解析，再发布；DELETE或metadata身份变化时不能发布。published结果冷解析原receipt，无DATA recopy。后续恢复close quorum和完整W健康复核继续复用原路径，只有原task条件化清理实际成功才清marker。
+
+真实TLS/ZK/native files测试覆盖A2/A3各四种OPEN或CLOSED空ledger／有历史prefix的空末片段；marker清除、原P/L保持、零DATA force、inactive及目标文件重启后type12 suffix exclusion都验证。另测实际boundary reply持有期间shutdown保留原lock、同intent续接、DELETE阻止publication、receipt删除/损坏导致QUARANTINED，以及terminal force失败保留旧membership/marker和原task。进程退出后文件重读不作为掉电证据。
+
+有限ProfileEmptyRepair检查两个冻结输入P=-1/L=0与P=2/L=48，1正向/11指定反例验证admission、durable边界先于publication、零DATA/零grant/无normal、原cut/birth/receipt/操作ID、DELETE与实际child permit。verified historical prefix、force/apply、cold metadata guard是输入；模型不生产TLS/crypto/fsync或liveness事实。DATA worker投影的EMPTY mutation仍表示禁止fake DATA repair，不替代新grantless路径。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileLifecycleStoreTest#emptyRepairVectorsExplicitlyForbidDataAndBindTheirBoundaryReceipt+repairIntent*+repairCommit*,SegmentProfileInitialSocketClientTest#replicationWorkerRepairsEmptyLedgerAndEmptyLastWithoutDataOrGrantForA2AndA3+emptyRepairForceFailureRetainsMembershipAndOriginalTask+emptyRepairLostBoundaryReplyResumesOriginalOperationAndDeleteNeverPublishes'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-empty-repair --config-prefix ce-profile-empty-repair
+```
+
+当前仍是显式隔离cohort、默认OFF、可丢弃目录。没有unused候选或固定槽耗尽继续DEFERRED；service bootstrap/动态pool、外部intent协调、same-ID rejoin/离线catch-up、delete/GC、总预算/完整A+C+D、stable兼容、Linux NUMA/掉电/长期性能和生产Gate仍OPEN，步骤14保持PARTIAL。
+
+模型广度 `unified-wal-model-mdoft16o` exit0：194配置28完整正向PASS/166指定反例，819源码inputs/946 artifact checksums；之后仅两处实现注释、accessor换行和测试长行换行，TLA/配置不变。最后定向 `unified-wal-model-ybw2p3z1` exit0：12配置1完整正向/11指定反例、819当前inputs/609 checksums。EMPTY正向106 generated/64 distinct、queue0、depth/diameter9、0.792秒/peak RSS106070016 bytes（广度run），是有限模型消耗，非存储性能。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；完整508配置和完整组合未运行，历史run不重绑。
+
+Java广度 `unified-wal-local-7JWtFZ0f` exit0：15类279项全部通过，common37/server242（socket83、lifecycle46、URmanager24、Classic worker2、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1052冻结inputs/18 artifact checksums；之后仅上述注释/格式调整。最终 `unified-wal-local-ckN58IQn` exit0：7项定向全部通过，1052当前inputs/5 checksums。最终style `unified-wal-empty-final-style-XKFTaAnK` exit0/2 checksums；root RAT `unified-wal-empty-checks-VkHnCexR` exit1/443 unapproved路径，与上一里程碑完全相同且全在父HEAD，5 checksums包含初轮三个accessor LeftCurly格式失败记录；已修正并通过最终style，不改RAT规则、不计CI全绿。最终Java与模型232共享/1639去重inputs、五个父HEAD designInputs及artifact checksums逐项核验；run sourceCommit/head保持父提交和冻结working-source hash的真实身份，不重绑。

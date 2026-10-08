@@ -616,6 +616,7 @@ public final class ZKProfileReservationStore {
             validateRepairAdmission(repair, admission, deadline);
             var node = reads.get(repairPath(value.getLedgerId(), reference.slot()) + "/committed", deadline);
             var commit = repairCommit(node);
+            validateEmptyBoundary(repair, commit, selected, deadline);
             if (!Arrays.equals(reference.digest(), ProfileRepairIntent.digest(node.bytes()))
                     || commit.beforeVersion() != context.generation() + i + (i >= publicationIndex ? 1 : 0)
                         + (closed && i >= closeIndex ? 1 : 0)
@@ -662,11 +663,60 @@ public final class ZKProfileReservationStore {
     private static boolean boundedRepairFragment(ProfileRepairIntent intent, LedgerMetadata metadata,
             ProfileRecoveryBoundary boundary) {
         Long end = metadata.getAllEnsembles().higherKey(intent.fragmentStart());
+        if (intent.empty()) {
+            return end == null && boundary != null && boundary.context().equals(intent.recovery())
+                    && intent.fragmentStart() == metadata.getAllEnsembles().lastKey()
+                    && boundary.prefixEntryId() == intent.fragmentStart() - 1;
+        }
         return intent.range().firstEntryId() == intent.fragmentStart()
                 && (end != null ? intent.range().lastEntryId() == end - 1
                     : boundary != null && boundary.context().equals(intent.recovery())
                         && intent.fragmentStart() == metadata.getAllEnsembles().lastKey()
                         && intent.range().lastEntryId() == boundary.prefixEntryId());
+    }
+
+    private static CloseTarget repairCloseTarget(ProfileRepairIntent intent, byte[] operation, long generation,
+            BoundarySnapshot selected) {
+        if (!intent.empty()) {
+            return new CloseTarget(intent.replacedMemberSlot(), intent, intent.closeScope(operation, generation));
+        }
+        if (selected == null || !intent.recovery().equals(selected.boundary().context())) {
+            throw new IllegalArgumentException("EMPTY close lost its selected boundary");
+        }
+        var binding = new org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding(
+                selected.boundary().prefixEntryId(), selected.boundary().prefixLength(), selected.reference().digest());
+        return new CloseTarget(intent.replacedMemberSlot(), intent,
+                intent.terminalScope(operation, generation, binding),
+                binding);
+    }
+
+    private static boolean emptyBoundaryMatches(ProfileRepairCommit.EmptyBoundary proof, ProfileRepairIntent intent,
+            CloseTarget close) {
+        return intent.empty() && close.terminal() != null && Arrays.equals(proof.intentDigest(),
+                ProfileRepairIntent.digest(intent.encode())) && Arrays.equals(proof.operationId(),
+                    close.scope().operationId()) && proof.generation() == close.scope().authorityGeneration()
+                && proof.binding().equals(close.terminal());
+    }
+
+    private void validateEmptyBoundary(RepairSnapshot repair, ProfileRepairCommit commit, BoundarySnapshot selected,
+            long deadline) throws InterruptedException, TimeoutException {
+        if (!repair.intent().empty()) {
+            if (commit.emptyBoundaryDigest() != null) {
+                throw new IllegalArgumentException("DATA commit carries an EMPTY boundary proof");
+            }
+            return;
+        }
+        var node = reads.get(repairPath(repair.intent().recovery().ledger().ledgerId(), repair.intent().slot())
+                + "/empty-boundary", deadline);
+        requireFound(node);
+        requirePersistent(node, true);
+        var proof = ProfileRepairCommit.EmptyBoundary.decode(node.bytes());
+        if (commit.emptyBoundaryDigest() == null || !Arrays.equals(commit.emptyBoundaryDigest(),
+                ProfileRepairIntent.digest(node.bytes())) || !emptyBoundaryMatches(proof, repair.intent(),
+                    repairCloseTarget(repair.intent(), commit.closeOperationId(),
+                            commit.closeGeneration(), selected))) {
+            throw new IllegalArgumentException("EMPTY membership lost its original boundary proof");
+        }
     }
 
     public record CloseTarget(int member, ProfileRepairIntent intent, ProfileControlScope scope,
@@ -745,7 +795,7 @@ public final class ZKProfileReservationStore {
         }
     }
 
-    /** Existing activated targets only. Empty selected last range authorizes no copy, grant or new member. */
+    /** Activated or published EMPTY targets only. Selection itself grants no DATA range or new member. */
     private List<CloseTarget> emptyClosingTargets(ProfileRecoveryContext context,
             org.apache.bookkeeper.client.api.LedgerMetadata metadata, BoundarySnapshot selected, long deadline)
             throws InterruptedException, TimeoutException {
@@ -758,6 +808,25 @@ public final class ZKProfileReservationStore {
         var binding = new org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding(
                 boundary.prefixEntryId(), boundary.prefixLength(), selected.reference().digest());
         for (int slot = 0; slot < members.size(); slot++) {
+            boolean repaired = false;
+            for (var ref : ProfileRepairCommit.head(metadata.getCustomMetadata().get(ProfileRepairCommit.KEY))) {
+                var repair = readRepair(metadata.getLedgerId(), ref.slot(), deadline);
+                var intent = repair.intent();
+                if (!intent.empty() || intent.fragmentStart() != metadata.getAllEnsembles().lastKey()
+                        || intent.replacedMemberSlot() != slot
+                        || !intent.install().targetBookie().equals(members.get(slot).toString())) {
+                    continue;
+                }
+                var commit = repairCommit(reads.get(repairPath(metadata.getLedgerId(), ref.slot()) + "/committed",
+                        deadline));
+                validateEmptyBoundary(repair, commit, selected, deadline);
+                targets.add(repairCloseTarget(intent, commit.closeOperationId(), commit.closeGeneration(), selected));
+                repaired = true;
+                break;
+            }
+            if (repaired) {
+                continue;
+            }
             var install = installs.get(members.get(slot).toString());
             if (install == null) {
                 throw new IllegalArgumentException("Empty last fragment has no retained activated target");
@@ -785,8 +854,13 @@ public final class ZKProfileReservationStore {
     private static boolean closingTargetMatches(CloseTarget target, ClosingPlan plan) {
         var value = plan.metadata().metadata().getValue();
         if (target.intent() != null) {
-            return target.terminal() == null && target.intent().recovery().equals(plan.context())
-                    && boundedRepairFragment(target.intent(), value, plan.selection().boundary());
+            return (target.intent().empty() ? target.terminal() != null : target.terminal() == null)
+                    && target.intent().recovery().equals(plan.context())
+                    && boundedRepairFragment(target.intent(), value, plan.selection().boundary())
+                    && (!target.intent().empty() || target.terminal().prefixEntryId()
+                        == plan.selection().boundary().prefixEntryId()
+                        && target.terminal().prefixLength() == plan.selection().boundary().prefixLength()
+                        && Arrays.equals(target.terminal().selectionDigest(), plan.selection().reference().digest()));
         }
         var selected = plan.selection();
         return target.terminal() != null && selected.boundary().prefixEntryId() < value.getAllEnsembles().lastKey()
@@ -1530,7 +1604,7 @@ public final class ZKProfileReservationStore {
     record WorkerRepairPlan(CreateStatus status, RecoveryResult recovery, RepairSnapshot prepared,
             byte[] closeId, boolean published) { }
 
-    /** Reuse this worker's retained COPY operation before allocating another fixed intent slot. */
+    /** Reuse this worker's retained DATA or EMPTY operation before allocating another fixed intent slot. */
     WorkerRepairPlan resumeWorkerRepair(ProfileLedgerMetadataStore metadata, ProfileRecoveryContext context,
             java.util.Set<Integer> resolved, java.util.Set<String> suppliedTargets) {
         requireRecoveryClient(metadata);
@@ -1551,7 +1625,8 @@ public final class ZKProfileReservationStore {
                 var committed = reads.get(repairPath(value.getLedgerId(), slot) + "/committed", deadline);
                 if (committed.code() == Code.NONODE.intValue()) {
                     return new WorkerRepairPlan(CreateStatus.ALREADY_APPLIED, current, repair,
-                            selfOperation("worker-close", repair.intent().encode()), false);
+                            repair.intent().empty() ? repair.intent().terminalOperationId()
+                                : selfOperation("worker-close", repair.intent().encode()), false);
                 }
                 var commit = repairCommit(committed);
                 var ensemble = value.getAllEnsembles().get(repair.intent().fragmentStart());
@@ -1600,7 +1675,8 @@ public final class ZKProfileReservationStore {
             }
             Long next = value.getAllEnsembles().higherKey(fragment.getKey());
             long last = next == null ? selected.boundary().prefixEntryId() : next - 1;
-            if (last < fragment.getKey()) {
+            boolean empty = next == null && last == fragment.getKey() - 1;
+            if (last < fragment.getKey() && !empty) {
                 return new WorkerRepairPlan(CreateStatus.UNAVAILABLE, current, null, null, false);
             }
             int free = -1;
@@ -1629,11 +1705,14 @@ public final class ZKProfileReservationStore {
                     ProfileRepairIntent.digest(binding), null);
             var intent = new ProfileRepairIntent(context, free, selfOperation("worker-intent", binding),
                     fragment.getKey(), member, repairEnsembleDigest(value, fragment.getKey()), install,
-                    selfOperation("worker-grant", binding),
-                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(fragment.getKey(), last));
+                    empty ? new byte[16] : selfOperation("worker-grant", binding),
+                    empty ? null : new org.apache.bookkeeper.common.profile.control.ProfileExactRange(
+                            fragment.getKey(), last),
+                    empty ? selfOperation("worker-empty-terminal", binding) : null);
             var prepared = prepareRepair(metadata, intent);
             return new WorkerRepairPlan(prepared.status(), current, prepared.snapshot(),
-                    prepared.snapshot() == null ? null : selfOperation("worker-close", intent.encode()), false);
+                    prepared.snapshot() == null ? null : intent.empty() ? intent.terminalOperationId()
+                            : selfOperation("worker-close", intent.encode()), false);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new WorkerRepairPlan(CreateStatus.DURABILITY_UNKNOWN, null, null, null, false);
@@ -1647,6 +1726,7 @@ public final class ZKProfileReservationStore {
     private static boolean selfTarget(RepairSnapshot repair, ProfileRecoveryContext context, long first,
             int member, String bookie, long prefix) {
         return repair != null && repair.intent().recovery().equals(context)
+                && !repair.intent().empty()
                 && repair.intent().fragmentStart() == first && repair.intent().replacedMemberSlot() == member
                 && repair.intent().install().targetBookie().equals(bookie)
                 && repair.intent().range().firstEntryId() == first && repair.intent().range().lastEntryId() == prefix;
@@ -1765,8 +1845,38 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    boolean repairAdmitted(RepairSnapshot expected) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var actual = readRepair(expected.intent().recovery().ledger().ledgerId(),
+                    expected.intent().slot(), deadline);
+            if (actual == null || !actual.equals(expected)) {
+                throw new IllegalArgumentException("Repair admission belongs to another intent birth");
+            }
+            var node = reads.get(repairPath(expected.intent().recovery().ledger().ledgerId(), expected.intent().slot())
+                    + "/admitted", deadline);
+            if (node.code() == Code.NONODE.intValue()) {
+                return false;
+            }
+            requireFound(node);
+            validateRepairAdmission(actual, node, deadline);
+            return true;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Repair admission read interrupted", interrupted);
+        } catch (TimeoutException unavailable) {
+            throw new IllegalStateException("Repair admission unavailable", unavailable);
+        }
+    }
+
     public record RepairCommitResult(CreateStatus status,
-            ProfileLedgerMetadataStore.MembershipSnapshot metadata, ProfileControlScope closeScope) { }
+            ProfileLedgerMetadataStore.MembershipSnapshot metadata, ProfileControlScope closeScope,
+            org.apache.bookkeeper.common.profile.control.ProfileControlRequest.TerminalBinding terminal) {
+        public RepairCommitResult(CreateStatus status, ProfileLedgerMetadataStore.MembershipSnapshot metadata,
+                ProfileControlScope closeScope) {
+            this(status, metadata, closeScope, null);
+        }
+    }
 
     /** Cold adoption of an already published result; no copied-at claim, recopy or metadata write is made. */
     public RepairCommitResult resolveRepairClose(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
@@ -1797,8 +1907,11 @@ public final class ZKProfileReservationStore {
                             && Arrays.equals(ref.digest(), ProfileRepairIntent.digest(node.bytes())))) {
                 return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
             }
+            var selected = selectedBoundary(intent.recovery(), value, deadline);
+            validateEmptyBoundary(actual, commit, selected, deadline);
+            var close = repairCloseTarget(intent, closeOperationId, commit.closeGeneration(), selected);
             return new RepairCommitResult(CreateStatus.ALREADY_APPLIED, current.metadata(),
-                    intent.closeScope(closeOperationId, commit.closeGeneration()));
+                    close.scope(), close.terminal());
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new RepairCommitResult(CreateStatus.DURABILITY_UNKNOWN, null, null);
@@ -1814,6 +1927,24 @@ public final class ZKProfileReservationStore {
      * Reuse the same intent, copied-at metadata snapshot and close ID after UNKNOWN. */
     public RepairCommitResult commitRepair(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
             ProfileLedgerMetadataStore.MembershipSnapshot copiedAt, byte[] closeOperationId) {
+        if (expected.intent().empty()) {
+            throw new IllegalArgumentException("EMPTY membership cannot use a caller DATA copied-at claim");
+        }
+        return commitRepairOnce(metadata, expected, copiedAt, closeOperationId, null);
+    }
+
+    RepairCommitResult commitEmptyRepair(ProfileLedgerMetadataStore metadata,
+            ProfileRecoveryCoordinator.EmptyRepairProof proof) {
+        if (!proof.repair().intent().empty()) {
+            throw new IllegalArgumentException("EMPTY publication requires its actual boundary proof");
+        }
+        return commitRepairOnce(metadata, proof.repair(), proof.before(), proof.boundary().operationId(),
+                proof.boundary());
+    }
+
+    private RepairCommitResult commitRepairOnce(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
+            ProfileLedgerMetadataStore.MembershipSnapshot copiedAt, byte[] closeOperationId,
+            ProfileRepairCommit.EmptyBoundary emptyProof) {
         requireRecoveryClient(metadata);
         var intent = expected.intent();
         closeOperationId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
@@ -1850,6 +1981,7 @@ public final class ZKProfileReservationStore {
             var selection = selectedBoundary(current.context(), before.metadata().getValue(), deadline);
             if (prior.code() == Code.OK.intValue()) {
                 var commit = repairCommit(prior);
+                validateEmptyBoundary(actual, commit, selection, deadline);
                 int index = -1;
                 for (int i = 0; i < head.size(); i++) {
                     var ref = head.get(i);
@@ -1872,9 +2004,11 @@ public final class ZKProfileReservationStore {
                             && ref.intentBirth().equals(expected.birth())
                             && ref.intentStoreVersion() == expected.storeVersion()
                             && Arrays.equals(ref.digest(), ProfileRepairIntent.digest(prior.bytes())));
+                var close = matching ? repairCloseTarget(intent, closeOperationId, commit.closeGeneration(), selection)
+                        : null;
                 return new RepairCommitResult(matching ? CreateStatus.ALREADY_APPLIED : CreateStatus.CONFLICT,
-                        matching ? before : null, matching ? intent.closeScope(closeOperationId,
-                                commit.closeGeneration()) : null);
+                        matching ? before : null, close == null ? null : close.scope(),
+                        close == null ? null : close.terminal());
             }
             if (prior.code() != Code.NONODE.intValue()) {
                 throw new IllegalStateException("Repair membership result unavailable");
@@ -1909,11 +2043,16 @@ public final class ZKProfileReservationStore {
                 return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
             }
             var desired = ProfileRepairCommit.replace(value, intent, intent.install().targetBookie());
-            long generation = Math.addExact(intent.grantGeneration(), head.size() + 1L);
-            intent.closeScope(closeOperationId, generation);
+            long generation = intent.empty() ? intent.grantGeneration()
+                    : Math.addExact(intent.grantGeneration(), head.size() + 1L);
+            var close = repairCloseTarget(intent, closeOperationId, generation, selection);
+            if (intent.empty() && (emptyProof == null || !emptyBoundaryMatches(emptyProof, intent, close))) {
+                return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
+            }
             var commit = new ProfileRepairCommit(Math.toIntExact(((org.apache.bookkeeper.versioning.LongVersion)
                     before.metadata().getVersion()).getLongVersion()), ProfileRecoveryContext.metadataDigest(value),
-                    ProfileRecoveryContext.metadataDigest(desired), old, closeOperationId, generation);
+                    ProfileRecoveryContext.metadataDigest(desired), old, closeOperationId, generation,
+                    emptyProof == null ? null : ProfileRepairIntent.digest(emptyProof.encode()));
             var next = new java.util.ArrayList<>(head);
             next.add(new ProfileRepairCommit.Reference(intent.slot(), expected.birth(), expected.storeVersion(),
                     ProfileRepairIntent.digest(commit.encode())));
@@ -1928,6 +2067,10 @@ public final class ZKProfileReservationStore {
             checks.add(Op.check(path + "/admitted", 0));
             checks.add(Op.check(repairAdmissionGuardPath(actual), 0));
             checks.add(metadata.repairMetadataWrite(before, desired));
+            if (emptyProof != null) {
+                checks.add(Op.create(path + "/empty-boundary", emptyProof.encode(), immutableAcls,
+                        CreateMode.PERSISTENT));
+            }
             checks.add(Op.create(path + "/committed", commit.encode(), immutableAcls, CreateMode.PERSISTENT));
             int code = multi(checks, deadline);
             var after = readRepairable(metadata, ledger);
@@ -1937,7 +2080,7 @@ public final class ZKProfileReservationStore {
             return new RepairCommitResult(matching ? code == Code.OK.intValue() ? CreateStatus.APPLIED
                     : CreateStatus.ALREADY_APPLIED : conditionalFailure(code) ? CreateStatus.CONFLICT
                     : CreateStatus.DURABILITY_UNKNOWN, matching ? after.metadata() : null,
-                    matching ? intent.closeScope(closeOperationId, generation) : null);
+                    matching ? close.scope() : null, matching ? close.terminal() : null);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new RepairCommitResult(CreateStatus.DURABILITY_UNKNOWN, null, null);
@@ -1962,6 +2105,49 @@ public final class ZKProfileReservationStore {
                                 ? ReadStatus.QUARANTINED : ReadStatus.UNAVAILABLE, null);
                 }
                 if (key.purpose() == ProfileAuthorityPurpose.RECOVERY_TERMINAL_CLOSE) {
+                    var value = current.metadata().metadata().getValue();
+                    var selected = selectedBoundary(current.context(), value, deadline);
+                    for (int slot = 0; slot < ProfileRepairIntent.MAX_INTENTS; slot++) {
+                        var repair = readRepair(key.ledgerId(), slot, deadline);
+                        if (repair == null || !repair.intent().empty()
+                                || !repair.intent().recovery().equals(current.context()) || selected == null
+                                || !boundedRepairFragment(repair.intent(), value, selected.boundary())) {
+                            continue;
+                        }
+                        var intent = repair.intent();
+                        var scope = repairCloseTarget(intent, intent.terminalOperationId(), intent.grantGeneration(),
+                                selected).scope();
+                        if (!scope.targetBookie().equals(localBookie)
+                                || !ProfileAuthorityKey.fromScope(scope).equals(key)) {
+                            continue;
+                        }
+                        var admitted = reads.get(repairPath(key.ledgerId(), slot) + "/admitted", deadline);
+                        if (admitted.code() != Code.OK.intValue()) {
+                            return new ProfileControlStore.ReadResult(admitted.code() == Code.NONODE.intValue()
+                                    ? ReadStatus.NOT_FOUND : ReadStatus.UNAVAILABLE, null);
+                        }
+                        validateRepairAdmission(repair, admitted, deadline);
+                        var committed = reads.get(repairPath(key.ledgerId(), slot) + "/committed", deadline);
+                        if (committed.code() == Code.OK.intValue()) {
+                            var commit = repairCommit(committed);
+                            validateEmptyBoundary(repair, commit, selected, deadline);
+                            if (!value.getAllEnsembles().get(intent.fragmentStart()).get(intent.replacedMemberSlot())
+                                    .toString().equals(intent.install().targetBookie())) {
+                                continue;
+                            }
+                        } else if (committed.code() != Code.NONODE.intValue()) {
+                            throw new IllegalStateException("EMPTY repair result unavailable");
+                        } else if (!repairMatchesMetadata(intent, value)) {
+                            continue;
+                        }
+                        var after = readRepairable(metadata, key.ledgerId());
+                        if (after.context() == null || !after.context().equals(current.context())) {
+                            return new ProfileControlStore.ReadResult(ReadStatus.QUARANTINED, null);
+                        }
+                        return ProfileControlStore.ReadResult.found(new CommittedProfileAuthority(scope,
+                                CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED,
+                                EngineProfile.SEGMENT_WAL_ENGINE, admitted.stat().getMzxid(), true));
+                    }
                     var prepared = closingPlan(metadata, current.context());
                     if (prepared.plan() == null) {
                         return new ProfileControlStore.ReadResult(prepared.status() == CreateStatus.DURABILITY_UNKNOWN
@@ -1983,6 +2169,9 @@ public final class ZKProfileReservationStore {
                         continue;
                     }
                     var intent = repair.intent();
+                    if (intent.empty() && key.purpose() != ProfileAuthorityPurpose.PREPARING_INSTALL) {
+                        continue; // EMPTY never authorizes either a DATA grant or grant-close.
+                    }
                     var committed = reads.get(repairPath(key.ledgerId(), slot) + "/committed", deadline);
                     ProfileControlScope scope;
                     if (key.purpose() == ProfileAuthorityPurpose.RECOVERY_GRANT_CLOSE) {
@@ -2139,11 +2328,12 @@ public final class ZKProfileReservationStore {
 
     private static boolean repairMatchesMetadata(ProfileRepairIntent intent,
             LedgerMetadata value) {
-        var entry = value.getAllEnsembles().floorEntry(intent.range().firstEntryId());
-        var next = value.getAllEnsembles().higherKey(intent.range().firstEntryId());
+        long first = intent.empty() ? intent.fragmentStart() : intent.range().firstEntryId();
+        var entry = value.getAllEnsembles().floorEntry(first);
+        var next = value.getAllEnsembles().higherKey(first);
         return entry != null && entry.getKey() == intent.fragmentStart()
                 && intent.replacedMemberSlot() < entry.getValue().size()
-                && (next == null || intent.range().lastEntryId() < next)
+                && (intent.empty() ? next == null : next == null || intent.range().lastEntryId() < next)
                 && Arrays.equals(intent.oldEnsembleDigest(), repairEnsembleDigest(value, intent.fragmentStart()));
     }
 
