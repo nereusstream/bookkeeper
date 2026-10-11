@@ -41,3 +41,6 @@
 
 
 2026-10-11继续第15步：883a42abd0之后已接显式fenced-CLOSED cluster logical delete，保留完整historical targets/离线义务、metadata seal与出生绑定tombstone、actual cold cancellation和原关闭查询；相关实现/当前证据由profile-wire/README.md“Fenced-CLOSED 集群逻辑删除与目标义务”拥有。当前尚未接本地TOMBSTONE wire/delete-applied、ordered delivery/cursor/catch-up/rejoin及physical/GC，继续这些真实剩余项与其他全16步未闭合范围；目标仍active，logical完成不代表整个目标或生产Gate完成。
+
+
+2026-10-12继续第15步：01b0df6fff后已接initial共享Bookie/incarnation delete delivery journal，同一ZKmulti提交无洞event/index/head，真实跨两ledger验证及exact read消费由profile-wire/README.md“初始共享 delete delivery journal”拥有。当前尚不产生本地delete-applied/cursor或writable authority，继续接实际TOMBSTONE wire/apply、catch-up/rejoin与全16步其余未闭合项；持续目标active，投递journal里程碑不等于整个目标完成。

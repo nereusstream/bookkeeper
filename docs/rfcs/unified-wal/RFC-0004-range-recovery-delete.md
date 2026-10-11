@@ -1126,3 +1126,6 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 
 
 2026-10-11 [Fenced-CLOSED 集群逻辑删除与目标义务](implementation/profile-wire/README.md#fenced-closed-集群逻辑删除与目标义务)已显式接matching CLOSED前置、原root delete cut、标准metadata不可逆seal、完整initial/replacement/admitted-repair targets及出生绑定cluster tombstone。同起点覆盖目标/离线incarnation保留，三段回复丢失续接，cancel等actual cold completion，manifest缺失/重建拒绝；新open拒绝、旧reader未本地tombstone前可读，未冒充physical/access barrier。76与14项Java、27有限模型配置各按当前source绑定通过，style通过，RAT443历史问题无新增。实际delivery/wire/delete-applied/cursor/catch-up/rejoin/回收与GC/默认SDK routing及综合Gate仍未闭合，步骤12/14/15保持PARTIAL/OPEN。
+
+
+2026-10-12 [初始共享 delete delivery journal](implementation/profile-wire/README.md#初始共享-delete-delivery-journal)已复用logical tombstone/完整target，实际ZK同事务提交event/index/连续head；一个Bookie/incarnation跨两真实ledger共用initial stream，旧绑定不可盲建新stream，丢回复/并发seq赢家/缺失与同字节重建拒绝已有证据。阶段79与最终7项Java、15配置有限模型各保留原source，style通过，RAT443历史问题无新增。4096-event有限prototype无snapshot/GC扩容，不授予本地cursor/registration authority；实际TOMBSTONE/apply、catch-up/rejoin/physical与综合Gate仍OPEN，步骤12/14/15保持PARTIAL。

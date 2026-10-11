@@ -1348,3 +1348,10 @@ Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksu
 2026-10-11，ProfileLogicalDelete消费fenced-CLOSED、实际ZK seal/tombstone、目标history/physical birth和cold终态，正向允许offline不阻塞logical且旧read/barrier/physical独立；precondition、seal顺序、漏retired/repair、早logical、忽略manifest birth、cancel早release和等待offline七种错误规则均得到指定反例。最终6tg4udtw与writer-close/whole-recovery共27配置，4完整正向/23指定反例、935当前inputs匹配；新正向109 generated/72 distinct、queue0、depth/diameter8、0.868秒/peak RSS107724800 bytes，单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。
 
 这是有限输入投影，不生产TLS/files、真实delivery/cursor/rejoin、完整拓扑、时钟/公平性/活性或完整A+C+D。实际76与14项Java、原source/config/run/command/失败回执与复现命令由[接线记录](../profile-wire/README.md#fenced-closed-集群逻辑删除与目标义务)拥有，综合Gate不提升。
+
+
+### 初始共享 delete delivery
+
+2026-10-12，ProfileDeleteDelivery投影两个ledger/一个target incarnation、initial assignment和bounded head，正确规则要求event/head同commit、重试唯一seq、exact assignment/birth与missing拒绝以及共享stream。最终j2innjna与logical-delete共15配置，2完整正向/13指定反例、944当前inputs匹配；新正向308 generated/110 distinct、queue0、depth/diameter8、0.945秒/peak RSS108871680 bytes，单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。initial缺Sequences的SANY失败保留，不计PASS。
+
+实际ZK/SDK/TLS/files阶段79与最终7项、raw codec与有限界限由[接线记录](../profile-wire/README.md#初始共享-delete-delivery-journal)拥有。本投影不生产physical dispatch/local cursor、注册linearization、handoff/snapshot/GC、TLS/fsync或完整时钟/公平性/活性/A+C+D，综合Gate不提升。

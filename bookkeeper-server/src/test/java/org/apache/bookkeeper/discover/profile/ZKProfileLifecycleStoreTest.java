@@ -124,6 +124,42 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
         return new Prepared(root, desired, prepared.page());
     }
 
+    @Test
+    public void deleteDeliveryCodecsHaveFixedBoundsAndIndependentCrc() {
+        var target = new ProfileDeleteRecord.Target("b1:3181", bytes(16, 2));
+        var head = new ProfileDeleteDelivery.Head(bytes(16, 81), 1, 1, 2, target);
+        byte[] encoded = head.encode();
+        assertEquals(77, encoded.length);
+        var crc = new CRC32C();
+        crc.update(encoded, 0, 73);
+        assertEquals((int) crc.getValue(), ByteBuffer.wrap(encoded).getInt(73));
+        assertEquals(head, ProfileDeleteDelivery.Head.decode(encoded));
+        var scope = scope("b1:3181");
+        var context = new org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext(44,
+                scope.ledgerInstanceId(), scope.descriptorIdentity().toBytes());
+        var event = new ProfileDeleteDelivery.Event(head.streamId(), 1, 1, 2, context, target,
+                new ProfileDeleteRecord.Reference(100, bytes(32, 7), bytes(32, 8)), bytes(16, 9), 10);
+        byte[] raw = event.encode();
+        assertEquals(249, raw.length);
+        crc.reset();
+        crc.update(raw, 0, raw.length - 4);
+        assertEquals((int) crc.getValue(), ByteBuffer.wrap(raw).getInt(raw.length - 4));
+        assertEquals(event, ProfileDeleteDelivery.Event.decode(raw));
+        byte[] stream = head.streamId();
+        stream[0] ^= 1;
+        assertArrayEquals(encoded, head.encode());
+        for (int count = 0; count < raw.length; count++) {
+            byte[] truncated = Arrays.copyOf(raw, count);
+            assertThrows(IllegalArgumentException.class, () -> ProfileDeleteDelivery.Event.decode(truncated));
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 2, 1, 0, target));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 1, 2, 0, target));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 1, 1, 4097, target));
+    }
+
     private record Replaced(ZKProfileReservationStore.Snapshot source, ProfileReplacementPage desired,
                             ZKProfileReservationStore.ReplacementSnapshot candidate) { }
 

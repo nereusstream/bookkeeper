@@ -1283,3 +1283,32 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 最终模型6tg4udtw共27配置，4完整正向/23指定反例，935当前inputs匹配；新logical投影只消费fenced-close、ZK durability/birth/version、retained history与cold terminal输入，覆盖precondition、先seal、完整义务、logical条件、出生绑定、cancel/permit及offline不阻塞logical。新正向109 generated/72 distinct、queue0、depth8、0.868秒/peak RSS107724800 bytes，非性能结果；TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE，未生产TLS/files、delivery/cursor/rejoin、全metadata拓扑、时钟/公平性/活性或A+C+D完整组合。旧yvc3rna6在cold行动/终态guard补齐前，不移绑最终源码。
 
 持久证据 /Users/liusinan/.codex/artifacts/unified-wal/logical-delete-evidence-hqfilyta 保留原run/source/config/command、失败和阶段绑定。compile/style exit0；RAT exit1，443 unapproved全在父HEAD，无新增、不称CI全绿。当前只有有界cluster logical阶段；实际TOMBSTONE wire/本地delete-applied、跨ledger ordered delivery/no-hole cursor、snapshot/catch-up、真实startup rejoin、physical query/GC/decommission、默认SDK routing与完整兼容/模型/性能/运维仍未闭合，步骤12/14/15及生产Gate仍PARTIAL/OPEN。Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。
+
+
+## 初始共享 delete delivery journal
+
+2026-10-12，第15步在现有cluster logical tombstone/完整target manifest上新增实际ZK delivery journal。每个Bookie stable identity/storage incarnation共用一个stream，不按ledger分配；initial streamGeneration=1/assignmentGeneration=1，immutable assignment、head与birth witness同一multi创建。assignment只固定本实验投递绑定，不授予writable registration或handshake/ACK权限，generation handoff/wipe未实现仍拒绝。
+
+appendDeleteDelivery先fresh验证原root、sealed metadata、出生绑定cluster tombstone和目标在完整manifest内，再在同一ZK multi中create immutable event、create per-ledger/target同请求续接index、CAS head N→N+1。event与index物理birth相同；head数据版本等于committed-through，head/witness/assignment物理birth一致。初始有限上限每stream4096 events；满额返回LIMIT保留义务，不盲建第二stream、丢事件或假装可持续无限增长。没有snapshot/compaction前不扩张此界限。
+
+Experimental UWDH/schema1 head为70+UTF8 bookie长度 bytes；UWDE/schema1 event为242+长度 bytes，使用既有60-byte ledger context、88-byte logical tombstone reference、stream/generation/assignment/sequence、request/epoch和exact target/incarnation，CRC32C严格，单record上限512 bytes。跨ledger head增长不改变assignment generation。未确认multi结果从同一index+head+event重读解析；并发loser可能UNAVAILABLE，重试仍沿同ledger/target/request，不能换target或多消耗序号。
+
+readDeleteDelivery仅返回已committed且仍匹配cluster tombstone、完整ledger context/target、request/epoch与index birth的effect；缺失或同字节重建、assignment/head身份不符、sequence<=head却无event均quarantine。sequence>当前head是UNAVAILABLE，不提供可推进cursor的non-applicability证明。读取不写cursor、不消费physical receipt，未接本地TOMBSTONE/应用/注册gate。旧incarnation不能由新incarnation继承本stream；既有assignment/index存在而head缺失时拒绝重建新stream。
+
+真实两-ledger验证在同一个SDK/ZK和三个实际Bookie文件/socket上重新创建ledger45、执行真实all-E INSTALL/ACTIVATE与empty writer close，再和ledger44分别logical delete；同target的两个event严格seq1/2且stream一致，只有一个head+一个assignment。重复append沿原坐标；wrong incarnation拒绝。event1丢失和同字节重建拒绝；head缺失/重建而old assignment保留拒绝。另一个真实ZK客户端注入event/index/head commit后的CONNECTIONLOSS，重读得到seq1；不同实际客户端并发同请求只有一个event/seq赢家。该测试是实际网络/存储创建关闭与ZK投递authority，不是目标已经收到或applied。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#committedDeleteDeliver*+logicalDelete*+ordinaryWriterClose*,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#committedDeleteDeliver*+logicalDelete*,ZKProfileLifecycleStoreTest#deleteDeliveryCodecsHaveFixedBoundsAndIndependentCrc'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-delivery --config-prefix ce-profile-delete-delivery --config-prefix a-profile-logical-delete --config-prefix ce-profile-logical-delete
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+首次compile失败来自record target accessor遮蔽outer parser及未捕获IOException，已修正；FlqS2GS2两ledger首项GREEN1。YJGfDEhE两项GREEN在丢回复与竞争尚未分离前，其race不保证注入发生，不计loss证明；随后先单独loss并assert实际dropped，再另target竞态。UBhycuOa三类79零fail/skip（metadata19/lifecycle50/native10）在末次仅unit长行换行及完整reader context复核前；rE0eNXVV两类7在reader复核前。最终kkggENGg两类7零fail/skip，1072当前inputs逐项匹配；不移绑原79。最终style exit0，RAT exit1，443 unapproved全部父HEAD既有、无新增，不称CI全绿。
+
+新ProfileDeleteDelivery有限投影以logical tombstone、ZK atomicity/birth/assignment作为输入，覆盖head/event原子提交、同请求唯一seq、精确binding、missing不可补成功和非per-ledger stream六个指定反例；initial biom2ze0缺Sequences模块导致SANY INCONCLUSIVE，修复后最终j2innjna的15配置为2完整正向/13指定反例，944当前inputs匹配。新正向308 generated/110 distinct、queue0、depth8、0.945秒/peak RSS108871680 bytes，非性能结论；TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。没有生产local cursor、TLS/fsync、注册线性化、handoff、snapshot/GC、完整时间/活性/公平性或A+C+D。
+
+持久证据 /Users/liusinan/.codex/artifacts/unified-wal/delete-delivery-evidence-rv38_1o0 保留原source/config/run/command、compile/SANY/style失败与阶段结果。当前只完成committed delivery source及其只读消费验证；实际TOMBSTONE wire、delete-applied/cursor、snapshot/catch-up、registration required-through cut/rejoin、物理查询/GC/decommission和全16步其他范围仍未闭合，步骤12/14/15及生产Gate保持PARTIAL/OPEN。首批隔离可丢弃，Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。

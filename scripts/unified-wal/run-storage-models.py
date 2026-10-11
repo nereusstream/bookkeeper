@@ -19,6 +19,14 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-delivery': None,
+    'ce-profile-delete-delivery-head': 'HeadCommitHasNoHole',
+    'ce-profile-delete-delivery-duplicate': 'SameRequestUsesOnePosition',
+    'ce-profile-delete-delivery-assignment': 'ReturnedHasExactAuthority',
+    'ce-profile-delete-delivery-birth': 'ReturnedHasExactAuthority',
+    'ce-profile-delete-delivery-missing': 'ReturnedHasExactAuthority',
+    'ce-profile-delete-delivery-streams': 'OneSharedStream',
+
     'a-profile-logical-delete': None,
     'ce-profile-logical-delete-close': 'DeleteNeedsFencedClosed',
     'ce-profile-logical-delete-seal': 'TargetsFollowStandardSeal',
@@ -780,6 +788,7 @@ def main():
                    else "ProfileRegisteredConnection.tla" if "profile-registered-connection" in name
                    else "ProfileWriterClose.tla" if "profile-writer-close" in name
                    else "ProfileLogicalDelete.tla" if "profile-logical-delete" in name
+                   else "ProfileDeleteDelivery.tla" if "profile-delete-delivery" in name
                    else "ProfileServiceShutdown.tla" if "profile-service-shutdown" in name
                    else "ProfileRecoveryPeerPool.tla" if "profile-recovery-peer-pool" in name
                    else "ProfileServiceBootstrap.tla" if "profile-service-bootstrap" in name

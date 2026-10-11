@@ -465,3 +465,8 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 ## Fenced-CLOSED 逻辑删除的 metadata seal
 
 2026-10-11，原root cut CAS消费matching CLOSED的metadata birth/version；随后用已定义membership-frozen key在同一标准CLOSED记录发布88-byte UWDS seal，才枚举完整历史targets。目标manifest/birth guard持久后，第二次同记录CAS发布UWDT cluster tombstone引用，形成普通logical result；不等待离线ACK、不混淆本地barrier/physical。原P/L/creator/ensemble与历史close proof保留，明确拒绝freeze后的repair写。actual cold completion、三段reply-loss、旧reader/新open和history/manifest identity证据由[接线记录](../profile-wire/README.md#fenced-closed-集群逻辑删除与目标义务)拥有；delivery、cursor、startup/rejoin、GC及步骤15/生产Gate未完成。
+
+
+## 初始共享 delete delivery source
+
+2026-10-12，logical tombstone上的exact target/incarnation可发布initial generation1共享stream；head、immutable assignment及birth witness同multi创建，event/index/head increment同multi提交，同请求仅沿原seq续接。4096-event界限不盲开新stream；read consumer复核完整ledger context、target与原logical ref，缺失/重建fail closed。实际两个ledger INSTALL/ACTIVATE/close与ZK丢回复/竞态证据由[接线记录](../profile-wire/README.md#初始共享-delete-delivery-journal)拥有。此journal不发布delete-applied、local cursor或writable registration，snapshot/handoff/投递wire/rejoin与Gate未完成。
