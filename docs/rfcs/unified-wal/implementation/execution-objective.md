@@ -47,3 +47,6 @@
 
 
 2026-10-12继续第15步：7d241ce0e5之后已接UIC7实际committed delivery/cold exact authority与Bookie type13 TOMBSTONE/continuous delete-applied cursor，同record持久并沿原checkpoint/rotation/restart重建；gap写盘前可重试、旧seq不回退、UNKNOWN不发布成功，实际旧I/O/read pin独立排空。源码/测试/模型及当前receipt由profile-wire/README.md“UIC7 本地 delete-applied 与连续 cursor”拥有。继续registration required-through提交cut、startup/offline catch-up/rejoin、snapshot/handoff、physical/GC/decommission及全16步其他未闭合范围；持续目标active，步骤12/14/15和生产Gate保持PARTIAL/OPEN。
+
+
+2026-10-12继续第15步：aac954a0f5之后已接fixed initial shared assignment/head的实际catch-up和原writable multi required-through cut，从healthy recovered control cursor校验；实际磁盘restart、DLR/seq2注册竞争、LIMIT/UNKNOWN/actual local completion与lost registration reply同session解析由profile-wire/README.md“初始 required-through cut 与真实 rejoin 追赶”拥有。持续目标active，步骤12/14/15及生产Gate仍PARTIAL/OPEN。继续持续在线delivery与默认bootstrap/其余required authority/device/compatibility producer、snapshot/handoff/history GC/decommission、full-bytes、兼容/正式性能/运维及综合验收，不以本切片或提交标记整个16步完成。

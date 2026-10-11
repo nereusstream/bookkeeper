@@ -475,3 +475,8 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 ## UIC7 committed delete authority 与本地 cursor
 
 2026-10-12，`deleteAuthorityReader(localBookie, incarnation, metadata)`从固定receipt重读完整committed event及actual logical tombstone/manifest/birth，只有原domain/context/target/stream/seq/request/epoch/ref/op/payload全部matching才投影DELETE_AUTHORIZED。原mTLS static/exact AuthZ及实际driver/cold/receive quota接入UIC7/schema6，不凭DELETE_INTENT或caller binding授权。Bookie type13同记录建立TOMBSTONE/continuous cursor；gap写盘前可重试、UNKNOWN无成功cursor、旧retry不回退，checkpoint/restart可重建。实现和证据由[协议记录](../profile-wire/README.md#uic7-本地-delete-applied-与连续-cursor)拥有。cursor不等runtime drain，不授予FREE/access-barrier/registration；startup catch-up、required-through提交cut、snapshot/handoff及Gate仍OPEN。
+
+
+## 初始 delete head 与 writable publication cut
+
+2026-10-12，`readDeleteHead`验证shared initial assignment/head/birth并提供finite required-through；startup不重建missing authority。显式empty commissioning保留同事务head/birth/immutable assignment，不免除旧scope义务。delete-aware ephemeral publisher从原healthy control log读取cursor，在原writable multi检查同assignment、head birth和版本；head增长不改变assignment，也不单凭N增长撤销已注册节点。actual cold catch-up、seq2先于registration的真实竞争与同session丢回复解析由[协议记录](../profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)拥有。仅fixed initial；在线delivery、完整bootstrap、assignment handoff/snapshot/历史GC/退役与Gate保持OPEN。

@@ -238,3 +238,8 @@ Java `unified-wal-local-GDbVx4DD` exit0：3类42项全部通过（persistent con
 2026-10-11 [共享索引与legacy退役拒绝](../profile-wire/README.md#共享引用索引与-legacy-退役拒绝)修复Profile过滤影响共享BookKeeperAdmin的问题：公开索引恢复全引用，仅Classic auditor过滤Profile；legacy退役对已知ensemble/marker中的Profile引用明确拒绝，避免无marker时提前成功。真实退役RED/GREEN与公开index/Classic实际任务范围验证通过；完整Profile退役/retained-history清理仍未实现，生产Gate不提升。
 
 2026-10-11 [CLOSED周期DATA审计](../profile-wire/README.md#profile-closed-data-周期审计)已复用原replica-check CLOSED范围、streamed metadata与真实全W验证，共用单peer pool/coordinator预算，actual health/lease drain与最后fresh cut后只生成检查任务。真实历史DATA hole→原worker修复/全W/marker闭环、健康/权限拒绝不clear、deadline/关闭保留actual资源通过。OPEN/正常writer close、payload/placement、总字节预算、离线/rejoin/delete与生产Gate仍OPEN，步骤12/14保持PARTIAL。
+
+
+## 初始 delete required-through 与实际恢复 cursor
+
+2026-10-12，explicit `bindDeleteDelivery`将原graph的healthy recovered control cursor接到既有ephemeral publisher，fresh writable multi同时检查initial assignment/birth/head版本；仅caller输入DELETE_RECOVERED或persistent READY不够。`catchUpProfileDeletes`实际冷读完整event/authority并经原force/apply推进no-hole cursor；LIMIT/UNKNOWN不开放gate，UNKNOWN保留actual local completion。已用真实磁盘restart/DLR/三节点与两ZK客户端验证seq2抢在注册前提交、继续追赶与lost reply同session解析。[接线记录](../profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)拥有源码、范围与证据。缺失assignment不默认empty；首次empty commissioning是显式动作。ordinary head增长不是assignment变化；后续在线消费、snapshot/handoff、其他真实compatibility/device/required-authority producer与默认bootstrap尚未闭合，不把此cursor切片升级为完整startup/Gate。

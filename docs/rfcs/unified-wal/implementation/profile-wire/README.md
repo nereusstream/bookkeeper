@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，最新为 [UIC7 本地 delete-applied 与连续 cursor](#uic7-本地-delete-applied-与连续-cursor)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，最新为 [初始 required-through cut 与真实 rejoin 追赶](#初始-required-through-cut-与真实-rejoin-追赶)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -1344,3 +1344,35 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 新 `ProfileDeleteApplied` 有限投影消费exact cold authority、force及checkpoint字节作为输入，检查continuous effect、durable前不成功、cursor/checkpoint重建、旧custody不能提前release、initial assignment和actual incarnation，7个mutations均为指定反例。最终7ii07jzb共23配置为3完整正向/20指定反例，953当前inputs匹配；新正向287 generated/120 distinct、queue0、depth12、0.895秒/peak RSS111116288 bytes，非性能结论。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE。模型不生产TLS/fsync/ZK/registration事实，不含snapshot/handoff/GC、完整时钟/活性/公平性或A+C+D组合。Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。
 
 当前新增wire/apply/continuous cursor切片；registration required-through提交cut、startup/offline catch-up/rejoin、snapshot/handoff、physical query/history GC/decommission、默认SDK routing及全16步其他验收仍未闭合。步骤12/14/15与生产Gate保持PARTIAL/OPEN，持续目标active。
+
+
+## 初始 required-through cut 与真实 rejoin 追赶
+
+2026-10-12，在 `aac954a0f5873322a66dad92616a273791a51511` 后继续接固定initial assignment的实际delete catch-up与writable publication cut。此前UIC7/native type13、原DLR/readiness/service-info/session-admission schema和历史receipt不重写；当前仍显式隔离、OFF/SYSTEM/PARK、可丢弃。此增量不关闭完整startup/registration/rejoin或生产Gate。
+
+`readDeleteHead(target)`直接sync/read/验证original shared head、immutable assignment和birth，并给出固定gen1/assignment1的required-through。缺失不会解释成EMPTY/default或触发恢复重建。`createInitialDeleteAssignment(target)`仅供显式首次commissioning创建empty head0，head/birth/immutable assignment同multi；old assignment仍在而head缺失时拒绝重新初始化。它不是wipe/decommission或旧incarnation reset授权，不在startup reader中自动调用；新incarnation独立target key，旧scope的obligation仍保留。完整verified bootstrap、历史压缩/snapshot及commissioning/terminal proof生产授权仍OPEN。
+
+`ZKProfileEphemeralRegistrationStore.bindDeleteDelivery`在原startup attempt任何cold operation前绑定本地storage incarnation、原reservation store及其durable cursor supplier，必须是publisher同一个实际ZK client。fresh writable create的原multi增加assignment0、原stream birth及head dataVersion检查；fixed assignment必须匹配readiness有效generation，本地cursor须匹配stream/gen/assignment并到达该head的N（空N0允许无effect cursor）。delete event先提交则旧head check失败，保持无writable并继续追赶；registration先提交则后续event仍在该incarnation共享stream中，ordinary head增长不改assignment generation，也不单凭新N撤销已经成立的registration。owned ALREADY/reply-loss解析保留原session/nonce；不新增metadata node/schema、Add-time lease、watch时序authority或轮询重试层。未绑定的历史reference publisher仍只覆盖其原输入事实，不代表具备此delete barrier。
+
+`IsolatedSegmentStorage.catchUpProfileDeletes`是显式bounded cold入口：要求原graph已实际恢复，读取自己的唯一initial assignment/head，按cursor+1重读完整committed event及原cold exact DELETE authority，逐effect复用原`SegmentProfileInstallStore`/控制I/O/owner force/apply，再fresh head；未解释的缺口、wrong binding、missing authority或changed incarnation不成功。最多maxEvents、deadline停止继续本地提交，相关borrowed store保持原cold read deadline；没有新增线程、队列、snapshot backend、自动bootstrap、全日志内存副本或physical reclaim等待。LIMIT需要caller另一次有界调用；UNKNOWN只解析已提交记录。`profileDeleteProgress`由这个仍opened/healthy的原control log提供，失败/关闭graph不再提供可注册的progress；无从caller supplied READY facts反推cursor。
+
+catch-up Attempt的completion以原store的实际local control I/O/owner apply observer为界，独立于caller等待及UNKNOWN result，访问器返回future副本。它不取消底层I/O，不证明ZK callback已取消、remote abort、全graph资源排空、access barrier、FREE或physical完成。原graph关闭/回收继续等待自己的driver/ticket/pin保护条件。
+
+真实组合复用三个实际Bookie/mTLS/SDK与ZK创建、关闭并logical-delete的非空ledger44和空ledger45。一个尚未本地delete的incarnation关闭原graph并从实际目录restart，预先绑定原session Admission，初始gate关闭/cursor缺失；即使输入persistent readiness声称READY，fresh writable在cursor未到head1时拒绝。cold追赶seq1后，原DLR在真实FileChannel/目录force并读回；另实际ZK client在writable multi前提交ledger45的seq2，原注册因head版本竞争失败且gate未打开。held实际DATA文件pin期间继续force/apply seq2，writable multi提交后丢回复，经同session/nonce重读与ALREADY解析后才openAfterReconciliation；目标后续读取不能发布已删除entry，demote保持不可重开。
+
+另一个实际incarnation从同目录restart，head2/maxEvents1只应用seq1并返回LIMIT；第二effect的真实控制force被hold，timeout返回UNKNOWN/cursor仍1/completion pending，caller手动complete自己的future副本不影响actual completion。release后原owner apply/cursor2与actual completion终结，新cold调用fresh解析为CAUGHT_UP且无额外force。两项真实ZK单测另覆盖empty commissioning、missing head/保留assignment不重建，以及wrong publisher client/incarnation/effective generation；其cursor/compatibility输入不冒充物理恢复，该链由上述actual graph组合提供。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileEphemeralRegistrationStoreTest,ZKProfileRegistrationStoreTest,ZKProfileLifecycleStoreTest,SegmentProfileInitialSocketClientTest#committedDeleteDeliver*+logicalDelete*+*Registration*+*Registered*+registered*+registration*+*Rejoin*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-registration --config-prefix ce-profile-delete-registration --config-prefix a-profile-delete-applied --config-prefix ce-profile-delete-applied --config-prefix a-registration-admission --config-prefix ce-registration-admission
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+原U87S3UjE的RED只因真实第二incarnation加入后旧namespace count仍期待2；更新为每incarnation一head/assignment并按exact target选head，5xmqxKl3的3项GREEN早于LIMIT/held force覆盖。最终fiQW91IE四类101项（ephemeral19/persistent13/lifecycle50/socket19）零fail/error/skip，1072当前source inputs逐项匹配；不叠加重复kopOhE3K三项。style exit0；RAT exit1，443 unapproved全是父HEAD已有路径、无新增，不称CI全绿。
+
+新`ProfileDeleteRegistration`有限投影只消费durable local cursor、committed head/initial assignment与ZK原子性输入，覆盖cursor不足、跳过head cut、missing default、wrong generation/incarnation及普通head增长不demote六反例。首次_e85up19遗漏Integers的负数定义，为SANY INCONCLUSIVE；修正后ks4f684z共20配置为3完整正向/17指定反例，961当前inputs匹配。新正向190 generated/78 distinct、queue0、depth8、0.805秒/peak RSS107970560 bytes，非性能结果；TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE。未生产TLS/fsync/硬件/ZK quorum、其他startup facts、在线delivery loop、snapshot/handoff/GC、完整时间/公平性/活性或A+C+D组合。
+
+持久证据 `/Users/liusinan/.codex/artifacts/unified-wal/delete-rejoin-evidence-rinuvevb` 保留各原source/config/run/command、失败及阶段身份。当前为explicit fixed initial catch-up/registration cut；持续在线投递/默认bootstrap与其他required authority/device/compatibility facts、snapshot/handoff/history GC/terminal decommission、full-bytes、完整运行/兼容/性能/运维验收仍未闭合。步骤12/14/15和生产Gate保持PARTIAL/OPEN；Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，持续目标active。

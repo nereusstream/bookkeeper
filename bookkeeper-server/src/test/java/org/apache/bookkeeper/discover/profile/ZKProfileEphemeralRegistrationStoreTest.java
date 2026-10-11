@@ -38,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentLocalReadinessStore;
 import org.apache.bookkeeper.common.profile.EngineProfile;
+import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore.PublicationStatus;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore.WritableRegistration;
@@ -103,6 +104,73 @@ public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
     private static WritableRegistration writable(ProfileServiceInfoProjection projection) {
         return new WritableRegistration(BOOKIE, projection.storageIncarnation(),
                 projection.readinessGeneration(), projection.persistentStoreVersion());
+    }
+
+    private VersionedRecord createWithDeleteAssignment() {
+        var original = record(1);
+        var ready = new ProfileReadinessRecord(original.bookieId(), original.storageIncarnation(), original.engine(),
+                original.protocolMajor(), original.protocolMinor(), original.capabilityGeneration(),
+                original.localFormatGeneration(), original.deviceManifestIdentity(),
+                original.deviceManifestGeneration(),
+                new Generation(1), original.localReadinessGeneration(), original.minimumReaderVersion(),
+                original.minimumWriterVersion(), original.capabilityHints(), original.state());
+        assertEquals(CasStatus.APPLIED, persistent(first).compareAndSet(BOOKIE, -1, 0, ready).status());
+        return persistent(first).read(BOOKIE).versionedRecord().orElseThrow();
+    }
+
+    @Test
+    public void deleteAwareWritableNeedsCommissionedAssignmentAndDoesNotRecreateMissingHead() throws Exception {
+        var projection = projection(createWithDeleteAssignment());
+        var deletes = new ZKProfileReservationStore(first, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        var target = new ProfileDeleteRecord.Target(BOOKIE, storage(1).value());
+        var publisher = publisher(first);
+        publisher.bindDeleteDelivery(deletes, storage(1), () -> null); // No local effects in this initial empty scope.
+        assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+        assertEquals(PublicationStatus.UNAVAILABLE, publisher.registerWritable(writable(projection)).status());
+        assertTrue(publisher.readWritable(BOOKIE).isEmpty());
+        var initial = deletes.createInitialDeleteAssignment(target);
+        assertEquals(ProfileControlStore.ReadStatus.FOUND, initial.status());
+        assertEquals(0, initial.head().committedThrough());
+        assertEquals(initial.head(), deletes.createInitialDeleteAssignment(target).head());
+        assertEquals(PublicationStatus.APPLIED, publisher.registerWritable(writable(projection)).status());
+        assertEquals(PublicationStatus.ALREADY_APPLIED, publisher.registerWritable(writable(projection)).status());
+        assertThrows(IllegalStateException.class, () -> publisher.bindDeleteDelivery(deletes, storage(1), () -> null));
+        publisher.demote(BOOKIE);
+        String stream = ROOT + "/delete-delivery/" + first.getChildren(ROOT + "/delete-delivery", false).stream()
+                .filter(child -> !child.endsWith("-assignment")).findFirst().orElseThrow();
+        org.apache.zookeeper.ZKUtil.deleteRecursive(second, stream);
+        assertEquals(ProfileControlStore.ReadStatus.NOT_FOUND, deletes.readDeleteHead(target).status());
+        assertEquals(ProfileControlStore.ReadStatus.QUARANTINED,
+                deletes.createInitialDeleteAssignment(target).status());
+        var fresh = publisher(first);
+        fresh.bindDeleteDelivery(deletes, storage(1), () -> null);
+        assertEquals(PublicationStatus.APPLIED, fresh.publishServiceInfo(projection).status());
+        assertEquals(PublicationStatus.UNAVAILABLE, fresh.registerWritable(writable(projection)).status());
+        assertTrue(fresh.readWritable(BOOKIE).isEmpty());
+        fresh.demote(BOOKIE);
+    }
+
+    @Test
+    public void deleteAwareWritableRejectsWrongClientIncarnationAndEffectiveGeneration() throws Exception {
+        var projection = projection(create()); // Existing fixture deliberately uses assignment generation 6.
+        var deletes = new ZKProfileReservationStore(first, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        var target = new ProfileDeleteRecord.Target(BOOKIE, storage(1).value());
+        assertEquals(ProfileControlStore.ReadStatus.FOUND, deletes.createInitialDeleteAssignment(target).status());
+        var publisher = publisher(first);
+        assertThrows(IllegalArgumentException.class, () -> publisher.bindDeleteDelivery(
+                new ZKProfileReservationStore(second, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5)),
+                storage(1), () -> null));
+        publisher.bindDeleteDelivery(deletes, storage(1), () -> null);
+        assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+        assertEquals(PublicationStatus.UNAVAILABLE, publisher.registerWritable(writable(projection)).status());
+        assertTrue(publisher.readWritable(BOOKIE).isEmpty());
+        publisher.demote(BOOKIE);
+        var different = publisher(first);
+        different.bindDeleteDelivery(deletes, storage(2), () -> null);
+        assertEquals(PublicationStatus.APPLIED, different.publishServiceInfo(projection).status());
+        assertEquals(PublicationStatus.CONFLICT, different.registerWritable(writable(projection)).status());
+        assertTrue(different.readWritable(BOOKIE).isEmpty());
+        different.demote(BOOKIE);
     }
 
     @Test

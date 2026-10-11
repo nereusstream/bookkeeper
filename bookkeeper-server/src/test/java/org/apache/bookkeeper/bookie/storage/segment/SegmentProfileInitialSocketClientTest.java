@@ -1632,6 +1632,41 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static final class DeleteRegistrationCutClient extends ZooKeeper {
+        volatile Runnable beforeWritable;
+        volatile boolean loseWritable;
+        volatile boolean dropped;
+
+        DeleteRegistrationCutClient(String connect, ZooKeeperWatcherBase watcher) throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
+            var copied = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(copied::add);
+            boolean writable = copied.stream().anyMatch(op -> op.getType() == org.apache.zookeeper.ZooDefs.OpCode.create
+                    && op.getPath().endsWith("/writable"));
+            var before = writable ? beforeWritable : null;
+            if (before != null) {
+                beforeWritable = null;
+                before.run();
+            }
+            super.multi(copied, (code, path, ignored, results) -> {
+                if (writable && loseWritable && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
+                    loseWritable = false;
+                    dropped = true;
+                    callback.processResult(org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue(),
+                            path, context, results);
+                } else {
+                    callback.processResult(code, path, context, results);
+                }
+            }, context);
+        }
+    }
+
     private static final class LostDeleteReplyClient extends ZooKeeper {
         private final int dropAt;
         private int commits;
@@ -1895,6 +1930,8 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(secondEvent.event(), fixture.reservations.appendDeleteDelivery(metadata, 45, target).event());
             assertEquals(firstEvent.event(), fixture.reservations.readDeleteDelivery(metadata, target, 1).event());
             assertEquals(secondEvent.event(), fixture.reservations.readDeleteDelivery(metadata, target, 2).event());
+            verifyActualDeleteRejoinCut(fixture, metadata, firstDeleted.manifest().targets().get(1));
+            verifyActualDeleteCatchUpLimitAndUnknown(fixture, metadata, firstDeleted.manifest().targets().get(2));
             var client = fixture.clients.get(target.bookie());
             var firstRequest = firstEvent.event().deleteApply("ledger-profile");
             var secondRequest = secondEvent.event().deleteApply("ledger-profile");
@@ -1938,9 +1975,18 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(ZKProfileReservationStore.DeliveryStatus.NOT_APPLICABLE,
                     fixture.reservations.appendDeleteDelivery(metadata, 44, wrong).status());
             var children = fixture.zk.getChildren("/socket-initial/delete-delivery", false);
-            assertEquals(2, children.size()); // One shared head and one immutable assignment, never per-ledger streams.
+            assertEquals(6, children.size()); // One head/assignment per incarnation, shared across both ledgers.
             String headName = "/socket-initial/delete-delivery/" + children.stream()
-                    .filter(child -> !child.endsWith("-assignment")).findFirst().orElseThrow();
+                    .filter(child -> !child.endsWith("-assignment"))
+                    .filter(child -> {
+                        try {
+                            return org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery.Head.decode(
+                                    fixture.zk.getData("/socket-initial/delete-delivery/" + child, false, null))
+                                        .target().equals(target);
+                        } catch (Exception failure) {
+                            throw new IllegalStateException(failure);
+                        }
+                    }).findFirst().orElseThrow();
             byte[] firstBytes = fixture.zk.getData(headName + "/event-1", false, null);
             fixture.zk.delete(headName + "/event-1", 0);
             assertEquals(ZKProfileReservationStore.DeliveryStatus.QUARANTINED,
@@ -1973,6 +2019,170 @@ public class SegmentProfileInitialSocketClientTest {
             fixture.zk.create(headName, lastHead, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
             assertEquals(ZKProfileReservationStore.DeliveryStatus.QUARANTINED,
                     fixture.reservations.appendDeleteDelivery(metadata, 45, target).status());
+        }
+    }
+
+    private static void verifyActualDeleteCatchUpLimitAndUnknown(Fixture fixture, ProfileLedgerMetadataStore metadata,
+            org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target target) throws Exception {
+        assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
+                fixture.reservations.appendDeleteDelivery(metadata, 44, target).status());
+        assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
+                fixture.reservations.appendDeleteDelivery(metadata, 45, target).status());
+        int node = fixture.identities.stream().map(identity -> identity.bookieId().toString()).toList()
+                .indexOf(target.bookie());
+        var config = files(fixture.nodes.get(node)).config();
+        fixture.nodes.get(node).close();
+        try (var replay = new IsolatedSegmentStorage(config, fixture.identities.get(node),
+                new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                        2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+            replay.restart();
+            var limited = CompletableFuture.supplyAsync(() -> replay.catchUpProfileDeletes(
+                    fixture.reservations, metadata, "ledger-profile", 1, Duration.ofSeconds(5)), fixture.cold)
+                    .get(10, TimeUnit.SECONDS);
+            assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.LIMIT, limited.status());
+            limited.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(1, replay.profileDeleteProgress().sequence());
+            var forcing = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var held = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            var field = SegmentBookieControlLog.class.getDeclaredField("io");
+            field.setAccessible(true);
+            field.set(bookie(replay), held);
+            var pending = CompletableFuture.supplyAsync(() -> replay.catchUpProfileDeletes(
+                    fixture.reservations, metadata, "ledger-profile", 1, Duration.ofSeconds(1)), fixture.cold);
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                var unknown = pending.get(5, TimeUnit.SECONDS);
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNKNOWN, unknown.status());
+                assertFalse(unknown.completion().isDone());
+                assertEquals(1, replay.profileDeleteProgress().sequence());
+                var callerView = unknown.completion();
+                callerView.complete(null);
+                assertFalse(unknown.completion().isDone());
+                release.countDown();
+                unknown.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(2, replay.profileDeleteProgress().sequence());
+                var reconciled = CompletableFuture.supplyAsync(() -> replay.catchUpProfileDeletes(
+                        fixture.reservations, metadata, "ledger-profile", 1, Duration.ofSeconds(5)), fixture.cold)
+                        .get(10, TimeUnit.SECONDS);
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, reconciled.status());
+                reconciled.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(1, held.forces);
+            } finally {
+                release.countDown();
+                pending.get(10, TimeUnit.SECONDS).completion().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static void verifyActualDeleteRejoinCut(Fixture fixture, ProfileLedgerMetadataStore originalMetadata,
+            org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target target) throws Exception {
+        var firstEvent = fixture.reservations.appendDeleteDelivery(originalMetadata, 44, target);
+        assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, firstEvent.status());
+        int node = fixture.identities.stream().map(identity -> identity.bookieId().toString()).toList()
+                .indexOf(target.bookie());
+        var config = files(fixture.nodes.get(node)).config();
+        fixture.nodes.get(node).close();
+        var watcher = new ZooKeeperWatcherBase(10000, false);
+        try (var client = new DeleteRegistrationCutClient(fixture.cluster.getZooKeeperConnectString(), watcher);
+                var replay = new IsolatedSegmentStorage(config, fixture.identities.get(node),
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                        new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                                2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                        new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                                new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+            String root = "/socket-delete-rejoin";
+            client.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            var reservations = new ZKProfileReservationStore(client, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            var metadata = new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var persistent = new org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore(
+                    client, root, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var publisher = new org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore(
+                    client, root, target.bookie(), ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            publisher.bindDeleteDelivery(reservations, fixture.identities.get(node).incarnation(),
+                    replay::profileDeleteProgress);
+            try (var admission = publisher.watchAdmission(watcher)) {
+                replay.bindProfileRegistration(admission);
+                replay.restart();
+                assertFalse(admission.getAsBoolean());
+                assertNull(replay.profileDeleteProgress());
+                assertFalse(bookie(replay).hasTerminalTombstone(fixture.context()));
+                var gen = new org.apache.bookkeeper.common.profile.startup.Generation(1);
+                var record = new org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord(target.bookie(),
+                        fixture.identities.get(node).incarnation(), EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, gen, gen,
+                        new org.apache.bookkeeper.common.profile.startup.ManifestIdentity(bytes(32, 7)), gen, gen, gen,
+                        1, 1, List.of(1),
+                        org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord.State.READY);
+                assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.CasStatus.APPLIED,
+                        persistent.compareAndSet(target.bookie(), -1, 0, record).status());
+                var ready = persistent.read(target.bookie()).versionedRecord().orElseThrow();
+                var projection = new org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection(
+                        target.bookie(), record.storageIncarnation(), gen, ready.storeVersion(), "rejoin", List.of(1));
+                var registration = new org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                        .WritableRegistration(target.bookie(), record.storageIncarnation(), gen, ready.storeVersion());
+                assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                        .PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+                assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                        .PublicationStatus.UNAVAILABLE, publisher.registerWritable(registration).status());
+                assertTrue(publisher.readWritable(target.bookie()).isEmpty());
+                var first = CompletableFuture.supplyAsync(() -> replay.catchUpProfileDeletes(
+                        reservations, metadata, "ledger-profile", 1, Duration.ofSeconds(5)), fixture.cold)
+                        .get(10, TimeUnit.SECONDS);
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, first.status());
+                first.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(1, replay.profileDeleteProgress().sequence());
+                assertTrue(bookie(replay).hasTerminalTombstone(fixture.context()));
+                try (var localReady = new SegmentLocalReadinessStore(config.directory(), target.bookie(),
+                        record.storageIncarnation())) {
+                    var receipt = new org.apache.bookkeeper.common.profile.startup.DurableLocalReadiness(
+                            target.bookie(), record.storageIncarnation(), record.deviceManifestIdentity(),
+                            gen, gen, gen,
+                            gen, org.apache.bookkeeper.common.profile.startup.DurableLocalReadiness.Status.READY, true);
+                    assertEquals(org.apache.bookkeeper.common.profile.startup.LocalReadinessStore.WriteStatus.APPLIED,
+                            localReady.write(receipt).status());
+                    assertEquals(receipt, localReady.read(target.bookie()).orElseThrow());
+                }
+
+                client.beforeWritable = () -> assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
+                        fixture.reservations.appendDeleteDelivery(originalMetadata, 45, target).status());
+                assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                        .PublicationStatus.CONFLICT, publisher.registerWritable(registration).status());
+                assertTrue(publisher.readWritable(target.bookie()).isEmpty());
+                assertFalse(admission.getAsBoolean());
+                try (var heldPin = files(replay).pinDataRead()) {
+                    var second = CompletableFuture.supplyAsync(() -> replay.catchUpProfileDeletes(
+                            reservations, metadata, "ledger-profile", 1, Duration.ofSeconds(5)), fixture.cold)
+                            .get(10, TimeUnit.SECONDS);
+                    assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, second.status());
+                    second.completion().get(5, TimeUnit.SECONDS);
+                    assertEquals(2, replay.profileDeleteProgress().sequence());
+                    client.loseWritable = true;
+                    assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                            .PublicationStatus.RESPONSE_LOST, publisher.registerWritable(registration).status());
+                    assertTrue(client.dropped);
+                    assertTrue(publisher.readWritable(target.bookie()).filter(registration::equals).isPresent());
+                    assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                            .PublicationStatus.ALREADY_APPLIED, publisher.registerWritable(registration).status());
+                    assertTrue(admission.openAfterReconciliation(registration));
+                    assertTrue(admission.allows(target.bookie(), record.storageIncarnation()));
+                }
+                var noRepeat = CompletableFuture.supplyAsync(() -> replay.catchUpProfileDeletes(
+                        reservations, metadata, "ledger-profile", 1, Duration.ofSeconds(5)), fixture.cold)
+                        .get(10, TimeUnit.SECONDS);
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, noRepeat.status());
+                assertTrue(admission.getAsBoolean());
+                assertFalse(replay.profileReadVisible(fixture.context(), 0));
+                publisher.demote(target.bookie());
+                assertFalse(admission.getAsBoolean());
+            }
         }
     }
 

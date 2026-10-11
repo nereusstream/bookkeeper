@@ -22,9 +22,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -35,12 +37,20 @@ import java.util.function.BiConsumer;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.control.ProfileAuthorityKey;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
+import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
+import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.TLSContextFactory;
@@ -249,6 +259,119 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 throw new IllegalArgumentException("Profile registration belongs to another Bookie");
             }
             profileAdmission = admission;
+        }
+    }
+
+    enum DeleteCatchUpStatus { CAUGHT_UP, LIMIT, UNAVAILABLE, QUARANTINED, UNKNOWN }
+
+    record DeleteCatchUpAttempt(DeleteCatchUpStatus status, ProfileDeleteDelivery.Head required,
+            CompletableFuture<Void> completion) {
+        DeleteCatchUpAttempt {
+            Objects.requireNonNull(status, "status");
+            Objects.requireNonNull(completion, "completion");
+        }
+        @Override
+        public CompletableFuture<Void> completion() {
+            return completion.copy();
+        }
+    }
+
+    /** Cold registration supplier, derived from this opened graph's original recovered control log. */
+    ProfileControlRequest.DeleteBinding profileDeleteProgress() {
+        synchronized (gate) {
+            if (!accepting || closed || bookie == null || !bookie.matchesScope(config, identity)) {
+                throw new IllegalStateException("Original local delete recovery is not available");
+            }
+            return bookie.deleteAppliedCursor();
+        }
+    }
+
+    /** Bounded cold startup/rejoin replay; no executor, remote abort or physical reclaim wait is added. */
+    DeleteCatchUpAttempt catchUpProfileDeletes(ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout) {
+        Objects.requireNonNull(reservations, "reservations");
+        Objects.requireNonNull(metadata, "metadata");
+        Objects.requireNonNull(domain, "domain");
+        if (maxEvents < 1 || maxEvents > 4096 || timeout.isNegative() || timeout.isZero()
+                || timeout.compareTo(Duration.ofMinutes(1)) > 0 || controls == null || controls.isOwnerThread()) {
+            throw new IllegalArgumentException("Delete catch-up requires a bounded cold caller");
+        }
+        long deadline = System.nanoTime() + timeout.toNanos();
+        var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+        var authorityReader = reservations.deleteAuthorityReader(target.bookie(), target.incarnation(), metadata);
+        CompletableFuture<Void> actual = CompletableFuture.completedFuture(null);
+        ProfileDeleteDelivery.Head required = null;
+        int applied = 0;
+        try {
+            while (System.nanoTime() < deadline) {
+                var read = reservations.readDeleteHead(target);
+                if (read.status() != ProfileControlStore.ReadStatus.FOUND) {
+                    return new DeleteCatchUpAttempt(read.status() == ProfileControlStore.ReadStatus.QUARANTINED
+                            ? DeleteCatchUpStatus.QUARANTINED : DeleteCatchUpStatus.UNAVAILABLE, required, actual);
+                }
+                required = read.head();
+                var cursor = profileDeleteProgress();
+                if (cursor != null && (!Arrays.equals(cursor.streamId(), required.streamId())
+                        || cursor.streamGeneration() != required.streamGeneration()
+                        || cursor.assignmentGeneration() != required.assignmentGeneration())) {
+                    return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, required, actual);
+                }
+                long through = cursor == null ? 0 : cursor.sequence();
+                if (through > required.committedThrough()) {
+                    return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, required, actual);
+                }
+                if (through == required.committedThrough()) {
+                    return new DeleteCatchUpAttempt(DeleteCatchUpStatus.CAUGHT_UP, required, actual);
+                }
+                if (applied == maxEvents) {
+                    return new DeleteCatchUpAttempt(DeleteCatchUpStatus.LIMIT, required, actual);
+                }
+                var delivery = reservations.readDeleteDelivery(metadata, target, through + 1);
+                if (delivery.status() != ZKProfileReservationStore.DeliveryStatus.COMMITTED
+                        || !Arrays.equals(delivery.event().streamId(), required.streamId())) {
+                    return new DeleteCatchUpAttempt(delivery.status()
+                            == ZKProfileReservationStore.DeliveryStatus.UNAVAILABLE
+                            ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);
+                }
+                var request = delivery.event().deleteApply(domain);
+                var authority = authorityReader.read(ProfileAuthorityKey.fromScope(request.scope()));
+                if (authority.authority() == null || !authority.authority().scope().equals(request.scope())) {
+                    return new DeleteCatchUpAttempt(authority.status() == ProfileControlStore.ReadStatus.UNAVAILABLE
+                            ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);
+                }
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    break;
+                }
+                actual = new CompletableFuture<>();
+                var terminal = actual;
+                var store = new SegmentProfileInstallStore(controls, identity, Duration.ofNanos(remaining));
+                var result = store.conditionalApply(new ProtectedProfileStateStore.Transition(
+                        request, authority.authority(), null), () -> terminal.complete(null));
+                switch (result.outcome()) {
+                    case APPLIED, ALREADY_APPLIED -> {
+                        actual.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                        applied++;
+                    }
+                    case DURABILITY_UNKNOWN -> {
+                        return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNKNOWN, required, actual);
+                    }
+                    case TRANSIENT_RECONCILING -> {
+                        return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, required, actual);
+                    }
+                    default -> {
+                        return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, required, actual);
+                    }
+                }
+            }
+            return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, required, actual);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNKNOWN, required, actual);
+        } catch (ExecutionException | TimeoutException unknown) {
+            return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNKNOWN, required, actual);
+        } catch (IllegalArgumentException | IllegalStateException invalid) {
+            return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, required, actual);
         }
     }
 

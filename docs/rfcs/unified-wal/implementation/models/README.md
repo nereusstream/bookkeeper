@@ -18,6 +18,13 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-delete-registration` | 固定initial stream/gen1，真实cursor/committed head与ZK原子性作为输入；注册cut需包含先提交event，普通head增长不demote，不含handoff/snapshot/online driver/physical/A+C+D |
+| `ce-profile-delete-registration-cursor` | IgnoreLocalCursor mutation须违反 `WritableCoveredPublicationCut` |
+| `ce-profile-delete-registration-cut` | SkipHeadCheck mutation须违反 `WritableCoveredPublicationCut` |
+| `ce-profile-delete-registration-missing` | DefaultMissing mutation须违反 `WritableHasAssignment` |
+| `ce-profile-delete-registration-generation` | IgnoreGeneration mutation须违反 `WritableHasEffectiveGeneration` |
+| `ce-profile-delete-registration-incarnation` | IgnoreIncarnation mutation须违反 `WritableUsesOriginalIncarnation` |
+| `ce-profile-delete-registration-growth` | DemoteOnGrowth mutation须违反 `OrdinaryHeadGrowthKeepsRegistration` |
 | `a-profile-delete-applied` | 两个固定initial event，连续cursor与TOMBSTONE同record，checkpoint/replay及旧I/O custody、真实incarnation；exact cold/force输入，不含registration/FREE/GC/A+C+D |
 | `ce-profile-delete-applied-hole` | SkipHole mutation须违反 `CursorHasNoHole` |
 | `ce-profile-delete-applied-effect` | CursorWithoutEffect mutation须违反 `CursorHasNoHole` |

@@ -673,3 +673,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-12 [UIC7 本地 delete-applied 与连续 cursor](rfcs/unified-wal/implementation/profile-wire/README.md#uic7-本地-delete-applied-与连续-cursor)已将committed event/实际cold authority接到mTLS CONTROL与原Bookie type13 write/force/owner apply，TOMBSTONE和连续cursor同record；gap写盘前可重试，旧seq不回退，UNKNOWN不发布cursor，absent ledger仍有durable effect坐标。实际非空/空两ledger、旧读取/目标拒绝、held pin、丢目标回复/fresh重试、force失败、checkpoint rotation/restart有定向证据。158项相关Java、23个有限模型配置（3正向/20指定反例）及style通过，RAT443历史问题无新增；原history receipt保留；registration required-through cut、startup/catch-up/rejoin、snapshot/handoff/physical/GC及综合Gate仍OPEN，步骤12/14/15保持PARTIAL。
+
+
+2026-10-12 [初始 required-through cut 与真实 rejoin 追赶](rfcs/unified-wal/implementation/profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)已绑定原恢复control cursor与实际shared assignment/head，把head版本/birth/assignment检查加入原writable multi；delete先赢需继续追赶，普通head增长不demote既有registration。原graph实际restart、bounded LIMIT/UNKNOWN/独立completion、真实seq2注册竞争、DLR force、held pin和丢注册回复同session解析已有证据。101项相关Java、20个有限模型配置（3正向/17指定反例）及style通过，RAT443历史问题无新增。仅explicit initial gen1；在线delivery/default bootstrap、其他required facts、snapshot/handoff/GC/decommission与综合Gate未闭合，步骤12/14/15保持PARTIAL/OPEN。

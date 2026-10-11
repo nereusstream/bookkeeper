@@ -891,3 +891,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [UIC7 delete-applied/cursor](../profile-wire/README.md#uic7-本地-delete-applied-与连续-cursor)新增Bookie type13，scope和96-byte stream binding同record；原write/force/owner apply一起建立terminal TOMBSTONE和连续cursor，seq gap在写盘前拒绝，UNKNOWN不发布成功。已有checkpoint保留第一effect记录并按sequence重建cursor；实际FileChannel rotation/restart与真实socket target重启有覆盖。旧DATA/读ticket和文件pin仍独立排空，cursor不替代受保护reclamation lease、FREE或access barrier；新storage incarnation不能继承原header/control cursor。固定initial assignment与4096-event界限保留，snapshot/handoff、startup/rejoin及production Gate尚未闭合。
+
+
+2026-10-12 [实际 delete catch-up](../profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)在opened original graph提供healthy recovered cursor，bounded cold逐event重读committed authority并复用原type13 write/force/owner apply；不新增schema/线程/队列，不等physical reclaim。实际restart后maxEvents1/LIMIT、held force下UNKNOWN/completion pending与late apply/fresh解析已有覆盖；caller future副本不能伪造actual local completion。registration cut从此control事实取值，其他startup事实/default bootstrap及完整rejoin/Gate仍OPEN。

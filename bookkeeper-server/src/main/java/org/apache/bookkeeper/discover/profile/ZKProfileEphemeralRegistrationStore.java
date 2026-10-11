@@ -27,6 +27,8 @@ import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
 import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
@@ -59,6 +61,9 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     private volatile boolean retired;
     private boolean operationStarted;
     private volatile Admission admission;
+    private ZKProfileReservationStore deleteDelivery;
+    private StorageIncarnation deleteIncarnation;
+    private Supplier<ProfileControlRequest.DeleteBinding> deleteProgress;
 
     public ZKProfileEphemeralRegistrationStore(ZooKeeper zk, String root, String bookieId,
                                               List<ACL> acls, Duration timeout) {
@@ -69,6 +74,20 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         sessionId = zk.getSessionId();
         timeoutNanos = timeout.toNanos();
         requireSession();
+    }
+
+    /** Bind the original local durable cursor before startup; a missing assignment never defaults to ready. */
+    public synchronized void bindDeleteDelivery(ZKProfileReservationStore reservations, StorageIncarnation incarnation,
+            Supplier<ProfileControlRequest.DeleteBinding> progress) {
+        if (operationStarted || retired || deleteDelivery != null) {
+            throw new IllegalStateException("Delete delivery must be bound once before startup publication");
+        }
+        Objects.requireNonNull(reservations, "reservations").requireDeletePublisherClient(zk);
+        Objects.requireNonNull(incarnation, "incarnation");
+        Objects.requireNonNull(progress, "progress");
+        deleteDelivery = reservations;
+        deleteIncarnation = incarnation;
+        deleteProgress = progress;
     }
 
     /** Bind before any cold operation, using the watcher manager of this exact client. */
@@ -298,6 +317,13 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                     requirePublishingSession();
                     return result(existing.equals(desired)
                             ? PublicationStatus.ALREADY_APPLIED : PublicationStatus.CONFLICT);
+                }
+                if (deleteDelivery != null) {
+                    if (!deleteIncarnation.equals(registration.storageIncarnation())) {
+                        return result(PublicationStatus.CONFLICT);
+                    }
+                    operations.addAll(deleteDelivery.deleteRegistrationChecks(
+                            authority.envelope().record(), deleteProgress.get(), deadline));
                 }
                 operations.add(Op.check(markerPath(path), 0));
                 // Updating the unchanged projection orders publication against a competing service-info refresh.

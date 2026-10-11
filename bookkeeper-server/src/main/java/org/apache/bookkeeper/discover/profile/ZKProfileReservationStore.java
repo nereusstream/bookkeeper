@@ -2666,6 +2666,128 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public record DeleteHeadResult(ReadStatus status, ProfileDeleteDelivery.Head head) {
+        public DeleteHeadResult {
+            if ((status == ReadStatus.FOUND) != (head != null)) {
+                throw new IllegalArgumentException("Only verified delete assignment carries its head");
+            }
+        }
+    }
+
+    private record DeleteHeadSnapshot(ProfileDeleteDelivery.Head head, ProfileZKReadClient.Node node) { }
+
+    private DeleteHeadSnapshot deleteHead(ProfileDeleteRecord.Target target, long deadline)
+            throws InterruptedException, TimeoutException {
+        String name = deliveryPath(target);
+        var node = reads.get(name, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(node);
+        var head = ProfileDeleteDelivery.Head.decode(node.bytes());
+        verifyDeliveryHead(node, head, name, deadline);
+        if (!head.target().equals(target)) {
+            throw new IllegalArgumentException("Delete assignment belongs to another storage incarnation");
+        }
+        return new DeleteHeadSnapshot(head, node);
+    }
+
+    /** Explicit initial commissioning only. Startup readers never recreate missing assignment authority. */
+    public DeleteHeadResult createInitialDeleteAssignment(ProfileDeleteRecord.Target target) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var parent = reads.get(deliveryRoot(), deadline);
+            byte[] parentBytes = java.nio.ByteBuffer.allocate(8).putInt(0x55574450).putInt(1).array();
+            if (parent.code() == Code.NONODE.intValue()) {
+                multi(List.of(Op.create(deliveryRoot(), parentBytes, pageAcls, CreateMode.PERSISTENT)), deadline);
+                parent = reads.get(deliveryRoot(), deadline);
+            }
+            requireFound(parent);
+            requirePersistent(parent, true);
+            if (!Arrays.equals(parent.bytes(), parentBytes)) {
+                return new DeleteHeadResult(ReadStatus.QUARANTINED, null);
+            }
+            String name = deliveryPath(target);
+            if (reads.get(name, deadline).code() == Code.NONODE.intValue()) {
+                var previous = reads.get(name + "-assignment", deadline);
+                if (previous.code() != Code.NONODE.intValue()) {
+                    return new DeleteHeadResult(previous.code() == Code.OK.intValue()
+                            ? ReadStatus.QUARANTINED : ReadStatus.UNAVAILABLE, null);
+                }
+                UUID id = UUID.randomUUID();
+                byte[] stream = java.nio.ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())
+                        .putLong(id.getLeastSignificantBits()).array();
+                var initial = new ProfileDeleteDelivery.Head(stream, 1, 1, 0, target);
+                multi(List.of(Op.create(name, initial.encode(), acls, CreateMode.PERSISTENT),
+                        Op.create(name + "/birth-" + HexFormat.of().formatHex(stream), stream,
+                                immutableAcls, CreateMode.PERSISTENT),
+                        Op.create(name + "-assignment", initial.encode(), immutableAcls, CreateMode.PERSISTENT)),
+                        deadline);
+            }
+            return readDeleteHead(target);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+        } catch (IllegalArgumentException invalid) {
+            return new DeleteHeadResult(ReadStatus.QUARANTINED, null);
+        }
+    }
+
+    /** Missing is unknown authority, never an empty applicable set or a bootstrap instruction. */
+    public DeleteHeadResult readDeleteHead(ProfileDeleteRecord.Target target) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            if (reads.sync(root, deadline) != Code.OK.intValue()) {
+                return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+            }
+            var current = deleteHead(target, deadline);
+            return current == null ? new DeleteHeadResult(ReadStatus.NOT_FOUND, null)
+                    : new DeleteHeadResult(ReadStatus.FOUND, current.head());
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+        } catch (IllegalArgumentException invalid) {
+            return new DeleteHeadResult(ReadStatus.QUARANTINED, null);
+        }
+    }
+
+    void requireDeletePublisherClient(ZooKeeper client) {
+        if (client != zk) {
+            throw new IllegalArgumentException("Delete registration cut must use the publisher's exact ZK client");
+        }
+    }
+
+    /** Checks join the caller's existing writable-publication multi, ordering it against every head increment. */
+    List<Op> deleteRegistrationChecks(org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord record,
+            org.apache.bookkeeper.common.profile.control.ProfileControlRequest.DeleteBinding local, long deadline)
+            throws InterruptedException, TimeoutException {
+        if (reads.sync(root, deadline) != Code.OK.intValue()) {
+            throw new IllegalStateException("Delete assignment unavailable for writable registration");
+        }
+        var target = new ProfileDeleteRecord.Target(record.bookieId(), record.storageIncarnation().value());
+        var current = deleteHead(target, deadline);
+        if (current == null
+                || record.effectiveAssignmentGeneration().value() != current.head().assignmentGeneration()) {
+            throw new IllegalStateException("Missing or different effective delete assignment");
+        }
+        var head = current.head();
+        if (local == null ? head.committedThrough() != 0
+                : !Arrays.equals(local.streamId(), head.streamId())
+                    || local.streamGeneration() != head.streamGeneration()
+                    || local.assignmentGeneration() != head.assignmentGeneration()
+                    || local.sequence() != head.committedThrough()) {
+            throw new IllegalStateException("Local delete-applied cursor has not reached required-through");
+        }
+        String name = deliveryPath(target);
+        return List.of(Op.check(name + "-assignment", 0),
+                Op.check(name + "/birth-" + HexFormat.of().formatHex(head.streamId()), 0),
+                Op.check(name, current.node().stat().getVersion()));
+    }
+
     private DeliveryResult resolveDelivery(long ledger, ProfileDeleteRecord.Target target,
             ProfileZKReadClient.Node receipt, ProfileZKReadClient.Node headNode, ProfileDeleteDelivery.Head head,
             long deadline) throws InterruptedException, TimeoutException {
