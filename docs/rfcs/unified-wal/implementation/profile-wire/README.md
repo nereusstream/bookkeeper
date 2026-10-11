@@ -939,3 +939,39 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 Java广度 `unified-wal-local-7JWtFZ0f` exit0：15类279项全部通过，common37/server242（socket83、lifecycle46、URmanager24、Classic worker2、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1052冻结inputs/18 artifact checksums；之后仅上述注释/格式调整。最终 `unified-wal-local-ckN58IQn` exit0：7项定向全部通过，1052当前inputs/5 checksums。最终style `unified-wal-empty-final-style-XKFTaAnK` exit0/2 checksums；root RAT `unified-wal-empty-checks-VkHnCexR` exit1/443 unapproved路径，与上一里程碑完全相同且全在父HEAD，5 checksums包含初轮三个accessor LeftCurly格式失败记录；已修正并通过最终style，不改RAT规则、不计CI全绿。最终Java与模型232共享/1639去重inputs、五个父HEAD designInputs及artifact checksums逐项核验；run sourceCommit/head保持父提交和冻结working-source hash的真实身份，不重绑。
 
 2026-10-09 AutoRecovery动态连接前置已补[registration消费者发现与再次复核](../startup-readiness/README.md#消费者发现与再次复核)，仍需实际mTLS/HELLO/再次复核与pool ownership接线；发现观察结果不授予ledger mutation authority，原WorkerOptions仍为显式preconnected cohort，默认服务bootstrap与生产Gate保持OPEN。
+
+## 注册观察驱动的连接与实际本地排空
+
+2026-10-11，第12/14步在既有ProfileInitialControlClient/ProfileNormalDataClient新增显式connectRegistered，返回一个拥有该次连接的RegisteredConnection。调用者提供既有ZK RegisteredPeer观察、client TLS、EventLoopGroup和有界ArrayBlockingQueue/AbortPolicy cold executor；group/executor保持借用，无新线程、后台watch、自动重试或普通Add的逐entry MetadataStore调用。
+
+连接顺序为原观察再次cold复核 → cold解析endpoint/DNS → 既有TLS1.3+mTLS与HTTPS hostname校验 → 既有HELLO的engine/BookieId/incarnation/实际能力检查 → HELLO readiness generation等于观察中的READY generation → 再次cold复核 → 交付CONTROL或DATA client。当前实际endpoint只接受tls://host:port，显式端口1..65535，拒绝userinfo/path/query/fragment、不支持scheme或不可解析地址；不改UWEP存储格式，旧hint文本仍可被消费者观察，但不能被这个连接入口当作可连接地址。READY的protocol major/minor必须属于当前实验版本；hints不授予transport、ledger或ACK authority，实际RPC/coordinator仍检查所需capability和权限。
+
+连接预算以nanoTime差值检查，CONNECT、TLS和HELLO消费连接阶段剩余预算；成功后每次RPC仍使用原配置timeout，不把耗时的cold检查扣到普通RPC超时上。caller等待超时、取消或close停止未来阶段；已排队/运行的cold任务和DNS/read仍必须实际终结，不承诺即时中断。公开completion是副本，不能复活内部结果。失败、取消或最后身份变化关闭该次socket，返回固定错误文本，不公开endpoint或敏感输入的异常cause。
+
+原close仍为非阻塞触发；新增closeAsync等待实际本地channel关闭、HELLO输出promise以及所有已取得的RPC/source/plaintext输出slot终结。close永久收走unused semaphore permits，slot在write和wire均terminal后才归还并收走；在closed检查前已开始的caller仍不能在drain后取得被回收的permit。channel closeFuture之后还经过event-loop收尾，避免把closeFuture早于outbound失败/inactive回调当作排空完成。RegisteredConnection的closeAsync额外等待实际cold child；借用group/executor必须活到该future完成，不得先shutdownNow丢弃尚未执行的任务。
+
+caller completion回调不应持有lifecycle lock或推迟实际socket close：先记录stop并启动关闭，完成drain检查，再在锁外完成caller future。对应真实回归让completion callback等待drain，同时cold终检仍在队列中，验证关闭不阻止cold收尾。任一底层实际工作不终结时不能声称drain完成；调用者也不能在自己的Netty event loop中阻塞等待closeAsync。
+
+这个future仅证明本地资源终结，不是远端force/abort或确定NONE的证据。已提交后断连/timeout仍保留UNKNOWN和原操作/坐标/intent义务，不回滚、不截短共享文件，不因连接关闭授予FREE。旧未注册connect入口和普通RPC结果三元组继续使用既有行为。
+
+真实TLS/ZK/native files测试包括CONTROL与DATA成功连接后实际FENCE、普通Add和点读；不支持endpoint、错误TLS trust、incarnation/generation错配；持有实际HELLO回复时删除注册；取消后queued cold终检排空；回复已到但输出promise未终结时close继续等待并在terminal后清零plaintext；queued DATA借用继续计费、恰好归还且原输入不变；连接cold排队消耗2.5秒后，实际FENCE回复持有2秒仍按原4秒RPC配置等待。单节点durable不冒充quorum ACK或掉电证据。
+
+有限ProfileRegisteredConnection投影验证pre/HELLO/post三种事实、cold/output/HELLO-write/transport实际terminal前不归还容量，以及关闭收走permit阻止旧caller晚取得；1正向/8指定反例。事实与terminal均为输入，模型不生产TLS/ZK/fsync、不覆盖remote abort、clock/liveness或完整预算组合。实际callback锁等待与RPC计时由Java回归检验。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#registered*+closeWaits*+validatedReplyDoesNotReleaseSerializedSlotBeforeActualWritePromise+cancelledWaitingRetainsBoundedPendingUntilOriginalWireTerminal'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection --config-prefix a-profile-peer-discovery --config-prefix ce-profile-peer-discovery --config-prefix a-profile-initial-client --config-prefix ce-profile-initial-client --config-prefix a-profile-normal-client --config-prefix ce-profile-normal-client
+```
+
+当前为显式单连接入口。AutoRecoveryMain bootstrap、动态pool/cohort发现及新旧/排空连接总预算、service shutdown与原task/session所有权仍待接线；same-ID rejoin、离线catch-up/delete/GC、完整A+C+D、stable兼容、Linux NUMA/掉电/正式长期性能和生产Gate保持OPEN，步骤12/14保持PARTIAL。历史临时回执在2026-10-11恢复时已不可访问，因此当前源码重新运行独立验证；历史名称、sourceCommit/designInputs和结果绑定不改写，本轮回执另存持久artifact目录。
+
+相关模型 `unified-wal-model-ezwn7ipx` exit0：44配置7完整正向PASS/37指定反例，837源码inputs/685 artifact checksums；在最后caller回调锁外完成的收尾前。最终 `unified-wal-model-nx8kvzgw` exit0：9配置1正向/8指定反例、837当前inputs/621 checksums。正向225 generated/163 distinct、queue0、depth/diameter11、1.027秒/peak RSS109920256 bytes（最终run），是有限模型消耗而非存储性能。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；完整524配置未运行。本轮Linux NUMA、掉电与正式可持续性能为NOT_EXECUTED。
+
+关闭顺序回归的实际RED `unified-wal-local-37Yuqit5` exit1：临时恢复旧的锁内caller completion先于socket close顺序后，registeredCloseCallbackCanAwaitDrainWithoutHoldingLifecycleLock在实际cold排队场景产生Timeout；修复源码经SHA guard恢复，未覆盖未知改动。此前修复版`unified-wal-local-aIrRNINt`两项PASS，最后源码的完整相关回归另行记录。受控mutation及fixed/red源码保存在`/Users/liusinan/.codex/artifacts/unified-wal/connection-callback-red-aywd9rqr`，不将测试编译错误或fixture误用INSTALL当成协议反例。
+
+最终Java `unified-wal-local-UOAB6lBP` exit0：17类317项全部通过、零skip，common37/server280（socket91、readiness13、ephemeral17、lifecycle46、UR24、Classic worker2、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1052当前冻结inputs/20 artifact checksums。最终style/root RAT `connection-checks-0kIfSr76`为exit0/exit1，443 unapproved路径全在父HEAD、没有新增失败路径，5 checksums；不改许可规则，不计CI全绿。Java/model共享232/去重1657 inputs与五个父HEAD designInputs全部核验，run的parent head与working-source hashes不重绑。
+
+本轮Java、模型、RED及check回执保存在`/Users/liusinan/.codex/artifacts/unified-wal/registered-connection-evidence-842lirim`及其archive.json列出的checks/mutation目录；原manifest/config/command内容保持原run位置和身份，archive为逐字节副本。TLC1.7.4从官方release重新取得，SHA-1 bee4a54f3ee3d4afc347c3240ec2d9e93b075104、SHA-256 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88，与冻结工具锁一致。历史tmp目录缺失不借用为当前验证。

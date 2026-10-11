@@ -21,6 +21,7 @@ import io.netty.handler.ssl.SslContext;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
@@ -58,6 +59,15 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return result;
     }
 
+    /** Registered cold observation -> existing mTLS/HELLO -> final cold identity reconciliation. */
+    public static ProfileSocketClient.RegisteredConnection<ProfileInitialControlClient> connectRegistered(
+            EventLoopGroup group, SslContext tls, ZKProfileRegistrationStore registry,
+            ZKProfileRegistrationStore.RegisteredPeer peer, ThreadPoolExecutor cold,
+            int maxPending, Duration timeout) {
+        return ProfileSocketClient.connectRegistered(group, tls, registry, peer, cold,
+                maxPending, timeout, false, 0, ProfileInitialControlClient::new);
+    }
+
     public ProfileHello.Server hello() {
         return socket.hello();
     }
@@ -91,6 +101,10 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
     public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {
         return socket.fence(context, operationId, credential);
+    }
+
+    public CompletableFuture<Void> closeAsync() {
+        return socket.closeAsync();
     }
 
     @Override

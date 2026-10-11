@@ -204,6 +204,7 @@ public class SegmentProfileInitialSocketClientTest {
         volatile boolean holdFirstReplies;
         final AtomicInteger replyFault = new AtomicInteger();
         final AtomicInteger faultTarget = new AtomicInteger(2);
+        volatile long helloReadinessGeneration;
         ZooKeeper zk;
         LedgerManager manager;
         ZKProfileReservationStore reservations;
@@ -367,7 +368,8 @@ public class SegmentProfileInitialSocketClientTest {
                                 protected void initChannel(SocketChannel socket) throws Exception {
                                     accepted.add(socket);
                                     if (!storage.installProfileConnection(socket.pipeline(), serverTls, budget,
-                                            131072, 64, "socket-test", 0, enableControl ? control : null,
+                                            131072, 64, "socket-test", helloReadinessGeneration,
+                                            enableControl ? control : null,
                                             enableRead ? new SegmentProfileReadConfig((caller, query) ->
                                                 readAllowed.get() && caller.equals(principal)
                                                     && query.context().equals(context()),
@@ -391,6 +393,17 @@ public class SegmentProfileInitialSocketClientTest {
                                                                     .wireValue())) {
                                                         frame.release();
                                                         promise.setSuccess();
+                                                        return;
+                                                    }
+                                                    if (fault == 23
+                                                            && op == ProfileOperation.FENCE_LEDGER.wireValue()) {
+                                                        heldReplies.add(() -> ctx.executor().execute(
+                                                                () -> ctx.writeAndFlush(frame, promise)));
+                                                        return;
+                                                    }
+                                                    if (fault == 22 && op == ProfileOperation.HELLO.wireValue()) {
+                                                        heldReplies.add(() -> ctx.executor().execute(
+                                                                () -> ctx.writeAndFlush(frame, promise)));
                                                         return;
                                                     }
                                                     if (fault == 21 && op == ProfileOperation.READ_ENTRY.wireValue()) {
@@ -5209,6 +5222,293 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore registeredPeer(
+            Fixture fixture, org.apache.zookeeper.ZooKeeper reader, String endpoint, long generation,
+            byte[] incarnation) throws Exception {
+        String root = "/socket-readiness";
+        fixture.zk.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var persistent = new org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore(
+                fixture.zk, root, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        var gen = new org.apache.bookkeeper.common.profile.startup.Generation(1);
+        var record = new org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord(
+                fixture.identities.get(0).bookieId().toString(),
+                new org.apache.bookkeeper.common.profile.startup.StorageIncarnation(incarnation),
+                EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, gen, gen,
+                new org.apache.bookkeeper.common.profile.startup.ManifestIdentity(bytes(32, 7)), gen, gen,
+                new org.apache.bookkeeper.common.profile.startup.Generation(generation), 1, 1, List.of(1),
+                org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord.State.READY);
+        assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.CasStatus.APPLIED,
+                persistent.compareAndSet(record.bookieId(), -1, 0, record).status());
+        var ready = persistent.read(record.bookieId()).versionedRecord().orElseThrow();
+        var projection = new org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection(
+                record.bookieId(), record.storageIncarnation(), record.localReadinessGeneration(),
+                ready.storeVersion(), endpoint, record.capabilityHints());
+        var publisher = new org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore(
+                fixture.zk, root, record.bookieId(), ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                .PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+        assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                .PublicationStatus.APPLIED, publisher.registerWritable(
+                    new org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                        .WritableRegistration(record.bookieId(), record.storageIncarnation(),
+                                record.localReadinessGeneration(), ready.storeVersion())).status());
+        return new org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore(
+                reader, root, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+    }
+
+    private static ZooKeeper registrationReader(Fixture fixture) throws Exception {
+        var watcher = new ZooKeeperWatcherBase(10000, false);
+        var reader = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
+        watcher.waitForConnection();
+        return reader;
+    }
+
+    @Test
+    public void registeredControlAndDataConnectThroughActualHelloAndFinalColdReconciliation() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            String endpoint = "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+            var registry = registeredPeer(fixture, reader, endpoint, 1,
+                    fixture.identities.get(0).incarnation().value());
+            var peer = registry.readPeer("socket0:3181").peer();
+            assertNotNull(peer);
+            var control = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                    registry, peer, fixture.cold, 2, Duration.ofSeconds(5));
+            var data = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                    registry, peer, fixture.cold, 2, 1060, Duration.ofSeconds(5));
+            try {
+                var connected = control.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(1, connected.hello().readinessGeneration());
+                var source = data.completion().get(5, TimeUnit.SECONDS);
+                evidenceEntry(fixture, source, 0, -1, 16, 16);
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                        source.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        connected.fence(fixture.context(), bytes(16, 71), fixture.credential)
+                            .get(5, TimeUnit.SECONDS).durableResult());
+            } finally {
+                control.closeAsync().get(5, TimeUnit.SECONDS);
+                data.closeAsync().get(5, TimeUnit.SECONDS);
+            }
+            assertFalse(fixture.clientGroup.isShuttingDown());
+        }
+    }
+
+    @Test
+    public void registeredConnectionDoesNotReuseRemainingHelloBudgetAsRpcTimeout() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            String endpoint = "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+            var registry = registeredPeer(fixture, reader, endpoint, 1,
+                    fixture.identities.get(0).incarnation().value());
+            var cold = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2));
+            var release = new CountDownLatch(1);
+            var entered = new CountDownLatch(1);
+            try {
+                cold.execute(() -> {
+                    entered.countDown();
+                    await(release);
+                });
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                var attempt = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        registry, registry.readPeer("socket0:3181").peer(), cold, 1, Duration.ofSeconds(4));
+                Thread.sleep(2500); // Consume connection budget without changing the configured per-RPC duration.
+                release.countDown();
+                var client = attempt.completion().get(5, TimeUnit.SECONDS);
+                fixture.faultTarget.set(0);
+                fixture.replyFault.set(23);
+                var pending = client.fence(fixture.context(), bytes(16, 72), fixture.credential);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(1, fixture.heldReplies.size());
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> pending.get(2, TimeUnit.SECONDS));
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        pending.get(2, TimeUnit.SECONDS).durableResult());
+                attempt.closeAsync().get(5, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+                cold.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    public void registeredConnectionRejectsEndpointTlsIdentityIncarnationAndReadinessMismatch() throws Exception {
+        for (int fault : List.of(0, 1, 2, 3)) {
+            try (Fixture fixture = new Fixture(false, false, true);
+                    var reader = registrationReader(fixture)) {
+                fixture.helloReadinessGeneration = 1;
+                int port = ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+                String endpoint = (fault == 0 ? "http://127.0.0.1:" : "tls://127.0.0.1:") + port;
+                SslContext tls = fault == 1 ? SslContextBuilder.forClient().sslProvider(SslProvider.JDK)
+                        .keyManager(new File(certificate("client-cert.pem")), new File(certificate("client-key.pem")))
+                        .trustManager(new File(certificate("client-cert.pem"))).protocols("TLSv1.3").build()
+                        : fixture.peerTls;
+                var registry = registeredPeer(fixture, reader, endpoint, fault == 3 ? 2 : 1,
+                        fault == 2 ? bytes(16, 77) : fixture.identities.get(0).incarnation().value());
+                var attempt = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, tls,
+                        registry, registry.readPeer("socket0:3181").peer(), fixture.cold, 1, Duration.ofSeconds(5));
+                assertThrows(ExecutionException.class, () -> attempt.completion().get(5, TimeUnit.SECONDS));
+                attempt.closeAsync().get(5, TimeUnit.SECONDS);
+                assertEquals(0, fixture.nodeIo.get(0).forces);
+                assertFalse(fixture.clientGroup.isShuttingDown());
+            }
+        }
+    }
+
+    @Test
+    public void registeredConnectionRejectsMetadataChangedWhileActualHelloReplyIsHeld() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.faultTarget.set(0);
+            fixture.replyFault.set(22);
+            String endpoint = "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+            var registry = registeredPeer(fixture, reader, endpoint, 1,
+                    fixture.identities.get(0).incarnation().value());
+            var attempt = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                    registry, registry.readPeer("socket0:3181").peer(), fixture.cold, 1, Duration.ofSeconds(5));
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertEquals(1, fixture.heldReplies.size());
+            String path = "/socket-readiness/" + java.util.Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString("socket0:3181".getBytes(StandardCharsets.UTF_8));
+            fixture.zk.delete(path + "/writable", -1);
+            fixture.replyFault.set(0);
+            fixture.heldReplies.forEach(Runnable::run);
+            assertThrows(ExecutionException.class, () -> attempt.completion().get(5, TimeUnit.SECONDS));
+            attempt.closeAsync().get(5, TimeUnit.SECONDS);
+            assertEquals(0, fixture.nodeIo.get(0).forces);
+        }
+    }
+
+    @Test
+    public void registeredCancellationRetainsQueuedColdWorkUntilActualTerminal() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.faultTarget.set(0);
+            fixture.replyFault.set(22);
+            String endpoint = "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+            var registry = registeredPeer(fixture, reader, endpoint, 1,
+                    fixture.identities.get(0).incarnation().value());
+            var cold = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1));
+            var release = new CountDownLatch(1);
+            try {
+                var attempt = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        registry, registry.readPeer("socket0:3181").peer(), cold, 1, Duration.ofSeconds(5));
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(1, fixture.heldReplies.size());
+                var blocking = new CountDownLatch(1);
+                cold.execute(() -> {
+                    blocking.countDown();
+                    await(release);
+                });
+                assertTrue(blocking.await(5, TimeUnit.SECONDS));
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (cold.getQueue().isEmpty() && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(1, cold.getQueue().size());
+                assertTrue(attempt.completion().cancel(false));
+                var closing = attempt.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closing.get(150, TimeUnit.MILLISECONDS));
+                release.countDown();
+                closing.get(5, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+                cold.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    public void registeredCloseCallbackCanAwaitDrainWithoutHoldingLifecycleLock() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.faultTarget.set(0);
+            fixture.replyFault.set(22);
+            String endpoint = "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+            var registry = registeredPeer(fixture, reader, endpoint, 1,
+                    fixture.identities.get(0).incarnation().value());
+            var cold = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1));
+            var release = new CountDownLatch(1);
+            try {
+                var attempt = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        registry, registry.readPeer("socket0:3181").peer(), cold, 1, Duration.ofSeconds(5));
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(1, fixture.heldReplies.size());
+                var blocking = new CountDownLatch(1);
+                cold.execute(() -> {
+                    blocking.countDown();
+                    await(release);
+                });
+                assertTrue(blocking.await(5, TimeUnit.SECONDS));
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (cold.getQueue().isEmpty() && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(1, cold.getQueue().size());
+                var callbackEntered = new CountDownLatch(1);
+                attempt.completion().whenComplete((value, failure) -> {
+                    callbackEntered.countDown();
+                    try {
+                        attempt.closeAsync().get(3, TimeUnit.SECONDS);
+                    } catch (Exception blocked) {
+                        throw new java.util.concurrent.CompletionException(blocked);
+                    }
+                });
+                var stopping = CompletableFuture.runAsync(() -> attempt.closeAsync());
+                assertTrue(callbackEntered.await(5, TimeUnit.SECONDS));
+                var socketField = attempt.getClass().getDeclaredField("socket");
+                socketField.setAccessible(true);
+                var owner = socketField.get(attempt);
+                var channelField = owner.getClass().getDeclaredField("channel");
+                channelField.setAccessible(true);
+                Channel channel = (Channel) channelField.get(owner);
+                channel.closeFuture().get(5, TimeUnit.SECONDS);
+                channel.eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
+                assertFalse(stopping.isDone());
+                release.countDown();
+                stopping.get(2, TimeUnit.SECONDS);
+                attempt.closeAsync().get(5, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+                cold.shutdownNow();
+            }
+        }
+    }
+
     @Test
     public void validatedReplyDoesNotReleaseSerializedSlotBeforeActualWritePromise() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
@@ -5258,6 +5558,112 @@ public class SegmentProfileInitialSocketClientTest {
                 }
                 assertEquals(Outcome.ALREADY_APPLIED, client.install(fixture.install(0))
                         .get(5, TimeUnit.SECONDS).outcome());
+            } finally {
+                if (held.get() != null) {
+                    held.get().trySuccess();
+                }
+                if (observed.get() != null) {
+                    observed.get().release();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void closeWaitsForQueuedDataBorrowAndDoesNotChangeTheOriginalInput() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var client = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+            var ownerField = ProfileNormalDataClient.class.getDeclaredField("socket");
+            ownerField.setAccessible(true);
+            var owner = ownerField.get(client);
+            var channelField = owner.getClass().getDeclaredField("channel");
+            channelField.setAccessible(true);
+            Channel channel = (Channel) channelField.get(owner);
+            var queued = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var source = (org.apache.bookkeeper.util.ByteBufList) entry(fixture, 0, 16);
+            byte[] original = new byte[source.readableBytes()];
+            source.getBytes(original);
+            int forces = files(fixture.nodes.get(0)).dataIo.forces;
+            try {
+                channel.eventLoop().execute(() -> {
+                    queued.countDown();
+                    await(release);
+                });
+                assertTrue(queued.await(5, TimeUnit.SECONDS));
+                var pending = client.addNormal(fixture.context(), fixture.credential, 0, source);
+                assertEquals(2, source.getBuffer(0).refCnt());
+                var closed = client.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closed.get(150, TimeUnit.MILLISECONDS));
+                release.countDown();
+                closed.get(5, TimeUnit.SECONDS);
+                assertThrows(ExecutionException.class, () -> pending.get(5, TimeUnit.SECONDS));
+                assertEquals(1, source.getBuffer(0).refCnt());
+                byte[] after = new byte[source.readableBytes()];
+                source.getBytes(after);
+                assertArrayEquals(original, after);
+                assertEquals(forces, files(fixture.nodes.get(0)).dataIo.forces);
+            } finally {
+                release.countDown();
+                source.release();
+            }
+        }
+    }
+
+    @Test
+    public void closeWaitsForActualWritePromiseEvenAfterReplyAndTransportClose() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                    fixture.reservations.createIfAbsent(fixture.reservation).status());
+            var client = fixture.connect(0, 1, Duration.ofSeconds(5));
+            var ownerField = ProfileInitialControlClient.class.getDeclaredField("socket");
+            ownerField.setAccessible(true);
+            Object owner = ownerField.get(client);
+            var field = owner.getClass().getDeclaredField("channel");
+            field.setAccessible(true);
+            Channel channel = (Channel) field.get(owner);
+            AtomicReference<ChannelPromise> held = new AtomicReference<>();
+            AtomicReference<ByteBuf> observed = new AtomicReference<>();
+            CountDownLatch actualWrite = new CountDownLatch(1);
+            channel.eventLoop().submit(() -> channel.pipeline().addAfter(
+                    channel.pipeline().context(SslHandler.class).name(), "holdWritePromise",
+                    new ChannelOutboundHandlerAdapter() {
+                        @Override
+                        public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+                            ByteBuf body = (ByteBuf) message;
+                            if (body.getUnsignedShort(body.readerIndex() + 14) == ProfileOperation.INSTALL.wireValue()
+                                    && held.compareAndSet(null, promise)) {
+                                observed.set(body.retainedDuplicate());
+                                ChannelPromise output = ctx.newPromise();
+                                output.addListener(sent -> {
+                                    assertTrue(sent.isSuccess());
+                                    actualWrite.countDown();
+                                });
+                                ctx.write(body, output);
+                            } else {
+                                ctx.write(body, promise);
+                            }
+                        }
+                    })).get(5, TimeUnit.SECONDS);
+            try {
+                var pending = client.install(fixture.install(0));
+                assertTrue(actualWrite.await(5, TimeUnit.SECONDS));
+                assertEquals(Outcome.APPLIED, pending.get(5, TimeUnit.SECONDS).outcome());
+                assertEquals(Outcome.TRANSIENT_RECONCILING, client.install(fixture.install(0)).get().outcome());
+                assertEquals(1, fixture.nodeIo.get(0).writes);
+                var closed = client.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closed.get(150, TimeUnit.MILLISECONDS));
+                assertTrue(observed.get().getInt(4) != 0); // Raw owned output is still in use by its promise.
+                held.get().setSuccess();
+                channel.eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
+                for (int offset = 0; offset < observed.get().capacity(); offset++) {
+                    assertEquals(0, observed.get().getByte(offset));
+                }
+                closed.get(5, TimeUnit.SECONDS);
             } finally {
                 if (held.get() != null) {
                     held.get().trySuccess();

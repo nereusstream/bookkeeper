@@ -32,6 +32,7 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.util.ReferenceCounted;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -41,8 +42,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import javax.net.ssl.SSLParameters;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
@@ -84,7 +88,15 @@ final class ProfileSocketClient implements AutoCloseable {
     private final int maxEntryBytes;
     private final ProfileHello.Server expected;
     private final Semaphore slots;
+    private final int maxSlots;
+    private final AtomicInteger retiredSlots = new AtomicInteger();
+    private final AtomicInteger helloWrites = new AtomicInteger();
+    private final AtomicBoolean channelAttached = new AtomicBoolean();
+    private final CompletableFuture<Void> drained = new CompletableFuture<>();
+    private volatile boolean initialized;
+    private volatile boolean transportClosed;
     private final long timeoutNanos;
+    private volatile long helloTimeoutNanos;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final CompletableFuture<ProfileSocketClient> ready = new CompletableFuture<>();
     private final Map<Long, Pending> pending = new HashMap<>(); // Event-loop confined.
@@ -97,17 +109,22 @@ final class ProfileSocketClient implements AutoCloseable {
                                 boolean normalData, int maxEntryBytes) {
         this.normalData = normalData;
         this.maxEntryBytes = maxEntryBytes;
+        expected = new ProfileHello.Server(EngineProfile.SEGMENT_WAL_ENGINE.wireValue(), incarnation, 0,
+                bookie, List.of());
+        validateSettings(maxPending, timeout, normalData, maxEntryBytes);
+        maxSlots = maxPending;
+        slots = new Semaphore(maxPending);
+        timeoutNanos = timeout.toNanos();
+    }
+
+    private static void validateSettings(int maxPending, Duration timeout, boolean normalData, int maxEntryBytes) {
         if (normalData && (maxEntryBytes < 36 || maxEntryBytes > 1024 * 1024 + 36)) {
             throw new IllegalArgumentException("Invalid installed ordinary entry bound");
         }
-        expected = new ProfileHello.Server(EngineProfile.SEGMENT_WAL_ENGINE.wireValue(), incarnation, 0,
-                bookie, List.of());
         if (maxPending < 1 || maxPending > ProfileReservation.MAX_INITIAL_TARGETS
                 || timeout.compareTo(Duration.ofMillis(1)) < 0 || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
             throw new IllegalArgumentException("Invalid bounded initial-control client settings");
         }
-        slots = new Semaphore(maxPending);
-        timeoutNanos = timeout.toNanos();
     }
 
     public static CompletableFuture<ProfileSocketClient> connect(EventLoopGroup group, SslContext tls,
@@ -122,50 +139,233 @@ final class ProfileSocketClient implements AutoCloseable {
         }
         var client = new ProfileSocketClient(expectedBookie, expectedIncarnation, maxPending, timeout,
                 normalData, maxEntryBytes);
-        client.ready.whenComplete((connected, failure) -> {
+        client.start(group, tls, remote, peerHostname, timeout);
+        return client.ready;
+    }
+
+    private void start(EventLoopGroup group, SslContext tls, InetSocketAddress remote, String peerHostname,
+            Duration timeout) {
+        helloTimeoutNanos = timeout.toNanos();
+        ready.whenComplete((connected, failure) -> {
             if (failure != null) {
-                client.close();
+                close();
             }
         });
-        new Bootstrap().group(group).channel(NioSocketChannel.class)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, Math.toIntExact(timeout.toMillis()))
-                .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel socket) {
-                        client.channel = socket;
-                        SslHandler ssl = tls.newHandler(socket.alloc(), peerHostname, remote.getPort());
-                        ssl.engine().setEnabledProtocols(new String[] {"TLSv1.3"});
-                        SSLParameters parameters = ssl.engine().getSSLParameters();
-                        parameters.setEndpointIdentificationAlgorithm("HTTPS");
-                        ssl.engine().setSSLParameters(parameters);
-                        ssl.setHandshakeTimeoutMillis(timeout.toMillis());
-                        socket.pipeline().addLast(ssl);
-                        socket.pipeline().addLast(new LengthFieldBasedFrameDecoder(normalData
-                                ? Math.max(MAX_RESPONSE_FRAME, 36 + ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES
-                                    + ProfileLacReplyCodec.EXPLICIT_BYTES + maxEntryBytes)
-                                        : MAX_RESPONSE_FRAME, 0, 4, 0, 0) {
-                            @Override
-                            protected long getUnadjustedFrameLength(ByteBuf buffer, int offset, int length,
-                                    java.nio.ByteOrder order) {
-                                long value = super.getUnadjustedFrameLength(buffer, offset, length, order);
-                                if (client.hello == null && value + 4 > MAX_RESPONSE_FRAME) {
-                                    throw new io.netty.handler.codec.TooLongFrameException("Oversized pre-HELLO reply");
+        try {
+            var connecting = new Bootstrap().group(group).channel(NioSocketChannel.class)
+                    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, Math.toIntExact(timeout.toMillis()))
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel socket) {
+                            attachChannel(socket);
+                            SslHandler ssl = tls.newHandler(socket.alloc(), peerHostname, remote.getPort());
+                            ssl.engine().setEnabledProtocols(new String[] {"TLSv1.3"});
+                            SSLParameters parameters = ssl.engine().getSSLParameters();
+                            parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                            ssl.engine().setSSLParameters(parameters);
+                            ssl.setHandshakeTimeoutMillis(timeout.toMillis());
+                            socket.pipeline().addLast(ssl);
+                            socket.pipeline().addLast(new LengthFieldBasedFrameDecoder(normalData
+                                    ? Math.max(MAX_RESPONSE_FRAME, 36 + ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES
+                                        + ProfileLacReplyCodec.EXPLICIT_BYTES + maxEntryBytes)
+                                            : MAX_RESPONSE_FRAME, 0, 4, 0, 0) {
+                                @Override
+                                protected long getUnadjustedFrameLength(ByteBuf buffer, int offset, int length,
+                                        java.nio.ByteOrder order) {
+                                    long value = super.getUnadjustedFrameLength(buffer, offset, length, order);
+                                    if (hello == null && value + 4 > MAX_RESPONSE_FRAME) {
+                                        throw new io.netty.handler.codec.TooLongFrameException(
+                                            "Oversized pre-HELLO reply");
+                                    }
+                                    return value;
                                 }
-                                return value;
+                            });
+                            socket.pipeline().addLast(new Responses());
+                            if (closed.get()) {
+                                socket.close();
                             }
-                        });
-                        socket.pipeline().addLast(client.new Responses());
-                        if (client.closed.get()) {
-                            socket.close();
                         }
-                    }
-                }).connect(remote).addListener(connected -> {
-                    if (!connected.isSuccess()) {
-                        client.ready.completeExceptionally(new IOException("Initial control connection failed",
-                                connected.cause()));
-                    }
-                });
-        return client.ready;
+                    }).connect(remote);
+            attachChannel(connecting.channel());
+            connecting.addListener(connected -> {
+                if (!connected.isSuccess()) {
+                    ready.completeExceptionally(
+                            new IOException("Initial control connection failed", connected.cause()));
+                }
+            });
+        } catch (RuntimeException failure) {
+            ready.completeExceptionally(unknown());
+        } finally {
+            initialized = true;
+            if (channel == null) {
+                transportClosed = true;
+            }
+            checkDrained();
+        }
+    }
+
+    private void attachChannel(Channel socket) {
+        channel = socket;
+        if (channelAttached.compareAndSet(false, true)) {
+            socket.closeFuture().addListener(ignored -> {
+                Runnable terminal = () -> {
+                    transportClosed = true;
+                    ready.completeExceptionally(unknown());
+                    checkDrained();
+                };
+                try {
+                    socket.eventLoop().execute(terminal); // After close's outbound failures and inactive callbacks.
+                } catch (RuntimeException stopped) {
+                    terminal.run();
+                }
+            });
+        }
+        if (closed.get()) {
+            socket.close();
+        }
+    }
+
+    /** Owns one registered connection from cold checks through actual local close/drain. */
+    public static final class RegisteredConnection<T> {
+        private final CompletableFuture<T> completion = new CompletableFuture<>();
+        private final CompletableFuture<Void> drained = new CompletableFuture<>();
+        private final AtomicBoolean stopped = new AtomicBoolean();
+        private volatile ProfileSocketClient socket;
+        private volatile boolean coldDone;
+
+        private RegisteredConnection() { }
+
+        public CompletableFuture<T> completion() {
+            var waiter = completion.copy();
+            waiter.whenComplete((value, failure) -> {
+                if (waiter.isCancelled()) {
+                    closeAsync();
+                }
+            });
+            return waiter;
+        }
+
+        /** Cancellation stops future phases; this future also waits for actual queued/running cold work. */
+        public CompletableFuture<Void> closeAsync() {
+            ProfileSocketClient owned;
+            synchronized (this) {
+                stopped.set(true);
+                owned = socket;
+            }
+            if (owned != null) {
+                owned.close();
+            }
+            checkDrained();
+            // User completion callbacks must not hold the lifecycle lock or postpone actual close.
+            completion.completeExceptionally(registeredUnavailable());
+            return drained.copy();
+        }
+
+        private void checkDrained() {
+            var owned = socket;
+            if (stopped.get() && coldDone && (owned == null || owned.drained.isDone())) {
+                drained.complete(null);
+            }
+        }
+    }
+
+    static <T> RegisteredConnection<T> connectRegistered(EventLoopGroup group, SslContext tls,
+            ZKProfileRegistrationStore registry, ZKProfileRegistrationStore.RegisteredPeer peer,
+            ThreadPoolExecutor cold, int maxPending, Duration timeout, boolean normalData, int maxEntryBytes,
+            Function<ProfileSocketClient, T> wrap) {
+        Objects.requireNonNull(group, "group");
+        Objects.requireNonNull(tls, "tls");
+        Objects.requireNonNull(registry, "registry");
+        Objects.requireNonNull(peer, "peer");
+        Objects.requireNonNull(cold, "cold");
+        if (!tls.isClient() || !(cold.getQueue() instanceof java.util.concurrent.ArrayBlockingQueue<?>)
+                || !(cold.getRejectedExecutionHandler() instanceof ThreadPoolExecutor.AbortPolicy)) {
+            throw new IllegalArgumentException(
+                    "Registered connection needs client TLS and a bounded rejecting cold owner");
+        }
+        // Validate fixed limits before submitting work, without creating a channel.
+        validateSettings(maxPending, timeout, normalData, maxEntryBytes);
+        long deadline = System.nanoTime() + timeout.toNanos();
+        var attempt = new RegisteredConnection<T>();
+        try {
+            CompletableFuture.supplyAsync(() -> {
+                requireRegisteredPhase(attempt, deadline);
+                if (registry.revalidatePeer(peer).peer() == null
+                        || peer.readiness().engine() != EngineProfile.SEGMENT_WAL_ENGINE
+                        || peer.readiness().protocolMajor() != ProfileFrameHeader.PROTOCOL_MAJOR
+                        || peer.readiness().protocolMinor() != ProfileFrameHeader.PROTOCOL_MINOR) {
+                    throw new IllegalStateException("Registered peer is unavailable or unsupported");
+                }
+                URI endpoint = URI.create(peer.projection().endpoint());
+                String host = endpoint.getHost();
+                if (!"tls".equals(endpoint.getScheme()) || host == null || endpoint.getPort() < 1
+                        || endpoint.getPort() > 65535 || endpoint.getRawUserInfo() != null
+                        || endpoint.getRawQuery() != null || endpoint.getRawFragment() != null
+                        || endpoint.getRawPath() == null || !endpoint.getRawPath().isEmpty()) {
+                    throw new IllegalArgumentException("Unsupported Profile endpoint");
+                }
+                if (host.startsWith("[")) {
+                    host = host.substring(1, host.length() - 1);
+                }
+                var remote = new InetSocketAddress(host, endpoint.getPort());
+                if (remote.isUnresolved()) {
+                    throw new IllegalStateException("Registered endpoint is unresolved");
+                }
+                requireRegisteredPhase(attempt, deadline);
+                return new RegisteredEndpoint(remote, host);
+            }, cold).thenCompose(endpoint -> {
+                requireRegisteredPhase(attempt, deadline);
+                long remaining = deadline - System.nanoTime();
+                if (remaining < TimeUnit.MILLISECONDS.toNanos(1)) {
+                    return CompletableFuture.<ProfileSocketClient>failedFuture(registeredUnavailable());
+                }
+                var budget = Duration.ofNanos(remaining);
+                var client = new ProfileSocketClient(peer.projection().bookieId(),
+                        peer.projection().storageIncarnation().value(), maxPending, timeout, normalData, maxEntryBytes);
+                synchronized (attempt) {
+                    requireRegisteredPhase(attempt, deadline);
+                    attempt.socket = client;
+                    client.drained.whenComplete((value, failure) -> attempt.checkDrained());
+                }
+                client.start(group, tls, endpoint.remote(), endpoint.hostname(), budget);
+                return client.ready;
+            }).thenCompose(client -> CompletableFuture.supplyAsync(() -> {
+                requireRegisteredPhase(attempt, deadline);
+                if (client.hello().readinessGeneration() != peer.projection().readinessGeneration().value()
+                        || registry.revalidatePeer(peer).peer() == null) {
+                    throw new IllegalStateException("Registered peer changed across HELLO");
+                }
+                requireRegisteredPhase(attempt, deadline);
+                return wrap.apply(client);
+            }, cold)).whenComplete((client, failure) -> {
+                attempt.coldDone = true;
+                boolean deliver;
+                synchronized (attempt) {
+                    deliver = failure == null && !attempt.stopped.get();
+                }
+                // A stop racing this already verified cut closes the same socket; callbacks hold no lifecycle lock.
+                if (!deliver || !attempt.completion.complete(client)) {
+                    attempt.closeAsync();
+                }
+                attempt.checkDrained();
+            });
+        } catch (RuntimeException rejected) {
+            attempt.coldDone = true;
+            attempt.closeAsync();
+        }
+        return attempt;
+    }
+
+    private record RegisteredEndpoint(InetSocketAddress remote, String hostname) { }
+
+    private static void requireRegisteredPhase(RegisteredConnection<?> attempt, long deadline) {
+        if (attempt.stopped.get() || deadline - System.nanoTime() <= 0) {
+            throw new IllegalStateException("Registered connection stopped or expired");
+        }
+    }
+
+    private static IOException registeredUnavailable() {
+        return new IOException("Registered Profile connection unavailable");
     }
 
     public ProfileHello.Server hello() {
@@ -316,7 +516,7 @@ final class ProfileSocketClient implements AutoCloseable {
                     ? buffer.retainedSlice(buffer.readerIndex(), buffer.readableBytes())
                     : ByteBufList.clone((ByteBufList) entry);
         } catch (RuntimeException | Error failedBorrow) {
-            slots.release();
+            returnSlot();
             throw failedBorrow;
         }
         enqueue(held);
@@ -495,7 +695,7 @@ final class ProfileSocketClient implements AutoCloseable {
         @Override
         public void channelActive(ChannelHandlerContext ctx) {
             helloDeadline = ctx.executor().schedule(ProfileSocketClient.this::close,
-                    timeoutNanos, TimeUnit.NANOSECONDS);
+                    helloTimeoutNanos, TimeUnit.NANOSECONDS);
             SslHandler ssl = ctx.pipeline().get(SslHandler.class);
             ssl.handshakeFuture().addListener(handshake -> {
                 try {
@@ -505,18 +705,28 @@ final class ProfileSocketClient implements AutoCloseable {
                         close();
                         return;
                     }
-                    ctx.writeAndFlush(encode(ProfileOperation.HELLO, 1,
+                    ByteBuf outgoing = encode(ProfileOperation.HELLO, 1,
                             new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY,
                                     ProfileLacReplyCodec.CAPABILITY, ProfileLacReplyCodec.EXPLICIT_CAPABILITY)
                                     : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY,
                                             RECOVERY_CLOSE_CAPABILITY,
                                             ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY,
-                                            ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY)).encode()))
-                            .addListener(written -> {
-                        if (!written.isSuccess()) {
-                            close();
-                        }
-                    });
+                                            ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY)).encode());
+                    helloWrites.incrementAndGet();
+                    try {
+                        ctx.writeAndFlush(outgoing).addListener(written -> {
+                            helloWrites.decrementAndGet();
+                            if (!written.isSuccess()) {
+                                close();
+                            }
+                            checkDrained();
+                        });
+                    } catch (RuntimeException | Error failedWrite) {
+                        io.netty.util.ReferenceCountUtil.safeRelease(outgoing);
+                        helloWrites.decrementAndGet();
+                        close();
+                        throw failedWrite;
+                    }
                 } catch (Exception invalidTls) {
                     close();
                 }
@@ -654,7 +864,7 @@ final class ProfileSocketClient implements AutoCloseable {
 
         @Override
         public void channelInactive(ChannelHandlerContext ctx) {
-            closed.set(true);
+            close();
             if (helloDeadline != null) {
                 helloDeadline.cancel(false);
             }
@@ -786,7 +996,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private void releaseIfTerminal() {
             if (writeDone && wireDone && !released) {
                 released = true;
-                slots.release();
+                returnSlot();
             }
         }
     }
@@ -804,9 +1014,36 @@ final class ProfileSocketClient implements AutoCloseable {
         return new IOException("Initial-control result is unknown");
     }
 
+    private void returnSlot() {
+        slots.release();
+        if (closed.get()) {
+            retireAvailableSlots();
+        }
+    }
+
+    private void retireAvailableSlots() {
+        retiredSlots.addAndGet(slots.drainPermits());
+        checkDrained();
+    }
+
+    private void checkDrained() {
+        if (closed.get() && initialized && transportClosed && retiredSlots.get() == maxSlots
+                && helloWrites.get() == 0) {
+            drained.complete(null);
+        }
+    }
+
+    /** Actual local transport, HELLO write and every acquired RPC/source/output slot are terminal.
+     * This is not a remote durable-result or server-I/O cancellation proof. */
+    public CompletableFuture<Void> closeAsync() {
+        close();
+        return drained.copy();
+    }
+
     @Override
     public void close() {
         closed.set(true);
+        retireAvailableSlots(); // Permanently remove unused slots, including callers racing their closed check.
         Channel socket = channel;
         if (socket != null) {
             socket.close();

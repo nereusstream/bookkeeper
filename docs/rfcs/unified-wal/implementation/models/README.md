@@ -1301,3 +1301,9 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-09新增ProfilePeerDiscovery有限消费者投影：1正向/6指定反例检查READY、owner、paired envelope、session marker及generation/birth末次一致性。publisher/strict codec/guard事实是输入，模型不生产ZK、TLS、crypto、HELLO或mutation authority。当前catalog515未全量运行，真实consumer范围由[startup-readiness](../startup-readiness/README.md#消费者发现与再次复核)拥有；相关producer/readiness/admission切片继续单独验证，不提升完整组合Gate。
 
 消费者相关广度i3w2dufn 21配置4正向/17指定反例、827 inputs/632 checksums；最终8z5elnia 7配置1正向/6反例、827当前inputs/607 checksums，与最终Java共享232/去重1647 inputs及五个父HEAD designInputs核验。消费者正向97/81 generated/distinct、queue0、depth/diameter4、0.775秒/peak RSS104448000 bytes（广度run），非性能结论。Java42相关回归在import排序前、最终5消费者PASS，scope与测量由startup-readiness记录拥有；catalog515未全量或完整组合验收。
+
+2026-10-11新增ProfileRegisteredConnection：1正向/8指定反例检查注册pre/HELLO/post事实和cold/output/HELLO-write/transport/permit实际terminal组合；输入不生产TLS/ZK/fsync，未检验clock/liveness/remote abort或完整预算。callback锁等待和RPC时间分离依赖真实Java。当前catalog524未全量或完整A+C+D验收，范围由[连接实现记录](../profile-wire/README.md#注册观察驱动的连接与实际本地排空)拥有。
+
+连接相关ezwn7ipx 44配置7完整正向/37指定反例、837 inputs/685 checksums，最后callback收尾前；最终nx8kvzgw 9配置1正向/8指定反例、837当前inputs/621 checksums。正向225/163 generated/distinct、queue0、depth/diameter11、1.027秒/peak RSS109920256 bytes，非性能结论；实际callback锁等待RED由Java生产，有限模型未证明liveness。完整524未全跑，历史run不重绑。
+
+最终Java UOAB6lBP 17类317项零skip、1052当前inputs/20 checksums，与最终nx8kvzgw共享232/去重1657 inputs及五个父HEAD designInputs核对；回执持久副本与RED在连接记录所列artifact目录，未修改原run身份。完整524及完整组合未宣称接受。

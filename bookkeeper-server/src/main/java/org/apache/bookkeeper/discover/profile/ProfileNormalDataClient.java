@@ -22,6 +22,7 @@ import io.netty.util.ReferenceCounted;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
@@ -58,6 +59,15 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         return result;
     }
 
+    /** Registered cold observation -> existing mTLS/HELLO -> final cold identity reconciliation. */
+    public static ProfileSocketClient.RegisteredConnection<ProfileNormalDataClient> connectRegistered(
+            EventLoopGroup group, SslContext tls, ZKProfileRegistrationStore registry,
+            ZKProfileRegistrationStore.RegisteredPeer peer, ThreadPoolExecutor cold,
+            int maxPending, int maxEntryBytes, Duration timeout) {
+        return ProfileSocketClient.connectRegistered(group, tls, registry, peer, cold,
+                maxPending, timeout, true, maxEntryBytes, ProfileNormalDataClient::new);
+    }
+
     public ProfileHello.Server hello() {
         return socket.hello();
     }
@@ -82,6 +92,10 @@ public final class ProfileNormalDataClient implements AutoCloseable {
     /** Return source provenance; sourceLength is not permission to close a prefix at piggybackLac. */
     public CompletableFuture<ProfileLacReplyCodec.Reply> readLac(ProfileLedgerContext context) {
         return socket.readLac(context);
+    }
+
+    public CompletableFuture<Void> closeAsync() {
+        return socket.closeAsync();
     }
 
     @Override
