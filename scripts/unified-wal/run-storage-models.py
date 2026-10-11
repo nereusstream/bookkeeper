@@ -19,6 +19,17 @@ import time
 
 
 MATRIX = {
+    'a-profile-membership-audit': None,
+    'ce-profile-membership-audit-classic-mask': 'KnownLossSchedulesCheck',
+    'ce-profile-membership-audit-classic-route': 'MarksBelongToProfile',
+    'ce-profile-membership-audit-scope': 'MarksHaveValidScope',
+    'ce-profile-membership-audit-cut': 'MarksUseStableCut',
+    'ce-profile-membership-audit-fresh': 'MarksUseFreshPeers',
+    'ce-profile-membership-audit-unknown': 'UnknownNeverMeansMissing',
+    'ce-profile-membership-audit-incarnation': 'KnownLossSchedulesCheck',
+    'ce-profile-membership-audit-grant': 'MarkerIsSchedulingOnly',
+    'ce-profile-membership-audit-queue': 'NotificationsAreCoalesced',
+
     'a-profile-service-bootstrap': None,
     'ce-profile-service-bootstrap-default': 'DefaultIsOff',
     'ce-profile-service-bootstrap-context': 'EnabledUsesContext',
@@ -648,6 +659,9 @@ def main():
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/server/service/AutoRecoveryService.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AutoRecoveryMainTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorPeriodicBookieCheckTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieCheckTaskTest.java")
+    inputs.append(root / "bookkeeper-common/src/test/java/org/apache/bookkeeper/test/TestStatsProvider.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestReplicationWorker.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/test/ZooKeeperUtil.java")
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning").glob("*.java"))
@@ -730,6 +744,7 @@ def main():
                    else "ProfileServiceShutdown.tla" if "profile-service-shutdown" in name
                    else "ProfileRecoveryPeerPool.tla" if "profile-recovery-peer-pool" in name
                    else "ProfileServiceBootstrap.tla" if "profile-service-bootstrap" in name
+                   else "ProfileMembershipAudit.tla" if "profile-membership-audit" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name

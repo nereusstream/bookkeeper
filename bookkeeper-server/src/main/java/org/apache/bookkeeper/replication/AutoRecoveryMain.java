@@ -41,6 +41,7 @@ import org.apache.bookkeeper.common.component.ComponentStarter;
 import org.apache.bookkeeper.common.component.LifecycleComponent;
 import org.apache.bookkeeper.common.component.LifecycleComponentStack;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileAuditor;
 import org.apache.bookkeeper.replication.ReplicationException.CompatibilityException;
 import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
 import org.apache.bookkeeper.server.conf.BookieConfiguration;
@@ -103,6 +104,7 @@ public class AutoRecoveryMain {
                 1, 1, 0, java.util.concurrent.TimeUnit.MILLISECONDS,
                 new java.util.concurrent.ArrayBlockingQueue<>(64),
                 new io.netty.util.concurrent.DefaultThreadFactory("profile-autorecovery-cold"));
+        private ProfileAuditor profileAuditor;
         private org.apache.bookkeeper.meta.LedgerManager ownedManager;
         private org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool pool;
         private org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator coordinator;
@@ -139,6 +141,7 @@ public class AutoRecoveryMain {
                     zk, manager, settings.acls(), timeout);
             coordinator = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
                     reservations, metadata, cold);
+            profileAuditor = new ProfileAuditor(registry, reservations, metadata, settings.cohort(), settings.work());
             pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
                     group, settings.tls(), cold, settings.cohort(), settings.peerLimits());
         }
@@ -237,7 +240,8 @@ public class AutoRecoveryMain {
                 resources.bind(client, settings);
             }
             elector = new AuditorElector(BookieImpl.getBookieId(conf).toString(), conf,
-                    client, statsLogger.scope(AUDITOR_SCOPE), false);
+                    client, statsLogger.scope(AUDITOR_SCOPE), false,
+                    resources == null ? null : resources.profileAuditor);
             worker = resources == null ? new ReplicationWorker(conf, client, false,
                     statsLogger.scope(REPLICATION_WORKER_SCOPE))
                     : new ReplicationWorker(conf, client, statsLogger.scope(REPLICATION_WORKER_SCOPE),

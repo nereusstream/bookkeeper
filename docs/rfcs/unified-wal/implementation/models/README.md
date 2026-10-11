@@ -1321,3 +1321,5 @@ Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksu
 2026-10-11，原ProfileServiceBootstrap加入SDK准入关闭/实际procedure结束和caller signal输入，新增2指定反例；本轮10配置1完整正向/9CE、相关54配置7正向/47CE得到预期结果。catalog由551增至553，完整矩阵/完整组合未运行。[真实SDK关闭中断RED/GREEN及回执](../profile-wire/README.md#sdk-关闭过程中的新中断)拥有当前证据；有限模型不替代SDK/ZK/TLS/fsync或资源字节证明。
 
 2026-10-11，原ProfileServiceShutdown加入actual auditor terminal输入，新增AuditorNeedsActualDrain指定反例；narrow11配置2正向/9CE与相关55配置7正向/48CE得到预期结果，catalog554未全跑。两份runner绑定实际auditor owners/producer依赖及Classic AuditorBookieTest源码。[实际service audit executor中断RED/GREEN及回执](../profile-wire/README.md#auditor-排空与-owned-sdk-关闭)拥有当前证据；模型不生产native input或完整组合保证。
+
+2026-10-11，新增ProfileMembershipAudit有限投影1完整正向/9指定反例，scope/cut/fresh/UNKNOWN/incarnation及Classic错误遮蔽/路由、marker无grant、通知合并；相关72配置9正向/63CE、最后换行后10配置1/9均符合预期。catalog564/完整组合未接受，facts仍由实际组件生产。[成员故障发现及真实闭环回执](../profile-wire/README.md#profile-成员故障发现与原-auditor-接线)拥有最新实现范围。

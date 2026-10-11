@@ -1103,3 +1103,35 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check
 最终Java 9g4pj27S exit0：5类51项零skip（URmanager24、Classic auditor shutdown/successive election2、AutoRecovery5、Classic worker3、actual service/socket/pool/worker17），1062当前inputs/8 artifact checksums。auditor-drain-checks-ht2mj80b的style exit0、RAT exit1，443 unapproved路径全在父HEAD、无新增，5 checksums，不计CI全绿。narrow wzcf66vo 11配置2完整正向/9指定反例、879inputs/657 checksums，在最后补入AuditorBookieTest源码锁前；相关750_1r7x 55配置7正向/48反例、880当前inputs/740 checksums。外部shutdown正向52 generated/30 distinct，self91/44，queue0、depth12，分别0.793/0.832秒、peak RSS107593728/106725376 bytes（相关run），非性能结论；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0/无symmetry/state constraint/CHECK_DEADLOCK FALSE。Java/model共享242/去重1700当前inputs与五个父HEAD design锁核验，历史run不重绑。
 
 持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/auditor-drain-evidence-edhuj_ar`及archive.json checks目录。catalog554/完整A+C+D组合未运行，Linux NUMA/掉电/正式性能NOT_EXECUTED；Profile注册感知的初始集合/变化通知/周期扫描、全字节预算、离线追赶/rejoin/delete/GC及综合验收仍OPEN，步骤12/14仍PARTIAL，生产Gate不提升。
+
+## Profile 成员故障发现与原 auditor 接线
+
+2026-10-11，第14步接通原AuditorElector/Auditor/AuditorBookieCheckTask的显式Profile成员发现。ProfileAuditor直接借用同一服务SDK/ZK context创建的原registration/reservation/metadata adapters，固定cohort（最多64）和WorkerOptions已验证的descriptor。普通构造器仍OFF。显式Profile auditor只检查带backlink且匹配本descriptor/cohort的ledger；Classic BookieLedgerIndexer跳过带实验Profile backlink的metadata，避免把Classic registry的同名Bookie可用性错误套到Profile ledger。Classic ledger仍走原index；不另建membership、选举、任务或权限日志。
+
+Profile分支复用原lostBookieRecoveryDelay、多成员故障处理、delay变更和periodicBookieCheck调度，启动known集合来自配置cohort，最终成员权威仍是LedgerMetadata ensembles。初始扫描即使periodic interval=0也照原规则执行一次。新observer顺序消费原LedgerRangeIterator，每次只保留一个metadata/probe与至多64个peer observations，不再构建另一份全ledger索引；原backend range、SDK/ZK/TLS/kernel/allocator的总字节上限仍未完成，此处不声明全内存有界。
+
+watchPeers只在配置Bookie的readiness path安装至多64个persistent recursive watch，不枚举整个registry或动态扩大cohort；事件仅请求原auditor executor上的cold检查，不在ZK事件线程读peer/授予权限。Profile通知在executor中合并为至多一项额外排队任务，实际scan仍串行；同BookieId的READY/incarnation/session变化也会按原delay安排检查。实际auditor排空后retire本observer，再best-effort移除仅属于它的watch；底层session仍由SDK拥有并实际关闭，observer retirement不冒充远端abort/注册删除或磁盘回收。需要支持persistent recursive watch的ZK；安装失败按原启动错误处理，不暗中改用另一发现框架。
+
+逐ledger核对metadata版本/内容/physical birth、backlink/instance、lifecycle/creatorToken/quorum和retained activation/repair目标身份；要求所有历史ensemble成员在cohort内，并把peer incarnation与已保留receipt匹配。对FOUND再cold revalidate，NOT_FOUND再读，最后再检查metadata/root cut。NOT_FOUND或稳定但不匹配的incarnation只生成原underreplication检查任务；UNAVAILABLE/CORRUPT、变化中的cut、缺失/不一致历史及scope不匹配都defer，不折算为空集合或DATA absence。DELETED不产生新任务。observer不写FENCE/INSTALL/grant/CLOSED、membership或clear marker，原worker/coordinator继续拥有实际授权、COPY、完整W健康证明及guarded completion。
+
+真实闭环：启动前删除Profile writable，保留Classic同名available节点且不手工mark；服务自动产生任务、由真实mTLS/native COPY替换到新目标并在全W健康/lease drain后清marker。关闭过程前的健康副本在observer-only启动中不产生任务；interval=0时删除writable也由真实watch产生原task，再启动原worker完成修复。interval=1的真实periodic检查遇到损坏service-info会记录defer、保持ledger OPEN且不产生marker；恢复注册继续扫描，同名incarnation改变会留下检查任务，但metadata仍OPEN且未授予写权。真实Classic ledger43与Profile ledger44同地址的index验证显示只包含Classic ledger，显式Profile observer不处理Classic ledger。
+
+初轮ZDf95ord exit1是真实RED：Classic同名registry掩盖Profile缺失，目标未替换；sc9PadVn为使用package-private helpers/PageResult字段错误的编译失败（无测试），改为复用discover/profile内原helpers与公开descriptor codec；R5EC4HNQ已自动完成membership但旧等待只看membership、尚未到marker实际排空，保持有效assert并改为同时等待membership和marker。Bv9qYbVj启动GREEN、7N7SfO6i三场景及kusm5Jry（含incarnation）三场景PASS。历史run保持原source/config/command身份，不重绑到后续源码。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'AutoRecoveryMainTest,AuditorBookieTest#testShutdown+testSuccessiveAuditorCrashes,AuditorPeriodicBookieCheckTest,AuditorBookieCheckTaskTest,SegmentProfileInitialSocketClientTest#profileAuditor*+profileAutoRecoveryService*+profileServiceShutdown*+profileBootstrapInitialization*+profileShutdownInterruptDuring*+registeredPeerPool*+registeredPool*+replicationWorker*,TestReplicationWorker#testReplicationStats+testReplicateEmptyOpenStateLedger+testRWZKConnectionLostOnNonRecoverableZkError,TestLedgerUnderreplicationManager'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-membership-audit --config-prefix ce-profile-membership-audit --config-prefix a-profile-service-bootstrap --config-prefix ce-profile-service-bootstrap --config-prefix a-profile-service-shutdown --config-prefix ce-profile-service-shutdown --config-prefix a-profile-recovery-peer-pool --config-prefix ce-profile-recovery-peer-pool --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker --config-prefix a-profile-peer-discovery --config-prefix ce-profile-peer-discovery
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+```
+
+ProfileMembershipAudit有限投影1完整正向/9指定反例覆盖Classic遮蔽与错误路由、scope/cut/freshness、UNKNOWN/同名incarnation、marker只是调度、通知合并。输入facts不由模型生产，模型不证明实际ZK watch/decoder/mTLS/fsync、内存全预算、clock/liveness或完整组合。
+
+当前已经是显式、固定descriptor/cohort的Profile成员故障发现与原worker闭环。周期DATA/replica/placement审计仍明确拒绝非0配置；全registry/总字节预算、普通writer closed adoption/required authority producer、离线追赶/rejoin/delete/GC、完整兼容/组合/长期正式性能及运维/生产验收仍OPEN，步骤12/14仍PARTIAL。Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。
+
+广度Java cvxA27kV exit0：7类57项零skip（Classic periodic1/task2/UR24/auditor2/Main5/worker3、native service/pool/worker20），1066 inputs/10 artifacts；之后只修正checkstyle指出测试行5683的121字符换行，未弱化断言或改变代码语义。最终JRKGj99g exit0：3项真实成员发现/修复/UNKNOWN/incarnation全部PASS，1066当前inputs/4 artifacts。相关模型_b04wuab 72配置9完整正向/63指定反例，895inputs/783checksums，在最后测试换行前；最终_x63yc0m 10配置1正向/9反例，895当前inputs/667checksums。正向1792 generated/768 distinct、queue0、depth3、0.870秒/peak RSS112410624 bytes（最终run），非性能结论；tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。Java/model共享246/去重1715当前inputs与五个父HEAD设计锁核验，catalog564及完整A+C+D未全跑。
+
+本轮历史及最终回执持久副本在`/Users/liusinan/.codex/artifacts/unified-wal/membership-audit-evidence-r9nyiz9e`；archive.json列出初次风格失败及最终checks目录，source/config/run/command身份不改。
+
+最终membership-audit-final-checks-ppc__8jf：style exit0/RAT exit1，443 unapproved路径全部在父HEAD、无新增，5 artifact checksums；初次n1lqyxuv只失败于测试行长121，2 checksums保留。未改许可规则、不称CI全绿。

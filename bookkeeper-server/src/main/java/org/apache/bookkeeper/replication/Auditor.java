@@ -43,6 +43,7 @@ import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.BookKeeperAdmin;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileAuditor;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LedgerManagerFactory;
 import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
@@ -87,6 +88,9 @@ public class Auditor implements AutoCloseable {
     private final List<AuditorTask> allAuditorTasks = Lists.newArrayList();
 
     private final AuditorStats auditorStats;
+    private final ProfileAuditor profileAuditor;
+    private AutoCloseable profileWatch;
+    private final AtomicBoolean profileAuditQueued = new AtomicBoolean();
 
     static BookKeeper createBookKeeperClient(ServerConfiguration conf) throws InterruptedException, IOException {
         return createBookKeeperClient(conf, NullStatsLogger.INSTANCE);
@@ -133,13 +137,18 @@ public class Auditor implements AutoCloseable {
                    boolean ownBkc,
                    StatsLogger statsLogger)
             throws UnavailableException {
+        this(bookieIdentifier, conf, bkc, ownBkc, statsLogger, null);
+    }
+
+    Auditor(String bookieIdentifier, ServerConfiguration conf, BookKeeper bkc, boolean ownBkc,
+            StatsLogger statsLogger, ProfileAuditor profileAuditor) throws UnavailableException {
         this(bookieIdentifier,
                 conf,
                 bkc,
                 ownBkc,
                 new BookKeeperAdmin(bkc, statsLogger, new ClientConfiguration(conf)),
                 true,
-                statsLogger);
+                statsLogger, profileAuditor);
     }
 
     public Auditor(final String bookieIdentifier,
@@ -150,6 +159,13 @@ public class Auditor implements AutoCloseable {
                    boolean ownAdmin,
                    StatsLogger statsLogger)
             throws UnavailableException {
+        this(bookieIdentifier, conf, bkc, ownBkc, admin, ownAdmin, statsLogger, null);
+    }
+
+    private Auditor(String bookieIdentifier, ServerConfiguration conf, BookKeeper bkc, boolean ownBkc,
+            BookKeeperAdmin admin, boolean ownAdmin, StatsLogger statsLogger, ProfileAuditor profileAuditor)
+            throws UnavailableException {
+        this.profileAuditor = profileAuditor;
         this.conf = conf;
         this.bookieIdentifier = bookieIdentifier;
         this.auditorStats = new AuditorStats(statsLogger);
@@ -166,7 +182,7 @@ public class Auditor implements AutoCloseable {
         this.auditorBookieCheckTask = new AuditorBookieCheckTask(
                 conf, auditorStats, admin, ledgerManager,
                 ledgerUnderreplicationManager, shutdownTaskHandler,
-                bookieLedgerIndexer, hasAuditCheckTask, submitBookieCheckTask);
+                bookieLedgerIndexer, hasAuditCheckTask, submitBookieCheckTask, profileAuditor);
         allAuditorTasks.add(auditorBookieCheckTask);
         this.auditorCheckAllLedgersTask = new AuditorCheckAllLedgersTask(
                 conf, auditorStats, admin, ledgerManager,
@@ -245,7 +261,11 @@ public class Auditor implements AutoCloseable {
             f.setException(new BKAuditException("Auditor shutting down"));
             return f;
         }
+        if (profileAuditor != null && !profileAuditQueued.compareAndSet(false, true)) {
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
         return executor.submit(() -> {
+            profileAuditQueued.set(false); // At most one additional Profile notification waits behind this job.
             try {
                 waitIfLedgerReplicationDisabled();
                 int lostBookieRecoveryDelay = Auditor.this.ledgerUnderreplicationManager
@@ -274,6 +294,13 @@ public class Auditor implements AutoCloseable {
                 // find lost bookies(if any)
                 bookiesToBeAudited.addAll(CollectionUtils.subtract(knownBookies, availableBookies));
                 if (bookiesToBeAudited.size() == 0) {
+                    if (profileAuditor != null && auditTask == null) {
+                        // READY/incarnation/session changes can matter without changing the set of BookieIds.
+                        auditTask = executor.schedule(() -> {
+                            auditorBookieCheckTask.startAudit(false);
+                            auditTask = null;
+                        }, lostBookieRecoveryDelay, TimeUnit.SECONDS);
+                    }
                     return;
                 }
 
@@ -395,9 +422,9 @@ public class Auditor implements AutoCloseable {
                 // Start with all available bookies
                 // to handle situations where the auditor
                 // is started after some bookies have already failed
-                knownBookies = admin.getAllBookies().stream()
-                        .map(BookieId::toString)
-                        .collect(Collectors.toList());
+                knownBookies = profileAuditor == null ? admin.getAllBookies().stream()
+                        .map(BookieId::toString).collect(Collectors.toList())
+                        : new ArrayList<>(profileAuditor.cohort());
                 this.ledgerUnderreplicationManager
                         .notifyLostBookieRecoveryDelayChanged(new LostBookieRecoveryDelayChangedCb());
             } catch (BKException bke) {
@@ -597,6 +624,9 @@ public class Auditor implements AutoCloseable {
     }
 
     protected List<String> getAvailableBookies() throws BKException {
+        if (profileAuditor != null) {
+            return profileAuditor.availableBookies();
+        }
         // Get the available bookies
         Collection<BookieId> availableBkAddresses = admin.getAvailableBookies();
         Collection<BookieId> readOnlyBkAddresses = admin.getReadOnlyBookies();
@@ -610,6 +640,17 @@ public class Auditor implements AutoCloseable {
     }
 
     private void watchBookieChanges() throws BKException {
+        if (profileAuditor != null) {
+            try {
+                profileWatch = profileAuditor.watch(this::submitAuditTask);
+            } catch (org.apache.zookeeper.KeeperException failed) {
+                throw BKException.create(BKException.Code.MetaStoreException);
+            } catch (InterruptedException stopped) {
+                Thread.currentThread().interrupt();
+                throw BKException.create(BKException.Code.InterruptedException);
+            }
+            return;
+        }
         admin.watchWritableBookiesChanged(bookies -> submitAuditTask());
         admin.watchReadOnlyBookiesChanged(bookies -> submitAuditTask());
     }
@@ -635,6 +676,13 @@ public class Auditor implements AutoCloseable {
                 executor.shutdownNow();
             }
 
+            if (profileWatch != null) {
+                try {
+                    profileWatch.close();
+                } catch (Exception failed) {
+                    log.warn().exception(failed).log("Could not remove Profile audit watch; SDK owns the session");
+                }
+            }
             // shutdown all auditorTasks to clean some resource
             allAuditorTasks.forEach(AuditorTask::shutdown);
             allAuditorTasks.clear();

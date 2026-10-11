@@ -34,7 +34,7 @@ import org.apache.bookkeeper.replication.ReplicationException.BKAuditException;
 import org.apache.zookeeper.AsyncCallback;
 
 /**
- * Preparing bookie vs its corresponding ledgers. This will always look up the
+ * Preparing Classic bookie vs its corresponding ledgers. This will always look up the
  * ledgermanager for ledger metadata and will generate indexes.
  */
 @CustomLog
@@ -65,6 +65,11 @@ public class BookieLedgerIndexer {
                 public void process(Long ledgerId, AsyncCallback.VoidCallback iterCallback) {
                     ledgerManager.readLedgerMetadata(ledgerId).whenComplete((metadata, exception) -> {
                                 if (exception == null) {
+                                    if (metadata.getValue().getCustomMetadata().containsKey(
+                                            org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink.KEY)) {
+                                        iterCallback.processResult(BKException.Code.OK, null, null);
+                                        return; // Profile membership needs its explicit scoped observer.
+                                    }
                                     for (Map.Entry<Long, ? extends List<BookieId>> ensemble
                                              : metadata.getValue().getAllEnsembles().entrySet()) {
                                         for (BookieId bookie : ensemble.getValue()) {

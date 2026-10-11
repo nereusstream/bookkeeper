@@ -32,6 +32,7 @@ import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeperAdmin;
 import org.apache.bookkeeper.common.concurrent.FutureUtils;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileAuditor;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
 import org.apache.commons.collections4.CollectionUtils;
@@ -40,6 +41,7 @@ import org.apache.commons.collections4.CollectionUtils;
 public class AuditorBookieCheckTask extends AuditorTask {
 
     private final BookieLedgerIndexer bookieLedgerIndexer;
+    private final ProfileAuditor profileAuditor;
     private final BiConsumer<Void, Throwable> submitCheckTask;
 
     public AuditorBookieCheckTask(ServerConfiguration conf,
@@ -51,8 +53,18 @@ public class AuditorBookieCheckTask extends AuditorTask {
                                   BookieLedgerIndexer bookieLedgerIndexer,
                                   BiConsumer<AtomicBoolean, Throwable> hasAuditCheckTask,
                                   BiConsumer<Void, Throwable> submitCheckTask) {
+        this(conf, auditorStats, admin, ledgerManager, ledgerUnderreplicationManager, shutdownTaskHandler,
+                bookieLedgerIndexer, hasAuditCheckTask, submitCheckTask, null);
+    }
+
+    AuditorBookieCheckTask(ServerConfiguration conf, AuditorStats auditorStats, BookKeeperAdmin admin,
+            LedgerManager ledgerManager, LedgerUnderreplicationManager ledgerUnderreplicationManager,
+            ShutdownTaskHandler shutdownTaskHandler, BookieLedgerIndexer bookieLedgerIndexer,
+            BiConsumer<AtomicBoolean, Throwable> hasAuditCheckTask, BiConsumer<Void, Throwable> submitCheckTask,
+            ProfileAuditor profileAuditor) {
         super(conf, auditorStats, admin, ledgerManager,
                 ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask);
+        this.profileAuditor = profileAuditor;
         this.bookieLedgerIndexer = bookieLedgerIndexer;
         this.submitCheckTask = submitCheckTask;
     }
@@ -109,6 +121,14 @@ public class AuditorBookieCheckTask extends AuditorTask {
         } catch (ReplicationException.UnavailableException ue) {
             log.error("Underreplication unavailable, skipping audit."
                     + "Will retry after a period");
+            return;
+        }
+        if (profileAuditor != null) {
+            try {
+                profileAuditor.audit(ledgerManager, ledgerUnderreplicationManager, conf.getZkTimeout(), auditorStats);
+            } catch (java.io.IOException | ReplicationException failed) {
+                throw new ReplicationException.BKAuditException("Profile membership scan unavailable", failed);
+            }
             return;
         }
         log.info("Starting auditBookies");

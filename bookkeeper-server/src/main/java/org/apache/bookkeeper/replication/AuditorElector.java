@@ -38,6 +38,7 @@ import lombok.CustomLog;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileAuditor;
 import org.apache.bookkeeper.meta.LedgerAuditorManager;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
@@ -73,6 +74,7 @@ public class AuditorElector {
 
 
     private final StatsLogger statsLogger;
+    private final ProfileAuditor profileAuditor;
 
 
     @VisibleForTesting
@@ -122,6 +124,12 @@ public class AuditorElector {
                           BookKeeper bkc,
                           StatsLogger statsLogger,
                           boolean ownBkc) throws UnavailableException {
+        this(bookieId, conf, bkc, statsLogger, ownBkc, null);
+    }
+
+    AuditorElector(String bookieId, ServerConfiguration conf, BookKeeper bkc, StatsLogger statsLogger,
+            boolean ownBkc, ProfileAuditor profileAuditor) throws UnavailableException {
+        this.profileAuditor = profileAuditor;
         this.bookieId = bookieId;
         this.conf = conf;
         this.bkc = bkc;
@@ -187,7 +195,7 @@ public class AuditorElector {
                     try {
                         ledgerAuditorManager.tryToBecomeAuditor(bookieId, e -> handleAuditorEvent(e));
 
-                        auditor = new Auditor(bookieId, conf, bkc, false, statsLogger);
+                        auditor = new Auditor(bookieId, conf, bkc, false, statsLogger, profileAuditor);
                         auditor.start();
                     } catch (InterruptedException e) {
                         log.error().exception(e).log("Interrupted while performing auditor election");

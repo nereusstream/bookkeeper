@@ -191,6 +191,42 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
         return current;
     }
 
+    /** Bounded persistent cohort watch. Events only request a cold audit; they do not classify peers. */
+    public AutoCloseable watchPeers(List<String> bookies, Runnable changed)
+            throws org.apache.zookeeper.KeeperException, InterruptedException {
+        List<String> peers = List.copyOf(bookies);
+        if (peers.isEmpty() || peers.size() > 64 || peers.stream().distinct().count() != peers.size()) {
+            throw new IllegalArgumentException("Profile watch requires a bounded unique cohort");
+        }
+        List<String> paths = peers.stream().map(this::path).toList();
+        var stopped = new java.util.concurrent.atomic.AtomicBoolean();
+        var watched = new java.util.ArrayList<String>();
+        org.apache.zookeeper.Watcher watcher = event -> {
+            if (!stopped.get() && event.getType()
+                    != org.apache.zookeeper.Watcher.Event.EventType.PersistentWatchRemoved) {
+                changed.run();
+            }
+        };
+        AutoCloseable retired = () -> {
+            stopped.set(true);
+            // Retire only this observer; actual session ownership remains with the service SDK.
+            watched.forEach(path -> zk.removeWatches(path, watcher, org.apache.zookeeper.Watcher.WatcherType.Any,
+                    true, (rc, removed, context) -> { }, null));
+        };
+        try {
+            for (String path : paths) {
+                zk.addWatch(path, watcher, org.apache.zookeeper.AddWatchMode.PERSISTENT_RECURSIVE);
+                watched.add(path);
+            }
+        } catch (org.apache.zookeeper.KeeperException | InterruptedException failed) {
+            stopped.set(true);
+            watched.forEach(path -> zk.removeWatches(path, watcher, org.apache.zookeeper.Watcher.WatcherType.Any,
+                    true, (rc, removed, context) -> { }, null));
+            throw failed;
+        }
+        return retired;
+    }
+
     private static boolean matchesPeer(Snapshot authority, ProfileServiceInfoProjection projection) {
         var record = authority.envelope().record();
         return record.bookieId().equals(projection.bookieId())
