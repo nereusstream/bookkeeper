@@ -813,3 +813,6 @@ PASS 不授权 Segment 成为 ACK authority，不授权生产 canary，也不证
 
 
 2026-10-12 B15 access叶片：[实际Unix credential快照](../implementation/startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)已在macOS双native UID与实际Arena/control/DATA/index目录验证，用完整有界文件清单及可读marker否证并修复“directory DENIED即整个scope DENIED”的0711/0644实际反例。31项最终Java/真实probe、style与许可状态按source保留；它是ACCESS_SNAPSHOT_ONLY，old-service drain/readonly/decommission NOT_VERIFIED、stock binary NOT_EXECUTED，journal/ledger是初始单Arena未使用的guard目录。B14/B15完整矩阵、multi-device/权限全scope/启动测量及本Spike整体Gate继续未接受，不能写成正式PASS。
+
+
+2026-10-12 B15 owned old-episode叶片：[真实Classic service关闭/进程退出/注册终态](../implementation/startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)已用当前构建的old UID JVM、真实E1 SDK Add/read与原stack/Journal/storage/driver路径，再将owned DRAINED观察及Unix access接到new target replay。held closed JVM和abrupt/expired absence不能假装DRAINED，34项通过并保留每stage/class/source身份。它不是released stock binary矩阵、外部deployment-manager authority或永久decommission，Classic Arena为guard且episode UUID非native incarnation；B14/B15与本Spike整体Gate继续未接受。

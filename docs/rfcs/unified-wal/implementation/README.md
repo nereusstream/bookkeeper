@@ -632,3 +632,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-12 [实际Unix credential new-scope快照](startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)已验证native双UID访问完整bounded现有文件及可读marker，真实0711/0644反例修复，access/canonical roots导入原actual restart/source/readiness组合。最终31项及style通过，RAT443历史问题无新增；这只是ACCESS_SNAPSHOT_ONLY，old-service disposition/privilege/stock binary/default bootstrap与完整fallback和综合验收仍OPEN，步骤12/14/15及生产Gate保持PARTIAL/OPEN。
+
+
+2026-10-12 [实际old Classic episode与new-scope replay组合](startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)已真实SDK写读/原stack与driver关闭/actual JVM退出/原session registration终态，owned observation接入actual Unix access与原startup组合；closed-live和abrupt-expired absence不等于DRAINED。最终34项/style通过，RAT443历史问题无新增。当前构建与受控episode证明不覆盖外部service authority、released stock矩阵、永久退役或default hook，步骤12/14/15/生产Gate与综合验收仍PARTIAL/OPEN。

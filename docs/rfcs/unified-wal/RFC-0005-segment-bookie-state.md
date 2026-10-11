@@ -845,3 +845,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-12 [实际Unix credential new-scope access快照](implementation/startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)已用native UID501/4294967294、完整bounded现有文件和已知可读marker验证真实读取/写打开/创建权限，directory-only假成功在0711目录/0644已知文件上真实RED后修复。原SDK/mTLS/实际restart/source/readiness组合导入真实access与canonical roots，31项最终验证通过、style通过、RAT443历史问题无新增。old-service disposition仍NOT_VERIFIED，Classic journal/ledger为guard目录，stock binary/提升权限/持续隔离和默认启动hook未证明；整体fallback/B14/B15及生产Gate仍OPEN。
+
+
+2026-10-12 [实际旧Classic episode关闭与new-scope组合](implementation/startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)已在old UID的独立真实JVM上复用原EmbeddedServer/Classic SDK Add/read、stack/Journal/storage/metadata driver关闭与native process终态，原注册session/birth匹配后fresh absence，closed但live或halt37后的absence均不产生DRAINED。受控observation与actual Unix access导入原replay/harness组合，34项最终验证/style通过，RAT443历史问题无新增。Classic native incarnation未新增，episode UUID为admin实验标识；外部服务/永久退役/stock binary/default生产hook和整体fallback/B14/B15/Gate仍OPEN。

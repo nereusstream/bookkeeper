@@ -62,3 +62,6 @@
 
 
 2026-10-12继续第12步：7f46962589后已在本机实际运行native双UID，对隔离new-scope完整有界现有文件/可读marker取得access快照并导入原actual restart/source/harness组合；directory-only在0711目录/0644已知文件上的假成功已真实RED/GREEN。最终31项/当前source与边界由startup-readiness/README.md“实际 Unix credential 的 new-scope access 快照”拥有。old-service disposition/OS-service全范围issuer、stock binary/pre-storage-open矩阵/default EmbeddedServer/SDK routing仍OPEN，继续它们及snapshot/handoff/GC/decommission/full-bytes/兼容/正式性能/运维与全16步验收。持续目标active，ACCESS_SNAPSHOT_ONLY不升级整体fallback/B14/B15或步骤12/14/15/生产Gate。
+
+
+2026-10-12继续第12步：25b7913260后已在old UID独立JVM运行当前真实Classic EmbeddedServer，实际SDK成功写读、原stack/journal/storage/driver关闭、original registration与actual process终态，owned DRAINED观察联接实际Unix access与原new target replay/source/harness。closed-live或abrupt/expiry absence不伪造排空；当前source/34项与未覆盖边界由startup-readiness/README.md“实际旧 Classic episode 的有序关闭与 new-scope 组合”拥有。继续外部old-service authority、released stock binary/pre-storage-open矩阵、default EmbeddedServer/SDK routing、snapshot/handoff/GC/decommission/full-bytes及全16步兼容/性能/运维/综合验收。持续目标active，单个owned episode不是整个fallback/B14/B15或生产Gate完成。

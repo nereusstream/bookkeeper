@@ -1422,3 +1422,6 @@ ZqosUvct六类176项（control49/persistent13/lifecycle51/ephemeral19/metadata19
 
 
 2026-10-12 [actual Unix access→原startup组合](../startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)已把native UID、实际canonical roots/NONE/READ_WRITE送入原reference fallback，再复用actual mTLS/ZK/CLOSED/delete/restart/source/harness/consumer。0711目录已知文件实际可读的假成功真实RED/GREEN，最终31项零fail/error/skip、style通过、RAT443父HEAD历史问题无新增。ACCESS_SNAPSHOT_ONLY不证明old-service disposition、stock binary或生产启动，default bootstrap/SDK路由/全fallback与综合Gate仍OPEN。
+
+
+2026-10-12 [owned真实Classic关闭→原startup组合](../startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)已从实际old UID JVM/原EmbeddedServer、SDK E1成功写读、原stack/driver关闭与process terminal产生受控old DRAINED观察，closed-live和halt37/ephemeral expiry负向均拒绝；与实际access/source/replay/harness/consumer正常及scheduler拒绝组合通过。最终34项零fail/error/skip，style通过、RAT443历史问题无新增。外部old-service authority、stock binary、permanent decommission及default bootstrap/SDK routing和综合Gate仍OPEN。

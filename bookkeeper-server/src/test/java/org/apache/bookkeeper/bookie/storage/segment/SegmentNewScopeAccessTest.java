@@ -91,9 +91,22 @@ public class SegmentNewScopeAccessTest {
 
     static StartupReadinessInput actualFallback(StartupReadinessInput requested, IsolatedSegmentConfig config)
             throws Exception {
+        return actualFallback(requested, config, null);
+    }
+
+    static StartupReadinessInput actualFallback(StartupReadinessInput requested, IsolatedSegmentConfig config,
+            SegmentClassicScopeEpisodeTest.Episode oldEpisode) throws Exception {
         var parent = config.directory().getParent();
-        var oldParent = Files.createDirectory(parent.resolve("declared-old-scope"));
-        var oldRoots = roots(oldParent);
+        List<Map<String, String>> oldRoots;
+        if (oldEpisode == null) {
+            var oldParent = Files.createDirectory(parent.resolve("declared-old-scope"));
+            oldRoots = roots(oldParent);
+        } else {
+            oldEpisode.drained();
+            oldRoots = new ArrayList<>();
+            oldEpisode.ready().path("roots").forEach(root -> oldRoots.add(Map.of(
+                    "kind", root.path("kind").asText(), "path", root.path("path").asText())));
+        }
         var journal = Files.createDirectory(parent.resolve("new-journal-scope"));
         var ledger = Files.createDirectory(parent.resolve("new-ledger-scope"));
         var newRoots = List.of(
@@ -106,12 +119,19 @@ public class SegmentNewScopeAccessTest {
         assertEquals("NONE", receipt.path("oldCredentialAccessToNewScope").asText());
         assertEquals("READ_WRITE", receipt.path("newCredentialAccessToNewScope").asText());
         var declared = requested.newScopeFallback();
-        var fallback = new NewScopeFallbackManifest(declared.oldBookieId(), declared.newBookieId(),
-                declared.oldStorageIncarnation(), declared.newStorageIncarnation(),
+        var oldScope = oldEpisode == null ? declared.oldStorageIncarnation()
+                : new org.apache.bookkeeper.common.profile.startup.StorageIncarnation(java.nio.ByteBuffer.allocate(16)
+                        .putLong(oldEpisode.scopeEpisode().getMostSignificantBits())
+                        .putLong(oldEpisode.scopeEpisode().getLeastSignificantBits()).array());
+        var fallback = new NewScopeFallbackManifest(oldEpisode == null ? declared.oldBookieId()
+                : oldEpisode.ready().path("bookieId").asText(), declared.newBookieId(),
+                oldScope, declared.newStorageIncarnation(),
                 typedRoots(receipt.path("oldRoots")), typedRoots(receipt.path("newRoots")),
                 new NewScopeFallbackManifest.CredentialScope("uid:" + receipt.at("/oldActor/actor/uid").asLong()),
                 new NewScopeFallbackManifest.CredentialScope("uid:" + receipt.at("/newActor/actor/uid").asLong()),
-                declared.oldScopeDisposition(), NewScopeFallbackManifest.AccessLevel.NONE,
+                oldEpisode == null ? declared.oldScopeDisposition()
+                        : NewScopeFallbackManifest.OldScopeDisposition.DRAINED,
+                NewScopeFallbackManifest.AccessLevel.NONE,
                 NewScopeFallbackManifest.AccessLevel.READ_WRITE);
         assertTrue(fallback.permitsNewScopeWritable());
         return new StartupReadinessInput(requested.compatibility(), requested.requiredDevices(),

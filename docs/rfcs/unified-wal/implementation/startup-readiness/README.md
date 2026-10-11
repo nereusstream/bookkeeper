@@ -340,3 +340,30 @@ request包含 `oldUser`、`oldRoots`/`newRoots` 两份各四项 `{kind: JOURNAL|
 父源码 `7f469625894fcb82c108074429c6cc8e83004be2`。初始qLtUZ5HV五项在known-file反例前；之后green六项在最后partial marker清理前，保留stage绑定，不叠加计覆盖。最终N9E8hDcb五类31项（access4/socket2/harness11/facts6/requirements8）零failure/error/skip，1078当前inputs全部匹配，实际Unix权限和原startup组合均执行。Spotless/Checkstyle exit0、Python源码compile通过且移除本次bytecode；root RAT仍exit1/443父HEAD历史路径、无新增。原模型语义未改，不新增/重跑TLC，不把旧model PASS移绑为Unix proof。archive `/Users/liusinan/.codex/artifacts/unified-wal/new-scope-access-evidence-hnn6m1xl` 保留原run/command/receipt/stage；red probe及test源码已按原hash恢复，1078 red inputs全部核对，可重现directory-only假成功。
 
 完整old-service disposition/OS-service范围issuer、真实stock old binary与pre-storage-open全矩阵、default EmbeddedServer/bootstrap/SDK routing和其余综合验收继续OPEN。B14/B15整体仍未接受；步骤12/14/15与生产Gate保持PARTIAL/OPEN。Linux/NUMA、真实掉电、正式性能本轮NOT_EXECUTED，完整目标继续active。
+
+
+## 实际旧 Classic episode 的有序关闭与 new-scope 组合
+
+2026-10-12，`SegmentClassicScopeEpisodeTest` 用actual old UID的独立JVM运行原 `EmbeddedServer`/Classic Bookie，隔离loopback端口、ZKnamespace及old journal/ledger/index roots。原metadata driver、registration manager、BookieNettyServer、request processor、Bookie/Journal/SyncThread/ledger storage与lifecycle stack均走当前真实实现，没有mock server或伪造注册。old Arena为Classic不使用的guard目录。new scope仍使用另一UID和前节实际access probe，本轮不创建系统账户、修改生产路径或启动部署服务。
+
+child真实注册后输出完整nonce/PID/UID/BookieId、registration path/original session owner/czxid、四类canonical roots与实际加载的EmbeddedServer/BookieImpl class SHA。parent再次读取actual registration并匹配birth/owner；原SDK在该Bookie完成E/W/A=1的CRC32C Add及读取，成功确认后关闭ledger/client。child接收到同nonce的CLOSE才调用原stack.close，再关闭明确自持有的metadata driver；server与Bookie running均false且exit code0后才原子发布CLOSED观察。它在CLOSED后有意继续等待EXIT，验证component close/registration消失并非actual process terminal。
+
+只有原wrapper正常exit0、captured actual Java ProcessHandle也已退出、同nonce/binding CLOSED存在且原writable/readonly registry均fresh absent，owned Episode才能返回drained观察。仍存活的closed JVM不能取得DRAINED；caller不能把缺registration或自己填写的enum当成它。异常路径让该实际JVM在已确认写入后halt37，不执行有序close或产生CLOSED；ZooKeeper TCP断连仍可保留ephemeral至session过期，测试等待真实expiry再fresh读absence，仍拒绝DRAINED。absence不是永久停写、wipe、访问屏障或decommission证明。
+
+`actualOldClassicDrainAndCredentialAccessFeedOriginalReadinessBridge` 将该owned observation的actual old BookieId/roots/UID和有序关闭结果，连同actual access NONE/READ_WRITE导入原fallback输入，再read/check冻结startup source、构造actual replay graph并运行原Harness/publisher/admission/consumer。两个rejoin实例各先完成old episode关闭，oldScope未真实排空时不能进入该转换；正常consumer与rejected scheduler/demote均有验证。原new target是既有隔离Profile dataset，首次创建与初始安装发生在fixture setup，本组合只证明old关闭后这次replay启动顺序，不冒充完整migration或首次new-scope bootstrap。
+
+Classic没有本原型的native Segment storage-incarnation字段；转换用本次实验分配并绑定old roots/BookieId/session/PID的episode UUID作为admin old-scope标识，不把它写入Classic格式或宣称由旧Cookie原生提供。该受控旧实例的DRAINED观察由程序自身持有的process lifetime产生；没有推广到外部进程、所有service accounts/aliases、部署管理器、released stock binary或旧数据永久不可重启。前节access工具仍固定oldServiceDisposition=NOT_VERIFIED，因为它只验证文件访问；actual old episode由本节额外提供，层次不得混同。default EmbeddedServer Profile hook与production authority issuer继续OPEN。
+
+复现（与前节相同的真实Unix身份前置，不可用则明确NOT_EXECUTED/skip）：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentClassicScopeEpisodeTest,SegmentNewScopeAccessTest,StartupReadinessFactsTest,StartupReadinessHarnessTest,ZKProfileStartupRequirementsStoreTest,SegmentProfileInitialSocketClientTest#actualOldClassicDrainAndCredentialAccessFeedOriginalReadinessBridge+physicalCredentialAccessFeedsOriginalReadinessBridge+readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `25b7913260144d0e96874ec865db934afb322501`。初始EvBvsNwx的一项失败发生在已完成主体关闭后的fixture cleanup：old UID可清空old目录，却不能移除其new UID持有的parent entry；改为old UID仅清空自有内容、new UID移除自持有parent，不改变生产权限。单episode green保留原stage；BePxQPHW含三个组合PASS，另abrupt场景因过早假设ephemeral随TCP退出而立即消失失败，已按实际session expiry等待，未删除有效判定。corrected五项通过；最终6ZXduv7I六类34项（episode2/access4/socket3/harness11/facts6/requirements8）零failure/error/skip，1094当前inputs全部匹配，collector包含实际classic/lifecycle/registry producer源码。
+
+最终五份drain receipt来自三个不同BookieId/nonce/actual process episode，重复查询不计新覆盖；所有old native UID为本机4294967294，class字节身份和original registration owner/birth保留。另有10份access观察。Spotless/Checkstyle exit0；RAT仍exit1/443父HEAD已有路径，无新增。原semantic模型不变，本轮未重跑TLC；实际PID/UID/SDK/journal/driver退出不能由旧模型PASS生产。归档 `/Users/liusinan/.codex/artifacts/unified-wal/classic-scope-episode-evidence-y39dj4hz` 保留所有stage、原source/command/receipts、失败child日志和checksum，不移绑历史PASS。
+
+这是owned isolated current-build Classic episode的关闭/排空与新scope replay组合，released-old-binary全矩阵、外部old-service authority/永久退役、default bootstrap/SDK routing与综合验收继续OPEN。B14/B15整体仍未接受，步骤12/14/15及生产Gate保持PARTIAL/OPEN；Linux/NUMA、真实掉电、正式性能本轮NOT_EXECUTED，完整目标保持active。

@@ -1720,18 +1720,26 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence() throws Exception {
-        runReadinessBridge(false);
+        runReadinessBridge(false, false);
     }
 
     @Test
     public void physicalCredentialAccessFeedsOriginalReadinessBridge() throws Exception {
         SegmentNewScopeAccessTest.requireCredentials();
-        runReadinessBridge(true);
+        runReadinessBridge(true, false);
     }
 
-    private void runReadinessBridge(boolean physicalAccess) throws Exception {
+    @Test
+    public void actualOldClassicDrainAndCredentialAccessFeedOriginalReadinessBridge() throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        runReadinessBridge(true, true);
+    }
+
+    private void runReadinessBridge(boolean physicalAccess, boolean actualOldService) throws Exception {
         for (boolean rejectedScheduler : List.of(false, true)) {
-            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture);
+                    var oldEpisode = actualOldService ? new SegmentClassicScopeEpisodeTest.Episode(
+                            fixture.cluster.getZooKeeperConnectString(), "/old-classic-rejoin") : null) {
                 fixture.connectAll(Duration.ofSeconds(5));
                 fixture.initialize().get(5, TimeUnit.SECONDS);
                 var data = new HashMap<BookieId, ProfileNormalDataClient>();
@@ -1754,6 +1762,13 @@ public class SegmentProfileInitialSocketClientTest {
                 var identity = fixture.identities.get(0);
                 var config = files(fixture.nodes.get(0)).config();
                 fixture.nodes.get(0).close();
+                if (oldEpisode != null) {
+                    oldEpisode.writeAndReadConfirmedEntry();
+                    oldEpisode.requestCloseAndHoldProcess();
+                    assertThrows(IllegalStateException.class, oldEpisode::drained);
+                    oldEpisode.exit();
+                    oldEpisode.drained();
+                }
                 var watcher = new ZooKeeperWatcherBase(10000, false);
                 try (var client = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher)) {
                     watcher.waitForConnection();
@@ -1774,7 +1789,8 @@ public class SegmentProfileInitialSocketClientTest {
                             ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
                     var requestedPolicy = startupPolicy(config, identity);
                     var requested = physicalAccess
-                            ? SegmentNewScopeAccessTest.actualFallback(requestedPolicy, config) : requestedPolicy;
+                            ? SegmentNewScopeAccessTest.actualFallback(requestedPolicy, config, oldEpisode)
+                            : requestedPolicy;
                     var expectedDevice = requested.requiredDevices().devices().get(0);
                     var required = new RequiredDeviceManifest(requested.requiredDevices().identity(),
                             requested.requiredDevices().generation(),
