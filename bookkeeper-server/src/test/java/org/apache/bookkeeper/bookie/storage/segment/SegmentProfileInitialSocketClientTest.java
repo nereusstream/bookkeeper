@@ -5945,6 +5945,80 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void profileShutdownInterruptDuringSdkCloseWaitsForActualMetadataClose() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                BookKeeper externalSdk = sdk(fixture)) {
+            var conf = profileWorkerConfiguration(fixture);
+            conf.setAllowLoopback(true);
+            conf.setAuditorPeriodicCheckInterval(0);
+            conf.setAuditorPeriodicReplicasCheckInterval(0);
+            conf.setAuditorPeriodicPlacementPolicyCheckInterval(0);
+            var settings = new org.apache.bookkeeper.replication.AutoRecoveryMain.ProfileSettings(
+                    "/socket-initial", "/socket-readiness", ZooDefs.Ids.OPEN_ACL_UNSAFE, fixture.peerTls,
+                    fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
+                    new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                            6, 12, 2, 1060, Duration.ofSeconds(5)),
+                    new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                            Map.of(), Map.of(), 3, 8, Duration.ofSeconds(30)));
+            var main = new org.apache.bookkeeper.replication.AutoRecoveryMain(
+                    conf, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, settings);
+            var clientField = main.getClass().getDeclaredField("bkc");
+            clientField.setAccessible(true);
+            var ownedSdk = (BookKeeper) clientField.get(main);
+            var ownedZk = ((org.apache.bookkeeper.meta.zk.ZKMetadataClientDriver)
+                    ownedSdk.getMetadataClientDriver()).getZk();
+            var resourcesField = main.getClass().getDeclaredField("profileResources");
+            resourcesField.setAccessible(true);
+            var resources = resourcesField.get(main);
+            var groupField = resources.getClass().getDeclaredField("group");
+            var coldField = resources.getClass().getDeclaredField("cold");
+            groupField.setAccessible(true);
+            coldField.setAccessible(true);
+            var group = (EventLoopGroup) groupField.get(resources);
+            var cold = (ThreadPoolExecutor) coldField.get(resources);
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var owner = new java.util.concurrent.atomic.AtomicReference<Thread>();
+            var stopper = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try {
+                ownedSdk.getClientCtx().getScheduler().execute(() -> {
+                    entered.countDown();
+                    await(release);
+                });
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                var stopping = stopper.submit(() -> {
+                    owner.set(Thread.currentThread());
+                    main.shutdown();
+                    return Thread.currentThread().isInterrupted();
+                });
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (!ownedSdk.getClientCtx().isClientClosed() && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertTrue(ownedSdk.getClientCtx().isClientClosed()); // This is admission, not SDK close completion.
+                assertEquals(ZooKeeper.States.CONNECTED, ownedZk.getState());
+                owner.get().interrupt(); // During close, after its irreversible closed flag.
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                assertEquals(ZooKeeper.States.CONNECTED, ownedZk.getState());
+                assertFalse(group.isShuttingDown());
+                assertFalse(cold.isShutdown());
+                release.countDown();
+                assertTrue(stopping.get(10, TimeUnit.SECONDS));
+                assertEquals(ZooKeeper.States.CLOSED, ownedZk.getState());
+                assertTrue(group.isTerminated());
+                assertTrue(cold.isTerminated());
+                assertFalse(externalSdk.getClientCtx().isClientClosed());
+            } finally {
+                release.countDown();
+                main.shutdown();
+                ownedSdk.getMetadataClientDriver().close(); // Also reclaim the RED run's stranded session.
+                stopper.shutdownNow();
+            }
+        }
+    }
+
+    @Test
     public void profileBootstrapInitializationFailureReclaimsItsNewOwnerThreads() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true);
                 BookKeeper sdk = sdk(fixture)) {

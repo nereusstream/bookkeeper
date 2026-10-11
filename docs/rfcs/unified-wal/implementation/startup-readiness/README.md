@@ -228,3 +228,5 @@ Java `unified-wal-local-GDbVx4DD` exit0：3类42项全部通过（persistent con
 2026-10-11consumer/registered connection已由[配置cohort peer pool与原worker lease](../profile-wire/README.md#注册-cohort-peer-pool-与实际-worker-lease)消费；不是无界registry枚举，也不授予ledger authority或自动rejoin，默认service bootstrap仍OFF。
 
 2026-10-11 registered pool由[显式owned AutoRecovery service](../profile-wire/README.md#显式-autorecovery-service-bootstrap-与-owned-资源)实例化，SDK/ZK authority context一致、failure/shutdown实际排空后关闭owner；默认service入口OFF，完整Profile audit/startup与生产Gate未接受。
+
+2026-10-11 [SDK关闭期间的新中断](../profile-wire/README.md#sdk-关闭过程中的新中断)已真实RED/GREEN验证并修复：原Main使用独立一次性SDK closer，caller中断只记账并等实际procedure结束，随后回收cold/group并恢复signal。48项Java与相关54模型配置得到预期结果；Profile availability/audit、全字节预算及步骤12/14/生产Gate仍PARTIAL/OPEN。

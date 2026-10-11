@@ -18,7 +18,7 @@
  under the License.
 *)
 EXTENDS Integers
-CONSTANTS DefaultEnabled, IgnoreContext, IgnoreAudit, IgnoreReady, EarlySDK, EarlyOwner, LeakFailure
+CONSTANTS DefaultEnabled, IgnoreContext, IgnoreAudit, IgnoreReady, EarlySDK, EarlyOwner, LeakFailure, EarlySDKReturn, LoseSignal
 VARIABLE s
 vars == <<s>>
 (* SDK/ZK ownership, supported audit scope, verified service readiness and actual
@@ -26,7 +26,8 @@ vars == <<s>>
 Init == s \in [explicit : BOOLEAN, context : BOOLEAN, audits : BOOLEAN, ready : BOOLEAN,
                phase : {"new"}, owners : {FALSE}, sdk : {FALSE}, enabled : {FALSE},
                active : {FALSE}, poolDrained : {FALSE}, stopping : {FALSE}, sdkClosed : {FALSE},
-               ownersClosed : {FALSE}, failed : {FALSE}, returned : {FALSE}]
+               ownersClosed : {FALSE}, failed : {FALSE}, returned : {FALSE},
+               sdkClosing : {FALSE}, sdkTerminal : {FALSE}, signaled : {FALSE}, signalRestored : {FALSE}]
 Allocate == /\ s.phase = "new"
             /\ s' = [s EXCEPT !.phase = "allocated", !.owners = s.explicit \/ DefaultEnabled, !.sdk = TRUE]
 Bind == /\ s.phase = "allocated"
@@ -38,13 +39,21 @@ Start == /\ s.phase = "bound" /\ (s.ready \/ IgnoreReady)
 Stop == /\ s.phase \in {"bound", "running"} /\ ~s.stopping /\ s' = [s EXCEPT !.stopping = TRUE]
 WorkerDone == /\ s.stopping /\ s.active /\ s' = [s EXCEPT !.active = FALSE]
 PoolDone == /\ s.stopping /\ ~s.active /\ ~s.poolDrained /\ s' = [s EXCEPT !.poolDrained = TRUE]
-SDKClose == /\ s.stopping /\ ~s.sdkClosed /\ (s.poolDrained \/ EarlySDK)
-            /\ s' = [s EXCEPT !.sdkClosed = TRUE]
+(* Admission closes before BookKeeper's interruptible waits. Caller interrupt does
+   not interrupt the independent one-shot SDK closer; sdkTerminal is its actual return input. *)
+SDKBegin == /\ s.stopping /\ ~s.sdkClosing /\ (s.poolDrained \/ EarlySDK)
+            /\ s' = [s EXCEPT !.sdkClosing = TRUE]
+Interrupt == /\ s.sdkClosing /\ ~s.sdkClosed /\ ~s.signaled
+             /\ s' = [s EXCEPT !.signaled = TRUE]
+SDKClose == /\ s.sdkClosing /\ ~s.sdkClosed
+            /\ s' = [s EXCEPT !.sdkClosed = TRUE, !.sdkTerminal = TRUE]
+SDKInterruptedReturn == /\ s.sdkClosing /\ s.signaled /\ ~s.sdkClosed /\ EarlySDKReturn
+                        /\ s' = [s EXCEPT !.sdkClosed = TRUE]
 OwnerClose == /\ s.stopping /\ ~s.ownersClosed /\ (s.sdkClosed \/ EarlyOwner)
               /\ s' = [s EXCEPT !.ownersClosed = TRUE]
 Return == /\ s.stopping /\ ~s.returned /\ ((s.sdkClosed /\ s.ownersClosed) \/ (s.failed /\ LeakFailure))
-          /\ s' = [s EXCEPT !.returned = TRUE]
-Next == Allocate \/ Bind \/ Fail \/ Start \/ Stop \/ WorkerDone \/ PoolDone \/ SDKClose \/ OwnerClose \/ Return
+          /\ s' = [s EXCEPT !.returned = TRUE, !.signalRestored = s.signaled /\ ~LoseSignal]
+Next == Allocate \/ Bind \/ Fail \/ Start \/ Stop \/ WorkerDone \/ PoolDone \/ SDKBegin \/ Interrupt \/ SDKClose \/ SDKInterruptedReturn \/ OwnerClose \/ Return
 Spec == Init /\ [][Next]_vars
 TypeOK == s.phase \in {"new", "allocated", "bound", "failed", "running"}
 DefaultIsOff == s.enabled => s.explicit
@@ -53,5 +62,7 @@ EnabledUsesSupportedAuditScope == s.enabled => s.audits
 StartNeedsReady == s.active => s.ready
 SDKWaitsForPool == s.sdkClosed => s.poolDrained
 OwnersWaitForSDK == s.ownersClosed => s.sdkClosed
+SDKCompletionNeedsActualReturn == s.sdkClosed => s.sdkTerminal
+ReturnPreservesSignal == s.returned /\ s.signaled => s.signalRestored
 FailureReturnKeepsNoOwners == s.returned /\ s.failed => s.sdkClosed /\ s.ownersClosed
 =============================================================================

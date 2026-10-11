@@ -1059,3 +1059,25 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 回执持久副本在`/Users/liusinan/.codex/artifacts/unified-wal/service-bootstrap-evidence-3lge8fhj`及archive.json checks目录。前期xWRb0KuS为unused KeeperException catch编译错误；PiwVUdy1为SDK CleanupLedgerManager不属native manager的拒绝，改用factory创建并拥有native manager；iAXpkSt0为fixture禁止loopback的配置失败，测试显式允许loopback、生产默认不改；bootstrap-checks-J1iaTeSP为import/长行checkstyle失败，已修正。这些不作为协议RED。
 
 当前已接显式配置cohort的owned服务入口，仍无默认CLI启用或生产Bookie listener/startup接管。registration-aware Profile auditor、全registry与全内存字节预算、same-ID rejoin/离线catch-up/delete/GC、完整兼容/组合/正式持续性能/运维及生产Gate继续OPEN，步骤12/14保持PARTIAL；Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。实际canary/生产启用仍须环境及相应授权。
+
+## SDK 关闭过程中的新中断
+
+2026-10-11，规划检查指出cf9459b838入口的一个实际窗口：BookKeeper.close先设置closed准入位，之后才在scheduler/mainWorkerPool等处等待并最终close metadata driver；新interrupt发生在等待中会跳出，Main原catch继续回收cold/group并结束procedure。再次SDK close因closed=true直接return，不能修复滞留session。前一轮“预中断+held READ”的PASS只覆盖进SDK等待前取出signal，不覆盖这个窗口；历史回执不重绑。
+
+本轮在原Main内增加一次性的autorecovery-sdk-close线程，既用于runtime shutdown，也用于初始化失败收尾。它只执行原SDK close，不引入新SDK API或普通Add开销。原唯一shutdown owner等待该线程实际终结，任何caller interrupt只记账、继续join，最后恢复；SDK异常传回caller，不把准入closed位当作完成，也不重试不可续接的close。每个Main的这一关闭阶段至多一个closer，不创建常驻调度器或重试队列；cold/group仍在SDK procedure返回之后收尾。异常返回不证明所有资源无条件关闭成功，原SDK的其他timeout/error语义未被升级成新保证。
+
+新增真实回归把服务自身SDK scheduler任务持有，再等closed位已设置/真实owned ZK仍CONNECTED时中断shutdown caller。修复前Gxr9qFjq exit1，1项实际FAIL，shutdown在scheduler未终结时返回；修复后j4fuCHGa exit0，1PASS，caller保持等待且cold/group未shutdown，释放任务后owned ZK CLOSED、cold/group terminated、signal保留、external SDK继续可用。RED finally显式清理滞留driver，不让测试遗留session；最终状态断言在这段清理前执行。
+
+ProfileServiceBootstrap原模型补入sdkClosing、caller signal、actual SDK return输入及signal restore，区分准入关闭与procedure结束；新增两个指定反例SDKCompletionNeedsActualReturn/ReturnPreservesSignal。仍是有限投影，不生产SDK/TLS/ZK/fsync事实、内存字节证据或被永久阻塞child的liveness。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'AutoRecoveryMainTest,SegmentProfileInitialSocketClientTest#profileAutoRecoveryService*+profileServiceShutdown*+profileBootstrapInitialization*+profileShutdownInterruptDuringSdkClose*+registeredPeerPool*+registeredPool*+replicationWorker*,TestReplicationWorker#testReplicationStats+testReplicateEmptyOpenStateLedger+testRWZKConnectionLostOnNonRecoverableZkError,TestLedgerUnderreplicationManager'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-service-bootstrap --config-prefix ce-profile-service-bootstrap --config-prefix a-profile-service-shutdown --config-prefix ce-profile-service-shutdown --config-prefix a-profile-recovery-peer-pool --config-prefix ce-profile-recovery-peer-pool --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+```
+
+最终Java bCRQ9XaW exit0：4类48项零skip（AutoRecovery5、URmanager24、Classic worker3、actual service/socket/pool/worker16），1056当前inputs/7 artifact checksums。sdk-close-checks-oc10vnwf的style exit0、RAT exit1，443 unapproved路径全在父HEAD，无新增，5 checksums；不计CI全绿。模型wk9v00r_ 10配置1完整正向/9指定反例、873inputs/655 checksums；相关hw_gy2l6 54配置7完整正向/47指定反例、873inputs/737 checksums。bootstrap正向499 generated/407 distinct、queue0、depth12、0.852秒/peak RSS110755840 bytes（相关run），是有限模型消耗而非性能结论；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0/无symmetry/state constraint/CHECK_DEADLOCK FALSE。Java/model共享236/去重1693当前inputs与五个父HEAD设计锁核验。完整catalog553/完整A+C+D组合未运行；Linux NUMA/掉电/正式性能NOT_EXECUTED，步骤12/14仍PARTIAL，生产Gate不提升。
+
+持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/sdk-close-evidence-juy8ki3e`，archive.json指向checks目录，原source/config/run/command身份不改。原auditor的初始集合、变化监听与membership周期扫描仍使用Classic registry；Profile/cohort/descriptor/instance/incarnation感知的故障发现、全字节预算、离线追赶/rejoin/delete/GC及综合验收继续OPEN。registration observation不替代DATA missing证明或repair授权。

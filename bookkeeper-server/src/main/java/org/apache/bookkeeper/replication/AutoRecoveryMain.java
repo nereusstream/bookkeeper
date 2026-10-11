@@ -274,10 +274,11 @@ public class AutoRecoveryMain {
             }
             if (client != null) {
                 try {
-                    client.close();
-                } catch (BKException | InterruptedException closeFailure) {
-                    interrupted |= closeFailure instanceof InterruptedException;
+                    closeClientUninterruptibly(client);
+                } catch (BKException closeFailure) {
                     failed.addSuppressed(closeFailure);
+                } finally {
+                    interrupted |= Thread.interrupted();
                 }
             }
             if (resources != null) {
@@ -362,12 +363,11 @@ public class AutoRecoveryMain {
                 interrupted |= profileResources.drain();
             }
             try {
-                bkc.close();
+                closeClientUninterruptibly(bkc);
             } catch (BKException failedClose) {
                 log.warn().exception(failedClose).log("Failed to close bookkeeper client for auto recovery");
-            } catch (InterruptedException stopping) {
-                interrupted = true;
-                log.warn().exception(stopping).log("Interrupted closing bookkeeper client for auto recovery");
+            } finally {
+                interrupted |= Thread.interrupted();
             }
             if (profileResources != null) {
                 interrupted |= profileResources.finishOwners();
@@ -379,6 +379,48 @@ public class AutoRecoveryMain {
                     notifyAll();
                 }
             }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    // BookKeeper.close sets its admission flag before interruptible executor waits; retrying cannot resume it.
+    // Give that one-shot procedure an independent owner so caller interrupts cannot strand its metadata session.
+    private static void closeClientUninterruptibly(BookKeeper client) throws BKException {
+        var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Thread closer = new Thread(() -> {
+            try {
+                client.close();
+            } catch (Throwable failedClose) {
+                failure.set(failedClose);
+            }
+        }, "autorecovery-sdk-close");
+        boolean interrupted = Thread.interrupted();
+        try {
+            closer.start();
+            for (;;) {
+                try {
+                    closer.join();
+                    break;
+                } catch (InterruptedException stopping) {
+                    interrupted = true;
+                }
+            }
+            Throwable failedClose = failure.get();
+            if (failedClose instanceof BKException bkFailure) {
+                throw bkFailure;
+            }
+            if (failedClose instanceof RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+            }
+            if (failedClose instanceof Error error) {
+                throw error;
+            }
+            if (failedClose != null) {
+                throw new IllegalStateException("AutoRecovery SDK close was not confirmed", failedClose);
+            }
+        } finally {
             if (interrupted) {
                 Thread.currentThread().interrupt();
             }

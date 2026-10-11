@@ -27,6 +27,8 @@ MATRIX = {
     'ce-profile-service-bootstrap-sdk': 'SDKWaitsForPool',
     'ce-profile-service-bootstrap-owners': 'OwnersWaitForSDK',
     'ce-profile-service-bootstrap-failure': 'FailureReturnKeepsNoOwners',
+    'ce-profile-service-bootstrap-interrupt': 'SDKCompletionNeedsActualReturn',
+    'ce-profile-service-bootstrap-signal': 'ReturnPreservesSignal',
 
     'a-profile-recovery-peer-pool': None,
     'ce-profile-recovery-peer-pool-capacity': 'ConnectionReservationIsBounded',

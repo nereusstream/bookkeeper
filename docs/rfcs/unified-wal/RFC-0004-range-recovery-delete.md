@@ -1110,3 +1110,5 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 2026-10-11 [registered cohort pool与worker lease](implementation/profile-wire/README.md#注册-cohort-peer-pool-与实际-worker-lease)消费真实READY/mTLS/HELLO创建固定snapshot，建立/借用/排空共同保守计费connection和RPC-slot预算；原worker在实际lease drain后才清原task/marker。实际缺副本修复、held promise/cold及episode/incarnation验证见记录；service bootstrap、全registry/字节预算与生产Gate仍OPEN，步骤12/14保持PARTIAL。
 
 2026-10-11 [显式AutoRecovery service bootstrap](implementation/profile-wire/README.md#显式-autorecovery-service-bootstrap-与-owned-资源)由服务自身SDK/ZK创建原coordinator/pool并消费真实任务；owned manager/SDK/cold/group在实际worker/lease排空后关闭，失败也收尾，默认入口OFF。Classic periodic payload/replica/placement audit非0明确拒绝；完整Profile availability/audit、字节预算与综合生产Gate仍OPEN，步骤12/14保持PARTIAL。
+
+2026-10-11 [SDK关闭期间的新中断](implementation/profile-wire/README.md#sdk-关闭过程中的新中断)已真实RED/GREEN验证并修复：原Main使用独立一次性SDK closer，caller中断只记账并等实际procedure结束，随后回收cold/group并恢复signal。48项Java与相关54模型配置得到预期结果；Profile availability/audit、全字节预算及步骤12/14/生产Gate仍PARTIAL/OPEN。
