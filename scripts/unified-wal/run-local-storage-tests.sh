@@ -59,6 +59,7 @@ paths.update([Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/tls/TL
 paths.update(Path('bookkeeper-server/src/test/resources') / name for name in
              ('server-key.pem', 'server-san-cert.pem', 'client-cert.pem', 'client-key.pem'))
 paths.update([Path('pom.xml'), Path('bookkeeper-server/pom.xml'), Path('scripts/unified-wal/run-local-storage-tests.sh')])
+paths.add(Path('scripts/unified-wal/probe-new-scope-access.py'))
 manifest = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
             'branch': subprocess.check_output(['git', 'branch', '--show-current'], text=True).strip(),
             'platform': platform.platform(), 'command': sys.argv[2:],

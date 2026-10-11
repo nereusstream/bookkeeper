@@ -310,3 +310,33 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 当前增加持久required格式/设备来源与显式pre-construction/frozen publication guard；真正old-binary fence和new-scope/credential物理证明、default bootstrap/SDK routing、snapshot/handoff/history GC/decommission、full-bytes及完整兼容/性能/运维仍OPEN。步骤12/14/15和生产Gate保持PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，完整目标继续active。
 
 最后仅清理五个新模型许可头的尾随空白，最终iou2vxf6四配置为1完整正向/3指定反例，978当前inputs匹配；完整模型语义未改，原fn17vvad和Java KGzRhsIE回执保持stage绑定。最终staged whitespace检查与本地提交一并核对。
+
+
+## 实际 Unix credential 的 new-scope access 快照
+
+2026-10-12，新增admin实验工具 `scripts/unified-wal/probe-new-scope-access.py`，输入oldUser和四类old/new canonical roots，实际运行当前身份及 `/usr/bin/sudo -n -u oldUser -- <same Python> -I -B <same script> --worker`。这里只处理调用方明确提供的隔离目录；工具不创建账户、不修改已有目录/文件权限、不改现有storage bytes，不启动/停止真实部署服务。旧child cwd为`/`、close_fds为true，仅继承stdio；报告native effective UID/GID/supplementary groups、nonce、script/input SHA、原command与actual exit，避免仅比较用户名或caller自述access等级。
+
+每个root实际执行directory read与私有nonce文件的create/write/fsync；对现有regular files及新建的0666可读nonce marker，再执行read-open/write-open。现有文件只open/close、不读取payload、不写入。marker检查用于空目录和execute-only目录；它不是真实authority文件，权限只修改在本工具创建的文件上。完整现有清单有128-file/128-directory界限，输入16KiB、worker/输出256KiB，超限不取子集成功。symbolic alias、hardlink/特殊文件、old/new root相等或祖先重叠、missing root、old UID0或同UID均不产生VERIFIED；known errno EACCES/EPERM才是DENIED，其他错误是UNAVAILABLE。前后核对root与文件identity/owner/mode/size，重叠new roots中的同一路径去重，不能以可读子集代替整份清单。
+
+new身份须能read/create/write/sync并打开现有文件；old身份必须对directory/create及全部known-file read/write-open均被实际拒绝。结束后只删除同device/inode的本工具nonce文件；partial marker写入失败也在实际调用结束后检查其身份再清理。成功的旧child已实际退出才返回VERIFIED，超时/不可运行/错身份/错nonce/缺清单均不产生可导入access事实。这里不承诺中断一个旧binary或远端操作，也不提供权限持续lease。
+
+测试先真实否证了早期directory-only规则：目录mode0711使old身份不能列举或创建，但四个0644 `known-authority` 文件仍可由actual old UID的`head`读出。red `44EZ9JGG` 一项failure是REJECTED期望却得到VERIFIED；不是mock或fixture失败。增加existing-file清单及0666 marker后，该场景返回REJECTED。额外验证private roots正向、0777公开roots拒绝、物理alias/missing/root-UID拒绝；可读marker和actual-file检查不能被“目录名不同”替代。
+
+原真实SDK/mTLS/ZK/CLOSED/delete/target restart组合的 `physicalCredentialAccessFeedsOriginalReadinessBridge` 在构造replay graph前运行probe，将实际canonical paths、effective UID和NONE/READ_WRITE access导入原NewScopeFallbackManifest，再复用原source/harness/admission/consumer。两个成功snapshot分别包含实际Arena/DATA/control/derived-index的16个现有文件，scheduler拒绝仍demote。当前单Arena图不使用Classic journal/ledger目录，这两类采用真实隔离guard目录；oldBookieId/incarnation、old roots与old-service DRAINED仍为外部reference声明，工具明确 `oldServiceDisposition=NOT_VERIFIED`，未证明旧服务曾运行或已真实排空/退役。
+
+本机实际new UID501、old `nobody` UID4294967294，native old身份包括其真实supplementary groups。最终八份receipt为3 access VERIFIED、2 REJECTED、3 UNAVAILABLE；原始inode/path/UID/errno/command保留在XML与提取的access-receipts.json。它证明这台macOS和这些隔离scope上的访问snapshot，不证明全部旧service凭据、privilege escalation、所有aliases/copied exports、权限后续不变或stock binary矩阵。`authority=ACCESS_SNAPSHOT_ONLY`、`stockBinaryMatrix=NOT_EXECUTED` 固定保留，不能从VERIFIED推导生产WRITABLE或整个fallback Gate通过。
+
+复现（Unix系统Python、`nobody`及noninteractive sudo实际可用；不可用时physical tests为NOT_EXECUTED/skip，原无特权reference测试仍执行）：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentNewScopeAccessTest,StartupReadinessFactsTest,StartupReadinessHarnessTest,ZKProfileStartupRequirementsStoreTest,SegmentProfileInitialSocketClientTest#physicalCredentialAccessFeedsOriginalReadinessBridge+readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence'
+/usr/bin/python3 -I -B scripts/unified-wal/probe-new-scope-access.py --timeout 10 < isolated-scope-request.json
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+request包含 `oldUser`、`oldRoots`/`newRoots` 两份各四项 `{kind: JOURNAL|LEDGER|INDEX|ARENA, path: <absolute canonical directory>}`；所有目录必须已经存在。命令中的JSON是操作者提供的隔离输入，本轮未新增或生成生产配置。
+
+父源码 `7f469625894fcb82c108074429c6cc8e83004be2`。初始qLtUZ5HV五项在known-file反例前；之后green六项在最后partial marker清理前，保留stage绑定，不叠加计覆盖。最终N9E8hDcb五类31项（access4/socket2/harness11/facts6/requirements8）零failure/error/skip，1078当前inputs全部匹配，实际Unix权限和原startup组合均执行。Spotless/Checkstyle exit0、Python源码compile通过且移除本次bytecode；root RAT仍exit1/443父HEAD历史路径、无新增。原模型语义未改，不新增/重跑TLC，不把旧model PASS移绑为Unix proof。archive `/Users/liusinan/.codex/artifacts/unified-wal/new-scope-access-evidence-hnn6m1xl` 保留原run/command/receipt/stage；red probe及test源码已按原hash恢复，1078 red inputs全部核对，可重现directory-only假成功。
+
+完整old-service disposition/OS-service范围issuer、真实stock old binary与pre-storage-open全矩阵、default EmbeddedServer/bootstrap/SDK routing和其余综合验收继续OPEN。B14/B15整体仍未接受；步骤12/14/15与生产Gate保持PARTIAL/OPEN。Linux/NUMA、真实掉电、正式性能本轮NOT_EXECUTED，完整目标继续active。

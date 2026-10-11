@@ -810,3 +810,6 @@ PASS 不授权 Segment 成为 ACK authority，不授权生产 canary，也不证
 
 
 2026-10-05 当前 COPY 状态增量：[COPY 证明与 selector](../implementation/local-storage/README.md#当前-copy-证明与-selector-状态)把当前 allocation 内逐条成功 COPY 的 location/UUID/generation/digest 与当前 selector 的 target/身份/原序号/必要 Bookie cut 从历史 MOVE 查询中分离。失去 selector 的成功 COPY 在 allocation 当前时仍保留证明，失败 MOVE 不发布，FREE 删除该 allocation 的全部证明；selector 不持有原整批 MOVE。原历史结果仍保留，image v1/v2 与实验字节不变。真实成功/失败 COPY、最高 image/损坏后 fallback、物理 rotation、FREE/复用/restart 及 force UNKNOWN 回归通过；七类 315 通过/5 平台跳过、style 通过，有限模型 32 正向完整通过/93 指定反例。请求代、独立紧凑业务 image、UUID/session/MOVE/T 历史裁剪、总工作集、长期负载、多 Arena、掉电/性能及完整模型尚未完成，步骤 8/10、B17 和生产 Gate 保持未完成。
+
+
+2026-10-12 B15 access叶片：[实际Unix credential快照](../implementation/startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)已在macOS双native UID与实际Arena/control/DATA/index目录验证，用完整有界文件清单及可读marker否证并修复“directory DENIED即整个scope DENIED”的0711/0644实际反例。31项最终Java/真实probe、style与许可状态按source保留；它是ACCESS_SNAPSHOT_ONLY，old-service drain/readonly/decommission NOT_VERIFIED、stock binary NOT_EXECUTED，journal/ledger是初始单Arena未使用的guard目录。B14/B15完整矩阵、multi-device/权限全scope/启动测量及本Spike整体Gate继续未接受，不能写成正式PASS。

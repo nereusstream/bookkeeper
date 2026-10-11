@@ -59,3 +59,6 @@
 
 
 2026-10-12继续第12步：a048b29cae后已持久初始单Arena compatibility/expected manifest source、显式构造前要求检查和原writable multi frozen birth条件；实际reader/writer version1不接受caller自报未来runtime，原恢复graph/consumer沿用。源码/实际stage与当前验证、物理proof未覆盖边界由startup-readiness/README.md“持久 startup requirements 与冻结发布条件”拥有。继续old-binary fence或独立credential/new-scope真实证明、default EmbeddedServer/bootstrap/SDK routing、snapshot/handoff/history GC/decommission、full-bytes/兼容/正式性能/运维及全16步综合验收。持续目标active，步骤12/14/15与生产Gate保持PARTIAL/OPEN，持久声明不能替代实际proof，本里程碑不等于目标完成。
+
+
+2026-10-12继续第12步：7f46962589后已在本机实际运行native双UID，对隔离new-scope完整有界现有文件/可读marker取得access快照并导入原actual restart/source/harness组合；directory-only在0711目录/0644已知文件上的假成功已真实RED/GREEN。最终31项/当前source与边界由startup-readiness/README.md“实际 Unix credential 的 new-scope access 快照”拥有。old-service disposition/OS-service全范围issuer、stock binary/pre-storage-open矩阵/default EmbeddedServer/SDK routing仍OPEN，继续它们及snapshot/handoff/GC/decommission/full-bytes/兼容/正式性能/运维与全16步验收。持续目标active，ACCESS_SNAPSHOT_ONLY不升级整体fallback/B14/B15或步骤12/14/15/生产Gate。

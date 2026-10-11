@@ -1720,6 +1720,16 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence() throws Exception {
+        runReadinessBridge(false);
+    }
+
+    @Test
+    public void physicalCredentialAccessFeedsOriginalReadinessBridge() throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        runReadinessBridge(true);
+    }
+
+    private void runReadinessBridge(boolean physicalAccess) throws Exception {
         for (boolean rejectedScheduler : List.of(false, true)) {
             try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
                 fixture.connectAll(Duration.ofSeconds(5));
@@ -1762,7 +1772,9 @@ public class SegmentProfileInitialSocketClientTest {
                     client.create(root + "-startup", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
                     var requirements = new ZKProfileStartupRequirementsStore(client, root + "-startup",
                             ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
-                    var requested = startupPolicy(config, identity);
+                    var requestedPolicy = startupPolicy(config, identity);
+                    var requested = physicalAccess
+                            ? SegmentNewScopeAccessTest.actualFallback(requestedPolicy, config) : requestedPolicy;
                     var expectedDevice = requested.requiredDevices().devices().get(0);
                     var required = new RequiredDeviceManifest(requested.requiredDevices().identity(),
                             requested.requiredDevices().generation(),

@@ -903,3 +903,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [持久required startup来源](../startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)提供显式graph构造/open前scope/manifest/minimum检查，原实际恢复输入使用compiled reader/writer version1/base feature1，caller runtime声明不替代本实现能力。原graph随后仍验证完整DATA/header/control/index/owner及delete追赶，持久source不提供实际READY观察、不补造缺失控制。真实restart与unsupported/prepared/caller substitution已有验证；stock fence/物理credential、default服务接线和生产Gate继续OPEN。
+
+
+2026-10-12 [实际Unix双身份scope access](../startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)在graph构造/open前cold probe完整bounded当前regular文件和可读marker；实际old UID不能打开Arena/DATA/control/index对象，实际new UID可访问。现有文件仅open/close、不读payload或写字节，nonce文件仅归本工具并按identity清理；符号别名/hardlink/missing/变化/超限不成功。两个实际restart组合snapshot各16文件，old-service disposition仍外部声明，default Bookie hook/full Gate继续OPEN。

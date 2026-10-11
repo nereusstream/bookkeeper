@@ -1419,3 +1419,6 @@ ZqosUvct六类176项（control49/persistent13/lifecycle51/ephemeral19/metadata19
 
 
 2026-10-12 [持久startup requirements与冻结发布条件](../startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)已在独立ZKnamespace持久声明完整compatibility/单Arena expected set，原publisher绑定私有source观察并在writable multi同时检查原birth/version；重建或preflight后变化不被新hint吸收。显式pre-construction检查及actual reader/writer1阻止caller自报未来runtime，原graph恢复/consumer复用。阶段85/最终26项Java、相关18/最终4配置模型分别绑定source，style通过，RAT443历史问题无新增。它不是stock fence或OS credential证明；default bootstrap/SDK routing、snapshot/handoff/GC/full-bytes与综合Gate仍OPEN。
+
+
+2026-10-12 [actual Unix access→原startup组合](../startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)已把native UID、实际canonical roots/NONE/READ_WRITE送入原reference fallback，再复用actual mTLS/ZK/CLOSED/delete/restart/source/harness/consumer。0711目录已知文件实际可读的假成功真实RED/GREEN，最终31项零fail/error/skip、style通过、RAT443父HEAD历史问题无新增。ACCESS_SNAPSHOT_ONLY不证明old-service disposition、stock binary或生产启动，default bootstrap/SDK路由/全fallback与综合Gate仍OPEN。

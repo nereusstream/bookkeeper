@@ -629,3 +629,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-12 [持久startup requirements与冻结发布条件](startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)已接独立immutable ZK兼容格式/单Arena expected set、显式构造前检查及writable同事务frozen source guard；caller自报未来runtime不能改变本实现version1。阶段85/最终26项Java、相关18/最终4配置模型分别保留source，style通过、RAT443历史问题无新增。required声明仍不能证明stock fence或物理credential隔离，default bootstrap/SDK routing、snapshot/handoff/GC/full-bytes/综合验收未闭合，步骤12/14/15与生产Gate保持PARTIAL/OPEN。
+
+
+2026-10-12 [实际Unix credential new-scope快照](startup-readiness/README.md#实际-unix-credential-的-new-scope-access-快照)已验证native双UID访问完整bounded现有文件及可读marker，真实0711/0644反例修复，access/canonical roots导入原actual restart/source/readiness组合。最终31项及style通过，RAT443历史问题无新增；这只是ACCESS_SNAPSHOT_ONLY，old-service disposition/privilege/stock binary/default bootstrap与完整fallback和综合验收仍OPEN，步骤12/14/15及生产Gate保持PARTIAL/OPEN。
