@@ -32,6 +32,7 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
 import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
+import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.discover.profile.ProfileEphemeralCodec.Envelope;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore.Node;
@@ -64,6 +65,8 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     private ZKProfileReservationStore deleteDelivery;
     private StorageIncarnation deleteIncarnation;
     private Supplier<ProfileControlRequest.DeleteBinding> deleteProgress;
+    private ZKProfileStartupRequirementsStore startupRequirements;
+    private ZKProfileStartupRequirementsStore.Observation startupObservation;
 
     public ZKProfileEphemeralRegistrationStore(ZooKeeper zk, String root, String bookieId,
                                               List<ACL> acls, Duration timeout) {
@@ -88,6 +91,25 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         deleteDelivery = reservations;
         deleteIncarnation = incarnation;
         deleteProgress = progress;
+    }
+
+    /** Freeze the pre-open declared requirements on this exact source/client and publisher attempt. */
+    public synchronized void bindStartupRequirements(ZKProfileStartupRequirementsStore source,
+            ZKProfileStartupRequirementsStore.Observation observation) {
+        if (operationStarted || retired || startupRequirements != null) {
+            throw new IllegalStateException("Startup requirements must be bound once before publication");
+        }
+        Objects.requireNonNull(source, "source").requirePublisherClient(zk, observation, bookieId);
+        startupRequirements = source;
+        startupObservation = observation;
+    }
+
+    /** A bound source cannot be replaced by a caller's compatibility/device requirements. */
+    public void requireStartupPolicy(StartupReadinessInput policy) {
+        if (startupObservation != null && (!startupObservation.compatibility().equals(policy.compatibility())
+                || !startupObservation.requiredDevices().equals(policy.requiredDevices()))) {
+            throw new IllegalArgumentException("Startup policy does not consume its frozen requirement source");
+        }
     }
 
     /** Keep the bridge on the original exact client/namespace/source and storage attempt. */
@@ -251,6 +273,9 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
             Envelope envelope = owned(node, bookieId);
             marker(authority.path(), deadline);
             if (writable) {
+                if (startupRequirements != null) {
+                    startupRequirements.publicationChecks(startupObservation, authority.envelope().record(), deadline);
+                }
                 Envelope service = owned(node(authority.path() + "/service-info", deadline), bookieId);
                 if (!service.equals(envelope) || !matches(authority, envelope.projection())) {
                     throw new IllegalStateException("Writable projection is stale or mismatched");
@@ -327,6 +352,10 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                     operations.add(Op.setData(path + "/service-info", bytes, version(serviceNode)));
                 }
             } else {
+                if (startupRequirements != null) {
+                    operations.addAll(startupRequirements.publicationChecks(
+                            startupObservation, authority.envelope().record(), deadline));
+                }
                 if (writableNode.code() != Code.NONODE.intValue()) {
                     Envelope existing = owned(writableNode, bookieId);
                     requirePublishingSession();

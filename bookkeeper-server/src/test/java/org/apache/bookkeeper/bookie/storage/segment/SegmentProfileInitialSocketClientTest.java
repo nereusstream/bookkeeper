@@ -122,6 +122,7 @@ import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LongHierarchicalLedgerManagerFactory;
@@ -1758,6 +1759,50 @@ public class SegmentProfileInitialSocketClientTest {
                     var publisher = new ZKProfileEphemeralRegistrationStore(client,
                             root, identity.bookieId().toString(),
                             ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    client.create(root + "-startup", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                    var requirements = new ZKProfileStartupRequirementsStore(client, root + "-startup",
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var requested = startupPolicy(config, identity);
+                    var expectedDevice = requested.requiredDevices().devices().get(0);
+                    var required = new RequiredDeviceManifest(requested.requiredDevices().identity(),
+                            requested.requiredDevices().generation(),
+                            List.of(new RequiredDeviceManifest.RequiredDeviceFact(
+                                    expectedDevice.deviceId(), expectedDevice.storageIncarnation(),
+                                    expectedDevice.manifestGeneration(), RequiredDeviceManifest.DeviceStatus.READY,
+                                    expectedDevice.arenaFormatVersion(), expectedDevice.controlFormatVersion(),
+                                    expectedDevice.checkpointFormatVersion(), expectedDevice.superblockGeneration(),
+                                    expectedDevice.mandatoryFeatures())));
+                    assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                            requirements.provision(requested.compatibility(), required));
+                    var startupSource = requirements.read(identity.bookieId().toString()).observation().orElseThrow();
+                    // The source is read and checked before constructing/opening the replay graph.
+                    var policy = IsolatedSegmentStorage.startupPolicy(startupSource, requested, config, identity);
+                    for (boolean prepared : List.of(true, false)) {
+                        String rejectedRoot = root + "-unsupported-" + prepared;
+                        client.create(rejectedRoot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                        var rejected = new ZKProfileStartupRequirementsStore(client, rejectedRoot,
+                                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                        var c = requested.compatibility();
+                        var unsupported = new BookieCompatibilityFact(c.bookieId(), c.storageIncarnation(),
+                                c.activeEngine(), c.profileWireMajor(), c.profileWireMinor(), c.descriptorHashSuite(),
+                                c.mandatoryLocalFeatures(), c.deviceManifestIdentity(), c.deviceManifestGeneration(),
+                                c.localFormatGeneration(), c.effectiveDeleteAssignmentGeneration(), prepared ? 1 : 2,
+                                c.minimumWriterVersion(), prepared ? BookieCompatibilityFact.MigrationState.PREPARED
+                                        : BookieCompatibilityFact.MigrationState.FORMAT_READY, c.migrationGeneration());
+                        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                                rejected.provision(unsupported, required));
+                        var observed = rejected.read(identity.bookieId().toString()).observation().orElseThrow();
+                        assertThrows(java.io.IOException.class,
+                                () -> IsolatedSegmentStorage.startupPolicy(observed, requested, config, identity));
+                        var claimedFutureRuntime = new StartupReadinessInput(
+                                requested.compatibility(), requested.requiredDevices(), requested.recoveryFacts(),
+                                requested.newScopeFallback(), requested.rollbackSafetyFacts(),
+                                requested.targetReadinessGeneration(), requested.capabilityGeneration(),
+                                99, 99, List.of(1), requested.profileEndpoint(), requested.capabilityHints());
+                        assertThrows(java.io.IOException.class, () -> IsolatedSegmentStorage.startupPolicy(
+                                observed, claimedFutureRuntime, config, identity));
+                    }
+                    publisher.bindStartupRequirements(requirements, startupSource);
                     try (var replay = new IsolatedSegmentStorage(config, identity,
                             new SecretKeySpec(bytes(32, 7), "AES"),
                             VALIDATOR, new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
@@ -1768,7 +1813,6 @@ public class SegmentProfileInitialSocketClientTest {
                         try (var admission = publisher.watchAdmission(watcher)) {
                             replay.bindProfileRegistration(admission);
                             replay.restart();
-                            var policy = startupPolicy(config, identity);
                             var wrongManifest = new RequiredDeviceManifest(
                                     new ManifestIdentity(bytes(32, 19)),
                                     policy.requiredDevices().generation(), policy.requiredDevices().devices());
@@ -1797,6 +1841,10 @@ public class SegmentProfileInitialSocketClientTest {
                             assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, facts.deleteStatus());
                             assertEquals(LocalRecoveryFacts.RecoveryStatus.RECOVERED,
                                     facts.input().recoveryFacts().allocatorRecovery());
+                            assertEquals(IsolatedSegmentStorage.STARTUP_READER_VERSION,
+                                    facts.input().runtimeReaderVersion());
+                            assertEquals(IsolatedSegmentStorage.STARTUP_WRITER_VERSION,
+                                    facts.input().runtimeWriterVersion());
                             assertEquals(RequiredDeviceManifest.DeviceStatus.READY,
                                     facts.input().requiredDevices().devices().get(0).status());
                             assertTrue(facts.input().rollbackSafetyFacts().tombstone());
@@ -1804,6 +1852,12 @@ public class SegmentProfileInitialSocketClientTest {
                             assertFalse(admission.getAsBoolean());
                             try (var local = new SegmentLocalReadinessStore(config.directory(),
                                     identity.bookieId().toString(), identity.incarnation())) {
+                                assertThrows(IllegalArgumentException.class, () -> replay.reconcileReadiness(
+                                        requested, local, persistent, publisher, source, sourceMetadata,
+                                        "ledger-profile",
+                                        sdk.getClientCtx().getScheduler(), fixture.cold, 4, Duration.ofSeconds(5),
+                                        Duration.ofMillis(100), () -> true));
+                                assertTrue(local.read(identity.bookieId().toString()).isEmpty());
                                 assertThrows(IllegalArgumentException.class, () -> replay.reconcileReadiness(
                                         policy, local,
                                         new ZKProfileRegistrationStore(fixture.zk,

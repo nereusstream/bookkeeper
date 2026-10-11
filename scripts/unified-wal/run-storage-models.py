@@ -528,6 +528,10 @@ MATRIX = {
     "ce-registration-publication-service": "WritableProjectionMatchesService",
     "ce-registration-publication-unknown": "UnresolvedPublicationNeverReportsApplied",
     "a-readiness-cas": None,
+    "a-startup-requirements": None,
+    "ce-startup-requirements-open": "StorageRequiresSupportedPreOpenSource",
+    "ce-startup-requirements-birth": "WritableUsesFrozenSourceAtPublication",
+    "ce-startup-requirements-substitution": "CallerCannotSubstituteBoundRequirements",
     "ce-readiness-cas-birth": "ReadinessCasPreservesBirthAndExpectedGeneration",
     "ce-readiness-cas-generation": "ReadinessCasPreservesBirthAndExpectedGeneration",
     "ce-readiness-cas-unknown": "UnresolvedLostReplyNeverReportsApplied",
@@ -852,6 +856,7 @@ def main():
                    else "LocalReadinessPublication.tla" if "local-readiness-publication" in name
                    else "RegistrationPublication.tla" if "registration-publication" in name
                    else "ReadinessCas.tla" if "readiness-cas" in name
+                   else "StartupRequirements.tla" if "startup-requirements" in name
                    else "CurrentCopyFacts.tla" if "current-copy-facts" in name
                    else "ArenaStateIndices.tla" if "arena-state-indices" in name
                    else "RetiredSequenceRanges.tla" if "retired-sequence-ranges" in name

@@ -64,6 +64,7 @@ import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.TLSContextFactory;
@@ -414,6 +415,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     // Reference feature 1 denotes the mandatory experimental version-1 header/control/framing base.
     static final int STARTUP_BASE_FORMAT_FEATURE = 1;
+    static final int STARTUP_READER_VERSION = 1;
+    static final int STARTUP_WRITER_VERSION = 1;
 
     /** Expected full single-Arena manifest identity, independent of a readable filesystem subset. */
     static ManifestIdentity startupDeviceManifestIdentity(
@@ -426,6 +429,25 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         } catch (java.security.NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);
         }
+    }
+
+    /** Explicit pre-construction check; no storage directory is opened and no observed recovery is invented. */
+    static StartupReadinessInput startupPolicy(ZKProfileStartupRequirementsStore.Observation source,
+            StartupReadinessInput requested, IsolatedSegmentConfig config, SegmentFileHeader identity)
+            throws IOException {
+        var policy = Objects.requireNonNull(source, "source").applyTo(requested);
+        requireStartupPolicyScope(policy, config, identity);
+        var compatibility = policy.compatibility();
+        if (compatibility.migrationState()
+                    != org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact.MigrationState.FORMAT_READY
+                || STARTUP_READER_VERSION < compatibility.minimumReaderVersion()
+                || STARTUP_WRITER_VERSION < compatibility.minimumWriterVersion()
+                || !policy.newScopeFallback().permitsNewScopeWritable()
+                || !policy.newScopeFallback().newBookieId().equals(identity.bookieId().toString())
+                || !policy.newScopeFallback().newStorageIncarnation().equals(identity.incarnation())) {
+            throw new IOException("Pre-open startup requirements or new-scope policy are not ready");
+        }
+        return policy;
     }
 
     record StartupFacts(StartupReadinessInput input,
@@ -447,32 +469,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata, String domain,
             int maxEvents, Duration timeout, BooleanSupplier live) throws IOException {
         Objects.requireNonNull(policy, "policy");
-        var compatibility = policy.compatibility();
-        var expected = policy.requiredDevices();
+        requireStartupPolicyScope(policy, config, identity);
         var one = new Generation(1);
         var digest = startupDeviceManifestIdentity(config, identity);
-        if (!compatibility.bookieId().equals(identity.bookieId().toString())
-                || !compatibility.storageIncarnation().equals(identity.incarnation())
-                || compatibility.activeEngine() != EngineProfile.SEGMENT_WAL_ENGINE
-                || compatibility.profileWireMajor() != 1 || compatibility.profileWireMinor() != 0
-                || compatibility.descriptorHashSuite() != 1
-                || !compatibility.mandatoryLocalFeatures().equals(List.of(STARTUP_BASE_FORMAT_FEATURE))
-                || !compatibility.localFormatGeneration().equals(one)
-                || !compatibility.deviceManifestGeneration().equals(one)
-                || !compatibility.deviceManifestIdentity().equals(digest)
-                || !expected.identity().equals(digest) || !expected.generation().equals(one)
-                || expected.devices().size() != 1) {
-            throw new IOException("Required compatibility/device scope does not match this actual isolated graph");
-        }
-        var device = expected.devices().get(0);
-        if (!device.deviceId().equals(identity.arenaId().toString())
-                || !device.storageIncarnation().equals(identity.incarnation())
-                || !device.manifestGeneration().equals(one) || device.arenaFormatVersion() != 1
-                || device.controlFormatVersion() != 1 || device.checkpointFormatVersion() != 1
-                || !device.superblockGeneration().equals(one)
-                || !device.mandatoryFeatures().equals(List.of(STARTUP_BASE_FORMAT_FEATURE))) {
-            throw new IOException("Required Arena identity/generation/format is unsupported or mismatched");
-        }
         var caughtUp = catchUpProfileDeletes(reservations, metadata, domain, maxEvents, timeout, live);
         if (caughtUp.status() != DeleteCatchUpStatus.CAUGHT_UP) {
             return new StartupFacts(null, caughtUp.status(), caughtUp.completion());
@@ -498,11 +497,43 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             var rollback = new RollbackSafetyFacts(
                     controls.localSuccess(), controls.routeOrInstall(), controls.activation(), controls.fenceOrGrant(),
                     controls.tombstone(), arena.appliedThrough() >= 0, controls.durabilityUnknown());
-            var actual = new StartupReadinessInput(compatibility,
+            var actual = new StartupReadinessInput(policy.compatibility(),
                     observed, recovery, policy.newScopeFallback(), rollback, policy.targetReadinessGeneration(),
-                    policy.capabilityGeneration(), policy.runtimeReaderVersion(), policy.runtimeWriterVersion(),
-                    policy.supportedMandatoryFeatures(), policy.profileEndpoint(), policy.capabilityHints());
+                    policy.capabilityGeneration(), STARTUP_READER_VERSION, STARTUP_WRITER_VERSION,
+                    List.of(STARTUP_BASE_FORMAT_FEATURE), policy.profileEndpoint(), policy.capabilityHints());
             return new StartupFacts(actual, caughtUp.status(), caughtUp.completion());
+        }
+    }
+
+    private static void requireStartupPolicyScope(StartupReadinessInput policy,
+            IsolatedSegmentConfig config, SegmentFileHeader identity) throws IOException {
+        var compatibility = policy.compatibility();
+        var expected = policy.requiredDevices();
+        var one = new Generation(1);
+        var digest = startupDeviceManifestIdentity(config, identity);
+        if (!compatibility.bookieId().equals(identity.bookieId().toString())
+                || !compatibility.storageIncarnation().equals(identity.incarnation())
+                || compatibility.activeEngine() != EngineProfile.SEGMENT_WAL_ENGINE
+                || compatibility.profileWireMajor() != 1 || compatibility.profileWireMinor() != 0
+                || compatibility.descriptorHashSuite() != 1
+                || compatibility.minimumReaderVersion() > STARTUP_READER_VERSION
+                || compatibility.minimumWriterVersion() > STARTUP_WRITER_VERSION
+                || !compatibility.mandatoryLocalFeatures().equals(List.of(STARTUP_BASE_FORMAT_FEATURE))
+                || !compatibility.localFormatGeneration().equals(one)
+                || !compatibility.deviceManifestGeneration().equals(one)
+                || !compatibility.deviceManifestIdentity().equals(digest)
+                || !expected.identity().equals(digest) || !expected.generation().equals(one)
+                || expected.devices().size() != 1) {
+            throw new IOException("Required compatibility/device scope does not match this actual isolated graph");
+        }
+        var device = expected.devices().get(0);
+        if (!device.deviceId().equals(identity.arenaId().toString())
+                || !device.storageIncarnation().equals(identity.incarnation())
+                || !device.manifestGeneration().equals(one) || device.arenaFormatVersion() != 1
+                || device.controlFormatVersion() != 1 || device.checkpointFormatVersion() != 1
+                || !device.superblockGeneration().equals(one)
+                || !device.mandatoryFeatures().equals(List.of(STARTUP_BASE_FORMAT_FEATURE))) {
+            throw new IOException("Required Arena identity/generation/format is unsupported or mismatched");
         }
     }
 
@@ -525,6 +556,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             throw new IllegalStateException("Readiness requires the original pre-bound pending admission");
         }
         publisher.requireStartupStores(profileAdmission, persistent, reservations, identity.incarnation());
+        publisher.requireStartupPolicy(policy);
         var facts = recoveredStartupFacts(policy, reservations, metadata, domain, maxEvents, timeout, live);
         if (facts.input() == null) {
             return new ReadinessAttempt(null, facts.deleteStatus(), facts.completion());

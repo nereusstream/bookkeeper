@@ -1378,3 +1378,14 @@ Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksu
 2026-10-12，ProfileDeleteDelivery投影两个ledger/一个target incarnation、initial assignment和bounded head，正确规则要求event/head同commit、重试唯一seq、exact assignment/birth与missing拒绝以及共享stream。最终j2innjna与logical-delete共15配置，2完整正向/13指定反例、944当前inputs匹配；新正向308 generated/110 distinct、queue0、depth/diameter8、0.945秒/peak RSS108871680 bytes，单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。initial缺Sequences的SANY失败保留，不计PASS。
 
 实际ZK/SDK/TLS/files阶段79与最终7项、raw codec与有限界限由[接线记录](../profile-wire/README.md#初始共享-delete-delivery-journal)拥有。本投影不生产physical dispatch/local cursor、注册linearization、handoff/snapshot/GC、TLS/fsync或完整时钟/公平性/活性/A+C+D，综合Gate不提升。
+
+
+### 持久 startup requirements 与冻结发布 cut
+
+2026-10-12，StartupRequirements有限投影接受完整codec、唯一immutable birth、ZKmulti原子性及actual graph recovery/readiness输入；unsupported source不能构造graph，构造后caller不能替换bound requirements，preflight后source重建必须由writable事务拒绝。三个错误规则取得指定反例。caller substitution位于构造后的readiness交接；构造前applyTo使用source覆盖caller要求，两阶段不能混同。
+
+runtime guard阶段fn17vvad四配置为1完整正向/3指定反例，978当时inputs匹配；正向22 generated/19 distinct、queue0、depth/diameter6、0.829秒/peak RSS104546304 bytes。相关hb9tihtt十八配置4正向/14CE属于最终header/test/runtime变化前stage，不移绑；早期substitution位于构造前的投影另保留为未采用阶段。catalog628/完整A+C+D未全跑。官方TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；checker资源不是服务性能，不生产old-binary fence、OS credential、TLS/fsync、完整时间/公平性/活性或生产权限。
+
+[实际required source与原启动组合](../startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)拥有阶段85/最终26项Java、许可/格式结果与源码证据，当前Gate保持PARTIAL/OPEN。
+
+最后仅清理五个新模型许可头的尾随空白，最终iou2vxf6四配置为1完整正向/3指定反例，978当前inputs匹配；完整模型语义未改，原fn17vvad和Java KGzRhsIE回执保持stage绑定。最终staged whitespace检查与本地提交一并核对。

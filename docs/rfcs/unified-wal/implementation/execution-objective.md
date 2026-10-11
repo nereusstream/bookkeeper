@@ -56,3 +56,6 @@
 
 
 2026-10-12继续第12/15步：3e82a21ed9后已把original recovered graph的device/allocator/route/delete事实接回原StartupReadinessHarness、真实DLR/ZK发布/session admission和既有consumer。manifest/client不匹配与scheduler拒绝路径已有真实组合证据，当前源码/阶段source及未覆盖范围由startup-readiness/README.md“实际恢复 graph 与原 startup 发布桥接”拥有。compatibility fence/new-scope独立credential真实issuer与默认EmbeddedServer/bootstrap/SDK routing继续OPEN，snapshot/handoff/history GC/decommission、full-bytes/兼容/正式性能/运维及全16步综合验收继续推进。持续目标active，步骤12/14/15和生产Gate保持PARTIAL/OPEN，本切片不等于整个目标完成。
+
+
+2026-10-12继续第12步：a048b29cae后已持久初始单Arena compatibility/expected manifest source、显式构造前要求检查和原writable multi frozen birth条件；实际reader/writer version1不接受caller自报未来runtime，原恢复graph/consumer沿用。源码/实际stage与当前验证、物理proof未覆盖边界由startup-readiness/README.md“持久 startup requirements 与冻结发布条件”拥有。继续old-binary fence或独立credential/new-scope真实证明、default EmbeddedServer/bootstrap/SDK routing、snapshot/handoff/history GC/decommission、full-bytes/兼容/正式性能/运维及全16步综合验收。持续目标active，步骤12/14/15与生产Gate保持PARTIAL/OPEN，持久声明不能替代实际proof，本里程碑不等于目标完成。

@@ -277,3 +277,36 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 相关既有有限投影 `u5cp9gcl` exit0，20配置为4正向完整探索/16指定反例；970 inputs仅上述test文件的最终格式/等价简名调整与run阶段不同，其余匹配，原manifest不移绑。投影检查DLR barriers/UNKNOWN、persistent CAS birth/generation、session发布和本地准入；没有新增模型或把guard输入宣称为真实fence/credential/TLS/fsync证明。TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；完整A+C+D及综合模型未全跑。持久证据 `/Users/liusinan/.codex/artifacts/unified-wal/startup-bridge-evidence-r0papqio` 保留原command/source/config/stage/reports/checksums。
 
 本切片接通实际恢复事实与原显式发布/准入/consumer，步骤12/14/15及生产Gate保持PARTIAL/OPEN。snapshot/handoff/history GC/decommission、OPEN/payload/placement、full-bytes、完整兼容/正式性能/运维与全16步综合验收仍需推进；Linux NUMA、真实掉电与正式性能本轮NOT_EXECUTED，持续目标保持active。
+
+
+## 持久 startup requirements 与冻结发布条件
+
+2026-10-12，`ZKProfileStartupRequirementsStore` 在调用方预先配置的独立namespace保存初始单Arena要求：完整 `BookieCompatibilityFact` 与 expected `RequiredDeviceManifest`，由一次真实ZK multi原子创建record及唯一birth子节点。它是required格式/身份/设备声明的持久来源，独立于readiness；不是stock old-binary fence、OS/service credential隔离证明，也不授予ledger INSTALL/normal/recovery权限。namespace/ACL仍由部署方提供，接口不创建生产scope或修改OS权限。
+
+`provision` 只创建、不更新：same完整内容返回ALREADY_APPLIED，不同内容CONFLICT；existing corrupt/missing birth不覆盖或补造。提交后丢回复/timeout保留RESPONSE_LOST，调用方从实际source重新取得观察。`read` 先sync，只有实际NONODE是NOT_FOUND；坏格式、ephemeral、非version0、错scope、缺/坏birth或parent/birth不在同一creation zxid为CORRUPT，读故障为UNAVAILABLE。Observation只由原store私有构造，冻结原envelope/czxid/mzxid；不能从调用方typed事实或readiness提示产生。
+
+实验UWSQ/schema1最多4096 bytes，仅一个required Arena，每份严格递增mandatory feature列表最多64个ID。字节顺序为magic/schema/birth UUID、length-prefixed UTF-8 BookieId、incarnation/Engine/wire/hash suite、mandatory features、manifest identity/generation、local format/effective assignment、minimum reader/writer、migration state/generation，再接device identity/incarnation/manifest generation、Arena/control/checkpoint formats、superblock generation/features及CRC32C。migration的显式值1/2/3/4分别为PREPARED/FORMAT_READY/QUARANTINED/UNKNOWN_MANDATORY，不依赖Java enum ordinal；未知schema/state、长度/UTF-8/feature不合法、trailing bytes与非canonical编码拒绝。device READY表示要求，不能证明磁盘已恢复；CRC32C不构成授权或old-binary可见sentinel。原DATA/control/wire bytes不变，未作stock binary兼容声明。
+
+显式调用先read source，再在任何新graph构造/open前执行 `IsolatedSegmentStorage.startupPolicy`：用观察替换caller compatibility/device要求，匹配原完整header的deterministic manifest、Bookie/incarnation/Arena/generation/formats及mandatory base feature。PREPARED/不支持scope或minimum版本拒绝。reader/writer支持固定为本实现实际version1，不能由caller自报runtime99越过minimum2；恢复facts也产生实际version1/base feature1。new-scope policy仍须满足原typed roots/身份/access/disposition合同，但其物理真实性未由此验证。随后走原恢复graph、实际delete catch-up及原Harness顺序；同scope迁移、PREPARED→FORMAT_READY工具及default EmbeddedServer hook仍未接入。
+
+publisher在首次cold操作前一次性 `bindStartupRequirements`，要求同一ZK client、原source对象/私有Observation及Bookie scope，不能在运行中重绑。graph的 `reconcileReadiness` 拒绝用另一份caller compatibility/device替换已绑定source；writable冷读取再复核source，writable创建的同一个multi加入原required record version0与唯一birth version0检查，同时消费已有readiness/info/session及delete required-through条件。即使要求内容相同，正常重新provision的物理birth也不能替代原attempt；preflight后变化由最终事务拒绝。回复丢失可从原source/owned registration解析，source变化不能被新hint或新观察悄悄吸收。没有添加按entry读、持续远端authority lease或强reset；不支持管理者恢复旧birth ID/全metadata重置，也不把registration投影当成兼容性fence。
+
+真实ZK测试覆盖并发不同要求single winner、原source Stat不被同操作重写、commit reply loss、held actual reply/timeout、parent ACL拒绝、损坏/缺birth/ephemeral与不补造；冻结publisher在source重建后拒绝，source在最后preflight与真实multi之间重新provision时无writable effect，原info保留；foreign source/client观察不能绑定。固定226-byte独立字段向量、CRC/截断/未知schema与有正确CRC的非法UTF-8均验证。原实际mTLS/SDK/CLOSED/delete/磁盘restart组合改为先读取source、检查后才构造replay graph；prepared和minimum2拒绝，即使caller自报runtime99也拒绝，caller替换要求在DLR前失败；正常发布/consumer及scheduler拒绝后的demote继续验证。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileStartupRequirementsStoreTest,StartupReadinessHarnessTest,StartupReadinessFactsTest,ZKProfileEphemeralRegistrationStoreTest,ZKProfileRegistrationStoreTest,SegmentLocalReadinessStoreTest,SegmentProfileInitialSocketClientTest#readinessBridge*+automaticDeletePublication*+preparedDeleteCancellation*+committedDeleteDeliver*+*Registration*+*Registered*+registered*+registration*+*Rejoin*'
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileStartupRequirementsStoreTest,StartupReadinessHarnessTest,StartupReadinessFactsTest,SegmentProfileInitialSocketClientTest#readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-startup-requirements --config-prefix ce-startup-requirements --config-prefix a-registration-publication --config-prefix ce-registration-publication --config-prefix a-readiness-cas --config-prefix ce-readiness-cas --config-prefix a-registration-admission --config-prefix ce-registration-admission
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `a048b29cae32fada0753a7c95ecf2fefc9a21a39`；阶段 `qy6yYYSK` 七类85项全部通过，在最终caller替换/UTF-8 negative和actual runtime guard前，按原stage保留。`kWs6a5Y9`/`lBeE5Og3`/`ZoQhNwYU` 各9项定向按原输入保存，不叠加计覆盖；首次 `v1qdFr3L` 的一项error是fixture撤去自身ADMIN后尝试恢复ACL，已改用独立只读拒绝目录，未改变生产ACL契约。最终 `KGzRhsIE` 四类26项（requirements8/socket1/harness11/facts6）零failure/error/skip，1076当前inputs全部匹配，actual runtime version guard和新negative已执行。最终style exit0；初次RAT448中的新增5个模型header补全真实ASF许可后，最终RAT仍exit1/443父HEAD已有路径，无新增，不改规则、不称CI全绿。
+
+相关模型 `hb9tihtt` 18配置为4完整正向/14指定反例，在最后header/test/runtime变化前，保留原输入。runtime guard阶段 `fn17vvad` 新投影4配置为1完整正向/3指定反例，978当时inputs匹配；检查unsupported pre-open、caller替换和writable遗漏frozen source birth三个性质。22 generated/19 distinct、queue0、depth/diameter6、0.829秒/peak RSS104546304 bytes属于有限checker消耗，非存储性能。官方TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；模型把完整解析、唯一immutable birth、ZKmulti原子性和actual graph readiness作为输入，不生产TLS/fsync/物理credential/fence或完整活性。catalog628与完整A+C+D未全跑。证据 `/Users/liusinan/.codex/artifacts/unified-wal/startup-requirements-evidence-udj556wk` 保留各stage原source/config/run/command/失败/当前snapshot与checksum；历史回执不移绑。
+
+当前增加持久required格式/设备来源与显式pre-construction/frozen publication guard；真正old-binary fence和new-scope/credential物理证明、default bootstrap/SDK routing、snapshot/handoff/history GC/decommission、full-bytes及完整兼容/性能/运维仍OPEN。步骤12/14/15和生产Gate保持PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，完整目标继续active。
+
+最后仅清理五个新模型许可头的尾随空白，最终iou2vxf6四配置为1完整正向/3指定反例，978当前inputs匹配；完整模型语义未改，原fn17vvad和Java KGzRhsIE回执保持stage绑定。最终staged whitespace检查与本地提交一并核对。

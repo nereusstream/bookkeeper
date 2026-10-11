@@ -1416,3 +1416,6 @@ ZqosUvct六类176项（control49/persistent13/lifecycle51/ephemeral19/metadata19
 
 
 2026-10-12 [实际恢复 graph 与原 startup 发布桥接](../startup-readiness/README.md#实际恢复-graph-与原-startup-发布桥接)已把原header/control/DATA/index/owner恢复与committed delete追赶产生的device/allocator/route/delete facts接回原Harness、DLR/persistent/info/writable和session admission，再启动原consumer；错scope/client或scheduler拒绝不会成功开放。广度77项与最终1项真实组合、20配置有限模型分别保留stage输入，style通过、RAT443父HEAD历史问题无新增。compatibility/new-scope/credential仍由外部policy提供，默认bootstrap/SDK routing、snapshot/handoff/GC/full-bytes与综合Gate未闭合，步骤12/14/15保持PARTIAL/OPEN。
+
+
+2026-10-12 [持久startup requirements与冻结发布条件](../startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)已在独立ZKnamespace持久声明完整compatibility/单Arena expected set，原publisher绑定私有source观察并在writable multi同时检查原birth/version；重建或preflight后变化不被新hint吸收。显式pre-construction检查及actual reader/writer1阻止caller自报未来runtime，原graph恢复/consumer复用。阶段85/最终26项Java、相关18/最终4配置模型分别绑定source，style通过，RAT443历史问题无新增。它不是stock fence或OS credential证明；default bootstrap/SDK routing、snapshot/handoff/GC/full-bytes与综合Gate仍OPEN。

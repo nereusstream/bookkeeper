@@ -900,3 +900,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [实际恢复 startup facts](../startup-readiness/README.md#实际恢复-graph-与原-startup-发布桥接)从原single-Arena全声明header生成expected manifest，复用真实控制/DATA/index/owner恢复和committed delete catch-up，在同一健康graph核对无未决义务后产生device/allocator/route/delete观察。它复用原恢复检查，必需控制文件不会CREATE；不是从可读子集补造required set或自动接管未健康CLOSE历史。原Harness发布后显式接admission/consumer，scheduler拒绝会退休/demote；compatibility fence、独立credential和默认Bookie启动仍未实现，生产Gate保持OPEN。
+
+
+2026-10-12 [持久required startup来源](../startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)提供显式graph构造/open前scope/manifest/minimum检查，原实际恢复输入使用compiled reader/writer version1/base feature1，caller runtime声明不替代本实现能力。原graph随后仍验证完整DATA/header/control/index/owner及delete追赶，持久source不提供实际READY观察、不补造缺失控制。真实restart与unsupported/prepared/caller substitution已有验证；stock fence/物理credential、default服务接线和生产Gate继续OPEN。

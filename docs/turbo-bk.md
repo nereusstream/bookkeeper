@@ -682,3 +682,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-12 [实际恢复 graph 与原 startup 发布桥接](rfcs/unified-wal/implementation/startup-readiness/README.md#实际恢复-graph-与原-startup-发布桥接)已将actual device/allocator/route/delete facts接回原Harness、DLR/ZK发布/session admission及既有consumer，manifest/client不匹配、consumer scheduler拒绝会拒绝或退休/demote。广度77项与最终1项真实组合、20配置有限模型按阶段source保留，style通过，RAT443父HEAD历史问题无新增。兼容性fence与credential/new-scope真实issuer、默认bootstrap/SDK routing、snapshot/handoff/GC、full-bytes及综合验收仍OPEN；步骤12/14/15保持PARTIAL，生产Gate不提升。
+
+
+2026-10-12 [持久startup requirements与冻结发布条件](rfcs/unified-wal/implementation/startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)已接独立immutable ZK兼容格式/单Arena expected set、显式构造前检查及writable同事务frozen source guard；caller自报未来runtime不能改变本实现version1。阶段85/最终26项Java、相关18/最终4配置模型分别保留source，style通过、RAT443历史问题无新增。required声明仍不能证明stock fence或物理credential隔离，default bootstrap/SDK routing、snapshot/handoff/GC/full-bytes/综合验收未闭合，步骤12/14/15与生产Gate保持PARTIAL/OPEN。

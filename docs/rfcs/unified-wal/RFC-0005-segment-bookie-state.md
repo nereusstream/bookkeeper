@@ -839,3 +839,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-12 [实际恢复 graph 与原 startup 发布桥接](implementation/startup-readiness/README.md#实际恢复-graph-与原-startup-发布桥接)已消费原全部声明DATA/双控制/派生定位/owner恢复和实际delete-applied追赶，产生本地device/allocator/route/delete facts及observed rollback flags，再沿原DLR→persistent→service-info→writable→本地准入顺序显式接consumer。required scope/client不匹配与scheduler拒绝不开放。兼容性fence/migration与独立credential/new-scope仍是policy输入，真实issuer、pre-replay权威和默认EmbeddedServer接线继续OPEN；reference feature1不改磁盘/wire格式。77项阶段回归、最终1项组合、20配置有限模型与style按原source保留，RAT443历史问题无新增，步骤12/14/15与生产Gate不提升。
+
+
+2026-10-12 [持久startup requirements与冻结发布条件](implementation/startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)已建立初始单Arena完整compatibility/expected-device的独立ZK immutable source与实验UWSQ/schema1，显式read/check早于replay graph构造，publisher的writable multi消费冻结birth/version。实际runtime version1与物理恢复事实独立于caller声明；expected READY不是observed READY，metadata声明不是stock old-binary mandatory fence或OS/service credential隔离证明。阶段85/最终26项Java、相关18/最终4配置模型与style按原source保留，RAT443历史问题无新增。same-scope迁移/old binary、独立credential/new-scope物理issuer、默认EmbeddedServer与SDK routing、完整startup及步骤12/14/15/生产Gate保持OPEN/PARTIAL。
