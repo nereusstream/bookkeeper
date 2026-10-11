@@ -19,6 +19,17 @@ import time
 
 
 MATRIX = {
+    'a-profile-replica-audit': None,
+    'ce-profile-replica-audit-open': 'AuditOnlyClosed',
+    'ce-profile-replica-audit-scope': 'AuditOnlyScoped',
+    'ce-profile-replica-audit-unknown': 'UnknownNeverSchedulesMissing',
+    'ce-profile-replica-audit-fresh': 'MarkerNeedsFinalFreshCut',
+    'ce-profile-replica-audit-clear': 'ObserverNeverClearsMarker',
+    'ce-profile-replica-audit-health': 'DrainWaitsActualHealth',
+    'ce-profile-replica-audit-lease': 'CapacityWaitsActualLease',
+    'ce-profile-replica-audit-sdk': 'SDKWaitsActualHealthAndLease',
+    'ce-profile-replica-audit-budget': 'SharedPoolReservationIsBounded',
+
     'a-profile-membership-audit': None,
     'ce-profile-membership-audit-admin-index': 'AdminIndexPreservesReferences',
     'ce-profile-membership-audit-admin-return': 'LegacyDoesNotRetireProfile',
@@ -656,11 +667,12 @@ def main():
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationWorker.java")
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/AutoRecoveryMain.java")
     inputs.extend(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication" / name for name in
-                  ("Auditor.java", "AuditorElector.java", "AuditorTask.java", "AuditorBookieCheckTask.java",
+                  ("Auditor.java", "AuditorElector.java", "AuditorTask.java", "AuditorBookieCheckTask.java", "AuditorReplicasCheckTask.java",
                    "BookieLedgerIndexer.java"))
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/server/service/AutoRecoveryService.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AutoRecoveryMainTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorReplicasCheckTaskTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/BookieLedgerIndexTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/BookieDecommissionTest.java")
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/BookKeeperAdmin.java")
@@ -750,6 +762,7 @@ def main():
                    else "ProfileRecoveryPeerPool.tla" if "profile-recovery-peer-pool" in name
                    else "ProfileServiceBootstrap.tla" if "profile-service-bootstrap" in name
                    else "ProfileMembershipAudit.tla" if "profile-membership-audit" in name
+                   else "ProfileReplicaAudit.tla" if "profile-replica-audit" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name
                    else "ProfileTerminalCut.tla" if "profile-terminal-cut" in name

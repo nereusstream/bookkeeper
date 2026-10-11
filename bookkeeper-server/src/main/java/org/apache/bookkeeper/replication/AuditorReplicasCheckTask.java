@@ -59,6 +59,7 @@ public class AuditorReplicasCheckTask extends AuditorTask {
     private static final int REPLICAS_CHECK_TIMEOUT_IN_SECS = 120;
     private static final BitSet EMPTY_BITSET = new BitSet();
 
+    private final org.apache.bookkeeper.discover.profile.ProfileAuditor profileAuditor;
     private final int zkOpTimeoutMs;
 
     private final AtomicInteger numLedgersFoundHavingNoReplicaOfAnEntry;
@@ -71,8 +72,17 @@ public class AuditorReplicasCheckTask extends AuditorTask {
                              LedgerUnderreplicationManager ledgerUnderreplicationManager,
                              ShutdownTaskHandler shutdownTaskHandler,
                              BiConsumer<AtomicBoolean, Throwable> hasAuditCheckTask) {
+        this(conf, auditorStats, admin, ledgerManager, ledgerUnderreplicationManager, shutdownTaskHandler,
+                hasAuditCheckTask, null);
+    }
+
+    AuditorReplicasCheckTask(ServerConfiguration conf, AuditorStats auditorStats, BookKeeperAdmin admin,
+            LedgerManager ledgerManager, LedgerUnderreplicationManager ledgerUnderreplicationManager,
+            ShutdownTaskHandler shutdownTaskHandler, BiConsumer<AtomicBoolean, Throwable> hasAuditCheckTask,
+            org.apache.bookkeeper.discover.profile.ProfileAuditor profileAuditor) {
         super(conf, auditorStats, admin, ledgerManager,
                 ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask);
+        this.profileAuditor = profileAuditor;
         this.zkOpTimeoutMs = conf.getZkTimeout() * 2;
         this.numLedgersFoundHavingNoReplicaOfAnEntry = new AtomicInteger(0);
         this.numLedgersFoundHavingLessThanAQReplicasOfAnEntry = new AtomicInteger(0);
@@ -90,6 +100,18 @@ public class AuditorReplicasCheckTask extends AuditorTask {
         try {
             if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {
                 log.info("Ledger replication disabled, skipping replicasCheck task.");
+                return;
+            }
+            if (profileAuditor != null) {
+                try {
+                    profileAuditor.auditData(ledgerManager, ledgerUnderreplicationManager, zkOpTimeoutMs, auditorStats);
+                    ledgerUnderreplicationManager.setReplicasCheckCTime(System.currentTimeMillis());
+                } catch (java.io.IOException | BKException | ReplicationException failed) {
+                    throw new ReplicationException.BKAuditException("Profile DATA audit unavailable", failed);
+                } catch (InterruptedException stopped) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
                 return;
             }
             Stopwatch stopwatch = Stopwatch.createStarted();

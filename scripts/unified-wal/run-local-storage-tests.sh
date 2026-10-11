@@ -32,11 +32,12 @@ paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replicatio
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationWorker.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/AutoRecoveryMain.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication') / name for name in
-             ('Auditor.java', 'AuditorElector.java', 'AuditorTask.java', 'AuditorBookieCheckTask.java',
+             ('Auditor.java', 'AuditorElector.java', 'AuditorTask.java', 'AuditorBookieCheckTask.java', 'AuditorReplicasCheckTask.java',
               'BookieLedgerIndexer.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/server/service/AutoRecoveryService.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AutoRecoveryMainTest.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieTest.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorReplicasCheckTaskTest.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/BookieLedgerIndexTest.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/client/BookieDecommissionTest.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/client/BookKeeperAdmin.java'))

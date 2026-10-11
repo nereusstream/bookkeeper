@@ -194,7 +194,7 @@ public class Auditor implements AutoCloseable {
         allAuditorTasks.add(auditorPlacementPolicyCheckTask);
         this.auditorReplicasCheckTask = new AuditorReplicasCheckTask(
                 conf, auditorStats, admin, ledgerManager,
-                ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask);
+                ledgerUnderreplicationManager, shutdownTaskHandler, hasAuditCheckTask, profileAuditor);
         allAuditorTasks.add(auditorReplicasCheckTask);
         executor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
             @Override

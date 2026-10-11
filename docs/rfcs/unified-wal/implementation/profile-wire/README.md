@@ -1162,3 +1162,34 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/decommission-boundary-evidence-ydhv573w`，archive.json指向checks，原source/config/run/command身份冻结不改。
 
 最终decommission-boundary-checks-0i0hf8nq的style exit0、RAT exit1，443 unapproved路径全在父HEAD，无新增，5 artifact checksums。保留既有许可规则，不计CI全绿。
+
+## Profile CLOSED DATA 周期审计
+
+2026-10-11，第14步把原AuditorReplicasCheckTask的periodic调度接到既有真实全W replica-health验证器。原Classic replica-check只分析CLOSED ledger；本分支沿用该范围，且包括匹配的空CLOSED/empty-last事实，不为了审计主动fence OPEN writer。默认构造器继续OFF；显式Profile设置允许非负auditorPeriodicReplicasCheckInterval，payload check/placement check非0继续拒绝。没有新的调度器、元数据日志、普通Add查询或另一套quorum算法。
+
+ProfileAuditor复用原streamed metadata scan，先核验descriptor/cohort/backlink/lifecycle/retained incarnation与fresh registration，只有匹配CLOSED继续DATA检查。直接借用同一Main SDK/context/coordinator与原registered peer pool，使用原WorkerOptions的coordinate/duration界限。pool为一个正在建立/借用/排空的snapshot，audit与worker争用同一connection/RPC-slot预算；busy或失败defer，不创建第二pool或扩大预算。大于配置coordinate界限、未匹配CLOSED authority或错误/变化中的状态仍defer，不计完整审计或data loss；全registry/range/SDK/TLS/kernel/allocator总字节证明未完成。
+
+原verifyClosedReplicas保留caller deadline/cancellation回复；新增同一coordinator内的ReplicaHealthAttempt.completion只在actual health child终结、permit归还后完成，stop只停止未来阶段。审计等actual completion，再close acquisition并等待实际cold/client/output/lease drain，最后再检查metadata physical birth/version/content与root cut，之后才允许生成原UR检查任务。caller timeout/interrupt不是排空，服务SDK/cold/group保持到原auditor实际结束。没有remote abort/NONE/FREE或坐标回滚。
+
+实际READ证据继续由原fenced matching CLOSED checker逐坐标检查所有write-set副本的digest/payload/累计length；MISSING/CORRUPT且final cut稳定才生成需检查的replica名字。UNAVAILABLE、权限拒绝、冲突、quarantine、预算终止或metadata/root改变只报告defer。FULLY_REPLICATED只计健康观察，不clear已有marker、不发布repair/normal权限或loss reset；原worker仍执行durable intent/grant/COPY/membership/terminal/完整W复核及guarded marker completion。replicasCheckCTime只记录本轮执行时间，不代表所有ledger已健康。
+
+真实闭环：五节点fixture保留历史fragment在socket2的实际DATA hole，所有publisher仍READY；periodic检查无手工mark生成socket2检查任务，原worker复制到新target4、发布历史membership、完整W复核和actual lease drain后清marker，原CLOSED P=3/L=64保持。健康CLOSED扫描及随后权限拒绝均保留原marker；故意持有三条真实READ回复超过200ms caller deadline后，audit仍保留6条connection reservation，pre-interrupted service shutdown等待actual health/lease，owned SDK/ZK持续可用，释放后才ZK CLOSED/容量归零。验证的是本地真实mTLS/ZK/files及生命周期，不是掉电/持续性能证据。
+
+uuFQWjdD为旧服务明确拒绝replica interval非0的能力缺口（无协议成功）；biqUR5uJ闭环GREEN1。dbZEo2tC另两场景未启用fixture recovery-read capability，真实checker按合同拒绝，补齐该既有能力后arkobyXa三场景全部PASS，未弱化生产校验。两份runner补入实际AuditorReplicasCheckTask及其Classic原测试源码，历史source/config/run/command不重绑。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'AutoRecoveryMainTest,AuditorBookieTest#testShutdown+testSuccessiveAuditorCrashes,AuditorPeriodicBookieCheckTest,AuditorBookieCheckTaskTest,AuditorReplicasCheckTaskTest,BookieLedgerIndexTest,SegmentProfileInitialSocketClientTest#profileReplicaAudit*+profilePeriodicReplicaAudit*+closedReplicaHealth*+sharedIndexRetainsAllReferencesWhileClassicAuditorOnlyMarksClassicLedgers+legacyDecommissionRejectsStillReferencedProfileWithoutMarker+profileAuditor*+profileAutoRecoveryService*+profileServiceShutdown*+profileBootstrapInitialization*+profileShutdownInterruptDuring*+registeredPeerPool*+registeredPool*+replicationWorker*,TestReplicationWorker#testReplicationStats+testReplicateEmptyOpenStateLedger+testRWZKConnectionLostOnNonRecoverableZkError,TestLedgerUnderreplicationManager'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-replica-audit --config-prefix ce-profile-replica-audit --config-prefix a-profile-membership-audit --config-prefix ce-profile-membership-audit --config-prefix a-profile-replica-health --config-prefix ce-profile-replica-health --config-prefix a-profile-service-bootstrap --config-prefix ce-profile-service-bootstrap --config-prefix a-profile-service-shutdown --config-prefix ce-profile-service-shutdown --config-prefix a-profile-recovery-peer-pool --config-prefix ce-profile-recovery-peer-pool --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker --config-prefix a-profile-peer-discovery --config-prefix ce-profile-peer-discovery
+```
+
+ProfileReplicaAudit有限投影1正向/9指定反例要求CLOSED与scope、rich UNKNOWN不计hole、健康观察不clear、actual health/lease先于容量和SDK关闭、shared reservation不复制与最终fresh cut；facts仍为输入，不由模型生产TLS/ZK/fsync、完整状态/时钟/liveness或总字节界限。
+
+当前CLOSED DATA审计已接原coordinator/worker闭环，OPEN audit/正常writer close与adoption/额外required authority producer、payload/placement audit、总预算、离线追赶/rejoin/delete/retained-history GC/完整退役、完整兼容与组合及正式性能/运维/生产Gate仍OPEN；步骤12/14/15保持未完成范围。Linux NUMA/掉电/正式性能NOT_EXECUTED。
+
+最终kCot2Spa exit0：9类68项零skip（Classic periodic1/task2/index3/UR24/replica-task1/auditor2/Main5/worker3，native27含原health cancellation/authority与新增周期审计），1069当前inputs/12 artifact checksums；本轮最后长行已在该run前修正。narrow abiye6_8 10配置1完整正向/9指定反例、912inputs/680 checksums，在最后test input锁/换行前；相关o_pfyzrv 94配置11正向/83反例、913当前inputs/838 checksums。新正向396 generated/336 distinct、queue0、depth7、0.859秒/peak RSS110542848 bytes（相关run），非性能结论；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0/无symmetry/state constraint/CHECK_DEADLOCK FALSE。Java/model共享251/去重1731当前inputs与五个父HEAD设计锁核验，catalog576/完整A+C+D组合未全跑。
+
+持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/replica-audit-evidence-si79s4ka`及archive.json列出的checks目录，旧source/design/config/run/command身份冻结不改。
+
+最终replica-audit-checks-exixx7_6：style exit0、RAT exit1，443 unapproved路径全在父HEAD，无新增，5 artifact checksums。不改许可规则、不称CI全绿。

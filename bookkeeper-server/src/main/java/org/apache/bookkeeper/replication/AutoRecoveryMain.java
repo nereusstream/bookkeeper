@@ -141,9 +141,10 @@ public class AutoRecoveryMain {
                     zk, manager, settings.acls(), timeout);
             coordinator = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
                     reservations, metadata, cold);
-            profileAuditor = new ProfileAuditor(registry, reservations, metadata, settings.cohort(), settings.work());
             pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
                     group, settings.tls(), cold, settings.cohort(), settings.peerLimits());
+            profileAuditor = new ProfileAuditor(registry, reservations, metadata, settings.cohort(), settings.work(),
+                    client.getClientCtx(), coordinator, pool);
         }
 
         private boolean drain() {
@@ -222,10 +223,10 @@ public class AutoRecoveryMain {
             throws IOException, InterruptedException, KeeperException, UnavailableException,
             CompatibilityException {
         if (settings != null && (conf.getAuditorPeriodicCheckInterval() != 0
-                || conf.getAuditorPeriodicReplicasCheckInterval() != 0
+                || conf.getAuditorPeriodicReplicasCheckInterval() < 0
                 || conf.getAuditorPeriodicPlacementPolicyCheckInterval() != 0)) {
             throw new IllegalArgumentException(
-                    "Profile service does not enable Classic payload/replica/placement audits");
+                    "Profile service does not enable Classic payload/placement audits");
         }
         this.conf = conf;
         ProfileResources resources = settings == null ? null : new ProfileResources();

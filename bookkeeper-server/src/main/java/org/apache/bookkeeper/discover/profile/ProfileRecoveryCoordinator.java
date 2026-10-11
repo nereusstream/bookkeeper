@@ -1519,6 +1519,32 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
+    /** Actual health child terminal, independent of an early caller deadline/cancellation. */
+    public static final class ReplicaHealthAttempt {
+        private final CompletableFuture<ReplicaHealthResult> reply;
+        private final CompletableFuture<ReplicaHealthResult> terminal;
+        private final AtomicBoolean stopped;
+
+        private ReplicaHealthAttempt(CompletableFuture<ReplicaHealthResult> reply,
+                CompletableFuture<ReplicaHealthResult> terminal, AtomicBoolean stopped) {
+            this.reply = reply;
+            this.terminal = terminal;
+            this.stopped = stopped;
+        }
+
+        public CompletableFuture<ReplicaHealthResult> completion() {
+            return terminal.copy();
+        }
+
+        public void stop() {
+            stopped.set(true);
+        }
+    }
+
+    private static ReplicaHealthAttempt finishedHealth(CompletableFuture<ReplicaHealthResult> result) {
+        return new ReplicaHealthAttempt(result, result, new AtomicBoolean());
+    }
+
     /** Bounded, one-coordinate-at-a-time health scan of matching CLOSED; quorum success is insufficient. */
     public CompletableFuture<ReplicaHealthResult> verifyClosedReplicas(long ledger, ClientContext sdk,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
@@ -1532,6 +1558,14 @@ public final class ProfileRecoveryCoordinator {
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration,
             org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker) {
+        return beginVerifyClosedReplicas(ledger, sdk, credential, suppliedData, suppliedControl,
+                maxCoordinates, maxDuration, worker).reply;
+    }
+
+    public ReplicaHealthAttempt beginVerifyClosedReplicas(long ledger, ClientContext sdk,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker) {
         long duration = maxDuration.toNanos();
         if (ledger < 0 || maxCoordinates < 1 || suppliedData.size() > 64 || suppliedControl.size() > 64
                 || duration <= 0 || maxDuration.compareTo(Duration.ofMinutes(1)) > 0) {
@@ -1539,13 +1573,16 @@ public final class ProfileRecoveryCoordinator {
         }
         ProfileRecoveryReadHandle.requireCompatibleSdk(sdk);
         if (sdk.isClientClosed()) {
-            return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+            return finishedHealth(CompletableFuture.failedFuture(
+                    BKException.create(BKException.Code.ClientClosedException)));
         }
         if (!active.tryAcquire()) {
-            return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.LIMIT));
+            return finishedHealth(CompletableFuture.completedFuture(
+                    replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.LIMIT)));
         }
         var stopped = new AtomicBoolean();
         var caller = new CompletableFuture<ReplicaHealthResult>();
+        var terminal = new CompletableFuture<ReplicaHealthResult>();
         long deadline = System.nanoTime() + duration;
         try {
             var data = Map.copyOf(suppliedData);
@@ -1554,8 +1591,8 @@ public final class ProfileRecoveryCoordinator {
             var task = worker == null ? null : worker.captureProfileTask(ledger);
             if (worker != null && task == null) {
                 active.release();
-                return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
-                        PrefixReason.AUTHORITY_CHANGED));
+                return finishedHealth(CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
+                        PrefixReason.AUTHORITY_CHANGED)));
             }
             var actual = CompletableFuture.supplyAsync(() -> reservations.readClosedForOpen(metadata, ledger), cold)
                     .thenCompose(read -> {
@@ -1573,8 +1610,10 @@ public final class ProfileRecoveryCoordinator {
                 }
                 active.release();
                 if (failure != null) {
+                    terminal.completeExceptionally(failure);
                     caller.completeExceptionally(failure);
                 } else {
+                    terminal.complete(result);
                     caller.complete(result);
                 }
             });
@@ -1596,7 +1635,7 @@ public final class ProfileRecoveryCoordinator {
                     stopped.set(true);
                 }
             });
-            return caller;
+            return new ReplicaHealthAttempt(caller, terminal, stopped);
         } catch (RuntimeException failedAdmission) {
             active.release();
             throw failedAdmission;

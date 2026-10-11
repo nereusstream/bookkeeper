@@ -48,10 +48,25 @@ public final class ProfileAuditor {
     private final ProfileLedgerMetadataStore metadata;
     private final List<String> cohort;
     private final ProfileDescriptorIdentity descriptor;
+    private final org.apache.bookkeeper.client.ClientContext sdk;
+    private final ProfileRecoveryCoordinator coordinator;
+    private final ProfileRecoveryPeerPool pool;
+    private final ProfileRecoveryCoordinator.WorkerOptions work;
 
     public ProfileAuditor(ZKProfileRegistrationStore registry, ZKProfileReservationStore reservations,
             ProfileLedgerMetadataStore metadata, List<BookieId> cohort,
             ProfileRecoveryCoordinator.WorkerOptions work) {
+        this(registry, reservations, metadata, cohort, work, null, null, null);
+    }
+
+    public ProfileAuditor(ZKProfileRegistrationStore registry, ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, List<BookieId> cohort,
+            ProfileRecoveryCoordinator.WorkerOptions work, org.apache.bookkeeper.client.ClientContext sdk,
+            ProfileRecoveryCoordinator coordinator, ProfileRecoveryPeerPool pool) {
+        this.sdk = sdk;
+        this.coordinator = coordinator;
+        this.pool = pool;
+        this.work = work;
         this.registry = registry;
         this.reservations = reservations;
         this.metadata = metadata;
@@ -92,7 +107,21 @@ public final class ProfileAuditor {
     public void audit(LedgerManager manager, LedgerUnderreplicationManager tasks, long timeout,
             AuditorStats stats) throws IOException, BKException, InterruptedException,
                     ReplicationException {
-        stats.getStatsLogger().getCounter("profile_audit_runs").inc();
+        scan(manager, tasks, timeout, stats, false);
+    }
+
+    public void auditData(LedgerManager manager, LedgerUnderreplicationManager tasks, long timeout,
+            AuditorStats stats) throws IOException, BKException, InterruptedException, ReplicationException {
+        if (sdk == null || coordinator == null || pool == null) {
+            throw new IllegalStateException("Profile DATA audit requires the service-owned recovery context");
+        }
+        scan(manager, tasks, timeout, stats, true);
+    }
+
+    private void scan(LedgerManager manager, LedgerUnderreplicationManager tasks, long timeout,
+            AuditorStats stats, boolean data)
+            throws IOException, BKException, InterruptedException, ReplicationException {
+        stats.getStatsLogger().getCounter(data ? "profile_data_audit_runs" : "profile_audit_runs").inc();
         var peers = new HashMap<String, ZKProfileRegistrationStore.PeerReadResult>();
         for (String name : cohort) {
             peers.put(name, registry.readPeer(name));
@@ -116,8 +145,17 @@ public final class ProfileAuditor {
                 if (!value.getValue().getCustomMetadata().containsKey(ProfileMetadataBacklink.KEY)) {
                     continue; // Explicit Profile service does not infer Classic failures from its cohort.
                 }
+                if (data && !value.getValue().isClosed()) {
+                    continue; // Match the original replicas-check CLOSED scope; do not fence an active writer.
+                }
                 var missing = missing(value, peers);
-                if (missing == null) {
+                if (data) {
+                    if (missing != null && missing.isEmpty()) {
+                        auditClosedData(value, tasks, stats);
+                    } else {
+                        stats.getStatsLogger().getCounter("profile_data_audit_deferred").inc();
+                    }
+                } else if (missing == null) {
                     stats.getStatsLogger().getCounter("profile_audit_deferred").inc();
                 } else if (!missing.isEmpty()) {
                     FutureUtils.result(tasks.markLedgerUnderreplicatedAsync(ledger, missing),
@@ -125,6 +163,102 @@ public final class ProfileAuditor {
                     stats.getStatsLogger().getCounter("profile_audit_suspected").inc();
                 }
             }
+        }
+    }
+
+    private void auditClosedData(Versioned<LedgerMetadata> expected, LedgerUnderreplicationManager tasks,
+            AuditorStats stats) throws InterruptedException, ReplicationException {
+        long ledger = expected.getValue().getLedgerId();
+        var before = metadata.readMembership(ledger);
+        var root = reservations.read(ledger);
+        if (before.snapshot() == null || root.snapshot() == null
+                || !before.snapshot().metadata().getVersion().equals(expected.getVersion())
+                || !ProfileLedgerMetadataStore.sameMetadata(before.snapshot().metadata().getValue(),
+                        expected.getValue())) {
+            stats.getStatsLogger().getCounter("profile_data_audit_deferred").inc();
+            return;
+        }
+        var acquisition = pool.acquire();
+        ProfileRecoveryCoordinator.ReplicaHealthAttempt health = null;
+        java.util.concurrent.CompletableFuture<ProfileRecoveryCoordinator.ReplicaHealthResult> actual = null;
+        ProfileRecoveryCoordinator.ReplicaHealthResult result = null;
+        boolean interrupted = false;
+        try {
+            var lease = acquisition.completion().get();
+            var credential = org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential.of(1,
+                    org.apache.bookkeeper.proto.checksum.DigestManager.generateMasterKey(
+                            expected.getValue().getPassword()));
+            health = coordinator.beginVerifyClosedReplicas(ledger, sdk, credential, lease.data(), lease.controls(),
+                    work.maxCoordinates(), work.maxDuration(), null);
+            actual = health.completion();
+            result = actual.get();
+        } catch (InterruptedException stopping) {
+            interrupted = true;
+            if (health != null) {
+                health.stop();
+            }
+        } catch (java.util.concurrent.ExecutionException | java.security.NoSuchAlgorithmException failed) {
+            stats.getStatsLogger().getCounter("profile_data_audit_deferred").inc();
+        } finally {
+            // A caller stop/deadline cannot release the coordinator's cold child or its peer reservations.
+            if (actual != null) {
+                for (;;) {
+                    try {
+                        actual.get();
+                        break;
+                    } catch (InterruptedException stopping) {
+                        interrupted = true;
+                        health.stop();
+                    } catch (java.util.concurrent.ExecutionException failed) {
+                        break;
+                    }
+                }
+            }
+            var drained = acquisition.closeAsync();
+            for (;;) {
+                try {
+                    drained.get();
+                    break;
+                } catch (InterruptedException stopping) {
+                    interrupted = true;
+                } catch (java.util.concurrent.ExecutionException failed) {
+                    throw new IllegalStateException("Profile DATA audit lease drain was not confirmed", failed);
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (interrupted) {
+            throw new InterruptedException("Profile DATA audit stopped after actual child drain");
+        }
+        if (result == null) {
+            return;
+        }
+        var fresh = metadata.readMembership(ledger);
+        var freshRoot = reservations.read(ledger);
+        if (fresh.snapshot() == null || freshRoot.snapshot() == null
+                || fresh.snapshot().birthZxid() != before.snapshot().birthZxid()
+                || !fresh.snapshot().metadata().getVersion().equals(before.snapshot().metadata().getVersion())
+                || !ProfileLedgerMetadataStore.sameMetadata(fresh.snapshot().metadata().getValue(),
+                        before.snapshot().metadata().getValue()) || !freshRoot.snapshot().equals(root.snapshot())) {
+            stats.getStatsLogger().getCounter("profile_data_audit_deferred").inc();
+            return;
+        }
+        if (result.status() == ProfileRecoveryCoordinator.ReplicaHealthStatus.UNDERREPLICATED) {
+            var missing = result.sources().stream().filter(source -> source.outcome()
+                    == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.SourceOutcome.MISSING
+                        || source.outcome()
+                            == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.SourceOutcome.CORRUPT)
+                    .map(source -> source.bookie().toString()).distinct().toList();
+            if (!missing.isEmpty()) {
+                FutureUtils.result(tasks.markLedgerUnderreplicatedAsync(ledger, missing),
+                        ReplicationException.EXCEPTION_HANDLER);
+                stats.getStatsLogger().getCounter("profile_data_audit_suspected").inc();
+            }
+        } else {
+            stats.getStatsLogger().getCounter(result.status() == ProfileRecoveryCoordinator.ReplicaHealthStatus
+                    .FULLY_REPLICATED ? "profile_data_audit_healthy" : "profile_data_audit_deferred").inc();
         }
     }
 
