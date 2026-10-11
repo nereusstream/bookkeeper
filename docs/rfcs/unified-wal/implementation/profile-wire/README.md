@@ -1081,3 +1081,25 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check
 最终Java bCRQ9XaW exit0：4类48项零skip（AutoRecovery5、URmanager24、Classic worker3、actual service/socket/pool/worker16），1056当前inputs/7 artifact checksums。sdk-close-checks-oc10vnwf的style exit0、RAT exit1，443 unapproved路径全在父HEAD，无新增，5 checksums；不计CI全绿。模型wk9v00r_ 10配置1完整正向/9指定反例、873inputs/655 checksums；相关hw_gy2l6 54配置7完整正向/47指定反例、873inputs/737 checksums。bootstrap正向499 generated/407 distinct、queue0、depth12、0.852秒/peak RSS110755840 bytes（相关run），是有限模型消耗而非性能结论；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0/无symmetry/state constraint/CHECK_DEADLOCK FALSE。Java/model共享236/去重1693当前inputs与五个父HEAD设计锁核验。完整catalog553/完整A+C+D组合未运行；Linux NUMA/掉电/正式性能NOT_EXECUTED，步骤12/14仍PARTIAL，生产Gate不提升。
 
 持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/sdk-close-evidence-juy8ki3e`，archive.json指向checks目录，原source/config/run/command身份不改。原auditor的初始集合、变化监听与membership周期扫描仍使用Classic registry；Profile/cohort/descriptor/instance/incarnation感知的故障发现、全字节预算、离线追赶/rejoin/delete/GC及综合验收继续OPEN。registration observation不替代DATA missing证明或repair授权。
+
+## Auditor 排空与 owned SDK 关闭
+
+2026-10-11，接入Profile故障发现前补齐另一个实际service生命周期窗口：原Auditor.shutdown在executor.awaitTermination被interrupt后直接catch/return，elector随后丢掉auditor引用，Main进入worker/SDK阶段；实际audit任务和它的metadata依赖可能尚未终结。SDK one-shot closer的上一轮证据不覆盖这个更早的audit阶段。
+
+Auditor现在先取出caller signal，等待实际executor终结；等待中的新interrupt只记账并继续。原30秒后尝试shutdownNow的策略保留，仍须等actual termination才close各task/admin/manager并恢复signal；不把executor.isShutdown当成结束。Auditor及AuditorElector的ownBkc分支复用Main已有的独立one-shot SDK close方法（package内部共享），无需另一套close框架；Profile服务的auditor/elector仍借用Main的SDK。admin/manager等close错误仍按原错误语义报告，procedure结束不等于资源无条件成功。
+
+真实回归在服务已经选出的auditor自身executor中持有一个实际任务，等shutdown线程已进入Auditor.shutdown的等待后注入interrupt。IUtkcEcf exit1、1实际FAIL：held任务未结束时shutdown已return，后续SDK关闭使滞留auditor工作不可用；测试finally显式回收RED的遗留auditor，不把该清理当验收。E9QccJOb exit0、1PASS：held任务未结束时SDK/owned ZK保持可用，释放后executor terminated、owned ZK CLOSED、signal保留、external SDK继续可用。该场景证明executor与SDK生命周期边界，不是Profile DATA missing或自动故障发现的证据。NkHzqV1O为遗漏admin.close checked InterruptedException的编译失败，无测试执行；修正其原错误处理后继续验证，不计协议RED。
+
+两份runner补入Auditor/AuditorElector/AuditorTask/AuditorBookieCheckTask/BookieLedgerIndexer及本轮选中的AuditorBookieTest源码锁。原ProfileServiceShutdown投影增加actual auditor terminal输入与一个指定反例AuditorNeedsActualDrain，native manager/SDK之前须同时结束实际auditor和worker；不生产这些actual输入、ZK/TLS/fsync或clock/liveness保证。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'AutoRecoveryMainTest,AuditorBookieTest#testShutdown+testSuccessiveAuditorCrashes,SegmentProfileInitialSocketClientTest#profileAutoRecoveryService*+profileServiceShutdown*+profileBootstrapInitialization*+profileShutdownInterruptDuring*+registeredPeerPool*+registeredPool*+replicationWorker*,TestReplicationWorker#testReplicationStats+testReplicateEmptyOpenStateLedger+testRWZKConnectionLostOnNonRecoverableZkError,TestLedgerUnderreplicationManager'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-service-bootstrap --config-prefix ce-profile-service-bootstrap --config-prefix a-profile-service-shutdown --config-prefix ce-profile-service-shutdown --config-prefix a-profile-recovery-peer-pool --config-prefix ce-profile-recovery-peer-pool --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+```
+
+最终Java 9g4pj27S exit0：5类51项零skip（URmanager24、Classic auditor shutdown/successive election2、AutoRecovery5、Classic worker3、actual service/socket/pool/worker17），1062当前inputs/8 artifact checksums。auditor-drain-checks-ht2mj80b的style exit0、RAT exit1，443 unapproved路径全在父HEAD、无新增，5 checksums，不计CI全绿。narrow wzcf66vo 11配置2完整正向/9指定反例、879inputs/657 checksums，在最后补入AuditorBookieTest源码锁前；相关750_1r7x 55配置7正向/48反例、880当前inputs/740 checksums。外部shutdown正向52 generated/30 distinct，self91/44，queue0、depth12，分别0.793/0.832秒、peak RSS107593728/106725376 bytes（相关run），非性能结论；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0/无symmetry/state constraint/CHECK_DEADLOCK FALSE。Java/model共享242/去重1700当前inputs与五个父HEAD design锁核验，历史run不重绑。
+
+持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/auditor-drain-evidence-edhuj_ar`及archive.json checks目录。catalog554/完整A+C+D组合未运行，Linux NUMA/掉电/正式性能NOT_EXECUTED；Profile注册感知的初始集合/变化通知/周期扫描、全字节预算、离线追赶/rejoin/delete/GC及综合验收仍OPEN，步骤12/14仍PARTIAL，生产Gate不提升。

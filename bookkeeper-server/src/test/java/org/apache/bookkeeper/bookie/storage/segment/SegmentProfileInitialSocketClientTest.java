@@ -5945,6 +5945,91 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void profileShutdownInterruptDuringAuditorWaitKeepsItsActualScanAndSdkAlive() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                BookKeeper externalSdk = sdk(fixture)) {
+            var conf = profileWorkerConfiguration(fixture);
+            conf.setAllowLoopback(true);
+            conf.setAuditorPeriodicCheckInterval(0);
+            conf.setAuditorPeriodicReplicasCheckInterval(0);
+            conf.setAuditorPeriodicPlacementPolicyCheckInterval(0);
+            var settings = new org.apache.bookkeeper.replication.AutoRecoveryMain.ProfileSettings(
+                    "/socket-initial", "/socket-readiness", ZooDefs.Ids.OPEN_ACL_UNSAFE, fixture.peerTls,
+                    fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
+                    new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                            6, 12, 2, 1060, Duration.ofSeconds(5)),
+                    new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                            Map.of(), Map.of(), 3, 8, Duration.ofSeconds(30)));
+            var main = new org.apache.bookkeeper.replication.AutoRecoveryMain(
+                    conf, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, settings);
+            var clientField = main.getClass().getDeclaredField("bkc");
+            clientField.setAccessible(true);
+            var ownedSdk = (BookKeeper) clientField.get(main);
+            var ownedZk = ((org.apache.bookkeeper.meta.zk.ZKMetadataClientDriver)
+                    ownedSdk.getMetadataClientDriver()).getZk();
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var owner = new java.util.concurrent.atomic.AtomicReference<Thread>();
+            var stopper = java.util.concurrent.Executors.newSingleThreadExecutor();
+            org.apache.bookkeeper.replication.Auditor auditor = null;
+            try {
+                main.start();
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (main.getAuditor() == null && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                auditor = main.getAuditor();
+                assertNotNull(auditor);
+                var executorField = auditor.getClass().getDeclaredField("executor");
+                executorField.setAccessible(true);
+                var executor = (java.util.concurrent.ScheduledExecutorService) executorField.get(auditor);
+                var scan = executor.submit(() -> {
+                    entered.countDown();
+                    await(release);
+                });
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                var stopping = stopper.submit(() -> {
+                    owner.set(Thread.currentThread());
+                    main.shutdown();
+                    return Thread.currentThread().isInterrupted();
+                });
+                until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while ((owner.get() == null || java.util.Arrays.stream(owner.get().getStackTrace())
+                        .noneMatch(frame -> frame.getClassName().equals(auditorClassName())
+                            && frame.getMethodName().equals("shutdown"))) && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertNotNull(owner.get());
+                assertTrue(java.util.Arrays.stream(owner.get().getStackTrace()).anyMatch(frame ->
+                        frame.getClassName().equals(auditorClassName()) && frame.getMethodName().equals("shutdown")));
+                owner.get().interrupt();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                assertFalse(scan.isDone());
+                assertFalse(ownedSdk.getClientCtx().isClientClosed());
+                assertEquals(ZooKeeper.States.CONNECTED, ownedZk.getState());
+                release.countDown();
+                assertTrue(stopping.get(10, TimeUnit.SECONDS));
+                assertTrue(scan.isDone());
+                assertTrue(executor.isTerminated());
+                assertEquals(ZooKeeper.States.CLOSED, ownedZk.getState());
+                assertFalse(externalSdk.getClientCtx().isClientClosed());
+            } finally {
+                release.countDown();
+                main.shutdown();
+                if (auditor != null) {
+                    auditor.close(); // Also reclaim the RED run's abandoned auditor resources.
+                }
+                stopper.shutdownNow();
+            }
+        }
+    }
+
+    private static String auditorClassName() {
+        return org.apache.bookkeeper.replication.Auditor.class.getName();
+    }
+
+    @Test
     public void profileShutdownInterruptDuringSdkCloseWaitsForActualMetadataClose() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true);
                 BookKeeper externalSdk = sdk(fixture)) {

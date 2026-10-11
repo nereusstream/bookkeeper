@@ -31,8 +31,12 @@ paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replicatio
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationException.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationWorker.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/AutoRecoveryMain.java'))
+paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication') / name for name in
+             ('Auditor.java', 'AuditorElector.java', 'AuditorTask.java', 'AuditorBookieCheckTask.java',
+              'BookieLedgerIndexer.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/server/service/AutoRecoveryService.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AutoRecoveryMainTest.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieTest.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestReplicationWorker.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/test/ZooKeeperUtil.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/util/ByteBufList.java'))

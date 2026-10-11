@@ -50,6 +50,7 @@ MATRIX = {
     'ce-profile-service-shutdown-metadata': 'SDKCloseKeepsMetadataCleanup',
     'ce-profile-service-shutdown-self': 'SelfStopNeverJoinsItself',
     'ce-profile-service-shutdown-restart': 'ShutdownNeverRestarts',
+    'ce-profile-service-shutdown-auditor': 'AuditorNeedsActualDrain',
 
     'a-profile-registered-connection': None,
     'ce-profile-registered-connection-pre': 'ReadyNeedsPre',
@@ -641,8 +642,12 @@ def main():
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationException.java")
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationWorker.java")
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/AutoRecoveryMain.java")
+    inputs.extend(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/replication" / name for name in
+                  ("Auditor.java", "AuditorElector.java", "AuditorTask.java", "AuditorBookieCheckTask.java",
+                   "BookieLedgerIndexer.java"))
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/server/service/AutoRecoveryService.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AutoRecoveryMainTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestReplicationWorker.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/test/ZooKeeperUtil.java")
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning").glob("*.java"))

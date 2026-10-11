@@ -1319,3 +1319,5 @@ Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksu
 2026-10-11 ProfileServiceBootstrap 1正向/7指定反例，以context/audit/ready及worker/pool/SDK实际终结为输入检查default OFF、owned绑定、failure/drain/close顺序；不生产SDK/TLS/ZK/fsync、byte budget/clock/liveness。相关54v7k04l 52配置7正向/45反例、871 inputs/731 checksums；最终jensczj9 8配置1正向/7反例、871当前inputs/649 checksums。实际Java47、共享236/去重1691输入及五个parent designInputs由连接记录拥有。正向269/227 generated/distinct、queue0、depth10、0.849秒/peak RSS109248512 bytes，非性能；catalog551未全跑/完整组合验收。
 
 2026-10-11，原ProfileServiceBootstrap加入SDK准入关闭/实际procedure结束和caller signal输入，新增2指定反例；本轮10配置1完整正向/9CE、相关54配置7正向/47CE得到预期结果。catalog由551增至553，完整矩阵/完整组合未运行。[真实SDK关闭中断RED/GREEN及回执](../profile-wire/README.md#sdk-关闭过程中的新中断)拥有当前证据；有限模型不替代SDK/ZK/TLS/fsync或资源字节证明。
+
+2026-10-11，原ProfileServiceShutdown加入actual auditor terminal输入，新增AuditorNeedsActualDrain指定反例；narrow11配置2正向/9CE与相关55配置7正向/48CE得到预期结果，catalog554未全跑。两份runner绑定实际auditor owners/producer依赖及Classic AuditorBookieTest源码。[实际service audit executor中断RED/GREEN及回执](../profile-wire/README.md#auditor-排空与-owned-sdk-关闭)拥有当前证据；模型不生产native input或完整组合保证。

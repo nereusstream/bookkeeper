@@ -387,7 +387,7 @@ public class AutoRecoveryMain {
 
     // BookKeeper.close sets its admission flag before interruptible executor waits; retrying cannot resume it.
     // Give that one-shot procedure an independent owner so caller interrupts cannot strand its metadata session.
-    private static void closeClientUninterruptibly(BookKeeper client) throws BKException {
+    static void closeClientUninterruptibly(BookKeeper client) throws BKException {
         var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
         Thread closer = new Thread(() -> {
             try {

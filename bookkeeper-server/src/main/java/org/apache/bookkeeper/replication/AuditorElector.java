@@ -259,7 +259,7 @@ public class AuditorElector {
         }
         if (ownBkc) {
             try {
-                bkc.close();
+                AutoRecoveryMain.closeClientUninterruptibly(bkc);
             } catch (BKException e) {
                 log.warn().exception(e).log("Failed to close bookkeeper client");
             }

@@ -619,9 +619,18 @@ public class Auditor implements AutoCloseable {
      */
     public void shutdown() {
         log.info("Shutting down auditor");
+        boolean interrupted = Thread.interrupted();
         executor.shutdown();
         try {
-            while (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+            for (;;) {
+                try {
+                    if (executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                        break;
+                    }
+                } catch (InterruptedException stopping) {
+                    interrupted = true;
+                    continue; // Keep the SDK and metadata managers alive for the actual auditor tasks.
+                }
                 log.warn("Executor not shutting down, interrupting");
                 executor.shutdownNow();
             }
@@ -634,7 +643,7 @@ public class Auditor implements AutoCloseable {
                 admin.close();
             }
             if (ownBkc) {
-                bkc.close();
+                AutoRecoveryMain.closeClientUninterruptibly(bkc);
             }
             if (ledgerManager != null) {
                 ledgerManager.close();
@@ -642,11 +651,16 @@ public class Auditor implements AutoCloseable {
             if (ledgerUnderreplicationManager != null) {
                 ledgerUnderreplicationManager.close();
             }
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            log.warn().exception(ie).log("Interrupted while shutting down auditor bookie");
+        } catch (InterruptedException stopping) {
+            interrupted = true;
+            log.warn().exception(stopping).log("Interrupted closing auditor dependencies");
         } catch (UnavailableException | IOException | BKException bke) {
             log.warn().exception(bke).log("Exception while shutting down auditor bookie");
+        } finally {
+            interrupted |= Thread.interrupted();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
