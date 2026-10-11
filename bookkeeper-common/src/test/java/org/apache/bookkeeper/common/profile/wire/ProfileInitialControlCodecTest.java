@@ -77,6 +77,44 @@ public class ProfileInitialControlCodecTest {
     }
 
     @Test
+    public void committedDeleteApplyUsesIndependentSchemaAndExactOwnedBinding() {
+        var base = scope(ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY);
+        var binding = new ProfileControlRequest.DeleteBinding(bytes(16, 8), 1, 1, 2, bytes(16, 9), 1, bytes(32, 10));
+        var scope = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(), base.ledgerInstanceId(),
+                base.descriptorIdentity(), base.targetBookie(), base.targetStorageIncarnation(), base.authorityDomain(),
+                base.authorityGeneration(), base.operationId(),
+                ProfileControlRequest.deletePayloadIdentity(base, binding),
+                null);
+        var request = ProfileControlRequest.deleteApply(scope, binding);
+        byte[] encoded = ProfileInitialControlCodec.encodeRequest(request);
+        assertEquals(236, encoded.length);
+        var decoded = ProfileInitialControlCodec.decodeRequest(ProfileOperation.TOMBSTONE_OR_DELETE_APPLY,
+                ByteBuffer.wrap(encoded), HELLO);
+        assertEquals(scope, decoded.scope());
+        assertEquals(binding, decoded.deleteBinding().orElseThrow());
+        byte[] owned = binding.streamId();
+        owned[0] = 0;
+        assertArrayEquals(bytes(16, 8), binding.streamId());
+        for (int size = 0; size < encoded.length; size++) {
+            byte[] cut = Arrays.copyOf(encoded, size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                    ProfileOperation.TOMBSTONE_OR_DELETE_APPLY, ByteBuffer.wrap(cut), HELLO));
+        }
+        byte[] changed = encoded.clone();
+        changed[changed.length - 1] ^= 1;
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.TOMBSTONE_OR_DELETE_APPLY, ByteBuffer.wrap(changed), HELLO));
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.encodeRequest(
+                ProfileControlRequest.operation(scope)));
+        assertThrows(IllegalArgumentException.class, () -> ProfileInitialControlCodec.decodeRequest(
+                ProfileOperation.ACTIVATE_INITIAL, ByteBuffer.wrap(encoded), HELLO));
+        var result = new ProfileControlResult(ProfileControlResult.Outcome.APPLIED, scope.operation(), 44,
+                HexFormat.of().formatHex(scope.operationId()), 1, 2, true);
+        assertEquals(result, ProfileInitialControlCodec.decodeReply(ProfileOperation.TOMBSTONE_OR_DELETE_APPLY,
+                ProfileInitialControlCodec.encodeReply(result)));
+    }
+
+    @Test
     public void standaloneBoundaryCloseOwnsEmptyPrefixAndCannotReplayAsGrantClose() throws Exception {
         byte[] vector;
         try (var in = getClass().getResourceAsStream("/profile-wire/terminal-boundary-close.bin")) {

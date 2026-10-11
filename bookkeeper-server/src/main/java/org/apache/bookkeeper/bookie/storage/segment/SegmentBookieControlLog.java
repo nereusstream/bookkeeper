@@ -319,6 +319,18 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
+    /** No record or admission cut was written for an out-of-order delivery. */
+    static final class DeleteSequenceException extends IOException {
+        private final boolean retryable;
+        DeleteSequenceException(boolean retryable) {
+            super("Delete delivery is outside the continuous initial assignment");
+            this.retryable = retryable;
+        }
+        boolean retryable() {
+            return retryable;
+        }
+    }
+
     private static final class Command {
         private final SegmentControlFormat.Type type;
         private final ProfileControlScope scope;
@@ -328,10 +340,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final GrantBinding grant;
         private final UUID closedGrantId;
         private final ProfileControlRequest.TerminalBinding terminal;
+        private final ProfileControlRequest.DeleteBinding deletion;
 
         private Command(SegmentControlFormat.Type type, ProfileControlScope scope, byte[] descriptor,
                         ProtectedProfileCredential credential,
                         ProtectedProfileCredential.SealedStorageValue sealed) {
+            this.deletion = null;
             this.terminal = null;
             this.type = type;
             this.scope = scope;
@@ -343,6 +357,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         private Command(ProfileControlScope scope, GrantBinding grant) {
+            this.deletion = null;
             this.terminal = null;
             this.type = SegmentControlFormat.Type.RECOVERY_GRANT;
             this.scope = scope;
@@ -358,6 +373,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         private Command(ProfileControlScope scope, GrantBinding grant, UUID closedGrantId, boolean terminal) {
+            this.deletion = null;
             this.terminal = null;
             this.type = terminal ? SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE
                     : SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE;
@@ -372,7 +388,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private Command(ProfileControlScope scope, ProfileControlRequest.TerminalBinding terminal) {
             this.type = SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY;
             this.scope = scope;
+            this.deletion = null;
             this.terminal = terminal;
+            this.descriptor = null;
+            this.credential = null;
+            this.sealed = null;
+            this.grant = null;
+            this.closedGrantId = null;
+        }
+
+        private Command(ProfileControlScope scope, ProfileControlRequest.DeleteBinding deletion) {
+            this.type = SegmentControlFormat.Type.DELETE_DELIVERY_APPLY;
+            this.scope = scope;
+            this.deletion = deletion;
+            this.terminal = null;
             this.descriptor = null;
             this.credential = null;
             this.sealed = null;
@@ -390,7 +419,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     && Arrays.equals(descriptor, other.descriptor)
                     && (credential == null ? other.credential == null : credential.matches(other.credential))
                     && (grant == null ? other.grant == null : grant.sameMeaning(other.grant))
-                    && Objects.equals(closedGrantId, other.closedGrantId) && Objects.equals(terminal, other.terminal);
+                    && Objects.equals(closedGrantId, other.closedGrantId) && Objects.equals(terminal, other.terminal)
+                    && Objects.equals(deletion, other.deletion);
         }
     }
 
@@ -448,6 +478,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private Generation physicalGeneration = LOG_GENERATION;
     private final Map<Long, LedgerState> ledgers = new HashMap<>();
     private final Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
+    private ProfileControlRequest.DeleteBinding deleteApplied;
     private final Map<UUID, AppliedOperation> operations = new HashMap<>();
     private final Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
     // First applied outcomes plus the latest LAC per ledger, bounded by the retained control log.
@@ -750,7 +781,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     || pendingRecoveryCloseWrite != null) {
                 throw new IllegalArgumentException("Invalid or unresolved Bookie control batch");
             }
+            if (commands.stream().anyMatch(command -> command.deletion != null) && commands.size() != 1) {
+                throw new IllegalArgumentException("One continuous delete effect per control batch");
+            }
             for (Command command : commands) {
+                verifyDeleteSequence(command);
                 if (command.terminal != null) {
                     throw new IllegalArgumentException("Terminal boundary requires its pre-cut close path");
                 }
@@ -773,7 +808,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             start = nextOffset;
             nextOffset += bytes;
             for (Command command : commands) {
-                if (command.type == SegmentControlFormat.Type.TOMBSTONE
+                if (isTombstone(command.type)
                         && !operations.containsKey(command.operationId())
                         && !fenceOperations.containsKey(command.operationId())
                         && !checkpointIds.contains(command.operationId())) {
@@ -825,7 +860,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 appliedOffset += record.remaining();
                 LedgerState state = ledgers.get(command.scope.ledgerId());
                 results.add(new Result(status, command.operationId(), sequence,
-                        state == null ? 0 : state.localGeneration,
+                        command.deletion != null
+                                && (status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE)
+                                ? command.deletion.sequence() : state == null ? 0 : state.localGeneration,
                         state == null ? 0 : state.localInstallGeneration));
             }
         } catch (RuntimeException | Error failure) {
@@ -1848,6 +1885,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return new Command(SegmentControlFormat.Type.ACTIVATE, scope, null, null, null);
         }
         if (scope.operation() == ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY) {
+            if (transition.request().deleteBinding().isPresent()) {
+                var deletion = transition.request().deleteBinding().orElseThrow();
+                ProfileControlRequest.deleteApply(scope, deletion);
+                return new Command(scope, deletion);
+            }
             return new Command(SegmentControlFormat.Type.TOMBSTONE, scope, null, null, null);
         }
         throw new IllegalArgumentException("Bookie control operation is not implemented");
@@ -1892,7 +1934,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private Status apply(Command command) {
         UUID operationId = command.operationId();
         LedgerState state = ledgers.get(command.scope.ledgerId());
-        if (command.type == SegmentControlFormat.Type.TOMBSTONE && state != null
+        if (isTombstone(command.type) && state != null
                 && state.context.equals(context(command.scope))) {
             state.pendingTombstone = false;
         }
@@ -1922,7 +1964,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             } else {
                 status = Status.CONDITION_FAILED;
             }
-        } else if (command.type == SegmentControlFormat.Type.TOMBSTONE) {
+        } else if (isTombstone(command.type)) {
             ProfileLedgerContext target = context(command.scope);
             ProfileLedgerContext terminal = tombstones.get(command.scope.ledgerId());
             if (terminal != null) {
@@ -2009,8 +2051,52 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 status = Status.APPLIED_DURABLE;
             }
         }
+        if (command.deletion != null && (status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE)) {
+            deleteApplied = command.deletion;
+        }
         operations.put(operationId, new AppliedOperation(command, status));
         return status;
+    }
+
+    private static boolean isTombstone(SegmentControlFormat.Type type) {
+        return type == SegmentControlFormat.Type.TOMBSTONE || type == SegmentControlFormat.Type.DELETE_DELIVERY_APPLY;
+    }
+
+    synchronized ProfileControlRequest.DeleteBinding deleteAppliedCursor() {
+        return deleteApplied;
+    }
+
+    private void verifyDeleteSequence(Command command) throws DeleteSequenceException {
+        if (command.deletion == null) {
+            return;
+        }
+        var prior = operations.get(command.operationId());
+        if (prior != null) {
+            if (!prior.command().sameMeaning(command) || prior.status() != Status.APPLIED_DURABLE
+                    && prior.status() != Status.ALREADY_DURABLE) {
+                throw new DeleteSequenceException(false);
+            }
+            return;
+        }
+        var deletion = command.deletion;
+        if (deleteApplied != null && (!Arrays.equals(deleteApplied.streamId(), deletion.streamId())
+                || deleteApplied.streamGeneration() != deletion.streamGeneration()
+                || deleteApplied.assignmentGeneration() != deletion.assignmentGeneration())) {
+            throw new DeleteSequenceException(false);
+        }
+        long next = deleteApplied == null ? 1 : deleteApplied.sequence() + 1;
+        if (deletion.sequence() != next) {
+            throw new DeleteSequenceException(deletion.sequence() > next);
+        }
+        var state = ledgers.get(command.scope.ledgerId());
+        var terminal = tombstones.get(command.scope.ledgerId());
+        var target = context(command.scope);
+        if (fenceOperations.containsKey(command.operationId()) || checkpointIds.contains(command.operationId())
+                || terminal != null && !terminal.equals(target)
+                || state != null && (!state.context.equals(target)
+                    || command.scope.authorityGeneration() < state.install.authorityGeneration())) {
+            throw new DeleteSequenceException(false);
+        }
     }
 
     private static boolean matchesClose(Command close, Command grant) {
@@ -2277,6 +2363,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private void resetRecoveredState() {
         ledgers.clear();
         tombstones.clear();
+        deleteApplied = null;
         operations.clear();
         fenceOperations.clear();
         checkpointState.clear();
@@ -2334,6 +2421,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             retain(sequence, parsed.operationId(), status, bytes);
         } else {
             Command command = decode(parsed);
+            verifyDeleteSequence(command);
             status = apply(command);
             retain(sequence, parsed.operationId(), status, bytes);
         }
@@ -2420,7 +2508,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private Command decode(SegmentControlParser.Command parsed) throws IOException {
         if (parsed.type() != SegmentControlFormat.Type.INSTALL
                 && parsed.type() != SegmentControlFormat.Type.ACTIVATE
-                && parsed.type() != SegmentControlFormat.Type.TOMBSTONE
+                && !isTombstone(parsed.type())
                 && parsed.type() != SegmentControlFormat.Type.RECOVERY_GRANT
                 && !isRecoveryClose(parsed.type())) {
             throw new IOException("Unsupported Bookie control command");
@@ -2439,6 +2527,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     throw new IOException("Invalid activation body");
                 }
                 return new Command(parsed.type(), scope, null, null, null);
+            }
+            if (parsed.type() == SegmentControlFormat.Type.DELETE_DELIVERY_APPLY) {
+                var deletion = ProfileControlRequest.DeleteBinding.decode(body);
+                ProfileControlRequest.deleteApply(scope, deletion);
+                return new Command(scope, deletion);
             }
             if (parsed.type() == SegmentControlFormat.Type.TOMBSTONE) {
                 if (scope.operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
@@ -2528,6 +2621,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private ByteBuffer body(Command command) {
         ByteBuffer scope = encodeScope(command.scope);
+        if (command.deletion != null) {
+            return ByteBuffer.allocate(scope.remaining() + ProfileControlRequest.DeleteBinding.BYTES)
+                    .put(scope).put(command.deletion.encode()).flip();
+        }
         if (command.type == SegmentControlFormat.Type.RECOVERY_GRANT) {
             return ByteBuffer.allocate(scope.remaining() + 32).put(scope).put(command.grant.intentId())
                     .putLong(command.grant.intentGeneration()).putLong(command.grant.grantGeneration()).flip();

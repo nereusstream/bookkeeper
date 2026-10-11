@@ -1129,3 +1129,6 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 
 
 2026-10-12 [初始共享 delete delivery journal](implementation/profile-wire/README.md#初始共享-delete-delivery-journal)已复用logical tombstone/完整target，实际ZK同事务提交event/index/连续head；一个Bookie/incarnation跨两真实ledger共用initial stream，旧绑定不可盲建新stream，丢回复/并发seq赢家/缺失与同字节重建拒绝已有证据。阶段79与最终7项Java、15配置有限模型各保留原source，style通过，RAT443历史问题无新增。4096-event有限prototype无snapshot/GC扩容，不授予本地cursor/registration authority；实际TOMBSTONE/apply、catch-up/rejoin/physical与综合Gate仍OPEN，步骤12/14/15保持PARTIAL。
+
+
+2026-10-12 [UIC7 本地 delete-applied 与连续 cursor](implementation/profile-wire/README.md#uic7-本地-delete-applied-与连续-cursor)已将committed event/实际cold authority接到mTLS CONTROL与原Bookie type13 write/force/owner apply，TOMBSTONE和连续cursor同record；gap写盘前可重试，旧seq不回退，UNKNOWN不发布cursor，absent ledger仍有durable effect坐标。实际非空/空两ledger、旧读取/目标拒绝、held pin、丢目标回复/fresh重试、force失败、checkpoint rotation/restart有定向证据。158项相关Java、23个有限模型配置（3正向/20指定反例）及style通过，RAT443历史问题无新增；原history receipt保留；registration required-through cut、startup/catch-up/rejoin、snapshot/handoff/physical/GC及综合Gate仍OPEN，步骤12/14/15保持PARTIAL。

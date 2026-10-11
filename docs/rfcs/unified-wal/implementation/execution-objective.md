@@ -44,3 +44,6 @@
 
 
 2026-10-12继续第15步：01b0df6fff后已接initial共享Bookie/incarnation delete delivery journal，同一ZKmulti提交无洞event/index/head，真实跨两ledger验证及exact read消费由profile-wire/README.md“初始共享 delete delivery journal”拥有。当前尚不产生本地delete-applied/cursor或writable authority，继续接实际TOMBSTONE wire/apply、catch-up/rejoin与全16步其余未闭合项；持续目标active，投递journal里程碑不等于整个目标完成。
+
+
+2026-10-12继续第15步：7d241ce0e5之后已接UIC7实际committed delivery/cold exact authority与Bookie type13 TOMBSTONE/continuous delete-applied cursor，同record持久并沿原checkpoint/rotation/restart重建；gap写盘前可重试、旧seq不回退、UNKNOWN不发布成功，实际旧I/O/read pin独立排空。源码/测试/模型及当前receipt由profile-wire/README.md“UIC7 本地 delete-applied 与连续 cursor”拥有。继续registration required-through提交cut、startup/offline catch-up/rejoin、snapshot/handoff、physical/GC/decommission及全16步其他未闭合范围；持续目标active，步骤12/14/15和生产Gate保持PARTIAL/OPEN。

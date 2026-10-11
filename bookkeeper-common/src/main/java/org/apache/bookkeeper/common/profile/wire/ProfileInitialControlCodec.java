@@ -54,6 +54,10 @@ public final class ProfileInitialControlCodec {
     public static final ProfileHello.Capability TERMINAL_BOUNDARY_CAPABILITY = new ProfileHello.Capability(
             TERMINAL_BOUNDARY_CAPABILITY_ID, TERMINAL_BOUNDARY_SCHEMA);
     public static final int TERMINAL_BOUNDARY_BYTES = 48;
+    public static final long DELETE_APPLY_CAPABILITY_ID = 0x55494337L;
+    public static final int DELETE_APPLY_SCHEMA = 6;
+    public static final ProfileHello.Capability DELETE_APPLY_CAPABILITY = new ProfileHello.Capability(
+            DELETE_APPLY_CAPABILITY_ID, DELETE_APPLY_SCHEMA);
     public static final int COMMON_BYTES = 126;
     public static final int RECOVERY_BINDING_BYTES = 48;
     public static final int MAX_GRANT_BYTES = COMMON_BYTES + ProfileControlScope.MAX_AUTHORITY_DOMAIN_BYTES
@@ -68,13 +72,15 @@ public final class ProfileInitialControlCodec {
     private static final int REPLY_MAGIC = 0x55574952;
 
     private static int schema(ProfileControlOperation operation) {
-        return operation == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_SCHEMA
+        return operation == ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY ? DELETE_APPLY_SCHEMA
+                : operation == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_SCHEMA
                 : operation == ProfileControlOperation.RECOVERY_GRANT_CLOSE ? RECOVERY_CLOSE_SCHEMA
                 : operation == ProfileControlOperation.RECOVERY_GRANT ? RECOVERY_SCHEMA
                 : operation == ProfileControlOperation.ACTIVATE_REPLACEMENT ? REPLACEMENT_SCHEMA : SCHEMA;
     }
     private static int schema(ProfileOperation operation) {
-        return operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_SCHEMA
+        return operation == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY ? DELETE_APPLY_SCHEMA
+                : operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_SCHEMA
                 : operation == ProfileOperation.RECOVERY_GRANT_CLOSE ? RECOVERY_CLOSE_SCHEMA
                 : operation == ProfileOperation.RECOVERY_GRANT ? RECOVERY_SCHEMA
                 : operation == ProfileOperation.ACTIVATE_REPLACEMENT ? REPLACEMENT_SCHEMA : SCHEMA;
@@ -91,18 +97,22 @@ public final class ProfileInitialControlCodec {
         return operation == ProfileOperation.INSTALL || operation == ProfileOperation.ACTIVATE_INITIAL
                 || operation == ProfileOperation.ACTIVATE_REPLACEMENT || operation == ProfileOperation.RECOVERY_GRANT
                 || operation == ProfileOperation.RECOVERY_GRANT_CLOSE
-                || operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE;
+                || operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE
+                || operation == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY;
     }
 
     public static int minimumRequestBytes(ProfileOperation operation) {
         return operation == ProfileOperation.INSTALL ? MIN_INSTALL_BYTES : COMMON_BYTES + 1
-                + (operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_BYTES
+                + (operation == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY ? ProfileControlRequest.DeleteBinding.BYTES
+                    : operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_BYTES
                     : operation == ProfileOperation.RECOVERY_GRANT_CLOSE ? RECOVERY_CLOSE_BINDING_BYTES
                     : operation == ProfileOperation.RECOVERY_GRANT ? RECOVERY_BINDING_BYTES : 0);
     }
 
     public static int maximumRequestBytes(ProfileOperation operation) {
         return operation == ProfileOperation.INSTALL ? MAX_INSTALL_BYTES
+                : operation == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY
+                    ? MAX_ACTIVATE_BYTES + ProfileControlRequest.DeleteBinding.BYTES
                 : operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE ? MAX_ACTIVATE_BYTES + TERMINAL_BOUNDARY_BYTES
                     : operation == ProfileOperation.RECOVERY_GRANT_CLOSE ? MAX_CLOSE_BYTES
                     : operation == ProfileOperation.RECOVERY_GRANT ? MAX_GRANT_BYTES : MAX_ACTIVATE_BYTES;
@@ -115,7 +125,8 @@ public final class ProfileInitialControlCodec {
                 && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT
                 && scope.operation() != ProfileControlOperation.RECOVERY_GRANT
                 && scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
-                && scope.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE) {
+                && scope.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
+                && scope.operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY) {
             throw invalid();
         }
         byte[] domain = text(scope.authorityDomain());
@@ -130,7 +141,9 @@ public final class ProfileInitialControlCodec {
         boolean recovery = scope.operation() == ProfileControlOperation.RECOVERY_GRANT || close;
         int size = COMMON_BYTES + domain.length + (descriptor == null ? 0 : 30 + descriptor.length)
                 + (recovery ? RECOVERY_BINDING_BYTES : 0) + (close ? 16 : 0)
-                + (scope.operation() == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_BYTES : 0);
+                + (scope.operation() == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE ? TERMINAL_BOUNDARY_BYTES : 0)
+                + (scope.operation() == ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
+                    ? ProfileControlRequest.DeleteBinding.BYTES : 0);
         ByteBuffer out = ByteBuffer.allocate(size);
         out.put(new ProfileLedgerContext(scope.ledgerId(), scope.ledgerInstanceId(),
                 scope.descriptorIdentity().toBytes()).encode())
@@ -150,6 +163,12 @@ public final class ProfileInitialControlCodec {
         if (scope.operation() == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE) {
             var boundary = request.terminalBinding().orElseThrow();
             out.putLong(boundary.prefixEntryId()).putLong(boundary.prefixLength()).put(boundary.selectionDigest());
+        }
+        if (scope.operation() == ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY) {
+            if (request.deleteBinding().isEmpty()) {
+                throw invalid();
+            }
+            out.put(request.deleteBinding().orElseThrow().encode());
         }
         if (descriptor != null) {
             ProtectedProfileCredential credential = request.protectedCredential().orElseThrow();
@@ -200,7 +219,9 @@ public final class ProfileInitialControlCodec {
                             ? ProfileControlOperation.RECOVERY_GRANT_CLOSE
                             : operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE
                                 ? ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
-                                : ProfileControlOperation.ACTIVATE_INITIAL;
+                                : operation == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY
+                                    ? ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
+                                    : ProfileControlOperation.ACTIVATE_INITIAL;
         org.apache.bookkeeper.common.profile.control.ProfileExactRange range = null;
         ProfileControlRequest.RecoveryBinding binding = null;
         byte[] closedGrant = null;
@@ -233,6 +254,9 @@ public final class ProfileInitialControlCodec {
             in.get(digest);
             return ProfileControlRequest.terminalClose(scope,
                     new ProfileControlRequest.TerminalBinding(prefix, length, digest));
+        }
+        if (operation == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY) {
+            return ProfileControlRequest.deleteApply(scope, ProfileControlRequest.DeleteBinding.decode(in));
         }
         if (operation != ProfileOperation.INSTALL) {
             if (in.hasRemaining()) {
@@ -274,7 +298,8 @@ public final class ProfileInitialControlCodec {
                 && result.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT
                 && result.operation() != ProfileControlOperation.RECOVERY_GRANT
                 && result.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
-                && result.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE)
+                && result.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
+                && result.operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY)
                 || result.operationIdHex().length() != 32) {
             throw invalid();
         }
@@ -338,7 +363,9 @@ public final class ProfileInitialControlCodec {
                             ? ProfileControlOperation.RECOVERY_GRANT_CLOSE
                             : operation == ProfileOperation.RECOVERY_TERMINAL_CLOSE
                                 ? ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
-                                : ProfileControlOperation.ACTIVATE_INITIAL,
+                                : operation == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY
+                                    ? ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
+                                    : ProfileControlOperation.ACTIVATE_INITIAL,
                 ledger, HexFormat.of().formatHex(id), generation, local, durable);
     }
 

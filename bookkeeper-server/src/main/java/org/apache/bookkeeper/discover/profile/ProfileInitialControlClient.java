@@ -97,6 +97,11 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return socket.terminalClose(request);
     }
 
+    /** Apply one committed delete delivery; continuous local progress is durable with its TOMBSTONE. */
+    public CompletableFuture<ProfileControlResult> deleteApply(ProfileControlRequest request) {
+        return socket.deleteApply(request);
+    }
+
     /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */
     public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {

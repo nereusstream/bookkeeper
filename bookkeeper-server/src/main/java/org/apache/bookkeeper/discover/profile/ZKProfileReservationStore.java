@@ -2868,6 +2868,56 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    /** Exact committed delivery grants local TOMBSTONE; DELETE_INTENT alone never grants this authority. */
+    public ProfileControlStore deleteAuthorityReader(String localBookie, byte[] storageIncarnation,
+            ProfileLedgerMetadataStore metadata) {
+        var target = new ProfileDeleteRecord.Target(localBookie, storageIncarnation);
+        requireRecoveryClient(metadata);
+        return key -> {
+            if (key.purpose() != ProfileAuthorityPurpose.TOMBSTONE_OR_DELETE) {
+                return ProfileControlStore.ReadResult.notFound();
+            }
+            long deadline = System.nanoTime() + timeoutNanos;
+            try {
+                var state = read(key.ledgerId(), deadline);
+                if (state.snapshot() == null) {
+                    return new ProfileControlStore.ReadResult(state.status(), null);
+                }
+                String domain = state.snapshot().reservation().installs().get(0).authorityDomain();
+                if (!domain.equals(key.authorityDomain())) {
+                    return ProfileControlStore.ReadResult.notFound();
+                }
+                var receipt = reads.get(path(key.ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target),
+                        deadline);
+                if (receipt.code() == Code.NONODE.intValue()) {
+                    return ProfileControlStore.ReadResult.notFound();
+                }
+                requireFound(receipt);
+                var candidate = ProfileDeleteDelivery.Event.decode(receipt.bytes());
+                var committed = readDeleteDelivery(metadata, target, candidate.sequence());
+                if (committed.status() != DeliveryStatus.COMMITTED) {
+                    return committed.status() == DeliveryStatus.QUARANTINED
+                            ? ProfileControlStore.ReadResult.quarantined()
+                            : ProfileControlStore.ReadResult.unavailable();
+                }
+                var scope = committed.event().deleteApply(domain).scope();
+                if (!candidate.equals(committed.event()) || !ProfileAuthorityKey.fromScope(scope).equals(key)) {
+                    return ProfileControlStore.ReadResult.quarantined();
+                }
+                return ProfileControlStore.ReadResult.found(new CommittedProfileAuthority(scope,
+                        CommittedProfileAuthority.State.DELETE_AUTHORIZED, EngineProfile.SEGMENT_WAL_ENGINE,
+                        receipt.stat().getCzxid(), true));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return ProfileControlStore.ReadResult.unavailable();
+            } catch (TimeoutException | IllegalStateException unavailable) {
+                return ProfileControlStore.ReadResult.unavailable();
+            } catch (IllegalArgumentException invalid) {
+                return ProfileControlStore.ReadResult.quarantined();
+            }
+        };
+    }
+
     /** Admission cut only. It retains published targets; it neither fences Bookies nor deletes/GCs any data. */
     public CreateResult cutDelete(Snapshot expected, byte[] operationId, byte[] payloadIdentity) {
         return cutDelete(expected, operationId, payloadIdentity, List.of());

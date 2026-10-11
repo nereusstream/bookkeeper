@@ -18,6 +18,14 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-delete-applied` | 两个固定initial event，连续cursor与TOMBSTONE同record，checkpoint/replay及旧I/O custody、真实incarnation；exact cold/force输入，不含registration/FREE/GC/A+C+D |
+| `ce-profile-delete-applied-hole` | SkipHole mutation须违反 `CursorHasNoHole` |
+| `ce-profile-delete-applied-effect` | CursorWithoutEffect mutation须违反 `CursorHasNoHole` |
+| `ce-profile-delete-applied-force` | SuccessBeforeForce mutation须违反 `CursorNeedsDurableEffect` |
+| `ce-profile-delete-applied-checkpoint` | LoseCheckpoint mutation须违反 `CursorHasNoHole` |
+| `ce-profile-delete-applied-custody` | ReleaseOldCustody mutation须违反 `OldCustodyWaitsPhysical` |
+| `ce-profile-delete-applied-assignment` | IgnoreAssignment mutation须违反 `ApplyUsesInitialAssignment` |
+| `ce-profile-delete-applied-incarnation` | InheritIncarnation mutation须违反 `CursorUsesActualIncarnation` |
 | `a-profile-initial-availability` | persistent PREPARING/candidate/READY/DELETE、target五类结果、required metadata及最后authority事实；all-E当前结果才AVAILABLE |
 | `ce-profile-initial-availability-ack` | A代替E，须违反 `AvailabilityWaitsForAllE` |
 | `ce-profile-initial-availability-binding` | 接受wrong binding，须违反 `AvailabilityHasCurrentBoundResults` |

@@ -80,6 +80,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private boolean recoveryControlNegotiated;
     private boolean recoveryCloseNegotiated;
     private boolean terminalBoundaryNegotiated;
+    private boolean deleteApplyNegotiated;
     private boolean established;
     private boolean controlEstablished;
     private boolean closed;
@@ -160,6 +161,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                                     ProfileLacReplyCodec.CAPABILITY);
                     readNegotiated = read != null && ProfileHello.decodeClient(offer).capabilities().contains(
                             ProfileReadEntryReplyCodec.CAPABILITY);
+                    deleteApplyNegotiated = control != null
+                            && ProfileHello.decodeClient(offer).capabilities().contains(
+                                    ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
                     terminalBoundaryNegotiated = control != null
                             && ProfileHello.decodeClient(offer).capabilities().contains(
                                     ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
@@ -401,7 +405,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void initialControl(ChannelHandlerContext ctx, Pending request) {
-        if (request.frame.header().operation() == ProfileOperation.RECOVERY_TERMINAL_CLOSE ? !terminalBoundaryNegotiated
+        if (request.frame.header().operation() == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY ? !deleteApplyNegotiated
+                : request.frame.header().operation() == ProfileOperation.RECOVERY_TERMINAL_CLOSE
+                    ? !terminalBoundaryNegotiated
                 : request.frame.header().operation() == ProfileOperation.RECOVERY_GRANT_CLOSE ? !recoveryCloseNegotiated
                 : request.frame.header().operation() == ProfileOperation.RECOVERY_GRANT ? !recoveryControlNegotiated
                 : request.frame.header().operation() == ProfileOperation.ACTIVATE_REPLACEMENT

@@ -19,6 +19,15 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-applied': None,
+    'ce-profile-delete-applied-hole': 'CursorHasNoHole',
+    'ce-profile-delete-applied-effect': 'CursorHasNoHole',
+    'ce-profile-delete-applied-force': 'CursorNeedsDurableEffect',
+    'ce-profile-delete-applied-checkpoint': 'CursorHasNoHole',
+    'ce-profile-delete-applied-custody': 'OldCustodyWaitsPhysical',
+    'ce-profile-delete-applied-assignment': 'ApplyUsesInitialAssignment',
+    'ce-profile-delete-applied-incarnation': 'CursorUsesActualIncarnation',
+
     'a-profile-delete-delivery': None,
     'ce-profile-delete-delivery-head': 'HeadCommitHasNoHole',
     'ce-profile-delete-delivery-duplicate': 'SameRequestUsesOnePosition',
@@ -788,6 +797,7 @@ def main():
                    else "ProfileRegisteredConnection.tla" if "profile-registered-connection" in name
                    else "ProfileWriterClose.tla" if "profile-writer-close" in name
                    else "ProfileLogicalDelete.tla" if "profile-logical-delete" in name
+                   else "ProfileDeleteApplied.tla" if "profile-delete-applied" in name
                    else "ProfileDeleteDelivery.tla" if "profile-delete-delivery" in name
                    else "ProfileServiceShutdown.tla" if "profile-service-shutdown" in name
                    else "ProfileRecoveryPeerPool.tla" if "profile-recovery-peer-pool" in name

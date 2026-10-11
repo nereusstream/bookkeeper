@@ -410,6 +410,14 @@ final class ProfileSocketClient implements AutoCloseable {
         return send(request, ProfileControlOperation.RECOVERY_TERMINAL_CLOSE, ProfileOperation.RECOVERY_TERMINAL_CLOSE);
     }
 
+    CompletableFuture<ProfileControlResult> deleteApply(ProfileControlRequest request) {
+        if (!hello().capabilities().contains(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY)) {
+            return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+        }
+        return send(request, ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY,
+                ProfileOperation.TOMBSTONE_OR_DELETE_APPLY);
+    }
+
     private CompletableFuture<ProfileControlResult> send(ProfileControlRequest request,
             ProfileControlOperation expectedOperation, ProfileOperation operation) {
         Objects.requireNonNull(request, "request");
@@ -718,7 +726,8 @@ final class ProfileSocketClient implements AutoCloseable {
                                     : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY,
                                             RECOVERY_CLOSE_CAPABILITY,
                                             ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY,
-                                            ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY)).encode());
+                                            ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY,
+                                            ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY)).encode());
                     helloWrites.incrementAndGet();
                     try {
                         ctx.writeAndFlush(outgoing).addListener(written -> {

@@ -68,8 +68,67 @@ public final class ProfileControlRequest {
         }
     }
 
+    /** Committed initial delete stream coordinate, bound to its original request and cluster tombstone. */
+    public record DeleteBinding(byte[] streamId, long streamGeneration, long assignmentGeneration, long sequence,
+            byte[] requestId, long deleteEpoch, byte[] tombstoneDigest) {
+        public static final int BYTES = 96;
+        public DeleteBinding {
+            streamId = Objects.requireNonNull(streamId, "streamId").clone();
+            requestId = Objects.requireNonNull(requestId, "requestId").clone();
+            tombstoneDigest = Objects.requireNonNull(tombstoneDigest, "tombstoneDigest").clone();
+            if (streamId.length != 16 || requestId.length != 16 || tombstoneDigest.length != 32
+                    || java.util.Arrays.equals(streamId, new byte[16])
+                    || java.util.Arrays.equals(requestId, new byte[16]) || streamGeneration != 1
+                    || assignmentGeneration != 1 || sequence < 1 || sequence > 4096 || deleteEpoch < 1) {
+                throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+            }
+        }
+        @Override
+        public byte[] streamId() {
+            return streamId.clone();
+        }
+        @Override
+        public byte[] requestId() {
+            return requestId.clone();
+        }
+        @Override
+        public byte[] tombstoneDigest() {
+            return tombstoneDigest.clone();
+        }
+        public byte[] encode() {
+            return java.nio.ByteBuffer.allocate(BYTES).put(streamId).putLong(streamGeneration)
+                    .putLong(assignmentGeneration).putLong(sequence).put(requestId).putLong(deleteEpoch)
+                    .put(tombstoneDigest).array();
+        }
+        public static DeleteBinding decode(java.nio.ByteBuffer input) {
+            if (input.remaining() != BYTES) {
+                throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+            }
+            byte[] stream = new byte[16];
+            input.get(stream);
+            long generation = input.getLong();
+            long assignment = input.getLong();
+            long sequence = input.getLong();
+            byte[] request = new byte[16];
+            input.get(request);
+            long epoch = input.getLong();
+            byte[] digest = new byte[32];
+            input.get(digest);
+            return new DeleteBinding(stream, generation, assignment, sequence, request, epoch, digest);
+        }
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof DeleteBinding binding && java.util.Arrays.equals(encode(), binding.encode());
+        }
+        @Override
+        public int hashCode() {
+            return java.util.Arrays.hashCode(encode());
+        }
+    }
+
     private final RecoveryBinding recoveryBinding;
     private final TerminalBinding terminalBinding;
+    private final DeleteBinding deleteBinding;
     private final byte[] closedGrantOperationId;
     private final ProfileControlScope scope;
     private final byte[] canonicalDescriptor;
@@ -97,6 +156,13 @@ public final class ProfileControlRequest {
     private ProfileControlRequest(ProfileControlScope scope, byte[] canonicalDescriptor, EngineProfile expectedEngine,
             ProtectedProfileCredential protectedCredential, RecoveryBinding recovery, byte[] closedGrant,
             TerminalBinding terminal) {
+        this(scope, canonicalDescriptor, expectedEngine, protectedCredential, recovery, closedGrant, terminal, null);
+    }
+
+    private ProfileControlRequest(ProfileControlScope scope, byte[] canonicalDescriptor, EngineProfile expectedEngine,
+            ProtectedProfileCredential protectedCredential, RecoveryBinding recovery, byte[] closedGrant,
+            TerminalBinding terminal, DeleteBinding deletion) {
+        deleteBinding = deletion;
         terminalBinding = terminal;
         recoveryBinding = recovery;
         closedGrantOperationId = closedGrant == null ? null : closedGrant.clone();
@@ -129,6 +195,35 @@ public final class ProfileControlRequest {
             throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
         }
         return new ProfileControlRequest(scope, null, null, null);
+    }
+
+    public static ProfileControlRequest deleteApply(ProfileControlScope scope, DeleteBinding binding) {
+        if (scope == null || binding == null || scope.operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
+                || scope.exactRange() != null || scope.authorityGeneration() != binding.deleteEpoch()
+                || !java.util.Arrays.equals(scope.publicSemanticPayloadIdentity(),
+                        deletePayloadIdentity(scope, binding))) {
+            throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
+        }
+        return new ProfileControlRequest(scope, null, null, null, null, null, null, binding);
+    }
+
+    public Optional<DeleteBinding> deleteBinding() {
+        return Optional.ofNullable(deleteBinding);
+    }
+
+    public static byte[] deletePayloadIdentity(ProfileControlScope scope, DeleteBinding binding) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            digest.update("BookKeeper/ProfileDeleteApply/v1\0".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            digest.update(new org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext(scope.ledgerId(),
+                    scope.ledgerInstanceId(), scope.descriptorIdentity().toBytes()).encode());
+            digest.update(scope.targetBookie().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            digest.update(scope.targetStorageIncarnation());
+            digest.update(scope.operationId());
+            return digest.digest(binding.encode());
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
     }
 
     public static ProfileControlRequest recoveryGrant(ProfileControlScope scope, RecoveryBinding binding) {

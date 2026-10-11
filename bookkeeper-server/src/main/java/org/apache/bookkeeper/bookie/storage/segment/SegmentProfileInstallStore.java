@@ -72,7 +72,8 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                     && scope.operation() != ProfileControlOperation.ACTIVATE_REPLACEMENT
                     && scope.operation() != ProfileControlOperation.RECOVERY_GRANT
                     && scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
-                    && scope.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE) {
+                    && scope.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
+                    && scope.operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY) {
                 return result(Outcome.UNSUPPORTED);
             }
             if (!transition.authority().scope().equals(scope)
@@ -86,6 +87,10 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
             CompletableFuture<TransitionResult> reply = new CompletableFuture<>();
             SegmentBookieControlDriver.BatchCompletion completion = (results, failure) -> {
                 try {
+                    if (failure instanceof SegmentBookieControlLog.DeleteSequenceException sequence) {
+                        reply.complete(result(sequence.retryable() ? Outcome.TRANSIENT_RECONCILING : Outcome.CONFLICT));
+                        return;
+                    }
                     if (failure != null || results == null || results.size() != 1) {
                         reply.complete(result(Outcome.DURABILITY_UNKNOWN));
                         return;

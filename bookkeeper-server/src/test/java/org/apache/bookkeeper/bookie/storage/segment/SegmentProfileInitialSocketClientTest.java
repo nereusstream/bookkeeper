@@ -324,6 +324,8 @@ public class SegmentProfileInitialSocketClientTest {
                     var replacementReader = reservations.replacementAuthorityReader(
                             scope.targetBookie(), metadataContext);
                     var repairReader = reservations.repairAuthorityReader(scope.targetBookie(), metadataContext);
+                    var deleteReader = reservations.deleteAuthorityReader(scope.targetBookie(),
+                            scope.targetStorageIncarnation(), metadataContext);
                     var control = new SegmentProfileControlConfig(VALIDATOR,
                             (caller, operation) -> caller.equals(principal)
                                     && (operation == ProfileControlOperation.INSTALL
@@ -331,9 +333,13 @@ public class SegmentProfileInitialSocketClientTest {
                                         || operation == ProfileControlOperation.ACTIVATE_REPLACEMENT
                                         || operation == ProfileControlOperation.RECOVERY_GRANT
                                         || operation == ProfileControlOperation.RECOVERY_GRANT_CLOSE
-                                        || operation == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE),
+                                        || operation == ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
+                                        || operation == ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY),
                             key -> {
                                 authorityReads.incrementAndGet();
+                                if (key.purpose() == ProfileAuthorityPurpose.TOMBSTONE_OR_DELETE) {
+                                    return deleteReader.read(key);
+                                }
                                 if (key.purpose() == ProfileAuthorityPurpose.RECOVERY_GRANT_CLOSE) {
                                     var supplied = closeAuthority;
                                     return supplied != null && key.equals(
@@ -468,6 +474,13 @@ public class SegmentProfileInitialSocketClientTest {
                                                             .wireValue()) {
                                                         heldReplies.add(() -> ctx.executor().execute(
                                                                 () -> ctx.writeAndFlush(frame, promise)));
+                                                        return;
+                                                    }
+                                                    if (fault == 24 && op == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY
+                                                            .wireValue()) {
+                                                        frame.release();
+                                                        promise.setSuccess();
+                                                        ctx.close();
                                                         return;
                                                     }
                                                     if (fault == 18
@@ -1822,7 +1835,14 @@ public class SegmentProfileInitialSocketClientTest {
                     1024, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
             initialWriter.enableWriterClose(recovery, fixture.descriptorBytes, VALIDATOR, fixture.clients,
                     4, Duration.ofSeconds(30)).get(5, TimeUnit.SECONDS);
+            assertEquals(0, initialWriter.appendAsync(Unpooled.wrappedBuffer(bytes(16, 8)))
+                    .get(5, TimeUnit.SECONDS).longValue());
             initialWriter.closeAsync().get(30, TimeUnit.SECONDS);
+            var oldReader = recovery.openReadOnly(44, sdk.getClientCtx(), fixture.password, data, 4)
+                    .get(5, TimeUnit.SECONDS);
+            try (var entries = oldReader.readAsync(0, 0).get(5, TimeUnit.SECONDS)) {
+                assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+            }
             var scopes = fixture.scopes.stream().map(scope -> new ProfileControlScope(scope.operation(),
                     scope.purpose(), 45, bytes(16, 61), scope.descriptorIdentity(), scope.targetBookie(),
                     scope.targetStorageIncarnation(),
@@ -1858,6 +1878,9 @@ public class SegmentProfileInitialSocketClientTest {
                     Duration.ofSeconds(30))
                     .get(30, TimeUnit.SECONDS);
             assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, secondDeleted.status());
+            try (var entries = oldReader.readAsync(0, 0).get(5, TimeUnit.SECONDS)) {
+                assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+            }
             var target = firstDeleted.manifest().targets().get(0);
             var firstEvent = fixture.reservations.appendDeleteDelivery(metadata, 44, target);
             assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, firstEvent.status());
@@ -1872,6 +1895,44 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(secondEvent.event(), fixture.reservations.appendDeleteDelivery(metadata, 45, target).event());
             assertEquals(firstEvent.event(), fixture.reservations.readDeleteDelivery(metadata, target, 1).event());
             assertEquals(secondEvent.event(), fixture.reservations.readDeleteDelivery(metadata, target, 2).event());
+            var client = fixture.clients.get(target.bookie());
+            var firstRequest = firstEvent.event().deleteApply("ledger-profile");
+            var secondRequest = secondEvent.event().deleteApply("ledger-profile");
+            int node = fixture.identities.stream().map(identity -> identity.bookieId().toString()).toList()
+                    .indexOf(target.bookie());
+            var local = bookie(fixture.nodes.get(node));
+            var event = firstEvent.event();
+            var forged = new org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery.Event(bytes(16, 99),
+                    event.streamGeneration(), event.assignmentGeneration(), event.sequence(), event.ledger(),
+                    event.target(), event.tombstone(), event.requestId(), event.deleteEpoch());
+            assertEquals(ProfileControlResult.Outcome.DENIED,
+                    client.deleteApply(forged.deleteApply("ledger-profile")).get(5, TimeUnit.SECONDS).outcome());
+            assertNull(local.deleteAppliedCursor());
+            assertEquals(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
+                    client.deleteApply(secondRequest).get(5, TimeUnit.SECONDS).outcome());
+            assertNull(local.deleteAppliedCursor());
+            try (var oldPin = files(fixture.nodes.get(node)).pinDataRead()) {
+                var firstApplied = client.deleteApply(firstRequest).get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileControlResult.Outcome.APPLIED, firstApplied.outcome());
+                assertTrue(firstApplied.durable());
+                assertEquals(1, firstApplied.localGeneration());
+                assertEquals(1, local.deleteAppliedCursor().sequence());
+                assertTrue(local.hasTerminalTombstone(fixture.context()));
+                var refused = data.get(fixture.identities.get(node).bookieId()).readEntry(fixture.context(), 0)
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileStatus.StatusClass.PROFILE_NOT_READY_OR_STALE, refused.status().statusClass());
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED,
+                        refused.outcome());
+                assertEquals(0, refused.entry().remaining());
+                assertEquals(ProfileControlResult.Outcome.ALREADY_APPLIED,
+                        client.deleteApply(firstRequest).get(5, TimeUnit.SECONDS).outcome());
+                assertEquals(ProfileControlResult.Outcome.APPLIED,
+                        client.deleteApply(secondRequest).get(5, TimeUnit.SECONDS).outcome());
+                assertEquals(2, local.deleteAppliedCursor().sequence());
+                assertEquals(ProfileControlResult.Outcome.ALREADY_APPLIED,
+                        client.deleteApply(firstRequest).get(5, TimeUnit.SECONDS).outcome());
+                assertEquals(2, local.deleteAppliedCursor().sequence());
+            }
             var wrong = new org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target(
                     target.bookie(), bytes(16, 103));
             assertEquals(ZKProfileReservationStore.DeliveryStatus.NOT_APPLICABLE,
@@ -1889,6 +1950,22 @@ public class SegmentProfileInitialSocketClientTest {
                     fixture.reservations.readDeleteDelivery(metadata, target, 1).status());
             assertEquals(ZKProfileReservationStore.DeliveryStatus.QUARANTINED,
                     fixture.reservations.appendDeleteDelivery(metadata, 44, target).status());
+            assertEquals(ProfileControlResult.Outcome.QUARANTINED,
+                    client.deleteApply(firstRequest).get(5, TimeUnit.SECONDS).outcome());
+            oldReader.closeAsync().get(5, TimeUnit.SECONDS);
+            var restartConfig = files(fixture.nodes.get(node)).config();
+            fixture.nodes.get(node).close();
+            try (var replay = new IsolatedSegmentStorage(restartConfig, fixture.identities.get(node),
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                    new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                            2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                    new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                            new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                replay.restart();
+                assertEquals(2, bookie(replay).deleteAppliedCursor().sequence());
+                assertTrue(bookie(replay).hasTerminalTombstone(fixture.context()));
+                assertTrue(bookie(replay).hasTerminalTombstone(secondEvent.event().ledger()));
+            }
             byte[] lastHead = fixture.zk.getData(headName, false, null);
             org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, headName);
             assertEquals(ZKProfileReservationStore.DeliveryStatus.QUARANTINED,
@@ -1927,6 +2004,18 @@ public class SegmentProfileInitialSocketClientTest {
                 var loss = store.appendDeleteDelivery(lostMetadata, 44, target);
                 assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, loss.status());
                 assertTrue(lost.dropped);
+                int appliedNode = fixture.identities.stream().map(identity -> identity.bookieId().toString()).toList()
+                        .indexOf(target.bookie());
+                fixture.faultTarget.set(appliedNode);
+                fixture.replyFault.set(24);
+                var request = loss.event().deleteApply("ledger-profile");
+                assertThrows(ExecutionException.class,
+                        () -> fixture.clients.get(target.bookie()).deleteApply(request).get(5, TimeUnit.SECONDS));
+                assertEquals(1, bookie(fixture.nodes.get(appliedNode)).deleteAppliedCursor().sequence());
+                fixture.replyFault.set(0);
+                var freshControl = fixture.connect(appliedNode, 4, Duration.ofSeconds(5));
+                assertEquals(ProfileControlResult.Outcome.ALREADY_APPLIED,
+                        freshControl.deleteApply(request).get(5, TimeUnit.SECONDS).outcome());
                 var racedTarget = deleted.manifest().targets().get(1);
                 var first = CompletableFuture.supplyAsync(
                         () -> store.appendDeleteDelivery(lostMetadata, 44, racedTarget),
@@ -1959,6 +2048,20 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(1, head.committedThrough());
                 assertEquals(1, fixture.zk.getChildren(headName, false).stream()
                         .filter(child -> child.startsWith("event-")).count());
+                int failedNode = fixture.identities.stream().map(identity -> identity.bookieId().toString()).toList()
+                        .indexOf(racedTarget.bookie());
+                var failedIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                var ioField = SegmentBookieControlLog.class.getDeclaredField("io");
+                ioField.setAccessible(true);
+                ioField.set(bookie(fixture.nodes.get(failedNode)), failedIo);
+                var uncertain = fixture.clients.get(racedTarget.bookie())
+                        .deleteApply(resolved.event().deleteApply("ledger-profile")).get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileControlResult.Outcome.DURABILITY_UNKNOWN, uncertain.outcome());
+                assertFalse(uncertain.durable());
+                assertEquals(0, uncertain.localGeneration());
+                assertNull(bookie(fixture.nodes.get(failedNode)).deleteAppliedCursor());
+                assertEquals(1, failedIo.forces);
+
             }
         }
     }

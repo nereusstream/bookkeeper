@@ -470,3 +470,8 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 ## 初始共享 delete delivery source
 
 2026-10-12，logical tombstone上的exact target/incarnation可发布initial generation1共享stream；head、immutable assignment及birth witness同multi创建，event/index/head increment同multi提交，同请求仅沿原seq续接。4096-event界限不盲开新stream；read consumer复核完整ledger context、target与原logical ref，缺失/重建fail closed。实际两个ledger INSTALL/ACTIVATE/close与ZK丢回复/竞态证据由[接线记录](../profile-wire/README.md#初始共享-delete-delivery-journal)拥有。此journal不发布delete-applied、local cursor或writable registration，snapshot/handoff/投递wire/rejoin与Gate未完成。
+
+
+## UIC7 committed delete authority 与本地 cursor
+
+2026-10-12，`deleteAuthorityReader(localBookie, incarnation, metadata)`从固定receipt重读完整committed event及actual logical tombstone/manifest/birth，只有原domain/context/target/stream/seq/request/epoch/ref/op/payload全部matching才投影DELETE_AUTHORIZED。原mTLS static/exact AuthZ及实际driver/cold/receive quota接入UIC7/schema6，不凭DELETE_INTENT或caller binding授权。Bookie type13同记录建立TOMBSTONE/continuous cursor；gap写盘前可重试、UNKNOWN无成功cursor、旧retry不回退，checkpoint/restart可重建。实现和证据由[协议记录](../profile-wire/README.md#uic7-本地-delete-applied-与连续-cursor)拥有。cursor不等runtime drain，不授予FREE/access-barrier/registration；startup catch-up、required-through提交cut、snapshot/handoff及Gate仍OPEN。

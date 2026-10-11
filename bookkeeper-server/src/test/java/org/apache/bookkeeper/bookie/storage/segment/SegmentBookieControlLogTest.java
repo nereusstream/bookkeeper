@@ -315,6 +315,21 @@ public class SegmentBookieControlLogTest {
                         EngineProfile.SEGMENT_WAL_ENGINE, 4, true), null);
     }
 
+    private static ProtectedProfileStateStore.Transition delivery(long ledgerId, int operationId, long sequence,
+            byte stream) {
+        var base = scope(ledgerId, ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY, operationId, 4);
+        var binding = new ProfileControlRequest.DeleteBinding(filled(16, stream), 1, 1, sequence,
+                filled(16, (byte) operationId), 4, filled(32, (byte) 9));
+        var scope = new ProfileControlScope(base.operation(), base.purpose(), ledgerId, base.ledgerInstanceId(),
+                base.descriptorIdentity(), base.targetBookie(), base.targetStorageIncarnation(), base.authorityDomain(),
+                base.authorityGeneration(), base.operationId(),
+                ProfileControlRequest.deletePayloadIdentity(base, binding),
+                null);
+        return new ProtectedProfileStateStore.Transition(ProfileControlRequest.deleteApply(scope, binding),
+                new CommittedProfileAuthority(scope, CommittedProfileAuthority.State.DELETE_AUTHORIZED,
+                        EngineProfile.SEGMENT_WAL_ENGINE, 4, true), null);
+    }
+
     private static ProfileOperationCodec.FenceLedger fence(int operationId, byte verifier) {
         byte[] id = new byte[16];
         id[15] = (byte) operationId;
@@ -1055,6 +1070,75 @@ public class SegmentBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
                     log.submitFence(fence(3, (byte) 5)).status());
             assertEquals(9, log.explicitLac(context()).orElseThrow().lac());
+        }
+    }
+
+    @Test
+    public void continuousDeleteCursorRetainsOldCustodyAndReplaysAfterCheckpointRotation() throws Exception {
+        var config = config();
+        var identity = identity();
+        try (var ignored = IsolatedSegmentFiles.create(config, identity);
+                var log = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            long cut = log.appliedThrough();
+            var second = delivery(45, 21, 2, (byte) 8);
+            var gap = assertThrows(SegmentBookieControlLog.DeleteSequenceException.class,
+                    () -> log.submitBatch(List.of(second)));
+            assertTrue(gap.retryable());
+            assertNull(log.deleteAppliedCursor());
+            assertEquals(cut, log.appliedThrough());
+            assertTrue(log.normalAdmission(context(), filled(20, (byte) 5)));
+            var oldAdd = log.admitNormal(context(), filled(20, (byte) 5)).orElseThrow();
+            log.claimForDriver(List.of(oldAdd));
+            var oldRead = log.admitRead(context()).orElseThrow();
+            try {
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        log.submitBatch(List.of(delivery(44, 20, 1, (byte) 8))).get(0).status());
+                assertEquals(1, log.deleteAppliedCursor().sequence());
+                assertFalse(log.canCompleteNormal(oldAdd));
+                assertFalse(log.canCompleteRead(oldRead));
+                assertThrows(IOException.class, () -> log.recoveryReadCut(config, identity));
+                assertThrows(IOException.class, log::rotate);
+                var applied = log.submitBatch(List.of(second)).get(0);
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, applied.status());
+                assertEquals(2, applied.localGeneration()); // Absent local ledger still has a durable effect receipt.
+                assertEquals(2, log.deleteAppliedCursor().sequence());
+            } finally {
+                oldAdd.driverTerminal();
+                oldRead.finish();
+            }
+            assertTrue(log.recoveryReadCut(config, identity) > cut);
+            var reset = assertThrows(SegmentBookieControlLog.DeleteSequenceException.class,
+                    () -> log.submitBatch(List.of(delivery(46, 22, 3, (byte) 9))));
+            assertFalse(reset.retryable());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(delivery(44, 20, 1, (byte) 8))).get(0).status());
+            assertEquals(2, log.deleteAppliedCursor().sequence());
+            log.rotate();
+        }
+        try (var replay = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(2, replay.deleteAppliedCursor().sequence());
+            assertTrue(replay.hasTerminalTombstone(context()));
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitBatch(List.of(delivery(45, 21, 2, (byte) 8))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    replay.submitBatch(List.of(delivery(46, 22, 3, (byte) 8))).get(0).status());
+            assertEquals(3, replay.deleteAppliedCursor().sequence());
+        }
+    }
+
+    @Test
+    public void uncertainDeleteDeliveryForceDoesNotPublishCursorOrReopenAdmission() throws Exception {
+        var config = config();
+        var identity = identity();
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false);
+        try (var ignored = IsolatedSegmentFiles.create(config, identity);
+                var log = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(delivery(44, 20, 1, (byte) 8))));
+            assertNull(log.deleteAppliedCursor());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            assertTrue(log.admitRead(context()).isEmpty());
         }
     }
 

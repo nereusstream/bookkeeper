@@ -888,3 +888,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 2026-10-08 [非空恢复terminal cut](../profile-wire/README.md#非空恢复-terminal-cut-与-matching-closed)新增Bookie type11与同操作type9升级：pending cut阻止新normal/recovery请求，等全部pre-cut DATA实际终结再force/apply，durable P进入checkpoint/replay。点读与READ_LAC结果终结时重验上界，restart/coverage inventory不发布e>P；compaction跳过已排除suffix、保留必要prefix，不截短shared DATA文件。实际checkpoint/rotation/restart与真实compaction回归范围由上述协议实现记录拥有；这不是离线节点即时读撤权或掉电验证。
 
 2026-10-08 [空最后fragment terminal boundary](../profile-wire/README.md#空最后-fragment-的独立终态关闭)沿用原控制I/O/owner/pre-cut排空路径新增Bookie type12，固定P/L/selection digest且无grant字段；generic batch拒绝绕过，pending/force失败不授权FREE。checkpoint/rotation/replay与实际尾部节点restart保留上界，不截短shared DATA；该局部实现不代表掉电、离线catch-up或生产接受。
+
+
+2026-10-12 [UIC7 delete-applied/cursor](../profile-wire/README.md#uic7-本地-delete-applied-与连续-cursor)新增Bookie type13，scope和96-byte stream binding同record；原write/force/owner apply一起建立terminal TOMBSTONE和连续cursor，seq gap在写盘前拒绝，UNKNOWN不发布成功。已有checkpoint保留第一effect记录并按sequence重建cursor；实际FileChannel rotation/restart与真实socket target重启有覆盖。旧DATA/读ticket和文件pin仍独立排空，cursor不替代受保护reclamation lease、FREE或access barrier；新storage incarnation不能继承原header/control cursor。固定initial assignment与4096-event界限保留，snapshot/handoff、startup/rejoin及production Gate尚未闭合。

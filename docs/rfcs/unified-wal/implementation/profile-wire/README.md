@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～14在本目录记录隔离真实 TLS/socket/storage/SDK/恢复接线的独立增量，最新为 [固定prefix与last-fragment写回](#固定最后-prefix-与真实-last-fragment-写回)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，最新为 [UIC7 本地 delete-applied 与连续 cursor](#uic7-本地-delete-applied-与连续-cursor)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -1312,3 +1312,35 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 新ProfileDeleteDelivery有限投影以logical tombstone、ZK atomicity/birth/assignment作为输入，覆盖head/event原子提交、同请求唯一seq、精确binding、missing不可补成功和非per-ledger stream六个指定反例；initial biom2ze0缺Sequences模块导致SANY INCONCLUSIVE，修复后最终j2innjna的15配置为2完整正向/13指定反例，944当前inputs匹配。新正向308 generated/110 distinct、queue0、depth8、0.945秒/peak RSS108871680 bytes，非性能结论；TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。没有生产local cursor、TLS/fsync、注册线性化、handoff、snapshot/GC、完整时间/活性/公平性或A+C+D。
 
 持久证据 /Users/liusinan/.codex/artifacts/unified-wal/delete-delivery-evidence-rv38_1o0 保留原source/config/run/command、compile/SANY/style失败与阶段结果。当前只完成committed delivery source及其只读消费验证；实际TOMBSTONE wire、delete-applied/cursor、snapshot/catch-up、registration required-through cut/rejoin、物理查询/GC/decommission和全16步其他范围仍未闭合，步骤12/14/15及生产Gate保持PARTIAL/OPEN。首批隔离可丢弃，Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。
+
+
+## UIC7 本地 delete-applied 与连续 cursor
+
+2026-10-12，在 `7d241ce0e500390ff0e1d18206eb452964069f97` 后继续接实际 committed delivery → cold exact authority → mTLS CONTROL → 原 Bookie write/force/owner apply。首批仍显式隔离、OFF/SYSTEM/PARK、可丢弃，不开放生产或普通 SDK 自动 delete routing。
+
+`ProfileDeleteDelivery.Event.deleteApply(domain)` 从完整 event 产生确定 operation ID 与 96-byte `DeleteBinding`：stream UUID/generation、assignment generation、sequence、原 request ID、delete epoch、cluster tombstone reference digest；scope 另绑定 ledger/instance/descriptor、Bookie/storage incarnation、domain、epoch/op/payload。只有 initial generation1/assignment1 与 sequence1～4096。`deleteAuthorityReader` 从 endpoint 派生的固定 ledger key、本地 Bookie/incarnation receipt 重新读取实际 journal event，再由原 `readDeleteDelivery` 校验 head/assignment/birth、event/index 同事务、logical tombstone/seal/完整 manifest；domain 必须来自原 reservation。仅 DELETE_INTENT、伪造 caller event、缺失/重建 authority 均不能授权。原 static principal/exact scope/AuthZ、bounded cold executor、CONTROL receive/output quota与实际 driver ownership继续使用。
+
+experimental UIC7 id `0x55494337`、semantic/schema version6，opcode复用 `TOMBSTONE_OR_DELETE_APPLY=0x0106`；UWIC/UWIR内层schema6，request223～350 bytes、reply60 bytes。CONTROL HELLO显式offer/advertise；delete操作单独检查peer capability/negotiation。Plain legacy local tombstone请求不接受为该wire body；其他UIC1～6原bytes保留，generic `ProfileOperationCodec`仍拒绝未冻结control body。只有source/golden corpus校验，released decoder/stock binary矩阵仍DEFERRED_NOT_RUN，G1保持BLOCKED_UNVERIFIED。
+
+Bookie新增type13 `DELETE_DELIVERY_APPLY`，原scope后保存96-byte binding，同一write/force/owner apply建立instance-specific terminal TOMBSTONE与continuous applied cursor。single control lane一次应用一个event；seq>N+1在任何写盘/准入cut前返回TRANSIENT_RECONCILING，不memoize成永久冲突；其他stream/generation、同坐标不同语义或local instance冲突拒绝。同请求重试ALREADY_APPLIED，重试早期seq不回退cursor。成功reply的localGeneration是该event sequence，包括本地没有ledger slot时；它是该experimental effect坐标，不是writable registration或生产receipt。force/timeout失败保留UNKNOWN而不发布成功cursor。新normal/recovery/read准入及迟到结果资格沿原TOMBSTONE cut拒绝；旧DATA/读ticket和文件pin保留至实际终结。cursor不要求runtime drain结束，也不证明ACCESS_BARRIER_COMPLETE、physical-reclaimed或FREE。
+
+type13原record进入已有retained operation checkpoint，按原sequence重放重建cursor；rotation/restart沿原storage header/incarnation、完整control校验及同步，不从新incarnation继承cursor。记录缺口、错误binding或其他initial assignment拒绝打开/应用，不猜测non-applicability、不盲开新stream。当前仅一个固定initial stream；snapshot/历史压缩扩容及assignment handoff未实现。
+
+真实两-ledger/socket用例增加非空ledger44/空ledger45：实际SDK append、writer close、旧readonly读取、logical delete后未本地tombstone前读取；伪造stream拒绝，seq2先到可重试，seq1/2按序durable，held真实DATA文件read pin期间cursor可推进；对应目标后续READ_ENTRY返回既有REFUSED/PROFILE_NOT_READY_OR_STALE、NONE和空body。重试旧seq不回退；实际storage restart保留两terminal context和cursor2，event同字节重建后endpoint隔离，即便本地已有ALREADY结果也必须重新授权。真实ZK提交回复丢失/并发winner原覆盖保留；目标TOMBSTONE回复在真实网络丢失后fresh CONTROL重试同request为ALREADY_APPLIED；另target真实force失败为DURABILITY_UNKNOWN/localGeneration0且cursor未发布。本地真实FileChannel覆盖absent ledger、gap无force/状态改变、旧driver-owned DATA/read ticket不释放/不允许rotation/reclamation cut、checkpoint rotation后cursor回放及继续seq3。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest#continuousDelete*+uncertainDelete*+*Tombstone*+tombstone*+*Checkpoint*+*Rotation*,SegmentProfileInitialSocketClientTest#committedDeleteDeliver*+logicalDelete*+ordinaryWriterClose*,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-applied --config-prefix ce-profile-delete-applied --config-prefix a-profile-delete-delivery --config-prefix ce-profile-delete-delivery --config-prefix a-profile-logical-delete --config-prefix ce-profile-logical-delete
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+持久证据 `/Users/liusinan/.codex/artifacts/unified-wal/delete-applied-evidence-q3gjc362` 保留原run/source/config/command及阶段compile/断言错误，不重绑历史PASS。首个gz0OixDk的9项GREEN早于非空payload/丢目标回复/force失败覆盖；B21NsMYG和sAEz0Y3H分别为testCompile错误（ticket方法、测试插入锚点）；mfDv5KZL的RED来自未claim driver ticket与误认既有read refusal status，修正为真实driver custody和既有REFUSED/空body合同。7E0TueYE共12项零fail/error/skip。
+
+最终K5aQf9D2六类158项（common codec8、receive decoder22、Bookie control49、metadata19/lifecycle50、真实socket10）零fail/error/skip，1072当前source inputs逐项匹配；不把重复12项与158相加。最终style exit0；RAT exit1，443 unapproved路径均存在于父HEAD，无新增，不称CI全绿。
+
+新 `ProfileDeleteApplied` 有限投影消费exact cold authority、force及checkpoint字节作为输入，检查continuous effect、durable前不成功、cursor/checkpoint重建、旧custody不能提前release、initial assignment和actual incarnation，7个mutations均为指定反例。最终7ii07jzb共23配置为3完整正向/20指定反例，953当前inputs匹配；新正向287 generated/120 distinct、queue0、depth12、0.895秒/peak RSS111116288 bytes，非性能结论。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE。模型不生产TLS/fsync/ZK/registration事实，不含snapshot/handoff/GC、完整时钟/活性/公平性或A+C+D组合。Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。
+
+当前新增wire/apply/continuous cursor切片；registration required-through提交cut、startup/offline catch-up/rejoin、snapshot/handoff、physical query/history GC/decommission、默认SDK routing及全16步其他验收仍未闭合。步骤12/14/15与生产Gate保持PARTIAL/OPEN，持续目标active。

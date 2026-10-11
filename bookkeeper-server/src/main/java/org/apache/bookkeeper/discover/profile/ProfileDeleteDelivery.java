@@ -22,6 +22,10 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.zip.CRC32C;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorIdentity;
+import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Experimental one shared stream per Bookie/incarnation. It is a delivery obligation, not a local cursor. */
@@ -122,6 +126,24 @@ public final class ProfileDeleteDelivery {
             return new Event(stream, generation, assignment, sequence, ledger, target,
                     ProfileDeleteRecord.Reference.decode(ref), request, epoch);
         }
+        /** Deterministic exact request; the server independently reads the committed event before authorization. */
+        public ProfileControlRequest deleteApply(String authorityDomain) {
+            byte[] prefix = "BookKeeper/DeleteDelivery/v1\0".getBytes(StandardCharsets.US_ASCII);
+            byte[] encoded = encode();
+            byte[] operation = Arrays.copyOf(ProfileRepairIntent.digest(
+                    ByteBuffer.allocate(encoded.length + prefix.length).put(prefix).put(encoded).array()), 16);
+            var binding = new ProfileControlRequest.DeleteBinding(streamId, streamGeneration, assignmentGeneration,
+                    sequence, requestId, deleteEpoch, ProfileRepairIntent.digest(tombstone.encode()));
+            var operationKind = ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY;
+            var scope = new ProfileControlScope(operationKind, operationKind.purpose(), ledger.ledgerId(),
+                    ledger.ledgerInstanceId(), ProfileDescriptorIdentity.fromBytes(ledger.descriptorIdentity()),
+                    target.bookie(), target.incarnation(), authorityDomain, deleteEpoch, operation, new byte[32], null);
+            return ProfileControlRequest.deleteApply(new ProfileControlScope(operationKind, operationKind.purpose(),
+                    ledger.ledgerId(), ledger.ledgerInstanceId(), scope.descriptorIdentity(), target.bookie(),
+                    target.incarnation(), authorityDomain, deleteEpoch, operation,
+                    ProfileControlRequest.deletePayloadIdentity(scope, binding), null), binding);
+        }
+
         boolean belongsTo(Head head) {
             return Arrays.equals(streamId, head.streamId) && streamGeneration == head.streamGeneration
                     && assignmentGeneration == head.assignmentGeneration && target.equals(head.target)
