@@ -1054,6 +1054,126 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    @Test
+    public void writerStopWaitsForActualDataWritePromiseAfterSdkQuorum() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                data.put(fixture.identities.get(node).bookieId(),
+                        dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+            }
+            var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
+                    1024, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
+            Channel channel = dataChannel(data.get(fixture.identities.get(0).bookieId()));
+            var held = new AtomicReference<ChannelPromise>();
+            var observed = new AtomicReference<ByteBuf>();
+            var written = new CountDownLatch(1);
+            channel.eventLoop().submit(() -> channel.pipeline().addAfter(
+                    channel.pipeline().context(SslHandler.class).name(), "holdWriterAddPromise",
+                    new ChannelOutboundHandlerAdapter() {
+                        @Override
+                        public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+                            ByteBuf body = (ByteBuf) message;
+                            if (body.getUnsignedShort(body.readerIndex() + 14)
+                                    == ProfileOperation.ADD_NORMAL.wireValue() && held.compareAndSet(null, promise)) {
+                                observed.set(body.retainedDuplicate());
+                                var actual = ctx.newPromise();
+                                actual.addListener(done -> written.countDown());
+                                ctx.write(body, actual);
+                            } else {
+                                ctx.write(body, promise);
+                            }
+                        }
+                    })).get(5, TimeUnit.SECONDS);
+            try {
+                assertEquals(0, handle.appendAsync(Unpooled.wrappedBuffer(bytes(16, 8)))
+                        .get(5, TimeUnit.SECONDS).longValue());
+                assertTrue(written.await(5, TimeUnit.SECONDS));
+                var firstStop = handle.stopLocalWrites();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> firstStop.get(150, TimeUnit.MILLISECONDS));
+                assertTrue(firstStop.cancel(false));
+                var actualStop = handle.stopLocalWrites();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> actualStop.get(150, TimeUnit.MILLISECONDS));
+                assertTrue(channel.isActive()); // The handle borrows this peer; it must not close its socket.
+                assertTrue(observed.get().getInt(4) != 0);
+                held.get().setSuccess();
+                actualStop.get(5, TimeUnit.SECONDS);
+                for (int offset = 0; offset < observed.get().capacity(); offset++) {
+                    assertEquals(0, observed.get().getByte(offset));
+                }
+                assertEquals(LedgerMetadata.State.OPEN,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                evidenceEntry(fixture, data.get(fixture.identities.get(0).bookieId()), 0, -1, 16, 16);
+            } finally {
+                if (held.get() != null) {
+                    held.get().trySuccess();
+                }
+                if (observed.get() != null) {
+                    observed.get().release();
+                }
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    public void writerStopWaitsForQueuedDataBorrowAndFailsPendingAppend() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                data.put(fixture.identities.get(node).bookieId(),
+                        dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+            }
+            var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
+                    1024, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
+            Channel channel = dataChannel(data.get(fixture.identities.get(0).bookieId()));
+            var queued = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            try {
+                channel.eventLoop().execute(() -> {
+                    queued.countDown();
+                    await(release);
+                });
+                assertTrue(queued.await(5, TimeUnit.SECONDS));
+                var append = sdkAdd(handle, bytes(16, 8));
+                sdk.getClientCtx().getMainWorkerPool().submitOrdered(44L, () -> null).get(5, TimeUnit.SECONDS);
+                assertFalse(append.isDone());
+                assertTrue(fixture.dataResults.get(0).isEmpty());
+                var stopping = handle.stopLocalWrites();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                assertThrows(ExecutionException.class, () -> append.get(5, TimeUnit.SECONDS));
+                assertTrue(handle.hasUncertainWrites());
+                release.countDown();
+                stopping.get(5, TimeUnit.SECONDS);
+                assertEquals(1, fixture.dataResults.get(0).size());
+                assertTrue(channel.isActive());
+                assertEquals(-1, handle.getLastAddConfirmed());
+                assertEquals(0, handle.getLength());
+                assertEquals(LedgerMetadata.State.OPEN,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+            } finally {
+                release.countDown();
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static Channel dataChannel(ProfileNormalDataClient client) throws Exception {
+        var ownerField = ProfileNormalDataClient.class.getDeclaredField("socket");
+        ownerField.setAccessible(true);
+        var owner = ownerField.get(client);
+        var channelField = owner.getClass().getDeclaredField("channel");
+        channelField.setAccessible(true);
+        return (Channel) channelField.get(owner);
+    }
+
     private static void evidenceEntry(Fixture fixture, ProfileNormalDataClient client,
             long id, long lac, long length, int payload) throws Exception {
         evidenceEntry(fixture, client, id, lac, length, bytes(payload, 8));
@@ -5168,8 +5288,11 @@ public class SegmentProfileInitialSocketClientTest {
                     var actual = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
                     assertEquals(LedgerMetadata.State.OPEN, actual.getValue().getState());
                     assertEquals(available.metadata().getVersion(), actual.getVersion());
-                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    var stopping = handle.stopLocalWrites();
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> stopping.get(150, TimeUnit.MILLISECONDS));
                     release.countDown();
+                    stopping.get(5, TimeUnit.SECONDS);
                     for (var storage : fixture.nodes) {
                         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                         while (files(storage).dataIo.forces == 0 && System.nanoTime() < end) {

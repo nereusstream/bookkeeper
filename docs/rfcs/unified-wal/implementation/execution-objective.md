@@ -33,3 +33,5 @@
 请注意，这期间不要忘了同步更新 docs中的文档，要保证文档中的内容是实现的最新版。
 
 2026-10-08续接：原实施会话01a0c86a-7130-73b2-b68f-45d726cac59b因上下文错误中断，用户指定当前会话01a11942-d65c-7ce2-9c9c-b1bafae62da2继续同一目标和共享工作区。原未提交URL2改动已读交接并继续验证；总目标保持active，不把会话迁移当完成。用户同时明确继续与规划检查入口01a0c84a-11d9-7951-80a4-8f2a6933c139交互，里程碑发送源码SHA/实际验证/剩余范围；这不授权第二编码agent、并行修改或发布动作。
+
+2026-10-11续接：旧实施会话01a11942-d65c-7ce2-9c9c-b1bafae62da2因context window耗尽failed并idle，用户指定新唯一实施会话01a12af4-a451-7c71-8f62-6ee31980e9ff接续完整16步合同。新会话已实际调用create_goal创建无token预算的active目标，继续gpt-6.1-sol/xhigh、单agent及原turbo-bk目录；旧会话不恢复编码，规划会话仍仅只读检查。起始HEAD核实为419cca10595f11a2b70d72f36148c6b3654788e5，本地origin/turbo-bk领先196提交，仅未跟踪PDF；历史输入锁和receipt不回退或移绑。先核对普通writer close的冻结P/length和实际DATA请求/输出promise/buffer排空，再复用既有durable terminal/metadata close，不能用扩展未确认tail的recovery代替普通close。步骤12/14/15与生产Gate保持PARTIAL/OPEN，会话接续不是总目标完成。

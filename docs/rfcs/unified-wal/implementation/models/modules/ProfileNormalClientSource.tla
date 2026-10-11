@@ -5,18 +5,21 @@
    The ASF licenses this file to you under the Apache License, Version 2.0. *)
 EXTENDS Naturals
 CONSTANTS CopyBeforeQuota, FreeQueuedSourceOnCancel, IgnoreEntryBound, PromoteNonDurable, ReleaseOutputOnReply
+CONSTANTS EarlySdkStop, CancelCompletesStop
 VARIABLE s
 vars == <<s>>
 (* One ordinary client request; real TLS/header binding and server force/owner
    evidence are supplied by existing client/dispatch slices. Input source views,
    encoded output, wire wait and local quota are distinct lifetimes. No crypto,
-   bytes/pool/kernel, metadata, full quorum SDK, timing, fairness or full A/C/D. *)
+   bytes/pool/kernel, metadata, full quorum SDK, timing, fairness or full A/C/D.
+   SDK stop consumes the same custody terminal; caller cancellation is not that terminal. *)
 Init == \E bound, fits \in BOOLEAN, outcome \in {"durable", "none", "unknown"} :
     s = [bound |-> bound, fits |-> fits, outcome |-> outcome, phase |-> "new",
          admitted |-> FALSE, source |-> FALSE, output |-> FALSE, quota |-> FALSE,
          cancelled |-> FALSE, writeDone |-> FALSE, wireDone |-> FALSE,
-         submitted |-> FALSE, reply |-> "pending"]
-Admit == /\ s.phase = "new"
+         submitted |-> FALSE, reply |-> "pending", sdkStopped |-> FALSE,
+         sdkDone |-> FALSE, stopCancelled |-> FALSE]
+Admit == /\ s.phase = "new" /\ ~s.sdkStopped
          /\ LET accepted == (s.bound \/ IgnoreEntryBound) /\ s.fits
             IN s' = [s EXCEPT !.phase = IF accepted THEN "queued" ELSE "done",
                      !.admitted = accepted, !.source = accepted,
@@ -43,17 +46,27 @@ TransportUnknown == /\ s.phase = "sent" /\ ~s.wireDone
                              !.reply = IF s.cancelled THEN "cancelled" ELSE "unknown"]
 Release == /\ s.phase = "sent" /\ s.writeDone /\ s.wireDone /\ s.quota
            /\ s' = [s EXCEPT !.phase = "done", !.quota = FALSE]
+StopSdk == /\ ~s.sdkStopped
+           /\ s' = [s EXCEPT !.sdkStopped = TRUE]
+CancelStopWait == /\ s.sdkStopped /\ ~s.sdkDone /\ ~s.stopCancelled
+                  /\ s' = [s EXCEPT !.stopCancelled = TRUE, !.sdkDone = CancelCompletesStop]
+FinishStop == /\ s.sdkStopped /\ ~s.sdkDone
+              /\ ((~s.source /\ ~s.output /\ ~s.quota) \/ EarlySdkStop)
+              /\ s' = [s EXCEPT !.sdkDone = TRUE]
 Next == Admit \/ Cancel \/ AbortQueued \/ Encode \/ WriteTerminal \/ Reply \/ TransportUnknown \/ Release
+        \/ StopSdk \/ CancelStopWait \/ FinishStop
 Spec == Init /\ [][Next]_vars
 TypeOK == /\ s.phase \in {"new", "queued", "sent", "done"}
           /\ s.outcome \in {"durable", "none", "unknown"}
           /\ s.reply \in {"pending", "cancelled", "success", "none", "unknown"}
           /\ \A field \in {"bound", "fits", "admitted", "source", "output", "quota", "cancelled",
-                            "writeDone", "wireDone", "submitted"} : s[field] \in BOOLEAN
+                            "writeDone", "wireDone", "submitted", "sdkStopped", "sdkDone",
+                            "stopCancelled"} : s[field] \in BOOLEAN
 SourceSnapshotRequiresQuota == s.source => s.quota
 QueuedSourceWaitsForTaskDecision == s.phase = "queued" => s.source
 SubmittedEntryFitsInstalledBound == s.submitted => s.bound
 SuccessRequiresDurableStatus == s.reply = "success" => s.outcome = "durable"
 OutputWaitsForActualWrite == s.output => s.quota
 SlotWaitsForWriteAndWire == s.admitted /\ ~(s.writeDone /\ s.wireDone) /\ s.phase # "done" => s.quota
+SdkStopWaitsActualCustody == s.sdkDone => ~s.source /\ ~s.output /\ ~s.quota
 ==============================================================================

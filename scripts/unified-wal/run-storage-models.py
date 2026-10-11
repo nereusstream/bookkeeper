@@ -361,6 +361,8 @@ MATRIX = {
     'ce-profile-normal-client-source-bound': 'SubmittedEntryFitsInstalledBound',
     'ce-profile-normal-client-source-status': 'SuccessRequiresDurableStatus',
     'ce-profile-normal-client-source-write': 'OutputWaitsForActualWrite',
+    'ce-profile-normal-client-source-sdk-stop': 'SdkStopWaitsActualCustody',
+    'ce-profile-normal-client-source-sdk-cancel': 'SdkStopWaitsActualCustody',
     'a-profile-initial-client': None,
     'ce-profile-initial-client-peer': 'RequestRequiresVerifiedPeer',
     'ce-profile-initial-client-binding': 'SuccessHasBoundReply',

@@ -1327,3 +1327,10 @@ Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksu
 2026-10-11，原ProfileMembershipAudit扩展共享admin index/legacy retire输入与2指定反例；narrow12配置1正向/11CE、相关74配置9正向/65CE已得到预期结果。catalog从564增至566，完整矩阵/完整组合未接受。[共享索引与实际legacy退役RED/GREEN](../profile-wire/README.md#共享引用索引与-legacy-退役拒绝)拥有当前边界，模型不生产retained-history或物理退役证明。
 
 2026-10-11，新增ProfileReplicaAudit有限投影1正向/9CE：CLOSED/scoped只读审计、rich UNKNOWN、无clear、actual health/lease/SDK与shared pool/fresh cut。相关94配置11正向/83CE全部得到预期结果；catalog576/完整组合未接受，facts仍由native组件生产。[CLOSED周期DATA审计与实际闭环回执](../profile-wire/README.md#profile-closed-data-周期审计)拥有最新证据。
+
+
+### SDK writer stop 的实际 DATA custody
+
+2026-10-11，既有 ProfileNormalClientSource 增加 sdkStopped/sdkDone/stopCancelled 的有限投影；stop 阻止新 Admit，已经排队的 source 仍按实际 encode/abort/write/wire/slot 终态排空。SdkStopWaitsActualCustody 要求 sdkDone 之前 source/output/quota 均归还；caller cancellation 不设置 actual done。两个新增候选错误规则 EarlySdkStop、CancelCompletesStop 取得指定反例。所有原配置显式关闭新错误规则，历史模型与 receipt 不改绑。
+
+最终 3b8imp78 exit 0：normal source 与 registered connection 共 17 配置，2 完整正向/15 指定反例。normal source 正向 403 generated/262 distinct、queue 0、depth/diameter 10、1.125 秒/peak RSS 111853568 bytes；单 worker、heap512/direct64MiB、seed1/fp0、无 symmetry/state constraint、CHECK_DEADLOCK FALSE。未展开完整 SDK quorum/replacement/close、远端 I/O、所有 timer、公平性/活性或 A+C+D 组合；实际终态是模型输入，不能由此生产 TLS/文件/metadata 持久化事实。实际 35 个 Java 回归、复现命令与原 source/design/config/command/失败证据归档由[接线记录](../profile-wire/README.md#sdk-writer-stop-与实际-data-排空)拥有，生产 Gate 不提升。

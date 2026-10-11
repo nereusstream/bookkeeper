@@ -602,3 +602,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-11 [共享索引与legacy退役拒绝](profile-wire/README.md#共享引用索引与-legacy-退役拒绝)修复Profile过滤影响共享BookKeeperAdmin的问题：公开索引恢复全引用，仅Classic auditor过滤Profile；legacy退役对已知ensemble/marker中的Profile引用明确拒绝，避免无marker时提前成功。真实退役RED/GREEN与公开index/Classic实际任务范围验证通过；完整Profile退役/retained-history清理仍未实现，生产Gate不提升。
 
 2026-10-11 [CLOSED周期DATA审计](profile-wire/README.md#profile-closed-data-周期审计)已复用原replica-check CLOSED范围、streamed metadata与真实全W验证，共用单peer pool/coordinator预算，actual health/lease drain与最后fresh cut后只生成检查任务。真实历史DATA hole→原worker修复/全W/marker闭环、健康/权限拒绝不clear、deadline/关闭保留actual资源通过。OPEN/正常writer close、payload/placement、总字节预算、离线/rejoin/delete与生产Gate仍OPEN，步骤12/14保持PARTIAL。
+
+
+2026-10-11 [SDK writer stop 与实际 DATA 排空](profile-wire/README.md#sdk-writer-stop-与实际-data-排空)已真实 RED/GREEN 修复逻辑 delivery 完成早于排队源/output promise 终结的边界；stop 等自身全部普通 DATA attempts 的实际终态，caller cancellation 不污染共享 completion，借用 socket 保留，UNKNOWN/OPEN 不变。35 个相关 SDK/socket/recovery/worker 用例零失败/skip，17 个有限模型配置得到预期结果，style 通过；RAT 保留 443 父 HEAD 历史问题、无新增。此为普通 close 的必要排空依赖；冻结 P/length 与 durable terminal/metadata close、adoption 尚未接通，步骤 12/14/15 和生产 Gate 仍 PARTIAL/OPEN。

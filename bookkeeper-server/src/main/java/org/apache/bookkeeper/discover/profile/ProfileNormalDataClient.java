@@ -72,6 +72,15 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         return socket.hello();
     }
 
+    /** Result and actual local source/output terminal are separate; neither proves a remote abort. */
+    public record AddAttempt(CompletableFuture<ProfileStatus> result, CompletableFuture<Void> completion) { }
+
+    /** Borrow one ordinary Add, exposing its actual terminal without closing the shared DATA connection. */
+    public AddAttempt beginNormalAdd(ProfileLedgerContext context, ProtectedProfileCredential credential,
+            long entryId, ReferenceCounted entry) {
+        return socket.beginNormalAdd(context, credential, entryId, entry);
+    }
+
     /** Borrow CRC32C/v3 BookKeeper entry bytes. Caller may release but must not modify them until the future ends. */
     public CompletableFuture<ProfileStatus> addNormal(ProfileLedgerContext context,
             ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {

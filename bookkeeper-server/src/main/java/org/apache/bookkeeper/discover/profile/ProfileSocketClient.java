@@ -470,6 +470,11 @@ final class ProfileSocketClient implements AutoCloseable {
 
     CompletableFuture<ProfileStatus> addNormal(ProfileLedgerContext context, ProtectedProfileCredential credential,
             long entryId, ReferenceCounted entry) {
+        return beginNormalAdd(context, credential, entryId, entry).result();
+    }
+
+    ProfileNormalDataClient.AddAttempt beginNormalAdd(ProfileLedgerContext context,
+            ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {
         return sendEntry(context, credential, entryId, entry, null);
     }
 
@@ -479,10 +484,10 @@ final class ProfileSocketClient implements AutoCloseable {
         if (entryId < intent.range().firstEntryId() || entryId > intent.range().lastEntryId()) {
             throw new IllegalArgumentException("Recovery entry lies outside its frozen intent range");
         }
-        return sendEntry(intent.recovery().ledger(), credential, entryId, entry, intent);
+        return sendEntry(intent.recovery().ledger(), credential, entryId, entry, intent).result();
     }
 
-    private CompletableFuture<ProfileStatus> sendEntry(ProfileLedgerContext context,
+    private ProfileNormalDataClient.AddAttempt sendEntry(ProfileLedgerContext context,
             ProtectedProfileCredential credential, long entryId, ReferenceCounted entry, ProfileRepairIntent intent) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(credential, "credential");
@@ -505,10 +510,12 @@ final class ProfileSocketClient implements AutoCloseable {
             throw new IllegalArgumentException("Ordinary entry is outside the installed bound");
         }
         if (closed.get()) {
-            return CompletableFuture.failedFuture(unknown());
+            return new ProfileNormalDataClient.AddAttempt(CompletableFuture.failedFuture(unknown()),
+                    CompletableFuture.completedFuture(null));
         }
         if (!slots.tryAcquire()) {
-            return CompletableFuture.completedFuture(transientNone());
+            return new ProfileNormalDataClient.AddAttempt(CompletableFuture.completedFuture(transientNone()),
+                    CompletableFuture.completedFuture(null));
         }
         Pending held = new Pending(context, credential, entryId, (int) size, intent);
         try {
@@ -520,7 +527,7 @@ final class ProfileSocketClient implements AutoCloseable {
             throw failedBorrow;
         }
         enqueue(held);
-        return held.dataReply;
+        return new ProfileNormalDataClient.AddAttempt(held.dataReply, held.completion.copy());
     }
 
     CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
@@ -902,6 +909,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private boolean writeDone;
         private boolean wireDone;
         private boolean released;
+        private CompletableFuture<Void> completion;
 
         private Pending(ProfileControlScope scope, ProfileOperation operation) {
             this.scope = scope;
@@ -919,6 +927,7 @@ final class ProfileSocketClient implements AutoCloseable {
             operation = intent == null ? ProfileOperation.ADD_NORMAL : ProfileOperation.ADD_RECOVERY;
             reply = null;
             dataReply = new CompletableFuture<>();
+            completion = new CompletableFuture<>();
             readReply = null;
             lacReply = null;
             this.context = context;
@@ -997,6 +1006,9 @@ final class ProfileSocketClient implements AutoCloseable {
             if (writeDone && wireDone && !released) {
                 released = true;
                 returnSlot();
+                if (completion != null) {
+                    completion.complete(null);
+                }
             }
         }
     }

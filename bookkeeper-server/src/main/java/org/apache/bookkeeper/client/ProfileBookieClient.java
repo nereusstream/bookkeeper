@@ -78,6 +78,9 @@ final class ProfileBookieClient implements BookieClient {
     private final Map<BookieId, Integer> counts = new ConcurrentHashMap<>();
     // Original ledger executor owns delivery state; shutdown completion uses a terminal CAS.
     private final Set<Delivery> pending = ConcurrentHashMap.newKeySet();
+    // A logical delivery may expire or reach A while its socket still owns source/output custody.
+    private final Set<CompletableFuture<Void>> addDrains = ConcurrentHashMap.newKeySet();
+    private final Object addLifecycle = new Object();
     private final CompletableFuture<Void> closeCompletion = new CompletableFuture<>();
 
     ProfileBookieClient(ClientContext base, ProfileLedgerContext ledger, ProtectedProfileCredential credential,
@@ -216,7 +219,21 @@ final class ProfileBookieClient implements BookieClient {
             }
             try {
                 inFlight = true;
-                client.addNormal(ledger, credential, entryId, bytes).whenComplete((status, failure) -> {
+                ProfileNormalDataClient.AddAttempt actual;
+                synchronized (addLifecycle) {
+                    // Also covers the synchronous close fallback after the original executor rejects work.
+                    actual = closed.get() ? null : client.beginNormalAdd(ledger, credential, entryId, bytes);
+                    if (actual != null) {
+                        addDrains.add(actual.completion());
+                    }
+                }
+                if (actual == null) {
+                    finish(BKException.Code.ClientClosedException);
+                    return;
+                }
+                var completion = actual.completion();
+                completion.whenComplete((unused, failure) -> addDrains.remove(completion));
+                actual.result().whenComplete((status, failure) -> {
                     try {
                         ordered(() -> classify(status, failure));
                     } catch (RejectedExecutionException shutdown) {
@@ -370,27 +387,43 @@ final class ProfileBookieClient implements BookieClient {
         return closed.get();
     }
     CompletableFuture<Void> closeCompletion() {
-        return closeCompletion;
+        return closeCompletion.copy();
     }
 
     @Override
     public void close() {
-        if (closed.compareAndSet(false, true)) {
-            Runnable drain = () -> {
-                try {
-                    for (Delivery delivery : List.copyOf(pending)) {
-                        delivery.finish(BKException.Code.ClientClosedException);
-                    }
-                    closeCompletion.complete(null);
-                } catch (RuntimeException failure) {
-                    closeCompletion.completeExceptionally(failure);
-                }
-            };
-            try {
-                ordered(drain);
-            } catch (RejectedExecutionException shutdown) {
-                drain.run();
+        synchronized (addLifecycle) {
+            if (!closed.compareAndSet(false, true)) {
+                return;
             }
+        }
+        Runnable drain = () -> {
+            Throwable callbackFailure = null;
+            for (Delivery delivery : List.copyOf(pending)) {
+                try {
+                    delivery.finish(BKException.Code.ClientClosedException);
+                } catch (RuntimeException failure) {
+                    if (callbackFailure == null) {
+                        callbackFailure = failure;
+                    } else {
+                        callbackFailure.addSuppressed(failure);
+                    }
+                }
+            }
+            Throwable failure = callbackFailure;
+            CompletableFuture.allOf(addDrains.toArray(CompletableFuture[]::new))
+                    .whenComplete((unused, terminalFailure) -> {
+                        if (failure != null || terminalFailure != null) {
+                            closeCompletion.completeExceptionally(failure != null ? failure : terminalFailure);
+                        } else {
+                            closeCompletion.complete(null);
+                        }
+                    });
+        };
+        try {
+            ordered(drain);
+        } catch (RejectedExecutionException shutdown) {
+            drain.run();
         }
     }
     @Override

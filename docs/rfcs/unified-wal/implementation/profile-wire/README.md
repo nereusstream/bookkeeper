@@ -1193,3 +1193,30 @@ ProfileReplicaAudit有限投影1正向/9指定反例要求CLOSED与scope、rich 
 持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/replica-audit-evidence-si79s4ka`及archive.json列出的checks目录，旧source/design/config/run/command身份冻结不改。
 
 最终replica-audit-checks-exixx7_6：style exit0、RAT exit1，443 unapproved路径全在父HEAD，无新增，5 artifact checksums。不改许可规则、不称CI全绿。
+
+
+## SDK writer stop 与实际 DATA 排空
+
+2026-10-11，续接普通 writer close 前先修复必要的本地排空边界。原 ProfileBookieClient.closeCompletion 只等待 SDK delivery callback，A 个成功、逻辑 deadline 或停止 delivery 后，socket 仍可能持有排队源副本或已编码输出/write promise；不能由该旧 completion 推导 writer DATA 已排空。
+
+ProfileNormalDataClient.beginNormalAdd 返回独立的 result 与 actual completion；沿用 ProfileSocketClient 原 writeDone/wireDone/released 判定，在源借用已归还、输出已清零/release、wire 已终结及原 RPC slot 归还后才完成 actual completion。普通 addNormal/addRecovery 的 result/status、wire 与存储格式不变。SDK 仅跟踪自己发出的普通 Add attempts，逻辑 delivery 完成不移除 actual custody；stop 冻结新发送，先结束所有 delivery，再等待已借用 attempts 的实际终态。发送登记与 stop 之间的局部锁也覆盖原 executor 拒绝后的同步 close fallback。caller cancellation 只取消等待副本，不污染共享 completion。
+
+保留借用 peer/socket，未增加线程、远端控制查询、逐 entry fsync 或 handshake。完成仅证明本 handle 的本地普通 DATA source/output/RPC custody 已终结；其他使用者的请求不属于这个 barrier。断连/timeout 的 actual wire terminal 仍不证明服务端 I/O 已取消、NONE、FREE 或 durable CLOSED，UNKNOWN 观察不清除。读取、LAC、replacement 控制操作及远端持久化另由各自合同约束；普通 writer 冻结 P/length 与 durable terminal/metadata close 尚未接通。
+
+真实回归 writerStopWaitsForActualDataWritePromiseAfterSdkQuorum 使用真实 mTLS/ZK/files/原 SDK，达到 A 后保留实际 DATA output promise，stop 必须持续等待；取消第一次 caller future 后，第二次 stop 仍待 actual，释放 promise 后输出才清零、借用连接仍可同坐标重试，metadata 保持 OPEN。writerStopWaitsForQueuedDataBorrowAndFailsPendingAppend 在原单 event loop 上暂停未编码 DATA，pending append 失败并调整已确认 length 后，stop 仍等待排队借用完成。原 sdkDeadlineKeepsUnknownRemoteIoAndNeverPublishesClassicClosedMetadata 补充 logical timeout 后 stop 不提前完成，释放真实 server force 后才排空；UNKNOWN 与 OPEN 语义不变。
+
+FqfR0HHI 为第一条回归 RED：旧 stop 提前返回；EbCtp1J5 最小 GREEN 1。GmyjXCEO 的 25 项中 24 通过、新 queued 用例错误地期待共用单 event loop 暂停期间仍得到 quorum，修正为 pending append 场景；X2L5QTV2 为该新测试的 Callable 缺少返回值编译失败，已修正。最终 0dINjiIr 的 25 项全部 PASS、零 skip；6NQqG64s 的整体恢复/末段 SELF 写回及原 worker 10 项全部 PASS、零 skip，共 35 个不重叠真实用例。历史 receipt 与本轮失败事实保留，不把未执行范围计 PASS。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#writerStop*+originalSdk*+sdk*+ordinary*+closeWaitsForQueuedDataBorrowAndDoesNotChangeTheOriginalInput+closeWaitsForActualWritePromiseEvenAfterReplyAndTransportClose+validatedReplyDoesNotReleaseSerializedSlotBeforeActualWritePromise+cancelledWaitingRetainsBoundedPendingUntilOriginalWireTerminal'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#wholePointRecoveryClosesEmptyAndNonemptyFromOpenWithOriginalSdkAndQuorum+selectedLastFragmentWritesBackToTheExistingMembersWithoutChangingMembership+replicationWorker*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-normal-client-source --config-prefix ce-profile-normal-client-source --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+既有 ProfileNormalClientSource 有限投影增加 SDK stop/caller cancellation，只消费原 source/output/quota 实际终态；early-stop 和 cancel-as-completion 两种错误规则得到指定 SdkStopWaitsActualCustody 反例。最终 3b8imp78 的 17 配置为 2 完整正向/15 指定反例，正向 source 模型 403 generated/262 distinct、queue 0、depth 10、1.125 秒/peak RSS 111853568 bytes；tool 1.7.4、单 worker、heap 512/direct 64 MiB、seed 1/fp 0、无 symmetry/state constraint、CHECK_DEADLOCK FALSE。不是性能结论、实际 TLS/fsync producer、完整时钟/公平性/活性或 A+C+D 全组合证明。
+
+本轮持久证据在 /Users/liusinan/.codex/artifacts/unified-wal/writer-stop-evidence-kr2up7fw，archive.json 保留原 run/source/config/command 身份。style exit 0；RAT 初次 445 含两个新配置的短许可头，补齐标准 Apache 头后仍 exit 1、443 unapproved 路径全存在于父 HEAD，无新增；不改许可规则，不称 CI 全绿。步骤 12/14/15 与生产 Gate 仍 PARTIAL/OPEN；普通 durable writer close/adoption、额外 required authority producer、OPEN/payload/placement audit、full-bytes、离线/rejoin/delete/history GC/完整退役、兼容/组合/正式性能/运维仍未闭合。Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED。
