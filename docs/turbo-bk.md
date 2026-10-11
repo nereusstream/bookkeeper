@@ -642,3 +642,5 @@ Segment production candidate 的最低 Gate：
 2026-10-09 [registration消费者发现与再次复核](rfcs/unified-wal/implementation/startup-readiness/README.md#消费者发现与再次复核)新增既有ZK store的独立reader读取，核验持久READY/birth、两份ephemeral projection、实际publisher owner/nonce marker和末次物理身份；同字节重建/更新/expiry等真实ZK验证见该记录。只读观察不授予transport或ledger authority，后续仍须mTLS/HELLO及再次冷复核。service bootstrap/动态pool尚未接通，步骤12/14及生产Gate仍PARTIAL/OPEN。
 
 2026-10-11 [注册观察驱动的连接与实际本地排空](rfcs/unified-wal/implementation/profile-wire/README.md#注册观察驱动的连接与实际本地排空)接既有consumer观察、真实mTLS/HELLO和最后cold复核；CONTROL/DATA client保持原RPC超时，closeAsync等待cold/channel/HELLO输出及实际RPC借用与promise terminal。发现/关闭不授予ledger authority或remote abort/NONE/FREE；动态pool、service bootstrap和总预算尚未接线，步骤12/14及生产Gate仍PARTIAL/OPEN。
+
+2026-10-11 [worker/service关闭边界](rfcs/unified-wal/implementation/profile-wire/README.md#worker-与服务关闭的中断及并发边界)修复join中断和重复shutdown提前关manager/SDK、self-join及启动前关闭；caller signal在procedure结束后恢复，AutoRecoveryMain不把继承signal送进SDK等待。真实READ/task与真实metadata client RED/GREEN见记录；动态pool/Profile bootstrap尚未接通，步骤14与生产Gate保持PARTIAL/OPEN。

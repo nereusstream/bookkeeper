@@ -83,6 +83,47 @@ public class AutoRecoveryMainTest extends BookKeeperClusterTestCase {
                 main.replicationWorker.isRunning());
     }
 
+    @Test
+    public void testShutdownBeforeStartClosesMetadataAndCannotRestart() throws Exception {
+        AutoRecoveryMain main = new AutoRecoveryMain(confByIndex(0));
+        var driver = (ZKMetadataClientDriver) main.bkc.getMetadataClientDriver();
+        var actualMetadataClient = driver.getZk();
+        try {
+            main.shutdown();
+            assertEquals(ZooKeeper.States.CLOSED, actualMetadataClient.getState());
+            org.junit.Assert.assertThrows(IllegalStateException.class, main::start);
+            main.shutdown();
+            assertEquals(ZooKeeper.States.CLOSED, actualMetadataClient.getState());
+        } finally {
+            main.shutdown();
+            driver.close();
+        }
+    }
+
+    @Test
+    public void testInterruptedShutdownClosesTheActualMetadataClientAndPreservesInterrupt() throws Exception {
+        AutoRecoveryMain main = new AutoRecoveryMain(confByIndex(0));
+        var driver = (ZKMetadataClientDriver) main.bkc.getMetadataClientDriver();
+        var actualMetadataClient = driver.getZk();
+        var stopper = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            main.start();
+            Awaitility.await().atMost(5, TimeUnit.SECONDS).until(main.replicationWorker::isRunning);
+            var stopping = stopper.submit(() -> {
+                Thread.currentThread().interrupt();
+                main.shutdown();
+                return Thread.currentThread().isInterrupted();
+            });
+            assertTrue(stopping.get(10, TimeUnit.SECONDS));
+            assertEquals(ZooKeeper.States.CLOSED, actualMetadataClient.getState());
+            assertFalse(main.replicationWorker.isRunning());
+        } finally {
+            main.shutdown();
+            driver.close();
+            stopper.shutdownNow();
+        }
+    }
+
     /**
      * Test that, if an autorecovery looses its ZK connection/session it will
      * shutdown.

@@ -74,6 +74,7 @@ public class AutoRecoveryMain {
     final AutoRecoveryDeathWatcher deathWatcher;
     int exitCode;
     private volatile boolean shuttingDown = false;
+    private boolean shutdownComplete;
     private volatile boolean running = false;
 
     // Exception handler
@@ -117,7 +118,10 @@ public class AutoRecoveryMain {
     /*
      * Start daemons
      */
-    public void start() {
+    public synchronized void start() {
+        if (shuttingDown) {
+            throw new IllegalStateException("AutoRecovery has already been shut down");
+        }
         auditorElector.start();
         replicationWorker.start();
         if (null != uncaughtExceptionHandler) {
@@ -143,28 +147,60 @@ public class AutoRecoveryMain {
 
     private void shutdown(int exitCode) {
         log.info().attr("exitCode", exitCode).log("Shutting down auto recovery");
-        if (shuttingDown) {
-            return;
+        boolean interrupted = Thread.interrupted();
+        boolean owner;
+        synchronized (this) {
+            owner = !shuttingDown;
+            if (owner) {
+                shuttingDown = true;
+                running = false;
+                this.exitCode = exitCode;
+            }
         }
-        log.info("Shutting down AutoRecovery");
-        shuttingDown = true;
-        running = false;
-        this.exitCode = exitCode;
-
         try {
-            auditorElector.shutdown();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn().exception(e).log("Interrupted shutting down auditor elector");
-        }
-        replicationWorker.shutdown();
-        try {
-            bkc.close();
-        } catch (BKException e) {
-            log.warn().exception(e).log("Failed to close bookkeeper client for auto recovery");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn().exception(e).log("Interrupted closing bookkeeper client for auto recovery");
+            if (!owner) {
+                synchronized (this) {
+                    while (!shutdownComplete) {
+                        try {
+                            wait();
+                        } catch (InterruptedException stopping) {
+                            interrupted = true;
+                        }
+                    }
+                }
+                return;
+            }
+            for (;;) {
+                try {
+                    auditorElector.shutdown();
+                    break;
+                } catch (InterruptedException stopping) {
+                    interrupted = true;
+                    Thread.interrupted();
+                    log.warn().exception(stopping)
+                            .log("Interrupted shutting down auditor elector; waiting for cleanup");
+                }
+            }
+            replicationWorker.shutdown();
+            interrupted |= Thread.interrupted(); // Worker preserved the signal; do not abort the SDK's close waits.
+            try {
+                bkc.close();
+            } catch (BKException failedClose) {
+                log.warn().exception(failedClose).log("Failed to close bookkeeper client for auto recovery");
+            } catch (InterruptedException stopping) {
+                interrupted = true;
+                log.warn().exception(stopping).log("Interrupted closing bookkeeper client for auto recovery");
+            }
+        } finally {
+            if (owner) {
+                synchronized (this) {
+                    shutdownComplete = true;
+                    notifyAll();
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

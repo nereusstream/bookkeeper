@@ -975,3 +975,29 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 最终Java `unified-wal-local-UOAB6lBP` exit0：17类317项全部通过、零skip，common37/server280（socket91、readiness13、ephemeral17、lifecycle46、UR24、Classic worker2、metadata19、control store12、PendingAddOp19、decoder22、Bookie15），1052当前冻结inputs/20 artifact checksums。最终style/root RAT `connection-checks-0kIfSr76`为exit0/exit1，443 unapproved路径全在父HEAD、没有新增失败路径，5 checksums；不改许可规则，不计CI全绿。Java/model共享232/去重1657 inputs与五个父HEAD designInputs全部核验，run的parent head与working-source hashes不重绑。
 
 本轮Java、模型、RED及check回执保存在`/Users/liusinan/.codex/artifacts/unified-wal/registered-connection-evidence-842lirim`及其archive.json列出的checks/mutation目录；原manifest/config/command内容保持原run位置和身份，archive为逐字节副本。TLC1.7.4从官方release重新取得，SHA-1 bee4a54f3ee3d4afc347c3240ec2d9e93b075104、SHA-256 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88，与冻结工具锁一致。历史tmp目录缺失不借用为当前验证。
+
+## Worker 与服务关闭的中断及并发边界
+
+2026-10-11，第14步在动态pool/service接线前修复原ReplicationWorker和AutoRecoveryMain的shutdown边界。原worker在join被中断后会继续关闭underreplication manager／自有SDK；同时workerRunning=false会让第二个shutdown caller提前返回。实际Profile READ child仍持有原task和buffer时，这两条路径都不能作为关闭完成。
+
+ReplicationWorker用既有实例monitor记录唯一shutdown owner和cleanup结束。owner停止新循环、取消原timer、interrupt原线程；所有外部caller均等该线程实际终结，收到interrupt只记账并继续join，非owner还等owner cleanup结束。完成后恢复各caller原有或等待期间的interrupt。worker在run的终态异常路径自停时不join自己，external owner已经负责关闭时worker也不等待该owner，避免互相等待；这条自停路径只能在当前attempt返回后到达。start与shutdown互斥，启动前close也取消timer/关闭资源，并显式拒绝之后重启，不复活已结束实例。原isRunning仍表示循环状态，不能替代shutdown实际排空证明。
+
+AutoRecoveryMain同样只有一个shutdown owner，其余caller等待该procedure收尾；启动与关闭互斥。入口及auditor/worker等待期间的interrupt先记录，auditor被中断后继续等待；worker返回时恢复的signal先取出，保持SDK.close的等待不带继承interrupt，最后再恢复caller signal。依赖关闭在实际worker drain之后发起。关闭过程中新的依赖异常仍沿原日志/失败语义处理，本段不宣称所有SDK/manager close都无条件成功，也不证明任意永不终结child的liveness。
+
+两条真实RED分别为：持有三条actual READ回复时预先interrupt的worker shutdown竟提前返回；原AutoRecoveryMain在带interrupt关闭后原始ZooKeeper client仍为CONNECTED。修复后的回归保留实际task/marker直到READ终结，覆盖加入等待中的interrupt和并发第二caller、self-stop、借用SDK/pool继续可用与原marker续接；真实Classic AutoRecovery验证metadata client达到CLOSED、signal保留、启动前shutdown与不能重启，并保留startup/shutdown/session loss及原Classic worker验证。测试持有原始ZK引用，避免把driver清空引用误认为client未关闭。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'AutoRecoveryMainTest,SegmentProfileInitialSocketClientTest#replicationWorker*,TestReplicationWorker#testReplicationStats+testReplicateEmptyOpenStateLedger+testRWZKConnectionLostOnNonRecoverableZkError,TestLedgerUnderreplicationManager'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check -q
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-service-shutdown --config-prefix ce-profile-service-shutdown --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection
+```
+
+有限ProfileServiceShutdown把actual child/thread/SDK close结果作为输入，2正向（外部/self）/8指定反例检查join、并发caller、manager/SDK开始关闭、signal恢复、继承interrupt导致metadata未关闭、自join与shutdown后重启；不生产真实SDK/ZK/网络，不证明clock/liveness/remote abort。当前仅修复服务基础关闭，不新增Profile bootstrap、发现、pool或强reset；步骤14和生产Gate仍PARTIAL/OPEN。普通Add无新增远端metadata、handshake或持久化操作；Linux NUMA、掉电与正式性能本轮NOT_EXECUTED。
+
+实际RED：`unified-wal-local-cgrZmhTm` exit1，预interrupt caller提前返回，原task/READ尚未drain；`unified-wal-local-vjgSGz5V` exit1，原始ZK client expected CLOSED/actual CONNECTED，保留additional-source-lock.json锁定当时AutoRecoveryMain及测试（早期runner尚未包含这两个路径）。随后runner补齐这两个既有文件的source lock。中间qmVwCqi2为测试在driver已清空引用后访问null的错误，不作为实现通过或协议反例。
+
+最终Java `unified-wal-local-cvMZ8z32` exit0：4类39项全部通过、零skip（AutoRecoveryMain5、Classic worker3、URmanager24、actual Profile worker7），1054当前inputs/7 artifact checksums。style/RAT `shutdown-checks-kyrqrOuu` exit0/exit1，443 unapproved路径全在父HEAD，无新增失败路径，5 checksums；不改许可规则、不计CI全绿。模型相关pkrb6t4a 35配置5完整正向/30指定反例、850 inputs/680 checksums，在最后日志换行前；最终akh085ut 10配置2正向/8反例、850当前inputs/633 checksums。外部正向39 generated/24 distinct，self78/38，queue0、depth11，分别0.852/0.833秒、peak RSS108003328/107429888 bytes，是有限模型消耗而非性能。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；完整534及完整A+C+D未全跑。
+
+最终Java/model共享234/去重1670 inputs及五个父HEAD designInputs全部核验；历史绑定不改。本轮RED、Java/model和checks在`/Users/liusinan/.codex/artifacts/unified-wal/service-shutdown-evidence-2p9jrbu9`及archive.json列出的checks目录有持久副本，保留原run身份。

@@ -1307,3 +1307,7 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 连接相关ezwn7ipx 44配置7完整正向/37指定反例、837 inputs/685 checksums，最后callback收尾前；最终nx8kvzgw 9配置1正向/8指定反例、837当前inputs/621 checksums。正向225/163 generated/distinct、queue0、depth/diameter11、1.027秒/peak RSS109920256 bytes，非性能结论；实际callback锁等待RED由Java生产，有限模型未证明liveness。完整524未全跑，历史run不重绑。
 
 最终Java UOAB6lBP 17类317项零skip、1052当前inputs/20 checksums，与最终nx8kvzgw共享232/去重1657 inputs及五个父HEAD designInputs核对；回执持久副本与RED在连接记录所列artifact目录，未修改原run身份。完整524及完整组合未宣称接受。
+
+2026-10-11新增ProfileServiceShutdown，外部/self两正向及八指定反例，消费actual child/thread/SDK观察，检查shutdown drain、重复caller、manager/SDK关闭顺序、中断恢复、metadata close/self-join/禁止重启。不生产真实SDK或ZK，不证明任意blocked child的liveness。当前catalog534未全跑或完整组合验收，真实RED/GREEN及scope由[服务关闭记录](../profile-wire/README.md#worker-与服务关闭的中断及并发边界)拥有。
+
+关闭相关pkrb6t4a 35配置5正向/30指定反例、850 inputs/680 checksums；最终akh085ut 10配置2正向/8反例、850当前inputs/633 checksums。外部39/24、self78/38 generated/distinct、queue0、depth11、0.852/0.833秒、peak RSS108003328/107429888 bytes，非性能结论。Java39真实回归与两个RED、共享234/去重1670 inputs及五个父HEAD设计锁由连接记录拥有；完整534与完整组合未接受。

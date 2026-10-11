@@ -98,6 +98,8 @@ public class ReplicationWorker implements Runnable {
     private final LedgerUnderreplicationManager underreplicationManager;
     private final ServerConfiguration conf;
     private volatile boolean workerRunning = false;
+    private boolean shutdownStarted;
+    private boolean shutdownComplete;
     private final BookKeeperAdmin admin;
     private final LedgerChecker ledgerChecker;
     private final BookKeeper bkc;
@@ -267,13 +269,21 @@ public class ReplicationWorker implements Runnable {
     /**
      * Start the replication worker.
      */
-    public void start() {
+    public synchronized void start() {
+        if (shutdownStarted) {
+            throw new IllegalStateException("Replication worker has already been shut down");
+        }
         this.workerThread.start();
     }
 
     @Override
     public void run() {
-        workerRunning = true;
+        synchronized (this) {
+            if (shutdownStarted) {
+                return;
+            }
+            workerRunning = true;
+        }
         while (workerRunning) {
             try {
                 if (!rereplicate()) {
@@ -882,36 +892,74 @@ public class ReplicationWorker implements Runnable {
      */
     public void shutdown() {
         log.info("Shutting down replication worker");
-
+        boolean interrupted = Thread.interrupted();
+        boolean owner;
         synchronized (this) {
-            if (!workerRunning) {
-                return;
+            owner = !shutdownStarted;
+            if (owner) {
+                shutdownStarted = true;
+                workerRunning = false;
             }
-            workerRunning = false;
         }
-        log.info("Shutting down ReplicationWorker");
-        this.pendingReplicationTimer.cancel();
         try {
-            this.workerThread.interrupt();
-            this.workerThread.join();
-        } catch (InterruptedException e) {
-            log.error().exception(e).log("Interrupted during shutting down replication worker");
-            Thread.currentThread().interrupt();
-        }
-        if (ownBkc) {
+            if (owner) {
+                pendingReplicationTimer.cancel();
+                if (Thread.currentThread() != workerThread) {
+                    workerThread.interrupt();
+                }
+            }
+            if (Thread.currentThread() == workerThread) {
+                if (!owner) {
+                    return; // The external owner is joining this thread; do not wait on it from here.
+                }
+            } else {
+                for (;;) {
+                    try {
+                        workerThread.join();
+                        break;
+                    } catch (InterruptedException stopping) {
+                        interrupted = true; // Actual Profile children still own the original task and buffers.
+                    }
+                }
+                if (!owner) {
+                    synchronized (this) {
+                        while (!shutdownComplete) {
+                            try {
+                                wait();
+                            } catch (InterruptedException stopping) {
+                                interrupted = true;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            // A self-stop reaches here only from run's terminal exception path, after its current attempt returned.
+            if (ownBkc) {
+                try {
+                    bkc.close();
+                } catch (InterruptedException stopping) {
+                    interrupted = true;
+                    log.warn().exception(stopping).log("Interrupted while closing the Bookie client");
+                } catch (BKException failedClose) {
+                    log.warn().exception(failedClose).log("Exception while closing the Bookie client");
+                }
+            }
             try {
-                bkc.close();
-            } catch (InterruptedException e) {
-                log.warn().exception(e).log("Interrupted while closing the Bookie client");
-                Thread.currentThread().interrupt();
-            } catch (BKException e) {
-                log.warn().exception(e).log("Exception while closing the Bookie client");
+                underreplicationManager.close();
+            } catch (UnavailableException failedClose) {
+                log.warn().exception(failedClose).log("Exception while closing the ZkLedgerUnderreplicationManager");
             }
-        }
-        try {
-            underreplicationManager.close();
-        } catch (UnavailableException e) {
-            log.warn().exception(e).log("Exception while closing the ZkLedgerUnderreplicationManager");
+        } finally {
+            if (owner) {
+                synchronized (this) {
+                    shutdownComplete = true;
+                    notifyAll();
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

@@ -2571,6 +2571,181 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void replicationWorkerSelfStopDrainsTheActualAttemptWithoutJoiningItself() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                data.put(fixture.identities.get(node).bookieId(), peer);
+                evidenceEntry(fixture, peer, 0, -1, 16, 16);
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                    fixture.credential, data, fixture.clients, 3, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            var options = new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                    data, fixture.clients, 3, 8, Duration.ofSeconds(30));
+            var stopper = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                fixture.replyFault.set(21);
+                var worker = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture),
+                        sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, coordinator, options);
+                worker.start();
+                awaitProfileWorkerStarted(worker);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(3, fixture.heldReplies.size());
+                var threadField = worker.getClass().getDeclaredField("workerThread");
+                threadField.setAccessible(true);
+                Thread actualWorker = (Thread) threadField.get(worker);
+                actualWorker.interrupt();
+                var stopping = stopper.submit(() -> {
+                    actualWorker.join();
+                    return actualWorker.isAlive();
+                });
+                try {
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                    assertTrue(monitor.isLedgerBeingReplicated(44));
+                    assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                } finally {
+                    fixture.replyFault.set(0);
+                    fixture.heldReplies.forEach(Runnable::run);
+                }
+                assertFalse(stopping.get(5, TimeUnit.SECONDS));
+                assertFalse(monitor.isLedgerBeingReplicated(44));
+                assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                assertFalse(sdk.getClientCtx().isClientClosed());
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                        data.values().iterator().next().readEntry(fixture.context(), 0)
+                            .get(5, TimeUnit.SECONDS).outcome());
+                var resumed = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture),
+                        sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, coordinator, options);
+                resumed.start();
+                try {
+                    awaitProfileWorkerStarted(resumed);
+                    until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (monitor.getLedgerUnreplicationInfo(44) != null && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertNull(monitor.getLedgerUnreplicationInfo(44));
+                } finally {
+                    resumed.shutdown();
+                }
+            } finally {
+                stopper.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    public void replicationWorkerInterruptedAndConcurrentShutdownKeepsOriginalTaskUntilActualDrain() throws Exception {
+        for (int mode : List.of(0, 1)) {
+            final int scenario = mode;
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                    data.put(fixture.identities.get(node).bookieId(), peer);
+                    evidenceEntry(fixture, peer, 0, -1, 16, 16);
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                        fixture.credential, data, fixture.clients, 3, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                var options = new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                        data, fixture.clients, 3, 8, Duration.ofSeconds(30));
+                var stopper = java.util.concurrent.Executors.newFixedThreadPool(2);
+                try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                    monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                    fixture.replyFault.set(21);
+                    var worker = new org.apache.bookkeeper.replication.ReplicationWorker(
+                            profileWorkerConfiguration(fixture),
+                            sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, coordinator, options);
+                    worker.start();
+                    awaitProfileWorkerStarted(worker);
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertEquals(3, fixture.heldReplies.size());
+                    var caller = new AtomicReference<Thread>();
+                    var stopping = stopper.submit(() -> {
+                        caller.set(Thread.currentThread());
+                        if (scenario == 0) {
+                            Thread.currentThread().interrupt();
+                        }
+                        worker.shutdown();
+                        return Thread.currentThread().isInterrupted();
+                    });
+                    java.util.concurrent.Future<Boolean> concurrent = null;
+                    try {
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                        assertTrue(monitor.isLedgerBeingReplicated(44));
+                        assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                        if (scenario == 1) {
+                            caller.get().interrupt();
+                            concurrent = stopper.submit(() -> {
+                                worker.shutdown();
+                                return Thread.currentThread().isInterrupted();
+                            });
+                            var waiting = concurrent;
+                            assertThrows(java.util.concurrent.TimeoutException.class,
+                                    () -> waiting.get(150, TimeUnit.MILLISECONDS));
+                        }
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                        assertTrue(monitor.isLedgerBeingReplicated(44));
+                    } finally {
+                        fixture.replyFault.set(0);
+                        fixture.heldReplies.forEach(Runnable::run);
+                    }
+                    assertTrue(stopping.get(5, TimeUnit.SECONDS));
+                    if (concurrent != null) {
+                        assertFalse(concurrent.get(5, TimeUnit.SECONDS));
+                    }
+                    assertFalse(monitor.isLedgerBeingReplicated(44));
+                    assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                    assertFalse(sdk.getClientCtx().isClientClosed());
+                    assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                            data.values().iterator().next().readEntry(fixture.context(), 0)
+                                .get(5, TimeUnit.SECONDS).outcome());
+                    var resumed = new org.apache.bookkeeper.replication.ReplicationWorker(
+                            profileWorkerConfiguration(fixture),
+                            sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, coordinator, options);
+                    resumed.start();
+                    try {
+                        awaitProfileWorkerStarted(resumed);
+                        until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (monitor.getLedgerUnreplicationInfo(44) != null && System.nanoTime() < until) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                        assertNull(monitor.getLedgerUnreplicationInfo(44));
+                    } finally {
+                        resumed.shutdown();
+                    }
+                } finally {
+                    stopper.shutdownNow();
+                }
+            }
+        }
+    }
+
+    @Test
     public void replicationWorkerRepairsEmptyLedgerAndEmptyLastWithoutDataOrGrantForA2AndA3() throws Exception {
         for (int ack : List.of(2, 3)) {
             for (int mode : List.of(0, 1, 2, 3)) {

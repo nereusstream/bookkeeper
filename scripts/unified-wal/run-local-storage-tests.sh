@@ -30,6 +30,8 @@ paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/meta/TestL
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestLedgerUnderreplicationManager.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationException.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/ReplicationWorker.java'))
+paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/replication/AutoRecoveryMain.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AutoRecoveryMainTest.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/TestReplicationWorker.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/test/ZooKeeperUtil.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/util/ByteBufList.java'))
