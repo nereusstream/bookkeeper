@@ -1660,6 +1660,9 @@ public class BookKeeperAdmin implements AutoCloseable {
             throw BKException.create(BKException.Code.IllegalOpException);
         }
 
+        BookieLedgerIndexer bookieLedgerIndexer = new BookieLedgerIndexer(bkc.ledgerManager);
+        rejectProfileDecommissionReferences(
+                bookieLedgerIndexer.getBookieToLedgerIndex().get(bookieAddress.toString()));
         triggerAudit();
 
         /*
@@ -1675,9 +1678,9 @@ public class BookKeeperAdmin implements AutoCloseable {
          * bookieLedgerIndexer.getBookieToLedgerIndex.
          */
 
-        BookieLedgerIndexer bookieLedgerIndexer = new BookieLedgerIndexer(bkc.ledgerManager);
         Map<String, Set<Long>> bookieToLedgersMap = bookieLedgerIndexer.getBookieToLedgerIndex();
         Set<Long> ledgersStoredInThisBookie = bookieToLedgersMap.get(bookieAddress.toString());
+        rejectProfileDecommissionReferences(ledgersStoredInThisBookie);
         if ((ledgersStoredInThisBookie != null) && (!ledgersStoredInThisBookie.isEmpty())) {
             /*
              * wait until all the ledgers are replicated to other
@@ -1698,7 +1701,32 @@ public class BookKeeperAdmin implements AutoCloseable {
             urLedgerIterator.forEachRemaining((urLedger) -> {
                 urLedgers.add(urLedger.getLedgerId());
             });
+            rejectProfileDecommissionReferences(urLedgers);
             waitForLedgersToBeReplicated(urLedgers, bookieAddress, bkc.ledgerManager);
+        }
+    }
+
+    private void rejectProfileDecommissionReferences(Collection<Long> ledgers)
+            throws BKException, InterruptedException {
+        if (ledgers == null) {
+            return;
+        }
+        for (long ledger : ledgers) {
+            LedgerMetadata value;
+            try {
+                value = FutureUtils.result(bkc.ledgerManager.readLedgerMetadata(ledger),
+                        BKException.HANDLER).getValue();
+            } catch (BKException absent) {
+                if (absent.getCode() == BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {
+                    continue;
+                }
+                throw absent;
+            }
+            if (value.getCustomMetadata().containsKey(
+                    org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink.KEY)) {
+                log.error().attr("ledgerId", ledger).log("Legacy decommission cannot retire Profile references");
+                throw BKException.create(BKException.Code.IllegalOpException);
+            }
         }
     }
 

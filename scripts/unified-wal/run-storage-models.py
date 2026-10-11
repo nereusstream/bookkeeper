@@ -20,6 +20,8 @@ import time
 
 MATRIX = {
     'a-profile-membership-audit': None,
+    'ce-profile-membership-audit-admin-index': 'AdminIndexPreservesReferences',
+    'ce-profile-membership-audit-admin-return': 'LegacyDoesNotRetireProfile',
     'ce-profile-membership-audit-classic-mask': 'KnownLossSchedulesCheck',
     'ce-profile-membership-audit-classic-route': 'MarksBelongToProfile',
     'ce-profile-membership-audit-scope': 'MarksHaveValidScope',
@@ -659,6 +661,9 @@ def main():
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/server/service/AutoRecoveryService.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AutoRecoveryMainTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/BookieLedgerIndexTest.java")
+    inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/client/BookieDecommissionTest.java")
+    inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/BookKeeperAdmin.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorPeriodicBookieCheckTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/replication/AuditorBookieCheckTaskTest.java")
     inputs.append(root / "bookkeeper-common/src/test/java/org/apache/bookkeeper/test/TestStatsProvider.java")

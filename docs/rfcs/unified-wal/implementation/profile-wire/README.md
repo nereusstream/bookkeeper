@@ -1106,7 +1106,7 @@ mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check
 
 ## Profile 成员故障发现与原 auditor 接线
 
-2026-10-11，第14步接通原AuditorElector/Auditor/AuditorBookieCheckTask的显式Profile成员发现。ProfileAuditor直接借用同一服务SDK/ZK context创建的原registration/reservation/metadata adapters，固定cohort（最多64）和WorkerOptions已验证的descriptor。普通构造器仍OFF。显式Profile auditor只检查带backlink且匹配本descriptor/cohort的ledger；Classic BookieLedgerIndexer跳过带实验Profile backlink的metadata，避免把Classic registry的同名Bookie可用性错误套到Profile ledger。Classic ledger仍走原index；不另建membership、选举、任务或权限日志。
+2026-10-11，第14步接通原AuditorElector/Auditor/AuditorBookieCheckTask的显式Profile成员发现。ProfileAuditor直接借用同一服务SDK/ZK context创建的原registration/reservation/metadata adapters，固定cohort（最多64）和WorkerOptions已验证的descriptor。普通构造器仍OFF。显式Profile auditor只检查带backlink且匹配本descriptor/cohort的ledger；Classic auditor使用限定的getClassicBookieToLedgerIndex过滤实验Profile backlink，避免把Classic registry的同名Bookie可用性错误套到Profile ledger；共享公开getBookieToLedgerIndex仍保留所有引用（下节修复）。Classic ledger仍走原index；不另建membership、选举、任务或权限日志。
 
 Profile分支复用原lostBookieRecoveryDelay、多成员故障处理、delay变更和periodicBookieCheck调度，启动known集合来自配置cohort，最终成员权威仍是LedgerMetadata ensembles。初始扫描即使periodic interval=0也照原规则执行一次。新observer顺序消费原LedgerRangeIterator，每次只保留一个metadata/probe与至多64个peer observations，不再构建另一份全ledger索引；原backend range、SDK/ZK/TLS/kernel/allocator的总字节上限仍未完成，此处不声明全内存有界。
 
@@ -1114,7 +1114,7 @@ watchPeers只在配置Bookie的readiness path安装至多64个persistent recursi
 
 逐ledger核对metadata版本/内容/physical birth、backlink/instance、lifecycle/creatorToken/quorum和retained activation/repair目标身份；要求所有历史ensemble成员在cohort内，并把peer incarnation与已保留receipt匹配。对FOUND再cold revalidate，NOT_FOUND再读，最后再检查metadata/root cut。NOT_FOUND或稳定但不匹配的incarnation只生成原underreplication检查任务；UNAVAILABLE/CORRUPT、变化中的cut、缺失/不一致历史及scope不匹配都defer，不折算为空集合或DATA absence。DELETED不产生新任务。observer不写FENCE/INSTALL/grant/CLOSED、membership或clear marker，原worker/coordinator继续拥有实际授权、COPY、完整W健康证明及guarded completion。
 
-真实闭环：启动前删除Profile writable，保留Classic同名available节点且不手工mark；服务自动产生任务、由真实mTLS/native COPY替换到新目标并在全W健康/lease drain后清marker。关闭过程前的健康副本在observer-only启动中不产生任务；interval=0时删除writable也由真实watch产生原task，再启动原worker完成修复。interval=1的真实periodic检查遇到损坏service-info会记录defer、保持ledger OPEN且不产生marker；恢复注册继续扫描，同名incarnation改变会留下检查任务，但metadata仍OPEN且未授予写权。真实Classic ledger43与Profile ledger44同地址的index验证显示只包含Classic ledger，显式Profile observer不处理Classic ledger。
+真实闭环：启动前删除Profile writable，保留Classic同名available节点且不手工mark；服务自动产生任务、由真实mTLS/native COPY替换到新目标并在全W健康/lease drain后清marker。关闭过程前的健康副本在observer-only启动中不产生任务；interval=0时删除writable也由真实watch产生原task，再启动原worker完成修复。interval=1的真实periodic检查遇到损坏service-info会记录defer、保持ledger OPEN且不产生marker；恢复注册继续扫描，同名incarnation改变会留下检查任务，但metadata仍OPEN且未授予写权。早期Classic43/Profile44同地址验证曾要求公开index只含Classic，后续共享调用方回归揭示该要求范围过宽；当前公开index包含43/44，只有Classic auditor生成43的任务，显式Profile observer不处理Classic ledger。
 
 初轮ZDf95ord exit1是真实RED：Classic同名registry掩盖Profile缺失，目标未替换；sc9PadVn为使用package-private helpers/PageResult字段错误的编译失败（无测试），改为复用discover/profile内原helpers与公开descriptor codec；R5EC4HNQ已自动完成membership但旧等待只看membership、尚未到marker实际排空，保持有效assert并改为同时等待membership和marker。Bv9qYbVj启动GREEN、7N7SfO6i三场景及kusm5Jry（含incarnation）三场景PASS。历史run保持原source/config/command身份，不重绑到后续源码。
 
@@ -1135,3 +1135,30 @@ ProfileMembershipAudit有限投影1完整正向/9指定反例覆盖Classic遮蔽
 本轮历史及最终回执持久副本在`/Users/liusinan/.codex/artifacts/unified-wal/membership-audit-evidence-r9nyiz9e`；archive.json列出初次风格失败及最终checks目录，source/config/run/command身份不改。
 
 最终membership-audit-final-checks-ppc__8jf：style exit0/RAT exit1，443 unapproved路径全部在父HEAD、无新增，5 artifact checksums；初次n1lqyxuv只失败于测试行长121，2 checksums保留。未改许可规则、不称CI全绿。
+
+## 共享引用索引与 legacy 退役拒绝
+
+2026-10-11，规划检查发现35a86ed03f的共享调用方回归：BookKeeperAdmin.decommissionBookie也消费公开getBookieToLedgerIndex。全局跳过Profile ledger后，目标仍在Profile ensemble内且无UR marker（例如注册损坏被正确defer）时，legacy退役可能把缺失索引当迁移完成，正常返回。x8MKPFtt是真实RED：原auditor已选出、实际Profile metadata44仍引用socket2、无marker，legacy方法等待原30秒后成功返回，assertThrows失败。
+
+恢复公开索引的完整引用语义，只由Classic AuditorBookieCheckTask调用package内部的getClassicBookieToLedgerIndex。两条路径复用同一个原metadata walker，不建第二索引框架；key presence决定Profile路由，损坏backlink不降级成Classic。BookKeeperAdmin对known ensemble引用在triggerAudit前作fresh metadata读取，遇到Profile tag明确IllegalOpException；原30秒后的fresh index及UR marker引用再次执行同一检查。metadata read失败沿原错误路径退出，不当不存在；实际已删除ledger可按原NoSuch语义忽略。未创建repair权限、迁移或删除数据，不能把这项拒绝当作Profile decommission实现。
+
+真实验证：共享公开index保留Classic43/Profile44；真正Classic auditor在其cookie目录初始化后只为43产生UR task，44仍无marker。legacy拒绝Profile引用后metadata ensemble/marker及外部SDK保留。原Profile startup/watch/periodic UNKNOWN/incarnation行为保留。JQVwW3nA定向4PASS；2VvQio9R的Classic auditor因借用legacy ZK的cookie目录/ledgers/cookies未建而提前退出，不作为协议RED；补齐该真实目录后ZFUmtrVm的3类10项全部PASS，无mock成功代替真实索引/审计。
+
+本修复只覆盖标准ensemble和UR marker中可见的Profile引用。retained activation、未发布/已admit RepairIntent、离线数据与删除/GC obligations的完整退役协议尚未实现；legacy API不是Profile物理安全退役入口。Profile bookie实际退役/擦盘仍不得启用，需步骤15/16完整合同和实际环境授权。Classic cold admin命令新增preflight读取，不宣称性能收益；普通Add无此查询。
+
+ProfileMembershipAudit补入共享admin index与legacy退役输入/2指定反例，要求公开查询保留引用、legacy不以已知Profile引用结束成功；模型不生产实际metadata、retained-history cleanup或磁盘回收证明。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#sharedIndexRetainsAllReferencesWhileClassicAuditorOnlyMarksClassicLedgers+legacyDecommissionRejectsStillReferencedProfileWithoutMarker+profileAuditor*,AuditorBookieCheckTaskTest,BookieLedgerIndexTest,BookieDecommissionTest#testDecommissionBookie+testDecommissionForEmptyLedgers'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-membership-audit --config-prefix ce-profile-membership-audit
+```
+
+两份runner补入共享BookKeeperAdmin及实际BookieLedgerIndexTest/BookieDecommissionTest输入；历史source/design/receipt绑定不改。完整Profile删除/rejoin/catch-up/GC、总字节预算、周期DATA审计、完整兼容/组合/正式性能与生产Gate仍OPEN，步骤12/14/15保持原未完成范围。Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。
+
+广度JblH1wJd exit0：9类64项零skip（Classic periodic1/task2/index3/UR24/auditor2/Main5/worker3/decommission普通+empty2、native22），1067 inputs/12 artifact checksums。之后仅把admin行1717和测试行5591长行换行，语义和有效断言不变；最终mxzr0tOQ exit0，3类10项全部PASS、1067当前inputs/6 checksums。相关模型r8hp_jno 74配置9完整正向/65指定反例、900inputs/789 checksums，在最后两处换行前；最终_6x_m2x_ 12配置1正向/11反例、900当前inputs/673 checksums。正向5440 generated/1920 distinct、queue0、depth5、1.040秒/peak RSS121552896 bytes（最终run），是有限模型消耗而非性能；tool1.7.4/单worker/heap512/direct64MiB/seed1/fp0/无symmetry/state constraint/CHECK_DEADLOCK FALSE。Java/model共享249/去重1718当前inputs与五个父HEAD设计锁核验，catalog566/完整组合未全跑。
+
+持久回执在`/Users/liusinan/.codex/artifacts/unified-wal/decommission-boundary-evidence-ydhv573w`，archive.json指向checks，原source/config/run/command身份冻结不改。
+
+最终decommission-boundary-checks-0i0hf8nq的style exit0、RAT exit1，443 unapproved路径全在父HEAD，无新增，5 artifact checksums。保留既有许可规则，不计CI全绿。

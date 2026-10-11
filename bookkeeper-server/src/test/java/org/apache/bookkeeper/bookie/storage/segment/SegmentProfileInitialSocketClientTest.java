@@ -5546,6 +5546,78 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void sharedIndexRetainsAllReferencesWhileClassicAuditorOnlyMarksClassicLedgers() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                BookKeeper sdk = sdk(fixture);
+                var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var original = fixture.manager.readLedgerMetadata(44).get().getValue();
+            fixture.manager.createLedgerMetadata(43, LedgerMetadataBuilder.from(original).withId(43)
+                    .withCustomMetadata(Map.of()).build()).get(5, TimeUnit.SECONDS);
+            var index = new org.apache.bookkeeper.replication.BookieLedgerIndexer(fixture.manager)
+                    .getBookieToLedgerIndex();
+            for (int node = 0; node < 3; node++) {
+                assertEquals(java.util.Set.of(43L, 44L), index.get("socket" + node + ":3181"));
+            }
+            // The borrowed-legacy-ZK SDK's Classic cookie registry uses its configured default root.
+            if (fixture.zk.exists("/ledgers/cookies", false) == null) {
+                fixture.zk.create("/ledgers/cookies", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            }
+            var conf = profileWorkerConfiguration(fixture);
+            conf.setLostBookieRecoveryDelay(0);
+            conf.setAuditorPeriodicBookieCheckInterval(0);
+            conf.setAuditorPeriodicCheckInterval(0);
+            conf.setAuditorPeriodicReplicasCheckInterval(0);
+            conf.setAuditorPeriodicPlacementPolicyCheckInterval(0);
+            try (var auditor = new org.apache.bookkeeper.replication.Auditor("classic-auditor:3181", conf, sdk,
+                    false, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE)) {
+                auditor.start();
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (monitor.getLedgerUnreplicationInfo(43) == null && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertNotNull(monitor.getLedgerUnreplicationInfo(43));
+                assertNull(monitor.getLedgerUnreplicationInfo(44));
+            }
+            assertFalse(sdk.getClientCtx().isClientClosed());
+        }
+    }
+
+    @Test
+    public void legacyDecommissionRejectsStillReferencedProfileWithoutMarker() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                BookKeeper sdk = sdk(fixture);
+                org.apache.bookkeeper.client.BookKeeperAdmin admin =
+                        new org.apache.bookkeeper.client.BookKeeperAdmin(sdk);
+                var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var conf = profileWorkerConfiguration(fixture);
+            conf.setLostBookieRecoveryDelay(0);
+            conf.setAuditorPeriodicBookieCheckInterval(0);
+            conf.setAuditorPeriodicCheckInterval(0);
+            conf.setAuditorPeriodicReplicasCheckInterval(0);
+            conf.setAuditorPeriodicPlacementPolicyCheckInterval(0);
+            var elector = new org.apache.bookkeeper.replication.AuditorElector(
+                    "legacy-auditor:3181", conf, sdk, false);
+            try {
+                elector.start().get(5, TimeUnit.SECONDS);
+                assertNull(monitor.getLedgerUnreplicationInfo(44));
+                var rejected = assertThrows(BKException.class,
+                        () -> admin.decommissionBookie(fixture.identities.get(2).bookieId()));
+                assertEquals(BKException.Code.IllegalOpException, rejected.getCode());
+                assertNull(monitor.getLedgerUnreplicationInfo(44));
+                assertEquals(fixture.identities.get(2).bookieId(),
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getAllEnsembles().get(0L).get(2));
+                assertFalse(sdk.getClientCtx().isClientClosed());
+            } finally {
+                elector.shutdown();
+            }
+        }
+    }
+
+    @Test
     public void profileAuditorWatchCreatesOriginalTaskAndWorkerRepairsWithoutManualMarker() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true);
                 BookKeeper sdk = sdk(fixture);
@@ -5619,7 +5691,7 @@ public class SegmentProfileInitialSocketClientTest {
             var index = new org.apache.bookkeeper.replication.BookieLedgerIndexer(fixture.manager)
                     .getBookieToLedgerIndex();
             for (int node = 0; node < 3; node++) {
-                assertEquals(java.util.Set.of(43L), index.get("socket" + node + ":3181"));
+                assertEquals(java.util.Set.of(43L, 44L), index.get("socket" + node + ":3181"));
             }
             var stats = new org.apache.bookkeeper.test.TestStatsProvider();
             var main = profileMembershipMain(fixture, stats.getStatsLogger(""), 1);

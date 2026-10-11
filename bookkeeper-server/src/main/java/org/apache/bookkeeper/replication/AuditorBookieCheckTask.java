@@ -175,7 +175,7 @@ public class AuditorBookieCheckTask extends AuditorTask {
 
     private Map<String, Set<Long>> generateBookie2LedgersIndex()
             throws ReplicationException.BKAuditException {
-        return bookieLedgerIndexer.getBookieToLedgerIndex();
+        return bookieLedgerIndexer.getClassicBookieToLedgerIndex();
     }
 
     private CompletableFuture<?> handleLostBookiesAsync(Collection<String> lostBookies,

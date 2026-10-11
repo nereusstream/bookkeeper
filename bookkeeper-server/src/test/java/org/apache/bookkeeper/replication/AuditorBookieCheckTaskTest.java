@@ -105,7 +105,7 @@ public class AuditorBookieCheckTaskTest {
         final Map<String, Set<Long>> bookiesAndLedgers = Maps.newHashMap();
         bookiesAndLedgers.put(bookieId1, getLedgers(bookie1LedgersCount));
         bookiesAndLedgers.put(bookieId2, getLedgers(bookie2LedgersCount));
-        when(ledgerIndexer.getBookieToLedgerIndex()).thenReturn(bookiesAndLedgers);
+        when(ledgerIndexer.getClassicBookieToLedgerIndex()).thenReturn(bookiesAndLedgers);
         when(underreplicationManager.isLedgerReplicationEnabled()).thenReturn(true);
 
         CompletableFuture<Versioned<LedgerMetadata>> metaPromise = new CompletableFuture<>();

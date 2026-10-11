@@ -34,7 +34,7 @@ import org.apache.bookkeeper.replication.ReplicationException.BKAuditException;
 import org.apache.zookeeper.AsyncCallback;
 
 /**
- * Preparing Classic bookie vs its corresponding ledgers. This will always look up the
+ * Preparing bookie vs its corresponding ledgers. This will always look up the
  * ledgermanager for ledger metadata and will generate indexes.
  */
 @CustomLog
@@ -56,6 +56,15 @@ public class BookieLedgerIndexer {
      */
     public Map<String, Set<Long>> getBookieToLedgerIndex()
             throws BKAuditException {
+        return getBookieToLedgerIndex(false);
+    }
+
+    // Only the Classic auditor filters unsupported Profile metadata; admin callers need all references.
+    Map<String, Set<Long>> getClassicBookieToLedgerIndex() throws BKAuditException {
+        return getBookieToLedgerIndex(true);
+    }
+
+    private Map<String, Set<Long>> getBookieToLedgerIndex(boolean classicOnly) throws BKAuditException {
         // bookie vs ledgers map
         final ConcurrentHashMap<String, Set<Long>> bookie2ledgersMap = new ConcurrentHashMap<String, Set<Long>>();
         final CountDownLatch ledgerCollectorLatch = new CountDownLatch(1);
@@ -65,7 +74,7 @@ public class BookieLedgerIndexer {
                 public void process(Long ledgerId, AsyncCallback.VoidCallback iterCallback) {
                     ledgerManager.readLedgerMetadata(ledgerId).whenComplete((metadata, exception) -> {
                                 if (exception == null) {
-                                    if (metadata.getValue().getCustomMetadata().containsKey(
+                                    if (classicOnly && metadata.getValue().getCustomMetadata().containsKey(
                                             org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink.KEY)) {
                                         iterCallback.processResult(BKException.Code.OK, null, null);
                                         return; // Profile membership needs its explicit scoped observer.
