@@ -2062,6 +2062,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return type == SegmentControlFormat.Type.TOMBSTONE || type == SegmentControlFormat.Type.DELETE_DELIVERY_APPLY;
     }
 
+    /** Observed control authority only; absence of local-success receipts is not a rollback permission. */
+    synchronized org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts rollbackSafetyFacts() {
+        return new org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts(false, !ledgers.isEmpty(),
+                ledgers.values().stream().anyMatch(state -> state.activationGeneration != 0),
+                !fenceOperations.isEmpty() || ledgers.values().stream().anyMatch(state -> state.fenced
+                        || !state.recoveryGrants.isEmpty()), !tombstones.isEmpty(), false, failed);
+    }
+
     synchronized ProfileControlRequest.DeleteBinding deleteAppliedCursor() {
         return deleteApplied;
     }

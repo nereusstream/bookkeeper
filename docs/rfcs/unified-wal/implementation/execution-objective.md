@@ -53,3 +53,6 @@
 
 
 2026-10-12继续第15步：65a28a35c4之后已把全部target event/index/head与有界publication prefix原子记录，完整prefix后才logical activation；schema2 reference固定required prefix birth，PREPARED不授权local delete。原registered graph已显式接borrowed cold/scheduler持续消费，UNKNOWN/stop/close保留actual local I/O及locks直到终结；实际网络/ZK/文件/注册竞争与当前证据由profile-wire/README.md“全目标 publication 与在线节点消费”拥有。默认bootstrap/SDK路由、其余required facts、snapshot/handoff/history GC/decommission、full-bytes/兼容/正式性能/运维与全部综合验收继续推进。持续目标active，步骤12/14/15及生产Gate保持PARTIAL/OPEN，不把本提交当16步完成。
+
+
+2026-10-12继续第12/15步：3e82a21ed9后已把original recovered graph的device/allocator/route/delete事实接回原StartupReadinessHarness、真实DLR/ZK发布/session admission和既有consumer。manifest/client不匹配与scheduler拒绝路径已有真实组合证据，当前源码/阶段source及未覆盖范围由startup-readiness/README.md“实际恢复 graph 与原 startup 发布桥接”拥有。compatibility fence/new-scope独立credential真实issuer与默认EmbeddedServer/bootstrap/SDK routing继续OPEN，snapshot/handoff/history GC/decommission、full-bytes/兼容/正式性能/运维及全16步综合验收继续推进。持续目标active，步骤12/14/15和生产Gate保持PARTIAL/OPEN，本切片不等于整个目标完成。

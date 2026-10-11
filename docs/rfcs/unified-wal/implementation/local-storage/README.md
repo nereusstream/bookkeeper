@@ -897,3 +897,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [原graph在线删除effect消费](../profile-wire/README.md#全目标-publication-与在线节点消费)由原注册attempt显式启动单active bounded cold probe，复用type13 force/apply/no-hole cursor；PREPARED/inactive不入本地TOMBSTONE。UNKNOWN后等actual completion，stop退休准入且不取消已提交I/O；graph close先排空consumer再关原owner/resources，false保留原锁。实际held native force与独立writer锁验证已有覆盖；无新线程/队列/持久任务系统、无FREE/强访问屏障保证，default bootstrap与完整Gate仍OPEN。
+
+
+2026-10-12 [实际恢复 startup facts](../startup-readiness/README.md#实际恢复-graph-与原-startup-发布桥接)从原single-Arena全声明header生成expected manifest，复用真实控制/DATA/index/owner恢复和committed delete catch-up，在同一健康graph核对无未决义务后产生device/allocator/route/delete观察。它复用原恢复检查，必需控制文件不会CREATE；不是从可读子集补造required set或自动接管未健康CLOSE历史。原Harness发布后显式接admission/consumer，scheduler拒绝会退休/demote；compatibility fence、独立credential和默认Bookie启动仍未实现，生产Gate保持OPEN。

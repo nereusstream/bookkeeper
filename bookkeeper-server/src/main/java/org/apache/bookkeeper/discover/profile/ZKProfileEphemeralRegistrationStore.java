@@ -90,6 +90,16 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         deleteProgress = progress;
     }
 
+    /** Keep the bridge on the original exact client/namespace/source and storage attempt. */
+    public void requireStartupStores(Admission expected, ZKProfileRegistrationStore persistent,
+            ZKProfileReservationStore reservations, StorageIncarnation incarnation) {
+        if (admission != expected || !backend.samePublisherContext(persistent) || deleteDelivery != reservations
+                || !incarnation.equals(deleteIncarnation)) {
+            throw new IllegalArgumentException("Startup stores do not belong to this publisher attempt");
+        }
+        requirePublishingSession();
+    }
+
     /** Bind before any cold operation, using the watcher manager of this exact client. */
     public synchronized Admission watchAdmission(ZooKeeperWatcherBase watcherManager) {
         Objects.requireNonNull(watcherManager, "watcherManager");

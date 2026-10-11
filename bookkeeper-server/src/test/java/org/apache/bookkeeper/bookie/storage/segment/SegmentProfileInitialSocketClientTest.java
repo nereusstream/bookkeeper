@@ -91,6 +91,15 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlResult.Outcome
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
+import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
+import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.LocalRecoveryFacts;
+import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
+import org.apache.bookkeeper.common.profile.startup.NewScopeFallbackManifest;
+import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
+import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
+import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
+import org.apache.bookkeeper.common.profile.startup.StartupReadinessResult;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
@@ -110,6 +119,8 @@ import org.apache.bookkeeper.discover.profile.ProfileReplacementCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementInstallPage;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementPage;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
+import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
 import org.apache.bookkeeper.meta.LedgerManager;
@@ -1664,6 +1675,189 @@ public class SegmentProfileInitialSocketClientTest {
                     callback.processResult(code, path, context, results);
                 }
             }, context);
+        }
+    }
+
+    private static StartupReadinessInput startupPolicy(
+            IsolatedSegmentConfig config, SegmentFileHeader identity) {
+        var gen = new Generation(1);
+        var manifest = IsolatedSegmentStorage.startupDeviceManifestIdentity(config, identity);
+        var compatibility = new BookieCompatibilityFact(
+                identity.bookieId().toString(), identity.incarnation(), EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, 1,
+                List.of(IsolatedSegmentStorage.STARTUP_BASE_FORMAT_FEATURE), manifest, gen, gen, gen, 1, 1,
+                BookieCompatibilityFact.MigrationState.FORMAT_READY, gen);
+        var devices = new RequiredDeviceManifest(manifest, gen, List.of(
+                new RequiredDeviceManifest.RequiredDeviceFact(
+                        identity.arenaId().toString(), identity.incarnation(), gen,
+                        RequiredDeviceManifest.DeviceStatus.CORRUPT,
+                        1, 1, 1, gen, List.of(IsolatedSegmentStorage.STARTUP_BASE_FORMAT_FEATURE))));
+        var missing = LocalRecoveryFacts.RecoveryStatus.MISSING;
+        var recovery = new LocalRecoveryFacts(identity.incarnation(),
+                gen, missing, missing, missing, gen);
+        var oldRoots = java.util.Arrays.stream(
+                NewScopeFallbackManifest.RootKind.values())
+                .map(kind -> new NewScopeFallbackManifest.StorageRoot(
+                        kind, "/old/" + kind.name())).sorted(java.util.Comparator.comparing(
+                            NewScopeFallbackManifest.StorageRoot::opaquePath))
+                .toList();
+        var newRoots = oldRoots.stream().map(root ->
+                new NewScopeFallbackManifest.StorageRoot(
+                        root.kind(), "/new/" + root.kind().name())).toList();
+        var fallback = new NewScopeFallbackManifest("old",
+                identity.bookieId().toString(), new StorageIncarnation(bytes(16, 111)),
+                identity.incarnation(), oldRoots, newRoots,
+                new NewScopeFallbackManifest.CredentialScope("old-user"),
+                new NewScopeFallbackManifest.CredentialScope("new-user"),
+                NewScopeFallbackManifest.OldScopeDisposition.DRAINED,
+                NewScopeFallbackManifest.AccessLevel.NONE,
+                NewScopeFallbackManifest.AccessLevel.READ_WRITE);
+        return new StartupReadinessInput(compatibility, devices, recovery,
+                fallback, new RollbackSafetyFacts(
+                        false, false, false, false, false, false, false), gen, gen, 1, 1,
+                List.of(IsolatedSegmentStorage.STARTUP_BASE_FORMAT_FEATURE), "startup", List.of(1));
+    }
+
+    @Test
+    public void readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence() throws Exception {
+        for (boolean rejectedScheduler : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    data.put(fixture.identities.get(node).bookieId(),
+                            dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk,
+                        (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold).recover(44, bytes(16, 51),
+                        sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR, fixture.credential,
+                        data, fixture.clients,
+                        4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                var deleted = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(fixture.reservations,
+                        metadata, fixture.cold).deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(),
+                                Duration.ofSeconds(30))
+                        .get(30, TimeUnit.SECONDS);
+                assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, deleted.status());
+                var identity = fixture.identities.get(0);
+                var config = files(fixture.nodes.get(0)).config();
+                fixture.nodes.get(0).close();
+                var watcher = new ZooKeeperWatcherBase(10000, false);
+                try (var client = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher)) {
+                    watcher.waitForConnection();
+                    String root = "/socket-readiness-bridge";
+                    client.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                    var source = new ZKProfileReservationStore(client, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            Duration.ofSeconds(5));
+                    var sourceMetadata = new ProfileLedgerMetadataStore(client,
+                            (AbstractZkLedgerManager) fixture.manager,
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var persistent = new ZKProfileRegistrationStore(client, root,
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var publisher = new ZKProfileEphemeralRegistrationStore(client,
+                            root, identity.bookieId().toString(),
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    try (var replay = new IsolatedSegmentStorage(config, identity,
+                            new SecretKeySpec(bytes(32, 7), "AES"),
+                            VALIDATOR, new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                                    2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                            new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                                    new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                        publisher.bindDeleteDelivery(source, identity.incarnation(), replay::profileDeleteProgress);
+                        try (var admission = publisher.watchAdmission(watcher)) {
+                            replay.bindProfileRegistration(admission);
+                            replay.restart();
+                            var policy = startupPolicy(config, identity);
+                            var wrongManifest = new RequiredDeviceManifest(
+                                    new ManifestIdentity(bytes(32, 19)),
+                                    policy.requiredDevices().generation(), policy.requiredDevices().devices());
+                            var wrongPolicy = new StartupReadinessInput(
+                                    policy.compatibility(), wrongManifest, policy.recoveryFacts(),
+                                    policy.newScopeFallback(),
+                                    policy.rollbackSafetyFacts(), policy.targetReadinessGeneration(),
+                                    policy.capabilityGeneration(),
+                                    policy.runtimeReaderVersion(),
+                                    policy.runtimeWriterVersion(),
+                                    policy.supportedMandatoryFeatures(), policy.profileEndpoint(),
+                                    policy.capabilityHints());
+                            assertThrows(java.io.IOException.class, () -> replay.recoveredStartupFacts(
+                                    wrongPolicy, source,
+                                    sourceMetadata, "ledger-profile", 4, Duration.ofSeconds(5)));
+                            assertNull(bookie(replay).deleteAppliedCursor());
+                            var facts = CompletableFuture.supplyAsync(() -> {
+                                try {
+                                    return replay.recoveredStartupFacts(policy, source, sourceMetadata,
+                                            "ledger-profile", 4,
+                                            Duration.ofSeconds(5));
+                                } catch (java.io.IOException failure) {
+                                    throw new java.util.concurrent.CompletionException(failure);
+                                }
+                            }, fixture.cold).get(10, TimeUnit.SECONDS);
+                            assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, facts.deleteStatus());
+                            assertEquals(LocalRecoveryFacts.RecoveryStatus.RECOVERED,
+                                    facts.input().recoveryFacts().allocatorRecovery());
+                            assertEquals(RequiredDeviceManifest.DeviceStatus.READY,
+                                    facts.input().requiredDevices().devices().get(0).status());
+                            assertTrue(facts.input().rollbackSafetyFacts().tombstone());
+                            assertTrue(facts.input().rollbackSafetyFacts().arenaAuthority());
+                            assertFalse(admission.getAsBoolean());
+                            try (var local = new SegmentLocalReadinessStore(config.directory(),
+                                    identity.bookieId().toString(), identity.incarnation())) {
+                                assertThrows(IllegalArgumentException.class, () -> replay.reconcileReadiness(
+                                        policy, local,
+                                        new ZKProfileRegistrationStore(fixture.zk,
+                                                root, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5)),
+                                        publisher, source, sourceMetadata, "ledger-profile",
+                                        sdk.getClientCtx().getScheduler(),
+                                        fixture.cold, 4, Duration.ofSeconds(5), Duration.ofMillis(100), () -> true));
+                                assertTrue(local.read(identity.bookieId().toString()).isEmpty());
+                                var scheduler = new java.util.concurrent.ScheduledThreadPoolExecutor(1);
+                                scheduler.shutdown();
+                                var startup = CompletableFuture.supplyAsync(() -> {
+                                    try {
+                                        return replay.reconcileReadiness(policy, local, persistent, publisher, source,
+                                                sourceMetadata, "ledger-profile", rejectedScheduler ? scheduler
+                                                        : sdk.getClientCtx().getScheduler(), fixture.cold, 4,
+                                                Duration.ofSeconds(5), Duration.ofMillis(100), () -> true);
+                                    } catch (java.io.IOException failure) {
+                                        throw new java.util.concurrent.CompletionException(failure);
+                                    }
+                                }, fixture.cold);
+                                if (rejectedScheduler) {
+                                    var failure = assertThrows(ExecutionException.class,
+                                            () -> startup.get(10, TimeUnit.SECONDS));
+                                    assertTrue(failure.getCause() instanceof IllegalStateException);
+                                    assertFalse(admission.getAsBoolean());
+                                    assertThrows(IllegalStateException.class,
+                                            () -> publisher.readWritable(identity.bookieId().toString()));
+                                    assertTrue(replay.close(Duration.ofSeconds(5)));
+                                    continue;
+                                }
+                                var attempt = startup.get(10, TimeUnit.SECONDS);
+                                attempt.completion().get(5, TimeUnit.SECONDS);
+                                assertEquals(StartupReadinessResult.Outcome.WRITABLE,
+                                        attempt.readiness().outcome());
+                                assertTrue(admission.getAsBoolean());
+                                assertTrue(local.read(identity.bookieId().toString()).orElseThrow().durable());
+                                assertEquals(policy.compatibility().deviceManifestIdentity(), persistent.read(
+                                        identity.bookieId().toString()).versionedRecord().orElseThrow().record()
+                                                .deviceManifestIdentity());
+                                assertTrue(publisher.readWritable(identity.bookieId().toString()).isPresent());
+                                assertFalse(replay.profileReadVisible(fixture.context(), 0));
+                            }
+                            assertTrue(replay.close(Duration.ofSeconds(5)));
+                            assertFalse(admission.getAsBoolean());
+                            publisher.demote(identity.bookieId().toString());
+                            var unavailable = replay.recoveredStartupFacts(policy, source, sourceMetadata,
+                                    "ledger-profile", 4, Duration.ofSeconds(5));
+                            assertNull(unavailable.input());
+                            assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.QUARANTINED,
+                                    unavailable.deleteStatus());
+                        }
+                    }
+                }
+            }
         }
     }
 

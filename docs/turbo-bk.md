@@ -679,3 +679,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-12 [全目标 publication 与在线节点消费](rfcs/unified-wal/implementation/profile-wire/README.md#全目标-publication-与在线节点消费)已把每target event/index/head与publication前缀同事务记录，全部target就绪才发布logical tombstone，消除logical success后journal尚未可见的窗口；PREPARED不授予local delete。schema2 reference绑定prefix birth，原schema1 bytes保留；原注册graph借用bounded cold/scheduler持续消费，UNKNOWN/stop等actual local completion，close未排空保留锁。真实自动投递/注册race/cancel续接/required prefix loss/held force已有证据；阶段176与当前10项Java、31个有限模型配置分别保留原source，style通过，RAT443历史问题无新增。default bootstrap、snapshot/handoff/GC/退役、其余facts/full-bytes/综合Gate仍OPEN，步骤12/14/15保持PARTIAL。
+
+
+2026-10-12 [实际恢复 graph 与原 startup 发布桥接](rfcs/unified-wal/implementation/startup-readiness/README.md#实际恢复-graph-与原-startup-发布桥接)已将actual device/allocator/route/delete facts接回原Harness、DLR/ZK发布/session admission及既有consumer，manifest/client不匹配、consumer scheduler拒绝会拒绝或退休/demote。广度77项与最终1项真实组合、20配置有限模型按阶段source保留，style通过，RAT443父HEAD历史问题无新增。兼容性fence与credential/new-scope真实issuer、默认bootstrap/SDK routing、snapshot/handoff/GC、full-bytes及综合验收仍OPEN；步骤12/14/15保持PARTIAL，生产Gate不提升。

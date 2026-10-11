@@ -45,6 +45,15 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.LocalReadinessStore;
+import org.apache.bookkeeper.common.profile.startup.LocalRecoveryFacts;
+import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
+import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
+import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
+import org.apache.bookkeeper.common.profile.startup.StartupCrashPoint;
+import org.apache.bookkeeper.common.profile.startup.StartupReadinessHarness;
+import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
+import org.apache.bookkeeper.common.profile.startup.StartupReadinessResult;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -53,6 +62,7 @@ import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
@@ -399,6 +409,150 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     identity.incarnation(), scheduler, cold, maxEvents, probeTimeout, pollInterval);
             deleteFollower.start();
             return deleteFollower;
+        }
+    }
+
+    // Reference feature 1 denotes the mandatory experimental version-1 header/control/framing base.
+    static final int STARTUP_BASE_FORMAT_FEATURE = 1;
+
+    /** Expected full single-Arena manifest identity, independent of a readable filesystem subset. */
+    static ManifestIdentity startupDeviceManifestIdentity(
+            IsolatedSegmentConfig config, SegmentFileHeader identity) {
+        try {
+            var hash = java.security.MessageDigest.getInstance("SHA-256");
+            hash.update("BookKeeper/IsolatedStartupDevice/v1\0".getBytes(StandardCharsets.US_ASCII));
+            hash.update(identity.encode(config, -1));
+            return new ManifestIdentity(hash.digest());
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    record StartupFacts(StartupReadinessInput input,
+            DeleteCatchUpStatus deleteStatus, CompletableFuture<Void> completion) {
+        @Override
+        public CompletableFuture<Void> completion() {
+            return completion.copy();
+        }
+    }
+
+    /** Replaces supplied device/recovery conclusions with this actual graph and committed delete catch-up. */
+    StartupFacts recoveredStartupFacts(StartupReadinessInput policy,
+            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata, String domain,
+            int maxEvents, Duration timeout) throws IOException {
+        return recoveredStartupFacts(policy, reservations, metadata, domain, maxEvents, timeout, () -> true);
+    }
+
+    private StartupFacts recoveredStartupFacts(StartupReadinessInput policy,
+            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata, String domain,
+            int maxEvents, Duration timeout, BooleanSupplier live) throws IOException {
+        Objects.requireNonNull(policy, "policy");
+        var compatibility = policy.compatibility();
+        var expected = policy.requiredDevices();
+        var one = new Generation(1);
+        var digest = startupDeviceManifestIdentity(config, identity);
+        if (!compatibility.bookieId().equals(identity.bookieId().toString())
+                || !compatibility.storageIncarnation().equals(identity.incarnation())
+                || compatibility.activeEngine() != EngineProfile.SEGMENT_WAL_ENGINE
+                || compatibility.profileWireMajor() != 1 || compatibility.profileWireMinor() != 0
+                || compatibility.descriptorHashSuite() != 1
+                || !compatibility.mandatoryLocalFeatures().equals(List.of(STARTUP_BASE_FORMAT_FEATURE))
+                || !compatibility.localFormatGeneration().equals(one)
+                || !compatibility.deviceManifestGeneration().equals(one)
+                || !compatibility.deviceManifestIdentity().equals(digest)
+                || !expected.identity().equals(digest) || !expected.generation().equals(one)
+                || expected.devices().size() != 1) {
+            throw new IOException("Required compatibility/device scope does not match this actual isolated graph");
+        }
+        var device = expected.devices().get(0);
+        if (!device.deviceId().equals(identity.arenaId().toString())
+                || !device.storageIncarnation().equals(identity.incarnation())
+                || !device.manifestGeneration().equals(one) || device.arenaFormatVersion() != 1
+                || device.controlFormatVersion() != 1 || device.checkpointFormatVersion() != 1
+                || !device.superblockGeneration().equals(one)
+                || !device.mandatoryFeatures().equals(List.of(STARTUP_BASE_FORMAT_FEATURE))) {
+            throw new IOException("Required Arena identity/generation/format is unsupported or mismatched");
+        }
+        var caughtUp = catchUpProfileDeletes(reservations, metadata, domain, maxEvents, timeout, live);
+        if (caughtUp.status() != DeleteCatchUpStatus.CAUGHT_UP) {
+            return new StartupFacts(null, caughtUp.status(), caughtUp.completion());
+        }
+        synchronized (gate) {
+            if (!accepting || closed || !files.matchesScope(config, identity)
+                    || !arena.matchesScope(config, identity) || !bookie.matchesScope(config, identity)) {
+                throw new IOException("Original recovered graph is no longer available");
+            }
+            // Actual opened graph has validated every required header, recovered/synced control and DATA,
+            // restored derived locations and bootstrapped its fixed owners. A caller READY cannot replace these steps.
+            bookie.recoveryReadCut(config, identity);
+            arena.requireStartupRecovered(config, identity);
+            var observed = new RequiredDeviceManifest(digest, one,
+                    List.of(new RequiredDeviceManifest.RequiredDeviceFact(
+                            identity.arenaId().toString(), identity.incarnation(), one,
+                            RequiredDeviceManifest.DeviceStatus.READY,
+                            1, 1, 1, one, List.of(STARTUP_BASE_FORMAT_FEATURE))));
+            var status = LocalRecoveryFacts.RecoveryStatus.RECOVERED;
+            var recovery = new LocalRecoveryFacts(identity.incarnation(),
+                    one, status, status, status, new Generation(caughtUp.required().assignmentGeneration()));
+            var controls = bookie.rollbackSafetyFacts();
+            var rollback = new RollbackSafetyFacts(
+                    controls.localSuccess(), controls.routeOrInstall(), controls.activation(), controls.fenceOrGrant(),
+                    controls.tombstone(), arena.appliedThrough() >= 0, controls.durabilityUnknown());
+            var actual = new StartupReadinessInput(compatibility,
+                    observed, recovery, policy.newScopeFallback(), rollback, policy.targetReadinessGeneration(),
+                    policy.capabilityGeneration(), policy.runtimeReaderVersion(), policy.runtimeWriterVersion(),
+                    policy.supportedMandatoryFeatures(), policy.profileEndpoint(), policy.capabilityHints());
+            return new StartupFacts(actual, caughtUp.status(), caughtUp.completion());
+        }
+    }
+
+    record ReadinessAttempt(StartupReadinessResult readiness, DeleteCatchUpStatus deleteStatus,
+            CompletableFuture<Void> completion) {
+        @Override
+        public CompletableFuture<Void> completion() {
+            return completion.copy();
+        }
+    }
+
+    /** Cold bridge to the original startup state machine. Compatibility/fallback policy still needs its issuer. */
+    ReadinessAttempt reconcileReadiness(StartupReadinessInput policy, LocalReadinessStore local,
+            ZKProfileRegistrationStore persistent, ZKProfileEphemeralRegistrationStore publisher,
+            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata, String domain,
+            ScheduledExecutorService scheduler, ThreadPoolExecutor cold, int maxEvents, Duration timeout,
+            Duration pollInterval, BooleanSupplier live) throws IOException {
+        Objects.requireNonNull(live, "live");
+        if (profileAdmission == null) {
+            throw new IllegalStateException("Readiness requires the original pre-bound pending admission");
+        }
+        publisher.requireStartupStores(profileAdmission, persistent, reservations, identity.incarnation());
+        var facts = recoveredStartupFacts(policy, reservations, metadata, domain, maxEvents, timeout, live);
+        if (facts.input() == null) {
+            return new ReadinessAttempt(null, facts.deleteStatus(), facts.completion());
+        }
+        if (!live.getAsBoolean()) {
+            publisher.demote(identity.bookieId().toString());
+            return new ReadinessAttempt(null, DeleteCatchUpStatus.UNAVAILABLE, facts.completion());
+        }
+        var readiness = new StartupReadinessHarness(local, persistent, publisher)
+                .run(facts.input(), StartupCrashPoint.NONE);
+        if (readiness.outcome() != StartupReadinessResult.Outcome.WRITABLE) {
+            return new ReadinessAttempt(readiness, facts.deleteStatus(), facts.completion());
+        }
+        try {
+            var registration = publisher.readWritable(identity.bookieId().toString()).orElseThrow();
+            if (!live.getAsBoolean() || !profileAdmission.openAfterReconciliation(registration)) {
+                throw new IllegalStateException("Startup attempt retired before final local admission");
+            }
+            var follower = startDeleteFollower(reservations, metadata, domain, scheduler, cold, maxEvents,
+                    timeout, pollInterval);
+            if (!live.getAsBoolean() || !profileAdmission.getAsBoolean() || follower.failure() != null) {
+                follower.closeAsync();
+                throw new IllegalStateException("Original startup consumer did not retain admission");
+            }
+            return new ReadinessAttempt(readiness, facts.deleteStatus(), facts.completion());
+        } catch (RuntimeException retired) {
+            publisher.demote(identity.bookieId().toString());
+            throw retired;
         }
     }
 

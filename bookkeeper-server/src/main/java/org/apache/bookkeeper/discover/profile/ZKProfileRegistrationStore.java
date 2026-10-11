@@ -301,6 +301,10 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
         timeoutNanos = timeout.toNanos();
     }
 
+    boolean samePublisherContext(ZKProfileRegistrationStore other) {
+        return other != null && other.zk == zk && other.root.equals(root);
+    }
+
     @Override
     public ReadResult read(String bookieId) {
         long deadline = System.nanoTime() + timeoutNanos;

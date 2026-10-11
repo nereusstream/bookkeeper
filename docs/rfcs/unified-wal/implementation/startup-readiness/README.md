@@ -246,3 +246,34 @@ Java `unified-wal-local-GDbVx4DD` exit0：3类42项全部通过（persistent con
 
 
 2026-10-12 [全目标 source与原注册consumer](../profile-wire/README.md#全目标-publication-与在线节点消费)在logical前使全部target head的required-through可见，PREPARED阻塞追赶而不授权删除；新reference持久绑定完整publication prefix。原registered graph显式借用cold/scheduler消费后续CLOSED effects，ordinary head增长不demote；stop/session退休保持local gate关闭并等待actual I/O，未排空close保留locks。该接线仍要求既有真实startup前置/default bootstrap等其余facts，snapshot/handoff及完整Gate不提升。
+
+
+## 实际恢复 graph 与原 startup 发布桥接
+
+2026-10-12，`IsolatedSegmentStorage.recoveredStartupFacts` 在原 opened graph 上产生 device/allocator/route/delete 观察，`reconcileReadiness` 将它们接到已有 `StartupReadinessHarness`，没有另建状态机、线程、队列或持久格式。入口是显式、有界的 cold 启动步骤，调用方须持有原 graph 的启动编排，先绑定 pending registration admission，再完成 `startNew`/健康 `restart`，期间不交付其他 graph 操作。
+
+初始单 Arena 的 expected manifest identity 是域分离 SHA-256 加原完整 immutable version-1 header；包含声明的全部 DATA 文件拓扑、Bookie/incarnation/Arena 和持久格式，不从当前可读目录子集猜测 required set。它不受执行线程数、placement 或目录位置影响。compatibility policy 和 expected device 要求须与本 graph 的固定 scope/generation/format 一致；错 manifest 或不支持的要求在 delete apply 前拒绝。内部 reference feature 1 表示 mandatory experimental version-1 header/control/framing base，不新增磁盘 feature bit、wire capability 或已发布格式承诺。
+
+实际 graph 打开仍复用原全部 DATA header、双控制日志、DATA recovery sync、派生定位恢复和固定 owner bootstrap；必需控制文件的 open 已不使用 CREATE，不因文件缺失补造权威。产生 facts 时再次检查同一健康 scope、无未决 Bookie 控制/entry义务、无未决或quarantine Arena状态及原 managed session。bounded delete catch-up 必须从 committed source 达到当前 shared assignment/head；LIMIT/UNKNOWN/UNAVAILABLE/QUARANTINED 均不产生可发布 input。观察覆盖 allocator/route/delete RECOVERED、实际 READY device 和当前 assignment generation； supplied device status/recovery conclusion 被实际观察替换。rollback facts 从已恢复 control 的 install/activation/fence/grant/tombstone 和 Arena authority 取得；没有 success receipt 不能证明曾经没有成功，仍不授予回退权限。
+
+publisher 要求原 admission 对象、同一个 ZK client/registration namespace、已绑定的 reservation source 与本 incarnation。原 Harness 顺序仍是 DLR 文件/目录持久化 → persistent readiness CAS → service-info → writable → exact final read；原 writable multi 继续消费 delete required-through cut。随后 `openAfterReconciliation` 再做原 session/nonce/tuple复核，并启动已有 `SegmentProfileDeleteFollower`。调度器拒绝、attempt退休或consumer失败不返回可用 WRITABLE，撤销本地准入并demote原发布；graph关闭仍按原consumer实际排空协议。completion 访问器只返回副本，其含义是已提交本地delete I/O/owner完成，不是远端ZK操作取消或整个graph排空。
+
+兼容性 fence/migration 状态、reader/writer门槛、new-scope roots/独立credential/access/disposition 仍是上游提供的 policy，当前桥接只核对其类型合同与本地scope，尚未提供其真实 issuer 或操作系统/service身份隔离证明。测试中的 old/new roots、credentials、FORMAT_READY和endpoint均是reference输入；不能把本次组合 WRITABLE 当成真实兼容迁移、生产endpoint或部署验收。默认 EmbeddedServer/bootstrap、SDK routing、完整pre-replay fence与其余required authority producer继续OPEN。
+
+真实组合测试先通过既有mTLS socket/coordinator把ledger44恢复为fenced CLOSED并逻辑删除，再关闭目标0、原目录/身份restart，在新ZK publishing client上追赶原committed delete。即使输入device为CORRUPT、recovery为MISSING，输出也必须来自实际恢复结果；错manifest在effect前拒绝，错publishing client在DLR前拒绝。正向读回真实durable DLR、persistent manifest和owned writable，并验证本地tombstone读拒绝、graph关闭退休准入、closed graph不能产生facts；另一轮用已关闭scheduler验证consumer接线拒绝与demote。它没有注入新的掉电、compatibility fence或物理credential故障。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'StartupReadinessHarnessTest,StartupReadinessFactsTest,ZKProfileEphemeralRegistrationStoreTest,ZKProfileRegistrationStoreTest,SegmentLocalReadinessStoreTest,SegmentProfileInitialSocketClientTest#readinessBridge*+automaticDeletePublication*+preparedDeleteCancellation*+committedDeleteDeliver*+*Registration*+*Registered*+registered*+registration*+*Rejoin*'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-local-readiness-publication --config-prefix ce-local-readiness-publication --config-prefix a-readiness-cas --config-prefix ce-readiness-cas --config-prefix a-registration-publication --config-prefix ce-registration-publication --config-prefix a-registration-admission --config-prefix ce-registration-admission
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `3e82a21ed9d540740db763acb38ab497225d6387`；广度 `LO15wlP1` 六类77项（common facts6/harness11、persistent13/ephemeral19、local DLR10/socket18）零failure/error/skip，在最终test格式及等价简名调整前，保留原stage输入；`SakRPo3Z`同选择早期运行不叠加计覆盖。最终 `bTjwd1kg` 一项组合测试（包含正常与scheduler拒绝两轮）零failure/error/skip，1073当前source inputs全部匹配。首次 `gTV7Lb7B` 因fixture给出空mandatory feature集合，被原类型合同拒绝；是fixture失败，不冒充生产bug红绿。中间正向与格式失败日志均保留。最终Spotless/Checkstyle exit0；root RAT exit1/443 unapproved，逐路径均属于父HEAD，没有新增，未改许可规则，不称CI全绿。
+
+相关既有有限投影 `u5cp9gcl` exit0，20配置为4正向完整探索/16指定反例；970 inputs仅上述test文件的最终格式/等价简名调整与run阶段不同，其余匹配，原manifest不移绑。投影检查DLR barriers/UNKNOWN、persistent CAS birth/generation、session发布和本地准入；没有新增模型或把guard输入宣称为真实fence/credential/TLS/fsync证明。TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；完整A+C+D及综合模型未全跑。持久证据 `/Users/liusinan/.codex/artifacts/unified-wal/startup-bridge-evidence-r0papqio` 保留原command/source/config/stage/reports/checksums。
+
+本切片接通实际恢复事实与原显式发布/准入/consumer，步骤12/14/15及生产Gate保持PARTIAL/OPEN。snapshot/handoff/history GC/decommission、OPEN/payload/placement、full-bytes、完整兼容/正式性能/运维与全16步综合验收仍需推进；Linux NUMA、真实掉电与正式性能本轮NOT_EXECUTED，持续目标保持active。
