@@ -1001,3 +1001,34 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 最终Java `unified-wal-local-cvMZ8z32` exit0：4类39项全部通过、零skip（AutoRecoveryMain5、Classic worker3、URmanager24、actual Profile worker7），1054当前inputs/7 artifact checksums。style/RAT `shutdown-checks-kyrqrOuu` exit0/exit1，443 unapproved路径全在父HEAD，无新增失败路径，5 checksums；不改许可规则、不计CI全绿。模型相关pkrb6t4a 35配置5完整正向/30指定反例、850 inputs/680 checksums，在最后日志换行前；最终akh085ut 10配置2正向/8反例、850当前inputs/633 checksums。外部正向39 generated/24 distinct，self78/38，queue0、depth11，分别0.852/0.833秒、peak RSS108003328/107429888 bytes，是有限模型消耗而非性能。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；完整534及完整A+C+D未全跑。
 
 最终Java/model共享234/去重1670 inputs及五个父HEAD designInputs全部核验；历史绑定不改。本轮RED、Java/model和checks在`/Users/liusinan/.codex/artifacts/unified-wal/service-shutdown-evidence-2p9jrbu9`及archive.json列出的checks目录有持久副本，保留原run身份。
+
+## 注册 cohort peer pool 与实际 worker lease
+
+2026-10-11，第14步新增ProfileRecoveryPeerPool，直接复用consumer观察和connectRegistered两种真实client。配置给定唯一BookieId cohort（1..64），不枚举无界registry children；每次实际task重新读取READY/ephemeral事实并建立一份固定CONTROL/DATA连接快照。没有额外线程、watch、自动重试、第二工作项日志或普通Add的逐entry metadata/handshake；group及有界cold owner仍借用。
+
+pool支持一个正在建立／借用／排空的snapshot。Limits显式约束总connection reservation（最多128）、总RPC slot reservation（最多4096）、每connection slot（最多32）、entry bound及连接/RPC timeout。开始cold发现前为整个cohort保守预留2*N connections和2*N*perConnectionSlots；不可用peer的两个连接都实际close/drain后才继续，最后所有cold和connection实际terminal前不释放batch。usage报告reserved capacity，不把“future已失败”“map为空”或“开始close”当可复用容量。新acquisition在旧snapshot存活时明确拒绝；这一串行策略让旧、connecting、borrowed、draining工作共同处于一个预算，不能超额叠加。
+
+这些是pool connection/RPC-slot上界，未宣称完成TLS/kernel/allocator/SDK全链路字节预算或可持续性能验收。cohort固定，注册状态、地址与同incarnation的READY/publisher episode动态刷新；已成功验证的BookieId/incarnation在本pool生命周期内绑定，变化时明确拒绝，不自动same-ID rejoin。coordinator的持久install/activation/repair历史仍是ledger权限与目标身份依据，重新创建pool不绕过该合同。
+
+Acquisition持有实际cold/connection孩子，caller cancellation只停止未来工作，closeAsync还等实际收尾；Lease只由pool生成，冻结data/control maps，并由实际attempt的owner释放。pool.closeAsync停止新snapshot，对已交付lease继续等待owner释放，不强制切换其peer、撤掉正在执行的I/O或提前归还容量。Lease释放后getter拒绝使用；group/executor必须保持活到pool实际close完成。
+
+原ReplicationWorker增加显式pool constructor，要求WorkerOptions不同时传入平行static maps。先在原UR task/lock下获取lease，实际acquisition失败或shutdown时仍等其cold/connection drain，再release原task；获取期间收到interrupt后不启动新的恢复阶段。成功后复用原beginWorker/recovery/COPY/固定intent与全W健康；coordinator在完整health proof之后、guarded marker transaction之前先close lease并等待本地实际output/source/cold终结，再fresh metadata cut和原task条件化清理。失败路径也由worker实际收尾pool后release原receipt。原static constructor、Classic routing和默认服务OFF保留，worker不拥有借用pool/SDK。
+
+真实TLS/ZK/native files验证：pool关闭期间lease仍可普通Add/点读，第二acquisition被拒绝且capacity保持；worker从registry动态取得三个可连接节点与一个实际listener不可连接节点，完成真实新target COPY/成员修复和marker清理；实际READ reply已到但client write promise被持有时，6条connection reservation、原task和marker都保留，终结后才清理；cold发现排队期间shutdown保持task/capacity，实际任务终结后归还；同incarnation的新READY episode重新连接、不同incarnation拒绝；不满足总slot预算的配置在发起工作前拒绝。
+
+有限ProfileRecoveryPeerPool投影1正向/8指定反例覆盖reservation上界、cold/transport terminal、原task、borrowed lease、验证事实、incarnation与actual child；registry/HELLO/terminal是输入，不生产TLS/ZK/fsync、byte budget、clock/liveness或remote abort。初次语法错误为INCONCLUSIVE；随后缺少禁止重复交付的模型guard导致正向反例，修正为与实际一次性acquisition一致，不改变Java合同来迁就模型。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#registeredPeerPool*+registeredPool*+replicationWorkerConsumesRegisteredPoolAndRepairsAnActuallyUnavailablePeer'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-recovery-peer-pool --config-prefix ce-profile-recovery-peer-pool --config-prefix a-profile-service-shutdown --config-prefix ce-profile-service-shutdown --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker --config-prefix a-profile-peer-discovery --config-prefix ce-profile-peer-discovery
+```
+
+这是显式、配置cohort的真实registered pool/worker消费路径，未新增AutoRecoveryMain的Profile bootstrap或默认listener。全registry发现、全内存字节预算、same-ID rejoin/离线catch-up/delete/GC、完整组合/兼容/长期性能与生产Gate仍OPEN；步骤12/14保持PARTIAL。Linux NUMA/掉电/正式性能本轮NOT_EXECUTED，模型PASS不替代实际内存/网络/存储证据。
+
+Java广度 `unified-wal-local-6IExbUWK` exit0：10类256项零skip（socket98、lifecycle46、metadata19、control12、readiness13、ephemeral17、UR24、Classic worker3、AutoRecovery5、PendingAddOp19），1055冻结inputs/13 artifact checksums；之后只强化held-output用例为实际等待channel closeFuture，确保已到health/lease drain barrier。最终 `unified-wal-local-RaoO9oaA` exit0：5项真实pool/worker定向PASS，1055当前inputs/4 checksums。style/RAT peer-pool-checks-FPIBoGFU exit0/exit1，443 unapproved全在父HEAD无新增，5 checksums；最终强化测试后的peer-pool-final-style-MGXcg1sN exit0/2 checksums。不改许可规则、不称CI全绿。
+
+相关模型 `unified-wal-model-o_634iuy`51配置7完整正向/44指定反例、861 inputs/720 checksums；最终强化测试后的`unified-wal-model-6n5ycbyg`9配置1完整正向/8反例、861当前inputs/642 checksums。pool正向64 generated/50 distinct、queue0、depth11、0.800秒/peak RSS107315200 bytes（广度run），非性能结论。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；完整543与完整组合未接受。Java/model共享235/去重1681当前inputs与五个父HEAD设计锁全部核验，历史run不重绑。
+
+本轮回执及模型调试记录有持久副本`/Users/liusinan/.codex/artifacts/unified-wal/peer-pool-evidence-5nkh13yg`，archive.json列出checks目录，保留原run metadata/command/source身份。初轮srheoptl因TLA precedence语法错误为INCONCLUSIVE，cgxvj4no缺一次性deliver guard导致模型正向失败；两者都保留，不计为Java协议RED或最终PASS。

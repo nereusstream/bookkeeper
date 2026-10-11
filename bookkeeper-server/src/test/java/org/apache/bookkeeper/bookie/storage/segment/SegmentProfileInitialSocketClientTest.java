@@ -5400,19 +5400,28 @@ public class SegmentProfileInitialSocketClientTest {
     private static org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore registeredPeer(
             Fixture fixture, org.apache.zookeeper.ZooKeeper reader, String endpoint, long generation,
             byte[] incarnation) throws Exception {
+        return registeredPeer(fixture, reader, 0, endpoint, generation, incarnation);
+    }
+
+    private static org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore registeredPeer(
+            Fixture fixture, org.apache.zookeeper.ZooKeeper reader, int target, String endpoint, long generation,
+            byte[] incarnation) throws Exception {
         String root = "/socket-readiness";
-        fixture.zk.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        if (fixture.zk.exists(root, false) == null) {
+            fixture.zk.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        }
         var persistent = new org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore(
                 fixture.zk, root, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
         var gen = new org.apache.bookkeeper.common.profile.startup.Generation(1);
         var record = new org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord(
-                fixture.identities.get(0).bookieId().toString(),
+                fixture.identities.get(target).bookieId().toString(),
                 new org.apache.bookkeeper.common.profile.startup.StorageIncarnation(incarnation),
                 EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, gen, gen,
                 new org.apache.bookkeeper.common.profile.startup.ManifestIdentity(bytes(32, 7)), gen, gen,
                 new org.apache.bookkeeper.common.profile.startup.Generation(generation), 1, 1, List.of(1),
                 org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord.State.READY);
-        assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.CasStatus.APPLIED,
+        assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore
+                            .CasStatus.APPLIED,
                 persistent.compareAndSet(record.bookieId(), -1, 0, record).status());
         var ready = persistent.read(record.bookieId()).versionedRecord().orElseThrow();
         var projection = new org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection(
@@ -5436,6 +5445,330 @@ public class SegmentProfileInitialSocketClientTest {
         var reader = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
         watcher.waitForConnection();
         return reader;
+    }
+
+    @Test
+    public void registeredPeerPoolPinsTheLeaseAndKeepsCapacityUntilActualClose() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            String endpoint = "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+            var registry = registeredPeer(fixture, reader, endpoint, 1,
+                    fixture.identities.get(0).incarnation().value());
+            var pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                    fixture.clientGroup, fixture.peerTls, fixture.cold, List.of(fixture.identities.get(0).bookieId()),
+                    new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                            2, 4, 2, 1060, Duration.ofSeconds(5)));
+            var acquisition = pool.acquire();
+            var lease = acquisition.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(2, pool.usage().reservedConnections());
+            assertEquals(4, pool.usage().reservedRpcSlots());
+            assertTrue(pool.usage().borrowed());
+            var unavailable = pool.acquire();
+            assertThrows(ExecutionException.class, () -> unavailable.completion().get(5, TimeUnit.SECONDS));
+            unavailable.closeAsync().get(5, TimeUnit.SECONDS);
+            assertEquals(2, pool.usage().reservedConnections());
+            var closing = pool.closeAsync();
+            assertThrows(java.util.concurrent.TimeoutException.class,
+                    () -> closing.get(150, TimeUnit.MILLISECONDS));
+            var source = lease.data().get(fixture.identities.get(0).bookieId());
+            evidenceEntry(fixture, source, 0, -1, 16, 16);
+            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                    source.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
+            lease.closeAsync().get(5, TimeUnit.SECONDS);
+            closing.get(5, TimeUnit.SECONDS);
+            assertEquals(0, pool.usage().reservedConnections());
+            assertEquals(0, pool.usage().reservedRpcSlots());
+            assertThrows(IllegalStateException.class, lease::data);
+            assertFalse(fixture.clientGroup.isShuttingDown());
+        }
+    }
+
+    @Test
+    public void replicationWorkerConsumesRegisteredPoolAndRepairsAnActuallyUnavailablePeer() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true);
+                BookKeeper sdk = sdk(fixture);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                var client = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                data.put(fixture.identities.get(node).bookieId(), client);
+                evidenceEntry(fixture, client, 0, -1, 16, 16);
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                    fixture.credential, data, fixture.clients, 3, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore registry = null;
+            for (int node = 0; node < 4; node++) {
+                String endpoint = "tls://127.0.0.1:"
+                        + ((InetSocketAddress) fixture.listeners.get(node).localAddress()).getPort();
+                registry = registeredPeer(fixture, reader, node, endpoint, 1,
+                        fixture.identities.get(node).incarnation().value());
+            }
+            fixture.listeners.get(2).close().syncUninterruptibly();
+            var pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                    fixture.clientGroup, fixture.peerTls, fixture.cold,
+                    fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
+                    new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                            8, 16, 2, 1060, Duration.ofSeconds(5)));
+            try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                var options = new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                        Map.of(), Map.of(), 3, 8, Duration.ofSeconds(30));
+                var worker = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture), sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE,
+                        coordinator, options, pool);
+                worker.start();
+                try {
+                    awaitProfileWorkerStarted(worker);
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                    while (monitor.getLedgerUnreplicationInfo(44) != null && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertNull(monitor.getLedgerUnreplicationInfo(44));
+                    assertEquals(fixture.identities.get(3).bookieId(),
+                            fixture.manager.readLedgerMetadata(44).get().getValue().getAllEnsembles().get(0L).get(2));
+                    assertEquals(0, pool.usage().reservedConnections());
+                } finally {
+                    worker.shutdown();
+                    pool.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void registeredPoolDrainPrecedesOriginalTaskAndMarkerRemoval() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                BookKeeper sdk = sdk(fixture);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var original = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                var client = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                original.put(fixture.identities.get(node).bookieId(), client);
+                evidenceEntry(fixture, client, 0, -1, 16, 16);
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                    fixture.credential, original, fixture.clients, 3, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore registry = null;
+            for (int node = 0; node < 3; node++) {
+                registry = registeredPeer(fixture, reader, node, "tls://127.0.0.1:"
+                        + ((InetSocketAddress) fixture.listeners.get(node).localAddress()).getPort(), 1,
+                        fixture.identities.get(node).incarnation().value());
+            }
+            var pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                    fixture.clientGroup, fixture.peerTls, fixture.cold,
+                    fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
+                    new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                            6, 6, 1, 1060, Duration.ofSeconds(5)));
+            var lease = pool.acquire().completion().get(5, TimeUnit.SECONDS);
+            var socketField = ProfileNormalDataClient.class.getDeclaredField("socket");
+            socketField.setAccessible(true);
+            var owner = socketField.get(lease.data().get(fixture.identities.get(0).bookieId()));
+            var channelField = owner.getClass().getDeclaredField("channel");
+            channelField.setAccessible(true);
+            Channel channel = (Channel) channelField.get(owner);
+            var held = new AtomicReference<ChannelPromise>();
+            var written = new CountDownLatch(1);
+            channel.eventLoop().submit(() -> channel.pipeline().addAfter(
+                    channel.pipeline().context(SslHandler.class).name(), "holdPoolReadWritePromise",
+                    new ChannelOutboundHandlerAdapter() {
+                        @Override
+                        public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+                            ByteBuf bytes = (ByteBuf) message;
+                            if (bytes.getUnsignedShort(bytes.readerIndex() + 14)
+                                    == ProfileOperation.READ_ENTRY.wireValue()
+                                    && held.compareAndSet(null, promise)) {
+                                var actual = ctx.newPromise();
+                                actual.addListener(done -> written.countDown());
+                                ctx.write(bytes, actual);
+                            } else {
+                                ctx.write(bytes, promise);
+                            }
+                        }
+                    })).get(5, TimeUnit.SECONDS);
+            try (var tasks = new org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager(
+                    profileWorkerConfiguration(fixture), fixture.zk)) {
+                tasks.enableProfileCleanupGuards();
+                tasks.markLedgerUnderreplicated(44, "socket2:3181");
+                assertEquals(44, tasks.pollLedgerToRereplicate());
+                var options = new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                        Map.of(), Map.of(), 3, 8, Duration.ofSeconds(30));
+                var attempt = coordinator.beginWorker(44, sdk.getClientCtx(), options, tasks, lease);
+                try {
+                    assertTrue(written.await(5, TimeUnit.SECONDS));
+                    channel.closeFuture().get(5, TimeUnit.SECONDS); // Health reached the lease drain barrier.
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> attempt.completion().get(150, TimeUnit.MILLISECONDS));
+                    assertTrue(tasks.isLedgerBeingReplicated(44));
+                    assertNotNull(tasks.getLedgerUnreplicationInfo(44));
+                    assertEquals(6, pool.usage().reservedConnections());
+                    held.get().setSuccess();
+                    assertEquals(ProfileRecoveryCoordinator.WorkerStatus.REPLICATED,
+                            attempt.completion().get(5, TimeUnit.SECONDS).status());
+                    assertNull(tasks.getLedgerUnreplicationInfo(44));
+                    assertEquals(0, pool.usage().reservedConnections());
+                    attempt.releaseTask();
+                } finally {
+                    if (held.get() != null) {
+                        held.get().trySuccess();
+                    }
+                    lease.closeAsync().get(5, TimeUnit.SECONDS);
+                    pool.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void registeredPoolAcquisitionShutdownKeepsTaskAndCapacityWhileColdWorkIsQueued() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                BookKeeper sdk = sdk(fixture);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var registry = registeredPeer(fixture, reader, "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort(), 1,
+                    fixture.identities.get(0).incarnation().value());
+            var cold = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(8));
+            var release = new CountDownLatch(1);
+            var entered = new CountDownLatch(1);
+            var stopper = java.util.concurrent.Executors.newSingleThreadExecutor();
+            var pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                    fixture.clientGroup, fixture.peerTls, cold, List.of(fixture.identities.get(0).bookieId()),
+                    new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                            2, 2, 1, 1060, Duration.ofSeconds(5)));
+            try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                cold.execute(() -> {
+                    entered.countDown();
+                    await(release);
+                });
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                monitor.markLedgerUnderreplicated(44, "socket2:3181");
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var worker = new org.apache.bookkeeper.replication.ReplicationWorker(
+                        profileWorkerConfiguration(fixture), sdk, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE,
+                        new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold),
+                        new ProfileRecoveryCoordinator.WorkerOptions(fixture.descriptorBytes, VALIDATOR,
+                                Map.of(), Map.of(), 3, 8, Duration.ofSeconds(30)), pool);
+                worker.start();
+                awaitProfileWorkerStarted(worker);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (pool.usage().reservedConnections() == 0 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(2, pool.usage().reservedConnections());
+                var stopping = stopper.submit(worker::shutdown);
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                assertTrue(monitor.isLedgerBeingReplicated(44));
+                assertEquals(2, pool.usage().reservedConnections());
+                release.countDown();
+                stopping.get(5, TimeUnit.SECONDS);
+                assertEquals(0, pool.usage().reservedConnections());
+                assertFalse(monitor.isLedgerBeingReplicated(44));
+                assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                assertFalse(sdk.getClientCtx().isClientClosed());
+            } finally {
+                release.countDown();
+                pool.closeAsync().get(5, TimeUnit.SECONDS);
+                stopper.shutdownNow();
+                cold.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    public void registeredPoolRefreshesSameIncarnationEpisodesAndRejectsSilentRejoin() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true);
+                var reader = registrationReader(fixture)) {
+            fixture.helloReadinessGeneration = 1;
+            String endpoint = "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+            var registry = registeredPeer(fixture, reader, endpoint, 1,
+                    fixture.identities.get(0).incarnation().value());
+            var cohort = List.of(fixture.identities.get(0).bookieId());
+            assertThrows(IllegalArgumentException.class,
+                    () -> new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                            fixture.clientGroup, fixture.peerTls, fixture.cold, cohort,
+                            new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                                    2, 2, 2, 1060, Duration.ofSeconds(5))));
+            var pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                    fixture.clientGroup, fixture.peerTls, fixture.cold, cohort,
+                    new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                            2, 4, 2, 1060, Duration.ofSeconds(5)));
+            try {
+                var first = pool.acquire().completion().get(5, TimeUnit.SECONDS);
+                first.closeAsync().get(5, TimeUnit.SECONDS);
+                for (int generation : List.of(2, 3)) {
+                    String path = "/socket-readiness/" + java.util.Base64.getUrlEncoder().withoutPadding()
+                            .encodeToString("socket0:3181".getBytes(StandardCharsets.UTF_8));
+                    for (String child : fixture.zk.getChildren(path, false)) {
+                        if (child.equals("service-info") || child.equals("writable") || child.startsWith("session-")) {
+                            fixture.zk.delete(path + "/" + child, -1);
+                        }
+                    }
+                    var before = registry.read("socket0:3181").versionedRecord().orElseThrow();
+                    var old = before.record();
+                    var record = new org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord(
+                            old.bookieId(), new org.apache.bookkeeper.common.profile.startup.StorageIncarnation(
+                                    generation == 3 ? bytes(16, 78) : old.storageIncarnation().value()), old.engine(),
+                            old.protocolMajor(), old.protocolMinor(), old.capabilityGeneration(),
+                            old.localFormatGeneration(),
+                            old.deviceManifestIdentity(), old.deviceManifestGeneration(),
+                            old.effectiveAssignmentGeneration(),
+                            new org.apache.bookkeeper.common.profile.startup.Generation(generation),
+                            old.minimumReaderVersion(), old.minimumWriterVersion(), old.capabilityHints(), old.state());
+                    assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore
+                            .CasStatus.APPLIED,
+                            registry.compareAndSet("socket0:3181", before.storeVersion(),
+                                    generation - 1, record).status());
+                    var ready = registry.read("socket0:3181").versionedRecord().orElseThrow();
+                    var projection = new org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection(
+                            old.bookieId(), record.storageIncarnation(), record.localReadinessGeneration(),
+                            ready.storeVersion(), endpoint, record.capabilityHints());
+                    var publisher = new org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore(
+                            fixture.zk, "/socket-readiness", old.bookieId(), ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            Duration.ofSeconds(5));
+                    assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                            .PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
+                    assertEquals(org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                            .PublicationStatus.APPLIED, publisher.registerWritable(
+                                new org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore
+                                    .WritableRegistration(old.bookieId(), record.storageIncarnation(),
+                                            record.localReadinessGeneration(), ready.storeVersion())).status());
+                    fixture.helloReadinessGeneration = generation;
+                    var acquisition = pool.acquire();
+                    if (generation == 2) {
+                        var lease = acquisition.completion().get(5, TimeUnit.SECONDS);
+                        assertEquals(2, lease.controls().get("socket0:3181").hello().readinessGeneration());
+                        lease.closeAsync().get(5, TimeUnit.SECONDS);
+                    } else {
+                        assertThrows(ExecutionException.class, () -> acquisition.completion().get(5, TimeUnit.SECONDS));
+                        acquisition.closeAsync().get(5, TimeUnit.SECONDS);
+                    }
+                    assertEquals(0, pool.usage().reservedConnections());
+                }
+            } finally {
+                pool.closeAsync().get(5, TimeUnit.SECONDS);
+            }
+        }
     }
 
     @Test

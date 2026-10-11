@@ -133,7 +133,17 @@ public final class ProfileRecoveryCoordinator {
 
     public WorkerAttempt beginWorker(long ledger, ClientContext sdk, WorkerOptions options,
             org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager) {
+        return beginWorker(ledger, sdk, options, manager, null);
+    }
+
+    /** A dynamic lease is drained before this attempt can consume its original task and marker. */
+    public WorkerAttempt beginWorker(long ledger, ClientContext sdk, WorkerOptions options,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager, ProfileRecoveryPeerPool.Lease lease) {
         ProfileRecoveryReadHandle.requireCompatibleSdk(sdk);
+        if (lease != null) {
+            options = new WorkerOptions(options.descriptor(), options.validator(), lease.data(), lease.controls(),
+                    options.maxCoordinates(), options.maxRepairs(), options.maxDuration());
+        }
         var task = manager.captureProfileTask(ledger);
         var stopped = new AtomicBoolean();
         if (ledger < 0 || task == null || sdk.isClientClosed() || !supportsWorker(manager) || !active.tryAcquire()) {
@@ -142,7 +152,8 @@ public final class ProfileRecoveryCoordinator {
         }
         var terminal = new CompletableFuture<WorkerResult>();
         var attempt = new WorkerAttempt(terminal, stopped, manager, task);
-        var flow = new WorkerFlow(ledger, sdk, options, manager, task, stopped);
+        var flow = new WorkerFlow(ledger, sdk, options, manager, task, stopped, lease);
+        var duration = options.maxDuration();
         var timer = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
         flow.done.whenComplete((result, failure) -> {
             var scheduled = timer.get();
@@ -157,7 +168,7 @@ public final class ProfileRecoveryCoordinator {
             }
         });
         try {
-            var scheduled = sdk.getScheduler().schedule(() -> stopped.set(true), options.maxDuration().toNanos(),
+            var scheduled = sdk.getScheduler().schedule(() -> stopped.set(true), duration.toNanos(),
                     java.util.concurrent.TimeUnit.NANOSECONDS);
             timer.set(scheduled);
             flow.step();
@@ -182,6 +193,7 @@ public final class ProfileRecoveryCoordinator {
         private final org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager;
         private final org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task;
         private final AtomicBoolean stopped;
+        private final ProfileRecoveryPeerPool.Lease lease;
         private final long deadline;
         private final CompletableFuture<WorkerResult> done = new CompletableFuture<>();
         private final java.util.Set<Integer> resolved = new java.util.HashSet<>();
@@ -190,13 +202,15 @@ public final class ProfileRecoveryCoordinator {
 
         WorkerFlow(long ledger, ClientContext sdk, WorkerOptions options,
                 org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager manager,
-                org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task, AtomicBoolean stopped) {
+                org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager.ProfileTask task, AtomicBoolean stopped,
+                ProfileRecoveryPeerPool.Lease lease) {
             this.ledger = ledger;
             this.sdk = sdk;
             this.options = options;
             this.manager = manager;
             this.task = task;
             this.stopped = stopped;
+            this.lease = lease;
             deadline = System.nanoTime() + options.maxDuration().toNanos();
         }
 
@@ -283,8 +297,10 @@ public final class ProfileRecoveryCoordinator {
                     return verifyClosedReplicasOnce(closed.snapshot(), sdk, key, options.data(), options.controls(),
                             options.maxCoordinates(), stopped, deadline, task).thenCompose(health -> {
                         if (health.proof() != null && !stopped.get()) {
-                            return CompletableFuture.supplyAsync(
-                                    () -> completeReplicationOnce(health.proof(), manager, stopped), cold)
+                            var drained = lease == null ? CompletableFuture.<Void>completedFuture(null)
+                                    : lease.closeAsync();
+                            return drained.thenCompose(ignored -> CompletableFuture.supplyAsync(
+                                    () -> completeReplicationOnce(health.proof(), manager, stopped), cold))
                                         .thenAccept(status -> finish(status == MarkerCleanupStatus.CLEARED
                                                 ? WorkerStatus.REPLICATED : status == MarkerCleanupStatus.DELETED
                                                     ? WorkerStatus.DELETED : WorkerStatus.DEFERRED));

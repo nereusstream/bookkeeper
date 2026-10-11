@@ -1106,3 +1106,5 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 2026-10-11 [注册观察驱动的连接与实际本地排空](implementation/profile-wire/README.md#注册观察驱动的连接与实际本地排空)接既有consumer观察、真实mTLS/HELLO和最后cold复核；CONTROL/DATA client保持原RPC超时，closeAsync等待cold/channel/HELLO输出及实际RPC借用与promise terminal。发现/关闭不授予ledger authority或remote abort/NONE/FREE；动态pool、service bootstrap和总预算尚未接线，步骤12/14及生产Gate仍PARTIAL/OPEN。
 
 2026-10-11 [worker/service关闭边界](implementation/profile-wire/README.md#worker-与服务关闭的中断及并发边界)修复join中断和重复shutdown提前关manager/SDK、self-join及启动前关闭；caller signal在procedure结束后恢复，AutoRecoveryMain不把继承signal送进SDK等待。真实READ/task与真实metadata client RED/GREEN见记录；动态pool/Profile bootstrap尚未接通，步骤14与生产Gate保持PARTIAL/OPEN。
+
+2026-10-11 [registered cohort pool与worker lease](implementation/profile-wire/README.md#注册-cohort-peer-pool-与实际-worker-lease)消费真实READY/mTLS/HELLO创建固定snapshot，建立/借用/排空共同保守计费connection和RPC-slot预算；原worker在实际lease drain后才清原task/marker。实际缺副本修复、held promise/cold及episode/incarnation验证见记录；service bootstrap、全registry/字节预算与生产Gate仍OPEN，步骤12/14保持PARTIAL。

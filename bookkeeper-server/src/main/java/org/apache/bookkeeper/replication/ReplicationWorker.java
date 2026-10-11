@@ -114,6 +114,7 @@ public class ReplicationWorker implements Runnable {
     private final LedgerManager ledgerManager;
     private final org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator profileRecovery;
     private final org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions profileOptions;
+    private final org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool profilePeerPool;
 
     // Expose Stats
     private final StatsLogger statsLogger;
@@ -187,7 +188,7 @@ public class ReplicationWorker implements Runnable {
                       boolean ownBkc,
                       StatsLogger statsLogger)
             throws CompatibilityException, InterruptedException, UnavailableException {
-        this(conf, bkc, ownBkc, statsLogger, null, null);
+        this(conf, bkc, ownBkc, statsLogger, null, null, null);
     }
 
     /** Explicit isolated Profile cohort. SDK, coordinator and verified pools remain borrowed. */
@@ -196,18 +197,33 @@ public class ReplicationWorker implements Runnable {
             org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions options)
             throws CompatibilityException, InterruptedException, UnavailableException {
         this(conf, bkc, false, statsLogger, java.util.Objects.requireNonNull(coordinator),
-                java.util.Objects.requireNonNull(options));
+                java.util.Objects.requireNonNull(options), null);
+    }
+
+    /** Registered peers are acquired per actual task; SDK, pool and coordinator stay borrowed. */
+    public ReplicationWorker(ServerConfiguration conf, BookKeeper bkc, StatsLogger statsLogger,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator coordinator,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions options,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool pool)
+            throws CompatibilityException, InterruptedException, UnavailableException {
+        this(conf, bkc, false, statsLogger, java.util.Objects.requireNonNull(coordinator),
+                java.util.Objects.requireNonNull(options), java.util.Objects.requireNonNull(pool));
     }
 
     private ReplicationWorker(ServerConfiguration conf, BookKeeper bkc, boolean ownBkc, StatsLogger statsLogger,
             org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator coordinator,
-            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions options)
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions options,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool pool)
             throws CompatibilityException, InterruptedException, UnavailableException {
         this.conf = conf;
         this.bkc = bkc;
         this.ownBkc = ownBkc;
         this.profileRecovery = coordinator;
         this.profileOptions = options;
+        this.profilePeerPool = pool;
+        if (pool != null && (!options.data().isEmpty() || !options.controls().isEmpty())) {
+            throw new IllegalArgumentException("Dynamic Profile worker options must not supply a parallel static pool");
+        }
         if (coordinator != null) {
             org.apache.bookkeeper.client.ProfileRecoveryReadHandle.requireCompatibleSdk(bkc.getClientCtx());
         }
@@ -508,17 +524,38 @@ public class ReplicationWorker implements Runnable {
         }
         var manager = (org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager) underreplicationManager;
         var original = manager.captureProfileTask(ledgerIdToReplicate);
-        org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerAttempt attempt;
-        try {
-            attempt = profileRecovery.beginWorker(ledgerIdToReplicate, bkc.getClientCtx(), profileOptions, manager);
-        } catch (RuntimeException rejected) {
-            manager.releaseProfileTask(original);
-            getExceptionCounter("ProfileAttemptRejected").inc();
-            return false;
-        }
-        var completion = attempt.completion();
+        org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Acquisition acquisition = null;
+        org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerAttempt attempt = null;
         boolean interrupted = false;
         try {
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Lease lease = null;
+            if (profilePeerPool != null) {
+                acquisition = profilePeerPool.acquire();
+                var ready = acquisition.completion();
+                for (;;) {
+                    try {
+                        lease = ready.get();
+                        break;
+                    } catch (InterruptedException stopping) {
+                        interrupted = true;
+                        acquisition.closeAsync();
+                    } catch (java.util.concurrent.ExecutionException unavailable) {
+                        getExceptionCounter("ProfilePeersUnavailable").inc();
+                        return false;
+                    }
+                }
+            }
+            if (interrupted) {
+                return false; // Acquisition was stopped; do not begin a new recovery with a racing ready result.
+            }
+            try {
+                attempt = profileRecovery.beginWorker(ledgerIdToReplicate, bkc.getClientCtx(),
+                        profileOptions, manager, lease);
+            } catch (RuntimeException rejected) {
+                getExceptionCounter("ProfileAttemptRejected").inc();
+                return false;
+            }
+            var completion = attempt.completion();
             for (;;) {
                 try {
                     var result = completion.get();
@@ -531,7 +568,7 @@ public class ReplicationWorker implements Runnable {
                     return false;
                 } catch (InterruptedException stopping) {
                     interrupted = true;
-                    attempt.stop(); // Await the actual child before releasing this task or closing the SDK.
+                    attempt.stop();
                 } catch (java.util.concurrent.ExecutionException failed) {
                     log.warn().attr("ledgerId", ledgerIdToReplicate).exception(failed.getCause())
                             .log("Profile replication attempt failed; retaining marker");
@@ -540,9 +577,30 @@ public class ReplicationWorker implements Runnable {
                 }
             }
         } finally {
-            attempt.releaseTask();
-            if (interrupted) {
-                Thread.currentThread().interrupt();
+            try {
+                if (acquisition != null) {
+                    var drained = acquisition.closeAsync();
+                    for (;;) {
+                        try {
+                            drained.get();
+                            break;
+                        } catch (InterruptedException stopping) {
+                            interrupted = true;
+                        } catch (java.util.concurrent.ExecutionException failedDrain) {
+                            throw new IllegalStateException(
+                                    "Profile peer drain was not confirmed", failedDrain.getCause());
+                        }
+                    }
+                }
+                if (attempt != null) {
+                    attempt.releaseTask();
+                } else {
+                    manager.releaseProfileTask(original);
+                }
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }
