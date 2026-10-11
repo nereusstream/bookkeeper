@@ -1016,3 +1016,5 @@ RFC 进入 Accepted 前必须：
 2026-10-11 [注册观察驱动的连接与实际本地排空](implementation/profile-wire/README.md#注册观察驱动的连接与实际本地排空)接既有consumer观察、真实mTLS/HELLO和最后cold复核；CONTROL/DATA client保持原RPC超时，closeAsync等待cold/channel/HELLO输出及实际RPC借用与promise terminal。发现/关闭不授予ledger authority或remote abort/NONE/FREE；动态pool、service bootstrap和总预算尚未接线，步骤12/14及生产Gate仍PARTIAL/OPEN。
 
 2026-10-11 [registered cohort pool与worker lease](implementation/profile-wire/README.md#注册-cohort-peer-pool-与实际-worker-lease)消费真实READY/mTLS/HELLO创建固定snapshot，建立/借用/排空共同保守计费connection和RPC-slot预算；原worker在实际lease drain后才清原task/marker。实际缺副本修复、held promise/cold及episode/incarnation验证见记录；service bootstrap、全registry/字节预算与生产Gate仍OPEN，步骤12/14保持PARTIAL。
+
+2026-10-11 [显式AutoRecovery service bootstrap](implementation/profile-wire/README.md#显式-autorecovery-service-bootstrap-与-owned-资源)由服务自身SDK/ZK创建原coordinator/pool并消费真实任务；owned manager/SDK/cold/group在实际worker/lease排空后关闭，失败也收尾，默认入口OFF。Classic periodic payload/replica/placement audit非0明确拒绝；完整Profile availability/audit、字节预算与综合生产Gate仍OPEN，步骤12/14保持PARTIAL。

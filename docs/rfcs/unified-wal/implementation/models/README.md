@@ -1315,3 +1315,5 @@ ProfileRepairCopy消费verified source/fence/grant及RPC实际终结事实，有
 2026-10-11新增ProfileRecoveryPeerPool，1正向/8指定反例检查单snapshot reservation、cold/transport/lease/child/task与不静默rejoin；verified facts和actual terminals是输入，未生产byte budget/TLS/ZK/fsync/clock/liveness。初轮语法INCONCLUSIVE及缺一次性delivery guard的正向失败保留为模型调试，不作为实现RED。当前catalog543未全量或完整组合验收，范围由连接记录拥有。
 
 Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksums；强化实际drain barrier测试后6n5ycbyg 9配置1正向/8反例、861当前inputs/642 checksums。Java256广度、最终5定向，与model共享235/去重1681 inputs及五个父HEAD设计锁核验。pool64/50 generated/distinct、queue0、depth11、0.800秒/peak RSS107315200 bytes，非性能结论；调试INCONCLUSIVE/正向失败保留，完整543未全跑。
+
+2026-10-11 ProfileServiceBootstrap 1正向/7指定反例，以context/audit/ready及worker/pool/SDK实际终结为输入检查default OFF、owned绑定、failure/drain/close顺序；不生产SDK/TLS/ZK/fsync、byte budget/clock/liveness。相关54v7k04l 52配置7正向/45反例、871 inputs/731 checksums；最终jensczj9 8配置1正向/7反例、871当前inputs/649 checksums。实际Java47、共享236/去重1691输入及五个parent designInputs由连接记录拥有。正向269/227 generated/distinct、queue0、depth10、0.849秒/peak RSS109248512 bytes，非性能；catalog551未全跑/完整组合验收。

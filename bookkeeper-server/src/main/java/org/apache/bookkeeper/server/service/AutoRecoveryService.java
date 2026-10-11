@@ -35,10 +35,14 @@ public class AutoRecoveryService extends ServerLifecycleComponent {
     private final AutoRecoveryMain main;
 
     public AutoRecoveryService(BookieConfiguration conf, StatsLogger statsLogger) throws Exception {
+        this(conf, statsLogger, null);
+    }
+
+    /** Programmatic experimental bootstrap; the ordinary component constructor remains off. */
+    public AutoRecoveryService(BookieConfiguration conf, StatsLogger statsLogger,
+            AutoRecoveryMain.ProfileSettings settings) throws Exception {
         super(NAME, conf, statsLogger);
-        this.main = new AutoRecoveryMain(
-            conf.getServerConf(),
-            statsLogger);
+        this.main = new AutoRecoveryMain(conf.getServerConf(), statsLogger, settings);
     }
 
     @Override

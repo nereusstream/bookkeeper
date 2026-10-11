@@ -1032,3 +1032,30 @@ Java广度 `unified-wal-local-6IExbUWK` exit0：10类256项零skip（socket98、
 相关模型 `unified-wal-model-o_634iuy`51配置7完整正向/44指定反例、861 inputs/720 checksums；最终强化测试后的`unified-wal-model-6n5ycbyg`9配置1完整正向/8反例、861当前inputs/642 checksums。pool正向64 generated/50 distinct、queue0、depth11、0.800秒/peak RSS107315200 bytes（广度run），非性能结论。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；完整543与完整组合未接受。Java/model共享235/去重1681当前inputs与五个父HEAD设计锁全部核验，历史run不重绑。
 
 本轮回执及模型调试记录有持久副本`/Users/liusinan/.codex/artifacts/unified-wal/peer-pool-evidence-5nkh13yg`，archive.json列出checks目录，保留原run metadata/command/source身份。初轮srheoptl因TLA precedence语法错误为INCONCLUSIVE，cgxvj4no缺一次性deliver guard导致模型正向失败；两者都保留，不计为Java协议RED或最终PASS。
+
+## 显式 AutoRecovery service bootstrap 与 owned 资源
+
+2026-10-11，第14步在原AutoRecoveryMain/AutoRecoveryService增加programmatic ProfileSettings入口，默认构造器继续OFF。settings给定原reservation/readiness namespace及ACL、client TLS、固定cohort、peer limits与空static-map WorkerOptions，复用现有descriptor validator/cold authority/pool/recovery；不新增配置文件格式、RFC、模块或平行控制框架。mutable ACL在输入/输出深拷贝，descriptor仍由既有WorkerOptions拥有。
+
+显式分支创建一个owned NIO group和1线程/64槽ArrayBlockingQueue+AbortPolicy cold owner。SDK通过原BookKeeper builder创建SYSTEM role，明确v3 wire/explicitLacInterval=0，借用该NIO group。使用该SDK的ZK metadata driver和factory新建native AbstractZkLedgerManager，再创建原ProfileLedgerMetadataStore、reservation/registration adapters、coordinator及registered pool；SDK自己的CleanupLedgerManager仍由SDK拥有，额外native manager由ProfileResources拥有，避免testing-only unwrap或混入外部ZK session。AuditorElector与ReplicationWorker保留原服务线程/factory/stat/marker路径，worker显式借用该coordinator/pool。Session-expiry listener在全部字段初始化后安装。
+
+当前不实现Classic payload/replica/placement audit对Profile的读取合同，所以显式配置必须把这三种periodic interval设为0，非0在分配资源前拒绝，不暗中修改caller配置。原metadata bookie-membership auditor/election仍保留；它使用Classic available registry，完整Profile registration-aware availability与periodic audit producer尚未接通，不能把bootstrap或worker成功当作这部分验收。native Profile操作仍由既有mTLS/HELLO/授权检查，默认SDK Profile open和legacy mutation/ACL验证仍按既有未闭合范围处理。
+
+成功关闭按原auditor/worker实际终结 → pool实际drain → owned native metadata manager close → SDK close → cold shutdown/实际termination → group shutdown/实际termination顺序进行，继承或等待期间的interrupt记账后在procedure结束恢复；不先shutdownNow丢掉queued child。原AutoRecoveryService的stop仍采用原no-op语义，实际销毁由close发起。本入口不支持关停后重启。初始化失败按已创建资源收尾，SDK close错误附加到原异常；本轮验证SDK/pool绑定后auditor identity失败会回收新建transport owner。关闭异常不作为资源无条件成功终结的证据。runtime有固定profile-autorecovery/profile-autorecovery-cold线程名用于运维区分，不含credentials或endpoint。
+
+真实TLS/ZK/native files测试使用服务自身不同SDK/ZK session和owned group/cold：实际不可连接的成员通过registered pool新target COPY/membership修复并清marker；close后owned group/cold terminated、外部SDK继续可用；持有三条真实READ回复期间预interrupt shutdown caller，原task/owned SDK/group/cold保持到实际lease结束，随后原始owned ZK client CLOSED、source容量归零、signal保留、marker继续待处理；故意在SDK/pool绑定后auditor identity失败时新建named owner线程全部终结。unsupported audit组合在resource allocation前拒绝。
+
+有限ProfileServiceBootstrap投影使用SDK/ZK context、supported audit scope、ready和actual worker/pool/SDK终结作为输入，1正向/7指定反例检查default OFF、绑定context、audit限制、实际worker工作开始时peer ready输入、pool前不关SDK、SDK前不关owners和失败cleanup。它不生产SDK/TLS/ZK/fsync、allocator/kernel byte bounds、clock/liveness或remote abort。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'AutoRecoveryMainTest,SegmentProfileInitialSocketClientTest#profileAutoRecoveryService*+profileServiceShutdown*+profileBootstrapInitialization*+registeredPeerPool*+registeredPool*+replicationWorker*,TestReplicationWorker#testReplicationStats+testReplicateEmptyOpenStateLedger+testRWZKConnectionLostOnNonRecoverableZkError,TestLedgerUnderreplicationManager'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-service-bootstrap --config-prefix ce-profile-service-bootstrap --config-prefix a-profile-service-shutdown --config-prefix ce-profile-service-shutdown --config-prefix a-profile-recovery-peer-pool --config-prefix ce-profile-recovery-peer-pool --config-prefix a-profile-registered-connection --config-prefix ce-profile-registered-connection --config-prefix a-profile-replication-worker --config-prefix ce-profile-replication-worker
+```
+
+最终Java oNtOEDZW exit0：4类47项零skip（AutoRecovery5、URmanager24、Classic worker3、actual socket/service/pool/worker15），1056当前inputs/7 checksums。style/RAT bootstrap-final-checks-fHuELJNn exit0/exit1，443 unapproved路径全部在父HEAD、没有新增，5 checksums，不计CI全绿。相关模型54v7k04l 52配置7完整正向/45指定反例、871 inputs/731 checksums，最后import/长行格式前；最终jensczj9 8配置1正向/7反例、871当前inputs/649 checksums。正向269 generated/227 distinct、queue0、depth10、0.849秒/peak RSS109248512 bytes（最终run），非性能结论。tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。Java/model共享236/去重1691 inputs及五个父HEAD设计锁核验，完整551与完整组合未接受；历史run身份不改。
+
+回执持久副本在`/Users/liusinan/.codex/artifacts/unified-wal/service-bootstrap-evidence-3lge8fhj`及archive.json checks目录。前期xWRb0KuS为unused KeeperException catch编译错误；PiwVUdy1为SDK CleanupLedgerManager不属native manager的拒绝，改用factory创建并拥有native manager；iAXpkSt0为fixture禁止loopback的配置失败，测试显式允许loopback、生产默认不改；bootstrap-checks-J1iaTeSP为import/长行checkstyle失败，已修正。这些不作为协议RED。
+
+当前已接显式配置cohort的owned服务入口，仍无默认CLI启用或生产Bookie listener/startup接管。registration-aware Profile auditor、全registry与全内存字节预算、same-ID rejoin/离线catch-up/delete/GC、完整兼容/组合/正式持续性能/运维及生产Gate继续OPEN，步骤12/14保持PARTIAL；Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。实际canary/生产启用仍须环境及相应授权。

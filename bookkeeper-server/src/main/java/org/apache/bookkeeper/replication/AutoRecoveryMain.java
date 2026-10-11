@@ -41,7 +41,6 @@ import org.apache.bookkeeper.common.component.ComponentStarter;
 import org.apache.bookkeeper.common.component.LifecycleComponent;
 import org.apache.bookkeeper.common.component.LifecycleComponentStack;
 import org.apache.bookkeeper.conf.ServerConfiguration;
-import org.apache.bookkeeper.meta.MetadataClientDriver;
 import org.apache.bookkeeper.replication.ReplicationException.CompatibilityException;
 import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
 import org.apache.bookkeeper.server.conf.BookieConfiguration;
@@ -67,11 +66,134 @@ import org.apache.zookeeper.KeeperException;
 @CustomLog
 public class AutoRecoveryMain {
 
+    /** Explicit experimental service cohort. No default configuration enables Profile. */
+    public record ProfileSettings(String reservationRoot, String readinessRoot,
+            java.util.List<org.apache.zookeeper.data.ACL> acls, io.netty.handler.ssl.SslContext tls,
+            java.util.List<org.apache.bookkeeper.net.BookieId> cohort,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits peerLimits,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.WorkerOptions work) {
+        public ProfileSettings {
+            org.apache.zookeeper.common.PathUtils.validatePath(reservationRoot);
+            org.apache.zookeeper.common.PathUtils.validatePath(readinessRoot);
+            java.util.Objects.requireNonNull(tls);
+            java.util.Objects.requireNonNull(peerLimits);
+            java.util.Objects.requireNonNull(work);
+            if (reservationRoot.equals("/") || readinessRoot.equals("/") || reservationRoot.equals(readinessRoot)
+                    || !tls.isClient() || acls.isEmpty() || cohort.isEmpty() || cohort.size() > 64
+                    || new java.util.HashSet<>(cohort).size() != cohort.size()
+                    || !work.data().isEmpty() || !work.controls().isEmpty()) {
+                throw new IllegalArgumentException("Invalid explicit Profile service scope");
+            }
+            cohort = java.util.List.copyOf(cohort);
+            acls = acls.stream().map(acl -> new org.apache.zookeeper.data.ACL(acl.getPerms(),
+                    new org.apache.zookeeper.data.Id(acl.getId().getScheme(), acl.getId().getId()))).toList();
+        }
+
+        @Override
+        public java.util.List<org.apache.zookeeper.data.ACL> acls() {
+            return acls.stream().map(acl -> new org.apache.zookeeper.data.ACL(acl.getPerms(),
+                    new org.apache.zookeeper.data.Id(acl.getId().getScheme(), acl.getId().getId()))).toList();
+        }
+    }
+
+    private static final class ProfileResources {
+        private final io.netty.channel.EventLoopGroup group = new io.netty.channel.nio.NioEventLoopGroup(1,
+                new io.netty.util.concurrent.DefaultThreadFactory("profile-autorecovery"));
+        private final java.util.concurrent.ThreadPoolExecutor cold = new java.util.concurrent.ThreadPoolExecutor(
+                1, 1, 0, java.util.concurrent.TimeUnit.MILLISECONDS,
+                new java.util.concurrent.ArrayBlockingQueue<>(64),
+                new io.netty.util.concurrent.DefaultThreadFactory("profile-autorecovery-cold"));
+        private org.apache.bookkeeper.meta.LedgerManager ownedManager;
+        private org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool pool;
+        private org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator coordinator;
+
+        private BookKeeper client(ServerConfiguration conf, StatsLogger stats)
+                throws IOException, InterruptedException {
+            var clientConf = new org.apache.bookkeeper.conf.ClientConfiguration(conf);
+            clientConf.setClientRole(org.apache.bookkeeper.conf.ClientConfiguration.CLIENT_ROLE_SYSTEM);
+            clientConf.setUseV2WireProtocol(false);
+            clientConf.setExplictLacInterval(0);
+            try {
+                return BookKeeper.forConfig(clientConf).statsLogger(stats).eventLoopGroup(group).build();
+            } catch (BKException failed) {
+                throw new IOException("Profile AutoRecovery SDK initialization failed", failed);
+            }
+        }
+
+        private void bind(BookKeeper client, ProfileSettings settings) throws IOException {
+            if (!(client.getMetadataClientDriver()
+                    instanceof org.apache.bookkeeper.meta.zk.ZKMetadataClientDriver driver)) {
+                throw new IllegalArgumentException("Profile AutoRecovery requires its own ZK authority context");
+            }
+            ownedManager = client.getLedgerManagerFactory().newLedgerManager();
+            if (!(ownedManager instanceof org.apache.bookkeeper.meta.AbstractZkLedgerManager manager)) {
+                throw new IllegalArgumentException("Profile AutoRecovery requires a ZK ledger manager");
+            }
+            var zk = driver.getZk();
+            var timeout = settings.peerLimits().timeout();
+            var registry = new org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore(
+                    zk, settings.readinessRoot(), settings.acls(), timeout);
+            var reservations = new org.apache.bookkeeper.discover.profile.ZKProfileReservationStore(
+                    zk, settings.reservationRoot(), settings.acls(), timeout);
+            var metadata = new org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore(
+                    zk, manager, settings.acls(), timeout);
+            coordinator = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
+                    reservations, metadata, cold);
+            pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                    group, settings.tls(), cold, settings.cohort(), settings.peerLimits());
+        }
+
+        private boolean drain() {
+            boolean interrupted = false;
+            if (pool != null) {
+                var completed = pool.closeAsync();
+                for (;;) {
+                    try {
+                        completed.get();
+                        break;
+                    } catch (InterruptedException stopping) {
+                        interrupted = true;
+                    } catch (java.util.concurrent.ExecutionException failed) {
+                        throw new IllegalStateException(
+                                "Profile service peer drain was not confirmed", failed.getCause());
+                    }
+                }
+            }
+            if (ownedManager != null) {
+                try {
+                    ownedManager.close();
+                    ownedManager = null;
+                } catch (IOException failedClose) {
+                    throw new IllegalStateException("Profile metadata manager close was not confirmed", failedClose);
+                }
+            }
+            return interrupted;
+        }
+
+        private boolean finishOwners() {
+            boolean interrupted = false;
+            cold.shutdown();
+            for (;;) {
+                try {
+                    if (cold.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                        break;
+                    }
+                } catch (InterruptedException stopping) {
+                    interrupted = true;
+                }
+            }
+            group.shutdownGracefully(0, 5, java.util.concurrent.TimeUnit.SECONDS).syncUninterruptibly();
+            interrupted |= Thread.interrupted();
+            return interrupted;
+        }
+    }
+
     private final ServerConfiguration conf;
     final BookKeeper bkc;
     final AuditorElector auditorElector;
     final ReplicationWorker replicationWorker;
     final AutoRecoveryDeathWatcher deathWatcher;
+    private final ProfileResources profileResources;
     int exitCode;
     private volatile boolean shuttingDown = false;
     private boolean shutdownComplete;
@@ -89,30 +211,83 @@ public class AutoRecoveryMain {
     public AutoRecoveryMain(ServerConfiguration conf, StatsLogger statsLogger)
             throws IOException, InterruptedException, KeeperException, UnavailableException,
             CompatibilityException {
-        this.conf = conf;
-        this.bkc = Auditor.createBookKeeperClient(conf, statsLogger.scope(BookKeeperClientStats.CLIENT_SCOPE));
-        MetadataClientDriver metadataClientDriver = bkc.getMetadataClientDriver();
-        metadataClientDriver.setSessionStateListener(() -> {
-            log.error("Client connection to the Metadata server has expired, so shutting down AutoRecoveryMain!");
-            // do not run "shutdown" in the main ZooKeeper client thread
-            // as it performs some blocking operations
-            CompletableFuture.runAsync(() -> {
-                shutdown(ExitCode.ZK_EXPIRED);
-            });
-        });
+        this(conf, statsLogger, null);
+    }
 
-        auditorElector = new AuditorElector(
-            BookieImpl.getBookieId(conf).toString(),
-            conf,
-            bkc,
-            statsLogger.scope(AUDITOR_SCOPE),
-            false);
-        replicationWorker = new ReplicationWorker(
-            conf,
-            bkc,
-            false,
-            statsLogger.scope(REPLICATION_WORKER_SCOPE));
-        deathWatcher = new AutoRecoveryDeathWatcher(this);
+    /** Explicit isolated Profile service; existing constructors remain off. */
+    public AutoRecoveryMain(ServerConfiguration conf, StatsLogger statsLogger, ProfileSettings settings)
+            throws IOException, InterruptedException, KeeperException, UnavailableException,
+            CompatibilityException {
+        if (settings != null && (conf.getAuditorPeriodicCheckInterval() != 0
+                || conf.getAuditorPeriodicReplicasCheckInterval() != 0
+                || conf.getAuditorPeriodicPlacementPolicyCheckInterval() != 0)) {
+            throw new IllegalArgumentException(
+                    "Profile service does not enable Classic payload/replica/placement audits");
+        }
+        this.conf = conf;
+        ProfileResources resources = settings == null ? null : new ProfileResources();
+        BookKeeper client = null;
+        AuditorElector elector = null;
+        ReplicationWorker worker = null;
+        try {
+            client = resources == null ? Auditor.createBookKeeperClient(
+                    conf, statsLogger.scope(BookKeeperClientStats.CLIENT_SCOPE))
+                    : resources.client(conf, statsLogger.scope(BookKeeperClientStats.CLIENT_SCOPE));
+            if (resources != null) {
+                resources.bind(client, settings);
+            }
+            elector = new AuditorElector(BookieImpl.getBookieId(conf).toString(), conf,
+                    client, statsLogger.scope(AUDITOR_SCOPE), false);
+            worker = resources == null ? new ReplicationWorker(conf, client, false,
+                    statsLogger.scope(REPLICATION_WORKER_SCOPE))
+                    : new ReplicationWorker(conf, client, statsLogger.scope(REPLICATION_WORKER_SCOPE),
+                            resources.coordinator, settings.work(), resources.pool);
+            bkc = client;
+            auditorElector = elector;
+            replicationWorker = worker;
+            profileResources = resources;
+            deathWatcher = new AutoRecoveryDeathWatcher(this);
+            client.getMetadataClientDriver().setSessionStateListener(() -> {
+                log.error("Client connection to the Metadata server expired, shutting down AutoRecoveryMain");
+                CompletableFuture.runAsync(() -> shutdown(ExitCode.ZK_EXPIRED));
+            });
+        } catch (IOException | InterruptedException | UnavailableException
+                | CompatibilityException | RuntimeException | Error failed) {
+            boolean interrupted = Thread.interrupted();
+            if (worker != null) {
+                worker.shutdown();
+                interrupted |= Thread.interrupted();
+            }
+            if (elector != null) {
+                for (;;) {
+                    try {
+                        elector.shutdown();
+                        break;
+                    } catch (InterruptedException stopping) {
+                        interrupted = true;
+                        Thread.interrupted();
+                    }
+                }
+            }
+            if (resources != null) {
+                interrupted |= resources.drain();
+            }
+            if (client != null) {
+                try {
+                    client.close();
+                } catch (BKException | InterruptedException closeFailure) {
+                    interrupted |= closeFailure instanceof InterruptedException;
+                    failed.addSuppressed(closeFailure);
+                }
+            }
+            if (resources != null) {
+                interrupted |= resources.finishOwners();
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            throw failed;
+        }
     }
 
     /*
@@ -183,6 +358,9 @@ public class AutoRecoveryMain {
             }
             replicationWorker.shutdown();
             interrupted |= Thread.interrupted(); // Worker preserved the signal; do not abort the SDK's close waits.
+            if (profileResources != null) {
+                interrupted |= profileResources.drain();
+            }
             try {
                 bkc.close();
             } catch (BKException failedClose) {
@@ -190,6 +368,9 @@ public class AutoRecoveryMain {
             } catch (InterruptedException stopping) {
                 interrupted = true;
                 log.warn().exception(stopping).log("Interrupted closing bookkeeper client for auto recovery");
+            }
+            if (profileResources != null) {
+                interrupted |= profileResources.finishOwners();
             }
         } finally {
             if (owner) {
@@ -202,6 +383,17 @@ public class AutoRecoveryMain {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    public boolean isProfileEnabled() {
+        return profileResources != null;
+    }
+
+    public org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Usage getProfilePeerUsage() {
+        if (profileResources == null) {
+            throw new IllegalStateException("Profile service is disabled");
+        }
+        return profileResources.pool.usage();
     }
 
     private int getExitCode() {

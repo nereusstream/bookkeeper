@@ -226,3 +226,5 @@ Java `unified-wal-local-GDbVx4DD` exit0：3类42项全部通过（persistent con
 2026-10-11消费者观察已接[显式注册连接入口](../profile-wire/README.md#注册观察驱动的连接与实际本地排空)：原观察→cold复核→actual mTLS/HELLO→cold再次复核→交付；失败/取消的cold与本地transport实际排空可等待。单连接不替代动态pool与service bootstrap/总预算，步骤12/14仍PARTIAL。
 
 2026-10-11consumer/registered connection已由[配置cohort peer pool与原worker lease](../profile-wire/README.md#注册-cohort-peer-pool-与实际-worker-lease)消费；不是无界registry枚举，也不授予ledger authority或自动rejoin，默认service bootstrap仍OFF。
+
+2026-10-11 registered pool由[显式owned AutoRecovery service](../profile-wire/README.md#显式-autorecovery-service-bootstrap-与-owned-资源)实例化，SDK/ZK authority context一致、failure/shutdown实际排空后关闭owner；默认service入口OFF，完整Profile audit/startup与生产Gate未接受。
