@@ -1334,3 +1334,10 @@ Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksu
 2026-10-11，既有 ProfileNormalClientSource 增加 sdkStopped/sdkDone/stopCancelled 的有限投影；stop 阻止新 Admit，已经排队的 source 仍按实际 encode/abort/write/wire/slot 终态排空。SdkStopWaitsActualCustody 要求 sdkDone 之前 source/output/quota 均归还；caller cancellation 不设置 actual done。两个新增候选错误规则 EarlySdkStop、CancelCompletesStop 取得指定反例。所有原配置显式关闭新错误规则，历史模型与 receipt 不改绑。
 
 最终 3b8imp78 exit 0：normal source 与 registered connection 共 17 配置，2 完整正向/15 指定反例。normal source 正向 403 generated/262 distinct、queue 0、depth/diameter 10、1.125 秒/peak RSS 111853568 bytes；单 worker、heap512/direct64MiB、seed1/fp0、无 symmetry/state constraint、CHECK_DEADLOCK FALSE。未展开完整 SDK quorum/replacement/close、远端 I/O、所有 timer、公平性/活性或 A+C+D 组合；实际终态是模型输入，不能由此生产 TLS/文件/metadata 持久化事实。实际 35 个 Java 回归、复现命令与原 source/design/config/command/失败证据归档由[接线记录](../profile-wire/README.md#sdk-writer-stop-与实际-data-排空)拥有，生产 Gate 不提升。
+
+
+### 普通 writer close 的固定 cut 与支持 kind
+
+2026-10-11，ProfileWriterClose有限投影将SDK confirmed P/L、actual DATA terminal、context+cut同CAS、digest/kind与durable terminal ACK作为输入；early-enter、漏原子cut、接纳tail、忽略digest、caller cancel冒充actual、忽略length和旧reader接受unsupported kind七种规则得到指定反例。最终dcq_0y4g含本切片与whole-recovery/normal-client-source共27配置，4完整正向/23指定反例，924当前inputs匹配；新增正向142 generated/96 distinct、queue0、depth/diameter7、0.990秒/peak RSS108806144 bytes，单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。
+
+该投影不生产TLS/fsync、SDK ACK、字节/身份、全metadata历史、所有时钟、公平性/活性或完整A+C+D；schema2的旧reader拒绝目前有锁定源码与raw kind测试，非旧二进制运行结果。实际阶段Java范围、复现命令和冻结回执由[接线记录](../profile-wire/README.md#普通-writer-close-与固定-cut-续接)拥有，完整模型/Gate不提升。

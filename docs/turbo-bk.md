@@ -661,3 +661,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-11 [SDK writer stop 与实际 DATA 排空](rfcs/unified-wal/implementation/profile-wire/README.md#sdk-writer-stop-与实际-data-排空)已真实 RED/GREEN 修复逻辑 delivery 完成早于排队源/output promise 终结的边界；stop 等自身全部普通 DATA attempts 的实际终态，caller cancellation 不污染共享 completion，借用 socket 保留，UNKNOWN/OPEN 不变。35 个相关 SDK/socket/recovery/worker 用例零失败/skip，17 个有限模型配置得到预期结果，style 通过；RAT 保留 443 父 HEAD 历史问题、无新增。此为普通 close 的必要排空依赖；冻结 P/length 与 durable terminal/metadata close、adoption 尚未接通，步骤 12/14/15 和生产 Gate 仍 PARTIAL/OPEN。
+
+
+2026-10-11 [普通 writer close 与固定 cut 续接](rfcs/unified-wal/implementation/profile-wire/README.md#普通-writer-close-与固定-cut-续接)在显式 cold 依赖下已接原 SDK close：冻结确认P/L、actual DATA排空、同CAS writer cut/UWRC schema2、固定prefix验证与既有SELF/terminal/标准CLOSED。A2/A3空/非空物理tail、健康文件restart、caller cancel/output、enter回复窗口新session续接、cut损坏拒绝、历史replacement与丢CLOSED回复均有真实证据；旧schema1向量不变，旧严格reader拒schema2为源码检查，不计二进制兼容PASS。阶段广度102/73/74与最终8项、27模型配置各按原source绑定保留，style通过，RAT443历史问题无新增。该有界close/adoption切片不闭合默认SDK路由、其他required authority、OPEN/payload/placement、full-bytes、删除/离线/rejoin/GC与综合Gate，步骤12/14/15仍PARTIAL/OPEN。

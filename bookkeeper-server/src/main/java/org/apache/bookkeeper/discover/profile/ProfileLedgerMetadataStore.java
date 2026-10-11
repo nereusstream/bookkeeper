@@ -283,6 +283,12 @@ public final class ProfileLedgerMetadataStore {
     /** Same-record OPEN -> IN_RECOVERY, guarded by both observed physical births. No fence/grant is implied. */
     Result enterRecovery(MembershipSnapshot expected, ProfileRecoveryContext context,
             List<Op> lifecycleChecks, long deadline) throws InterruptedException, TimeoutException, IOException {
+        return enterRecovery(expected, context, lifecycleChecks, deadline, null);
+    }
+
+    Result enterRecovery(MembershipSnapshot expected, ProfileRecoveryContext context,
+            List<Op> lifecycleChecks, long deadline, ProfileRecoveryBoundary.WriterClose writerClose)
+            throws InterruptedException, TimeoutException, IOException {
         var input = expected.metadata().getValue();
         if (mutationClient == null || !mutableMembership(input)
                 || !(expected.metadata().getVersion() instanceof LongVersion version)
@@ -290,10 +296,16 @@ public final class ProfileLedgerMetadataStore {
                 || expected.birthZxid() != context.metadataBirth() || input.getCToken() != context.creatorToken()
                 || input.getAllEnsembles().size() > MAX_EXPERIMENTAL_FRAGMENTS
                 || input.getEnsembleSize() > ProfileReservation.MAX_INITIAL_TARGETS
-                || !Arrays.equals(ProfileRecoveryContext.metadataDigest(input), context.predecessorDigest())) {
+                || input.getCustomMetadata().containsKey(ProfileRecoveryBoundary.WRITER_CLOSE_KEY)
+                || !Arrays.equals(ProfileRecoveryContext.metadataDigest(
+                    writerClose == null ? input : writerClose.attachTo(input)), context.predecessorDigest())) {
             return new Result(Outcome.CONFLICT, null);
         }
-        var base = ProfileRecoveryContext.predecessorProjection(input);
+        var original = ProfileRecoveryContext.predecessorProjection(input);
+        if (!sameMetadata(original, input)) {
+            return new Result(Outcome.CONFLICT, null);
+        }
+        var base = writerClose == null ? original : writerClose.attachTo(original);
         var custom = new java.util.TreeMap<>(base.getCustomMetadata());
         custom.put(ProfileRecoveryContext.KEY, context.encode());
         var desired = LedgerMetadataBuilder.from(base).withCToken(base.getCToken())
@@ -312,13 +324,13 @@ public final class ProfileLedgerMetadataStore {
         }
         if (before.snapshot().birthZxid() != expected.birthZxid()
                 || !before.snapshot().metadata().getVersion().equals(expected.metadata().getVersion())
-                || !sameMetadata(base, before.snapshot().metadata().getValue())) {
+                || !sameMetadata(input, before.snapshot().metadata().getValue())) {
             return new Result(Outcome.CONFLICT, null);
         }
         var guarded = ensureMembershipGuard(before.snapshot(), deadline);
         if (guarded == null || guarded.birthZxid() != expected.birthZxid()
                 || !guarded.metadata().getVersion().equals(expected.metadata().getVersion())
-                || !sameMetadata(base, guarded.metadata().getValue())) {
+                || !sameMetadata(input, guarded.metadata().getValue())) {
             return new Result(Outcome.CONFLICT, null);
         }
         var checks = new java.util.ArrayList<>(lifecycleChecks);
@@ -337,7 +349,7 @@ public final class ProfileLedgerMetadataStore {
         }
         return new Result(code == Code.BADVERSION.intValue() || code == Code.NONODE.intValue()
                 || after.snapshot().birthZxid() != expected.birthZxid()
-                || !sameMetadata(base, after.snapshot().metadata().getValue())
+                || !sameMetadata(input, after.snapshot().metadata().getValue())
                 ? Outcome.CONFLICT : Outcome.DURABILITY_UNKNOWN, null);
     }
 
@@ -548,6 +560,7 @@ public final class ProfileLedgerMetadataStore {
         Objects.requireNonNull(initial, "initial");
         Objects.requireNonNull(backlink, "backlink");
         if (initial.getMetadataFormatVersion() != 3 || initial.getState() != LedgerMetadata.State.OPEN
+                || initial.getCustomMetadata().containsKey(ProfileRecoveryBoundary.WRITER_CLOSE_KEY)
                 || initial.getDigestType() != DigestType.CRC32C || initial.getAllEnsembles().size() != 1
                 || initial.getAllEnsembles().firstKey() != 0
                 || initial.getEnsembleSize() < 1 || initial.getAckQuorumSize() < 1

@@ -27,8 +27,45 @@ public record ProfileRecoveryBoundary(ProfileRecoveryContext context, int before
     public static final String KEY = "bookkeeper.experimental.profile.recovery-prefix";
     public static final int BYTES = 256;
     public static final int REFERENCE_BYTES = 56;
+    public static final String WRITER_CLOSE_KEY = "bookkeeper.experimental.profile.writer-close";
     private static final int MAGIC = 0x55575246; // UWRF
     private static final int REFERENCE_MAGIC = 0x55575253; // UWRS
+
+    /** Frozen ordinary writer P/L; bound by the context predecessor digest, never a CLOSED receipt. */
+    public record WriterClose(long prefixEntryId, long prefixLength) {
+        public WriterClose {
+            if (prefixEntryId < -1 || prefixEntryId == Long.MAX_VALUE || prefixLength < 0
+                    || prefixEntryId == -1 && prefixLength != 0) {
+                throw new IllegalArgumentException("Invalid ordinary writer close prefix");
+            }
+        }
+
+        public byte[] encode() {
+            return finish(ByteBuffer.allocate(32).putInt(0x55574e43).putShort((short) 1).putShort((short) 0)
+                    .putLong(prefixEntryId).putLong(prefixLength).putInt(0));
+        }
+
+        public static WriterClose decode(byte[] bytes) {
+            var input = checked(bytes, 32, 0x55574e43);
+            var cut = new WriterClose(input.getLong(), input.getLong());
+            if (input.getInt() != 0) {
+                throw new IllegalArgumentException("Invalid writer close reserved bytes");
+            }
+            return cut;
+        }
+
+        LedgerMetadata attachTo(LedgerMetadata value) {
+            var custom = new java.util.TreeMap<>(value.getCustomMetadata());
+            custom.put(WRITER_CLOSE_KEY, encode());
+            return org.apache.bookkeeper.client.LedgerMetadataBuilder.from(value)
+                    .withCToken(value.getCToken()).withCustomMetadata(custom).build();
+        }
+    }
+
+    static WriterClose writerClose(LedgerMetadata value) {
+        byte[] bytes = value.getCustomMetadata().get(WRITER_CLOSE_KEY);
+        return bytes == null ? null : WriterClose.decode(bytes);
+    }
 
     public ProfileRecoveryBoundary {
         java.util.Objects.requireNonNull(context, "context");

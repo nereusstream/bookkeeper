@@ -721,10 +721,12 @@ public final class ProfileRecoveryCoordinator {
         };
     }
 
-    public enum PrefixStatus { VERIFIED_NORMAL_TAIL, DEFERRED, CONFLICT, QUARANTINED, DATA_LOSS }
+    public enum PrefixStatus {
+        VERIFIED_NORMAL_TAIL, VERIFIED_WRITER_PREFIX, DEFERRED, CONFLICT, QUARANTINED, DATA_LOSS
+    }
 
     public enum PrefixReason {
-        NORMAL_TAIL, LIMIT, CANCELLED, DEADLINE, LAC_UNAVAILABLE, SOURCE_UNAVAILABLE, REQUIRED_HOLE,
+        NORMAL_TAIL, WRITER_CLOSE, LIMIT, CANCELLED, DEADLINE, LAC_UNAVAILABLE, SOURCE_UNAVAILABLE, REQUIRED_HOLE,
         PAYLOAD_CONFLICT, LENGTH_CONFLICT, PERMISSION, AUTHORITY_CHANGED,
         AUTHORITY_UNAVAILABLE, AUTHORITY_UNRECOVERABLE
     }
@@ -750,7 +752,8 @@ public final class ProfileRecoveryCoordinator {
             throw new IllegalArgumentException("Prefix verification requires its frozen context and finite bounds");
         }
         var context = accepted.context();
-        if (suppliedData.values().stream().anyMatch(peer -> !peer.hello().capabilities().contains(
+        if (ProfileRecoveryBoundary.writerClose(accepted.metadata().metadata().getValue()) == null
+                && suppliedData.values().stream().anyMatch(peer -> !peer.hello().capabilities().contains(
                 org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.EXPLICIT_CAPABILITY))) {
             return CompletableFuture.completedFuture(new PrefixResult(PrefixStatus.DEFERRED,
                     PrefixReason.LAC_UNAVAILABLE, context, null, -1, -1, 0, 0, List.of()));
@@ -821,27 +824,34 @@ public final class ProfileRecoveryCoordinator {
                 }
                 var verify = new PrefixVerification(reader, context, ready.recovery().metadata(),
                         stopped, maxCoordinates);
-                var checked = reader.readLacEvidence().handle((lac, failure) -> {
-                    if (failure != null) {
-                        if (!(cause(failure) instanceof BKException)) {
-                            verify.done.completeExceptionally(failure);
-                            return verify.done;
+                CompletableFuture<PrefixResult> checked;
+                if (verify.writerClose != null) {
+                    verify.required = verify.writerClose.prefixEntryId();
+                    verify.start();
+                    checked = verify.done;
+                } else {
+                    checked = reader.readLacEvidence().handle((lac, failure) -> {
+                        if (failure != null) {
+                            if (!(cause(failure) instanceof BKException)) {
+                                verify.done.completeExceptionally(failure);
+                                return verify.done;
+                            }
+                            boolean conflict = cause(failure)
+                                    instanceof org.apache.bookkeeper.client.ProfileLedgerHandle
+                                        .LacLengthConflictException;
+                            boolean unauthorized = BKException.getExceptionCode(cause(failure))
+                                    == BKException.Code.UnauthorizedAccessException;
+                            verify.finish(conflict ? PrefixStatus.QUARANTINED : unauthorized
+                                    ? PrefixStatus.CONFLICT : PrefixStatus.DEFERRED,
+                                    conflict ? PrefixReason.LENGTH_CONFLICT : unauthorized
+                                        ? PrefixReason.PERMISSION : PrefixReason.LAC_UNAVAILABLE, List.of());
+                        } else {
+                            verify.required = lac.prefixEntryId();
+                            verify.start();
                         }
-                        boolean conflict = cause(failure)
-                                instanceof org.apache.bookkeeper.client.ProfileLedgerHandle
-                                    .LacLengthConflictException;
-                        boolean unauthorized = BKException.getExceptionCode(cause(failure))
-                                == BKException.Code.UnauthorizedAccessException;
-                        verify.finish(conflict ? PrefixStatus.QUARANTINED : unauthorized
-                                ? PrefixStatus.CONFLICT : PrefixStatus.DEFERRED,
-                                conflict ? PrefixReason.LENGTH_CONFLICT : unauthorized
-                                    ? PrefixReason.PERMISSION : PrefixReason.LAC_UNAVAILABLE, List.of());
-                    } else {
-                        verify.required = lac.prefixEntryId();
-                        verify.start();
-                    }
-                    return verify.done;
-                }).thenCompose(value -> value);
+                        return verify.done;
+                    }).thenCompose(value -> value);
+                }
                 return checked.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
                     var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
                     if (current.context() == null || !context.equals(current.context())
@@ -895,6 +905,7 @@ public final class ProfileRecoveryCoordinator {
         private final ProfileRecoveryContext context;
         private final ProfileLedgerMetadataStore.MembershipSnapshot metadata;
         private final AtomicBoolean stopped;
+        private final ProfileRecoveryBoundary.WriterClose writerClose;
         private int remaining;
         private long required = -1;
         private long next;
@@ -908,9 +919,16 @@ public final class ProfileRecoveryCoordinator {
             this.metadata = metadata;
             this.stopped = stopped;
             remaining = bound;
+            writerClose = ProfileRecoveryBoundary.writerClose(metadata.metadata().getValue());
         }
 
         void start() {
+            if (!stopped.get() && writerClose != null && next > writerClose.prefixEntryId()) {
+                finish(length == writerClose.prefixLength() ? PrefixStatus.VERIFIED_WRITER_PREFIX
+                        : PrefixStatus.QUARANTINED, length == writerClose.prefixLength() ? PrefixReason.WRITER_CLOSE
+                            : PrefixReason.LENGTH_CONFLICT, List.of());
+                return;
+            }
             if (stopped.get() || remaining-- == 0 || next == Long.MAX_VALUE) {
                 finish(PrefixStatus.DEFERRED, stopped.get() ? PrefixReason.CANCELLED : PrefixReason.LIMIT, List.of());
                 return;
@@ -1007,6 +1025,50 @@ public final class ProfileRecoveryCoordinator {
             byte[] canonicalDescriptor, org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration) {
+        return recover(ledger, operationId, sdk, canonicalDescriptor, validator, credential, suppliedData,
+                suppliedControl, maxCoordinates, maxDuration, null);
+    }
+
+    /** Local SDK stop supplies this one immutable confirmed cut; durable publication remains separate. */
+    public record WriterCloseRequest(org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext ledger,
+            org.apache.bookkeeper.versioning.Versioned<org.apache.bookkeeper.client.api.LedgerMetadata> metadata,
+            long prefixEntryId, long prefixLength, byte[] operationId) {
+        public WriterCloseRequest {
+            Objects.requireNonNull(ledger, "ledger");
+            Objects.requireNonNull(metadata, "metadata");
+            operationId = ProfileLifecycleHead.fixed(operationId, 16, true);
+            new ProfileRecoveryBoundary.WriterClose(prefixEntryId, prefixLength);
+            if (metadata.getValue().getState() != org.apache.bookkeeper.client.api.LedgerMetadata.State.OPEN
+                    || !(metadata.getVersion() instanceof org.apache.bookkeeper.versioning.LongVersion)
+                    || metadata.getValue().getLedgerId() != ledger.ledgerId()
+                    || prefixEntryId < metadata.getValue().getAllEnsembles().lastKey() - 1) {
+                throw new IllegalArgumentException("Writer close requires its exact OPEN snapshot and confirmed cut");
+            }
+        }
+        @Override
+        public byte[] operationId() {
+            return operationId.clone();
+        }
+        @Override
+        public String toString() {
+            return "WriterCloseRequest{ledger=" + ledger.ledgerId() + ", prefix=" + prefixEntryId + '}';
+        }
+    }
+
+    /** Ordinary close freezes P/L in the same IN_RECOVERY CAS, then reuses fixed-prefix terminal close. */
+    public CompletableFuture<RecoveryResult> closeWriter(WriterCloseRequest request, ClientContext sdk,
+            byte[] canonicalDescriptor, org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration) {
+        return recover(request.ledger().ledgerId(), request.operationId(), sdk, canonicalDescriptor, validator,
+                credential, suppliedData, suppliedControl, maxCoordinates, maxDuration, request);
+    }
+
+    private CompletableFuture<RecoveryResult> recover(long ledger, byte[] operationId, ClientContext sdk,
+            byte[] canonicalDescriptor, org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration,
+            WriterCloseRequest writerRequest) {
         long duration = maxDuration.toNanos();
         if (ledger < 0 || maxCoordinates < 1 || suppliedData.size() > 64 || suppliedControl.size() > 64
                 || duration <= 0 || maxDuration.compareTo(Duration.ofMinutes(1)) > 0
@@ -1036,7 +1098,7 @@ public final class ProfileRecoveryCoordinator {
             var data = Map.copyOf(suppliedData);
             var controls = Map.copyOf(suppliedControl);
             var actual = recoverOnce(ledger, operation, sdk, descriptor, decoded, identity, key, data,
-                    controls, maxCoordinates, stopped, progress);
+                    controls, maxCoordinates, stopped, progress, writerRequest);
             var timer = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
             actual.whenComplete((result, failure) -> {
                 var scheduled = timer.get();
@@ -1083,8 +1145,17 @@ public final class ProfileRecoveryCoordinator {
             ProtectedProfileCredential key, Map<BookieId, ProfileNormalDataClient> data,
             Map<String, ProfileInitialControlClient> controls, int maxCoordinates, AtomicBoolean stopped,
             java.util.concurrent.atomic.AtomicReference<RecoveryResult> progress) {
+        return recoverOnce(ledger, operation, sdk, descriptor, decoded, identity, key, data, controls,
+                maxCoordinates, stopped, progress, null);
+    }
+
+    private CompletableFuture<RecoveryResult> recoverOnce(long ledger, byte[] operation, ClientContext sdk,
+            byte[] descriptor, org.apache.bookkeeper.common.profile.ProfileDescriptor decoded, byte[] identity,
+            ProtectedProfileCredential key, Map<BookieId, ProfileNormalDataClient> data,
+            Map<String, ProfileInitialControlClient> controls, int maxCoordinates, AtomicBoolean stopped,
+            java.util.concurrent.atomic.AtomicReference<RecoveryResult> progress, WriterCloseRequest writerRequest) {
         return CompletableFuture.supplyAsync(
-                () -> startRecovery(ledger, operation, decoded, identity, key, stopped), cold)
+                () -> startRecovery(ledger, operation, decoded, identity, key, stopped, writerRequest), cold)
                 .thenCompose(start -> {
             if (start.closed() != null) {
                 return CompletableFuture.completedFuture(new RecoveryResult(ledger,
@@ -1114,13 +1185,15 @@ public final class ProfileRecoveryCoordinator {
                     return CompletableFuture.completedFuture(recoveryFailure(ledger, context,
                             completionStatus(selected.status()), null));
                 }
-                if (data.values().stream().anyMatch(peer -> !peer.hello().capabilities().contains(
+                if (ProfileRecoveryBoundary.writerClose(accepted.metadata().metadata().getValue()) == null
+                        && data.values().stream().anyMatch(peer -> !peer.hello().capabilities().contains(
                         org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.EXPLICIT_CAPABILITY))) {
                     return CompletableFuture.completedFuture(progress.get());
                 }
                 return verifyPrefixOnce(accepted, sdk, data, controls, key, maxCoordinates, stopped)
                         .thenCompose(proof -> {
-                    if (proof.status() != PrefixStatus.VERIFIED_NORMAL_TAIL || stopped.get()) {
+                    if (proof.status() != PrefixStatus.VERIFIED_NORMAL_TAIL
+                            && proof.status() != PrefixStatus.VERIFIED_WRITER_PREFIX || stopped.get()) {
                         return CompletableFuture.completedFuture(new RecoveryResult(ledger,
                                 stopped.get() || proof.status() == PrefixStatus.DEFERRED ? RecoveryStatus.DEFERRED
                                     : proof.status() == PrefixStatus.DATA_LOSS ? RecoveryStatus.DATA_LOSS
@@ -1145,7 +1218,7 @@ public final class ProfileRecoveryCoordinator {
 
     private RecoveryStart startRecovery(long ledger, byte[] operation,
             org.apache.bookkeeper.common.profile.ProfileDescriptor descriptor, byte[] identity,
-            ProtectedProfileCredential key, AtomicBoolean stopped) {
+            ProtectedProfileCredential key, AtomicBoolean stopped, WriterCloseRequest writerRequest) {
         if (stopped.get()) {
             return new RecoveryStart(null, null, RecoveryStatus.DEFERRED);
         }
@@ -1182,6 +1255,10 @@ public final class ProfileRecoveryCoordinator {
                             ? RecoveryStatus.DEFERRED : RecoveryStatus.QUARANTINED);
             }
             var snapshot = read.snapshot();
+            if (writerRequest != null && !writerRequestMatches(writerRequest, snapshot.context(),
+                    snapshot.closed().metadata().metadata().getValue())) {
+                return new RecoveryStart(null, null, RecoveryStatus.CONFLICT);
+            }
             return Arrays.equals(identity, snapshot.context().ledger().descriptorIdentity())
                     ? new RecoveryStart(new ZKProfileReservationStore.RecoveryResult(
                         ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, snapshot.context(),
@@ -1195,15 +1272,32 @@ public final class ProfileRecoveryCoordinator {
         if (value.getState() == org.apache.bookkeeper.client.api.LedgerMetadata.State.IN_RECOVERY) {
             accepted = reservations.readRecovery(metadata, ledger);
         } else {
-            var captured = reservations.captureRecovery(metadata, ledger, operation);
+            if (writerRequest != null && (!member.snapshot().metadata().getVersion()
+                    .equals(writerRequest.metadata().getVersion())
+                    || !ProfileLedgerMetadataStore.sameMetadata(value, writerRequest.metadata().getValue()))) {
+                return new RecoveryStart(null, null, RecoveryStatus.CONFLICT);
+            }
+            var cut = writerRequest == null ? null : new ProfileRecoveryBoundary.WriterClose(
+                    writerRequest.prefixEntryId(), writerRequest.prefixLength());
+            var captured = reservations.captureRecovery(metadata, ledger, operation, cut);
             if (captured.plan() == null || !Arrays.equals(identity,
-                    captured.plan().context().ledger().descriptorIdentity())) {
+                    captured.plan().context().ledger().descriptorIdentity()) || writerRequest != null
+                        && (!writerRequest.ledger().equals(captured.plan().context().ledger())
+                            || !captured.plan().predecessor().metadata().getVersion()
+                            .equals(writerRequest.metadata().getVersion())
+                            || !ProfileLedgerMetadataStore.sameMetadata(
+                                captured.plan().predecessor().metadata().getValue(),
+                                writerRequest.metadata().getValue()))) {
                 return new RecoveryStart(null, null, RecoveryStatus.CONFLICT);
             }
             if (stopped.get()) {
                 return new RecoveryStart(null, null, RecoveryStatus.DEFERRED);
             }
-            accepted = reservations.beginRecovery(metadata, captured.plan());
+            accepted = reservations.beginRecovery(metadata, captured.plan(), cut);
+        }
+        if (writerRequest != null && accepted.context() != null && !writerRequestMatches(writerRequest,
+                accepted.context(), accepted.metadata().metadata().getValue())) {
+            return new RecoveryStart(null, null, RecoveryStatus.CONFLICT);
         }
         if (accepted.context() != null && !Arrays.equals(identity, accepted.context().ledger().descriptorIdentity())) {
             return new RecoveryStart(null, null, RecoveryStatus.CONFLICT);
@@ -1211,6 +1305,23 @@ public final class ProfileRecoveryCoordinator {
         return new RecoveryStart(accepted, null, accepted.outcome() == ProfileLedgerMetadataStore.Outcome.QUARANTINED
                 ? RecoveryStatus.QUARANTINED : accepted.outcome() == ProfileLedgerMetadataStore.Outcome.CONFLICT
                     ? RecoveryStatus.CONFLICT : RecoveryStatus.DEFERRED);
+    }
+
+    private static boolean writerRequestMatches(WriterCloseRequest request, ProfileRecoveryContext context,
+            org.apache.bookkeeper.client.api.LedgerMetadata current) {
+        var cut = ProfileRecoveryBoundary.writerClose(current);
+        try {
+            return cut != null && cut.prefixEntryId() == request.prefixEntryId()
+                    && cut.prefixLength() == request.prefixLength() && context.ledger().equals(request.ledger())
+                    && Arrays.equals(context.operationId(), request.operationId())
+                    && context.predecessorVersion() == ((org.apache.bookkeeper.versioning.LongVersion)
+                        request.metadata().getVersion()).getLongVersion()
+                    && context.creatorToken() == request.metadata().getValue().getCToken()
+                    && Arrays.equals(context.predecessorDigest(), ProfileRecoveryContext.metadataDigest(
+                        cut.attachTo(request.metadata().getValue())));
+        } catch (java.io.IOException invalid) {
+            return false;
+        }
     }
 
     private CompletableFuture<RecoveryResult> recoverSelected(ZKProfileReservationStore.RecoveryResult accepted,

@@ -457,6 +457,11 @@ public final class ZKProfileReservationStore {
 
     /** Freeze once. An UNKNOWN caller must reuse this plan, not silently recapture another birth or version. */
     public RecoveryCapture captureRecovery(ProfileLedgerMetadataStore metadata, long ledger, byte[] operation) {
+        return captureRecovery(metadata, ledger, operation, null);
+    }
+
+    RecoveryCapture captureRecovery(ProfileLedgerMetadataStore metadata, long ledger, byte[] operation,
+            ProfileRecoveryBoundary.WriterClose writerClose) {
         requireRecoveryClient(metadata);
         operation = ProfileLifecycleHead.fixed(operation, 16, true);
         long deadline = System.nanoTime() + timeoutNanos;
@@ -469,10 +474,16 @@ public final class ZKProfileReservationStore {
                         : ReadStatus.UNAVAILABLE, null);
             }
             if (member.snapshot().metadata().getValue().getState() != LedgerMetadata.State.OPEN
+                    || member.snapshot().metadata().getValue().getCustomMetadata()
+                        .containsKey(ProfileRecoveryBoundary.WRITER_CLOSE_KEY)
                     || !recoveryPublicationMatches(root.snapshot(), member.snapshot(), deadline)) {
                 return new RecoveryCapture(ReadStatus.QUARANTINED, null);
             }
-            var context = ProfileRecoveryContext.capture(member.snapshot(), root.snapshot(), operation);
+            if (writerClose != null && writerClose.prefixEntryId()
+                    < member.snapshot().metadata().getValue().getAllEnsembles().lastKey() - 1) {
+                return new RecoveryCapture(ReadStatus.QUARANTINED, null);
+            }
+            var context = ProfileRecoveryContext.capture(member.snapshot(), root.snapshot(), operation, writerClose);
             return new RecoveryCapture(ReadStatus.FOUND, new RecoveryPlan(member.snapshot(), root.snapshot(), context));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -485,6 +496,11 @@ public final class ZKProfileReservationStore {
     }
 
     public RecoveryResult beginRecovery(ProfileLedgerMetadataStore metadata, RecoveryPlan frozen) {
+        return beginRecovery(metadata, frozen, null);
+    }
+
+    RecoveryResult beginRecovery(ProfileLedgerMetadataStore metadata, RecoveryPlan frozen,
+            ProfileRecoveryBoundary.WriterClose writerClose) {
         requireRecoveryClient(metadata);
         var context = frozen.context();
         long ledger = context.ledger().ledgerId();
@@ -501,7 +517,7 @@ public final class ZKProfileReservationStore {
                 return recoveryFailure(ProfileLedgerMetadataStore.Outcome.CONFLICT);
             }
             var checks = recoveryRootChecks(root.snapshot(), deadline);
-            var committed = metadata.enterRecovery(frozen.predecessor(), context, checks, deadline);
+            var committed = metadata.enterRecovery(frozen.predecessor(), context, checks, deadline, writerClose);
             if (committed.metadata() == null) {
                 return recoveryFailure(committed.outcome());
             }
@@ -575,6 +591,12 @@ public final class ZKProfileReservationStore {
         boolean closed = value.getState() == LedgerMetadata.State.CLOSED;
         var selected = selectedBoundary(context, value, deadline);
         var boundary = selected == null ? candidate : selected.boundary();
+        var writerClose = ProfileRecoveryBoundary.writerClose(value);
+        if (writerClose != null && (writerClose.prefixEntryId() < value.getAllEnsembles().lastKey() - 1
+                || boundary != null && (boundary.prefixEntryId() != writerClose.prefixEntryId()
+                    || boundary.prefixLength() != writerClose.prefixLength()))) {
+            throw new IllegalArgumentException("Recovery cannot change the frozen writer close prefix");
+        }
         int publicationIndex = selected == null ? Integer.MAX_VALUE
                 : Math.toIntExact(selected.reference().publicationBeforeVersion() - context.generation());
         int closeIndex = head.size();
@@ -1222,6 +1244,7 @@ public final class ZKProfileReservationStore {
             ProfileRecoveryCoordinator.PrefixResult proof) {
         requireRecoveryClient(metadata);
         if (proof.status() != ProfileRecoveryCoordinator.PrefixStatus.VERIFIED_NORMAL_TAIL
+                && proof.status() != ProfileRecoveryCoordinator.PrefixStatus.VERIFIED_WRITER_PREFIX
                 || proof.metadata() == null) {
             throw new IllegalArgumentException("Prefix selection requires the verified read predicate");
         }
@@ -1402,6 +1425,15 @@ public final class ZKProfileReservationStore {
     private boolean recoveryPublicationMatches(Snapshot current,
             ProfileLedgerMetadataStore.MembershipSnapshot predecessor, long deadline)
             throws InterruptedException, TimeoutException {
+        if (ProfileRecoveryBoundary.writerClose(predecessor.metadata().getValue()) != null) {
+            var value = predecessor.metadata().getValue();
+            var custom = new java.util.TreeMap<>(value.getCustomMetadata());
+            custom.remove(ProfileRecoveryBoundary.WRITER_CLOSE_KEY);
+            predecessor = new ProfileLedgerMetadataStore.MembershipSnapshot(predecessor.birthZxid(),
+                    new org.apache.bookkeeper.versioning.Versioned<>(org.apache.bookkeeper.client
+                        .LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
+                        .withCustomMetadata(custom).build(), predecessor.metadata().getVersion()));
+        }
         if (current.lifecycle().state() == ProfileLifecycleHead.State.READY) {
             var page = page(current, deadline);
             return page != null && page.storeVersion() == current.lifecycle().readyPageVersion()

@@ -424,6 +424,68 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
     }
 
     @Test
+    public void ordinaryWriterCutHasIndependentFixedBytesAndStrictBounds() {
+        for (String hex : java.util.List.of(
+                "55574e4300010000ffffffffffffffff000000000000000000000000f8ee81ee",
+                "55574e4300010000000000000000000000000000000000100000000089792ce9")) {
+            byte[] vector = java.util.HexFormat.of().parseHex(hex);
+            var raw = java.nio.ByteBuffer.wrap(vector);
+            var crc = new java.util.zip.CRC32C();
+            crc.update(vector, 0, 28);
+            assertEquals((int) crc.getValue(), raw.getInt(28));
+            var decoded = ProfileRecoveryBoundary.WriterClose.decode(vector);
+            assertEquals(raw.getLong(8), decoded.prefixEntryId());
+            assertEquals(raw.getLong(16), decoded.prefixLength());
+            assertArrayEquals(vector, decoded.encode());
+            for (int bytes = 0; bytes < vector.length; bytes++) {
+                byte[] truncated = java.util.Arrays.copyOf(vector, bytes);
+                assertThrows(IllegalArgumentException.class,
+                        () -> ProfileRecoveryBoundary.WriterClose.decode(truncated));
+            }
+            byte[] extra = java.util.Arrays.copyOf(vector, 33);
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.WriterClose.decode(extra));
+            byte[] corrupt = vector.clone();
+            corrupt[12] ^= 1;
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.WriterClose.decode(corrupt));
+            byte[] reserved = vector.clone();
+            reserved[27] = 1;
+            crc.reset();
+            crc.update(reserved, 0, 28);
+            java.nio.ByteBuffer.wrap(reserved).putInt(28, (int) crc.getValue());
+            assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryBoundary.WriterClose.decode(reserved));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new ProfileRecoveryBoundary.WriterClose(-1, 16));
+        assertThrows(IllegalArgumentException.class, () -> new ProfileRecoveryBoundary.WriterClose(Long.MAX_VALUE, 0));
+    }
+
+    @Test
+    public void writerCloseContextHasItsOwnSchemaAndPreservesTheLegacyVector() throws Exception {
+        byte[] legacy = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(getClass().getResource(
+                "/unified-wal-segment/recovery-context.bin").toURI()));
+        var old = ProfileRecoveryContext.decode(legacy);
+        assertFalse(old.writerClose());
+        assertArrayEquals(legacy, old.encode());
+        var writer = new ProfileRecoveryContext(old.ledger(), old.operationId(), old.metadataBirth(),
+                old.predecessorVersion(), old.creatorToken(), old.predecessorDigest(), old.lifecycleBirthZxid(),
+                old.lifecycleBirth(), old.lifecycleSequence(), old.lifecycleVersion(), old.controlGeneration(), true);
+        byte[] vector = legacy.clone();
+        java.nio.ByteBuffer.wrap(vector).putShort(4, (short) 2);
+        var crc = new java.util.zip.CRC32C();
+        crc.update(vector, 0, vector.length - 4);
+        java.nio.ByteBuffer.wrap(vector).putInt(vector.length - 4, (int) crc.getValue());
+        assertArrayEquals(vector, writer.encode());
+        assertEquals(184, vector.length);
+        assertTrue(ProfileRecoveryContext.decode(vector).writerClose());
+        // The locked pre-writer-close source requires schema1; schema2 cannot pass that guard.
+        assertTrue(java.nio.ByteBuffer.wrap(vector).getShort(4) != 1);
+        vector[5] = 3;
+        crc.reset();
+        crc.update(vector, 0, vector.length - 4);
+        java.nio.ByteBuffer.wrap(vector).putInt(vector.length - 4, (int) crc.getValue());
+        assertThrows(IllegalArgumentException.class, () -> ProfileRecoveryContext.decode(vector));
+    }
+
+    @Test
     public void selectedPrefixFixesOriginAndAllowsLastFragmentCommitAndContextRestart() throws Exception {
         try (LedgerManager lm = manager(first)) {
             ready(lm);

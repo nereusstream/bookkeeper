@@ -46,8 +46,10 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.common.util.OrderedScheduler;
+import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
 import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
+import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementCoordinator;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.net.BookieId;
@@ -58,7 +60,7 @@ import org.apache.bookkeeper.versioning.Versioned;
 /**
  * Experimental Profile writer, using the original LedgerHandle/PendingAddOp write engine.
  * Borrows the SDK context and verified clients; replacement requires an explicitly configured bounded pool.
- * Ordinary point reads and explicit source/anchor evidence are opt-in; recovery/close publication stay disabled.
+ * Ordinary point reads and source evidence are opt-in; writer close borrows explicitly configured cold peers.
  * Local stop is never a metadata CLOSED receipt or cancellation of remote I/O.
  */
 public final class ProfileLedgerHandle extends LedgerHandle {
@@ -72,12 +74,22 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     private byte[] replacementDescriptor;
     private int replacementLimit;
     private volatile ProfileReplacementCoordinator.Operation currentReplacement;
+    private final ClientContext base;
+    private volatile CloseSettings closeSettings;
+    private final AtomicBoolean closeStarted = new AtomicBoolean();
+    private final CompletableFuture<Void> durableClose = new CompletableFuture<>();
+    private volatile ProfileRecoveryCoordinator.WriterCloseRequest writerCloseRequest;
+
+    private record CloseSettings(ProfileRecoveryCoordinator coordinator, byte[] descriptor,
+            org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
+            Map<String, ProfileInitialControlClient> controls, int coordinates, Duration duration) { }
 
     private ProfileLedgerHandle(ProfileContext context, ProfileInitialLifecycleCoordinator.Result initial,
             int maxPendingEntries, int maxPayloadBytes) throws GeneralSecurityException {
         super(context, initial.metadata().getValue().getLedgerId(), initial.metadata(), BookKeeper.DigestType.CRC32C,
                 initial.metadata().getValue().getPassword(), EnumSet.noneOf(WriteFlag.class));
         transport = context.transport;
+        base = context.base;
         entries = new Semaphore(maxPendingEntries);
         this.maxPayloadBytes = maxPayloadBytes;
     }
@@ -345,6 +357,42 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         return currentReplacement;
     }
 
+    /** Explicit experimental close configuration; the normal DATA hot path acquires no new authority. */
+    public CompletableFuture<Void> enableWriterClose(ProfileRecoveryCoordinator coordinator, byte[] descriptor,
+            org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
+            Map<String, ProfileInitialControlClient> controls, int maxCoordinates, Duration duration) {
+        if (descriptor.length > ProfileDescriptorCodec.MAX_CANONICAL_LENGTH || controls.size() > 64
+                || maxCoordinates < 1 || duration.isNegative() || duration.isZero()
+                || duration.compareTo(Duration.ofMinutes(1)) > 0) {
+            throw new IllegalArgumentException("Writer close requires bounded descriptor, peers and duration");
+        }
+        byte[] owned = descriptor.clone();
+        var decoded = ProfileDescriptorCodec.decode(owned, validator);
+        if (!Arrays.equals(ProfileDescriptorCodec.identityOf(decoded, validator).toBytes(),
+                transport.ledgerContext().descriptorIdentity())) {
+            throw new IllegalArgumentException("Writer close descriptor does not match this handle");
+        }
+        var settings = new CloseSettings(Objects.requireNonNull(coordinator, "coordinator"), owned, validator,
+                Map.copyOf(controls), maxCoordinates, duration);
+        var configured = new CompletableFuture<Void>();
+        executeOrdered(() -> {
+            synchronized (this) {
+                if (lastAddPushed != INVALID_ENTRY_ID || stopped.get() || closeSettings != null) {
+                    configured.completeExceptionally(new IllegalStateException("Configure before first append"));
+                    return;
+                }
+                closeSettings = settings;
+            }
+            configured.complete(null);
+        });
+        return configured;
+    }
+
+    /** The original frozen request after local stop; retry/adoption must preserve this P/L and identity. */
+    public ProfileRecoveryCoordinator.WriterCloseRequest writerCloseRequest() {
+        return writerCloseRequest;
+    }
+
     /** Logical failure can still leave remote DATA; a later NONE never clears this observation. */
     public boolean hasUncertainWrites() {
         return transport.hasUncertainWrites();
@@ -565,8 +613,90 @@ public final class ProfileLedgerHandle extends LedgerHandle {
 
     @Override
     void asyncCloseInternal(CloseCallback callback, Object ctx, int code) {
+        var settings = closeSettings;
+        if (settings != null) {
+            durableClose.whenComplete((unused, failure) -> callback.closeComplete(failure == null ? BKException.Code.OK
+                    : BKException.getExceptionCode(failure, BKException.Code.UnexpectedConditionException), this, ctx));
+            if (closeStarted.compareAndSet(false, true)) {
+                try {
+                    executeOrdered(() -> closeWriter(settings, code));
+                } catch (RejectedExecutionException unavailable) {
+                    handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
+                    transport.closeCompletion().whenComplete((unused, failure) ->
+                            durableClose.completeExceptionally(
+                                BKException.create(BKException.Code.InterruptedException)));
+                }
+            }
+            return;
+        }
         handleUnrecoverableErrorDuringAdd(code);
         executeOrdered(() -> callback.closeComplete(BKException.Code.IllegalOpException, this, ctx));
+    }
+
+    private void closeWriter(CloseSettings settings, int code) {
+        final List<PendingAddOp> pending;
+        final Versioned<LedgerMetadata> expected;
+        final long prefix;
+        final long finalLength;
+        synchronized (this) {
+            stopped.set(true);
+            pending = drainPendingAddsAndAdjustLength();
+            lastAddPushed = lastAddConfirmed;
+            prefix = lastAddConfirmed;
+            finalLength = length.get();
+            expected = getVersionedLedgerMetadata();
+        }
+        if (timeoutFuture != null) {
+            timeoutFuture.cancel(false);
+        }
+        Throwable localFailure = null;
+        try {
+            writerCloseRequest = new ProfileRecoveryCoordinator.WriterCloseRequest(transport.ledgerContext(),
+                    expected, prefix, finalLength, identity());
+            errorOutPendingAdds(code, pending);
+        } catch (RuntimeException failure) {
+            localFailure = failure;
+        } finally {
+            transport.close();
+        }
+        Throwable stopFailure = localFailure;
+        transport.closeCompletion().whenComplete((unused, failure) -> {
+            if (failure != null || stopFailure != null) {
+                durableClose.completeExceptionally(failure != null ? failure : stopFailure);
+                return;
+            }
+            try {
+                settings.coordinator().closeWriter(writerCloseRequest, base, settings.descriptor(),
+                        settings.validator(), ProtectedProfileCredential.of(1, ledgerKey), transport.readPeers(),
+                        settings.controls(), settings.coordinates(), settings.duration())
+                            .whenComplete((result, error) -> {
+                    if (error != null) {
+                        durableClose.completeExceptionally(error);
+                        return;
+                    }
+                    int closeCode = switch (result.status()) {
+                        case RECOVERED_AND_CLOSED -> BKException.Code.OK;
+                        case DEFERRED -> BKException.Code.TimeoutException;
+                        case CONFLICT -> BKException.Code.MetadataVersionException;
+                        case QUARANTINED -> BKException.Code.DigestMatchException;
+                        case DATA_LOSS -> BKException.Code.ReadException;
+                        case DELETED -> BKException.Code.NoSuchLedgerExistsException;
+                    };
+                    if (closeCode == BKException.Code.OK) {
+                        if (!setLedgerMetadata(expected, result.publication().metadata().metadata())) {
+                            durableClose.completeExceptionally(
+                                    BKException.create(BKException.Code.MetadataVersionException));
+                        } else {
+                            durableClose.complete(null);
+                        }
+                    } else {
+                        durableClose.completeExceptionally(BKException.create(closeCode));
+                    }
+                });
+            } catch (RuntimeException unavailable) {
+                durableClose.completeExceptionally(unavailable);
+            }
+        });
     }
 
     record ProfileContext(ClientContext base, ProfileBookieClient transport) implements ClientContext {

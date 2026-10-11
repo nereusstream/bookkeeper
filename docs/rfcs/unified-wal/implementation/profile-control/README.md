@@ -455,3 +455,8 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 2026-10-08 [历史fragment repair membership与close授权](../profile-wire/README.md#历史fragment-repair-membership与close授权)已用同一ZK事务发布标准membership和immutable repair结果，实际close authority随后接入UIC4；bounded head/digest/inverse校验继续采用同一恢复token，physical admission guard防止同UUID/version0重建通过旧cut。真实copy/socket/files与ZK连续commit/reply-loss/delete竞争已有定向验证。最后开放fragment仍需terminal/frontier proof；完整copy coordinator、AutoRecovery和matching CLOSED保持OPEN，不授予normal或strong loss reset。
 
 2026-10-08 [历史fragment完整copy协调与同操作恢复](../profile-wire/README.md#历史fragment完整copy协调与同操作恢复)已将原SDK recovery read/digest、单entry actual recovery Add、ZK publication及UIC4 close串成bounded协调入口；取消保留在途permit，copy失败不发布membership，published intent按原close ID解析且不recopy。换组fencing来源补齐未变成员，已验证repair-head metadata版本可继续只读。underreplication worker/scheduling、最后开放fragment/frontier和matching CLOSED仍OPEN。
+
+
+## 普通 writer close 的同记录 cut
+
+2026-10-11，原 birth/version/root-guarded OPEN→IN_RECOVERY CAS可同时发布冻结writer P/L的32-byte UWNC marker；其内容进入context canonical OPEN projection digest，writer-only UWRC/schema2保持184-byte宽度并强制marker存在。核验原READY/replacement history时投影掉由此CAS新加的marker，原membership/creator/birth/版本与冲突reserved状态拒绝保留。marker既不是DATA证明，也不是第二份CLOSED或membership权威；同一次标准CLOSED仍由已验证fixed-prefix、实际terminal quorum与原root CAS发布。实际SDK/TLS/files、回复丢失/新session、marker损坏与schema1向量边界由[接线记录](../profile-wire/README.md#普通-writer-close-与固定-cut-续接)拥有，旧Profile二进制矩阵/完整兼容、步骤12/14/15与生产Gate保持未闭合。

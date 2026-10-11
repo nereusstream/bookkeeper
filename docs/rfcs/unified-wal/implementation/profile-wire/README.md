@@ -1220,3 +1220,35 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 既有 ProfileNormalClientSource 有限投影增加 SDK stop/caller cancellation，只消费原 source/output/quota 实际终态；early-stop 和 cancel-as-completion 两种错误规则得到指定 SdkStopWaitsActualCustody 反例。最终 3b8imp78 的 17 配置为 2 完整正向/15 指定反例，正向 source 模型 403 generated/262 distinct、queue 0、depth 10、1.125 秒/peak RSS 111853568 bytes；tool 1.7.4、单 worker、heap 512/direct 64 MiB、seed 1/fp 0、无 symmetry/state constraint、CHECK_DEADLOCK FALSE。不是性能结论、实际 TLS/fsync producer、完整时钟/公平性/活性或 A+C+D 全组合证明。
 
 本轮持久证据在 /Users/liusinan/.codex/artifacts/unified-wal/writer-stop-evidence-kr2up7fw，archive.json 保留原 run/source/config/command 身份。style exit 0；RAT 初次 445 含两个新配置的短许可头，补齐标准 Apache 头后仍 exit 1、443 unapproved 路径全存在于父 HEAD，无新增；不改许可规则，不称 CI 全绿。步骤 12/14/15 与生产 Gate 仍 PARTIAL/OPEN；普通 durable writer close/adoption、额外 required authority producer、OPEN/payload/placement audit、full-bytes、离线/rejoin/delete/history GC/完整退役、兼容/组合/正式性能/运维仍未闭合。Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED。
+
+
+## 普通 writer close 与固定 cut 续接
+
+2026-10-11，第14步在显式提供既有 cold coordinator、canonical descriptor/validator 和 verified CONTROL peers 后，把原 ProfileLedgerHandle.close/closeAsync/asyncClose 接到同一个关闭 procedure。enableWriterClose 与 replacement 依赖配置一样在首次 append 前完成；未提供这些依赖的旧 factory 仍显式拒绝 durable close，不创建第二个 SDK/线程/连接池或猜测控制面。普通 Add 路径不新增 metadata/control/handshake。当前是有界、隔离、可丢弃实验接线，不是默认 BookKeeper.open/create 路由或生产 authority。
+
+原 ledger executor 停收、drain pending adds 并调整 length，在同一 handle lock 内冻结 lastAddConfirmed=P、length=L、OPEN metadata snapshot 与单次 operation ID。之后先结束 pending callbacks，并等待上节自身 DATA source/output/RPC 的 actual completion；caller 取消 close future 不取消共享 procedure，重复 close 消费同一结果。只有实际排空后，才用原 SDK base context 和保留 DATA peers 调用既有 coordinator。旧 metadata/creator/backlink、descriptor、credential、root 或 pending replacement 对不上时返回 non-OK；不重新 OPEN，不分配新的 entry 坐标。
+
+关闭 cut 以标准 metadata 的 bookkeeper.experimental.profile.writer-close key 保存，和 OPEN→IN_RECOVERY/context 在同一次 birth/version/root-checked ZK multi 发布。实验 UWNC/schema1 固定32字节：magic4、schema/reserved各2、P/L各8、reserved4、CRC32C4；(-1,0) 和 Long.MAX_VALUE/负值规则严格检查。两份独立原始向量为 55574e4300010000ffffffffffffffff000000000000000000000000f8ee81ee 与 55574e4300010000000000000000000000000000000000100000000089792ce9。它记录必须保持的普通 writer cut，不证明任何 DATA 或 CLOSED，也不另存 membership。
+
+该 marker 进入 context 的 canonical OPEN projection digest，不能在 repair/history inverse 时被删除；核对原 READY/replacement publication 时只投影掉这个由本次 CAS 新增的 marker，仍保留原 membership/版本/creator/birth证明。原 OPEN 中冲突 reserved 状态的拒绝保留。Writer context 使用同为184字节的 UWRC/schema2，强制 marker 存在；普通 recovery 的 schema1/原 corpus 字节与12参数构造入口不变。Schema2 不能伪装成 schema1：锁定父源码18853770fe的旧 decode 严格要求schema1，已静态核对其拒绝条件；当前向量测试独立改 header/CRC、核验旧向量不变与未知schema3拒绝。历史 Profile-aware 二进制实际 recovery/混跑和完整 stock-binary/old-decoder 矩阵未执行，不计 G1 或 stable PASS。
+
+通用 recovery/worker 看到这个 matching mandatory writer context 时，也只读验证0..P及累计 L，产生 VERIFIED_WRITER_PREFIX，既不查询 normal tail 是否存在，也不吸收P之后的物理记录；required hole、length/payload冲突、权限或预算不足都不发布选择/关闭。随后复用原 UWRF/UWRS、SELF bounded last-fragment COPY/grant-close、空末段 UIC6/type12、distinct terminal ACK 和唯一标准 CLOSED(P,L,context)/UWCF close-history CAS。该路径沿用原 fencing、UNKNOWN、真实I/O和固定操作续接，不制造普通 activation 或 loss reset。提供的 CONTROL principal 仍需原 exact AuthZ，DATA credential 不代替控制权限。
+
+真实验证包括：A2/A3 空、非空 SDK writer 的实际副本均留有更长未确认 tail，close、独立 readonly-open 和健康文件 close/restart 保持原 P/L 与读上界；held DATA output promise 期间 metadata 仍为原 OPEN，取消第一次 caller future、重复 close、新 append 拒绝和最后输出清零均被覆盖；已提交 IN_RECOVERY/cut但reply未到时，caller deadline 后另一实际 ZK client/新 coordinator 沿用原 context、P/L 关闭，改动或删除 cut 则 non-OK；真实 DATA force 失败触发已完成 replacement 后，历史fragment与当前membership保持，CLOSED CAS reply CONNECTIONLOSS按重读同一结果解析，两段 SDK payload 都可读。后两类是实际 reply-window/fresh-session 验证，不称真实进程死亡；当前文件 restart 是健康关闭/replay，未称掉电证明。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#ordinaryWriterClose*+writerStop*+originalSdk*+sdk*+wholePointRecovery*+wholeRecovery*+selectedLastFragment*+closedRepair*+closedReplicaHealth*+replicationWorker*,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#ordinaryWriterClose*+writerStop*+wholePointRecoveryClosesEmptyAndNonemptyFromOpenWithOriginalSdkAndQuorum,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#ordinaryWriterClose*+wholePointRecoveryClosesEmptyAndNonemptyFromOpenWithOriginalSdkAndQuorum,ZKProfileLifecycleStoreTest#writerCloseContextHasItsOwnSchemaAndPreservesTheLegacyVector+ordinaryWriterCutHasIndependentFixedBytesAndStrictBounds+recoveryContextVectorOwnsItsFieldsAndRejectsMalformedIdentity'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-writer-close --config-prefix ce-profile-writer-close --config-prefix a-profile-normal-client-source --config-prefix ce-profile-normal-client-source --config-prefix a-profile-whole-recovery --config-prefix ce-profile-whole-recovery
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+o0XW6MW5原整体入口1通过；JEUF4LcB新测试误用不存在的 storage helper，testCompile失败，修正为已有实际 restart入口后KVSX6gV7首项通过；vjXoj95p3项、fCOPZraU历史/丢CLOSED回复1项通过。广度Er5XHRyQ 3类101、csnnW1mt 3类102均零fail/skip，分别在最后测试换行/新增历史场景与显式保留 reserved guard 前；TamSz4Dr3类73在schema2前，schema2后的3M6fyKpH3类74零fail/skip，在最后3处仅长行换行前。最终Hc3KETQ9两类8项零fail/skip，1069当前inputs逐项hash匹配；这些范围分开保留，不相加为独立用例数、不移绑旧PASS。最终 style exit0；RAT exit1，443 unapproved路径全部存在父HEAD，无新增，不改许可规则或称CI全绿。
+
+最终模型dcq_0y4g为27配置：4完整正向/23指定反例，924当前inputs逐项hash匹配。新增 ProfileWriterClose 只投影 confirmed P/L、DATA terminal、同CAS cut、digest/支持kind、固定adoption、length与caller cancellation；新正向142 generated/96 distinct、queue0、depth7、0.990秒/peak RSS108806144 bytes，非性能结论；tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。TLS/fsync、完整SDK/metadata历史、所有timer、公平性/活性与A+C+D完整组合仍非该有限模型产物。
+
+持久证据在 /Users/liusinan/.codex/artifacts/unified-wal/writer-close-evidence-a6gtqzmd，archive.json保留所有原source/config/run/command、失败与阶段身份。当前 prefix验证/SELF末段操作仍有显式 coordinate/duration界限，超限defer；完整大规模close成本、任意故障/进程kill/掉电、混跑兼容、默认SDK路由、其他required-authority producer、OPEN/payload/placement audit、full-bytes、离线追赶/rejoin/delete/history GC/退役和综合运维/性能未闭合。步骤12/14/15与生产Gate仍PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。

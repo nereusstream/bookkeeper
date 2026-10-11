@@ -34,10 +34,19 @@ import org.apache.bookkeeper.versioning.LongVersion;
 /** One fixed experimental same-record recovery identity. It is not a fence/grant or CLOSED receipt. */
 public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operationId, long metadataBirth,
         int predecessorVersion, long creatorToken, byte[] predecessorDigest, long lifecycleBirthZxid,
-        UUID lifecycleBirth, long lifecycleSequence, int lifecycleVersion, long controlGeneration) {
+        UUID lifecycleBirth, long lifecycleSequence, int lifecycleVersion, long controlGeneration,
+        boolean writerClose) {
     public static final String KEY = "bookkeeper.experimental.profile.recovery-context";
     public static final int ENCODED_BYTES = 184;
     private static final int MAGIC = 0x55575243; // UWRC
+
+    public ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operationId, long metadataBirth,
+            int predecessorVersion, long creatorToken, byte[] predecessorDigest, long lifecycleBirthZxid,
+            UUID lifecycleBirth, long lifecycleSequence, int lifecycleVersion, long controlGeneration) {
+        this(ledger, operationId, metadataBirth, predecessorVersion, creatorToken, predecessorDigest,
+                lifecycleBirthZxid,
+                lifecycleBirth, lifecycleSequence, lifecycleVersion, controlGeneration, false);
+    }
 
     public ProfileRecoveryContext {
         java.util.Objects.requireNonNull(ledger, "ledger");
@@ -54,6 +63,12 @@ public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operati
 
     static ProfileRecoveryContext capture(ProfileLedgerMetadataStore.MembershipSnapshot metadata,
             ZKProfileReservationStore.Snapshot root, byte[] operation) throws IOException {
+        return capture(metadata, root, operation, null);
+    }
+
+    static ProfileRecoveryContext capture(ProfileLedgerMetadataStore.MembershipSnapshot metadata,
+            ZKProfileReservationStore.Snapshot root, byte[] operation,
+            ProfileRecoveryBoundary.WriterClose writerClose) throws IOException {
         var value = metadata.metadata().getValue();
         var reference = ProfileMetadataBacklink.from(value);
         if (!reference.equals(root.reservation().backlink())
@@ -63,9 +78,10 @@ public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operati
         var scope = root.reservation().installs().get(0);
         return new ProfileRecoveryContext(new ProfileLedgerContext(reference.ledgerId(), reference.instanceId(),
                 scope.descriptorIdentity().toBytes()), operation, metadata.birthZxid(),
-                Math.toIntExact(version.getLongVersion()), value.getCToken(), metadataDigest(value),
+                Math.toIntExact(version.getLongVersion()), value.getCToken(),
+                metadataDigest(writerClose == null ? value : writerClose.attachTo(value)),
                 root.birthZxid(), root.lifecycle().birthId(), root.lifecycle().sequence(),
-                root.lifecycleDataVersion(), root.lifecycle().controlGeneration());
+                root.lifecycleDataVersion(), root.lifecycle().controlGeneration(), writerClose != null);
     }
 
     @Override
@@ -83,7 +99,8 @@ public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operati
     }
 
     public byte[] encode() {
-        ByteBuffer out = ByteBuffer.allocate(ENCODED_BYTES).putInt(MAGIC).putShort((short) 1).putShort((short) 0)
+        ByteBuffer out = ByteBuffer.allocate(ENCODED_BYTES).putInt(MAGIC)
+                .putShort((short) (writerClose ? 2 : 1)).putShort((short) 0)
                 .put(ledger.encode()).put(operationId).putLong(metadataBirth).putInt(predecessorVersion)
                 .putLong(creatorToken).put(predecessorDigest).putLong(lifecycleBirthZxid)
                 .putLong(lifecycleBirth.getMostSignificantBits()).putLong(lifecycleBirth.getLeastSignificantBits())
@@ -100,8 +117,11 @@ public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operati
         CRC32C crc = new CRC32C();
         crc.update(bytes, 0, bytes.length - 4);
         ByteBuffer in = ByteBuffer.wrap(bytes);
-        if (in.getInt(bytes.length - 4) != (int) crc.getValue() || in.getInt() != MAGIC
-                || in.getShort() != 1 || in.getShort() != 0) {
+        if (in.getInt(bytes.length - 4) != (int) crc.getValue() || in.getInt() != MAGIC) {
+            throw new IllegalArgumentException("Invalid recovery context checksum/magic");
+        }
+        int schema = in.getShort();
+        if (schema != 1 && schema != 2 || in.getShort() != 0) {
             throw new IllegalArgumentException("Invalid recovery context schema or checksum");
         }
         var ledger = ProfileLedgerContext.decode(in);
@@ -113,7 +133,8 @@ public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operati
         byte[] digest = new byte[32];
         in.get(digest);
         return new ProfileRecoveryContext(ledger, operation, birth, version, creator, digest,
-                in.getLong(), new UUID(in.getLong(), in.getLong()), in.getLong(), in.getInt(), in.getLong());
+                in.getLong(), new UUID(in.getLong(), in.getLong()), in.getLong(), in.getInt(), in.getLong(),
+                schema == 2);
     }
 
     boolean matchesRoot(ZKProfileReservationStore.Snapshot root) {
@@ -131,6 +152,7 @@ public record ProfileRecoveryContext(ProfileLedgerContext ledger, byte[] operati
     boolean matchesRecovery(ProfileLedgerMetadataStore.MembershipSnapshot current) throws IOException {
         var value = current.metadata().getValue();
         return value.getState() == LedgerMetadata.State.IN_RECOVERY && current.birthZxid() == metadataBirth
+                && writerClose == value.getCustomMetadata().containsKey(ProfileRecoveryBoundary.WRITER_CLOSE_KEY)
                 && current.metadata().getVersion() instanceof LongVersion version
                 && version.getLongVersion() == generation() && value.getCToken() == creatorToken
                 && Arrays.equals(value.getCustomMetadata().get(KEY), encode())

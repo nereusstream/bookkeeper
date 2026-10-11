@@ -19,6 +19,15 @@ import time
 
 
 MATRIX = {
+    'a-profile-writer-close': None,
+    'ce-profile-writer-close-enter': 'EnterWaitsActualData',
+    'ce-profile-writer-close-atomic': 'RecoveryAtomicallyFreezesCut',
+    'ce-profile-writer-close-tail': 'ClosedMatchesWriterPrefix',
+    'ce-profile-writer-close-digest': 'AdoptionNeedsBoundCut',
+    'ce-profile-writer-close-cancel': 'CompletionWaitsData',
+    'ce-profile-writer-close-length': 'ClosedMatchesWriterPrefix',
+    'ce-profile-writer-close-kind': 'AdoptionNeedsSupportedKind',
+
     'a-profile-replica-audit': None,
     'ce-profile-replica-audit-open': 'AuditOnlyClosed',
     'ce-profile-replica-audit-scope': 'AuditOnlyScoped',
@@ -760,6 +769,7 @@ def main():
                    else "ProfileEmptyRepair.tla" if "profile-empty-repair" in name
                    else "ProfilePeerDiscovery.tla" if "profile-peer-discovery" in name
                    else "ProfileRegisteredConnection.tla" if "profile-registered-connection" in name
+                   else "ProfileWriterClose.tla" if "profile-writer-close" in name
                    else "ProfileServiceShutdown.tla" if "profile-service-shutdown" in name
                    else "ProfileRecoveryPeerPool.tla" if "profile-recovery-peer-pool" in name
                    else "ProfileServiceBootstrap.tla" if "profile-service-bootstrap" in name
