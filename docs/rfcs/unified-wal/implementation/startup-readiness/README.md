@@ -243,3 +243,6 @@ Java `unified-wal-local-GDbVx4DD` exit0：3类42项全部通过（persistent con
 ## 初始 delete required-through 与实际恢复 cursor
 
 2026-10-12，explicit `bindDeleteDelivery`将原graph的healthy recovered control cursor接到既有ephemeral publisher，fresh writable multi同时检查initial assignment/birth/head版本；仅caller输入DELETE_RECOVERED或persistent READY不够。`catchUpProfileDeletes`实际冷读完整event/authority并经原force/apply推进no-hole cursor；LIMIT/UNKNOWN不开放gate，UNKNOWN保留actual local completion。已用真实磁盘restart/DLR/三节点与两ZK客户端验证seq2抢在注册前提交、继续追赶与lost reply同session解析。[接线记录](../profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)拥有源码、范围与证据。缺失assignment不默认empty；首次empty commissioning是显式动作。ordinary head增长不是assignment变化；后续在线消费、snapshot/handoff、其他真实compatibility/device/required-authority producer与默认bootstrap尚未闭合，不把此cursor切片升级为完整startup/Gate。
+
+
+2026-10-12 [全目标 source与原注册consumer](../profile-wire/README.md#全目标-publication-与在线节点消费)在logical前使全部target head的required-through可见，PREPARED阻塞追赶而不授权删除；新reference持久绑定完整publication prefix。原registered graph显式借用cold/scheduler消费后续CLOSED effects，ordinary head增长不demote；stop/session退休保持local gate关闭并等待actual I/O，未排空close保留locks。该接线仍要求既有真实startup前置/default bootstrap等其余facts，snapshot/handoff及完整Gate不提升。

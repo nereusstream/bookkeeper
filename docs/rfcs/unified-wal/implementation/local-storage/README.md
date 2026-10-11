@@ -894,3 +894,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [实际 delete catch-up](../profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)在opened original graph提供healthy recovered cursor，bounded cold逐event重读committed authority并复用原type13 write/force/owner apply；不新增schema/线程/队列，不等physical reclaim。实际restart后maxEvents1/LIMIT、held force下UNKNOWN/completion pending与late apply/fresh解析已有覆盖；caller future副本不能伪造actual local completion。registration cut从此control事实取值，其他startup事实/default bootstrap及完整rejoin/Gate仍OPEN。
+
+
+2026-10-12 [原graph在线删除effect消费](../profile-wire/README.md#全目标-publication-与在线节点消费)由原注册attempt显式启动单active bounded cold probe，复用type13 force/apply/no-hole cursor；PREPARED/inactive不入本地TOMBSTONE。UNKNOWN后等actual completion，stop退休准入且不取消已提交I/O；graph close先排空consumer再关原owner/resources，false保留原锁。实际held native force与独立writer锁验证已有覆盖；无新线程/队列/持久任务系统、无FREE/强访问屏障保证，default bootstrap与完整Gate仍OPEN。

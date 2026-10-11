@@ -2461,6 +2461,136 @@ public final class ZKProfileReservationStore {
                     new org.apache.bookkeeper.versioning.LongVersion(seal.beforeVersion())));
     }
 
+    private record PreparedDeliverySnapshot(ProfileDeleteRecord.PreparedDeliveries value,
+            ProfileZKReadClient.Node node, String guard) { }
+
+    private PreparedDeliverySnapshot preparedDeliveries(long ledger, ProfileDeleteRecord.Manifest manifest,
+            ProfileDeleteRecord.Reference reference, long deadline) throws InterruptedException, TimeoutException {
+        String name = deleteManifestPath(ledger) + "/delivery-prepared";
+        var node = reads.get(name, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(node);
+        requirePersistent(node, false);
+        var value = ProfileDeleteRecord.PreparedDeliveries.decode(node.bytes());
+        String guard = name + "/birth-" + HexFormat.of().formatHex(value.birthId());
+        var anchor = reads.get(guard, deadline);
+        requireFound(anchor);
+        requirePersistent(anchor, true);
+        if (value.reference().birth() != reference.birth()
+                || !Arrays.equals(value.reference().digest(), reference.digest())
+                || !Arrays.equals(value.reference().sealDigest(), reference.sealDigest())
+                || reference.publicationId() != null
+                    && !Arrays.equals(value.reference().publicationId(), reference.publicationId())
+                || value.reference().publicationId() != null
+                    && !Arrays.equals(value.reference().publicationId(), value.birthId())
+                || value.targetCount() != manifest.targets().size()
+                || node.stat().getVersion() != value.preparedThrough()
+                || anchor.stat().getCzxid() != node.stat().getCzxid()
+                || !Arrays.equals(anchor.bytes(), value.birthId())) {
+            throw new IllegalArgumentException("Delete publication prefix is missing, recreated or mismatched");
+        }
+        return new PreparedDeliverySnapshot(value, node, guard);
+    }
+
+    private PreparedDeliverySnapshot prepareDeleteDeliveries(ProfileLedgerMetadataStore metadata, Snapshot frozen,
+            ProfileLedgerMetadataStore.MembershipSnapshot member, ProfileDeleteRecord.Manifest manifest,
+            ProfileDeleteRecord.Reference reference, boolean versioned,
+            java.util.function.BooleanSupplier live, long deadline)
+            throws InterruptedException, TimeoutException {
+        String name = deleteManifestPath(manifest.ledger().ledgerId()) + "/delivery-prepared";
+        var current = preparedDeliveries(manifest.ledger().ledgerId(), manifest, reference, deadline);
+        if (current == null) {
+            if (!versioned && reference.publicationId() != null) {
+                return null;
+            }
+            UUID id = UUID.randomUUID();
+            byte[] birth = java.nio.ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())
+                    .putLong(id.getLeastSignificantBits()).array();
+            var bound = versioned ? new ProfileDeleteRecord.Reference(reference.birth(), reference.digest(),
+                    reference.sealDigest(), birth) : reference;
+            var initial = new ProfileDeleteRecord.PreparedDeliveries(bound, birth, manifest.targets().size(), 0);
+            var checks = new java.util.ArrayList<>(recoveryRootChecks(frozen, deadline));
+            checks.addAll(metadata.checksForMembership(member));
+            checks.add(Op.check(deleteManifestPath(manifest.ledger().ledgerId()), 0));
+            checks.add(Op.check(deleteManifestPath(manifest.ledger().ledgerId()) + "/birth-"
+                    + Long.toHexString(reference.birth()), 0));
+            checks.add(Op.create(name, initial.encode(), acls, CreateMode.PERSISTENT));
+            checks.add(Op.create(name + "/birth-" + HexFormat.of().formatHex(birth), birth,
+                    immutableAcls, CreateMode.PERSISTENT));
+            if (!live.getAsBoolean()) {
+                return null;
+            }
+            multi(checks, deadline);
+            current = preparedDeliveries(manifest.ledger().ledgerId(), manifest, reference, deadline);
+        }
+        while (current != null && current.value().preparedThrough() < manifest.targets().size()) {
+            if (!live.getAsBoolean()) {
+                return null;
+            }
+            int slot = current.value().preparedThrough();
+            var target = manifest.targets().get(slot);
+            long ledger = manifest.ledger().ledgerId();
+            String headPath = deliveryPath(target);
+            String receiptPath = path(ledger) + "/delete-delivery-" + deliveryTargetKey(target);
+            var receipt = reads.get(receiptPath, deadline);
+            var head = deleteHead(target, deadline);
+            if (head == null) {
+                if (receipt.code() != Code.NONODE.intValue()) {
+                    throw new IllegalArgumentException("Retained delivery has lost its required stream head");
+                }
+                if (createInitialDeleteAssignment(target).status() != ReadStatus.FOUND) {
+                    return null;
+                }
+                head = deleteHead(target, deadline);
+            }
+            if (head == null || head.head().committedThrough() == ProfileDeleteDelivery.MAX_EVENTS
+                    && receipt.code() == Code.NONODE.intValue()) {
+                return null;
+            }
+            var bound = current.value().reference();
+            var checks = new java.util.ArrayList<>(recoveryRootChecks(frozen, deadline));
+            checks.addAll(metadata.checksForMembership(member));
+            checks.add(Op.check(current.guard(), 0));
+            checks.add(Op.check(headPath + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0));
+            if (receipt.code() == Code.OK.intValue()) {
+                var resolved = resolveDelivery(ledger, target, receipt, head.node(), head.head(), deadline);
+                var event = resolved.event();
+                if (!event.ledger().equals(manifest.ledger()) || event.deleteEpoch() != manifest.seal().epoch()
+                        || !Arrays.equals(event.requestId(), manifest.seal().requestId())
+                        || !Arrays.equals(event.tombstone().encode(), bound.encode())) {
+                    throw new IllegalArgumentException("Retained delivery belongs to another delete request");
+                }
+                checks.add(Op.check(receiptPath, 0));
+                checks.add(Op.check(headPath + "/event-" + Long.toHexString(event.sequence()), 0));
+                checks.add(Op.check(headPath, head.node().stat().getVersion()));
+            } else if (receipt.code() == Code.NONODE.intValue()) {
+                var next = head.head().next();
+                var event = new ProfileDeleteDelivery.Event(next.streamId(), next.streamGeneration(),
+                        next.assignmentGeneration(), next.committedThrough(), manifest.ledger(), target, bound,
+                        manifest.seal().requestId(), manifest.seal().epoch());
+                checks.add(Op.create(headPath + "/event-" + Long.toHexString(event.sequence()), event.encode(),
+                        immutableAcls, CreateMode.PERSISTENT));
+                checks.add(Op.create(receiptPath, event.encode(), immutableAcls, CreateMode.PERSISTENT));
+                checks.add(Op.setData(headPath, next.encode(), head.node().stat().getVersion()));
+            } else {
+                return null;
+            }
+            checks.add(Op.setData(name, current.value().next().encode(), current.node().stat().getVersion()));
+            if (!live.getAsBoolean()) {
+                return null;
+            }
+            multi(checks, deadline);
+            var after = preparedDeliveries(ledger, manifest, reference, deadline);
+            if (after == null || after.value().preparedThrough() <= slot) {
+                return null;
+            }
+            current = after;
+        }
+        return current;
+    }
+
     /** Logical deletion only: same-record seal, complete retained targets and authoritative tombstone.
      * Does not wait for target ACKs, local barriers or physical reclaim; no online-delete fallback. */
     DeleteResult deleteClosed(ProfileLedgerMetadataStore metadata, long ledger, byte[] request,
@@ -2538,8 +2668,17 @@ public final class ZKProfileReservationStore {
                     return new DeleteResult(latest.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
                             : DeleteStatus.CONFLICT, null);
                 }
-                return new DeleteResult(DeleteStatus.LOGICALLY_DELETED, deleteManifest(ledger,
-                        ProfileDeleteRecord.Reference.decode(tombstone), seal, deadline));
+                var reference = ProfileDeleteRecord.Reference.decode(tombstone);
+                var manifest = deleteManifest(ledger, reference, seal, deadline);
+                var published = reference.publicationId() == null
+                        ? prepareDeleteDeliveries(metadata, root, actual.snapshot(), manifest, reference, false,
+                            live, deadline)
+                        : preparedDeliveries(ledger, manifest, reference, deadline);
+                if (published != null && published.value().preparedThrough() == manifest.targets().size()) {
+                    return new DeleteResult(DeleteStatus.LOGICALLY_DELETED, manifest);
+                }
+                return new DeleteResult(reference.publicationId() != null ? DeleteStatus.QUARANTINED
+                        : live.getAsBoolean() ? DeleteStatus.UNAVAILABLE : DeleteStatus.CANCELLED, null);
             }
             if (!live.getAsBoolean()) {
                 return new DeleteResult(DeleteStatus.CANCELLED, null);
@@ -2589,10 +2728,21 @@ public final class ZKProfileReservationStore {
             if (!live.getAsBoolean()) {
                 return new DeleteResult(DeleteStatus.CANCELLED, null);
             }
+            var published = prepareDeleteDeliveries(metadata, root, actual.snapshot(), manifest, reference,
+                    true, live, deadline);
+            if (published == null || published.value().preparedThrough() != manifest.targets().size()) {
+                return new DeleteResult(live.getAsBoolean() ? DeleteStatus.UNAVAILABLE : DeleteStatus.CANCELLED, null);
+            }
+            if (!live.getAsBoolean()) {
+                return new DeleteResult(DeleteStatus.CANCELLED, null);
+            }
             var checks = new java.util.ArrayList<>(recoveryRootChecks(root, deadline));
             checks.addAll(metadata.checksForMembership(actual.snapshot()));
             checks.add(Op.check(name, 0));
             checks.add(Op.check(guardPath, 0));
+            checks.add(Op.check(published.guard(), 0));
+            checks.add(Op.check(name + "/delivery-prepared", manifest.targets().size()));
+            reference = published.value().reference();
             checks.add(metadata.deleteTombstoneWrite(actual.snapshot(), reference));
             multi(checks, deadline);
             var done = metadata.readMembership(ledger, deadline);
@@ -2619,12 +2769,14 @@ public final class ZKProfileReservationStore {
         }
     }
 
-    public enum DeliveryStatus { COMMITTED, NOT_LOGICALLY_DELETED, NOT_APPLICABLE, LIMIT, QUARANTINED, UNAVAILABLE }
+    public enum DeliveryStatus {
+        COMMITTED, PREPARED, NOT_LOGICALLY_DELETED, NOT_APPLICABLE, LIMIT, QUARANTINED, UNAVAILABLE
+    }
 
     public record DeliveryResult(DeliveryStatus status, ProfileDeleteDelivery.Event event) {
         public DeliveryResult {
-            if ((status == DeliveryStatus.COMMITTED) != (event != null)) {
-                throw new IllegalArgumentException("Only committed delete delivery carries an event");
+            if ((status == DeliveryStatus.COMMITTED || status == DeliveryStatus.PREPARED) != (event != null)) {
+                throw new IllegalArgumentException("Only recorded delete delivery carries an event");
             }
         }
     }
@@ -2835,6 +2987,21 @@ public final class ZKProfileReservationStore {
             if (!manifest.targets().contains(target)) {
                 return new DeliveryResult(DeliveryStatus.NOT_APPLICABLE, null);
             }
+            if (reference.publicationId() != null) {
+                var recorded = reads.get(path(ledger) + "/delete-delivery-" + deliveryTargetKey(target), deadline);
+                if (recorded.code() != Code.OK.intValue()) {
+                    return new DeliveryResult(recorded.code() == Code.NONODE.intValue()
+                            ? DeliveryStatus.QUARANTINED : DeliveryStatus.UNAVAILABLE, null);
+                }
+                requirePersistent(recorded, true);
+                var event = ProfileDeleteDelivery.Event.decode(recorded.bytes());
+                if (!event.ledger().equals(manifest.ledger()) || !event.target().equals(target)
+                        || event.deleteEpoch() != seal.epoch() || !Arrays.equals(event.requestId(), seal.requestId())
+                        || !Arrays.equals(event.tombstone().encode(), reference.encode())) {
+                    return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
+                }
+                return readDeleteDelivery(metadata, target, event.sequence());
+            }
             var parent = reads.get(deliveryRoot(), deadline);
             byte[] parentBytes = java.nio.ByteBuffer.allocate(8).putInt(0x55574450).putInt(1).array();
             if (parent.code() == Code.NONODE.intValue()) {
@@ -2969,17 +3136,24 @@ public final class ZKProfileReservationStore {
             var value = member.snapshot().metadata().getValue();
             byte[] reference = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
             var seal = ProfileDeleteRecord.Seal.decode(value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY));
-            if (!seal.matches(state.snapshot()) || reference == null
-                    || !Arrays.equals(reference, event.tombstone().encode())
+            if (!seal.matches(state.snapshot()) || reference != null
+                    && !Arrays.equals(reference, event.tombstone().encode())
                     || event.deleteEpoch() != seal.epoch() || !Arrays.equals(event.requestId(), seal.requestId())) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
-            var manifest = deleteManifest(event.ledger().ledgerId(), ProfileDeleteRecord.Reference.decode(reference),
-                    seal, deadline);
+            var manifest = deleteManifest(event.ledger().ledgerId(), event.tombstone(), seal, deadline);
             if (!manifest.ledger().equals(event.ledger()) || !manifest.targets().contains(target)) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
-            return resolved;
+            if (event.tombstone().publicationId() != null) {
+                var published = preparedDeliveries(event.ledger().ledgerId(), manifest, event.tombstone(), deadline);
+                int slot = manifest.targets().indexOf(target);
+                if (published == null || published.value().preparedThrough() <= slot
+                        || reference != null && published.value().preparedThrough() != manifest.targets().size()) {
+                    return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
+                }
+            }
+            return reference == null ? new DeliveryResult(DeliveryStatus.PREPARED, event) : resolved;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);

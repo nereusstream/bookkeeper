@@ -29,11 +29,14 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
@@ -198,6 +201,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private boolean startAttempted;
     private boolean accepting;
     private ZKProfileEphemeralRegistrationStore.Admission profileAdmission;
+    private SegmentProfileDeleteFollower deleteFollower;
     private boolean closed;
     private IndexCheckpoint indexCheckpoint;
     private FreeOperation freeOperation;
@@ -289,6 +293,12 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     /** Bounded cold startup/rejoin replay; no executor, remote abort or physical reclaim wait is added. */
     DeleteCatchUpAttempt catchUpProfileDeletes(ZKProfileReservationStore reservations,
             ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout) {
+        return catchUpProfileDeletes(reservations, metadata, domain, maxEvents, timeout, () -> true);
+    }
+
+    DeleteCatchUpAttempt catchUpProfileDeletes(ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout, BooleanSupplier live) {
+        Objects.requireNonNull(live, "live");
         Objects.requireNonNull(reservations, "reservations");
         Objects.requireNonNull(metadata, "metadata");
         Objects.requireNonNull(domain, "domain");
@@ -303,7 +313,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         ProfileDeleteDelivery.Head required = null;
         int applied = 0;
         try {
-            while (System.nanoTime() < deadline) {
+            while (live.getAsBoolean() && System.nanoTime() < deadline) {
                 var read = reservations.readDeleteHead(target);
                 if (read.status() != ProfileControlStore.ReadStatus.FOUND) {
                     return new DeleteCatchUpAttempt(read.status() == ProfileControlStore.ReadStatus.QUARANTINED
@@ -331,6 +341,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                         || !Arrays.equals(delivery.event().streamId(), required.streamId())) {
                     return new DeleteCatchUpAttempt(delivery.status()
                             == ZKProfileReservationStore.DeliveryStatus.UNAVAILABLE
+                            || delivery.status() == ZKProfileReservationStore.DeliveryStatus.PREPARED
                             ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);
                 }
                 var request = delivery.event().deleteApply(domain);
@@ -340,7 +351,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                             ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);
                 }
                 long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) {
+                if (remaining <= 0 || !live.getAsBoolean()) {
                     break;
                 }
                 actual = new CompletableFuture<>();
@@ -372,6 +383,22 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNKNOWN, required, actual);
         } catch (IllegalArgumentException | IllegalStateException invalid) {
             return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, required, actual);
+        }
+    }
+
+    /** One original registration attempt, borrowing the caller's already bounded cold executor and scheduler. */
+    SegmentProfileDeleteFollower startDeleteFollower(ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, ScheduledExecutorService scheduler,
+            ThreadPoolExecutor cold, int maxEvents, Duration probeTimeout, Duration pollInterval) {
+        synchronized (gate) {
+            if (!accepting || closed || deleteFollower != null || profileAdmission == null
+                    || !profileAdmission.allowsDeleteFollower(reservations, identity.incarnation())) {
+                throw new IllegalStateException("Delete follower requires this opened, registered original attempt");
+            }
+            deleteFollower = new SegmentProfileDeleteFollower(this, reservations, metadata, domain, profileAdmission,
+                    identity.incarnation(), scheduler, cold, maxEvents, probeTimeout, pollInterval);
+            deleteFollower.start();
+            return deleteFollower;
         }
     }
 
@@ -1903,10 +1930,21 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     execution.stopAdmission();
                 }
             }
+            long deadline = System.nanoTime() + timeout.toNanos();
+            if (deleteFollower != null) {
+                try {
+                    deleteFollower.closeAsync().get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } catch (TimeoutException unfinished) {
+                    return false;
+                } catch (ExecutionException failure) {
+                    throw new IOException("Delete follower drain failed", failure.getCause());
+                }
+            }
             IOException first = null;
             if (execution != null) {
                 try {
-                    if (!execution.shutdown(timeout)) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0 || !execution.shutdown(Duration.ofNanos(remaining))) {
                         return false;
                     }
                 } catch (IOException failure) {

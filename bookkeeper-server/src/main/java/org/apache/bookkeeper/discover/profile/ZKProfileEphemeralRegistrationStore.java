@@ -145,6 +145,11 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                     && opened.storageIncarnation().equals(localIncarnation);
         }
 
+        /** The consumer belongs to this exact commissioned source and original storage/session attempt. */
+        public boolean allowsDeleteFollower(ZKProfileReservationStore source, StorageIncarnation incarnation) {
+            return deleteDelivery == source && incarnation.equals(deleteIncarnation) && getAsBoolean();
+        }
+
         /** Cold-path final reconciliation after local startup checks; read failures retire and propagate. */
         public synchronized boolean openAfterReconciliation(WritableRegistration expected) {
             Objects.requireNonNull(expected, "expected");

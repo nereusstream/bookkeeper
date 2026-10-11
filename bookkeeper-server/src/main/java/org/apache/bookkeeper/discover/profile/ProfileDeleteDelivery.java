@@ -31,7 +31,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 /** Experimental one shared stream per Bookie/incarnation. It is a delivery obligation, not a local cursor. */
 public final class ProfileDeleteDelivery {
     static final int MAX_EVENTS = 4096;
-    static final int MAX_BYTES = 512;
+    static final int MAX_BYTES = 258 + ProfileControlScope.MAX_TARGET_BOOKIE_BYTES;
 
     private ProfileDeleteDelivery() { }
 
@@ -103,20 +103,23 @@ public final class ProfileDeleteDelivery {
         }
         public byte[] encode() {
             byte[] name = target.bookie().getBytes(StandardCharsets.UTF_8);
-            return finish(header(242 + name.length, 0x55574445).put(streamId).putLong(streamGeneration)
-                    .putLong(assignmentGeneration).putLong(sequence).put(ledger.encode()).put(tombstone.encode())
+            byte[] reference = tombstone.encode();
+            return finish(header(154 + reference.length + name.length, 0x55574445,
+                    tombstone.publicationId() == null ? 1 : 2).put(streamId).putLong(streamGeneration)
+                    .putLong(assignmentGeneration).putLong(sequence).put(ledger.encode()).put(reference)
                     .put(requestId).putLong(deleteEpoch).putShort((short) name.length).put(name)
                     .put(target.incarnation()));
         }
         public static Event decode(byte[] bytes) {
-            var input = checked(bytes, 243, 0x55574445);
+            int schema = bytes != null && bytes.length >= 8 ? ByteBuffer.wrap(bytes).getShort(4) : 0;
+            var input = checked(bytes, schema == 2 ? 259 : 243, 0x55574445, schema);
             byte[] stream = new byte[16];
             input.get(stream);
             long generation = input.getLong();
             long assignment = input.getLong();
             long sequence = input.getLong();
             var ledger = ProfileLedgerContext.decode(input);
-            byte[] ref = new byte[88];
+            byte[] ref = new byte[schema == 2 ? 104 : 88];
             input.get(ref);
             byte[] request = new byte[16];
             input.get(request);
@@ -178,7 +181,11 @@ public final class ProfileDeleteDelivery {
     }
 
     private static ByteBuffer header(int size, int magic) {
-        return ByteBuffer.allocate(size).putInt(magic).putShort((short) 1).putShort((short) 0);
+        return header(size, magic, 1);
+    }
+
+    private static ByteBuffer header(int size, int magic, int schema) {
+        return ByteBuffer.allocate(size).putInt(magic).putShort((short) schema).putShort((short) 0);
     }
 
     private static byte[] finish(ByteBuffer output) {
@@ -191,14 +198,18 @@ public final class ProfileDeleteDelivery {
     }
 
     private static ByteBuffer checked(byte[] bytes, int min, int magic) {
-        if (bytes == null || bytes.length < min || bytes.length > MAX_BYTES) {
+        return checked(bytes, min, magic, 1);
+    }
+
+    private static ByteBuffer checked(byte[] bytes, int min, int magic, int schema) {
+        if (schema != 1 && schema != 2 || bytes == null || bytes.length < min || bytes.length > MAX_BYTES) {
             throw new IllegalArgumentException("Invalid delete delivery byte bound before allocation");
         }
         var input = ByteBuffer.wrap(bytes);
         var crc = new CRC32C();
         crc.update(bytes, 0, bytes.length - 4);
         if (input.getInt(bytes.length - 4) != (int) crc.getValue() || input.getInt() != magic
-                || input.getShort() != 1 || input.getShort() != 0) {
+                || input.getShort() != schema || input.getShort() != 0) {
             throw new IllegalArgumentException("Invalid delete delivery schema/CRC");
         }
         return input;

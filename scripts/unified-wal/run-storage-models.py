@@ -19,6 +19,15 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-publication': None,
+    'ce-profile-delete-publication-prefix': 'LogicalHasEveryDelivery',
+    'ce-profile-delete-publication-activation': 'LogicalHasEveryDelivery',
+    'ce-profile-delete-publication-inert': 'AppliedNeedsLogicalActivation',
+    'ce-profile-delete-publication-birth': 'ReportedPublicationHasBirth',
+    'ce-profile-delete-publication-stop': 'StoppedStartsNoProbe',
+    'ce-profile-delete-publication-release': 'FollowerDrainWaitsActual',
+    'ce-profile-delete-publication-overlap': 'OneOwnedProbe',
+
     'a-profile-delete-registration': None,
     'ce-profile-delete-registration-cursor': 'WritableCoveredPublicationCut',
     'ce-profile-delete-registration-cut': 'WritableCoveredPublicationCut',
@@ -805,6 +814,7 @@ def main():
                    else "ProfileRegisteredConnection.tla" if "profile-registered-connection" in name
                    else "ProfileWriterClose.tla" if "profile-writer-close" in name
                    else "ProfileLogicalDelete.tla" if "profile-logical-delete" in name
+                   else "ProfileDeletePublication.tla" if "profile-delete-publication" in name
                    else "ProfileDeleteRegistration.tla" if "profile-delete-registration" in name
                    else "ProfileDeleteApplied.tla" if "profile-delete-applied" in name
                    else "ProfileDeleteDelivery.tla" if "profile-delete-delivery" in name

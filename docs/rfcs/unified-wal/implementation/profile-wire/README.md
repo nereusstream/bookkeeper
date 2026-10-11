@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，最新为 [初始 required-through cut 与真实 rejoin 追赶](#初始-required-through-cut-与真实-rejoin-追赶)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，最新为 [全目标 publication 与在线节点消费](#全目标-publication-与在线节点消费)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -1376,3 +1376,40 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 新`ProfileDeleteRegistration`有限投影只消费durable local cursor、committed head/initial assignment与ZK原子性输入，覆盖cursor不足、跳过head cut、missing default、wrong generation/incarnation及普通head增长不demote六反例。首次_e85up19遗漏Integers的负数定义，为SANY INCONCLUSIVE；修正后ks4f684z共20配置为3完整正向/17指定反例，961当前inputs匹配。新正向190 generated/78 distinct、queue0、depth8、0.805秒/peak RSS107970560 bytes，非性能结果；TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE。未生产TLS/fsync/硬件/ZK quorum、其他startup facts、在线delivery loop、snapshot/handoff/GC、完整时间/公平性/活性或A+C+D组合。
 
 持久证据 `/Users/liusinan/.codex/artifacts/unified-wal/delete-rejoin-evidence-rinuvevb` 保留各原source/config/run/command、失败及阶段身份。当前为explicit fixed initial catch-up/registration cut；持续在线投递/默认bootstrap与其他required authority/device/compatibility facts、snapshot/handoff/history GC/terminal decommission、full-bytes、完整运行/兼容/性能/运维验收仍未闭合。步骤12/14/15和生产Gate保持PARTIAL/OPEN；Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，持续目标active。
+
+
+## 全目标 publication 与在线节点消费
+
+2026-10-12，在 `65a28a35c4e3947438b2e36b9f85a2e031c79c34` 后补齐logical success与target journal之间的窗口，并接显式原注册实例的持续消费。删除前置仍是matching fenced-CLOSED；OPEN ledger在线删除、强访问撤权/reset、高级Range、跨Arena迁移继续disabled。当前在线消费指已注册Bookie消费CLOSED删除effects，不是开放在线删除前置或生产路由。
+
+原logical实现先发布cluster tombstone，后续才手动append target event，writable cut只能看到已经增长的head。现在完整retained manifest落盘后，按其固定排序逐target原子记录event/index/head与`delivery-prepared`前缀K→K+1；全部目标recorded后，原logical tombstone CAS检查同birth/manifest与完整publication前缀。任何registration若在该target event前赢，则后续event保留在其online stream；若在event后尝试，则必须等待active effect并到达相应N。logical completion之前所有target的required-through都已经可见，不依赖watch先后或caller随后补append，不等待target ACK/offline节点/physical reclaim。每个事务仅一个target；既有最大1088目标保留，当前未做1088-target真实耗时验证。
+
+新增`PreparedDeliveries`是该manifest的有序提交前缀，明确区别于Bookie applied cursor/派生清理队列：固定reference、publication UUID、targetCount/through、CRC，mutable node dataVersion严格等于through，同multi birth child防止ABA。每次前缀推进只能与新event/index/head同事务，或重读并检查已存在的exact immutable event/index/head后推进；回复丢失从原前缀续接，不重复序号。caller cancel/期限在后续阶段检查，全部event已recorded后取消仍不提交logical；沿同request/reference恢复即可激活原events。源丢失、出生绑定失配或缺口不补成功。
+
+为了区别新数据的missing publication与旧schema1未包含该引用，UWDT reference新增schema2/104 bytes，保留原schema1/88 bytes；schema2追加16-byte publication UUID，绑定required prefix birth。UWDE event随reference新增schema2，为258+UTF8 target长度、最大513 bytes；原schema1为242+长度。PreparedDeliveries为schema2/140 bytes，legacy reference为schema1/124 bytes。原head、seal、manifest、UIC7的96-byte binding、native type13与历史vectors字节保持；旧严格reference/event reader会拒绝schema2，只计源码/新decoder验证，stock/released binary兼容矩阵仍DEFERRED_NOT_RUN、G1 BLOCKED_UNVERIFIED。历史schema1 logical reference可在同request下验证完整manifest并补齐原target records；新schema2 referenced prefix缺失时quarantine且不盲建新前缀。完整legacy/bootstrap/mixed-binary验收仍OPEN。
+
+recorded event在cluster tombstone激活前为`PREPARED`；`readDeleteDelivery`检查真实seal/manifest/event/index/head/birth与prefix覆盖，返回此状态但不提供DELETE_AUTHORIZED。cold authority reader将其defer，catch-up不能推进cursor或写local TOMBSTONE。只有parent metadata已匹配该reference、publication完整时才COMMITTED并授权。新schema2 prefix缺失/重建必须拒绝，不能借caller READY或已经得到的旧结果跳过fresh authority。
+
+`SegmentProfileDeleteFollower`由原opened/registered graph显式启动，必须属于同delete source、storage incarnation、原Admission/session；借用现有bounded cold executor及scheduler，不创建线程、队列、target连接或新持久任务系统。一个scheduled trigger、一个active probe，按有限maxEvents/timeout调用原catch-up；LIMIT继续小批，PREPARED/transient等待下一次，UNKNOWN等original actual local control completion后再fresh解析。原writable的ordinary head增长不demote；源明确缺失/损坏或原session退休则关闭此consumer和local admission，不自动重开。failure可由owner查询，未吞成成功。
+
+stop立即退休准入并取消下一次tick，仍等待已接受cold工作及它已提交的actual local I/O/owner apply；future访问器只给副本，caller不能伪造actual drain。graph `close(timeout)`在原owner仍运行时先等consumer，再关原execution/files/index/control；超时返回false并保留原locks供下一次drain。没有把stop当作remote abort、NONE、FREE或强访问/physical完成。borrowed executor/client/scheduler仍由caller按原职责排空和关闭。
+
+真实组合新增：generic CLOSED的ledger44，实际目录重启并原session registration先赢head0后启动consumer；真实ZK pause在全部target event/prefix已提交、logical CAS尚未发送时，读到PREPARED，exact authority UNAVAILABLE且没有native force/cursor。发布logical后，三个target的COMMITTED event均已存在；consumer自动进入actual native force，held force timeout为UNKNOWN，ordinary head增长不改变原registration。stop/future副本/100ms graph close都不释放在途资源，独立DATA writer锁仍被排他占有；release后原owner apply/cursor1、consumer drain与graph close完成。原两-ledger rejoin race改为真实ledger45 logical publication在注册前提交，验证当前自动所有target source，而非手动追加造成的假race。
+
+另真实commit-reply hold在最后publication前缀事务之后取消：completion保持pending，metadata无logical key；实际cold return后仍无logical，新coordinator同request使用相同event/sequence/publication ID完成。删除schema2 required prefix后，effect read、append查询和同操作delete均quarantine且不重建。新数据的missing index也quarantine，query-only append不补新event/sequence，head保持原N；返回前验证exact ledger context/target/request/epoch/reference，不能从别的ledger receipt取得结果。metadata cut/seal/logical的三种loss继续按语义path注入，额外journal loss在automatic event/index/head/prefix commit后发生并重读同坐标。离线target无listener仍得到自己的journal obligation。原格式单测新增schema2/CRC/truncation/owned publication ID、1088计数边界与255-byte target的实际513-byte event；它不是1088-node或最坏fanout性能证明。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileLifecycleStoreTest,ZKProfileEphemeralRegistrationStoreTest,ZKProfileRegistrationStoreTest,ProfileLedgerMetadataStoreTest,SegmentProfileInitialSocketClientTest#automaticDeletePublication*+preparedDeleteCancellation*+committedDeleteDeliver*+logicalDelete*+ordinaryWriterClose*+*Registration*+*Registered*+registered*+registration*+*Rejoin*,SegmentBookieControlLogTest#continuousDelete*+uncertainDelete*+*Tombstone*+tombstone*+*Checkpoint*+*Rotation*'
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileLifecycleStoreTest#deleteDeliveryCodecs*+versionedDeleteReference*,SegmentProfileInitialSocketClientTest#automaticDeletePublication*+preparedDeleteCancellation*+committedDeleteDeliver*+logicalDelete*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-publication --config-prefix ce-profile-delete-publication --config-prefix a-profile-delete-registration --config-prefix ce-profile-delete-registration --config-prefix a-profile-delete-applied --config-prefix ce-profile-delete-applied --config-prefix a-profile-logical-delete --config-prefix ce-profile-logical-delete
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+ZqosUvct六类176项（control49/persistent13/lifecycle51/ephemeral19/metadata19/socket25）零fail/error/skip，在末次test换行及schema1已有logical但publication未完时的UNAVAILABLE/CANCELLED分类前；保留阶段绑定、不移绑。OrcDYFwr两类10项在新schema2 query-only index保护前；GFA4k7oK十项在最后exact ledger/instance/reference检查前，保持阶段绑定。最终iqAKCBuq两类10项零fail/error/skip，1073当前source inputs匹配。初始0iI8QYyG是schema1 publication阶段、92RYZb4d六项在consumer前，vYvlwGnj七项在cancel/prefix-loss案例前，EvDYMDoK十项在末次上述调整前；不叠加重复覆盖。最终style exit0；RAT exit1、443 unapproved全在父HEAD已有，无新增，不称CI全绿。
+
+新`ProfileDeletePublication`有限投影以fenced-CLOSED、ZK原子性、immutable source和actual I/O/owner终结为输入，覆盖前缀早于index、logical早于全部目标、inert消费、prefix birth、stop后新工作、提前drain和probe重叠七个指定反例。最终p2tsybra共31配置为4完整正向/27指定反例，970当前inputs匹配；新正向327 generated/148 distinct、queue0、depth14、模型最终指标见归档coverage-summary.json，非性能测量，非性能结论。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；未生产TLS/fsync/硬件、真实1088-target边界、snapshot/GC/handoff、完整时钟/公平性/活性或A+C+D组合。
+
+持久证据 `/Users/liusinan/.codex/artifacts/unified-wal/delete-publication-evidence-q384f2jy` 保留原source/config/run/command、阶段与style失败。当前automatic full-target source与explicit online consumer已接；默认bootstrap/SDK routing、其余required compatibility/device/authority producer、snapshot/handoff/history GC/decommission、full-bytes及综合兼容/性能/运维仍未闭合。步骤12/14/15及生产Gate保持PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，完整目标继续active。

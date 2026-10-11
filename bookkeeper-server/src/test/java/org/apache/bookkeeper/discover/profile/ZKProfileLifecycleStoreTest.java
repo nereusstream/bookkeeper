@@ -160,6 +160,48 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
                 () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 1, 1, 4097, target));
     }
 
+    @Test
+    public void versionedDeleteReferenceBindsPublicationBirthWithoutChangingLegacyBytes() {
+        var legacy = new ProfileDeleteRecord.Reference(100, bytes(32, 7), bytes(32, 8));
+        var versioned = new ProfileDeleteRecord.Reference(100, bytes(32, 7), bytes(32, 8), bytes(16, 9));
+        assertEquals(88, legacy.encode().length);
+        assertEquals(104, versioned.encode().length);
+        assertArrayEquals(legacy.encode(), ProfileDeleteRecord.Reference.decode(legacy.encode()).encode());
+        assertArrayEquals(versioned.encode(), ProfileDeleteRecord.Reference.decode(versioned.encode()).encode());
+        var prefix = new ProfileDeleteRecord.PreparedDeliveries(versioned, bytes(16, 9), 1088, 1088);
+        assertEquals(140, prefix.encode().length);
+        assertArrayEquals(prefix.encode(), ProfileDeleteRecord.PreparedDeliveries.decode(prefix.encode()).encode());
+        var scope = scope("b1:3181");
+        var context = new org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext(44,
+                scope.ledgerInstanceId(), scope.descriptorIdentity().toBytes());
+        var target = new ProfileDeleteRecord.Target("x".repeat(255), bytes(16, 2));
+        var event = new ProfileDeleteDelivery.Event(bytes(16, 81), 1, 1, 1, context, target, versioned,
+                bytes(16, 9), 10);
+        assertEquals(513, event.encode().length);
+        assertEquals(event, ProfileDeleteDelivery.Event.decode(event.encode()));
+        byte[] owned = versioned.publicationId();
+        owned[0] ^= 1;
+        assertArrayEquals(bytes(16, 9), versioned.publicationId());
+        for (byte[] raw : List.of(versioned.encode(), prefix.encode(), event.encode())) {
+            for (int size = 0; size < raw.length; size++) {
+                byte[] truncated = Arrays.copyOf(raw, size);
+                if (raw.length == 104) {
+                    assertThrows(IllegalArgumentException.class, () -> ProfileDeleteRecord.Reference.decode(truncated));
+                } else if (raw.length == 140) {
+                    assertThrows(IllegalArgumentException.class,
+                            () -> ProfileDeleteRecord.PreparedDeliveries.decode(truncated));
+                } else {
+                    assertThrows(IllegalArgumentException.class, () -> ProfileDeleteDelivery.Event.decode(truncated));
+                }
+            }
+        }
+        assertThrows(IllegalArgumentException.class, () -> new ProfileDeleteRecord.PreparedDeliveries(
+                versioned, bytes(16, 9), 1089, 0));
+        byte[] changed = versioned.encode();
+        changed[90] ^= 1;
+        assertThrows(IllegalArgumentException.class, () -> ProfileDeleteRecord.Reference.decode(changed));
+    }
+
     private record Replaced(ZKProfileReservationStore.Snapshot source, ProfileReplacementPage desired,
                             ZKProfileReservationStore.ReplacementSnapshot candidate) { }
 

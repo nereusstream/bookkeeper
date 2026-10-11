@@ -183,10 +183,14 @@ public final class ProfileDeleteRecord {
         }
     }
 
-    public record Reference(long birth, byte[] digest, byte[] sealDigest) {
+    public record Reference(long birth, byte[] digest, byte[] sealDigest, byte[] publicationId) {
+        public Reference(long birth, byte[] digest, byte[] sealDigest) {
+            this(birth, digest, sealDigest, null);
+        }
         public Reference {
             digest = ProfileLifecycleHead.fixed(digest, 32, false);
             sealDigest = ProfileLifecycleHead.fixed(sealDigest, 32, false);
+            publicationId = publicationId == null ? null : ProfileLifecycleHead.fixed(publicationId, 16, true);
             if (birth <= 0) {
                 throw new IllegalArgumentException("Invalid deletion manifest birth");
             }
@@ -199,19 +203,64 @@ public final class ProfileDeleteRecord {
         public byte[] sealDigest() {
             return sealDigest.clone();
         }
+        @Override
+        public byte[] publicationId() {
+            return publicationId == null ? null : publicationId.clone();
+        }
         public byte[] encode() {
-            return finish(header(88, 0x55574454).putLong(birth).put(digest).put(sealDigest).putInt(0));
+            var output = header(publicationId == null ? 88 : 104, 0x55574454, publicationId == null ? 1 : 2)
+                    .putLong(birth).put(digest).put(sealDigest);
+            if (publicationId != null) {
+                output.put(publicationId);
+            }
+            return finish(output.putInt(0));
         }
         public static Reference decode(byte[] bytes) {
-            var input = checked(bytes, 88, 0x55574454);
+            boolean published = bytes != null && bytes.length == 104;
+            var input = checked(bytes, published ? 104 : 88, 0x55574454, published ? 2 : 1);
             long birth = input.getLong();
             byte[] digest = new byte[32];
             byte[] seal = new byte[32];
             input.get(digest).get(seal);
+            byte[] publication = published ? new byte[16] : null;
+            if (publication != null) {
+                input.get(publication);
+            }
             if (input.getInt() != 0) {
                 throw new IllegalArgumentException("Invalid deletion reference reserved bytes");
             }
-            return new Reference(birth, digest, seal);
+            return new Reference(birth, digest, seal, publication);
+        }
+    }
+
+    /** Atomic publication prefix over this immutable manifest's sorted targets; never a local applied cursor. */
+    record PreparedDeliveries(Reference reference, byte[] birthId, int targetCount, int preparedThrough) {
+        PreparedDeliveries {
+            java.util.Objects.requireNonNull(reference, "reference");
+            birthId = ProfileLifecycleHead.fixed(birthId, 16, true);
+            if (targetCount < 1 || targetCount > MAX_TARGETS || preparedThrough < 0 || preparedThrough > targetCount) {
+                throw new IllegalArgumentException("Invalid delete publication prefix");
+            }
+        }
+        @Override
+        public byte[] birthId() {
+            return birthId.clone();
+        }
+        byte[] encode() {
+            return finish(header(reference.publicationId() == null ? 124 : 140, 0x55574446,
+                    reference.publicationId() == null ? 1 : 2).put(reference.encode()).put(birthId)
+                    .putInt(targetCount).putInt(preparedThrough));
+        }
+        static PreparedDeliveries decode(byte[] bytes) {
+            boolean published = bytes != null && bytes.length == 140;
+            var input = checked(bytes, published ? 140 : 124, 0x55574446, published ? 2 : 1);
+            byte[] reference = new byte[published ? 104 : 88];
+            byte[] birth = new byte[16];
+            input.get(reference).get(birth);
+            return new PreparedDeliveries(Reference.decode(reference), birth, input.getInt(), input.getInt());
+        }
+        PreparedDeliveries next() {
+            return new PreparedDeliveries(reference, birthId, targetCount, preparedThrough + 1);
         }
     }
 
@@ -235,7 +284,11 @@ public final class ProfileDeleteRecord {
     }
 
     private static ByteBuffer header(int size, int magic) {
-        return ByteBuffer.allocate(size).putInt(magic).putShort((short) 1).putShort((short) 0);
+        return header(size, magic, 1);
+    }
+
+    private static ByteBuffer header(int size, int magic, int schema) {
+        return ByteBuffer.allocate(size).putInt(magic).putShort((short) schema).putShort((short) 0);
     }
 
     private static byte[] finish(ByteBuffer output) {
@@ -248,6 +301,10 @@ public final class ProfileDeleteRecord {
     }
 
     private static ByteBuffer checked(byte[] bytes, int size, int magic) {
+        return checked(bytes, size, magic, 1);
+    }
+
+    private static ByteBuffer checked(byte[] bytes, int size, int magic, int schema) {
         if (bytes == null || bytes.length != size) {
             throw new IllegalArgumentException("Invalid deletion record width");
         }
@@ -255,7 +312,7 @@ public final class ProfileDeleteRecord {
         crc.update(bytes, 0, size - 4);
         var input = ByteBuffer.wrap(bytes);
         if (input.getInt(size - 4) != (int) crc.getValue() || input.getInt() != magic
-                || input.getShort() != 1 || input.getShort() != 0) {
+                || input.getShort() != schema || input.getShort() != 0) {
             throw new IllegalArgumentException("Invalid deletion record schema/CRC");
         }
         return input;

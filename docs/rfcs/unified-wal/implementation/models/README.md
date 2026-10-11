@@ -18,6 +18,14 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `a-profile-delete-publication` | 两个target有序publication prefix、logical activation及单consumer停收/actual cold+I/O终结；真实ZK/force为输入，不含1088-target/GC/handoff/TLS/A+C+D |
+| `ce-profile-delete-publication-prefix` | PrefixBeforeIndex mutation须违反 `LogicalHasEveryDelivery` |
+| `ce-profile-delete-publication-activation` | EarlyLogical mutation须违反 `LogicalHasEveryDelivery` |
+| `ce-profile-delete-publication-inert` | ConsumeInert mutation须违反 `AppliedNeedsLogicalActivation` |
+| `ce-profile-delete-publication-birth` | IgnoreBirth mutation须违反 `ReportedPublicationHasBirth` |
+| `ce-profile-delete-publication-stop` | StartAfterStop mutation须违反 `StoppedStartsNoProbe` |
+| `ce-profile-delete-publication-release` | ReleaseEarly mutation须违反 `FollowerDrainWaitsActual` |
+| `ce-profile-delete-publication-overlap` | OverlapProbe mutation须违反 `OneOwnedProbe` |
 | `a-profile-delete-registration` | 固定initial stream/gen1，真实cursor/committed head与ZK原子性作为输入；注册cut需包含先提交event，普通head增长不demote，不含handoff/snapshot/online driver/physical/A+C+D |
 | `ce-profile-delete-registration-cursor` | IgnoreLocalCursor mutation须违反 `WritableCoveredPublicationCut` |
 | `ce-profile-delete-registration-cut` | SkipHeadCheck mutation须违反 `WritableCoveredPublicationCut` |

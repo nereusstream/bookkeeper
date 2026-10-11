@@ -480,3 +480,8 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 ## 初始 delete head 与 writable publication cut
 
 2026-10-12，`readDeleteHead`验证shared initial assignment/head/birth并提供finite required-through；startup不重建missing authority。显式empty commissioning保留同事务head/birth/immutable assignment，不免除旧scope义务。delete-aware ephemeral publisher从原healthy control log读取cursor，在原writable multi检查同assignment、head birth和版本；head增长不改变assignment，也不单凭N增长撤销已注册节点。actual cold catch-up、seq2先于registration的真实竞争与同session丢回复解析由[协议记录](../profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)拥有。仅fixed initial；在线delivery、完整bootstrap、assignment handoff/snapshot/历史GC/退役与Gate保持OPEN。
+
+
+## 全目标 publication 与 logical activation
+
+2026-10-12，fixed target manifest下新增按target原子提交event/index/head/publication prefix，原logical tombstone CAS只在完整prefix与birth匹配后发布；registration cut不再依赖后续手动append。schema2 reference/104 bytes绑定required publication UUID，新prefix140/event258+target；schema1原bytes保留、完整旧binary兼容未验收。PREPARED只有recorded source，不提供DELETE_AUTHORIZED；active reference、完整prefix及exact retained event都重新验证后才授权。[协议记录](../profile-wire/README.md#全目标-publication-与在线节点消费)拥有范围/测试/模型，缺required prefix不重建。default bootstrap、snapshot/handoff/retention/GC/退役及Gate仍OPEN。

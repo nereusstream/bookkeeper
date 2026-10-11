@@ -676,3 +676,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-12 [初始 required-through cut 与真实 rejoin 追赶](rfcs/unified-wal/implementation/profile-wire/README.md#初始-required-through-cut-与真实-rejoin-追赶)已绑定原恢复control cursor与实际shared assignment/head，把head版本/birth/assignment检查加入原writable multi；delete先赢需继续追赶，普通head增长不demote既有registration。原graph实际restart、bounded LIMIT/UNKNOWN/独立completion、真实seq2注册竞争、DLR force、held pin和丢注册回复同session解析已有证据。101项相关Java、20个有限模型配置（3正向/17指定反例）及style通过，RAT443历史问题无新增。仅explicit initial gen1；在线delivery/default bootstrap、其他required facts、snapshot/handoff/GC/decommission与综合Gate未闭合，步骤12/14/15保持PARTIAL/OPEN。
+
+
+2026-10-12 [全目标 publication 与在线节点消费](rfcs/unified-wal/implementation/profile-wire/README.md#全目标-publication-与在线节点消费)已把每target event/index/head与publication前缀同事务记录，全部target就绪才发布logical tombstone，消除logical success后journal尚未可见的窗口；PREPARED不授予local delete。schema2 reference绑定prefix birth，原schema1 bytes保留；原注册graph借用bounded cold/scheduler持续消费，UNKNOWN/stop等actual local completion，close未排空保留锁。真实自动投递/注册race/cancel续接/required prefix loss/held force已有证据；阶段176与当前10项Java、31个有限模型配置分别保留原source，style通过，RAT443历史问题无新增。default bootstrap、snapshot/handoff/GC/退役、其余facts/full-bytes/综合Gate仍OPEN，步骤12/14/15保持PARTIAL。

@@ -50,3 +50,6 @@
 
 
 2026-10-12继续第15步：aac954a0f5之后已接fixed initial shared assignment/head的实际catch-up和原writable multi required-through cut，从healthy recovered control cursor校验；实际磁盘restart、DLR/seq2注册竞争、LIMIT/UNKNOWN/actual local completion与lost registration reply同session解析由profile-wire/README.md“初始 required-through cut 与真实 rejoin 追赶”拥有。持续目标active，步骤12/14/15及生产Gate仍PARTIAL/OPEN。继续持续在线delivery与默认bootstrap/其余required authority/device/compatibility producer、snapshot/handoff/history GC/decommission、full-bytes、兼容/正式性能/运维及综合验收，不以本切片或提交标记整个16步完成。
+
+
+2026-10-12继续第15步：65a28a35c4之后已把全部target event/index/head与有界publication prefix原子记录，完整prefix后才logical activation；schema2 reference固定required prefix birth，PREPARED不授权local delete。原registered graph已显式接borrowed cold/scheduler持续消费，UNKNOWN/stop/close保留actual local I/O及locks直到终结；实际网络/ZK/文件/注册竞争与当前证据由profile-wire/README.md“全目标 publication 与在线节点消费”拥有。默认bootstrap/SDK路由、其余required facts、snapshot/handoff/history GC/decommission、full-bytes/兼容/正式性能/运维与全部综合验收继续推进。持续目标active，步骤12/14/15及生产Gate保持PARTIAL/OPEN，不把本提交当16步完成。
