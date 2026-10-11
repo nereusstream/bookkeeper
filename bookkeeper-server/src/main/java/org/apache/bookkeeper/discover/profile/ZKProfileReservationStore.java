@@ -921,7 +921,8 @@ public final class ZKProfileReservationStore {
             if (!context.matchesRoot(root.snapshot()) && !deleted) {
                 return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
             }
-            var projection = recoveryRepairProjection(context, member.snapshot(), deadline);
+            var projection = recoveryRepairProjection(context,
+                    deleteProjection(root.snapshot(), member.snapshot(), deadline), deadline);
             var predecessor = new ProfileLedgerMetadataStore.MembershipSnapshot(context.metadataBirth(),
                     new org.apache.bookkeeper.versioning.Versioned<>(ProfileRecoveryContext.predecessorProjection(
                             projection.metadata().getValue()),
@@ -2392,8 +2393,238 @@ public final class ZKProfileReservationStore {
         return ProfileRepairIntent.digest(bytes.toByteArray());
     }
 
+    public enum DeleteStatus { LOGICALLY_DELETED, PRECONDITION_FAILED, CONFLICT, QUARANTINED, UNAVAILABLE, CANCELLED }
+
+    public record DeleteResult(DeleteStatus status, ProfileDeleteRecord.Manifest manifest) {
+        public DeleteResult {
+            if ((status == DeleteStatus.LOGICALLY_DELETED) != (manifest != null)) {
+                throw new IllegalArgumentException("Only complete cluster tombstone carries its target obligation");
+            }
+        }
+    }
+
+    private String deleteManifestPath(long ledger) {
+        return path(ledger) + "/delete-targets";
+    }
+
+    private ProfileDeleteRecord.Manifest deleteManifest(long ledger, ProfileDeleteRecord.Reference reference,
+            ProfileDeleteRecord.Seal seal, long deadline) throws InterruptedException, TimeoutException {
+        String name = deleteManifestPath(ledger);
+        var node = reads.get(name, deadline);
+        requireFound(node);
+        requirePersistent(node, true);
+        var guard = reads.get(name + "/birth-" + Long.toHexString(reference.birth()), deadline);
+        requireFound(guard);
+        requirePersistent(guard, true);
+        var manifest = ProfileDeleteRecord.Manifest.decode(node.bytes());
+        byte[] expected = java.nio.ByteBuffer.allocate(40).putLong(reference.birth()).put(reference.digest()).array();
+        if (node.stat().getCzxid() != reference.birth()
+                || !Arrays.equals(ProfileRepairIntent.digest(node.bytes()), reference.digest())
+                || !Arrays.equals(guard.bytes(), expected) || !manifest.seal().equals(seal)
+                || !Arrays.equals(reference.sealDigest(), ProfileRepairIntent.digest(seal.encode()))
+                || manifest.ledger().ledgerId() != ledger) {
+            throw new IllegalArgumentException("Required delete target manifest is missing, recreated or corrupt");
+        }
+        return manifest;
+    }
+
+    private ProfileLedgerMetadataStore.MembershipSnapshot deleteProjection(Snapshot root,
+            ProfileLedgerMetadataStore.MembershipSnapshot current, long deadline)
+            throws InterruptedException, TimeoutException, java.io.IOException {
+        var value = current.metadata().getValue();
+        byte[] bytes = value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY);
+        byte[] logical = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
+        if (bytes == null) {
+            if (logical != null) {
+                throw new IllegalArgumentException("Cluster tombstone has no membership seal");
+            }
+            return current;
+        }
+        var seal = ProfileDeleteRecord.Seal.decode(bytes);
+        if (!seal.matches(root) || current.birthZxid() != seal.metadataBirth()
+                || value.getState() != LedgerMetadata.State.CLOSED
+                || ((org.apache.bookkeeper.versioning.LongVersion) current.metadata().getVersion()).getLongVersion()
+                    != seal.beforeVersion() + 1L + (logical == null ? 0 : 1)
+                || !Arrays.equals(ProfileDeleteRecord.closedDigest(value), seal.closedDigest())) {
+            throw new IllegalArgumentException("Deletion seal does not preserve the exact CLOSED record");
+        }
+        if (logical != null) {
+            var manifest = deleteManifest(value.getLedgerId(), ProfileDeleteRecord.Reference.decode(logical),
+                    seal, deadline);
+            var context = ProfileRecoveryContext.decode(value.getCustomMetadata().get(ProfileRecoveryContext.KEY));
+            if (!manifest.ledger().equals(context.ledger())) {
+                throw new IllegalArgumentException("Deletion manifest belongs to a different ledger instance");
+            }
+        }
+        return new ProfileLedgerMetadataStore.MembershipSnapshot(current.birthZxid(),
+                new org.apache.bookkeeper.versioning.Versioned<>(ProfileDeleteRecord.strip(value),
+                    new org.apache.bookkeeper.versioning.LongVersion(seal.beforeVersion())));
+    }
+
+    /** Logical deletion only: same-record seal, complete retained targets and authoritative tombstone.
+     * Does not wait for target ACKs, local barriers or physical reclaim; no online-delete fallback. */
+    DeleteResult deleteClosed(ProfileLedgerMetadataStore metadata, long ledger, byte[] request,
+            java.util.function.BooleanSupplier live) {
+        requireRecoveryClient(metadata);
+        request = ProfileLifecycleHead.fixed(request, 16, true);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var observed = read(ledger, deadline);
+            var member = metadata.readMembership(ledger, deadline);
+            if (observed.status() != ReadStatus.FOUND || member.snapshot() == null) {
+                return new DeleteResult(observed.status() == ReadStatus.UNAVAILABLE
+                        || member.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
+                            : DeleteStatus.QUARANTINED, null);
+            }
+            var root = observed.snapshot();
+            var value = member.snapshot().metadata().getValue();
+            if (value.getState() != LedgerMetadata.State.CLOSED) {
+                return new DeleteResult(DeleteStatus.PRECONDITION_FAILED, null);
+            }
+            var context = ProfileRecoveryContext.decode(value.getCustomMetadata().get(ProfileRecoveryContext.KEY));
+            var closed = readClosedRecovery(metadata, context);
+            if (closed.metadata() == null) {
+                return new DeleteResult(closed.outcome() == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
+                        ? DeleteStatus.UNAVAILABLE : DeleteStatus.QUARANTINED, null);
+            }
+            member = new ProfileLedgerMetadataStore.MembershipRead(ReadStatus.FOUND, closed.metadata());
+            value = closed.metadata().metadata().getValue();
+            byte[] payload = ProfileRepairIntent.digest(java.nio.ByteBuffer.allocate(
+                    org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext.ENCODED_LENGTH + 16)
+                    .put(context.ledger().encode()).put(request).array());
+            if (root.lifecycle().state() != ProfileLifecycleHead.State.DELETE_INTENT) {
+                if (!context.matchesRoot(root) || !live.getAsBoolean()) {
+                    return new DeleteResult(live.getAsBoolean() ? DeleteStatus.CONFLICT : DeleteStatus.CANCELLED, null);
+                }
+                var cut = cutDelete(root, request, payload, metadata.checksForMembership(closed.metadata()));
+                if (cut.snapshot() == null) {
+                    return new DeleteResult(cut.status() == CreateStatus.CONFLICT ? DeleteStatus.CONFLICT
+                            : cut.status() == CreateStatus.QUARANTINED ? DeleteStatus.QUARANTINED
+                                : DeleteStatus.UNAVAILABLE, null);
+                }
+                root = cut.snapshot();
+            }
+            if (!Arrays.equals(root.lifecycle().operationId(), request)
+                    || !Arrays.equals(root.lifecycle().payloadIdentity(), payload)) {
+                return new DeleteResult(DeleteStatus.CONFLICT, null);
+            }
+            if (!live.getAsBoolean()) {
+                return new DeleteResult(DeleteStatus.CANCELLED, null);
+            }
+            byte[] oldSeal = value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY);
+            var seal = oldSeal == null ? new ProfileDeleteRecord.Seal(request, root.lifecycle().controlGeneration(),
+                    Math.toIntExact(((org.apache.bookkeeper.versioning.LongVersion) member.snapshot().metadata()
+                        .getVersion()).getLongVersion()), member.snapshot().birthZxid(), root.birthZxid(),
+                    ProfileDeleteRecord.closedDigest(value)) : ProfileDeleteRecord.Seal.decode(oldSeal);
+            if (oldSeal == null) {
+                var checks = new java.util.ArrayList<>(recoveryRootChecks(root, deadline));
+                checks.addAll(metadata.checksForMembership(member.snapshot()));
+                checks.add(metadata.deleteSealWrite(member.snapshot(), seal));
+                multi(checks, deadline);
+            }
+            var actual = metadata.readMembership(ledger, deadline);
+            if (actual.snapshot() == null) {
+                return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+            }
+            deleteProjection(root, actual.snapshot(), deadline);
+            value = actual.snapshot().metadata().getValue();
+            if (!Arrays.equals(value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY), seal.encode())) {
+                return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+            }
+            byte[] tombstone = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
+            if (tombstone != null) {
+                var latest = read(ledger, deadline);
+                if (latest.snapshot() == null || !latest.snapshot().equals(root)) {
+                    return new DeleteResult(latest.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
+                            : DeleteStatus.CONFLICT, null);
+                }
+                return new DeleteResult(DeleteStatus.LOGICALLY_DELETED, deleteManifest(ledger,
+                        ProfileDeleteRecord.Reference.decode(tombstone), seal, deadline));
+            }
+            if (!live.getAsBoolean()) {
+                return new DeleteResult(DeleteStatus.CANCELLED, null);
+            }
+            var retained = retainedActivationTargets(ledger);
+            if (retained.status() != ReadStatus.FOUND) {
+                return new DeleteResult(retained.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
+                        : DeleteStatus.QUARANTINED, null);
+            }
+            var targets = new java.util.TreeSet<ProfileDeleteRecord.Target>();
+            retained.targets().forEach(receipt -> targets.add(new ProfileDeleteRecord.Target(
+                    receipt.scope().targetBookie(), receipt.scope().targetStorageIncarnation())));
+            if (value.getAllEnsembles().values().stream().flatMap(List::stream)
+                    .anyMatch(bookie -> targets.stream()
+                        .noneMatch(target -> target.bookie().equals(bookie.toString())))) {
+                return new DeleteResult(DeleteStatus.QUARANTINED, null);
+            }
+            var manifest = new ProfileDeleteRecord.Manifest(context.ledger(), seal, List.copyOf(targets));
+            String name = deleteManifestPath(ledger);
+            var node = reads.get(name, deadline);
+            if (node.code() == Code.NONODE.intValue()) {
+                var checks = new java.util.ArrayList<>(recoveryRootChecks(root, deadline));
+                checks.addAll(metadata.checksForMembership(actual.snapshot()));
+                checks.add(Op.create(name, manifest.encode(), pageAcls, CreateMode.PERSISTENT));
+                multi(checks, deadline);
+                node = reads.get(name, deadline);
+            }
+            requireFound(node);
+            requirePersistent(node, true);
+            if (!Arrays.equals(node.bytes(), manifest.encode())) {
+                return new DeleteResult(DeleteStatus.CONFLICT, null);
+            }
+            var reference = new ProfileDeleteRecord.Reference(node.stat().getCzxid(),
+                    ProfileRepairIntent.digest(node.bytes()), ProfileRepairIntent.digest(seal.encode()));
+            String guardPath = name + "/birth-" + Long.toHexString(reference.birth());
+            byte[] guardBytes = java.nio.ByteBuffer.allocate(40).putLong(reference.birth())
+                    .put(reference.digest()).array();
+            var guard = reads.get(guardPath, deadline);
+            if (guard.code() == Code.NONODE.intValue()) {
+                var checks = new java.util.ArrayList<>(recoveryRootChecks(root, deadline));
+                checks.addAll(metadata.checksForMembership(actual.snapshot()));
+                checks.add(Op.check(name, 0));
+                checks.add(Op.create(guardPath, guardBytes, immutableAcls, CreateMode.PERSISTENT));
+                multi(checks, deadline);
+            }
+            deleteManifest(ledger, reference, seal, deadline);
+            if (!live.getAsBoolean()) {
+                return new DeleteResult(DeleteStatus.CANCELLED, null);
+            }
+            var checks = new java.util.ArrayList<>(recoveryRootChecks(root, deadline));
+            checks.addAll(metadata.checksForMembership(actual.snapshot()));
+            checks.add(Op.check(name, 0));
+            checks.add(Op.check(guardPath, 0));
+            checks.add(metadata.deleteTombstoneWrite(actual.snapshot(), reference));
+            multi(checks, deadline);
+            var done = metadata.readMembership(ledger, deadline);
+            if (done.snapshot() == null) {
+                return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+            }
+            deleteProjection(root, done.snapshot(), deadline);
+            var latest = read(ledger, deadline);
+            if (latest.snapshot() == null || !latest.snapshot().equals(root)) {
+                return new DeleteResult(latest.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
+                        : DeleteStatus.CONFLICT, null);
+            }
+            return Arrays.equals(done.snapshot().metadata().getValue().getCustomMetadata()
+                    .get(ProfileDeleteRecord.TOMBSTONE_KEY), reference.encode())
+                        ? new DeleteResult(DeleteStatus.LOGICALLY_DELETED, manifest)
+                        : new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return new DeleteResult(DeleteStatus.QUARANTINED, null);
+        }
+    }
+
     /** Admission cut only. It retains published targets; it neither fences Bookies nor deletes/GCs any data. */
     public CreateResult cutDelete(Snapshot expected, byte[] operationId, byte[] payloadIdentity) {
+        return cutDelete(expected, operationId, payloadIdentity, List.of());
+    }
+
+    private CreateResult cutDelete(Snapshot expected, byte[] operationId, byte[] payloadIdentity, List<Op> checks) {
         operationId = ProfileLifecycleHead.fixed(operationId, 16, true);
         payloadIdentity = ProfileLifecycleHead.fixed(payloadIdentity, 32, false);
         long ledger = expected.reservation().backlink().ledgerId();
@@ -2428,7 +2659,7 @@ public final class ZKProfileReservationStore {
                     ProfileLifecycleHead.State.DELETE_INTENT, head.sequence() + 1, head.sequence(),
                     head.controlGeneration() + 1, operationId, payloadIdentity, head.readyPageVersion(),
                             head.readyPageDigest());
-            return cas(current, next, null, deadline);
+            return cas(current, next, null, deadline, checks);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new CreateResult(CreateStatus.DURABILITY_UNKNOWN, null);
@@ -2441,8 +2672,14 @@ public final class ZKProfileReservationStore {
 
     private CreateResult cas(Snapshot current, ProfileLifecycleHead desired, ReadySnapshot prepared, long deadline)
             throws InterruptedException, TimeoutException {
+        return cas(current, desired, prepared, deadline, List.of());
+    }
+
+    private CreateResult cas(Snapshot current, ProfileLifecycleHead desired, ReadySnapshot prepared, long deadline,
+            List<Op> additionalChecks) throws InterruptedException, TimeoutException {
         long ledger = desired.backlink().ledgerId();
         var operations = new java.util.ArrayList<Op>();
+        operations.addAll(additionalChecks);
         operations.add(Op.check(path(ledger), current.rootDataVersion()));
         operations.add(Op.check(marker(headPath(ledger), current.lifecycle().birthId()), 0));
         if (prepared != null) {

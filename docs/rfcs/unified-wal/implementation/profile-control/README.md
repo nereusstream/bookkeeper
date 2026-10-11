@@ -460,3 +460,8 @@ common/server Spotless/Checkstyle exit0：unified-wal-replacement-wire-style-7gt
 ## 普通 writer close 的同记录 cut
 
 2026-10-11，原 birth/version/root-guarded OPEN→IN_RECOVERY CAS可同时发布冻结writer P/L的32-byte UWNC marker；其内容进入context canonical OPEN projection digest，writer-only UWRC/schema2保持184-byte宽度并强制marker存在。核验原READY/replacement history时投影掉由此CAS新加的marker，原membership/creator/birth/版本与冲突reserved状态拒绝保留。marker既不是DATA证明，也不是第二份CLOSED或membership权威；同一次标准CLOSED仍由已验证fixed-prefix、实际terminal quorum与原root CAS发布。实际SDK/TLS/files、回复丢失/新session、marker损坏与schema1向量边界由[接线记录](../profile-wire/README.md#普通-writer-close-与固定-cut-续接)拥有，旧Profile二进制矩阵/完整兼容、步骤12/14/15与生产Gate保持未闭合。
+
+
+## Fenced-CLOSED 逻辑删除的 metadata seal
+
+2026-10-11，原root cut CAS消费matching CLOSED的metadata birth/version；随后用已定义membership-frozen key在同一标准CLOSED记录发布88-byte UWDS seal，才枚举完整历史targets。目标manifest/birth guard持久后，第二次同记录CAS发布UWDT cluster tombstone引用，形成普通logical result；不等待离线ACK、不混淆本地barrier/physical。原P/L/creator/ensemble与历史close proof保留，明确拒绝freeze后的repair写。actual cold completion、三段reply-loss、旧reader/新open和history/manifest identity证据由[接线记录](../profile-wire/README.md#fenced-closed-集群逻辑删除与目标义务)拥有；delivery、cursor、startup/rejoin、GC及步骤15/生产Gate未完成。

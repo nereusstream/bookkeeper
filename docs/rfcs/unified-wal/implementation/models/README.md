@@ -1341,3 +1341,10 @@ Pool关联o_634iuy 51配置7完整正向/44指定反例、861 inputs/720 checksu
 2026-10-11，ProfileWriterClose有限投影将SDK confirmed P/L、actual DATA terminal、context+cut同CAS、digest/kind与durable terminal ACK作为输入；early-enter、漏原子cut、接纳tail、忽略digest、caller cancel冒充actual、忽略length和旧reader接受unsupported kind七种规则得到指定反例。最终dcq_0y4g含本切片与whole-recovery/normal-client-source共27配置，4完整正向/23指定反例，924当前inputs匹配；新增正向142 generated/96 distinct、queue0、depth/diameter7、0.990秒/peak RSS108806144 bytes，单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。
 
 该投影不生产TLS/fsync、SDK ACK、字节/身份、全metadata历史、所有时钟、公平性/活性或完整A+C+D；schema2的旧reader拒绝目前有锁定源码与raw kind测试，非旧二进制运行结果。实际阶段Java范围、复现命令和冻结回执由[接线记录](../profile-wire/README.md#普通-writer-close-与固定-cut-续接)拥有，完整模型/Gate不提升。
+
+
+### 集群逻辑删除与完整目标义务
+
+2026-10-11，ProfileLogicalDelete消费fenced-CLOSED、实际ZK seal/tombstone、目标history/physical birth和cold终态，正向允许offline不阻塞logical且旧read/barrier/physical独立；precondition、seal顺序、漏retired/repair、早logical、忽略manifest birth、cancel早release和等待offline七种错误规则均得到指定反例。最终6tg4udtw与writer-close/whole-recovery共27配置，4完整正向/23指定反例、935当前inputs匹配；新正向109 generated/72 distinct、queue0、depth/diameter8、0.868秒/peak RSS107724800 bytes，单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE。
+
+这是有限输入投影，不生产TLS/files、真实delivery/cursor/rejoin、完整拓扑、时钟/公平性/活性或完整A+C+D。实际76与14项Java、原source/config/run/command/失败回执与复现命令由[接线记录](../profile-wire/README.md#fenced-closed-集群逻辑删除与目标义务)拥有，综合Gate不提升。

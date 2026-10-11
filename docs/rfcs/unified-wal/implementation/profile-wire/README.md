@@ -1252,3 +1252,34 @@ o0XW6MW5原整体入口1通过；JEUF4LcB新测试误用不存在的 storage hel
 最终模型dcq_0y4g为27配置：4完整正向/23指定反例，924当前inputs逐项hash匹配。新增 ProfileWriterClose 只投影 confirmed P/L、DATA terminal、同CAS cut、digest/支持kind、固定adoption、length与caller cancellation；新正向142 generated/96 distinct、queue0、depth7、0.990秒/peak RSS108806144 bytes，非性能结论；tool1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE。TLS/fsync、完整SDK/metadata历史、所有timer、公平性/活性与A+C+D完整组合仍非该有限模型产物。
 
 持久证据在 /Users/liusinan/.codex/artifacts/unified-wal/writer-close-evidence-a6gtqzmd，archive.json保留所有原source/config/run/command、失败与阶段身份。当前 prefix验证/SELF末段操作仍有显式 coordinate/duration界限，超限defer；完整大规模close成本、任意故障/进程kill/掉电、混跑兼容、默认SDK路由、其他required-authority producer、OPEN/payload/placement audit、full-bytes、离线追赶/rejoin/delete/history GC/退役和综合运维/性能未闭合。步骤12/14/15与生产Gate仍PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。
+
+
+## Fenced-CLOSED 集群逻辑删除与目标义务
+
+2026-10-11，第15步新增显式 ProfileDeleteCoordinator，借用原 SDK scheduler、cold executor、ZK reservation/metadata stores。deleteLedgerAsync/beginDelete 只接受已通过原完整历史/selection/close验证的 matching fenced-CLOSED；OPEN 或未满足该证明不代为关闭、不按 online-delete 返回成功。默认 BookKeeper.deleteLedger 路由未接本入口，普通 Add 无新 metadata/control 查询、线程、连接池或 fsync。
+
+流程为 fresh CLOSED/root proof → 同一 root cut CAS消费标准 metadata birth/version → DELETE_INTENT关闭新 admission → 在标准CLOSED记录CAS发布既有 membership-frozen key → 从该sealed版本与原initial/replacement/admitted-repair历史枚举全部bookie/incarnation → 持久有界immutable delete-targets及其birth guard → 再次标准metadata CAS发布 bookkeeper.experimental.profile.deleted 的出生绑定manifest引用。P/L、creator、原ensemble map与recovery close事实不改变；先seal再枚举，所有受支持membership/grant/activation publication仍消费原root cut，后续repair metadata写对freeze明确拒绝。仅DELETE_INTENT、seal、inert target candidate或UNKNOWN都不是logical completion。
+
+使用实验UWDS/schema1固定88-byte seal（request/epoch/pre-seal version/metadata及lifecycle物理birth/完整CLOSED digest）、UWDM/schema1 target manifest和UWDT/schema1固定88-byte logical reference。manifest使用既有60-byte ProfileLedgerContext、88-byte seal、count与严格UTF-8 bookie/16-byte incarnation，固定prefix含CRC为164 bytes；目标按UTF-8 bytes/incarnation排序且去重，沿原32 initial/32 replacement pages/32 repair slots给出最多1088目标，512KiB前置上限。reference绑定manifest czxid、digest及seal digest，immutable birth witness和最后fresh root/metadata检查阻止同字节/version0重建冒充旧义务。不是新的membership/ACK权威或持久任务系统。
+
+LOGICALLY_DELETED只证明authoritative cluster tombstone及完整可恢复target义务已提交，不等待目标online/ACK、local access barrier、runtime drain、compaction或FREE。原standard metadata与所有历史输入暂保留，供发现/续接；没有伪造target delete-applied、delivery sequence/cursor或physical receipt。历史 matching CLOSED查询在核对seal/manifest后投影原版本，仍能报告此前真实关闭；新readonly-open和repair admission被原DELETE cut拒绝。旧reader在目标尚未本地tombstone时仍可能读，符合普通删除的边界，强访问撤销继续disabled。
+
+同一request/instance/payload继续三段CAS，回复丢失按实际persistent state解析；另request冲突。Caller timeout/cancel停止等待和未来阶段，beginDelete.completion仅在实际cold procedure返回后完成，不是remote ZK request abort/NONE。Procedure仍运行时保留同一permit和借用资源；冷阶段尚未终结不能以caller future作为owner排空证明。持久admission/history/manifest不依赖易失发送队列，下一阶段delivery/catch-up将消费这些义务。
+
+真实验证：OPEN precondition不改root；generic recovery(schema1)与ordinary writer close(schema2)两类CLOSED都在断开一个actual listener/CONTROL/DATA连接后完成logical delete并保留该incarnation；新open拒绝，既有SDK readonly reader仍可读，P/L/ensemble不变。实际force失败→同起点replacement覆盖socket2后，最终ensemble没有socket2，manifest仍包括四个获授权目标；root cut/seal/logical三段真实ZK multi的commit后CONNECTIONLOSS都重读同request完成。Held cut reply期间cancel不release permit，实际cold completion后由另一ZK客户端/新coordinator续接同请求；已经引用的manifest删除或同字节重建均quarantine且不复活root。
+
+独立raw UWDS向量与CRC、UWDM布局/count/排序/重复/truncation/超大count前置拒绝和不可变incarnation也有覆盖。初始8ZiFt841/r6EbHx2l发现manifest把既有60-byte ledger context误计为64-byte的实现错误（RED/诊断），改为引用ENCODED_LENGTH后41IEMqGI GREEN1，临时异常诊断已撤销。TUGpq4OC GREEN2；IilDQfCo4项是actual completion API前且测试使用错误的8-thread executor barrier假设，不作为排空证明；换成真实Attempt.completion后ePXr6PJy4项通过。最终456zVqhN三类76项（metadata19/lifecycle49/native8）、OjTIJZUW原整体recovery/repair/health/worker14项均零fail/skip，两run共1071当前inputs分别核对无变化；重复覆盖不合计为独立用例。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#logicalDelete*+ordinaryWriterClose*,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#wholePointRecovery*+wholeRecovery*+closedRepair*+closedReplicaHealth*+replicationWorker*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-logical-delete --config-prefix ce-profile-logical-delete --config-prefix a-profile-writer-close --config-prefix ce-profile-writer-close --config-prefix a-profile-whole-recovery --config-prefix ce-profile-whole-recovery
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+最终模型6tg4udtw共27配置，4完整正向/23指定反例，935当前inputs匹配；新logical投影只消费fenced-close、ZK durability/birth/version、retained history与cold terminal输入，覆盖precondition、先seal、完整义务、logical条件、出生绑定、cancel/permit及offline不阻塞logical。新正向109 generated/72 distinct、queue0、depth8、0.868秒/peak RSS107724800 bytes，非性能结果；TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint/CHECK_DEADLOCK FALSE，未生产TLS/files、delivery/cursor/rejoin、全metadata拓扑、时钟/公平性/活性或A+C+D完整组合。旧yvc3rna6在cold行动/终态guard补齐前，不移绑最终源码。
+
+持久证据 /Users/liusinan/.codex/artifacts/unified-wal/logical-delete-evidence-hqfilyta 保留原run/source/config/command、失败和阶段绑定。compile/style exit0；RAT exit1，443 unapproved全在父HEAD，无新增、不称CI全绿。当前只有有界cluster logical阶段；实际TOMBSTONE wire/本地delete-applied、跨ledger ordered delivery/no-hole cursor、snapshot/catch-up、真实startup rejoin、physical query/GC/decommission、默认SDK routing与完整兼容/模型/性能/运维仍未闭合，步骤12/14/15及生产Gate仍PARTIAL/OPEN。Linux NUMA/掉电/正式性能本轮NOT_EXECUTED。

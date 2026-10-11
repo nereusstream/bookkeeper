@@ -19,6 +19,15 @@ import time
 
 
 MATRIX = {
+    'a-profile-logical-delete': None,
+    'ce-profile-logical-delete-close': 'DeleteNeedsFencedClosed',
+    'ce-profile-logical-delete-seal': 'TargetsFollowStandardSeal',
+    'ce-profile-logical-delete-history': 'LogicalHasCompleteObligation',
+    'ce-profile-logical-delete-logical': 'LogicalHasCompleteObligation',
+    'ce-profile-logical-delete-birth': 'ReportRequiresManifestBirth',
+    'ce-profile-logical-delete-cancel': 'ColdOwnsGate',
+    'ce-profile-logical-delete-offline': 'OfflineDoesNotPreventLogical',
+
     'a-profile-writer-close': None,
     'ce-profile-writer-close-enter': 'EnterWaitsActualData',
     'ce-profile-writer-close-atomic': 'RecoveryAtomicallyFreezesCut',
@@ -770,6 +779,7 @@ def main():
                    else "ProfilePeerDiscovery.tla" if "profile-peer-discovery" in name
                    else "ProfileRegisteredConnection.tla" if "profile-registered-connection" in name
                    else "ProfileWriterClose.tla" if "profile-writer-close" in name
+                   else "ProfileLogicalDelete.tla" if "profile-logical-delete" in name
                    else "ProfileServiceShutdown.tla" if "profile-service-shutdown" in name
                    else "ProfileRecoveryPeerPool.tla" if "profile-recovery-peer-pool" in name
                    else "ProfileServiceBootstrap.tla" if "profile-service-bootstrap" in name

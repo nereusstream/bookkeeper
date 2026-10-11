@@ -38,3 +38,6 @@
 
 
 2026-10-11本会话实施进展：18853770fe先交付SDK writer stop的实际DATA排空；随后在原共享工作区继续普通writer close，加入同记录固定P/L cut、writer-only同长UWRC/schema2、原SELF/terminal/标准CLOSED与固定cut续接。实际测试、source/config/receipt及剩余边界由profile-wire/README.md的“普通 writer close 与固定 cut 续接”拥有。持续目标保持active；显式有界实验切片、一次提交和schema2源码拒绝检查都不是16步、生产或完整兼容验收完成，继续独立推进其他required authority、OPEN audit、full-bytes、删除/离线/rejoin/GC及综合验收。
+
+
+2026-10-11继续第15步：883a42abd0之后已接显式fenced-CLOSED cluster logical delete，保留完整historical targets/离线义务、metadata seal与出生绑定tombstone、actual cold cancellation和原关闭查询；相关实现/当前证据由profile-wire/README.md“Fenced-CLOSED 集群逻辑删除与目标义务”拥有。当前尚未接本地TOMBSTONE wire/delete-applied、ordered delivery/cursor/catch-up/rejoin及physical/GC，继续这些真实剩余项与其他全16步未闭合范围；目标仍active，logical完成不代表整个目标或生产Gate完成。

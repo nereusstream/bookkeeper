@@ -486,6 +486,53 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
     }
 
     @Test
+    public void deleteSealAndManifestHaveBoundedIndependentBytesAndCanonicalTargets() {
+        byte[] vector = HexFormat.of().parseHex("555744530001000051515151515151515151515151515151"
+                + "000000000000000900000006000000000000006400000000000000c8"
+                + "09090909090909090909090909090909090909090909090909090909090909098b0d9a6d");
+        var seal = ProfileDeleteRecord.Seal.decode(vector);
+        assertEquals(9, seal.epoch());
+        assertEquals(6, seal.beforeVersion());
+        assertEquals(100, seal.metadataBirth());
+        assertEquals(200, seal.lifecycleBirth());
+        assertArrayEquals(vector, seal.encode());
+        var crc = new java.util.zip.CRC32C();
+        crc.update(vector, 0, 84);
+        assertEquals((int) crc.getValue(), ByteBuffer.wrap(vector).getInt(84));
+        var scope = scope("b1:3181");
+        var context = new org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext(44,
+                scope.ledgerInstanceId(), scope.descriptorIdentity().toBytes());
+        var first = new ProfileDeleteRecord.Target("b1:3181", bytes(16, 2));
+        var second = new ProfileDeleteRecord.Target("b2:3181", bytes(16, 3));
+        var manifest = new ProfileDeleteRecord.Manifest(context, seal, List.of(first, second));
+        byte[] encoded = manifest.encode();
+        assertEquals(164 + 2 * (18 + 7), encoded.length);
+        crc.reset();
+        crc.update(encoded, 0, encoded.length - 4);
+        assertEquals((int) crc.getValue(), ByteBuffer.wrap(encoded).getInt(encoded.length - 4));
+        assertEquals(manifest, ProfileDeleteRecord.Manifest.decode(encoded));
+        byte[] incarnation = first.incarnation();
+        incarnation[0] ^= 1;
+        assertArrayEquals(encoded, manifest.encode());
+        assertThrows(IllegalArgumentException.class, () -> new ProfileDeleteRecord.Manifest(
+                context, seal, List.of(second, first)));
+        assertThrows(IllegalArgumentException.class, () -> new ProfileDeleteRecord.Manifest(
+                context, seal, List.of(first, first)));
+        for (int count = 0; count < encoded.length; count++) {
+            byte[] truncated = Arrays.copyOf(encoded, count);
+            assertThrows(IllegalArgumentException.class, () -> ProfileDeleteRecord.Manifest.decode(truncated));
+        }
+        byte[] excessive = encoded.clone();
+        ByteBuffer.wrap(excessive).putInt(156, Integer.MAX_VALUE);
+        crc.reset();
+        crc.update(excessive, 0, excessive.length - 4);
+        ByteBuffer.wrap(excessive).putInt(excessive.length - 4, (int) crc.getValue());
+        assertThrows(IllegalArgumentException.class, () -> ProfileDeleteRecord.Manifest.decode(excessive));
+        var reference = new ProfileDeleteRecord.Reference(1000, bytes(32, 7), bytes(32, 8));
+        assertArrayEquals(reference.encode(), ProfileDeleteRecord.Reference.decode(reference.encode()).encode());
+    }
+
+    @Test
     public void selectedPrefixFixesOriginAndAllowsLastFragmentCommitAndContextRestart() throws Exception {
         try (LedgerManager lm = manager(first)) {
             ready(lm);

@@ -440,6 +440,9 @@ public final class ProfileLedgerMetadataStore {
     }
 
     Op repairMetadataWrite(MembershipSnapshot expected, LedgerMetadata desired) throws IOException {
+        if (expected.metadata().getValue().getCustomMetadata().containsKey(MEMBERSHIP_FROZEN_KEY)) {
+            throw new IllegalArgumentException("Delete-sealed membership is irreversible");
+        }
         boolean closed = expected.metadata().getValue().getState() == LedgerMetadata.State.CLOSED;
         if (closed) {
             var before = expected.metadata().getValue();
@@ -452,6 +455,36 @@ public final class ProfileLedgerMetadataStore {
             }
         }
         return recoveryMetadataWrite(expected, desired, closed);
+    }
+
+    Op deleteSealWrite(MembershipSnapshot expected, ProfileDeleteRecord.Seal seal) throws IOException {
+        var value = expected.metadata().getValue();
+        if (value.getState() != LedgerMetadata.State.CLOSED || expected.birthZxid() != seal.metadataBirth()
+                || ((LongVersion) expected.metadata().getVersion()).getLongVersion() != seal.beforeVersion()
+                || value.getCustomMetadata().containsKey(MEMBERSHIP_FROZEN_KEY)
+                || value.getCustomMetadata().containsKey(ProfileDeleteRecord.TOMBSTONE_KEY)
+                || !Arrays.equals(ProfileDeleteRecord.closedDigest(value), seal.closedDigest())) {
+            throw new IllegalArgumentException("Deletion seal requires its exact matching CLOSED predecessor");
+        }
+        var custom = new java.util.TreeMap<>(value.getCustomMetadata());
+        custom.put(MEMBERSHIP_FROZEN_KEY, seal.encode());
+        return recoveryMetadataWrite(expected, LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
+                .withCustomMetadata(custom).build(), true);
+    }
+
+    Op deleteTombstoneWrite(MembershipSnapshot expected, ProfileDeleteRecord.Reference reference) throws IOException {
+        var value = expected.metadata().getValue();
+        var seal = ProfileDeleteRecord.Seal.decode(value.getCustomMetadata().get(MEMBERSHIP_FROZEN_KEY));
+        if (value.getState() != LedgerMetadata.State.CLOSED || expected.birthZxid() != seal.metadataBirth()
+                || ((LongVersion) expected.metadata().getVersion()).getLongVersion() != seal.beforeVersion() + 1L
+                || value.getCustomMetadata().containsKey(ProfileDeleteRecord.TOMBSTONE_KEY)
+                || !Arrays.equals(ProfileRepairIntent.digest(seal.encode()), reference.sealDigest())) {
+            throw new IllegalArgumentException("Cluster tombstone requires its sealed metadata and manifest");
+        }
+        var custom = new java.util.TreeMap<>(value.getCustomMetadata());
+        custom.put(ProfileDeleteRecord.TOMBSTONE_KEY, reference.encode());
+        return recoveryMetadataWrite(expected, LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
+                .withCustomMetadata(custom).build(), true);
     }
 
     Op closedMetadataWrite(MembershipSnapshot expected, ProfileRecoveryBoundary boundary) throws IOException {

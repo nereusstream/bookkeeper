@@ -1535,6 +1535,277 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    @Test
+    public void logicalDeleteKeepsOfflineObligationsAndDoesNotPromiseAnOldReaderBarrier() throws Exception {
+        for (boolean writerClose : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    data.put(fixture.identities.get(node).bookieId(),
+                            dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var recovery = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                var deletion = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(
+                        fixture.reservations, metadata, fixture.cold);
+                var originalRoot = fixture.reservations.read(44).snapshot();
+                assertEquals(ZKProfileReservationStore.DeleteStatus.PRECONDITION_FAILED, deletion.deleteLedgerAsync(
+                        44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(30))
+                            .get(30, TimeUnit.SECONDS).status());
+                assertEquals(originalRoot, fixture.reservations.read(44).snapshot());
+                if (writerClose) {
+                    var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
+                            1024, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
+                    handle.enableWriterClose(recovery, fixture.descriptorBytes, VALIDATOR, fixture.clients,
+                            4, Duration.ofSeconds(30)).get(5, TimeUnit.SECONDS);
+                    assertEquals(0, sdkAdd(handle, bytes(16, 8)).get(5, TimeUnit.SECONDS).longValue());
+                    handle.closeAsync().get(30, TimeUnit.SECONDS);
+                } else {
+                    for (var peer : data.values()) {
+                        evidenceEntry(fixture, peer, 0, -1, 16, 16);
+                    }
+                    assertEquals(ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
+                            recovery.recover(44, bytes(16, 51), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                                    fixture.credential, data, fixture.clients, 4, Duration.ofSeconds(30))
+                                .get(30, TimeUnit.SECONDS).status());
+                }
+                var closed = fixture.manager.readLedgerMetadata(44).get();
+                var context = org.apache.bookkeeper.discover.profile.ProfileRecoveryContext.decode(closed.getValue()
+                        .getCustomMetadata().get(org.apache.bookkeeper.discover.profile.ProfileRecoveryContext.KEY));
+                var reader = recovery.openReadOnly(44, sdk.getClientCtx(), fixture.password, data, 4)
+                        .get(5, TimeUnit.SECONDS);
+                try {
+                    fixture.listeners.get(2).close().syncUninterruptibly();
+                    fixture.clients.get("socket2:3181").closeAsync().get(5, TimeUnit.SECONDS);
+                    data.get(fixture.identities.get(2).bookieId()).closeAsync().get(5, TimeUnit.SECONDS);
+                    var result = deletion.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(),
+                            Duration.ofSeconds(30))
+                            .get(30, TimeUnit.SECONDS);
+                    assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, result.status());
+                    assertEquals(3, result.manifest().targets().size());
+                    assertTrue(result.manifest().targets().stream().anyMatch(target ->
+                            target.bookie().equals("socket2:3181") && java.util.Arrays.equals(target.incarnation(),
+                                fixture.identities.get(2).incarnation().value())));
+                    var deleted = fixture.manager.readLedgerMetadata(44).get();
+                    assertEquals(LedgerMetadata.State.CLOSED, deleted.getValue().getState());
+                    assertEquals(0, deleted.getValue().getLastEntryId());
+                    assertEquals(16, deleted.getValue().getLength());
+                    assertEquals(closed.getValue().getAllEnsembles(), deleted.getValue().getAllEnsembles());
+                    assertEquals(((org.apache.bookkeeper.versioning.LongVersion) closed.getVersion())
+                            .getLongVersion() + 2,
+                            ((org.apache.bookkeeper.versioning.LongVersion) deleted.getVersion()).getLongVersion());
+                    assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
+                            deletion.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(30))
+                                .get(30, TimeUnit.SECONDS).status());
+                    assertEquals(deleted.getVersion(), fixture.manager.readLedgerMetadata(44).get().getVersion());
+                    assertEquals(ZKProfileReservationStore.DeleteStatus.CONFLICT,
+                            deletion.deleteLedgerAsync(44, bytes(16, 102), sdk.getClientCtx(), Duration.ofSeconds(30))
+                                .get(30, TimeUnit.SECONDS).status());
+                    assertThrows(ExecutionException.class,
+                            () -> recovery.openReadOnly(44, sdk.getClientCtx(), fixture.password, data, 4)
+                                .get(5, TimeUnit.SECONDS));
+                    try (var entries = reader.readAsync(0, 0).get(5, TimeUnit.SECONDS)) {
+                        assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+                    }
+                    assertEquals(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED,
+                            fixture.reservations.readClosedRecovery(metadata, context).outcome());
+                } finally {
+                    reader.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    private static final class LostDeleteReplyClient extends ZooKeeper {
+        private final int dropAt;
+        private int commits;
+        volatile boolean dropped;
+
+        LostDeleteReplyClient(String connect, ZooKeeperWatcherBase watcher, int dropAt) throws Exception {
+            super(connect, 10000, watcher);
+            this.dropAt = dropAt;
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
+            var ops = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(ops::add);
+            boolean mutation = ops.stream().anyMatch(op -> op.getType() == ZooDefs.OpCode.setData);
+            super.multi(ops, (code, name, ignored, results) -> {
+                if (mutation && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()
+                        && ++commits == dropAt) {
+                    dropped = true;
+                    callback.processResult(org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue(),
+                            name, context, results);
+                } else {
+                    callback.processResult(code, name, context, results);
+                }
+            }, context);
+        }
+    }
+
+    @Test
+    public void logicalDeleteResolvesEachMetadataReplyLossAndRetainsOverwrittenActivationTargets() throws Exception {
+        for (int drop : List.of(1, 2, 3)) {
+            try (Fixture fixture = new Fixture(false, false, true, 4, 3, true, true); BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 4; node++) {
+                    data.put(fixture.identities.get(node).bookieId(),
+                            dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+                }
+                var next = new ProfileReplacementCoordinator.Target(fixture.connect(3, 4, Duration.ofSeconds(5)),
+                        data.get(fixture.identities.get(3).bookieId()));
+                var current = new HashMap<>(data);
+                current.remove(fixture.identities.get(3).bookieId());
+                var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, current, 8,
+                        1024, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var recovery = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                handle.enableReplacement(new ProfileReplacementCoordinator(fixture.reservations, metadata,
+                        VALIDATOR, fixture.cold), List.of(next), fixture.descriptorBytes, 1).get(5, TimeUnit.SECONDS);
+                handle.enableWriterClose(recovery, fixture.descriptorBytes, VALIDATOR, fixture.clients,
+                        4, Duration.ofSeconds(30)).get(5, TimeUnit.SECONDS);
+                fixture.expectedFailedDataSessions.add(2);
+                files(fixture.nodes.get(2)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                try {
+                    assertEquals(0, sdkAdd(handle, bytes(16, 8)).get(10, TimeUnit.SECONDS).longValue());
+                    assertEquals(List.of(0L), new ArrayList<>(handle.getLedgerMetadata().getAllEnsembles().keySet()));
+                    assertFalse(handle.getLedgerMetadata().getAllEnsembles().values().stream().flatMap(List::stream)
+                            .anyMatch(bookie -> bookie.toString().equals("socket2:3181")));
+                    handle.closeAsync().get(30, TimeUnit.SECONDS);
+                    var context = org.apache.bookkeeper.discover.profile.ProfileRecoveryContext.decode(
+                            handle.getLedgerMetadata().getCustomMetadata().get(
+                                org.apache.bookkeeper.discover.profile.ProfileRecoveryContext.KEY));
+                    var watcher = new ZooKeeperWatcherBase(10000, false);
+                    try (var lost = new LostDeleteReplyClient(fixture.cluster.getZooKeeperConnectString(),
+                            watcher, drop)) {
+                        var store = new ZKProfileReservationStore(lost, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                                Duration.ofSeconds(5));
+                        var lostMetadata = new ProfileLedgerMetadataStore(lost,
+                                (AbstractZkLedgerManager) fixture.manager,
+                                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                        var deletion = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(
+                                store, lostMetadata, fixture.cold);
+                        var deleted = deletion.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(),
+                                Duration.ofSeconds(30))
+                                .get(30, TimeUnit.SECONDS);
+                        assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, deleted.status());
+                        assertTrue(lost.dropped);
+                        assertEquals(4, deleted.manifest().targets().size());
+                        assertTrue(deleted.manifest().targets().stream()
+                                .anyMatch(target -> target.bookie().equals("socket2:3181")));
+                        assertEquals(ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED,
+                                store.readClosedRecovery(lostMetadata, context).outcome());
+                    }
+                } finally {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void logicalDeleteCancellationKeepsActualColdAttemptAndResumesTheSameRequest() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int node = 0; node < 3; node++) {
+                data.put(fixture.identities.get(node).bookieId(), dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold).recover(44, bytes(16, 51),
+                    sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR, fixture.credential, data, fixture.clients,
+                    4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+            var watcher = new ZooKeeperWatcherBase(10000, false);
+            try (var held = new HoldWriterEnterClient(fixture.cluster.getZooKeeperConnectString(), watcher)) {
+                var store = new ZKProfileReservationStore(held, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        Duration.ofSeconds(5));
+                var heldMetadata = new ProfileLedgerMetadataStore(held, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var deletion = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(
+                        store, heldMetadata, fixture.cold);
+                var attempt = deletion.beginDelete(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(30));
+                var pending = attempt.result();
+                try {
+                    assertTrue(held.entered.await(5, TimeUnit.SECONDS));
+                    assertTrue(pending.cancel(false));
+                    assertFalse(attempt.completion().isDone());
+                    assertEquals(ZKProfileReservationStore.DeleteStatus.UNAVAILABLE,
+                            deletion.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(30))
+                                .get(5, TimeUnit.SECONDS).status());
+                    var partial = fixture.manager.readLedgerMetadata(44).get().getValue();
+                    assertNull(partial.getCustomMetadata().get(
+                            org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.SEAL_KEY));
+                    assertNull(partial.getCustomMetadata().get(
+                            org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.TOMBSTONE_KEY));
+                    assertEquals(org.apache.bookkeeper.discover.profile.ProfileLifecycleHead.State.DELETE_INTENT,
+                            fixture.reservations.read(44).snapshot().lifecycle().state());
+                    held.release.run();
+                    held.release = null;
+                    attempt.completion().get(5, TimeUnit.SECONDS);
+                    var fresh = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(
+                            fixture.reservations, metadata, fixture.cold);
+                    assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
+                            fresh.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(30))
+                                .get(30, TimeUnit.SECONDS).status());
+                } finally {
+                    if (held.release != null) {
+                        held.release.run();
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void logicalDeleteCannotReuseARecreatedManifestOrLoseItsPublishedObligation() throws Exception {
+        for (boolean recreate : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                for (int node = 0; node < 3; node++) {
+                    data.put(fixture.identities.get(node).bookieId(),
+                            dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var recovery = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                recovery.recover(44, bytes(16, 51), sdk.getClientCtx(), fixture.descriptorBytes, VALIDATOR,
+                        fixture.credential, data, fixture.clients, 4, Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                var deletion = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(
+                        fixture.reservations, metadata, fixture.cold);
+                assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
+                        deletion.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(30))
+                            .get(30, TimeUnit.SECONDS).status());
+                String name = "/socket-initial/2c/delete-targets";
+                byte[] original = fixture.zk.getData(name, false, null);
+                org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, name);
+                if (recreate) {
+                    fixture.zk.create(name, original, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                }
+                assertEquals(ZKProfileReservationStore.DeleteStatus.QUARANTINED,
+                        deletion.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(30))
+                            .get(30, TimeUnit.SECONDS).status());
+                assertEquals(org.apache.bookkeeper.discover.profile.ProfileLifecycleHead.State.DELETE_INTENT,
+                        fixture.reservations.read(44).snapshot().lifecycle().state());
+                assertThrows(ExecutionException.class,
+                        () -> recovery.openReadOnly(44, sdk.getClientCtx(), fixture.password, data, 4)
+                            .get(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
     private static Channel dataChannel(ProfileNormalDataClient client) throws Exception {
         var ownerField = ProfileNormalDataClient.class.getDeclaredField("socket");
         ownerField.setAccessible(true);

@@ -1123,3 +1123,6 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 
 
 2026-10-11 [普通 writer close 与固定 cut 续接](implementation/profile-wire/README.md#普通-writer-close-与固定-cut-续接)在显式 cold 依赖下已接原 SDK close：冻结确认P/L、actual DATA排空、同CAS writer cut/UWRC schema2、固定prefix验证与既有SELF/terminal/标准CLOSED。A2/A3空/非空物理tail、健康文件restart、caller cancel/output、enter回复窗口新session续接、cut损坏拒绝、历史replacement与丢CLOSED回复均有真实证据；旧schema1向量不变，旧严格reader拒schema2为源码检查，不计二进制兼容PASS。阶段广度102/73/74与最终8项、27模型配置各按原source绑定保留，style通过，RAT443历史问题无新增。该有界close/adoption切片不闭合默认SDK路由、其他required authority、OPEN/payload/placement、full-bytes、删除/离线/rejoin/GC与综合Gate，步骤12/14/15仍PARTIAL/OPEN。
+
+
+2026-10-11 [Fenced-CLOSED 集群逻辑删除与目标义务](implementation/profile-wire/README.md#fenced-closed-集群逻辑删除与目标义务)已显式接matching CLOSED前置、原root delete cut、标准metadata不可逆seal、完整initial/replacement/admitted-repair targets及出生绑定cluster tombstone。同起点覆盖目标/离线incarnation保留，三段回复丢失续接，cancel等actual cold completion，manifest缺失/重建拒绝；新open拒绝、旧reader未本地tombstone前可读，未冒充physical/access barrier。76与14项Java、27有限模型配置各按当前source绑定通过，style通过，RAT443历史问题无新增。实际delivery/wire/delete-applied/cursor/catch-up/rejoin/回收与GC/默认SDK routing及综合Gate仍未闭合，步骤12/14/15保持PARTIAL/OPEN。
