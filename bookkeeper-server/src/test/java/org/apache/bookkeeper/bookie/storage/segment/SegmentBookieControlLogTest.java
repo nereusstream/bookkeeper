@@ -10636,6 +10636,12 @@ public class SegmentBookieControlLogTest {
         try (SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
             assertEquals(coverage, index.coverage().orElseThrow());
             assertTrue(index.get(context(45), 1).isPresent());
+            var cacheField = SegmentDerivedIndex.class.getDeclaredField("cache");
+            cacheField.setAccessible(true);
+            var cache = (org.rocksdb.Cache) cacheField.get(index);
+            assertTrue(cache.getUsage() > 0); // Actual SST reads, not a configured capacity value.
+            assertTrue(cache.getUsage() <= SegmentDerivedIndex.BLOCK_CACHE_BYTES);
+            assertTrue(cache.getPinnedUsage() <= cache.getUsage());
         }
     }
 

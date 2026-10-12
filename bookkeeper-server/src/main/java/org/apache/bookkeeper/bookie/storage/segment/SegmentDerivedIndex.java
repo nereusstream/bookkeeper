@@ -49,6 +49,7 @@ import org.rocksdb.WriteOptions;
 
 /** Rebuildable, WAL-disabled locator store. Calls belong to startup/maintenance I/O, never an append owner. */
 final class SegmentDerivedIndex implements AutoCloseable {
+    static final long BLOCK_CACHE_BYTES = 1024 * 1024;
     private static final byte[] BINDING_KEY = {0};
     private static final byte[] LOCATION_BEGIN = {16};
     private static final byte[] LOCATION_END = {17};
@@ -116,7 +117,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
         this.maxEntries = maxEntries;
         scope = digest().digest(identity.encode(config, -3).array());
         RocksDB.loadLibrary();
-        cache = new LRUCache(1024 * 1024);
+        cache = new LRUCache(BLOCK_CACHE_BYTES, -1, true);
         options = new Options().setCreateIfMissing(true).setUseFsync(true)
                 .setWriteBufferSize(1024 * 1024).setMaxWriteBufferNumber(2)
                 .setMaxBackgroundJobs(2).setMaxOpenFiles(32)

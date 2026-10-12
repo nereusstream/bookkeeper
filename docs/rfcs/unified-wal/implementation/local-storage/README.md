@@ -943,3 +943,17 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [Assignment handoff 的 EFFECTIVE 与 G2/G3 接续](../profile-wire/README.md#assignment-handoff-的-effective-与-g2g3-接续)已把原graph gate退役、owned registration删除、NON_WRITABLE投影与native assignment/head更新放进原publisher同一ZK multi；原type15 force/apply/checkpoint/replay接续effective progress，原事件身份保留。三目标真实G2/G3 READY、SDK Add/close、新旧事件与混合snapshot、健康文件旋转重启、native丢回复/held callback与type15 UNKNOWN已有验证。79项原阶段Java（server 71/common codec 8）/最终21项补验及35有限模型配置通过，1929个最终源码输入核验一致，style通过、RAT443父HEAD无新增；完整Gate不提升。retention/offline/backup-restore、accepted terminal decommission/unrecoverable/history GC、其他required authority/default routing/full-bytes/兼容/正式性能/运维/全16步验收继续OPEN。
+
+## 派生 index block cache 与共享 DATA 预算
+
+2026-10-13，接续父提交`868469df472ff42fe466fb085f16812bed9da6e5`。原SegmentDerivedIndex使用1 MiB LRUCache的默认非strict配置，且这份native cache policy未计入ProfileService DATA账本。现在保持原容量和自动shard选择，使用LRUCache(BLOCK_CACHE_BYTES, -1, true)；按[RocksDB9.9.3 LRUCache](https://github.com/facebook/rocksdb/blob/v9.9.3/java/src/main/java/org/rocksdb/LRUCache.java)契约，cache满时拒绝插入，而不隐含允许越过其charge容量。该约束针对cache charge，不是整个native allocator/进程RSS或所有RocksDB对象的hard cap。
+
+ProfileService在实际storage构造、index/native cache及pool打开前，以原DataWorkingSet一次保留`buffers * (bufferBytes + 4095) + BLOCK_CACHE_BYTES`。拒绝整个start时不打开目录/storage或发布WRITABLE；原total/control/unclassified quota不增加。shared working set继续保留到实际storage/index/cache/pool关闭，caller timeout、held force和异步索引任务不能提前归还；listener connection-only drain与storage/full drain次序不改变。真实service测试fixture显式提供2 MiB total以容纳新增必需cache allowance，生产quota不自动扩容；原source snapshot仍按其allocator计费，不再次固定预留input cap。
+
+依赖版本由当前pom、9.9.3 jar SHA和同tag原始Java/header/native源码核对。[WriteBufferManager](https://github.com/facebook/rocksdb/blob/v9.9.3/include/rocksdb/write_buffer_manager.h)允许在超过threshold后等待flush，[ReserveMemWithCache](https://github.com/facebook/rocksdb/blob/v9.9.3/memtable/write_buffer_manager.cc#L61)还会忽略cache charging失败。因此本轮没有增加WBM或把1 MiB write-buffer size/max-number配置当作完整memtable硬上限，更不以block cache reservation掩盖memtable、table-reader和native对象仍未入统一总账的问题。
+
+`unified-wal-local-C98Ys4ox`将service reservation临时恢复父HEAD逻辑，保持当前strict cache及新测试：DATA只够固定pool时start竟然完成，新的expected IOException断言失败（1 failure/0 error/0 skip）。该红不是编译失败或mock；保留exact source/输入/XML。actual handle终止后按SHA恢复当前service。`unified-wal-local-sKufc4kA`小范围3项绿，最终`unified-wal-local-HNZY5P9U`2类34项（Bookie control/index20、socket14）均0 failure/error/skip。cache增加原真实SST get后的actual getUsage>0且<=1 MiB、pinned usage不超过usage断言；这些是该workload观测，不是full cache压力/任意native峰值或性能测量。
+
+最终覆盖原独立key/location/coverage字节向量、实际flush/publication、派生database删除重建/tombstone保留、进程退出恢复/不提升未CLOSED DATA、异步Put/Get/duplicate/coverage/UNKNOWN及held native lock、SDK/注册发现/EmbeddedServer/owned resources、quota拒绝、force期间close和健康restart。1115 Java inputs逐项匹配最终source；red与green分别冻结，不移绑旧PASS。原模型未改、也未覆盖strict cache/WBM malloc，本轮不重跑TLC；既有模型结果保持原source绑定。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/index-cache-budget-evidence-Y97dhGYQ`保存raw stage输入/命令/XML、red/green源码、同tag依赖source及jar SHA、最终文档与checker诊断。Spotless/Checkstyle exit0；所有Java/checker终止后的独立RAT exit1，443 unapproved逐项存在父HEAD、无新增，不称CI全绿。这里仅完成block cache charge政策与ProfileService reservation；bare storage/listener的独立pool实验、memtable/Java队列/locator对象/控制状态/MetadataStore/JDK/opaque TLS/kernel/caller reply/outbound cohort统一总账、Linux NUMA/真实掉电/正式性能/canary、完整兼容/其他16步验收继续OPEN，默认OFF/SYSTEM/PARK及disabled能力不变。

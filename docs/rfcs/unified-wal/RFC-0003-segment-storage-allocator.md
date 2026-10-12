@@ -950,3 +950,5 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 2026-10-08 [空最后fragment terminal boundary](implementation/profile-wire/README.md#空最后-fragment-的独立终态关闭)沿用原控制I/O/owner/pre-cut排空路径新增Bookie type12，固定P/L/selection digest且无grant字段；generic batch拒绝绕过，pending/force失败不授权FREE。checkpoint/rotation/replay与实际尾部节点restart保留上界，不截短shared DATA；该局部实现不代表掉电、离线catch-up或生产接受。
 
 2026-10-12 [本地删除空间终结](implementation/profile-wire/README.md#本地删除空间终结)已将实际terminal TOMBSTONE接到原native index/coordinate/coverage及COPY/MOVE/FREE，按实际allocated DATA/旧COPY复核本地REUSABLE；混合块可零净容量增益退休，普通维护仍要求正净增益。旧IO/owner credit与deadline/cancel独立排空，其他ledger保留、corrupt/limit不伪造成功。3类282项Java与20有限模型配置（4完整正向/16指定反例）通过；网络physical receipt/全目标/retention/GC/退役及其他16步验收仍OPEN，生产Gate不提升。
+
+2026-10-13 [派生 index block cache 与共享 DATA 预算](implementation/local-storage/README.md#派生-index-block-cache-与共享-data-预算)已将原1 MiB index block cache启用strict capacity，并在ProfileService storage open前与固定池合并预留于原DATA额度；原缓存大小与协议/格式不变。旧service只预留池的真实quota红、当前拒绝绿及最终2类34项真实Java通过；memtable/WBM并非hard native上限，所有native/对象总账与正式性能仍OPEN。本轮不重跑不覆盖该native政策的TLC，旧模型保持原绑定，默认OFF/SYSTEM/PARK及16步生产Gate不提升。

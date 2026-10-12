@@ -330,9 +330,11 @@ public final class SegmentProfileService implements AutoCloseable {
             synchronized (gate) {
                 requireLive();
                 try {
-                    dataWorkingSet = transport.budget().reserveDataWorkingSet(execution.reservedBufferBytes());
+                    dataWorkingSet = transport.budget().reserveDataWorkingSet(Math.addExact(
+                            execution.reservedBufferBytes(), SegmentDerivedIndex.BLOCK_CACHE_BYTES));
                 } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
-                    throw new IOException("Profile DATA quota cannot reserve its aligned storage buffers", exhausted);
+                    throw new IOException("Profile DATA quota cannot reserve storage buffers and index cache",
+                            exhausted);
                 }
             }
             storage = new IsolatedSegmentStorage(config, identity, key, validator, execution, limits);

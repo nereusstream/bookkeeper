@@ -2164,13 +2164,14 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private final class ServiceEpisode implements AutoCloseable {
+        private static final long DATA_BYTES = 2L * 1024 * 1024 - 131072 - 262144;
         final ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
         final ZooKeeper client;
         final ZKProfileStartupRequirementsStore requirements;
         final ZKProfileRegistrationStore persistent;
         final ZKProfileEphemeralRegistrationStore publisher;
         final SegmentProfileService service;
-        final ProfileReceiveBudget budget = new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8);
+        final ProfileReceiveBudget budget = new ProfileReceiveBudget(2L * 1024 * 1024, 131072, 262144, 8, 8, 8);
         final IsolatedSegmentConfig config;
         final ServerConfiguration bootstrapConfiguration;
         final SegmentProfileService.Startup startup;
@@ -2527,18 +2528,19 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
-    public void ownedProfileServiceRefusesStorageBuffersBeforeOpenWhenSharedDataQuotaIsFull() throws Exception {
+    public void ownedProfileServiceRefusesIndexCacheBeforeOpenWhenSharedDataQuotaOnlyFitsBuffers() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
             var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
                     1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
             var requested = servicePolicy(config, fixture.identities.get(0), 1);
             try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
                     new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
-                try (var held = episode.budget.reserveDataWorkingSet(131072)) {
+                long heldBytes = ServiceEpisode.DATA_BYTES - 2L * (4096 + 4095);
+                try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
                     assertThrows(java.io.IOException.class, () -> episode.service.start(false));
                     assertNull(episode.storage());
                     assertFalse(Files.exists(config.directory()));
-                    assertEquals(131072, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(heldBytes, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
                     assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
                     assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
                 }
@@ -2706,7 +2708,8 @@ public class SegmentProfileInitialSocketClientTest {
                 }, null);
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
                 assertFalse(episodes.get(0).service.close(Duration.ofMillis(100)));
-                assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA) >= 2L * (4096 + 4095));
+                assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA)
+                        >= 2L * (4096 + 4095) + SegmentDerivedIndex.BLOCK_CACHE_BYTES);
                 assertFalse(episodes.get(0).budget.closeAdmissionAndDrain().isDone());
                 if (ownsResources) {
                     episodes.get(0).assertOwnedResourcesTerminal(false);
