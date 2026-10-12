@@ -638,3 +638,5 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-12 [显式Profile listener与actual网络credit drain](profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已管理native parent/child、worker交接及receive ledger；retire新连接不提前归还frame/cold/backing，caller copy completion不污染actual终态，borrowed graph/loops/cold保持原owner。46项相关Java/13配置模型得到预期结果，style通过、RAT443历史问题无新增。完整startup owner/default hook/SDK routing、full-bytes、stock binary及综合验收仍OPEN，步骤11/12/14/15和生产Gate保持PARTIAL/OPEN。
+
+2026-10-12 [显式 Profile 服务 owner](startup-readiness/README.md#显式-profile-服务启动与-owner-排空)已连接 requirements/pre-open Arena/Index 根绑定、实际 native bind endpoint、原恢复/Harness/registration/consumer、注册发现 SDK 和 listener→storage→DLR 实际排空。held DATA force 与 publication stop 保留 owner/locks，actual old Classic drain/Unix access 接入 existing restart；最终58项 Java、style通过，RAT443父 HEAD 路径无新增。default EmbeddedServer/完整外部 authority、stock矩阵、snapshot/handoff/GC/decommission/full-bytes/性能/运维和综合验收继续 OPEN，步骤11/12/14/15及生产 Gate保持 PARTIAL/OPEN。

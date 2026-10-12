@@ -912,3 +912,5 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [显式网络listener owner](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)持有native listener/channels及original receive budget，复用opened graph的既有Profile pipeline；network credit drain与borrowed storage pool/DATA I/O/owner drain分开，caller先完成listener再执行original graph close，不把channel close或零连接数当queued accepted fd/cold/backing已归还。actual mTLS与worker queue竞争有覆盖，default startup与full-bytes/生产Gate仍OPEN。
+
+2026-10-12 [显式 Profile 服务 owner](../startup-readiness/README.md#显式-profile-服务启动与-owner-排空)现已在 requirements/version/new-scope 与原生 Arena/Index proof 根绑定之后构造 graph，实际 bind 后才执行原 readiness 发布；服务关闭先退休准入，按 listener 实际排空→原 graph/follower/owner/I/O/pool→DLR lock 顺序回收。真实 held DATA force、publication stop、首次创建/SDK/read/generation2 restart 和 actual old UID/access replay 组合已验证。默认 EmbeddedServer/完整 authority、full-bytes 与综合 Gate 仍 OPEN。

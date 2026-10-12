@@ -851,3 +851,5 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-12 [显式Profile listener及网络实际排空](implementation/profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)复用actual opened graph、TLS/HELLO/control/DATA pipeline，parent close后worker barriers消除queued accepted socket未入budget的空窗；原receive ledger退休admission并等actual cold/frame/response/backing/slots归还，future副本不授权终态。borrowed graph/cold/loops不归listener关闭，存储native I/O仍依原owner排空。46项Java/13配置有限模型及style验证，RAT443历史问题无新增；未接default pre-storage hook/full startup authority或闭合full-bytes，步骤11/12/14/15及生产Gate保持PARTIAL/OPEN。
+
+2026-10-12 [显式 Profile 服务 owner](implementation/startup-readiness/README.md#显式-profile-服务启动与-owner-排空)已把 pre-open requirements/实际 Arena-Index 根绑定、原 graph/DLR、实际 listener 地址、readiness 发布/admission/consumer 和原 SDK 注册发现接为一次隔离 episode；关闭依次退休、demote、native network drain、原 storage drain 与 DLR lock。真实 force 未结束和 publication 晚到均不能提前释放锁或恢复 writable；58项相关 Java/style通过，RAT443父 HEAD 路径无新增。default EmbeddedServer、外部永久 physical/service authority、released stock矩阵、full-bytes 与全16步综合 Gate 仍 OPEN。

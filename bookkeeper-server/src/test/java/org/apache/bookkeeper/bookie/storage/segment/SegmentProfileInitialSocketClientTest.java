@@ -1857,6 +1857,379 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static final class HeldServicePublicationClient extends ZooKeeper {
+        final CountDownLatch submitted = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        volatile boolean armed;
+
+        HeldServicePublicationClient(String connect, ZooKeeperWatcherBase watcher) throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
+            var copied = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(copied::add);
+            if (armed && copied.stream().anyMatch(op -> op.getPath().startsWith("/socket-service-readiness/"))) {
+                armed = false;
+                submitted.countDown();
+                await(release);
+            }
+            super.multi(copied, callback, context);
+        }
+    }
+
+    private final class ServiceEpisode implements AutoCloseable {
+        final ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
+        final ZooKeeper client;
+        final ZKProfileStartupRequirementsStore requirements;
+        final ZKProfileRegistrationStore persistent;
+        final ZKProfileEphemeralRegistrationStore publisher;
+        final SegmentProfileService service;
+        final ProfileReceiveBudget budget = new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8);
+        final IsolatedSegmentConfig config;
+
+        ServiceEpisode(Fixture fixture, int target, IsolatedSegmentConfig config,
+                StartupReadinessInput requested, BookieCompatibilityFact requiredCompatibility,
+                InetSocketAddress address, java.util.concurrent.ScheduledExecutorService scheduler) throws Exception {
+            this(fixture, target, config, requested, requiredCompatibility, address, scheduler, false);
+        }
+
+        ServiceEpisode(Fixture fixture, int target, IsolatedSegmentConfig config,
+                StartupReadinessInput requested, BookieCompatibilityFact requiredCompatibility,
+                InetSocketAddress address, java.util.concurrent.ScheduledExecutorService scheduler,
+                boolean holdPublication) throws Exception {
+            this.config = config;
+            client = holdPublication
+                    ? new HeldServicePublicationClient(fixture.cluster.getZooKeeperConnectString(), watcher)
+                    : new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
+            watcher.waitForConnection();
+            String root = "/socket-service-readiness";
+            String requiredRoot = "/socket-service-required-" + target + "-"
+                    + Integer.toUnsignedString(config.directory().hashCode());
+            for (String path : List.of(root, requiredRoot)) {
+                if (client.exists(path, false) == null) {
+                    client.create(path, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                }
+            }
+            var identity = fixture.identities.get(target);
+            requirements = new ZKProfileStartupRequirementsStore(client, requiredRoot,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            if (requiredCompatibility != null) {
+                assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                        requirements.provision(requiredCompatibility, requested.requiredDevices()));
+            }
+            persistent = new ZKProfileRegistrationStore(client, root, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            publisher = new ZKProfileEphemeralRegistrationStore(client, root, identity.bookieId().toString(),
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var source = new ZKProfileReservationStore(client, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND,
+                    source.createInitialDeleteAssignment(new org.apache.bookkeeper.discover.profile
+                            .ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value()))
+                            .status());
+            var metadata = new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var startup = new SegmentProfileService.Startup(requirements, requested, persistent, publisher,
+                    source, metadata, watcher, "ledger-profile", scheduler, fixture.cold, 4,
+                    Duration.ofSeconds(5), Duration.ofMillis(100));
+            var control = fixture.controlConfigs.get(target);
+            var read = new SegmentProfileReadConfig((caller, query) -> fixture.readAllowed.get()
+                    && control.staticAuthorizer().allows(caller, ProfileControlOperation.INSTALL)
+                    && query.context().equals(fixture.context()),
+                    (caller, query) -> fixture.readAllowed.get()
+                    && control.staticAuthorizer().allows(caller, ProfileControlOperation.INSTALL)
+                    && query.context().equals(fixture.context()));
+            var transport = new SegmentProfileService.Transport(fixture.serverTls, budget,
+                    new SegmentProfileListener.Settings(131072, 64, "socket-test",
+                            requested.targetReadinessGeneration().value()),
+                    address, fixture.acceptor, fixture.worker, control, read);
+            service = new SegmentProfileService(config, identity, new SecretKeySpec(bytes(32, 7), "AES"),
+                    VALIDATOR, new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                            2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                    new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                            new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))),
+                    startup, transport);
+        }
+
+        IsolatedSegmentStorage storage() throws Exception {
+            var field = SegmentProfileService.class.getDeclaredField("storage");
+            field.setAccessible(true);
+            return (IsolatedSegmentStorage) field.get(service);
+        }
+
+        void replaceNode(Fixture fixture, int target, boolean existing) throws Exception {
+            fixture.listeners.get(target).close().sync();
+            fixture.nodes.get(target).close();
+            InetSocketAddress bound = service.start(existing);
+            var field = SegmentProfileService.class.getDeclaredField("listener");
+            field.setAccessible(true);
+            var listenerField = SegmentProfileListener.class.getDeclaredField("listener");
+            listenerField.setAccessible(true);
+            fixture.listeners.set(target, (Channel) listenerField.get(field.get(service)));
+            fixture.nodes.set(target, storage());
+            fixture.budgets.set(target, budget);
+            assertEquals("tls://127.0.0.1:" + bound.getPort(), publisher.readServiceInfo(
+                    fixture.identities.get(target).bookieId().toString()).orElseThrow().endpoint());
+            assertTrue(publisher.readWritable(fixture.identities.get(target).bookieId().toString()).isPresent());
+        }
+
+        @Override
+        public void close() throws Exception {
+            service.close();
+            client.close();
+        }
+    }
+
+    private static StartupReadinessInput servicePolicy(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long generation) throws Exception {
+        var policy = startupPolicy(config, identity);
+        var device = policy.requiredDevices().devices().get(0);
+        var devices = new RequiredDeviceManifest(policy.requiredDevices().identity(),
+                policy.requiredDevices().generation(),
+                List.of(new RequiredDeviceManifest.RequiredDeviceFact(device.deviceId(), device.storageIncarnation(),
+                        device.manifestGeneration(), RequiredDeviceManifest.DeviceStatus.READY,
+                        device.arenaFormatVersion(), device.controlFormatVersion(), device.checkpointFormatVersion(),
+                        device.superblockGeneration(), device.mandatoryFeatures())));
+        var f = policy.newScopeFallback();
+        var arena = config.directory().getParent().toRealPath().resolve(config.directory().getFileName());
+        var roots = f.newRoots().stream().map(root -> new NewScopeFallbackManifest.StorageRoot(root.kind(),
+                switch (root.kind()) {
+                    case ARENA -> arena.toString();
+                    case INDEX -> arena.resolve("derived-index").toString();
+                    default -> root.opaquePath();
+                })).sorted(java.util.Comparator.comparing(NewScopeFallbackManifest.StorageRoot::opaquePath)).toList();
+        var fallback = new NewScopeFallbackManifest(f.oldBookieId(), f.newBookieId(), f.oldStorageIncarnation(),
+                f.newStorageIncarnation(), f.oldRoots(), roots, f.oldCredentialScope(), f.newCredentialScope(),
+                f.oldScopeDisposition(), f.oldCredentialAccessToNewScope(), f.newCredentialAccessToNewScope());
+        return new StartupReadinessInput(policy.compatibility(), devices, policy.recoveryFacts(), fallback,
+                policy.rollbackSafetyFacts(), new Generation(generation), policy.capabilityGeneration(),
+                policy.runtimeReaderVersion(), policy.runtimeWriterVersion(), policy.supportedMandatoryFeatures(),
+                policy.profileEndpoint(), policy.capabilityHints());
+    }
+
+    @Test
+    public void ownedProfileServiceRejectsRequirementsBeforeStorageOpenAndCleansBindFailure() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            for (int failure = 0; failure < 6; failure++) {
+                var identity = fixture.identities.get(failure % 3);
+                var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("unopened"),
+                        1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                var requested = servicePolicy(config, identity, 1);
+                var c = requested.compatibility();
+                var required = failure == 0 ? null : new BookieCompatibilityFact(c.bookieId(), c.storageIncarnation(),
+                        c.activeEngine(), c.profileWireMajor(), c.profileWireMinor(), c.descriptorHashSuite(),
+                        c.mandatoryLocalFeatures(), c.deviceManifestIdentity(), c.deviceManifestGeneration(),
+                        c.localFormatGeneration(), c.effectiveDeleteAssignmentGeneration(), failure == 2 ? 2 : 1,
+                        c.minimumWriterVersion(), failure == 1 ? BookieCompatibilityFact.MigrationState.PREPARED
+                                : BookieCompatibilityFact.MigrationState.FORMAT_READY, c.migrationGeneration());
+                if (failure == 3 || failure == 5) {
+                    var f = requested.newScopeFallback();
+                    var roots = failure == 5 ? f.newRoots().stream().map(root -> root.kind()
+                            == NewScopeFallbackManifest.RootKind.ARENA
+                            ? new NewScopeFallbackManifest.StorageRoot(root.kind(), root.opaquePath() + "-other")
+                            : root)
+                            .sorted(java.util.Comparator.comparing(NewScopeFallbackManifest.StorageRoot::opaquePath))
+                            .toList() : f.newRoots();
+                    var unsafe = new NewScopeFallbackManifest(f.oldBookieId(), f.newBookieId(),
+                            f.oldStorageIncarnation(), f.newStorageIncarnation(), f.oldRoots(), roots,
+                            f.oldCredentialScope(), f.newCredentialScope(), failure == 3
+                                    ? NewScopeFallbackManifest.OldScopeDisposition.UNKNOWN : f.oldScopeDisposition(),
+                            f.oldCredentialAccessToNewScope(), f.newCredentialAccessToNewScope());
+                    requested = new StartupReadinessInput(requested.compatibility(), requested.requiredDevices(),
+                            requested.recoveryFacts(), unsafe, requested.rollbackSafetyFacts(),
+                            requested.targetReadinessGeneration(), requested.capabilityGeneration(),
+                            requested.runtimeReaderVersion(), requested.runtimeWriterVersion(),
+                            requested.supportedMandatoryFeatures(), requested.profileEndpoint(),
+                            requested.capabilityHints());
+                }
+                if (failure == 4) {
+                    // Existing native endpoint: storage may open, but no readiness receipt may be published.
+                    try (var episode = new ServiceEpisode(fixture, failure % 3, config, requested, required,
+                            (InetSocketAddress) fixture.listeners.get(0).localAddress(),
+                            sdk.getClientCtx().getScheduler())) {
+                        assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                        assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                        assertTrue(episode.persistent.read(identity.bookieId().toString()).versionedRecord().isEmpty());
+                        try (var reopened = new IsolatedSegmentStorage(config, identity,
+                                new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                                new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                                        2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                                new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                            reopened.restart();
+                        }
+                    }
+                } else {
+                    try (var episode = new ServiceEpisode(fixture, failure % 3, config, requested, required,
+                            new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                        assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                        assertFalse(Files.exists(config.directory()));
+                        assertNull(episode.storage());
+                        assertTrue(episode.persistent.read(identity.bookieId().toString()).versionedRecord().isEmpty());
+                    }
+                }
+            }
+            assertFalse(fixture.worker.isShuttingDown());
+            assertFalse(fixture.cold.isShutdown());
+        }
+    }
+
+    @Test
+    public void ownedProfileServicePublishesBoundEndpointSupportsSdkAndRetainsDrainAcrossRestart() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                BookKeeper sdk = sdk(fixture)) {
+            var episodes = new ArrayList<ServiceEpisode>();
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            var release = new CountDownLatch(1);
+            ProfileLedgerHandle handle = null;
+            try {
+                for (int target = 0; target < 3; target++) {
+                    var original = files(fixture.nodes.get(target)).config();
+                    var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                            1, 1, 1, original.bytesPerFile(), 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                    var requested = servicePolicy(config, fixture.identities.get(target), 1);
+                    var episode = new ServiceEpisode(fixture, target, config, requested, requested.compatibility(),
+                            new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler());
+                    episodes.add(episode);
+                    episode.replaceNode(fixture, target, false);
+                    var peer = episode.persistent.readPeer(fixture.identities.get(target).bookieId().toString()).peer();
+                    var connected = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                            episode.persistent, peer, fixture.cold, 4, Duration.ofSeconds(5));
+                    fixture.clients.put(peer.projection().bookieId(), connected.completion().get(5, TimeUnit.SECONDS));
+                    var ordinary = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                            episode.persistent, peer, fixture.cold, 8, 1060, Duration.ofSeconds(5));
+                    var normal = ordinary.completion().get(5, TimeUnit.SECONDS);
+                    fixture.dataClients.add(normal);
+                    data.put(fixture.identities.get(target).bookieId(), normal);
+                }
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data,
+                        8, 1024, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                assertEquals(0, handle.addEntry(bytes(16, 8)));
+                var normal = data.get(fixture.identities.get(0).bookieId());
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                        normal.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
+                var forcing = new CountDownLatch(1);
+                files(episodes.get(0).storage()).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    forcing.countDown();
+                    await(release);
+                });
+                var second = new CompletableFuture<Long>();
+                handle.asyncAddEntry(bytes(16, 9), (code, ledger, entry, context) -> {
+                    if (code == 0) {
+                        second.complete(entry);
+                    } else {
+                        second.completeExceptionally(BKException.create(code));
+                    }
+                }, null);
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertFalse(episodes.get(0).service.close(Duration.ofMillis(100)));
+                assertThrows(java.io.IOException.class,
+                        () -> SegmentDataFileLock.open(episodes.get(0).config.directory()));
+                assertThrows(IllegalStateException.class,
+                        () -> episodes.get(0).publisher.readWritable("socket0:3181"));
+                assertFalse(fixture.worker.isShuttingDown());
+                release.countDown();
+                assertEquals(1, second.get(5, TimeUnit.SECONDS).longValue());
+                assertTrue(episodes.get(0).service.close(Duration.ofSeconds(5)));
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                handle = null;
+                var requested = servicePolicy(episodes.get(0).config, fixture.identities.get(0), 2);
+                var restarted = new ServiceEpisode(fixture, 0, episodes.get(0).config, requested, null,
+                        new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler());
+                episodes.add(restarted);
+                restarted.replaceNode(fixture, 0, true);
+                var peer = restarted.persistent.readPeer("socket0:3181").peer();
+                var connected = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        restarted.persistent, peer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
+                try {
+                    var recovered = connected.completion().get(5, TimeUnit.SECONDS);
+                    assertEquals(2, recovered.hello().readinessGeneration());
+                    assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                            recovered.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
+                } finally {
+                    connected.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                release.countDown();
+                if (handle != null) {
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+                for (var episode : episodes) {
+                    episode.close();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileServiceStopDuringPublicationKeepsActualOwnerUntilLateRpcTerminates() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), true)) {
+                var client = (HeldServicePublicationClient) episode.client;
+                client.armed = true;
+                var starting = java.util.concurrent.Executors.newSingleThreadExecutor();
+                try {
+                    var actual = starting.submit(() -> episode.service.start(false));
+                    assertTrue(client.submitted.await(5, TimeUnit.SECONDS));
+                    assertFalse(episode.service.close(Duration.ofMillis(100)));
+                    assertFalse(actual.isDone());
+                    assertNotNull(episode.storage());
+                    assertThrows(java.io.IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                    assertThrows(IllegalStateException.class,
+                            () -> episode.publisher.readWritable("socket0:3181"));
+                    client.release.countDown();
+                    assertThrows(ExecutionException.class, () -> actual.get(10, TimeUnit.SECONDS));
+                    assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                    assertNull(client.exists("/socket-service-readiness/"
+                            + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                                    "socket0:3181".getBytes(StandardCharsets.UTF_8)) + "/writable", false));
+                    try (var lock = SegmentDataFileLock.open(config.directory())) {
+                        assertNotNull(lock);
+                    }
+                    assertFalse(fixture.worker.isShuttingDown());
+                    assertFalse(fixture.cold.isShutdown());
+                } finally {
+                    client.release.countDown();
+                    starting.shutdown();
+                    assertTrue(starting.awaitTermination(10, TimeUnit.SECONDS));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileServiceConsumesActualOldClassicDrainAndUnixAccessBeforeRestart() throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture);
+                var old = new SegmentClassicScopeEpisodeTest.Episode(
+                        fixture.cluster.getZooKeeperConnectString(), "/old-classic-service")) {
+            var config = files(fixture.nodes.get(0)).config();
+            fixture.listeners.get(0).close().sync();
+            fixture.nodes.get(0).close();
+            old.writeAndReadConfirmedEntry();
+            old.requestCloseAndHoldProcess();
+            assertThrows(IllegalStateException.class, old::drained);
+            old.exit();
+            old.drained();
+            var requested = SegmentNewScopeAccessTest.actualFallback(
+                    servicePolicy(config, fixture.identities.get(0), 1), config, old);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                episode.replaceNode(fixture, 0, true);
+                assertTrue(episode.service.close(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
     @Test
     public void readinessBridgeUsesActualRecoveredFactsAndOriginalPublicationSequence() throws Exception {
         runReadinessBridge(false, false);

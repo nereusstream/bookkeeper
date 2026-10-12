@@ -370,3 +370,27 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 
 
 2026-10-12 [显式Profile listener与actual network drain](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已复用original graph/pipeline并管理native parent/child、worker handoff与receive ledger终态；cold/frame/backing保留至实际归还，caller future不能伪造drain，borrowed graph/cold/loops由caller续接。actual mTLS/held cold/bind failure/queued accepted socket验证完成，46项Java/13配置模型得到预期结果、style通过，RAT443历史问题无新增。它是full startup owner的必要接线，尚未把required/physical proof、端口和registration组成default服务入口，生产Gate继续OPEN。
+
+## 显式 Profile 服务启动与 owner 排空
+
+2026-10-12，`SegmentProfileService` 将原 graph、DLR receipt、session admission、listener 和 delete consumer 接成一个显式隔离服务 episode。构造 owner 不打开目录、创建 graph 或绑定端口；`start(existing)` 由外部 cold caller 执行，先读取原 immutable requirements、运行原 version/scope/new-scope 检查，再核对 fallback 的 ARENA/INDEX 根与将要打开的原生目录。已存在的祖先通过 real path 解析，未创建的后缀保持计划路径；错根、相对根及与任一 old root 的祖先/后代重叠拒绝。此检查只绑定路径，不生产 Unix access、old-service disposition 或永久隔离事实，物理 proof issuer 仍由调用方提供。
+
+检查通过后才构造原 `IsolatedSegmentStorage`，冻结 requirement birth、绑定原 delete source 和 pending admission、验证相同 publisher stores，然后创建或恢复真实 graph。DLR owner 在 storage open 后创建；实际 native listener bind 成功后，用实际 IP/端口产生 `tls://` endpoint（支持随机端口），再执行原 catch-up → recovered facts → Harness/DLR/persistent/info/writable → admission → follower。调用方填写的 endpoint 不代替实际 bind 地址；HELLO 与注册使用同一 readiness generation。实际 bind 失败不发布 readiness；失败启动走同一 owner 的关闭，未实际排空时保留 owner 和 locks，不用失败/cancel/timeout 表示清理成功。
+
+`close(timeout)` 先退休 episode、原 admission 和 receive ledger。启动仍在执行时返回 false，启动线程保留自己的真实工作，晚到结果不能重新开放该 attempt；它终结后才进入清理。正常关闭先尝试 demote owned registration，再等待 listener 的 native parent/child/worker handoff 及 cold/frame/output/backing credit，随后执行原 storage follower、owner、DATA/I/O/pool drain，最后关闭 DLR writer lock。false 保留实际存储锁供后续 drain；demotion 未确认或实际 drain 出错保留异常，不返回成功。timeout 是本地 drain 截止时间，metadata demotion 另受原 store timeout 约束。ZK client、TLS、cold executor、scheduler 和 event loops 均借用，调用方必须等真实 drain 后才能关闭它们；没有新增线程、重试队列或同名持久化框架。
+
+四项新增真实组合测试覆盖：missing/PREPARED/minimum reader2/UNKNOWN old disposition/错 Arena proof 在 graph 构造与目录创建前拒绝；占用端口导致 bind 失败后可真实重新打开 graph；三个首次创建的隔离服务经实际注册发现、mTLS/HELLO、原 initial coordinator 和 SDK 完成 Add/read。阻塞实际 DATA force 时，关闭超时仍保留 native lock，其他副本的合法 quorum ACK 不被误称目标已排空；实际 force 终结后关闭并以 generation2 restart，再经注册连接读取已确认 entry。另一测试在原 ZK publication multi 前暂停，stop 返回 false、保留锁且退休 admission，原 RPC 晚到后不能产生 writable；真实终结后锁可重新获得。
+
+前三项以显式 typed fallback 输入验证机械接线，不能证明物理授权。第四项先运行实际 old UID 的当前 Classic JVM/SDK 写读、有序 stack/driver close、actual process exit 和原 registration 终态，再用真实双 UID access probe 的 canonical roots 接入此服务 owner 的 **existing dataset restart**。fixture 的初始 dataset 仍先前创建；该组合不是首次 migration、外部服务永久退役或 released old-binary 矩阵。Classic episode UUID 仍为实验 admin scope 标识，access 仍为 ACCESS_SNAPSHOT_ONLY。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileStartupRequirementsStoreTest,ZKProfileEphemeralRegistrationStoreTest,SegmentLocalReadinessStoreTest,SegmentProfileInitialSocketClientTest#ownedProfile*+ordinaryDataClient*+ordinarySourceQuota*+ordinaryDataRejection*+ordinaryTimeout*+ordinaryServerForce*+ordinaryReply*+writerStop*+ordinaryWriterClose*+readinessBridge*+automaticDeletePublication*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `08a15da7b712c880ebb1400b348959e78791b6e0`。最终 `vlh2i7CZ` 四类58项（requirements8/ephemeral19/DLR10/socket21）零 failure/error/skip，1096 inputs 全部匹配最终源码；实际 old UID、access 和 SDK 组合已执行。最初2项、随后3项的 green 保留原 stage；两次阶段失败来自新增 negative fixture 把 case3 当作三节点列表索引，已修正，不计生产 bug 红，未弱化断言。最终 Spotless/Checkstyle exit0；root RAT exit1/443 unapproved 全为父 HEAD 已有路径，无新增，不称 CI 全绿。原语义模型未改，本轮未重跑 TLC，也没有从旧模型移绑服务或原生路径证明。
+
+archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-service-evidence-c0hy9i94` 保留原 stage inputs/log/reports、最终1096份源码快照、实际 UID/process/access receipt、compiled service class SHA、style/RAT 和 checksum。当前接通显式服务启动/发布/SDK发现/关闭/restart；default EmbeddedServer/配置入口、完整外部 physical authority、released stock/pre-storage-open 矩阵、snapshot/handoff/GC/decommission、full-bytes/兼容/正式性能/运维与综合验收继续 OPEN。默认 OFF/SYSTEM/PARK 和其他 disabled 能力不变；步骤11/12/14/15及生产 Gate 保持 PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED，完整目标 active。
