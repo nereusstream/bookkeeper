@@ -394,3 +394,26 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 父源码 `08a15da7b712c880ebb1400b348959e78791b6e0`。最终 `vlh2i7CZ` 四类58项（requirements8/ephemeral19/DLR10/socket21）零 failure/error/skip，1096 inputs 全部匹配最终源码；实际 old UID、access 和 SDK 组合已执行。最初2项、随后3项的 green 保留原 stage；两次阶段失败来自新增 negative fixture 把 case3 当作三节点列表索引，已修正，不计生产 bug 红，未弱化断言。最终 Spotless/Checkstyle exit0；root RAT exit1/443 unapproved 全为父 HEAD 已有路径，无新增，不称 CI 全绿。原语义模型未改，本轮未重跑 TLC，也没有从旧模型移绑服务或原生路径证明。
 
 archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-service-evidence-c0hy9i94` 保留原 stage inputs/log/reports、最终1096份源码快照、实际 UID/process/access receipt、compiled service class SHA、style/RAT 和 checksum。当前接通显式服务启动/发布/SDK发现/关闭/restart；default EmbeddedServer/配置入口、完整外部 physical authority、released stock/pre-storage-open 矩阵、snapshot/handoff/GC/decommission、full-bytes/兼容/正式性能/运维与综合验收继续 OPEN。默认 OFF/SYSTEM/PARK 和其他 disabled 能力不变；步骤11/12/14/15及生产 Gate 保持 PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED，完整目标 active。
+
+## EmbeddedServer 显式 Profile 分支与 lifecycle
+
+2026-10-12，原 `EmbeddedServer.Builder.build()` 在构造 stats/Classic metadata driver、registration、ledger manager、目录、cookie、ledger storage 之前选择显式 `experimentalProfileService(owner, existingStorage)` 分支。没有 opt-in 时仍是原 Classic 默认；没有增加默认启用的配置属性或将 Profile graph 塞入 Classic LedgerStorage。Profile 分支只组装原 stats service 与同一 owner 的 lifecycle component，构造 stack 不打开 Profile storage；`stack.start()` 调用前节真实 pre-open/recovery/bind/readiness 路径。该模式的 Classic BookieService/registration/ledger-manager/directory getter 为 null；不得用于 Classic admin/storage API。
+
+显式分支拒绝混入 caller-supplied Classic resources、Classic auto-recovery/data-integrity/HTTP/scrubber/read-only 和 extra components，不能静默忽略这些已配置能力。stats provider 的原 borrowing 规则保留；Profile 的 TLS/ZK/cold/scheduler/loops 仍由 caller 提供并持有至实际 drain。当前 owner 构造仍是内部实验装配；配置文件/bootstrap factory、外部 authority issuer 和 Main 命令入口的完整装配尚未交付，不能把这个 builder hook 宣称为默认可部署服务。
+
+Profile component 复用原 LifecycleComponent/stack/listener 接口，但 STARTED 仅在原 owner 成功且 episode 未退休后成立。启动失败通知所配置 exception handler 后仍抛出失败，即使 handler 返回也不能让 stack 继续启动后续组件。stop/close 先走原 owner 实际排空；timeout、启动尚未终结或 demotion/drain 异常向上传递，不提前标 STOPPED/CLOSED，也不吞掉异常。原 stack 的 reverse close 因此停在未终结的 Profile component，stats 及更早资源不能继续释放；实际终结后可重试。一个 owner 只绑定一次 lifecycle，stop 后不能重启同 episode，restart 使用新 owner/publisher 与原 existing dataset。
+
+三项新增真实组合验证：在不可用的 Classic metadata URI 和未创建的 Classic journal/ledger/index 路径下，组装/start 三个 Profile stack、注册发现、mTLS、原 initial coordinator、SDK Add/read、generation2 restart；held DATA force 时 stack close 真实超时并保留 STARTED/native lock/stats，force 终结后才 CLOSED。missing requirements 在 storage constructor/目录创建前拒绝，exception handler 返回仍非 STARTED；冲突 auto-recovery 配置在 build 前拒绝。真实 publication multi 暂停时，stop 不能取消实际 RPC或标终态，晚到结果不能开放 writable/STARTED，实际终结后才能关闭。原四项 EmbeddedServer 单测保留，当前真实 old-UID Classic episode 路径也在同次 Profile 组合回归中执行。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'TestEmbeddedServer,SegmentProfileInitialSocketClientTest#embeddedProfile*+ownedProfile*+ordinaryDataClient*+ordinarySourceQuota*+ordinaryDataRejection*+ordinaryTimeout*+ordinaryServerForce*+ordinaryReply*+writerStop*+ordinaryWriterClose*+readinessBridge*+automaticDeletePublication*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+# 等构建终结后再扫描，避免 target class 正在更新。
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `9796c5c77d8809fbcadc0fde1ea31d77ad062581`。最初2项 green 保留原 stage；扩大28项的一次失败是测试把 A=2 ACK 当成指定第三个目标已完成。测试改为以同坐标/同字节取得该目标自己的 durable reply 后再断言读取，保留原 quorum 及 FOUND 断言，不降低生产 ACK 契约。最终 `XM6r1Dpb` 两类28项（原 EmbeddedServer4/socket24）零 failure/error/skip，1100 inputs 全部匹配最终源码；最终 Spotless/Checkstyle exit0。首个并行 RAT 因编译更新 class 的 NoSuchFileException 未形成许可结论；构建终结后独立 RAT exit1/443，全为父 HEAD 路径，无新增。原语义模型未改，本轮不重跑 TLC，不移绑旧 PASS 为 native startup/lifecycle 证明。
+
+archive `/Users/liusinan/.codex/artifacts/unified-wal/embedded-profile-evidence-28m1cmu4` 保留 stage 输入/log/reports、最终源码与当前 Classic/UID/access receipt、style/RAT/checksum。该里程碑交付显式 EmbeddedServer builder/lifecycle hook，配置 bootstrap、完整外部 physical authority、released stock矩阵、snapshot/handoff/GC/decommission、full-bytes/正式兼容/性能/运维及全16步综合验收继续 OPEN。默认 OFF/SYSTEM/PARK 与 disabled 能力不变，步骤11/12/14/15及生产 Gate 保持 PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED，完整目标 active。

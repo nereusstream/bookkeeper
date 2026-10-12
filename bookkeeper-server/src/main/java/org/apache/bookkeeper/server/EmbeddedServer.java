@@ -62,6 +62,7 @@ import org.apache.bookkeeper.bookie.datainteg.DataIntegrityCookieValidation;
 import org.apache.bookkeeper.bookie.datainteg.DataIntegrityService;
 import org.apache.bookkeeper.bookie.datainteg.EntryCopier;
 import org.apache.bookkeeper.bookie.datainteg.EntryCopierImpl;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileService;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.BookKeeperAdmin;
 import org.apache.bookkeeper.common.allocator.ByteBufAllocatorWithOomHandler;
@@ -212,6 +213,9 @@ public class EmbeddedServer {
         private ByteBufAllocator allocator;
         private UncleanShutdownDetection uncleanShutdownDetection;
 
+        private SegmentProfileService experimentalProfileService;
+        private boolean existingProfileStorage;
+
         private Builder(BookieConfiguration conf) {
             checkNotNull(conf, "bookieConfiguration cannot be null");
 
@@ -264,6 +268,20 @@ public class EmbeddedServer {
         }
 
         /**
+         * Explicit disposable Profile mode. Its owner must carry the required startup and physical proof inputs.
+         * Classic storage/services are not constructed; borrowed Profile resources remain the caller's responsibility.
+         * Omitting this opt-in retains the existing Classic default.
+         */
+        public Builder experimentalProfileService(SegmentProfileService service, boolean existingStorage) {
+            if (experimentalProfileService != null) {
+                throw new IllegalStateException("Profile service already supplied");
+            }
+            experimentalProfileService = checkNotNull(service, "profile service");
+            existingProfileStorage = existingStorage;
+            return this;
+        }
+
+        /**
          * Build the bookie server.
          *
          * <p>
@@ -280,6 +298,10 @@ public class EmbeddedServer {
          * @throws java.lang.Exception
          */
         public EmbeddedServer build() throws Exception {
+
+            if (experimentalProfileService != null) {
+                return buildExperimentalProfile();
+            }
 
             final ComponentInfoPublisher componentInfoPublisher = new ComponentInfoPublisher();
 
@@ -507,6 +529,29 @@ public class EmbeddedServer {
                     diskChecker, ledgerDirsManager, indexDirsManager, bookieService, autoRecoveryService,
                     dataIntegrityService, httpService);
 
+        }
+
+        private EmbeddedServer buildExperimentalProfile() throws Exception {
+            var server = conf.getServerConf();
+            var extras = server.getExtraServerComponents();
+            if (metadataDriver != null || registrationManager != null || ledgerManagerFactory != null
+                    || diskChecker != null || ledgerDirsManager != null || indexDirsManager != null
+                    || allocator != null || uncleanShutdownDetection != null
+                    || server.isAutoRecoveryDaemonEnabled() || server.isDataIntegrityCheckingEnabled()
+                    || server.isHttpServerEnabled() || server.isLocalScrubEnabled() || server.isForceReadOnlyBookie()
+                    || extras != null && extras.length != 0) {
+                throw new IllegalArgumentException("Experimental Profile mode cannot build Classic services/resources");
+            }
+            var stack = LifecycleComponentStack.newBuilder().withName("bookie-server");
+            if (statsProvider == null) {
+                var stats = new StatsProviderService(conf);
+                statsProvider = stats.getStatsProvider();
+                stack.addComponent(stats);
+            }
+            stack.addComponent(experimentalProfileService.lifecycle(existingProfileStorage));
+            // Classic getters are absent in this explicitly selected mode; no cookie/directory/storage open occurred.
+            return new EmbeddedServer(stack.build(), statsProvider, null, null, null, null, null,
+                    null, null, null, null);
         }
 
         /**

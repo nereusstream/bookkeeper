@@ -1890,6 +1890,7 @@ public class SegmentProfileInitialSocketClientTest {
         final SegmentProfileService service;
         final ProfileReceiveBudget budget = new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8);
         final IsolatedSegmentConfig config;
+        org.apache.bookkeeper.server.EmbeddedServer embedded;
 
         ServiceEpisode(Fixture fixture, int target, IsolatedSegmentConfig config,
                 StartupReadinessInput requested, BookieCompatibilityFact requiredCompatibility,
@@ -1962,14 +1963,48 @@ public class SegmentProfileInitialSocketClientTest {
         }
 
         void replaceNode(Fixture fixture, int target, boolean existing) throws Exception {
+            replaceNode(fixture, target, existing, false);
+        }
+
+        org.apache.bookkeeper.server.EmbeddedServer assembleEmbedded() throws Exception {
+            var classic = temporary.newFolder().toPath().resolve("classic-must-stay-absent");
+            var configuration = new ServerConfiguration().setMetadataServiceUri("do-not-open-classic://invalid")
+                    .setJournalDirName(classic.resolve("journal").toString())
+                    .setLedgerDirNames(new String[] {classic.resolve("ledger").toString()})
+                    .setIndexDirName(new String[] {classic.resolve("index").toString()});
+            var server = org.apache.bookkeeper.server.EmbeddedServer.builder(
+                    new org.apache.bookkeeper.server.conf.BookieConfiguration(configuration))
+                    .experimentalProfileService(service, false).build();
+            assertFalse(Files.exists(classic));
+            assertNull(server.getBookieService());
+            assertNull(server.getRegistrationManager());
+            assertNull(server.getLedgerManagerFactory());
+            return server;
+        }
+
+        void replaceNode(Fixture fixture, int target, boolean existing, boolean useEmbedded) throws Exception {
             fixture.listeners.get(target).close().sync();
             fixture.nodes.get(target).close();
-            InetSocketAddress bound = service.start(existing);
+            if (useEmbedded) {
+                if (existing) {
+                    var configuration = new ServerConfiguration()
+                            .setMetadataServiceUri("do-not-open-classic://invalid");
+                    embedded = org.apache.bookkeeper.server.EmbeddedServer.builder(
+                            new org.apache.bookkeeper.server.conf.BookieConfiguration(configuration))
+                            .experimentalProfileService(service, true).build();
+                } else {
+                    embedded = assembleEmbedded();
+                }
+                embedded.getLifecycleComponentStack().start();
+            } else {
+                service.start(existing);
+            }
             var field = SegmentProfileService.class.getDeclaredField("listener");
             field.setAccessible(true);
             var listenerField = SegmentProfileListener.class.getDeclaredField("listener");
             listenerField.setAccessible(true);
             fixture.listeners.set(target, (Channel) listenerField.get(field.get(service)));
+            var bound = (InetSocketAddress) fixture.listeners.get(target).localAddress();
             fixture.nodes.set(target, storage());
             fixture.budgets.set(target, budget);
             assertEquals("tls://127.0.0.1:" + bound.getPort(), publisher.readServiceInfo(
@@ -1979,6 +2014,9 @@ public class SegmentProfileInitialSocketClientTest {
 
         @Override
         public void close() throws Exception {
+            if (embedded != null) {
+                embedded.getLifecycleComponentStack().close();
+            }
             service.close();
             client.close();
         }
@@ -2080,6 +2118,15 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void ownedProfileServicePublishesBoundEndpointSupportsSdkAndRetainsDrainAcrossRestart() throws Exception {
+        runOwnedProfileService(false);
+    }
+
+    @Test
+    public void embeddedProfileServiceRunsSdkWithoutClassicOpenAndRetainsStackUntilActualDrain() throws Exception {
+        runOwnedProfileService(true);
+    }
+
+    private void runOwnedProfileService(boolean embedded) throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
                 BookKeeper sdk = sdk(fixture)) {
             var episodes = new ArrayList<ServiceEpisode>();
@@ -2095,7 +2142,7 @@ public class SegmentProfileInitialSocketClientTest {
                     var episode = new ServiceEpisode(fixture, target, config, requested, requested.compatibility(),
                             new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler());
                     episodes.add(episode);
-                    episode.replaceNode(fixture, target, false);
+                    episode.replaceNode(fixture, target, false, embedded);
                     var peer = episode.persistent.readPeer(fixture.identities.get(target).bookieId().toString()).peer();
                     var connected = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
                             episode.persistent, peer, fixture.cold, 4, Duration.ofSeconds(5));
@@ -2111,6 +2158,17 @@ public class SegmentProfileInitialSocketClientTest {
                         8, 1024, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
                 assertEquals(0, handle.addEntry(bytes(16, 8)));
                 var normal = data.get(fixture.identities.get(0).bookieId());
+                // A=2 does not establish completion at this particular target. Confirm the exact retry there.
+                var originalEntry = entry(fixture, 0, 16);
+                try {
+                    var confirmed = normal.addNormal(fixture.context(), fixture.credential, 0, originalEntry)
+                            .get(5, TimeUnit.SECONDS);
+                    assertEquals(ProfileStatus.StatusClass.OK, confirmed.statusClass());
+                    assertTrue(confirmed.durableResult() == ProfileStatus.DurableResult.APPLIED
+                            || confirmed.durableResult() == ProfileStatus.DurableResult.ALREADY_APPLIED);
+                } finally {
+                    originalEntry.release();
+                }
                 assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
                         normal.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
                 var forcing = new CountDownLatch(1);
@@ -2128,6 +2186,14 @@ public class SegmentProfileInitialSocketClientTest {
                 }, null);
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
                 assertFalse(episodes.get(0).service.close(Duration.ofMillis(100)));
+                if (embedded) {
+                    var stack = episodes.get(0).embedded.getLifecycleComponentStack();
+                    assertThrows(java.io.UncheckedIOException.class, stack::close);
+                    assertEquals(org.apache.bookkeeper.common.component.Lifecycle.State.STARTED,
+                            stack.getComponent(stack.getNumComponents() - 1).lifecycleState());
+                    assertEquals(org.apache.bookkeeper.common.component.Lifecycle.State.STARTED,
+                            stack.getComponent(0).lifecycleState());
+                }
                 assertThrows(java.io.IOException.class,
                         () -> SegmentDataFileLock.open(episodes.get(0).config.directory()));
                 assertThrows(IllegalStateException.class,
@@ -2136,13 +2202,19 @@ public class SegmentProfileInitialSocketClientTest {
                 release.countDown();
                 assertEquals(1, second.get(5, TimeUnit.SECONDS).longValue());
                 assertTrue(episodes.get(0).service.close(Duration.ofSeconds(5)));
+                if (embedded) {
+                    var stack = episodes.get(0).embedded.getLifecycleComponentStack();
+                    stack.close();
+                    assertEquals(org.apache.bookkeeper.common.component.Lifecycle.State.CLOSED,
+                            stack.getComponent(stack.getNumComponents() - 1).lifecycleState());
+                }
                 handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 handle = null;
                 var requested = servicePolicy(episodes.get(0).config, fixture.identities.get(0), 2);
                 var restarted = new ServiceEpisode(fixture, 0, episodes.get(0).config, requested, null,
                         new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler());
                 episodes.add(restarted);
-                restarted.replaceNode(fixture, 0, true);
+                restarted.replaceNode(fixture, 0, true, embedded);
                 var peer = restarted.persistent.readPeer("socket0:3181").peer();
                 var connected = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
                         restarted.persistent, peer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
@@ -2167,7 +2239,44 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void embeddedProfileStartupFailureCannotBecomeStartedEvenWhenExceptionHandlerReturns() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("unopened"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, null,
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                var conflict = new ServerConfiguration().setAutoRecoveryDaemonEnabled(true);
+                assertThrows(IllegalArgumentException.class, () -> org.apache.bookkeeper.server.EmbeddedServer.builder(
+                        new org.apache.bookkeeper.server.conf.BookieConfiguration(conflict))
+                        .experimentalProfileService(episode.service, false).build());
+                var stack = episode.assembleEmbedded().getLifecycleComponentStack();
+                var notified = new AtomicInteger();
+                stack.setExceptionHandler((thread, failure) -> notified.incrementAndGet());
+                assertThrows(IllegalStateException.class, stack::start);
+                assertEquals(1, notified.get());
+                assertEquals(org.apache.bookkeeper.common.component.Lifecycle.State.INITIALIZED,
+                        stack.getComponent(stack.getNumComponents() - 1).lifecycleState());
+                assertFalse(Files.exists(config.directory()));
+                assertNull(episode.storage());
+                stack.close();
+                assertEquals(org.apache.bookkeeper.common.component.Lifecycle.State.CLOSED,
+                        stack.getComponent(stack.getNumComponents() - 1).lifecycleState());
+            }
+        }
+    }
+
+    @Test
     public void ownedProfileServiceStopDuringPublicationKeepsActualOwnerUntilLateRpcTerminates() throws Exception {
+        runProfilePublicationStop(false);
+    }
+
+    @Test
+    public void embeddedProfileStopDuringPublicationKeepsOriginalEpisodeAndNeverStartsLate() throws Exception {
+        runProfilePublicationStop(true);
+    }
+
+    private void runProfilePublicationStop(boolean embedded) throws Exception {
         try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
             var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
                     1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
@@ -2176,11 +2285,27 @@ public class SegmentProfileInitialSocketClientTest {
                     new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), true)) {
                 var client = (HeldServicePublicationClient) episode.client;
                 client.armed = true;
+                if (embedded) {
+                    episode.embedded = episode.assembleEmbedded();
+                }
                 var starting = java.util.concurrent.Executors.newSingleThreadExecutor();
                 try {
-                    var actual = starting.submit(() -> episode.service.start(false));
+                    var actual = starting.submit(() -> {
+                        if (embedded) {
+                            episode.embedded.getLifecycleComponentStack().start();
+                        } else {
+                            episode.service.start(false);
+                        }
+                        return null;
+                    });
                     assertTrue(client.submitted.await(5, TimeUnit.SECONDS));
                     assertFalse(episode.service.close(Duration.ofMillis(100)));
+                    if (embedded) {
+                        var stack = episode.embedded.getLifecycleComponentStack();
+                        assertThrows(java.io.UncheckedIOException.class, stack::stop);
+                        assertEquals(org.apache.bookkeeper.common.component.Lifecycle.State.INITIALIZED,
+                                stack.getComponent(stack.getNumComponents() - 1).lifecycleState());
+                    }
                     assertFalse(actual.isDone());
                     assertNotNull(episode.storage());
                     assertThrows(java.io.IOException.class, () -> SegmentDataFileLock.open(config.directory()));

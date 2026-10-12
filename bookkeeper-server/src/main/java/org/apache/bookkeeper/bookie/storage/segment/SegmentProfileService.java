@@ -18,18 +18,24 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import io.netty.channel.EventLoopGroup;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import javax.crypto.SecretKey;
+import org.apache.bookkeeper.common.component.Lifecycle;
+import org.apache.bookkeeper.common.component.LifecycleComponent;
+import org.apache.bookkeeper.common.component.LifecycleListener;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.NewScopeFallbackManifest;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
@@ -48,7 +54,7 @@ import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
  * Metadata client, TLS, event loops, bounded cold executor and scheduler remain borrowed until actual drain.
  * The supplied new-scope policy still requires its external physical/old-service proof issuer.
  */
-final class SegmentProfileService implements AutoCloseable {
+public final class SegmentProfileService implements AutoCloseable {
     record Startup(ZKProfileStartupRequirementsStore requirements, StartupReadinessInput requested,
             ZKProfileRegistrationStore persistent, ZKProfileEphemeralRegistrationStore publisher,
             ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata,
@@ -112,6 +118,7 @@ final class SegmentProfileService implements AutoCloseable {
     private boolean retired;
     private boolean closed;
     private boolean demoted;
+    private boolean lifecycleBound;
 
     /** No directory, storage constructor, listener or registration is opened here. */
     SegmentProfileService(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
@@ -261,6 +268,125 @@ final class SegmentProfileService implements AutoCloseable {
             existing = existing.getParent();
         }
         return existing.toRealPath().resolve(existing.relativize(path));
+    }
+
+    /** One explicit experimental EmbeddedServer component; no storage is opened while assembling the stack. */
+    public LifecycleComponent lifecycle(boolean existing) {
+        synchronized (gate) {
+            if (lifecycleBound || attempted || retired) {
+                throw new IllegalStateException("Profile service lifecycle must be bound once before startup");
+            }
+            lifecycleBound = true;
+            return new ServiceLifecycle(existing);
+        }
+    }
+
+    private final class ServiceLifecycle implements LifecycleComponent {
+        private final boolean existing;
+        private final Set<LifecycleListener> listeners = new CopyOnWriteArraySet<>();
+        private volatile Lifecycle.State state = Lifecycle.State.INITIALIZED;
+        private volatile Thread.UncaughtExceptionHandler handler;
+
+        private ServiceLifecycle(boolean existing) {
+            this.existing = existing;
+        }
+
+        @Override
+        public String getName() {
+            return "experimental-segment-profile";
+        }
+
+        @Override
+        public Lifecycle.State lifecycleState() {
+            return state;
+        }
+
+        @Override
+        public void addLifecycleListener(LifecycleListener listener) {
+            listeners.add(Objects.requireNonNull(listener, "listener"));
+        }
+
+        @Override
+        public void removeLifecycleListener(LifecycleListener listener) {
+            listeners.remove(listener);
+        }
+
+        @Override
+        public void setExceptionHandler(Thread.UncaughtExceptionHandler handler) {
+            this.handler = handler;
+        }
+
+        @Override
+        public void start() {
+            synchronized (gate) {
+                if (state == Lifecycle.State.STARTED) {
+                    return;
+                }
+                if (state != Lifecycle.State.INITIALIZED || attempted || retired) {
+                    throw new IllegalStateException("Use a fresh Profile episode to restart storage");
+                }
+            }
+            listeners.forEach(LifecycleListener::beforeStart);
+            try {
+                SegmentProfileService.this.start(existing);
+                synchronized (gate) {
+                    requireLive();
+                    state = Lifecycle.State.STARTED;
+                }
+            } catch (IOException | InterruptedException | RuntimeException | Error failure) {
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                var notify = handler;
+                if (notify != null) {
+                    try {
+                        notify.uncaughtException(Thread.currentThread(), failure);
+                    } catch (RuntimeException callbackFailure) {
+                        failure.addSuppressed(callbackFailure);
+                    }
+                }
+                throw new IllegalStateException("Profile service failed to start", failure);
+            }
+            listeners.forEach(LifecycleListener::afterStart);
+        }
+
+        @Override
+        public void stop() {
+            if (state == Lifecycle.State.STOPPED || state == Lifecycle.State.CLOSED) {
+                return;
+            }
+            listeners.forEach(LifecycleListener::beforeStop);
+            // Do not mark terminal or let the stack release borrowed resources before actual drain.
+            drain();
+            synchronized (gate) {
+                if (state != Lifecycle.State.CLOSED) {
+                    state = Lifecycle.State.STOPPED;
+                }
+            }
+            listeners.forEach(LifecycleListener::afterStop);
+        }
+
+        private void drain() {
+            try {
+                SegmentProfileService.this.close();
+            } catch (IOException failure) {
+                throw new UncheckedIOException(failure);
+            }
+        }
+
+        @Override
+        public void close() {
+            if (state == Lifecycle.State.CLOSED) {
+                return;
+            }
+            stop();
+            listeners.forEach(LifecycleListener::beforeClose);
+            drain();
+            synchronized (gate) {
+                state = Lifecycle.State.CLOSED;
+            }
+            listeners.forEach(LifecycleListener::afterClose);
+        }
     }
 
     private void requireLive() throws IOException {

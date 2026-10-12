@@ -67,6 +67,9 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / nam
     'proto/BookieServer.java', 'proto/BookieNettyServer.java', 'proto/BookieRequestProcessor.java',
     'discover/ZKRegistrationManager.java', 'meta/zk/ZKMetadataBookieDriver.java'))
 paths.add(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/component/LifecycleComponentStack.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/server/TestEmbeddedServer.java'))
+paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/component') / name for name in
+             ('LifecycleComponent.java', 'Lifecycle.java', 'LifecycleListener.java'))
 manifest = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
             'branch': subprocess.check_output(['git', 'branch', '--show-current'], text=True).strip(),
             'platform': platform.platform(), 'command': sys.argv[2:],
