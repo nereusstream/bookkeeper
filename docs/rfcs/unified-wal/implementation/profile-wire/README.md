@@ -2,11 +2,11 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，当前增量包括 [OPEN 固定 LAC 前缀审计](#open-固定-lac-前缀审计)、[网络 WRITE_LAC 与确认前缀生产](#网络-write_lac-与确认前缀生产)和 [本地删除空间终结](#本地删除空间终结)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，以及 [恢复执行的 released compatibility 矩阵](#恢复执行的-released-compatibility-矩阵)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
-当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
+当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX PASS_SCOPED — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 的四版本 released-decoder/localhost stock-binary 610-vector矩阵已通过原probe Oracle。内部 handle/master-key/allocation effect 仍无直接观测，完整G1保持 `BLOCKED_UNVERIFIED`，不是stable wire**。
 
-后续步骤11已有下文的[真实隔离普通 Add 接线](#真实隔离普通-add-接线)。它复用本目录冻结的实验字节合同；原 Block D 回执、corpus、compatibility延期和G1状态保留其历史范围。
+后续步骤11已有下文的[真实隔离普通 Add 接线](#真实隔离普通-add-接线)。它复用本目录冻结的实验字节合同；原 Block D 回执、corpus、历史compatibility延期和G1状态保留原绑定，不移绑本次结果。
 
 ## Scope guard
 
@@ -36,19 +36,38 @@ guard 只允许本模块的 pure codec、test corpus、冻结 harness 和 owner 
 
 覆盖包括：每个subtype、client/server HELLO、全部240个status/retry/durable组合、normal/recovery distinct bodies、magic逐byte flip、1..31-byte header truncation、body truncation、outer/body mismatch、三个oversize边界、version/header/flags/reserved/subtype、malformed HELLO/status/data、normal/recovery interchange、TLS ClientHello、v3/pre-v3 adversarial prefixes、Profile后接legacy-like ADD prefix，以及seed `0x505746555a5a0001` 的256个arbitrary vectors。strict new-codec corpus test同时断言全部frame reject在body allocation前发生。
 
-replacement `0x0FF04250` 已重建同一组610个vector及全部checksums；新增的确定性回归要求pre-v3 opcode byte `0xf0`、其XOR `0xff`结果`0x0f`及全部single-bit flips均保持在Classic opcode `1..7`之外。本阶段16个wire/corpus单测通过。仓库记录的 stock old Bookie 支持列表为 `4.14.8 / 4.15.5 / 4.16.7 / 4.17.2`，但 replacement 的 released decoder 与 localhost stock binary raw-corpus matrix 明确为 `DEFERRED_NOT_RUN`，没有 raw artifacts、machine receipt 或兼容结论。代码和new-codec corpus完成不等于 wire stable，也不等于 G1 PASS。
+replacement `0x0FF04250` 已重建同一组610个vector及全部checksums；新增的确定性回归要求pre-v3 opcode byte `0xf0`、其XOR `0xff`结果`0x0f`及全部single-bit flips均保持在Classic opcode `1..7`之外。本阶段16个wire/corpus单测通过。stock old Bookie列表为 `4.14.8 / 4.15.5 / 4.16.7 / 4.17.2`；原阶段replacement矩阵为 `DEFERRED_NOT_RUN`，2026-10-13的新run结果见下节。new-codec及本次scoped矩阵均不单独赋予stable wire或完整G1 PASS。
 
-## Deferred compatibility execution
+## Historical deferred compatibility execution
 
-当前 Wave 0 不再执行 released-decoder/stock-binary 层：不解析或启动锁定的旧版 BookKeeper artifact，不启动 Bookie/ZooKeeper 进程，不打开 probe socket，也不向旧 decoder/binary 回放610个 raw vectors。`tests/profile-wire-compatibility/`、现有 corpus 与 frozen counterexample 只作为未完成工作的可追溯材料保留，不接入常规 Maven reactor、CI 或后续模块任务。
+原 Wave 0 阶段停止 released-decoder/stock-binary 执行并标记 `DEFERRED_NOT_RUN`，只保留harness/corpus/frozen counterexample。本段保存历史处置；2026-10-13完整16步持续目标已恢复fresh隔离run，当前结果由下一节拥有。harness仍不接入常规Maven reactor或CI。
 
-`DEFERRED_NOT_RUN` 不是 PASS、FAIL 或 waiver；它表示该层没有当前结果。G1 因此保持 `BLOCKED_UNVERIFIED`，candidate 继续 `NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY`。不依赖 G1 的 pure codec、reference implementation 和 isolated/discardable prototype 可以继续，但不得据此接入 production listener、Classic fallback、ACK 或其他 authority。若未来单独恢复兼容认证，必须显式授权、使用新的 run identity 并从零生成证据；不得复用当前延期状态充当结果。
+历史 `DEFERRED_NOT_RUN` 不是 PASS、FAIL 或 waiver，不移绑新证据。candidate继续 `NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY`，不依赖G1的隔离prototype可以继续；局部矩阵结果不授权production listener、Classic fallback或ACK。
+
+## 恢复执行的 released compatibility 矩阵
+
+2026-10-13，源提交 `ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3`，run `uw-stock-compatibility-Mftgib2k`。完整16步持续目标要求恢复真实兼容证据，本次在唯一checkout按fresh身份执行原harness，未修改candidate、610-vector corpus、probe Oracle或原冻结反例。所有输入636个文件、锁定server JAR SHA256/SHA512、实际完整classpath JAR SHA256及Zulu17.0.6 java/javac SHA已核验；class-load记录确认decoder/Main来自对应released JAR，不含checkout target/classes。
+
+| released version | decoder vectors / recognized requests | stock connections / response bytes | storage / namespace | old magic control |
+| --- | --- | --- | --- | --- |
+| 4.14.8 | 610 / 0 | 610 / 0 | 7 files / 12 nodes，不变 | 1 recognized，预期FAIL |
+| 4.15.5 | 610 / 0 | 610 / 0 | 8 files / 12 nodes，不变 | 1 recognized，预期FAIL |
+| 4.16.7 | 610 / 0 | 610 / 0 | 8 files / 12 nodes，不变 | 1 recognized，预期FAIL |
+| 4.17.2 | 610 / 0 | 610 / 0 | 8 files / 12 nodes，不变 | 1 recognized，预期FAIL |
+
+每个decoder：306 extracted frames、303 incomplete frames、306 decoder exceptions、305 fallback transitions、零 recognized/Classic route claim/fallback-followed-by-effect；这里没有声称old decoder零fallback。原CE在四个decoder上均识别一个ParsedAddRequest、exit1，证明probe不是空转。每个stock矩阵原Oracle PASS/exit0，零connection failure、零ACK/OK；其ackOrOk保守计任何非空响应，不重定义为成功码。
+
+四个真实stock Main均为私有loopback TCP/独立ZooKeeper namespace及可丢弃journal/ledger目录，显式Classic InterleavedLedgerStorage。实际命令是 `Main -c <private-conf>`；历史lock的 `localbookie 1` 不是该main的有效CLI，未执行也未覆盖历史lock。ZK server-only可选metrics/snappy依赖依据对应released父POM，仅加入ZK classpath。每个endpoint先实际创建、关闭并读取37-byte Classic sentinel；矩阵前后全部journal/ledger文件size/SHA以及native namespace path/stat/data SHA一致，再用released SDK核验同一ledger0/LAC0/length37/payload SHA。4.14.8初次ZK缺metrics/cluster init失败和首次仅storage比对的成功输出均保留，最终另跑完整namespace/storage/sentinel组合。部分released SDK关闭时打印worker-pool/session warning，helper exit0和实际子进程终态分开记录。
+
+证据 `/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU` 保存636个原始输入、312个raw文件、逐vector JSONL/summary、所有命令/config/class-load/进程/快照/辅助源码及失败诊断。`verified-results.json`校验每版本610个ID完整且顺序相同、原输入/全部JAR不变、namespace/storage字节相同、sentinel及精确PID终结/端口释放；`raw-sha256.json`锁定归档。复现见 [`tests/profile-wire-compatibility/README.md`](../../../../../tests/profile-wire-compatibility/README.md)。原生产Java与TLA模型未改，本次未重跑无新验证目的的storage/model/style矩阵。
+
+当前 `matrixStatus=PASS_SCOPED`，完整 `G1=BLOCKED_UNVERIFIED`：已观察decoder产物、有限200ms网络读取、持久文件及namespace；未直接观测stock进程内handle/master-key/allocation effect，快照不变不证明这些内部行为为零，也不证明所有storage backend、长期负载、完整Profile parse/no-fallback面或stable wire。继续补齐该范围、Main/default Profile routing/其他required authority、full-bytes、backup/restore/accepted decommission/history GC、正式性能/运维与16步综合验收。默认OFF/SYSTEM/PARK、disabled能力及生产Gate OPEN保持；Linux NUMA/真实掉电/正式性能/canary仍NOT_EXECUTED。
 
 ## Frozen counterexample
 
-首个真实 released decoder run 在 Apache BookKeeper `4.14.8` 上发现 [`CE-20260831T105059Z`](counterexamples/ce-20260831T105059Z-4.14.8-magic-flip-1/README.md)：`0x0FFE4250` 的第二个magic byte被corpus逐byte XOR `0xff` 后成为 `0x01`，真实pre-v3 decoder把它识别为`ADDENTRY`并产生`ParsedAddRequest`。因此原候选硬 FAIL，raw bytes/artifact digest/result/repro已冻结。replacement 的G1保持 `BLOCKED_UNVERIFIED`；若未来显式恢复兼容认证，只能保留deterministic regression并用新run identity重跑全部四个真实released decoder和stock binary，不能删除vector、覆盖反例或放宽Oracle。
+首个真实 released decoder run 在 Apache BookKeeper `4.14.8` 上发现 [`CE-20260831T105059Z`](counterexamples/ce-20260831T105059Z-4.14.8-magic-flip-1/README.md)：`0x0FFE4250` 的第二个magic byte被corpus逐byte XOR `0xff` 后成为 `0x01`，真实pre-v3 decoder把它识别为`ADDENTRY`并产生`ParsedAddRequest`。因此原候选硬 FAIL，raw bytes/artifact digest/result/repro已冻结。2026-10-13四版本decoder重放该原始bytes均产生同一请求，作为预期失败控制，原反例保持不变；replacement的scoped结果不降低原Oracle或覆盖旧FAIL。
 
-replacement candidate 的机器锁见 [`candidate.json`](candidate.json)。它只记录当前实验候选、延期执行状态与G1阻塞，不覆盖或重写上述counterexample。
+replacement candidate 的机器锁见 [`candidate.json`](candidate.json)，记录当前实验候选、本次scoped矩阵与G1剩余阻塞，不覆盖或重写上述counterexample。
 
 ## 真实隔离普通 Add 接线
 

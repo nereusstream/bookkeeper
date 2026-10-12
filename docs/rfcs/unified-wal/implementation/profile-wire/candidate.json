@@ -18,7 +18,18 @@
     "errors": 0
   },
   "releasedDecoderAndBinaryMatrix": ["4.14.8", "4.15.5", "4.16.7", "4.17.2"],
-  "matrixStatus": "DEFERRED_NOT_RUN",
-  "matrixExecution": "EXCLUDED_FROM_CURRENT_IMPLEMENTATION_AND_CI",
-  "g1": "BLOCKED_UNVERIFIED"
+  "matrixStatus": "PASS_SCOPED",
+  "matrixExecution": "ISOLATED_FRESH_RUN_OUTSIDE_REACTOR_AND_CI",
+  "g1": "BLOCKED_UNVERIFIED",
+  "matrixRun": {
+    "sourceCommit": "ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3",
+    "runIdentity": "uw-stock-compatibility-Mftgib2k",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU",
+    "vectorsPerVersion": 610,
+    "releasedDecoderOracle": "PASS",
+    "stockBinaryProbeOracle": "PASS",
+    "stockStorageAndNamespaceSnapshots": "UNCHANGED",
+    "frozenCounterexampleControl": "EXPECTED_FAIL_ALL_FOUR_DECODERS",
+    "g1Remaining": "Internal stock handle/master-key/allocation effects not directly observed; finite socket read window and Classic Interleaved backend only"
+  }
 }

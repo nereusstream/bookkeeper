@@ -12,7 +12,7 @@
 
 已冻结、延期验证的模块：
 
-- [`Experimental Profile wire 与冻结的 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard、pure codec 与610-vector corpus 已实现；真实4.14.8 decoder发现并冻结原`0x0FFE4250`反例，replacement `0x0FF04250`与authoritative corpus已通过new-codec定向回归。released-decoder/localhost stock-binary矩阵为`DEFERRED_NOT_RUN`，harness与corpus只保留、不进入当前执行，G1保持`BLOCKED_UNVERIFIED`。
+- [`Experimental Profile wire 与冻结的 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard、pure codec 与610-vector corpus 已实现；真实4.14.8 decoder发现并冻结原`0x0FFE4250`反例，replacement `0x0FF04250`与authoritative corpus已通过new-codec定向回归。2026-10-13 fresh run的四版本610-vector released-decoder/localhost stock网络矩阵已通过原probe Oracle，stock文件/namespace不变、Classic sentinel可读，状态`PASS_SCOPED`；内部handle/master-key/allocation尚无直接观测，完整G1保持`BLOCKED_UNVERIFIED`。历史反例与延期回执保留原绑定。
 
 输入锁见 [`manifest.json`](manifest.json)。每个模块自己的source/test/artifact范围、复现命令、证据结论和剩余BLOCK由模块目录拥有。实现证据不能自动提升四份owner RFC或三个Spike的状态。
 
@@ -697,3 +697,5 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-13 [全目标终结屏障与单调 retention 窗口](profile-wire/README.md#全目标终结屏障与单调-retention-窗口)已在全部历史target的原native REUSABLE receipts后原子建立retention barrier，保留原policy/receipt出生关系；coordinator使用opaque本地单调观察，重启重新等待完整窗口，每次检查重验native事实。6类30项Java与9有限模型配置有分阶段证据；elapsed不授权GC，backup/restore接受、accepted decommission/unrecoverable、剩余history GC及全16步Gate继续OPEN，默认OFF/SYSTEM/PARK及disabled不变。
 
 2026-10-13 [默认 SDK open 的 Profile 拒绝边界](profile-wire/README.md#默认-sdk-open-的-profile-拒绝边界)已在原LedgerOpenOp密码/digest验证后、Classic handle/listener/recovery创建前识别mandatory Profile backlink，返回原IllegalOpException，避免当前SDK误用Classic路径。真实CLOSED旧行为红、新OPEN/CLOSED/valid-CRC future marker拒绝绿及三Bookie Classic兼容，最终2类17项通过；Main/外部issuer、默认Profile routing、released stock矩阵及全16步Gate仍OPEN，默认OFF/SYSTEM/PARK与disabled不变。
+
+2026-10-13 [恢复执行的 released compatibility 矩阵](profile-wire/README.md#恢复执行的-released-compatibility-矩阵)：父源码ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3上四个released decoder和真实私有loopback stock Main各跑610向量，原probe Oracle均通过；Classic sentinel成功、stock文件/native namespace快照不变、原旧magic控制在四个decoder均预期FAIL。636个输入/实际JAR/JDK/class-load与312 raw文件归档核验，所有自有进程终结/端口释放。当前PASS_SCOPED，内部handle/master-key/allocation无直接观测使完整G1仍BLOCKED_UNVERIFIED；步骤11/12/14/15、生产Gate与16步验收仍OPEN，默认OFF/SYSTEM/PARK及disabled不变。继续其余兼容effect、Main/default routing/required authority、full-bytes、backup/restore/accepted退役/GC、正式性能与运维；不重绑历史回执。

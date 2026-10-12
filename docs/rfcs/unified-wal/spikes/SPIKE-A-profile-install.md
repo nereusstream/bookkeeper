@@ -309,7 +309,7 @@ Wave 0 partial evidence：typed reference endpoint的12项普通功能测试已�
 
 ### A25：Raw Profile decoder corpus 与 no downgrade
 
-状态：**DEFERRED_NOT_RUN**。当前 Wave 0 不执行 released decoder 或 localhost stock binary 回放，已存在的 corpus、harness 与 `0x0FFE4250` counterexample 只冻结保留。此状态既不是PASS也不是waiver；A25未闭合，Spike A与G1继续BLOCK，只有未来单独显式授权的fresh run才能产生结果。
+状态：**PASS_SCOPED / A25 OPEN**。2026-10-13完整16步目标恢复了[fresh隔离run](../implementation/profile-wire/README.md#恢复执行的-released-compatibility-矩阵)：四个released decoder及真实loopback stock Bookie各610-vector原probe Oracle通过，stock文件/私有namespace不变且Classic sentinel可读；原反例在四个decoder均预期FAIL。内部handle/master-key/allocation尚无直接观测，不能以快照替代完整effect Oracle；A25未闭合、Spike A与G1继续BLOCK。原DEFERRED和反例回执保持历史绑定。
 
 步骤：保留已否证`0x0FFE4250`的frozen反例，将TLS ClientHello、完整合法replacement `0x0FF04250` frame、每个subtype、magic逐byte翻转、1..31-byte header truncation、outer/body length/oversize、major/minor/headerLength/flags/reserved/subtype、malformed HELLO、合法v3 prefix后接Profile magic、触发current v3各种`RuntimeException`、pre-v3 version=0/nonzero与接近legacy ADD opcode的prefix、normal/recovery互换及seeded fuzz，投喂每个受支持真实stock old v2/v3 decoder/binary与new decoder。
 
