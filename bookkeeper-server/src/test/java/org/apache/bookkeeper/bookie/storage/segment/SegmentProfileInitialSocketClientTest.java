@@ -111,6 +111,9 @@ import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator;
+import org.apache.bookkeeper.discover.profile.ProfileDeletePhysicalReceipt;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
 import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
@@ -3621,6 +3624,290 @@ public class SegmentProfileInitialSocketClientTest {
                         result.status());
                 assertEquals(3, result.targets().size());
                 assertEquals(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, result.targets().get(target).outcome());
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    private String physicalReceiptPath(Fixture fixture, ProfileDeletePhysicalReceipt receipt) throws Exception {
+        String parent = "/socket-initial/2c/delete-targets";
+        String marker = "birth-" + java.util.HexFormat.of().formatHex(receipt.birthId());
+        for (String child : fixture.zk.getChildren(parent, false)) {
+            if (child.startsWith("physical-") && fixture.zk.getChildren(parent + "/" + child, false).contains(marker)) {
+                return parent + "/" + child;
+            }
+        }
+        throw new AssertionError("Actual immutable physical receipt is missing");
+    }
+
+    @Test
+    public void physicalDeletionReceiptsResumeAcrossCoordinatorRestartAndActualOfflineTargets() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+            var first = manifest.targets().get(0);
+            for (var target : manifest.targets()) {
+                var event = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).event();
+                var applied = fixture.clients.get(target.bookie()).deleteApply(event.deleteApply("ledger-profile"))
+                        .get(5, TimeUnit.SECONDS);
+                assertTrue(applied.outcome() == Outcome.APPLIED || applied.outcome() == Outcome.ALREADY_APPLIED);
+            }
+            var coordinator = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            var partial = coordinator.beginAwaitPhysicalDeletion(manifest,
+                    Map.of(first, fixture.clients.get(first.bookie())), sdk.getClientCtx(),
+                    64, 8, Duration.ofSeconds(10));
+            var partialResult = partial.result().get(15, TimeUnit.SECONDS);
+            partial.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING, partialResult.status());
+            assertEquals(3, partialResult.targets().size());
+            var stored = fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, first);
+            assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.FOUND, stored.status());
+            byte[] original = stored.receipt().encode();
+            assertEquals(ProfilePhysicalDeleteCodec.Outcome.REUSABLE, stored.receipt().reply().outcome());
+            var others = new HashMap<ProfileDeleteRecord.Target, ProfileInitialControlClient>();
+            for (int index = 0; index < 3; index++) {
+                var target = manifest.targets().get(index);
+                if (target.equals(first)) {
+                    fixture.clients.get(target.bookie()).closeAsync().get(5, TimeUnit.SECONDS);
+                    fixture.listeners.get(index).close().sync();
+                    fixture.nodes.get(index).close();
+                } else {
+                    others.put(target, fixture.clients.get(target.bookie()));
+                    assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT,
+                            fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target).status());
+                }
+            }
+            var freshStore = new ZKProfileReservationStore(fixture.zk, "/socket-initial",
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var fresh = new ProfileDeleteCoordinator(freshStore, metadata, fixture.cold);
+            var remaining = fresh.beginAwaitPhysicalDeletion(manifest, others, sdk.getClientCtx(),
+                    64, 8, Duration.ofSeconds(10));
+            assertEquals(ProfileDeleteCoordinator.PhysicalStatus.DURABLY_REUSABLE_EVERY_TARGET,
+                    remaining.result().get(15, TimeUnit.SECONDS).status());
+            remaining.completion().get(5, TimeUnit.SECONDS);
+            for (int index = 1; index < 3; index++) {
+                fixture.clients.get(manifest.targets().get(index).bookie()).closeAsync().get(5, TimeUnit.SECONDS);
+                fixture.listeners.get(index).close().sync();
+                fixture.nodes.get(index).close();
+            }
+            var offline = new ProfileDeleteCoordinator(freshStore, metadata, fixture.cold)
+                    .beginAwaitPhysicalDeletion(manifest, Map.of(), sdk.getClientCtx(),
+                            64, 8, Duration.ofSeconds(10));
+            assertEquals(ProfileDeleteCoordinator.PhysicalStatus.DURABLY_REUSABLE_EVERY_TARGET,
+                    offline.result().get(15, TimeUnit.SECONDS).status());
+            offline.completion().get(5, TimeUnit.SECONDS);
+            assertArrayEquals(original,
+                    freshStore.readPhysicalDeleteReceipt(metadata, manifest, first).receipt().encode());
+            assertEquals(3, freshStore.retainedActivationTargets(44).targets().size());
+            assertTrue(fixture.manager.readLedgerMetadata(44).get().getValue().getCustomMetadata()
+                    .containsKey(ProfileDeleteRecord.TOMBSTONE_KEY));
+            var wrong = new ProfileDeleteRecord.Target(first.bookie(), bytes(16, 93));
+            assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.QUARANTINED,
+                    freshStore.readPhysicalDeleteReceipt(metadata, manifest, wrong).status());
+        }
+    }
+
+    @Test
+    public void physicalDeletionReceiptRejectsMissingGuardAndRecreatedMetadataBirth() throws Exception {
+        for (boolean metadataAba : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                var metadata = preparePhysicalDelete(fixture, sdk, false);
+                var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+                var target = manifest.targets().get(0);
+                var attempt = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                        .beginAwaitPhysicalDeletion(manifest, Map.of(target, fixture.clients.get(target.bookie())),
+                                sdk.getClientCtx(), 64, 8, Duration.ofSeconds(10));
+                assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING,
+                        attempt.result().get(15, TimeUnit.SECONDS).status());
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                var receipt = fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target).receipt();
+                assertNotNull(receipt);
+                if (metadataAba) {
+                    String path = ((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44);
+                    var before = new org.apache.zookeeper.data.Stat();
+                    byte[] body = fixture.zk.getData(path, false, before);
+                    var guards = new java.util.TreeMap<String, byte[]>();
+                    for (String child : fixture.zk.getChildren(path, false)) {
+                        assertTrue(fixture.zk.getChildren(path + "/" + child, false).isEmpty());
+                        guards.put(child, fixture.zk.getData(path + "/" + child, false, null));
+                    }
+                    org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, path);
+                    fixture.zk.create(path, body, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                    for (var guard : guards.entrySet()) {
+                        fixture.zk.create(path + "/" + guard.getKey(), guard.getValue(),
+                                ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                    }
+                    for (int version = 0; version < before.getVersion(); version++) {
+                        fixture.zk.setData(path, body, -1);
+                    }
+                    var after = new org.apache.zookeeper.data.Stat();
+                    assertArrayEquals(body, fixture.zk.getData(path, false, after));
+                    assertEquals(before.getVersion(), after.getVersion());
+                    assertNotEquals(before.getCzxid(), after.getCzxid());
+                } else {
+                    String path = physicalReceiptPath(fixture, receipt) + "/birth-"
+                            + java.util.HexFormat.of().formatHex(receipt.birthId());
+                    byte[] body = fixture.zk.getData(path, false, null);
+                    fixture.zk.delete(path, 0);
+                    assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.QUARANTINED,
+                            fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target).status());
+                    fixture.zk.create(path, body, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                }
+                assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.QUARANTINED,
+                        fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target).status());
+                var fresh = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                        .beginAwaitPhysicalDeletion(manifest, Map.of(), sdk.getClientCtx(),
+                                64, 8, Duration.ofSeconds(10));
+                var result = fresh.result().get(15, TimeUnit.SECONDS);
+                fresh.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileDeleteCoordinator.PhysicalStatus.QUARANTINED, result.status());
+                assertEquals(3, result.targets().size());
+            }
+        }
+    }
+
+    private static final class PhysicalReceiptReplyClient extends ZooKeeper {
+        private final boolean hold;
+        final CountDownLatch committed = new CountDownLatch(1);
+        volatile boolean intercepted;
+        volatile Runnable release;
+
+        PhysicalReceiptReplyClient(String connect, ZooKeeperWatcherBase watcher, boolean hold) throws Exception {
+            super(connect, 10000, watcher);
+            this.hold = hold;
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
+            var ops = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(ops::add);
+            boolean physical = !intercepted && ops.stream().anyMatch(op ->
+                    op.getType() == ZooDefs.OpCode.create && op.getPath().contains("/delete-targets/physical-"));
+            super.multi(ops, (code, path, ignored, results) -> {
+                if (physical && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
+                    intercepted = true;
+                    if (hold) {
+                        release = () -> callback.processResult(code, path, context, results);
+                    } else {
+                        callback.processResult(org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue(),
+                                path, context, results);
+                    }
+                    committed.countDown();
+                } else {
+                    callback.processResult(code, path, context, results);
+                }
+            }, context);
+        }
+    }
+
+    @Test
+    public void physicalDeletionReceiptLostReplyAndCallerCancelResolveSameNativeCommit() throws Exception {
+        for (boolean cancel : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                var metadata = preparePhysicalDelete(fixture, sdk, false);
+                var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+                var target = manifest.targets().get(0);
+                var watcher = new ZooKeeperWatcherBase(10000, false);
+                try (var client = new PhysicalReceiptReplyClient(fixture.cluster.getZooKeeperConnectString(),
+                        watcher, cancel)) {
+                    var store = new ZKProfileReservationStore(client, "/socket-initial",
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var borrowedMetadata = new ProfileLedgerMetadataStore(client,
+                            (AbstractZkLedgerManager) fixture.manager, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            Duration.ofSeconds(5));
+                    var coordinator = new ProfileDeleteCoordinator(store, borrowedMetadata, fixture.cold);
+                    var attempt = coordinator.beginAwaitPhysicalDeletion(manifest,
+                            Map.of(target, fixture.clients.get(target.bookie())), sdk.getClientCtx(),
+                            64, 8, Duration.ofSeconds(10));
+                    try {
+                        assertTrue(client.committed.await(5, TimeUnit.SECONDS));
+                        if (cancel) {
+                            assertTrue(attempt.result().cancel(false));
+                            assertThrows(java.util.concurrent.TimeoutException.class,
+                                    () -> attempt.completion().get(150, TimeUnit.MILLISECONDS));
+                            Runnable released = client.release;
+                            client.release = null;
+                            released.run();
+                        } else {
+                            assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING,
+                                    attempt.result().get(15, TimeUnit.SECONDS).status());
+                        }
+                        attempt.completion().get(5, TimeUnit.SECONDS);
+                        assertTrue(client.intercepted);
+                        var durable = store.readPhysicalDeleteReceipt(borrowedMetadata, manifest, target);
+                        assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.FOUND, durable.status());
+                        byte[] original = durable.receipt().encode();
+                        var resumed = new ProfileDeleteCoordinator(store, borrowedMetadata, fixture.cold)
+                                .beginAwaitPhysicalDeletion(manifest, Map.of(), sdk.getClientCtx(),
+                                        64, 8, Duration.ofSeconds(10));
+                        var result = resumed.result().get(15, TimeUnit.SECONDS);
+                        resumed.completion().get(5, TimeUnit.SECONDS);
+                        assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING, result.status());
+                        assertEquals(ProfilePhysicalDeleteCodec.Outcome.REUSABLE,
+                                result.targets().get(target).outcome());
+                        assertArrayEquals(original,
+                                store.readPhysicalDeleteReceipt(borrowedMetadata, manifest, target).receipt().encode());
+                        assertEquals(1, fixture.zk.getChildren("/socket-initial/2c/delete-targets", false).stream()
+                                .filter(child -> child.startsWith("physical-")).count());
+                    } finally {
+                        if (client.release != null) {
+                            client.release.run();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void physicalDeletionReceiptNeverPersistsPendingBeforeActualFree() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+            var target = manifest.targets().get(0);
+            var node = fixture.nodes.get(0);
+            var field = IsolatedSegmentStorage.class.getDeclaredField("arena");
+            field.setAccessible(true);
+            var arena = (SegmentArenaControlLog) field.get(node);
+            var ioField = SegmentArenaControlLog.class.getDeclaredField("io");
+            ioField.setAccessible(true);
+            var forcing = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            ioField.set(arena, new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            }));
+            var coordinator = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            try {
+                var attempt = coordinator.beginAwaitPhysicalDeletion(manifest,
+                        Map.of(target, fixture.clients.get(target.bookie())), sdk.getClientCtx(),
+                        64, 8, Duration.ofMillis(400));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING,
+                        attempt.result().get(5, TimeUnit.SECONDS).status());
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT,
+                        fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target).status());
+                assertThrows(java.io.IOException.class, () -> files(node).close());
+                release.countDown();
+                boolean stored = false;
+                for (int tries = 0; tries < 50 && !stored; tries++) {
+                    var resumed = coordinator.beginAwaitPhysicalDeletion(manifest,
+                            Map.of(target, fixture.clients.get(target.bookie())), sdk.getClientCtx(),
+                            64, 8, Duration.ofSeconds(5));
+                    resumed.result().get(10, TimeUnit.SECONDS);
+                    resumed.completion().get(5, TimeUnit.SECONDS);
+                    stored = fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target).status()
+                            == ZKProfileReservationStore.PhysicalReceiptStatus.FOUND;
+                    if (!stored) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                    }
+                }
+                assertTrue(stored);
+                assertEquals(2, arena.allocationGeneration(0, 4096));
             } finally {
                 release.countDown();
             }

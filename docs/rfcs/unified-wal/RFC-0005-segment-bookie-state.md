@@ -864,3 +864,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-12 [网络删除空间查询与全目标观察](implementation/profile-wire/README.md#网络删除空间查询与全目标观察)已接独立UIC8/OPERATION_STATUS、同一持久UIC7事件和原mTLS/direct/exact权威检查，实际FREE后fresh查询才报告REUSABLE；完整历史manifest逐target/incarnation观察，缺peer保留PENDING，全部REUSABLE仍是ephemeral结果。durable terminal receipts/retention/GC/退役及其他16步验收继续OPEN；默认OFF/SYSTEM/PARK和disabled能力不变，生产Gate不提升。
+
+
+2026-10-12 [删除物理终结记录与持久接续](implementation/profile-wire/README.md#删除物理终结记录与持久接续)已把实际UIC8 REUSABLE绑定完整事件/request/target/incarnation，条件化存入原ZK不可变row与birth guard；新await入口按完整历史targets重读全部记录，支持coordinator重建及已有记录的实际离线目标。原观察入口保持只读，PENDING/UNKNOWN无记录，不删除历史义务或授予GC权限。最终6类105项Java/31有限模型配置（4正向/27指定反例）及style通过；retention、accepted decommission/unrecoverable、snapshot/handoff/history GC和其他16步验收仍OPEN，生产Gate不提升。

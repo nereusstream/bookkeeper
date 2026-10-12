@@ -3238,6 +3238,157 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public enum PhysicalReceiptStatus { FOUND, ABSENT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN }
+
+    public record PhysicalReceiptResult(PhysicalReceiptStatus status, ProfileDeletePhysicalReceipt receipt) {
+        public PhysicalReceiptResult {
+            if ((status == PhysicalReceiptStatus.FOUND) != (receipt != null)) {
+                throw new IllegalArgumentException("Only a verified stored physical receipt carries its body");
+            }
+        }
+    }
+
+    String physicalDeleteReceiptPath(long ledger, ProfileDeleteRecord.Target target) {
+        return deleteManifestPath(ledger) + "/physical-" + deliveryTargetKey(target);
+    }
+
+    /** Native metadata receipt only; no offline status or cursor can manufacture a terminal result. */
+    public PhysicalReceiptResult readPhysicalDeleteReceipt(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Manifest manifest, ProfileDeleteRecord.Target target) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId());
+            if (logical.manifest() == null) {
+                return physicalReceiptFailure(logical.status() == DeleteStatus.UNAVAILABLE
+                        ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
+            }
+            if (!Arrays.equals(logical.manifest().encode(), manifest.encode())
+                    || !manifest.targets().contains(target)) {
+                return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
+            }
+            String name = physicalDeleteReceiptPath(manifest.ledger().ledgerId(), target);
+            var node = reads.get(name, deadline);
+            if (node.code() == Code.NONODE.intValue()) {
+                return physicalReceiptFailure(PhysicalReceiptStatus.ABSENT);
+            }
+            requireFound(node);
+            requirePersistent(node, true);
+            var receipt = ProfileDeletePhysicalReceipt.decode(node.bytes());
+            var rootRead = read(manifest.ledger().ledgerId(), deadline);
+            if (rootRead.snapshot() == null) {
+                return physicalReceiptFailure(rootRead.status() == ReadStatus.UNAVAILABLE
+                        ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
+            }
+            String domain = rootRead.snapshot().reservation().installs().get(0).authorityDomain();
+            if (!receipt.event().target().equals(target) || !receipt.matches(manifest, domain)) {
+                return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
+            }
+            var committed = readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), target);
+            if (committed.status() != DeliveryStatus.COMMITTED) {
+                return physicalReceiptFailure(committed.status() == DeliveryStatus.UNAVAILABLE
+                        ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
+            }
+            if (!receipt.event().equals(committed.event())) {
+                return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
+            }
+            var guard = reads.get(name + "/birth-" + HexFormat.of().formatHex(receipt.birthId()), deadline);
+            requireFound(guard);
+            requirePersistent(guard, true);
+            byte[] expected = java.nio.ByteBuffer.allocate(48).put(receipt.birthId())
+                    .put(ProfileRepairIntent.digest(node.bytes())).array();
+            if (guard.stat().getCzxid() != node.stat().getCzxid() || !Arrays.equals(expected, guard.bytes())) {
+                return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
+            }
+            return new PhysicalReceiptResult(PhysicalReceiptStatus.FOUND, receipt);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return physicalReceiptFailure(PhysicalReceiptStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return physicalReceiptFailure(PhysicalReceiptStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
+        }
+    }
+
+    /** Only the actual verified CONTROL collector can publish; immutable same-event retries retain the first row. */
+    PhysicalReceiptResult publishPhysicalDeleteReceipt(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Manifest manifest, ProfileDeletePhysicalReceipt receipt,
+            java.util.function.BooleanSupplier live) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        boolean submitted = false;
+        try {
+            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId());
+            var rootRead = read(manifest.ledger().ledgerId(), deadline);
+            var member = metadata.readMembership(manifest.ledger().ledgerId(), deadline);
+            if (logical.manifest() == null || rootRead.snapshot() == null || member.snapshot() == null) {
+                return physicalReceiptFailure(logical.status() == DeleteStatus.UNAVAILABLE
+                        || rootRead.status() == ReadStatus.UNAVAILABLE || member.status() == ReadStatus.UNAVAILABLE
+                            ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
+            }
+            var state = rootRead.snapshot();
+            deleteProjection(state, member.snapshot(), deadline);
+            var value = member.snapshot().metadata().getValue();
+            byte[] referenceBytes = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
+            var reference = ProfileDeleteRecord.Reference.decode(referenceBytes);
+            String domain = state.reservation().installs().get(0).authorityDomain();
+            if (!Arrays.equals(logical.manifest().encode(), manifest.encode())
+                    || !receipt.matches(manifest, domain)
+                    || !Arrays.equals(referenceBytes, receipt.event().tombstone().encode())) {
+                return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
+            }
+            var committed = readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), receipt.event().target());
+            if (committed.status() != DeliveryStatus.COMMITTED || !receipt.event().equals(committed.event())) {
+                return physicalReceiptFailure(committed.status() == DeliveryStatus.UNAVAILABLE
+                        ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
+            }
+            var prior = readPhysicalDeleteReceipt(metadata, manifest, receipt.event().target());
+            if (prior.status() != PhysicalReceiptStatus.ABSENT) {
+                return prior;
+            }
+            var operations = new ArrayList<>(recoveryRootChecks(state, deadline));
+            operations.addAll(metadata.checksForMembership(member.snapshot()));
+            operations.add(Op.check(deleteManifestPath(manifest.ledger().ledgerId()), 0));
+            operations.add(Op.check(deleteManifestPath(manifest.ledger().ledgerId()) + "/birth-"
+                    + Long.toHexString(reference.birth()), 0));
+            operations.add(Op.check(path(manifest.ledger().ledgerId()) + "/delete-delivery-"
+                    + deliveryTargetKey(receipt.event().target()), 0));
+            String stream = deliveryPath(receipt.event().target());
+            operations.add(Op.check(stream + "-assignment", 0));
+            operations.add(Op.check(stream + "/birth-" + HexFormat.of().formatHex(receipt.event().streamId()), 0));
+            operations.add(Op.check(stream + "/event-" + Long.toHexString(receipt.event().sequence()), 0));
+            String name = physicalDeleteReceiptPath(manifest.ledger().ledgerId(), receipt.event().target());
+            byte[] body = receipt.encode();
+            operations.add(Op.create(name, body, pageAcls, CreateMode.PERSISTENT));
+            operations.add(Op.create(name + "/birth-" + HexFormat.of().formatHex(receipt.birthId()),
+                    java.nio.ByteBuffer.allocate(48).put(receipt.birthId())
+                            .put(ProfileRepairIntent.digest(body)).array(), immutableAcls, CreateMode.PERSISTENT));
+            if (!live.getAsBoolean()) {
+                return physicalReceiptFailure(PhysicalReceiptStatus.UNAVAILABLE);
+            }
+            submitted = true;
+            multi(operations, deadline);
+            var stored = readPhysicalDeleteReceipt(metadata, manifest, receipt.event().target());
+            return stored.status() == PhysicalReceiptStatus.ABSENT
+                    || stored.status() == PhysicalReceiptStatus.UNAVAILABLE
+                    ? physicalReceiptFailure(PhysicalReceiptStatus.DURABILITY_UNKNOWN) : stored;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return physicalReceiptFailure(submitted ? PhysicalReceiptStatus.DURABILITY_UNKNOWN
+                    : PhysicalReceiptStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return physicalReceiptFailure(submitted ? PhysicalReceiptStatus.DURABILITY_UNKNOWN
+                    : PhysicalReceiptStatus.UNAVAILABLE);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
+        }
+    }
+
+    private static PhysicalReceiptResult physicalReceiptFailure(PhysicalReceiptStatus status) {
+        return new PhysicalReceiptResult(status, null);
+    }
+
     /** Exact committed delivery grants local TOMBSTONE; DELETE_INTENT alone never grants this authority. */
     public ProfileControlStore deleteAuthorityReader(String localBookie, byte[] storageIncarnation,
             ProfileLedgerMetadataStore metadata) {

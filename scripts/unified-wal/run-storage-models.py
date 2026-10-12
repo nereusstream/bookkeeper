@@ -19,6 +19,14 @@ import time
 
 
 MATRIX = {
+    'a-profile-physical-receipt': None,
+    'ce-profile-physical-receipt-scope': 'ReceiptWritesNeedScope',
+    'ce-profile-physical-receipt-commit': 'ReceiptObservationsNeedCommit',
+    'ce-profile-physical-receipt-birth': 'ReceiptObservationsNeedBirth',
+    'ce-profile-physical-receipt-quorum': 'ReceiptCompletionNeedsEveryStoredTarget',
+    'ce-profile-physical-receipt-stop': 'ReceiptStopStartsNoPublication',
+    'ce-profile-physical-receipt-release': 'ReceiptReleaseWaitsProcedure',
+
     'a-profile-physical-wire': None,
     'ce-profile-physical-wire-event': 'PhysicalWireNeedsEvent',
     'ce-profile-physical-wire-peer': 'PhysicalWireNeedsPeer',
@@ -884,6 +892,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfilePhysicalReceipt.tla" if "profile-physical-receipt" in name
                    else "ProfilePhysicalDeleteWire.tla" if "profile-physical-wire" in name
                    else "ProfilePhysicalDelete.tla" if "profile-physical-delete" in name
                    else "ProfileWriteLac.tla" if "profile-write-lac" in name

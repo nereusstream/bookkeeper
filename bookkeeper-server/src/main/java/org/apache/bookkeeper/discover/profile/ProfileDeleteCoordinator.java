@@ -119,7 +119,7 @@ public final class ProfileDeleteCoordinator {
         }
     }
 
-    public enum PhysicalStatus { REUSABLE_EVERY_TARGET, PENDING, QUARANTINED }
+    public enum PhysicalStatus { REUSABLE_EVERY_TARGET, DURABLY_REUSABLE_EVERY_TARGET, PENDING, QUARANTINED }
 
     public record TargetObservation(ProfilePhysicalDeleteCodec.Outcome outcome,
             ProfilePhysicalDeleteCodec.Reply reply) { }
@@ -139,6 +139,20 @@ public final class ProfileDeleteCoordinator {
     public PhysicalAttempt beginObservePhysicalDeletion(ProfileDeleteRecord.Manifest manifest,
             Map<ProfileDeleteRecord.Target, ProfileInitialControlClient> peers, ClientContext sdk,
             int maximumAllocations, int maximumCompactions, Duration maxDuration) {
+        return beginPhysicalDeletion(manifest, peers, sdk, maximumAllocations, maximumCompactions, maxDuration, false);
+    }
+
+    /** Persist actual peer terminal receipts and resume from them after coordinator restart or target disconnect.
+     * All historical targets must have an exact stored receipt. No retention or history-GC permission is granted. */
+    public PhysicalAttempt beginAwaitPhysicalDeletion(ProfileDeleteRecord.Manifest manifest,
+            Map<ProfileDeleteRecord.Target, ProfileInitialControlClient> peers, ClientContext sdk,
+            int maximumAllocations, int maximumCompactions, Duration maxDuration) {
+        return beginPhysicalDeletion(manifest, peers, sdk, maximumAllocations, maximumCompactions, maxDuration, true);
+    }
+
+    private PhysicalAttempt beginPhysicalDeletion(ProfileDeleteRecord.Manifest manifest,
+            Map<ProfileDeleteRecord.Target, ProfileInitialControlClient> peers, ClientContext sdk,
+            int maximumAllocations, int maximumCompactions, Duration maxDuration, boolean persist) {
         Objects.requireNonNull(manifest, "manifest");
         var clients = Map.copyOf(peers);
         if (maximumAllocations < 1 || maximumAllocations > 4096 || maximumCompactions < 1
@@ -203,8 +217,27 @@ public final class ProfileDeleteCoordinator {
         }
         for (var target : manifest.targets()) {
             chain = chain.thenComposeAsync(valid -> {
-                if (!valid || !live.getAsBoolean() || !clients.containsKey(target)) {
+                if (!valid || !live.getAsBoolean()) {
                     return CompletableFuture.completedFuture(valid);
+                }
+                if (persist) {
+                    var stored = reservations.readPhysicalDeleteReceipt(metadata, manifest, target);
+                    if (stored.status() == ZKProfileReservationStore.PhysicalReceiptStatus.FOUND) {
+                        observations.put(target, new TargetObservation(ProfilePhysicalDeleteCodec.Outcome.REUSABLE,
+                                stored.receipt().reply()));
+                        return CompletableFuture.completedFuture(true);
+                    }
+                    if (stored.status() != ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT) {
+                        observations.put(target,
+                                new TargetObservation(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, null));
+                        if (stored.status() == ZKProfileReservationStore.PhysicalReceiptStatus.QUARANTINED) {
+                            quarantined.set(true);
+                        }
+                        return CompletableFuture.completedFuture(true);
+                    }
+                }
+                if (!clients.containsKey(target) || !live.getAsBoolean()) {
+                    return CompletableFuture.completedFuture(true);
                 }
                 var event = reservations.readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), target);
                 if (event.status() != ZKProfileReservationStore.DeliveryStatus.COMMITTED
@@ -228,11 +261,25 @@ public final class ProfileDeleteCoordinator {
                         maximumAllocations, maximumCompactions, millis);
                 var attempt = clients.get(target).physicalDelete(request);
                 terminal.add(attempt.completion());
-                return attempt.result().handle((reply, failure) -> {
-                    observations.put(target, new TargetObservation(failure == null && reply != null
-                            ? reply.outcome() : ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, reply));
+                return attempt.result().handleAsync((reply, failure) -> {
+                    var outcome = failure == null && reply != null
+                            ? reply.outcome() : ProfilePhysicalDeleteCodec.Outcome.UNKNOWN;
+                    if (persist && outcome == ProfilePhysicalDeleteCodec.Outcome.REUSABLE) {
+                        var receipt = ProfileDeletePhysicalReceipt.fromVerifiedReply(
+                                event.event(), clients.get(target).hello(), request, reply);
+                        var written = reservations.publishPhysicalDeleteReceipt(metadata, manifest, receipt, live);
+                        if (written.status() != ZKProfileReservationStore.PhysicalReceiptStatus.FOUND) {
+                            outcome = ProfilePhysicalDeleteCodec.Outcome.UNKNOWN;
+                            if (written.status() == ZKProfileReservationStore.PhysicalReceiptStatus.QUARANTINED) {
+                                quarantined.set(true);
+                            }
+                        } else {
+                            reply = written.receipt().reply();
+                        }
+                    }
+                    observations.put(target, new TargetObservation(outcome, reply));
                     return true;
-                });
+                }, cold);
             }, cold);
         }
         chain.thenApplyAsync(valid -> {
@@ -251,8 +298,34 @@ public final class ProfileDeleteCoordinator {
             }
             boolean all = manifest.targets().stream().allMatch(target ->
                     observations.get(target).outcome() == ProfilePhysicalDeleteCodec.Outcome.REUSABLE);
-            return new PhysicalResult(all ? PhysicalStatus.REUSABLE_EVERY_TARGET : PhysicalStatus.PENDING,
-                    manifest, observations);
+            if (persist && all) {
+                // Re-read every immutable target row; an earlier read or write callback is not the final gate.
+                for (var target : manifest.targets()) {
+                    if (!live.getAsBoolean()) {
+                        return new PhysicalResult(PhysicalStatus.PENDING, manifest, observations);
+                    }
+                    var stored = reservations.readPhysicalDeleteReceipt(metadata, manifest, target);
+                    if (stored.status() != ZKProfileReservationStore.PhysicalReceiptStatus.FOUND) {
+                        observations.put(target,
+                                new TargetObservation(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, null));
+                        return new PhysicalResult(stored.status()
+                                == ZKProfileReservationStore.PhysicalReceiptStatus.QUARANTINED
+                                    ? PhysicalStatus.QUARANTINED : PhysicalStatus.PENDING, manifest, observations);
+                    }
+                }
+                var finalLogical = reservations.readLogicalDeletion(metadata, manifest.ledger().ledgerId(),
+                        manifest.seal().requestId());
+                if (!live.getAsBoolean() || finalLogical.manifest() == null
+                        || !Arrays.equals(finalLogical.manifest().encode(), manifest.encode())) {
+                    return new PhysicalResult(finalLogical.status()
+                            == ZKProfileReservationStore.DeleteStatus.UNAVAILABLE || !live.getAsBoolean()
+                                ? PhysicalStatus.PENDING : PhysicalStatus.QUARANTINED, manifest, observations);
+                }
+            }
+            return new PhysicalResult(all
+                    ? persist ? PhysicalStatus.DURABLY_REUSABLE_EVERY_TARGET
+                        : PhysicalStatus.REUSABLE_EVERY_TARGET
+                    : PhysicalStatus.PENDING, manifest, observations);
         }, cold).whenComplete((result, failure) ->
                 CompletableFuture.allOf(terminal.toArray(CompletableFuture[]::new)).whenComplete((ignored, failed) -> {
                     timer.cancel(false);

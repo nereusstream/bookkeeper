@@ -1571,3 +1571,24 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 ```
 
 证据目录 /Users/liusinan/.codex/artifacts/unified-wal/physical-wire-evidence-oi3enfjt 保留最终source、原阶段5文件、命令/输入/XML、模型与诊断失败；旧PASS不移绑。最终Spotless/Checkstyle exit0；编译/测试完全终结后RAT独立exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。完整16步与步骤11/12/14/15、生产Gate仍PARTIAL/OPEN；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+## 删除物理终结记录与持久接续
+
+2026-10-12，父源码2bee47a83d之后新增ProfileDeletePhysicalReceipt（UWPT/schema1）：固定132字节外壳，加有界原Event和完整UIC8 request，保留固定96字节REUSABLE reply、nonce和独立CRC32C。event包含ledger context、target/incarnation、delete request/epoch、stream/assignment/sequence与logical tombstone reference的birth/digest；request保留原UIC7 scope/DeleteBinding及有界参数，reply仍由实际socket的request/op/flags/摘要校验拥有。package-private collector仅接受同一verified HELLO/capability/engine及同事件REUSABLE；PENDING/LIMIT/UNKNOWN、另一incarnation或另一event不产生记录。stored decoder只检验语法和绑定，不生产TLS/authority事实。
+
+原ZKProfileReservationStore在既有delete-targets下按完整target/incarnation key持久保存一条有界physical row及同multi birth child。byte body不可改写，child绑定nonce、body SHA-256及同一creation zxid；发布复用recoveryRootChecks、原metadata membership birth/version checks、frozen manifest/reference birth、实际delivery index、stream assignment/birth和event。conditional multi之前再次检查live；之后从实际metadata重读，未知提交结果只查询同一记录。已存在的matching row保留第一次request/cuts/计数，重复查询、不同本地query limits或coordinator重建不覆写它。每次读仍要求同一logical manifest、metadata birth/CLOSED seal、原提交event/index和receipt birth guard；缺失/recreate/corrupt不计为终结。row只属于原Profile namespace owner的实验接受边界，不是外部wipe/decommission attestation。
+
+ProfileDeleteCoordinator.beginAwaitPhysicalDeletion复用同一bounded cold、SDK timer、active custody和原CONTROL peers；beginObservePhysicalDeletion保持只读ephemeral语义。新入口先查询每个完整历史target的匹配持久记录，缺记录且缺peer继续PENDING，有peer时只从实际UIC8 REUSABLE写记录；最终再次逐target重读全部row和logical manifest后，才能返回DURABLY_REUSABLE_EVERY_TARGET。实际Bookie已离线时，只有此前有匹配记录的同一incarnation可接续；timeout、cursor、最终ensemble map和AQ不能替代它。该结果表示本实验scope的Arena复用终态，未保存或宣称secure erase、强访问屏障、accepted decommission/unrecoverable或history-GC权限。row中的bytes/counters来自所保存的具体attempt，不是ledger累计payload/文件系统返还量。
+
+waiting future取消不会释放仍在实际cold procedure/本地RPC中持有的资源；已接受的ZK multi或server I/O可晚于取消提交，后续从原native状态解析。completion是实际collector return与本地RPC/source/output drain，不能用它证明远程ZK请求撤销或remote FREE终止。native held FREE下PENDING不会写记录；释放后新attempt从持久FREE/generation重读再收集REUSABLE。native ZK multi确已提交但回调CONNECTIONLOSS、或回调held期间caller cancel，不丢弃或重复发布第一次记录。
+
+真实mTLS/ZK/SDK/file组合覆盖：部分target持久进度→新store/coordinator重建→原target实际关连接/listener/storage→其余target回收→所有target实际离线后无peer接续；缺peer无记录保持PENDING、完整target义务/tombstone不删除；错误incarnation、receipt guard缺失/重建、相同metadata bytes/version/guard内容但physical birth重建均拒绝；实际multi回复丢失与caller cancel/held cold completion解析同native row；held FREE/PENDING零row后再恢复。独立codec测试仅拥有canonical/bounds/CRC/绑定/non-REUSABLE拒绝，不能代替实际producer。
+
+G69bT181阶段在Corretto21.0.10执行6类105项Java，0 failure/error/skip；保留原1108输入绑定。随后加强metadata ABA fixture，原bytes、version和guard内容全部还原，仅physical birth改变；最终hEWWqxvs的2类2项通过，1108输入逐SHA核验，未变更生产代码。最终6l4xfie0执行31模型配置（4完整正向/27指定反例），1040 inputs与Java去重1884一致。新ProfilePhysicalReceipt正向6787 generated/2360 distinct、queue0、depth19，0.941秒/peak RSS131678208 bytes。TLC1.7.4、单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；catalog678/完整A+C+D未全跑，不形成fairness/liveness或性能结论。此前wDdB9uvF中metadata测试未先移除真实birth children而触发NotEmpty，修正fixture后保留原拒绝断言；失败不计PASS，不移绑旧阶段。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeletePhysicalReceiptTest,ProfilePhysicalDeleteCodecTest,ProfileInitialControlCodecTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,SegmentProfileInitialSocketClientTest#physicalDelet*+committedDelete*+automaticDelete*+logicalDelete*+preparedDelete*+ordinaryWriterClose*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-physical-receipt --config-prefix ce-profile-physical-receipt --config-prefix a-profile-physical-wire --config-prefix ce-profile-physical-wire --config-prefix a-profile-physical-delete --config-prefix ce-profile-physical-delete --config-prefix a-profile-delete-publication --config-prefix ce-profile-delete-publication
+```
+
+证据 /Users/liusinan/.codex/artifacts/unified-wal/physical-receipt-evidence-aurhprzt 保留最终源码、105项阶段的原test文件、原命令/inputs/XML、模型与诊断阶段，旧PASS不移绑。最终Spotless/Checkstyle exit0；编译/测试终结后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。retention/offline/backup-restore policy、accepted terminal decommission/unrecoverable、stream/journal snapshot/handoff及history/page GC仍OPEN；本实现不清旧义务、删除stream event或压缩tombstone。Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续OPEN，步骤11/12/14/15与生产Gate不提升。默认OFF/SYSTEM/PARK和disabled能力不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
