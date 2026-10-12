@@ -1271,6 +1271,103 @@ public class SegmentProfileInitialSocketClientTest {
         return BookKeeper.forConfig(config).zk(fixture.zk).eventLoopGroup(fixture.clientGroup).build();
     }
 
+    @Test
+    public void defaultSdkOpenRejectsProfileMetadataBeforeCreatingClassicClosedHandles() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var recovery = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+            handle.enableWriterClose(recovery, fixture.descriptorBytes, VALIDATOR, fixture.clients,
+                    4, Duration.ofSeconds(30)).get(5, TimeUnit.SECONDS);
+            handle.addEntry(bytes(16, 8));
+            handle.closeAsync().get(30, TimeUnit.SECONDS);
+            var before = fixture.manager.readLedgerMetadata(44).get();
+            assertTrue(before.getValue().isClosed());
+            for (boolean recovering : List.of(false, true)) {
+                var result = new CompletableFuture<Integer>();
+                org.apache.bookkeeper.client.AsyncCallback.OpenCallback callback = (code, opened, context) -> {
+                    if (opened != null) {
+                        opened.closeAsync();
+                    }
+                    result.complete(code);
+                };
+                if (recovering) {
+                    sdk.asyncOpenLedger(44, BookKeeper.DigestType.CRC32C, fixture.password, callback, null);
+                } else {
+                    sdk.asyncOpenLedgerNoRecovery(44, BookKeeper.DigestType.CRC32C, fixture.password, callback, null);
+                }
+                assertEquals(BKException.Code.IllegalOpException, result.get(5, TimeUnit.SECONDS).intValue());
+            }
+            var after = fixture.manager.readLedgerMetadata(44).get();
+            assertEquals(before.getVersion(), after.getVersion());
+            assertArrayEquals(new org.apache.bookkeeper.meta.LedgerMetadataSerDe().serialize(before.getValue()),
+                    new org.apache.bookkeeper.meta.LedgerMetadataSerDe().serialize(after.getValue()));
+        }
+    }
+
+    @Test
+    public void defaultSdkOpenRejectsProfileBeforeRecoveryMutationAndKeepsPasswordChecks() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+            try {
+                var before = fixture.manager.readLedgerMetadata(44).get();
+                assertEquals(LedgerMetadata.State.OPEN, before.getValue().getState());
+                for (boolean recovering : List.of(false, true)) {
+                    var failure = assertThrows(ExecutionException.class, () -> sdk.newOpenLedgerOp()
+                            .withLedgerId(44).withDigestType(org.apache.bookkeeper.client.api.DigestType.CRC32C)
+                            .withPassword(fixture.password).withRecovery(recovering).execute()
+                            .get(5, TimeUnit.SECONDS));
+                    assertEquals(BKException.Code.IllegalOpException, BKException.getExceptionCode(failure));
+                }
+                var failure = assertThrows(ExecutionException.class, () -> sdk.newOpenLedgerOp()
+                        .withLedgerId(44).withDigestType(org.apache.bookkeeper.client.api.DigestType.CRC32C)
+                        .withPassword(bytes(16, 99)).withRecovery(true).execute().get(5, TimeUnit.SECONDS));
+                assertEquals(BKException.Code.UnauthorizedAccessException, BKException.getExceptionCode(failure));
+                var after = fixture.manager.readLedgerMetadata(44).get();
+                assertEquals(before.getVersion(), after.getVersion());
+                assertArrayEquals(new org.apache.bookkeeper.meta.LedgerMetadataSerDe().serialize(before.getValue()),
+                        new org.apache.bookkeeper.meta.LedgerMetadataSerDe().serialize(after.getValue()));
+                assertEquals(0, handle.addEntry(bytes(16, 8)));
+            } finally {
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    public void defaultSdkOpenRejectsMalformedAndFutureProfileBacklinksWithoutClassicFallback() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            byte[] future = new org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink(
+                    46, bytes(16, 1), bytes(16, 2)).encode();
+            java.nio.ByteBuffer.wrap(future).putInt(4, 2);
+            var crc = new java.util.zip.CRC32C();
+            crc.update(future, 0, future.length - 4);
+            java.nio.ByteBuffer.wrap(future).putInt(future.length - 4, (int) crc.getValue());
+            for (byte[] marker : List.of(new byte[] {1}, future)) {
+                long ledger = marker.length == 1 ? 45 : 46;
+                var declared = org.apache.bookkeeper.client.LedgerMetadataBuilder.create()
+                        .withId(ledger).withMetadataFormatVersion(3).withEnsembleSize(3)
+                        .withWriteQuorumSize(3).withAckQuorumSize(2)
+                        .withDigestType(org.apache.bookkeeper.client.api.DigestType.CRC32C)
+                        .withPassword(fixture.password).newEnsembleEntry(0,
+                                fixture.identities.stream().map(SegmentFileHeader::bookieId).toList())
+                        .withCustomMetadata(Map.of(org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink.KEY,
+                                marker)).withClosedState().withLastEntryId(-1).withLength(0).build();
+                var created = fixture.manager.createLedgerMetadata(ledger, declared).get(5, TimeUnit.SECONDS);
+                var failure = assertThrows(ExecutionException.class, () -> sdk.newOpenLedgerOp()
+                        .withLedgerId(ledger).withDigestType(org.apache.bookkeeper.client.api.DigestType.CRC32C)
+                        .withPassword(fixture.password).withRecovery(false).execute().get(5, TimeUnit.SECONDS));
+                assertEquals(BKException.Code.IllegalOpException, BKException.getExceptionCode(failure));
+                assertEquals(created.getVersion(), fixture.manager.readLedgerMetadata(ledger).get().getVersion());
+            }
+        }
+    }
+
     private static ProfileLedgerHandle writer(Fixture fixture, BookKeeper sdk,
             org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator.Result available,
             int entries, int attempts, Duration deadline, Duration backoff) throws Exception {

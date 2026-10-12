@@ -20,6 +20,7 @@
  */
 package org.apache.bookkeeper.client;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -59,6 +60,26 @@ public class LedgerRecoveryTest extends BookKeeperClusterTestCase {
         super(3);
         this.digestType = DigestType.CRC32;
         this.baseConf.setAllowEphemeralPorts(false);
+    }
+
+    @Test
+    public void testClassicOpenPreservesUnreservedCustomMetadataAndReadsActualData() throws Exception {
+        byte[] password = "classic-custom".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] data = "classic payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        var custom = java.util.Map.of("application.profile", new byte[] {1},
+                "bookkeeper.experimental.profile.user-note", new byte[] {2});
+        long ledger;
+        try (var writer = bkc.createLedger(3, 3, 2, digestType, password, custom)) {
+            ledger = writer.getId();
+            assertEquals(0, writer.addEntry(data));
+        }
+        try (var reader = bkc.openLedgerNoRecovery(ledger, digestType, password)) {
+            assertArrayEquals(data, reader.readEntries(0, 0).nextElement().getEntry());
+            assertArrayEquals(custom.get("application.profile"),
+                    reader.getLedgerMetadata().getCustomMetadata().get("application.profile"));
+            assertArrayEquals(custom.get("bookkeeper.experimental.profile.user-note"),
+                    reader.getLedgerMetadata().getCustomMetadata().get("bookkeeper.experimental.profile.user-note"));
+        }
     }
 
     private void testInternal(int numEntries) throws Exception {

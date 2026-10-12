@@ -39,6 +39,7 @@ import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.client.impl.OpenBuilderBase;
 import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.stats.OpStatsLogger;
 import org.apache.bookkeeper.util.OrderedGenericCallback;
 import org.apache.bookkeeper.versioning.Versioned;
@@ -208,6 +209,14 @@ class LedgerOpenOp {
                     return;
                 }
             }
+        }
+
+        // This operation builds a Classic handle. A Profile reference, including a malformed or future one,
+        // requires its explicit runtime before a handle, listener or Classic recovery mutation is created.
+        if (metadata.getCustomMetadata().containsKey(ProfileMetadataBacklink.KEY)) {
+            log.warn().attr("ledgerId", ledgerId).log("Profile metadata requires an explicit Profile runtime");
+            openComplete(BKException.Code.IllegalOpException, null);
+            return;
         }
 
         // get the ledger metadata back
