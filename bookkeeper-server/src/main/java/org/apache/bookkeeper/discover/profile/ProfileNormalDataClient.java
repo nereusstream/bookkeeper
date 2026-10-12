@@ -93,6 +93,14 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         return socket.addRecovery(intent, credential, entryId, entry);
     }
 
+    /** Explicit LAC result and actual source/output terminal, using the same bounded DATA socket. */
+    public record LacWriteAttempt(CompletableFuture<ProfileStatus> result, CompletableFuture<Void> completion) { }
+
+    public LacWriteAttempt beginWriteLac(ProfileLedgerContext context, ProtectedProfileCredential credential,
+            long lac, org.apache.bookkeeper.util.ByteBufList digest) {
+        return socket.beginWriteLac(context, credential, lac, digest);
+    }
+
     /** Explicit point read; NOT_READY/UNKNOWN refusals are not missing evidence and never cause activation. */
     public CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
         return socket.readEntry(context, entryId);

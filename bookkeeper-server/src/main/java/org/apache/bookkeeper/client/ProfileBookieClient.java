@@ -78,7 +78,7 @@ final class ProfileBookieClient implements BookieClient {
     private final Map<BookieId, Integer> counts = new ConcurrentHashMap<>();
     // Original ledger executor owns delivery state; shutdown completion uses a terminal CAS.
     private final Set<Delivery> pending = ConcurrentHashMap.newKeySet();
-    // A logical delivery may expire or reach A while its socket still owns source/output custody.
+    // A logical Add/LAC delivery may expire or reach A while its socket still owns source/output custody.
     private final Set<CompletableFuture<Void>> addDrains = ConcurrentHashMap.newKeySet();
     private final Object addLifecycle = new Object();
     private final CompletableFuture<Void> closeCompletion = new CompletableFuture<>();
@@ -122,6 +122,11 @@ final class ProfileBookieClient implements BookieClient {
     @Override
     public void addEntry(BookieId address, long ledgerId, byte[] key, long entryId, ReferenceCounted bytes,
             WriteCallback callback, Object context, int options, boolean failFast, EnumSet<WriteFlag> flags) {
+        writeEntry(address, ledgerId, key, entryId, bytes, callback, context, options, flags, false);
+    }
+
+    private void writeEntry(BookieId address, long ledgerId, byte[] key, long entryId, ReferenceCounted bytes,
+            WriteCallback callback, Object context, int options, EnumSet<WriteFlag> flags, boolean lacWrite) {
         ProfileNormalDataClient peer = clients.get(address);
         int rejected = closed.get() ? BKException.Code.ClientClosedException
                 : recoveryContext != null ? BKException.Code.IllegalOpException
@@ -141,7 +146,7 @@ final class ProfileBookieClient implements BookieClient {
                             : BKException.Code.TooManyRequestsException, ledgerId, entryId, address, context);
                     return;
                 }
-                Delivery delivery = new Delivery(address, peer, entryId, bytes, callback, context);
+                Delivery delivery = new Delivery(address, peer, entryId, bytes, callback, context, lacWrite);
                 counts.merge(address, 1, Integer::sum);
                 pending.add(delivery);
                 var current = clients.get(address);
@@ -186,6 +191,7 @@ final class ProfileBookieClient implements BookieClient {
         final ReferenceCounted bytes;
         final WriteCallback callback;
         final Object context;
+        final boolean lacWrite;
         final long deadline = System.nanoTime() + retry.deadline().toNanos();
         int attempts;
         boolean unknown;
@@ -195,7 +201,8 @@ final class ProfileBookieClient implements BookieClient {
         volatile boolean inFlight;
 
         Delivery(BookieId target, ProfileNormalDataClient client, long entryId, ReferenceCounted bytes,
-                WriteCallback callback, Object context) {
+                WriteCallback callback, Object context, boolean lacWrite) {
+            this.lacWrite = lacWrite;
             this.target = target;
             this.client = client;
             this.incarnation = client.hello().storageIncarnation();
@@ -219,21 +226,27 @@ final class ProfileBookieClient implements BookieClient {
             }
             try {
                 inFlight = true;
-                ProfileNormalDataClient.AddAttempt actual;
+                CompletableFuture<ProfileStatus> result;
+                CompletableFuture<Void> completion;
                 synchronized (addLifecycle) {
                     // Also covers the synchronous close fallback after the original executor rejects work.
-                    actual = closed.get() ? null : client.beginNormalAdd(ledger, credential, entryId, bytes);
-                    if (actual != null) {
-                        addDrains.add(actual.completion());
+                    if (closed.get()) {
+                        finish(BKException.Code.ClientClosedException);
+                        return;
                     }
+                    if (lacWrite) {
+                        var actual = client.beginWriteLac(ledger, credential, entryId, (ByteBufList) bytes);
+                        result = actual.result();
+                        completion = actual.completion();
+                    } else {
+                        var actual = client.beginNormalAdd(ledger, credential, entryId, bytes);
+                        result = actual.result();
+                        completion = actual.completion();
+                    }
+                    addDrains.add(completion);
                 }
-                if (actual == null) {
-                    finish(BKException.Code.ClientClosedException);
-                    return;
-                }
-                var completion = actual.completion();
                 completion.whenComplete((unused, failure) -> addDrains.remove(completion));
-                actual.result().whenComplete((status, failure) -> {
+                result.whenComplete((status, failure) -> {
                     try {
                         ordered(() -> classify(status, failure));
                     } catch (RejectedExecutionException shutdown) {
@@ -437,7 +450,13 @@ final class ProfileBookieClient implements BookieClient {
     @Override
     public void writeLac(BookieId address, long ledgerId, byte[] key, long lac, ByteBufList bytes,
             WriteLacCallback cb, Object ctx) {
-        ordered(() -> cb.writeLacComplete(BKException.Code.IllegalOpException, ledgerId, address, ctx));
+        if (lac < 0 || bytes.size() != 1 || bytes.readableBytes() != 20) {
+            ordered(() -> cb.writeLacComplete(BKException.Code.IllegalOpException, ledgerId, address, ctx));
+            return;
+        }
+        writeEntry(address, ledgerId, key, lac, bytes,
+                (code, id, entry, peer, ignored) -> cb.writeLacComplete(code, id, peer, ctx),
+                ctx, 0, EnumSet.noneOf(WriteFlag.class), true);
     }
     @Override
     public void readEntry(BookieId address, long ledgerId, long entryId, ReadEntryCallback cb, Object ctx,

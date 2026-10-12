@@ -7606,7 +7606,15 @@ public class SegmentBookieControlLogTest {
                 assertEquals(control == null ? List.of() : List.of(
                         new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1),
                         new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
-                                ProfileInitialControlCodec.REPLACEMENT_SCHEMA)),
+                                ProfileInitialControlCodec.REPLACEMENT_SCHEMA),
+                        new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
+                                ProfileInitialControlCodec.RECOVERY_SCHEMA),
+                        new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
+                                ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA),
+                        ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY,
+                        ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY,
+                        ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY,
+                        ProfileOperationCodec.WRITE_LAC_CAPABILITY),
                         hello.capabilities());
             } catch (Exception | Error cause) {
                 close();
@@ -12574,7 +12582,7 @@ public class SegmentBookieControlLogTest {
             bookie.submitBatch(List.of(tombstone(44, 20)));
             IOException live = assertThrows(IOException.class, () -> arena.prepareFree(
                     new UUID(0, 301), 101, files, bookie, ByteBuffer.allocate(4096)));
-            assertTrue(live.getMessage(), live.getMessage().contains("exact terminal tombstone"));
+            assertTrue(live.getMessage(), live.getMessage().contains("live record"));
             assertTrue(arena.hasAppliedGrant(0, 4096, 4096, 0, 1, 101, 1));
             bookie.submitBatch(List.of(tombstone(48, 21)));
             try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 302), 101,

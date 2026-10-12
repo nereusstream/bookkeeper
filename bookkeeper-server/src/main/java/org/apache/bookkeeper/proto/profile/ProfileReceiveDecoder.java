@@ -350,6 +350,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 || (operation == ProfileOperation.FENCE_LEDGER && header.bodyLength() != 100)
                 || (operation == ProfileOperation.READ_ENTRY && header.bodyLength() != 72)
                 || (operation == ProfileOperation.READ_LAC && header.bodyLength() != 60)
+                || (operation == ProfileOperation.WRITE_LAC
+                    && header.bodyLength() != org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec
+                        .WRITE_LAC_BODY_BYTES)
                 || (operation == ProfileOperation.ADD_NORMAL && header.bodyLength() > maxNormalBodyBytes)
                 || (operation == ProfileOperation.ADD_RECOVERY && header.bodyLength() > maxRecoveryBodyBytes)
                 || (initialControlBounds && ProfileInitialControlCodec.supported(operation)

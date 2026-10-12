@@ -24,6 +24,10 @@ import java.util.Objects;
 
 /** Typed codec for only the data operation bodies frozen by the executable test manifest. */
 public final class ProfileOperationCodec {
+    /** Opt-in original CRC32C explicit LAC write, with a durable local control result. */
+    public static final ProfileHello.Capability WRITE_LAC_CAPABILITY = new ProfileHello.Capability(0x55574c31, 1);
+    public static final int WRITE_LAC_BODY_BYTES = 116;
+
 
     public static final int CREDENTIAL_KIND = 1;
     public static final int CREDENTIAL_LENGTH = 20;

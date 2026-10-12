@@ -648,3 +648,5 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-12 [同一 episode owned资源](startup-readiness/README.md#同一服务-episode-的-owned-资源初始化与终止)已接 deferred native ZK/原metadata driver-LM、bounded cold/scheduler/loops，原服务实际drain后才确认各终态；metadata scheduler held任务、初始化失败部分资源、三节点SDK/restart得到最终33项/1103输入与style证据，RAT443父HEAD无新增。TLS/physical issuer仍借用，完整Main/外部authority/stock矩阵/full-bytes及其他综合验收继续OPEN，生产Gate不提升。
 
 2026-10-12 [OPEN 固定 LAC 前缀审计](profile-wire/README.md#open-固定-lac-前缀审计)已复用原 SDK LAC、flags=0 普通读、全W扫描和周期任务共享池，只观察冻结下界P/L，不fence writer或授予CLOSED proof/marker清理。实际writer并行增长、损坏/权限/metadata变化、UNKNOWN与稳定缺失、deadline/actual drain及共享恢复回归共28项通过；20模型配置得到2完整正向/18指定反例，style通过、RAT443父HEAD无新增。其余required authority、完整审计/总预算、Main/外部authority/stock矩阵、GC/退役/性能/运维和综合验收仍OPEN，生产Gate不提升。
+
+2026-10-12 [网络 WRITE_LAC 与确认前缀生产](profile-wire/README.md#网络-write_lac-与确认前缀生产)已接原网络WRITE_LAC、durable control force/apply与SDK确认prefix的distinct AQ，fence后只解析同值，UNKNOWN/cancel不提前归还actual output/wire custody；既有URL2/required-prefix实际消费新producer。7类337项Java和29有限模型配置（5完整正向/24指定反例）通过；其他required authority/自动策略/默认routing/总预算/Main/stock/GC/退役/性能/运维及全16步综合验收仍OPEN，生产Gate不提升。

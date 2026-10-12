@@ -19,6 +19,18 @@ import time
 
 
 MATRIX = {
+    'a-profile-write-lac-a2': None,
+    'a-profile-write-lac-a3': None,
+    'ce-profile-write-lac-scope': 'WriteLacHasScope',
+    'ce-profile-write-lac-digest': 'WriteLacHasDigest',
+    'ce-profile-write-lac-confirmed': 'WriteLacUsesConfirmedCut',
+    'ce-profile-write-lac-force': 'WriteLacAppliedNeedsForce',
+    'ce-profile-write-lac-quorum': 'WriteLacQuorumIsDistinct',
+    'ce-profile-write-lac-unknown': 'WriteLacAckIsDurable',
+    'ce-profile-write-lac-drain': 'WriteLacReleaseWaitsActual',
+    'ce-profile-write-lac-fence': 'WriteLacFenceNeverAdvances',
+    'ce-profile-write-lac-replay': 'WriteLacReplayPreservesAuthority',
+
     'a-profile-delete-publication': None,
     'ce-profile-delete-publication-prefix': 'LogicalHasEveryDelivery',
     'ce-profile-delete-publication-activation': 'LogicalHasEveryDelivery',
@@ -764,6 +776,7 @@ def main():
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileRecoveryReadHandle.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/LedgerHandle.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingAddOp.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/PendingWriteLacOp.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ClientContext.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ClientInternalConf.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/BookKeeperClientStats.java",
@@ -853,6 +866,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileWriteLac.tla" if "profile-write-lac" in name
                    else "ProfileLacEvidence.tla" if "profile-lac-evidence" in name
                    else "ProfileLacSource.tla" if "profile-lac-source" in name
                    else "ProfilePointReadDispatch.tla" if "profile-point-read" in name

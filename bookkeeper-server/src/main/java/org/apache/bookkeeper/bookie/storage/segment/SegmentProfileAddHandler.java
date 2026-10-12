@@ -74,6 +74,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private boolean readNegotiated;
     private boolean lacNegotiated;
     private boolean explicitLacNegotiated;
+    private boolean writeLacNegotiated;
     private ProfileTransportContext transport;
     private boolean initialControlNegotiated;
     private boolean replacementControlNegotiated;
@@ -127,6 +128,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     ? 2 * (ProfileFrameHeader.ENCODED_LENGTH + ProfileFrameCodec.OUTER_LENGTH_PREFIX
                             + 36 + ProfileHello.MAX_BOOKIE_ID_BYTES
                             + (control == null && read == null ? 0 : 8 * ProfileHello.MAX_CAPABILITIES))
+                    : frame.header().operation() == ProfileOperation.WRITE_LAC
+                            ? 4 * ProfileOperationCodec.WRITE_LAC_BODY_BYTES + RESPONSE_BYTES
                     : frame.header().operation() == ProfileOperation.READ_ENTRY
                             || frame.header().operation() == ProfileOperation.READ_LAC
                             ? 4 * 72 + ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES
@@ -153,6 +156,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 if (control != null || read != null) {
                     byte[] offer = new byte[frame.body().readableBytes()];
                     frame.body().getBytes(frame.body().readerIndex(), offer);
+                    writeLacNegotiated = control != null && ProfileHello.decodeClient(offer).capabilities()
+                            .contains(ProfileOperationCodec.WRITE_LAC_CAPABILITY);
                     explicitLacNegotiated = read != null && read.lacAuthorization() != null
                             && ProfileHello.decodeClient(offer).capabilities().contains(
                                     ProfileLacReplyCodec.EXPLICIT_CAPABILITY);
@@ -193,6 +198,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 ctx.close();
             } else if (ProfileInitialControlCodec.supported(frame.header().operation())) {
                 initialControl(ctx, request);
+            } else if (frame.header().operation() == ProfileOperation.WRITE_LAC) {
+                writeLac(ctx, request);
             } else if (frame.header().operation() == ProfileOperation.FENCE_LEDGER) {
                 fence(ctx, request);
             } else if (frame.header().operation() == ProfileOperation.ADD_RECOVERY) {
@@ -219,6 +226,70 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             }
             ctx.close();
             throw failure;
+        }
+    }
+
+    private void writeLac(ChannelHandlerContext ctx, Pending request) {
+        if (!writeLacNegotiated) {
+            write(ctx, request, ProfileStatus.unsupported(), null);
+            return;
+        }
+        ProfileOperationCodec.WriteLac value;
+        try {
+            byte[] body = new byte[ProfileOperationCodec.WRITE_LAC_BODY_BYTES];
+            if (request.frame.body().readableBytes() != body.length) {
+                throw new IllegalArgumentException("Invalid explicit LAC body length");
+            }
+            request.frame.body().getBytes(request.frame.body().readerIndex(), body);
+            value = (ProfileOperationCodec.WriteLac) ProfileOperationCodec.decode(ProfileOperation.WRITE_LAC, body);
+            var raw = io.netty.buffer.Unpooled.wrappedBuffer(value.body());
+            try {
+                var digest = org.apache.bookkeeper.proto.checksum.DigestManager.instantiate(
+                        value.context().ledgerId(), new byte[0],
+                        org.apache.bookkeeper.client.BookKeeper.DigestType.toProtoDigestType(
+                                org.apache.bookkeeper.client.BookKeeper.DigestType.CRC32C),
+                        io.netty.buffer.UnpooledByteBufAllocator.DEFAULT, false);
+                if (value.lac() < 0 || raw.readableBytes() != ProfileLacReplyCodec.EXPLICIT_BYTES
+                        || digest.verifyDigestAndReturnLac(raw) != value.lac()) {
+                    throw new IllegalArgumentException("Explicit LAC differs from its original digest");
+                }
+            } finally {
+                raw.release();
+            }
+        } catch (IllegalArgumentException | java.security.GeneralSecurityException
+                | org.apache.bookkeeper.client.BKException.BKDigestMatchException invalid) {
+            write(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE), null);
+            return;
+        }
+        var refused = storage.profileLacRejection(value);
+        if (refused != null) {
+            write(ctx, request, rejectionStatus(refused), null);
+            return;
+        }
+        request.beginControl();
+        boolean submitted = false;
+        try {
+            refused = storage.submitProfileLac(value, (result, failure) -> {
+                try {
+                    complete(ctx, request, failure != null || result == null ? unknown() : switch (result) {
+                        case APPLIED_DURABLE -> status(StatusClass.OK, RetryDisposition.NEVER, DurableResult.APPLIED);
+                        case ALREADY_DURABLE -> status(StatusClass.OK, RetryDisposition.NEVER,
+                                DurableResult.ALREADY_APPLIED);
+                        case CONDITION_FAILED, INCOMPATIBLE -> status(StatusClass.PROFILE_IDENTITY_CONFLICT,
+                                RetryDisposition.NEVER, DurableResult.NONE);
+                    });
+                } finally {
+                    request.endControl();
+                }
+            });
+            submitted = refused == null;
+            if (!submitted) {
+                write(ctx, request, rejectionStatus(refused), null);
+            }
+        } finally {
+            if (!submitted) {
+                request.endControl();
+            }
         }
     }
 

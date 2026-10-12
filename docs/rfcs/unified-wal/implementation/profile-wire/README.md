@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，当前 DATA 审计增量为 [OPEN 固定 LAC 前缀审计](#open-固定-lac-前缀审计)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，当前增量包括 [OPEN 固定 LAC 前缀审计](#open-固定-lac-前缀审计)和 [网络 WRITE_LAC 与确认前缀生产](#网络-write_lac-与确认前缀生产)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -1492,3 +1492,32 @@ mvn -o -N apache-rat:check
 最终模型 l2xb3ba7：20配置为2完整正向/18指定反例，997当前 source inputs；OPEN 正向592 generated/416 distinct、queue0、depth8、0.861秒/peak RSS109592576 bytes，CLOSED正向396/336、queue0、depth7。ProfileOpenReplicaAudit 要求 scoped known cut、固定前缀、不 fence、实际 source/final fresh、不清 marker、actual health/lease 排空；真实 LAC/ZK/TLS/fsync 等作为输入，不生产这些事实，不检查完整时钟/fairness/liveness。TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无 symmetry/state constraint、CHECK_DEADLOCK FALSE。checker成本不是服务性能，catalog644/完整 A+C+D 未全跑，原 CLOSED 模型与历史回执不重绑。
 
 持久证据 /Users/liusinan/.codex/artifacts/unified-wal/open-audit-evidence-ah8rwjp3 保留原 run/source/config/command、失败与阶段身份；最终 Java/model 去重1841输入匹配。Spotless/Checkstyle exit0；RAT exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。额外 required authority producer、任意大 ledger 审计、payload/placement、全链路字节预算、完整 Main/外部 authority/stock矩阵、snapshot/handoff/history GC/decommission、兼容/正式性能/运维和综合验收继续 OPEN。步骤11/12/14/15与生产Gate保持PARTIAL/OPEN；Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，默认OFF/SYSTEM/PARK及disabled能力保持。
+
+## 网络 WRITE_LAC 与确认前缀生产
+
+2026-10-12，第11/14步接通已有 WRITE_LAC opcode/codec、本地 EXPLICIT_LAC control record 与真实 SDK。新增独立实验 HELLO capability UWL1（0x55574c31/version1），按原递增顺序编码；只在显式 control 配置下 advertise。原 decoder 在分配 body 前要求该 CRC32C 首版请求恰为116字节，正文仍是既有 context60/LAC8/credential24/bodyLength4/原 BK digest20；opcode/body codec/控制持久化格式及 URL1/URL2 不变。未协商能力不发送或执行写入，返回 unsupported/NONE，不降级 Classic。
+
+SegmentProfileAddHandler 验证原 ledger/LAC CRC32C digest、非负LAC、外层与digest同值，再验证 actual writable admission、installed instance/credential/active状态。它复用原 SegmentBookieControlDriver 的 reserved control I/O、force 和 owner apply；只有实际 APPLIED_DURABLE/ALREADY_DURABLE 返回成功。force失败或结果不确定保留 UNKNOWN，无前进、回滚或伪造 NONE。相同字节重复不再次force；旧值/冲突拒绝，fence后只能解析既有同值，不接受更高LAC，TOMBSTONE/身份变化仍拒绝。连接仍使用原 DATA receive/RPC额度，控制文件I/O使用既有预留，不增设队列/线程或普通Add往返。
+
+ProfileLedgerHandle.flushConfirmedLac 在原 ordered SDK executor 冻结自己的 lastAddConfirmed 和当前ensemble，复用原 DigestManager、PendingWriteLacOp 和distinct ACK quorum；空/停止writer拒绝。固定cut和digest随同一次操作发送，API不接受caller指定未来frontier。ProfileBookieClient复用原 bounded delivery/retry/status分类和实际drain集合，ProfileSocketClient只借用20字节digest且在真实output/write/wire终态归还slot。A个成功或caller取消不提前结束其他目标的actual custody，writer stop/close仍等这些借用终结；transport结束不证明远端I/O已取消或durability NONE。explicitLacInterval仍要求0，本增量为显式调用，不新增周期flush策略。
+
+该真实producer把已经SDK确认、尚未piggyback传播的尾entry作为durable explicit LAC交给既有 URL2/quorum/point-length/required-prefix消费路径。explicit LAC不携带length，不免除连续prefix验证；后续speculative payload的较低提示不能抹去已接受LAC，不能跨hole关闭。它不创建strong token、repair-completion/reset authority，不接管默认SDK路由。
+
+六个新真实socket/SDK测试覆盖A2/A3确认prefix、required frontier与speculative suffix、实际文件reopen后保留explicit/fence、CRC/credential/instance/同值/fence边界、force前distinct AQ门槛、force失败UNKNOWN、丢回复fresh socket零重复force、未支持capability、caller取消时held force与已durable但held reply的actual drain。原required-loss/UNKNOWN/无authority suffix oracle改为使用网络producer；其他corrupt-read用例仍由既有底层故障输入产生坏explicit，未放宽网络校验。
+
+共享回归纠正两处旧测试断言：旧 socket helper 只期待最初两个HELLO capability，更新为当前完整8项精确列表；FREE拒绝文本已随既有terminal exclusion/applied successor合同扩展，改为核对live record原因。活数据拒绝、grant保留、完整terminal条件下FREE及full/covered restart行为断言保留，生产回收代码未改。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileOperationCodecTest,ProfileFrameCodecTest,ProfileHelloStatusTest,ProfileLacReplyCodecTest,ProfileReceiveDecoderTest,SegmentBookieControlLogTest,SegmentProfileInitialSocketClientTest#writeLac*+prefixVerifier*+sdkLacEvidence*+explicit*Lac*+corruptExplicitLac*+lacSource*+openReplicaAudit*+profileReplicaAudit*+profilePeriodicReplicaAudit*+closedReplicaHealth*+ordinaryWriterClose*+wholeRecovery*+originalSdk*+ordinaryDataClient*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-write-lac --config-prefix ce-profile-write-lac --config-prefix a-profile-lac-evidence --config-prefix ce-profile-lac-evidence --config-prefix a-profile-normal-client-source --config-prefix ce-profile-normal-client-source
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+mvn -o -N apache-rat:check
+```
+
+父源码9ebcdbdb5146df61243b2a4e0a05259ba63b8028。最终 oKgwCo3S exit0，7类337项零failure/error/skip（common codec/HELLO/LAC18、decoder23、Bookie control260、socket定向36），1103当前inputs匹配；JDK为本次实际Corretto21.0.10，不重绑旧Java17结果。lzDjgecH为proto enum引用compile失败；80wvFV2o的5项socket错误为开发期HELLO排序拒绝、decoder1通过；7QK3wOwJ定向6项通过，早于最后两个新socket用例；jfVMagDE广度337中8项旧断言失败，其余结果按阶段保留，不冒充最终全绿。
+
+最终模型 huj366ry：29配置为5完整正向/24指定反例，1010当前inputs，Java/model去重1853；runner补锁实际复用的PendingWriteLacOp。新A2模型260405 generated/41896 distinct，A3为248663/39520，均queue0/depth21，分别1.791/1.678秒、peak RSS271597568/272793600 bytes。ProfileWriteLac有限投影检查scope/digest/confirmed cut、force前无apply/ACK、distinct AQ、UNKNOWN不计票、actual source/output/wire排空、fence后不增长与replay authority保留；真实TLS/digest/fsync/ZK作为输入，不由模型生产，无fairness/liveness/完整A+C+D或性能结论。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog655/完整组合未全跑。3udquej5、phk5kbrp、594kpcen原stage输入保留，不移绑。
+
+持久证据 /Users/liusinan/.codex/artifacts/unified-wal/write-lac-evidence-oucr0lk4 保留原run/source/config/command及失败阶段。最终Spotless/Checkstyle exit0；RAT exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。其余accepted ACK/AQ/repair-completion producer、自动explicit策略/默认SDK routing、完整OPEN/payload/placement审计、总字节预算、Main/外部authority/stock矩阵、snapshot/handoff/history GC/decommission、正式性能/运维与综合验收仍OPEN。步骤11/12/14/15与生产Gate保持PARTIAL/OPEN，默认OFF/SYSTEM/PARK及disabled能力保持；Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。

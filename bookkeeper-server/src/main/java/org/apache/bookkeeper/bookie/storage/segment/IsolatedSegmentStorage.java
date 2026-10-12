@@ -821,6 +821,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                             .EXPLICIT_CAPABILITY);
                 }
             }
+            if (control != null) {
+                capabilities.add(ProfileOperationCodec.WRITE_LAC_CAPABILITY);
+            }
             ProfileHello.Server hello = new ProfileHello.Server(
                     EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
                     identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(),
@@ -880,6 +883,27 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return rejection;
             }
             return controls.submitFence(request, completion)
+                    ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
+    SegmentBookieControlLog.NormalRejection profileLacRejection(ProfileOperationCodec.WriteLac request) {
+        synchronized (gate) {
+            if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()) {
+                return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            }
+            return bookie.explicitLacRejection(request);
+        }
+    }
+
+    SegmentBookieControlLog.NormalRejection submitProfileLac(ProfileOperationCodec.WriteLac request,
+            SegmentBookieControlDriver.LacCompletion completion) {
+        synchronized (gate) {
+            var rejection = profileLacRejection(request);
+            if (rejection != null) {
+                return rejection;
+            }
+            return controls.submitExplicitLac(request, completion)
                     ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
         }
     }

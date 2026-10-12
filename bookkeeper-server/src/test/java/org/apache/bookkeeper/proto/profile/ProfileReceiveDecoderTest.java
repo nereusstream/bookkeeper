@@ -546,6 +546,27 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
+    public void explicitLacRejectsWrongFixedBodyBeforeAllocation() throws Exception {
+        for (int length : List.of(115, 117, 65_536)) {
+            ProfileReceiveBudget budget = new ProfileReceiveBudget(8_192, 2_048, 512, 8, 8, 4);
+            ProfileReceiveDecoder decoder = decoder(budget, 6_000, 64);
+            EmbeddedChannel channel = new EmbeddedChannel(decoder);
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+            ProfileInboundFrame greeting = channel.readInbound();
+            greeting.close();
+            decoder.markEstablished();
+            byte[] bytes = frame(ProfileOperation.WRITE_LAC, length);
+            assertThrows(IOException.class, () -> channel.writeInbound(
+                    Unpooled.wrappedBuffer(Arrays.copyOf(bytes, 36))));
+            assertFalse(channel.isActive());
+            assertNull(channel.readInbound());
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
     public void unclassifiedSlotRejectsBeforeTlsInstallationAndRecoversOnClose() throws Exception {
         ServerConfiguration conf = new ServerConfiguration();
         conf.setTLSKeyStoreType("PEM");

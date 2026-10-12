@@ -1403,3 +1403,10 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 2026-10-12，ProfileOpenReplicaAudit 独立投影实际 OPEN scoped LAC 下界cut、writer增长、source outcome/稳定缺失、最终fresh authority以及actual health/lease drain。a-open-replica-audit完整正向；ce-open-replica-audit-{scope,cut,tail,fence,unknown,fresh,clear,health,lease}分别要求原范围/known cut、固定tail边界、不fence writer、marker实际source/final fresh、不清marker及独立两段排空性质的指定反例。原ProfileReplicaAudit继续拥有CLOSED分支，AuditOnlyClosed不用于新的OPEN分支。
 
 最终l2xb3ba7按原父源码a71a23ed73绑定：20配置为2完整正向/18指定反例，997当前inputs；OPEN正向592 generated/416 distinct、queue0、depth8、0.861秒/peak RSS109592576 bytes，CLOSED396/336、queue0、depth7。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog644/完整A+C+D未全跑。真实LAC/TLS/ZK/force是输入，不由有限模型生产，无完整fairness/liveness/性能结论。原阶段ijipljah及历史receipt不重绑；[实际实现/28项Java及持久证据](../profile-wire/README.md#open-固定-lac-前缀审计)拥有当前范围，步骤11/12/14/15和生产Gate仍PARTIAL/OPEN。
+
+
+## 网络 WRITE_LAC producer 与实际排空投影
+
+2026-10-12，ProfileWriteLac 以原SDK confirmed cut、实际scope/digest/force/apply和独立source/output/wire终态为输入，固定3个peer、A2/A3；不生产TLS/CRC/fsync/ZK，不模拟完整lifecycle/fairness。a-profile-write-lac-a2/a3为完整正向，ce-profile-write-lac-{scope,digest,confirmed,force,quorum,unknown,drain,fence,replay}要求对应指定反例；相同已durable值在fence后可解析，但不能增长，caller stop不等于remote I/O取消。
+
+最终huj366ry：新模型与原LAC-evidence/normal-client-source共29配置，5完整正向/24指定反例，1010当前inputs；runner新增实际PendingWriteLacOp源码锁。新A2为260405 generated/41896 distinct、A3为248663/39520，均queue0/depth21，1.791/1.678秒、peak RSS271597568/272793600 bytes。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog655/完整A+C+D未全跑，checker消耗不是服务性能。原3udquej5/phk5kbrp/594kpcen保持阶段绑定；[真实网络/337项Java及receipt](../profile-wire/README.md#网络-write_lac-与确认前缀生产)拥有实现与Gate边界，完整目标active、生产Gate仍OPEN。

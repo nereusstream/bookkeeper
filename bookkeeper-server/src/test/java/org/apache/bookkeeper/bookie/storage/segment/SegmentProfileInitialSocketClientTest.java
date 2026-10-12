@@ -406,7 +406,8 @@ public class SegmentProfileInitialSocketClientTest {
                                                                   ChannelPromise promise) {
                                                     ByteBuf frame = (ByteBuf) message;
                                                     int op = frame.getUnsignedShort(frame.readerIndex() + 14);
-                                                    int fault = replyFault.get() == 21 ? 21
+                                                    int fault = replyFault.get() == 21 || replyFault.get() == 26
+                                                            ? replyFault.get()
                                                             : target == faultTarget.get() ? replyFault.get() : 0;
                                                     if (fault == 1
                                                             && (op == ProfileOperation.ACTIVATE_INITIAL.wireValue()
@@ -414,6 +415,18 @@ public class SegmentProfileInitialSocketClientTest {
                                                                     .wireValue())) {
                                                         frame.release();
                                                         promise.setSuccess();
+                                                        return;
+                                                    }
+                                                    if (fault == 26 && op == ProfileOperation.WRITE_LAC.wireValue()) {
+                                                        heldReplies.add(() -> ctx.executor().execute(
+                                                                () -> ctx.writeAndFlush(frame, promise)));
+                                                        return;
+                                                    }
+                                                    if (fault == 25 && op == ProfileOperation.WRITE_LAC.wireValue()) {
+                                                        replyFault.compareAndSet(25, 0);
+                                                        frame.release();
+                                                        promise.setSuccess();
+                                                        ctx.close();
                                                         return;
                                                     }
                                                     if (fault == 23
@@ -3888,7 +3901,14 @@ public class SegmentProfileInitialSocketClientTest {
                         evidenceEntry(fixture, peer, 0, -1, 16, 16);
                     }
                     if (mode != 1) {
-                        persistExplicitLac(fixture, node, 2, false);
+                        var lac = lacDigest(fixture, 2);
+                        try {
+                            assertEquals(ProfileStatus.DurableResult.APPLIED,
+                                    peer.beginWriteLac(fixture.context(), fixture.credential, 2, lac).result().get()
+                                        .durableResult());
+                        } finally {
+                            lac.release();
+                        }
                     }
                 }
                 if (mode == 2) {
@@ -6766,6 +6786,283 @@ public class SegmentProfileInitialSocketClientTest {
             } finally {
                 release.countDown();
                 source.release();
+            }
+        }
+    }
+
+    private static org.apache.bookkeeper.util.ByteBufList lacDigest(Fixture fixture, long value) throws Exception {
+        return DigestManager.instantiate(44, fixture.password,
+                org.apache.bookkeeper.client.BookKeeper.DigestType.toProtoDigestType(
+                        org.apache.bookkeeper.client.BookKeeper.DigestType.CRC32C),
+                UnpooledByteBufAllocator.DEFAULT, false).computeDigestAndPackageForSendingLac(value);
+    }
+
+    @Test
+    public void writeLacSdkPublishesConfirmedPrefixAndRecoveryConsumesItForA2AndA3() throws Exception {
+        for (int ack : List.of(2, 3)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, ack, true, true)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                try (BookKeeper sdk = sdk(fixture)) {
+                    var handle = writer(fixture, sdk, available, 8, 3,
+                            Duration.ofSeconds(5), Duration.ofMillis(5));
+                    try {
+                        assertThrows(ExecutionException.class, () -> handle.flushConfirmedLac().get());
+                        assertEquals(0, handle.addEntry(bytes(16, 8)));
+                        assertEquals(1, handle.addEntry(bytes(16, 9)));
+                        assertEquals(0, handle.readLacEvidence().get(5, TimeUnit.SECONDS).prefixEntryId());
+                        assertEquals(1L, handle.flushConfirmedLac().get(5, TimeUnit.SECONDS).longValue());
+                        var observed = handle.readLacEvidence().get(5, TimeUnit.SECONDS);
+                        assertEquals(1, observed.prefixEntryId());
+                        assertEquals(32, observed.prefixLength());
+                        assertFalse(observed.explicitSources().isEmpty());
+                        assertEquals(1, handle.getLastAddConfirmed());
+                        assertEquals(LedgerMetadata.State.OPEN,
+                                fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                    } finally {
+                        handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                    Map<BookieId, ProfileNormalDataClient> data = new HashMap<>();
+                    for (int node = 0; node < 3; node++) {
+                        var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
+                        data.put(fixture.identities.get(node).bookieId(), peer);
+                        assertEquals(1, peer.readLac(fixture.context()).get().explicitLac());
+                        // Later payload is speculative; its -1 hint cannot erase the accepted explicit authority.
+                        evidenceEntry(fixture, peer, 3, -1, 48, 16);
+                    }
+                    var metadata = new ProfileLedgerMetadataStore(fixture.zk,
+                            (AbstractZkLedgerManager) fixture.manager, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                            Duration.ofSeconds(5));
+                    var accepted = fixture.reservations.beginRecovery(metadata,
+                            fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan());
+                    var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                    var proof = coordinator.verifyPrefix(accepted, sdk.getClientCtx(), data, fixture.clients,
+                            fixture.credential, 5, Duration.ofSeconds(5)).get(5, TimeUnit.SECONDS);
+                    assertEquals(ProfileRecoveryCoordinator.PrefixStatus.VERIFIED_NORMAL_TAIL, proof.status());
+                    assertEquals(1, proof.requiredFrontier());
+                    assertEquals(1, proof.prefixEntryId());
+                    assertEquals(32, proof.prefixLength());
+                    assertEquals(2, proof.unresolvedEntry());
+                    assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                            fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                    var restartConfig = files(fixture.nodes.get(0)).config();
+                    fixture.nodes.get(0).close();
+                    try (var replay = new IsolatedSegmentStorage(restartConfig, fixture.identities.get(0),
+                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                            new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                                    2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                            new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                                    new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                        replay.restart();
+                        assertEquals(1, bookie(replay).explicitLac(fixture.context()).orElseThrow().lac());
+                        assertFalse(bookie(replay).normalAdmission(fixture.context(),
+                                DigestManager.generateMasterKey(fixture.password)));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void writeLacWireValidatesDigestCredentialScopeAndResolvesDuplicatesAfterFence() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var peer = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+            var source = lacDigest(fixture, 1);
+            var changed = lacDigest(fixture, 2);
+            try {
+                int before = fixture.nodeIo.get(0).forces;
+                assertEquals(ProfileStatus.StatusClass.BAD_REQUEST,
+                        peer.beginWriteLac(fixture.context(), fixture.credential, 2, source)
+                            .result().get().statusClass());
+                assertEquals(ProfileStatus.StatusClass.UNAUTHORIZED,
+                        peer.beginWriteLac(fixture.context(), ProtectedProfileCredential.of(1, bytes(20, 99)), 1,
+                                source).result().get().statusClass());
+                var wrong = new org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext(44,
+                        bytes(16, 98), fixture.context().descriptorIdentity());
+                assertEquals(ProfileStatus.StatusClass.PROFILE_IDENTITY_CONFLICT,
+                        peer.beginWriteLac(wrong, fixture.credential, 1, source).result().get().statusClass());
+                changed.getBuffer(0).setByte(19, changed.getBuffer(0).getByte(19) ^ 1);
+                assertEquals(ProfileStatus.StatusClass.BAD_REQUEST,
+                        peer.beginWriteLac(fixture.context(), fixture.credential, 2, changed)
+                            .result().get().statusClass());
+                assertEquals(before, fixture.nodeIo.get(0).forces);
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        peer.beginWriteLac(fixture.context(), fixture.credential, 1, source).result().get()
+                            .durableResult());
+                int applied = fixture.nodeIo.get(0).forces;
+                assertEquals(before + 1, applied);
+                assertEquals(ProfileStatus.DurableResult.ALREADY_APPLIED,
+                        peer.beginWriteLac(fixture.context(), fixture.credential, 1, source).result().get()
+                            .durableResult());
+                assertEquals(applied, fixture.nodeIo.get(0).forces);
+                assertEquals(ProfileStatus.StatusClass.OK,
+                        fixture.clients.get("socket0:3181").fence(fixture.context(), bytes(16, 27),
+                                fixture.credential).get().statusClass());
+                int fenced = fixture.nodeIo.get(0).forces;
+                assertEquals(ProfileStatus.DurableResult.ALREADY_APPLIED,
+                        peer.beginWriteLac(fixture.context(), fixture.credential, 1, source).result().get()
+                            .durableResult());
+                changed.release();
+                changed = lacDigest(fixture, 2);
+                assertEquals(ProfileStatus.StatusClass.FENCED,
+                        peer.beginWriteLac(fixture.context(), fixture.credential, 2, changed)
+                            .result().get().statusClass());
+                assertEquals(fenced, fixture.nodeIo.get(0).forces);
+            } finally {
+                source.release();
+                changed.release();
+            }
+        }
+    }
+
+    @Test
+    public void writeLacSdkNeedsDurableAckQuorumAndStopWaitsActualOutputAfterCancellation() throws Exception {
+        for (boolean cancel : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                try (BookKeeper sdk = sdk(fixture)) {
+                    var handle = writer(fixture, sdk, available, 8, 3,
+                            Duration.ofSeconds(5), Duration.ofMillis(5));
+                    var releases = List.of(new CountDownLatch(1), new CountDownLatch(1), new CountDownLatch(1));
+                    var forcing = new CountDownLatch(cancel ? 3 : 2);
+                    try {
+                        handle.addEntry(bytes(16, 8));
+                        var field = SegmentBookieControlLog.class.getDeclaredField("io");
+                        field.setAccessible(true);
+                        for (int node = cancel ? 0 : 1; node < 3; node++) {
+                            var release = releases.get(node);
+                            field.set(bookie(fixture.nodes.get(node)),
+                                    new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                                        forcing.countDown();
+                                        await(release);
+                                    }));
+                        }
+                        var pending = handle.flushConfirmedLac();
+                        assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> pending.get(150, TimeUnit.MILLISECONDS));
+                        if (cancel) {
+                            assertTrue(pending.cancel(false));
+                        } else {
+                            releases.get(1).countDown();
+                            assertEquals(0L, pending.get(5, TimeUnit.SECONDS).longValue());
+                        }
+                        var stopped = handle.stopLocalWrites();
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> stopped.get(150, TimeUnit.MILLISECONDS));
+                        assertFalse(sdk.getClientCtx().isClientClosed());
+                        releases.forEach(CountDownLatch::countDown);
+                        stopped.get(5, TimeUnit.SECONDS);
+                        assertEquals(LedgerMetadata.State.OPEN,
+                                fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                    } finally {
+                        releases.forEach(CountDownLatch::countDown);
+                        handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void writeLacLostReplyResolvesSameDurableBytesAndForceFailureNeverAcknowledges() throws Exception {
+        for (boolean fail : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var peer = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+                var source = lacDigest(fixture, 1);
+                try {
+                    int before = fixture.nodeIo.get(0).forces;
+                    if (fail) {
+                        var field = SegmentBookieControlLog.class.getDeclaredField("io");
+                        field.setAccessible(true);
+                        var broken = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                        field.set(bookie(fixture.nodes.get(0)), broken);
+                        var response = peer.beginWriteLac(fixture.context(), fixture.credential, 1, source)
+                                .result().get(5, TimeUnit.SECONDS);
+                        assertEquals(ProfileStatus.DurableResult.UNKNOWN, response.durableResult());
+                        assertNotEquals(ProfileStatus.StatusClass.OK, response.statusClass());
+                        assertEquals(1, broken.forces);
+                        assertTrue(bookie(fixture.nodes.get(0)).explicitLac(fixture.context()).isEmpty());
+                    } else {
+                        fixture.faultTarget.set(0);
+                        fixture.replyFault.set(25);
+                        var unknown = peer.beginWriteLac(fixture.context(), fixture.credential, 1, source);
+                        assertThrows(ExecutionException.class, () -> unknown.result().get(5, TimeUnit.SECONDS));
+                        unknown.completion().get(5, TimeUnit.SECONDS);
+                        assertEquals(before + 1, fixture.nodeIo.get(0).forces);
+                        var fresh = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+                        assertEquals(ProfileStatus.DurableResult.ALREADY_APPLIED,
+                                fresh.beginWriteLac(fixture.context(), fixture.credential, 1, source)
+                                    .result().get().durableResult());
+                        assertEquals(before + 1, fixture.nodeIo.get(0).forces);
+                    }
+                } finally {
+                    source.release();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void writeLacUnsupportedPeerGrantsNoDurableResult() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, false)) {
+            var peer = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+            assertFalse(peer.hello().capabilities().contains(
+                    org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec.WRITE_LAC_CAPABILITY));
+            var source = lacDigest(fixture, 1);
+            try {
+                var refused = peer.beginWriteLac(fixture.context(), fixture.credential, 1, source);
+                assertEquals(ProfileStatus.StatusClass.UNSUPPORTED_PROTOCOL_OPCODE_CAPABILITY_ENGINE,
+                        refused.result().get().statusClass());
+                assertEquals(ProfileStatus.DurableResult.NONE, refused.result().get().durableResult());
+                refused.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(0, fixture.nodeIo.get(0).forces);
+            } finally {
+                source.release();
+            }
+        }
+    }
+
+    @Test
+    public void writeLacCanceledQuorumWaitKeepsActualReplyCustodyUntilStopDrains() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3,
+                        Duration.ofSeconds(5), Duration.ofMillis(5));
+                try {
+                    handle.addEntry(bytes(16, 8));
+                    fixture.replyFault.set(26);
+                    var pending = handle.flushConfirmedLac();
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+                    }
+                    assertEquals(3, fixture.heldReplies.size());
+                    for (var node : fixture.nodes) {
+                        assertEquals(0, bookie(node).explicitLac(fixture.context()).orElseThrow().lac());
+                    }
+                    assertTrue(pending.cancel(false));
+                    var stopped = handle.stopLocalWrites();
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> stopped.get(150, TimeUnit.MILLISECONDS));
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    stopped.get(5, TimeUnit.SECONDS);
+                    assertTrue(pending.isCancelled());
+                    assertEquals(LedgerMetadata.State.OPEN,
+                            fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                } finally {
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
             }
         }
     }

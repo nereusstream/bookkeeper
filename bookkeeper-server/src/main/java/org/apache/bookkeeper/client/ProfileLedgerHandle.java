@@ -423,6 +423,41 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         }
     }
 
+    /** Flush this writer's confirmed prefix through the original SDK digest and ACK-quorum engine.
+     * Caller cancellation stops waiting; stop/close still wait for every borrowed LAC output/slot. */
+    public CompletableFuture<Long> flushConfirmedLac() {
+        if (!lacInFlight.compareAndSet(false, true)) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.TooManyRequestsException));
+        }
+        var result = new CompletableFuture<Long>();
+        try {
+            executeOrdered(() -> {
+                if (!isHandleWritable() || getLastAddConfirmed() < 0) {
+                    result.completeExceptionally(BKException.create(BKException.Code.IllegalOpException));
+                    return;
+                }
+                try {
+                    long confirmed = getLastAddConfirmed();
+                    var operation = new PendingWriteLacOp(this, new ProfileContext(base, transport),
+                            List.copyOf(getCurrentEnsemble()), (code, handle, ignored) -> {
+                        if (code == BKException.Code.OK) {
+                            result.complete(confirmed);
+                        } else {
+                            result.completeExceptionally(BKException.create(code));
+                        }
+                    }, null);
+                    operation.setLac(confirmed);
+                    operation.initiate(getDigestManager().computeDigestAndPackageForSendingLac(confirmed));
+                } catch (RuntimeException failure) {
+                    result.completeExceptionally(failure);
+                }
+            });
+        } catch (RejectedExecutionException unavailable) {
+            result.completeExceptionally(unavailable);
+        }
+        return result.whenComplete((value, failure) -> lacInFlight.set(false)).copy();
+    }
+
     /** One bounded query per handle; cancellation stops caller waiting while actual socket work drains. */
     public CompletableFuture<LacEvidence> readLacEvidence() {
         if (!lacInFlight.compareAndSet(false, true)) {

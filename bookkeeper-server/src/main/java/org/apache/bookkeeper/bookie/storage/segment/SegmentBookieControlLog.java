@@ -1603,6 +1603,17 @@ final class SegmentBookieControlLog implements AutoCloseable {
         activeAdmissions--;
     }
 
+    synchronized NormalRejection explicitLacRejection(ProfileOperationCodec.WriteLac request) {
+        var rejection = fenceRejection(request.context(), request.credential());
+        if (rejection != null) {
+            return rejection;
+        }
+        var prior = ledgers.get(request.context().ledgerId()).explicitLac;
+        // Resolving the exact durable value remains possible after FENCE; it never advances the frontier.
+        return prior != null && request.lac() <= prior.lac() ? null
+                : normalRejection(request.context(), request.credential());
+    }
+
     /** A cold, authenticated LAC update uses the Bookie control barrier, never the normal DATA path. */
     Status submitExplicitLac(ProfileOperationCodec.WriteLac request) throws IOException {
         LacAttempt attempt = prepareExplicitLac(request);

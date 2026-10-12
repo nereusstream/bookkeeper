@@ -538,6 +538,38 @@ final class ProfileSocketClient implements AutoCloseable {
         return new ProfileNormalDataClient.AddAttempt(held.dataReply, held.completion.copy());
     }
 
+    ProfileNormalDataClient.LacWriteAttempt beginWriteLac(ProfileLedgerContext context,
+            ProtectedProfileCredential credential, long lac, ByteBufList digest) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(credential, "credential");
+        Objects.requireNonNull(digest, "digest");
+        if (!normalData || lac < 0 || digest.size() != 1 || digest.readableBytes() != 20) {
+            throw new IllegalArgumentException("Explicit LAC requires DATA and the original CRC32C digest");
+        }
+        if (!hello().capabilities().contains(ProfileOperationCodec.WRITE_LAC_CAPABILITY)) {
+            return new ProfileNormalDataClient.LacWriteAttempt(
+                    CompletableFuture.completedFuture(ProfileStatus.unsupported()),
+                    CompletableFuture.completedFuture(null));
+        }
+        if (closed.get()) {
+            return new ProfileNormalDataClient.LacWriteAttempt(
+                    CompletableFuture.failedFuture(unknown()), CompletableFuture.completedFuture(null));
+        }
+        if (!slots.tryAcquire()) {
+            return new ProfileNormalDataClient.LacWriteAttempt(
+                    CompletableFuture.completedFuture(transientNone()), CompletableFuture.completedFuture(null));
+        }
+        Pending held = new Pending(context, credential, lac, 20, null, ProfileOperation.WRITE_LAC);
+        try {
+            held.entry = ByteBufList.clone(digest);
+        } catch (RuntimeException | Error failedBorrow) {
+            returnSlot();
+            throw failedBorrow;
+        }
+        enqueue(held);
+        return new ProfileNormalDataClient.LacWriteAttempt(held.dataReply, held.completion.copy());
+    }
+
     CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
         Objects.requireNonNull(context, "context");
         if (!normalData || entryId < 0) {
@@ -575,6 +607,27 @@ final class ProfileSocketClient implements AutoCloseable {
         Pending held = new Pending(context);
         enqueue(held);
         return held.lacReply;
+    }
+
+    private ByteBuf encodeWriteLac(Pending held, long id) {
+        ByteBuf bytes = channel.alloc().buffer(152, 152);
+        try {
+            bytes.writeInt(148).writeInt(ProfileFrameHeader.MAGIC)
+                    .writeShort(ProfileFrameHeader.PROTOCOL_MAJOR).writeShort(ProfileFrameHeader.PROTOCOL_MINOR)
+                    .writeShort(ProfileFrameHeader.ENCODED_LENGTH).writeShort(ProfileOperation.WRITE_LAC.wireValue())
+                    .writeInt(0).writeLong(id).writeInt(ProfileOperationCodec.WRITE_LAC_BODY_BYTES).writeInt(0)
+                    .writeBytes(held.context.encode()).writeLong(held.entryId).writeShort(1).writeShort(20);
+            int keyPosition = bytes.writerIndex();
+            bytes.writeZero(20);
+            held.credential.writeWireCredential(bytes.nioBuffer(keyPosition, 20));
+            var body = ((ByteBufList) held.entry).getBuffer(0);
+            bytes.writeInt(20).writeBytes(body, body.readerIndex(), body.readableBytes());
+            return bytes;
+        } catch (RuntimeException | Error failure) {
+            bytes.setZero(0, bytes.capacity());
+            bytes.release();
+            throw failure;
+        }
     }
 
     private ByteBuf encodeNormal(Pending held, long id) {
@@ -643,6 +696,7 @@ final class ProfileSocketClient implements AutoCloseable {
                         bytes = held.operation == ProfileOperation.ADD_NORMAL
                                 || held.operation == ProfileOperation.ADD_RECOVERY
                                 ? encodeNormal(held, id)
+                                : held.operation == ProfileOperation.WRITE_LAC ? encodeWriteLac(held, id)
                                 : held.operation == ProfileOperation.FENCE_LEDGER ? encodeFence(held, id)
                                 : held.operation == ProfileOperation.READ_ENTRY ? encode(held.operation, id,
                                         ProfileOperationCodec.encode(ProfileOperation.READ_ENTRY,
@@ -722,7 +776,8 @@ final class ProfileSocketClient implements AutoCloseable {
                     }
                     ByteBuf outgoing = encode(ProfileOperation.HELLO, 1,
                             new ProfileHello.Client(normalData ? List.of(ProfileReadEntryReplyCodec.CAPABILITY,
-                                    ProfileLacReplyCodec.CAPABILITY, ProfileLacReplyCodec.EXPLICIT_CAPABILITY)
+                                    ProfileLacReplyCodec.CAPABILITY, ProfileLacReplyCodec.EXPLICIT_CAPABILITY,
+                                    ProfileOperationCodec.WRITE_LAC_CAPABILITY)
                                     : List.of(CAPABILITY, REPLACEMENT_CAPABILITY, RECOVERY_CAPABILITY,
                                             RECOVERY_CLOSE_CAPABILITY,
                                             ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY,
@@ -828,7 +883,8 @@ final class ProfileSocketClient implements AutoCloseable {
                     throw invalidReply();
                 }
                 if (held.operation == ProfileOperation.ADD_NORMAL || held.operation == ProfileOperation.ADD_RECOVERY
-                        || held.operation == ProfileOperation.FENCE_LEDGER) {
+                        || held.operation == ProfileOperation.FENCE_LEDGER
+                        || held.operation == ProfileOperation.WRITE_LAC) {
                     ProfileStatus status = ProfileStatus.decode(body);
                     if (header.isError() != (status.statusClass() != ProfileStatus.StatusClass.OK)
                             || status.statusClass() == ProfileStatus.StatusClass.OK
@@ -931,9 +987,15 @@ final class ProfileSocketClient implements AutoCloseable {
 
         private Pending(ProfileLedgerContext context, ProtectedProfileCredential credential,
                         long entryId, int entryBytes, ProfileRepairIntent intent) {
+            this(context, credential, entryId, entryBytes, intent,
+                    intent == null ? ProfileOperation.ADD_NORMAL : ProfileOperation.ADD_RECOVERY);
+        }
+
+        private Pending(ProfileLedgerContext context, ProtectedProfileCredential credential,
+                        long entryId, int entryBytes, ProfileRepairIntent intent, ProfileOperation operation) {
             scope = null;
             repair = intent;
-            operation = intent == null ? ProfileOperation.ADD_NORMAL : ProfileOperation.ADD_RECOVERY;
+            this.operation = operation;
             reply = null;
             dataReply = new CompletableFuture<>();
             completion = new CompletableFuture<>();
