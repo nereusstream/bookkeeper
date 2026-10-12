@@ -1435,3 +1435,6 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 ## Delete assignment PREPARED cut 投影
 
 2026-10-12，ProfileDeleteHandoff仅投影actual snapshot/logical-COMMITTED输入、old publisher captured admission/head version与准备multi的排序、stop和actual procedure return；不生产native事实、不实现local G+1 adoption/EFFECTIVE/route retirement或GC。a-profile-delete-handoff-prepare完整正向，ce-profile-delete-handoff-{admission,head,snapshot,commit,stop,release}要求指定反例。最终ipces_48按父源码a6dae28dda当前实现绑定，与snapshot/delete-publication共23配置、3完整正向/20指定反例，1061 inputs与Java去重1905一致。新正向106 generated/62 distinct、queue0、depth6、0.795秒/peak RSS105988096 bytes；catalog693/完整A+C+D未全跑。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，无完整handoff/fairness/liveness/性能结论。[实际阶段114项与最终6项Java](../profile-wire/README.md#assignment-handoff-的-prepared-与投递-cut)拥有当前scope；0k4bd84n/t4uond57与各Java阶段不移绑，生产Gate保持OPEN。
+
+
+2026-10-12 [Assignment handoff 的本地持久 adoption](../profile-wire/README.md#assignment-handoff-的本地持久-adoption)已将实际PREPARED Plan接入原Bookie type14 force/owner apply/checkpoint/replay；必须先完成原G1 cut，空cut不生成effect，重复相同Plan不再force，普通G1 DATA保持有效。等待超时不释放实际I/O，fresh native admission ABA拒绝重新确认。最终4类27项Java、20有限模型配置（3正向/17指定反例）及style通过；native catch-up ACK/EFFECTIVE CAS/old-route retirement、retention/GC及其他16步验收仍OPEN，生产Gate不提升。

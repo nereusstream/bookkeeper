@@ -19,6 +19,12 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-adoption': None,
+    'ce-profile-delete-adoption-cut': 'AdoptionHasCompleteCut',
+    'ce-profile-delete-adoption-force': 'AdoptionHasForce',
+    'ce-profile-delete-adoption-checkpoint': 'AdoptionReplaysCheckpoint',
+    'ce-profile-delete-adoption-release': 'AdoptionReleaseWaitsOwnerTerminal',
+
     'a-profile-delete-handoff-prepare': None,
     'ce-profile-delete-handoff-admission': 'HandoffPreparedCutIsStable',
     'ce-profile-delete-handoff-head': 'HandoffPreparedCutIsStable',
@@ -909,6 +915,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileDeleteAdoption.tla" if "profile-delete-adoption" in name
                    else "ProfileDeleteHandoff.tla" if "profile-delete-handoff" in name
                    else "ProfileDeleteSnapshot.tla" if "profile-delete-snapshot" in name
                    else "ProfilePhysicalReceipt.tla" if "profile-physical-receipt" in name

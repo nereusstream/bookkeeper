@@ -142,7 +142,7 @@ cluster READY/standard membership先提交、local activation后消费；route/i
 ```text
 Bookie-level protected control log + A/B checkpoint
     route / credential / install / activation / fence / recovery grant /
-    committed-readable / explicit LAC / tombstone / local delete cursor/readiness
+    committed-readable / explicit LAC / tombstone / local delete cursor/readiness / prepared assignment adoption
 per-Arena ArenaControlLog + allocator checkpoint
     allocation ownership / generation / relocation selector / retirement
 Data Arena
@@ -870,3 +870,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-12 [删除流完整 snapshot 与真实启动追赶](implementation/profile-wire/README.md#删除流完整-snapshot-与真实启动追赶)已将原generation1 shared stream的完整prefix保存为有界immutable pages/root＋conditional publication witness，绑定scope/原event birth并接入实际TOMBSTONE/cursor启动追赶。真实缺prefix＋suffix、65-ledger两page、missing/recreate、取消/回复丢失及并发有111项Java/23有限模型配置（3正向/20指定反例）证据；无旧journal删除、assignment handoff或GC权限。retention/terminal退役/history GC及其他16步验收继续OPEN，生产Gate不提升。
+
+
+2026-10-12 [Assignment handoff 的本地持久 adoption](implementation/profile-wire/README.md#assignment-handoff-的本地持久-adoption)已将实际PREPARED Plan接入原Bookie type14 force/owner apply/checkpoint/replay；必须先完成原G1 cut，空cut不生成effect，重复相同Plan不再force，普通G1 DATA保持有效。等待超时不释放实际I/O，fresh native admission ABA拒绝重新确认。最终4类27项Java、20有限模型配置（3正向/17指定反例）及style通过；native catch-up ACK/EFFECTIVE CAS/old-route retirement、retention/GC及其他16步验收仍OPEN，生产Gate不提升。

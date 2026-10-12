@@ -121,6 +121,9 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
@@ -1124,6 +1127,94 @@ public class SegmentBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
                     replay.submitBatch(List.of(delivery(46, 22, 3, (byte) 8))).get(0).status());
             assertEquals(3, replay.deleteAppliedCursor().sequence());
+        }
+    }
+
+    private ProfileDeleteHandoff.Plan handoffPlan(int operation, long through) {
+        var target = new ProfileDeleteRecord.Target(identity().bookieId().toString(), identity().incarnation().value());
+        var head = new ProfileDeleteDelivery.Head(filled(16, (byte) 8), 1, 1, through, target);
+        return new ProfileDeleteHandoff.Plan(filled(16, (byte) operation), head, 10, 2,
+                through == 0 ? 0 : 1, through == 0 ? 0 : 11,
+                through == 0 ? new byte[32] : filled(32, (byte) 12));
+    }
+
+    @Test
+    public void deleteHandoffAdoptionRequiresCompleteCutAndSurvivesCheckpointRotation() throws Exception {
+        var config = config();
+        var identity = identity();
+        var io = new SegmentFileIo();
+        var plan = handoffPlan(90, 2);
+        try (var ignored = IsolatedSegmentFiles.create(config, identity);
+                var log = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.applyHandoffDurable(log.appendHandoffDurably(plan)));
+            assertNull(log.adoptedDeleteHandoff());
+            assertEquals(0, io.forces);
+            log.submitBatch(List.of(delivery(44, 20, 1, (byte) 8)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.applyHandoffDurable(log.appendHandoffDurably(plan)));
+            log.submitBatch(List.of(delivery(45, 21, 2, (byte) 8)));
+            var durable = log.appendHandoffDurably(plan);
+            assertNull(log.adoptedDeleteHandoff()); // force alone has not applied the record.
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, log.applyHandoffDurable(durable));
+            int forced = io.forces;
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.applyHandoffDurable(log.appendHandoffDurably(plan)));
+            assertEquals(forced, io.forces);
+            assertEquals(1, log.deleteAppliedCursor().assignmentGeneration());
+            assertEquals(2, log.deleteAppliedCursor().sequence());
+            assertTrue(assertThrows(SegmentBookieControlLog.DeleteSequenceException.class,
+                    () -> log.submitBatch(List.of(delivery(46, 22, 3, (byte) 8)))).retryable());
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    log.applyHandoffDurable(log.appendHandoffDurably(handoffPlan(91, 2))));
+            log.rotate();
+        }
+        try (var replay = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertArrayEquals(plan.encode(), replay.adoptedDeleteHandoff().encode());
+            assertEquals(2, replay.deleteAppliedCursor().sequence());
+            assertEquals(1, replay.deleteAppliedCursor().assignmentGeneration());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitBatch(List.of(delivery(44, 20, 1, (byte) 8))).get(0).status());
+            assertTrue(replay.hasTerminalTombstone(context()));
+        }
+    }
+
+    @Test
+    public void emptyDeleteHandoffAdoptionReplaysWithoutInventingAnEffectAndRejectsOtherTarget() throws Exception {
+        var config = config();
+        var identity = identity();
+        var plan = handoffPlan(92, 0);
+        var wrong = new ProfileDeleteHandoff.Plan(plan.operationId(),
+                new ProfileDeleteDelivery.Head(plan.predecessor().streamId(), 1, 1, 0,
+                        new ProfileDeleteRecord.Target("other", identity.incarnation().value())), 10, 2, 0, 0,
+                new byte[32]);
+        try (var ignored = IsolatedSegmentFiles.create(config, identity);
+                var log = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    log.applyHandoffDurable(log.appendHandoffDurably(wrong)));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.applyHandoffDurable(log.appendHandoffDurably(plan)));
+            assertNull(log.deleteAppliedCursor());
+            assertTrue(log.rollbackSafetyFacts().refusesOldBinarySameScopeRollback());
+            log.checkpoint();
+        }
+        try (var replay = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertArrayEquals(plan.encode(), replay.adoptedDeleteHandoff().encode());
+            assertNull(replay.deleteAppliedCursor());
+        }
+    }
+
+    @Test
+    public void uncertainDeleteHandoffForcePublishesNoLocalAdoptionAndPoisonsWriter() throws Exception {
+        var config = config();
+        var identity = identity();
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+        try (var ignored = IsolatedSegmentFiles.create(config, identity);
+                var log = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR, io)) {
+            assertThrows(IOException.class, () -> log.appendHandoffDurably(handoffPlan(93, 0)));
+            assertNull(log.adoptedDeleteHandoff());
+            assertNull(log.deleteAppliedCursor());
+            assertThrows(IOException.class, () -> log.appendHandoffDurably(handoffPlan(93, 0)));
         }
     }
 

@@ -4691,6 +4691,119 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void deleteHandoffNativeAdoptionAppliesRealPrefixKeepsG1DataAndReplaysSamePlan() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int index = 0; index < 3; index++) {
+                data.put(fixture.identities.get(index).bookieId(),
+                        dataClient(fixture, index, 8, Duration.ofSeconds(5)));
+            }
+            var writer = openHandoffTestLedger(fixture, sdk, metadata, 45, data);
+            var target = new ProfileDeleteRecord.Target(
+                    "socket1:3181", fixture.identities.get(1).incarnation().value());
+            var prepared = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                    .beginPrepareHandoff(target, bytes(16, 121), sdk.getClientCtx(), 64, Duration.ofSeconds(10));
+            var plan = prepared.result().get(15, TimeUnit.SECONDS).plan();
+            prepared.completion().get(5, TimeUnit.SECONDS);
+            assertNotNull(plan);
+            assertNull(fixture.nodes.get(1).profileDeleteProgress());
+            int forces = fixture.nodeIo.get(1).forces;
+            var adopted = CompletableFuture.supplyAsync(() -> fixture.nodes.get(1).adoptPreparedProfileDeletes(
+                    fixture.reservations, metadata, "ledger-profile", 64, Duration.ofSeconds(10), () -> true),
+                    fixture.cold).get(15, TimeUnit.SECONDS);
+            assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.ADOPTED_DURABLE, adopted.status());
+            adopted.completion().get(5, TimeUnit.SECONDS);
+            assertArrayEquals(plan.encode(), adopted.plan().encode());
+            assertEquals(forces + 2, fixture.nodeIo.get(1).forces); // Real TOMBSTONE then separate adoption force.
+            assertEquals(1, fixture.nodes.get(1).profileDeleteProgress().assignmentGeneration());
+            assertTrue(bookie(fixture.nodes.get(1)).hasTerminalTombstone(fixture.context()));
+            var duplicate = fixture.nodes.get(1).adoptPreparedProfileDeletes(fixture.reservations, metadata,
+                    "ledger-profile", 64, Duration.ofSeconds(10), () -> true);
+            assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.ADOPTED_DURABLE, duplicate.status());
+            assertEquals(forces + 2, fixture.nodeIo.get(1).forces);
+            assertEquals(0, writer.appendAsync(Unpooled.wrappedBuffer(bytes(16, 94)))
+                    .get(5, TimeUnit.SECONDS).longValue());
+            assertEquals(forces + 2, fixture.nodeIo.get(1).forces);
+            writer.closeAsync().get(30, TimeUnit.SECONDS);
+            bookie(fixture.nodes.get(1)).rotate();
+            var restartConfig = files(fixture.nodes.get(1)).config();
+            fixture.nodes.get(1).close();
+            try (var replay = new IsolatedSegmentStorage(restartConfig, fixture.identities.get(1),
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                    new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                            2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                    new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                            new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                replay.restart();
+                assertArrayEquals(plan.encode(), bookie(replay).adoptedDeleteHandoff().encode());
+                assertEquals(1, replay.profileDeleteProgress().assignmentGeneration());
+                assertEquals(1, replay.profileDeleteProgress().sequence());
+                assertTrue(bookie(replay).hasTerminalTombstone(fixture.context()));
+            }
+            assertEquals(1, fixture.reservations.readDeleteHead(target).head().assignmentGeneration());
+        }
+    }
+
+    @Test
+    public void deleteHandoffAdoptionTimeoutKeepsActualForceCustodyAndEmptyCut() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var target = new ProfileDeleteRecord.Target(
+                    "socket1:3181", fixture.identities.get(1).incarnation().value());
+            fixture.reservations.createInitialDeleteAssignment(target);
+            var prepared = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                    .beginPrepareHandoff(target, bytes(16, 122), sdk.getClientCtx(), 64, Duration.ofSeconds(10));
+            var plan = prepared.result().get(15, TimeUnit.SECONDS).plan();
+            prepared.completion().get(5, TimeUnit.SECONDS);
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var held = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                entered.countDown();
+                await(release);
+            });
+            var field = SegmentBookieControlLog.class.getDeclaredField("io");
+            field.setAccessible(true);
+            field.set(bookie(fixture.nodes.get(1)), held);
+            try {
+                var pending = CompletableFuture.supplyAsync(() -> fixture.nodes.get(1).adoptPreparedProfileDeletes(
+                        fixture.reservations, metadata, "ledger-profile", 64, Duration.ofSeconds(1), () -> true),
+                        fixture.cold);
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                var unknown = pending.get(5, TimeUnit.SECONDS);
+                assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.UNKNOWN, unknown.status());
+                assertFalse(unknown.completion().isDone());
+                assertNull(bookie(fixture.nodes.get(1)).adoptedDeleteHandoff());
+                assertNull(fixture.nodes.get(1).profileDeleteProgress());
+                release.countDown();
+                unknown.completion().get(5, TimeUnit.SECONDS);
+                assertArrayEquals(plan.encode(), bookie(fixture.nodes.get(1)).adoptedDeleteHandoff().encode());
+                var duplicate = fixture.nodes.get(1).adoptPreparedProfileDeletes(fixture.reservations, metadata,
+                        "ledger-profile", 64, Duration.ofSeconds(5), () -> true);
+                assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.ADOPTED_DURABLE, duplicate.status());
+                assertEquals(1, held.forces);
+                assertNull(fixture.nodes.get(1).profileDeleteProgress());
+                String path = actualDeleteStreamPath(fixture, target) + "/assignment-admission";
+                var before = new org.apache.zookeeper.data.Stat();
+                byte[] body = fixture.zk.getData(path, false, before);
+                fixture.zk.delete(path, before.getVersion());
+                fixture.zk.create(path, body, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                fixture.zk.setData(path, body, -1);
+                var stale = fixture.nodes.get(1).adoptPreparedProfileDeletes(fixture.reservations, metadata,
+                        "ledger-profile", 64, Duration.ofSeconds(5), () -> true);
+                assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.QUARANTINED, stale.status());
+                assertArrayEquals(plan.encode(), bookie(fixture.nodes.get(1)).adoptedDeleteHandoff().encode());
+                assertEquals(1, held.forces);
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
     public void committedDeleteDeliveriesShareOneIncarnationStreamAcrossTwoActualLedgers() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
             fixture.connectAll(Duration.ofSeconds(5));

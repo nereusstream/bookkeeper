@@ -61,6 +61,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
@@ -326,6 +327,99 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 throw new IllegalStateException("Original local delete recovery is not available");
             }
             return bookie.deleteAppliedCursor();
+        }
+    }
+
+    enum DeleteAdoptionStatus { ADOPTED_DURABLE, UNAVAILABLE, QUARANTINED, UNKNOWN }
+
+    record DeleteAdoptionAttempt(DeleteAdoptionStatus status, ProfileDeleteHandoff.Plan plan,
+            CompletableFuture<Void> completion) {
+        DeleteAdoptionAttempt {
+            Objects.requireNonNull(status, "status");
+            Objects.requireNonNull(completion, "completion");
+            if ((status == DeleteAdoptionStatus.ADOPTED_DURABLE) != (plan != null)) {
+                throw new IllegalArgumentException("Only a durable local adoption carries its plan");
+            }
+        }
+        @Override
+        public CompletableFuture<Void> completion() {
+            return completion.copy();
+        }
+    }
+
+    /** Native cold authority read, complete old cut, original force/apply, then fresh native recheck. */
+    DeleteAdoptionAttempt adoptPreparedProfileDeletes(ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout, BooleanSupplier live) {
+        Objects.requireNonNull(reservations, "reservations");
+        Objects.requireNonNull(metadata, "metadata");
+        Objects.requireNonNull(live, "live");
+        if (maxEvents < 1 || maxEvents > 4096 || timeout.isNegative() || timeout.isZero()
+                || timeout.compareTo(Duration.ofMinutes(1)) > 0 || controls == null || controls.isOwnerThread()) {
+            throw new IllegalArgumentException("Delete adoption requires a bounded cold caller");
+        }
+        long deadline = System.nanoTime() + timeout.toNanos();
+        var actual = CompletableFuture.<Void>completedFuture(null);
+        var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+        try {
+            var source = reservations.readPreparedDeleteHandoff(target);
+            if (source.status() != ZKProfileReservationStore.DeleteHandoffStatus.PREPARED) {
+                return new DeleteAdoptionAttempt(source.status()
+                        == ZKProfileReservationStore.DeleteHandoffStatus.QUARANTINED
+                            ? DeleteAdoptionStatus.QUARANTINED : DeleteAdoptionStatus.UNAVAILABLE, null, actual);
+            }
+            if (!live.getAsBoolean() || System.nanoTime() >= deadline) {
+                return new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNAVAILABLE, null, actual);
+            }
+            var catchUp = catchUpProfileDeletes(reservations, metadata, domain, maxEvents,
+                    Duration.ofNanos(deadline - System.nanoTime()), live);
+            actual = catchUp.completion();
+            if (catchUp.status() != DeleteCatchUpStatus.CAUGHT_UP) {
+                return new DeleteAdoptionAttempt(switch (catchUp.status()) {
+                    case QUARANTINED -> DeleteAdoptionStatus.QUARANTINED;
+                    case UNKNOWN -> DeleteAdoptionStatus.UNKNOWN;
+                    default -> DeleteAdoptionStatus.UNAVAILABLE;
+                }, null, actual);
+            }
+            actual.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            var fresh = reservations.readPreparedDeleteHandoff(target);
+            if (fresh.status() != ZKProfileReservationStore.DeleteHandoffStatus.PREPARED
+                    || !Arrays.equals(fresh.plan().encode(), source.plan().encode())) {
+                return new DeleteAdoptionAttempt(DeleteAdoptionStatus.QUARANTINED, null, actual);
+            }
+            var result = new CompletableFuture<SegmentBookieControlLog.Status>();
+            var terminal = new CompletableFuture<Void>();
+            synchronized (gate) {
+                if (!accepting || closed || !live.getAsBoolean() || System.nanoTime() >= deadline
+                        || !controls.submitHandoff(source.plan(), (value, failure) -> {
+                            if (failure == null) {
+                                result.complete(value);
+                            } else {
+                                result.completeExceptionally(failure);
+                            }
+                        }, () -> terminal.complete(null))) {
+                    return new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNAVAILABLE, null, actual);
+                }
+            }
+            actual = terminal;
+            var applied = result.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            actual.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            if (applied != SegmentBookieControlLog.Status.APPLIED_DURABLE
+                    && applied != SegmentBookieControlLog.Status.ALREADY_DURABLE) {
+                return new DeleteAdoptionAttempt(DeleteAdoptionStatus.QUARANTINED, null, actual);
+            }
+            fresh = reservations.readPreparedDeleteHandoff(target);
+            if (fresh.status() != ZKProfileReservationStore.DeleteHandoffStatus.PREPARED
+                    || !Arrays.equals(fresh.plan().encode(), source.plan().encode())) {
+                return new DeleteAdoptionAttempt(DeleteAdoptionStatus.QUARANTINED, null, actual);
+            }
+            return new DeleteAdoptionAttempt(DeleteAdoptionStatus.ADOPTED_DURABLE, source.plan(), actual);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNKNOWN, null, actual);
+        } catch (ExecutionException | TimeoutException unknown) {
+            return new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNKNOWN, null, actual);
+        } catch (IllegalArgumentException | IllegalStateException invalid) {
+            return new DeleteAdoptionAttempt(DeleteAdoptionStatus.QUARANTINED, null, actual);
         }
     }
 

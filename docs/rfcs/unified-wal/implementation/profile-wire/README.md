@@ -1617,7 +1617,7 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 
 ## Assignment handoff 的 PREPARED 与投递 cut
 
-2026-10-12，父源码a6dae28dda之后新增ProfileDeleteHandoff的有界UWHP/schema1计划与UWHA/schema1 admission。计划绑定stable target/incarnation、原Head/stream/assignment、head physical birth、next generation、操作ID和已完整发布snapshot的generation/birth/SHA；空stream以实际Head through0表示无prefix，没有虚构snapshot或local cursor。这里实现的是G+1 PREPARED的必要前置协议，未实现local G+1 force/adoption、catch-up ACK、EFFECTIVE CAS或old-route retirement，不能把计划或freeze当成切换完成。
+2026-10-12，父源码a6dae28dda之后新增ProfileDeleteHandoff的有界UWHP/schema1计划与UWHA/schema1 admission。计划绑定stable target/incarnation、原Head/stream/assignment、head physical birth、next generation、操作ID和已完整发布snapshot的generation/birth/SHA；空stream以实际Head through0表示无prefix，没有虚构snapshot或local cursor。此节只实现G+1 PREPARED的必要前置协议；本地持久adoption由下节接续，native catch-up ACK、EFFECTIVE CAS和old-route retirement仍未实现，不能把计划或freeze当成切换完成。
 
 原ZKProfileReservationStore为每个existing shared stream初始化assignment-admission，active G1初态与stream/target digest绑定。handoff先核验完整native snapshot及每个effect的authoritative LOGICALLY_DELETED/COMMITTED状态，再在同一个ZK multi中check原head version/birth与snapshot selection/root，更新admission version并创建不可变handoff-prepared。plan creation zxid必须等于admission修改zxid，plan/body digest和原head/cut必须仍一致；重建bytes/version不能冒充原准备事务。当前G1 Head和immutable assignment没有改变，旧event/index/metadata/target义务继续保留。
 
@@ -1634,5 +1634,25 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeleteHandoffTest,Pr
 python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-handoff --config-prefix ce-profile-delete-handoff --config-prefix a-profile-delete-snapshot --config-prefix ce-profile-delete-snapshot --config-prefix a-profile-delete-publication --config-prefix ce-profile-delete-publication
 ```
 
-证据 /Users/liusinan/.codex/artifacts/unified-wal/handoff-prepare-evidence-13l0dgu2 保留最终source、114项原阶段两文件、原命令/inputs/XML、模型与诊断stage，旧PASS不移绑。准备中的stream不会自行恢复new delete allocation；必须接续实际local G+1 adoption/ACK及EFFECTIVE协议，当前明确保持OPEN，未提供人为取消freeze或伪造ACK的绕过。retention/accepted terminal decommission/unrecoverable、old route/journal/history/page GC及Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续OPEN。默认OFF/SYSTEM/PARK和disabled能力不变，生产Gate不提升；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+证据 /Users/liusinan/.codex/artifacts/unified-wal/handoff-prepare-evidence-13l0dgu2 保留最终source、114项原阶段两文件、原命令/inputs/XML、模型与诊断stage，旧PASS不移绑。准备中的stream不会自行恢复new delete allocation；本地adoption已由下节接续，native ACK及EFFECTIVE协议仍明确保持OPEN，未提供人为取消freeze或伪造ACK的绕过。retention/accepted terminal decommission/unrecoverable、old route/journal/history/page GC及Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续OPEN。默认OFF/SYSTEM/PARK和disabled能力不变，生产Gate不提升；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 最终Spotless/Checkstyle exit0；编译/测试终结后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。
+
+
+## Assignment handoff 的本地持久 adoption
+
+2026-10-12，在PREPARED/cut之后接续本地必要阶段。`IsolatedSegmentStorage.adoptPreparedProfileDeletes`是有界cold入口：按原Bookie/incarnation读取native PREPARED完整Plan，先通过原`catchUpProfileDeletes`应用所有G1 prefix，等待真实owner终态，再重读原Plan。原`SegmentBookieControlDriver`占用既有control writer和reserved I/O；Bookie control type14 `DELETE_HANDOFF_ADOPT`以原Plan operation ID、next generation、expected predecessor generation及完整canonical Plan作为header/body。写入与force成功后才由owner顺序apply；随后再次native核验Plan，才返回`ADOPTED_DURABLE`。该状态只证明这一opened graph的本地持久准备，不是native ACK或EFFECTIVE事实，未增加wire opcode。
+
+`SegmentBookieControlLog`只接受匹配实际storage identity且本地no-hole cursor恰好等于predecessor cut的Plan；空cut要求没有本地effect，不构造sequence0 DeleteBinding。adoption单独保存，现有cursor继续是G1，原event UUID/scope、TOMBSTONE与物理终结记录均保留。已有同一Plan按完整字节解析为ALREADY，无再次force；不同Plan或与原控制operation冲突拒绝。adoption后的新旧流event被本地拒绝，已应用event继续幂等；普通G1 DATA不受此准备阶段影响。
+
+记录接入原journal首遍扫描、checkpoint retained operations、旋转及restart replay。checkpoint history清理不会把adoption当作旧checkpoint ID删除。重放核验原cut和完整header/body绑定，恢复的是已force/apply的Plan与原G1 effects；不把prepared next generation写成当前cursor或READY generation。空cut adoption也是拒绝同scope旧binary rollback的持久authority存在事实。
+
+force/I/O失败不公布本地adoption并使原writer fail-closed。timeout/interruption只结束等待，`DeleteAdoptionAttempt.completion`独立等到原owner completion credit实际归还；held force解除后才可解析实际落地结果。fresh native source被替换或不可确认时不返回durable adoption成功，即使本地同Plan已保存；不会覆盖本地记录或猜测有效assignment。
+
+验证：最终`EyoTHVLz`四类27项Java，失败/错误/跳过均0。新增五项实际文件/原ZK/SDK/网络验证包括完整prefix TOMBSTONE→独立adoption force、相同Plan免force、G1正常Add、checkpoint旋转重启、空cut重启、错误target/未完整cut、force失败、held force超时后实际终态与native admission同bytes/version ABA。原`K6RgekWM`五项阶段PASS保留原SocketTest源码，未移绑最终ABA断言。`fnkts5vj`20项有限配置为3正向完整PASS/17指定性质反例；新增adoption正向53 generated/34 distinct、queue0、depth/diameter9、1.012s、RSS106708992B，四个反例分别检验完整cut、force、checkpoint保留和真实owner释放边界。模型的native authority与物理I/O来自Java事实，不证明native ACK/EFFECTIVE、真实掉电或完整A+C+D。Java1112与模型1067输入的1911个唯一source hash在最终源码逐项核验一致；当前声明catalog698项，本次只运行20项。
+
+```sh
+scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest#*DeleteHandoff*+deleteHandoffAdoptionRequiresCompleteCutAndSurvivesCheckpointRotation+continuousDeleteCursor*+uncertainDeleteDelivery*+originalJournalRestoresLatestCompactedCheckpointAndCorruptionFallback+legacyCheckpoint*+bookieControlDriverKeepsOwnerResponsiveAcrossFenceWaitAndForce+rejectedControlIo*+explicitLacUsesReservedControlIoAndAppliesOnTheOwner,SegmentProfileInitialSocketClientTest#deleteHandoff*+deleteSnapshot*+committedDeleteDeliveriesShareOneIncarnationStreamAcrossTwoActualLedgers,SegmentControlFormatTest,ProfileDeleteHandoffTest'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-adoption --config-prefix ce-profile-delete-adoption --config-prefix a-profile-delete-handoff --config-prefix ce-profile-delete-handoff --config-prefix a-profile-delete-snapshot --config-prefix ce-profile-delete-snapshot
+```
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/handoff-adoption-evidence-pe_6hpi5`保存最终source、原stage override、命令/inputs/XML、模型完整trace及diagnostics。Spotless/Checkstyle exit0；Java与模型终止后的独立RAT exit1，443 unapproved均存在父HEAD、无新增。native catch-up ACK、conditional EFFECTIVE、old-route retirement及连续G2 journal/registration接线仍OPEN；retention/accepted terminal decommission/unrecoverable/history GC，以及Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续推进。默认OFF/SYSTEM/PARK及disabled能力不变，生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

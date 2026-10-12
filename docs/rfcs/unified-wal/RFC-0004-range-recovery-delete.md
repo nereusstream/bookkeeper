@@ -1156,3 +1156,6 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 
 
 2026-10-12 [Assignment handoff 的 PREPARED 与投递 cut](implementation/profile-wire/README.md#assignment-handoff-的-prepared-与投递-cut)已把完整native snapshot/COMMITTED effects接到原ZK admission/head同multi排序，两个实际delete publisher路径都不能跨冻结cut；旧G1 DATA与已记录effect仍有效，计划不生成local G2或EFFECTIVE事实。114项原阶段/最终6项Java和23有限模型配置（3正向/20指定反例）通过；local adoption/ACK/EFFECTIVE/route retirement、retention/GC及其他16步验收仍OPEN，生产Gate不提升。
+
+
+2026-10-12 [Assignment handoff 的本地持久 adoption](implementation/profile-wire/README.md#assignment-handoff-的本地持久-adoption)已将实际PREPARED Plan接入原Bookie type14 force/owner apply/checkpoint/replay；必须先完成原G1 cut，空cut不生成effect，重复相同Plan不再force，普通G1 DATA保持有效。等待超时不释放实际I/O，fresh native admission ABA拒绝重新确认。最终4类27项Java、20有限模型配置（3正向/17指定反例）及style通过；native catch-up ACK/EFFECTIVE CAS/old-route retirement、retention/GC及其他16步验收仍OPEN，生产Gate不提升。

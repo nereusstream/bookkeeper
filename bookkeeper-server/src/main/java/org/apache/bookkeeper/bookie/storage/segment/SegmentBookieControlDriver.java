@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
 
 /** Bookie control commands use reserved control I/O and return ordered results to the owner. */
 final class SegmentBookieControlDriver {
@@ -134,6 +135,62 @@ final class SegmentBookieControlDriver {
                 public void failed(Throwable cause) {
                     owner.requireOwner();
                     deliver(completion, null, cause);
+                }
+            });
+        } catch (RuntimeException | Error failure) {
+            busy.set(false);
+            throw failure;
+        }
+        if (!accepted) {
+            busy.set(false);
+        }
+        return accepted;
+    }
+
+    /** Cold native handoff adoption uses the same reserved writer and actual owner terminal hook. */
+    boolean submitHandoff(ProfileDeleteHandoff.Plan plan, LacCompletion completion, Runnable terminal) {
+        Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(completion, "completion");
+        Objects.requireNonNull(terminal, "terminal");
+        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
+            return false;
+        }
+        boolean accepted;
+        try {
+            accepted = owner.submitControl(new SegmentOwnerLoop.Command() {
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    var durable = new AtomicReference<SegmentBookieControlLog.HandoffWrite>();
+                    try {
+                        io.submitControl(ticket, () -> durable.set(log.appendHandoffDurably(plan)), failure -> {
+                            owner.requireOwner();
+                            if (failure != null) {
+                                deliver(completion, null, failure);
+                                return;
+                            }
+                            SegmentBookieControlLog.Status result;
+                            try {
+                                result = log.applyHandoffDurable(durable.get());
+                            } catch (Throwable applyFailure) {
+                                deliver(completion, null, applyFailure);
+                                return;
+                            }
+                            deliver(completion, result, null);
+                        });
+                    } catch (Throwable failure) {
+                        ticket.complete(() -> deliver(completion, null, failure));
+                    }
+                }
+
+                @Override
+                public void failed(Throwable failure) {
+                    owner.requireOwner();
+                    deliver(completion, null, failure);
+                }
+
+                @Override
+                public void terminal() {
+                    terminal.run();
                 }
             });
         } catch (RuntimeException | Error failure) {
