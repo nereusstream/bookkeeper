@@ -327,6 +327,78 @@ public final class ProfileDeleteCoordinator {
 
     public enum PhysicalStatus { REUSABLE_EVERY_TARGET, DURABLY_REUSABLE_EVERY_TARGET, PENDING, QUARANTINED }
 
+    public record JournalCompactionAttempt(
+            CompletableFuture<ZKProfileReservationStore.JournalCompactionResult> result,
+            CompletableFuture<Void> completion) { }
+
+    /** Bounded duplicate-prefix cleanup; actual cold completion remains independent of waiting cancellation. */
+    public JournalCompactionAttempt beginCompactJournalPrefix(ProfileDeleteRecord.Target target,
+            long first, long last, ClientContext sdk, Duration maxDuration) {
+        Objects.requireNonNull(target, "target");
+        if (first < 1 || last < first || last > ProfileDeleteDelivery.MAX_EVENTS
+                || last - first >= ProfileDeleteSnapshot.EVENTS_PER_PAGE
+                || maxDuration.isNegative() || maxDuration.isZero()
+                || maxDuration.compareTo(Duration.ofMinutes(1)) > 0) {
+            throw new IllegalArgumentException("Delete journal compaction requires a bounded prefix batch");
+        }
+        var unavailable = ZKProfileReservationStore.journalCompactionFailure(
+                ZKProfileReservationStore.JournalCompactionStatus.UNAVAILABLE, first, last);
+        if (sdk.isClientClosed()) {
+            return new JournalCompactionAttempt(CompletableFuture.failedFuture(
+                    BKException.create(BKException.Code.ClientClosedException)),
+                    CompletableFuture.completedFuture(null));
+        }
+        if (!active.tryAcquire()) {
+            return new JournalCompactionAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+        var stopped = new AtomicBoolean();
+        var caller = new CompletableFuture<ZKProfileReservationStore.JournalCompactionResult>();
+        var completion = new CompletableFuture<Void>();
+        var timer = new AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
+        try {
+            var actual = CompletableFuture.supplyAsync(() -> reservations.compactDeleteJournalPrefix(
+                    metadata, target, first, last, () -> !stopped.get() && !sdk.isClientClosed()), cold);
+            actual.whenComplete((result, failure) -> {
+                var scheduled = timer.get();
+                if (scheduled != null) {
+                    scheduled.cancel(false);
+                }
+                active.release();
+                completion.complete(null);
+                if (failure == null) {
+                    caller.complete(result);
+                } else {
+                    caller.completeExceptionally(failure);
+                }
+            });
+            try {
+                var scheduled = sdk.getScheduler().schedule(() -> {
+                    stopped.set(true);
+                    caller.complete(ZKProfileReservationStore.journalCompactionFailure(
+                            ZKProfileReservationStore.JournalCompactionStatus.DURABILITY_UNKNOWN, first, last));
+                }, maxDuration.toNanos(), TimeUnit.NANOSECONDS);
+                timer.set(scheduled);
+                if (actual.isDone()) {
+                    scheduled.cancel(false);
+                }
+            } catch (RejectedExecutionException rejected) {
+                stopped.set(true);
+                caller.complete(unavailable);
+            }
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return new JournalCompactionAttempt(caller, completion.copy());
+        } catch (RejectedExecutionException rejected) {
+            active.release();
+            return new JournalCompactionAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+    }
+
     public record TargetObservation(ProfilePhysicalDeleteCodec.Outcome outcome,
             ProfilePhysicalDeleteCodec.Reply reply) { }
 

@@ -4013,6 +4013,194 @@ public final class ZKProfileReservationStore {
         return new DeleteSnapshotResult(status, null);
     }
 
+    private List<Op> deleteSnapshotChecks(ProfileDeleteRecord.Target target, DeleteSnapshotView view, long deadline)
+            throws InterruptedException, TimeoutException {
+        snapshotEffect(target, 1, view, deadline); // Recheck the original complete view's current selection.
+        String name = deleteSnapshotPath(target, view.value().generation());
+        var checks = new ArrayList<Op>();
+        checks.add(Op.check(deliveryPath(target) + "/snapshot-current", (int) view.selectionVersion));
+        checks.add(Op.check(name, 0));
+        checks.add(Op.check(name + "/birth-" + HexFormat.of().formatHex(view.value().birthId()), 0));
+        checks.add(Op.check(name + "/published", 0));
+        for (int page = 0; page < view.value().pageDigests().size(); page++) {
+            checks.add(Op.check(name + "/page-" + Integer.toHexString(page), 0));
+        }
+        return checks;
+    }
+
+    private List<Op> deleteEventChecks(ProfileDeleteDelivery.Event event, long deadline)
+            throws InterruptedException, TimeoutException {
+        String name = deliveryPath(event.target()) + "/event-" + Long.toHexString(event.sequence());
+        var node = reads.get(name, deadline);
+        var index = reads.get(path(event.ledger().ledgerId()) + "/delete-delivery-"
+                + deliveryTargetKey(event.target()), deadline);
+        requireFound(index);
+        requirePersistent(index, true);
+        if (!Arrays.equals(index.bytes(), event.encode())) {
+            throw new IllegalArgumentException("Delete event lost its original index");
+        }
+        if (node.code() != Code.NONODE.intValue()) {
+            requireFound(node);
+            requirePersistent(node, true);
+            if (node.stat().getCzxid() != index.stat().getCzxid()
+                    || !Arrays.equals(node.bytes(), event.encode())) {
+                throw new IllegalArgumentException("Delete event was recreated or changed");
+            }
+            return List.of(Op.check(name, 0));
+        }
+        var loaded = readDeleteSnapshot(event.target());
+        if (loaded.snapshot() == null) {
+            if (loaded.status() == DeleteSnapshotStatus.UNAVAILABLE) {
+                throw new IllegalStateException("Required delete snapshot unavailable");
+            }
+            throw new IllegalArgumentException("Missing delete event has no complete snapshot");
+        }
+        var effect = snapshotEffect(event.target(), event.sequence(), loaded.snapshot(), deadline);
+        if (effect.originalBirth() != index.stat().getCzxid()
+                || !Arrays.equals(effect.event().encode(), event.encode())) {
+            throw new IllegalArgumentException("Snapshot effect lost its original event/index identity");
+        }
+        return deleteSnapshotChecks(event.target(), loaded.snapshot(), deadline);
+    }
+
+    public enum JournalCompactionStatus {
+        COMPACTED, PRECONDITION_FAILED, CANCELLED, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN
+    }
+
+    public record JournalCompactionResult(JournalCompactionStatus status, ProfileDeleteDelivery.Head head,
+            ProfileDeleteSnapshot.Root snapshot, long firstSequence, long lastSequence) {
+        public JournalCompactionResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == JournalCompactionStatus.COMPACTED) != (head != null)
+                    || (head == null) != (snapshot == null)
+                    || firstSequence < 1 || lastSequence < firstSequence
+                    || lastSequence - firstSequence >= ProfileDeleteSnapshot.EVENTS_PER_PAGE
+                    || lastSequence > ProfileDeleteDelivery.MAX_EVENTS) {
+                throw new IllegalArgumentException("Invalid bounded delete journal compaction result");
+            }
+        }
+    }
+
+    static JournalCompactionResult journalCompactionFailure(JournalCompactionStatus status, long first, long last) {
+        return new JournalCompactionResult(status, null, null, first, last);
+    }
+
+    /** Remove only bounded duplicate journal rows behind an effective handoff and complete retained snapshot.
+     * Every effect/index/ledger tombstone and physical obligation remains required; no target-history GC. */
+    JournalCompactionResult compactDeleteJournalPrefix(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Target target, long first, long last, java.util.function.BooleanSupplier live) {
+        requireRecoveryClient(metadata);
+        if (first < 1 || last < first || last > ProfileDeleteDelivery.MAX_EVENTS
+                || last - first >= ProfileDeleteSnapshot.EVENTS_PER_PAGE) {
+            throw new IllegalArgumentException("Delete journal compaction exceeds its prefix batch bound");
+        }
+        long deadline = System.nanoTime() + timeoutNanos;
+        boolean submitted = false;
+        try {
+            var head = deleteHead(target, deadline);
+            if (head == null || head.head().assignmentGeneration() == 1) {
+                return journalCompactionFailure(JournalCompactionStatus.PRECONDITION_FAILED, first, last);
+            }
+            var effective = effectiveHandoff(target, head.head().assignmentGeneration(), deadline);
+            var loaded = readDeleteSnapshot(target);
+            if (loaded.snapshot() == null) {
+                return journalCompactionFailure(loaded.status() == DeleteSnapshotStatus.UNAVAILABLE
+                        ? JournalCompactionStatus.UNAVAILABLE : JournalCompactionStatus.QUARANTINED, first, last);
+            }
+            var view = loaded.snapshot();
+            if (last > effective.plan().predecessor().committedThrough()
+                    || last > view.value().cut().committedThrough()) {
+                return journalCompactionFailure(JournalCompactionStatus.PRECONDITION_FAILED, first, last);
+            }
+            String stream = deliveryPath(target);
+            var checks = new ArrayList<Op>(deleteSnapshotChecks(target, view, deadline));
+            checks.add(Op.check(stream, head.node().stat().getVersion()));
+            checks.add(Op.check(stream + "-assignment", 0));
+            checks.add(Op.check(stream + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0));
+            String handoff = handoffEffectivePath(target, head.head().assignmentGeneration());
+            checks.add(Op.check(handoff, 0));
+            checks.add(Op.check(handoff + "/birth-" + HexFormat.of().formatHex(effective.birthId()), 0));
+            var removals = new ArrayList<Op>();
+            for (long sequence = first; sequence <= last; sequence++) {
+                if (!live.getAsBoolean()) {
+                    return journalCompactionFailure(JournalCompactionStatus.CANCELLED, first, last);
+                }
+                ProfileZKReadClient.requireTime(deadline);
+                var effect = view.effects().get((int) sequence - 1);
+                var committed = readDeleteDelivery(metadata, target, sequence, view);
+                if (committed.status() != DeliveryStatus.COMMITTED
+                        || !Arrays.equals(effect.event().encode(), committed.event().encode())) {
+                    return journalCompactionFailure(committed.status() == DeliveryStatus.UNAVAILABLE
+                            ? JournalCompactionStatus.UNAVAILABLE : JournalCompactionStatus.QUARANTINED, first, last);
+                }
+                var state = read(effect.event().ledger().ledgerId(), deadline);
+                var member = metadata.readMembership(effect.event().ledger().ledgerId(), deadline);
+                if (state.snapshot() == null || member.snapshot() == null) {
+                    return journalCompactionFailure(JournalCompactionStatus.UNAVAILABLE, first, last);
+                }
+                checks.addAll(recoveryRootChecks(state.snapshot(), deadline));
+                checks.addAll(metadata.checksForMembership(member.snapshot()));
+                checks.add(Op.check(path(effect.event().ledger().ledgerId()) + "/delete-delivery-"
+                        + deliveryTargetKey(target), 0));
+                String eventPath = stream + "/event-" + Long.toHexString(sequence);
+                var eventNode = reads.get(eventPath, deadline);
+                if (eventNode.code() != Code.NONODE.intValue()) {
+                    requireFound(eventNode);
+                    requirePersistent(eventNode, true);
+                    if (eventNode.stat().getCzxid() != effect.originalBirth()
+                            || !Arrays.equals(eventNode.bytes(), effect.event().encode())) {
+                        return journalCompactionFailure(JournalCompactionStatus.QUARANTINED, first, last);
+                    }
+                    removals.add(Op.delete(eventPath, 0));
+                }
+            }
+            if (!live.getAsBoolean()) {
+                return journalCompactionFailure(JournalCompactionStatus.CANCELLED, first, last);
+            }
+            if (!removals.isEmpty()) {
+                checks.addAll(removals);
+                submitted = true;
+                multi(checks, deadline);
+            }
+            var fresh = readDeleteSnapshot(target);
+            var latest = deleteHead(target, deadline);
+            if (fresh.snapshot() == null || latest == null
+                    || fresh.snapshot().rootBirth != view.rootBirth
+                    || fresh.snapshot().selectionVersion != view.selectionVersion
+                    || fresh.snapshot().selectionZxid != view.selectionZxid
+                    || !Arrays.equals(fresh.snapshot().value().encode(), view.value().encode())
+                    || !Arrays.equals(latest.head().encode(), head.head().encode())) {
+                return journalCompactionFailure(submitted ? JournalCompactionStatus.DURABILITY_UNKNOWN
+                        : JournalCompactionStatus.UNAVAILABLE, first, last);
+            }
+            for (long sequence = first; sequence <= last; sequence++) {
+                var node = reads.get(stream + "/event-" + Long.toHexString(sequence), deadline);
+                if (node.code() != Code.NONODE.intValue()) {
+                    return journalCompactionFailure(submitted ? JournalCompactionStatus.DURABILITY_UNKNOWN
+                            : JournalCompactionStatus.UNAVAILABLE, first, last);
+                }
+                var committed = readDeleteDelivery(metadata, target, sequence, fresh.snapshot());
+                if (committed.status() != DeliveryStatus.COMMITTED) {
+                    return journalCompactionFailure(committed.status() == DeliveryStatus.QUARANTINED
+                            ? JournalCompactionStatus.QUARANTINED : submitted
+                                ? JournalCompactionStatus.DURABILITY_UNKNOWN : JournalCompactionStatus.UNAVAILABLE,
+                            first, last);
+                }
+            }
+            return new JournalCompactionResult(JournalCompactionStatus.COMPACTED,
+                    latest.head(), fresh.snapshot().value(), first, last);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return journalCompactionFailure(submitted ? JournalCompactionStatus.DURABILITY_UNKNOWN
+                    : JournalCompactionStatus.UNAVAILABLE, first, last);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return journalCompactionFailure(submitted ? JournalCompactionStatus.DURABILITY_UNKNOWN
+                    : JournalCompactionStatus.UNAVAILABLE, first, last);
+        } catch (IllegalArgumentException invalid) {
+            return journalCompactionFailure(JournalCompactionStatus.QUARANTINED, first, last);
+        }
+    }
+
     /** Missing is unknown authority, never an empty applicable set or a bootstrap instruction. */
     public DeleteHeadResult readDeleteHead(ProfileDeleteRecord.Target target) {
         long deadline = System.nanoTime() + timeoutNanos;
@@ -4551,7 +4739,7 @@ public final class ZKProfileReservationStore {
             String stream = deliveryPath(receipt.event().target());
             operations.add(Op.check(stream + "-assignment", 0));
             operations.add(Op.check(stream + "/birth-" + HexFormat.of().formatHex(receipt.event().streamId()), 0));
-            operations.add(Op.check(stream + "/event-" + Long.toHexString(receipt.event().sequence()), 0));
+            operations.addAll(deleteEventChecks(receipt.event(), deadline));
             String name = physicalDeleteReceiptPath(manifest.ledger().ledgerId(), receipt.event().target());
             byte[] body = receipt.encode();
             operations.add(Op.create(name, body, pageAcls, CreateMode.PERSISTENT));

@@ -1727,3 +1727,24 @@ scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeleteRetentionTest,Profi
 最终 `unified-wal-model-u9b9e3zg`：retention/logical-delete/delete-publication/physical-receipt 共29配置，4完整正向与25指定反例。新增有限投影覆盖 native policy CAS、同事务绑定、旧窗口保留、birth ABA、无策略历史不可补写；完整字节和实际存储事实仍由Java生产，不证明时间、backup restore或GC。1115 Java与1094模型输入的1938个唯一source SHA冻结核验一致，证据在 `/Users/liusinan/.codex/artifacts/unified-wal/delete-retention-evidence-b3jp036x`，含原输入/命令/XML、旧source overrides和失败诊断。最终Spotless/Checkstyle exit0；所有Java/模型终结后的独立RAT exit1，443 unapproved均存在父HEAD、无新增。
 
 后续继续真实backup/restore接受条件、rejoin与history/page/tombstone/lineage GC、accepted decommission/unrecoverable及完整16步其余验收。默认OFF/SYSTEM/PARK和disabled能力不变，步骤11/12/14/15与生产Gate保持PARTIAL/OPEN；Linux NUMA、真实掉电、stock binary、正式性能/canary本轮NOT_EXECUTED。阶段归档后仅释放精确自有、已完成且可再生的临时产物；共享targets、用户PDF及其他任务文件保留。
+
+
+## 删除 journal prefix 的实际 compaction
+
+2026-10-12，接续父提交`9d581d67dbf3a4efe657c7a9045e2b6627f96be9`。`ProfileDeleteCoordinator.beginCompactJournalPrefix`复用原bounded cold、SDK timer、实际completion与semaphore custody；`ZKProfileReservationStore.compactDeleteJournalPrefix`只删除原shared stream里由完整published snapshot替代的duplicate event rows。每次显式[first,last]最多64项，last不超过最新native EFFECTIVE handoff的predecessor cut及snapshot covered-through；G1、未生效handoff或未覆盖suffix不得执行。没有后台线程、逐entry Add metadata、格式升级或默认routing变化。
+
+删除前核验完整snapshot root/pages/current selection的原生出生/发布关系、同Bookie/incarnation的effective lineage、原始event/index出生与字节、每个effect的logical-COMMITTED metadata/Manifest。head version、scope birth、effective guard、snapshot pointer/root/birth/published/全部pages、metadata/root与index检查和实际event删除进入同一native multi。原event没有子节点；不删除index、任何snapshot effect/page、Manifest/tombstone/retention/physical receipt或handoff history。提交后重读同一完整snapshot/selection/head、实际row absence和每个逻辑effect，才返回COMPACTED及对应range；已被其他健康compactor移除的相同range也可按当前完整事实幂等确认。没有把候选行数当作本次实际删除数量。未知回复、来源变化与取消保留各自状态，不伪造GC成功。
+
+`publishPhysicalDeleteReceipt`原先依赖raw event的native check，现经`deleteEventChecks`在row已compact时改查完整snapshot原始effect/index身份及current/root/pages条件；raw row仍存在时继续核验原生event/index commit。这样prefix删除后仍能取得并持久保存真实UIC8 REUSABLE，而不是放弃尚未终结的物理义务。缺chunk、recreated index、不同original birth或不完整source仍fail closed。新接口不移除stream或旧incarnation，不产生永久decommission、backup restore接受或target Manifest GC权限。
+
+真实三目标主路径验证G1拒绝、G2在原SDK新journal DATA/close/delete后删除旧prefix、published snapshot先赢使旧native批次无效、GC回复丢失后确认、幂等重查、删后全目标physical receipt持久化、G3继续删除seq2、held native回复时caller cancel不释放actual cold custody，以及Bookie控制日志rotation和健康文件restart仍保持两ledger tombstone/原event identity与through2/effective3。最后删除必需snapshot chunk的可丢弃故障使后续读取/compaction quarantine，logical tombstone及target义务仍保留。
+
+阶段`unified-wal-local-YHazqNaa`实际6类34项、零failure/error/skip；仅修正coordinator行宽后，最终`unified-wal-local-KkzAMPyV`上述实际主路径1项补验通过。最初vRnVb2ce把相同through的幂等snapshot publication误当作竞争，测试未通过；后来使用真实seq2 publication竞争，保留原失败及每阶段source绑定。复现共享范围：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeleteSnapshotTest,ProfileDeleteHandoffTest,ProfileDeleteRetentionTest,ProfileDeletePhysicalReceiptTest,ZKProfileReservationStoreTest,SegmentProfileInitialSocketClientTest#deleteHandoffEffective*+deleteSnapshot*+physicalDeletionReceipt*+deleteRetention*+deleteWithoutPolicyRemainsProtectedAfterClusterPolicyIsIntroduced'
+```
+
+最终`unified-wal-model-9yl_dhii`与snapshot/EFFECTIVE/physical-receipt共31配置，4完整正向/27指定反例；新增有限投影只消费Java的完整source/native/local FREE事实，检查snapshot/effective takeover、selection CAS、effects保留、原始physical birth和actual custody。1115 Java与1102模型输入的1946个唯一source SHA逐项冻结；`/Users/liusinan/.codex/artifacts/unified-wal/journal-compaction-evidence-9qrgu28k`保留source、原命令/inputs/XML、所有stage overrides、模型及失败诊断。最终Spotless/Checkstyle exit0；Java/模型/checker终结后的独立RAT exit1，443 unapproved均存在父HEAD、无新增，不提升CI或生产Gate。
+
+这里完成有界journal duplicate prefix删除。snapshot仍含所有still-required effects；target Manifest/tombstone、snapshot/page/lineage本身的GC、backup/restore接受、retention时间屏障与accepted decommission/unrecoverable继续实施。4096-event及64-generation原prototype上限保持，不宣称可无限扩容。默认OFF/SYSTEM/PARK及disabled能力不变，完整16步/生产Gate OPEN；Linux NUMA、真实掉电、stock binary和正式性能/canary本轮NOT_EXECUTED。

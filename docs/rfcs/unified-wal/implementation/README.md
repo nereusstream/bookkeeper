@@ -678,3 +678,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-12 [删除 retention policy 与原子 receipt](profile-wire/README.md#删除-retention-policy-与原子-receipt)已将显式offline/rejoin、metadata propagation、backup/restore窗口绑定到原逻辑删除的native同事务metadata/immutable receipt，保留策略历史与全部target义务。策略竞争整体拒绝，旧窗口不随新策略缩短，无策略历史继续受保护。6类38项真实回归、29有限模型配置及1938冻结source通过，style exit0；RAT443父HEAD路径无新增。BOUND不授权GC，实际backup/restore/rejoin接受、历史GC与全16步其余验收继续OPEN；默认OFF/SYSTEM/PARK和生产Gate不提升。
+
+
+2026-10-12 [删除 journal prefix 的实际 compaction](profile-wire/README.md#删除-journal-prefix-的实际-compaction)已接完整snapshot与同incarnation EFFECTIVE cut后的bounded native duplicate-row删除，并接通删后physical receipt持久化。真实G2/G3、snapshot publication竞争、回复丢失/held cancel、rotation/restart有6类34项原阶段及最终1项补验、31有限模型配置和1946冻结source证据。全部effect/index/Manifest/tombstone/retention/physical及handoff义务保留；snapshot/page/lineage/target GC、backup restore接受和16步其余验收仍OPEN，默认OFF/SYSTEM/PARK及生产Gate不提升。

@@ -19,6 +19,13 @@ import time
 
 
 MATRIX = {
+    'a-profile-journal-compaction': None,
+    'ce-profile-journal-compaction-snapshot': 'PrunedHasCompleteSnapshot',
+    'ce-profile-journal-compaction-effective': 'PrunedHasEffectiveTakeover',
+    'ce-profile-journal-compaction-effects': 'PrunedKeepsEveryEffect',
+    'ce-profile-journal-compaction-cas': 'PrunedHasNativeSelectionCAS',
+    'ce-profile-journal-compaction-physical': 'PhysicalReceiptKeepsOriginalBirth',
+    'ce-profile-journal-compaction-custody': 'CancellationKeepsActualCustody',
     'a-profile-delete-retention': None,
     'ce-profile-delete-retention-cas': 'RetentionHasCurrentPolicyCAS',
     'ce-profile-delete-retention-atomic': 'RetentionHasAtomicTombstone',
@@ -938,6 +945,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileJournalCompaction.tla" if "profile-journal-compaction" in name
                    else "ProfileDeleteRetention.tla" if "profile-delete-retention" in name
                    else "ProfileDeleteEffective.tla" if "profile-delete-effective" in name
                    else "ProfileDeleteHandoffAck.tla" if "profile-handoff-ack" in name

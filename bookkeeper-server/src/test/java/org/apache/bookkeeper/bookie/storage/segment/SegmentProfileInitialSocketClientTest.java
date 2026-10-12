@@ -4697,6 +4697,7 @@ public class SegmentProfileInitialSocketClientTest {
         volatile boolean intercepted;
         volatile Runnable release;
         volatile Runnable beforeSelectedMulti;
+        volatile int selectedOpType = -1;
 
         HandoffReplyClient(String connect, ZooKeeperWatcherBase watcher, boolean hold) throws Exception {
             this(connect, watcher, hold, "/handoff-prepared");
@@ -4714,7 +4715,8 @@ public class SegmentProfileInitialSocketClientTest {
                 org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
             var ops = new ArrayList<org.apache.zookeeper.Op>();
             operations.forEach(ops::add);
-            boolean handoff = !intercepted && ops.stream().anyMatch(op -> op.getPath().endsWith(suffix));
+            boolean handoff = !intercepted && ops.stream().anyMatch(op -> op.getPath().endsWith(suffix)
+                    && (selectedOpType < 0 || op.getType() == selectedOpType));
             Runnable before = handoff ? beforeSelectedMulti : null;
             if (before != null) {
                 beforeSelectedMulti = null;
@@ -5154,13 +5156,23 @@ public class SegmentProfileInitialSocketClientTest {
     @Test
     public void deleteHandoffEffectiveAllRealTargetsRejoinG2AndKeepOldEventsWithNewJournalData() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
-            preparePhysicalDelete(fixture, sdk, false);
+            var initialMetadata = preparePhysicalDelete(fixture, sdk, false);
+            var initialTarget = new ProfileDeleteRecord.Target(fixture.identities.get(0).bookieId().toString(),
+                    fixture.identities.get(0).incarnation().value());
+            var premature = new ProfileDeleteCoordinator(fixture.reservations, initialMetadata, fixture.cold)
+                    .beginCompactJournalPrefix(initialTarget, 1, 1, sdk.getClientCtx(), Duration.ofSeconds(10));
+            assertEquals(ZKProfileReservationStore.JournalCompactionStatus.PRECONDITION_FAILED,
+                    premature.result().get(15, TimeUnit.SECONDS).status());
+            premature.completion().get(5, TimeUnit.SECONDS);
+            assertNotNull(fixture.zk.exists(actualDeleteStreamPath(fixture, initialTarget) + "/event-1", false));
             for (var client : fixture.clients.values()) {
                 client.closeAsync().get(5, TimeUnit.SECONDS);
             }
             fixture.clients.clear();
             var watcher = new ZooKeeperWatcherBase(10000, false);
-            try (var client = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher)) {
+            try (var client = new HandoffReplyClient(fixture.cluster.getZooKeeperConnectString(), watcher,
+                    false, "/event-1")) {
+                client.selectedOpType = org.apache.zookeeper.ZooDefs.OpCode.delete;
                 watcher.waitForConnection();
                 client.create("/handoff-readiness", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
                 client.create("/handoff-requirements", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
@@ -5245,6 +5257,48 @@ public class SegmentProfileInitialSocketClientTest {
                     for (int node = 0; node < 3; node++) {
                         var target = new ProfileDeleteRecord.Target(fixture.identities.get(node).bookieId().toString(),
                                 fixture.identities.get(node).incarnation().value());
+                        var compactor = new ProfileDeleteCoordinator(source, metadata, fixture.cold);
+                        if (node == 0) {
+                            client.beforeSelectedMulti = () -> assertEquals(
+                                    ZKProfileReservationStore.DeleteSnapshotStatus.FOUND,
+                                    fixture.reservations.publishDeleteSnapshot(initialMetadata, target,
+                                            64, Duration.ofSeconds(10), () -> true).status());
+                            var raced = compactor.beginCompactJournalPrefix(
+                                    target, 1, 1, sdk.getClientCtx(), Duration.ofSeconds(10));
+                            assertEquals(ZKProfileReservationStore.JournalCompactionStatus.DURABILITY_UNKNOWN,
+                                    raced.result().get(15, TimeUnit.SECONDS).status());
+                            raced.completion().get(5, TimeUnit.SECONDS);
+                            assertNotNull(client.exists(actualDeleteStreamPath(fixture, target) + "/event-1", false));
+                        }
+                        var compact = compactor.beginCompactJournalPrefix(
+                                target, 1, 1, sdk.getClientCtx(), Duration.ofSeconds(10));
+                        var compacted = compact.result().get(15, TimeUnit.SECONDS);
+                        assertEquals(ZKProfileReservationStore.JournalCompactionStatus.COMPACTED, compacted.status());
+                        compact.completion().get(5, TimeUnit.SECONDS);
+                        assertNull(client.exists(actualDeleteStreamPath(fixture, target) + "/event-1", false));
+                        assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
+                                source.readDeleteDelivery(metadata, target, 1).status());
+                        var duplicate = compactor.beginCompactJournalPrefix(
+                                target, 1, 1, sdk.getClientCtx(), Duration.ofSeconds(10));
+                        assertEquals(ZKProfileReservationStore.JournalCompactionStatus.COMPACTED,
+                                duplicate.result().get(15, TimeUnit.SECONDS).status());
+                        duplicate.completion().get(5, TimeUnit.SECONDS);
+                    }
+                    assertTrue("Actual prefix transaction reply must be lost once", client.intercepted);
+                    var manifest = source.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+                    var physicalPeers = new HashMap<ProfileDeleteRecord.Target, ProfileInitialControlClient>();
+                    for (var target : manifest.targets()) {
+                        physicalPeers.put(target, fixture.clients.get(target.bookie()));
+                    }
+                    var physical = new ProfileDeleteCoordinator(source, metadata, fixture.cold)
+                            .beginAwaitPhysicalDeletion(manifest, physicalPeers, sdk.getClientCtx(),
+                                    64, 8, Duration.ofSeconds(10));
+                    assertEquals(ProfileDeleteCoordinator.PhysicalStatus.DURABLY_REUSABLE_EVERY_TARGET,
+                            physical.result().get(15, TimeUnit.SECONDS).status());
+                    physical.completion().get(5, TimeUnit.SECONDS);
+                    for (int node = 0; node < 3; node++) {
+                        var target = new ProfileDeleteRecord.Target(fixture.identities.get(node).bookieId().toString(),
+                                fixture.identities.get(node).incarnation().value());
                         var next = source.readDeleteDelivery(metadata, target, 2);
                         assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, next.status());
                         assertEquals(2, next.event().assignmentGeneration());
@@ -5282,6 +5336,36 @@ public class SegmentProfileInitialSocketClientTest {
                                 source.readDeleteHandoffAcknowledgement(target, 2).status());
                         readyHandoffPublisher(fixture, sdk, node, files(storage).config(), client, source, metadata,
                                 requirements, persistent, watcher, locals.get(node), 3);
+                        if (node == 1) {
+                            var heldWatcher = new ZooKeeperWatcherBase(10000, false);
+                            try (var held = new HandoffReplyClient(fixture.cluster.getZooKeeperConnectString(),
+                                    heldWatcher, true, "/event-2")) {
+                                held.selectedOpType = org.apache.zookeeper.ZooDefs.OpCode.delete;
+                                var heldSource = new ZKProfileReservationStore(held, "/socket-initial",
+                                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                                var heldMetadata = new ProfileLedgerMetadataStore(held,
+                                        (AbstractZkLedgerManager) fixture.manager,
+                                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                                var compactor = new ProfileDeleteCoordinator(heldSource, heldMetadata, fixture.cold);
+                                var attempt = compactor.beginCompactJournalPrefix(
+                                        target, 2, 2, sdk.getClientCtx(), Duration.ofSeconds(10));
+                                assertTrue(held.committed.await(5, TimeUnit.SECONDS));
+                                assertFalse(attempt.completion().isDone());
+                                assertTrue(attempt.result().cancel(false));
+                                assertFalse(attempt.completion().isDone());
+                                assertEquals(ZKProfileReservationStore.JournalCompactionStatus.UNAVAILABLE,
+                                        compactor.beginCompactJournalPrefix(target, 2, 2, sdk.getClientCtx(),
+                                                Duration.ofSeconds(10)).result().get(5, TimeUnit.SECONDS).status());
+                                held.release.run();
+                                attempt.completion().get(10, TimeUnit.SECONDS);
+                            }
+                        }
+                        var compact = new ProfileDeleteCoordinator(source, metadata, fixture.cold)
+                                .beginCompactJournalPrefix(target, 2, 2, sdk.getClientCtx(), Duration.ofSeconds(10));
+                        assertEquals(ZKProfileReservationStore.JournalCompactionStatus.COMPACTED,
+                                compact.result().get(15, TimeUnit.SECONDS).status());
+                        compact.completion().get(5, TimeUnit.SECONDS);
+                        assertNull(client.exists(actualDeleteStreamPath(fixture, target) + "/event-2", false));
                         assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
                                 source.readDeleteDelivery(metadata, target, 1).status());
                         assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
@@ -5317,6 +5401,19 @@ public class SegmentProfileInitialSocketClientTest {
                         assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, caughtUp.status());
                         caughtUp.completion().get(5, TimeUnit.SECONDS);
                     }
+                    var retainedSnapshot = source.readDeleteSnapshot(initialTarget).snapshot();
+                    String page = actualDeleteStreamPath(fixture, initialTarget) + "/snapshot-"
+                            + Long.toHexString(retainedSnapshot.value().generation()) + "/page-0";
+                    client.delete(page, 0); // Disposable corruption after real compaction and restart.
+                    var rejected = new ProfileDeleteCoordinator(source, metadata, fixture.cold)
+                            .beginCompactJournalPrefix(initialTarget, 1, 2, sdk.getClientCtx(), Duration.ofSeconds(10));
+                    assertEquals(ZKProfileReservationStore.JournalCompactionStatus.QUARANTINED,
+                            rejected.result().get(15, TimeUnit.SECONDS).status());
+                    rejected.completion().get(5, TimeUnit.SECONDS);
+                    assertEquals(ZKProfileReservationStore.DeliveryStatus.QUARANTINED,
+                            source.readDeleteDelivery(metadata, initialTarget, 1).status());
+                    assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
+                            source.readLogicalDeletion(metadata, 44, bytes(16, 101)).status());
                 } finally {
                     for (var local : locals) {
                         local.close();

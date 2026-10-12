@@ -103,3 +103,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-12继续第15步：acbe51b599之后已接显式cluster retention policy native CAS、immutable revisions和原logical tombstone同事务receipt；实际策略竞争/回复丢失/旧窗口/无策略历史/guard ABA有证据。6类38项Java、29有限模型配置、1938当前source与style通过；独立RAT443父HEAD无新增。scope/receipt由profile-wire/README.md“删除 retention policy 与原子 receipt”拥有。仍须继续真实backup/restore接受、rejoin与history/page/tombstone/lineage GC、accepted terminal decommission/unrecoverable，以及Main/default SDK/其他required authority/full-bytes/兼容/正式性能/运维/全16步综合验收。BOUND不是GC权限，不删除历史义务。完整目标active，生产Gate OPEN；默认OFF/SYSTEM/PARK和disabled能力不变。每阶段归档后复核精确自有可清理产物，保留source/receipt、原失败诊断和活动任务。
+
+
+2026-10-12继续第12/15步：9d581d67db之后已接snapshot/同incarnation EFFECTIVE cut后的真实有界journal prefix compaction与删后physical receipt native条件，保持全部effect/index/target/tombstone/retention/lineage和物理义务。真实G2/G3、原SDK DATA/close/delete、source竞争、UNKNOWN/cancel custody、rotation/restart和missing chunk有6类34项原阶段及最终1项补验、31有限模型配置、1946当前source和style证据；scope/receipt由profile-wire/README.md“删除 journal prefix 的实际 compaction”拥有。继续backup/restore接受、retention时间屏障、snapshot/page/lineage/target Manifest/tombstone GC、accepted permanent decommission/unrecoverable及Main/default SDK/其他required authority/full-bytes/兼容/正式性能/运维/全16步综合验收。当前接口只删除可由完整snapshot替代的duplicate journal rows，不缩窄整体目标。目标active、生产Gate OPEN；默认OFF/SYSTEM/PARK和disabled能力保持，每阶段继续归档并复核精确自有可清理产物。
