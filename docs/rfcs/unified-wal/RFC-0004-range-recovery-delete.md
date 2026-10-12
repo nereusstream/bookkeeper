@@ -1171,3 +1171,5 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 
 
 2026-10-12 [删除 journal prefix 的实际 compaction](implementation/profile-wire/README.md#删除-journal-prefix-的实际-compaction)已接完整snapshot与同incarnation EFFECTIVE cut后的bounded native duplicate-row删除，并接通删后physical receipt持久化。真实G2/G3、snapshot publication竞争、回复丢失/held cancel、rotation/restart有6类34项原阶段及最终1项补验、31有限模型配置和1946冻结source证据。全部effect/index/Manifest/tombstone/retention/physical及handoff义务保留；snapshot/page/lineage/target GC、backup restore接受和16步其余验收仍OPEN，默认OFF/SYSTEM/PARK及生产Gate不提升。
+
+2026-10-13 [全目标终结屏障与单调 retention 窗口](implementation/profile-wire/README.md#全目标终结屏障与单调-retention-窗口)已在全部历史target的原native REUSABLE receipts后原子建立retention barrier，保留原policy/receipt出生关系；coordinator使用opaque本地单调观察，重启重新等待完整窗口，每次检查重验native事实。6类30项Java与9有限模型配置有分阶段证据；elapsed不授权GC，backup/restore接受、accepted decommission/unrecoverable、剩余history GC及全16步Gate继续OPEN，默认OFF/SYSTEM/PARK及disabled不变。

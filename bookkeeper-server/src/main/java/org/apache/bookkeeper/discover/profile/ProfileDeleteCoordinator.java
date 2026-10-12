@@ -41,6 +41,7 @@ public final class ProfileDeleteCoordinator {
     private final ProfileLedgerMetadataStore metadata;
     private final ThreadPoolExecutor cold;
     private final Semaphore active = new Semaphore(1);
+    private final Object retentionEpisode = new Object();
 
     public ProfileDeleteCoordinator(ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata,
             ThreadPoolExecutor cold) {
@@ -116,6 +117,153 @@ public final class ProfileDeleteCoordinator {
         } catch (RejectedExecutionException unavailable) {
             active.release();
             return new Attempt(CompletableFuture.completedFuture(unavailable()),
+                    CompletableFuture.completedFuture(null));
+        }
+    }
+
+    /** Opaque process-local observation; restart requires a fresh full window, never a wall-clock subtraction. */
+    public static final class RetentionWindow {
+        private final Object episode;
+        private final ProfileDeleteRecord.Manifest manifest;
+        private final ZKProfileReservationStore.RetentionBarrierResult original;
+        private final long observedAt;
+
+        private RetentionWindow(Object episode, ProfileDeleteRecord.Manifest manifest,
+                ZKProfileReservationStore.RetentionBarrierResult original) {
+            this.episode = episode;
+            this.manifest = manifest;
+            this.original = original;
+            observedAt = System.nanoTime();
+        }
+
+        public ProfileDeleteRetention.Barrier barrier() {
+            return original.barrier();
+        }
+
+        public long nativeCommit() {
+            return original.nativeCommit();
+        }
+
+        public long remainingMillis() {
+            long elapsed = System.nanoTime() - observedAt;
+            long window = barrier().retention().policy().totalWindowMillis();
+            if (elapsed < 0) {
+                return window;
+            }
+            long millis = TimeUnit.NANOSECONDS.toMillis(elapsed);
+            return millis >= window ? 0 : window - millis;
+        }
+    }
+
+    public enum RetentionWindowStatus {
+        WAITING, WINDOW_ELAPSED, PENDING_TARGETS, PROTECTED_WITHOUT_POLICY,
+        QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN
+    }
+
+    public record RetentionWindowResult(RetentionWindowStatus status, RetentionWindow window) {
+        public RetentionWindowResult {
+            if ((status == RetentionWindowStatus.WAITING || status == RetentionWindowStatus.WINDOW_ELAPSED)
+                    != (window != null)) {
+                throw new IllegalArgumentException("Only a verified retention observation carries a window");
+            }
+        }
+    }
+
+    public record RetentionWindowAttempt(CompletableFuture<RetentionWindowResult> result,
+            CompletableFuture<Void> completion) { }
+
+    /** Persist the original all-target cut and start a conservative local wait. No GC permission is returned. */
+    public RetentionWindowAttempt beginRetentionWindow(ProfileDeleteRecord.Manifest manifest,
+            ClientContext sdk, Duration maxDuration) {
+        return beginRetentionWindow(manifest, null, sdk, maxDuration);
+    }
+
+    /** Fresh native revalidation plus elapsed local window; backup acceptance and other GC gates remain separate. */
+    public RetentionWindowAttempt beginCheckRetentionWindow(RetentionWindow window,
+            ClientContext sdk, Duration maxDuration) {
+        Objects.requireNonNull(window, "window");
+        if (window.episode != retentionEpisode) {
+            throw new IllegalArgumentException("A restarted coordinator requires a fresh retention observation");
+        }
+        return beginRetentionWindow(window.manifest, window, sdk, maxDuration);
+    }
+
+    private RetentionWindowAttempt beginRetentionWindow(ProfileDeleteRecord.Manifest manifest,
+            RetentionWindow window, ClientContext sdk, Duration maxDuration) {
+        Objects.requireNonNull(manifest, "manifest");
+        if (maxDuration.isNegative() || maxDuration.isZero() || maxDuration.compareTo(Duration.ofMinutes(1)) > 0
+                || cold.getMaximumPoolSize() == Integer.MAX_VALUE
+                || (long) cold.getQueue().size() + cold.getQueue().remainingCapacity() >= Integer.MAX_VALUE
+                || !(cold.getRejectedExecutionHandler() instanceof ThreadPoolExecutor.AbortPolicy)) {
+            throw new IllegalArgumentException("Retention observation requires bounded original cold work");
+        }
+        if (sdk.isClientClosed() || !active.tryAcquire()) {
+            return new RetentionWindowAttempt(CompletableFuture.completedFuture(
+                    new RetentionWindowResult(RetentionWindowStatus.UNAVAILABLE, null)),
+                    CompletableFuture.completedFuture(null));
+        }
+        var stopped = new AtomicBoolean();
+        var caller = new CompletableFuture<RetentionWindowResult>();
+        var completion = new CompletableFuture<Void>();
+        var timer = new AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
+        try {
+            var actual = CompletableFuture.supplyAsync(() -> window == null
+                    ? reservations.publishDeleteRetentionBarrier(metadata, manifest,
+                        () -> !stopped.get() && !sdk.isClientClosed())
+                    : reservations.readDeleteRetentionBarrier(metadata, manifest), cold);
+            actual.whenComplete((result, failure) -> {
+                var scheduled = timer.get();
+                if (scheduled != null) {
+                    scheduled.cancel(false);
+                }
+                active.release();
+                completion.complete(null);
+                if (failure != null) {
+                    caller.completeExceptionally(failure);
+                } else if (result.status() == ZKProfileReservationStore.RetentionBarrierStatus.BOUND) {
+                    if (window != null && (result.nativeCommit() != window.nativeCommit()
+                            || !Arrays.equals(result.barrier().encode(), window.barrier().encode()))) {
+                        caller.complete(new RetentionWindowResult(RetentionWindowStatus.QUARANTINED, null));
+                    } else {
+                        var observed = window == null
+                                ? new RetentionWindow(retentionEpisode, manifest, result) : window;
+                        caller.complete(new RetentionWindowResult(observed.remainingMillis() == 0
+                                ? RetentionWindowStatus.WINDOW_ELAPSED : RetentionWindowStatus.WAITING, observed));
+                    }
+                } else {
+                    var status = switch (result.status()) {
+                        case PENDING_TARGETS -> RetentionWindowStatus.PENDING_TARGETS;
+                        case PROTECTED_WITHOUT_POLICY -> RetentionWindowStatus.PROTECTED_WITHOUT_POLICY;
+                        case UNAVAILABLE -> RetentionWindowStatus.UNAVAILABLE;
+                        case DURABILITY_UNKNOWN -> RetentionWindowStatus.DURABILITY_UNKNOWN;
+                        default -> RetentionWindowStatus.QUARANTINED;
+                    };
+                    caller.complete(new RetentionWindowResult(status, null));
+                }
+            });
+            try {
+                var scheduled = sdk.getScheduler().schedule(() -> {
+                    stopped.set(true);
+                    caller.complete(new RetentionWindowResult(RetentionWindowStatus.UNAVAILABLE, null));
+                }, maxDuration.toNanos(), TimeUnit.NANOSECONDS);
+                timer.set(scheduled);
+                if (actual.isDone()) {
+                    scheduled.cancel(false);
+                }
+            } catch (RejectedExecutionException unavailable) {
+                stopped.set(true);
+                caller.complete(new RetentionWindowResult(RetentionWindowStatus.UNAVAILABLE, null));
+            }
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return new RetentionWindowAttempt(caller, completion.copy());
+        } catch (RejectedExecutionException unavailable) {
+            active.release();
+            return new RetentionWindowAttempt(CompletableFuture.completedFuture(
+                    new RetentionWindowResult(RetentionWindowStatus.UNAVAILABLE, null)),
                     CompletableFuture.completedFuture(null));
         }
     }

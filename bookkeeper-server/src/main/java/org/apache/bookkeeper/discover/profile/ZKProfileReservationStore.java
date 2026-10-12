@@ -27,6 +27,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileDeleteAdoption;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
@@ -2573,6 +2574,177 @@ public final class ZKProfileReservationStore {
             return new RetentionResult(RetentionStatus.UNAVAILABLE, null, 0);
         } catch (IOException | IllegalArgumentException invalid) {
             return new RetentionResult(RetentionStatus.QUARANTINED, null, 0);
+        }
+    }
+
+    public enum RetentionBarrierStatus {
+        BOUND, ABSENT, PENDING_TARGETS, PROTECTED_WITHOUT_POLICY, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN
+    }
+
+    public record RetentionBarrierResult(RetentionBarrierStatus status, ProfileDeleteRetention.Barrier barrier,
+            long nativeCommit) {
+        public RetentionBarrierResult {
+            if ((status == RetentionBarrierStatus.BOUND) != (barrier != null)
+                    || barrier == null && nativeCommit != 0 || barrier != null && nativeCommit <= 0) {
+                throw new IllegalArgumentException("Only an original native retention barrier has a commit");
+            }
+        }
+    }
+
+    private static RetentionBarrierResult retentionBarrierFailure(RetentionBarrierStatus status) {
+        return new RetentionBarrierResult(status, null, 0);
+    }
+
+    private record RetentionTerminalCut(byte[] digest, long latestCommit, List<Op> checks) { }
+
+    private RetentionTerminalCut retentionTerminalCut(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Manifest manifest, long deadline) throws InterruptedException, TimeoutException {
+        var bytes = java.nio.ByteBuffer.allocate(Math.multiplyExact(manifest.targets().size(), 40));
+        var checks = new ArrayList<Op>();
+        long latest = 0;
+        for (var target : manifest.targets()) {
+            var verified = readPhysicalDeleteReceipt(metadata, manifest, target);
+            if (verified.status() == PhysicalReceiptStatus.ABSENT) {
+                return null;
+            }
+            if (verified.status() == PhysicalReceiptStatus.UNAVAILABLE
+                    || verified.status() == PhysicalReceiptStatus.DURABILITY_UNKNOWN) {
+                throw new IllegalStateException("Physical retention cut is unavailable");
+            }
+            if (verified.status() != PhysicalReceiptStatus.FOUND) {
+                throw new IllegalArgumentException("Physical retention cut is invalid");
+            }
+            var receipt = verified.receipt();
+            String name = physicalDeleteReceiptPath(manifest.ledger().ledgerId(), target);
+            var node = reads.get(name, deadline);
+            requireFound(node);
+            requirePersistent(node, true);
+            String birth = name + "/birth-" + HexFormat.of().formatHex(receipt.birthId());
+            var guard = reads.get(birth, deadline);
+            requireFound(guard);
+            requirePersistent(guard, true);
+            if (!Arrays.equals(node.bytes(), receipt.encode()) || node.stat().getCzxid() <= 0
+                    || guard.stat().getCzxid() != node.stat().getCzxid()
+                    || !Arrays.equals(guard.bytes(), java.nio.ByteBuffer.allocate(48).put(receipt.birthId())
+                        .put(ProfileRepairIntent.digest(node.bytes())).array())) {
+                throw new IllegalArgumentException("Physical receipt changed while observing its retention cut");
+            }
+            bytes.putLong(node.stat().getCzxid()).put(ProfileRepairIntent.digest(node.bytes()));
+            latest = Math.max(latest, node.stat().getCzxid());
+            checks.add(Op.check(name, 0));
+            checks.add(Op.check(birth, 0));
+        }
+        return new RetentionTerminalCut(ProfileRepairIntent.digest(bytes.array()), latest, List.copyOf(checks));
+    }
+
+    /** No caller clock or reported offline state can create this all-historical-target terminal cut. */
+    public RetentionBarrierResult readDeleteRetentionBarrier(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Manifest manifest) {
+        return retentionBarrier(metadata, manifest, false, () -> true);
+    }
+
+    RetentionBarrierResult publishDeleteRetentionBarrier(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Manifest manifest, BooleanSupplier live) {
+        return retentionBarrier(metadata, manifest, true, live);
+    }
+
+    private RetentionBarrierResult retentionBarrier(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Manifest manifest, boolean create, BooleanSupplier live) {
+        requireRecoveryClient(metadata);
+        Objects.requireNonNull(manifest, "manifest");
+        long deadline = System.nanoTime() + timeoutNanos;
+        boolean submitted = false;
+        try {
+            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId());
+            if (logical.manifest() == null) {
+                return retentionBarrierFailure(logical.status() == DeleteStatus.UNAVAILABLE
+                        ? RetentionBarrierStatus.UNAVAILABLE : RetentionBarrierStatus.QUARANTINED);
+            }
+            if (!Arrays.equals(logical.manifest().encode(), manifest.encode())) {
+                return retentionBarrierFailure(RetentionBarrierStatus.QUARANTINED);
+            }
+            var member = metadata.readMembership(manifest.ledger().ledgerId(), deadline);
+            if (member.snapshot() == null) {
+                return retentionBarrierFailure(member.status() == ReadStatus.UNAVAILABLE
+                        ? RetentionBarrierStatus.UNAVAILABLE : RetentionBarrierStatus.QUARANTINED);
+            }
+            var reference = ProfileDeleteRecord.Reference.decode(member.snapshot().metadata().getValue()
+                    .getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY));
+            var retained = retentionReceipt(metadata, member.snapshot(), reference, deadline);
+            String parent = deleteManifestPath(manifest.ledger().ledgerId());
+            String name = parent + "/retention-barrier";
+            var node = reads.get(name, deadline);
+            if (retained.status() == RetentionStatus.PROTECTED_WITHOUT_POLICY) {
+                return retentionBarrierFailure(node.code() == Code.NONODE.intValue()
+                        ? RetentionBarrierStatus.PROTECTED_WITHOUT_POLICY : RetentionBarrierStatus.QUARANTINED);
+            }
+            var cut = retentionTerminalCut(metadata, manifest, deadline);
+            if (cut == null) {
+                return retentionBarrierFailure(node.code() == Code.NONODE.intValue()
+                        ? RetentionBarrierStatus.PENDING_TARGETS : RetentionBarrierStatus.QUARANTINED);
+            }
+            if (node.code() != Code.NONODE.intValue()) {
+                requireFound(node);
+                requirePersistent(node, true);
+                var barrier = ProfileDeleteRetention.Barrier.decode(node.bytes());
+                var guard = reads.get(name + "/birth-" + barrier.birthId(), deadline);
+                requireFound(guard);
+                requirePersistent(guard, true);
+                if (!Arrays.equals(barrier.retention().encode(), retained.receipt().encode())
+                        || !Arrays.equals(barrier.terminalDigest(), cut.digest())
+                        || barrier.latestTerminalCommit() != cut.latestCommit()
+                        || node.stat().getCzxid() <= cut.latestCommit()
+                        || guard.stat().getCzxid() != node.stat().getCzxid()
+                        || !Arrays.equals(guard.bytes(), retentionGuard(barrier.birthId(), node.bytes()))) {
+                    return retentionBarrierFailure(RetentionBarrierStatus.QUARANTINED);
+                }
+                return new RetentionBarrierResult(RetentionBarrierStatus.BOUND, barrier, node.stat().getCzxid());
+            }
+            if (!create) {
+                return retentionBarrierFailure(RetentionBarrierStatus.ABSENT);
+            }
+            var root = read(manifest.ledger().ledgerId(), deadline);
+            if (root.snapshot() == null) {
+                return retentionBarrierFailure(root.status() == ReadStatus.UNAVAILABLE
+                        ? RetentionBarrierStatus.UNAVAILABLE : RetentionBarrierStatus.QUARANTINED);
+            }
+            var revision = retentionRevision(retained.receipt().policy(), deadline);
+            if (revision.stat().getCzxid() != retained.receipt().policyBirth()) {
+                return retentionBarrierFailure(RetentionBarrierStatus.QUARANTINED);
+            }
+            var barrier = new ProfileDeleteRetention.Barrier(UUID.randomUUID(), retained.receipt(),
+                    cut.digest(), cut.latestCommit());
+            var operations = new ArrayList<>(recoveryRootChecks(root.snapshot(), deadline));
+            operations.addAll(metadata.checksForMembership(member.snapshot()));
+            operations.add(Op.check(parent, 0));
+            operations.add(Op.check(parent + "/birth-" + Long.toHexString(reference.birth()), 0));
+            operations.add(Op.check(parent + "/retention", 0));
+            operations.add(Op.check(parent + "/retention/birth-" + retained.receipt().birthId(), 0));
+            String policy = deleteRetentionRevisionPath(retained.receipt().policy().generation());
+            operations.add(Op.check(policy, 0));
+            operations.add(Op.check(policy + "/birth-" + retained.receipt().policy().revision(), 0));
+            operations.addAll(cut.checks());
+            operations.add(Op.create(name, barrier.encode(), pageAcls, CreateMode.PERSISTENT));
+            operations.add(Op.create(name + "/birth-" + barrier.birthId(),
+                    retentionGuard(barrier.birthId(), barrier.encode()), immutableAcls, CreateMode.PERSISTENT));
+            if (!live.getAsBoolean()) {
+                return retentionBarrierFailure(RetentionBarrierStatus.UNAVAILABLE);
+            }
+            submitted = true;
+            multi(operations, deadline);
+            var after = retentionBarrier(metadata, manifest, false, live);
+            return after.status() == RetentionBarrierStatus.ABSENT
+                    || after.status() == RetentionBarrierStatus.UNAVAILABLE
+                    ? retentionBarrierFailure(RetentionBarrierStatus.DURABILITY_UNKNOWN) : after;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return retentionBarrierFailure(submitted
+                    ? RetentionBarrierStatus.DURABILITY_UNKNOWN : RetentionBarrierStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return retentionBarrierFailure(submitted
+                    ? RetentionBarrierStatus.DURABILITY_UNKNOWN : RetentionBarrierStatus.UNAVAILABLE);
+        } catch (IOException | IllegalArgumentException invalid) {
+            return retentionBarrierFailure(RetentionBarrierStatus.QUARANTINED);
         }
     }
 

@@ -27,6 +27,7 @@ public final class ProfileDeleteRetention {
     public static final String KEY = "bookkeeper.experimental.profile.delete-retention";
     private static final int POLICY_BYTES = 60;
     private static final int RECEIPT_BYTES = 200;
+    private static final int BARRIER_BYTES = 268;
 
     private ProfileDeleteRetention() { }
 
@@ -92,6 +93,38 @@ public final class ProfileDeleteRetention {
 
         boolean matches(ProfileDeleteRecord.Reference reference) {
             return Arrays.equals(tombstone.encode(), reference.encode());
+        }
+    }
+
+    /** First native all-target terminal cut. It starts a retention window, never grants history-GC authority. */
+    public record Barrier(UUID birthId, Receipt retention, byte[] terminalDigest, long latestTerminalCommit) {
+        public Barrier {
+            Objects.requireNonNull(birthId, "birthId");
+            Objects.requireNonNull(retention, "retention");
+            terminalDigest = ProfileLifecycleHead.fixed(terminalDigest, 32, false);
+            if (birthId.equals(new UUID(0, 0)) || latestTerminalCommit <= 0) {
+                throw invalid();
+            }
+        }
+
+        @Override
+        public byte[] terminalDigest() {
+            return terminalDigest.clone();
+        }
+
+        public byte[] encode() {
+            return finish(header(BARRIER_BYTES, 0x55575242)
+                    .putLong(birthId.getMostSignificantBits()).putLong(birthId.getLeastSignificantBits())
+                    .put(retention.encode()).put(terminalDigest).putLong(latestTerminalCommit));
+        }
+
+        public static Barrier decode(byte[] bytes) {
+            var in = checked(bytes, BARRIER_BYTES, 0x55575242);
+            UUID birth = new UUID(in.getLong(), in.getLong());
+            byte[] receipt = new byte[RECEIPT_BYTES];
+            byte[] digest = new byte[32];
+            in.get(receipt).get(digest);
+            return new Barrier(birth, Receipt.decode(receipt), digest, in.getLong());
         }
     }
 

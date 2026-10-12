@@ -3677,6 +3677,12 @@ public class SegmentProfileInitialSocketClientTest {
                     fixture.reservations.readDeleteRetention(metadata, 44, bytes(16, 101)).status());
             assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
                     fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).status());
+            var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+            var protectedWindow = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                    .beginRetentionWindow(manifest, sdk.getClientCtx(), Duration.ofSeconds(5));
+            assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.PROTECTED_WITHOUT_POLICY,
+                    protectedWindow.result().get(5, TimeUnit.SECONDS).status());
+            protectedWindow.completion().get(5, TimeUnit.SECONDS);
         }
     }
 
@@ -3985,6 +3991,181 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, result.targets().get(target).outcome());
             } finally {
                 release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void retentionWindowStartsAfterAllNativePhysicalReceiptsAndRestartsConservatively() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var policy = new org.apache.bookkeeper.discover.profile.ProfileDeleteRetention.Policy(
+                    1, UUID.randomUUID(), 500, 0, 500);
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                    fixture.reservations.publishDeleteRetentionPolicy(policy));
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+            var coordinator = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            var pending = coordinator.beginRetentionWindow(manifest, sdk.getClientCtx(), Duration.ofSeconds(5));
+            assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.PENDING_TARGETS,
+                    pending.result().get(5, TimeUnit.SECONDS).status());
+            pending.completion().get(5, TimeUnit.SECONDS);
+            var peers = new HashMap<ProfileDeleteRecord.Target, ProfileInitialControlClient>();
+            for (var target : manifest.targets()) {
+                var event = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).event();
+                var applied = fixture.clients.get(target.bookie()).deleteApply(event.deleteApply("ledger-profile"))
+                        .get(5, TimeUnit.SECONDS).outcome();
+                assertTrue(applied == ProfileControlResult.Outcome.APPLIED
+                        || applied == ProfileControlResult.Outcome.ALREADY_APPLIED);
+                peers.put(target, fixture.clients.get(target.bookie()));
+            }
+            var physical = coordinator.beginAwaitPhysicalDeletion(manifest, peers, sdk.getClientCtx(),
+                    64, 8, Duration.ofSeconds(10));
+            assertEquals(ProfileDeleteCoordinator.PhysicalStatus.DURABLY_REUSABLE_EVERY_TARGET,
+                    physical.result().get(15, TimeUnit.SECONDS).status());
+            physical.completion().get(5, TimeUnit.SECONDS);
+            var begin = coordinator.beginRetentionWindow(manifest, sdk.getClientCtx(), Duration.ofSeconds(5));
+            var waiting = begin.result().get(5, TimeUnit.SECONDS);
+            begin.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.WAITING, waiting.status());
+            assertEquals(policy, waiting.window().barrier().retention().policy());
+            assertTrue(waiting.window().nativeCommit() > waiting.window().barrier().latestTerminalCommit());
+            String path = "/socket-initial/2c/delete-targets/retention-barrier";
+            byte[] original = fixture.zk.getData(path, false, null);
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (waiting.window().remainingMillis() != 0 && System.nanoTime() < until) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+            }
+            assertEquals(0, waiting.window().remainingMillis());
+            var check = coordinator.beginCheckRetentionWindow(waiting.window(), sdk.getClientCtx(),
+                    Duration.ofSeconds(5));
+            assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.WINDOW_ELAPSED,
+                    check.result().get(5, TimeUnit.SECONDS).status());
+            check.completion().get(5, TimeUnit.SECONDS);
+            var restarted = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            assertThrows(IllegalArgumentException.class, () -> restarted.beginCheckRetentionWindow(
+                    waiting.window(), sdk.getClientCtx(), Duration.ofSeconds(5)));
+            var fresh = restarted.beginRetentionWindow(manifest, sdk.getClientCtx(), Duration.ofSeconds(5));
+            var freshWindow = fresh.result().get(5, TimeUnit.SECONDS);
+            fresh.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.WAITING, freshWindow.status());
+            assertEquals(waiting.window().nativeCommit(), freshWindow.window().nativeCommit());
+            assertArrayEquals(original, fixture.zk.getData(path, false, null));
+            String guard = path + "/birth-" + waiting.window().barrier().birthId();
+            byte[] guardBytes = fixture.zk.getData(guard, false, null);
+            fixture.zk.delete(guard, 0);
+            fixture.zk.create(guard, guardBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            var corrupt = restarted.beginCheckRetentionWindow(freshWindow.window(), sdk.getClientCtx(),
+                    Duration.ofSeconds(5));
+            assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.QUARANTINED,
+                    corrupt.result().get(5, TimeUnit.SECONDS).status());
+            corrupt.completion().get(5, TimeUnit.SECONDS);
+            assertTrue(fixture.manager.readLedgerMetadata(44).get().getValue().getCustomMetadata()
+                    .containsKey(ProfileDeleteRecord.TOMBSTONE_KEY));
+        }
+    }
+
+    @Test
+    public void retentionBarrierLostReplyCancelAndNativeGuardRaceKeepActualCustody() throws Exception {
+        for (boolean hold : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                        fixture.reservations.publishDeleteRetentionPolicy(
+                                new org.apache.bookkeeper.discover.profile.ProfileDeleteRetention.Policy(
+                                        1, UUID.randomUUID(), 60000, 0, 60000)));
+                var metadata = preparePhysicalDelete(fixture, sdk, false);
+                var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+                var peers = new HashMap<ProfileDeleteRecord.Target, ProfileInitialControlClient>();
+                for (var target : manifest.targets()) {
+                    var event = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).event();
+                    var applied = fixture.clients.get(target.bookie()).deleteApply(event.deleteApply("ledger-profile"))
+                            .get(5, TimeUnit.SECONDS).outcome();
+                    assertTrue(applied == ProfileControlResult.Outcome.APPLIED
+                            || applied == ProfileControlResult.Outcome.ALREADY_APPLIED);
+                    peers.put(target, fixture.clients.get(target.bookie()));
+                }
+                var physical = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                        .beginAwaitPhysicalDeletion(manifest, peers, sdk.getClientCtx(),
+                                64, 8, Duration.ofSeconds(10));
+                assertEquals(ProfileDeleteCoordinator.PhysicalStatus.DURABLY_REUSABLE_EVERY_TARGET,
+                        physical.result().get(15, TimeUnit.SECONDS).status());
+                physical.completion().get(5, TimeUnit.SECONDS);
+                var watcher = new ZooKeeperWatcherBase(10000, false);
+                try (var client = new HandoffReplyClient(fixture.cluster.getZooKeeperConnectString(), watcher,
+                        hold, "/retention-barrier")) {
+                    var source = new ZKProfileReservationStore(client, "/socket-initial",
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var scoped = new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) fixture.manager,
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var coordinator = new ProfileDeleteCoordinator(source, scoped, fixture.cold);
+                    var attempt = coordinator.beginRetentionWindow(manifest, sdk.getClientCtx(),
+                            Duration.ofSeconds(10));
+                    assertTrue(client.committed.await(5, TimeUnit.SECONDS));
+                    String path = "/socket-initial/2c/delete-targets/retention-barrier";
+                    byte[] original = fixture.zk.getData(path, false, null);
+                    if (hold) {
+                        assertTrue(attempt.result().cancel(false));
+                        assertFalse(attempt.completion().isDone());
+                        attempt.completion().complete(null);
+                        var busy = coordinator.beginRetentionWindow(manifest, sdk.getClientCtx(),
+                                Duration.ofSeconds(5));
+                        assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.UNAVAILABLE,
+                                busy.result().get(5, TimeUnit.SECONDS).status());
+                        client.release.run();
+                    } else {
+                        assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.WAITING,
+                                attempt.result().get(5, TimeUnit.SECONDS).status());
+                        attempt.completion().get(5, TimeUnit.SECONDS);
+                    }
+                    ProfileDeleteCoordinator.RetentionWindowResult resolved = null;
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    do {
+                        var resumed = coordinator.beginRetentionWindow(manifest, sdk.getClientCtx(),
+                                Duration.ofSeconds(5));
+                        resolved = resumed.result().get(5, TimeUnit.SECONDS);
+                        resumed.completion().get(5, TimeUnit.SECONDS);
+                        if (resolved.status() == ProfileDeleteCoordinator.RetentionWindowStatus.UNAVAILABLE) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                        }
+                    } while (resolved.status() == ProfileDeleteCoordinator.RetentionWindowStatus.UNAVAILABLE
+                            && System.nanoTime() < until);
+                    assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.WAITING, resolved.status());
+                    assertArrayEquals(original, resolved.window().barrier().encode());
+                    assertArrayEquals(original, fixture.zk.getData(path, false, null));
+                    assertTrue(resolved.window().remainingMillis() > 0);
+                }
+                // A selected native guard removal must reject the entire barrier transaction.
+                String path = "/socket-initial/2c/delete-targets/retention-barrier";
+                var first = fixture.reservations.readDeleteRetentionBarrier(metadata, manifest);
+                fixture.zk.delete(path + "/birth-" + first.barrier().birthId(), 0);
+                fixture.zk.delete(path, 0);
+                var receipt = fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest,
+                        manifest.targets().get(0)).receipt();
+                String guard = physicalReceiptPath(fixture, receipt) + "/birth-"
+                        + java.util.HexFormat.of().formatHex(receipt.birthId());
+                var raceWatcher = new ZooKeeperWatcherBase(10000, false);
+                try (var client = new HandoffReplyClient(fixture.cluster.getZooKeeperConnectString(), raceWatcher,
+                        false, "/retention-barrier")) {
+                    client.beforeSelectedMulti = () -> {
+                        try {
+                            fixture.zk.delete(guard, 0);
+                        } catch (Exception failure) {
+                            throw new IllegalStateException(failure);
+                        }
+                    };
+                    var source = new ZKProfileReservationStore(client, "/socket-initial",
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var scoped = new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) fixture.manager,
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var attempt = new ProfileDeleteCoordinator(source, scoped, fixture.cold)
+                            .beginRetentionWindow(manifest, sdk.getClientCtx(), Duration.ofSeconds(5));
+                    assertEquals(ProfileDeleteCoordinator.RetentionWindowStatus.QUARANTINED,
+                            attempt.result().get(5, TimeUnit.SECONDS).status());
+                    attempt.completion().get(5, TimeUnit.SECONDS);
+                    assertNull(client.beforeSelectedMulti);
+                    assertNull(fixture.zk.exists(path, false));
+                    assertTrue(fixture.manager.readLedgerMetadata(44).get().getValue().getCustomMetadata()
+                            .containsKey(ProfileDeleteRecord.TOMBSTONE_KEY));
+                }
             }
         }
     }
