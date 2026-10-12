@@ -740,3 +740,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-13 [客户端 transport backing 与实际关闭](rfcs/unified-wal/implementation/profile-wire/README.md#客户端-transport-backing-与实际关闭)已把原SDK/cohort客户端TLS/帧及普通/恢复Add、WRITE_LAC私有snapshot接入现有backing ledger，实际close等待最后view归还；cohort原slot上限之外可观察其transport backing与固定quota。最终4类69项Java、24有限模型配置及1946当前source/style通过。仅transport ByteBuf计量，opaque TLS/codec/caller数组及存储/index/control等统一总账和正式性能仍OPEN；默认OFF/SYSTEM/PARK、disabled与完整生产Gate不提升。
+
+
+2026-10-13 [客户端 codec workspace 与有界 reply 解析](rfcs/unified-wal/implementation/profile-wire/README.md#客户端-codec-workspace-与有界-reply-解析)已在原backing账本中预留临时codec byte数组工作集，并删除fallback full-frame多层副本；真实CONTROL发送前拒绝、已协商read reply拒绝与最后owner drain得到验证。8类93项Java（common21/server72）、24有限模型配置、1946当前source及style通过。只完成客户端暂存工作集，caller/长期对象、server/control/cold/storage/index及opaque TLS等总账和全16步Gate仍OPEN，默认与disabled能力不提升。

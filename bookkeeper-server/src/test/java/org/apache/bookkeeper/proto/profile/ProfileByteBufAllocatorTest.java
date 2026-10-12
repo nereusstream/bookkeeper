@@ -35,6 +35,29 @@ import org.junit.Test;
 
 public class ProfileByteBufAllocatorTest {
     @Test
+    public void codecWorkspaceSharesQuotaAndDrainsSeparatelyFromBacking() {
+        var budget = budget();
+        var client = budget.admitClient(ProfileReceiveBudget.Lane.DATA, 512);
+        var root = client.allocator().heapBuffer(16, 16);
+        var workspace = client.reserveWorkspace(496);
+        assertEquals(16, client.usedBytes());
+        assertEquals(496, client.workspaceBytes());
+        assertEquals(16, client.peakBytes());
+        assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                () -> client.allocator().directBuffer(1, 1));
+        assertThrows(ProfileReceiveBudget.CapacityExceededException.class, () -> client.reserveWorkspace(1));
+        root.release();
+        client.close();
+        assertFalse(client.drained().isDone());
+        assertEquals(0, client.usedBytes());
+        assertEquals(496, client.workspaceBytes());
+        workspace.close();
+        assertEquals(0, client.workspaceBytes());
+        assertTrue(client.drained().isDone());
+        assertThrows(ProfileReceiveBudget.CapacityExceededException.class, () -> client.reserveWorkspace(1));
+    }
+
+    @Test
     public void clientAllocationSharesBackingAndRetainsDrainUntilLastView() {
         var budget = budget();
         var data = budget.admitClient(ProfileReceiveBudget.Lane.DATA, 512);

@@ -35,6 +35,7 @@ public final class ProfileReceiveBudget {
         private Lane lane = Lane.UNCLASSIFIED;
         private int byteLimit;
         private long bytes;
+        private long workspaceBytes;
         private long peakBytes;
         private boolean closed;
         private final CompletableFuture<Void> drained = new CompletableFuture<>();
@@ -52,6 +53,10 @@ public final class ProfileReceiveBudget {
         }
 
         Credit reserve(int requested) {
+            return reserve(requested, false);
+        }
+
+        private Credit reserve(int requested, boolean workspace) {
             synchronized (ProfileReceiveBudget.this) {
                 if (closed || byteLimit == 0 || requested > byteLimit - bytes) {
                     return null;
@@ -59,8 +64,12 @@ public final class ProfileReceiveBudget {
                 Credit credit = ProfileReceiveBudget.this.reserveOwned(lane, requested);
                 if (credit != null) {
                     credit.connection = this;
+                    credit.workspace = workspace;
                     bytes += requested;
-                    peakBytes = Math.max(peakBytes, bytes);
+                    if (workspace) {
+                        workspaceBytes += requested;
+                    }
+                    peakBytes = Math.max(peakBytes, bytes - workspaceBytes);
                 }
                 return credit;
             }
@@ -93,6 +102,7 @@ public final class ProfileReceiveBudget {
         private Lane lane;
         private int bytes;
         private ConnectionPermit connection;
+        private boolean workspace;
         private boolean closed;
 
         private Credit(Lane lane, int bytes) {
@@ -102,7 +112,7 @@ public final class ProfileReceiveBudget {
 
         void require(ConnectionPermit expected, int size) {
             synchronized (ProfileReceiveBudget.this) {
-                if (closed || connection != expected || expected.closed || bytes != size) {
+                if (closed || workspace || connection != expected || expected.closed || bytes != size) {
                     throw new IllegalStateException("Invalid backing buffer receive credit");
                 }
             }
@@ -115,6 +125,7 @@ public final class ProfileReceiveBudget {
                 }
                 Credit child = new Credit(lane, size);
                 child.connection = connection;
+                child.workspace = workspace;
                 bytes -= size;
                 return child;
             }
@@ -130,6 +141,9 @@ public final class ProfileReceiveBudget {
                 usedBytes[lane.ordinal()] -= bytes;
                 if (connection != null) {
                     connection.bytes -= bytes;
+                    if (workspace) {
+                        connection.workspaceBytes -= bytes;
+                    }
                 }
             }
             if (connection != null) {
@@ -177,7 +191,7 @@ public final class ProfileReceiveBudget {
 
         public long usedBytes() {
             synchronized (ProfileReceiveBudget.this) {
-                return connection.bytes;
+                return connection.bytes - connection.workspaceBytes;
             }
         }
 
@@ -190,6 +204,39 @@ public final class ProfileReceiveBudget {
 
         public CompletableFuture<Void> drained() {
             return connection.drained.copy();
+        }
+
+        /** Reserved capacity for bounded codec temporaries, retained until parsing/copy/ownership handoff ends. */
+        public final class Workspace implements AutoCloseable {
+            private final Credit credit;
+
+            private Workspace(Credit credit) {
+                this.credit = credit;
+            }
+
+            @Override
+            public void close() {
+                credit.close();
+            }
+        }
+
+        public Workspace reserveWorkspace(int bytes) {
+            Credit credit = connection.reserve(bytes, true);
+            if (credit == null) {
+                throw new CapacityExceededException();
+            }
+            try {
+                return new Workspace(credit);
+            } catch (RuntimeException | Error failedConstruction) {
+                credit.close();
+                throw failedConstruction;
+            }
+        }
+
+        public long workspaceBytes() {
+            synchronized (ProfileReceiveBudget.this) {
+                return connection.workspaceBytes;
+            }
         }
 
         @Override

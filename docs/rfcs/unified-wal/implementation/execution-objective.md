@@ -109,3 +109,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-13继续full-bytes必要路径：6da8d38a47之后已将原ProfileSocketClient/registered cohort TLS/帧backing接入原额度allocator，普通/恢复Add及WRITE_LAC使用已计费exact私有snapshot，actual close等待最后output view而非只等slot/promise。最终4类69项Java、24原有限模型配置、1946当前source与style有证据，scope/receipt由profile-wire/README.md“客户端 transport backing 与实际关闭”拥有。这里不闭合full-bytes：codec/caller数组、JDK/opaque native TLS/kernel/object overhead及storage/index/control/cold统一总账继续实施，性能收益未测量。继续backup/restore、retention时间屏障/剩余history GC、永久退役/required authority/default SDK/兼容/正式性能/运维和全16步验收。目标active，生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled能力不变；按阶段归档后复核精确自有临时路径，不释放活动资源。
+
+
+2026-10-13继续full-bytes必要路径：8774f689a8之后已复用原connection/lane/Credit接codec Workspace，共享quota而分开计量，正常/异常/owner转交后归还；fallback reply只复制有界body。正确read fixture的实际编码/解码拒绝、最后backing drain与原wire/SDK有8类93项Java、24原有限模型配置、1946当前source/style证据，scope/receipt由profile-wire/README.md“客户端 codec workspace 与有界 reply 解析”拥有。继续caller reply/长期对象预算转交、server codec/control/cold/JDK/opaque TLS/kernel/object/storage/index统一总账及正式测量，不能据该上界reservation将full-bytes或16步目标判定完成。backup/restore、retention时间屏障/剩余history GC、永久退役/required authority/default routing/兼容/性能/运维继续推进；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变，按阶段归档/复核精确自有可清理路径。

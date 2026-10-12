@@ -55,7 +55,6 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult.Outcome;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
-import org.apache.bookkeeper.common.profile.wire.ProfileFrame;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
@@ -260,6 +259,11 @@ final class ProfileSocketClient implements AutoCloseable {
         public long backingBytes() {
             var owned = socket;
             return owned == null ? 0 : owned.backingBytes();
+        }
+
+        public long codecWorkspaceBytes() {
+            var owned = socket;
+            return owned == null ? 0 : owned.codecWorkspaceBytes();
         }
 
         public CompletableFuture<T> completion() {
@@ -765,7 +769,7 @@ final class ProfileSocketClient implements AutoCloseable {
                 try {
                     held.deadline = channel.eventLoop().schedule(this::close, timeoutNanos, TimeUnit.NANOSECONDS);
                     ByteBuf bytes;
-                    try {
+                    try (var workspace = backing.reserveWorkspace(encodingWorkspaceBytes(held))) {
                         bytes = held.operation == ProfileOperation.ADD_NORMAL
                                 || held.operation == ProfileOperation.ADD_RECOVERY
                                 ? encodeNormal(held, id)
@@ -835,6 +839,16 @@ final class ProfileSocketClient implements AutoCloseable {
         }
     }
 
+    private int encodingWorkspaceBytes(Pending held) {
+        // An INSTALL descriptor snapshot plus the encoded body are the only variable-sized byte arrays.
+        int bound = held.controlRequest == null ? 256
+                : ProfileInitialControlCodec.maximumRequestBytes(held.operation);
+        if (held.operation == ProfileOperation.OPERATION_STATUS) {
+            bound = ProfilePhysicalDeleteCodec.MAX_REQUEST_BYTES;
+        }
+        return Math.addExact(1024, Math.multiplyExact(2, bound));
+    }
+
     private final class Responses extends SimpleChannelInboundHandler<ByteBuf> {
         @Override
         public void channelActive(ChannelHandlerContext ctx) {
@@ -842,7 +856,7 @@ final class ProfileSocketClient implements AutoCloseable {
                     helloTimeoutNanos, TimeUnit.NANOSECONDS);
             SslHandler ssl = ctx.pipeline().get(SslHandler.class);
             ssl.handshakeFuture().addListener(handshake -> {
-                try {
+                try (var workspace = backing.reserveWorkspace(2 * MAX_RESPONSE_FRAME + 1024)) {
                     if (!handshake.isSuccess() || closed.get()
                             || ssl.engine().getSession().getLocalCertificates() == null
                             || ssl.engine().getSession().getPeerCertificates().length == 0) {
@@ -883,7 +897,8 @@ final class ProfileSocketClient implements AutoCloseable {
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, ByteBuf bytes) {
-            try {
+            try (var workspace = backing.reserveWorkspace(Math.addExact(1024,
+                    Math.multiplyExact(2, bytes.readableBytes())))) {
                 byte[] fixed = new byte[36];
                 bytes.getBytes(bytes.readerIndex(), fixed);
                 var inspected = ProfileFrameCodec.inspectHeader(fixed, hello == null
@@ -965,15 +980,17 @@ final class ProfileSocketClient implements AutoCloseable {
                     held.readReply.complete(received);
                     return;
                 }
-                byte[] frameBytes = new byte[bytes.readableBytes()];
-                bytes.getBytes(bytes.readerIndex(), frameBytes);
-                ProfileFrame frame = ProfileFrameCodec.decode(frameBytes, hello == null
-                        ? ProfileFrameCodec.DecodePhase.PRE_HELLO : ProfileFrameCodec.DecodePhase.ESTABLISHED);
-                var header = frame.header();
+                var header = readHeader;
                 if (!header.isResponse() || (header.flags() & ProfileFrameHeader.END_OF_STREAM) != 0) {
                     throw invalidReply();
                 }
-                byte[] body = frame.body();
+                int bodyBound = hello == null ? MAX_RESPONSE_FRAME - 36
+                        : Math.max(ProfileStatus.ENCODED_LENGTH, ProfileInitialControlCodec.REPLY_BYTES);
+                if (header.bodyLength() > bodyBound) {
+                    throw invalidReply();
+                }
+                byte[] body = new byte[header.bodyLength()];
+                bytes.getBytes(bytes.readerIndex() + 36, body);
                 if (hello == null) {
                     if (header.operation() != ProfileOperation.HELLO || header.requestId() != 1 || header.isError()) {
                         throw invalidReply();
@@ -1261,6 +1278,10 @@ final class ProfileSocketClient implements AutoCloseable {
 
     public long peakBackingBytes() {
         return backing.peakBytes();
+    }
+
+    public long codecWorkspaceBytes() {
+        return backing.workspaceBytes();
     }
 
     /** Actual local transport, HELLO write and every acquired RPC/source/output slot are terminal.

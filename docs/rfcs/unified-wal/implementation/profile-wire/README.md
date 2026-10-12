@@ -1771,3 +1771,24 @@ scripts/unified-wal/run-local-storage-tests.sh 'ProfileByteBufAllocatorTest,Prof
 最终`unified-wal-model-loe6fatk`复用原backing-budget/recovery-peer-pool/writer-close投影，24配置为3完整正向/21指定反例；没有将server root投影冒充完整客户端/跨组件memory证明。1115 Java与1102模型输入的1946个唯一source SHA逐项核验一致，所有早期stage保留各自绑定。证据`/Users/liusinan/.codex/artifacts/unified-wal/client-backing-evidence-6kln6y6n`拥有原命令/input/XML、source overrides、模型与失败诊断。最终Spotless/Checkstyle exit0；独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。
 
 计量范围是transport-owned ByteBuf reservation/backing及新的私有输入snapshot。codec临时byte数组、转交caller的reply对象/数组、JDK SSLEngine内部对象/ByteBuffer、opaque native TLS、kernel buffers/对象开销、存储/index/control/cold工作集与统一总账仍待完成。unpooled与额外snapshot copy的性能影响未经正式前后测量。完整full-bytes、backup/restore/retention时间屏障/剩余history GC/其他required authority/default routing/兼容/运维和16步验收继续OPEN；默认OFF/SYSTEM/PARK、disabled能力不变，生产Gate OPEN，Linux NUMA/真实掉电/stock binary/正式性能/canary本轮NOT_EXECUTED。
+
+
+## 客户端 codec workspace 与有界 reply 解析
+
+2026-10-13，接续父提交`8774f689a85f38d182449282bb2b1a12c99e8fb9`。在原ClientAllocation/ConnectionPermit/Credit里增加有生命周期的codec Workspace，与ByteBuf backing消耗同一connection/lane quota；不另建memory ledger、pool、线程或队列。workspace计数与backing/其peak分开，credit split保留类别，workspace credit不得被当作backing adopt。构造失败归还reservation，close/drain等待所有实际workspace与backing；client/registered connection/cohort可观察当前workspace。
+
+ProfileSocketClient在任何请求codec/HELLO编码及reply解码前预留workspace，正常、异常与明确ownership handoff后关闭。请求采用`1024 + 2 * bound`的codec byte-array工作上界：control使用原maximumRequestBytes，physical query使用原MAX_REQUEST_BYTES，固定DATA/query encoding bound为256；HELLO使用原MAX_RESPONSE_FRAME。reply采用`1024 + 2 * actualFrameBytes`，覆盖固定头/context副本及decoder所创建的entry/explicit payload byte数组。它是保守reservation policy，不称每个reserved byte都已分配，不是RSS。转交调用方的decoded Reply和client长期HELLO/control对象另有owner，不以workspace归还宣称这些对象物理内存消失。
+
+原fallback reply先复制full frame、再创建ProfileFrame body与body()副本，现复用既已检查的fixed header及精确frame length/response flags，只分配一次有界body。pre-HELLO限制为原MAX_RESPONSE_FRAME减36，established fallback只接受原status/control reply上限；READ_ENTRY/LAC/physical typed ByteBuffer分支保留原scope/correlation/flags/digest校验。协议、格式、capability与所有原向量字节不变；超过形状或workspace额度不能成为成功、MISSING或payload DATA_LOSS。codec额度不足保留原queued transport不确定性，未改变query/control结果契约。
+
+真实mTLS新增两类拒绝：CONTROL剩余空间不足codec reservation时，没有发送/native写入且保留的backing继续阻止close；已协商READ_ENTRY的真实read reply在decoder前受同一quota约束，拒绝导致原transport exception，不能产生成功或missing结果。释放最后backing后实际关闭完成。共享ledger小测验证workspace与root的同额度竞争、分别计量与仅workspace仍可阻止drain。最初IM9UUdD1 getter位置编译失败已修正；5k7uQCK9/fKmaWP0j/B7OcrlPT的read fixture未开启READ_ENTRY，错误结果解释与断言均不计通过。最终先检查真实能力并启用现有read fixture，原生产状态语义未修改；诊断source/输出保留。
+
+最终`unified-wal-local-epL6oTq8`：8个实际类93项（common21/server72），零failure/error/skip，含原codec vectors、allocator/receive/inbound、SDK ordinary/recovery/close/WRITE_LAC、registered pool/worker与delete/retention/G2-G3。定向15项及正确fixture的2项保留原source；不将失败阶段或无协商路径列为完成。复现：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'ProfileByteBufAllocatorTest,ProfileReceiveDecoderTest,ProfileInboundPipelineSocketTest,ProfileFrameCodecTest,ProfileInitialControlCodecTest,ProfileReadEntryReplyCodecTest,ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest#codec*Workspace*+clientBackingQuota*+ordinary*+*ActualWritePromise*+*ExplicitLac*+*LacEvidence*+writeLac*+writerStopWaitsForActualDataWritePromiseAfterSdkQuorum+registeredPeerPool*+registeredPool*+replicationWorkerConsumesRegisteredPoolAndRepairsAnActuallyUnavailablePeer+deleteHandoffEffectiveAllRealTargetsRejoinG2AndKeepOldEventsWithNewJournalData+deleteRetention*+logicalDelete*'
+```
+
+最终`unified-wal-model-jgnwpkbt`复用原backing/workspace/pool/writer-close投影，共24配置、3完整正向/21指定反例；不将有限root模型当作codec所有数组/对象或RSS完整证明。1115 Java与1102模型输入的1946个唯一source SHA逐项核验。证据`/Users/liusinan/.codex/artifacts/unified-wal/codec-workspace-evidence-sod16tmf`保存每个stage原inputs/命令/XML、source overrides、模型与失败诊断。最终Spotless/Checkstyle exit0；Java/模型/checker终結后的独立RAT exit1，443 unapproved全部存在父HEAD、无新增，不称CI全绿。
+
+本增量只接客户端临时codec byte-array工作集与消除fallback frame副本。caller-owned reply/长期对象的预算转交、server codec/control/cold工作集、JDK/opaque native TLS/kernel/object overhead、存储/index统一总账继续实施；reservation上界和snapshot/unpooled性能未经正式测量。full-bytes、backup/restore/retention时间屏障/剩余history GC、永久退役/required authority/default routing/兼容/性能/运维与完整16步Gate保持OPEN，默认OFF/SYSTEM/PARK和disabled能力不变。

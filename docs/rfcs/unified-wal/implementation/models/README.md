@@ -1453,3 +1453,6 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-13 [客户端 transport backing 与实际关闭](../profile-wire/README.md#客户端-transport-backing-与实际关闭)复用原ProfileBackingBudget、ProfileRecoveryPeerPool、ProfileWriterClose的有限root credit/actual drain/原SDK cut投影；最终loe6fatk共24配置、3完整正向/21指定反例。1102模型inputs与Java去重1946一致；catalog726，完整A+C+D未全跑。np7kk5dg与各Java早期阶段保留原source，不移绑。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；不证明客户端所有字节、TLS/provider/kernel/RSS、跨组件总内存、性能或liveness，生产Gate OPEN。客户端private snapshot与actual retained output由真实Java回归生产，不把server backing投影扩张成全链路内存证明。
+
+
+2026-10-13 [客户端 codec workspace 与有界 reply 解析](../profile-wire/README.md#客户端-codec-workspace-与有界-reply-解析)继续使用原ProfileBackingBudget workspace/root credit、ProfileRecoveryPeerPool custody、ProfileWriterClose cut投影。最终jgnwpkbt共24配置、3完整正向/21指定反例，1102模型inputs与Java去重1946一致；catalog726、完整A+C+D未全跑。hbx53yv8/w1fa0twt及各Javastage保留原source，不移绑。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；codec临时字节上界与真实拒绝来自Java路径，模型不证明所有数组/对象、caller ownership总账、RSS、TLS/kernel、性能或liveness，生产Gate OPEN。

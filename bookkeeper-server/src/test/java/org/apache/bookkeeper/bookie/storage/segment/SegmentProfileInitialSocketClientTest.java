@@ -740,6 +740,96 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void codecReplyWorkspaceRefusalIsUnknownAndNeverMissingOrSuccessfulData() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var client = dataClient(fixture, 0, 2, Duration.ofSeconds(5));
+            assertTrue(client.hello().capabilities().contains(
+                    org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY));
+            var source = entry(fixture, 0, 16);
+            try {
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        client.addNormal(fixture.context(), fixture.credential, 0, source)
+                                .get(5, TimeUnit.SECONDS).durableResult());
+            } finally {
+                source.release();
+            }
+            Channel channel = dataChannel(client);
+            var held = new AtomicReference<ByteBuf>();
+            channel.eventLoop().submit(() -> {
+                String decoder = channel.pipeline().context(io.netty.handler.codec.LengthFieldBasedFrameDecoder.class)
+                        .name();
+                channel.pipeline().addAfter(decoder, "exhaustReplyWorkspace",
+                        new io.netty.channel.ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void channelRead(ChannelHandlerContext ctx, Object message) {
+                                var frame = (ByteBuf) message;
+                                if (frame.getUnsignedShort(frame.readerIndex() + 14)
+                                        == ProfileOperation.READ_ENTRY.wireValue() && held.get() == null) {
+                                    int free = Math.toIntExact(client.backingLimitBytes() - client.backingBytes()
+                                            - client.codecWorkspaceBytes());
+                                    held.set(ctx.alloc().heapBuffer(free - 512, free - 512));
+                                }
+                                ctx.fireChannelRead(message);
+                            }
+                        });
+            }).get(5, TimeUnit.SECONDS);
+            try {
+                var result = client.readEntry(fixture.context(), 0);
+                assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+                assertNotNull(held.get());
+                assertEquals(0, client.codecWorkspaceBytes());
+                var closed = client.closeAsync();
+                assertFalse(closed.isDone());
+                held.getAndSet(null).release();
+                closed.get(5, TimeUnit.SECONDS);
+                assertEquals(0, client.backingBytes());
+            } finally {
+                if (held.get() != null) {
+                    held.getAndSet(null).release();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void codecWorkspaceRefusalCannotSendControlOrCompleteBeforeRemainingBacking() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                    fixture.reservations.createIfAbsent(fixture.reservation).status());
+            var client = fixture.connect(0, 1, Duration.ofSeconds(5));
+            var ownerField = ProfileInitialControlClient.class.getDeclaredField("socket");
+            ownerField.setAccessible(true);
+            var owner = ownerField.get(client);
+            var channelField = owner.getClass().getDeclaredField("channel");
+            channelField.setAccessible(true);
+            Channel channel = (Channel) channelField.get(owner);
+            var held = new AtomicReference<ByteBuf>();
+            try {
+                var result = channel.eventLoop().submit(() -> {
+                    int free = Math.toIntExact(client.backingLimitBytes() - client.backingBytes());
+                    held.set(channel.alloc().heapBuffer(free - 512, free - 512));
+                    return client.install(fixture.install(0));
+                }).get(5, TimeUnit.SECONDS);
+                assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+                assertEquals(0, fixture.nodeIo.get(0).writes);
+                assertEquals(0, client.codecWorkspaceBytes());
+                var closed = client.closeAsync();
+                assertFalse(closed.isDone());
+                assertTrue(client.backingBytes() >= held.get().capacity());
+                held.getAndSet(null).release();
+                closed.get(5, TimeUnit.SECONDS);
+                assertEquals(0, client.backingBytes());
+            } finally {
+                if (held.get() != null) {
+                    held.getAndSet(null).release();
+                }
+            }
+        }
+    }
+
+    @Test
     public void clientBackingQuotaRejectsBeforeSendAndSnapshotsCallerWithActualOutputDrain() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
             fixture.connectAll(Duration.ofSeconds(5));

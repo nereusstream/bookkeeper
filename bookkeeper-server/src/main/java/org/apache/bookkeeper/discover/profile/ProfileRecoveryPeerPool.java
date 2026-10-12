@@ -274,6 +274,11 @@ public final class ProfileRecoveryPeerPool {
                 .mapToLong(ProfileSocketClient.RegisteredConnection::backingBytes).sum();
     }
 
+    public synchronized long codecWorkspaceBytes() {
+        return active == null ? 0 : active.connections.stream()
+                .mapToLong(ProfileSocketClient.RegisteredConnection::codecWorkspaceBytes).sum();
+    }
+
     /** Fixed transport-backing ceiling for the currently reserved CONTROL/DATA cohort; excludes opaque memory. */
     public synchronized long backingLimitBytes() {
         return active == null ? 0 : Math.multiplyExact((long) cohort.size(), Math.addExact(

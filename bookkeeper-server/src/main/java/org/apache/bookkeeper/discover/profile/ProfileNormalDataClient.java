@@ -127,6 +127,10 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         return socket.peakBackingBytes();
     }
 
+    public long codecWorkspaceBytes() {
+        return socket.codecWorkspaceBytes();
+    }
+
     @Override
     public void close() {
         socket.close();
