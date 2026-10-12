@@ -1592,3 +1592,25 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 ```
 
 证据 /Users/liusinan/.codex/artifacts/unified-wal/physical-receipt-evidence-aurhprzt 保留最终源码、105项阶段的原test文件、原命令/inputs/XML、模型与诊断阶段，旧PASS不移绑。最终Spotless/Checkstyle exit0；编译/测试终结后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。retention/offline/backup-restore policy、accepted terminal decommission/unrecoverable、stream/journal snapshot/handoff及history/page GC仍OPEN；本实现不清旧义务、删除stream event或压缩tombstone。Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续OPEN，步骤11/12/14/15与生产Gate不提升。默认OFF/SYSTEM/PARK和disabled能力不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+## 删除流完整 snapshot 与真实启动追赶
+
+2026-10-12，父源码6bf92b4a3f之后新增ProfileDeleteSnapshot（UWDX root/UWDY page，schema1）：64 effects/page、最多64 pages，覆盖原stream最多4096个连续event；最多64个snapshot generations。root绑定完整target/incarnation、原stream/assignment generation、covered-through、snapshot generation/nonce及全部page SHA-256。每页保留原完整Event和original event/index creation zxid，顺序/数量/目标/stream/digest/CRC必须匹配；不能用digest-only root、缺page或cursor替代effect。该snapshot保存完整prefix，不在此阶段去重/裁剪历史或改变generation1的assignment。
+
+原ZKProfileReservationStore的显式cold publish先从真实committed delivery与per-ledger index收集完整prefix，再按固定generation创建不可变candidate/root birth child和有界pages，最后以原snapshot-current的版本CAS发布，并同multi创建published witness。selection version必须等于snapshot generation-1，published witness绑定candidate physical birth/body SHA，且witness creation zxid必须等于selection修改zxid；所有page都须在root创建后、publication之前创建。Root/page/selection或原index重建，即使bytes/version/CRC相同，也不直接成为新authority。部分准备保持inert；取消停止未来stage，丢发布回复从native状态解析。并发claim同一generation时保留一个健康candidate，竞争方可重读/接续，不把合法赢家当作corruption。发布不删除journal或旧snapshot，head普通增长继续保留完整suffix。
+
+readDeleteSnapshot完整核验全部pages、root birth和publication witness，二次确认同一selection，才构造private native DeleteSnapshotView。原readDeleteDelivery/authority reader在journal event缺失时，仅可使用matching已发布snapshot中同一sequence的完整Event和original birth，并继续核验原per-ledger index、metadata physical birth/CLOSED seal、logical tombstone及exact scope。已有journal event若corrupt/recreated仍拒绝，不能由snapshot静默覆盖。prefix查询不能越过cut，suffix仍从原journal无洞读取。
+
+IsolatedSegmentStorage.catchUpProfileDeletes在本次cold attempt中只加载一次完整view，复用原authority reader与原Bookie TOMBSTONE/delete-applied type13 write/force/owner apply；没有新local cursor格式或持久派生队列。逐条effect达到durable apply和实际owner terminal后才推进cursor，LIMIT/UNKNOWN保留未完成项；snapshot本身不能跳过TOMBSTONE，仍不等待physical compaction/FREE。捕获view只属于本次attempt，不新增全局cache；selection变化导致重读/未就绪，不能扩大scope。ProfileDeleteCoordinator.beginSnapshot复用原bounded AbortPolicy cold、SDK timer、active custody，waiting cancel/deadline与实际cold return分开，不把completion称为远程ZK撤销证明。
+
+真实ZK/mTLS/SDK/file验证覆盖非空ledger44＋非空ledger45：snapshot prefix1发布后head增长到2，在可丢弃fixture中移除event1，healthy重开从snapshot逐条应用第一份TOMBSTONE，maxEvents=1只到LIMIT/cursor1，随后从真实suffix达到cursor2；snapshot generation2仍不改变stream/assignment generation1。实际65个已初始化、普通close和logical delete的ledgers形成两个native pages，maxEvents64拒绝部分发布，第二page缺失在任何bootstrap effect前拒绝。缺page、同bytes/version page或selection重建、原index重建均不bootstrap；native publication回复丢失、page回调held期间caller cancel/actual drain、原candidate接续及两个实际publisher并发也保留原journal和local cursor义务。Fixture默认READ只授权44，新用例仅显式加入实际READY安装结果的第二context；不是注入successful source/fence/receipt。此前错误读取尚未生成的recovery context造成fixture失败，修正后原数据/TOMBSTONE断言保留，失败不计PASS。
+
+最终SWrojBUj在Corretto21.0.10执行7类111项Java，0 failure/error/skip，1110输入逐SHA核验；r7gvztdd执行23有限模型配置（3完整正向/20指定反例）、1051 inputs与Java去重1895一致。新ProfileDeleteSnapshot正向358 generated/164 distinct、queue0、depth13，0.952秒/peak RSS110624768 bytes；TLC1.7.4、单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。catalog686/完整A+C+D未全跑，不作完整fairness/liveness、长期容量或性能结论。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeleteSnapshotTest,ProfileDeletePhysicalReceiptTest,ProfilePhysicalDeleteCodecTest,ProfileInitialControlCodecTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,SegmentProfileInitialSocketClientTest#deleteSnapshot*+physicalDelet*+committedDelete*+automaticDelete*+logicalDelete*+preparedDelete*+ordinaryWriterClose*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-snapshot --config-prefix ce-profile-delete-snapshot --config-prefix a-profile-physical-receipt --config-prefix ce-profile-physical-receipt --config-prefix a-profile-delete-publication --config-prefix ce-profile-delete-publication
+```
+
+证据 /Users/liusinan/.codex/artifacts/unified-wal/delete-snapshot-evidence-8dhv920k 保留最终source/命令/inputs/XML、模型与诊断阶段，旧PASS不移绑。assignment G+1 PREPARED/effective handoff、retention/offline/backup-restore policy、accepted decommission/unrecoverable、journal prefix/history/page/tombstone GC仍OPEN；本API没有删旧event或放弃任何target义务。Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维和全16步综合验收继续OPEN。默认OFF/SYSTEM/PARK、disabled能力及生产Gate不提升；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+最终Spotless/Checkstyle exit0；编译/测试完全终结后的独立RAT exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。

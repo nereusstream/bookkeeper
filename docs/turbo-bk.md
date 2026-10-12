@@ -716,3 +716,6 @@ Segment production candidate 的最低 Gate：
 
 2026-10-12 [删除物理终结记录与持久接续](rfcs/unified-wal/implementation/profile-wire/README.md#删除物理终结记录与持久接续)已把实际UIC8 REUSABLE绑定完整事件/request/target/incarnation，条件化存入原ZK不可变row与birth guard；新await入口按完整历史targets重读全部记录，支持coordinator重建及已有记录的实际离线目标。原观察入口保持只读，PENDING/UNKNOWN无记录，不删除历史义务或授予GC权限。最终6类105项Java/31有限模型配置（4正向/27指定反例）及style通过；retention、accepted decommission/unrecoverable、snapshot/handoff/history GC和其他16步验收仍OPEN，生产Gate不提升。
 原105项阶段保留source绑定；最终还原同bytes/version/guards的metadata birth ABA补验2项通过，31模型与1884当前输入一致，style通过，RAT443父HEAD无新增。
+
+
+2026-10-12 [删除流完整 snapshot 与真实启动追赶](rfcs/unified-wal/implementation/profile-wire/README.md#删除流完整-snapshot-与真实启动追赶)已将原generation1 shared stream的完整prefix保存为有界immutable pages/root＋conditional publication witness，绑定scope/原event birth并接入实际TOMBSTONE/cursor启动追赶。真实缺prefix＋suffix、65-ledger两page、missing/recreate、取消/回复丢失及并发有111项Java/23有限模型配置（3正向/20指定反例）证据；无旧journal删除、assignment handoff或GC权限。retention/terminal退役/history GC及其他16步验收继续OPEN，生产Gate不提升。

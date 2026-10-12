@@ -19,6 +19,15 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-snapshot': None,
+    'ce-profile-delete-snapshot-chunk': 'SnapshotPublicationHasEveryChunk',
+    'ce-profile-delete-snapshot-scope': 'SnapshotPublicationHasScope',
+    'ce-profile-delete-snapshot-birth': 'SnapshotBootstrapHasScopeAndBirth',
+    'ce-profile-delete-snapshot-effect': 'SnapshotCursorHasEveryEffect',
+    'ce-profile-delete-snapshot-suffix': 'SnapshotBootstrapHasCompleteSuffix',
+    'ce-profile-delete-snapshot-stop': 'SnapshotStopStartsNoPublication',
+    'ce-profile-delete-snapshot-release': 'SnapshotReleaseWaitsProcedure',
+
     'a-profile-physical-receipt': None,
     'ce-profile-physical-receipt-scope': 'ReceiptWritesNeedScope',
     'ce-profile-physical-receipt-commit': 'ReceiptObservationsNeedCommit',
@@ -892,6 +901,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileDeleteSnapshot.tla" if "profile-delete-snapshot" in name
                    else "ProfilePhysicalReceipt.tla" if "profile-physical-receipt" in name
                    else "ProfilePhysicalDeleteWire.tla" if "profile-physical-wire" in name
                    else "ProfilePhysicalDelete.tla" if "profile-physical-delete" in name

@@ -347,7 +347,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
         long deadline = System.nanoTime() + timeout.toNanos();
         var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
-        var authorityReader = reservations.deleteAuthorityReader(target.bookie(), target.incarnation(), metadata);
+        ZKProfileReservationStore.DeleteSnapshotView snapshot = null;
+        boolean snapshotLoaded = false;
         CompletableFuture<Void> actual = CompletableFuture.completedFuture(null);
         ProfileDeleteDelivery.Head required = null;
         int applied = 0;
@@ -375,7 +376,19 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 if (applied == maxEvents) {
                     return new DeleteCatchUpAttempt(DeleteCatchUpStatus.LIMIT, required, actual);
                 }
-                var delivery = reservations.readDeleteDelivery(metadata, target, through + 1);
+                if (!snapshotLoaded) {
+                    var loaded = reservations.readDeleteSnapshot(target);
+                    if (loaded.status() != ZKProfileReservationStore.DeleteSnapshotStatus.FOUND
+                            && loaded.status() != ZKProfileReservationStore.DeleteSnapshotStatus.ABSENT) {
+                        return new DeleteCatchUpAttempt(loaded.status()
+                                == ZKProfileReservationStore.DeleteSnapshotStatus.QUARANTINED
+                                    ? DeleteCatchUpStatus.QUARANTINED : DeleteCatchUpStatus.UNAVAILABLE,
+                                required, actual);
+                    }
+                    snapshot = loaded.snapshot();
+                    snapshotLoaded = true;
+                }
+                var delivery = reservations.readDeleteDelivery(metadata, target, through + 1, snapshot);
                 if (delivery.status() != ZKProfileReservationStore.DeliveryStatus.COMMITTED
                         || !Arrays.equals(delivery.event().streamId(), required.streamId())) {
                     return new DeleteCatchUpAttempt(delivery.status()
@@ -384,7 +397,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                             ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);
                 }
                 var request = delivery.event().deleteApply(domain);
-                var authority = authorityReader.read(ProfileAuthorityKey.fromScope(request.scope()));
+                var authority = reservations.deleteAuthorityReader(target.bookie(), target.incarnation(),
+                        metadata, snapshot).read(ProfileAuthorityKey.fromScope(request.scope()));
                 if (authority.authority() == null || !authority.authority().scope().equals(request.scope())) {
                     return new DeleteCatchUpAttempt(authority.status() == ProfileControlStore.ReadStatus.UNAVAILABLE
                             ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);

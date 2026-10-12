@@ -119,6 +119,75 @@ public final class ProfileDeleteCoordinator {
         }
     }
 
+    public record SnapshotAttempt(CompletableFuture<ZKProfileReservationStore.DeleteSnapshotResult> result,
+            CompletableFuture<Void> completion) { }
+
+    /** Original cold/timer custody; waiting cancellation stops future publication stages, not accepted ZK I/O. */
+    public SnapshotAttempt beginSnapshot(ProfileDeleteRecord.Target target, ClientContext sdk,
+            int maximumEvents, Duration maxDuration) {
+        Objects.requireNonNull(target, "target");
+        if (maximumEvents < 1 || maximumEvents > ProfileDeleteDelivery.MAX_EVENTS
+                || maxDuration.isNegative() || maxDuration.isZero()
+                || maxDuration.compareTo(Duration.ofMinutes(1)) > 0
+                || cold.getMaximumPoolSize() == Integer.MAX_VALUE
+                || (long) cold.getQueue().size() + cold.getQueue().remainingCapacity() >= Integer.MAX_VALUE
+                || !(cold.getRejectedExecutionHandler() instanceof ThreadPoolExecutor.AbortPolicy)) {
+            throw new IllegalArgumentException("Delete snapshot requires a bounded cold attempt");
+        }
+        var unavailable = new ZKProfileReservationStore.DeleteSnapshotResult(
+                ZKProfileReservationStore.DeleteSnapshotStatus.UNAVAILABLE, null);
+        if (sdk.isClientClosed() || !active.tryAcquire()) {
+            return new SnapshotAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+        var stopped = new AtomicBoolean();
+        var caller = new CompletableFuture<ZKProfileReservationStore.DeleteSnapshotResult>();
+        var completion = new CompletableFuture<Void>();
+        var timer = new AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
+        try {
+            var actual = CompletableFuture.supplyAsync(() -> reservations.publishDeleteSnapshot(
+                    metadata, target, maximumEvents, maxDuration,
+                    () -> !stopped.get() && !sdk.isClientClosed()), cold);
+            actual.whenComplete((result, failure) -> {
+                var scheduled = timer.get();
+                if (scheduled != null) {
+                    scheduled.cancel(false);
+                }
+                active.release();
+                completion.complete(null);
+                if (failure == null) {
+                    caller.complete(result);
+                } else {
+                    caller.completeExceptionally(failure);
+                }
+            });
+            try {
+                var scheduled = sdk.getScheduler().schedule(() -> {
+                    stopped.set(true);
+                    caller.complete(new ZKProfileReservationStore.DeleteSnapshotResult(
+                            ZKProfileReservationStore.DeleteSnapshotStatus.DURABILITY_UNKNOWN, null));
+                }, maxDuration.toNanos(), TimeUnit.NANOSECONDS);
+                timer.set(scheduled);
+                if (actual.isDone()) {
+                    scheduled.cancel(false);
+                }
+            } catch (RejectedExecutionException rejected) {
+                stopped.set(true);
+                caller.complete(unavailable);
+            }
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return new SnapshotAttempt(caller, completion.copy());
+        } catch (RejectedExecutionException rejected) {
+            active.release();
+            return new SnapshotAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+    }
+
     public enum PhysicalStatus { REUSABLE_EVERY_TARGET, DURABLY_REUSABLE_EVERY_TARGET, PENDING, QUARANTINED }
 
     public record TargetObservation(ProfilePhysicalDeleteCodec.Outcome outcome,

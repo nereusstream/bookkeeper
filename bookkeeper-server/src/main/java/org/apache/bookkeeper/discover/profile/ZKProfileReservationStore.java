@@ -2887,6 +2887,326 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public enum DeleteSnapshotStatus { FOUND, ABSENT, LIMIT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN }
+
+    /** Constructed only by complete native root/page verification; no caller-provided snapshot fact is accepted. */
+    public static final class DeleteSnapshotView {
+        private final ProfileDeleteSnapshot.Root value;
+        private final long rootBirth;
+        private final long selectionVersion;
+        private final long selectionZxid;
+        private final List<ProfileDeleteSnapshot.Effect> effects;
+
+        private DeleteSnapshotView(ProfileDeleteSnapshot.Root value, long rootBirth, long selectionVersion,
+                long selectionZxid, List<ProfileDeleteSnapshot.Effect> effects) {
+            this.value = value;
+            this.rootBirth = rootBirth;
+            this.selectionVersion = selectionVersion;
+            this.selectionZxid = selectionZxid;
+            this.effects = List.copyOf(effects);
+        }
+
+        public ProfileDeleteSnapshot.Root value() {
+            return value;
+        }
+
+        public List<ProfileDeleteSnapshot.Effect> effects() {
+            return effects;
+        }
+    }
+
+    public record DeleteSnapshotResult(DeleteSnapshotStatus status, DeleteSnapshotView snapshot) {
+        public DeleteSnapshotResult {
+            if ((status == DeleteSnapshotStatus.FOUND) != (snapshot != null)) {
+                throw new IllegalArgumentException("Only a completely verified native snapshot carries effects");
+            }
+        }
+    }
+
+    private String deleteSnapshotPath(ProfileDeleteRecord.Target target, long generation) {
+        return deliveryPath(target) + "/snapshot-" + Long.toHexString(generation);
+    }
+
+    private record SnapshotSelection(ProfileDeleteSnapshot.Root value, ProfileZKReadClient.Node selected,
+            ProfileZKReadClient.Node rootNode) { }
+
+    private SnapshotSelection deleteSnapshotSelection(ProfileDeleteRecord.Target target, long deadline)
+            throws InterruptedException, TimeoutException {
+        String parent = deliveryPath(target);
+        var selected = reads.get(parent + "/snapshot-current", deadline);
+        if (selected.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(selected);
+        requirePersistent(selected, false);
+        var value = ProfileDeleteSnapshot.Root.decode(selected.bytes());
+        if (!value.cut().target().equals(target) || selected.stat().getVersion() != value.generation() - 1) {
+            throw new IllegalArgumentException("Snapshot selection does not match its generation and target");
+        }
+        String name = deleteSnapshotPath(target, value.generation());
+        var rootNode = reads.get(name, deadline);
+        requireFound(rootNode);
+        requirePersistent(rootNode, true);
+        if (!Arrays.equals(rootNode.bytes(), selected.bytes())) {
+            throw new IllegalArgumentException("Snapshot selection/root mismatch");
+        }
+        var guard = reads.get(name + "/birth-" + HexFormat.of().formatHex(value.birthId()), deadline);
+        requireFound(guard);
+        requirePersistent(guard, true);
+        if (guard.stat().getCzxid() != rootNode.stat().getCzxid()
+                || !Arrays.equals(guard.bytes(), value.birthId())) {
+            throw new IllegalArgumentException("Snapshot root physical birth is missing or recreated");
+        }
+        var published = reads.get(name + "/published", deadline);
+        requireFound(published);
+        requirePersistent(published, true);
+        byte[] witness = java.nio.ByteBuffer.allocate(40).putLong(rootNode.stat().getCzxid())
+                .put(ProfileRepairIntent.digest(rootNode.bytes())).array();
+        if (published.stat().getCzxid() != selected.stat().getMzxid()
+                || !Arrays.equals(witness, published.bytes())) {
+            throw new IllegalArgumentException("Snapshot publication/selection was recreated or changed");
+        }
+        var head = deleteHead(target, deadline);
+        if (head == null || !Arrays.equals(value.cut().streamId(), head.head().streamId())
+                || value.cut().streamGeneration() != head.head().streamGeneration()
+                || value.cut().assignmentGeneration() != head.head().assignmentGeneration()
+                || value.cut().committedThrough() > head.head().committedThrough()) {
+            throw new IllegalArgumentException("Snapshot lies outside the effective stream prefix");
+        }
+        return new SnapshotSelection(value, selected, rootNode);
+    }
+
+    public DeleteSnapshotResult readDeleteSnapshot(ProfileDeleteRecord.Target target) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            if (reads.sync(root, deadline) != Code.OK.intValue()) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+            }
+            var selected = deleteSnapshotSelection(target, deadline);
+            if (selected == null) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.ABSENT);
+            }
+            var value = selected.value();
+            var effects = new ArrayList<ProfileDeleteSnapshot.Effect>((int) value.cut().committedThrough());
+            String name = deleteSnapshotPath(target, value.generation());
+            for (int index = 0; index < value.pageDigests().size(); index++) {
+                var node = reads.get(name + "/page-" + Integer.toHexString(index), deadline);
+                requireFound(node);
+                requirePersistent(node, true);
+                var page = ProfileDeleteSnapshot.Page.decode(node.bytes());
+                if (page.index() != index || !page.matches(value)
+                        || node.stat().getCzxid() < selected.rootNode().stat().getCzxid()
+                        || node.stat().getCzxid() > selected.selected().stat().getMzxid()) {
+                    throw new IllegalArgumentException("Missing, incomplete or recreated snapshot page");
+                }
+                effects.addAll(page.effects());
+            }
+            var fresh = deleteSnapshotSelection(target, deadline);
+            if (fresh == null || fresh.rootNode().stat().getCzxid() != selected.rootNode().stat().getCzxid()
+                    || fresh.selected().stat().getVersion() != selected.selected().stat().getVersion()
+                    || fresh.selected().stat().getMzxid() != selected.selected().stat().getMzxid()
+                    || !Arrays.equals(fresh.value().encode(), value.encode())) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+            }
+            return new DeleteSnapshotResult(DeleteSnapshotStatus.FOUND, new DeleteSnapshotView(value,
+                    selected.rootNode().stat().getCzxid(), selected.selected().stat().getVersion(),
+                    selected.selected().stat().getMzxid(), effects));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+        }
+    }
+
+    /** Explicit bounded cold publication. Inert preparation is resumable; old journal/assignment remain intact. */
+    public DeleteSnapshotResult publishDeleteSnapshot(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Target target, int maximumEvents, Duration maxDuration,
+            java.util.function.BooleanSupplier live) {
+        requireRecoveryClient(metadata);
+        if (maximumEvents < 1 || maximumEvents > ProfileDeleteDelivery.MAX_EVENTS
+                || maxDuration.isNegative() || maxDuration.isZero()
+                || maxDuration.compareTo(Duration.ofMinutes(1)) > 0) {
+            throw new IllegalArgumentException("Snapshot publication needs bounded cold work");
+        }
+        long deadline = System.nanoTime() + maxDuration.toNanos();
+        boolean submitted = false;
+        try {
+            if (!live.getAsBoolean()) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+            }
+            if (reads.sync(root, deadline) != Code.OK.intValue()) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+            }
+            var currentHead = deleteHead(target, deadline);
+            if (currentHead == null || currentHead.head().committedThrough() == 0) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.ABSENT);
+            }
+            var previous = deleteSnapshotSelection(target, deadline);
+            if (previous != null
+                    && previous.value().cut().committedThrough() == currentHead.head().committedThrough()) {
+                return readDeleteSnapshot(target);
+            }
+            long generation = previous == null ? 1 : previous.value().generation() + 1;
+            if (generation > ProfileDeleteSnapshot.MAX_GENERATIONS) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.LIMIT);
+            }
+            String name = deleteSnapshotPath(target, generation);
+            var candidate = reads.get(name, deadline);
+            ProfileDeleteSnapshot.Root prepared = null;
+            if (candidate.code() == Code.OK.intValue()) {
+                requirePersistent(candidate, true);
+                prepared = ProfileDeleteSnapshot.Root.decode(candidate.bytes());
+                if (previous == null && reads.get(name + "/published", deadline).code() == Code.OK.intValue()) {
+                    return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+                }
+                if (prepared.generation() != generation || !prepared.cut().target().equals(target)
+                        || !Arrays.equals(prepared.cut().streamId(), currentHead.head().streamId())
+                        || prepared.cut().committedThrough() > currentHead.head().committedThrough()) {
+                    return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+                }
+            } else if (candidate.code() != Code.NONODE.intValue()) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+            }
+            var cut = prepared == null ? currentHead.head() : prepared.cut();
+            if (cut.committedThrough() > maximumEvents) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.LIMIT);
+            }
+            var effects = new ArrayList<ProfileDeleteSnapshot.Effect>((int) cut.committedThrough());
+            var cached = previous == null ? null : readDeleteSnapshot(target).snapshot();
+            for (long sequence = 1; sequence <= cut.committedThrough(); sequence++) {
+                if (!live.getAsBoolean()) {
+                    return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+                }
+                ProfileZKReadClient.requireTime(deadline);
+                var event = readDeleteDelivery(metadata, target, sequence, cached);
+                if (event.status() != DeliveryStatus.COMMITTED) {
+                    return deleteSnapshotFailure(event.status() == DeliveryStatus.UNAVAILABLE
+                            ? DeleteSnapshotStatus.UNAVAILABLE : DeleteSnapshotStatus.QUARANTINED);
+                }
+                var index = reads.get(path(event.event().ledger().ledgerId()) + "/delete-delivery-"
+                        + deliveryTargetKey(target), deadline);
+                requireFound(index);
+                requirePersistent(index, true);
+                if (!Arrays.equals(index.bytes(), event.event().encode())) {
+                    return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+                }
+                effects.add(new ProfileDeleteSnapshot.Effect(index.stat().getCzxid(), event.event()));
+            }
+            UUID nonce = UUID.randomUUID();
+            byte[] birth = prepared == null ? java.nio.ByteBuffer.allocate(16)
+                    .putLong(nonce.getMostSignificantBits()).putLong(nonce.getLeastSignificantBits()).array()
+                    : prepared.birthId();
+            var pages = new ArrayList<ProfileDeleteSnapshot.Page>();
+            var digests = new ArrayList<byte[]>();
+            for (int first = 0; first < effects.size(); first += ProfileDeleteSnapshot.EVENTS_PER_PAGE) {
+                var page = new ProfileDeleteSnapshot.Page(birth, pages.size(), effects.subList(first,
+                        Math.min(effects.size(), first + ProfileDeleteSnapshot.EVENTS_PER_PAGE)));
+                pages.add(page);
+                digests.add(ProfileRepairIntent.digest(page.encode()));
+            }
+            var value = new ProfileDeleteSnapshot.Root(birth, generation, cut, digests);
+            if (prepared != null && !Arrays.equals(prepared.encode(), value.encode())) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+            }
+            if (!live.getAsBoolean()) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+            }
+            if (prepared == null) {
+                submitted = true;
+                multi(List.of(Op.check(deliveryPath(target), currentHead.node().stat().getVersion()),
+                        Op.check(deliveryPath(target) + "-assignment", 0),
+                        Op.check(deliveryPath(target) + "/birth-"
+                                + HexFormat.of().formatHex(cut.streamId()), 0),
+                        Op.create(name, value.encode(), pageAcls, CreateMode.PERSISTENT),
+                        Op.create(name + "/birth-" + HexFormat.of().formatHex(birth), birth,
+                                immutableAcls, CreateMode.PERSISTENT)), deadline);
+            }
+            var rootNode = reads.get(name, deadline);
+            requireFound(rootNode);
+            requirePersistent(rootNode, true);
+            if (!Arrays.equals(rootNode.bytes(), value.encode())) {
+                var winner = ProfileDeleteSnapshot.Root.decode(rootNode.bytes());
+                if (winner.generation() == generation && winner.cut().target().equals(target)
+                        && Arrays.equals(winner.cut().streamId(), cut.streamId())
+                        && winner.cut().streamGeneration() == cut.streamGeneration()
+                        && winner.cut().assignmentGeneration() == cut.assignmentGeneration()) {
+                    var selected = readDeleteSnapshot(target);
+                    return selected.snapshot() != null && selected.snapshot().value().generation() >= generation
+                            ? selected : deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+                }
+                return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+            }
+            var guard = reads.get(name + "/birth-" + HexFormat.of().formatHex(birth), deadline);
+            requireFound(guard);
+            requirePersistent(guard, true);
+            if (guard.stat().getCzxid() != rootNode.stat().getCzxid() || !Arrays.equals(guard.bytes(), birth)) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+            }
+            for (var page : pages) {
+                if (!live.getAsBoolean()) {
+                    return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+                }
+                String pagePath = name + "/page-" + Integer.toHexString(page.index());
+                var stored = reads.get(pagePath, deadline);
+                if (stored.code() == Code.NONODE.intValue()) {
+                    submitted = true;
+                    multi(List.of(Op.check(name, 0),
+                            Op.check(name + "/birth-" + HexFormat.of().formatHex(birth), 0),
+                            Op.create(pagePath, page.encode(), immutableAcls, CreateMode.PERSISTENT)), deadline);
+                    stored = reads.get(pagePath, deadline);
+                }
+                requireFound(stored);
+                requirePersistent(stored, true);
+                if (!Arrays.equals(stored.bytes(), page.encode())
+                        || stored.stat().getCzxid() < rootNode.stat().getCzxid()) {
+                    return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+                }
+            }
+            var checks = new ArrayList<Op>();
+            checks.add(Op.check(name, 0));
+            checks.add(Op.check(name + "/birth-" + HexFormat.of().formatHex(birth), 0));
+            checks.add(Op.check(deliveryPath(target) + "-assignment", 0));
+            checks.add(Op.check(deliveryPath(target) + "/birth-" + HexFormat.of().formatHex(cut.streamId()), 0));
+            for (var page : pages) {
+                checks.add(Op.check(name + "/page-" + Integer.toHexString(page.index()), 0));
+            }
+            String selectedPath = deliveryPath(target) + "/snapshot-current";
+            if (previous == null) {
+                checks.add(Op.create(selectedPath, value.encode(), acls, CreateMode.PERSISTENT));
+            } else {
+                checks.add(Op.setData(selectedPath, value.encode(), previous.selected().stat().getVersion()));
+            }
+            checks.add(Op.create(name + "/published", java.nio.ByteBuffer.allocate(40)
+                    .putLong(rootNode.stat().getCzxid()).put(ProfileRepairIntent.digest(value.encode())).array(),
+                    immutableAcls, CreateMode.PERSISTENT));
+            if (!live.getAsBoolean()) {
+                return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
+            }
+            submitted = true;
+            multi(checks, deadline);
+            var published = readDeleteSnapshot(target);
+            return published.snapshot() != null && published.snapshot().value().generation() >= generation
+                    ? published : deleteSnapshotFailure(published.status() == DeleteSnapshotStatus.QUARANTINED
+                        ? DeleteSnapshotStatus.QUARANTINED : DeleteSnapshotStatus.DURABILITY_UNKNOWN);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return deleteSnapshotFailure(submitted ? DeleteSnapshotStatus.DURABILITY_UNKNOWN
+                    : DeleteSnapshotStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return deleteSnapshotFailure(submitted ? DeleteSnapshotStatus.DURABILITY_UNKNOWN
+                    : DeleteSnapshotStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return deleteSnapshotFailure(DeleteSnapshotStatus.QUARANTINED);
+        }
+    }
+
+    private static DeleteSnapshotResult deleteSnapshotFailure(DeleteSnapshotStatus status) {
+        return new DeleteSnapshotResult(status, null);
+    }
+
     /** Missing is unknown authority, never an empty applicable set or a bootstrap instruction. */
     public DeleteHeadResult readDeleteHead(ProfileDeleteRecord.Target target) {
         long deadline = System.nanoTime() + timeoutNanos;
@@ -2940,9 +3260,41 @@ public final class ZKProfileReservationStore {
                 Op.check(name, current.node().stat().getVersion()));
     }
 
+    private ProfileDeleteSnapshot.Effect snapshotEffect(ProfileDeleteRecord.Target target, long sequence,
+            DeleteSnapshotView cached, long deadline) throws InterruptedException, TimeoutException {
+        DeleteSnapshotView view = cached;
+        if (view == null) {
+            var loaded = readDeleteSnapshot(target);
+            if (loaded.snapshot() == null) {
+                if (loaded.status() == DeleteSnapshotStatus.UNAVAILABLE) {
+                    throw new IllegalStateException("Delete snapshot unavailable");
+                }
+                throw new IllegalArgumentException("No complete snapshot covers the missing journal prefix");
+            }
+            view = loaded.snapshot();
+        }
+        var current = deleteSnapshotSelection(target, deadline);
+        if (current == null || current.rootNode().stat().getCzxid() != view.rootBirth
+                || current.selected().stat().getVersion() != view.selectionVersion
+                || current.selected().stat().getMzxid() != view.selectionZxid
+                || !Arrays.equals(current.value().encode(), view.value.encode())) {
+            throw new IllegalStateException("Snapshot selection changed during the cold attempt");
+        }
+        if (!view.value.cut().target().equals(target) || sequence > view.value.cut().committedThrough()) {
+            throw new IllegalArgumentException("Snapshot does not cover this exact target/sequence");
+        }
+        return view.effects.get((int) sequence - 1);
+    }
+
     private DeliveryResult resolveDelivery(long ledger, ProfileDeleteRecord.Target target,
             ProfileZKReadClient.Node receipt, ProfileZKReadClient.Node headNode, ProfileDeleteDelivery.Head head,
             long deadline) throws InterruptedException, TimeoutException {
+        return resolveDelivery(ledger, target, receipt, headNode, head, null, deadline);
+    }
+
+    private DeliveryResult resolveDelivery(long ledger, ProfileDeleteRecord.Target target,
+            ProfileZKReadClient.Node receipt, ProfileZKReadClient.Node headNode, ProfileDeleteDelivery.Head head,
+            DeleteSnapshotView cached, long deadline) throws InterruptedException, TimeoutException {
         requireFound(receipt);
         requirePersistent(receipt, true);
         var event = ProfileDeleteDelivery.Event.decode(receipt.bytes());
@@ -2950,12 +3302,20 @@ public final class ZKProfileReservationStore {
             throw new IllegalArgumentException("Retained delete delivery does not match its stream assignment");
         }
         var actual = reads.get(deliveryPath(target) + "/event-" + Long.toHexString(event.sequence()), deadline);
-        requireFound(actual);
-        requirePersistent(actual, true);
-        if (actual.stat().getCzxid() != receipt.stat().getCzxid()
-                || actual.stat().getCzxid() > headNode.stat().getMzxid()
-                || !Arrays.equals(actual.bytes(), receipt.bytes())) {
-            throw new IllegalArgumentException("Delete event/index commit is missing, recreated or mismatched");
+        if (actual.code() == Code.NONODE.intValue()) {
+            var retained = snapshotEffect(target, event.sequence(), cached, deadline);
+            if (retained.originalBirth() != receipt.stat().getCzxid()
+                    || !Arrays.equals(retained.event().encode(), receipt.bytes())) {
+                throw new IllegalArgumentException("Snapshot effect/index original birth mismatch");
+            }
+        } else {
+            requireFound(actual);
+            requirePersistent(actual, true);
+            if (actual.stat().getCzxid() != receipt.stat().getCzxid()
+                    || actual.stat().getCzxid() > headNode.stat().getMzxid()
+                    || !Arrays.equals(actual.bytes(), receipt.bytes())) {
+                throw new IllegalArgumentException("Delete event/index commit is missing, recreated or mismatched");
+            }
         }
         return new DeliveryResult(DeliveryStatus.COMMITTED, event);
     }
@@ -3168,6 +3528,11 @@ public final class ZKProfileReservationStore {
     /** Read only a committed effect. Missing sequence/receipt never becomes a cursor or non-applicability proof. */
     public DeliveryResult readDeleteDelivery(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
             long sequence) {
+        return readDeleteDelivery(metadata, target, sequence, null);
+    }
+
+    public DeliveryResult readDeleteDelivery(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
+            long sequence, DeleteSnapshotView cached) {
         requireRecoveryClient(metadata);
         if (sequence < 1 || sequence > ProfileDeleteDelivery.MAX_EVENTS) {
             throw new IllegalArgumentException("Invalid bounded delivery sequence");
@@ -3189,15 +3554,20 @@ public final class ZKProfileReservationStore {
                 return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);
             }
             var eventNode = reads.get(name + "/event-" + Long.toHexString(sequence), deadline);
-            requireFound(eventNode);
-            requirePersistent(eventNode, true);
-            var event = ProfileDeleteDelivery.Event.decode(eventNode.bytes());
+            ProfileDeleteDelivery.Event event;
+            if (eventNode.code() == Code.NONODE.intValue()) {
+                event = snapshotEffect(target, sequence, cached, deadline).event();
+            } else {
+                requireFound(eventNode);
+                requirePersistent(eventNode, true);
+                event = ProfileDeleteDelivery.Event.decode(eventNode.bytes());
+            }
             if (event.sequence() != sequence || !event.belongsTo(head)) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
             var receipt = reads.get(path(event.ledger().ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target),
                     deadline);
-            var resolved = resolveDelivery(event.ledger().ledgerId(), target, receipt, node, head, deadline);
+            var resolved = resolveDelivery(event.ledger().ledgerId(), target, receipt, node, head, cached, deadline);
             if (!event.equals(resolved.event())) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
@@ -3392,6 +3762,11 @@ public final class ZKProfileReservationStore {
     /** Exact committed delivery grants local TOMBSTONE; DELETE_INTENT alone never grants this authority. */
     public ProfileControlStore deleteAuthorityReader(String localBookie, byte[] storageIncarnation,
             ProfileLedgerMetadataStore metadata) {
+        return deleteAuthorityReader(localBookie, storageIncarnation, metadata, null);
+    }
+
+    public ProfileControlStore deleteAuthorityReader(String localBookie, byte[] storageIncarnation,
+            ProfileLedgerMetadataStore metadata, DeleteSnapshotView cached) {
         var target = new ProfileDeleteRecord.Target(localBookie, storageIncarnation);
         requireRecoveryClient(metadata);
         return key -> {
@@ -3415,7 +3790,7 @@ public final class ZKProfileReservationStore {
                 }
                 requireFound(receipt);
                 var candidate = ProfileDeleteDelivery.Event.decode(receipt.bytes());
-                var committed = readDeleteDelivery(metadata, target, candidate.sequence());
+                var committed = readDeleteDelivery(metadata, target, candidate.sequence(), cached);
                 if (committed.status() != DeliveryStatus.COMMITTED) {
                     return committed.status() == DeliveryStatus.QUARANTINED
                             ? ProfileControlStore.ReadResult.quarantined()
