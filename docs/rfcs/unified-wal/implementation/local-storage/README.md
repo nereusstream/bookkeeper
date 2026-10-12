@@ -931,3 +931,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [删除流完整 snapshot 与真实启动追赶](../profile-wire/README.md#删除流完整-snapshot-与真实启动追赶)已将原generation1 shared stream的完整prefix保存为有界immutable pages/root＋conditional publication witness，绑定scope/原event birth并接入实际TOMBSTONE/cursor启动追赶。真实缺prefix＋suffix、65-ledger两page、missing/recreate、取消/回复丢失及并发有111项Java/23有限模型配置（3正向/20指定反例）证据；无旧journal删除、assignment handoff或GC权限。retention/terminal退役/history GC及其他16步验收继续OPEN，生产Gate不提升。
+
+
+2026-10-12 [Assignment handoff 的 PREPARED 与投递 cut](../profile-wire/README.md#assignment-handoff-的-prepared-与投递-cut)已把完整native snapshot/COMMITTED effects接到原ZK admission/head同multi排序，两个实际delete publisher路径都不能跨冻结cut；旧G1 DATA与已记录effect仍有效，计划不生成local G2或EFFECTIVE事实。114项原阶段/最终6项Java和23有限模型配置（3正向/20指定反例）通过；local adoption/ACK/EFFECTIVE/route retirement、retention/GC及其他16步验收仍OPEN，生产Gate不提升。

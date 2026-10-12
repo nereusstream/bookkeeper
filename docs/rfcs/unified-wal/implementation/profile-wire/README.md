@@ -1614,3 +1614,25 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 
 证据 /Users/liusinan/.codex/artifacts/unified-wal/delete-snapshot-evidence-8dhv920k 保留最终source/命令/inputs/XML、模型与诊断阶段，旧PASS不移绑。assignment G+1 PREPARED/effective handoff、retention/offline/backup-restore policy、accepted decommission/unrecoverable、journal prefix/history/page/tombstone GC仍OPEN；本API没有删旧event或放弃任何target义务。Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维和全16步综合验收继续OPEN。默认OFF/SYSTEM/PARK、disabled能力及生产Gate不提升；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 最终Spotless/Checkstyle exit0；编译/测试完全终结后的独立RAT exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。
+
+## Assignment handoff 的 PREPARED 与投递 cut
+
+2026-10-12，父源码a6dae28dda之后新增ProfileDeleteHandoff的有界UWHP/schema1计划与UWHA/schema1 admission。计划绑定stable target/incarnation、原Head/stream/assignment、head physical birth、next generation、操作ID和已完整发布snapshot的generation/birth/SHA；空stream以实际Head through0表示无prefix，没有虚构snapshot或local cursor。这里实现的是G+1 PREPARED的必要前置协议，未实现local G+1 force/adoption、catch-up ACK、EFFECTIVE CAS或old-route retirement，不能把计划或freeze当成切换完成。
+
+原ZKProfileReservationStore为每个existing shared stream初始化assignment-admission，active G1初态与stream/target digest绑定。handoff先核验完整native snapshot及每个effect的authoritative LOGICALLY_DELETED/COMMITTED状态，再在同一个ZK multi中check原head version/birth与snapshot selection/root，更新admission version并创建不可变handoff-prepared。plan creation zxid必须等于admission修改zxid，plan/body digest和原head/cut必须仍一致；重建bytes/version不能冒充原准备事务。当前G1 Head和immutable assignment没有改变，旧event/index/metadata/target义务继续保留。
+
+原prepareDeleteDeliveries主路径和legacy append路径在创建新event时共同读取admission，并把同一版本Op.check加入原event/index/head multi：旧publisher先赢则head version使准备冲突，准备先赢则旧admission version使迟到publisher的multi失败，不产生越过固定cut的新旧路由event。已记录event仍可读取和幂等解析；准备不阻止现有G1普通DATA或原prefix的实际TOMBSTONE应用。新的logical delete若无法完成该target的delivery准备，保持未完成，不发布普通logical成功。已有PREPARED但尚未logical activation的event是暂时的snapshot前置条件，不误标为corruption。
+
+ProfileDeleteCoordinator.beginPrepareHandoff复用原bounded AbortPolicy cold、SDK scheduler与active custody；cancel/deadline只结束等待并停止未来准备stage，已接受ZK I/O按native状态解析，actual completion不提前随caller cancel完成。丢准备事务回复、取消期间native回调held、coordinator重建都只解析同一operation/cut；另一operation冲突。active admission缺失但已有plan、或相同bytes/version的admission新physical transaction均拒绝。
+
+实际mTLS/ZK/SDK/file用例覆盖：ledger44已logical delete且target尚无local cursor时，G+1计划不会产生local G2 cursor，原G1 DATA writer45仍可追加且没有额外control force；对45的新logical delete不能越过cut；原44的TOMBSTONE/cursor可继续实际应用为G1。另一个真实ZK publisher读到旧admission后被暂停，准备先commit再释放它，旧multi不能生成event2。native准备回复CONNECTIONLOSS、caller cancel/held actual completion、相同计划接续、不同operation拒绝、admission ABA和空stream准备均有独立实际验证。
+
+RLOeS31I原阶段7类114项Java通过，保留原source绑定；两文件仅换行修正后，taTxfenk最终3类6项通过，1112当前inputs逐SHA核验。最终ipces_48执行23有限模型配置（3完整正向/20指定反例），1061 inputs与Java去重1905一致。新ProfileDeleteHandoff正向106 generated/62 distinct、queue0、depth6、0.795秒/peak RSS105988096 bytes。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE；catalog693/完整A+C+D未全跑，不证明完整handoff/fairness/liveness或性能。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeleteHandoffTest,ProfileDeleteSnapshotTest,ProfileDeletePhysicalReceiptTest,ProfileInitialControlCodecTest,ZKProfileLifecycleStoreTest,ProfileLedgerMetadataStoreTest,SegmentProfileInitialSocketClientTest#deleteHandoff*+deleteSnapshot*+physicalDelet*+committedDelete*+automaticDelete*+logicalDelete*+preparedDelete*+ordinaryWriterClose*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-handoff --config-prefix ce-profile-delete-handoff --config-prefix a-profile-delete-snapshot --config-prefix ce-profile-delete-snapshot --config-prefix a-profile-delete-publication --config-prefix ce-profile-delete-publication
+```
+
+证据 /Users/liusinan/.codex/artifacts/unified-wal/handoff-prepare-evidence-13l0dgu2 保留最终source、114项原阶段两文件、原命令/inputs/XML、模型与诊断stage，旧PASS不移绑。准备中的stream不会自行恢复new delete allocation；必须接续实际local G+1 adoption/ACK及EFFECTIVE协议，当前明确保持OPEN，未提供人为取消freeze或伪造ACK的绕过。retention/accepted terminal decommission/unrecoverable、old route/journal/history/page GC及Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续OPEN。默认OFF/SYSTEM/PARK和disabled能力不变，生产Gate不提升；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+最终Spotless/Checkstyle exit0；编译/测试终结后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。

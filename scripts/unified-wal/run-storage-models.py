@@ -19,6 +19,14 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-handoff-prepare': None,
+    'ce-profile-delete-handoff-admission': 'HandoffPreparedCutIsStable',
+    'ce-profile-delete-handoff-head': 'HandoffPreparedCutIsStable',
+    'ce-profile-delete-handoff-snapshot': 'HandoffPreparedHasSnapshot',
+    'ce-profile-delete-handoff-commit': 'HandoffPreparedHasCommittedEffects',
+    'ce-profile-delete-handoff-stop': 'HandoffStopStartsNoPreparation',
+    'ce-profile-delete-handoff-release': 'HandoffReleaseWaitsActual',
+
     'a-profile-delete-snapshot': None,
     'ce-profile-delete-snapshot-chunk': 'SnapshotPublicationHasEveryChunk',
     'ce-profile-delete-snapshot-scope': 'SnapshotPublicationHasScope',
@@ -901,6 +909,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileDeleteHandoff.tla" if "profile-delete-handoff" in name
                    else "ProfileDeleteSnapshot.tla" if "profile-delete-snapshot" in name
                    else "ProfilePhysicalReceipt.tla" if "profile-physical-receipt" in name
                    else "ProfilePhysicalDeleteWire.tla" if "profile-physical-wire" in name

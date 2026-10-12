@@ -2566,6 +2566,11 @@ public final class ZKProfileReservationStore {
                 checks.add(Op.check(headPath + "/event-" + Long.toHexString(event.sequence()), 0));
                 checks.add(Op.check(headPath, head.node().stat().getVersion()));
             } else if (receipt.code() == Code.NONODE.intValue()) {
+                var admission = assignmentAdmission(head, true, deadline);
+                if (admission.value().frozen()) {
+                    return null;
+                }
+                checks.add(Op.check(headPath + "/assignment-admission", admission.node().stat().getVersion()));
                 var next = head.head().next();
                 var event = new ProfileDeleteDelivery.Event(next.streamId(), next.streamGeneration(),
                         next.assignmentGeneration(), next.committedThrough(), manifest.ledger(), target, bound,
@@ -2887,6 +2892,210 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public enum DeleteHandoffStatus { PREPARED, ABSENT, LIMIT, CONFLICT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN }
+
+    public record DeleteHandoffResult(DeleteHandoffStatus status, ProfileDeleteHandoff.Plan plan) {
+        public DeleteHandoffResult {
+            if ((status == DeleteHandoffStatus.PREPARED) != (plan != null)) {
+                throw new IllegalArgumentException("Only actual handoff preparation carries its fixed plan");
+            }
+        }
+    }
+
+    private record AssignmentAdmission(ProfileDeleteHandoff.Admission value, ProfileZKReadClient.Node node) { }
+
+    private AssignmentAdmission assignmentAdmission(DeleteHeadSnapshot head, boolean create, long deadline)
+            throws InterruptedException, TimeoutException {
+        String parent = deliveryPath(head.head().target());
+        String name = parent + "/assignment-admission";
+        var node = reads.get(name, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            if (reads.get(parent + "/handoff-prepared", deadline).code() == Code.OK.intValue()) {
+                throw new IllegalArgumentException("Prepared handoff lost its admission fence");
+            }
+            if (!create) {
+                return null;
+            }
+            var initial = new ProfileDeleteHandoff.Admission(head.head().assignmentGeneration(),
+                    ProfileDeleteHandoff.scopeDigest(head.head()), new byte[32]);
+            multi(List.of(Op.check(parent, head.node().stat().getVersion()),
+                    Op.check(parent + "-assignment", 0),
+                    Op.check(parent + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0),
+                    Op.create(name, initial.encode(), acls, CreateMode.PERSISTENT)), deadline);
+            node = reads.get(name, deadline);
+        }
+        requireFound(node);
+        requirePersistent(node, false);
+        var value = ProfileDeleteHandoff.Admission.decode(node.bytes());
+        if (value.activeGeneration() != head.head().assignmentGeneration()
+                || !Arrays.equals(value.scopeDigest(), ProfileDeleteHandoff.scopeDigest(head.head()))
+                || node.stat().getVersion() != (value.frozen() ? 1 : 0)
+                || !value.frozen() && reads.get(parent + "/handoff-prepared", deadline).code() == Code.OK.intValue()) {
+            throw new IllegalArgumentException("Assignment admission scope/version mismatch");
+        }
+        return new AssignmentAdmission(value, node);
+    }
+
+    public DeleteHandoffResult readPreparedDeleteHandoff(ProfileDeleteRecord.Target target) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            if (reads.sync(root, deadline) != Code.OK.intValue()) {
+                return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+            }
+            var head = deleteHead(target, deadline);
+            if (head == null) {
+                return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+            }
+            var admission = assignmentAdmission(head, false, deadline);
+            if (admission == null || !admission.value().frozen()) {
+                return deleteHandoffFailure(DeleteHandoffStatus.ABSENT);
+            }
+            String name = deliveryPath(target) + "/handoff-prepared";
+            var node = reads.get(name, deadline);
+            requireFound(node);
+            requirePersistent(node, true);
+            var plan = ProfileDeleteHandoff.Plan.decode(node.bytes());
+            if (!Arrays.equals(plan.predecessor().encode(), head.head().encode())
+                    || plan.headBirth() != head.node().stat().getCzxid()
+                    || admission.node().stat().getMzxid() != node.stat().getCzxid()
+                    || !Arrays.equals(admission.value().preparedDigest(), ProfileRepairIntent.digest(plan.encode()))) {
+                return deleteHandoffFailure(DeleteHandoffStatus.QUARANTINED);
+            }
+            if (plan.predecessor().committedThrough() != 0) {
+                var snapshot = readDeleteSnapshot(target);
+                if (snapshot.snapshot() == null) {
+                    return deleteHandoffFailure(snapshot.status() == DeleteSnapshotStatus.UNAVAILABLE
+                            ? DeleteHandoffStatus.UNAVAILABLE : DeleteHandoffStatus.QUARANTINED);
+                }
+                var view = snapshot.snapshot();
+                if (view.rootBirth != plan.snapshotBirth()
+                        || view.value().generation() != plan.snapshotGeneration()
+                        || !Arrays.equals(view.value().cut().encode(), plan.predecessor().encode())
+                        || !Arrays.equals(ProfileRepairIntent.digest(view.value().encode()), plan.snapshotDigest())) {
+                    return deleteHandoffFailure(DeleteHandoffStatus.QUARANTINED);
+                }
+            }
+            var fresh = reads.get(deliveryPath(target) + "/assignment-admission", deadline);
+            requireFound(fresh);
+            if (fresh.stat().getVersion() != admission.node().stat().getVersion()
+                    || fresh.stat().getMzxid() != admission.node().stat().getMzxid()
+                    || !Arrays.equals(fresh.bytes(), admission.node().bytes())) {
+                return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+            }
+            return new DeleteHandoffResult(DeleteHandoffStatus.PREPARED, plan);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return deleteHandoffFailure(DeleteHandoffStatus.QUARANTINED);
+        }
+    }
+
+    /** Prepare the next assignment and freeze old delete allocation at a completely committed prefix.
+     * G1 data/registration remains active; no local G+1 cursor, EFFECTIVE publication or route retirement occurs. */
+    public DeleteHandoffResult prepareDeleteHandoff(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Target target, byte[] operationId, int maximumEvents, Duration duration,
+            java.util.function.BooleanSupplier live) {
+        requireRecoveryClient(metadata);
+        byte[] operation = ProfileLifecycleHead.fixed(operationId, 16, true);
+        if (maximumEvents < 1 || maximumEvents > ProfileDeleteDelivery.MAX_EVENTS
+                || duration.isNegative() || duration.isZero() || duration.compareTo(Duration.ofMinutes(1)) > 0) {
+            throw new IllegalArgumentException("Handoff needs bounded native preparation");
+        }
+        long deadline = System.nanoTime() + duration.toNanos();
+        boolean submitted = false;
+        try {
+            if (!live.getAsBoolean() || reads.sync(root, deadline) != Code.OK.intValue()) {
+                return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+            }
+            var head = deleteHead(target, deadline);
+            if (head == null) {
+                return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+            }
+            var admission = assignmentAdmission(head, true, deadline);
+            if (admission.value().frozen()) {
+                var prior = readPreparedDeleteHandoff(target);
+                return prior.plan() != null && !Arrays.equals(prior.plan().operationId(), operation)
+                        ? deleteHandoffFailure(DeleteHandoffStatus.CONFLICT) : prior;
+            }
+            if (head.head().committedThrough() > maximumEvents
+                    || head.head().assignmentGeneration() == ProfileDeleteSnapshot.MAX_GENERATIONS) {
+                return deleteHandoffFailure(DeleteHandoffStatus.LIMIT);
+            }
+            DeleteSnapshotView snapshot = null;
+            if (head.head().committedThrough() != 0) {
+                var built = publishDeleteSnapshot(metadata, target, maximumEvents,
+                        Duration.ofNanos(Math.max(1, deadline - System.nanoTime())), live);
+                if (built.snapshot() == null) {
+                    return deleteHandoffFailure(built.status() == DeleteSnapshotStatus.LIMIT
+                            ? DeleteHandoffStatus.LIMIT : built.status() == DeleteSnapshotStatus.QUARANTINED
+                                ? DeleteHandoffStatus.QUARANTINED : DeleteHandoffStatus.UNAVAILABLE);
+                }
+                snapshot = built.snapshot();
+                if (!Arrays.equals(snapshot.value().cut().encode(), head.head().encode())) {
+                    return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+                }
+                // Inert delivery preparation is not a committed effect and cannot be frozen as applied progress.
+                for (var effect : snapshot.effects()) {
+                    if (!live.getAsBoolean()) {
+                        return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+                    }
+                    ProfileZKReadClient.requireTime(deadline);
+                    var committed = readDeleteDelivery(metadata, target, effect.event().sequence(), snapshot);
+                    if (committed.status() != DeliveryStatus.COMMITTED) {
+                        return deleteHandoffFailure(committed.status() == DeliveryStatus.QUARANTINED
+                                ? DeleteHandoffStatus.QUARANTINED : DeleteHandoffStatus.UNAVAILABLE);
+                    }
+                }
+            }
+            var plan = new ProfileDeleteHandoff.Plan(operation, head.head(), head.node().stat().getCzxid(),
+                    head.head().assignmentGeneration() + 1, snapshot == null ? 0 : snapshot.value().generation(),
+                    snapshot == null ? 0 : snapshot.rootBirth,
+                    snapshot == null ? new byte[32] : ProfileRepairIntent.digest(snapshot.value().encode()));
+            var frozen = new ProfileDeleteHandoff.Admission(admission.value().activeGeneration(),
+                    admission.value().scopeDigest(), ProfileRepairIntent.digest(plan.encode()));
+            var checks = new ArrayList<Op>();
+            String parent = deliveryPath(target);
+            checks.add(Op.check(parent, head.node().stat().getVersion()));
+            checks.add(Op.check(parent + "-assignment", 0));
+            checks.add(Op.check(parent + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0));
+            if (snapshot != null) {
+                checks.add(Op.check(parent + "/snapshot-current", (int) snapshot.selectionVersion));
+                checks.add(Op.check(deleteSnapshotPath(target, snapshot.value().generation()), 0));
+                checks.add(Op.check(deleteSnapshotPath(target, snapshot.value().generation()) + "/published", 0));
+            }
+            checks.add(Op.setData(parent + "/assignment-admission", frozen.encode(),
+                    admission.node().stat().getVersion()));
+            checks.add(Op.create(parent + "/handoff-prepared", plan.encode(), immutableAcls, CreateMode.PERSISTENT));
+            if (!live.getAsBoolean()) {
+                return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
+            }
+            submitted = true;
+            multi(checks, deadline);
+            var prepared = readPreparedDeleteHandoff(target);
+            if (prepared.plan() != null && !Arrays.equals(prepared.plan().operationId(), operation)) {
+                return deleteHandoffFailure(DeleteHandoffStatus.CONFLICT);
+            }
+            return prepared.status() == DeleteHandoffStatus.ABSENT
+                    ? deleteHandoffFailure(DeleteHandoffStatus.DURABILITY_UNKNOWN) : prepared;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return deleteHandoffFailure(submitted ? DeleteHandoffStatus.DURABILITY_UNKNOWN
+                    : DeleteHandoffStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return deleteHandoffFailure(submitted ? DeleteHandoffStatus.DURABILITY_UNKNOWN
+                    : DeleteHandoffStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return deleteHandoffFailure(DeleteHandoffStatus.QUARANTINED);
+        }
+    }
+
+    private static DeleteHandoffResult deleteHandoffFailure(DeleteHandoffStatus status) {
+        return new DeleteHandoffResult(status, null);
+    }
+
     public enum DeleteSnapshotStatus { FOUND, ABSENT, LIMIT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN }
 
     /** Constructed only by complete native root/page verification; no caller-provided snapshot fact is accepted. */
@@ -3084,7 +3293,8 @@ public final class ZKProfileReservationStore {
                 var event = readDeleteDelivery(metadata, target, sequence, cached);
                 if (event.status() != DeliveryStatus.COMMITTED) {
                     return deleteSnapshotFailure(event.status() == DeliveryStatus.UNAVAILABLE
-                            ? DeleteSnapshotStatus.UNAVAILABLE : DeleteSnapshotStatus.QUARANTINED);
+                            || event.status() == DeliveryStatus.PREPARED
+                                ? DeleteSnapshotStatus.UNAVAILABLE : DeleteSnapshotStatus.QUARANTINED);
                 }
                 var index = reads.get(path(event.event().ledger().ledgerId()) + "/delete-delivery-"
                         + deliveryTargetKey(target), deadline);
@@ -3494,11 +3704,16 @@ public final class ZKProfileReservationStore {
             if (head.committedThrough() == ProfileDeleteDelivery.MAX_EVENTS) {
                 return new DeliveryResult(DeliveryStatus.LIMIT, null);
             }
+            var admission = assignmentAdmission(new DeleteHeadSnapshot(head, headNode), true, deadline);
+            if (admission.value().frozen()) {
+                return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);
+            }
             var next = head.next();
             var event = new ProfileDeleteDelivery.Event(head.streamId(), head.streamGeneration(),
                     head.assignmentGeneration(), next.committedThrough(), manifest.ledger(), target, reference,
                     seal.requestId(), seal.epoch());
             var operations = new java.util.ArrayList<>(recoveryRootChecks(state, deadline));
+            operations.add(Op.check(name + "/assignment-admission", admission.node().stat().getVersion()));
             operations.addAll(metadata.checksForMembership(member.snapshot()));
             operations.add(Op.check(name + "/birth-" + HexFormat.of().formatHex(head.streamId()), 0));
             operations.add(Op.create(name + "/event-" + Long.toHexString(event.sequence()), event.encode(),

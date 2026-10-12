@@ -119,6 +119,75 @@ public final class ProfileDeleteCoordinator {
         }
     }
 
+    public record HandoffAttempt(CompletableFuture<ZKProfileReservationStore.DeleteHandoffResult> result,
+            CompletableFuture<Void> completion) { }
+
+    /** Real PREPARED publication only; actual local adoption/EFFECTIVE switching remain separate stages. */
+    public HandoffAttempt beginPrepareHandoff(ProfileDeleteRecord.Target target, byte[] operationId,
+            ClientContext sdk, int maximumEvents, Duration duration) {
+        Objects.requireNonNull(target, "target");
+        byte[] operation = ProfileLifecycleHead.fixed(operationId, 16, true);
+        if (maximumEvents < 1 || maximumEvents > ProfileDeleteDelivery.MAX_EVENTS
+                || duration.isNegative() || duration.isZero() || duration.compareTo(Duration.ofMinutes(1)) > 0
+                || cold.getMaximumPoolSize() == Integer.MAX_VALUE
+                || (long) cold.getQueue().size() + cold.getQueue().remainingCapacity() >= Integer.MAX_VALUE
+                || !(cold.getRejectedExecutionHandler() instanceof ThreadPoolExecutor.AbortPolicy)) {
+            throw new IllegalArgumentException("Handoff preparation needs the original bounded cold executor");
+        }
+        var unavailable = new ZKProfileReservationStore.DeleteHandoffResult(
+                ZKProfileReservationStore.DeleteHandoffStatus.UNAVAILABLE, null);
+        if (sdk.isClientClosed() || !active.tryAcquire()) {
+            return new HandoffAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+        var caller = new CompletableFuture<ZKProfileReservationStore.DeleteHandoffResult>();
+        var completion = new CompletableFuture<Void>();
+        var stopped = new AtomicBoolean();
+        var timer = new AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
+        try {
+            var actual = CompletableFuture.supplyAsync(() -> reservations.prepareDeleteHandoff(
+                    metadata, target, operation, maximumEvents, duration,
+                    () -> !stopped.get() && !sdk.isClientClosed()), cold);
+            actual.whenComplete((result, failure) -> {
+                var scheduled = timer.get();
+                if (scheduled != null) {
+                    scheduled.cancel(false);
+                }
+                active.release();
+                completion.complete(null);
+                if (failure == null) {
+                    caller.complete(result);
+                } else {
+                    caller.completeExceptionally(failure);
+                }
+            });
+            try {
+                var scheduled = sdk.getScheduler().schedule(() -> {
+                    stopped.set(true);
+                    caller.complete(new ZKProfileReservationStore.DeleteHandoffResult(
+                            ZKProfileReservationStore.DeleteHandoffStatus.DURABILITY_UNKNOWN, null));
+                }, duration.toNanos(), TimeUnit.NANOSECONDS);
+                timer.set(scheduled);
+                if (actual.isDone()) {
+                    scheduled.cancel(false);
+                }
+            } catch (RejectedExecutionException rejected) {
+                stopped.set(true);
+                caller.complete(unavailable);
+            }
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return new HandoffAttempt(caller, completion.copy());
+        } catch (RejectedExecutionException rejected) {
+            active.release();
+            return new HandoffAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+    }
+
     public record SnapshotAttempt(CompletableFuture<ZKProfileReservationStore.DeleteSnapshotResult> result,
             CompletableFuture<Void> completion) { }
 
