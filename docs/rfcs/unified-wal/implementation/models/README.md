@@ -1417,3 +1417,9 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 2026-10-12，ProfilePhysicalDelete检查实际terminal/scope、known raw DATA/旧COPY、native row清理、其他ledger COPY/MOVE保留、FREE force、old I/O与actual owner credit终态；真实native/CRC/fsync/ZK为输入，不由模型生产。a-profile-physical-delete完整正向，ce-profile-physical-delete-{scope,unknown,index,copy,force,live,io,owner}要求指定反例；取消停止新COPY阶段，已接受的native compaction继续达到终态。
 
 最终34tuje3n按父源码c78c32f4ba绑定，结合原compaction-group/terminal-index/whole-FREE共20配置，4完整正向/16指定反例、1020当前inputs。新正向110 generated/78 distinct、queue0、depth12、0.832秒/peak RSS106938368 bytes；Java/model去重1864核验。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog664/完整A+C+D未全跑，无完整fairness/liveness/性能结论。jvuqmgpu/c47vx6lw/x_0tvuaq保持原projection/stage；[实际282项Java与scope/receipt](../profile-wire/README.md#本地删除空间终结)拥有当前实现，集群物理终结/GC/退役和生产Gate仍OPEN。
+
+## 网络删除空间查询投影
+
+2026-10-12，ProfilePhysicalDeleteWire补充exact committed event/verified peer/同一local applied event、fresh reply权威、全历史target与实际wire/output release约束。外部mTLS/ZK/持久event/FREE为真实Java输入，不由模型生产；当前投影不产生terminal receipt或GC权限。a-profile-physical-wire完整正向，ce-profile-physical-wire-{event,peer,cursor,fresh,quorum,drain}分别要求指定反例；有限三目标集合不证明任意历史长度、fairness/liveness或性能。[原实装与证据边界](../profile-wire/README.md#网络删除空间查询与全目标观察)拥有当前状态。
+
+最终utiasjpr按父源码04bfae5221的未提交实现绑定，结合本地physical/delete-publication共24配置，3完整正向/21指定反例、1030 inputs；最终Java/model去重1874一致核验。新正向4765 generated/3684 distinct、queue0、depth8、0.901秒/peak RSS131235840 bytes。catalog671/完整A+C+D未全跑；原sg2w2lt8/yfxzoi6c保留阶段绑定，TLC/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。生产Gate及durable receipts/GC/退役继续OPEN。

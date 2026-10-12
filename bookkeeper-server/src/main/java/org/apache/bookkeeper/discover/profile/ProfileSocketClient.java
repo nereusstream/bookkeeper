@@ -64,6 +64,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.util.ByteBufList;
@@ -418,6 +419,27 @@ final class ProfileSocketClient implements AutoCloseable {
                 ProfileOperation.TOMBSTONE_OR_DELETE_APPLY);
     }
 
+    ProfileInitialControlClient.PhysicalAttempt physicalDelete(ProfilePhysicalDeleteCodec.Request request) {
+        Objects.requireNonNull(request, "request");
+        ProfileControlScope scope = request.deletion().scope();
+        if (normalData || !scope.targetBookie().equals(hello().bookieId())
+                || !Arrays.equals(scope.targetStorageIncarnation(), hello().storageIncarnation())) {
+            throw new IllegalArgumentException("Physical delete request is not bound to the verified CONTROL peer");
+        }
+        if (!hello().capabilities().contains(ProfilePhysicalDeleteCodec.CAPABILITY)) {
+            return new ProfileInitialControlClient.PhysicalAttempt(
+                    CompletableFuture.failedFuture(new IOException("Peer does not support UIC8")),
+                    CompletableFuture.completedFuture(null));
+        }
+        if (closed.get() || !slots.tryAcquire()) {
+            return new ProfileInitialControlClient.PhysicalAttempt(CompletableFuture.failedFuture(unknown()),
+                    CompletableFuture.completedFuture(null));
+        }
+        Pending held = new Pending(request);
+        enqueue(held);
+        return new ProfileInitialControlClient.PhysicalAttempt(held.physicalReply, held.completion.copy());
+    }
+
     private CompletableFuture<ProfileControlResult> send(ProfileControlRequest request,
             ProfileControlOperation expectedOperation, ProfileOperation operation) {
         Objects.requireNonNull(request, "request");
@@ -704,6 +726,8 @@ final class ProfileSocketClient implements AutoCloseable {
                                 : held.operation == ProfileOperation.READ_LAC ? encode(held.operation, id,
                                         ProfileOperationCodec.encode(ProfileOperation.READ_LAC,
                                                 new ProfileOperationCodec.ReadLac(held.context)))
+                                : held.operation == ProfileOperation.OPERATION_STATUS ? encode(held.operation, id,
+                                        ProfilePhysicalDeleteCodec.encodeRequest(held.physicalRequest))
                                 : encode(held.operation, id,
                                         ProfileInitialControlCodec.encodeRequest(held.controlRequest));
                     } finally {
@@ -782,7 +806,8 @@ final class ProfileSocketClient implements AutoCloseable {
                                             RECOVERY_CLOSE_CAPABILITY,
                                             ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY,
                                             ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY,
-                                            ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY)).encode());
+                                            ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY,
+                                            ProfilePhysicalDeleteCodec.CAPABILITY)).encode());
                     helloWrites.incrementAndGet();
                     try {
                         ctx.writeAndFlush(outgoing).addListener(written -> {
@@ -816,6 +841,41 @@ final class ProfileSocketClient implements AutoCloseable {
                     throw invalidReply();
                 }
                 var readHeader = inspected.header();
+                if (hello != null && readHeader.operation() == ProfileOperation.OPERATION_STATUS) {
+                    Pending held = pending.get(readHeader.requestId());
+                    if (held == null || held.operation != ProfileOperation.OPERATION_STATUS || !readHeader.isResponse()
+                            || (readHeader.flags() & ProfileFrameHeader.END_OF_STREAM) != 0) {
+                        throw invalidReply();
+                    }
+                    var payload = bytes.nioBuffer(bytes.readerIndex() + 36, readHeader.bodyLength());
+                    ProfilePhysicalDeleteCodec.Reply received = null;
+                    IOException refused = null;
+                    if (readHeader.bodyLength() == ProfileStatus.ENCODED_LENGTH) {
+                        byte[] statusBytes = new byte[ProfileStatus.ENCODED_LENGTH];
+                        payload.get(statusBytes);
+                        var status = ProfileStatus.decode(statusBytes);
+                        if (!readHeader.isError() || status.statusClass() == ProfileStatus.StatusClass.OK) {
+                            throw invalidReply();
+                        }
+                        refused = new IOException("Physical deletion refused: " + status);
+                    } else {
+                        received = ProfilePhysicalDeleteCodec.decodeReply(payload, held.physicalIdentity);
+                        if (readHeader.isError() != (received.status().statusClass()
+                                != ProfileStatus.StatusClass.OK)) {
+                            throw invalidReply();
+                        }
+                    }
+                    pending.remove(readHeader.requestId());
+                    held.wireDone = true;
+                    held.deadline.cancel(false);
+                    held.releaseIfTerminal();
+                    if (refused != null) {
+                        held.physicalReply.completeExceptionally(refused);
+                    } else {
+                        held.physicalReply.complete(received);
+                    }
+                    return;
+                }
                 if (hello != null && readHeader.operation() == ProfileOperation.READ_LAC) {
                     Pending held = pending.get(readHeader.requestId());
                     if (held == null || held.operation != ProfileOperation.READ_LAC || !readHeader.isResponse()
@@ -962,6 +1022,9 @@ final class ProfileSocketClient implements AutoCloseable {
         private final CompletableFuture<ProfileReadEntryReplyCodec.Reply> readReply;
         private final CompletableFuture<ProfileLacReplyCodec.Reply> lacReply;
         private ProfileControlRequest controlRequest;
+        private ProfilePhysicalDeleteCodec.Request physicalRequest;
+        private byte[] physicalIdentity;
+        private CompletableFuture<ProfilePhysicalDeleteCodec.Reply> physicalReply;
         private ProfileRepairIntent repair;
         private byte[] fenceId;
         private ProfileLedgerContext context;
@@ -975,6 +1038,19 @@ final class ProfileSocketClient implements AutoCloseable {
         private boolean wireDone;
         private boolean released;
         private CompletableFuture<Void> completion;
+
+        private Pending(ProfilePhysicalDeleteCodec.Request request) {
+            scope = request.deletion().scope();
+            operation = ProfileOperation.OPERATION_STATUS;
+            reply = null;
+            dataReply = null;
+            readReply = null;
+            lacReply = null;
+            physicalRequest = request;
+            physicalIdentity = ProfilePhysicalDeleteCodec.requestIdentity(request);
+            physicalReply = new CompletableFuture<>();
+            completion = new CompletableFuture<>();
+        }
 
         private Pending(ProfileControlScope scope, ProfileOperation operation) {
             this.scope = scope;
@@ -1041,7 +1117,8 @@ final class ProfileSocketClient implements AutoCloseable {
         }
 
         private boolean cancelled() {
-            return lacReply != null ? lacReply.isCancelled() : readReply != null ? readReply.isCancelled()
+            return physicalReply != null ? physicalReply.isCancelled()
+                    : lacReply != null ? lacReply.isCancelled() : readReply != null ? readReply.isCancelled()
                     : dataReply == null ? reply.isCancelled() : dataReply.isCancelled();
         }
 
@@ -1053,6 +1130,7 @@ final class ProfileSocketClient implements AutoCloseable {
             credential = null;
             fenceId = null;
             controlRequest = null;
+            physicalRequest = null;
         }
 
         private void fail(IOException failure) {
@@ -1062,7 +1140,9 @@ final class ProfileSocketClient implements AutoCloseable {
             }
             discardSource();
             releaseIfTerminal();
-            if (lacReply != null) {
+            if (physicalReply != null) {
+                physicalReply.completeExceptionally(failure);
+            } else if (lacReply != null) {
                 lacReply.completeExceptionally(failure);
             } else if (readReply != null) {
                 readReply.completeExceptionally(failure);

@@ -7614,6 +7614,7 @@ public class SegmentBookieControlLogTest {
                         ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY,
                         ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY,
                         ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY,
+                        org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec.CAPABILITY,
                         ProfileOperationCodec.WRITE_LAC_CAPABILITY),
                         hello.capabilities());
             } catch (Exception | Error cause) {

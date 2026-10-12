@@ -861,3 +861,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 2026-10-12 [owned资源初始化/终止](implementation/startup-readiness/README.md#同一服务-episode-的-owned-资源初始化与终止)现已由同一handle deferred创建原ZK/metadata/cold/scheduler/loops，实际network/storage drain后才关闭它们，metadata scheduler和native ZK线程/loops终态未确认时不完成。真实SDK/restart、held任务及partial-init失败有33项验证；TLS/physical authority和完整Main/stock/full-bytes/Gate仍OPEN。
 
 2026-10-12 [本地删除空间终结](implementation/profile-wire/README.md#本地删除空间终结)已将实际terminal TOMBSTONE接到原native index/coordinate/coverage及COPY/MOVE/FREE，按实际allocated DATA/旧COPY复核本地REUSABLE；混合块可零净容量增益退休，普通维护仍要求正净增益。旧IO/owner credit与deadline/cancel独立排空，其他ledger保留、corrupt/limit不伪造成功。3类282项Java与20有限模型配置（4完整正向/16指定反例）通过；网络physical receipt/全目标/retention/GC/退役及其他16步验收仍OPEN，生产Gate不提升。
+
+
+2026-10-12 [网络删除空间查询与全目标观察](implementation/profile-wire/README.md#网络删除空间查询与全目标观察)已接独立UIC8/OPERATION_STATUS、同一持久UIC7事件和原mTLS/direct/exact权威检查，实际FREE后fresh查询才报告REUSABLE；完整历史manifest逐target/incarnation观察，缺peer保留PENDING，全部REUSABLE仍是ephemeral结果。durable terminal receipts/retention/GC/退役及其他16步验收继续OPEN；默认OFF/SYSTEM/PARK和disabled能力不变，生产Gate不提升。

@@ -59,6 +59,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
@@ -839,6 +840,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 capabilities.add(ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY);
                 capabilities.add(ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
                 capabilities.add(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
+                capabilities.add(ProfilePhysicalDeleteCodec.CAPABILITY);
             }
             if (read != null) {
                 capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY);
@@ -1173,6 +1175,13 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return SegmentProfilePhysicalDelete.Status.PENDING;
             }
             return bookie.hasTerminalTombstone(context) ? null : SegmentProfilePhysicalDelete.Status.NOT_DELETED;
+        }
+    }
+
+    boolean hasAppliedDeleteEvent(org.apache.bookkeeper.common.profile.control.ProfileControlRequest request) {
+        synchronized (gate) {
+            return accepting && execution != null && execution.accepting()
+                    && bookie.matchesScope(config, identity) && bookie.hasAppliedDeleteEvent(request);
         }
     }
 

@@ -32,6 +32,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
+import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 
 /** Charged plaintext framing after TLS, sharing the connection ledger with its backing allocator. */
 final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
@@ -358,6 +359,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 || (initialControlBounds && ProfileInitialControlCodec.supported(operation)
                     && (header.bodyLength() < ProfileInitialControlCodec.minimumRequestBytes(operation)
                         || header.bodyLength() > ProfileInitialControlCodec.maximumRequestBytes(operation)))
+                || (initialControlBounds && operation == ProfileOperation.OPERATION_STATUS
+                    && (header.bodyLength() < ProfilePhysicalDeleteCodec.MIN_REQUEST_BYTES
+                        || header.bodyLength() > ProfilePhysicalDeleteCodec.MAX_REQUEST_BYTES))
                 || (operation.isReservedDisabled() && header.bodyLength() != 0)) {
             throw new IOException("Invalid Profile request header");
         }

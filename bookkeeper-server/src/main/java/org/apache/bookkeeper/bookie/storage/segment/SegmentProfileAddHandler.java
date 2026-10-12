@@ -23,6 +23,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.ssl.SslHandler;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -46,6 +47,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus.DurableResult;
@@ -82,6 +84,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private boolean recoveryCloseNegotiated;
     private boolean terminalBoundaryNegotiated;
     private boolean deleteApplyNegotiated;
+    private boolean physicalDeleteNegotiated;
     private boolean established;
     private boolean controlEstablished;
     private boolean closed;
@@ -134,6 +137,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                             || frame.header().operation() == ProfileOperation.READ_LAC
                             ? 4 * 72 + ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES
                                 + ProfileLacReplyCodec.EXPLICIT_BYTES + maxEntryBytes + 36
+                    : frame.header().operation() == ProfileOperation.OPERATION_STATUS
+                            ? 8 * (int) frame.header().bodyLength() + 2 * ProfilePhysicalDeleteCodec.REPLY_BYTES
+                                + RESPONSE_BYTES
                     : (control != null && ProfileInitialControlCodec.supported(frame.header().operation())
                             ? 8 * (int) frame.header().bodyLength() + 2 * ProfileInitialControlCodec.REPLY_BYTES
                             : frame.header().operation() == ProfileOperation.FENCE_LEDGER
@@ -166,6 +172,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                                     ProfileLacReplyCodec.CAPABILITY);
                     readNegotiated = read != null && ProfileHello.decodeClient(offer).capabilities().contains(
                             ProfileReadEntryReplyCodec.CAPABILITY);
+                    physicalDeleteNegotiated = control != null
+                            && ProfileHello.decodeClient(offer).capabilities().contains(
+                                    ProfilePhysicalDeleteCodec.CAPABILITY);
                     deleteApplyNegotiated = control != null
                             && ProfileHello.decodeClient(offer).capabilities().contains(
                                     ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
@@ -196,6 +205,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 write(ctx, request, null, body);
             } else if (!established) {
                 ctx.close();
+            } else if (frame.header().operation() == ProfileOperation.OPERATION_STATUS) {
+                physicalDelete(ctx, request);
             } else if (ProfileInitialControlCodec.supported(frame.header().operation())) {
                 initialControl(ctx, request);
             } else if (frame.header().operation() == ProfileOperation.WRITE_LAC) {
@@ -475,6 +486,162 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         });
     }
 
+    private boolean admitControl(ChannelHandlerContext ctx, Pending request) {
+        CompletableFuture<Boolean> admitted = new CompletableFuture<>();
+        try {
+            ctx.executor().execute(() -> {
+                try {
+                    if (admitted.isDone() || request.finished.get() || !ctx.channel().isActive()) {
+                        admitted.complete(false);
+                        return;
+                    }
+                    if (!controlEstablished) {
+                        ProfileInboundPipeline.markControlAuthorized(
+                                ctx.pipeline(), request.frame, request.credit);
+                        controlEstablished = true;
+                    }
+                    request.beginControl();
+                    if (!admitted.complete(true)) {
+                        request.endControl();
+                    }
+                } catch (Exception failedAdmission) {
+                    admitted.complete(false);
+                }
+            });
+            // No effects before this actual event-loop budget transfer. A timed-out task
+            // cannot later authorize: release stops it and the EL checks finished again.
+            if (!admitted.get(control.timeout().toNanos(), TimeUnit.NANOSECONDS)) {
+                return false;
+            }
+        } catch (Exception unavailable) {
+            if (unavailable instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            if (!admitted.complete(false) && admitted.getNow(false)) {
+                request.endControl();
+            }
+            return false;
+        }
+        if (request.finished.get()) {
+            request.endControl();
+            return false;
+        }
+        return true;
+    }
+
+    private ProfileControlResult authorizePhysicalDelete(ChannelHandlerContext ctx, Pending request,
+            ProfilePhysicalDeleteCodec.Request parsed, boolean admit) {
+        ProtectedProfileStateStore observedStore = new ProtectedProfileStateStore() {
+            @Override
+            public TransitionResult conditionalApply(Transition transition) {
+                // The original endpoint has already checked principal, exact committed authority and identity.
+                // This path observes an existing UIC7 event; it never applies or skips a delete delivery.
+                if (admit && !admitControl(ctx, request)) {
+                    return new TransitionResult(ProfileControlResult.Outcome.TRANSIENT_RECONCILING, 0, false);
+                }
+                boolean applied = storage.hasAppliedDeleteEvent(transition.request());
+                return new TransitionResult(applied
+                        ? ProfileControlResult.Outcome.ALREADY_APPLIED : ProfileControlResult.Outcome.NOT_FOUND,
+                        0, applied);
+            }
+
+            @Override
+            public TransitionResult queryOperationResult(ProfileControlScope scope) {
+                return new TransitionResult(ProfileControlResult.Outcome.UNSUPPORTED, 0, false);
+            }
+        };
+        return new IsolatedProfileControlEndpoint(EngineProfile.SEGMENT_WAL_ENGINE, control.validator(),
+                control.staticAuthorizer(), control.controlStore(), control.exactAuthorizer(), observedStore)
+                .handle(transport, parsed.deletion());
+    }
+
+    private void physicalDelete(ChannelHandlerContext ctx, Pending request) {
+        if (!physicalDeleteNegotiated) {
+            request.closeAfterWrite = !controlEstablished;
+            write(ctx, request, ProfileStatus.unsupported(), null);
+            return;
+        }
+        request.beginCold();
+        try {
+            control.executor().execute(() -> {
+                boolean handedOff = false;
+                try {
+                    if (request.finished.get()) {
+                        return;
+                    }
+                    ByteBuf body = request.frame.body();
+                    var parsed = ProfilePhysicalDeleteCodec.decodeRequest(
+                            body.nioBuffer(body.readerIndex(), body.readableBytes()), hello);
+                    var authorized = authorizePhysicalDelete(ctx, request, parsed, true);
+                    if (authorized.outcome() != ProfileControlResult.Outcome.ALREADY_APPLIED) {
+                        request.endControl();
+                        complete(ctx, request, ProfileInitialControlCodec.status(authorized.outcome()));
+                        return;
+                    }
+                    if (request.finished.get()) {
+                        request.endControl();
+                        return;
+                    }
+                    var context = new ProfileLedgerContext(parsed.deletion().scope().ledgerId(),
+                            parsed.deletion().scope().ledgerInstanceId(),
+                            parsed.deletion().scope().descriptorIdentity().toBytes());
+                    var attempt = storage.reclaimDeletedLedger(context, control.executor(),
+                            parsed.maximumAllocations(), parsed.maximumCompactions(),
+                            Duration.ofMillis(parsed.timeoutMillis()));
+                    attempt.completion().whenComplete((ignored, failure) -> request.endControl());
+                    handedOff = true;
+                    attempt.result().whenComplete((value, failure) -> {
+                        try {
+                            control.executor().execute(() -> {
+                                try {
+                                    if (request.finished.get()) {
+                                        return;
+                                    }
+                                    // Re-read the same committed event before publishing any success.
+                                    var fresh = authorizePhysicalDelete(ctx, request, parsed, false);
+                                    var outcome = failure == null && value != null
+                                            && fresh.outcome() == ProfileControlResult.Outcome.ALREADY_APPLIED
+                                            ? ProfilePhysicalDeleteCodec.Outcome.valueOf(value.status().name())
+                                            : ProfilePhysicalDeleteCodec.Outcome.UNKNOWN;
+                                    var reply = new ProfilePhysicalDeleteCodec.Reply(
+                                            ProfilePhysicalDeleteCodec.status(outcome), outcome,
+                                            value == null ? 0 : value.scannedAllocations(),
+                                            value == null ? 0 : value.compactions(),
+                                            value == null ? 0 : value.freedAllocations(),
+                                            value == null ? 0 : value.sourceBytesRetired(),
+                                            value == null ? 0 : value.destinationBytes(),
+                                            value == null ? -1 : value.bookieCut(),
+                                            value == null ? -1 : value.arenaCut());
+                                    complete(ctx, request, reply.status(),
+                                            ProfilePhysicalDeleteCodec.encodeReply(parsed, reply));
+                                } finally {
+                                    request.endCold();
+                                }
+                            });
+                        } catch (RejectedExecutionException exhausted) {
+                            complete(ctx, request, unknown());
+                            request.endCold();
+                        }
+                    });
+                } catch (IllegalArgumentException invalid) {
+                    request.endControl();
+                    complete(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE));
+                } catch (RuntimeException failed) {
+                    request.endControl();
+                    complete(ctx, request, unknown());
+                } finally {
+                    if (!handedOff) {
+                        request.endCold();
+                    }
+                }
+            });
+        } catch (RejectedExecutionException exhausted) {
+            request.endCold();
+            write(ctx, request, status(StatusClass.TRANSIENT_UNAVAILABLE,
+                    RetryDisposition.SAME_PROFILE_OPERATION, DurableResult.NONE), null);
+        }
+    }
+
     private void initialControl(ChannelHandlerContext ctx, Pending request) {
         if (request.frame.header().operation() == ProfileOperation.TOMBSTONE_OR_DELETE_APPLY ? !deleteApplyNegotiated
                 : request.frame.header().operation() == ProfileOperation.RECOVERY_TERMINAL_CLOSE
@@ -507,45 +674,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     ProtectedProfileStateStore admittedStore = new ProtectedProfileStateStore() {
                         @Override
                         public TransitionResult conditionalApply(Transition transition) {
-                            CompletableFuture<Boolean> admitted = new CompletableFuture<>();
-                            try {
-                                ctx.executor().execute(() -> {
-                                    try {
-                                        if (admitted.isDone() || request.finished.get() || !ctx.channel().isActive()) {
-                                            admitted.complete(false);
-                                            return;
-                                        }
-                                        if (!controlEstablished) {
-                                            ProfileInboundPipeline.markControlAuthorized(
-                                                    ctx.pipeline(), request.frame, request.credit);
-                                            controlEstablished = true;
-                                        }
-                                        request.beginControl();
-                                        if (!admitted.complete(true)) {
-                                            request.endControl();
-                                        }
-                                    } catch (Exception failedAdmission) {
-                                        admitted.complete(false);
-                                    }
-                                });
-                                // No effects before this actual event-loop budget transfer. A timed-out task
-                                // cannot later authorize: release stops it and the EL checks finished again.
-                                if (!admitted.get(control.timeout().toNanos(), TimeUnit.NANOSECONDS)) {
-                                    return new TransitionResult(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
-                                            0, false);
-                                }
-                            } catch (Exception unavailable) {
-                                if (unavailable instanceof InterruptedException) {
-                                    Thread.currentThread().interrupt();
-                                }
-                                if (!admitted.complete(false) && admitted.getNow(false)) {
-                                    request.endControl();
-                                }
-                                return new TransitionResult(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
-                                        0, false);
-                            }
-                            if (request.finished.get()) {
-                                request.endControl();
+                            if (!admitControl(ctx, request)) {
                                 return new TransitionResult(ProfileControlResult.Outcome.TRANSIENT_RECONCILING,
                                         0, false);
                             }

@@ -2960,6 +2960,80 @@ public final class ZKProfileReservationStore {
         return new DeliveryResult(DeliveryStatus.COMMITTED, event);
     }
 
+    /** Read-only exact logical deletion and all historical obligations; creates no delivery or GC authority. */
+    public DeleteResult readLogicalDeletion(ProfileLedgerMetadataStore metadata, long ledger, byte[] requestId) {
+        requireRecoveryClient(metadata);
+        byte[] request = ProfileLifecycleHead.fixed(requestId, 16, true);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var rootRead = read(ledger, deadline);
+            var member = metadata.readMembership(ledger, deadline);
+            if (rootRead.snapshot() == null || member.snapshot() == null) {
+                return new DeleteResult(rootRead.status() == ReadStatus.UNAVAILABLE
+                        || member.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
+                            : DeleteStatus.QUARANTINED, null);
+            }
+            var state = rootRead.snapshot();
+            var value = member.snapshot().metadata().getValue();
+            byte[] logical = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
+            if (state.lifecycle().state() != ProfileLifecycleHead.State.DELETE_INTENT || logical == null
+                    || !Arrays.equals(state.lifecycle().operationId(), request)) {
+                return new DeleteResult(DeleteStatus.PRECONDITION_FAILED, null);
+            }
+            deleteProjection(state, member.snapshot(), deadline);
+            var reference = ProfileDeleteRecord.Reference.decode(logical);
+            var seal = ProfileDeleteRecord.Seal.decode(value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY));
+            var manifest = deleteManifest(ledger, reference, seal, deadline);
+            if (reference.publicationId() != null) {
+                var publication = preparedDeliveries(ledger, manifest, reference, deadline);
+                if (publication == null || publication.value().preparedThrough() != manifest.targets().size()) {
+                    return new DeleteResult(DeleteStatus.QUARANTINED, null);
+                }
+            }
+            var fresh = read(ledger, deadline);
+            return fresh.snapshot() != null && fresh.snapshot().equals(state)
+                    ? new DeleteResult(DeleteStatus.LOGICALLY_DELETED, manifest)
+                    : new DeleteResult(fresh.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
+                            : DeleteStatus.CONFLICT, null);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            return new DeleteResult(DeleteStatus.QUARANTINED, null);
+        }
+    }
+
+    /** Read the immutable per-ledger target index, then the actual committed stream event. No append or gap skip. */
+    public DeliveryResult readLedgerDeleteDelivery(ProfileLedgerMetadataStore metadata, long ledger,
+            ProfileDeleteRecord.Target target) {
+        requireRecoveryClient(metadata);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var recorded = reads.get(path(ledger) + "/delete-delivery-" + deliveryTargetKey(target), deadline);
+            if (recorded.code() != Code.OK.intValue()) {
+                return new DeliveryResult(recorded.code() == Code.NONODE.intValue()
+                        ? DeliveryStatus.QUARANTINED : DeliveryStatus.UNAVAILABLE, null);
+            }
+            requirePersistent(recorded, true);
+            var event = ProfileDeleteDelivery.Event.decode(recorded.bytes());
+            if (event.ledger().ledgerId() != ledger || !event.target().equals(target)) {
+                return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
+            }
+            var actual = readDeleteDelivery(metadata, target, event.sequence());
+            return actual.event() != null && !Arrays.equals(actual.event().encode(), event.encode())
+                    ? new DeliveryResult(DeliveryStatus.QUARANTINED, null) : actual;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);
+        } catch (IllegalArgumentException invalid) {
+            return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
+        }
+    }
+
     /** Commit one event and contiguous head in one ZK multi; each incarnation shares this stream across ledgers. */
     public DeliveryResult appendDeleteDelivery(ProfileLedgerMetadataStore metadata, long ledger,
             ProfileDeleteRecord.Target target) {

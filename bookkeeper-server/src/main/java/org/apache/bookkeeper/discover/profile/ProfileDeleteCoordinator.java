@@ -19,6 +19,9 @@
 package org.apache.bookkeeper.discover.profile;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
@@ -29,6 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.ClientContext;
+import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 
 /** Borrowed cold logical deletion; delivery, access barriers and physical reclaim are separate procedures. */
 public final class ProfileDeleteCoordinator {
@@ -113,6 +117,151 @@ public final class ProfileDeleteCoordinator {
             return new Attempt(CompletableFuture.completedFuture(unavailable()),
                     CompletableFuture.completedFuture(null));
         }
+    }
+
+    public enum PhysicalStatus { REUSABLE_EVERY_TARGET, PENDING, QUARANTINED }
+
+    public record TargetObservation(ProfilePhysicalDeleteCodec.Outcome outcome,
+            ProfilePhysicalDeleteCodec.Reply reply) { }
+
+    /** Ephemeral exact-event observations, not persisted terminal receipts or history-GC authority. */
+    public record PhysicalResult(PhysicalStatus status, ProfileDeleteRecord.Manifest manifest,
+            Map<ProfileDeleteRecord.Target, TargetObservation> targets) {
+        public PhysicalResult {
+            targets = Map.copyOf(targets);
+        }
+    }
+
+    public record PhysicalAttempt(CompletableFuture<PhysicalResult> result, CompletableFuture<Void> completion) { }
+
+    /** Observe every historical identity/incarnation through existing verified CONTROL peers.
+     * Missing peers remain PENDING. This method neither applies UIC7 nor discards offline obligations. */
+    public PhysicalAttempt beginObservePhysicalDeletion(ProfileDeleteRecord.Manifest manifest,
+            Map<ProfileDeleteRecord.Target, ProfileInitialControlClient> peers, ClientContext sdk,
+            int maximumAllocations, int maximumCompactions, Duration maxDuration) {
+        Objects.requireNonNull(manifest, "manifest");
+        var clients = Map.copyOf(peers);
+        if (maximumAllocations < 1 || maximumAllocations > 4096 || maximumCompactions < 1
+                || maximumCompactions > 256 || maxDuration.isZero() || maxDuration.isNegative()
+                || maxDuration.compareTo(Duration.ofMinutes(1)) > 0
+                || cold.getMaximumPoolSize() == Integer.MAX_VALUE
+                || (long) cold.getQueue().size() + cold.getQueue().remainingCapacity() >= Integer.MAX_VALUE
+                || !(cold.getRejectedExecutionHandler() instanceof ThreadPoolExecutor.AbortPolicy)) {
+            throw new IllegalArgumentException("Physical observation requires bounded original cold work");
+        }
+        for (var entry : clients.entrySet()) {
+            var hello = entry.getValue().hello();
+            if (!manifest.targets().contains(entry.getKey()) || !entry.getKey().bookie().equals(hello.bookieId())
+                    || !Arrays.equals(entry.getKey().incarnation(), hello.storageIncarnation())) {
+                throw new IllegalArgumentException("Physical observation peer differs from its obligated target");
+            }
+        }
+        var observations = new java.util.concurrent.ConcurrentHashMap<ProfileDeleteRecord.Target, TargetObservation>();
+        for (var target : manifest.targets()) {
+            observations.put(target, new TargetObservation(ProfilePhysicalDeleteCodec.Outcome.PENDING, null));
+        }
+        var pending = new PhysicalResult(PhysicalStatus.PENDING, manifest, observations);
+        if (sdk.isClientClosed() || !active.tryAcquire()) {
+            return new PhysicalAttempt(CompletableFuture.completedFuture(pending),
+                    CompletableFuture.completedFuture(null));
+        }
+        var caller = new CompletableFuture<PhysicalResult>();
+        var completion = new CompletableFuture<Void>();
+        var stopped = new AtomicBoolean();
+        var terminal = new ArrayList<CompletableFuture<Void>>();
+        var quarantined = new AtomicBoolean();
+        long deadline = System.nanoTime() + maxDuration.toNanos();
+        java.util.concurrent.ScheduledFuture<?> timer;
+        try {
+            timer = sdk.getScheduler().schedule(() -> {
+                stopped.set(true);
+                caller.complete(new PhysicalResult(PhysicalStatus.PENDING, manifest, observations));
+            }, maxDuration.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (RejectedExecutionException rejected) {
+            active.release();
+            return new PhysicalAttempt(CompletableFuture.completedFuture(pending),
+                    CompletableFuture.completedFuture(null));
+        }
+        caller.whenComplete((result, failure) -> {
+            if (caller.isCancelled()) {
+                stopped.set(true);
+            }
+        });
+        java.util.function.BooleanSupplier live =
+                () -> !stopped.get() && !sdk.isClientClosed() && System.nanoTime() < deadline;
+        CompletableFuture<Boolean> chain;
+        try {
+            chain = CompletableFuture.supplyAsync(() -> {
+                var fresh = reservations.readLogicalDeletion(metadata, manifest.ledger().ledgerId(),
+                        manifest.seal().requestId());
+                boolean valid = fresh.manifest() != null && Arrays.equals(fresh.manifest().encode(), manifest.encode());
+                quarantined.set(!valid && fresh.status() != ZKProfileReservationStore.DeleteStatus.UNAVAILABLE);
+                return valid;
+            }, cold);
+        } catch (RejectedExecutionException exhausted) {
+            chain = CompletableFuture.failedFuture(exhausted);
+        }
+        for (var target : manifest.targets()) {
+            chain = chain.thenComposeAsync(valid -> {
+                if (!valid || !live.getAsBoolean() || !clients.containsKey(target)) {
+                    return CompletableFuture.completedFuture(valid);
+                }
+                var event = reservations.readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), target);
+                if (event.status() != ZKProfileReservationStore.DeliveryStatus.COMMITTED
+                        || !event.event().ledger().equals(manifest.ledger())
+                        || event.event().deleteEpoch() != manifest.seal().epoch()
+                        || !Arrays.equals(event.event().requestId(), manifest.seal().requestId())) {
+                    observations.put(target, new TargetObservation(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, null));
+                    if (event.status() != ZKProfileReservationStore.DeliveryStatus.UNAVAILABLE) {
+                        quarantined.set(true);
+                    }
+                    return CompletableFuture.completedFuture(true);
+                }
+                var root = reservations.read(manifest.ledger().ledgerId());
+                if (root.snapshot() == null || !live.getAsBoolean()) {
+                    return CompletableFuture.completedFuture(false);
+                }
+                String domain = root.snapshot().reservation().installs().get(0).authorityDomain();
+                int millis = (int) Math.max(1, Math.min(60_000,
+                        TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+                var request = new ProfilePhysicalDeleteCodec.Request(event.event().deleteApply(domain),
+                        maximumAllocations, maximumCompactions, millis);
+                var attempt = clients.get(target).physicalDelete(request);
+                terminal.add(attempt.completion());
+                return attempt.result().handle((reply, failure) -> {
+                    observations.put(target, new TargetObservation(failure == null && reply != null
+                            ? reply.outcome() : ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, reply));
+                    return true;
+                });
+            }, cold);
+        }
+        chain.thenApplyAsync(valid -> {
+            if (!valid || !live.getAsBoolean()) {
+                return new PhysicalResult(quarantined.get() ? PhysicalStatus.QUARANTINED : PhysicalStatus.PENDING,
+                        manifest, observations);
+            }
+            var fresh = reservations.readLogicalDeletion(metadata, manifest.ledger().ledgerId(),
+                    manifest.seal().requestId());
+            if (fresh.manifest() == null || !Arrays.equals(fresh.manifest().encode(), manifest.encode())) {
+                return new PhysicalResult(fresh.status() == ZKProfileReservationStore.DeleteStatus.UNAVAILABLE
+                        ? PhysicalStatus.PENDING : PhysicalStatus.QUARANTINED, manifest, observations);
+            }
+            if (quarantined.get()) {
+                return new PhysicalResult(PhysicalStatus.QUARANTINED, manifest, observations);
+            }
+            boolean all = manifest.targets().stream().allMatch(target ->
+                    observations.get(target).outcome() == ProfilePhysicalDeleteCodec.Outcome.REUSABLE);
+            return new PhysicalResult(all ? PhysicalStatus.REUSABLE_EVERY_TARGET : PhysicalStatus.PENDING,
+                    manifest, observations);
+        }, cold).whenComplete((result, failure) ->
+                CompletableFuture.allOf(terminal.toArray(CompletableFuture[]::new)).whenComplete((ignored, failed) -> {
+                    timer.cancel(false);
+                    active.release();
+                    completion.complete(null);
+                    caller.complete(failure == null ? result
+                            : new PhysicalResult(PhysicalStatus.PENDING, manifest, observations));
+                }));
+        return new PhysicalAttempt(caller, completion.copy());
     }
 
     private static ZKProfileReservationStore.DeleteResult unavailable() {

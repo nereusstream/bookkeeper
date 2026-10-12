@@ -101,8 +101,13 @@ import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessResult;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.common.profile.wire.ProfileFrame;
+import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
+import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
+import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
@@ -427,6 +432,51 @@ public class SegmentProfileInitialSocketClientTest {
                                                         frame.release();
                                                         promise.setSuccess();
                                                         ctx.close();
+                                                        return;
+                                                    }
+                                                    if (op == ProfileOperation.OPERATION_STATUS.wireValue()) {
+                                                        if (fault == 27) {
+                                                            frame.release();
+                                                            promise.setSuccess();
+                                                            ctx.close();
+                                                            return;
+                                                        }
+                                                        if (fault == 28) {
+                                                            heldReplies.add(() -> ctx.executor().execute(
+                                                                    () -> ctx.writeAndFlush(frame, promise)));
+                                                            return;
+                                                        }
+                                                        if (fault == 30 && frame.readableBytes() == 36
+                                                                + ProfilePhysicalDeleteCodec.REPLY_BYTES) {
+                                                            int digest = frame.readerIndex() + 36 + 16;
+                                                            frame.setByte(digest, frame.getByte(digest) ^ 1);
+                                                            var crc = new java.util.zip.CRC32C();
+                                                            crc.update(frame.nioBuffer(frame.readerIndex() + 36,
+                                                                    ProfilePhysicalDeleteCodec.REPLY_BYTES - 4));
+                                                            frame.setInt(frame.writerIndex() - 4, (int) crc.getValue());
+                                                        }
+                                                    }
+                                                    if (fault == 29 && op == ProfileOperation.HELLO.wireValue()) {
+                                                        byte[] encoded = new byte[frame.readableBytes()];
+                                                        frame.getBytes(frame.readerIndex(), encoded);
+                                                        var decoded = ProfileFrameCodec.decode(encoded,
+                                                                ProfileFrameCodec.DecodePhase.PRE_HELLO);
+                                                        var original = ProfileHello.decodeServer(decoded.body());
+                                                        var reduced = new ProfileHello.Server(original.activeEngine(),
+                                                                original.storageIncarnation(),
+                                                                original.readinessGeneration(), original.bookieId(),
+                                                                original.capabilities().stream().filter(cap ->
+                                                                    !cap.equals(ProfilePhysicalDeleteCodec.CAPABILITY))
+                                                                        .toList()).encode();
+                                                        var header = decoded.header();
+                                                        var response = new ProfileFrame(new ProfileFrameHeader(
+                                                                header.protocolMajor(), header.protocolMinor(),
+                                                                header.headerLength(), header.operation(),
+                                                                header.flags(), header.requestId(), reduced.length, 0),
+                                                                reduced);
+                                                        frame.release();
+                                                        ctx.writeAndFlush(Unpooled.wrappedBuffer(
+                                                                ProfileFrameCodec.encode(response)), promise);
                                                         return;
                                                     }
                                                     if (fault == 23
@@ -3320,6 +3370,261 @@ public class SegmentProfileInitialSocketClientTest {
         assertEquals(ProfileControlResult.Outcome.APPLIED, fixture.clients.get(target.bookie())
                 .deleteApply(event.event().deleteApply("ledger-profile")).get(5, TimeUnit.SECONDS).outcome());
         return metadata;
+    }
+
+    @Test
+    public void physicalDeleteControlUsesSameCommittedEventAndActualFreeWithoutGlobalCompletion() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var coordinator = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(
+                    fixture.reservations, metadata, fixture.cold);
+            var manifest = coordinator.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(),
+                    Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS).manifest();
+            var targets = manifest.targets();
+            var target = targets.stream().filter(value -> value.bookie().equals("socket0:3181"))
+                    .findFirst().orElseThrow();
+            var event = fixture.reservations.readDeleteDelivery(metadata, target, 1).event();
+            var request = new ProfilePhysicalDeleteCodec.Request(event.deleteApply("ledger-profile"), 64, 8, 5000);
+            var client = fixture.clients.get(target.bookie());
+            assertTrue(client.hello().capabilities().contains(ProfilePhysicalDeleteCodec.CAPABILITY));
+            var attempt = client.physicalDelete(request);
+            var reply = attempt.result().get(10, TimeUnit.SECONDS);
+            attempt.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ProfilePhysicalDeleteCodec.Outcome.REUSABLE, reply.outcome());
+            assertEquals(1, reply.freedAllocations());
+            assertEquals(SegmentArenaControlLog.BLOCK_BYTES, reply.sourceBytesRetired());
+            var repeat = client.physicalDelete(request);
+            assertEquals(0, repeat.result().get(5, TimeUnit.SECONDS).freedAllocations());
+            repeat.completion().get(5, TimeUnit.SECONDS);
+            // Another obligated identity has committed authority, but no local UIC7 application.
+            var other = targets.stream().filter(value -> value.bookie().equals("socket1:3181"))
+                    .findFirst().orElseThrow();
+            var unapplied = fixture.reservations.readDeleteDelivery(metadata, other, 1).event();
+            assertThrows(ExecutionException.class, () -> fixture.clients.get(other.bookie())
+                    .physicalDelete(new ProfilePhysicalDeleteCodec.Request(
+                            unapplied.deleteApply("ledger-profile"), 64, 8, 5000)).result().get(5, TimeUnit.SECONDS));
+            assertFalse(bookie(fixture.nodes.get(1)).hasTerminalTombstone(fixture.context()));
+            assertEquals(3, fixture.reservations.retainedActivationTargets(44).targets().size());
+            assertEquals(3, coordinator.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(),
+                    Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS).manifest().targets().size());
+            assertEquals(1, bookie(fixture.nodes.get(0)).deleteAppliedCursor().sequence());
+            var partial = coordinator.beginObservePhysicalDeletion(manifest, Map.of(target, client),
+                    sdk.getClientCtx(), 64, 8, Duration.ofSeconds(10));
+            var observed = partial.result().get(15, TimeUnit.SECONDS);
+            partial.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator.PhysicalStatus.PENDING,
+                    observed.status());
+            assertEquals(3, observed.targets().size());
+            assertEquals(ProfilePhysicalDeleteCodec.Outcome.PENDING, observed.targets().get(other).outcome());
+            var peers = new HashMap<org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target,
+                    ProfileInitialControlClient>();
+            for (var obligated : targets) {
+                var control = fixture.clients.get(obligated.bookie());
+                var delivered = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, obligated);
+                var applied = control.deleteApply(delivered.event().deleteApply("ledger-profile"))
+                        .get(5, TimeUnit.SECONDS);
+                assertTrue(applied.outcome() == Outcome.APPLIED || applied.outcome() == Outcome.ALREADY_APPLIED);
+                peers.put(obligated, control);
+            }
+            var all = coordinator.beginObservePhysicalDeletion(manifest, peers, sdk.getClientCtx(),
+                    64, 8, Duration.ofSeconds(10));
+            assertEquals(org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator.PhysicalStatus
+                    .REUSABLE_EVERY_TARGET, all.result().get(15, TimeUnit.SECONDS).status());
+            all.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(3, fixture.reservations.retainedActivationTargets(44).targets().size());
+            var wrong = new org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target(
+                    target.bookie(), bytes(16, 93));
+            assertThrows(IllegalArgumentException.class, () -> coordinator.beginObservePhysicalDeletion(
+                    manifest, Map.of(wrong, client), sdk.getClientCtx(), 64, 8, Duration.ofSeconds(10)));
+        }
+    }
+
+    @Test
+    public void physicalDeleteControlDeadlineKeepsActualFreeAndReceiveCreditsUntilForceReturns() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var target = new org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target(
+                    "socket0:3181", fixture.identities.get(0).incarnation().value());
+            var event = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).event();
+            var node = fixture.nodes.get(0);
+            var field = IsolatedSegmentStorage.class.getDeclaredField("arena");
+            field.setAccessible(true);
+            var arena = (SegmentArenaControlLog) field.get(node);
+            var ioField = SegmentArenaControlLog.class.getDeclaredField("io");
+            ioField.setAccessible(true);
+            var forcing = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            ioField.set(arena, new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            }));
+            try {
+                var client = fixture.clients.get(target.bookie());
+                long beforeCredits = fixture.budgets.get(0).used(ProfileReceiveBudget.Lane.CONTROL);
+                var attempt = client.physicalDelete(new ProfilePhysicalDeleteCodec.Request(
+                        event.deleteApply("ledger-profile"), 64, 8, 300));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                var reply = attempt.result().get(5, TimeUnit.SECONDS);
+                assertEquals(ProfilePhysicalDeleteCodec.Outcome.PENDING, reply.outcome());
+                assertEquals(ProfileStatus.DurableResult.UNKNOWN, reply.status().durableResult());
+                attempt.completion().get(5, TimeUnit.SECONDS); // Actual local RPC terminal, not server FREE.
+                assertTrue(fixture.budgets.get(0).used(ProfileReceiveBudget.Lane.CONTROL) > beforeCredits);
+                assertThrows(java.io.IOException.class, () -> files(node).close());
+                assertEquals(SegmentProfilePhysicalDelete.Status.PENDING, node.reclaimDeletedLedger(
+                        fixture.context(), fixture.cold, 64, 8, Duration.ofSeconds(5)).result().get().status());
+                release.countDown();
+                boolean done = false;
+                for (int tries = 0; tries < 100 && !done; tries++) {
+                    var resumed = client.physicalDelete(new ProfilePhysicalDeleteCodec.Request(
+                            event.deleteApply("ledger-profile"), 64, 8, 5000));
+                    var result = resumed.result().get(10, TimeUnit.SECONDS);
+                    resumed.completion().get(5, TimeUnit.SECONDS);
+                    done = result.outcome() == ProfilePhysicalDeleteCodec.Outcome.REUSABLE;
+                    if (!done) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                    }
+                }
+                assertTrue(done);
+                assertEquals(2, arena.allocationGeneration(0, 4096));
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void physicalDeleteControlLostReplyCancelAndWrongBindingReuseDurableFree() throws Exception {
+        for (int fault : List.of(27, 28, 30)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                var metadata = preparePhysicalDelete(fixture, sdk, false);
+                var target = new org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target(
+                        "socket0:3181", fixture.identities.get(0).incarnation().value());
+                var event = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).event();
+                var request = new ProfilePhysicalDeleteCodec.Request(event.deleteApply("ledger-profile"), 64, 8, 5000);
+                fixture.faultTarget.set(0);
+                fixture.replyFault.set(fault);
+                try {
+                    var attempt = fixture.clients.get(target.bookie()).physicalDelete(request);
+                    if (fault == 28) {
+                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+                        }
+                        assertEquals(1, fixture.heldReplies.size());
+                        assertTrue(attempt.result().cancel(false));
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> attempt.completion().get(150, TimeUnit.MILLISECONDS));
+                        fixture.replyFault.set(0);
+                        fixture.releaseReplies();
+                    } else {
+                        assertThrows(ExecutionException.class, () -> attempt.result().get(10, TimeUnit.SECONDS));
+                    }
+                    attempt.completion().get(5, TimeUnit.SECONDS);
+                    fixture.replyFault.set(0);
+                    var fresh = fault == 28 ? fixture.clients.get(target.bookie())
+                            : fixture.connect(0, 8, Duration.ofSeconds(5));
+                    var repeated = fresh.physicalDelete(request);
+                    assertEquals(ProfilePhysicalDeleteCodec.Outcome.REUSABLE,
+                            repeated.result().get(10, TimeUnit.SECONDS).outcome());
+                    assertEquals(0, repeated.result().get().freedAllocations());
+                    repeated.completion().get(5, TimeUnit.SECONDS);
+                } finally {
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void physicalDeleteControlUnsupportedPeerDoesNoAuthorityReadOrRetirement() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var target = new org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target(
+                    "socket0:3181", fixture.identities.get(0).incarnation().value());
+            var event = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).event();
+            fixture.faultTarget.set(0);
+            fixture.replyFault.set(29);
+            try {
+                var peer = fixture.connect(0, 8, Duration.ofSeconds(5));
+                assertFalse(peer.hello().capabilities().contains(ProfilePhysicalDeleteCodec.CAPABILITY));
+                int before = fixture.authorityReads.get();
+                var attempt = peer.physicalDelete(new ProfilePhysicalDeleteCodec.Request(
+                        event.deleteApply("ledger-profile"), 64, 8, 5000));
+                assertThrows(ExecutionException.class, () -> attempt.result().get(5, TimeUnit.SECONDS));
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(before, fixture.authorityReads.get());
+                var local = fixture.nodes.get(0).reclaimDeletedLedger(fixture.context(),
+                        fixture.cold, 64, 8, Duration.ofSeconds(5));
+                assertEquals(1, local.result().get(10, TimeUnit.SECONDS).freedAllocations());
+                local.completion().get(5, TimeUnit.SECONDS);
+            } finally {
+                fixture.replyFault.set(0);
+            }
+        }
+    }
+
+    @Test
+    public void physicalDeleteControlRechecksActualEventBeforeReportingReusable() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var target = new org.apache.bookkeeper.discover.profile.ProfileDeleteRecord.Target(
+                    "socket0:3181", fixture.identities.get(0).incarnation().value());
+            var event = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).event();
+            var node = fixture.nodes.get(0);
+            var field = IsolatedSegmentStorage.class.getDeclaredField("arena");
+            field.setAccessible(true);
+            var arena = (SegmentArenaControlLog) field.get(node);
+            var ioField = SegmentArenaControlLog.class.getDeclaredField("io");
+            ioField.setAccessible(true);
+            var forcing = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            ioField.set(arena, new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            }));
+            try {
+                var attempt = fixture.clients.get(target.bookie()).physicalDelete(
+                        new ProfilePhysicalDeleteCodec.Request(event.deleteApply("ledger-profile"), 64, 8, 5000));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                var children = fixture.zk.getChildren("/socket-initial/delete-delivery", false);
+                String headName = "/socket-initial/delete-delivery/" + children.stream()
+                        .filter(child -> !child.endsWith("-assignment"))
+                        .filter(child -> {
+                            try {
+                                return org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery.Head.decode(
+                                        fixture.zk.getData("/socket-initial/delete-delivery/" + child, false, null))
+                                            .target().equals(target);
+                            } catch (Exception failure) {
+                                throw new IllegalStateException(failure);
+                            }
+                        }).findFirst().orElseThrow();
+                fixture.zk.delete(headName + "/event-1", 0);
+                release.countDown();
+                assertEquals(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN,
+                        attempt.result().get(10, TimeUnit.SECONDS).outcome());
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(2, arena.allocationGeneration(0, 4096));
+                assertTrue(bookie(node).hasAppliedDeleteEvent(event.deleteApply("ledger-profile")));
+                assertEquals(ZKProfileReservationStore.DeliveryStatus.QUARANTINED,
+                        fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).status());
+                var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+                assertNotNull(manifest);
+                var coordinator = new org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator(
+                        fixture.reservations, metadata, fixture.cold);
+                var checked = coordinator.beginObservePhysicalDeletion(manifest,
+                        Map.of(target, fixture.clients.get(target.bookie())), sdk.getClientCtx(),
+                        64, 8, Duration.ofSeconds(10));
+                var result = checked.result().get(15, TimeUnit.SECONDS);
+                checked.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator.PhysicalStatus.QUARANTINED,
+                        result.status());
+                assertEquals(3, result.targets().size());
+                assertEquals(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, result.targets().get(target).outcome());
+            } finally {
+                release.countDown();
+            }
+        }
     }
 
     @Test

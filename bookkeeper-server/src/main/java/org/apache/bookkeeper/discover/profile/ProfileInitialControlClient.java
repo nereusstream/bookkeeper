@@ -27,6 +27,7 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 
 /** Existing experimental initial-control API backed by one bounded, authenticated CONTROL connection. */
@@ -100,6 +101,15 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
     /** Apply one committed delete delivery; continuous local progress is durable with its TOMBSTONE. */
     public CompletableFuture<ProfileControlResult> deleteApply(ProfileControlRequest request) {
         return socket.deleteApply(request);
+    }
+
+    /** Waiting result and actual local RPC/source/output termination are distinct. */
+    public record PhysicalAttempt(CompletableFuture<ProfilePhysicalDeleteCodec.Reply> result,
+            CompletableFuture<Void> completion) { }
+
+    /** Independent UIC8 bounded local retirement; neither a target-set receipt nor global deletion. */
+    public PhysicalAttempt physicalDelete(ProfilePhysicalDeleteCodec.Request request) {
+        return socket.physicalDelete(request);
     }
 
     /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */

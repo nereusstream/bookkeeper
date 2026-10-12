@@ -19,6 +19,14 @@ import time
 
 
 MATRIX = {
+    'a-profile-physical-wire': None,
+    'ce-profile-physical-wire-event': 'PhysicalWireNeedsEvent',
+    'ce-profile-physical-wire-peer': 'PhysicalWireNeedsPeer',
+    'ce-profile-physical-wire-cursor': 'PhysicalWireNeedsAppliedEvent',
+    'ce-profile-physical-wire-fresh': 'PhysicalWireReportNeedsFreshEvent',
+    'ce-profile-physical-wire-quorum': 'PhysicalWireAggregateNeedsEveryTarget',
+    'ce-profile-physical-wire-drain': 'PhysicalWireReleaseNeedsActual',
+
     'a-profile-physical-delete': None,
     'ce-profile-physical-delete-scope': 'PhysicalHasScope',
     'ce-profile-physical-delete-unknown': 'PhysicalHasKnownBytes',
@@ -876,6 +884,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfilePhysicalDeleteWire.tla" if "profile-physical-wire" in name
                    else "ProfilePhysicalDelete.tla" if "profile-physical-delete" in name
                    else "ProfileWriteLac.tla" if "profile-write-lac" in name
                    else "ProfileLacEvidence.tla" if "profile-lac-evidence" in name

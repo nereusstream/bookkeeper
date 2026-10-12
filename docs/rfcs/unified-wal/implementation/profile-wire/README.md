@@ -1548,3 +1548,26 @@ mvn -o -N apache-rat:check
 最终模型34tuje3n，20配置为4完整正向/16指定反例，1020当前inputs；新ProfilePhysicalDelete检查scope/known bytes、不能index/selector-only跳过allocated copies、COPY保留其他ledger、FREE force、old I/O与actual owner credit终态。正向110 generated/78 distinct、queue0、depth12、0.832秒/peak RSS106938368 bytes；结合原compaction-group/terminal-index/whole-FREE，Java/model去重1864输入核验。TLC1.7.4、Corretto21、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；真实TLS/ZK/CRC/fsync为输入，无full lifecycle/fairness/liveness/性能结论，catalog664/完整A+C+D未全跑。jvuqmgpu/c47vx6lw/x_0tvuaq的旧projection/stage不重绑。
 
 持久证据 /Users/liusinan/.codex/artifacts/unified-wal/physical-delete-evidence-ejqsebvi 保留原run/source/config/command、失败与阶段身份。最终Spotless/Checkstyle exit0；RAT exit1、443 unapproved路径全部在父HEAD，无新增，不称CI全绿。网络physical query/receipt、全historical target终结、accepted decommission/unrecoverable、retention policy与history/journal snapshot/handoff/GC仍OPEN；旧义务全部保留。本地保守quiescence与显式limit不证明任意持续负载下完成。Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/综合验收继续OPEN，步骤11/12/14/15与生产Gate保持PARTIAL/OPEN；默认OFF/SYSTEM/PARK和disabled能力保持，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。
+
+## 网络删除空间查询与全目标观察
+
+2026-10-12，父源码04bfae5221之后新增独立UIC8 capability 0x55494338/version1，在冻结OPERATION_STATUS控制opcode上只开放显式有界physical-delete请求。ProfilePhysicalDeleteCodec以24字节前缀封装原UIC7的完整删除事件；最多4096次allocation扫描、256组compaction、60000毫秒。固定96字节reply包含原status、REUSABLE/NOT_DELETED/PENDING/LIMIT/UNKNOWN、计数/字节、Bookie/Arena cuts、完整canonical请求SHA-256和CRC32C。HELLO仍固定bookie/incarnation，客户端另检验requestId/op/flags/status及request摘要；UIC8未协商时不发physical请求。没有改变UIC1–7、持久化control格式或普通Add路径。
+
+服务端复用原IsolatedProfileControlEndpoint的mTLS principal、static permission、直接提交权威、exact scope与engine检查；只读protected adapter要求SegmentBookieControlLog中同一operation/scope/DeleteBinding已持久应用，且同一ledger instance有terminal TOMBSTONE。当前deleteApplied cursor不能替代该事件，也不在此请求中补应用/跳过UIC7。原event-loop transfer先取得CONTROL credit再启动SegmentProfilePhysicalDelete；原index/COPY/MOVE/FREE与fresh raw allocation inspection拥有本地物理事实。报告REUSABLE前再次直接读同一删除权威和本地事件；权威消失或变化，即使FREE已完成，也只报告UNKNOWN。PENDING/LIMIT/UNKNOWN不伪造NONE；未授权、未协商、body非法或未持久应用的pre-effect refusal不启动回收。
+
+ProfileInitialControlClient.PhysicalAttempt把waiting result与实际本地RPC/source/output终态分开。取消/回复丢失不撤销已接受的server I/O；server的cold/control/receive custody保留到实际child与输出promise终态。caller RPC completion不是remote FREE完成证明；本地REUSABLE仍仅表示Arena可复用，不是文件缩小、secure erase、强reader barrier或生产删除完成。
+
+ZKProfileReservationStore新增readLogicalDeletion及readLedgerDeleteDelivery，只读核验原metadata birth/version/CLOSED digest、DELETE_INTENT、logical reference、manifest/publication及实际target-index/stream event。ProfileDeleteCoordinator.beginObservePhysicalDeletion冻结完整历史manifest，逐个按bookie/incarnation匹配已有verified CONTROL peers，复用bounded cold与SDK scheduler。缺peer保留PENDING，拒绝/UNKNOWN不成为成功；只有全部历史targets返回同一事件绑定的REUSABLE、且最终logical manifest仍相同时，才报告REUSABLE_EVERY_TARGET。源数据损坏报告QUARANTINED，未取得事实保留PENDING；没有AQ替代全目标、删offline obligation、补投递或产生GC权限。该结果是ephemeral observation；durable per-target terminal receipt、accepted decommission/unrecoverable和retention/snapshot/handoff/history GC仍OPEN。
+
+真实ZK/mTLS/SDK/file用例覆盖同事件FREE/重复零FREE、未apply其他target拒绝、部分peer与全目标观察、错误incarnation cohort拒绝、held FREE下PENDING/UNKNOWN及server file/receive custody、回复丢失重连、取消等待实际wire/output、CRC正确但request摘要错误拒绝、独立cap缺失无authority read/无retirement，以及FREE期间实际committed event消失后的UNKNOWN与协调器QUARANTINED。UIC1–7/原control admission共享回归保持原断言。
+
+验证使用Corretto21.0.10；bpv6hst8阶段9类349项Java全部通过（0 failure/error/skip），保留其原source绑定。5个文件仅作换行/导入修正后，vfC4BlUq最终8类70项通过，1106源码输入逐SHA核验；未重新执行的262项Bookie全类结果仍属于原阶段，不移绑。最终utiasjpr的1030输入、24模型配置（3完整正向/21指定反例）与Java去重1874输入核验一致；新正向4765 generated/3684 distinct、queue0、depth8，0.901秒/peak RSS131235840 bytes。catalog671/完整A+C+D未全跑；TLC1.7.4、单worker/heap512/direct64MiB/seed1/fp0、CHECK_DEADLOCK FALSE，不提升fairness/liveness或性能Gate。
+
+重跑入口仍为原脚本，具体命令/各阶段inputs与原XML、模型配置/反例在证据目录保留：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfilePhysicalDeleteCodecTest,ProfileInitialControlCodecTest,ProfileFrameCodecTest,ProfileHelloStatusTest,ProfileOperationCodecTest,IsolatedProfileControlEndpointTest,ProfileReceiveDecoderTest,SegmentProfileInitialSocketClientTest#physicalDeleteControl*+newPeerInactive*+lostReplacementSocketResponse*+verifiedHello*+ownedProfileListenerWaits*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-physical-wire --config-prefix ce-profile-physical-wire --config-prefix a-profile-physical-delete --config-prefix ce-profile-physical-delete --config-prefix a-profile-delete-publication --config-prefix ce-profile-delete-publication
+```
+
+证据目录 /Users/liusinan/.codex/artifacts/unified-wal/physical-wire-evidence-oi3enfjt 保留最终source、原阶段5文件、命令/输入/XML、模型与诊断失败；旧PASS不移绑。最终Spotless/Checkstyle exit0；编译/测试完全终结后RAT独立exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。完整16步与步骤11/12/14/15、生产Gate仍PARTIAL/OPEN；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

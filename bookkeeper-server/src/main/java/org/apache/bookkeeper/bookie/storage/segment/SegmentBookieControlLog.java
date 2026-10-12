@@ -1558,6 +1558,18 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return !closed && !failed && context.equals(tombstones.get(context.ledgerId()));
     }
 
+    /** Exact persisted event and terminal context; a later applied cursor alone is insufficient. */
+    synchronized boolean hasAppliedDeleteEvent(ProfileControlRequest request) {
+        if (request.scope().operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
+                || request.deleteBinding().isEmpty() || !hasTerminalTombstone(context(request.scope()))) {
+            return false;
+        }
+        Command candidate = new Command(request.scope(), request.deleteBinding().orElseThrow());
+        AppliedOperation applied = operations.get(candidate.operationId());
+        return applied != null && (applied.status() == Status.APPLIED_DURABLE
+                || applied.status() == Status.ALREADY_DURABLE) && applied.command().sameMeaning(candidate);
+    }
+
     /** A durable suffix cut excludes only coordinates above P; pending cuts are never FREE authority. */
     synchronized boolean hasTerminalExclusion(ProfileLedgerContext context, long entryId) {
         LedgerState state = ledgers.get(context.ledgerId());
