@@ -21,6 +21,7 @@ package org.apache.bookkeeper.discover.profile;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.zip.CRC32C;
 
 /** Immutable PREPARED handoff cut. It neither advances a local cursor nor makes the next assignment effective. */
@@ -76,6 +77,68 @@ public final class ProfileDeleteHandoff {
             in.get(head);
             var result = new Plan(operation, ProfileDeleteDelivery.Head.decode(head), headBirth,
                     next, snapshotGeneration, snapshotBirth, digest);
+            if (!Arrays.equals(result.encode(), bytes)) {
+                throw invalid();
+            }
+            return result;
+        }
+    }
+
+    /** Immutable native acknowledgement of the original owner's local force/apply result. */
+    public static final class Acknowledgement {
+        private final Plan plan;
+        private final long controlSequence;
+        private final byte[] birthId;
+
+        private Acknowledgement(Plan plan, long controlSequence, byte[] birthId) {
+            this.plan = Objects.requireNonNull(plan, "plan");
+            this.birthId = ProfileLifecycleHead.fixed(birthId, 16, true);
+            if (controlSequence < 0) {
+                throw invalid();
+            }
+            this.controlSequence = controlSequence;
+        }
+
+        static Acknowledgement recorded(Plan plan, long controlSequence) {
+            UUID id = UUID.randomUUID();
+            return new Acknowledgement(plan, controlSequence, ByteBuffer.allocate(16)
+                    .putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits()).array());
+        }
+
+        public Plan plan() {
+            return plan;
+        }
+
+        public long controlSequence() {
+            return controlSequence;
+        }
+
+        public byte[] birthId() {
+            return birthId.clone();
+        }
+
+        boolean matches(Plan expected) {
+            return Arrays.equals(plan.encode(), expected.encode());
+        }
+
+        public byte[] encode() {
+            byte[] body = plan.encode();
+            return finish(header(40 + body.length, 0x5557484b).putLong(controlSequence)
+                    .put(birthId).putInt(body.length).put(body));
+        }
+
+        public static Acknowledgement decode(byte[] bytes) {
+            var in = checked(bytes, 40 + 167, 40 + MAX_BYTES, 0x5557484b);
+            long sequence = in.getLong();
+            byte[] birth = new byte[16];
+            in.get(birth);
+            int size = in.getInt();
+            if (size < 167 || size > MAX_BYTES || in.remaining() != size + 4) {
+                throw invalid();
+            }
+            byte[] body = new byte[size];
+            in.get(body);
+            var result = new Acknowledgement(Plan.decode(body), sequence, birth);
             if (!Arrays.equals(result.encode(), bytes)) {
                 throw invalid();
             }

@@ -30,6 +30,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileDeleteAdoption;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.ClientContext;
 import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
@@ -184,6 +185,73 @@ public final class ProfileDeleteCoordinator {
         } catch (RejectedExecutionException rejected) {
             active.release();
             return new HandoffAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+    }
+
+    public record HandoffAckAttempt(CompletableFuture<ZKProfileReservationStore.DeleteHandoffAckResult> result,
+            CompletableFuture<Void> completion) { }
+
+    /** Persist the original local owner result; cancellation cannot manufacture or revoke native ACK. */
+    public HandoffAckAttempt beginAcknowledgeHandoff(SegmentProfileDeleteAdoption local,
+            ClientContext sdk, Duration duration) {
+        Objects.requireNonNull(local, "local");
+        if (duration.isNegative() || duration.isZero() || duration.compareTo(Duration.ofMinutes(1)) > 0
+                || cold.getMaximumPoolSize() == Integer.MAX_VALUE
+                || (long) cold.getQueue().size() + cold.getQueue().remainingCapacity() >= Integer.MAX_VALUE
+                || !(cold.getRejectedExecutionHandler() instanceof ThreadPoolExecutor.AbortPolicy)) {
+            throw new IllegalArgumentException("Handoff acknowledgement needs the original bounded cold executor");
+        }
+        var unavailable = new ZKProfileReservationStore.DeleteHandoffAckResult(
+                ZKProfileReservationStore.DeleteHandoffAckStatus.UNAVAILABLE, null);
+        if (sdk.isClientClosed() || !active.tryAcquire()) {
+            return new HandoffAckAttempt(CompletableFuture.completedFuture(unavailable),
+                    CompletableFuture.completedFuture(null));
+        }
+        var caller = new CompletableFuture<ZKProfileReservationStore.DeleteHandoffAckResult>();
+        var completion = new CompletableFuture<Void>();
+        var stopped = new AtomicBoolean();
+        var timer = new AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
+        try {
+            var actual = CompletableFuture.supplyAsync(() -> reservations.acknowledgeDeleteHandoff(
+                    local, duration,
+                    () -> !stopped.get() && !sdk.isClientClosed()), cold);
+            actual.whenComplete((result, failure) -> {
+                var scheduled = timer.get();
+                if (scheduled != null) {
+                    scheduled.cancel(false);
+                }
+                active.release();
+                completion.complete(null);
+                if (failure == null) {
+                    caller.complete(result);
+                } else {
+                    caller.completeExceptionally(failure);
+                }
+            });
+            try {
+                var scheduled = sdk.getScheduler().schedule(() -> {
+                    stopped.set(true);
+                    caller.complete(new ZKProfileReservationStore.DeleteHandoffAckResult(
+                            ZKProfileReservationStore.DeleteHandoffAckStatus.DURABILITY_UNKNOWN, null));
+                }, duration.toNanos(), TimeUnit.NANOSECONDS);
+                timer.set(scheduled);
+                if (actual.isDone()) {
+                    scheduled.cancel(false);
+                }
+            } catch (RejectedExecutionException rejected) {
+                stopped.set(true);
+                caller.complete(unavailable);
+            }
+            caller.whenComplete((result, failure) -> {
+                if (caller.isCancelled()) {
+                    stopped.set(true);
+                }
+            });
+            return new HandoffAckAttempt(caller, completion.copy());
+        } catch (RejectedExecutionException rejected) {
+            active.release();
+            return new HandoffAckAttempt(CompletableFuture.completedFuture(unavailable),
                     CompletableFuture.completedFuture(null));
         }
     }

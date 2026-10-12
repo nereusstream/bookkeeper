@@ -19,6 +19,13 @@ import time
 
 
 MATRIX = {
+    'a-profile-handoff-ack': None,
+    'ce-profile-handoff-ack-local': 'AckHasActualLocalAdoption',
+    'ce-profile-handoff-ack-source': 'AckConfirmsOriginalPreparation',
+    'ce-profile-handoff-ack-birth': 'AckConfirmsOriginalRowBirth',
+    'ce-profile-handoff-ack-retry': 'AckMatchingRetryRetainsFirstRow',
+    'ce-profile-handoff-ack-release': 'AckReleaseWaitsActualColdReturn',
+
     'a-profile-delete-adoption': None,
     'ce-profile-delete-adoption-cut': 'AdoptionHasCompleteCut',
     'ce-profile-delete-adoption-force': 'AdoptionHasForce',
@@ -780,7 +787,7 @@ def main():
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
                   "SegmentControlRotation.java", "SegmentDataFileLock.java", "SegmentDerivedIndex.java",
                   "SegmentDataRecovery.java", "SegmentOwnerLoop.java", "SegmentIoExecutor.java", "SegmentPointRead.java",
-                  "SegmentArenaControlDriver.java", "SegmentBookieControlDriver.java", "SegmentProfileInstallStore.java", "SegmentProfileControlConfig.java", "SegmentProfileReadConfig.java",
+                  "SegmentArenaControlDriver.java", "SegmentBookieControlDriver.java", "SegmentProfileDeleteAdoption.java", "SegmentProfileInstallStore.java", "SegmentProfileControlConfig.java", "SegmentProfileReadConfig.java",
                   "SegmentArenaMove.java", "SegmentDuplicateCheck.java",
                   "SegmentEntryInputs.java", "SegmentBufferPool.java", "SegmentBatchFormat.java",
                   "SegmentLocalReadinessStore.java", "SegmentLocalReadinessCodec.java", "SegmentFileIo.java",
@@ -915,6 +922,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileDeleteHandoffAck.tla" if "profile-handoff-ack" in name
                    else "ProfileDeleteAdoption.tla" if "profile-delete-adoption" in name
                    else "ProfileDeleteHandoff.tla" if "profile-delete-handoff" in name
                    else "ProfileDeleteSnapshot.tla" if "profile-delete-snapshot" in name

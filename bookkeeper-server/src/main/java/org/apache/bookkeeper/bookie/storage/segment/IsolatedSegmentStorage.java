@@ -332,14 +332,17 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     enum DeleteAdoptionStatus { ADOPTED_DURABLE, UNAVAILABLE, QUARANTINED, UNKNOWN }
 
-    record DeleteAdoptionAttempt(DeleteAdoptionStatus status, ProfileDeleteHandoff.Plan plan,
+    record DeleteAdoptionAttempt(DeleteAdoptionStatus status, SegmentProfileDeleteAdoption adoption,
             CompletableFuture<Void> completion) {
         DeleteAdoptionAttempt {
             Objects.requireNonNull(status, "status");
             Objects.requireNonNull(completion, "completion");
-            if ((status == DeleteAdoptionStatus.ADOPTED_DURABLE) != (plan != null)) {
+            if ((status == DeleteAdoptionStatus.ADOPTED_DURABLE) != (adoption != null)) {
                 throw new IllegalArgumentException("Only a durable local adoption carries its plan");
             }
+        }
+        ProfileDeleteHandoff.Plan plan() {
+            return adoption == null ? null : adoption.plan();
         }
         @Override
         public CompletableFuture<Void> completion() {
@@ -388,6 +391,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             var result = new CompletableFuture<SegmentBookieControlLog.Status>();
             var terminal = new CompletableFuture<Void>();
+            SegmentBookieControlLog appliedOwner;
             synchronized (gate) {
                 if (!accepting || closed || !live.getAsBoolean() || System.nanoTime() >= deadline
                         || !controls.submitHandoff(source.plan(), (value, failure) -> {
@@ -399,6 +403,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                         }, () -> terminal.complete(null))) {
                     return new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNAVAILABLE, null, actual);
                 }
+                appliedOwner = bookie;
             }
             actual = terminal;
             var applied = result.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
@@ -412,7 +417,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     || !Arrays.equals(fresh.plan().encode(), source.plan().encode())) {
                 return new DeleteAdoptionAttempt(DeleteAdoptionStatus.QUARANTINED, null, actual);
             }
-            return new DeleteAdoptionAttempt(DeleteAdoptionStatus.ADOPTED_DURABLE, source.plan(), actual);
+            var adoption = SegmentProfileDeleteAdoption.fromApplied(appliedOwner, source.plan());
+            return adoption == null
+                    ? new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNAVAILABLE, null, actual)
+                    : new DeleteAdoptionAttempt(DeleteAdoptionStatus.ADOPTED_DURABLE, adoption, actual);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNKNOWN, null, actual);

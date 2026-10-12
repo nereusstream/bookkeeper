@@ -27,6 +27,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileDeleteAdoption;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.profile.EngineProfile;
@@ -3094,6 +3095,155 @@ public final class ZKProfileReservationStore {
 
     private static DeleteHandoffResult deleteHandoffFailure(DeleteHandoffStatus status) {
         return new DeleteHandoffResult(status, null);
+    }
+
+    public enum DeleteHandoffAckStatus { ACKNOWLEDGED, ABSENT, CONFLICT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN }
+
+    public record DeleteHandoffAckResult(DeleteHandoffAckStatus status,
+            ProfileDeleteHandoff.Acknowledgement acknowledgement) {
+        public DeleteHandoffAckResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == DeleteHandoffAckStatus.ACKNOWLEDGED) != (acknowledgement != null)) {
+                throw new IllegalArgumentException("Only a verified native acknowledgement carries its record");
+            }
+        }
+    }
+
+    /** Read-only durable first acknowledgement; the exact native preparation must still be verifiable. */
+    public DeleteHandoffAckResult readDeleteHandoffAcknowledgement(ProfileDeleteRecord.Target target) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var source = readPreparedDeleteHandoff(target);
+            if (source.status() != DeleteHandoffStatus.PREPARED) {
+                return deleteHandoffAckFailure(source.status() == DeleteHandoffStatus.QUARANTINED
+                        ? DeleteHandoffAckStatus.QUARANTINED : source.status() == DeleteHandoffStatus.ABSENT
+                            ? DeleteHandoffAckStatus.ABSENT : DeleteHandoffAckStatus.UNAVAILABLE);
+            }
+            String name = deliveryPath(target) + "/handoff-ack";
+            var node = reads.get(name, deadline);
+            if (node.code() == Code.NONODE.intValue()) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.ABSENT);
+            }
+            requireFound(node);
+            requirePersistent(node, true);
+            var ack = ProfileDeleteHandoff.Acknowledgement.decode(node.bytes());
+            if (!ack.matches(source.plan())) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.QUARANTINED);
+            }
+            var guard = reads.get(name + "/birth-" + HexFormat.of().formatHex(ack.birthId()), deadline);
+            requireFound(guard);
+            requirePersistent(guard, true);
+            byte[] expected = java.nio.ByteBuffer.allocate(48).put(ack.birthId())
+                    .put(ProfileRepairIntent.digest(node.bytes())).array();
+            if (guard.stat().getCzxid() != node.stat().getCzxid() || !Arrays.equals(guard.bytes(), expected)) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.QUARANTINED);
+            }
+            var fresh = readPreparedDeleteHandoff(target);
+            if (fresh.status() != DeleteHandoffStatus.PREPARED || !ack.matches(fresh.plan())) {
+                return deleteHandoffAckFailure(fresh.status() == DeleteHandoffStatus.QUARANTINED
+                        ? DeleteHandoffAckStatus.QUARANTINED : DeleteHandoffAckStatus.UNAVAILABLE);
+            }
+            return new DeleteHandoffAckResult(DeleteHandoffAckStatus.ACKNOWLEDGED, ack);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return deleteHandoffAckFailure(DeleteHandoffAckStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return deleteHandoffAckFailure(DeleteHandoffAckStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return deleteHandoffAckFailure(DeleteHandoffAckStatus.QUARANTINED);
+        }
+    }
+
+    /** Only an original opened control owner's opaque force/apply result can publish this native row. */
+    public DeleteHandoffAckResult acknowledgeDeleteHandoff(SegmentProfileDeleteAdoption local,
+            Duration duration, java.util.function.BooleanSupplier live) {
+        Objects.requireNonNull(local, "local");
+        Objects.requireNonNull(live, "live");
+        if (duration.isNegative() || duration.isZero() || duration.compareTo(Duration.ofMinutes(1)) > 0) {
+            throw new IllegalArgumentException("Handoff acknowledgement requires a bounded cold caller");
+        }
+        long deadline = System.nanoTime() + duration.toNanos();
+        boolean submitted = false;
+        var plan = local.plan();
+        var target = plan.predecessor().target();
+        try {
+            if (!live.getAsBoolean() || !local.isCurrent()) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.UNAVAILABLE);
+            }
+            var prior = readDeleteHandoffAcknowledgement(target);
+            if (prior.status() != DeleteHandoffAckStatus.ABSENT) {
+                return prior.acknowledgement() != null && !prior.acknowledgement().matches(plan)
+                        ? deleteHandoffAckFailure(DeleteHandoffAckStatus.CONFLICT) : prior;
+            }
+            var source = readPreparedDeleteHandoff(target);
+            if (source.plan() == null) {
+                return deleteHandoffAckFailure(source.status() == DeleteHandoffStatus.QUARANTINED
+                        ? DeleteHandoffAckStatus.QUARANTINED : DeleteHandoffAckStatus.UNAVAILABLE);
+            }
+            if (!Arrays.equals(source.plan().encode(), plan.encode())) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.CONFLICT);
+            }
+            var head = deleteHead(target, deadline);
+            var admission = head == null ? null : assignmentAdmission(head, false, deadline);
+            String parent = deliveryPath(target);
+            var prepared = reads.get(parent + "/handoff-prepared", deadline);
+            requireFound(prepared);
+            requirePersistent(prepared, true);
+            if (head == null || admission == null || !admission.value().frozen()
+                    || !Arrays.equals(head.head().encode(), plan.predecessor().encode())
+                    || head.node().stat().getCzxid() != plan.headBirth()
+                    || prepared.stat().getCzxid() != admission.node().stat().getMzxid()
+                    || !Arrays.equals(prepared.bytes(), plan.encode())
+                    || !Arrays.equals(admission.value().preparedDigest(), ProfileRepairIntent.digest(plan.encode()))) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.QUARANTINED);
+            }
+            var operations = new ArrayList<Op>();
+            operations.add(Op.check(parent, head.node().stat().getVersion()));
+            operations.add(Op.check(parent + "-assignment", 0));
+            operations.add(Op.check(parent + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0));
+            operations.add(Op.check(parent + "/assignment-admission", admission.node().stat().getVersion()));
+            operations.add(Op.check(parent + "/handoff-prepared", 0));
+            if (plan.predecessor().committedThrough() != 0) {
+                var snapshot = readDeleteSnapshot(target);
+                var view = snapshot.snapshot();
+                if (view == null || view.rootBirth != plan.snapshotBirth()
+                        || !Arrays.equals(ProfileRepairIntent.digest(view.value().encode()), plan.snapshotDigest())) {
+                    return deleteHandoffAckFailure(snapshot.status() == DeleteSnapshotStatus.UNAVAILABLE
+                            ? DeleteHandoffAckStatus.UNAVAILABLE : DeleteHandoffAckStatus.QUARANTINED);
+                }
+                operations.add(Op.check(parent + "/snapshot-current", (int) view.selectionVersion));
+                operations.add(Op.check(deleteSnapshotPath(target, view.value().generation()), 0));
+                operations.add(Op.check(deleteSnapshotPath(target, view.value().generation()) + "/published", 0));
+            }
+            var ack = ProfileDeleteHandoff.Acknowledgement.recorded(plan, local.controlSequence());
+            String name = parent + "/handoff-ack";
+            operations.add(Op.create(name, ack.encode(), pageAcls, CreateMode.PERSISTENT));
+            byte[] guard = java.nio.ByteBuffer.allocate(48).put(ack.birthId())
+                    .put(ProfileRepairIntent.digest(ack.encode())).array();
+            operations.add(Op.create(name + "/birth-" + HexFormat.of().formatHex(ack.birthId()), guard,
+                    immutableAcls, CreateMode.PERSISTENT));
+            if (!live.getAsBoolean() || !local.isCurrent()) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.UNAVAILABLE);
+            }
+            submitted = true;
+            multi(operations, deadline);
+            var result = readDeleteHandoffAcknowledgement(target);
+            return result.status() == DeleteHandoffAckStatus.ABSENT
+                    ? deleteHandoffAckFailure(DeleteHandoffAckStatus.DURABILITY_UNKNOWN) : result;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return deleteHandoffAckFailure(submitted
+                    ? DeleteHandoffAckStatus.DURABILITY_UNKNOWN : DeleteHandoffAckStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return deleteHandoffAckFailure(submitted
+                    ? DeleteHandoffAckStatus.DURABILITY_UNKNOWN : DeleteHandoffAckStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return deleteHandoffAckFailure(DeleteHandoffAckStatus.QUARANTINED);
+        }
+    }
+
+    private static DeleteHandoffAckResult deleteHandoffAckFailure(DeleteHandoffAckStatus status) {
+        return new DeleteHandoffAckResult(status, null);
     }
 
     public enum DeleteSnapshotStatus { FOUND, ABSENT, LIMIT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN }

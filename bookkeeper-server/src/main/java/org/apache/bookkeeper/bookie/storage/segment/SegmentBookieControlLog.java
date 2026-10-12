@@ -2104,6 +2104,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return deleteHandoff;
     }
 
+    synchronized long adoptedDeleteHandoffSequence(ProfileDeleteHandoff.Plan plan) {
+        if (closed || failed || deleteHandoff == null || plan == null
+                || !Arrays.equals(deleteHandoff.encode(), plan.encode())) {
+            return -1;
+        }
+        var record = checkpointState.get(operationId(plan.operationId()));
+        return record == null ? -1 : record.sequence();
+    }
+
     private boolean reservedOperation(UUID id) {
         return checkpointIds.contains(id) || isHandoffOperation(id);
     }

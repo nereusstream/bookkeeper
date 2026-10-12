@@ -17,6 +17,7 @@
 package org.apache.bookkeeper.discover.profile;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -65,4 +66,30 @@ public class ProfileDeleteHandoffTest {
                 ProfileRepairIntent.digest(plan.encode()));
         assertTrue(ProfileDeleteHandoff.Admission.decode(pending.encode()).frozen());
     }
+    @Test
+    public void acknowledgementRetainsCanonicalPlanControlSequenceAndImmutableBirth() {
+        var target = new ProfileDeleteRecord.Target("b1:3181", bytes(16, 2));
+        var cut = new ProfileDeleteDelivery.Head(bytes(16, 3), 1, 1, 0, target);
+        var plan = new ProfileDeleteHandoff.Plan(bytes(16, 4), cut, 100, 2, 0, 0, new byte[32]);
+        var ack = ProfileDeleteHandoff.Acknowledgement.recorded(plan, 0);
+        var recovered = ProfileDeleteHandoff.Acknowledgement.decode(ack.encode());
+        assertArrayEquals(ack.encode(), recovered.encode());
+        assertEquals(0, recovered.controlSequence());
+        assertTrue(recovered.matches(plan));
+        byte[] birth = recovered.birthId();
+        birth[0] ^= 1;
+        assertFalse(Arrays.equals(birth, recovered.birthId()));
+        assertThrows(IllegalArgumentException.class, () -> ProfileDeleteHandoff.Acknowledgement.recorded(plan, -1));
+        for (int size = 0; size < ack.encode().length; size++) {
+            byte[] truncated = Arrays.copyOf(ack.encode(), size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileDeleteHandoff.Acknowledgement.decode(truncated));
+        }
+        byte[] oversized = ack.encode();
+        ByteBuffer.wrap(oversized).putInt(32, Integer.MAX_VALUE);
+        CRC32C crc = new CRC32C();
+        crc.update(oversized, 0, oversized.length - 4);
+        ByteBuffer.wrap(oversized).putInt(oversized.length - 4, (int) crc.getValue());
+        assertThrows(IllegalArgumentException.class, () -> ProfileDeleteHandoff.Acknowledgement.decode(oversized));
+    }
+
 }

@@ -4574,13 +4574,19 @@ public class SegmentProfileInitialSocketClientTest {
 
     private static final class HandoffReplyClient extends ZooKeeper {
         private final boolean hold;
+        private final String suffix;
         final CountDownLatch committed = new CountDownLatch(1);
         volatile boolean intercepted;
         volatile Runnable release;
 
         HandoffReplyClient(String connect, ZooKeeperWatcherBase watcher, boolean hold) throws Exception {
+            this(connect, watcher, hold, "/handoff-prepared");
+        }
+
+        HandoffReplyClient(String connect, ZooKeeperWatcherBase watcher, boolean hold, String suffix) throws Exception {
             super(connect, 10000, watcher);
             this.hold = hold;
+            this.suffix = suffix;
             watcher.waitForConnection();
         }
 
@@ -4589,7 +4595,7 @@ public class SegmentProfileInitialSocketClientTest {
                 org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
             var ops = new ArrayList<org.apache.zookeeper.Op>();
             operations.forEach(ops::add);
-            boolean handoff = !intercepted && ops.stream().anyMatch(op -> op.getPath().endsWith("/handoff-prepared"));
+            boolean handoff = !intercepted && ops.stream().anyMatch(op -> op.getPath().endsWith(suffix));
             super.multi(ops, (code, path, ignored, results) -> {
                 if (handoff && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
                     intercepted = true;
@@ -4776,6 +4782,9 @@ public class SegmentProfileInitialSocketClientTest {
                 var unknown = pending.get(5, TimeUnit.SECONDS);
                 assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.UNKNOWN, unknown.status());
                 assertFalse(unknown.completion().isDone());
+                assertNull(unknown.adoption());
+                assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.ABSENT,
+                        fixture.reservations.readDeleteHandoffAcknowledgement(target).status());
                 assertNull(bookie(fixture.nodes.get(1)).adoptedDeleteHandoff());
                 assertNull(fixture.nodes.get(1).profileDeleteProgress());
                 release.countDown();
@@ -4799,6 +4808,137 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(1, held.forces);
             } finally {
                 release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void deleteHandoffNativeAckRetainsRealAdoptionAcrossOfflineReadRestartAndBirthAba() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var target = new ProfileDeleteRecord.Target(
+                    "socket1:3181", fixture.identities.get(1).incarnation().value());
+            var coordinator = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            var preparation = coordinator.beginPrepareHandoff(target, bytes(16, 123), sdk.getClientCtx(),
+                    64, Duration.ofSeconds(10));
+            var plan = preparation.result().get(15, TimeUnit.SECONDS).plan();
+            preparation.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.ABSENT,
+                    fixture.reservations.readDeleteHandoffAcknowledgement(target).status());
+            var adoption = fixture.nodes.get(1).adoptPreparedProfileDeletes(fixture.reservations, metadata,
+                    "ledger-profile", 64, Duration.ofSeconds(10), () -> true);
+            assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.ADOPTED_DURABLE, adoption.status());
+            assertTrue(adoption.adoption().isCurrent());
+            var publication = coordinator.beginAcknowledgeHandoff(adoption.adoption(), sdk.getClientCtx(),
+                    Duration.ofSeconds(10));
+            var result = publication.result().get(15, TimeUnit.SECONDS);
+            publication.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.ACKNOWLEDGED, result.status());
+            assertArrayEquals(plan.encode(), result.acknowledgement().plan().encode());
+            assertEquals(adoption.adoption().controlSequence(), result.acknowledgement().controlSequence());
+            assertEquals(1, fixture.reservations.readDeleteHead(target).head().assignmentGeneration());
+            assertEquals(1, fixture.nodes.get(1).profileDeleteProgress().assignmentGeneration());
+            var restartConfig = files(fixture.nodes.get(1)).config();
+            fixture.nodes.get(1).close();
+            assertFalse(adoption.adoption().isCurrent());
+            var rebuilt = new ZKProfileReservationStore(fixture.zk, "/socket-initial",
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            assertArrayEquals(result.acknowledgement().encode(),
+                    rebuilt.readDeleteHandoffAcknowledgement(target).acknowledgement().encode());
+            assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.UNAVAILABLE,
+                    rebuilt.acknowledgeDeleteHandoff(adoption.adoption(), Duration.ofSeconds(5), () -> true).status());
+            try (var replay = new IsolatedSegmentStorage(restartConfig, fixture.identities.get(1),
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                    new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                            2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                    new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                            new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                replay.restart();
+                var recovered = replay.adoptPreparedProfileDeletes(rebuilt, metadata,
+                        "ledger-profile", 64, Duration.ofSeconds(10), () -> true);
+                var resumed = new ProfileDeleteCoordinator(rebuilt, metadata, fixture.cold)
+                        .beginAcknowledgeHandoff(recovered.adoption(), sdk.getClientCtx(), Duration.ofSeconds(10));
+                assertArrayEquals(result.acknowledgement().encode(),
+                        resumed.result().get(15, TimeUnit.SECONDS).acknowledgement().encode());
+                resumed.completion().get(5, TimeUnit.SECONDS);
+                assertTrue(bookie(replay).hasTerminalTombstone(fixture.context()));
+                String name = actualDeleteStreamPath(fixture, target) + "/handoff-ack";
+                String guard = fixture.zk.getChildren(name, false).get(0);
+                byte[] body = fixture.zk.getData(name, false, null);
+                byte[] witness = fixture.zk.getData(name + "/" + guard, false, null);
+                org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, name);
+                fixture.zk.create(name, body, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                fixture.zk.create(name + "/" + guard, witness, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.QUARANTINED,
+                        rebuilt.readDeleteHandoffAcknowledgement(target).status());
+                assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.QUARANTINED,
+                        rebuilt.acknowledgeDeleteHandoff(recovered.adoption(), Duration.ofSeconds(5), () -> true)
+                                .status());
+            }
+        }
+    }
+
+    @Test
+    public void deleteHandoffNativeAckLostReplyCancelAndColdOwnershipKeepSameImmutableRow() throws Exception {
+        for (boolean hold : new boolean[] {false, true}) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                fixture.initialize().get(5, TimeUnit.SECONDS);
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var target = new ProfileDeleteRecord.Target(
+                        "socket1:3181", fixture.identities.get(1).incarnation().value());
+                fixture.reservations.createInitialDeleteAssignment(target);
+                var preparation = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                        .beginPrepareHandoff(target, bytes(16, 124), sdk.getClientCtx(), 64, Duration.ofSeconds(10));
+                preparation.result().get(15, TimeUnit.SECONDS);
+                preparation.completion().get(5, TimeUnit.SECONDS);
+                var local = fixture.nodes.get(1).adoptPreparedProfileDeletes(fixture.reservations, metadata,
+                        "ledger-profile", 64, Duration.ofSeconds(10), () -> true);
+                assertNull(fixture.nodes.get(1).profileDeleteProgress());
+                assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.UNAVAILABLE,
+                        fixture.reservations.acknowledgeDeleteHandoff(local.adoption(), Duration.ofSeconds(5),
+                                () -> false).status());
+                assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.ABSENT,
+                        fixture.reservations.readDeleteHandoffAcknowledgement(target).status());
+                var watcher = new ZooKeeperWatcherBase(10000, false);
+                try (var client = new HandoffReplyClient(fixture.cluster.getZooKeeperConnectString(), watcher,
+                        hold, "/handoff-ack")) {
+                    var store = new ZKProfileReservationStore(client, "/socket-initial",
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var coordinator = new ProfileDeleteCoordinator(store, metadata, fixture.cold);
+                    try {
+                        var attempt = coordinator.beginAcknowledgeHandoff(local.adoption(), sdk.getClientCtx(),
+                                Duration.ofSeconds(10));
+                        assertTrue(client.committed.await(5, TimeUnit.SECONDS));
+                        if (hold) {
+                            assertTrue(attempt.result().cancel(true));
+                            assertFalse(attempt.completion().isDone());
+                            var occupied = coordinator.beginAcknowledgeHandoff(local.adoption(), sdk.getClientCtx(),
+                                    Duration.ofSeconds(5));
+                            assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.UNAVAILABLE,
+                                    occupied.result().get(5, TimeUnit.SECONDS).status());
+                            client.release.run();
+                        } else {
+                            assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.ACKNOWLEDGED,
+                                    attempt.result().get(15, TimeUnit.SECONDS).status());
+                        }
+                        attempt.completion().get(5, TimeUnit.SECONDS);
+                        var stored = store.readDeleteHandoffAcknowledgement(target);
+                        assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.ACKNOWLEDGED, stored.status());
+                        var resumed = new ProfileDeleteCoordinator(store, metadata, fixture.cold)
+                                .beginAcknowledgeHandoff(local.adoption(), sdk.getClientCtx(), Duration.ofSeconds(10));
+                        assertArrayEquals(stored.acknowledgement().encode(),
+                                resumed.result().get(15, TimeUnit.SECONDS).acknowledgement().encode());
+                        resumed.completion().get(5, TimeUnit.SECONDS);
+                        assertEquals(0, stored.acknowledgement().plan().predecessor().committedThrough());
+                        assertEquals(1, store.readDeleteHead(target).head().assignmentGeneration());
+                    } finally {
+                        if (client.release != null) {
+                            client.release.run();
+                        }
+                    }
+                }
             }
         }
     }
