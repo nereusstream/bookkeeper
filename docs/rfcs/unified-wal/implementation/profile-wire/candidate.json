@@ -9,7 +9,7 @@
   "preV3OpcodeOracle": "original, XOR-0xFF, and every single-bit flip remain outside Classic opcodes 1..7",
   "supersededCandidate": "0x0FFE4250",
   "frozenCounterexample": "CE-20260831T105059Z",
-  "corpusVectors": 611,
+  "corpusVectors": 665,
   "fuzzSeedHex": "505746555a5a0001",
   "newCodecTests": {
     "status": "PASS",
@@ -22,35 +22,62 @@
   "matrixExecution": "ISOLATED_FRESH_RUN_OUTSIDE_REACTOR_AND_CI",
   "g1": "BLOCKED_UNVERIFIED",
   "matrixRun": {
-    "sourceParent": "55388d6da00d9662cfaa890ede2dd24abde64769",
-    "sourceInputsSha256": "f2fd23591162b4c678a2fddc988b3939d60309ccb8b9d42d8499c93e1c94842b",
-    "runIdentity": "uw-stock-effect-611-oc3r_rd3",
-    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-effect-evidence-aakgx616",
-    "vectorsPerVersion": 611,
+    "sourceParent": "365dcb802e0bcea1e8f4be64f40c86f480ec5a08",
+    "sourceInputsSha256": "2f8fa969804320177fa881ae25ec3720241cfd884575a17248fac4bf5d582ae7",
+    "runIdentity": "uw-control-compat-4grpqg8o",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/control-compat-evidence-yr6r7iu4",
+    "vectorsPerVersion": 665,
+    "newCurrentControlFrames": 9,
+    "newMagicFlipVectors": 36,
+    "newTruncationVectors": 9,
     "releasedDecoderOracle": "PASS",
     "stockBinaryProbeOracle": "PASS",
     "stockInternalEffectObservation": "ZERO_WITH_BEFORE_AND_AFTER_CLASSIC_CONTROLS",
-    "stockChannelLifecycle": "611_ACTIVE_611_INACTIVE_ZERO_REMAINING",
+    "stockChannelLifecycle": "665_ACTIVE_665_INACTIVE_ZERO_REMAINING",
     "stockStorageAndNamespaceSnapshots": "UNCHANGED",
+    "releasedResolverProtocolSelection": "PASS_FOUR_CASES_PER_VERSION_WITH_SERVICE_INFO_FUTURE_FIXTURE",
     "frozenCounterexampleControl": "EXPECTED_FAIL_ALL_FOUR_DECODERS",
     "currentProfileTests": {
-      "classes": 5,
-      "tests": 37,
+      "classes": 7,
+      "tests": 47,
       "failures": 0,
       "errors": 0,
       "skipped": 0
     },
-    "g1Remaining": "Fixed reference corpus/Classic Interleaved backend only; complete current control-body, mixed-version/auth/semantic/startup acceptance remains open"
+    "g1Remaining": "Fixed corpus now includes supported experimental control codec requests; mixed rolling versions/auth/semantic/startup and general stable control-body acceptance remain open"
   },
-  "previousMatrixRun": {
-    "sourceCommit": "ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3",
-    "runIdentity": "uw-stock-compatibility-Mftgib2k",
-    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU",
-    "vectorsPerVersion": 610,
-    "releasedDecoderOracle": "PASS",
-    "stockBinaryProbeOracle": "PASS",
-    "stockStorageAndNamespaceSnapshots": "UNCHANGED",
-    "frozenCounterexampleControl": "EXPECTED_FAIL_ALL_FOUR_DECODERS",
-    "g1Remaining": "Internal stock handle/master-key/allocation effects not directly observed; finite socket read window and Classic Interleaved backend only"
-  }
+  "previousMatrixRuns": [
+    {
+      "sourceCommit": "ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3",
+      "runIdentity": "uw-stock-compatibility-Mftgib2k",
+      "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU",
+      "vectorsPerVersion": 610,
+      "releasedDecoderOracle": "PASS",
+      "stockBinaryProbeOracle": "PASS",
+      "stockStorageAndNamespaceSnapshots": "UNCHANGED",
+      "frozenCounterexampleControl": "EXPECTED_FAIL_ALL_FOUR_DECODERS",
+      "g1Remaining": "Internal stock handle/master-key/allocation effects not directly observed; finite socket read window and Classic Interleaved backend only"
+    },
+    {
+      "sourceParent": "55388d6da00d9662cfaa890ede2dd24abde64769",
+      "sourceInputsSha256": "f2fd23591162b4c678a2fddc988b3939d60309ccb8b9d42d8499c93e1c94842b",
+      "runIdentity": "uw-stock-effect-611-oc3r_rd3",
+      "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-effect-evidence-aakgx616",
+      "vectorsPerVersion": 611,
+      "releasedDecoderOracle": "PASS",
+      "stockBinaryProbeOracle": "PASS",
+      "stockInternalEffectObservation": "ZERO_WITH_BEFORE_AND_AFTER_CLASSIC_CONTROLS",
+      "stockChannelLifecycle": "611_ACTIVE_611_INACTIVE_ZERO_REMAINING",
+      "stockStorageAndNamespaceSnapshots": "UNCHANGED",
+      "frozenCounterexampleControl": "EXPECTED_FAIL_ALL_FOUR_DECODERS",
+      "currentProfileTests": {
+        "classes": 5,
+        "tests": 37,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "g1Remaining": "Fixed reference corpus/Classic Interleaved backend only; complete current control-body, mixed-version/auth/semantic/startup acceptance remains open"
+    }
+  ]
 }

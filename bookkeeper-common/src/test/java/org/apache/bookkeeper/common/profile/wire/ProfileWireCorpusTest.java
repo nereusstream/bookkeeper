@@ -26,6 +26,7 @@ import static org.junit.Assert.assertThrows;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -110,6 +111,23 @@ public class ProfileWireCorpusTest {
             case HELLO_CLIENT -> ProfileHello.decodeClient(frame.body());
             case HELLO_SERVER -> ProfileHello.decodeServer(frame.body());
             case DATA -> ProfileOperationCodec.decode(frame.header().operation(), frame.body());
+            case CURRENT_CONTROL -> {
+                var request = ProfileInitialControlCodec.decodeRequest(frame.header().operation(),
+                        ByteBuffer.wrap(frame.body()), ProfileWireCorpusFixtures.CONTROL_HELLO);
+                assertEquals(vector.id(), vector.typedExpectation(), request.scope().operation().name());
+                assertArrayEquals(vector.id(), frame.body(), ProfileInitialControlCodec.encodeRequest(request));
+                assertEquals(ProfileWireValidationException.Reason.BLOCKED_UNFROZEN_CONTROL_BODY,
+                        assertThrows(ProfileWireValidationException.class, () -> ProfileOperationCodec.decode(
+                                frame.header().operation(), frame.body())).reason());
+            }
+            case PHYSICAL_CONTROL -> {
+                var request = ProfilePhysicalDeleteCodec.decodeRequest(ByteBuffer.wrap(frame.body()),
+                        ProfileWireCorpusFixtures.CONTROL_HELLO);
+                assertEquals(vector.id(), vector.typedExpectation(), request.deletion().scope().operation().name()
+                        + "/" + request.maximumAllocations() + "/" + request.maximumCompactions()
+                        + "/" + request.timeoutMillis());
+                assertArrayEquals(vector.id(), frame.body(), ProfilePhysicalDeleteCodec.encodeRequest(request));
+            }
             case BLOCKED_CONTROL -> assertTypedReason(
                     vector,
                     () -> ProfileOperationCodec.decode(frame.header().operation(), frame.body()));

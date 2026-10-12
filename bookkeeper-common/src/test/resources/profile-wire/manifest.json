@@ -5,7 +5,7 @@
   "fixtureSchema": "id,path,phase,frameResult,frameReason,typed,typedExpectation,close,bytes",
   "fuzzSeedHex": "505746555a5a0001",
   "fuzzIterations": 256,
-  "vectorCount": 611,
-  "categories": {"adversarial":9,"fuzz":256,"invalid":86,"valid":260},
-  "frameResults": {"REJECT":328,"ACCEPT":283}
+  "vectorCount": 665,
+  "categories": {"adversarial":9,"fuzz":256,"invalid":131,"valid":269},
+  "frameResults": {"REJECT":373,"ACCEPT":292}
 }

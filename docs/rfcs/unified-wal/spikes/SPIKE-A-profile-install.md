@@ -309,7 +309,7 @@ Wave 0 partial evidence：typed reference endpoint的12项普通功能测试已�
 
 ### A25：Raw Profile decoder corpus 与 no downgrade
 
-状态：**PASS_SCOPED / A25 OPEN**。2026-10-13完整16步目标恢复了[fresh隔离run](../implementation/profile-wire/README.md#恢复执行的-released-compatibility-矩阵)：当前四个released decoder及真实loopback stock Bookie各611-vector原probe Oracle通过；JDI直接观测corpus期间内部effect为零及611条channel实际终结，前后Classic控制触发实际路径，stock文件/私有namespace不变；原反例在四个decoder均预期FAIL。当前reference corpus已补齐现有RECOVERY_TERMINAL_CLOSE枚举，原610个raw bytes不变；未覆盖全部当前control-body及mixed-version接受，A25完整范围、Spike A与G1继续BLOCK。原DEFERRED和反例回执保持历史绑定。
+状态：**PASS_SCOPED / A25 OPEN**。2026-10-13完整16步目标恢复了[fresh隔离run](../implementation/profile-wire/README.md#恢复执行的-released-compatibility-矩阵)：当前四个released decoder及真实loopback stock Bookie各665-vector（含完整实验control请求）原probe Oracle通过；JDI直接观测corpus期间内部effect为零及665条channel实际终结，前后Classic控制触发实际路径，stock文件/私有namespace不变；原反例在四个decoder均预期FAIL。当前reference corpus已补齐现有RECOVERY_TERMINAL_CLOSE枚举，原610个raw bytes不变；当前两个实际control codec的9个完整请求及45个magic/truncation变体已入corpus，原611 bytes保持；四版resolver在mixed/Profile-only endpoint输入上均只选择bookie-rpc，metadata I/O仍未验证。mixed rolling versions/auth/semantic/startup及general stable control-body接受未完成，A25完整接受、Spike A与G1继续BLOCK。原DEFERRED和反例回执保持历史绑定。
 
 步骤：保留已否证`0x0FFE4250`的frozen反例，将TLS ClientHello、完整合法replacement `0x0FF04250` frame、每个subtype、magic逐byte翻转、1..31-byte header truncation、outer/body length/oversize、major/minor/headerLength/flags/reserved/subtype、malformed HELLO、合法v3 prefix后接Profile magic、触发current v3各种`RuntimeException`、pre-v3 version=0/nonzero与接近legacy ADD opcode的prefix、normal/recovery互换及seeded fuzz，投喂每个受支持真实stock old v2/v3 decoder/binary与new decoder。
 

@@ -39,22 +39,22 @@
     "frameManifest": "0x0FF04250/protocol-1.0/header-32",
     "fuzzSeedHex": "505746555a5a0001",
     "fuzzIterations": 256,
-    "corpusVectors": 611,
+    "corpusVectors": 665,
     "oldBinaryMatrix": [
       "4.14.8",
       "4.15.5",
       "4.16.7",
       "4.17.2"
     ],
-    "oldBinaryMatrixExecution": "ISOLATED_611_CORPUS_WITH_STOCK_EFFECT_OBSERVATION",
+    "oldBinaryMatrixExecution": "ISOLATED_665_CORPUS_WITH_CURRENT_CONTROL_EFFECT_AND_RESOLVER_CHECKS",
     "counterexample": "CE-20260831T105059Z",
     "g1": "BLOCKED_UNVERIFIED",
     "currentRun": {
-      "sourceParent": "55388d6da00d9662cfaa890ede2dd24abde64769",
-      "sourceInputsSha256": "f2fd23591162b4c678a2fddc988b3939d60309ccb8b9d42d8499c93e1c94842b",
-      "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-effect-evidence-aakgx616",
+      "sourceParent": "365dcb802e0bcea1e8f4be64f40c86f480ec5a08",
+      "sourceInputsSha256": "2f8fa969804320177fa881ae25ec3720241cfd884575a17248fac4bf5d582ae7",
+      "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/control-compat-evidence-yr6r7iu4",
       "status": "PASS_SCOPED",
-      "g1Remaining": "Complete current control-body/mixed-version/auth/semantic/startup Gate not verified"
+      "g1Remaining": "Mixed rolling versions/auth/semantic/startup and general stable control-body Gate not verified"
     }
   },
   "profileControl": {

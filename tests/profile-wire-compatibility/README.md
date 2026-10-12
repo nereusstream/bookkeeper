@@ -1,8 +1,8 @@
 # Profile Wire Compatibility Harness
 
-本目录保留 Wave 0 Block D 的 released-decoder/stock-binary probe、artifact lock 与源代码。2026-10-13 按完整16步持续目标恢复了隔离验证；当前四版本611-vector decoder、loopback stock网络与内部effect观测均通过，状态为 `PASS_SCOPED`。先前610-vector矩阵保留原身份。完整G1仍为 `BLOCKED_UNVERIFIED`：这里验证固定reference corpus与Classic Interleaved backend，未完成全部当前control-body、mixed-version/auth/semantic/startup接受范围。
+本目录保留 Wave 0 Block D 的 released-decoder/stock-binary probe、artifact lock 与源代码。2026-10-13 按完整16步持续目标恢复了隔离验证；当前四版本665-vector（含完整实验control请求）decoder、loopback stock网络与内部effect观测均通过，状态为 `PASS_SCOPED`。先前610/611-vector矩阵保留原身份。当前加入两个实际control codec的9个完整请求及45个magic/truncation变体；四版本released resolver协议选择也已通过纯逻辑检查。完整G1仍为 `BLOCKED_UNVERIFIED`：固定corpus与Classic Interleaved backend结果不代表mixed rolling versions/auth/semantic/startup及general stable control-body接受完成。
 
-本harness仍不属于常规Maven reactor或CI。候选、原probe Oracle和冻结反例未修改；现有生成器补齐RECOVERY_TERMINAL_CLOSE后当前corpus为611个，原610个raw bytes保持一致。每次执行使用fresh run identity、私有loopback端口/ZooKeeper namespace/可丢弃数据目录；stock classpath只来自锁定released artifact，不包含当前checkout的classes。
+本harness仍不属于常规Maven reactor或CI。候选、原probe Oracle和冻结反例未修改；现有生成器补齐RECOVERY_TERMINAL_CLOSE并增加实际control codec完整请求后当前corpus为665个，原611个raw bytes保持一致。每次执行使用fresh run identity、私有loopback端口/ZooKeeper namespace/可丢弃数据目录；stock classpath只来自锁定released artifact，不包含当前checkout的classes。
 
 本次源提交 `ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3`，run `uw-stock-compatibility-Mftgib2k`，证据目录 `/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU` 保存636个原始source/corpus输入、全部classpath JAR SHA256、server JAR SHA256/SHA512、Zulu17.0.6 executable SHA、class-load来源、逐vector JSONL、命令/退出码、配置、namespace/storage前后快照、进程终态、原始失败诊断及本次辅助脚本。`verified-results.json`汇总已逐项核验的范围，`raw-sha256.json`锁定原始输出。原冻结反例在全部四个decoder上各识别一个 `ParsedAddRequest`、exit1，作为预期失败控制。
 
@@ -60,3 +60,9 @@ stock层使用真实 `org.apache.bookkeeper.server.Main -c <private-bookie.conf>
 随后比对快照、以released SDK重读sentinel，关闭并核验自己启动的精确PID/端口。`StockBinaryProbe`的 `ackOrOk` 保守计数任何非空响应，PASS同时要求零response bytes、零该计数、零connection failure；200ms read timeout不是成功ACK或实际服务排空证明。辅助源码、实际配置和完整执行命令在上述证据的 `raw/` 中，路径/端口是本次run身份，复现必须重新分配。4.14.8首次ZK缺metrics启动失败、其cluster init失败及其后首次只比对storage的run也已保留；最终matrix另取得namespace快照，不将失败诊断计PASS。部分released client关闭打印worker-pool/session warning，helper exit0和实际子进程终态分别保存，不声称旧SDK已无清理问题。
 
 权威状态与剩余G1边界见 `docs/rfcs/unified-wal/implementation/profile-wire/README.md` 和 `candidate.json`。
+
+当前665-vector run为 `uw-control-compat-4grpqg8o`，父提交 `365dcb802e0bcea1e8f4be64f40c86f480ec5a08`，证据 `/Users/liusinan/.codex/artifacts/unified-wal/control-compat-evidence-yr6r7iu4`。新增control frames用client当前两个codec编码，由对应decoder及round-trip验证；每frame的四个magic flip和末尾truncation也进入同一fixtures.tsv。原611 binary、probe Oracle与冻结反例不改，历史610/611 run不重绑定。七类47项当前Profile测试通过；四版665-vector stock decoder/network/JDI/native快照验证均PASS，channel665/665/zero remaining；原反例各expected FAIL。
+
+新resolver检查使用对应released DefaultBookieAddressResolver和标准service-info future fixture，四版各4案例通过：endpoint两种排序只选bookie-rpc；known Profile-only的opaque/legacy-shaped ID均拒绝。它验证pure protocol selection，registration I/O/publication/advertisement不在该probe范围。全部JAR/JDK/class-load/SHA、实际命令/config/退出码/原始输出在上述证据；resolver与stock有独立input身份。
+
+复现resolver：以对应released classpath编译StockResolverProbe.java，并以该class目录加released classpath运行 `StockResolverProbe <version> <fresh-summary.json>`。JDK仍为锁定Zulu17.0.6；不要添加当前checkout target/classes。实际完整compile/run命令和class-load来源见run归档。

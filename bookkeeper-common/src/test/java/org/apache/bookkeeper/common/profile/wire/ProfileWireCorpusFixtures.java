@@ -24,6 +24,18 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import org.apache.bookkeeper.common.profile.DurabilityMode;
+import org.apache.bookkeeper.common.profile.EngineProfile;
+import org.apache.bookkeeper.common.profile.PayloadFormat;
+import org.apache.bookkeeper.common.profile.ProfileDescriptor;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorCodec;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorIdentity;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
+import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 
 /** Deterministic authoritative Profile wire corpus builder. */
 final class ProfileWireCorpusFixtures {
@@ -38,18 +50,104 @@ final class ProfileWireCorpusFixtures {
     private static final ProfileLedgerContext CONTEXT = new ProfileLedgerContext(
             0x0102_0304_0506_0708L, sequence(16, 1), sequence(36, 17));
     private static final byte[] CREDENTIAL = sequence(20, 71);
+    static final ProfileHello.Server CONTROL_HELLO = new ProfileHello.Server(
+            EngineProfile.SEGMENT_WAL_ENGINE.wireValue(), sequence(16, 91), 0, "isolated:3181", List.of(
+                    new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1),
+                    new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID, 2),
+                    new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID, 3),
+                    new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID, 4),
+                    ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY,
+                    ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY,
+                    ProfilePhysicalDeleteCodec.CAPABILITY));
 
     private ProfileWireCorpusFixtures() {}
 
     static List<Vector> allVectors() {
         List<Vector> vectors = new ArrayList<>();
         addValid(vectors);
+        addCurrentControl(vectors);
         addInvalidFraming(vectors);
         addInvalidHello(vectors);
         addInvalidTypedBodies(vectors);
         addAdversarialLegacyPrefixes(vectors);
         addFuzz(vectors);
         return List.copyOf(vectors);
+    }
+
+    private static void addCurrentControl(List<Vector> vectors) {
+        var validator = new ProfileDescriptorValidator((id, version) -> false,
+                (id, generation) -> id == 7 && generation == 11);
+        var descriptor = new ProfileDescriptor(EngineProfile.SEGMENT_WAL_ENGINE, PayloadFormat.OPAQUE_LEDGER,
+                DurabilityMode.SYNC_ON_ACK, 3, 3, 2, 0, 7, 11, List.of());
+        byte[] identity = ProfileDescriptorCodec.identityOf(descriptor, validator).toBytes();
+        var install = ProfileControlRequest.install(controlScope(ProfileControlOperation.INSTALL, identity, null),
+                ProfileDescriptorCodec.encode(descriptor, validator), EngineProfile.SEGMENT_WAL_ENGINE,
+                ProtectedProfileCredential.of(1, CREDENTIAL));
+        addControl(vectors, "install", ProfileOperation.INSTALL, install);
+        addControl(vectors, "activate-initial", ProfileOperation.ACTIVATE_INITIAL,
+                ProfileControlRequest.operation(
+                        controlScope(ProfileControlOperation.ACTIVATE_INITIAL, identity, null)));
+        addControl(vectors, "activate-replacement", ProfileOperation.ACTIVATE_REPLACEMENT,
+                ProfileControlRequest.operation(
+                        controlScope(ProfileControlOperation.ACTIVATE_REPLACEMENT, identity, null)));
+        var recovery = new ProfileControlRequest.RecoveryBinding(sequence(16, 101), 1, 1);
+        addControl(vectors, "recovery-grant", ProfileOperation.RECOVERY_GRANT,
+                ProfileControlRequest.recoveryGrant(controlScope(ProfileControlOperation.RECOVERY_GRANT,
+                        identity, new ProfileExactRange(0, 4)), recovery));
+        addControl(vectors, "recovery-grant-close", ProfileOperation.RECOVERY_GRANT_CLOSE,
+                ProfileControlRequest.recoveryClose(controlScope(ProfileControlOperation.RECOVERY_GRANT_CLOSE,
+                        identity, new ProfileExactRange(0, 4)), recovery, sequence(16, 121)));
+        for (long prefix : new long[] {-1, 4}) {
+            var scope = controlScope(ProfileControlOperation.RECOVERY_TERMINAL_CLOSE, identity, null);
+            var binding = new ProfileControlRequest.TerminalBinding(prefix, prefix < 0 ? 0 : 64, sequence(32, 131));
+            scope = withPayload(scope, ProfileControlRequest.terminalPayloadIdentity(scope, binding));
+            addControl(vectors, prefix < 0 ? "terminal-empty" : "terminal-prefix",
+                    ProfileOperation.RECOVERY_TERMINAL_CLOSE, ProfileControlRequest.terminalClose(scope, binding));
+        }
+        var scope = controlScope(ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY, identity, null);
+        var binding = new ProfileControlRequest.DeleteBinding(sequence(16, 141), 1, 1, 2,
+                sequence(16, 151), 1, sequence(32, 161));
+        scope = withPayload(scope, ProfileControlRequest.deletePayloadIdentity(scope, binding));
+        var deletion = ProfileControlRequest.deleteApply(scope, binding);
+        addControl(vectors, "delete-apply", ProfileOperation.TOMBSTONE_OR_DELETE_APPLY, deletion);
+        addCurrentControlFrame(vectors, "physical-delete", ProfileOperation.TOMBSTONE_OR_DELETE_APPLY,
+                ProfilePhysicalDeleteCodec.encodeRequest(new ProfilePhysicalDeleteCodec.Request(deletion, 4, 2, 1000)),
+                Typed.PHYSICAL_CONTROL, "TOMBSTONE_OR_DELETE_APPLY/4/2/1000");
+    }
+
+    private static ProfileControlScope controlScope(ProfileControlOperation operation, byte[] identity,
+            ProfileExactRange range) {
+        return new ProfileControlScope(operation, operation.purpose(), 44, sequence(16, 1),
+                ProfileDescriptorIdentity.fromBytes(identity),
+                CONTROL_HELLO.bookieId(), CONTROL_HELLO.storageIncarnation(), "ledger-profile", 1,
+                sequence(16, 31), sequence(32, 51), range);
+    }
+
+    private static ProfileControlScope withPayload(ProfileControlScope scope, byte[] payload) {
+        return new ProfileControlScope(scope.operation(), scope.purpose(), scope.ledgerId(), scope.ledgerInstanceId(),
+                scope.descriptorIdentity(), scope.targetBookie(), scope.targetStorageIncarnation(),
+                scope.authorityDomain(), scope.authorityGeneration(), scope.operationId(), payload, scope.exactRange());
+    }
+
+    private static void addControl(List<Vector> vectors, String name, ProfileOperation operation,
+            ProfileControlRequest request) {
+        addCurrentControlFrame(vectors, name, operation, ProfileInitialControlCodec.encodeRequest(request),
+                Typed.CURRENT_CONTROL, request.scope().operation().name());
+    }
+
+    private static void addCurrentControlFrame(List<Vector> vectors, String name, ProfileOperation operation,
+            byte[] body, Typed typed, String expectation) {
+        byte[] bytes = frame(operation, 201, body);
+        addAccept(vectors, "valid/current-control-" + name, bytes, Phase.ESTABLISHED, typed, expectation);
+        for (int index = 0; index < 4; index++) {
+            byte[] changed = bytes.clone();
+            changed[4 + index] ^= (byte) 0xff;
+            addFrameReject(vectors, "invalid/current-control-" + name + "-magic-flip-" + index,
+                    changed, Phase.ESTABLISHED, ProfileWireValidationException.Reason.BAD_MAGIC);
+        }
+        addFrameReject(vectors, "invalid/current-control-" + name + "-body-truncation",
+                Arrays.copyOf(bytes, bytes.length - 1), Phase.ESTABLISHED,
+                ProfileWireValidationException.Reason.TRUNCATED_BODY);
     }
 
     private static void addValid(List<Vector> vectors) {
@@ -489,6 +587,8 @@ final class ProfileWireCorpusFixtures {
         DATA,
         DATA_REJECT,
         BLOCKED_CONTROL,
+        CURRENT_CONTROL,
+        PHYSICAL_CONTROL,
         UNSUPPORTED,
         STATUS,
         STATUS_REJECT

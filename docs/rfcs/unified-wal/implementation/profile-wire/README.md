@@ -4,7 +4,7 @@
 
 本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，以及 [恢复执行的 released compatibility 矩阵](#恢复执行的-released-compatibility-矩阵)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
-当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX PASS_SCOPED — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 的当前四版本611-vector released-decoder/localhost stock-binary矩阵已通过，真实JDI观测内部effect为零且611条连接实际终结，见[当前增量](#released-stock-内部-effect-与-corpus-补齐)。完整current control-body/mixed-version/auth/semantic/startup接受仍待完成，G1保持 `BLOCKED_UNVERIFIED`，不是stable wire**。
+当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX PASS_SCOPED — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 的当前四版本665-vector（含完整实验control请求）released-decoder/localhost stock-binary矩阵已通过，真实JDI观测内部effect为零且665条连接实际终结，见[当前增量](#当前-control-请求与-released-resolver)。当前已实现control codec的完整请求样本与released resolver协议选择已验证；mixed rolling versions/auth/semantic/startup及general stable control-body接受仍待完成，G1保持 `BLOCKED_UNVERIFIED`，不是stable wire**。
 
 后续步骤11已有下文的[真实隔离普通 Add 接线](#真实隔离普通-add-接线)。它复用本目录冻结的实验字节合同；原 Block D 回执、corpus、历史compatibility延期和G1状态保留原绑定，不移绑本次结果。
 
@@ -32,7 +32,7 @@ guard 只允许本模块的 pure codec、test corpus、冻结 harness 和 owner 
 
 ## Authoritative byte corpus milestone
 
-`bookkeeper-common/src/test/resources/profile-wire/` 当前保留611个authoritative vectors：260 valid、86 invalid、9 adversarial old-protocol/TLS prefixes、256 fixed-seed fuzz。原阶段610-vector身份与回执不变；新增RECOVERY_TERMINAL_CLOSE header只补齐现有生成器枚举，原610个raw bytes与另14个补充fixture均未改。全部vector共享同一 `fixtures.tsv`，逐项固定phase、frame accept/reject reason、typed decode/status、close结果和byte count；`checksums.sha256` 锁定每个binary、fixture和manifest。
+`bookkeeper-common/src/test/resources/profile-wire/` 当前保留665个authoritative vectors：269 valid、131 invalid、9 adversarial old-protocol/TLS prefixes、256 fixed-seed fuzz。新增9个完整实验control请求、36个magic flip与9个body truncation由下文当前增量拥有；原611个raw bytes保持一致。原阶段610-vector身份与回执不变；新增RECOVERY_TERMINAL_CLOSE header只补齐现有生成器枚举，原610个raw bytes与另14个补充fixture均未改。全部vector共享同一 `fixtures.tsv`，逐项固定phase、frame accept/reject reason、typed decode/status、close结果和byte count；`checksums.sha256` 锁定每个binary、fixture和manifest。
 
 覆盖包括：每个subtype、client/server HELLO、全部240个status/retry/durable组合、normal/recovery distinct bodies、magic逐byte flip、1..31-byte header truncation、body truncation、outer/body mismatch、三个oversize边界、version/header/flags/reserved/subtype、malformed HELLO/status/data、normal/recovery interchange、TLS ClientHello、v3/pre-v3 adversarial prefixes、Profile后接legacy-like ADD prefix，以及seed `0x505746555a5a0001` 的256个arbitrary vectors。strict new-codec corpus test同时断言全部frame reject在body allocation前发生。
 
@@ -93,6 +93,28 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileFrameCodecTest,Profi
 ```
 
 当前compatibility `PASS_SCOPED`已包含固定611 reference corpus的旧stock内部effect；完整current control-body、mixed-version/auth/semantic/startup及其余Spike接受仍未完成，A25完整范围与G1保持OPEN/BLOCKED_UNVERIFIED，不晋升stable wire或production authority。默认OFF/SYSTEM/PARK、disabled能力及生产Gate OPEN保持；Linux NUMA/真实掉电/正式性能/canary未执行。后续继续完整16步剩余实现与综合验收。
+
+## 当前 control 请求与 released resolver
+
+2026-10-13，父提交 `365dcb802e0bcea1e8f4be64f40c86f480ec5a08`。前述611-vector run只含generic control header；当前沿原ProfileWireCorpusFixtures/Generator补入client实际调用的ProfileInitialControlCodec和ProfilePhysicalDeleteCodec完整请求。新scope是已启用实验schema的bytes，不修改生产codec/wire值、descriptor合同、capability默认值或Generic OperationCodec的BLOCKED_UNFROZEN_CONTROL_BODY。
+
+九个完整样本为INSTALL、ACTIVATE_INITIAL、ACTIVATE_REPLACEMENT、RECOVERY_GRANT、RECOVERY_GRANT_CLOSE、empty/prefix RECOVERY_TERMINAL_CLOSE、TOMBSTONE_OR_DELETE_APPLY及其physical-delete body。使用原descriptor validator、protected credential、exact range/intent/grant、terminal/delete payload identity与physical request limits生成；typed consumer使用对应actual codec解码并round-trip，当前control也验证generic codec继续拒绝。每个完整frame另生成四个magic-byte XOR与末尾截断；reject在body allocator调用前发生。新增9 valid/45 invalid，当前665 vectors为269 valid、131 invalid、9 adversarial、256 fixed-seed fuzz；原611 raw bytes及14个其他fixture不改，不删原反例。
+
+首次探索编译缺ByteBuffer import的诊断已保留，修正后 `unified-wal-local-VNznK2Wi` 中13项common测试有3个expected corpus RED（缺新resource、fixtures/manifest差异、checksum613而预期667），两个actual control codec原10项均通过。生成资源后最终 `unified-wal-local-Dm8Q5w3z` 七类47项全部PASS、零skip；包含canonical frame/corpus/HELLO、两个current control codec、receive deadline/bounds/close与真实mTLS pipeline，不把这些组件结果扩成整体mixed/rolling接受。
+
+fresh stock run `uw-control-compat-4grpqg8o` 四版本各665 vectors：decoder均352 extracted/312 incomplete/352 exceptions/351 fallback transitions、zero recognized/route claim/fallback-followed-by-effect；原old magic控制各一条ParsedAddRequest、expected exit1。真实Main的原network Oracle均PASS：665 connections、zero response/ACK/connection failure；JDI corpus effect zero、665 active/665 inactive/zero remaining，前后Classic正向effect hits仍为4.14/4.15的18/21与4.16/4.17的17/20。journal/ledger和完整私有namespace快照一致，原sentinel可读、新sentinel可写，全部自有PID终结/端口释放。
+
+新StockResolverProbe在每个released classpath上直接调用实际DefaultBookieAddressResolver：Profile/Classic两种endpoint顺序均选bookie-rpc；known Profile-only对opaque及legacy-shaped ID均明确BookieIdNotResolvedException，不静默借host:port绕过。四版各4案例PASS，class-load确认来自对应released JAR。stdlib Proxy仅提供completed service-info future作为输入；它是协议选择逻辑验证，不模拟registration publication成功，不证明MetadataStore I/O、实际Profile advertisement或AuthZ。
+
+证据 `/Users/liusinan/.codex/artifacts/unified-wal/control-compat-evidence-yr6r7iu4` 保存815个stock/current encoder输入、1170个Java runner输入、独立resolver source身份；801个重合SHA全部一致，共1185 unique inputs。stock输入canonical清单SHA256 `2f8fa969804320177fa881ae25ec3720241cfd884575a17248fac4bf5d582ae7`；raw vectors/逐条JSONL、JAR/JDK/class-load、实际private config/commands/exit、JDI事件/phase/native快照、原失败/RED/GREEN XML均归档核验。common Spotless/Checkstyle exit0，resolver/package-info定向Checkstyle9.3 exit0；终结后独立RAT exit1，443 unapproved均存在父提交、无新增，不称整体CI通过。生产Java、模型与old probe Oracle/冻结反例均未改。
+
+复现当前Profile组件：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileFrameCodecTest,ProfileHelloStatusTest,ProfileWireCorpusTest,ProfileInitialControlCodecTest,ProfilePhysicalDeleteCodecTest,ProfileReceiveDecoderTest,ProfileInboundPipelineSocketTest'
+```
+
+stock/JDI沿原harness README；resolver单独compile/run，输入是同一released classpath与fresh输出路径。历史610/611证据保留原source/input/run绑定。当前固定corpus已覆盖supported experimental control codec完整请求样本，兼容状态仍PASS_SCOPED；mixed rolling versions/auth/semantic/startup及general stable control-body接受未完成，A25整体、G1、生产Gate与全部16步保持OPEN/BLOCKED_UNVERIFIED。默认OFF/SYSTEM/PARK及disabled不变，Linux NUMA/真实掉电/正式性能/canary仍NOT_EXECUTED。
 
 ## Frozen counterexample
 
