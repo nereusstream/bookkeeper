@@ -885,3 +885,5 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-13 [客户端 codec workspace 与有界 reply 解析](implementation/profile-wire/README.md#客户端-codec-workspace-与有界-reply-解析)已在原backing账本中预留临时codec byte数组工作集，并删除fallback full-frame多层副本；真实CONTROL发送前拒绝、已协商read reply拒绝与最后owner drain得到验证。8类93项Java（common21/server72）、24有限模型配置、1946当前source及style通过。只完成客户端暂存工作集，caller/长期对象、server/control/cold/storage/index及opaque TLS等总账和全16步Gate仍OPEN，默认与disabled能力不提升。
+
+2026-10-13 [接收端 workspace 分类与响应 backing 转交](implementation/profile-wire/README.md#接收端-workspace-分类与响应-backing-转交)已复用原connection/lane/Credit区分接收端解析、冷任务及响应workspace，按原quota在响应分配前原子转成backing；CONTROL转交失败不改账，caller/transport终结不提前结束actual cold/force/last view。4类47项原阶段Java及1项定向补验、7个原backing有限模型配置有分阶段输入证据。这里完成预算分类与owner转交，未补齐MetadataStore内部、长期对象、caller/opaque TLS/kernel或storage/index统一总账；默认OFF/SYSTEM/PARK、disabled和全16步生产Gate保持OPEN。

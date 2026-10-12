@@ -234,17 +234,31 @@ public class ProfileByteBufAllocatorTest {
         ProfileReceiveBudget.ConnectionPermit permit = budget.admitUnclassified();
         permit.limit(128);
         ProfileByteBufAllocator allocator = new ProfileByteBufAllocator(permit);
-        ProfileReceiveBudget.Credit workspace = permit.reserve(128);
-        ProfileReceiveBudget.Credit response = workspace.split(44);
+        ProfileReceiveBudget.Credit workspace = permit.reserveWorkspace(128);
+        assertEquals(128, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertThrows(IllegalStateException.class, () -> allocator.adopt(workspace, 128));
+        ProfileReceiveBudget.Credit response = workspace.splitToBacking(44);
         ByteBuf buffer = allocator.adopt(response, 44);
+        ByteBuf view = buffer.retainedDuplicate();
         try {
             assertEquals(128, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertEquals(84, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertNull(permit.reserve(1));
             workspace.close();
             assertEquals(44, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-        } finally {
+            assertEquals(0, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
             buffer.release();
             permit.close();
+            assertFalse(budget.closeAdmissionAndDrain().isDone());
+            assertEquals(44, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        } finally {
+            if (buffer.refCnt() > 1) {
+                buffer.release();
+            }
+            view.release();
+            permit.close();
         }
+        assertTrue(budget.closeAdmissionAndDrain().isDone());
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 

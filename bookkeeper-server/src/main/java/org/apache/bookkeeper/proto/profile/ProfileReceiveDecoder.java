@@ -125,7 +125,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         if (terminated || context == null || !context.executor().inEventLoop()) {
             throw new IOException("Profile response requires a live receiving event loop");
         }
-        return charge(bytes);
+        return chargeWorkspace(bytes);
     }
 
     ByteBuf allocateResponse(ProfileInboundPipeline.ResponseCredit workspace, int bytes) {
@@ -136,7 +136,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         if (!(context.alloc() instanceof ProfileByteBufAllocator allocator)) {
             return context.alloc().buffer(bytes, bytes);
         }
-        ProfileReceiveBudget.Credit backing = held.shared.split(bytes);
+        ProfileReceiveBudget.Credit backing = held.shared.splitToBacking(bytes);
         try {
             return allocator.adopt(backing, bytes);
         } catch (RuntimeException | Error failure) {
@@ -308,7 +308,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             }
             ProfileFrameHeader header = frameHeader;
             if (header.operation() == ProfileOperation.HELLO) {
-                HeldCredit helloCopy = charge(header.bodyLength());
+                HeldCredit helloCopy = chargeWorkspace(header.bodyLength());
                 try {
                     byte[] body = new byte[header.bodyLength()];
                     frame.getBytes(FIXED_HEADER_BYTES, body);
@@ -398,11 +398,23 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     }
 
     private HeldCredit charge(int bytes) throws IOException {
-        ProfileReceiveBudget.Credit shared = connectionPermit.reserve(bytes);
+        return hold(connectionPermit.reserve(bytes));
+    }
+
+    private HeldCredit chargeWorkspace(int bytes) throws IOException {
+        return hold(connectionPermit.reserveWorkspace(bytes));
+    }
+
+    private HeldCredit hold(ProfileReceiveBudget.Credit shared) throws IOException {
         if (shared == null) {
             throw new IOException("Connection or Bookie Profile receive capacity exhausted");
         }
-        return new HeldCredit(shared);
+        try {
+            return new HeldCredit(shared);
+        } catch (RuntimeException | Error failure) {
+            shared.close();
+            throw failure;
+        }
     }
 
     private void discardPartial() {

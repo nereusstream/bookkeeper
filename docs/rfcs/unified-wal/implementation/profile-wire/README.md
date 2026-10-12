@@ -1792,3 +1792,19 @@ scripts/unified-wal/run-local-storage-tests.sh 'ProfileByteBufAllocatorTest,Prof
 最终`unified-wal-model-jgnwpkbt`复用原backing/workspace/pool/writer-close投影，共24配置、3完整正向/21指定反例；不将有限root模型当作codec所有数组/对象或RSS完整证明。1115 Java与1102模型输入的1946个唯一source SHA逐项核验。证据`/Users/liusinan/.codex/artifacts/unified-wal/codec-workspace-evidence-sod16tmf`保存每个stage原inputs/命令/XML、source overrides、模型与失败诊断。最终Spotless/Checkstyle exit0；Java/模型/checker终結后的独立RAT exit1，443 unapproved全部存在父HEAD、无新增，不称CI全绿。
 
 本增量只接客户端临时codec byte-array工作集与消除fallback frame副本。caller-owned reply/长期对象的预算转交、server codec/control/cold工作集、JDK/opaque native TLS/kernel/object overhead、存储/index统一总账继续实施；reservation上界和snapshot/unpooled性能未经正式测量。full-bytes、backup/restore/retention时间屏障/剩余history GC、永久退役/required authority/default routing/兼容/性能/运维与完整16步Gate保持OPEN，默认OFF/SYSTEM/PARK和disabled能力不变。
+
+## 接收端 workspace 分类与响应 backing 转交
+
+2026-10-13，接续父提交`724f267bc91c96349973e79b4239c5a76391c265`。接收端原本已经在同一connection/lane账本预留解析、冷线程和响应容量，并由原Pending保留到actual cold/control/read/output终态；该预留曾统一计作backing。现在复用原Credit的workspace类别，ProfileReceiveDecoder.reserveResponse及HELLO临时body copy使用workspace credit，不新增ledger、pool、线程或queue，也不改变任何原额度、请求/回复格式或准入权限。
+
+ProfileReceiveBudget.workspaceBytes(lane)公开当前预留的parse/cold/codec容量，它仍包含于used(lane)。这是上界reservation类别，不是已分配数组长度、RSS或完整heap计量；used-workspace还包含原connection base policy，不能直接称纯ByteBuf物理容量。客户端同类别也进入所在lane计数。reserve、split、close和UNCLASSIFIED→CONTROL原子transfer在同一原monitor更新类别；转交失败及外来connection credit拒绝不移动workspace。caller future完成或transport关闭不归还仍由原cold/control任务持有的credit。
+
+生产响应分配通过Credit.splitToBacking在实际allocator.adopt之前从已预留workspace划出exact capacity。总connection/lane quota不重新release/reserve、不重复收费；workspace减少，backing peak在分配前更新。workspace不可直接adopt，closed connection及超额split拒绝；allocator构造失败由原调用方归还child。原Pending的workspace关闭后，已转交root仍由实际backing owner持有，最后retained view释放才扣账/actual drain。EmbeddedChannel独立allocator的原测试兼容路径继续保留，不由该路径宣称production backing证明。
+
+原服务端解析/响应上界policy保持：CONTROL使用原8*actual body与固定reply allowance，read使用原maxEntryBytes allowance，固定Add/WRITE_LAC/HELLO沿用原边界。这次没有把MetadataStore get/authority/snapshot/字符串对象或installed长期状态全部纳入这些上界；也没有因类型分类宣称冷依赖的全部副本都已计费。
+
+`unified-wal-local-ZZ96g79B`实际4类47项（allocator9/decoder23/pipeline真实TLS1/socket14）均0 failure/error/skip。复用现有测试增加quota全满、workspace不能adopt、split守恒、最后retained view、CONTROL成功/失败及外来workspace分类断言；真实listener关闭时held authority read仍保留UNCLASSIFIED workspace。socket集包含actual mTLS INSTALL/replacement/read、CONTROL fence/recovery-close UNKNOWN、physical delete/force/lost reply/authorization与客户端codec拒绝。`unified-wal-local-XWyr0ZY1`最终1项定向补验进一步断言physical RPC已PENDING/UNKNOWN及local RPC completion结束、实际FREE force仍被阻塞时，CONTROL workspace依然高于请求前值。最初SlsQ50pC是测试受检异常声明编译失败，修复后以上结果才计通过；未弱化生产结果或已有语义断言。
+
+原ProfileBackingBudget有限投影`unified-wal-model-fyj4mdsv`共7配置，1完整正向/6指定反例；不将root/split守恒模型扩展为workspace所有数组或native依赖完整证明。Java1115与模型1102输入去重1946，分别保存原stage实际source SHA；模型仍绑定测试签名修复前输入，Java broad仍绑定追加physical workspace断言前输入，保留对应source override，不把旧PASS移绑最终source。最终production source与47项stage一致，新增physical断言由最后补验验证。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/server-workspace-evidence-5SFy4JA7`保存原inputs/命令/XML、model输出、source-at-broad-test、分阶段source override及原编译诊断。最终Spotless/Checkstyle exit0；Java、模型与checker终止后的独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。这里仅推进接收端原预留类别与response owner转交；caller/长期对象、MetadataStore内部、JDK/opaque native TLS/kernel/object overhead及storage/index/cohort统一总账继续OPEN，正式测量与Linux NUMA/真实掉电/canary未执行。完整16步与生产Gate保持OPEN，默认OFF/SYSTEM/PARK和disabled能力不变。

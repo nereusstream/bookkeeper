@@ -192,10 +192,14 @@ public class ProfileReceiveDecoderTest {
         assertEquals(ProfileOperation.INSTALL, accepted.header().operation());
         assertThrows(IllegalStateException.class, () -> controlDecoder.markControlAuthorized(controlHello));
         ProfileInboundPipeline.ResponseCredit workspace = controlDecoder.reserveResponse(100);
+        assertEquals(100, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         controlDecoder.markControlAuthorized(accepted, workspace);
         assertEquals(64 + install.length + 100, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        assertEquals(0, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(100, budget.workspaceBytes(ProfileReceiveBudget.Lane.CONTROL));
         accepted.close();
         workspace.close();
+        assertEquals(0, budget.workspaceBytes(ProfileReceiveBudget.Lane.CONTROL));
         assertThrows(IOException.class, () -> control.writeInbound(
                 Unpooled.wrappedBuffer(frame(ProfileOperation.ADD_NORMAL, 0))));
         assertFalse(control.isActive());
@@ -421,6 +425,7 @@ public class ProfileReceiveDecoderTest {
             connection.pipeline().get(ProfileReceiveDecoder.class).markEstablished();
         }
         ProfileInboundPipeline.ResponseCredit foreign = otherDecoder.reserveResponse(75);
+        assertEquals(75, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         byte[] fence = frame(ProfileOperation.FENCE_LEDGER, 100);
         assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(fence)));
         ProfileInboundFrame candidate = channel.readInbound();
@@ -429,6 +434,7 @@ public class ProfileReceiveDecoderTest {
         assertTrue(other.isActive());
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
         assertEquals(fence.length + 64 + 75, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(75, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         candidate.close();
         foreign.close();
         channel.finishAndReleaseAll();
@@ -438,7 +444,7 @@ public class ProfileReceiveDecoderTest {
     }
 
     @Test
-    public void failedControlTransferKeepsHeldFrameChargedToUnclassified() {
+    public void failedControlTransferKeepsHeldFrameChargedToUnclassified() throws Exception {
         ProfileReceiveBudget budget = new ProfileReceiveBudget(1_000, 150, 500, 8, 8, 4);
         ProfileReceiveDecoder decoder = decoder(budget, 900, 64);
         EmbeddedChannel channel = new EmbeddedChannel(decoder);
@@ -449,13 +455,18 @@ public class ProfileReceiveDecoderTest {
         byte[] fence = frame(ProfileOperation.FENCE_LEDGER, 100);
         assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(fence)));
         ProfileInboundFrame candidate = channel.readInbound();
-        assertThrows(IOException.class, () -> decoder.markControlAuthorized(candidate));
+        ProfileInboundPipeline.ResponseCredit workspace = decoder.reserveResponse(75);
+        assertThrows(IOException.class, () -> decoder.markControlAuthorized(candidate, workspace));
         assertFalse(channel.isActive());
         assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-        assertEquals(fence.length, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(fence.length + 75, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(75, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        assertEquals(0, budget.workspaceBytes(ProfileReceiveBudget.Lane.CONTROL));
         candidate.close();
+        workspace.close();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
     @Test

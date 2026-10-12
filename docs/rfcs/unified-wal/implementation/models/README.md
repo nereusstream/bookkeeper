@@ -1456,3 +1456,5 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-13 [客户端 codec workspace 与有界 reply 解析](../profile-wire/README.md#客户端-codec-workspace-与有界-reply-解析)继续使用原ProfileBackingBudget workspace/root credit、ProfileRecoveryPeerPool custody、ProfileWriterClose cut投影。最终jgnwpkbt共24配置、3完整正向/21指定反例，1102模型inputs与Java去重1946一致；catalog726、完整A+C+D未全跑。hbx53yv8/w1fa0twt及各Javastage保留原source，不移绑。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；codec临时字节上界与真实拒绝来自Java路径，模型不证明所有数组/对象、caller ownership总账、RSS、TLS/kernel、性能或liveness，生产Gate OPEN。
+
+2026-10-13 [接收端 workspace 分类与响应 backing 转交](../profile-wire/README.md#接收端-workspace-分类与响应-backing-转交)复用原ProfileBackingBudget守恒/response split/lane/last view投影，fyj4mdsv共7配置、1完整正向/6指定反例。1102模型输入与Java输入去重1946，每阶段固定实际source；测试签名修复后保留原模型输入及override，不移绑。catalog726与完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，原CHECK_DEADLOCK FALSE；workspace类别计数、实际TLS/cold/force断言来自Java路径，本有限模型不证明所有codec/MetadataStore对象、RSS、TLS/kernel、性能或liveness，生产Gate OPEN。

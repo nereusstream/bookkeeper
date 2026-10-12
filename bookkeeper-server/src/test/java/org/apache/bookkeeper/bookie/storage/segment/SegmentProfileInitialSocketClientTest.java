@@ -2034,6 +2034,7 @@ public class SegmentProfileInitialSocketClientTest {
                     var caller = listener.closeAsync();
                     assertFalse(caller.isDone());
                     assertTrue(budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED) > 0);
+                    assertTrue(budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED) > 0);
                     caller.complete(null);
                     assertFalse(listener.closeAsync().isDone());
                     assertThrows(java.util.concurrent.TimeoutException.class,
@@ -2043,6 +2044,7 @@ public class SegmentProfileInitialSocketClientTest {
                     assertTrue(request.isDone());
                     for (var lane : ProfileReceiveBudget.Lane.values()) {
                         assertEquals(0, budget.used(lane));
+                        assertEquals(0, budget.workspaceBytes(lane));
                         assertEquals(0, budget.usedConnections(lane));
                     }
                     assertFalse(fixture.worker.isShuttingDown());
@@ -3791,6 +3793,7 @@ public class SegmentProfileInitialSocketClientTest {
             try {
                 var client = fixture.clients.get(target.bookie());
                 long beforeCredits = fixture.budgets.get(0).used(ProfileReceiveBudget.Lane.CONTROL);
+                long beforeWorkspace = fixture.budgets.get(0).workspaceBytes(ProfileReceiveBudget.Lane.CONTROL);
                 var attempt = client.physicalDelete(new ProfilePhysicalDeleteCodec.Request(
                         event.deleteApply("ledger-profile"), 64, 8, 300));
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
@@ -3799,6 +3802,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(ProfileStatus.DurableResult.UNKNOWN, reply.status().durableResult());
                 attempt.completion().get(5, TimeUnit.SECONDS); // Actual local RPC terminal, not server FREE.
                 assertTrue(fixture.budgets.get(0).used(ProfileReceiveBudget.Lane.CONTROL) > beforeCredits);
+                assertTrue(fixture.budgets.get(0).workspaceBytes(ProfileReceiveBudget.Lane.CONTROL) > beforeWorkspace);
                 assertThrows(java.io.IOException.class, () -> files(node).close());
                 assertEquals(SegmentProfilePhysicalDelete.Status.PENDING, node.reclaimDeletedLedger(
                         fixture.context(), fixture.cold, 64, 8, Duration.ofSeconds(5)).result().get().status());

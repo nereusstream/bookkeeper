@@ -56,6 +56,10 @@ public final class ProfileReceiveBudget {
             return reserve(requested, false);
         }
 
+        Credit reserveWorkspace(int requested) {
+            return reserve(requested, true);
+        }
+
         private Credit reserve(int requested, boolean workspace) {
             synchronized (ProfileReceiveBudget.this) {
                 if (closed || byteLimit == 0 || requested > byteLimit - bytes) {
@@ -68,6 +72,7 @@ public final class ProfileReceiveBudget {
                     bytes += requested;
                     if (workspace) {
                         workspaceBytes += requested;
+                        usedWorkspaceBytes[lane.ordinal()] += requested;
                     }
                     peakBytes = Math.max(peakBytes, bytes - workspaceBytes);
                 }
@@ -131,6 +136,22 @@ public final class ProfileReceiveBudget {
             }
         }
 
+        /** Reclassify an already reserved response capacity before its backing allocation. */
+        Credit splitToBacking(int size) {
+            synchronized (ProfileReceiveBudget.this) {
+                if (closed || !workspace || connection == null || connection.closed || size < 0 || size > bytes) {
+                    throw new IllegalStateException("Invalid response workspace transfer");
+                }
+                Credit child = new Credit(lane, size);
+                child.connection = connection;
+                bytes -= size;
+                connection.workspaceBytes -= size;
+                usedWorkspaceBytes[lane.ordinal()] -= size;
+                connection.peakBytes = Math.max(connection.peakBytes, connection.bytes - connection.workspaceBytes);
+                return child;
+            }
+        }
+
         @Override
         public void close() {
             synchronized (ProfileReceiveBudget.this) {
@@ -143,6 +164,7 @@ public final class ProfileReceiveBudget {
                     connection.bytes -= bytes;
                     if (workspace) {
                         connection.workspaceBytes -= bytes;
+                        usedWorkspaceBytes[lane.ordinal()] -= bytes;
                     }
                 }
             }
@@ -155,6 +177,7 @@ public final class ProfileReceiveBudget {
 
     private final long[] limits = new long[Lane.values().length];
     private final long[] usedBytes = new long[Lane.values().length];
+    private final long[] usedWorkspaceBytes = new long[Lane.values().length];
     private final int[] connectionLimits = new int[Lane.values().length];
     private final int[] usedConnections = new int[Lane.values().length];
     private boolean accepting = true;
@@ -221,7 +244,7 @@ public final class ProfileReceiveBudget {
         }
 
         public Workspace reserveWorkspace(int bytes) {
-            Credit credit = connection.reserve(bytes, true);
+            Credit credit = connection.reserveWorkspace(bytes);
             if (credit == null) {
                 throw new CapacityExceededException();
             }
@@ -326,6 +349,7 @@ public final class ProfileReceiveBudget {
             throw new IllegalStateException("Invalid receive connection transfer");
         }
         long bytes = 0;
+        long workspaceBytes = 0;
         for (int i = 0; i < credits.length; i++) {
             Credit credit = credits[i];
             if (credit == null || credit.owner != this || credit.closed || credit.lane != source
@@ -338,6 +362,9 @@ public final class ProfileReceiveBudget {
                 }
             }
             bytes += credit.bytes;
+            if (credit.workspace) {
+                workspaceBytes += credit.bytes;
+            }
         }
         if (source == target || bytes > limits[target.ordinal()] - usedBytes[target.ordinal()]
                 || usedConnections[target.ordinal()] >= connectionLimits[target.ordinal()]) {
@@ -345,6 +372,8 @@ public final class ProfileReceiveBudget {
         }
         usedBytes[source.ordinal()] -= bytes;
         usedBytes[target.ordinal()] += bytes;
+        usedWorkspaceBytes[source.ordinal()] -= workspaceBytes;
+        usedWorkspaceBytes[target.ordinal()] += workspaceBytes;
         usedConnections[source.ordinal()]--;
         usedConnections[target.ordinal()]++;
         connection.lane = target;
@@ -359,6 +388,14 @@ public final class ProfileReceiveBudget {
             throw new IllegalArgumentException("Receive lane required");
         }
         return usedBytes[lane.ordinal()];
+    }
+
+    /** Reserved parse/cold/codec work capacity; included in used(), not a measurement of heap usage. */
+    public synchronized long workspaceBytes(Lane lane) {
+        if (lane == null) {
+            throw new IllegalArgumentException("Receive lane required");
+        }
+        return usedWorkspaceBytes[lane.ordinal()];
     }
 
     public synchronized int usedConnections(Lane lane) {
