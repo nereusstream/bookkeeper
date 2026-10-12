@@ -56,6 +56,7 @@ import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
 
 /** Isolated Bookie-owned control log; no production route, DATA or ACK authority. */
@@ -481,6 +482,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
     private ProfileControlRequest.DeleteBinding deleteApplied;
     private ProfileDeleteHandoff.Plan deleteHandoff;
+    private ProfileDeleteHandoff.Effective deleteEffective;
+    private final Map<UUID, ProfileDeleteHandoff.Plan> handoffOperations = new HashMap<>();
+    private final Map<UUID, ProfileDeleteHandoff.Effective> effectiveOperations = new HashMap<>();
     private HandoffWrite pendingHandoff;
     private final Map<UUID, AppliedOperation> operations = new HashMap<>();
     private final Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
@@ -2091,22 +2095,26 @@ final class SegmentBookieControlLog implements AutoCloseable {
     /** Observed control authority only; absence of local-success receipts is not a rollback permission. */
     synchronized org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts rollbackSafetyFacts() {
         return new org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts(
-                false, !ledgers.isEmpty() || deleteHandoff != null,
+                false, !ledgers.isEmpty() || !handoffOperations.isEmpty(),
                 ledgers.values().stream().anyMatch(state -> state.activationGeneration != 0),
                 !fenceOperations.isEmpty() || ledgers.values().stream().anyMatch(state -> state.fenced
                         || !state.recoveryGrants.isEmpty()), !tombstones.isEmpty(), false, failed);
     }
 
-    record HandoffWrite(ProfileDeleteHandoff.Plan plan, ByteBuffer record, long sequence, long offset,
-            Status immediate) { }
+    record HandoffWrite(ProfileDeleteHandoff.Plan plan, ProfileDeleteHandoff.Effective effective,
+            ByteBuffer record, long sequence, long offset, Status immediate) {
+        UUID operationId() {
+            return SegmentBookieControlLog.operationId(effective == null ? plan.operationId() : effective.birthId());
+        }
+    }
 
     synchronized ProfileDeleteHandoff.Plan adoptedDeleteHandoff() {
         return deleteHandoff;
     }
 
     synchronized long adoptedDeleteHandoffSequence(ProfileDeleteHandoff.Plan plan) {
-        if (closed || failed || deleteHandoff == null || plan == null
-                || !Arrays.equals(deleteHandoff.encode(), plan.encode())) {
+        var applied = plan == null ? null : handoffOperations.get(operationId(plan.operationId()));
+        if (closed || failed || applied == null || !Arrays.equals(applied.encode(), plan.encode())) {
             return -1;
         }
         var record = checkpointState.get(operationId(plan.operationId()));
@@ -2114,11 +2122,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private boolean reservedOperation(UUID id) {
-        return checkpointIds.contains(id) || isHandoffOperation(id);
+        return checkpointIds.contains(id) || isHandoffOperation(id) || effectiveOperations.containsKey(id);
     }
 
     private boolean isHandoffOperation(UUID id) {
-        return deleteHandoff != null && id.equals(operationId(deleteHandoff.operationId()));
+        return handoffOperations.containsKey(id);
     }
 
     private Status handoffCondition(ProfileDeleteHandoff.Plan plan) {
@@ -2127,22 +2135,21 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 || !Arrays.equals(head.target().incarnation(), identity.incarnation().value())) {
             return Status.INCOMPATIBLE;
         }
-        if (deleteHandoff != null) {
-            return Arrays.equals(deleteHandoff.encode(), plan.encode())
-                    ? Status.ALREADY_DURABLE : Status.INCOMPATIBLE;
-        }
         UUID id = operationId(plan.operationId());
-        if (operations.containsKey(id) || fenceOperations.containsKey(id) || checkpointIds.contains(id)) {
+        var prior = handoffOperations.get(id);
+        if (prior != null) {
+            return Arrays.equals(prior.encode(), plan.encode()) ? Status.ALREADY_DURABLE : Status.INCOMPATIBLE;
+        }
+        if (deleteHandoff != null || head.assignmentGeneration() != effectiveDeleteGeneration()) {
             return Status.INCOMPATIBLE;
         }
-        if (head.committedThrough() == 0) {
-            return deleteApplied == null ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
+        if (operations.containsKey(id) || fenceOperations.containsKey(id) || reservedOperation(id)) {
+            return Status.INCOMPATIBLE;
         }
-        return deleteApplied != null && Arrays.equals(deleteApplied.streamId(), head.streamId())
-                && deleteApplied.streamGeneration() == head.streamGeneration()
-                && deleteApplied.assignmentGeneration() == head.assignmentGeneration()
-                && deleteApplied.sequence() == head.committedThrough()
-                ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
+        var progress = effectiveDeleteProgress();
+        return progress == null ? head.committedThrough() == 0 && head.assignmentGeneration() == 1
+                ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED
+                : progress.matches(head) ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
     }
 
     /** Only the original control writer calls this after a fresh native PREPARED authority read. */
@@ -2156,18 +2163,22 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
             Status condition = handoffCondition(plan);
             if (condition != Status.APPLIED_DURABLE) {
-                return new HandoffWrite(plan, null, -1, -1, condition);
+                return new HandoffWrite(plan, null, null, -1, -1, condition);
             }
             long sequence = durableThrough + 1;
             ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.DELETE_HANDOFF_ADOPT,
                     LOG_GENERATION, sequence, operationId(plan.operationId()), new Generation(plan.nextGeneration()),
                     plan.predecessor().assignmentGeneration(), ByteBuffer.wrap(plan.encode()));
             requireCapacity(record.remaining());
-            write = new HandoffWrite(plan, record, sequence, nextOffset, null);
+            write = new HandoffWrite(plan, null, record, sequence, nextOffset, null);
             nextOffset += record.remaining();
             pendingHandoff = write;
             writing = true;
         }
+        return writeHandoffDurably(write);
+    }
+
+    private HandoffWrite writeHandoffDurably(HandoffWrite write) throws IOException {
         try {
             io.writeFully(channel, physicalRecord(write.record()), write.offset());
             io.force(channel, true);
@@ -2195,9 +2206,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IllegalArgumentException("Only the next durable handoff can be applied");
         }
         try {
-            applyHandoff(write.plan());
+            if (write.effective() == null) {
+                applyHandoff(write.plan());
+            } else {
+                applyEffectiveHandoff(write.effective());
+            }
             appliedThrough = write.sequence();
-            retain(write.sequence(), operationId(write.plan().operationId()), Status.APPLIED_DURABLE, write.record());
+            retain(write.sequence(), write.operationId(), Status.APPLIED_DURABLE, write.record());
             appliedOffset = write.offset() + write.record().remaining();
             return Status.APPLIED_DURABLE;
         } catch (IOException | RuntimeException | Error failure) {
@@ -2214,6 +2229,95 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IOException("Durable handoff does not follow its complete local predecessor cut");
         }
         deleteHandoff = plan;
+        handoffOperations.put(operationId(plan.operationId()), plan);
+    }
+
+    private long effectiveDeleteGeneration() {
+        return deleteEffective == null ? 1 : deleteEffective.plan().nextGeneration();
+    }
+
+    synchronized ProfileDeleteDelivery.Progress effectiveDeleteProgress() {
+        var base = deleteEffective != null ? deleteEffective.head()
+                : deleteHandoff == null ? null : deleteHandoff.predecessor();
+        if (base == null) {
+            return ProfileDeleteDelivery.Progress.fromEvent(deleteApplied);
+        }
+        return new ProfileDeleteDelivery.Progress(base.streamId(), base.streamGeneration(),
+                effectiveDeleteGeneration(), deleteApplied == null ? 0 : deleteApplied.sequence());
+    }
+
+    synchronized ProfileDeleteHandoff.Effective effectiveDeleteHandoff() {
+        return deleteEffective;
+    }
+
+    private Status effectiveHandoffCondition(ProfileDeleteHandoff.Effective effective) {
+        var prior = effectiveOperations.get(operationId(effective.birthId()));
+        if (prior != null) {
+            return Arrays.equals(prior.encode(), effective.encode()) ? Status.ALREADY_DURABLE : Status.INCOMPATIBLE;
+        }
+        var plan = effective.plan();
+        var adopted = handoffOperations.get(operationId(plan.operationId()));
+        UUID id = operationId(effective.birthId());
+        var progress = effectiveDeleteProgress();
+        if (adopted == null || !Arrays.equals(adopted.encode(), plan.encode()) || reservedOperation(id)
+                || operations.containsKey(id) || fenceOperations.containsKey(id)
+                || effectiveDeleteGeneration() != plan.predecessor().assignmentGeneration()) {
+            return Status.INCOMPATIBLE;
+        }
+        return progress != null && progress.matches(plan.predecessor())
+                ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
+    }
+
+    HandoffWrite appendEffectiveHandoffDurably(ProfileDeleteHandoff.Effective effective) throws IOException {
+        Objects.requireNonNull(effective, "effective");
+        HandoffWrite write;
+        synchronized (this) {
+            requireWritable();
+            if (writing || checkpointing || pending != null) {
+                throw new IOException("Bookie control writer is occupied");
+            }
+            Status condition = effectiveHandoffCondition(effective);
+            if (condition != Status.APPLIED_DURABLE) {
+                return new HandoffWrite(effective.plan(), effective, null, -1, -1, condition);
+            }
+            long sequence = durableThrough + 1;
+            ByteBuffer record = SegmentControlFormat.encode(SegmentControlFormat.Type.DELETE_HANDOFF_EFFECTIVE,
+                    LOG_GENERATION, sequence, operationId(effective.birthId()),
+                    new Generation(effective.plan().nextGeneration()),
+                    effective.plan().predecessor().assignmentGeneration(), ByteBuffer.wrap(effective.encode()));
+            requireCapacity(record.remaining());
+            write = new HandoffWrite(effective.plan(), effective, record, sequence, nextOffset, null);
+            nextOffset += record.remaining();
+            pendingHandoff = write;
+            writing = true;
+        }
+        return writeHandoffDurably(write);
+    }
+
+    private void applyEffectiveHandoff(ProfileDeleteHandoff.Effective effective) throws IOException {
+        if (effectiveHandoffCondition(effective) != Status.APPLIED_DURABLE) {
+            throw new IOException("Effective handoff lacks its original local adoption and complete predecessor cut");
+        }
+        deleteEffective = effective;
+        deleteHandoff = null;
+        effectiveOperations.put(operationId(effective.birthId()), effective);
+    }
+
+    private static ProfileDeleteHandoff.Effective decodeEffectiveHandoff(SegmentControlParser.Command parsed)
+            throws IOException {
+        byte[] bytes = new byte[parsed.body().remaining()];
+        parsed.body().get(bytes);
+        try {
+            var effective = ProfileDeleteHandoff.Effective.decode(bytes);
+            if (!parsed.operationId().equals(operationId(effective.birthId()))
+                    || parsed.operationGeneration().value() != effective.plan().nextGeneration()
+                    || parsed.expectedGeneration() != effective.plan().predecessor().assignmentGeneration()) {
+                throw new IllegalArgumentException("Effective handoff header differs from its body");
+            }
+            return effective;
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid durable effective handoff", invalid);
+        }
     }
 
     private static ProfileDeleteHandoff.Plan decodeHandoff(SegmentControlParser.Command parsed) throws IOException {
@@ -2252,9 +2356,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new DeleteSequenceException(true);
         }
         var deletion = command.deletion;
+        if (deletion.assignmentGeneration() != effectiveDeleteGeneration()) {
+            throw new DeleteSequenceException(false);
+        }
+        if (deleteEffective != null && (!Arrays.equals(deletion.streamId(), deleteEffective.head().streamId())
+                || deletion.streamGeneration() != deleteEffective.head().streamGeneration())) {
+            throw new DeleteSequenceException(false);
+        }
         if (deleteApplied != null && (!Arrays.equals(deleteApplied.streamId(), deletion.streamId())
-                || deleteApplied.streamGeneration() != deletion.streamGeneration()
-                || deleteApplied.assignmentGeneration() != deletion.assignmentGeneration())) {
+                || deleteApplied.streamGeneration() != deletion.streamGeneration())) {
             throw new DeleteSequenceException(false);
         }
         long next = deleteApplied == null ? 1 : deleteApplied.sequence() + 1;
@@ -2376,6 +2486,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 if (reference.equals(publications[reference.slot()])) {
                     candidates.add(reference);
                 }
+            } else if (parsed.type() == SegmentControlFormat.Type.DELETE_HANDOFF_EFFECTIVE) {
+                decodeEffectiveHandoff(parsed);
             } else if (parsed.type() == SegmentControlFormat.Type.DELETE_HANDOFF_ADOPT) {
                 decodeHandoff(parsed);
             } else if (parsed.type() == SegmentControlFormat.Type.FENCE) {
@@ -2542,6 +2654,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
         tombstones.clear();
         deleteApplied = null;
         deleteHandoff = null;
+        deleteEffective = null;
+        handoffOperations.clear();
+        effectiveOperations.clear();
         operations.clear();
         fenceOperations.clear();
         checkpointState.clear();
@@ -2587,7 +2702,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IOException("Repeated operation in Bookie checkpoint");
         }
         Status status = Status.APPLIED_DURABLE;
-        if (parsed.type() == SegmentControlFormat.Type.DELETE_HANDOFF_ADOPT) {
+        if (parsed.type() == SegmentControlFormat.Type.DELETE_HANDOFF_EFFECTIVE) {
+            applyEffectiveHandoff(decodeEffectiveHandoff(parsed));
+            retain(sequence, parsed.operationId(), status, bytes);
+        } else if (parsed.type() == SegmentControlFormat.Type.DELETE_HANDOFF_ADOPT) {
             applyHandoff(decodeHandoff(parsed));
             retain(sequence, parsed.operationId(), status, bytes);
         } else if (parsed.type() == SegmentControlFormat.Type.FENCE) {
@@ -2617,7 +2735,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throws IOException {
         if (reference.generation() != checkpointGeneration + 1 || reference.through() >= sequence
                 || operations.containsKey(operationId) || fenceOperations.containsKey(operationId)
-                || isHandoffOperation(operationId) || !checkpointIds.add(operationId)) {
+                || reservedOperation(operationId) || !checkpointIds.add(operationId)) {
             throw new IOException("Invalid durable Bookie checkpoint transition");
         }
         checkpointGeneration = reference.generation();

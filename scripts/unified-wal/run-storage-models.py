@@ -19,6 +19,16 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-effective': None,
+    'ce-profile-delete-effective-cut': 'EffectiveHasCompleteLocalCut',
+    'ce-profile-delete-effective-ack': 'EffectiveHasOriginalAck',
+    'ce-profile-delete-effective-registry': 'EffectiveRetiresOldRegistry',
+    'ce-profile-delete-effective-gate': 'EffectiveRetiresOldGate',
+    'ce-profile-delete-effective-force': 'EffectiveLocalProgressHasForce',
+    'ce-profile-delete-effective-event': 'EffectiveNewEventKeepsGeneration',
+    'ce-profile-delete-effective-history': 'EffectiveOldEventKeepsLineage',
+    'ce-profile-delete-effective-checkpoint': 'EffectiveCheckpointKeepsProgress',
+
     'a-profile-handoff-ack': None,
     'ce-profile-handoff-ack-local': 'AckHasActualLocalAdoption',
     'ce-profile-handoff-ack-source': 'AckConfirmsOriginalPreparation',
@@ -922,6 +932,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileDeleteEffective.tla" if "profile-delete-effective" in name
                    else "ProfileDeleteHandoffAck.tla" if "profile-handoff-ack" in name
                    else "ProfileDeleteAdoption.tla" if "profile-delete-adoption" in name
                    else "ProfileDeleteHandoff.tla" if "profile-delete-handoff" in name

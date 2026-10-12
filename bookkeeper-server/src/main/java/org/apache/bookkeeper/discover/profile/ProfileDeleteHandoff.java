@@ -146,6 +146,63 @@ public final class ProfileDeleteHandoff {
         }
     }
 
+    /** Immutable native switch witness; the old ACK and its complete predecessor cut remain in this record. */
+    public static final class Effective {
+        private final Acknowledgement acknowledgement;
+        private final byte[] birthId;
+
+        private Effective(Acknowledgement acknowledgement, byte[] birthId) {
+            this.acknowledgement = Objects.requireNonNull(acknowledgement, "acknowledgement");
+            this.birthId = ProfileLifecycleHead.fixed(birthId, 16, true);
+        }
+
+        static Effective recorded(Acknowledgement acknowledgement) {
+            UUID id = UUID.randomUUID();
+            return new Effective(acknowledgement, ByteBuffer.allocate(16)
+                    .putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits()).array());
+        }
+
+        public Acknowledgement acknowledgement() {
+            return acknowledgement;
+        }
+
+        public Plan plan() {
+            return acknowledgement.plan();
+        }
+
+        public byte[] birthId() {
+            return birthId.clone();
+        }
+
+        public ProfileDeleteDelivery.Head head() {
+            var old = plan().predecessor();
+            return new ProfileDeleteDelivery.Head(old.streamId(), old.streamGeneration(), plan().nextGeneration(),
+                    old.committedThrough(), old.target());
+        }
+
+        public byte[] encode() {
+            byte[] ack = acknowledgement.encode();
+            return finish(header(32 + ack.length, 0x55574845).put(birthId).putInt(ack.length).put(ack));
+        }
+
+        public static Effective decode(byte[] bytes) {
+            var in = checked(bytes, 32 + 207, 32 + 40 + MAX_BYTES, 0x55574845);
+            byte[] birth = new byte[16];
+            in.get(birth);
+            int size = in.getInt();
+            if (size < 207 || size > 40 + MAX_BYTES || in.remaining() != size + 4) {
+                throw invalid();
+            }
+            byte[] ack = new byte[size];
+            in.get(ack);
+            var result = new Effective(Acknowledgement.decode(ack), birth);
+            if (!Arrays.equals(result.encode(), bytes)) {
+                throw invalid();
+            }
+            return result;
+        }
+    }
+
     /** Native admission CAS body; the scope digest binds the stable stream/target, not a caller metadata path. */
     record Admission(long activeGeneration, byte[] scopeDigest, byte[] preparedDigest) {
         Admission {

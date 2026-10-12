@@ -20,6 +20,7 @@ package org.apache.bookkeeper.discover.profile;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -28,6 +29,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileDeleteAdoption;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
@@ -64,7 +66,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     private volatile Admission admission;
     private ZKProfileReservationStore deleteDelivery;
     private StorageIncarnation deleteIncarnation;
-    private Supplier<ProfileControlRequest.DeleteBinding> deleteProgress;
+    private Supplier<ProfileDeleteDelivery.Progress> deleteProgress;
     private ZKProfileStartupRequirementsStore startupRequirements;
     private ZKProfileStartupRequirementsStore.Observation startupObservation;
 
@@ -90,7 +92,20 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         Objects.requireNonNull(progress, "progress");
         deleteDelivery = reservations;
         deleteIncarnation = incarnation;
-        deleteProgress = progress;
+        deleteProgress = () -> ProfileDeleteDelivery.Progress.fromEvent(progress.get());
+    }
+
+    /** Bind the original effective assignment/cursor producer, including an empty persisted G+1 base. */
+    public synchronized void bindDeleteAssignment(ZKProfileReservationStore reservations,
+            StorageIncarnation incarnation,
+            Supplier<ProfileDeleteDelivery.Progress> progress) {
+        if (operationStarted || retired || deleteDelivery != null) {
+            throw new IllegalStateException("Delete assignment must be bound once before startup publication");
+        }
+        Objects.requireNonNull(reservations, "reservations").requireDeletePublisherClient(zk);
+        deleteIncarnation = Objects.requireNonNull(incarnation, "incarnation");
+        deleteProgress = Objects.requireNonNull(progress, "progress");
+        deleteDelivery = reservations;
     }
 
     /** Freeze the pre-open declared requirements on this exact source/client and publisher attempt. */
@@ -158,6 +173,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         private final ZooKeeperWatcherBase watcherManager;
         private final AtomicInteger state = new AtomicInteger(); // 0 pending, 1 open, 2 permanently retired.
         private volatile WritableRegistration openedRegistration;
+        private volatile long openedAssignmentGeneration;
 
         private Admission(ZooKeeperWatcherBase watcherManager) {
             this.watcherManager = watcherManager;
@@ -165,6 +181,14 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
 
         public String bookieId() {
             return bookieId;
+        }
+
+        public boolean isRetired() {
+            return state.get() == 2 && retired;
+        }
+
+        public long openedAssignmentGeneration() {
+            return openedAssignmentGeneration;
         }
 
         /** Bind the hot gate to the exact local storage identity, not just to a connected registration. */
@@ -202,8 +226,22 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                     return false;
                 }
                 requirePublishingSession();
+                var current = backend.snapshot(bookieId, System.nanoTime() + timeoutNanos);
+                if (current == null || current.stat().getMzxid() != expected.persistentStoreVersion()
+                        || current.envelope().record().state() != ProfileReadinessRecord.State.READY) {
+                    close();
+                    return false;
+                }
+                openedAssignmentGeneration = current.envelope().record().effectiveAssignmentGeneration().value();
                 openedRegistration = expected;
                 return state.compareAndSet(0, 1) && getAsBoolean();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                close();
+                throw new IllegalStateException("Registration reconciliation interrupted", interrupted);
+            } catch (TimeoutException timeout) {
+                close();
+                throw new IllegalStateException("Registration reconciliation unavailable", timeout);
             } catch (RuntimeException unavailable) {
                 boolean alreadyRetired = retired;
                 close();
@@ -390,6 +428,94 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
             return result(submitted ? PublicationStatus.RESPONSE_LOST : PublicationStatus.UNAVAILABLE);
         } catch (IllegalArgumentException | IllegalStateException rejected) {
             return result(submitted ? PublicationStatus.RESPONSE_LOST : PublicationStatus.UNAVAILABLE);
+        }
+    }
+
+    /** Retire this graph's old gate, then switch assignment and remove its owned publication atomically. */
+    public ZKProfileReservationStore.DeleteHandoffEffectiveResult makeDeleteHandoffEffective(
+            SegmentProfileDeleteAdoption local) {
+        Objects.requireNonNull(local, "local");
+        beginOperation();
+        var plan = local.plan();
+        var target = plan.predecessor().target();
+        long deadline = System.nanoTime() + timeoutNanos;
+        boolean submitted = false;
+        try {
+            requireScope(target.bookie());
+            requireSession();
+            if (deleteDelivery == null || deleteIncarnation == null || admission == null
+                    || !Arrays.equals(deleteIncarnation.value(), target.incarnation())) {
+                return ZKProfileReservationStore.effectiveFailure(
+                        ZKProfileReservationStore.DeleteHandoffEffectiveStatus.CONFLICT);
+            }
+            var prior = deleteDelivery.readEffectiveDeleteHandoff(target, plan.nextGeneration());
+            if (prior.status() == ZKProfileReservationStore.DeleteHandoffEffectiveStatus.EFFECTIVE) {
+                return Arrays.equals(prior.value().plan().encode(), plan.encode()) ? prior
+                        : ZKProfileReservationStore.effectiveFailure(
+                                ZKProfileReservationStore.DeleteHandoffEffectiveStatus.CONFLICT);
+            }
+            if (prior.status() != ZKProfileReservationStore.DeleteHandoffEffectiveStatus.ABSENT || !local.isCurrent()) {
+                return prior;
+            }
+            Snapshot authority = backend.snapshot(bookieId, deadline);
+            if (authority == null || !authority.envelope().record().storageIncarnation().equals(deleteIncarnation)
+                    || authority.envelope().record().effectiveAssignmentGeneration().value()
+                        != plan.predecessor().assignmentGeneration()) {
+                return ZKProfileReservationStore.effectiveFailure(
+                        ZKProfileReservationStore.DeleteHandoffEffectiveStatus.CONFLICT);
+            }
+            String path = authority.path();
+            Node service = node(path + "/service-info", deadline);
+            Node writableNode = node(path + "/writable", deadline);
+            var projection = owned(service, bookieId);
+            marker(path, deadline);
+            if (writableNode.code() != Code.NONODE.intValue() && !owned(writableNode, bookieId).equals(projection)) {
+                throw new IllegalStateException("Owned writable registration differs from its service projection");
+            }
+            var prepared = deleteDelivery.prepareEffectiveHandoff(local, deadline);
+            if (prepared == null || !local.retireRegistration(admission)) {
+                return ZKProfileReservationStore.effectiveFailure(
+                        ZKProfileReservationStore.DeleteHandoffEffectiveStatus.UNAVAILABLE);
+            }
+            // The negative publication revokes the old READY projection; it claims no new local-ready receipt.
+            var record = authority.envelope().record();
+            var nonWritable = new org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord(
+                    record.bookieId(), record.storageIncarnation(), record.engine(), record.protocolMajor(),
+                    record.protocolMinor(), record.capabilityGeneration(), record.localFormatGeneration(),
+                    record.deviceManifestIdentity(), record.deviceManifestGeneration(),
+                    new org.apache.bookkeeper.common.profile.startup.Generation(plan.nextGeneration()),
+                    record.localReadinessGeneration(), record.minimumReaderVersion(), record.minimumWriterVersion(),
+                    record.capabilityHints(),
+                    org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord.State.NON_WRITABLE);
+            List<Op> operations = conditions(authority);
+            operations.addAll(prepared.operations());
+            operations.add(Op.setData(path, ProfileReadinessCodec.encode(new ProfileReadinessCodec.Envelope(
+                    authority.envelope().birthId(), nonWritable)), authority.stat().getVersion()));
+            operations.add(Op.check(markerPath(path), 0));
+            if (writableNode.code() != Code.NONODE.intValue()) {
+                operations.add(Op.delete(path + "/writable", writableNode.stat().getVersion()));
+            }
+            operations.add(Op.delete(path + "/service-info", service.stat().getVersion()));
+            operations.add(Op.delete(markerPath(path), 0));
+            requireSession();
+            submitted = true;
+            backend.multi(operations, deadline);
+            var result = deleteDelivery.readEffectiveDeleteHandoff(target, plan.nextGeneration());
+            return result.status() == ZKProfileReservationStore.DeleteHandoffEffectiveStatus.ABSENT
+                    ? ZKProfileReservationStore.effectiveFailure(
+                            ZKProfileReservationStore.DeleteHandoffEffectiveStatus.DURABILITY_UNKNOWN) : result;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return ZKProfileReservationStore.effectiveFailure(submitted
+                    ? ZKProfileReservationStore.DeleteHandoffEffectiveStatus.DURABILITY_UNKNOWN
+                    : ZKProfileReservationStore.DeleteHandoffEffectiveStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return ZKProfileReservationStore.effectiveFailure(submitted
+                    ? ZKProfileReservationStore.DeleteHandoffEffectiveStatus.DURABILITY_UNKNOWN
+                    : ZKProfileReservationStore.DeleteHandoffEffectiveStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return ZKProfileReservationStore.effectiveFailure(
+                    ZKProfileReservationStore.DeleteHandoffEffectiveStatus.QUARANTINED);
         }
     }
 

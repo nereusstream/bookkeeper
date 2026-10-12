@@ -2801,11 +2801,110 @@ public final class ZKProfileReservationStore {
         return deliveryRoot() + "/" + deliveryTargetKey(target);
     }
 
+    private String handoffPreparedPath(ProfileDeleteRecord.Target target, long generation) {
+        return deliveryPath(target) + (generation == 2 ? "/handoff-prepared" : "/handoff-prepared-" + generation);
+    }
+
+    private String handoffAckPath(ProfileDeleteRecord.Target target, long generation) {
+        return deliveryPath(target) + (generation == 2 ? "/handoff-ack" : "/handoff-ack-" + generation);
+    }
+
+    private String handoffEffectivePath(ProfileDeleteRecord.Target target, long generation) {
+        return deliveryPath(target) + "/handoff-effective-" + generation;
+    }
+
+    private void verifyHandoffBirth(String name, ProfileZKReadClient.Node node, byte[] birth, long deadline)
+            throws InterruptedException, TimeoutException {
+        var guard = reads.get(name + "/birth-" + HexFormat.of().formatHex(birth), deadline);
+        requireFound(guard);
+        requirePersistent(guard, true);
+        byte[] expected = java.nio.ByteBuffer.allocate(48).put(birth)
+                .put(ProfileRepairIntent.digest(node.bytes())).array();
+        if (guard.stat().getCzxid() != node.stat().getCzxid() || !Arrays.equals(guard.bytes(), expected)) {
+            throw new IllegalArgumentException("Handoff record physical birth was lost or recreated");
+        }
+    }
+
+    private ProfileDeleteHandoff.Effective effectiveHandoff(ProfileDeleteRecord.Target target, long generation,
+            long deadline) throws InterruptedException, TimeoutException {
+        String name = handoffEffectivePath(target, generation);
+        var node = reads.get(name, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            throw new IllegalArgumentException("Effective assignment has no original handoff witness");
+        }
+        requireFound(node);
+        requirePersistent(node, true);
+        var effective = ProfileDeleteHandoff.Effective.decode(node.bytes());
+        var plan = effective.plan();
+        if (!plan.predecessor().target().equals(target) || plan.nextGeneration() != generation) {
+            throw new IllegalArgumentException("Effective handoff belongs to another assignment");
+        }
+        verifyHandoffBirth(name, node, effective.birthId(), deadline);
+        var prepared = reads.get(handoffPreparedPath(target, generation), deadline);
+        requireFound(prepared);
+        requirePersistent(prepared, true);
+        if (!Arrays.equals(prepared.bytes(), plan.encode())) {
+            throw new IllegalArgumentException("Effective handoff lost its original PREPARED plan");
+        }
+        String ackName = handoffAckPath(target, generation);
+        var ack = reads.get(ackName, deadline);
+        requireFound(ack);
+        requirePersistent(ack, true);
+        if (!Arrays.equals(ack.bytes(), effective.acknowledgement().encode())) {
+            throw new IllegalArgumentException("Effective handoff lost its original local acknowledgement");
+        }
+        verifyHandoffBirth(ackName, ack, effective.acknowledgement().birthId(), deadline);
+        if (ack.stat().getCzxid() < prepared.stat().getCzxid()
+                || node.stat().getCzxid() <= ack.stat().getCzxid()) {
+            throw new IllegalArgumentException("Effective handoff did not follow preparation and acknowledgement");
+        }
+        return effective;
+    }
+
+    private List<ProfileDeleteHandoff.Effective> handoffLineage(ProfileDeleteDelivery.Head head, long headBirth,
+            long deadline) throws InterruptedException, TimeoutException {
+        var lineage = new ArrayList<ProfileDeleteHandoff.Effective>();
+        long through = 0;
+        for (long generation = 2; generation <= head.assignmentGeneration(); generation++) {
+            var effective = effectiveHandoff(head.target(), generation, deadline);
+            var predecessor = effective.plan().predecessor();
+            if (effective.plan().headBirth() != headBirth
+                    || predecessor.assignmentGeneration() != generation - 1
+                    || !Arrays.equals(predecessor.streamId(), head.streamId())
+                    || predecessor.streamGeneration() != head.streamGeneration()
+                    || predecessor.committedThrough() < through
+                    || predecessor.committedThrough() > head.committedThrough()) {
+                throw new IllegalArgumentException("Effective handoff lineage has a gap or another stream birth");
+            }
+            through = predecessor.committedThrough();
+            lineage.add(effective);
+        }
+        return List.copyOf(lineage);
+    }
+
+    private boolean eventBelongsTo(ProfileDeleteDelivery.Event event, ProfileDeleteDelivery.Head head,
+            long deadline) throws InterruptedException, TimeoutException {
+        if (!Arrays.equals(event.streamId(), head.streamId()) || event.streamGeneration() != head.streamGeneration()
+                || !event.target().equals(head.target()) || event.sequence() > head.committedThrough()) {
+            return false;
+        }
+        var node = reads.get(deliveryPath(head.target()), deadline);
+        requireFound(node);
+        long generation = head.assignmentGeneration();
+        for (var effective : handoffLineage(head, node.stat().getCzxid(), deadline)) {
+            if (event.sequence() <= effective.plan().predecessor().committedThrough()) {
+                generation = effective.plan().predecessor().assignmentGeneration();
+                break;
+            }
+        }
+        return event.assignmentGeneration() == generation;
+    }
+
     private void verifyDeliveryHead(ProfileZKReadClient.Node node, ProfileDeleteDelivery.Head head,
             String parent, long deadline) throws InterruptedException, TimeoutException {
         requireFound(node);
         requirePersistent(node, false);
-        if (node.stat().getVersion() != head.committedThrough()) {
+        if (node.stat().getVersion() != head.committedThrough() + head.assignmentGeneration() - 1) {
             throw new IllegalArgumentException("Delete stream head version no longer matches its committed sequence");
         }
         var guard = reads.get(parent + "/birth-" + HexFormat.of().formatHex(head.streamId()), deadline);
@@ -2822,6 +2921,7 @@ public final class ZKProfileReservationStore {
                 || !Arrays.equals(initial.streamId(), head.streamId()) || !initial.target().equals(head.target())) {
             throw new IllegalArgumentException("Initial delete assignment cannot be replaced with a new stream");
         }
+        handoffLineage(head, node.stat().getCzxid(), deadline);
     }
 
     public record DeleteHeadResult(ReadStatus status, ProfileDeleteDelivery.Head head) {
@@ -2911,7 +3011,11 @@ public final class ZKProfileReservationStore {
         String name = parent + "/assignment-admission";
         var node = reads.get(name, deadline);
         if (node.code() == Code.NONODE.intValue()) {
-            if (reads.get(parent + "/handoff-prepared", deadline).code() == Code.OK.intValue()) {
+            if (head.head().assignmentGeneration() != 1) {
+                throw new IllegalArgumentException("Effective assignment lost its original admission");
+            }
+            if (reads.get(handoffPreparedPath(head.head().target(),
+                    head.head().assignmentGeneration() + 1), deadline).code() == Code.OK.intValue()) {
                 throw new IllegalArgumentException("Prepared handoff lost its admission fence");
             }
             if (!create) {
@@ -2930,8 +3034,9 @@ public final class ZKProfileReservationStore {
         var value = ProfileDeleteHandoff.Admission.decode(node.bytes());
         if (value.activeGeneration() != head.head().assignmentGeneration()
                 || !Arrays.equals(value.scopeDigest(), ProfileDeleteHandoff.scopeDigest(head.head()))
-                || node.stat().getVersion() != (value.frozen() ? 1 : 0)
-                || !value.frozen() && reads.get(parent + "/handoff-prepared", deadline).code() == Code.OK.intValue()) {
+                || node.stat().getVersion() != 2 * (head.head().assignmentGeneration() - 1) + (value.frozen() ? 1 : 0)
+                || !value.frozen() && reads.get(handoffPreparedPath(head.head().target(),
+                    head.head().assignmentGeneration() + 1), deadline).code() == Code.OK.intValue()) {
             throw new IllegalArgumentException("Assignment admission scope/version mismatch");
         }
         return new AssignmentAdmission(value, node);
@@ -2951,7 +3056,7 @@ public final class ZKProfileReservationStore {
             if (admission == null || !admission.value().frozen()) {
                 return deleteHandoffFailure(DeleteHandoffStatus.ABSENT);
             }
-            String name = deliveryPath(target) + "/handoff-prepared";
+            String name = handoffPreparedPath(target, head.head().assignmentGeneration() + 1);
             var node = reads.get(name, deadline);
             requireFound(node);
             requirePersistent(node, true);
@@ -3069,7 +3174,8 @@ public final class ZKProfileReservationStore {
             }
             checks.add(Op.setData(parent + "/assignment-admission", frozen.encode(),
                     admission.node().stat().getVersion()));
-            checks.add(Op.create(parent + "/handoff-prepared", plan.encode(), immutableAcls, CreateMode.PERSISTENT));
+            checks.add(Op.create(handoffPreparedPath(target, plan.nextGeneration()),
+                    plan.encode(), immutableAcls, CreateMode.PERSISTENT));
             if (!live.getAsBoolean()) {
                 return deleteHandoffFailure(DeleteHandoffStatus.UNAVAILABLE);
             }
@@ -3097,6 +3203,122 @@ public final class ZKProfileReservationStore {
         return new DeleteHandoffResult(status, null);
     }
 
+    public enum DeleteHandoffEffectiveStatus {
+        EFFECTIVE, ABSENT, CONFLICT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN
+    }
+
+    public record DeleteHandoffEffectiveResult(DeleteHandoffEffectiveStatus status,
+            ProfileDeleteHandoff.Effective value) {
+        public DeleteHandoffEffectiveResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == DeleteHandoffEffectiveStatus.EFFECTIVE) != (value != null)) {
+                throw new IllegalArgumentException("Only a verified native effective assignment carries its witness");
+            }
+        }
+    }
+
+    public DeleteHandoffEffectiveResult readEffectiveDeleteHandoff(ProfileDeleteRecord.Target target, long generation) {
+        if (generation < 2 || generation > ProfileDeleteSnapshot.MAX_GENERATIONS) {
+            throw new IllegalArgumentException("Unsupported effective assignment generation");
+        }
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            if (reads.sync(root, deadline) != Code.OK.intValue()) {
+                return effectiveFailure(DeleteHandoffEffectiveStatus.UNAVAILABLE);
+            }
+            var head = deleteHead(target, deadline);
+            if (head == null) {
+                return effectiveFailure(DeleteHandoffEffectiveStatus.UNAVAILABLE);
+            }
+            if (head.head().assignmentGeneration() < generation) {
+                return effectiveFailure(DeleteHandoffEffectiveStatus.ABSENT);
+            }
+            var effective = effectiveHandoff(target, generation, deadline);
+            return new DeleteHandoffEffectiveResult(DeleteHandoffEffectiveStatus.EFFECTIVE, effective);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return effectiveFailure(DeleteHandoffEffectiveStatus.UNAVAILABLE);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return effectiveFailure(DeleteHandoffEffectiveStatus.UNAVAILABLE);
+        } catch (IllegalArgumentException invalid) {
+            return effectiveFailure(DeleteHandoffEffectiveStatus.QUARANTINED);
+        }
+    }
+
+    static DeleteHandoffEffectiveResult effectiveFailure(DeleteHandoffEffectiveStatus status) {
+        return new DeleteHandoffEffectiveResult(status, null);
+    }
+
+    record EffectivePublication(ProfileDeleteHandoff.Effective value, List<Op> operations) { }
+
+    /** Joins the exact publisher's owned-registration retirement multi; this method never publishes alone. */
+    EffectivePublication prepareEffectiveHandoff(SegmentProfileDeleteAdoption local, long deadline)
+            throws InterruptedException, TimeoutException {
+        if (!local.isCurrent()) {
+            return null;
+        }
+        var plan = local.plan();
+        var target = plan.predecessor().target();
+        var source = readDeleteHandoffAcknowledgement(target);
+        if (source.status() != DeleteHandoffAckStatus.ACKNOWLEDGED
+                || !source.acknowledgement().matches(plan)) {
+            return null;
+        }
+        var head = deleteHead(target, deadline);
+        var admission = head == null ? null : assignmentAdmission(head, false, deadline);
+        String parent = deliveryPath(target);
+        var prepared = reads.get(handoffPreparedPath(target, plan.nextGeneration()), deadline);
+        requireFound(prepared);
+        requirePersistent(prepared, true);
+        if (head == null || admission == null || !admission.value().frozen()
+                || !Arrays.equals(head.head().encode(), plan.predecessor().encode())
+                || head.node().stat().getCzxid() != plan.headBirth()
+                || prepared.stat().getCzxid() != admission.node().stat().getMzxid()
+                || !Arrays.equals(prepared.bytes(), plan.encode())) {
+            throw new IllegalArgumentException("Effective publication lost its original frozen preparation");
+        }
+        String ackName = handoffAckPath(target, plan.nextGeneration());
+        var ack = reads.get(ackName, deadline);
+        requireFound(ack);
+        requirePersistent(ack, true);
+        if (!Arrays.equals(ack.bytes(), source.acknowledgement().encode())) {
+            return null;
+        }
+        verifyHandoffBirth(ackName, ack, source.acknowledgement().birthId(), deadline);
+        var effective = ProfileDeleteHandoff.Effective.recorded(source.acknowledgement());
+        var next = new ProfileDeleteHandoff.Admission(plan.nextGeneration(),
+                ProfileDeleteHandoff.scopeDigest(effective.head()), new byte[32]);
+        var operations = new ArrayList<Op>();
+        operations.add(Op.check(parent, head.node().stat().getVersion()));
+        operations.add(Op.check(parent + "-assignment", 0));
+        operations.add(Op.check(parent + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0));
+        operations.add(Op.check(handoffPreparedPath(target, plan.nextGeneration()), 0));
+        operations.add(Op.check(ackName, 0));
+        operations.add(Op.check(ackName + "/birth-"
+                + HexFormat.of().formatHex(source.acknowledgement().birthId()), 0));
+        if (plan.predecessor().committedThrough() != 0) {
+            var snapshot = readDeleteSnapshot(target);
+            var view = snapshot.snapshot();
+            if (view == null || view.rootBirth != plan.snapshotBirth()
+                    || !Arrays.equals(ProfileRepairIntent.digest(view.value().encode()), plan.snapshotDigest())) {
+                return null;
+            }
+            operations.add(Op.check(parent + "/snapshot-current", (int) view.selectionVersion));
+            operations.add(Op.check(deleteSnapshotPath(target, view.value().generation()), 0));
+            operations.add(Op.check(deleteSnapshotPath(target, view.value().generation()) + "/published", 0));
+        }
+        operations.add(Op.setData(parent + "/assignment-admission",
+                next.encode(), admission.node().stat().getVersion()));
+        operations.add(Op.setData(parent, effective.head().encode(), head.node().stat().getVersion()));
+        String name = handoffEffectivePath(target, plan.nextGeneration());
+        operations.add(Op.create(name, effective.encode(), pageAcls, CreateMode.PERSISTENT));
+        byte[] guard = java.nio.ByteBuffer.allocate(48).put(effective.birthId())
+                .put(ProfileRepairIntent.digest(effective.encode())).array();
+        operations.add(Op.create(name + "/birth-" + HexFormat.of().formatHex(effective.birthId()), guard,
+                immutableAcls, CreateMode.PERSISTENT));
+        return new EffectivePublication(effective, List.copyOf(operations));
+    }
+
     public enum DeleteHandoffAckStatus { ACKNOWLEDGED, ABSENT, CONFLICT, QUARANTINED, UNAVAILABLE, DURABILITY_UNKNOWN }
 
     public record DeleteHandoffAckResult(DeleteHandoffAckStatus status,
@@ -3111,15 +3333,40 @@ public final class ZKProfileReservationStore {
 
     /** Read-only durable first acknowledgement; the exact native preparation must still be verifiable. */
     public DeleteHandoffAckResult readDeleteHandoffAcknowledgement(ProfileDeleteRecord.Target target) {
+        var prepared = readPreparedDeleteHandoff(target);
+        if (prepared.plan() != null) {
+            return readDeleteHandoffAcknowledgement(target, prepared.plan().nextGeneration());
+        }
+        var head = readDeleteHead(target);
+        if (head.head() != null && head.head().assignmentGeneration() > 1) {
+            return readDeleteHandoffAcknowledgement(target, head.head().assignmentGeneration());
+        }
+        return deleteHandoffAckFailure(prepared.status() == DeleteHandoffStatus.QUARANTINED
+                ? DeleteHandoffAckStatus.QUARANTINED : prepared.status() == DeleteHandoffStatus.ABSENT
+                    ? DeleteHandoffAckStatus.ABSENT : DeleteHandoffAckStatus.UNAVAILABLE);
+    }
+
+    public DeleteHandoffAckResult readDeleteHandoffAcknowledgement(ProfileDeleteRecord.Target target, long generation) {
+        if (generation < 2 || generation > ProfileDeleteSnapshot.MAX_GENERATIONS) {
+            throw new IllegalArgumentException("Unsupported acknowledgement generation");
+        }
         long deadline = System.nanoTime() + timeoutNanos;
         try {
+            var head = deleteHead(target, deadline);
+            if (head == null) {
+                return deleteHandoffAckFailure(DeleteHandoffAckStatus.UNAVAILABLE);
+            }
+            if (head.head().assignmentGeneration() >= generation) {
+                var effective = effectiveHandoff(target, generation, deadline);
+                return new DeleteHandoffAckResult(DeleteHandoffAckStatus.ACKNOWLEDGED, effective.acknowledgement());
+            }
             var source = readPreparedDeleteHandoff(target);
             if (source.status() != DeleteHandoffStatus.PREPARED) {
                 return deleteHandoffAckFailure(source.status() == DeleteHandoffStatus.QUARANTINED
                         ? DeleteHandoffAckStatus.QUARANTINED : source.status() == DeleteHandoffStatus.ABSENT
                             ? DeleteHandoffAckStatus.ABSENT : DeleteHandoffAckStatus.UNAVAILABLE);
             }
-            String name = deliveryPath(target) + "/handoff-ack";
+            String name = handoffAckPath(target, generation);
             var node = reads.get(name, deadline);
             if (node.code() == Code.NONODE.intValue()) {
                 return deleteHandoffAckFailure(DeleteHandoffAckStatus.ABSENT);
@@ -3127,7 +3374,7 @@ public final class ZKProfileReservationStore {
             requireFound(node);
             requirePersistent(node, true);
             var ack = ProfileDeleteHandoff.Acknowledgement.decode(node.bytes());
-            if (!ack.matches(source.plan())) {
+            if (source.plan().nextGeneration() != generation || !ack.matches(source.plan())) {
                 return deleteHandoffAckFailure(DeleteHandoffAckStatus.QUARANTINED);
             }
             var guard = reads.get(name + "/birth-" + HexFormat.of().formatHex(ack.birthId()), deadline);
@@ -3170,7 +3417,7 @@ public final class ZKProfileReservationStore {
             if (!live.getAsBoolean() || !local.isCurrent()) {
                 return deleteHandoffAckFailure(DeleteHandoffAckStatus.UNAVAILABLE);
             }
-            var prior = readDeleteHandoffAcknowledgement(target);
+            var prior = readDeleteHandoffAcknowledgement(target, plan.nextGeneration());
             if (prior.status() != DeleteHandoffAckStatus.ABSENT) {
                 return prior.acknowledgement() != null && !prior.acknowledgement().matches(plan)
                         ? deleteHandoffAckFailure(DeleteHandoffAckStatus.CONFLICT) : prior;
@@ -3186,7 +3433,7 @@ public final class ZKProfileReservationStore {
             var head = deleteHead(target, deadline);
             var admission = head == null ? null : assignmentAdmission(head, false, deadline);
             String parent = deliveryPath(target);
-            var prepared = reads.get(parent + "/handoff-prepared", deadline);
+            var prepared = reads.get(handoffPreparedPath(target, plan.nextGeneration()), deadline);
             requireFound(prepared);
             requirePersistent(prepared, true);
             if (head == null || admission == null || !admission.value().frozen()
@@ -3202,7 +3449,7 @@ public final class ZKProfileReservationStore {
             operations.add(Op.check(parent + "-assignment", 0));
             operations.add(Op.check(parent + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0));
             operations.add(Op.check(parent + "/assignment-admission", admission.node().stat().getVersion()));
-            operations.add(Op.check(parent + "/handoff-prepared", 0));
+            operations.add(Op.check(handoffPreparedPath(target, plan.nextGeneration()), 0));
             if (plan.predecessor().committedThrough() != 0) {
                 var snapshot = readDeleteSnapshot(target);
                 var view = snapshot.snapshot();
@@ -3216,7 +3463,7 @@ public final class ZKProfileReservationStore {
                 operations.add(Op.check(deleteSnapshotPath(target, view.value().generation()) + "/published", 0));
             }
             var ack = ProfileDeleteHandoff.Acknowledgement.recorded(plan, local.controlSequence());
-            String name = parent + "/handoff-ack";
+            String name = handoffAckPath(target, plan.nextGeneration());
             operations.add(Op.create(name, ack.encode(), pageAcls, CreateMode.PERSISTENT));
             byte[] guard = java.nio.ByteBuffer.allocate(48).put(ack.birthId())
                     .put(ProfileRepairIntent.digest(ack.encode())).array();
@@ -3227,7 +3474,7 @@ public final class ZKProfileReservationStore {
             }
             submitted = true;
             multi(operations, deadline);
-            var result = readDeleteHandoffAcknowledgement(target);
+            var result = readDeleteHandoffAcknowledgement(target, plan.nextGeneration());
             return result.status() == DeleteHandoffAckStatus.ABSENT
                     ? deleteHandoffAckFailure(DeleteHandoffAckStatus.DURABILITY_UNKNOWN) : result;
         } catch (InterruptedException interrupted) {
@@ -3328,9 +3575,18 @@ public final class ZKProfileReservationStore {
         var head = deleteHead(target, deadline);
         if (head == null || !Arrays.equals(value.cut().streamId(), head.head().streamId())
                 || value.cut().streamGeneration() != head.head().streamGeneration()
-                || value.cut().assignmentGeneration() != head.head().assignmentGeneration()
+                || value.cut().assignmentGeneration() > head.head().assignmentGeneration()
                 || value.cut().committedThrough() > head.head().committedThrough()) {
             throw new IllegalArgumentException("Snapshot lies outside the effective stream prefix");
+        }
+        var lineage = handoffLineage(head.head(), head.node().stat().getCzxid(), deadline);
+        for (var effective : lineage) {
+            long generation = effective.plan().nextGeneration();
+            long cut = effective.plan().predecessor().committedThrough();
+            if (value.cut().assignmentGeneration() < generation && value.cut().committedThrough() > cut
+                    || value.cut().assignmentGeneration() >= generation && value.cut().committedThrough() < cut) {
+                throw new IllegalArgumentException("Snapshot cut crosses its assignment lineage boundary");
+            }
         }
         return new SnapshotSelection(value, selected, rootNode);
     }
@@ -3357,6 +3613,11 @@ public final class ZKProfileReservationStore {
                         || node.stat().getCzxid() < selected.rootNode().stat().getCzxid()
                         || node.stat().getCzxid() > selected.selected().stat().getMzxid()) {
                     throw new IllegalArgumentException("Missing, incomplete or recreated snapshot page");
+                }
+                for (var effect : page.effects()) {
+                    if (!eventBelongsTo(effect.event(), value.cut(), deadline)) {
+                        throw new IllegalArgumentException("Snapshot effect lies outside its assignment handoff cut");
+                    }
                 }
                 effects.addAll(page.effects());
             }
@@ -3593,9 +3854,24 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    List<Op> requiredDeleteAssignmentChecks(
+            org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact required, long deadline)
+            throws InterruptedException, TimeoutException {
+        var target = new ProfileDeleteRecord.Target(required.bookieId(), required.storageIncarnation().value());
+        var head = deleteHead(target, deadline);
+        if (head == null
+                || head.head().assignmentGeneration() != required.effectiveDeleteAssignmentGeneration().value()) {
+            throw new IllegalStateException("Required effective assignment changed before startup publication");
+        }
+        String name = deliveryPath(target);
+        return List.of(Op.check(name + "-assignment", 0),
+                Op.check(name + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0),
+                Op.check(name, head.node().stat().getVersion()));
+    }
+
     /** Checks join the caller's existing writable-publication multi, ordering it against every head increment. */
     List<Op> deleteRegistrationChecks(org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord record,
-            org.apache.bookkeeper.common.profile.control.ProfileControlRequest.DeleteBinding local, long deadline)
+            ProfileDeleteDelivery.Progress local, long deadline)
             throws InterruptedException, TimeoutException {
         if (reads.sync(root, deadline) != Code.OK.intValue()) {
             throw new IllegalStateException("Delete assignment unavailable for writable registration");
@@ -3607,11 +3883,8 @@ public final class ZKProfileReservationStore {
             throw new IllegalStateException("Missing or different effective delete assignment");
         }
         var head = current.head();
-        if (local == null ? head.committedThrough() != 0
-                : !Arrays.equals(local.streamId(), head.streamId())
-                    || local.streamGeneration() != head.streamGeneration()
-                    || local.assignmentGeneration() != head.assignmentGeneration()
-                    || local.sequence() != head.committedThrough()) {
+        if (local == null ? head.committedThrough() != 0 || head.assignmentGeneration() != 1
+                : !local.matches(head)) {
             throw new IllegalStateException("Local delete-applied cursor has not reached required-through");
         }
         String name = deliveryPath(target);
@@ -3658,7 +3931,8 @@ public final class ZKProfileReservationStore {
         requireFound(receipt);
         requirePersistent(receipt, true);
         var event = ProfileDeleteDelivery.Event.decode(receipt.bytes());
-        if (event.ledger().ledgerId() != ledger || !event.target().equals(target) || !event.belongsTo(head)) {
+        if (event.ledger().ledgerId() != ledger || !event.target().equals(target)
+                || !eventBelongsTo(event, head, deadline)) {
             throw new IllegalArgumentException("Retained delete delivery does not match its stream assignment");
         }
         var actual = reads.get(deliveryPath(target) + "/event-" + Long.toHexString(event.sequence()), deadline);
@@ -3927,7 +4201,7 @@ public final class ZKProfileReservationStore {
                 requirePersistent(eventNode, true);
                 event = ProfileDeleteDelivery.Event.decode(eventNode.bytes());
             }
-            if (event.sequence() != sequence || !event.belongsTo(head)) {
+            if (event.sequence() != sequence || !eventBelongsTo(event, head, deadline)) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
             var receipt = reads.get(path(event.ledger().ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target),

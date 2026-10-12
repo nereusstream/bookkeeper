@@ -19,28 +19,33 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.util.Objects;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
+import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 
 /** Original opened control owner's applied adoption; callers cannot manufacture a local force result. */
 public final class SegmentProfileDeleteAdoption {
+    private final IsolatedSegmentStorage owner;
     private final SegmentBookieControlLog source;
     private final ProfileDeleteHandoff.Plan plan;
     private final long controlSequence;
 
-    private SegmentProfileDeleteAdoption(SegmentBookieControlLog source, ProfileDeleteHandoff.Plan plan,
+    private SegmentProfileDeleteAdoption(IsolatedSegmentStorage owner, SegmentBookieControlLog source,
+            ProfileDeleteHandoff.Plan plan,
             long controlSequence) {
+        this.owner = Objects.requireNonNull(owner, "owner");
         this.source = Objects.requireNonNull(source, "source");
         this.plan = Objects.requireNonNull(plan, "plan");
         this.controlSequence = controlSequence;
     }
 
     /** Package-owned factory used after actual force/apply and owner terminal, followed by native recheck. */
-    static SegmentProfileDeleteAdoption fromApplied(SegmentBookieControlLog source, ProfileDeleteHandoff.Plan plan) {
+    static SegmentProfileDeleteAdoption fromApplied(IsolatedSegmentStorage owner, SegmentBookieControlLog source,
+            ProfileDeleteHandoff.Plan plan) {
         synchronized (source) {
             long sequence = source.adoptedDeleteHandoffSequence(plan);
             if (plan == null || sequence < 0) {
                 return null;
             }
-            return new SegmentProfileDeleteAdoption(source, plan, sequence);
+            return new SegmentProfileDeleteAdoption(owner, source, plan, sequence);
         }
     }
 
@@ -50,6 +55,11 @@ public final class SegmentProfileDeleteAdoption {
 
     public long controlSequence() {
         return controlSequence;
+    }
+
+    /** Retire only the exact registration gate attached to this original physical owner. */
+    public boolean retireRegistration(ZKProfileEphemeralRegistrationStore.Admission expected) {
+        return owner.retireProfileAdmissionForHandoff(source, plan, expected);
     }
 
     /** A stopped, failed or different opened graph cannot newly attest the persisted receipt. */

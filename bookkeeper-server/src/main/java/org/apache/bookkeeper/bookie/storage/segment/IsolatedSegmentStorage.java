@@ -306,6 +306,62 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
+    /** A fresh nonce may replace a retired gate only after the original control log made G+1 effective. */
+    void bindNextProfileRegistration(ZKProfileEphemeralRegistrationStore.Admission admission, Duration timeout)
+            throws InterruptedException, ExecutionException, TimeoutException {
+        Objects.requireNonNull(admission, "admission");
+        if (timeout.isNegative() || timeout.isZero() || timeout.compareTo(Duration.ofMinutes(1)) > 0
+                || controls == null || controls.isOwnerThread()) {
+            throw new IllegalArgumentException("Next registration requires a bounded cold caller");
+        }
+        long deadline = System.nanoTime() + timeout.toNanos();
+        SegmentProfileDeleteFollower previous;
+        ZKProfileEphemeralRegistrationStore.Admission retired;
+        synchronized (gate) {
+            retired = profileAdmission;
+            if (!accepting || closed || retired == null || !retired.isRetired()
+                    || bookie.effectiveDeleteHandoff() == null
+                    || bookie.effectiveDeleteProgress().assignmentGeneration() <= retired.openedAssignmentGeneration()
+                    || !admission.bookieId().equals(identity.bookieId().toString())) {
+                throw new IllegalStateException("Next registration has no new applied effective assignment");
+            }
+            previous = deleteFollower;
+        }
+        if (previous != null) {
+            previous.closeAsync().get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+        }
+        synchronized (gate) {
+            if (!accepting || closed || profileAdmission != retired || retired.getAsBoolean()
+                    || !bookie.matchesScope(config, identity)) {
+                throw new IllegalStateException("Original registration handoff owner changed during actual drain");
+            }
+            deleteFollower = null;
+            profileAdmission = admission;
+        }
+    }
+
+    boolean retireProfileAdmissionForHandoff(SegmentBookieControlLog source, ProfileDeleteHandoff.Plan plan,
+            ZKProfileEphemeralRegistrationStore.Admission expected) {
+        synchronized (gate) {
+            if (!accepting || closed || bookie != source || profileAdmission != expected || expected == null
+                    || source.adoptedDeleteHandoffSequence(plan) < 0
+                    || !expected.bookieId().equals(identity.bookieId().toString())) {
+                return false;
+            }
+            expected.close();
+            return true;
+        }
+    }
+
+    ProfileDeleteDelivery.Progress profileDeleteAssignmentProgress() {
+        synchronized (gate) {
+            if (!accepting || closed || bookie == null || !bookie.matchesScope(config, identity)) {
+                throw new IllegalStateException("Original local assignment recovery is not available");
+            }
+            return bookie.effectiveDeleteProgress();
+        }
+    }
+
     enum DeleteCatchUpStatus { CAUGHT_UP, LIMIT, UNAVAILABLE, QUARANTINED, UNKNOWN }
 
     record DeleteCatchUpAttempt(DeleteCatchUpStatus status, ProfileDeleteDelivery.Head required,
@@ -417,7 +473,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     || !Arrays.equals(fresh.plan().encode(), source.plan().encode())) {
                 return new DeleteAdoptionAttempt(DeleteAdoptionStatus.QUARANTINED, null, actual);
             }
-            var adoption = SegmentProfileDeleteAdoption.fromApplied(appliedOwner, source.plan());
+            var adoption = SegmentProfileDeleteAdoption.fromApplied(this, appliedOwner, source.plan());
             return adoption == null
                     ? new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNAVAILABLE, null, actual)
                     : new DeleteAdoptionAttempt(DeleteAdoptionStatus.ADOPTED_DURABLE, adoption, actual);
@@ -428,6 +484,61 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             return new DeleteAdoptionAttempt(DeleteAdoptionStatus.UNKNOWN, null, actual);
         } catch (IllegalArgumentException | IllegalStateException invalid) {
             return new DeleteAdoptionAttempt(DeleteAdoptionStatus.QUARANTINED, null, actual);
+        }
+    }
+
+    private record EffectiveLocalAttempt(DeleteCatchUpStatus status, CompletableFuture<Void> completion) { }
+
+    /** Original native witness only; repeat both local stages after UNKNOWN without inventing an event. */
+    private EffectiveLocalAttempt applyEffectiveProfileDeletes(ZKProfileReservationStore reservations,
+            ProfileDeleteHandoff.Effective effective, long deadline, BooleanSupplier live) {
+        CompletableFuture<Void> actual = CompletableFuture.completedFuture(null);
+        var target = effective.plan().predecessor().target();
+        try {
+            for (boolean adopt : new boolean[] {true, false}) {
+                var fresh = reservations.readEffectiveDeleteHandoff(target, effective.plan().nextGeneration());
+                if (fresh.value() == null || !Arrays.equals(fresh.value().encode(), effective.encode())) {
+                    return new EffectiveLocalAttempt(fresh.status()
+                            == ZKProfileReservationStore.DeleteHandoffEffectiveStatus.QUARANTINED
+                                ? DeleteCatchUpStatus.QUARANTINED : DeleteCatchUpStatus.UNAVAILABLE, actual);
+                }
+                var result = new CompletableFuture<SegmentBookieControlLog.Status>();
+                var terminal = new CompletableFuture<Void>();
+                synchronized (gate) {
+                    if (!accepting || closed || !live.getAsBoolean() || System.nanoTime() >= deadline) {
+                        return new EffectiveLocalAttempt(DeleteCatchUpStatus.UNAVAILABLE, actual);
+                    }
+                    SegmentBookieControlDriver.LacCompletion completed = (value, failure) -> {
+                        if (failure == null) {
+                            result.complete(value);
+                        } else {
+                            result.completeExceptionally(failure);
+                        }
+                    };
+                    boolean accepted = adopt
+                            ? controls.submitHandoff(effective.plan(), completed, () -> terminal.complete(null))
+                            : controls.submitEffectiveHandoff(effective, completed, () -> terminal.complete(null));
+                    if (!accepted) {
+                        return new EffectiveLocalAttempt(DeleteCatchUpStatus.UNAVAILABLE, actual);
+                    }
+                }
+                actual = terminal;
+                var value = result.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                actual.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                if (value != SegmentBookieControlLog.Status.APPLIED_DURABLE
+                        && value != SegmentBookieControlLog.Status.ALREADY_DURABLE) {
+                    return new EffectiveLocalAttempt(DeleteCatchUpStatus.QUARANTINED, actual);
+                }
+            }
+            var fresh = reservations.readEffectiveDeleteHandoff(target, effective.plan().nextGeneration());
+            return new EffectiveLocalAttempt(fresh.value() != null
+                    && Arrays.equals(fresh.value().encode(), effective.encode())
+                        ? DeleteCatchUpStatus.CAUGHT_UP : DeleteCatchUpStatus.UNAVAILABLE, actual);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new EffectiveLocalAttempt(DeleteCatchUpStatus.UNKNOWN, actual);
+        } catch (ExecutionException | TimeoutException unknown) {
+            return new EffectiveLocalAttempt(DeleteCatchUpStatus.UNKNOWN, actual);
         }
     }
 
@@ -459,20 +570,46 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 var read = reservations.readDeleteHead(target);
                 if (read.status() != ProfileControlStore.ReadStatus.FOUND) {
                     return new DeleteCatchUpAttempt(read.status() == ProfileControlStore.ReadStatus.QUARANTINED
-                            ? DeleteCatchUpStatus.QUARANTINED : DeleteCatchUpStatus.UNAVAILABLE, required, actual);
+                            ? DeleteCatchUpStatus.QUARANTINED : DeleteCatchUpStatus.UNAVAILABLE,
+                                required, actual);
                 }
                 required = read.head();
-                var cursor = profileDeleteProgress();
+                var cursor = profileDeleteAssignmentProgress();
                 if (cursor != null && (!Arrays.equals(cursor.streamId(), required.streamId())
                         || cursor.streamGeneration() != required.streamGeneration()
-                        || cursor.assignmentGeneration() != required.assignmentGeneration())) {
+                        || cursor.assignmentGeneration() > required.assignmentGeneration())) {
                     return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, required, actual);
                 }
-                long through = cursor == null ? 0 : cursor.sequence();
+                long through = cursor == null ? 0 : cursor.through();
+                long assignment = cursor == null ? 1 : cursor.assignmentGeneration();
+                if (assignment < required.assignmentGeneration()) {
+                    var effective = reservations.readEffectiveDeleteHandoff(target, assignment + 1);
+                    if (effective.value() == null) {
+                        return new DeleteCatchUpAttempt(effective.status()
+                                == ZKProfileReservationStore.DeleteHandoffEffectiveStatus.QUARANTINED
+                                    ? DeleteCatchUpStatus.QUARANTINED : DeleteCatchUpStatus.UNAVAILABLE,
+                                required, actual);
+                    }
+                    long cut = effective.value().plan().predecessor().committedThrough();
+                    if (through > cut) {
+                        return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, required, actual);
+                    }
+                    if (through == cut) {
+                        var appliedAssignment = applyEffectiveProfileDeletes(
+                                reservations, effective.value(), deadline, live);
+                        actual = appliedAssignment.completion();
+                        if (appliedAssignment.status() != DeleteCatchUpStatus.CAUGHT_UP) {
+                            return new DeleteCatchUpAttempt(appliedAssignment.status(), required, actual);
+                        }
+                        snapshot = null;
+                        snapshotLoaded = false;
+                        continue;
+                    }
+                }
                 if (through > required.committedThrough()) {
                     return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, required, actual);
                 }
-                if (through == required.committedThrough()) {
+                if (through == required.committedThrough() && assignment == required.assignmentGeneration()) {
                     return new DeleteCatchUpAttempt(DeleteCatchUpStatus.CAUGHT_UP, required, actual);
                 }
                 if (applied == maxEvents) {

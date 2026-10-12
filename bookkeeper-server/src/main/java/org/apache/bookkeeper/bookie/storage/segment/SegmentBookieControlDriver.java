@@ -150,6 +150,21 @@ final class SegmentBookieControlDriver {
     /** Cold native handoff adoption uses the same reserved writer and actual owner terminal hook. */
     boolean submitHandoff(ProfileDeleteHandoff.Plan plan, LacCompletion completion, Runnable terminal) {
         Objects.requireNonNull(plan, "plan");
+        return submitHandoffAppend(() -> log.appendHandoffDurably(plan), completion, terminal);
+    }
+
+    boolean submitEffectiveHandoff(ProfileDeleteHandoff.Effective effective, LacCompletion completion,
+            Runnable terminal) {
+        Objects.requireNonNull(effective, "effective");
+        return submitHandoffAppend(() -> log.appendEffectiveHandoffDurably(effective), completion, terminal);
+    }
+
+    @FunctionalInterface
+    private interface HandoffAppend {
+        SegmentBookieControlLog.HandoffWrite append() throws IOException;
+    }
+
+    private boolean submitHandoffAppend(HandoffAppend append, LacCompletion completion, Runnable terminal) {
         Objects.requireNonNull(completion, "completion");
         Objects.requireNonNull(terminal, "terminal");
         if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
@@ -162,7 +177,7 @@ final class SegmentBookieControlDriver {
                 public void run(SegmentOwnerLoop.Ticket ticket) {
                     var durable = new AtomicReference<SegmentBookieControlLog.HandoffWrite>();
                     try {
-                        io.submitControl(ticket, () -> durable.set(log.appendHandoffDurably(plan)), failure -> {
+                        io.submitControl(ticket, () -> durable.set(append.append()), failure -> {
                             owner.requireOwner();
                             if (failure != null) {
                                 deliver(completion, null, failure);

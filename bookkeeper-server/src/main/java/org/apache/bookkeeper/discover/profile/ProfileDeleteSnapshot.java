@@ -163,7 +163,12 @@ public final class ProfileDeleteSnapshot {
             return index < root.pageDigests.size() && Arrays.equals(birthId, root.birthId)
                     && effects.size() == expected
                     && Arrays.equals(ProfileRepairIntent.digest(encode()), root.pageDigests.get(index))
-                    && effects.stream().allMatch(effect -> effect.event().belongsTo(root.cut()));
+                    && effects.stream().allMatch(effect ->
+                        Arrays.equals(effect.event().streamId(), root.cut().streamId())
+                        && effect.event().streamGeneration() == root.cut().streamGeneration()
+                        && effect.event().target().equals(root.cut().target())
+                        && effect.event().assignmentGeneration() <= root.cut().assignmentGeneration()
+                        && effect.event().sequence() <= root.cut().committedThrough());
         }
     }
 

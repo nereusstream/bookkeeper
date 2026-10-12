@@ -79,7 +79,8 @@ public final class ProfileControlRequest {
             if (streamId.length != 16 || requestId.length != 16 || tombstoneDigest.length != 32
                     || java.util.Arrays.equals(streamId, new byte[16])
                     || java.util.Arrays.equals(requestId, new byte[16]) || streamGeneration != 1
-                    || assignmentGeneration != 1 || sequence < 1 || sequence > 4096 || deleteEpoch < 1) {
+                    || assignmentGeneration < 1 || assignmentGeneration > 64
+                    || sequence < 1 || sequence > 4096 || deleteEpoch < 1) {
                 throw new ProfileControlValidationException(INVALID_REQUEST_SHAPE);
             }
         }

@@ -40,9 +40,10 @@ public final class ProfileDeleteDelivery {
         public Head {
             streamId = ProfileLifecycleHead.fixed(streamId, 16, true);
             java.util.Objects.requireNonNull(target, "target");
-            if (streamGeneration != 1 || assignmentGeneration != 1 || committedThrough < 0
+            if (streamGeneration != 1 || assignmentGeneration < 1
+                    || assignmentGeneration > ProfileDeleteSnapshot.MAX_GENERATIONS || committedThrough < 0
                     || committedThrough > MAX_EVENTS) {
-                throw new IllegalArgumentException("Unsupported initial delete delivery assignment or head");
+                throw new IllegalArgumentException("Unsupported bounded delete delivery assignment or head");
             }
         }
         @Override
@@ -79,6 +80,30 @@ public final class ProfileDeleteDelivery {
         }
     }
 
+    /** Effective assignment and no-hole through are separate from the original last-event binding. */
+    public record Progress(byte[] streamId, long streamGeneration, long assignmentGeneration, long through) {
+        public Progress {
+            streamId = ProfileLifecycleHead.fixed(streamId, 16, true);
+            if (streamGeneration != 1 || assignmentGeneration < 1
+                    || assignmentGeneration > ProfileDeleteSnapshot.MAX_GENERATIONS
+                    || through < 0 || through > MAX_EVENTS) {
+                throw new IllegalArgumentException("Invalid bounded delete assignment progress");
+            }
+        }
+        @Override
+        public byte[] streamId() {
+            return streamId.clone();
+        }
+        public boolean matches(Head head) {
+            return Arrays.equals(streamId, head.streamId()) && streamGeneration == head.streamGeneration()
+                    && assignmentGeneration == head.assignmentGeneration() && through == head.committedThrough();
+        }
+        public static Progress fromEvent(ProfileControlRequest.DeleteBinding event) {
+            return event == null ? null : new Progress(event.streamId(), event.streamGeneration(),
+                    event.assignmentGeneration(), event.sequence());
+        }
+    }
+
     public record Event(byte[] streamId, long streamGeneration, long assignmentGeneration, long sequence,
             ProfileLedgerContext ledger, ProfileDeleteRecord.Target target, ProfileDeleteRecord.Reference tombstone,
             byte[] requestId, long deleteEpoch) {
@@ -88,7 +113,8 @@ public final class ProfileDeleteDelivery {
             java.util.Objects.requireNonNull(ledger, "ledger");
             java.util.Objects.requireNonNull(target, "target");
             java.util.Objects.requireNonNull(tombstone, "tombstone");
-            if (streamGeneration != 1 || assignmentGeneration != 1 || sequence < 1
+            if (streamGeneration != 1 || assignmentGeneration < 1
+                    || assignmentGeneration > ProfileDeleteSnapshot.MAX_GENERATIONS || sequence < 1
                     || sequence > MAX_EVENTS || deleteEpoch < 1) {
                 throw new IllegalArgumentException("Invalid bounded initial delete delivery event");
             }

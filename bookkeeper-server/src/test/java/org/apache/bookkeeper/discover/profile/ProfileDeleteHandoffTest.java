@@ -92,4 +92,27 @@ public class ProfileDeleteHandoffTest {
         assertThrows(IllegalArgumentException.class, () -> ProfileDeleteHandoff.Acknowledgement.decode(oversized));
     }
 
+    @Test
+    public void effectiveWitnessRetainsOriginalAckAndEmptyBaseWithoutInventingAnEvent() {
+        var target = new ProfileDeleteRecord.Target("b1:3181", bytes(16, 2));
+        var predecessor = new ProfileDeleteDelivery.Head(bytes(16, 3), 1, 1, 0, target);
+        var plan = new ProfileDeleteHandoff.Plan(bytes(16, 4), predecessor, 100, 2, 0, 0, new byte[32]);
+        var ack = ProfileDeleteHandoff.Acknowledgement.recorded(plan, 0);
+        var effective = ProfileDeleteHandoff.Effective.recorded(ack);
+        var decoded = ProfileDeleteHandoff.Effective.decode(effective.encode());
+        assertArrayEquals(effective.encode(), decoded.encode());
+        assertArrayEquals(ack.encode(), decoded.acknowledgement().encode());
+        assertEquals(2, decoded.head().assignmentGeneration());
+        assertEquals(0, decoded.head().committedThrough());
+        var progress = new ProfileDeleteDelivery.Progress(predecessor.streamId(), 1, 2, 0);
+        assertTrue(progress.matches(decoded.head()));
+        assertFalse(progress.matches(predecessor));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ProfileDeleteDelivery.Head(bytes(16, 3), 1, 65, 0, target));
+        for (int size = 0; size < effective.encode().length; size++) {
+            byte[] truncated = Arrays.copyOf(effective.encode(), size);
+            assertThrows(IllegalArgumentException.class, () -> ProfileDeleteHandoff.Effective.decode(truncated));
+        }
+    }
+
 }

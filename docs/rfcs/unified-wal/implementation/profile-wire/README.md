@@ -1676,3 +1676,33 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 ```
 
 证据`/Users/liusinan/.codex/artifacts/unified-wal/handoff-ack-evidence-e0npfd3k`保存最终source、原stage overrides、命令/inputs/XML、完整模型trace与diagnostics。Spotless/Checkstyle exit0；最终checker与Java均终止后的独立RAT exit1，443 unapproved路径均存在父HEAD、无新增。下一阶段必须接续conditional EFFECTIVE、真实G2 journal/progress/registration和old-route retirement，ACK不能单独完成assignment切换；retention/offline/backup-restore policy、accepted terminal decommission/unrecoverable/history GC、Main/默认routing/其他required authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续OPEN。默认OFF/SYSTEM/PARK和disabled能力不变，生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Assignment handoff 的 EFFECTIVE 与 G2/G3 接续
+
+2026-10-12接续原PREPARED/native ACK协议。`ZKProfileEphemeralRegistrationStore.makeDeleteHandoffEffective`只消费原opened storage owner的opaque adoption与该publisher绑定的实际gate/client/source。先退休原本地gate，再在原ZK multi中join readiness birth/version、原Plan/ACK/stream/admission/snapshot检查，更新head与active assignment、创建immutable UWHE/schema1 effect及同事务birth guard，并删除该session/nonce的service-info、writable与marker。旧READY投影同时改为NON_WRITABLE；这项负向投影保留原local readiness generation，不伪造新的LOCAL_READY。另一publisher的节点不能作为owned节点删除；版本竞争和未知回复按native状态解析。
+
+shared stream与初始birth保持，head版本显式包含已完成assignment切换次数。每代Plan/ACK/effect保留：G2沿用原path，后续使用generation suffix。native head必须有完整、有界、单调cut的effect lineage；原Plan/ACK/effect body、physical birth与创建顺序均核验。旧event仍按其对应cut归属，新增event使用当前assignment。mixed snapshot的结构检查与native lineage核验分开，旧prefix不能仅因当前generation前进而失效，也不能被重新标成新event。当前仍保留所有journal、Plan/ACK/effect、snapshot pages和instance-specific义务，无GC授权。
+
+`SegmentBookieControlLog`的type15 `DELETE_HANDOFF_EFFECTIVE`保存完整native effect，使用effect birth作为独立operation ID，并核验本地原type14 adoption和完整predecessor cut。原writer write/force成功后由owner顺序apply，checkpoint及journal首遍扫描/rotation/replay保留全部handoff记录。`ProfileDeleteDelivery.Progress`报告effective assignment与no-hole through；原last-event DeleteBinding保留其真实generation/request/UUID。空cut的进展来自原type14/type15，始终没有虚构sequence0删除event。新generation请求须匹配已应用type15，旧已应用event仍可幂等解析。
+
+原`catchUpProfileDeletes`先应用每个handoff cut前的原event，再按native immutable witness续接type14/type15，最后消费当前suffix；UNKNOWN仅结束等待，原owner completion独立排空。`bindNextProfileRegistration`要求原gate已退休、实际effective assignment已前进，并等待旧follower实际终态后才能绑定新nonce；pending gate不能被当成退休gate替换。同assignment的原attempt不会因reconnect重新开放。
+
+`ZKProfileStartupRequirementsStore.bindDeleteAssignments`为原immutable compatibility/device source绑定实际native assignment producer。observation的assignment generation来自同client、同Bookie/incarnation的完整native head，低于commissioned requirement或缺失/腐坏均拒绝；READY multi再次join该assignment版本。原compatibility/device envelope、birth与其他要求保持，普通head增长不改变assignment fact。新的READY仍经过原真实graph recovery、durable local receipt、persistent readiness和writable publication，不以cluster effect替代local type15/cursor。
+
+实际证据：`LpxLOfFL`十类79项Java（server 71＋common codec 8）（失败/错误/跳过0）覆盖原组件回归、三目标G1→G2→G3、真实SDK新ledger Add/普通close、G2事件、混合G1/G2 pages、原prefix读取、control rotation及三节点真实文件restart。`LvPJJ3Ze`验证empty cut下native CONNECTIONLOSS/held callback、NON_WRITABLE窗口、type15 held force的UNKNOWN与actual completion、零effect progress和row/birth ABA；无mock force成功。历史阶段`dbRlEJFZ`、`8OjbNvZy`、`RLapJvPm`、`LO11v0Px`按原source保存，不移绑新增断言。`KtmhVCaB`最终两类21项补验覆盖明确retired状态与拒绝替换pending gate；79项阶段保留原三份source，最终新增断言不移绑。
+
+35有限配置为5正向完整PASS/30指定反例；最终`yg5meujg`新增两次effective切换投影106 generated/61 distinct、queue0、depth/diameter18、5.947s、RSS88899584B。模型的native事务、完整bytes、physical birth与force事实由Java验证提供，不证明全A+C+D、真实掉电或生产authority。713个声明配置中本轮只运行相关35项。G1 canonical bytes保持；G2/G3的旧严格reader拒绝属于源码检查，released-decoder/stock binary兼容矩阵仍未执行。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/handoff-effective-evidence-_fbj01xu`保存各stage source/input/命令/XML、模型和失败诊断。最终Java1113与模型1085输入的1929个唯一source SHA逐项核验一致；所有历史stage按其source/input冻结。最终Spotless/Checkstyle exit0；最终Java/checker终止后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增。默认OFF/SYSTEM/PARK与disabled能力不变；生产Gate OPEN。后续继续retention/offline/backup-restore、accepted decommission/unrecoverable、history/page/tombstone/lineage GC，以及Main/default SDK/其他required authority/full-bytes/兼容/正式性能/运维/全16步综合验收；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+最终复现命令：
+
+```sh
+scripts/unified-wal/run-local-storage-tests.sh 'ProfileInitialControlCodecTest,ProfileDeleteHandoffTest,ProfileDeleteSnapshotTest,ProfileDeletePhysicalReceiptTest,ZKProfileStartupRequirementsStoreTest,ZKProfileEphemeralRegistrationStoreTest,ZKProfileRegistrationStoreTest,SegmentBookieControlLogTest#*DeleteHandoff*+deleteHandoffAdoptionRequiresCompleteCutAndSurvivesCheckpointRotation+continuousDeleteCursor*+uncertainDeleteDelivery*+originalJournalRestoresLatestCompactedCheckpointAndCorruptionFallback+legacyCheckpoint*,SegmentProfileInitialSocketClientTest#deleteHandoff*+deleteSnapshot*+committedDeleteDeliveriesShareOneIncarnationStreamAcrossTwoActualLedgers,SegmentControlFormatTest'
+scripts/unified-wal/run-local-storage-tests.sh 'ZKProfileEphemeralRegistrationStoreTest,SegmentProfileInitialSocketClientTest#deleteHandoffEffective*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-delete-effective --config-prefix ce-profile-delete-effective --config-prefix a-profile-handoff-ack --config-prefix ce-profile-handoff-ack --config-prefix a-profile-delete-adoption --config-prefix ce-profile-delete-adoption --config-prefix a-profile-delete-handoff --config-prefix ce-profile-delete-handoff --config-prefix a-profile-delete-snapshot --config-prefix ce-profile-delete-snapshot
+```
+
+原46/79分量没有扩大成整个系统验收；最终21项的目的为pending gate收紧及该组件回归。当前G2/G3 end-to-end与有限schema bounds不声称全部64代、实际掉电、stock binary或正式性能已验证。清理仅在source/raw receipt/diagnostic/checksums归档并确认原进程终止后执行精确本任务临时路径；共享targets、用户PDF/改动及其他任务产物保留。

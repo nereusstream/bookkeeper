@@ -46,11 +46,15 @@ public final class ZKProfileStartupRequirementsStore {
     /** Only this store's verified persistent bytes can create an observation. */
     public final class Observation {
         private final ProfileStartupRequirementsCodec.Envelope envelope;
+        private final BookieCompatibilityFact effectiveCompatibility;
         private final long birthZxid;
         private final long modifiedZxid;
 
-        private Observation(ProfileStartupRequirementsCodec.Envelope envelope, long birthZxid, long modifiedZxid) {
+        private Observation(ProfileStartupRequirementsCodec.Envelope envelope,
+                BookieCompatibilityFact effectiveCompatibility,
+                long birthZxid, long modifiedZxid) {
             this.envelope = envelope;
+            this.effectiveCompatibility = effectiveCompatibility;
             this.birthZxid = birthZxid;
             this.modifiedZxid = modifiedZxid;
         }
@@ -60,7 +64,7 @@ public final class ZKProfileStartupRequirementsStore {
         }
 
         public BookieCompatibilityFact compatibility() {
-            return envelope.compatibility();
+            return effectiveCompatibility;
         }
         public RequiredDeviceManifest requiredDevices() {
             return envelope.devices();
@@ -83,6 +87,8 @@ public final class ZKProfileStartupRequirementsStore {
     private final List<ACL> acls;
     private final List<ACL> markerAcls;
     private final long timeoutNanos;
+    private ZKProfileReservationStore deleteAssignments;
+    private boolean observationStarted;
 
     public ZKProfileStartupRequirementsStore(ZooKeeper zk, String root, List<ACL> acls, Duration timeout) {
         this.zk = Objects.requireNonNull(zk, "zk");
@@ -104,6 +110,15 @@ public final class ZKProfileStartupRequirementsStore {
         timeoutNanos = timeout.toNanos();
     }
 
+    /** Bind the actual native assignment producer before consuming this immutable compatibility/device source. */
+    public synchronized void bindDeleteAssignments(ZKProfileReservationStore reservations) {
+        if (deleteAssignments != null || observationStarted) {
+            throw new IllegalStateException("Delete assignment producer must be bound once before observation");
+        }
+        Objects.requireNonNull(reservations, "reservations").requireDeletePublisherClient(zk);
+        deleteAssignments = reservations;
+    }
+
     /** Explicit create-only provisioning. An existing missing/corrupt record is never overwritten or repaired. */
     public ProvisionStatus provision(BookieCompatibilityFact compatibility, RequiredDeviceManifest devices) {
         byte[] bytes = ProfileStartupRequirementsCodec.encode(
@@ -113,7 +128,8 @@ public final class ZKProfileStartupRequirementsStore {
         try {
             var existing = snapshot(compatibility.bookieId(), deadline);
             if (existing != null) {
-                return existing.compatibility().equals(compatibility) && existing.requiredDevices().equals(devices)
+                return existing.envelope.compatibility().equals(compatibility)
+                        && existing.requiredDevices().equals(devices)
                         ? ProvisionStatus.ALREADY_APPLIED : ProvisionStatus.CONFLICT;
             }
             var envelope = ProfileStartupRequirementsCodec.decode(bytes);
@@ -170,7 +186,8 @@ public final class ZKProfileStartupRequirementsStore {
             throws InterruptedException, TimeoutException {
         var current = snapshot(expected.compatibility().bookieId(), deadline);
         if (current == null || expected.owner() != this || current.birthZxid != expected.birthZxid
-                || current.modifiedZxid != expected.modifiedZxid || !current.envelope.equals(expected.envelope)) {
+                || current.modifiedZxid != expected.modifiedZxid || !current.envelope.equals(expected.envelope)
+                || !current.compatibility().equals(expected.compatibility())) {
             throw new IllegalStateException("Required startup source changed or disappeared");
         }
         var c = expected.compatibility();
@@ -188,7 +205,13 @@ public final class ZKProfileStartupRequirementsStore {
                 || c.minimumWriterVersion() != readiness.minimumWriterVersion()) {
             throw new IllegalArgumentException("Readiness does not consume the required startup scope");
         }
-        return List.of(Op.check(marker(expected.envelope), 0), Op.check(path(c.bookieId()), 0));
+        var checks = new java.util.ArrayList<Op>();
+        checks.add(Op.check(marker(expected.envelope), 0));
+        checks.add(Op.check(path(c.bookieId()), 0));
+        if (deleteAssignments != null) {
+            checks.addAll(deleteAssignments.requiredDeleteAssignmentChecks(c, deadline));
+        }
+        return List.copyOf(checks);
     }
 
     private Observation snapshot(String bookieId, long deadline) throws InterruptedException, TimeoutException {
@@ -220,7 +243,31 @@ public final class ZKProfileStartupRequirementsStore {
                 || anchor.stat().getCzxid() != stat.getCzxid()) {
             throw new IllegalArgumentException("Invalid startup birth marker");
         }
-        return new Observation(envelope, stat.getCzxid(), stat.getMzxid());
+        var c = envelope.compatibility();
+        if (deleteAssignments != null) {
+            var target = new ProfileDeleteRecord.Target(c.bookieId(), c.storageIncarnation().value());
+            var actual = deleteAssignments.readDeleteHead(target);
+            if (actual.status() != org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND) {
+                if (actual.status()
+                        == org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.QUARANTINED) {
+                    throw new IllegalArgumentException("Required native assignment is corrupt");
+                }
+                throw new IllegalStateException("Required native assignment is unavailable");
+            }
+            long generation = actual.head().assignmentGeneration();
+            if (generation < c.effectiveDeleteAssignmentGeneration().value()) {
+                throw new IllegalStateException("Native assignment has not reached its commissioned requirement");
+            }
+            c = new BookieCompatibilityFact(c.bookieId(), c.storageIncarnation(), c.activeEngine(),
+                    c.profileWireMajor(), c.profileWireMinor(), c.descriptorHashSuite(), c.mandatoryLocalFeatures(),
+                    c.deviceManifestIdentity(), c.deviceManifestGeneration(), c.localFormatGeneration(),
+                    new org.apache.bookkeeper.common.profile.startup.Generation(generation),
+                    c.minimumReaderVersion(), c.minimumWriterVersion(), c.migrationState(), c.migrationGeneration());
+        }
+        synchronized (this) {
+            observationStarted = true;
+        }
+        return new Observation(envelope, c, stat.getCzxid(), stat.getMzxid());
     }
 
     String path(String bookieId) {
