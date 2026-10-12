@@ -1138,3 +1138,5 @@ Model E 在推进 general E/W/A fast recovery 时覆盖：
 
 
 2026-10-12 [全目标 publication 与在线节点消费](implementation/profile-wire/README.md#全目标-publication-与在线节点消费)已把每target event/index/head与publication前缀同事务记录，全部target就绪才发布logical tombstone，消除logical success后journal尚未可见的窗口；PREPARED不授予local delete。schema2 reference绑定prefix birth，原schema1 bytes保留；原注册graph借用bounded cold/scheduler持续消费，UNKNOWN/stop等actual local completion，close未排空保留锁。真实自动投递/注册race/cancel续接/required prefix loss/held force已有证据；阶段176与当前10项Java、31个有限模型配置分别保留原source，style通过，RAT443历史问题无新增。default bootstrap、snapshot/handoff/GC/退役、其余facts/full-bytes/综合Gate仍OPEN，步骤12/14/15保持PARTIAL。
+
+2026-10-12 [OPEN 固定 LAC 前缀审计](implementation/profile-wire/README.md#open-固定-lac-前缀审计)已接原周期任务/SDK/coordinator/共享池，固定下界P/L逐坐标全W观察且不fence writer；健康结果无CLOSED proof、不清marker，未fenced缺失仍UNKNOWN，actual health/lease排空后才复核并标记实际损坏/稳定缺失。最终28项Java与20有限模型配置（2完整正向/18指定反例）、style通过，RAT443父HEAD路径无新增；完整OPEN审计、其他required authority/总预算/Main/外部authority/stock矩阵/GC/退役及综合验收仍OPEN，生产Gate不提升。

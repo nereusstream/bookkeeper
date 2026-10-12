@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，最新为 [全目标 publication 与在线节点消费](#全目标-publication-与在线节点消费)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，当前 DATA 审计增量为 [OPEN 固定 LAC 前缀审计](#open-固定-lac-前缀审计)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -1463,3 +1463,32 @@ archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-listener-evidence-
 2026-10-12 [配置与显式 bootstrap](../startup-readiness/README.md#配置转换与显式-bootstrap)现在实际 properties 经原配置对象冻结 graph 参数，原公开 authority/transport 接入 same owner/listener/SDK；多值/未知/非法配置及 ISOLATED 无 owner 在 Classic/data open 前拒绝。30项相关回归通过，不增加普通 Add 的 MetadataStore、handshake 或 control fsync；Main/owned环境/full authority/full-bytes/综合 Gate仍 OPEN。
 
 2026-10-12 [owned ZK/metadata/cold/loops](../startup-readiness/README.md#同一服务-episode-的-owned-资源初始化与终止)已在同一服务episode复用原authority readers，原listener/graph实际drain后才确认元数据与外部执行资源终结。三节点实际SDK/原REGISTER/restart、held metadata task及partial初始化失败与原DATA/close回归共33项通过；TLS与完整Main/authority/full-bytes/综合Gate仍OPEN。
+
+
+## OPEN 固定 LAC 前缀审计
+
+2026-10-12，第14步在原 ProfileAuditor / AuditorReplicasCheckTask 的周期任务中增加 OPEN 固定前缀观察。原 CLOSED 分支、matching CLOSED 全副本 proof 和 worker 条件化清 marker 保持原合同；OPEN 分支使用同一 SDK、coordinator、registered peer pool、coordinate/duration 界限和实际 completion，不增加调度器或普通 Add 查询。
+
+ProfileRecoveryCoordinator.beginVerifyOpenReplicas 从实际冷读冻结 OPEN metadata birth/version/完整内容、READY root、published page 和 retained source incarnation。ProfileRecoveryReadHandle.fromOpenAudit 复用原 ProfileBookieClient，只发送 flags=0 普通 READ 和原 READ_LAC；拒绝 recovery probe/packing，不发 FENCE、recovery Add、metadata close 或恢复 grant。原 SDK LAC quorum 与 matching point-read length 产生本轮固定的下界 P/L，ReplicaScan 只检查 0..P 的全部 write-set 副本、digest/payload 和连续累计 length；writer 后续增长不扩大这次扫描。
+
+健康结果为 VERIFIED_OPEN_PREFIX/openCut，无 CLOSED ReplicaHealthProof，独立计数 profile_open_prefix_audit_healthy，不证明整个 OPEN ledger 或未确认 tail 健康。UNDERREPLICATED 只使用实际 scoped MISSING/CORRUPT。原 Bookie 缺失证明仍要求 durable fenced 与稳定读准入：活动、未 fenced 源缺少 DATA 仍返回 UNKNOWN/UNAVAILABLE，审计不主动 fence 它；已有 durable fence 的稳定缺失才可计 MISSING。权限拒绝、未知结果、预算终止或 authority 变化不生成 loss/健康证明。健康 OPEN 观察不清已有 marker，不产生新的持久 required-frontier authority。
+
+扫描后重新冷读完整 metadata/root/retained sources；周期任务再等待 actual health 和 lease/output/cold drain，最后复核 metadata/root，稳定且有实际缺失/损坏才写原 underreplication 检查任务。caller timeout/cancel 和线程中断不提前释放共享 reservation，也不提前关闭 owned SDK/ZK。
+
+五个新真实 mTLS/ZK/file/SDK 用例覆盖：持有 anchor READ 时 writer 继续 Add、固定 P/L 与无 CLOSED proof；实际 wire corruption、权限拒绝和 metadata CAS 变化；周期任务自动标记损坏且 writer 仍 OPEN；未 fenced UNKNOWN 与已有 durable fence 下 MISSING 的区别；超过 deadline 后 shutdown 仍等待三条实际 anchor 回复和 lease 排空。原 CLOSED 周期审计、普通 writer close、whole recovery、prefix verifier 和 SDK LAC 共享路径同时回归。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#openReplicaAudit*+profileReplicaAudit*+profilePeriodicReplicaAudit*+requiredPrefix*+normalTail*+originalSdkRead*+explicitLac*+wholeRecovery*+ordinaryWriterClose*'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#prefixVerifier*+closedReplicaHealth*+sdkLacEvidence*+explicitOnlyLac*+corruptExplicitLac*+lacSource*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-open-replica-audit --config-prefix ce-open-replica-audit --config-prefix a-profile-replica-audit --config-prefix ce-profile-replica-audit
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+mvn -o -N apache-rat:check
+```
+
+父源码 a71a23ed730be7f066eeb3128cbc8bda32276957。最终 Java 2xzvT988 的15项与 aK4pB6vU 的13项均零 failure/error/skip，各1103 source inputs 与当前文件匹配；实际执行的用例名在 XML，不把未匹配的 wildcard 当覆盖。早期 GKixWslU 的失败来自 OPEN READ 错用 HIGH_PRIORITY-only 被原 transport 拒绝及旧指标断言；修正为原 flags=0 和独立 OPEN 指标，未放宽生产协议校验。AE9QKkFq 三项、uycWr0Ej 广度结果保留阶段输入，不移绑最终源码。
+
+最终模型 l2xb3ba7：20配置为2完整正向/18指定反例，997当前 source inputs；OPEN 正向592 generated/416 distinct、queue0、depth8、0.861秒/peak RSS109592576 bytes，CLOSED正向396/336、queue0、depth7。ProfileOpenReplicaAudit 要求 scoped known cut、固定前缀、不 fence、实际 source/final fresh、不清 marker、actual health/lease 排空；真实 LAC/ZK/TLS/fsync 等作为输入，不生产这些事实，不检查完整时钟/fairness/liveness。TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无 symmetry/state constraint、CHECK_DEADLOCK FALSE。checker成本不是服务性能，catalog644/完整 A+C+D 未全跑，原 CLOSED 模型与历史回执不重绑。
+
+持久证据 /Users/liusinan/.codex/artifacts/unified-wal/open-audit-evidence-ah8rwjp3 保留原 run/source/config/command、失败与阶段身份；最终 Java/model 去重1841输入匹配。Spotless/Checkstyle exit0；RAT exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。额外 required authority producer、任意大 ledger 审计、payload/placement、全链路字节预算、完整 Main/外部 authority/stock矩阵、snapshot/handoff/history GC/decommission、兼容/正式性能/运维和综合验收继续 OPEN。步骤11/12/14/15与生产Gate保持PARTIAL/OPEN；Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，默认OFF/SYSTEM/PARK及disabled能力保持。

@@ -145,13 +145,14 @@ public final class ProfileAuditor {
                 if (!value.getValue().getCustomMetadata().containsKey(ProfileMetadataBacklink.KEY)) {
                     continue; // Explicit Profile service does not infer Classic failures from its cohort.
                 }
-                if (data && !value.getValue().isClosed()) {
-                    continue; // Match the original replicas-check CLOSED scope; do not fence an active writer.
+                if (data && !value.getValue().isClosed()
+                        && value.getValue().getState() != LedgerMetadata.State.OPEN) {
+                    continue;
                 }
                 var missing = missing(value, peers);
                 if (data) {
                     if (missing != null && missing.isEmpty()) {
-                        auditClosedData(value, tasks, stats);
+                        auditDataCut(value, tasks, stats);
                     } else {
                         stats.getStatsLogger().getCounter("profile_data_audit_deferred").inc();
                     }
@@ -166,7 +167,7 @@ public final class ProfileAuditor {
         }
     }
 
-    private void auditClosedData(Versioned<LedgerMetadata> expected, LedgerUnderreplicationManager tasks,
+    private void auditDataCut(Versioned<LedgerMetadata> expected, LedgerUnderreplicationManager tasks,
             AuditorStats stats) throws InterruptedException, ReplicationException {
         long ledger = expected.getValue().getLedgerId();
         var before = metadata.readMembership(ledger);
@@ -188,8 +189,11 @@ public final class ProfileAuditor {
             var credential = org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential.of(1,
                     org.apache.bookkeeper.proto.checksum.DigestManager.generateMasterKey(
                             expected.getValue().getPassword()));
-            health = coordinator.beginVerifyClosedReplicas(ledger, sdk, credential, lease.data(), lease.controls(),
-                    work.maxCoordinates(), work.maxDuration(), null);
+            health = expected.getValue().isClosed()
+                    ? coordinator.beginVerifyClosedReplicas(ledger, sdk, credential, lease.data(), lease.controls(),
+                            work.maxCoordinates(), work.maxDuration(), null)
+                    : coordinator.beginVerifyOpenReplicas(ledger, sdk, credential, lease.data(),
+                            work.maxCoordinates(), work.maxDuration());
             actual = health.completion();
             result = actual.get();
         } catch (InterruptedException stopping) {
@@ -256,6 +260,8 @@ public final class ProfileAuditor {
                         ReplicationException.EXCEPTION_HANDLER);
                 stats.getStatsLogger().getCounter("profile_data_audit_suspected").inc();
             }
+        } else if (result.status() == ProfileRecoveryCoordinator.ReplicaHealthStatus.VERIFIED_OPEN_PREFIX) {
+            stats.getStatsLogger().getCounter("profile_open_prefix_audit_healthy").inc();
         } else {
             stats.getStatsLogger().getCounter(result.status() == ProfileRecoveryCoordinator.ReplicaHealthStatus
                     .FULLY_REPLICATED ? "profile_data_audit_healthy" : "profile_data_audit_deferred").inc();

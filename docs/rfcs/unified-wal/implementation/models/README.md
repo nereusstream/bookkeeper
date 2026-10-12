@@ -1396,3 +1396,10 @@ runtime guard阶段fn17vvad四配置为1完整正向/3指定反例，978当时in
 2026-10-12，ProfileListenerDrain将native parent/child terminal、queued worker handoff、actual cold/output/backing credit归还作为输入；停止新连接、保持旧credit、caller copy、晚register socket必须经barrier与实际child close后才network done。五个错误规则为早done/漏worker fence/退休后重开/断连早还credit/caller冒充actual。首次新投影因TLA precedence SANY失败为INCONCLUSIVE；最终07__nh2q与backing-budget共13配置2完整正向/11指定反例，986当前inputs匹配，新正向374 generated/127 distinct、queue0、depth12、0.768秒/peak RSS107724800 bytes。
 
 TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog634/完整A+C+D未全跑。模型不关闭storage owner/外部loops，不生产TLS/fsync/actual fd/metadata事实，checker成本不是服务性能。[真实held cold、borrowed owner、queued accepted fd与source回执](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)拥有当前Java及Gate边界。
+
+
+## OPEN 固定前缀审计投影
+
+2026-10-12，ProfileOpenReplicaAudit 独立投影实际 OPEN scoped LAC 下界cut、writer增长、source outcome/稳定缺失、最终fresh authority以及actual health/lease drain。a-open-replica-audit完整正向；ce-open-replica-audit-{scope,cut,tail,fence,unknown,fresh,clear,health,lease}分别要求原范围/known cut、固定tail边界、不fence writer、marker实际source/final fresh、不清marker及独立两段排空性质的指定反例。原ProfileReplicaAudit继续拥有CLOSED分支，AuditOnlyClosed不用于新的OPEN分支。
+
+最终l2xb3ba7按原父源码a71a23ed73绑定：20配置为2完整正向/18指定反例，997当前inputs；OPEN正向592 generated/416 distinct、queue0、depth8、0.861秒/peak RSS109592576 bytes，CLOSED396/336、queue0、depth7。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog644/完整A+C+D未全跑。真实LAC/TLS/ZK/force是输入，不由有限模型生产，无完整fairness/liveness/性能结论。原阶段ijipljah及历史receipt不重绑；[实际实现/28项Java及持久证据](../profile-wire/README.md#open-固定-lac-前缀审计)拥有当前范围，步骤11/12/14/15和生产Gate仍PARTIAL/OPEN。

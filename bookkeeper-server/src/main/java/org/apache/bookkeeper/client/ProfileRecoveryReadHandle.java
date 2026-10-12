@@ -77,7 +77,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
     }
 
     private final ProfileBookieClient transport;
-    private final ProfileRecoveryContext recovery;
+    private final boolean fencingReads;
     private final AtomicBoolean active = new AtomicBoolean();
     private final Object probeOwner = new Object();
 
@@ -120,11 +120,56 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
 
     private ProfileRecoveryReadHandle(ProfileLedgerHandle.ProfileContext context,
             ZKProfileReservationStore.RecoveryResult accepted) throws GeneralSecurityException {
-        super(context, accepted.context().ledger().ledgerId(), accepted.metadata().metadata(),
-                BookKeeper.DigestType.CRC32C, accepted.metadata().metadata().getValue().getPassword(),
+        this(context, accepted.context().ledger().ledgerId(), accepted.metadata().metadata(), true);
+    }
+
+    private ProfileRecoveryReadHandle(ProfileLedgerHandle.ProfileContext context, long ledger,
+            org.apache.bookkeeper.versioning.Versioned<LedgerMetadata> metadata, boolean fencingReads)
+            throws GeneralSecurityException {
+        super(context, ledger, metadata,
+                BookKeeper.DigestType.CRC32C, metadata.getValue().getPassword(),
                 EnumSet.noneOf(WriteFlag.class));
         transport = context.transport();
-        recovery = accepted.context();
+        this.fencingReads = fencingReads;
+    }
+
+    /** Read-only OPEN prefix observer. The coordinator supplies and revalidates the actual frozen membership/root. */
+    public static ProfileRecoveryReadHandle fromOpenAudit(ClientContext base,
+            org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore.MembershipSnapshot member,
+            org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext ledger,
+            List<ProfileInstallReceipt> permitted, Map<BookieId, ProfileNormalDataClient> data)
+            throws GeneralSecurityException {
+        requireCompatibleSdk(base);
+        var value = member.metadata().getValue();
+        if (value.getState() != LedgerMetadata.State.OPEN || value.getLedgerId() != ledger.ledgerId()
+                || value.getDigestType() != org.apache.bookkeeper.client.api.DigestType.CRC32C
+                || value.getEnsembleSize() != 3 || value.getWriteQuorumSize() != 3
+                || value.getAckQuorumSize() < 2 || value.getAckQuorumSize() > 3
+                || value.getAllEnsembles().size() > 32 || data.isEmpty() || data.size() > 64
+                || !Arrays.equals(org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink.from(value)
+                        .instanceId(),
+                        ledger.ledgerInstanceId())) {
+            throw new IllegalArgumentException("OPEN audit requires matching original membership/instance and peers");
+        }
+        for (var entry : data.entrySet()) {
+            String name = entry.getKey().toString();
+            var hello = entry.getValue().hello();
+            if (hello.activeEngine() != 3 || !hello.bookieId().equals(name)
+                    || permitted.stream().noneMatch(receipt -> receipt.scope().targetBookie().equals(name)
+                        && java.util.Arrays.equals(receipt.scope().targetStorageIncarnation(),
+                                hello.storageIncarnation())
+                        && receipt.scope().ledgerId() == ledger.ledgerId()
+                        && java.util.Arrays.equals(receipt.scope().ledgerInstanceId(), ledger.ledgerInstanceId())
+                        && java.util.Arrays.equals(receipt.scope().descriptorIdentity().toBytes(),
+                                ledger.descriptorIdentity()))) {
+                throw new IllegalArgumentException("OPEN audit DATA peer is not a retained source incarnation");
+            }
+        }
+        var credential = ProtectedProfileCredential.of(1, DigestManager.generateMasterKey(value.getPassword()));
+        var transport = new ProfileBookieClient(base, ledger, credential, data, 1,
+                new ProfileBookieClient.Retry(1, java.time.Duration.ofSeconds(5), java.time.Duration.ofMillis(1)));
+        return new ProfileRecoveryReadHandle(new ProfileLedgerHandle.ProfileContext(base, transport),
+                ledger.ledgerId(), member.metadata(), false);
     }
 
     public static void requireCompatibleSdk(ClientContext base) {
@@ -212,6 +257,9 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
 
     /** Original recovery read aggregation; every missing source is fenced with this instance before its point read. */
     public CompletableFuture<Probe> probe(long entryId) {
+        if (!fencingReads) {
+            return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
+        }
         if (entryId < 0 || !active.compareAndSet(false, true)) {
             return CompletableFuture.failedFuture(BKException.create(entryId < 0 ? BKException.Code.IllegalOpException
                     : BKException.Code.TooManyRequestsException));
@@ -297,8 +345,8 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
                     int slot = i;
                     int member = writeSet.get(i);
                     BookieId bookie = ensemble.get(member);
-                    int flags = org.apache.bookkeeper.proto.BookieProtocol.FLAG_HIGH_PRIORITY
-                            | org.apache.bookkeeper.proto.BookieProtocol.FLAG_DO_FENCING;
+                    int flags = fencingReads ? org.apache.bookkeeper.proto.BookieProtocol.FLAG_HIGH_PRIORITY
+                            | org.apache.bookkeeper.proto.BookieProtocol.FLAG_DO_FENCING : 0;
                     try {
                         transport.readEntry(bookie, getId(), entryId,
                                 (code, ledger, entry, bytes, ignored) -> receive(slot, member, bookie, code, bytes),
@@ -364,7 +412,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
 
     /** Original SDK recovery packing of this handle's validated probe. Serialization performs no Add or activation. */
     public io.netty.util.ReferenceCounted packageRecoveryEntry(Probe probe) {
-        if (probe.owner != probeOwner || probe.outcome() != ProbeOutcome.CANDIDATE) {
+        if (!fencingReads || probe.owner != probeOwner || probe.outcome() != ProbeOutcome.CANDIDATE) {
             throw new IllegalArgumentException("Recovery packing requires this handle's candidate");
         }
         return getDigestManager().computeDigestAndPackageForSending(probe.entryId(), getLastAddConfirmed(),

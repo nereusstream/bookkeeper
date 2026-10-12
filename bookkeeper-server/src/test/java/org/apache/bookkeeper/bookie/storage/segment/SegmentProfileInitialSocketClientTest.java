@@ -8295,6 +8295,262 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static ProfileLedgerHandle prepareOpenReplicaAudit(Fixture fixture, BookKeeper sdk,
+            ZooKeeper reader, Map<BookieId, ProfileNormalDataClient> data) throws Exception {
+        fixture.helloReadinessGeneration = 1;
+        fixture.connectAll(Duration.ofSeconds(5));
+        var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+        for (int node = 0; node < 3; node++) {
+            data.put(fixture.identities.get(node).bookieId(), dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+        }
+        var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
+                1024, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+        try {
+            assertEquals(0, handle.addEntry(bytes(16, 8)));
+            assertEquals(1, handle.addEntry(bytes(16, 8)));
+            // Independently confirm the latest DATA source at all queried endpoints, beyond SDK A=2.
+            for (var peer : data.values()) {
+                evidenceEntry(fixture, peer, 1, 0, 32, 16);
+            }
+            for (int node = 0; node < 3; node++) {
+                registeredPeer(fixture, reader, node, "tls://127.0.0.1:"
+                        + ((InetSocketAddress) fixture.listeners.get(node).localAddress()).getPort(), 1,
+                        fixture.identities.get(node).incarnation().value());
+            }
+            return handle;
+        } catch (Exception | Error failure) {
+            handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            throw failure;
+        }
+    }
+
+    private static ProfileRecoveryCoordinator openAuditCoordinator(Fixture fixture) {
+        return new ProfileRecoveryCoordinator(fixture.reservations,
+                new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5)), fixture.cold);
+    }
+
+    @Test
+    public void openReplicaAuditKeepsFixedLacPrefixWhileWriterContinuesAndReturnsNoClosedProof() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture);
+                var reader = registrationReader(fixture)) {
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            var handle = prepareOpenReplicaAudit(fixture, sdk, reader, data);
+            try {
+                fixture.replyFault.set(21); // Actual anchor READ replies, after native I/O.
+                var attempt = openAuditCoordinator(fixture).beginVerifyOpenReplicas(44, sdk.getClientCtx(),
+                        fixture.credential, data, 8, Duration.ofSeconds(30));
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(3, fixture.heldReplies.size());
+                assertEquals(2, handle.addEntry(bytes(16, 8))); // An audit must not FENCE this writer.
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                var result = attempt.completion().get(10, TimeUnit.SECONDS);
+                assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.VERIFIED_OPEN_PREFIX, result.status());
+                assertEquals(0, result.openCut().prefixEntryId());
+                assertEquals(16, result.openCut().prefixLength());
+                assertNull(result.proof());
+                assertEquals(LedgerMetadata.State.OPEN,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                assertEquals(3, handle.addEntry(bytes(16, 8)));
+            } finally {
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    public void openReplicaAuditReportsCorruptSourceAndRejectsPermissionAndChangingMetadata() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture);
+                var reader = registrationReader(fixture)) {
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            var handle = prepareOpenReplicaAudit(fixture, sdk, reader, data);
+            try {
+                var coordinator = openAuditCoordinator(fixture);
+                fixture.replyFault.set(16); // One native READ payload corrupted in transit, valid scope/framing.
+                var corrupt = coordinator.beginVerifyOpenReplicas(44, sdk.getClientCtx(), fixture.credential,
+                        data, 8, Duration.ofSeconds(30)).completion().get(10, TimeUnit.SECONDS);
+                assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.UNDERREPLICATED, corrupt.status());
+                assertTrue(corrupt.sources().stream().anyMatch(source -> source.bookie().equals(
+                        fixture.identities.get(2).bookieId()) && source.outcome()
+                        == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.SourceOutcome.CORRUPT));
+                assertNull(corrupt.proof());
+                fixture.replyFault.set(0);
+                fixture.readAllowed.set(false);
+                assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.CONFLICT,
+                        coordinator.beginVerifyOpenReplicas(44, sdk.getClientCtx(), fixture.credential,
+                                data, 8, Duration.ofSeconds(30)).completion().get(10, TimeUnit.SECONDS).status());
+                fixture.readAllowed.set(true);
+                fixture.replyFault.set(21);
+                var changing = coordinator.beginVerifyOpenReplicas(44, sdk.getClientCtx(), fixture.credential,
+                        data, 8, Duration.ofSeconds(30));
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(3, fixture.heldReplies.size());
+                var before = fixture.manager.readLedgerMetadata(44).get();
+                var custom = new HashMap<>(before.getValue().getCustomMetadata());
+                custom.put("open-audit-change", bytes(1, 77));
+                fixture.manager.writeLedgerMetadata(44, LedgerMetadataBuilder.from(before.getValue())
+                        .withCustomMetadata(custom).build(), before.getVersion()).get(5, TimeUnit.SECONDS);
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.CONFLICT,
+                        changing.completion().get(10, TimeUnit.SECONDS).status());
+            } finally {
+                fixture.readAllowed.set(true);
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    public void openReplicaAuditPeriodicTaskMarksCorruptionAndKeepsWriterOpen() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture);
+                var reader = registrationReader(fixture)) {
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            var handle = prepareOpenReplicaAudit(fixture, sdk, reader, data);
+            var stats = new org.apache.bookkeeper.test.TestStatsProvider();
+            var main = replicaAuditMain(fixture, stats.getStatsLogger(""), Duration.ofSeconds(30));
+            try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                startOnlyProfileAuditor(main);
+                assertTrue(stats.getCounter("auditor.profile_open_prefix_audit_healthy").get() > 0);
+                assertNull(monitor.getLedgerUnreplicationInfo(44));
+                fixture.replyFault.set(16);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+                while (monitor.getLedgerUnreplicationInfo(44) == null && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+                assertTrue(monitor.getLedgerUnreplicationInfo(44).getReplicaList().contains("socket2:3181"));
+                assertEquals(LedgerMetadata.State.OPEN,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                assertEquals(2, handle.addEntry(bytes(16, 8)));
+                fixture.replyFault.set(0);
+                fixture.readAllowed.set(false);
+                until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while ((stats.getCounter("auditor.profile_data_audit_deferred") == null
+                        || stats.getCounter("auditor.profile_data_audit_deferred").get() == 0)
+                        && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertTrue(stats.getCounter("auditor.profile_data_audit_deferred").get() > 0);
+                assertNotNull(monitor.getLedgerUnreplicationInfo(44));
+            } finally {
+                fixture.readAllowed.set(true);
+                fixture.replyFault.set(0);
+                main.shutdown();
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    public void openReplicaAuditDistinguishesUnfencedUnknownFromDurablyFencedAbsence() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            var acks = new RoundRobinDistributionSchedule(3, 2, 3).getAckSet();
+            try {
+                for (int node = 0; node < 3; node++) {
+                    var peer = dataClient(fixture, node, 8, Duration.ofSeconds(5));
+                    data.put(fixture.identities.get(node).bookieId(), peer);
+                    if (node < 2) {
+                        evidenceEntry(fixture, peer, 0, -1, 16, 16);
+                        assertEquals(node == 1, acks.completeBookieAndCheck(node));
+                    }
+                }
+                for (int node = 0; node < 2; node++) {
+                    evidenceEntry(fixture, data.get(fixture.identities.get(node).bookieId()), 1, 0, 32, 16);
+                }
+                var coordinator = openAuditCoordinator(fixture);
+                var unknown = coordinator.beginVerifyOpenReplicas(44, sdk.getClientCtx(), fixture.credential,
+                        data, 8, Duration.ofSeconds(30)).completion().get(10, TimeUnit.SECONDS);
+                assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.DEFERRED, unknown.status());
+                assertTrue(unknown.sources().stream().anyMatch(source -> source.bookie().equals(
+                        fixture.identities.get(2).bookieId()) && source.outcome()
+                        == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.SourceOutcome.UNAVAILABLE));
+                assertFalse(unknown.sources().stream().anyMatch(source -> source.outcome()
+                        == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.SourceOutcome.MISSING));
+                fixture.clients.get("socket2:3181").fence(fixture.context(), bytes(16, 75), fixture.credential)
+                        .get(5, TimeUnit.SECONDS);
+                var stable = coordinator.beginVerifyOpenReplicas(44, sdk.getClientCtx(), fixture.credential,
+                        data, 8, Duration.ofSeconds(30)).completion().get(10, TimeUnit.SECONDS);
+                assertEquals(ProfileRecoveryCoordinator.ReplicaHealthStatus.UNDERREPLICATED, stable.status());
+                assertTrue(stable.sources().stream().anyMatch(source -> source.bookie().equals(
+                        fixture.identities.get(2).bookieId()) && source.outcome()
+                        == org.apache.bookkeeper.client.ProfileRecoveryReadHandle.SourceOutcome.MISSING));
+                assertNull(stable.proof());
+                assertEquals(LedgerMetadata.State.OPEN,
+                        fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+            } finally {
+                acks.recycle();
+            }
+        }
+    }
+
+    @Test
+    public void openReplicaAuditDeadlineAndShutdownWaitForActualAnchorAndLeaseDrain() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture);
+                var reader = registrationReader(fixture)) {
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            var handle = prepareOpenReplicaAudit(fixture, sdk, reader, data);
+            var main = replicaAuditMain(fixture, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE,
+                    Duration.ofMillis(200));
+            var clientField = main.getClass().getDeclaredField("bkc");
+            clientField.setAccessible(true);
+            var ownedSdk = (BookKeeper) clientField.get(main);
+            var ownedZk = ((org.apache.bookkeeper.meta.zk.ZKMetadataClientDriver)
+                    ownedSdk.getMetadataClientDriver()).getZk();
+            var stopper = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try (var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                fixture.replyFault.set(21);
+                var electorField = main.getClass().getDeclaredField("auditorElector");
+                electorField.setAccessible(true);
+                ((org.apache.bookkeeper.replication.AuditorElector) electorField.get(main)).start()
+                        .get(5, TimeUnit.SECONDS);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(3, fixture.heldReplies.size());
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(250));
+                assertEquals(6, main.getProfilePeerUsage().reservedConnections());
+                var stopping = stopper.submit(() -> {
+                    Thread.currentThread().interrupt();
+                    main.shutdown();
+                    return Thread.currentThread().isInterrupted();
+                });
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                assertFalse(ownedSdk.getClientCtx().isClientClosed());
+                assertEquals(ZooKeeper.States.CONNECTED, ownedZk.getState());
+                assertNull(monitor.getLedgerUnreplicationInfo(44));
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                assertTrue(stopping.get(10, TimeUnit.SECONDS));
+                assertEquals(ZooKeeper.States.CLOSED, ownedZk.getState());
+                assertEquals(0, main.getProfilePeerUsage().reservedConnections());
+                assertNull(monitor.getLedgerUnreplicationInfo(44));
+            } finally {
+                fixture.replyFault.set(0);
+                fixture.heldReplies.forEach(Runnable::run);
+                main.shutdown();
+                stopper.shutdownNow();
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     private static void prepareHealthyReplicaAudit(Fixture fixture, BookKeeper sdk,
             org.apache.zookeeper.ZooKeeper reader) throws Exception {
         fixture.helloReadinessGeneration = 1;

@@ -72,6 +72,16 @@ MATRIX = {
     'ce-profile-writer-close-kind': 'AdoptionNeedsSupportedKind',
 
     'a-profile-replica-audit': None,
+    'a-open-replica-audit': None,
+    'ce-open-replica-audit-scope': 'OpenAuditHasScopeAndKnownCut',
+    'ce-open-replica-audit-cut': 'OpenAuditHasScopeAndKnownCut',
+    'ce-open-replica-audit-tail': 'OpenAuditNeverScansGrowingTail',
+    'ce-open-replica-audit-fence': 'OpenAuditNeverFencesWriter',
+    'ce-open-replica-audit-unknown': 'OpenAuditMarkerHasActualSource',
+    'ce-open-replica-audit-fresh': 'OpenAuditMarkerUsesFinalFresh',
+    'ce-open-replica-audit-clear': 'OpenAuditNeverClearsMarker',
+    'ce-open-replica-audit-health': 'OpenAuditWaitsActualHealth',
+    'ce-open-replica-audit-lease': 'OpenAuditWaitsActualLease',
     'ce-profile-replica-audit-open': 'AuditOnlyClosed',
     'ce-profile-replica-audit-scope': 'AuditOnlyScoped',
     'ce-profile-replica-audit-unknown': 'UnknownNeverSchedulesMissing',
@@ -833,6 +843,7 @@ def main():
                    else "ProfileRecoveryPeerPool.tla" if "profile-recovery-peer-pool" in name
                    else "ProfileServiceBootstrap.tla" if "profile-service-bootstrap" in name
                    else "ProfileMembershipAudit.tla" if "profile-membership-audit" in name
+                   else "ProfileOpenReplicaAudit.tla" if "open-replica-audit" in name
                    else "ProfileReplicaAudit.tla" if "profile-replica-audit" in name
                    else "ProfileWholeRecovery.tla" if "profile-whole-recovery" in name
                    else "ProfileReadonlyOpen.tla" if "profile-readonly" in name

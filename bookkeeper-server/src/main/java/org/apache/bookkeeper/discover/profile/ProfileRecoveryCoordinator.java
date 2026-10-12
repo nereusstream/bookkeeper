@@ -1591,7 +1591,7 @@ public final class ProfileRecoveryCoordinator {
     }
 
     public enum ReplicaHealthStatus {
-        FULLY_REPLICATED, UNDERREPLICATED, DEFERRED, CONFLICT, QUARANTINED, DELETED
+        FULLY_REPLICATED, VERIFIED_OPEN_PREFIX, UNDERREPLICATED, DEFERRED, CONFLICT, QUARANTINED, DELETED
     }
 
     /** Produced only after all required write-set copies and the final cold metadata recheck succeed.
@@ -1619,13 +1619,23 @@ public final class ProfileRecoveryCoordinator {
     }
 
     public record ReplicaHealthResult(ReplicaHealthStatus status, PrefixReason reason, long unresolvedEntry,
-            List<ProfileRecoveryReadHandle.SourceEvidence> sources, ReplicaHealthProof proof) {
+            List<ProfileRecoveryReadHandle.SourceEvidence> sources, ReplicaHealthProof proof,
+            org.apache.bookkeeper.client.ProfileLedgerHandle.LacEvidence openCut) {
+        public ReplicaHealthResult(ReplicaHealthStatus status, PrefixReason reason, long unresolvedEntry,
+                List<ProfileRecoveryReadHandle.SourceEvidence> sources, ReplicaHealthProof proof) {
+            this(status, reason, unresolvedEntry, sources, proof, null);
+        }
+
         public ReplicaHealthResult {
             Objects.requireNonNull(status, "status");
             Objects.requireNonNull(reason, "reason");
             sources = List.copyOf(sources);
             if ((status == ReplicaHealthStatus.FULLY_REPLICATED) != (proof != null)) {
                 throw new IllegalArgumentException("Only a complete replica health observation carries its proof");
+            }
+            if (proof != null && openCut != null
+                    || status == ReplicaHealthStatus.VERIFIED_OPEN_PREFIX && openCut == null) {
+                throw new IllegalArgumentException("OPEN prefix observations cannot carry CLOSED health proof");
             }
         }
     }
@@ -1677,6 +1687,22 @@ public final class ProfileRecoveryCoordinator {
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration,
             org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker) {
+        return beginVerifyReplicas(ledger, sdk, credential, suppliedData, suppliedControl, maxCoordinates,
+                maxDuration, worker, false);
+    }
+
+    /** Observe only the original SDK LAC-derived lower prefix of OPEN, without FENCE or marker-clear proof. */
+    public ReplicaHealthAttempt beginVerifyOpenReplicas(long ledger, ClientContext sdk,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            int maxCoordinates, Duration maxDuration) {
+        return beginVerifyReplicas(ledger, sdk, credential, suppliedData, Map.of(), maxCoordinates,
+                maxDuration, null, true);
+    }
+
+    private ReplicaHealthAttempt beginVerifyReplicas(long ledger, ClientContext sdk,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration,
+            org.apache.bookkeeper.meta.ZkLedgerUnderreplicationManager worker, boolean open) {
         long duration = maxDuration.toNanos();
         if (ledger < 0 || maxCoordinates < 1 || suppliedData.size() > 64 || suppliedControl.size() > 64
                 || duration <= 0 || maxDuration.compareTo(Duration.ofMinutes(1)) > 0) {
@@ -1705,7 +1731,18 @@ public final class ProfileRecoveryCoordinator {
                 return finishedHealth(CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
                         PrefixReason.AUTHORITY_CHANGED)));
             }
-            var actual = CompletableFuture.supplyAsync(() -> reservations.readClosedForOpen(metadata, ledger), cold)
+            CompletableFuture<ReplicaHealthResult> actual;
+            if (open) {
+                actual = CompletableFuture.supplyAsync(() -> captureOpenSnapshot(ledger), cold)
+                        .thenCompose(snapshot -> {
+                    if (snapshot == null) {
+                        return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED,
+                                PrefixReason.AUTHORITY_UNAVAILABLE));
+                    }
+                    return verifyOpenReplicasOnce(snapshot, sdk, key, data, maxCoordinates, stopped);
+                });
+            } else {
+                actual = CompletableFuture.supplyAsync(() -> reservations.readClosedForOpen(metadata, ledger), cold)
                     .thenCompose(read -> {
                 if (read.snapshot() == null) {
                     return CompletableFuture.completedFuture(replicaReadFailure(read.status()));
@@ -1713,6 +1750,7 @@ public final class ProfileRecoveryCoordinator {
                 return verifyClosedReplicasOnce(read.snapshot(), sdk, key, data, controls, maxCoordinates,
                         stopped, deadline, task);
             });
+            }
             var timer = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>();
             actual.whenComplete((result, failure) -> {
                 var scheduled = timer.get();
@@ -1751,6 +1789,106 @@ public final class ProfileRecoveryCoordinator {
             active.release();
             throw failedAdmission;
         }
+    }
+
+    private record OpenSnapshot(ProfileLedgerMetadataStore.MembershipSnapshot member,
+            ZKProfileReservationStore.Snapshot root, List<ProfileInstallReceipt> sources,
+            org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext ledger) { }
+
+    private OpenSnapshot captureOpenSnapshot(long ledger) {
+        var member = metadata.readMembership(ledger).snapshot();
+        var root = reservations.read(ledger).snapshot();
+        var retained = reservations.retainedActivationTargets(ledger);
+        var page = reservations.readPublishedPage(ledger).page();
+        if (member == null || root == null || page == null
+                || member.metadata().getValue().getState() != org.apache.bookkeeper.client.api.LedgerMetadata.State.OPEN
+                || root.lifecycle().state() != ProfileLifecycleHead.State.READY
+                || retained.status()
+                    != org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND
+                || !root.reservation().backlink().equals(ProfileMetadataBacklink.from(member.metadata().getValue()))
+                || page.page().creatorToken() != member.metadata().getValue().getCToken()
+                || !page.page().matchesQuorum(member.metadata().getValue())) {
+            return null;
+        }
+        var scope = root.reservation().installs().get(0);
+        var current = new java.util.HashMap<String, byte[]>();
+        for (var receipt : retained.targets()) {
+            String name = receipt.scope().targetBookie();
+            byte[] incarnation = receipt.scope().targetStorageIncarnation();
+            byte[] old = current.putIfAbsent(name, incarnation);
+            if (old != null && !Arrays.equals(old, incarnation)) {
+                return null;
+            }
+        }
+        return new OpenSnapshot(member, root, retained.targets(),
+                new org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext(ledger,
+                        scope.ledgerInstanceId(), scope.descriptorIdentity().toBytes()));
+    }
+
+    private static boolean sameOpenSnapshot(OpenSnapshot before, OpenSnapshot after) {
+        return after != null && before.member().birthZxid() == after.member().birthZxid()
+                && before.member().metadata().getVersion().equals(after.member().metadata().getVersion())
+                && ProfileLedgerMetadataStore.sameMetadata(before.member().metadata().getValue(),
+                        after.member().metadata().getValue())
+                && before.root().equals(after.root()) && before.sources().equals(after.sources());
+    }
+
+    private CompletableFuture<ReplicaHealthResult> verifyOpenReplicasOnce(OpenSnapshot snapshot, ClientContext sdk,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> data, int maxCoordinates,
+            AtomicBoolean stopped) {
+        ProfileRecoveryReadHandle reader;
+        try {
+            if (!credential.matchesWireVerifier(org.apache.bookkeeper.proto.checksum.DigestManager.generateMasterKey(
+                    snapshot.member().metadata().getValue().getPassword()))) {
+                return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
+                        PrefixReason.PERMISSION));
+            }
+            var permitted = new java.util.HashMap<BookieId, ProfileNormalDataClient>();
+            for (var receipt : snapshot.sources()) {
+                var name = BookieId.parse(receipt.scope().targetBookie());
+                if (data.containsKey(name)) {
+                    permitted.put(name, data.get(name));
+                }
+            }
+            reader = ProfileRecoveryReadHandle.fromOpenAudit(sdk, snapshot.member(), snapshot.ledger(),
+                    snapshot.sources(), permitted);
+        } catch (java.security.GeneralSecurityException failure) {
+            return CompletableFuture.failedFuture(failure);
+        } catch (IllegalArgumentException unsupported) {
+            return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
+                    PrefixReason.AUTHORITY_CHANGED));
+        }
+        return reader.readLacEvidence().thenCompose(cut -> {
+            if (stopped.get() || cut.prefixEntryId() >= maxCoordinates) {
+                return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED,
+                        stopped.get() ? PrefixReason.CANCELLED : PrefixReason.LIMIT));
+            }
+            var scan = new ReplicaScan(reader, cut.prefixEntryId(), cut.prefixLength(), stopped);
+            scan.step();
+            return scan.done.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
+                if (stopped.get()) {
+                    return replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.CANCELLED);
+                }
+                if (!sameOpenSnapshot(snapshot, captureOpenSnapshot(snapshot.ledger().ledgerId()))) {
+                    return replicaFailure(ReplicaHealthStatus.CONFLICT, PrefixReason.AUTHORITY_CHANGED);
+                }
+                return new ReplicaHealthResult(result.status() == ReplicaHealthStatus.FULLY_REPLICATED
+                        ? ReplicaHealthStatus.VERIFIED_OPEN_PREFIX : result.status(), result.reason(),
+                        result.unresolvedEntry(), result.sources(), null, cut);
+            }, cold));
+        }).handle((result, failure) -> {
+            if (failure == null) {
+                return result;
+            }
+            var actual = cause(failure);
+            if (actual instanceof BKException exception) {
+                return replicaFailure(exception.getCode() == BKException.Code.UnauthorizedAccessException
+                        ? ReplicaHealthStatus.CONFLICT : ReplicaHealthStatus.DEFERRED,
+                        exception.getCode() == BKException.Code.UnauthorizedAccessException
+                            ? PrefixReason.PERMISSION : PrefixReason.LAC_UNAVAILABLE);
+            }
+            throw new java.util.concurrent.CompletionException(actual);
+        }).whenComplete((result, failure) -> reader.closeAsync());
     }
 
     private CompletableFuture<ReplicaHealthResult> verifyClosedReplicasOnce(
@@ -1938,7 +2076,8 @@ public final class ProfileRecoveryCoordinator {
 
     private static final class ReplicaScan {
         private final ProfileRecoveryReadHandle reader;
-        private final ZKProfileReservationStore.ReadOnlySnapshot snapshot;
+        private final long prefix;
+        private final long finalLength;
         private final AtomicBoolean stopped;
         private final CompletableFuture<ReplicaScanResult> done = new CompletableFuture<>();
         private long next;
@@ -1946,18 +2085,23 @@ public final class ProfileRecoveryCoordinator {
 
         ReplicaScan(ProfileRecoveryReadHandle reader, ZKProfileReservationStore.ReadOnlySnapshot snapshot,
                 AtomicBoolean stopped) {
+            this(reader, snapshot.closed().metadata().metadata().getValue().getLastEntryId(),
+                    snapshot.closed().metadata().metadata().getValue().getLength(), stopped);
+        }
+
+        ReplicaScan(ProfileRecoveryReadHandle reader, long prefix, long finalLength, AtomicBoolean stopped) {
             this.reader = reader;
-            this.snapshot = snapshot;
+            this.prefix = prefix;
+            this.finalLength = finalLength;
             this.stopped = stopped;
         }
 
         void step() {
-            var value = snapshot.closed().metadata().metadata().getValue();
             if (stopped.get()) {
                 done.complete(new ReplicaScanResult(ReplicaHealthStatus.DEFERRED,
                         PrefixReason.CANCELLED, next, List.of()));
-            } else if (next > value.getLastEntryId()) {
-                done.complete(length == value.getLength()
+            } else if (next > prefix) {
+                done.complete(length == finalLength
                         ? new ReplicaScanResult(ReplicaHealthStatus.FULLY_REPLICATED,
                                 PrefixReason.NORMAL_TAIL, -1, List.of())
                         : new ReplicaScanResult(ReplicaHealthStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT,
