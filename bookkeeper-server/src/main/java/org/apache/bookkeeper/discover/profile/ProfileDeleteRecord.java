@@ -268,6 +268,7 @@ public final class ProfileDeleteRecord {
         var custom = new java.util.TreeMap<>(value.getCustomMetadata());
         custom.remove(SEAL_KEY);
         custom.remove(TOMBSTONE_KEY);
+        custom.remove(ProfileDeleteRetention.KEY);
         return LedgerMetadataBuilder.from(value).withCToken(value.getCToken()).withCustomMetadata(custom).build();
     }
 

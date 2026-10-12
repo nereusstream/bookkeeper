@@ -463,6 +463,7 @@ public final class ProfileLedgerMetadataStore {
                 || ((LongVersion) expected.metadata().getVersion()).getLongVersion() != seal.beforeVersion()
                 || value.getCustomMetadata().containsKey(MEMBERSHIP_FROZEN_KEY)
                 || value.getCustomMetadata().containsKey(ProfileDeleteRecord.TOMBSTONE_KEY)
+                || value.getCustomMetadata().containsKey(ProfileDeleteRetention.KEY)
                 || !Arrays.equals(ProfileDeleteRecord.closedDigest(value), seal.closedDigest())) {
             throw new IllegalArgumentException("Deletion seal requires its exact matching CLOSED predecessor");
         }
@@ -473,18 +474,46 @@ public final class ProfileLedgerMetadataStore {
     }
 
     Op deleteTombstoneWrite(MembershipSnapshot expected, ProfileDeleteRecord.Reference reference) throws IOException {
+        return deleteTombstoneWrite(expected, reference, null);
+    }
+
+    Op deleteTombstoneWrite(MembershipSnapshot expected, ProfileDeleteRecord.Reference reference,
+            ProfileDeleteRetention.Receipt retention) throws IOException {
         var value = expected.metadata().getValue();
         var seal = ProfileDeleteRecord.Seal.decode(value.getCustomMetadata().get(MEMBERSHIP_FROZEN_KEY));
         if (value.getState() != LedgerMetadata.State.CLOSED || expected.birthZxid() != seal.metadataBirth()
                 || ((LongVersion) expected.metadata().getVersion()).getLongVersion() != seal.beforeVersion() + 1L
                 || value.getCustomMetadata().containsKey(ProfileDeleteRecord.TOMBSTONE_KEY)
+                || value.getCustomMetadata().containsKey(ProfileDeleteRetention.KEY)
                 || !Arrays.equals(ProfileRepairIntent.digest(seal.encode()), reference.sealDigest())) {
             throw new IllegalArgumentException("Cluster tombstone requires its sealed metadata and manifest");
         }
         var custom = new java.util.TreeMap<>(value.getCustomMetadata());
         custom.put(ProfileDeleteRecord.TOMBSTONE_KEY, reference.encode());
+        if (retention != null) {
+            if (!retention.matches(reference)) {
+                throw new IllegalArgumentException("Retention receipt belongs to another deletion");
+            }
+            custom.put(ProfileDeleteRetention.KEY, retention.encode());
+        }
         return recoveryMetadataWrite(expected, LedgerMetadataBuilder.from(value).withCToken(value.getCToken())
                 .withCustomMetadata(custom).build(), true);
+    }
+
+    long deleteTombstoneCommit(MembershipSnapshot expected, long deadline)
+            throws InterruptedException, TimeoutException, IOException {
+        String name = ((AbstractZkLedgerManager) manager).getLedgerPath(expected.metadata().getValue().getLedgerId());
+        var node = mutationReads.get(name, deadline);
+        if (node.code() != Code.OK.intValue()) {
+            throw new IllegalStateException("Delete retention metadata unavailable");
+        }
+        if (node.stat().getEphemeralOwner() != 0 || node.stat().getCzxid() != expected.birthZxid()
+                || node.stat().getVersion() != ((LongVersion) expected.metadata().getVersion()).getLongVersion()
+                || !sameMetadata(expected.metadata().getValue(), new LedgerMetadataSerDe().parseConfig(node.bytes(),
+                        expected.metadata().getValue().getLedgerId(), Optional.of(node.stat().getCtime())))) {
+            throw new IllegalArgumentException("Delete retention metadata changed or was recreated");
+        }
+        return node.stat().getMzxid();
     }
 
     Op closedMetadataWrite(MembershipSnapshot expected, ProfileRecoveryBoundary boundary) throws IOException {

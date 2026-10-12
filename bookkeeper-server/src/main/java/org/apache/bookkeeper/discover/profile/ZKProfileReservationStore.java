@@ -923,7 +923,7 @@ public final class ZKProfileReservationStore {
                 return new ClosedRecoveryResult(ProfileLedgerMetadataStore.Outcome.CONFLICT, null, null);
             }
             var projection = recoveryRepairProjection(context,
-                    deleteProjection(root.snapshot(), member.snapshot(), deadline), deadline);
+                    deleteProjection(metadata, root.snapshot(), member.snapshot(), deadline), deadline);
             var predecessor = new ProfileLedgerMetadataStore.MembershipSnapshot(context.metadataBirth(),
                     new org.apache.bookkeeper.versioning.Versioned<>(ProfileRecoveryContext.predecessorProjection(
                             projection.metadata().getValue()),
@@ -2408,6 +2408,174 @@ public final class ZKProfileReservationStore {
         return path(ledger) + "/delete-targets";
     }
 
+    private String deleteRetentionPolicyPath() {
+        return root + "/delete-retention-policy";
+    }
+
+    private String deleteRetentionRevisionPath(long generation) {
+        return deleteRetentionPolicyPath() + "/revision-" + generation;
+    }
+
+    private static byte[] retentionGuard(UUID birth, byte[] body) {
+        return java.nio.ByteBuffer.allocate(48).putLong(birth.getMostSignificantBits())
+                .putLong(birth.getLeastSignificantBits()).put(ProfileRepairIntent.digest(body)).array();
+    }
+
+    private ProfileZKReadClient.Node retentionRevision(ProfileDeleteRetention.Policy policy, long deadline)
+            throws InterruptedException, TimeoutException {
+        String name = deleteRetentionRevisionPath(policy.generation());
+        var node = reads.get(name, deadline);
+        requireFound(node);
+        requirePersistent(node, true);
+        var guard = reads.get(name + "/birth-" + policy.revision(), deadline);
+        requireFound(guard);
+        requirePersistent(guard, true);
+        if (!Arrays.equals(node.bytes(), policy.encode()) || guard.stat().getCzxid() != node.stat().getCzxid()
+                || !Arrays.equals(guard.bytes(), retentionGuard(policy.revision(), node.bytes()))) {
+            throw new IllegalArgumentException("Delete retention policy revision is missing, recreated or corrupt");
+        }
+        return node;
+    }
+
+    private record RetentionPolicySnapshot(ProfileDeleteRetention.Policy value, ProfileZKReadClient.Node current,
+            ProfileZKReadClient.Node revision) { }
+
+    private RetentionPolicySnapshot retentionPolicy(long deadline) throws InterruptedException, TimeoutException {
+        var current = reads.get(deleteRetentionPolicyPath(), deadline);
+        if (current.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(current);
+        requirePersistent(current, false);
+        var value = ProfileDeleteRetention.Policy.decode(current.bytes());
+        var revision = retentionRevision(value, deadline);
+        var first = reads.get(deleteRetentionRevisionPath(1), deadline);
+        requireFound(first);
+        requirePersistent(first, true);
+        if (current.stat().getVersion() != value.generation() - 1
+                || current.stat().getMzxid() != revision.stat().getCzxid()
+                || current.stat().getCzxid() != first.stat().getCzxid()) {
+            throw new IllegalArgumentException("Delete retention policy pointer has no original native commit");
+        }
+        return new RetentionPolicySnapshot(value, current, revision);
+    }
+
+    /** Explicit bounded cold cluster-policy CAS. Old immutable revisions remain required by their delete receipts. */
+    public CreateStatus publishDeleteRetentionPolicy(ProfileDeleteRetention.Policy desired) {
+        Objects.requireNonNull(desired, "desired");
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var before = retentionPolicy(deadline);
+            if (before != null && before.value().equals(desired)) {
+                return CreateStatus.ALREADY_APPLIED;
+            }
+            if (desired.generation() != (before == null ? 1 : before.value().generation() + 1)) {
+                return CreateStatus.CONFLICT;
+            }
+            String name = deleteRetentionPolicyPath();
+            String revision = deleteRetentionRevisionPath(desired.generation());
+            var operations = new ArrayList<Op>();
+            if (before == null) {
+                operations.add(Op.create(name, desired.encode(), acls, CreateMode.PERSISTENT));
+            } else {
+                operations.addAll(retentionPolicyChecks(before));
+                operations.add(Op.setData(name, desired.encode(), before.current().stat().getVersion()));
+            }
+            operations.add(Op.create(revision, desired.encode(), pageAcls, CreateMode.PERSISTENT));
+            operations.add(Op.create(revision + "/birth-" + desired.revision(),
+                    retentionGuard(desired.revision(), desired.encode()), immutableAcls, CreateMode.PERSISTENT));
+            int code = multi(operations, deadline);
+            var after = retentionPolicy(deadline);
+            if (after != null && after.value().equals(desired)) {
+                return CreateStatus.APPLIED;
+            }
+            return code == Code.BADVERSION.intValue() || code == Code.NODEEXISTS.intValue()
+                    ? CreateStatus.CONFLICT : CreateStatus.DURABILITY_UNKNOWN;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return CreateStatus.UNAVAILABLE;
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return CreateStatus.UNAVAILABLE;
+        } catch (IllegalArgumentException invalid) {
+            return CreateStatus.QUARANTINED;
+        }
+    }
+
+    private List<Op> retentionPolicyChecks(RetentionPolicySnapshot policy) {
+        String revision = deleteRetentionRevisionPath(policy.value().generation());
+        return List.of(Op.check(deleteRetentionPolicyPath(), policy.current().stat().getVersion()),
+                Op.check(revision, 0), Op.check(revision + "/birth-" + policy.value().revision(), 0));
+    }
+
+    public enum RetentionStatus { BOUND, PROTECTED_WITHOUT_POLICY, QUARANTINED, UNAVAILABLE }
+
+    public record RetentionResult(RetentionStatus status, ProfileDeleteRetention.Receipt receipt,
+            long nativeCreatedAtMillis) {
+        public RetentionResult {
+            if ((status == RetentionStatus.BOUND) != (receipt != null)
+                    || nativeCreatedAtMillis < 0 || receipt == null && nativeCreatedAtMillis != 0) {
+                throw new IllegalArgumentException("Only a verified native delete receipt carries retention windows");
+            }
+        }
+    }
+
+    private RetentionResult retentionReceipt(ProfileLedgerMetadataStore metadata,
+            ProfileLedgerMetadataStore.MembershipSnapshot member, ProfileDeleteRecord.Reference reference,
+            long deadline) throws InterruptedException, TimeoutException, IOException {
+        String name = deleteManifestPath(member.metadata().getValue().getLedgerId()) + "/retention";
+        byte[] bytes = member.metadata().getValue().getCustomMetadata().get(ProfileDeleteRetention.KEY);
+        var node = reads.get(name, deadline);
+        if (bytes == null && node.code() == Code.NONODE.intValue()) {
+            return new RetentionResult(RetentionStatus.PROTECTED_WITHOUT_POLICY, null, 0);
+        }
+        requireFound(node);
+        requirePersistent(node, true);
+        var value = ProfileDeleteRetention.Receipt.decode(bytes);
+        var guard = reads.get(name + "/birth-" + value.birthId(), deadline);
+        requireFound(guard);
+        requirePersistent(guard, true);
+        var policy = retentionRevision(value.policy(), deadline);
+        if (!value.matches(reference) || !Arrays.equals(bytes, node.bytes())
+                || node.stat().getCzxid() != metadata.deleteTombstoneCommit(member, deadline)
+                || guard.stat().getCzxid() != node.stat().getCzxid()
+                || !Arrays.equals(guard.bytes(), retentionGuard(value.birthId(), bytes))
+                || policy.stat().getCzxid() != value.policyBirth() || node.stat().getCtime() < 0) {
+            throw new IllegalArgumentException("Delete retention receipt has no original tombstone/policy commit");
+        }
+        return new RetentionResult(RetentionStatus.BOUND, value, node.stat().getCtime());
+    }
+
+    /** Read-only policy binding, with no elapsed-window, backup acceptance, decommission or GC conclusion. */
+    public RetentionResult readDeleteRetention(ProfileLedgerMetadataStore metadata, long ledger, byte[] requestId) {
+        requireRecoveryClient(metadata);
+        var logical = readLogicalDeletion(metadata, ledger, requestId);
+        if (logical.status() != DeleteStatus.LOGICALLY_DELETED) {
+            return new RetentionResult(logical.status() == DeleteStatus.UNAVAILABLE
+                    ? RetentionStatus.UNAVAILABLE : RetentionStatus.QUARANTINED, null, 0);
+        }
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var member = metadata.readMembership(ledger, deadline);
+            if (member.snapshot() == null) {
+                return new RetentionResult(member.status() == ReadStatus.UNAVAILABLE
+                        ? RetentionStatus.UNAVAILABLE : RetentionStatus.QUARANTINED, null, 0);
+            }
+            var reference = ProfileDeleteRecord.Reference.decode(member.snapshot().metadata().getValue()
+                    .getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY));
+            if (!Arrays.equals(reference.digest(), ProfileRepairIntent.digest(logical.manifest().encode()))) {
+                return new RetentionResult(RetentionStatus.QUARANTINED, null, 0);
+            }
+            return retentionReceipt(metadata, member.snapshot(), reference, deadline);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new RetentionResult(RetentionStatus.UNAVAILABLE, null, 0);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new RetentionResult(RetentionStatus.UNAVAILABLE, null, 0);
+        } catch (IOException | IllegalArgumentException invalid) {
+            return new RetentionResult(RetentionStatus.QUARANTINED, null, 0);
+        }
+    }
+
     private ProfileDeleteRecord.Manifest deleteManifest(long ledger, ProfileDeleteRecord.Reference reference,
             ProfileDeleteRecord.Seal seal, long deadline) throws InterruptedException, TimeoutException {
         String name = deleteManifestPath(ledger);
@@ -2429,12 +2597,16 @@ public final class ZKProfileReservationStore {
         return manifest;
     }
 
-    private ProfileLedgerMetadataStore.MembershipSnapshot deleteProjection(Snapshot root,
+    private ProfileLedgerMetadataStore.MembershipSnapshot deleteProjection(ProfileLedgerMetadataStore metadata,
+            Snapshot root,
             ProfileLedgerMetadataStore.MembershipSnapshot current, long deadline)
             throws InterruptedException, TimeoutException, java.io.IOException {
         var value = current.metadata().getValue();
         byte[] bytes = value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY);
         byte[] logical = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
+        if (logical == null && value.getCustomMetadata().containsKey(ProfileDeleteRetention.KEY)) {
+            throw new IllegalArgumentException("Delete retention cannot precede its logical tombstone");
+        }
         if (bytes == null) {
             if (logical != null) {
                 throw new IllegalArgumentException("Cluster tombstone has no membership seal");
@@ -2456,6 +2628,7 @@ public final class ZKProfileReservationStore {
             if (!manifest.ledger().equals(context.ledger())) {
                 throw new IllegalArgumentException("Deletion manifest belongs to a different ledger instance");
             }
+            retentionReceipt(metadata, current, ProfileDeleteRecord.Reference.decode(logical), deadline);
         }
         return new ProfileLedgerMetadataStore.MembershipSnapshot(current.birthZxid(),
                 new org.apache.bookkeeper.versioning.Versioned<>(ProfileDeleteRecord.strip(value),
@@ -2662,7 +2835,7 @@ public final class ZKProfileReservationStore {
             if (actual.snapshot() == null) {
                 return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
             }
-            deleteProjection(root, actual.snapshot(), deadline);
+            deleteProjection(metadata, root, actual.snapshot(), deadline);
             value = actual.snapshot().metadata().getValue();
             if (!Arrays.equals(value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY), seal.encode())) {
                 return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
@@ -2749,13 +2922,25 @@ public final class ZKProfileReservationStore {
             checks.add(Op.check(published.guard(), 0));
             checks.add(Op.check(name + "/delivery-prepared", manifest.targets().size()));
             reference = published.value().reference();
-            checks.add(metadata.deleteTombstoneWrite(actual.snapshot(), reference));
+            var retention = retentionPolicy(deadline);
+            ProfileDeleteRetention.Receipt retentionReceipt = null;
+            if (retention != null) {
+                retentionReceipt = new ProfileDeleteRetention.Receipt(UUID.randomUUID(), retention.value(),
+                        retention.revision().stat().getCzxid(), reference);
+                checks.addAll(retentionPolicyChecks(retention));
+                String receiptPath = name + "/retention";
+                checks.add(Op.create(receiptPath, retentionReceipt.encode(), pageAcls, CreateMode.PERSISTENT));
+                checks.add(Op.create(receiptPath + "/birth-" + retentionReceipt.birthId(),
+                        retentionGuard(retentionReceipt.birthId(), retentionReceipt.encode()),
+                        immutableAcls, CreateMode.PERSISTENT));
+            }
+            checks.add(metadata.deleteTombstoneWrite(actual.snapshot(), reference, retentionReceipt));
             multi(checks, deadline);
             var done = metadata.readMembership(ledger, deadline);
             if (done.snapshot() == null) {
                 return new DeleteResult(DeleteStatus.UNAVAILABLE, null);
             }
-            deleteProjection(root, done.snapshot(), deadline);
+            deleteProjection(metadata, root, done.snapshot(), deadline);
             var latest = read(ledger, deadline);
             if (latest.snapshot() == null || !latest.snapshot().equals(root)) {
                 return new DeleteResult(latest.status() == ReadStatus.UNAVAILABLE ? DeleteStatus.UNAVAILABLE
@@ -3974,7 +4159,7 @@ public final class ZKProfileReservationStore {
                     || !Arrays.equals(state.lifecycle().operationId(), request)) {
                 return new DeleteResult(DeleteStatus.PRECONDITION_FAILED, null);
             }
-            deleteProjection(state, member.snapshot(), deadline);
+            deleteProjection(metadata, state, member.snapshot(), deadline);
             var reference = ProfileDeleteRecord.Reference.decode(logical);
             var seal = ProfileDeleteRecord.Seal.decode(value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY));
             var manifest = deleteManifest(ledger, reference, seal, deadline);
@@ -4047,7 +4232,7 @@ public final class ZKProfileReservationStore {
                     || !value.getCustomMetadata().containsKey(ProfileDeleteRecord.TOMBSTONE_KEY)) {
                 return new DeliveryResult(DeliveryStatus.NOT_LOGICALLY_DELETED, null);
             }
-            deleteProjection(state, member.snapshot(), deadline);
+            deleteProjection(metadata, state, member.snapshot(), deadline);
             var reference = ProfileDeleteRecord.Reference.decode(value.getCustomMetadata()
                     .get(ProfileDeleteRecord.TOMBSTONE_KEY));
             var seal = ProfileDeleteRecord.Seal.decode(value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY));
@@ -4215,7 +4400,7 @@ public final class ZKProfileReservationStore {
             if (state.snapshot() == null || member.snapshot() == null) {
                 return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);
             }
-            deleteProjection(state.snapshot(), member.snapshot(), deadline);
+            deleteProjection(metadata, state.snapshot(), member.snapshot(), deadline);
             var value = member.snapshot().metadata().getValue();
             byte[] reference = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
             var seal = ProfileDeleteRecord.Seal.decode(value.getCustomMetadata().get(ProfileDeleteRecord.SEAL_KEY));
@@ -4337,7 +4522,7 @@ public final class ZKProfileReservationStore {
                             ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
             }
             var state = rootRead.snapshot();
-            deleteProjection(state, member.snapshot(), deadline);
+            deleteProjection(metadata, state, member.snapshot(), deadline);
             var value = member.snapshot().metadata().getValue();
             byte[] referenceBytes = value.getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY);
             var reference = ProfileDeleteRecord.Reference.decode(referenceBytes);

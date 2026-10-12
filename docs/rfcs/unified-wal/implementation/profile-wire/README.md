@@ -1706,3 +1706,24 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 ```
 
 原46/79分量没有扩大成整个系统验收；最终21项的目的为pending gate收紧及该组件回归。当前G2/G3 end-to-end与有限schema bounds不声称全部64代、实际掉电、stock binary或正式性能已验证。清理仅在source/raw receipt/diagnostic/checksums归档并确认原进程终止后执行精确本任务临时路径；共享targets、用户PDF/改动及其他任务产物保留。
+
+
+## 删除 retention policy 与原子 receipt
+
+2026-10-12，接续父提交 `acbe51b599ba54bd3fb99ae80156bafcd133b472`。`ProfileDeleteRetention.Policy` 显式保存 offline/rejoin、metadata propagation、backup/restore 三个毫秒窗口及 generation/revision；拒绝隐含零 offline/restore 窗口与总和溢出，没有内置保留天数。这里保存配置合同，尚未执行最大离线窗口、backup restore 接受或 GC。
+
+`ZKProfileReservationStore.publishDeleteRetentionPolicy` 在原 reservation namespace 中通过 native version CAS 更新 current pointer，并在同一 multi 创建 immutable revision 与 birth guard。读取验证 pointer version、原始 root birth、pointer mZxid 与 revision cZxid、完整策略字节和 guard；并发发布者不能覆盖同一 generation 的赢家。旧 revision 保留，后续策略可以改变窗口，已经删除的 ledger 始终使用自己的原始快照。
+
+fenced-CLOSED 删除仍复用原 seal、完整历史 Manifest 和 delivery publication。最终同一个 ZK multi 检查所观察策略的 pointer/revision/guard，将完整 retention receipt 写入 metadata custom key 与 immutable `delete-targets/retention` row/birth guard。receipt 绑定完整 publication Reference、策略 revision 的原始 cZxid 与窗口。`deleteProjection` 和 `readDeleteRetention` 核验 row 与 metadata 的同事务 zxid及 metadata birth/version/完整字段；原始 metadata map 序列化顺序不作为身份。所有历史 targets、event/index、physical receipts、snapshot 和 handoff lineage继续保留。
+
+策略更新先于最终提交时，整个 tombstone/receipt multi失败，原请求重试必须读取新策略；丢回复后按真实 metadata/row确认原提交。无策略的历史删除返回 `PROTECTED_WITHOUT_POLICY`，以后发布策略不补写它的 receipt。策略缺失观察与首次发布并发时，删除也可以保留为无策略记录，始终受保护。已绑定 receipt 的任一 metadata/row/policy/guard 缺失、重建或失配会 quarantine。`BOUND` 仅证明策略绑定；native创建时间不是 GC 时间屏障，窗口到期、物理目标终结或该状态均不能单独授权 GC。
+
+最终真实回归 `unified-wal-local-McnXwOIe`：6个实际测试类、38项，零 failure/error/skip；包括真实SDK Add/close/delete、最终multi回复丢失、策略竞争的整体拒绝与同请求续接、旧策略缩短后保留原receipt、实际policy/receipt guard重建，以及原logical/physical receipt/snapshot/G2-G3路径。此前7项、8项阶段保持各自 source 绑定；失败诊断不计通过。命令中的 `ProfileDeleteRecordTest` 和 `ProfileDeleteDeliveryTest` 没有匹配到类，不计入实际测试范围。复现可使用：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeleteRetentionTest,ProfileDeletePhysicalReceiptTest,ProfileDeleteHandoffTest,ProfileDeleteSnapshotTest,ZKProfileReservationStoreTest,SegmentProfileInitialSocketClientTest#logicalDelete*+physicalDeletionReceipt*+deleteSnapshot*+deleteHandoffEffective*+deleteRetention*+deleteWithoutPolicyRemainsProtectedAfterClusterPolicyIsIntroduced'
+```
+
+最终 `unified-wal-model-u9b9e3zg`：retention/logical-delete/delete-publication/physical-receipt 共29配置，4完整正向与25指定反例。新增有限投影覆盖 native policy CAS、同事务绑定、旧窗口保留、birth ABA、无策略历史不可补写；完整字节和实际存储事实仍由Java生产，不证明时间、backup restore或GC。1115 Java与1094模型输入的1938个唯一source SHA冻结核验一致，证据在 `/Users/liusinan/.codex/artifacts/unified-wal/delete-retention-evidence-b3jp036x`，含原输入/命令/XML、旧source overrides和失败诊断。最终Spotless/Checkstyle exit0；所有Java/模型终结后的独立RAT exit1，443 unapproved均存在父HEAD、无新增。
+
+后续继续真实backup/restore接受条件、rejoin与history/page/tombstone/lineage GC、accepted decommission/unrecoverable及完整16步其余验收。默认OFF/SYSTEM/PARK和disabled能力不变，步骤11/12/14/15与生产Gate保持PARTIAL/OPEN；Linux NUMA、真实掉电、stock binary、正式性能/canary本轮NOT_EXECUTED。阶段归档后仅释放精确自有、已完成且可再生的临时产物；共享targets、用户PDF及其他任务文件保留。

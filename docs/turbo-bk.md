@@ -731,3 +731,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-12 [Assignment handoff 的 EFFECTIVE 与 G2/G3 接续](rfcs/unified-wal/implementation/profile-wire/README.md#assignment-handoff-的-effective-与-g2g3-接续)已把原graph gate退役、owned registration删除、NON_WRITABLE投影与native assignment/head更新放进原publisher同一ZK multi；原type15 force/apply/checkpoint/replay接续effective progress，原事件身份保留。三目标真实G2/G3 READY、SDK Add/close、新旧事件与混合snapshot、健康文件旋转重启、native丢回复/held callback与type15 UNKNOWN已有验证。79项原阶段Java（server 71/common codec 8）/最终21项补验及35有限模型配置通过，1929个最终源码输入核验一致，style通过、RAT443父HEAD无新增；完整Gate不提升。retention/offline/backup-restore、accepted terminal decommission/unrecoverable/history GC、其他required authority/default routing/full-bytes/兼容/正式性能/运维/全16步验收继续OPEN。
+
+
+2026-10-12 [删除 retention policy 与原子 receipt](rfcs/unified-wal/implementation/profile-wire/README.md#删除-retention-policy-与原子-receipt)已将显式offline/rejoin、metadata propagation、backup/restore窗口绑定到原逻辑删除的native同事务metadata/immutable receipt，保留策略历史与全部target义务。策略竞争整体拒绝，旧窗口不随新策略缩短，无策略历史继续受保护。6类38项真实回归、29有限模型配置及1938冻结source通过，style exit0；RAT443父HEAD路径无新增。BOUND不授权GC，实际backup/restore/rejoin接受、历史GC与全16步其余验收继续OPEN；默认OFF/SYSTEM/PARK和生产Gate不提升。

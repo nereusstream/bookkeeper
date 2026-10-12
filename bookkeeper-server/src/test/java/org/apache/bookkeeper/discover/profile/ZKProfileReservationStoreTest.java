@@ -42,6 +42,47 @@ import org.apache.zookeeper.ZooDefs;
 import org.junit.Test;
 
 public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
+    @Test
+    public void retentionPolicyUsesNativeCasAndPreservesImmutablePriorRevisionAfterLostReply() throws Exception {
+        var source = store(first);
+        var original = new ProfileDeleteRetention.Policy(1, java.util.UUID.randomUUID(), 100, 20, 300);
+        first.loseReply.set(true);
+        assertEquals(CreateStatus.APPLIED, source.publishDeleteRetentionPolicy(original));
+        assertEquals(CreateStatus.ALREADY_APPLIED, source.publishDeleteRetentionPolicy(original));
+        byte[] oldBytes = first.getData(ROOT + "/delete-retention-policy/revision-1", false, null);
+        var next = new ProfileDeleteRetention.Policy(2, java.util.UUID.randomUUID(), 1, 0, 1);
+        assertEquals(CreateStatus.APPLIED, source.publishDeleteRetentionPolicy(next));
+        assertArrayEquals(oldBytes, first.getData(ROOT + "/delete-retention-policy/revision-1", false, null));
+        assertEquals(CreateStatus.CONFLICT, source.publishDeleteRetentionPolicy(original));
+        assertEquals(CreateStatus.CONFLICT, store(second).publishDeleteRetentionPolicy(
+                new ProfileDeleteRetention.Policy(2, java.util.UUID.randomUUID(), 200, 30, 500)));
+    }
+
+    @Test
+    public void retentionPolicyConcurrentPublisherLosesExactNativeVersion() throws Exception {
+        var source = store(first);
+        var original = new ProfileDeleteRetention.Policy(1, java.util.UUID.randomUUID(), 100, 20, 300);
+        assertEquals(CreateStatus.APPLIED, source.publishDeleteRetentionPolicy(original));
+        var winner = new ProfileDeleteRetention.Policy(2, java.util.UUID.randomUUID(), 200, 20, 300);
+        first.beforeMulti.set(() -> assertEquals(CreateStatus.APPLIED,
+                store(second).publishDeleteRetentionPolicy(winner)));
+        assertEquals(CreateStatus.CONFLICT, source.publishDeleteRetentionPolicy(
+                new ProfileDeleteRetention.Policy(2, java.util.UUID.randomUUID(), 1, 0, 1)));
+        assertArrayEquals(winner.encode(), first.getData(ROOT + "/delete-retention-policy", false, null));
+    }
+
+    @Test
+    public void retentionPolicyBirthGuardRecreationIsQuarantined() throws Exception {
+        var source = store(first);
+        var original = new ProfileDeleteRetention.Policy(1, java.util.UUID.randomUUID(), 100, 20, 300);
+        assertEquals(CreateStatus.APPLIED, source.publishDeleteRetentionPolicy(original));
+        String guard = ROOT + "/delete-retention-policy/revision-1/birth-" + original.revision();
+        byte[] bytes = first.getData(guard, false, null);
+        first.delete(guard, 0);
+        first.create(guard, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        assertEquals(CreateStatus.QUARANTINED, source.publishDeleteRetentionPolicy(original));
+    }
+
     private static byte[] bytes(int count, int value) {
         byte[] result = new byte[count];
         Arrays.fill(result, (byte) value);

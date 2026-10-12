@@ -19,6 +19,12 @@ import time
 
 
 MATRIX = {
+    'a-profile-delete-retention': None,
+    'ce-profile-delete-retention-cas': 'RetentionHasCurrentPolicyCAS',
+    'ce-profile-delete-retention-atomic': 'RetentionHasAtomicTombstone',
+    'ce-profile-delete-retention-window': 'RetentionKeepsOriginalWindows',
+    'ce-profile-delete-retention-birth': 'RetentionRejectsRecreatedBirth',
+    'ce-profile-delete-retention-legacy': 'RetentionDoesNotBackfillLegacy',
     'a-profile-delete-effective': None,
     'ce-profile-delete-effective-cut': 'EffectiveHasCompleteLocalCut',
     'ce-profile-delete-effective-ack': 'EffectiveHasOriginalAck',
@@ -932,6 +938,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfileDeleteRetention.tla" if "profile-delete-retention" in name
                    else "ProfileDeleteEffective.tla" if "profile-delete-effective" in name
                    else "ProfileDeleteHandoffAck.tla" if "profile-handoff-ack" in name
                    else "ProfileDeleteAdoption.tla" if "profile-delete-adoption" in name

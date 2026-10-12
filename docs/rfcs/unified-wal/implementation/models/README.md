@@ -1444,3 +1444,6 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-12 [Assignment handoff 的 EFFECTIVE 与 G2/G3 接续](../profile-wire/README.md#assignment-handoff-的-effective-与-g2g3-接续)已把原graph gate退役、owned registration删除、NON_WRITABLE投影与native assignment/head更新放进原publisher同一ZK multi；原type15 force/apply/checkpoint/replay接续effective progress，原事件身份保留。三目标真实G2/G3 READY、SDK Add/close、新旧事件与混合snapshot、健康文件旋转重启、native丢回复/held callback与type15 UNKNOWN已有验证。79项原阶段Java（server 71/common codec 8）/最终21项补验及35有限模型配置通过，1929个最终源码输入核验一致，style通过、RAT443父HEAD无新增；完整Gate不提升。retention/offline/backup-restore、accepted terminal decommission/unrecoverable/history GC、其他required authority/default routing/full-bytes/兼容/正式性能/运维/全16步验收继续OPEN。
+
+
+2026-10-12 [删除 retention policy 与原子 receipt](../profile-wire/README.md#删除-retention-policy-与原子-receipt)：新增ProfileDeleteRetention有限投影，只消费Java产生的native事务/完整字节事实，检查策略CAS、同事务tombstone、旧窗口保留、birth ABA与legacy保护。最终u9b9e3zg与logical-delete/delete-publication/physical-receipt共29配置、4完整正向/25指定反例。新正向37 generated/24 distinct、queue0、depth/diameter6、0.789秒、peak RSS105693184 bytes；TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。1094模型inputs与Java去重1938一致；catalog 719，完整A+C+D未全跑。7rjvqpde配置解析失败及3lkfcm54早期source独立归档，不移绑最终source。模型不证明时间、backup/restore接受、GC、liveness或性能，生产Gate OPEN。
