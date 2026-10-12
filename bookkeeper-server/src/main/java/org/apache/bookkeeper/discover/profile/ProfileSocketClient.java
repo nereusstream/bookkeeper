@@ -67,6 +67,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
+import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.util.ByteBufList;
 
 /**
@@ -90,6 +91,9 @@ final class ProfileSocketClient implements AutoCloseable {
     private final ProfileHello.Server expected;
     private final Semaphore slots;
     private final int maxSlots;
+    private final int backingLimitBytes;
+    private final ProfileReceiveBudget.ClientAllocation backing;
+    private final CompletableFuture<Void> backingDrained;
     private final AtomicInteger retiredSlots = new AtomicInteger();
     private final AtomicInteger helloWrites = new AtomicInteger();
     private final AtomicBoolean channelAttached = new AtomicBoolean();
@@ -116,6 +120,22 @@ final class ProfileSocketClient implements AutoCloseable {
         maxSlots = maxPending;
         slots = new Semaphore(maxPending);
         timeoutNanos = timeout.toNanos();
+        backingLimitBytes = backingLimit(normalData, maxPending, maxEntryBytes);
+        var role = normalData ? ProfileReceiveBudget.Lane.DATA : ProfileReceiveBudget.Lane.CONTROL;
+        var budget = new ProfileReceiveBudget(backingLimitBytes + 2L,
+                normalData ? 1 : backingLimitBytes, 1, 1, 1, 1);
+        backing = Objects.requireNonNull(budget.admitClient(role, backingLimitBytes));
+        backingDrained = backing.drained();
+        backingDrained.whenComplete((ignored, failure) -> checkDrained());
+    }
+
+    static int backingLimit(boolean normalData, int maxPending, int maxEntryBytes) {
+        int frame = normalData ? Math.max(MAX_RESPONSE_FRAME, maxEntryBytes + 256)
+                : Math.max(MAX_RESPONSE_FRAME, Math.max(ProfileInitialControlCodec.MAX_INSTALL_BYTES + 36,
+                    ProfilePhysicalDeleteCodec.MAX_REQUEST_BYTES + 36));
+        // This is a backing quota with handshake/resize room, not an SSLEngine internal-memory estimate.
+        return Math.toIntExact(Math.addExact(1024 * 1024L,
+                Math.multiplyExact(3L * maxPending, frame)));
     }
 
     private static void validateSettings(int maxPending, Duration timeout, boolean normalData, int maxEntryBytes) {
@@ -154,6 +174,7 @@ final class ProfileSocketClient implements AutoCloseable {
         });
         try {
             var connecting = new Bootstrap().group(group).channel(NioSocketChannel.class)
+                    .option(ChannelOption.ALLOCATOR, backing.allocator())
                     .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, Math.toIntExact(timeout.toMillis()))
                     .handler(new ChannelInitializer<SocketChannel>() {
                         @Override
@@ -235,6 +256,11 @@ final class ProfileSocketClient implements AutoCloseable {
         private volatile boolean coldDone;
 
         private RegisteredConnection() { }
+
+        public long backingBytes() {
+            var owned = socket;
+            return owned == null ? 0 : owned.backingBytes();
+        }
 
         public CompletableFuture<T> completion() {
             var waiter = completion.copy();
@@ -549,15 +575,36 @@ final class ProfileSocketClient implements AutoCloseable {
         }
         Pending held = new Pending(context, credential, entryId, (int) size, intent);
         try {
-            held.entry = entry instanceof ByteBuf buffer
-                    ? buffer.retainedSlice(buffer.readerIndex(), buffer.readableBytes())
-                    : ByteBufList.clone((ByteBufList) entry);
+            held.entry = snapshotEntry(entry, (int) size);
+        } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
+            returnSlot();
+            return new ProfileNormalDataClient.AddAttempt(CompletableFuture.completedFuture(transientNone()),
+                    CompletableFuture.completedFuture(null));
         } catch (RuntimeException | Error failedBorrow) {
             returnSlot();
             throw failedBorrow;
         }
         enqueue(held);
         return new ProfileNormalDataClient.AddAttempt(held.dataReply, held.completion.copy());
+    }
+
+    private ByteBuf snapshotEntry(ReferenceCounted entry, int size) {
+        ByteBuf snapshot = backing.allocator().heapBuffer(size, size);
+        try {
+            if (entry instanceof ByteBuf buffer) {
+                snapshot.writeBytes(buffer, buffer.readerIndex(), buffer.readableBytes());
+            } else {
+                var buffers = (ByteBufList) entry;
+                for (int index = 0; index < buffers.size(); index++) {
+                    var buffer = buffers.getBuffer(index);
+                    snapshot.writeBytes(buffer, buffer.readerIndex(), buffer.readableBytes());
+                }
+            }
+            return snapshot;
+        } catch (RuntimeException | Error failure) {
+            snapshot.release();
+            throw failure;
+        }
     }
 
     ProfileNormalDataClient.LacWriteAttempt beginWriteLac(ProfileLedgerContext context,
@@ -583,7 +630,11 @@ final class ProfileSocketClient implements AutoCloseable {
         }
         Pending held = new Pending(context, credential, lac, 20, null, ProfileOperation.WRITE_LAC);
         try {
-            held.entry = ByteBufList.clone(digest);
+            held.entry = snapshotEntry(digest, 20);
+        } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
+            returnSlot();
+            return new ProfileNormalDataClient.LacWriteAttempt(
+                    CompletableFuture.completedFuture(transientNone()), CompletableFuture.completedFuture(null));
         } catch (RuntimeException | Error failedBorrow) {
             returnSlot();
             throw failedBorrow;
@@ -642,7 +693,7 @@ final class ProfileSocketClient implements AutoCloseable {
             int keyPosition = bytes.writerIndex();
             bytes.writeZero(20);
             held.credential.writeWireCredential(bytes.nioBuffer(keyPosition, 20));
-            var body = ((ByteBufList) held.entry).getBuffer(0);
+            var body = (ByteBuf) held.entry;
             bytes.writeInt(20).writeBytes(body, body.readerIndex(), body.readableBytes());
             return bytes;
         } catch (RuntimeException | Error failure) {
@@ -1192,8 +1243,24 @@ final class ProfileSocketClient implements AutoCloseable {
     private void checkDrained() {
         if (closed.get() && initialized && transportClosed && retiredSlots.get() == maxSlots
                 && helloWrites.get() == 0) {
-            drained.complete(null);
+            backing.close();
+            if (backingDrained.isDone()) {
+                drained.complete(null);
+            }
         }
+    }
+
+    /** Actual transport-owned ByteBuf capacities; caller results and provider-internal memory are separate owners. */
+    public long backingBytes() {
+        return backing.usedBytes();
+    }
+
+    public int backingLimitBytes() {
+        return backingLimitBytes;
+    }
+
+    public long peakBackingBytes() {
+        return backing.peakBytes();
     }
 
     /** Actual local transport, HELLO write and every acquired RPC/source/output slot are terminal.

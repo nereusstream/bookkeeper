@@ -879,3 +879,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-12 [Assignment handoff 的 EFFECTIVE 与 G2/G3 接续](implementation/profile-wire/README.md#assignment-handoff-的-effective-与-g2g3-接续)已把原graph gate退役、owned registration删除、NON_WRITABLE投影与native assignment/head更新放进原publisher同一ZK multi；原type15 force/apply/checkpoint/replay接续effective progress，原事件身份保留。三目标真实G2/G3 READY、SDK Add/close、新旧事件与混合snapshot、健康文件旋转重启、native丢回复/held callback与type15 UNKNOWN已有验证。79项原阶段Java（server 71/common codec 8）/最终21项补验及35有限模型配置通过，1929个最终源码输入核验一致，style通过、RAT443父HEAD无新增；完整Gate不提升。retention/offline/backup-restore、accepted terminal decommission/unrecoverable/history GC、其他required authority/default routing/full-bytes/兼容/正式性能/运维/全16步验收继续OPEN。
+
+
+2026-10-13 [客户端 transport backing 与实际关闭](implementation/profile-wire/README.md#客户端-transport-backing-与实际关闭)已把原SDK/cohort客户端TLS/帧及普通/恢复Add、WRITE_LAC私有snapshot接入现有backing ledger，实际close等待最后view归还；cohort原slot上限之外可观察其transport backing与固定quota。最终4类69项Java、24有限模型配置及1946当前source/style通过。仅transport ByteBuf计量，opaque TLS/codec/caller数组及存储/index/control等统一总账和正式性能仍OPEN；默认OFF/SYSTEM/PARK、disabled与完整生产Gate不提升。

@@ -122,6 +122,18 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return socket.closeAsync();
     }
 
+    public long backingBytes() {
+        return socket.backingBytes();
+    }
+
+    public int backingLimitBytes() {
+        return socket.backingLimitBytes();
+    }
+
+    public long peakBackingBytes() {
+        return socket.peakBackingBytes();
+    }
+
     @Override
     public void close() {
         socket.close();

@@ -268,6 +268,19 @@ public final class ProfileRecoveryPeerPool {
                 active != null && active.delivered, closing);
     }
 
+    /** Sampled actual reserved ByteBuf capacities across the owned cohort, including closing connections. */
+    public synchronized long backingBytes() {
+        return active == null ? 0 : active.connections.stream()
+                .mapToLong(ProfileSocketClient.RegisteredConnection::backingBytes).sum();
+    }
+
+    /** Fixed transport-backing ceiling for the currently reserved CONTROL/DATA cohort; excludes opaque memory. */
+    public synchronized long backingLimitBytes() {
+        return active == null ? 0 : Math.multiplyExact((long) cohort.size(), Math.addExact(
+                (long) ProfileSocketClient.backingLimit(false, limits.perConnectionSlots(), 0),
+                ProfileSocketClient.backingLimit(true, limits.perConnectionSlots(), limits.maxEntryBytes())));
+    }
+
     /** Pool close stops new acquisitions. A delivered lease remains pinned until its owner releases it. */
     public CompletableFuture<Void> closeAsync() {
         Acquisition stop;

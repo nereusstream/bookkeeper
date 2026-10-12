@@ -34,6 +34,38 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.junit.Test;
 
 public class ProfileByteBufAllocatorTest {
+    @Test
+    public void clientAllocationSharesBackingAndRetainsDrainUntilLastView() {
+        var budget = budget();
+        var data = budget.admitClient(ProfileReceiveBudget.Lane.DATA, 512);
+        var control = budget.admitClient(ProfileReceiveBudget.Lane.CONTROL, 256);
+        assertNull(budget.admitClient(ProfileReceiveBudget.Lane.CONTROL, 256));
+        var root = data.allocator().heapBuffer(512, 512);
+        var view = root.retainedSlice(0, 16);
+        assertEquals(512, data.usedBytes());
+        assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                () -> data.allocator().directBuffer(1, 1));
+        var reserved = control.allocator().directBuffer(256, 256);
+        assertEquals(256, control.usedBytes());
+        root.release();
+        data.close();
+        data.drained().complete(null); // Caller copies cannot complete actual ownership.
+        assertFalse(data.drained().isDone());
+        assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                () -> data.allocator().heapBuffer(1, 1));
+        var all = budget.closeAdmissionAndDrain();
+        assertFalse(all.isDone());
+        assertNull(budget.admitClient(ProfileReceiveBudget.Lane.DATA, 512));
+        view.release();
+        assertTrue(data.drained().isDone());
+        assertEquals(0, data.usedBytes());
+        control.close();
+        assertFalse(control.drained().isDone());
+        reserved.release();
+        assertTrue(control.drained().isDone());
+        assertTrue(all.isDone());
+    }
+
     private static ProfileReceiveBudget budget() {
         return new ProfileReceiveBudget(1024, 256, 256, 2, 2, 1);
     }

@@ -35,7 +35,9 @@ public final class ProfileReceiveBudget {
         private Lane lane = Lane.UNCLASSIFIED;
         private int byteLimit;
         private long bytes;
+        private long peakBytes;
         private boolean closed;
+        private final CompletableFuture<Void> drained = new CompletableFuture<>();
 
         private ConnectionPermit() {
         }
@@ -58,6 +60,7 @@ public final class ProfileReceiveBudget {
                 if (credit != null) {
                     credit.connection = this;
                     bytes += requested;
+                    peakBytes = Math.max(peakBytes, bytes);
                 }
                 return credit;
             }
@@ -71,7 +74,17 @@ public final class ProfileReceiveBudget {
                     usedConnections[lane.ordinal()]--;
                 }
             }
+            completeConnectionDrainIfIdle();
             completeDrainIfIdle();
+        }
+
+        private void completeConnectionDrainIfIdle() {
+            synchronized (ProfileReceiveBudget.this) {
+                if (!closed || bytes != 0) {
+                    return;
+                }
+            }
+            drained.complete(null);
         }
     }
 
@@ -119,6 +132,9 @@ public final class ProfileReceiveBudget {
                     connection.bytes -= bytes;
                 }
             }
+            if (connection != null) {
+                connection.completeConnectionDrainIfIdle();
+            }
             completeDrainIfIdle();
         }
     }
@@ -143,6 +159,59 @@ public final class ProfileReceiveBudget {
         connectionLimits[Lane.UNCLASSIFIED.ordinal()] = maxUnclassifiedConnections;
         connectionLimits[Lane.DATA.ordinal()] = maxDataConnections;
         connectionLimits[Lane.CONTROL.ordinal()] = maxControlConnections;
+    }
+
+    /** Outbound role is chosen by the local client before TLS; this grants no remote operation authority. */
+    public final class ClientAllocation implements AutoCloseable {
+        private final ConnectionPermit connection;
+        private final ProfileByteBufAllocator allocator;
+
+        private ClientAllocation(ConnectionPermit connection) {
+            this.connection = connection;
+            allocator = new ProfileByteBufAllocator(connection);
+        }
+
+        public io.netty.buffer.ByteBufAllocator allocator() {
+            return allocator;
+        }
+
+        public long usedBytes() {
+            synchronized (ProfileReceiveBudget.this) {
+                return connection.bytes;
+            }
+        }
+
+        /** Peak reserved backing capacities, including an allocation before its construction completes. */
+        public long peakBytes() {
+            synchronized (ProfileReceiveBudget.this) {
+                return connection.peakBytes;
+            }
+        }
+
+        public CompletableFuture<Void> drained() {
+            return connection.drained.copy();
+        }
+
+        @Override
+        public void close() {
+            connection.close();
+        }
+    }
+
+    /** Bound actual outbound backing with the existing byte/slot ledger; no handshake or readiness assertion. */
+    public synchronized ClientAllocation admitClient(Lane role, int connectionBytes) {
+        if (role == null || role == Lane.UNCLASSIFIED || connectionBytes < 1) {
+            throw new IllegalArgumentException("Outbound client role and backing limit required");
+        }
+        int index = role.ordinal();
+        if (!accepting || usedConnections[index] >= connectionLimits[index]) {
+            return null;
+        }
+        var permit = new ConnectionPermit();
+        permit.lane = role;
+        permit.byteLimit = connectionBytes;
+        usedConnections[index]++;
+        return new ClientAllocation(permit);
     }
 
     /** Called before a TLS handler is created for the accepted channel. */

@@ -1748,3 +1748,26 @@ scripts/unified-wal/run-local-storage-tests.sh 'ProfileDeleteSnapshotTest,Profil
 最终`unified-wal-model-9yl_dhii`与snapshot/EFFECTIVE/physical-receipt共31配置，4完整正向/27指定反例；新增有限投影只消费Java的完整source/native/local FREE事实，检查snapshot/effective takeover、selection CAS、effects保留、原始physical birth和actual custody。1115 Java与1102模型输入的1946个唯一source SHA逐项冻结；`/Users/liusinan/.codex/artifacts/unified-wal/journal-compaction-evidence-9qrgu28k`保留source、原命令/inputs/XML、所有stage overrides、模型及失败诊断。最终Spotless/Checkstyle exit0；Java/模型/checker终结后的独立RAT exit1，443 unapproved均存在父HEAD、无新增，不提升CI或生产Gate。
 
 这里完成有界journal duplicate prefix删除。snapshot仍含所有still-required effects；target Manifest/tombstone、snapshot/page/lineage本身的GC、backup/restore接受、retention时间屏障与accepted decommission/unrecoverable继续实施。4096-event及64-generation原prototype上限保持，不宣称可无限扩容。默认OFF/SYSTEM/PARK及disabled能力不变，完整16步/生产Gate OPEN；Linux NUMA、真实掉电、stock binary和正式性能/canary本轮NOT_EXECUTED。
+
+
+## 客户端 transport backing 与实际关闭
+
+2026-10-13，接续父提交`6da8d38a4788259b0798e9342bc5caa47bdbb25d`。原ProfileSocketClient使用默认allocator；cohort的connection/RPC-slot上限无法计量该allocator的实际backing，普通/恢复Add与WRITE_LAC的retained输入还能延长调用方大backing的寿命。现在所有显式及registered CONTROL/DATA客户端在TLS handler创建前安装原ProfileByteBufAllocator，经ProfileReceiveBudget.ClientAllocation使用已有byte/slot账本。已知outbound用途只作本地资源分类，不授予remote authority，也不改变接收端认证CONTROL frame的分类条件。
+
+每连接固定backing quota为`1 MiB + 3 * maxPending * boundedFrameBytes`；DATA frame bound取现有response上限与`maxEntryBytes+256`的较大值，CONTROL取现有response/最大INSTALL/physical query frame的较大值。1 MiB是握手/临时backing工作额度，属于此实验实现的资源policy，不是SSLEngine内部内存估计，也不保证任意provider/最大frame在所有重叠峰值下均可准入。超过额度时在分配前拒绝；所有heap/direct root、旧加新扩容峰值、retained view、TLS经channel allocator取得的socket/明文/密文buffer仍沿用原真实释放后的扣账。
+
+普通Add、ADD_RECOVERY与WRITE_LAC在入队前取得已计费exact-size heap snapshot，不再为网络持有调用方完整backing。payload/CRC与wire格式不变，所有copy都有quota；copy不足返回TRANSIENT_UNAVAILABLE/NONE和已结束local completion，不提交请求。已入队或已有输出的不确定状态继续保留原UNKNOWN/实际promise终态，不伪造remote abort。quota同样约束CONTROL输出；ordinary Add没有新MetadataStore往返、控制fsync或handshake。
+
+ClientAllocation的实际drain独立于slot返还与caller future copy；connection关闭后仍被最后view持有的credit保留。ProfileSocketClient只有transport/HELLO/RPC实际终结及最后backing归还后才完成closeAsync；cohort继续按这些真实终态释放原lease/connection/RPC容量。client/adapter提供当前reserved backing与historical peak诊断；peak包含分配构造前的reservation，不是RSS。pool汇总owned connections的sampled backing，并报告已保留CONTROL/DATA cohort的固定quota总和；它不把独立瞬时采样称为原子全局内存snapshot。
+
+真实mTLS回归用实际channel backing占满客户端quota，验证source拒绝发生在发送之前、没有native DATA写；暂停原EL时捕获并修改/释放2 MiB调用方root，原exact payload仍实际durable；APPLIED回复与transport关闭后hold write promise，promise结束并清零wire bytes后，最后output view仍阻止close，释放它后实际byte credit归零。共享CONTROL/DATA账本测试还覆盖DATA满额时保留CONTROL容量与caller复制future不能伪造drain。原CONTROL关闭测试保留全部promise/清零断言，并纠正“尚持有output view时close已经完成”的过时假设。
+
+最终`unified-wal-local-4TsvZYoP`为4个实际测试类69项、零failure/error/skip，含actual allocator/decoder/inbound socket、普通与恢复SDK路径、writer close/stop、WRITE_LAC/LAC evidence、registered pool/worker、delete/retention/G2-G3。最初M8MpwEXG误要求idle live bytes大于0，改用historical reservation peak；dUAzWUMI的上述旧关闭断言未通过，保留原source/输出。原命令中的ProfileInitialReceiveTest无实际类，不计覆盖；最终命令使用真实类：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'ProfileByteBufAllocatorTest,ProfileReceiveDecoderTest,ProfileInboundPipelineSocketTest,SegmentProfileInitialSocketClientTest#clientBackingQuota*+ordinary*+*ActualWritePromise*+*ExplicitLac*+*LacEvidence*+writeLac*+writerStopWaitsForActualDataWritePromiseAfterSdkQuorum+registeredPeerPool*+registeredPool*+replicationWorkerConsumesRegisteredPoolAndRepairsAnActuallyUnavailablePeer+deleteHandoffEffectiveAllRealTargetsRejoinG2AndKeepOldEventsWithNewJournalData+deleteRetention*+logicalDelete*'
+```
+
+最终`unified-wal-model-loe6fatk`复用原backing-budget/recovery-peer-pool/writer-close投影，24配置为3完整正向/21指定反例；没有将server root投影冒充完整客户端/跨组件memory证明。1115 Java与1102模型输入的1946个唯一source SHA逐项核验一致，所有早期stage保留各自绑定。证据`/Users/liusinan/.codex/artifacts/unified-wal/client-backing-evidence-6kln6y6n`拥有原命令/input/XML、source overrides、模型与失败诊断。最终Spotless/Checkstyle exit0；独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。
+
+计量范围是transport-owned ByteBuf reservation/backing及新的私有输入snapshot。codec临时byte数组、转交caller的reply对象/数组、JDK SSLEngine内部对象/ByteBuffer、opaque native TLS、kernel buffers/对象开销、存储/index/control/cold工作集与统一总账仍待完成。unpooled与额外snapshot copy的性能影响未经正式前后测量。完整full-bytes、backup/restore/retention时间屏障/剩余history GC/其他required authority/default routing/兼容/运维和16步验收继续OPEN；默认OFF/SYSTEM/PARK、disabled能力不变，生产Gate OPEN，Linux NUMA/真实掉电/stock binary/正式性能/canary本轮NOT_EXECUTED。

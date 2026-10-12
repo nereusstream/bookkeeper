@@ -740,6 +740,121 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void clientBackingQuotaRejectsBeforeSendAndSnapshotsCallerWithActualOutputDrain() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var client = dataClient(fixture, 0, 2, Duration.ofSeconds(5));
+            Channel channel = dataChannel(client);
+            assertTrue(client.peakBackingBytes() > 0); // TLS/socket backing may already be released when idle.
+            ReferenceCounted source = entry(fixture, 0, 16);
+            int oldWrites = fixture.nodeIo.get(0).writes;
+            try {
+                channel.eventLoop().submit(() -> {
+                    int free = Math.toIntExact(client.backingLimitBytes() - client.backingBytes());
+                    var full = channel.alloc().heapBuffer(free, free);
+                    try {
+                        assertEquals(client.backingLimitBytes(), client.backingBytes());
+                        var refused = client.beginNormalAdd(fixture.context(), fixture.credential, 0, source);
+                        assertTrue(refused.completion().isDone());
+                        assertEquals(ProfileStatus.DurableResult.NONE, refused.result().join().durableResult());
+                        assertEquals(ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE,
+                                refused.result().join().statusClass());
+                    } finally {
+                        full.release();
+                    }
+                }).get(5, TimeUnit.SECONDS);
+                assertEquals(oldWrites, fixture.nodeIo.get(0).writes);
+            } finally {
+                source.release();
+            }
+            var held = new AtomicReference<ChannelPromise>();
+            var observed = new AtomicReference<ByteBuf>();
+            var written = new CountDownLatch(1);
+            channel.eventLoop().submit(() -> channel.pipeline().addAfter(
+                    channel.pipeline().context(SslHandler.class).name(), "holdBudgetedAddPromise",
+                    new ChannelOutboundHandlerAdapter() {
+                        @Override
+                        public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+                            var body = (ByteBuf) message;
+                            if (body.getUnsignedShort(body.readerIndex() + 14)
+                                    == ProfileOperation.ADD_NORMAL.wireValue() && held.compareAndSet(null, promise)) {
+                                observed.set(body.retainedDuplicate());
+                                var actual = ctx.newPromise();
+                                actual.addListener(done -> written.countDown());
+                                ctx.write(body, actual);
+                            } else {
+                                ctx.write(body, promise);
+                            }
+                        }
+                    })).get(5, TimeUnit.SECONDS);
+            var blocked = new CountDownLatch(1);
+            var proceed = new CountDownLatch(1);
+            ByteBuf large = Unpooled.buffer(2 * 1024 * 1024, 2 * 1024 * 1024);
+            ByteBuf view = null;
+            try {
+                var encoded = entry(fixture, 0, 16);
+                try {
+                    if (encoded instanceof ByteBuf buffer) {
+                        large.writeBytes(buffer, buffer.readerIndex(), buffer.readableBytes());
+                    } else {
+                        var pieces = (org.apache.bookkeeper.util.ByteBufList) encoded;
+                        for (int index = 0; index < pieces.size(); index++) {
+                            var buffer = pieces.getBuffer(index);
+                            large.writeBytes(buffer, buffer.readerIndex(), buffer.readableBytes());
+                        }
+                    }
+                } finally {
+                    encoded.release();
+                }
+                view = large.retainedSlice(0, large.readableBytes());
+                channel.eventLoop().execute(() -> {
+                    blocked.countDown();
+                    await(proceed);
+                });
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                var attempt = client.beginNormalAdd(fixture.context(), fixture.credential, 0, view);
+                assertEquals(2, large.refCnt()); // No transport retain of the caller's oversized backing.
+                large.setZero(0, large.readableBytes());
+                view.release();
+                view = null;
+                large.release();
+                large = null;
+                proceed.countDown();
+                assertTrue(written.await(5, TimeUnit.SECONDS));
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        attempt.result().get(5, TimeUnit.SECONDS).durableResult());
+                var closed = client.closeAsync();
+                assertFalse(closed.isDone());
+                held.get().trySuccess();
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertFalse(closed.isDone()); // The retained actual output still owns backing after its promise.
+                assertTrue(client.backingBytes() >= observed.get().capacity());
+                for (int index = 0; index < observed.get().capacity(); index++) {
+                    assertEquals(0, observed.get().getByte(index));
+                }
+                observed.getAndSet(null).release();
+                closed.get(5, TimeUnit.SECONDS);
+                assertEquals(0, client.backingBytes());
+            } finally {
+                proceed.countDown();
+                if (held.get() != null) {
+                    held.get().trySuccess();
+                }
+                if (observed.get() != null) {
+                    observed.getAndSet(null).release();
+                }
+                if (view != null) {
+                    view.release();
+                }
+                if (large != null) {
+                    large.release();
+                }
+            }
+        }
+    }
+
+    @Test
     public void ordinaryDataClientUsesRealDigestAndDurableResponsesInOriginalAckSet() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
             fixture.connectAll(Duration.ofSeconds(5));
@@ -10680,6 +10795,8 @@ public class SegmentProfileInitialSocketClientTest {
             var lease = acquisition.completion().get(5, TimeUnit.SECONDS);
             assertEquals(2, pool.usage().reservedConnections());
             assertEquals(4, pool.usage().reservedRpcSlots());
+            assertTrue(pool.backingLimitBytes() > 0);
+            assertTrue(pool.backingBytes() <= pool.backingLimitBytes());
             assertTrue(pool.usage().borrowed());
             var unavailable = pool.acquire();
             assertThrows(ExecutionException.class, () -> unavailable.completion().get(5, TimeUnit.SECONDS));
@@ -10696,6 +10813,8 @@ public class SegmentProfileInitialSocketClientTest {
             closing.get(5, TimeUnit.SECONDS);
             assertEquals(0, pool.usage().reservedConnections());
             assertEquals(0, pool.usage().reservedRpcSlots());
+            assertEquals(0, pool.backingBytes());
+            assertEquals(0, pool.backingLimitBytes());
             assertThrows(IllegalStateException.class, lease::data);
             assertFalse(fixture.clientGroup.isShuttingDown());
         }
@@ -12567,7 +12686,11 @@ public class SegmentProfileInitialSocketClientTest {
                 for (int offset = 0; offset < observed.get().capacity(); offset++) {
                     assertEquals(0, observed.get().getByte(offset));
                 }
+                assertFalse(closed.isDone());
+                assertTrue(client.backingBytes() >= observed.get().capacity());
+                observed.getAndSet(null).release();
                 closed.get(5, TimeUnit.SECONDS);
+                assertEquals(0, client.backingBytes());
             } finally {
                 if (held.get() != null) {
                     held.get().trySuccess();
