@@ -26,10 +26,10 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfileStaticOperationAuthorizer;
 
 /** Borrowed cold resources for explicit experimental INSTALL/ACTIVATE socket opt-in. */
-record SegmentProfileControlConfig(ProfileDescriptorValidator validator,
+public record SegmentProfileControlConfig(ProfileDescriptorValidator validator,
         ProfileStaticOperationAuthorizer staticAuthorizer, ProfileControlStore controlStore,
         ProfileControlAuthorizer exactAuthorizer, ThreadPoolExecutor executor, Duration timeout) {
-    SegmentProfileControlConfig {
+    public SegmentProfileControlConfig {
         Objects.requireNonNull(validator, "validator");
         Objects.requireNonNull(staticAuthorizer, "staticAuthorizer");
         Objects.requireNonNull(controlStore, "controlStore");

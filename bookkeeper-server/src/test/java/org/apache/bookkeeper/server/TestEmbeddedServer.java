@@ -24,7 +24,9 @@ package org.apache.bookkeeper.server;
 import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LD_INDEX_SCOPE;
 import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LD_LEDGER_SCOPE;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -42,6 +44,7 @@ import org.apache.bookkeeper.bookie.BookieResources;
 import org.apache.bookkeeper.bookie.LedgerDirsManager;
 import org.apache.bookkeeper.bookie.LegacyCookieValidation;
 import org.apache.bookkeeper.bookie.UncleanShutdownDetectionImpl;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileService;
 import org.apache.bookkeeper.common.allocator.ByteBufAllocatorWithOomHandler;
 import org.apache.bookkeeper.common.component.LifecycleComponentStack;
 import org.apache.bookkeeper.conf.ServerConfiguration;
@@ -68,6 +71,27 @@ import org.mockito.junit.MockitoJUnitRunner;
  */
 @RunWith(MockitoJUnitRunner.class)
 public class TestEmbeddedServer {
+
+    @Test
+    public void isolatedConfigurationRequiresExplicitOwnerBeforeClassicConstruction() throws Exception {
+        var configuration = new ServerConfiguration().setMetadataServiceUri("do-not-open-classic://invalid");
+        assertFalse(SegmentProfileService.isolatedConfigurationEnabled(configuration));
+        assertThrows(IllegalArgumentException.class, () -> SegmentProfileService.fromConfiguration(
+                configuration, null, null, null, null));
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "Mode", "ISOLATED");
+        assertThrows(IllegalStateException.class, () -> EmbeddedServer.builder(
+                new BookieConfiguration(configuration)).build());
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "Mode", "UNKNOWN");
+        assertThrows(IllegalArgumentException.class, () -> EmbeddedServer.builder(
+                new BookieConfiguration(configuration)).build());
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "Mode", java.util.List.of("OFF", "ISOLATED"));
+        assertThrows(IllegalArgumentException.class,
+                () -> SegmentProfileService.isolatedConfigurationEnabled(configuration));
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "Mode", "OFF");
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "AdvancedRangeEnabled", true);
+        assertThrows(IllegalArgumentException.class, () -> EmbeddedServer.builder(
+                new BookieConfiguration(configuration)).build());
+    }
 
     static class TestComponent extends ServerLifecycleComponent {
 

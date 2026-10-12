@@ -417,3 +417,41 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 父源码 `9796c5c77d8809fbcadc0fde1ea31d77ad062581`。最初2项 green 保留原 stage；扩大28项的一次失败是测试把 A=2 ACK 当成指定第三个目标已完成。测试改为以同坐标/同字节取得该目标自己的 durable reply 后再断言读取，保留原 quorum 及 FOUND 断言，不降低生产 ACK 契约。最终 `XM6r1Dpb` 两类28项（原 EmbeddedServer4/socket24）零 failure/error/skip，1100 inputs 全部匹配最终源码；最终 Spotless/Checkstyle exit0。首个并行 RAT 因编译更新 class 的 NoSuchFileException 未形成许可结论；构建终结后独立 RAT exit1/443，全为父 HEAD 路径，无新增。原语义模型未改，本轮不重跑 TLC，不移绑旧 PASS 为 native startup/lifecycle 证明。
 
 archive `/Users/liusinan/.codex/artifacts/unified-wal/embedded-profile-evidence-28m1cmu4` 保留 stage 输入/log/reports、最终源码与当前 Classic/UID/access receipt、style/RAT/checksum。该里程碑交付显式 EmbeddedServer builder/lifecycle hook，配置 bootstrap、完整外部 physical authority、released stock矩阵、snapshot/handoff/GC/decommission、full-bytes/正式兼容/性能/运维及全16步综合验收继续 OPEN。默认 OFF/SYSTEM/PARK 与 disabled 能力不变，步骤11/12/14/15及生产 Gate 保持 PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED，完整目标 active。
+
+## 配置转换与显式 bootstrap
+
+2026-10-12，`SegmentProfileService.fromConfiguration(ServerConfiguration, key, validator, startup, transport)` 将原配置对象中的显式本地参数冻结为原 IsolatedSegmentConfig/ExecutionGroup.Settings/Storage.Limits/BatchLimits，再构造同一服务 owner。调用不打开 metadata、目录、文件或端口；Bookie/incarnation/单 Arena UUID 从 supplied startup facts 取得，实际 start 仍需原 persistent requirements/source birth、完整 header identity、native root binding、recovery 和 readiness 校验。配置文本不能生成 physical access、old-service disposition、credential 或 committed operation authority。
+
+`Startup`/`Transport` 与原 control/read 配置现在提供公开的实验装配接口，复用原 typed stores、authorizers、TLS、receive budget 和有界 cold/loops；没有增加另一套 backend、持久化格式或线程框架。配置对象在 factory 返回后再修改不改变该 owner 的布局/执行/预算。所有数值要求整数、精确 int/long 范围；拒绝多值、未知 `experimentalSegment*` 键、未知 mode、相对目录、missing mandatory bounds、非法单项及跨 layout/worker/buffer/batch 组合。prefix 检查遍历实际 keys 后显式匹配，不能使用 Commons `getKeys(prefix)` 把平铺键漏掉。
+
+字段名均在下表短名之前添加 `experimentalSegment`，例如 `experimentalSegmentMode`。各预算是原组件预算，不是 full-bytes 整体验收。
+
+| 短名 | 要求/默认 |
+|---|---|
+| Mode | 默认 OFF；factory 只接受显式 ISOLATED |
+| Directory | 必需的独立绝对目录 |
+| LogicalShards / DataFiles / BytesPerFile | 原默认 4 / 2 / 16777216；持久布局在启动时匹配原 manifest/header |
+| MaxPayloadBytes / MaxPendingEntries | 原默认 1048576 / 256 |
+| Backend / Affinity / NumaPolicy / WaitStrategy | 原默认 FILE_CHANNEL / OFF / SYSTEM / PARK；沿用既有支持范围，unsupported 显式拒绝 |
+| Workers / IoThreads / ControlSlots / Buffers / BufferBytes | 均必需，沿用原 execution bounds；worker 不超过固定 shards/pending |
+| InputBudgetBytes / BufferBudgetBytes / StartupTimeoutMillis | 均必需；buffer budget 覆盖原 aligned buffers 与 input budget |
+| ControlLogBytes / HotEntries / IndexedEntries | 均必需，沿用原 control/hot/index bounds |
+| PoolBlocks / MaintenanceBlocks | 均必需，合计不超过单 DATA file 的真实块容量 |
+| BatchBytes / BatchEntries / BatchDelayMillis | 均必需，沿用原 batch limits，并匹配 buffer/最大 entry envelope |
+
+正常使用顺序是：外部 issuer/调用方提供已验证 startup/authority 与借用的 transport 环境，调用 factory，再向原 EmbeddedServer builder 显式提交该 owner。无 Mode/默认 OFF 不启用 factory；原手工 owner opt-in 仍为独立显式接口。配置为 ISOLATED 却未提交明确 owner，或者有未知 mode/key、多值参数时，原 `EmbeddedServer.build()` 在全部 Classic 构造之前拒绝，不能从缺失 authority 自动退回 Classic。**当前 Main 的裸配置入口仍不能自行生产外部 proof/resource 环境，ISOLATED 会 fail closed**；完整 Main 装配、外部 authority issuer 和 owned borrowed-resource bootstrap 继续 OPEN。
+
+原服务组合测试现实际写出 properties 文件，经 ServerConfiguration.loadConf 加载后走此 factory：startup rejection、真实三节点 EmbeddedServer/注册发现/mTLS/原 coordinator/SDK/read、held force/stop、generation2 restart 和 actual old Classic/双 UID access replay 均保留。新增负向覆盖错误 worker/pool/buffer/input/hot/batch、非整数、unsupported backend/spin、relative path、missing indexed bound、unknown advanced Range 键及多值 mode；未构造 graph/未创建目录。改变原配置的 BufferBytes/Affinity 后，已冻结 owner 仍按 OFF/SYSTEM/PARK 真正启动并发布。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'TestEmbeddedServer,SegmentProfileInitialSocketClientTest#profileConfiguration*+embeddedProfile*+ownedProfile*+ordinaryDataClient*+ordinarySourceQuota*+ordinaryDataRejection*+ordinaryTimeout*+ordinaryServerForce*+ordinaryReply*+writerStop*+ordinaryWriterClose*+readinessBridge*+automaticDeletePublication*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+# 构建终结后单独执行。
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `6a043e7e45bf4b63268e2ffc3df7f45f39a74414`。初始16项中两个负向真实失败：Commons namespace prefix iterator 未遍历这些 flat keys，多值 mode 与未知键绕过检查；改为实际 key 枚举，原断言保留，16项 green。随后实际 properties 加载与扩大回归的最终 `1fAkbzBj` 两类30项（原 EmbeddedServer及配置5/socket25）零 failure/error/skip，1100 inputs 全部匹配最终源码；19份 settings/properties SHA 回执记录不同测试实例，不计额外覆盖。最终 Spotless/Checkstyle exit0，独立 root RAT exit1/443，全为父 HEAD 路径，无新增。模型语义不变，本轮不重跑 TLC，不移绑旧模型为配置/物理证明。
+
+archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-bootstrap-evidence-o6zzfc8e` 保留 red/green/最终 stage inputs/log/reports、最终源码、实际 config/Classic/UID/access receipt、style/RAT/checksum。当前完成配置转换和可调用的显式 programmatic bootstrap；Main/resource/environment 完整装配、外部 authority/stock矩阵、snapshot/handoff/GC/decommission/full-bytes/正式兼容/性能/运维与全16步验收继续 OPEN。默认 OFF/SYSTEM/PARK 和 disabled 能力不变，步骤11/12/14/15及生产 Gate 保持 PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED，完整目标 active。

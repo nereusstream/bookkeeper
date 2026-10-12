@@ -299,6 +299,11 @@ public class EmbeddedServer {
          */
         public EmbeddedServer build() throws Exception {
 
+            boolean configuredProfile = SegmentProfileService.isolatedConfigurationEnabled(conf.getServerConf());
+            if (configuredProfile && experimentalProfileService == null) {
+                throw new IllegalStateException("ISOLATED configuration requires an explicit Profile bootstrap owner");
+            }
+
             if (experimentalProfileService != null) {
                 return buildExperimentalProfile();
             }

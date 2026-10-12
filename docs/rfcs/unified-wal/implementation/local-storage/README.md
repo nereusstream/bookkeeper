@@ -916,3 +916,5 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 2026-10-12 [显式 Profile 服务 owner](../startup-readiness/README.md#显式-profile-服务启动与-owner-排空)现已在 requirements/version/new-scope 与原生 Arena/Index proof 根绑定之后构造 graph，实际 bind 后才执行原 readiness 发布；服务关闭先退休准入，按 listener 实际排空→原 graph/follower/owner/I/O/pool→DLR lock 顺序回收。真实 held DATA force、publication stop、首次创建/SDK/read/generation2 restart 和 actual old UID/access replay 组合已验证。默认 EmbeddedServer/完整 authority、full-bytes 与综合 Gate 仍 OPEN。
 
 2026-10-12 [EmbeddedServer 显式 Profile hook](../startup-readiness/README.md#embeddedserver-显式-profile-分支与-lifecycle)现在原 builder 在 Classic 构造前选择独立 owner，原 stack 驱动真实文件创建/recovery与网络/注册/SDK。Profile component 仅在 actual drain 后进入终态，超时保留原锁并阻止更早资源关闭；配置 bootstrap/外部 authority 与完整 Gate继续 OPEN。
+
+2026-10-12 [配置转换与显式 bootstrap](../startup-readiness/README.md#配置转换与显式-bootstrap)已复用原 layout/execution/batch bounds，先完成 scalar/integer/跨参数校验再构造 owner，冻结参数不受后续配置修改影响；actual properties 已驱动原 graph 创建/recovery与 EmbeddedServer/SDK/restart。配置不产生物理 authority，Main/owned环境/full-bytes/综合验收继续 OPEN。

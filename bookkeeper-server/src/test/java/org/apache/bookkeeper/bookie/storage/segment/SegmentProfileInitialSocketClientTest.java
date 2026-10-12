@@ -1890,6 +1890,9 @@ public class SegmentProfileInitialSocketClientTest {
         final SegmentProfileService service;
         final ProfileReceiveBudget budget = new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8);
         final IsolatedSegmentConfig config;
+        final ServerConfiguration bootstrapConfiguration;
+        final SegmentProfileService.Startup startup;
+        final SegmentProfileService.Transport transport;
         org.apache.bookkeeper.server.EmbeddedServer embedded;
 
         ServiceEpisode(Fixture fixture, int target, IsolatedSegmentConfig config,
@@ -1934,7 +1937,7 @@ public class SegmentProfileInitialSocketClientTest {
                             .status());
             var metadata = new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) fixture.manager,
                     ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
-            var startup = new SegmentProfileService.Startup(requirements, requested, persistent, publisher,
+            startup = new SegmentProfileService.Startup(requirements, requested, persistent, publisher,
                     source, metadata, watcher, "ledger-profile", scheduler, fixture.cold, 4,
                     Duration.ofSeconds(5), Duration.ofMillis(100));
             var control = fixture.controlConfigs.get(target);
@@ -1944,16 +1947,41 @@ public class SegmentProfileInitialSocketClientTest {
                     (caller, query) -> fixture.readAllowed.get()
                     && control.staticAuthorizer().allows(caller, ProfileControlOperation.INSTALL)
                     && query.context().equals(fixture.context()));
-            var transport = new SegmentProfileService.Transport(fixture.serverTls, budget,
-                    new SegmentProfileListener.Settings(131072, 64, "socket-test",
-                            requested.targetReadinessGeneration().value()),
+            transport = new SegmentProfileService.Transport(fixture.serverTls, budget,
+                    131072, 64, "socket-test", requested.targetReadinessGeneration().value(),
                     address, fixture.acceptor, fixture.worker, control, read);
-            service = new SegmentProfileService(config, identity, new SecretKeySpec(bytes(32, 7), "AES"),
-                    VALIDATOR, new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
-                            2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
-                    new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
-                            new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))),
-                    startup, transport);
+            Map<String, Object> settings = Map.ofEntries(
+                    Map.entry("Mode", "ISOLATED"), Map.entry("Directory", config.directory().toString()),
+                    Map.entry("LogicalShards", config.logicalShards()), Map.entry("DataFiles", config.dataFiles()),
+                    Map.entry("BytesPerFile", config.bytesPerFile()),
+                    Map.entry("MaxPayloadBytes", config.maxPayloadBytes()),
+                    Map.entry("MaxPendingEntries", config.maxPendingEntries()), Map.entry("Workers", 1),
+                    Map.entry("IoThreads", 2), Map.entry("ControlSlots", 6), Map.entry("Buffers", 2),
+                    Map.entry("BufferBytes", 4096), Map.entry("InputBudgetBytes", 4096),
+                    Map.entry("BufferBudgetBytes", 2 * (4096L + 4095) + 4096), Map.entry("StartupTimeoutMillis", 5000),
+                    Map.entry("ControlLogBytes", 1024 * 1024), Map.entry("HotEntries", 8),
+                    Map.entry("IndexedEntries", 16),
+                    Map.entry("PoolBlocks", 1), Map.entry("MaintenanceBlocks", 1), Map.entry("BatchBytes", 4096),
+                    Map.entry("BatchEntries", 1), Map.entry("BatchDelayMillis", 30000));
+            var properties = new java.util.Properties();
+            settings.forEach((name, value) -> properties.setProperty(
+                    SegmentProfileService.CONFIG_PREFIX + name, value.toString()));
+            var input = temporary.newFolder().toPath().resolve("bookie.properties");
+            try {
+                try (var output = Files.newOutputStream(input)) {
+                    properties.store(output, "Disposable Profile bootstrap bounds; authority is supplied separately");
+                }
+                bootstrapConfiguration = new ServerConfiguration();
+                bootstrapConfiguration.loadConf(input.toUri().toURL());
+                System.out.println("UW_PROFILE_CONFIG_RECEIPT " + new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(Map.of("settings", settings, "propertiesSha256",
+                                java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                                        .digest(Files.readAllBytes(input))), "schema", 1)));
+            } finally {
+                Files.deleteIfExists(input);
+            }
+            service = SegmentProfileService.fromConfiguration(bootstrapConfiguration,
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, startup, transport);
         }
 
         IsolatedSegmentStorage storage() throws Exception {
@@ -1968,7 +1996,8 @@ public class SegmentProfileInitialSocketClientTest {
 
         org.apache.bookkeeper.server.EmbeddedServer assembleEmbedded() throws Exception {
             var classic = temporary.newFolder().toPath().resolve("classic-must-stay-absent");
-            var configuration = new ServerConfiguration().setMetadataServiceUri("do-not-open-classic://invalid")
+            var configuration = new ServerConfiguration(bootstrapConfiguration)
+                    .setMetadataServiceUri("do-not-open-classic://invalid")
                     .setJournalDirName(classic.resolve("journal").toString())
                     .setLedgerDirNames(new String[] {classic.resolve("ledger").toString()})
                     .setIndexDirName(new String[] {classic.resolve("index").toString()});
@@ -1987,7 +2016,7 @@ public class SegmentProfileInitialSocketClientTest {
             fixture.nodes.get(target).close();
             if (useEmbedded) {
                 if (existing) {
-                    var configuration = new ServerConfiguration()
+                    var configuration = new ServerConfiguration(bootstrapConfiguration)
                             .setMetadataServiceUri("do-not-open-classic://invalid");
                     embedded = org.apache.bookkeeper.server.EmbeddedServer.builder(
                             new org.apache.bookkeeper.server.conf.BookieConfiguration(configuration))
@@ -2113,6 +2142,43 @@ public class SegmentProfileInitialSocketClientTest {
             }
             assertFalse(fixture.worker.isShuttingDown());
             assertFalse(fixture.cold.isShutdown());
+        }
+    }
+
+    @Test
+    public void profileConfigurationRejectsInvalidBoundsBeforeOpenAndFreezesValidSettings() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("unopened"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                for (var bad : Map.<String, Object>ofEntries(Map.entry("Buffers", 0), Map.entry("Workers", 2),
+                        Map.entry("BufferBytes", 4096.5), Map.entry("InputBudgetBytes", 1),
+                        Map.entry("BufferBudgetBytes", 4096), Map.entry("HotEntries", 0),
+                        Map.entry("PoolBlocks", 1024), Map.entry("BatchBytes", 8192),
+                        Map.entry("Backend", "IO_URING"), Map.entry("WaitStrategy", "BOUNDED_SPIN"),
+                        Map.entry("Directory", "relative"), Map.entry("AdvancedRangeEnabled", true)).entrySet()) {
+                    var invalid = new ServerConfiguration(episode.bootstrapConfiguration);
+                    invalid.setProperty(SegmentProfileService.CONFIG_PREFIX + bad.getKey(), bad.getValue());
+                    assertThrows(RuntimeException.class, () -> SegmentProfileService.fromConfiguration(invalid,
+                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, episode.startup, episode.transport));
+                    assertFalse(Files.exists(config.directory()));
+                }
+                var missing = new ServerConfiguration(episode.bootstrapConfiguration);
+                missing.clearProperty(SegmentProfileService.CONFIG_PREFIX + "IndexedEntries");
+                assertThrows(IllegalArgumentException.class, () -> SegmentProfileService.fromConfiguration(missing,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, episode.startup, episode.transport));
+                assertNull(episode.storage());
+                assertTrue(episode.persistent.read("socket0:3181").versionedRecord().isEmpty());
+                // Mutating the original configuration cannot change the already frozen owner.
+                episode.bootstrapConfiguration.setProperty(SegmentProfileService.CONFIG_PREFIX + "BufferBytes", 1);
+                episode.bootstrapConfiguration.setProperty(SegmentProfileService.CONFIG_PREFIX + "Affinity", "REQUIRE");
+                episode.replaceNode(fixture, 0, false, true);
+                assertEquals("OFF", files(episode.storage()).config().affinity());
+                assertEquals("SYSTEM", files(episode.storage()).config().numaPolicy());
+                assertEquals("PARK", files(episode.storage()).config().waitStrategy());
+            }
         }
     }
 

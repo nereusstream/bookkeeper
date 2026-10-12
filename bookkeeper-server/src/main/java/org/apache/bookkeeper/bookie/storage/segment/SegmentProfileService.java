@@ -26,6 +26,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -40,11 +41,13 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.NewScopeFallbackManifest;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessResult;
+import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
+import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.TLSContextFactory;
 import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
@@ -55,12 +58,20 @@ import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
  * The supplied new-scope policy still requires its external physical/old-service proof issuer.
  */
 public final class SegmentProfileService implements AutoCloseable {
-    record Startup(ZKProfileStartupRequirementsStore requirements, StartupReadinessInput requested,
+    public static final String CONFIG_PREFIX = "experimentalSegment";
+    private static final Set<String> CONFIG_FIELDS = Set.of("Mode", "Directory", "LogicalShards", "DataFiles",
+            "BytesPerFile", "MaxPayloadBytes", "MaxPendingEntries", "Backend", "Affinity", "NumaPolicy", "WaitStrategy",
+            "Workers", "IoThreads", "ControlSlots", "Buffers", "BufferBytes", "InputBudgetBytes", "BufferBudgetBytes",
+            "StartupTimeoutMillis", "ControlLogBytes", "HotEntries", "IndexedEntries", "PoolBlocks",
+            "MaintenanceBlocks",
+            "BatchBytes", "BatchEntries", "BatchDelayMillis");
+
+    public record Startup(ZKProfileStartupRequirementsStore requirements, StartupReadinessInput requested,
             ZKProfileRegistrationStore persistent, ZKProfileEphemeralRegistrationStore publisher,
             ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata,
             ZooKeeperWatcherBase watcher, String domain, ScheduledExecutorService scheduler,
             ThreadPoolExecutor cold, int maxEvents, Duration timeout, Duration pollInterval) {
-        Startup {
+        public Startup {
             Objects.requireNonNull(requirements, "requirements");
             Objects.requireNonNull(requested, "requested");
             Objects.requireNonNull(persistent, "persistent");
@@ -83,13 +94,14 @@ public final class SegmentProfileService implements AutoCloseable {
         }
     }
 
-    record Transport(TLSContextFactory tls, ProfileReceiveBudget budget, SegmentProfileListener.Settings settings,
+    public record Transport(TLSContextFactory tls, ProfileReceiveBudget budget,
+            int connectionBytes, int connectionBaseBytes, String trustDomain, long readinessGeneration,
             InetSocketAddress address, EventLoopGroup acceptor, EventLoopGroup worker,
             SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
-        Transport {
+        public Transport {
             Objects.requireNonNull(tls, "tls");
             Objects.requireNonNull(budget, "budget");
-            Objects.requireNonNull(settings, "settings");
+            new SegmentProfileListener.Settings(connectionBytes, connectionBaseBytes, trustDomain, readinessGeneration);
             Objects.requireNonNull(address, "address");
             Objects.requireNonNull(acceptor, "acceptor");
             Objects.requireNonNull(worker, "worker");
@@ -97,6 +109,117 @@ public final class SegmentProfileService implements AutoCloseable {
                 throw new IllegalArgumentException("Explicit resolved Profile endpoint required");
             }
         }
+
+        Transport(TLSContextFactory tls, ProfileReceiveBudget budget, SegmentProfileListener.Settings settings,
+                InetSocketAddress address, EventLoopGroup acceptor, EventLoopGroup worker,
+                SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
+            this(tls, budget, settings.connectionBytes(), settings.connectionBaseBytes(), settings.trustDomain(),
+                    settings.readinessGeneration(), address, acceptor, worker, control, read);
+        }
+
+        SegmentProfileListener.Settings settings() {
+            return new SegmentProfileListener.Settings(connectionBytes, connectionBaseBytes, trustDomain,
+                    readinessGeneration);
+        }
+    }
+
+    /** Strict opt-in, including unknown-key rejection; safe before any Classic or Profile resource construction. */
+    public static boolean isolatedConfigurationEnabled(ServerConfiguration configuration) {
+        var keys = Objects.requireNonNull(configuration, "configuration").getKeys();
+        while (keys.hasNext()) {
+            String name = keys.next();
+            if (!name.startsWith(CONFIG_PREFIX)) {
+                continue;
+            }
+            if (!CONFIG_FIELDS.contains(name.substring(CONFIG_PREFIX.length()))) {
+                throw new IllegalArgumentException("Unsupported experimental Segment configuration key: " + name);
+            }
+            Object value = configuration.getProperty(name);
+            if (!(value instanceof CharSequence || value instanceof Number || value instanceof Boolean)) {
+                throw new IllegalArgumentException("Experimental Segment settings must be single scalar values: "
+                        + name);
+            }
+        }
+        return switch (configuration.getString(CONFIG_PREFIX + "Mode", "OFF")) {
+            case "OFF" -> false;
+            case "ISOLATED" -> true;
+            default -> throw new IllegalArgumentException("Experimental Segment mode must be OFF or ISOLATED");
+        };
+    }
+
+    /**
+     * Freeze explicit local bounds from ordinary Bookie configuration, borrowing the supplied authority/transport.
+     * No metadata, directory or storage is opened here; configuration text cannot create physical startup proof.
+     */
+    public static SegmentProfileService fromConfiguration(ServerConfiguration configuration, SecretKey key,
+            ProfileDescriptorValidator validator, Startup startup, Transport transport) {
+        if (!isolatedConfigurationEnabled(configuration)) {
+            throw new IllegalArgumentException("Experimental Segment configuration is OFF");
+        }
+        Objects.requireNonNull(startup, "startup");
+        String directory = configuration.getString(CONFIG_PREFIX + "Directory");
+        if (directory == null || !Path.of(directory).isAbsolute()) {
+            throw new IllegalArgumentException("Explicit absolute experimental Segment directory required");
+        }
+        var defaults = IsolatedSegmentConfig.defaults(Path.of(directory));
+        var config = new IsolatedSegmentConfig(defaults.directory(), 1,
+                optionalInt(configuration, "LogicalShards", defaults.logicalShards()),
+                optionalInt(configuration, "DataFiles", defaults.dataFiles()),
+                optionalLong(configuration, "BytesPerFile", defaults.bytesPerFile()), 4096,
+                optionalInt(configuration, "MaxPayloadBytes", defaults.maxPayloadBytes()),
+                optionalInt(configuration, "MaxPendingEntries", defaults.maxPendingEntries()),
+                configuration.getString(CONFIG_PREFIX + "Backend", defaults.backend()),
+                configuration.getString(CONFIG_PREFIX + "Affinity", defaults.affinity()),
+                configuration.getString(CONFIG_PREFIX + "NumaPolicy", defaults.numaPolicy()),
+                configuration.getString(CONFIG_PREFIX + "WaitStrategy", defaults.waitStrategy()));
+        var execution = new SegmentExecutionGroup.Settings(requiredInt(configuration, "Workers"),
+                requiredInt(configuration, "IoThreads"), requiredInt(configuration, "ControlSlots"),
+                requiredInt(configuration, "Buffers"), requiredInt(configuration, "BufferBytes"),
+                requiredLong(configuration, "InputBudgetBytes"), requiredLong(configuration, "BufferBudgetBytes"),
+                Duration.ofMillis(requiredLong(configuration, "StartupTimeoutMillis")));
+        var batches = new SegmentDataPhysicalDriver.BatchLimits(requiredInt(configuration, "BatchBytes"),
+                requiredInt(configuration, "BatchEntries"),
+                Duration.ofMillis(requiredLong(configuration, "BatchDelayMillis")));
+        var limits = new IsolatedSegmentStorage.Limits(requiredLong(configuration, "ControlLogBytes"),
+                requiredInt(configuration, "HotEntries"), requiredInt(configuration, "IndexedEntries"),
+                requiredInt(configuration, "PoolBlocks"), requiredInt(configuration, "MaintenanceBlocks"), batches);
+        long blocks = (config.bytesPerFile() - 4096) / SegmentArenaControlLog.BLOCK_BYTES;
+        int largestEntry = SegmentBatchFormat.maxPayload(config) + SegmentBatchFormat.ENTRY_OVERHEAD;
+        if (execution.workers() > config.logicalShards() || execution.workers() > config.maxPendingEntries()
+                || limits.hotEntries() < config.logicalShards()
+                || (long) limits.poolBlocks() + limits.maintenanceBlocks() > blocks
+                || batches.bytes() > execution.bufferBytes()
+                || SegmentBatchFormat.alignedLength(SegmentBatchFormat.RECORD_HEADER + largestEntry)
+                    > execution.bufferBytes() || largestEntry > execution.inputBudgetBytes()) {
+            throw new IllegalArgumentException("Incompatible experimental Segment layout/execution/batch bounds");
+        }
+        var policy = startup.requested();
+        if (policy.requiredDevices().devices().size() != 1) {
+            throw new IllegalArgumentException("One declared Arena required for isolated bootstrap");
+        }
+        var identity = new SegmentFileHeader(policy.compatibility().storageIncarnation(),
+                UUID.fromString(policy.requiredDevices().devices().get(0).deviceId()),
+                BookieId.parse(policy.compatibility().bookieId()));
+        return new SegmentProfileService(config, identity, key, validator, execution, limits, startup, transport);
+    }
+
+    private static long requiredLong(ServerConfiguration configuration, String field) {
+        if (!configuration.containsKey(CONFIG_PREFIX + field)) {
+            throw new IllegalArgumentException("Missing experimental Segment setting: " + field);
+        }
+        return Long.parseLong(configuration.getString(CONFIG_PREFIX + field));
+    }
+
+    private static int requiredInt(ServerConfiguration configuration, String field) {
+        return Math.toIntExact(requiredLong(configuration, field));
+    }
+
+    private static long optionalLong(ServerConfiguration configuration, String field, long fallback) {
+        return configuration.containsKey(CONFIG_PREFIX + field) ? requiredLong(configuration, field) : fallback;
+    }
+
+    private static int optionalInt(ServerConfiguration configuration, String field, int fallback) {
+        return Math.toIntExact(optionalLong(configuration, field, fallback));
     }
 
     private final Object gate = new Object();
