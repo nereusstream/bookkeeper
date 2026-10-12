@@ -607,7 +607,11 @@ public class SegmentProfileInitialSocketClientTest {
                 channel.close().syncUninterruptibly();
             }
             for (Channel channel : listeners) {
-                channel.close().syncUninterruptibly();
+                if (channel.isOpen()) {
+                    channel.close().syncUninterruptibly();
+                } else {
+                    channel.closeFuture().syncUninterruptibly();
+                }
             }
             for (int target = 0; target < nodes.size(); target++) {
                 IsolatedSegmentStorage storage = nodes.get(target);
@@ -1893,6 +1897,7 @@ public class SegmentProfileInitialSocketClientTest {
         final ServerConfiguration bootstrapConfiguration;
         final SegmentProfileService.Startup startup;
         final SegmentProfileService.Transport transport;
+        final boolean ownsResources;
         org.apache.bookkeeper.server.EmbeddedServer embedded;
 
         ServiceEpisode(Fixture fixture, int target, IsolatedSegmentConfig config,
@@ -1905,7 +1910,15 @@ public class SegmentProfileInitialSocketClientTest {
                 StartupReadinessInput requested, BookieCompatibilityFact requiredCompatibility,
                 InetSocketAddress address, java.util.concurrent.ScheduledExecutorService scheduler,
                 boolean holdPublication) throws Exception {
+            this(fixture, target, config, requested, requiredCompatibility, address, scheduler, holdPublication, false);
+        }
+
+        ServiceEpisode(Fixture fixture, int target, IsolatedSegmentConfig config,
+                StartupReadinessInput requested, BookieCompatibilityFact requiredCompatibility,
+                InetSocketAddress address, java.util.concurrent.ScheduledExecutorService scheduler,
+                boolean holdPublication, boolean ownsResources) throws Exception {
             this.config = config;
+            this.ownsResources = ownsResources;
             client = holdPublication
                     ? new HeldServicePublicationClient(fixture.cluster.getZooKeeperConnectString(), watcher)
                     : new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
@@ -1980,8 +1993,22 @@ public class SegmentProfileInitialSocketClientTest {
             } finally {
                 Files.deleteIfExists(input);
             }
-            service = SegmentProfileService.fromConfiguration(bootstrapConfiguration,
-                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, startup, transport);
+            if (ownsResources) {
+                bootstrapConfiguration.setMetadataServiceUri("zk+longhierarchical://"
+                        + fixture.cluster.getZooKeeperConnectString() + "/socket-ledgers");
+                bootstrapConfiguration.setZkTimeout(5000);
+                var owned = new SegmentProfileOwnedResources.Settings(requested, requiredRoot, root,
+                        "/socket-initial",
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, "ledger-profile", 4, Duration.ofSeconds(5),
+                        Duration.ofMillis(100), 2, 4, 64);
+                service = SegmentProfileService.withOwnedResources(bootstrapConfiguration,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, owned, fixture.serverTls, budget,
+                        131072, 64, "socket-test", address, control.staticAuthorizer(),
+                        control.exactAuthorizer(), read);
+            } else {
+                service = SegmentProfileService.fromConfiguration(bootstrapConfiguration,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, startup, transport);
+            }
         }
 
         IsolatedSegmentStorage storage() throws Exception {
@@ -2012,7 +2039,12 @@ public class SegmentProfileInitialSocketClientTest {
         }
 
         void replaceNode(Fixture fixture, int target, boolean existing, boolean useEmbedded) throws Exception {
-            fixture.listeners.get(target).close().sync();
+            var previous = fixture.listeners.get(target);
+            if (previous.isOpen()) {
+                previous.close().sync();
+            } else {
+                previous.closeFuture().sync();
+            }
             fixture.nodes.get(target).close();
             if (useEmbedded) {
                 if (existing) {
@@ -2036,9 +2068,38 @@ public class SegmentProfileInitialSocketClientTest {
             var bound = (InetSocketAddress) fixture.listeners.get(target).localAddress();
             fixture.nodes.set(target, storage());
             fixture.budgets.set(target, budget);
-            assertEquals("tls://127.0.0.1:" + bound.getPort(), publisher.readServiceInfo(
-                    fixture.identities.get(target).bookieId().toString()).orElseThrow().endpoint());
-            assertTrue(publisher.readWritable(fixture.identities.get(target).bookieId().toString()).isPresent());
+            if (ownsResources) {
+                var peer = persistent.readPeer(fixture.identities.get(target).bookieId().toString()).peer();
+                assertNotNull(peer);
+                assertEquals("tls://127.0.0.1:" + bound.getPort(), peer.projection().endpoint());
+            } else {
+                assertEquals("tls://127.0.0.1:" + bound.getPort(), publisher.readServiceInfo(
+                        fixture.identities.get(target).bookieId().toString()).orElseThrow().endpoint());
+                assertTrue(publisher.readWritable(fixture.identities.get(target).bookieId().toString()).isPresent());
+            }
+        }
+
+        Object ownedResources() throws Exception {
+            var field = SegmentProfileService.class.getDeclaredField("ownedResources");
+            field.setAccessible(true);
+            return field.get(service);
+        }
+
+        Object ownedField(String name) throws Exception {
+            var field = SegmentProfileOwnedResources.class.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.get(ownedResources());
+        }
+
+        void assertOwnedResourcesTerminal(boolean terminal) throws Exception {
+            assertEquals(terminal, ((EventLoopGroup) ownedField("worker")).isTerminated());
+            assertEquals(terminal, ((EventLoopGroup) ownedField("acceptor")).isTerminated());
+            assertEquals(terminal, ((ThreadPoolExecutor) ownedField("cold")).isTerminated());
+            assertEquals(terminal, ((java.util.concurrent.ScheduledThreadPoolExecutor) ownedField("scheduler"))
+                    .isTerminated());
+            assertEquals(terminal, ownedField("zkClosed"));
+            assertEquals(terminal, ownedField("managerClosed"));
+            assertEquals(terminal, ownedField("driverClosed"));
         }
 
         @Override
@@ -2192,7 +2253,100 @@ public class SegmentProfileInitialSocketClientTest {
         runOwnedProfileService(true);
     }
 
+    @Test
+    public void ownedProfileResourcesRunSdkAndWaitForActualExecutorsMetadataAndNetworkDrain() throws Exception {
+        runOwnedProfileService(true, true);
+    }
+
+    @Test
+    public void ownedProfileResourcesKeepZkAndNetworkUntilActualMetadataSchedulerTerminal() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("owned-meta"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
+                episode.replaceNode(fixture, 0, false, true);
+                var manager = (AbstractZkLedgerManager) episode.ownedField("manager");
+                var field = AbstractZkLedgerManager.class.getDeclaredField("scheduler");
+                field.setAccessible(true);
+                var scheduler = (java.util.concurrent.ScheduledExecutorService) field.get(manager);
+                var entered = new CountDownLatch(1);
+                var release = new CountDownLatch(1);
+                var actual = scheduler.submit(() -> {
+                    entered.countDown();
+                    await(release);
+                });
+                try {
+                    assertTrue(entered.await(5, TimeUnit.SECONDS));
+                    assertFalse(episode.service.close(Duration.ofMillis(200)));
+                    assertFalse(actual.isDone());
+                    assertEquals(false, episode.ownedField("managerClosed"));
+                    assertEquals(false, episode.ownedField("zkClosed"));
+                    assertFalse(((EventLoopGroup) episode.ownedField("worker")).isShuttingDown());
+                    release.countDown();
+                    actual.get(5, TimeUnit.SECONDS);
+                    assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                    episode.assertOwnedResourcesTerminal(true);
+                } finally {
+                    release.countDown();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileInitializationFailureRetainsHandleAndDrainsActualPartialResources() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("owned-unopened"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, null,
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
+                assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                assertFalse(Files.exists(config.directory()));
+                assertNull(episode.storage());
+                assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                episode.assertOwnedResourcesTerminal(true);
+                var settings = new SegmentProfileOwnedResources.Settings(requested, "/missing-startup",
+                        "/missing-readiness", "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE, "ledger-profile",
+                        4, Duration.ofSeconds(5), Duration.ofMillis(100), 1, 1, 4);
+                try (var noZk = new java.net.ServerSocket(0)) {
+                    var invalid = new ServerConfiguration(episode.bootstrapConfiguration);
+                    invalid.setMetadataServiceUri("zk+longhierarchical://127.0.0.1:" + noZk.getLocalPort()
+                            + "/socket-ledgers");
+                    invalid.setZkTimeout(1000);
+                    var control = fixture.controlConfigs.get(0);
+                    var failed = SegmentProfileService.withOwnedResources(invalid,
+                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, fixture.serverTls,
+                            new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8), 131072, 64, "socket-test",
+                            new InetSocketAddress("127.0.0.1", 0), control.staticAuthorizer(),
+                            control.exactAuthorizer(), null);
+                    try {
+                        assertThrows(java.io.IOException.class, () -> failed.start(false));
+                        assertTrue(failed.close(Duration.ofSeconds(5)));
+                        var resourcesField = SegmentProfileService.class.getDeclaredField("ownedResources");
+                        resourcesField.setAccessible(true);
+                        var resources = resourcesField.get(failed);
+                        for (String name : List.of("worker", "acceptor")) {
+                            var terminal = SegmentProfileOwnedResources.class.getDeclaredField(name);
+                            terminal.setAccessible(true);
+                            assertTrue(((EventLoopGroup) terminal.get(resources)).isTerminated());
+                        }
+                        assertFalse(Files.exists(config.directory()));
+                    } finally {
+                        failed.close();
+                    }
+                }
+            }
+        }
+    }
+
     private void runOwnedProfileService(boolean embedded) throws Exception {
+        runOwnedProfileService(embedded, false);
+    }
+
+    private void runOwnedProfileService(boolean embedded, boolean ownsResources) throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
                 BookKeeper sdk = sdk(fixture)) {
             var episodes = new ArrayList<ServiceEpisode>();
@@ -2206,7 +2360,8 @@ public class SegmentProfileInitialSocketClientTest {
                             1, 1, 1, original.bytesPerFile(), 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
                     var requested = servicePolicy(config, fixture.identities.get(target), 1);
                     var episode = new ServiceEpisode(fixture, target, config, requested, requested.compatibility(),
-                            new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler());
+                            new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false,
+                            ownsResources);
                     episodes.add(episode);
                     episode.replaceNode(fixture, target, false, embedded);
                     var peer = episode.persistent.readPeer(fixture.identities.get(target).bookieId().toString()).peer();
@@ -2252,6 +2407,9 @@ public class SegmentProfileInitialSocketClientTest {
                 }, null);
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
                 assertFalse(episodes.get(0).service.close(Duration.ofMillis(100)));
+                if (ownsResources) {
+                    episodes.get(0).assertOwnedResourcesTerminal(false);
+                }
                 if (embedded) {
                     var stack = episodes.get(0).embedded.getLifecycleComponentStack();
                     assertThrows(java.io.UncheckedIOException.class, stack::close);
@@ -2262,12 +2420,19 @@ public class SegmentProfileInitialSocketClientTest {
                 }
                 assertThrows(java.io.IOException.class,
                         () -> SegmentDataFileLock.open(episodes.get(0).config.directory()));
-                assertThrows(IllegalStateException.class,
-                        () -> episodes.get(0).publisher.readWritable("socket0:3181"));
+                if (ownsResources) {
+                    assertNull(episodes.get(0).persistent.readPeer("socket0:3181").peer());
+                } else {
+                    assertThrows(IllegalStateException.class,
+                            () -> episodes.get(0).publisher.readWritable("socket0:3181"));
+                }
                 assertFalse(fixture.worker.isShuttingDown());
                 release.countDown();
                 assertEquals(1, second.get(5, TimeUnit.SECONDS).longValue());
                 assertTrue(episodes.get(0).service.close(Duration.ofSeconds(5)));
+                if (ownsResources) {
+                    episodes.get(0).assertOwnedResourcesTerminal(true);
+                }
                 if (embedded) {
                     var stack = episodes.get(0).embedded.getLifecycleComponentStack();
                     stack.close();
@@ -2278,7 +2443,7 @@ public class SegmentProfileInitialSocketClientTest {
                 handle = null;
                 var requested = servicePolicy(episodes.get(0).config, fixture.identities.get(0), 2);
                 var restarted = new ServiceEpisode(fixture, 0, episodes.get(0).config, requested, null,
-                        new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler());
+                        new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, ownsResources);
                 episodes.add(restarted);
                 restarted.replaceNode(fixture, 0, true, embedded);
                 var peer = restarted.persistent.readPeer("socket0:3181").peer();

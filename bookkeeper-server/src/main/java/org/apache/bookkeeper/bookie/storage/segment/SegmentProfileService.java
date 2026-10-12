@@ -157,6 +157,18 @@ public final class SegmentProfileService implements AutoCloseable {
             throw new IllegalArgumentException("Experimental Segment configuration is OFF");
         }
         Objects.requireNonNull(startup, "startup");
+        var parameters = localParameters(configuration, startup.requested());
+        return new SegmentProfileService(parameters.config(), parameters.identity(), key, validator,
+                parameters.execution(), parameters.limits(), startup, transport);
+    }
+
+    private record LocalParameters(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentExecutionGroup.Settings execution, IsolatedSegmentStorage.Limits limits) { }
+
+    private static LocalParameters localParameters(ServerConfiguration configuration, StartupReadinessInput policy) {
+        if (!isolatedConfigurationEnabled(configuration)) {
+            throw new IllegalArgumentException("Experimental Segment configuration is OFF");
+        }
         String directory = configuration.getString(CONFIG_PREFIX + "Directory");
         if (directory == null || !Path.of(directory).isAbsolute()) {
             throw new IllegalArgumentException("Explicit absolute experimental Segment directory required");
@@ -193,14 +205,29 @@ public final class SegmentProfileService implements AutoCloseable {
                     > execution.bufferBytes() || largestEntry > execution.inputBudgetBytes()) {
             throw new IllegalArgumentException("Incompatible experimental Segment layout/execution/batch bounds");
         }
-        var policy = startup.requested();
+        Objects.requireNonNull(policy, "policy");
         if (policy.requiredDevices().devices().size() != 1) {
             throw new IllegalArgumentException("One declared Arena required for isolated bootstrap");
         }
         var identity = new SegmentFileHeader(policy.compatibility().storageIncarnation(),
                 UUID.fromString(policy.requiredDevices().devices().get(0).deviceId()),
                 BookieId.parse(policy.compatibility().bookieId()));
-        return new SegmentProfileService(config, identity, key, validator, execution, limits, startup, transport);
+        return new LocalParameters(config, identity, execution, limits);
+    }
+
+    /** Deferred owned initialization; caller retains this handle when startup fails. TLS stays borrowed. */
+    public static SegmentProfileService withOwnedResources(ServerConfiguration configuration, SecretKey key,
+            ProfileDescriptorValidator validator, SegmentProfileOwnedResources.Settings settings,
+            TLSContextFactory tls, ProfileReceiveBudget budget, int connectionBytes, int connectionBaseBytes,
+            String trustDomain, InetSocketAddress address,
+            org.apache.bookkeeper.common.profile.control.ProfileStaticOperationAuthorizer staticAuthorizer,
+            org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer exactAuthorizer,
+            SegmentProfileReadConfig read) {
+        var parameters = localParameters(configuration, settings.policy());
+        var resources = new SegmentProfileOwnedResources(new ServerConfiguration(configuration), settings, tls,
+                budget, connectionBytes, connectionBaseBytes, trustDomain, address, staticAuthorizer, exactAuthorizer,
+                read, validator);
+        return new SegmentProfileService(parameters, key, validator, resources);
     }
 
     private static long requiredLong(ServerConfiguration configuration, String field) {
@@ -230,8 +257,9 @@ public final class SegmentProfileService implements AutoCloseable {
     private final ProfileDescriptorValidator validator;
     private final SegmentExecutionGroup.Settings execution;
     private final IsolatedSegmentStorage.Limits limits;
-    private final Startup startup;
-    private final Transport transport;
+    private Startup startup;
+    private Transport transport;
+    private SegmentProfileOwnedResources ownedResources;
     private IsolatedSegmentStorage storage;
     private SegmentLocalReadinessStore local;
     private ZKProfileEphemeralRegistrationStore.Admission admission;
@@ -242,6 +270,17 @@ public final class SegmentProfileService implements AutoCloseable {
     private boolean closed;
     private boolean demoted;
     private boolean lifecycleBound;
+
+    private SegmentProfileService(LocalParameters parameters, SecretKey key, ProfileDescriptorValidator validator,
+            SegmentProfileOwnedResources resources) {
+        config = parameters.config();
+        identity = parameters.identity();
+        this.key = Objects.requireNonNull(key, "key");
+        this.validator = Objects.requireNonNull(validator, "validator");
+        execution = parameters.execution();
+        limits = parameters.limits();
+        ownedResources = resources;
+    }
 
     /** No directory, storage constructor, listener or registration is opened here. */
     SegmentProfileService(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
@@ -272,6 +311,12 @@ public final class SegmentProfileService implements AutoCloseable {
         }
         Throwable failed = null;
         try {
+            if (ownedResources != null) {
+                var environment = ownedResources.open();
+                startup = environment.startup();
+                transport = environment.transport();
+                requireLive();
+            }
             var source = startup.requirements().read(identity.bookieId().toString());
             if (source.status() != ZKProfileStartupRequirementsStore.Status.FOUND) {
                 throw new IOException("Startup requirements unavailable: " + source.status());
@@ -519,6 +564,12 @@ public final class SegmentProfileService implements AutoCloseable {
     }
 
     private void requireExternalThread() {
+        if (transport == null) {
+            if (ownedResources != null) {
+                ownedResources.requireExternalThread();
+            }
+            return;
+        }
         for (var loop : transport.worker()) {
             if (loop.inEventLoop()) {
                 throw new IllegalStateException("Profile service lifecycle requires an external cold caller");
@@ -543,7 +594,11 @@ public final class SegmentProfileService implements AutoCloseable {
             if (admission != null) {
                 admission.close();
             }
-            transport.budget().closeAdmissionAndDrain();
+            if (transport != null) {
+                transport.budget().closeAdmissionAndDrain();
+            } else if (ownedResources != null) {
+                ownedResources.retire();
+            }
             if (attempted && !startupFinished) {
                 return false;
             }
@@ -585,6 +640,9 @@ public final class SegmentProfileService implements AutoCloseable {
             }
             if (demotionFailure != null) {
                 throw demotionFailure;
+            }
+            if (ownedResources != null && !ownedResources.close(deadline)) {
+                return false;
             }
             closed = true;
             return true;

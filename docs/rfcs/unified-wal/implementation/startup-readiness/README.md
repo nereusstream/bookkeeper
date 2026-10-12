@@ -455,3 +455,28 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 父源码 `6a043e7e45bf4b63268e2ffc3df7f45f39a74414`。初始16项中两个负向真实失败：Commons namespace prefix iterator 未遍历这些 flat keys，多值 mode 与未知键绕过检查；改为实际 key 枚举，原断言保留，16项 green。随后实际 properties 加载与扩大回归的最终 `1fAkbzBj` 两类30项（原 EmbeddedServer及配置5/socket25）零 failure/error/skip，1100 inputs 全部匹配最终源码；19份 settings/properties SHA 回执记录不同测试实例，不计额外覆盖。最终 Spotless/Checkstyle exit0，独立 root RAT exit1/443，全为父 HEAD 路径，无新增。模型语义不变，本轮不重跑 TLC，不移绑旧模型为配置/物理证明。
 
 archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-bootstrap-evidence-o6zzfc8e` 保留 red/green/最终 stage inputs/log/reports、最终源码、实际 config/Classic/UID/access receipt、style/RAT/checksum。当前完成配置转换和可调用的显式 programmatic bootstrap；Main/resource/environment 完整装配、外部 authority/stock矩阵、snapshot/handoff/GC/decommission/full-bytes/正式兼容/性能/运维与全16步验收继续 OPEN。默认 OFF/SYSTEM/PARK 和 disabled 能力不变，步骤11/12/14/15及生产 Gate 保持 PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED，完整目标 active。
+
+## 同一服务 episode 的 owned 资源初始化与终止
+
+2026-10-12，`SegmentProfileService.withOwnedResources` 在原参数快照后返回一个尚未打开资源的 owner。`start` 才初始化同一次 `SegmentProfileOwnedResources`：一个 native ZooKeeper/原 watcher manager，原 ZKMetadataClientDriver/ledger-manager factory/AbstractZkLedgerManager，bounded cold executor、delete scheduler 和独立 acceptor/worker loops。原 driver 显式借用该 exact ZK client，后续 requirements/persistent/publisher/reservation/metadata store 全用同一 client 与 namespace；没有构造 Classic registration manager、目录、cookie 或 LedgerStorage。Metadata URI/session timeout 使用原配置，三个 Profile namespaces/ACL、实际 startup policy、有限 worker/queue/poll bounds 由明确 Settings 提供；required source/delete assignment 必须已 commissioned，不在启动中补造。
+
+控制路径复用原 install/activation/replacement/repair/delete authority readers，按原 purpose 选取，沿用 caller 的 static/exact Authorizer 与 nonblocking read policy；不是 auth-only 或 caller enum 授权。原 owner 的 native root/header/recovery/catch-up/Harness/registration/admission/consumer/SDK 路径继续使用。TLS factory 仍明确借用，receive budget 归这个 listener episode；secret key与physical/old-service proof仍来自外部 issuer。没有新重试层、每 entry MetadataStore 或另一套 control/data 格式。
+
+初始化发生在 caller 已持有的 owner 内；部分 metadata/连接初始化失败，或者已初始化但缺 required source，原 `start` finally 会退休并走同一清理路径，失败/未排空时保留 handle 与异常。close-before-start 不创建线程/连接，旧 borrowed-resource factory 不关闭 caller 的资源。真实服务 drain 完成后才 shutdown cold/scheduler并等待 actual termination；`AbstractZkLedgerManager.closeAndAwaitTermination(timeout)` 确認其原 scheduler，保留 legacy close 的原非阻塞行为。随后确认原 factory/driver close、原 `ZooKeeper.close(wait)` 的 send/event-thread terminal，再等待 worker/acceptor termination；false/异常保留后续资源与状态供重试，不能先释放 ZK 或网络 loops。
+
+原 ZK 3.9.5 的 close(wait) 会先调用 synchronous close，再分别 join/check send/event threads；其 closeSession 与原 sender join 在 bounded wait 检查之前。因此本接口的 deadline 不能宣称为所有底层 RPC/join 的硬总截止时间；metadata demotion同样有原 store timeout。实际完成仍必须得到各原资源的终态，不用调用 close、caller timeout/cancel、ZK状态或内部 flag 单独证明排空。SDK/目录权限/current-build Classic证据不升级 released stock、永久服务退役或full-bytes。
+
+三项新增真实测试：三 owned Bookie episode 用原 properties/metadata URI、独立 ZK与原 LM、各自 cold/scheduler/loops完成 mTLS/initial coordinator/原 SDK Add/read与generation2 restart；held DATA force 时网络/storage owner未排空，全部外部资源仍未终止，实际 force终结后才完成全资源关闭。另在原 metadata scheduler 上保留一个实际未终结任务，close 返回 false、ZK/worker未关闭；该任务真正退出后同 owner重试成功。missing requirements与原 TCP/ZK handshake timeout均在无 storage constructor/目录创建时失败，caller仍持有handle，已创建的真实资源终结。fixture改为对已 native closed 的 listener读取closeFuture，不在其event loop已经终止后再次投递close。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'TestEmbeddedServer,SegmentProfileInitialSocketClientTest#profileConfiguration*+embeddedProfile*+ownedProfile*+ordinaryDataClient*+ordinarySourceQuota*+ordinaryDataRejection*+ordinaryTimeout*+ordinaryServerForce*+ordinaryReply*+writerStop*+ordinaryWriterClose*+readinessBridge*+automaticDeletePublication*'
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+# 等构建结束后执行。
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `1e7c0c37a9ea73767dd29f5a3b5fc3f53e4ef42f`。最初 compile 失败是cleanup再次调用getFactory的checked MetadataException；改为保留实际已创建factory，未创建时不重试初始化。首个 SDK测试完成实际关闭后在fixture重复close已终结event-loop的channel时error，按原closeFuture修正，未弱化drain断言。最小三项green后，最终 `uuTpSN6F` 两类33项（原 EmbeddedServer/配置5/socket28）零 failure/error/skip，1103 inputs全部匹配，collector补齐metadata client driver和watcher producer。最终Spotless/Checkstyle exit0，独立root RAT exit1/443父HEAD路径，无新增；模型语义未改，本轮不重跑TLC，不移绑旧PASS为原生资源事实。
+
+archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-owned-evidence-7vj7l7nd` 保留stage输入/log/reports、最终源码、actual config/Classic/UID/access receipt、ZK close字节码核对、style/RAT/checksum。当前提供可调用的 owned ZK/metadata/executor/event-loop bootstrap，完整 Main/外部 physical authority/TLS native ownership、released stock矩阵、snapshot/handoff/GC/decommission、full-bytes/正式兼容/性能/运维及全16步验收仍 OPEN。默认 OFF/SYSTEM/PARK 和 disabled 能力不变，步骤11/12/14/15及生产 Gate仍 PARTIAL/OPEN；Linux NUMA/真实掉电/正式性能本轮 NOT_EXECUTED，完整目标 active。

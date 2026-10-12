@@ -715,4 +715,13 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
             log.warn().exception(e).log("Error when closing zookeeper based ledger manager");
         }
     }
+
+    /** Explicit resource-owner drain; the legacy close API keeps its existing nonblocking behavior. */
+    public boolean closeAndAwaitTermination(java.time.Duration timeout) throws InterruptedException {
+        if (timeout.isNegative() || timeout.isZero()) {
+            throw new IllegalArgumentException("Positive metadata scheduler drain timeout required");
+        }
+        scheduler.shutdown();
+        return scheduler.awaitTermination(timeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
 }

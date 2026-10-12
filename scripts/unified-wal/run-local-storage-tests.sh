@@ -67,6 +67,8 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / nam
     'proto/BookieServer.java', 'proto/BookieNettyServer.java', 'proto/BookieRequestProcessor.java',
     'discover/ZKRegistrationManager.java', 'meta/zk/ZKMetadataBookieDriver.java'))
 paths.add(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/component/LifecycleComponentStack.java'))
+paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/meta/zk/ZKMetadataClientDriver.java'))
+paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/zookeeper/ZooKeeperWatcherBase.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/server/TestEmbeddedServer.java'))
 paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/component') / name for name in
              ('LifecycleComponent.java', 'Lifecycle.java', 'LifecycleListener.java'))

@@ -1461,3 +1461,5 @@ archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-listener-evidence-
 2026-10-12 [EmbeddedServer 显式 Profile lifecycle](../startup-readiness/README.md#embeddedserver-显式-profile-分支与-lifecycle)已用原 stack 驱动实际 owner startup/bind/registration/SDK/restart，并在 Classic 构造前选择该分支。held native force 或 publication 未终结时，关闭异常阻止 stack 越过原 owner；handler 返回不能把失败启动标 STARTED。普通 DATA/UNKNOWN/close/readiness/delete 与原 Classic 回归共28项通过，配置 bootstrap/full authority/full-bytes/综合 Gate仍 OPEN。
 
 2026-10-12 [配置与显式 bootstrap](../startup-readiness/README.md#配置转换与显式-bootstrap)现在实际 properties 经原配置对象冻结 graph 参数，原公开 authority/transport 接入 same owner/listener/SDK；多值/未知/非法配置及 ISOLATED 无 owner 在 Classic/data open 前拒绝。30项相关回归通过，不增加普通 Add 的 MetadataStore、handshake 或 control fsync；Main/owned环境/full authority/full-bytes/综合 Gate仍 OPEN。
+
+2026-10-12 [owned ZK/metadata/cold/loops](../startup-readiness/README.md#同一服务-episode-的-owned-资源初始化与终止)已在同一服务episode复用原authority readers，原listener/graph实际drain后才确认元数据与外部执行资源终结。三节点实际SDK/原REGISTER/restart、held metadata task及partial初始化失败与原DATA/close回归共33项通过；TLS与完整Main/authority/full-bytes/综合Gate仍OPEN。

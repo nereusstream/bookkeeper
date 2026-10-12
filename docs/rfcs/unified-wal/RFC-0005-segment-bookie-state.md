@@ -857,3 +857,5 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 2026-10-12 [EmbeddedServer 显式 Profile 分支](implementation/startup-readiness/README.md#embeddedserver-显式-profile-分支与-lifecycle)已将 builder opt-in 置于 Classic metadata/directory/cookie/storage 构造前，原 stack 只在实际启动成功后标 STARTED、实际 owner drain 后标 STOPPED/CLOSED；错误不吞掉，stack 不越过未排空 component。真实 SDK/注册发现/restart、publication stop/held force 和原 Classic 回归有28项验证。无 opt-in 仍走 Classic 默认；配置 factory、完整外部 authority/stock矩阵与整体 Gate仍 OPEN。
 
 2026-10-12 [配置/显式 bootstrap](implementation/startup-readiness/README.md#配置转换与显式-bootstrap)已让配置转换冻结原 graph 参数、复用公开 typed authority/transport 和原 owner；mode默认OFF，配置不生成 disposition/credential/access proof，ISOLATED缺 owner 不回退 Classic。实际 properties→原服务/SDK/restart与 pre-open 配置拒绝通过30项验证；Main/owned环境/完整外部 authority、stock matrix、full-bytes及综合 Gate仍 OPEN。
+
+2026-10-12 [owned资源初始化/终止](implementation/startup-readiness/README.md#同一服务-episode-的-owned-资源初始化与终止)现已由同一handle deferred创建原ZK/metadata/cold/scheduler/loops，实际network/storage drain后才关闭它们，metadata scheduler和native ZK线程/loops终态未确认时不完成。真实SDK/restart、held任务及partial-init失败有33项验证；TLS/physical authority和完整Main/stock/full-bytes/Gate仍OPEN。

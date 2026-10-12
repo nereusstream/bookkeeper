@@ -918,3 +918,5 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 2026-10-12 [EmbeddedServer 显式 Profile hook](../startup-readiness/README.md#embeddedserver-显式-profile-分支与-lifecycle)现在原 builder 在 Classic 构造前选择独立 owner，原 stack 驱动真实文件创建/recovery与网络/注册/SDK。Profile component 仅在 actual drain 后进入终态，超时保留原锁并阻止更早资源关闭；配置 bootstrap/外部 authority 与完整 Gate继续 OPEN。
 
 2026-10-12 [配置转换与显式 bootstrap](../startup-readiness/README.md#配置转换与显式-bootstrap)已复用原 layout/execution/batch bounds，先完成 scalar/integer/跨参数校验再构造 owner，冻结参数不受后续配置修改影响；actual properties 已驱动原 graph 创建/recovery与 EmbeddedServer/SDK/restart。配置不产生物理 authority，Main/owned环境/full-bytes/综合验收继续 OPEN。
+
+2026-10-12 [同一 episode owned资源](../startup-readiness/README.md#同一服务-episode-的-owned-资源初始化与终止)让 caller在初始化前持有cleanup handle，缺requirements/实际ZK handshake失败不打开storage；服务原native I/O/owner drain后再确认metadata/cold/scheduler/ZK/event-loops终结。held DATA/metadata任务有真实验证；TLS/physical authority和Main/full-bytes/综合验收仍OPEN。
