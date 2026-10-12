@@ -33,6 +33,9 @@ final class SegmentOwnerLoop {
         void run(Ticket ticket);
 
         void failed(Throwable cause);
+
+        /** Optional observer after actual owner completion credit is returned; normal DATA allocates no future. */
+        default void terminal() { }
     }
 
     private record ControlTask(Runnable action, boolean awaitsCompletion) { }
@@ -555,6 +558,11 @@ final class SegmentOwnerLoop {
                 } else {
                     pending--;
                 }
+            }
+            try {
+                ticket.command.terminal();
+            } catch (Throwable cause) {
+                recordFailure(cause);
             }
         }
     }

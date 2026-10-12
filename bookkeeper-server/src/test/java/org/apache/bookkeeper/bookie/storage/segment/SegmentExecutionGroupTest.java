@@ -135,6 +135,54 @@ public class SegmentExecutionGroupTest {
     }
 
     @Test
+    public void terminalObserverRunsAfterActualIoAndMakesTheOriginalOwnerSlotAvailable() throws Exception {
+        var config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("terminal-owner"), 1, 4, 2,
+                16 * 1024 * 1024, 4096, 1024 * 1024, 1, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        var group = SegmentExecutionGroup.start(config,
+                new SegmentExecutionGroup.Settings(1, 2, 2, 3, 4096, 4096, 3 * 8191 + 4096, WAIT));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var terminal = new CountDownLatch(1);
+        var followup = new CountDownLatch(1);
+        var acceptedAfterTerminal = new AtomicReference<Boolean>();
+        var failure = new AtomicReference<Throwable>();
+        try {
+            assertTrue(group.submit(0, new SegmentOwnerLoop.Command() {
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    group.io().submit(ticket, () -> {
+                        entered.countDown();
+                        await(release);
+                    }, failure::set);
+                }
+
+                @Override
+                public void failed(Throwable cause) {
+                    failure.set(cause);
+                }
+
+                @Override
+                public void terminal() {
+                    acceptedAfterTerminal.set(group.submit(0,
+                            command(ticket -> ticket.complete(followup::countDown))));
+                    terminal.countDown();
+                }
+            }));
+            await(entered);
+            assertFalse(group.submit(0, command(ticket -> ticket.complete(() -> { }))));
+            assertFalse(terminal.await(150, TimeUnit.MILLISECONDS));
+            release.countDown();
+            await(terminal);
+            assertTrue(acceptedAfterTerminal.get());
+            await(followup);
+            assertNull(failure.get());
+        } finally {
+            release.countDown();
+            assertTrue(group.shutdown(WAIT));
+        }
+    }
+
+    @Test
     public void controlIoRunsWhenDataWorkerIsBlocked() throws Exception {
         SegmentExecutionGroup group = SegmentExecutionGroup.start(config("OFF", "SYSTEM"), settings());
         CountDownLatch dataStarted = new CountDownLatch(1);

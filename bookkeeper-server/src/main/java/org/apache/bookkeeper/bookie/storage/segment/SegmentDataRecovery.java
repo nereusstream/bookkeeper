@@ -282,11 +282,42 @@ final class SegmentDataRecovery {
                 new CompactionTail(destination, tail.offset()));
     }
 
-    /** Record bytes borrow the original owner's workspace only during the synchronous visitor call. */
+    @FunctionalInterface
+    private interface AllocationVisitor {
+        void accept(SegmentPointRead.Location location, SegmentBatchParser.Record record) throws IOException;
+    }
+
     private static CompactionEnd scanCompactionAllocation(IsolatedSegmentConfig config, SegmentArenaControlLog arena,
-                                                FileChannel data, SegmentArenaControlLog.Allocation victim,
-                                                long usedEnd, SegmentBookieControlLog bookie, ByteBuffer workspace,
-                                                CompactionVisitor visitor) throws IOException {
+            FileChannel data, SegmentArenaControlLog.Allocation victim, long usedEnd, SegmentBookieControlLog bookie,
+            ByteBuffer workspace, CompactionVisitor visitor) throws IOException {
+        return scanAllocation(config, arena, data, victim, usedEnd, workspace, (location, record) -> {
+            if (bookie.hasTerminalTombstone(record.context()) || !arena.isSelectedRecord(location, record)) {
+                return;
+            }
+            if (!bookie.locallyReadableContext(record.context())) {
+                throw new IOException("Compaction source has no locally readable Bookie context");
+            }
+            if (bookie.locallyReadableCoordinate(record.context(), record.entryId())) {
+                visitor.accept(new SegmentArenaMove.Source(location,
+                        arena.currentSelectorSequence(record.context(), record.entryId())), record);
+            }
+        });
+    }
+
+    /** Include terminal and obsolete copies: an index miss or selector alone cannot prove physical retirement. */
+    static boolean containsAllocatedInstance(IsolatedSegmentConfig config, SegmentArenaControlLog arena,
+            FileChannel data, SegmentArenaControlLog.Allocation allocation, long usedEnd, ByteBuffer workspace,
+            ProfileLedgerContext context) throws IOException {
+        boolean[] found = {false};
+        scanAllocation(config, arena, data, allocation, usedEnd, workspace,
+                (location, record) -> found[0] |= record.context().equals(context));
+        return found[0];
+    }
+
+    /** Record bytes borrow the original owner's workspace only during the synchronous visitor call. */
+    private static CompactionEnd scanAllocation(IsolatedSegmentConfig config, SegmentArenaControlLog arena,
+            FileChannel data, SegmentArenaControlLog.Allocation victim, long usedEnd, ByteBuffer workspace,
+            AllocationVisitor visitor) throws IOException {
         if (!victim.equals(arena.currentAllocation(victim.allocationId()))) {
             throw new IOException("Compaction source allocation changed before its capture");
         }
@@ -330,19 +361,7 @@ final class SegmentDataRecovery {
                         != victim.ownerShard()) {
                     throw new IOException("Compaction source record has another logical shard");
                 }
-                if (bookie.hasTerminalTombstone(record.context())
-                        || !arena.isSelectedRecord(location, record)) {
-                    continue;
-                }
-                if (!bookie.locallyReadableContext(record.context())) {
-                    throw new IOException("Compaction source has no locally readable Bookie context");
-                }
-                if (!bookie.locallyReadableCoordinate(record.context(), record.entryId())) {
-                    continue;
-                }
-                SegmentArenaMove.Source source = new SegmentArenaMove.Source(location,
-                        arena.currentSelectorSequence(record.context(), record.entryId()));
-                visitor.accept(source, record);
+                visitor.accept(location, record);
             }
             offset += length;
             writtenEnd = offset;

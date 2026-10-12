@@ -920,3 +920,5 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 2026-10-12 [配置转换与显式 bootstrap](../startup-readiness/README.md#配置转换与显式-bootstrap)已复用原 layout/execution/batch bounds，先完成 scalar/integer/跨参数校验再构造 owner，冻结参数不受后续配置修改影响；actual properties 已驱动原 graph 创建/recovery与 EmbeddedServer/SDK/restart。配置不产生物理 authority，Main/owned环境/full-bytes/综合验收继续 OPEN。
 
 2026-10-12 [同一 episode owned资源](../startup-readiness/README.md#同一服务-episode-的-owned-资源初始化与终止)让 caller在初始化前持有cleanup handle，缺requirements/实际ZK handshake失败不打开storage；服务原native I/O/owner drain后再确认metadata/cold/scheduler/ZK/event-loops终结。held DATA/metadata任务有真实验证；TLS/physical authority和Main/full-bytes/综合验收仍OPEN。
+
+2026-10-12 [本地删除空间终结](../profile-wire/README.md#本地删除空间终结)已将实际terminal TOMBSTONE接到原native index/coordinate/coverage及COPY/MOVE/FREE，按实际allocated DATA/旧COPY复核本地REUSABLE；混合块可零净容量增益退休，普通维护仍要求正净增益。旧IO/owner credit与deadline/cancel独立排空，其他ledger保留、corrupt/limit不伪造成功。3类282项Java与20有限模型配置（4完整正向/16指定反例）通过；网络physical receipt/全目标/retention/GC/退役及其他16步验收仍OPEN，生产Gate不提升。

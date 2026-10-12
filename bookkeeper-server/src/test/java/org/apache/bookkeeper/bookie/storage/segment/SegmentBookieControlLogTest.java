@@ -12566,6 +12566,104 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void physicalDeleteRetiresMixedAllocationAtZeroNetGainAndKeepsLiveDataReadable() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("physical-delete-mixed");
+        var cold = new java.util.concurrent.ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+                new java.util.concurrent.ArrayBlockingQueue<>(4));
+        try {
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+                storage.startNew();
+                installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                        install(48, 3, (byte) 5), activate(48, 4));
+                writeAfterIndexBackpressure(storage, context(44), 1);
+                writeAfterIndexBackpressure(storage, context(48), 1);
+                installStorage(storage, tombstone(44, 20));
+                assertEquals(IsolatedSegmentStorage.CompactionStatus.NO_NET_GAIN,
+                        compactShard(storage, 999, 0).status());
+                var attempt = storage.reclaimDeletedLedger(context(44), cold, 64, 8, Duration.ofSeconds(10));
+                var result = attempt.result().get(10, TimeUnit.SECONDS);
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(SegmentProfilePhysicalDelete.Status.REUSABLE, result.status());
+                assertEquals(1, result.freedAllocations());
+                assertEquals(SegmentArenaControlLog.BLOCK_BYTES, result.sourceBytesRetired());
+                assertEquals(result.sourceBytesRetired(), result.destinationBytes());
+                try (var read = storageRead(storage, context(48), 1).result()) {
+                    assertEquals(SegmentBatchFormat.RELOCATION_COPY, read.result().record().origin());
+                    assertEquals(context(48), read.result().record().context());
+                    assertEquals(1, read.result().record().entryId());
+                }
+                var refused = new CompletableFuture<ReadReply>();
+                assertTrue(storage.submitRead(context(44), 1, new SegmentPointRead.ReadRequest(
+                        (status, read, failure) -> refused.complete(new ReadReply(status, read, failure)))));
+                assertEquals(SegmentPointRead.ReadStatus.NOT_READY, refused.get(5, TimeUnit.SECONDS).status());
+                writeAfterIndexBackpressure(storage, context(48), 2);
+            }
+            try (IsolatedSegmentStorage replay = storage(config, 2, 6, 4, 32, 3)) {
+                replay.restart();
+                var repeated = replay.reclaimDeletedLedger(context(44), cold, 64, 8, Duration.ofSeconds(5));
+                assertEquals(SegmentProfilePhysicalDelete.Status.REUSABLE, repeated.result().get().status());
+                assertEquals(0, repeated.result().get().compactions());
+                repeated.completion().get(5, TimeUnit.SECONDS);
+                try (var read = storageRead(replay, context(48), 2).result()) {
+                    assertEquals(2, read.result().record().entryId());
+                }
+            }
+            assertEquals(config.bytesPerFile(), Files.size(config.directory().resolve("data-0")));
+        } finally {
+            cold.shutdown();
+            assertTrue(cold.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    public void physicalDeleteLimitAndCorruptAllocatedBytesNeverBecomeReusableFromAnIndexMiss() throws Exception {
+        for (boolean corrupt : List.of(false, true)) {
+            IsolatedSegmentConfig config = coverageRecoveryConfig("physical-delete-bound-" + corrupt);
+            var cold = new java.util.concurrent.ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(4));
+            try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
+                storage.startNew();
+                installStorage(storage, install(44, 1, (byte) 5), activate(44, 2),
+                        install(45, 3, (byte) 5), activate(45, 4));
+                var old = writeAfterIndexBackpressure(storage, context(44), 1);
+                writeAfterIndexBackpressure(storage, context(45), 1);
+                installStorage(storage, tombstone(44, 20));
+                if (corrupt) {
+                    try (FileChannel data = FileChannel.open(config.directory().resolve("data-0"),
+                            StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                        var value = ByteBuffer.allocate(1);
+                        SegmentFileIo.readFully(data, value, old.candidate().address().offset() + 256);
+                        value.put(0, (byte) (value.get(0) ^ 1)).position(0);
+                        new SegmentFileIo().writeFully(data, value, old.candidate().address().offset() + 256);
+                        data.force(true);
+                    }
+                }
+                var attempt = storage.reclaimDeletedLedger(context(44), cold, corrupt ? 64 : 1, 1,
+                        Duration.ofSeconds(5));
+                var result = attempt.result().get(5, TimeUnit.SECONDS);
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(corrupt ? SegmentProfilePhysicalDelete.Status.UNKNOWN
+                        : SegmentProfilePhysicalDelete.Status.LIMIT, result.status());
+                if (corrupt) {
+                    assertNotNull(result.failure());
+                    var arena = (SegmentArenaControlLog) storageField(storage, "arena");
+                    assertEquals(1, arena.allocationGeneration(0, old.candidate().address().offset()));
+                } else {
+                    var completed = storage.reclaimDeletedLedger(context(44), cold, 64, 8, Duration.ofSeconds(5));
+                    assertEquals(SegmentProfilePhysicalDelete.Status.REUSABLE, completed.result().get().status());
+                    completed.completion().get(5, TimeUnit.SECONDS);
+                }
+                try (var read = storageRead(storage, context(45), 1).result()) {
+                    assertEquals(1, read.result().record().entryId());
+                }
+            } finally {
+                cold.shutdown();
+                assertTrue(cold.awaitTermination(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    @Test
     public void wholeDeadAllocationFreePreservesLiveSharedFileDataAcrossFullAndCoveredRestart() throws Exception {
         IsolatedSegmentConfig config = coverageRecoveryConfig("whole-allocation-free");
         long upper = 4096 + SegmentArenaControlLog.BLOCK_BYTES;

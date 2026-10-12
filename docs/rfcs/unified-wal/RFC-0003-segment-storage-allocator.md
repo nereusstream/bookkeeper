@@ -948,3 +948,5 @@ checkpoint缺失/损坏、索引代际不匹配或无法证明覆盖时回退必
 2026-10-08 [恢复terminal读上界](implementation/profile-wire/README.md#非空恢复-terminal-cut-与-matching-closed)沿用Bookie控制owner新增实验type11；pending cut停新normal/recovery准入并等待全部旧DATA终结，实际force/apply后保存P且checkpoint/replay保留同操作升级。点读/READ_LAC/restart inventory过滤e>P，compaction将其视为已排除尾部并保留必要prefix；共享DATA文件不截短。该边界仅在已处理terminal命令的节点成立，离线追赶/全局读撤权未完成，不提升存储或生产Gate。
 
 2026-10-08 [空最后fragment terminal boundary](implementation/profile-wire/README.md#空最后-fragment-的独立终态关闭)沿用原控制I/O/owner/pre-cut排空路径新增Bookie type12，固定P/L/selection digest且无grant字段；generic batch拒绝绕过，pending/force失败不授权FREE。checkpoint/rotation/replay与实际尾部节点restart保留上界，不截短shared DATA；该局部实现不代表掉电、离线catch-up或生产接受。
+
+2026-10-12 [本地删除空间终结](implementation/profile-wire/README.md#本地删除空间终结)已将实际terminal TOMBSTONE接到原native index/coordinate/coverage及COPY/MOVE/FREE，按实际allocated DATA/旧COPY复核本地REUSABLE；混合块可零净容量增益退休，普通维护仍要求正净增益。旧IO/owner credit与deadline/cancel独立排空，其他ledger保留、corrupt/limit不伪造成功。3类282项Java与20有限模型配置（4完整正向/16指定反例）通过；网络physical receipt/全目标/retention/GC/退役及其他16步验收仍OPEN，生产Gate不提升。

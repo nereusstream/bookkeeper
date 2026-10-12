@@ -19,6 +19,16 @@ import time
 
 
 MATRIX = {
+    'a-profile-physical-delete': None,
+    'ce-profile-physical-delete-scope': 'PhysicalHasScope',
+    'ce-profile-physical-delete-unknown': 'PhysicalHasKnownBytes',
+    'ce-profile-physical-delete-index': 'PhysicalScanIncludesAllOrigins',
+    'ce-profile-physical-delete-copy': 'PhysicalScanIncludesAllOrigins',
+    'ce-profile-physical-delete-force': 'PhysicalFreeNeedsForce',
+    'ce-profile-physical-delete-live': 'PhysicalKeepsOtherLedger',
+    'ce-profile-physical-delete-io': 'PhysicalWaitsOldIo',
+    'ce-profile-physical-delete-owner': 'PhysicalCreditWaitsActualOwner',
+
     'a-profile-write-lac-a2': None,
     'a-profile-write-lac-a3': None,
     'ce-profile-write-lac-scope': 'WriteLacHasScope',
@@ -866,6 +876,7 @@ def main():
                    else "ProfileRecoveryPrefix.tla" if "profile-recovery-prefix" in name
                    else "ProfileRecoveryObservation.tla" if "profile-recovery-observation" in name
                    else "ProfileRecoveryPrelude.tla" if "profile-recovery-prelude" in name
+                   else "ProfilePhysicalDelete.tla" if "profile-physical-delete" in name
                    else "ProfileWriteLac.tla" if "profile-write-lac" in name
                    else "ProfileLacEvidence.tla" if "profile-lac-evidence" in name
                    else "ProfileLacSource.tla" if "profile-lac-source" in name

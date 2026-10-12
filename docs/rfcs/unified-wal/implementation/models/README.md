@@ -1410,3 +1410,10 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 2026-10-12，ProfileWriteLac 以原SDK confirmed cut、实际scope/digest/force/apply和独立source/output/wire终态为输入，固定3个peer、A2/A3；不生产TLS/CRC/fsync/ZK，不模拟完整lifecycle/fairness。a-profile-write-lac-a2/a3为完整正向，ce-profile-write-lac-{scope,digest,confirmed,force,quorum,unknown,drain,fence,replay}要求对应指定反例；相同已durable值在fence后可解析，但不能增长，caller stop不等于remote I/O取消。
 
 最终huj366ry：新模型与原LAC-evidence/normal-client-source共29配置，5完整正向/24指定反例，1010当前inputs；runner新增实际PendingWriteLacOp源码锁。新A2为260405 generated/41896 distinct、A3为248663/39520，均queue0/depth21，1.791/1.678秒、peak RSS271597568/272793600 bytes。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog655/完整A+C+D未全跑，checker消耗不是服务性能。原3udquej5/phk5kbrp/594kpcen保持阶段绑定；[真实网络/337项Java及receipt](../profile-wire/README.md#网络-write_lac-与确认前缀生产)拥有实现与Gate边界，完整目标active、生产Gate仍OPEN。
+
+
+## 本地删除空间终结投影
+
+2026-10-12，ProfilePhysicalDelete检查实际terminal/scope、known raw DATA/旧COPY、native row清理、其他ledger COPY/MOVE保留、FREE force、old I/O与actual owner credit终态；真实native/CRC/fsync/ZK为输入，不由模型生产。a-profile-physical-delete完整正向，ce-profile-physical-delete-{scope,unknown,index,copy,force,live,io,owner}要求指定反例；取消停止新COPY阶段，已接受的native compaction继续达到终态。
+
+最终34tuje3n按父源码c78c32f4ba绑定，结合原compaction-group/terminal-index/whole-FREE共20配置，4完整正向/16指定反例、1020当前inputs。新正向110 generated/78 distinct、queue0、depth12、0.832秒/peak RSS106938368 bytes；Java/model去重1864核验。TLC1.7.4/Corretto21/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog664/完整A+C+D未全跑，无完整fairness/liveness/性能结论。jvuqmgpu/c47vx6lw/x_0tvuaq保持原projection/stage；[实际282项Java与scope/receipt](../profile-wire/README.md#本地删除空间终结)拥有当前实现，集群物理终结/GC/退役和生产Gate仍OPEN。

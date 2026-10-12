@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
 final class IsolatedSegmentFiles implements AutoCloseable {
@@ -135,6 +136,20 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 throw new IOException("Bookie authority changed during whole-allocation verification");
             }
             return proof;
+        }
+
+        boolean containsAllocatedInstance(SegmentArenaControlLog.Allocation allocation,
+                SegmentBookieControlLog bookie, ProfileLedgerContext context, ByteBuffer workspace) throws IOException {
+            requireHeld(owner, authority);
+            if (allocation.file() != file || !bookie.hasTerminalTombstone(context)) {
+                throw new IOException("Deleted-instance inspection needs its exact terminal context and DATA file");
+            }
+            boolean found = SegmentDataRecovery.containsAllocatedInstance(owner.config, authority,
+                    owner.data.get(file), allocation, owner.allocationEnd(allocation, authority), workspace, context);
+            if (bookie.recoveryReadCut(owner.config, owner.identity) != bookieLease.cut()) {
+                throw new IOException("Deleted-instance authority changed during its physical inspection");
+            }
+            return found;
         }
 
         SegmentDataRecovery.CompactionPlan inspectCompaction(List<SegmentArenaControlLog.Allocation> victims,

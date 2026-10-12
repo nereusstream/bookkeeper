@@ -650,3 +650,5 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-12 [OPEN 固定 LAC 前缀审计](profile-wire/README.md#open-固定-lac-前缀审计)已复用原 SDK LAC、flags=0 普通读、全W扫描和周期任务共享池，只观察冻结下界P/L，不fence writer或授予CLOSED proof/marker清理。实际writer并行增长、损坏/权限/metadata变化、UNKNOWN与稳定缺失、deadline/actual drain及共享恢复回归共28项通过；20模型配置得到2完整正向/18指定反例，style通过、RAT443父HEAD无新增。其余required authority、完整审计/总预算、Main/外部authority/stock矩阵、GC/退役/性能/运维和综合验收仍OPEN，生产Gate不提升。
 
 2026-10-12 [网络 WRITE_LAC 与确认前缀生产](profile-wire/README.md#网络-write_lac-与确认前缀生产)已接原网络WRITE_LAC、durable control force/apply与SDK确认prefix的distinct AQ，fence后只解析同值，UNKNOWN/cancel不提前归还actual output/wire custody；既有URL2/required-prefix实际消费新producer。7类337项Java和29有限模型配置（5完整正向/24指定反例）通过；其他required authority/自动策略/默认routing/总预算/Main/stock/GC/退役/性能/运维及全16步综合验收仍OPEN，生产Gate不提升。
+
+2026-10-12 [本地删除空间终结](profile-wire/README.md#本地删除空间终结)已将实际terminal TOMBSTONE接到原native index/coordinate/coverage及COPY/MOVE/FREE，按实际allocated DATA/旧COPY复核本地REUSABLE；混合块可零净容量增益退休，普通维护仍要求正净增益。旧IO/owner credit与deadline/cancel独立排空，其他ledger保留、corrupt/limit不伪造成功。3类282项Java与20有限模型配置（4完整正向/16指定反例）通过；网络physical receipt/全目标/retention/GC/退役及其他16步验收仍OPEN，生产Gate不提升。

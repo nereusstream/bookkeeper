@@ -33,6 +33,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiConsumer;
@@ -104,9 +105,21 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     static final class IndexCheckpointRequest {
         private final AtomicReference<BiConsumer<IndexCheckpointResult, Throwable>> response;
+        private final Runnable terminal;
 
         IndexCheckpointRequest(BiConsumer<IndexCheckpointResult, Throwable> completion) {
+            this(completion, null);
+        }
+
+        IndexCheckpointRequest(BiConsumer<IndexCheckpointResult, Throwable> completion, Runnable terminal) {
             response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+            this.terminal = terminal;
+        }
+
+        private void terminal() {
+            if (terminal != null) {
+                terminal.run();
+            }
         }
 
         boolean stopWaiting() {
@@ -140,9 +153,21 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     static final class CompactionRequest {
         private final AtomicReference<BiConsumer<CompactionResult, Throwable>> response;
+        private final Runnable terminal;
 
         CompactionRequest(BiConsumer<CompactionResult, Throwable> completion) {
+            this(completion, null);
+        }
+
+        CompactionRequest(BiConsumer<CompactionResult, Throwable> completion, Runnable terminal) {
             response = new AtomicReference<>(Objects.requireNonNull(completion, "completion"));
+            this.terminal = terminal;
+        }
+
+        private void terminal() {
+            if (terminal != null) {
+                terminal.run();
+            }
         }
 
         boolean stopWaiting() {
@@ -217,6 +242,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private IndexCheckpoint indexCheckpoint;
     private FreeOperation freeOperation;
     private CompactionOperation compaction;
+    private boolean deleteInspection;
+    private final AtomicBoolean physicalDeleteRunning = new AtomicBoolean();
     private ControlRotation controlRotation;
     private volatile Throwable controlMaintenanceFailure;
     private final SpaceSweep[] spaceSweeps;
@@ -998,7 +1025,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitLacRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
-                    && compaction == null && controlRotation == null && !controlCapacityPaused()
+                    && compaction == null && !deleteInspection && controlRotation == null && !controlCapacityPaused()
                     && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
                             .submitLac(context, request);
         }
@@ -1007,7 +1034,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitLatestRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
-                    && compaction == null && controlRotation == null && !controlCapacityPaused()
+                    && compaction == null && !deleteInspection && controlRotation == null && !controlCapacityPaused()
                     && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
                             .submitLatest(context, request);
         }
@@ -1016,7 +1043,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
-                    && compaction == null && controlRotation == null && !controlCapacityPaused()
+                    && compaction == null && !deleteInspection && controlRotation == null && !controlCapacityPaused()
                     && reads[SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards())]
                             .submit(context, entryId, request);
         }
@@ -1050,7 +1077,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(publicationIo, "publicationIo");
         synchronized (gate) {
             if (!accepting || !execution.accepting() || indexCheckpoint != null || freeOperation != null
-                    || compaction != admitted || controlRotation != null || controlCapacityPaused()) {
+                    || compaction != admitted || deleteInspection || controlRotation != null
+                    || controlCapacityPaused()) {
                 return false;
             }
             IndexCheckpoint checkpoint = new IndexCheckpoint(request, publicationIo, cleanup);
@@ -1070,7 +1098,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(request, "request");
         synchronized (gate) {
             if (!accepting || !execution.accepting() || freeOperation != null || indexCheckpoint != null
-                    || compaction != null || controlRotation != null || controlCapacityPaused()) {
+                    || compaction != null || deleteInspection || controlRotation != null || controlCapacityPaused()) {
                 return false;
             }
             FreeOperation operation = new FreeOperation(operationId, allocationId, request);
@@ -1128,9 +1156,154 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
+    /** Explicit cold physical deletion; global completion/retention and strong access revocation are separate. */
+    public SegmentProfilePhysicalDelete.Attempt reclaimDeletedLedger(ProfileLedgerContext context,
+            ThreadPoolExecutor cold, int maxAllocations, int maxCompactions, Duration timeout) {
+        return SegmentProfilePhysicalDelete.begin(this, context, cold, physicalDeleteRunning,
+                maxAllocations, maxCompactions, timeout);
+    }
+
+    record DeletedScan(boolean complete, List<SegmentArenaControlLog.Allocation> victims,
+            int scanned, long bookieCut, long arenaCut) { }
+
+    SegmentProfilePhysicalDelete.Status physicalDeletePrecondition(ProfileLedgerContext context) {
+        synchronized (gate) {
+            if (!accepting || execution == null || !execution.accepting()
+                    || !bookie.matchesScope(config, identity)) {
+                return SegmentProfilePhysicalDelete.Status.PENDING;
+            }
+            return bookie.hasTerminalTombstone(context) ? null : SegmentProfilePhysicalDelete.Status.NOT_DELETED;
+        }
+    }
+
+    boolean hasDeletedInstance(ProfileLedgerContext context) {
+        synchronized (gate) {
+            return accepting && execution.accepting() && bookie.hasTerminalTombstone(context);
+        }
+    }
+
+    CompletableFuture<DeletedScan> inspectDeletedInstance(ProfileLedgerContext context, int maximum) {
+        var result = new CompletableFuture<DeletedScan>();
+        synchronized (gate) {
+            if (!canCompact() || !bookie.hasTerminalTombstone(context)) {
+                result.completeExceptionally(new IOException("Deleted-instance inspection is unavailable"));
+                return result;
+            }
+            deleteInspection = true;
+            var command = new SegmentOwnerLoop.Command() {
+                private SegmentBufferPool.Lease buffer;
+                private DeletedScan completed;
+                private Throwable failure;
+
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    buffer = execution.owner(0).pool().acquire(execution.owner(0).pool().bufferBytes());
+                    if (buffer == null) {
+                        ticket.complete(() -> finish(null, new IOException("Physical inspection buffer is busy")));
+                        return;
+                    }
+                    var value = new java.util.concurrent.atomic.AtomicReference<DeletedScan>();
+                    execution.io().submitContinuing(ticket, () -> {
+                        long through = -1;
+                        long bookieCut = -1;
+                        int scanned = 0;
+                        for (int shard = 0; shard < config.logicalShards(); shard++) {
+                            int file = shard % config.dataFiles();
+                            if (!arena.dataFileAvailable(file)) {
+                                throw new IOException(
+                                        "Physical deletion cannot interpret an unavailable DATA file");
+                            }
+                            try (var lease = bookie.protectReclamation(config, identity);
+                                    var guard = files.protectReclamation(arena, file, lease)) {
+                                if (through < 0) {
+                                    // Freeze only after previously accepted DATA/read I/O is quiescent.
+                                    through = arena.appliedThrough();
+                                    bookieCut = lease.cut();
+                                }
+                                long after = -1;
+                                for (;;) {
+                                    var window = arena.compactionCandidates(shard, after, through);
+                                    if (window.allocations().isEmpty()) {
+                                        break;
+                                    }
+                                    if (scanned > maximum - window.allocations().size()) {
+                                        value.set(new DeletedScan(false, List.of(), scanned, bookieCut, through));
+                                        return;
+                                    }
+                                    boolean found = false;
+                                    for (var allocation : window.allocations()) {
+                                        found |= guard.containsAllocatedInstance(allocation, bookie, context,
+                                                buffer.bytes());
+                                    }
+                                    scanned += window.allocations().size();
+                                    if (found) {
+                                        value.set(new DeletedScan(false, window.allocations(),
+                                                scanned, bookieCut, through));
+                                        return;
+                                    }
+                                    after = window.lastOrder();
+                                }
+                            }
+                        }
+                        value.set(new DeletedScan(true, List.of(), scanned, bookieCut, through));
+                    }, failure -> ticket.complete(() -> finish(value.get(), failure)));
+                }
+
+                private void finish(DeletedScan value, Throwable failure) {
+                    if (buffer != null) {
+                        buffer.close();
+                        buffer = null;
+                    }
+                    synchronized (gate) {
+                        deleteInspection = false;
+                    }
+                    completed = value;
+                    this.failure = failure;
+                }
+
+                @Override
+                public void terminal() {
+                    if (failure == null && completed != null) {
+                        result.complete(completed);
+                    } else {
+                        result.completeExceptionally(failure != null ? failure
+                                : new IOException("Physical inspection has no result"));
+                    }
+                }
+
+                @Override
+                public void failed(Throwable failure) {
+                    finish(null, failure);
+                }
+            };
+            try {
+                if (!execution.owner(0).submit(0, command)) {
+                    deleteInspection = false;
+                    result.completeExceptionally(new IOException("Physical inspection owner is busy"));
+                }
+            } catch (RuntimeException | Error failure) {
+                deleteInspection = false;
+                result.completeExceptionally(failure);
+            }
+        }
+        return result;
+    }
+
+    boolean compactDeletedWindow(ProfileLedgerContext context, List<SegmentArenaControlLog.Allocation> victims,
+            CompactionRequest request) throws IOException {
+        synchronized (gate) {
+            if (!canCompact() || !bookie.hasTerminalTombstone(context)) {
+                return false;
+            }
+            // Physical retirement may relocate a mixed block at zero net capacity gain.
+            // The original capacity-maintenance callers continue to require positive net gain.
+            return admitCompaction(UUID.randomUUID(), victims, request, new SegmentFileIo(), false, context);
+        }
+    }
+
     private boolean canCompact() {
         return accepting && execution.accepting() && indexCheckpoint == null && freeOperation == null
-                && compaction == null && controlRotation == null && !controlCapacityPaused()
+                && compaction == null && !deleteInspection && controlRotation == null && !controlCapacityPaused()
                 && config.maxPendingEntries() >= 2;
     }
 
@@ -1374,10 +1547,16 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private boolean admitCompaction(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
                                     CompactionRequest request, SegmentFileIo publicationIo, boolean selectVictims)
             throws IOException {
+        return admitCompaction(operationId, victims, request, publicationIo, selectVictims, null);
+    }
+
+    private boolean admitCompaction(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
+            CompactionRequest request, SegmentFileIo publicationIo, boolean selectVictims,
+            ProfileLedgerContext deletedContext) throws IOException {
         arena.requireUnusedOperation(operationId);
         arena.requireUnusedOperation(phaseId(operationId, "ALLOC"));
         CompactionOperation operation = new CompactionOperation(operationId, victims, request, publicationIo,
-                selectVictims);
+                selectVictims, deletedContext);
         compaction = operation;
         if (!maintainIndex(new IndexCheckpointRequest(operation::prepared), new SegmentFileIo(), true, operation)) {
             compaction = null;
@@ -1424,6 +1603,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private final SegmentFileIo publicationIo;
         private final int shard;
         private final boolean selectVictims;
+        private final ProfileLedgerContext deletedContext;
         private SegmentOwnerLoop.Ticket ticket;
         private SegmentBufferPool.Lease buffer;
         private SegmentDataRecovery.CompactionPlan plan;
@@ -1444,7 +1624,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private long destinationOffset;
 
         private CompactionOperation(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
-                                    CompactionRequest request, SegmentFileIo publicationIo, boolean selectVictims) {
+                                    CompactionRequest request, SegmentFileIo publicationIo, boolean selectVictims,
+                                    ProfileLedgerContext deletedContext) {
+            this.deletedContext = deletedContext;
             this.operationId = operationId;
             this.victims = List.copyOf(victims);
             this.request = request;
@@ -1495,7 +1677,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             releaseBuffer();
             if (failure != null) {
                 finish(CompactionStatus.TRANSIENT_UNAVAILABLE, failure);
-            } else if (!plan.hasNetGain()) {
+            } else if (!plan.hasNetGain() && deletedContext == null) {
                 finish(CompactionStatus.NO_NET_GAIN, null);
             } else if (plan.destinationBlocks() > limits.maintenanceBlocks()) {
                 finish(CompactionStatus.TRANSIENT_UNAVAILABLE, null);
@@ -1750,6 +1932,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
 
         @Override
+        public void terminal() {
+            request.terminal();
+        }
+
+        @Override
         public void failed(Throwable cause) {
             if (move != null && !moveSubmitted) {
                 move.close();
@@ -1849,6 +2036,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private final SegmentFileIo publicationIo;
         private final boolean cleanup;
         private final Worker[] workers;
+        private int ownerTerminated;
         private int ready;
         private int finished;
         private boolean finishing;
@@ -1875,6 +2063,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
 
         private synchronized void refused(Worker worker) {
+            worker.terminal();
             worker.terminal = true;
             finished++;
             unavailable(null);
@@ -2061,6 +2250,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             private final int id;
             private final List<SegmentHotDirectory.IndexCut> cuts = new ArrayList<>();
             private SegmentOwnerLoop.Ticket ticket;
+            private boolean ownerDone;
             private boolean ready;
             private boolean terminal;
             private boolean coordinatesReady;
@@ -2086,6 +2276,18 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             private void resumeIndexes() {
                 for (SegmentHotDirectory.IndexCut cut : cuts) {
                     hotDirectories[cut.stream().shard()].resumeIndexAfterCheckpoint();
+                }
+            }
+
+            @Override
+            public void terminal() {
+                synchronized (IndexCheckpoint.this) {
+                    if (!ownerDone) {
+                        ownerDone = true;
+                        if (++ownerTerminated == workers.length) {
+                            request.terminal();
+                        }
+                    }
                 }
             }
 

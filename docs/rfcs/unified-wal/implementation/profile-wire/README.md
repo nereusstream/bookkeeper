@@ -2,7 +2,7 @@
 
 > **EXPERIMENTAL_TEST_MANIFEST / NOT_STABLE_WIRE / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE**
 
-本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，当前增量包括 [OPEN 固定 LAC 前缀审计](#open-固定-lac-前缀审计)和 [网络 WRITE_LAC 与确认前缀生产](#网络-write_lac-与确认前缀生产)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
+本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与延期 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，当前增量包括 [OPEN 固定 LAC 前缀审计](#open-固定-lac-前缀审计)、[网络 WRITE_LAC 与确认前缀生产](#网络-write_lac-与确认前缀生产)和 [本地删除空间终结](#本地删除空间终结)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
 当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX DEFERRED_NOT_RUN — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 未获得 released-decoder/localhost stock-binary 兼容结论，G1保持 `BLOCKED_UNVERIFIED`**。
 
@@ -1521,3 +1521,30 @@ mvn -o -N apache-rat:check
 最终模型 huj366ry：29配置为5完整正向/24指定反例，1010当前inputs，Java/model去重1853；runner补锁实际复用的PendingWriteLacOp。新A2模型260405 generated/41896 distinct，A3为248663/39520，均queue0/depth21，分别1.791/1.678秒、peak RSS271597568/272793600 bytes。ProfileWriteLac有限投影检查scope/digest/confirmed cut、force前无apply/ACK、distinct AQ、UNKNOWN不计票、actual source/output/wire排空、fence后不增长与replay authority保留；真实TLS/digest/fsync/ZK作为输入，不由模型生产，无fairness/liveness/完整A+C+D或性能结论。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog655/完整组合未全跑。3udquej5、phk5kbrp、594kpcen原stage输入保留，不移绑。
 
 持久证据 /Users/liusinan/.codex/artifacts/unified-wal/write-lac-evidence-oucr0lk4 保留原run/source/config/command及失败阶段。最终Spotless/Checkstyle exit0；RAT exit1、443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。其余accepted ACK/AQ/repair-completion producer、自动explicit策略/默认SDK routing、完整OPEN/payload/placement审计、总字节预算、Main/外部authority/stock矩阵、snapshot/handoff/history GC/decommission、正式性能/运维与综合验收仍OPEN。步骤11/12/14/15与生产Gate保持PARTIAL/OPEN，默认OFF/SYSTEM/PARK及disabled能力保持；Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。
+
+## 本地删除空间终结
+
+2026-10-12，第15步新增显式本地图入口 IsolatedSegmentStorage.reclaimDeletedLedger / SegmentProfilePhysicalDelete。它只接受匹配的实际本地 terminal TOMBSTONE，借用既有 bounded cold executor、原 index checkpoint/COPY/MOVE/FREE 与 owner/I/O服务；无新增graph线程/队列、普通Add远端查询或持久格式。caller排队deadline使用JDK共享timeout服务，每graph最多一个活跃attempt；未把该timer纳入完整进程字节证明。REUSABLE仅表示该instance的旧allocated空间已不再保留、可由Arena内部复用，不表示filesystem shrink、secure erase、其他目标完成、强访问撤销或history GC。
+
+先完成原终态native row清理、原owner coordinate归还与durable coverage，再在原Bookie/files reclamation protection及borrowed scratch下检查当前allocation原始字节。检查包括terminal DATA和已失去selector的旧RELOCATION_COPY，不能由index miss、current selector或cursor推断物理终结。首次cut在原DATA/read I/O实际quiescent后冻结，按控制顺序的16-allocation窗口遍历；既有validateAllocationIdentity在持久化前强制file=ownerShard%dataFiles，原startup/compaction单当前stream-generation合同继续适用。未知/损坏、不可用文件、未排空义务或超出总扫描/compaction/duration界限均非成功。
+
+含该instance的窗口交给原compactor完整捕获/recapture、COPY force、条件MOVE、fresh FREE proof及control force/apply；随后重新扫描至无该instance的allocated copy。混合块为了真正退役旧块，可在该显式physical请求中接受零净容量增益；普通容量维护仍要求正净增益。其他ledger活数据必须由原COPY/MOVE保留，destination与source退休bytes分开返回。统计只累计本轮完成的RECLAIMED组，sourceBytesRetired包含共享旧allocation的空间，不等于该ledger的payload bytes；重复/新attempt从实际durable FREE/generation重读，不依赖旧内存计数。
+
+caller result与actual completion独立；JDK completeOnTimeout覆盖cold排队时间，PENDING/取消停止未来阶段；deadline/cancel只停止未来阶段，不撤销已接受的index/COPY/force/FREE。原SegmentOwnerLoop新增无future分配的可选terminal观察点，在实际completion slot归还后调用；physical index检查等待全部原worker终态、compaction等待原ticket终态，scratch/guard及singleton仍保持到child终结。UNKNOWN保留实际exception原因；没有把target超时解释为NONE/decommission，也没有在此API清metadata、target obligation或tombstone。
+
+真实mTLS/ZK/SDK普通close→logical delete→UIC7 force/apply之后，本地入口覆盖非空/空ledger、wrong instance/尚未apply的其他target拒绝、旧file容量不变与healthy reopen；native混合allocation验证普通NO_NET_GAIN及physical零净增益COPY/FREE、其他ledger继续可读写和restart；corrupt原始DATA且index已清理仍UNKNOWN，总扫描budget不足仍LIMIT并可从durable状态重试。持有FREE force时deadline/cancel仍保留文件保护/actual completion，重复请求不抢singleton；释放后新attempt观察已经完成的退休。独立真实owner/IO用例验证终态观察点之前slot不可借用，之后原slot可用；真实cold队列阻塞时caller按时PENDING，singleton/completion保持到排队工作退出，超时任务不新增I/O。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest,SegmentExecutionGroupTest#terminalObserver*+allOwnerPools*+controlIoRuns*+crossThreadReturn*+partialPool*+fullDataAdmission*+entryInputsShare*+bufferBudget*+unavailableAffinity*,SegmentProfileInitialSocketClientTest#physicalDelete*+committedDelete*+automaticDelete*+logicalDelete*+preparedDelete*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-physical-delete --config-prefix ce-profile-physical-delete --config-prefix c-compaction-group --config-prefix c-terminal-index --config-prefix ce-terminal-index --config-prefix c-whole-free --config-prefix ce-whole-free
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am -DskipTests spotless:check checkstyle:check
+mvn -o -N apache-rat:check
+```
+
+父源码c78c32f4bad940d217685f781742ccdcf3529f99。最终IcyjZt0h exit0，3类282项零failure/error/skip（Bookie control262、owner9、socket11），1104当前inputs匹配；本机Corretto21.0.10，不移绑旧Java17结果。H0ei3tBu仅compile成功、selector未匹配测试，不计行为PASS。开发期YaZ5CMdK/Iw87Qk6F/aWWB6U00保留原失败：背压/未等actual结束、空cut假设、错误辅助方法/未释放read lease、owner配置与扫描budget口径；mKTVVOfP是引用不存在helper的testCompile失败。9ntIcil6五项通过早于后续范围核对；BVcDXkYN广度282仅一项off-route用例被既有allocation身份校验拒绝，该不可达假设已删除，没有放宽持久化校验。pvEXp1aO的281项早于排队deadline调整，x_0tvuaq保留该阶段模型绑定；其余旧scope、结果和源码绑定冻结。
+
+最终模型34tuje3n，20配置为4完整正向/16指定反例，1020当前inputs；新ProfilePhysicalDelete检查scope/known bytes、不能index/selector-only跳过allocated copies、COPY保留其他ledger、FREE force、old I/O与actual owner credit终态。正向110 generated/78 distinct、queue0、depth12、0.832秒/peak RSS106938368 bytes；结合原compaction-group/terminal-index/whole-FREE，Java/model去重1864输入核验。TLC1.7.4、Corretto21、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；真实TLS/ZK/CRC/fsync为输入，无full lifecycle/fairness/liveness/性能结论，catalog664/完整A+C+D未全跑。jvuqmgpu/c47vx6lw/x_0tvuaq的旧projection/stage不重绑。
+
+持久证据 /Users/liusinan/.codex/artifacts/unified-wal/physical-delete-evidence-ejqsebvi 保留原run/source/config/command、失败与阶段身份。最终Spotless/Checkstyle exit0；RAT exit1、443 unapproved路径全部在父HEAD，无新增，不称CI全绿。网络physical query/receipt、全historical target终结、accepted decommission/unrecoverable、retention policy与history/journal snapshot/handoff/GC仍OPEN；旧义务全部保留。本地保守quiescence与显式limit不证明任意持续负载下完成。Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/综合验收继续OPEN，步骤11/12/14/15与生产Gate保持PARTIAL/OPEN；默认OFF/SYSTEM/PARK和disabled能力保持，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED。
