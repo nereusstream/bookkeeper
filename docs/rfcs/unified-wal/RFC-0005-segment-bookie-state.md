@@ -848,3 +848,6 @@ RFC-0005 未 Accepted 前，RFC-0003 只能解锁 Segment shadow writer，不能
 
 
 2026-10-12 [实际旧Classic episode关闭与new-scope组合](implementation/startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)已在old UID的独立真实JVM上复用原EmbeddedServer/Classic SDK Add/read、stack/Journal/storage/metadata driver关闭与native process终态，原注册session/birth匹配后fresh absence，closed但live或halt37后的absence均不产生DRAINED。受控observation与actual Unix access导入原replay/harness组合，34项最终验证/style通过，RAT443历史问题无新增。Classic native incarnation未新增，episode UUID为admin实验标识；外部服务/永久退役/stock binary/default生产hook和整体fallback/B14/B15/Gate仍OPEN。
+
+
+2026-10-12 [显式Profile listener及网络实际排空](implementation/profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)复用actual opened graph、TLS/HELLO/control/DATA pipeline，parent close后worker barriers消除queued accepted socket未入budget的空窗；原receive ledger退休admission并等actual cold/frame/response/backing/slots归还，future副本不授权终态。borrowed graph/cold/loops不归listener关闭，存储native I/O仍依原owner排空。46项Java/13配置有限模型及style验证，RAT443历史问题无新增；未接default pre-storage hook/full startup authority或闭合full-bytes，步骤11/12/14/15及生产Gate保持PARTIAL/OPEN。

@@ -367,3 +367,6 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 最终五份drain receipt来自三个不同BookieId/nonce/actual process episode，重复查询不计新覆盖；所有old native UID为本机4294967294，class字节身份和original registration owner/birth保留。另有10份access观察。Spotless/Checkstyle exit0；RAT仍exit1/443父HEAD已有路径，无新增。原semantic模型不变，本轮未重跑TLC；实际PID/UID/SDK/journal/driver退出不能由旧模型PASS生产。归档 `/Users/liusinan/.codex/artifacts/unified-wal/classic-scope-episode-evidence-y39dj4hz` 保留所有stage、原source/command/receipts、失败child日志和checksum，不移绑历史PASS。
 
 这是owned isolated current-build Classic episode的关闭/排空与新scope replay组合，released-old-binary全矩阵、外部old-service authority/永久退役、default bootstrap/SDK routing与综合验收继续OPEN。B14/B15整体仍未接受，步骤12/14/15及生产Gate保持PARTIAL/OPEN；Linux/NUMA、真实掉电、正式性能本轮NOT_EXECUTED，完整目标保持active。
+
+
+2026-10-12 [显式Profile listener与actual network drain](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已复用original graph/pipeline并管理native parent/child、worker handoff与receive ledger终态；cold/frame/backing保留至实际归还，caller future不能伪造drain，borrowed graph/cold/loops由caller续接。actual mTLS/held cold/bind failure/queued accepted socket验证完成，46项Java/13配置模型得到预期结果、style通过，RAT443历史问题无新增。它是full startup owner的必要接线，尚未把required/physical proof、端口和registration组成default服务入口，生产Gate继续OPEN。

@@ -691,3 +691,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-12 [实际old Classic episode与new-scope replay组合](rfcs/unified-wal/implementation/startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)已真实SDK写读/原stack与driver关闭/actual JVM退出/原session registration终态，owned observation接入actual Unix access与原startup组合；closed-live和abrupt-expired absence不等于DRAINED。最终34项/style通过，RAT443历史问题无新增。当前构建与受控episode证明不覆盖外部service authority、released stock矩阵、永久退役或default hook，步骤12/14/15/生产Gate与综合验收仍PARTIAL/OPEN。
+
+
+2026-10-12 [显式Profile listener与actual网络credit drain](rfcs/unified-wal/implementation/profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已管理native parent/child、worker交接及receive ledger；retire新连接不提前归还frame/cold/backing，caller copy completion不污染actual终态，borrowed graph/loops/cold保持原owner。46项相关Java/13配置模型得到预期结果，style通过、RAT443历史问题无新增。完整startup owner/default hook/SDK routing、full-bytes、stock binary及综合验收仍OPEN，步骤11/12/14/15和生产Gate保持PARTIAL/OPEN。

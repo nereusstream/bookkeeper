@@ -1389,3 +1389,10 @@ runtime guard阶段fn17vvad四配置为1完整正向/3指定反例，978当时in
 [实际required source与原启动组合](../startup-readiness/README.md#持久-startup-requirements-与冻结发布条件)拥有阶段85/最终26项Java、许可/格式结果与源码证据，当前Gate保持PARTIAL/OPEN。
 
 最后仅清理五个新模型许可头的尾随空白，最终iou2vxf6四配置为1完整正向/3指定反例，978当前inputs匹配；完整模型语义未改，原fn17vvad和Java KGzRhsIE回执保持stage绑定。最终staged whitespace检查与本地提交一并核对。
+
+
+### 显式 listener 与 network credit drain
+
+2026-10-12，ProfileListenerDrain将native parent/child terminal、queued worker handoff、actual cold/output/backing credit归还作为输入；停止新连接、保持旧credit、caller copy、晚register socket必须经barrier与实际child close后才network done。五个错误规则为早done/漏worker fence/退休后重开/断连早还credit/caller冒充actual。首次新投影因TLA precedence SANY失败为INCONCLUSIVE；最终07__nh2q与backing-budget共13配置2完整正向/11指定反例，986当前inputs匹配，新正向374 generated/127 distinct、queue0、depth12、0.768秒/peak RSS107724800 bytes。
+
+TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog634/完整A+C+D未全跑。模型不关闭storage owner/外部loops，不生产TLS/fsync/actual fd/metadata事实，checker成本不是服务性能。[真实held cold、borrowed owner、queued accepted fd与source回执](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)拥有当前Java及Gate边界。

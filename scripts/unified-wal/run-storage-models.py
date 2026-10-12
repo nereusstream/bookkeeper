@@ -529,6 +529,12 @@ MATRIX = {
     "ce-registration-publication-unknown": "UnresolvedPublicationNeverReportsApplied",
     "a-readiness-cas": None,
     "a-startup-requirements": None,
+    "a-profile-listener-drain": None,
+    "ce-profile-listener-drain-early": "ListenerDoneHasNoTrackedCustody",
+    "ce-profile-listener-drain-handoff": "ListenerDoneWaitsWorkerHandoff",
+    "ce-profile-listener-drain-admission": "RetiredListenerCannotAdmit",
+    "ce-profile-listener-drain-credit": "DisconnectKeepsActualCredit",
+    "ce-profile-listener-drain-caller": "CallerCannotCompleteActualListenerDrain",
     "ce-startup-requirements-open": "StorageRequiresSupportedPreOpenSource",
     "ce-startup-requirements-birth": "WritableUsesFrozenSourceAtPublication",
     "ce-startup-requirements-substitution": "CallerCannotSubstituteBoundRequirements",
@@ -706,7 +712,8 @@ def main():
                   "SegmentArenaControlDriver.java", "SegmentBookieControlDriver.java", "SegmentProfileInstallStore.java", "SegmentProfileControlConfig.java", "SegmentProfileReadConfig.java",
                   "SegmentArenaMove.java", "SegmentDuplicateCheck.java",
                   "SegmentEntryInputs.java", "SegmentBufferPool.java", "SegmentBatchFormat.java",
-                  "SegmentLocalReadinessStore.java", "SegmentLocalReadinessCodec.java", "SegmentFileIo.java"])
+                  "SegmentLocalReadinessStore.java", "SegmentLocalReadinessCodec.java", "SegmentFileIo.java",
+                  "SegmentProfileListener.java"])
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentLocalReadinessStoreTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBookieControlLogTest.java")
     inputs.append(root / "bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/segment/SegmentProfileInstallStoreTest.java")
@@ -857,6 +864,7 @@ def main():
                    else "RegistrationPublication.tla" if "registration-publication" in name
                    else "ReadinessCas.tla" if "readiness-cas" in name
                    else "StartupRequirements.tla" if "startup-requirements" in name
+                   else "ProfileListenerDrain.tla" if "profile-listener-drain" in name
                    else "CurrentCopyFacts.tla" if "current-copy-facts" in name
                    else "ArenaStateIndices.tla" if "arena-state-indices" in name
                    else "RetiredSequenceRanges.tla" if "retired-sequence-ranges" in name

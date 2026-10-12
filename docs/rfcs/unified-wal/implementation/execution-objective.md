@@ -65,3 +65,6 @@
 
 
 2026-10-12继续第12步：25b7913260后已在old UID独立JVM运行当前真实Classic EmbeddedServer，实际SDK成功写读、原stack/journal/storage/driver关闭、original registration与actual process终态，owned DRAINED观察联接实际Unix access与原new target replay/source/harness。closed-live或abrupt/expiry absence不伪造排空；当前source/34项与未覆盖边界由startup-readiness/README.md“实际旧 Classic episode 的有序关闭与 new-scope 组合”拥有。继续外部old-service authority、released stock binary/pre-storage-open矩阵、default EmbeddedServer/SDK routing、snapshot/handoff/GC/decommission/full-bytes及全16步兼容/性能/运维/综合验收。持续目标active，单个owned episode不是整个fallback/B14/B15或生产Gate完成。
+
+
+2026-10-12继续第11/12步：23b40fdaf8后已抽出实际Profile listener owner，复用原opened graph/pipeline，管理native parent/child/worker交接与原receive ledger退休/actual drain，held cold/backing与未入账accepted fd不提前完成，caller future不污染actual终态。源码/46项Java/13模型配置与未覆盖范围由profile-wire/README.md“显式 Profile listener 与实际网络 credit 排空”拥有。继续将required/physical proofs、pre-storage-open、端口/registration/graph接入full startup owner/default EmbeddedServer及SDK routing，以及snapshot/handoff/GC/decommission/full-bytes/stock matrix/性能/运维和全16步综合验收；完整目标active，生产Gate不提升。

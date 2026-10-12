@@ -194,6 +194,8 @@ public class SegmentProfileInitialSocketClientTest {
         final List<SegmentFileIo> nodeIo = new ArrayList<>();
         final List<SegmentFileHeader> identities = new ArrayList<>();
         final List<ProfileReceiveBudget> budgets = new ArrayList<>();
+        final List<SegmentProfileControlConfig> controlConfigs = new ArrayList<>();
+        TLSContextFactory serverTls;
         final List<Channel> listeners = new ArrayList<>();
         final List<Channel> accepted = new CopyOnWriteArrayList<>();
         final Map<String, ProfileInitialControlClient> clients = new HashMap<>();
@@ -272,7 +274,7 @@ public class SegmentProfileInitialSocketClientTest {
                 tlsConf.setTLSCertificatePath(certificate("server-san-cert.pem"));
                 tlsConf.setTLSTrustStoreType("PEM");
                 tlsConf.setTLSTrustStore(certificate("client-cert.pem"));
-                TLSContextFactory serverTls = TLSContextFactory.forProfileServer();
+                serverTls = TLSContextFactory.forProfileServer();
                 serverTls.init(SecurityHandlerFactory.NodeType.Server, tlsConf, UnpooledByteBufAllocator.DEFAULT);
                 peerTls = SslContextBuilder.forClient().sslProvider(SslProvider.JDK)
                         .keyManager(new File(certificate("client-cert.pem")), new File(certificate("client-key.pem")))
@@ -378,6 +380,7 @@ public class SegmentProfileInitialSocketClientTest {
                             (caller, requested, authority) -> caller.equals(principal)
                                     && requested.equals(authority.scope()) ? Decision.ALLOW : Decision.DENY,
                             cold, Duration.ofSeconds(5));
+                    controlConfigs.add(control);
                     ProfileReceiveBudget budget = new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8);
                     budgets.add(budget);
                     listeners.add(new ServerBootstrap().group(acceptor, worker).channel(NioServerSocketChannel.class)
@@ -1716,6 +1719,142 @@ public class SegmentProfileInitialSocketClientTest {
                 fallback, new RollbackSafetyFacts(
                         false, false, false, false, false, false, false), gen, gen, 1, 1,
                 List.of(IsolatedSegmentStorage.STARTUP_BASE_FORMAT_FEATURE), "startup", List.of(1));
+    }
+
+    @Test
+    public void ownedProfileListenerWaitsForActualColdRequestAndRetiresConnectionAdmission() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var storage = fixture.nodes.get(0);
+            var old = fixture.controlConfigs.get(0);
+            var held = new SegmentProfileControlConfig(old.validator(), old.staticAuthorizer(), key -> {
+                entered.countDown();
+                try {
+                    assertTrue(release.await(20, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+                return old.controlStore().read(key);
+            }, old.exactAuthorizer(), old.executor(), old.timeout());
+            fixture.listeners.get(0).close().sync();
+            var budget = fixture.budgets.get(0);
+            var listener = new SegmentProfileListener(storage, fixture.serverTls, budget,
+                    new SegmentProfileListener.Settings(131072, 64, "socket-test", 0),
+                    new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker, held, null);
+            try {
+                var address = listener.bound().get(5, TimeUnit.SECONDS);
+                var identity = fixture.identities.get(0);
+                try (var client = ProfileInitialControlClient.connect(fixture.clientGroup, fixture.peerTls, address,
+                        "apache.bookkeeper.org", identity.bookieId().toString(), identity.incarnation().value(),
+                        4, Duration.ofSeconds(5)).get(5, TimeUnit.SECONDS)) {
+                    var request = client.install(fixture.install(0));
+                    assertTrue(entered.await(5, TimeUnit.SECONDS));
+                    var caller = listener.closeAsync();
+                    assertFalse(caller.isDone());
+                    assertTrue(budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED) > 0);
+                    caller.complete(null);
+                    assertFalse(listener.closeAsync().isDone());
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> listener.closeAsync().get(100, TimeUnit.MILLISECONDS));
+                    release.countDown();
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                    assertTrue(request.isDone());
+                    for (var lane : ProfileReceiveBudget.Lane.values()) {
+                        assertEquals(0, budget.used(lane));
+                        assertEquals(0, budget.usedConnections(lane));
+                    }
+                    assertFalse(fixture.worker.isShuttingDown());
+                    assertFalse(fixture.cold.isShutdown());
+                    assertThrows(java.io.IOException.class, () -> {
+                        try (var connection = new java.net.Socket()) {
+                            connection.connect(address, 1000);
+                        }
+                    });
+                }
+            } finally {
+                release.countDown();
+                listener.closeAsync().get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileListenerBindFailureDrainsItsBudgetAndKeepsBorrowedGraphAlive() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            var budget = new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8);
+            var listener = new SegmentProfileListener(fixture.nodes.get(0), fixture.serverTls, budget,
+                    new SegmentProfileListener.Settings(131072, 64, "socket-test", 0),
+                    (InetSocketAddress) fixture.listeners.get(0).localAddress(), fixture.acceptor, fixture.worker,
+                    fixture.controlConfigs.get(0), null);
+            assertThrows(ExecutionException.class, () -> listener.bound().get(5, TimeUnit.SECONDS));
+            listener.closeAsync().get(5, TimeUnit.SECONDS);
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(10, TimeUnit.SECONDS);
+            for (var lane : ProfileReceiveBudget.Lane.values()) {
+                assertEquals(0, budget.used(lane));
+                assertEquals(0, budget.usedConnections(lane));
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileListenerWaitsForAcceptedSocketAlreadyQueuedToWorkers() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.listeners.get(0).close().sync();
+            var budget = fixture.budgets.get(0);
+            var listener = new SegmentProfileListener(fixture.nodes.get(0), fixture.serverTls, budget,
+                    new SegmentProfileListener.Settings(131072, 64, "socket-test", 0),
+                    new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker,
+                    fixture.controlConfigs.get(0), null);
+            var release = new CountDownLatch(1);
+            var blocked = new CountDownLatch(2);
+            var accepted = new CountDownLatch(1);
+            try {
+                var address = listener.bound().get(5, TimeUnit.SECONDS);
+                var field = SegmentProfileListener.class.getDeclaredField("listener");
+                field.setAccessible(true);
+                Channel parent = (Channel) field.get(listener);
+                parent.eventLoop().submit(() -> parent.pipeline().addFirst("observeAccepted",
+                        new io.netty.channel.ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void channelRead(ChannelHandlerContext context, Object message) throws Exception {
+                                accepted.countDown();
+                                context.fireChannelRead(message);
+                            }
+                        })).get(5, TimeUnit.SECONDS);
+                for (var loop : fixture.worker) {
+                    loop.execute(() -> {
+                        blocked.countDown();
+                        try {
+                            assertTrue(release.await(20, TimeUnit.SECONDS));
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                    });
+                }
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                try (var connection = new java.net.Socket()) {
+                    connection.connect(address, 1000);
+                    assertTrue(accepted.await(5, TimeUnit.SECONDS));
+                    var closing = listener.closeAsync();
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> closing.get(100, TimeUnit.MILLISECONDS));
+                    for (var lane : ProfileReceiveBudget.Lane.values()) {
+                        assertEquals(0, budget.usedConnections(lane));
+                    }
+                    release.countDown();
+                    closing.get(5, TimeUnit.SECONDS);
+                    connection.setSoTimeout(1000);
+                    assertEquals(-1, connection.getInputStream().read());
+                }
+            } finally {
+                release.countDown();
+                listener.closeAsync().get(5, TimeUnit.SECONDS);
+            }
+        }
     }
 
     @Test

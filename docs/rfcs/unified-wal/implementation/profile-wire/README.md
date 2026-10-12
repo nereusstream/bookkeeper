@@ -1425,3 +1425,33 @@ ZqosUvct六类176项（control49/persistent13/lifecycle51/ephemeral19/metadata19
 
 
 2026-10-12 [owned真实Classic关闭→原startup组合](../startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)已从实际old UID JVM/原EmbeddedServer、SDK E1成功写读、原stack/driver关闭与process terminal产生受控old DRAINED观察，closed-live和halt37/ephemeral expiry负向均拒绝；与实际access/source/replay/harness/consumer正常及scheduler拒绝组合通过。最终34项零fail/error/skip，style通过、RAT443历史问题无新增。外部old-service authority、stock binary、permanent decommission及default bootstrap/SDK routing和综合Gate仍OPEN。
+
+
+## 显式 Profile listener 与实际网络 credit 排空
+
+2026-10-12，`SegmentProfileListener` 从已恢复的original `IsolatedSegmentStorage` 复用 `installProfileConnection`，真正绑定Profile-only NIO listener，持有parent及全部accepted channels。TLS/HELLO/operation parser、static/exact authorizer、原CONTROL冷读、storage drivers、deadline/status与charged backing均沿原pipeline；不另建handler/协议/线程/冷队列。graph/TLS/cold/acceptor/worker仍由caller持有；传入receive budget由该listener episode管理，不能与另一个独立listener共享并分别关闭。
+
+`bound()`与`closeAsync()`只返回private actual future的副本，caller complete/cancel不宣告真实终态。bind失败先清理native channel及本组件budget，再向bound caller传播失败；已恢复graph和借用event loops保持可用。这个入口是显式isolated组件，不自动创建storage目录、不产生compatibility/new-scope authority，不接入default EmbeddedServer或生产配置；HELLO readiness generation仍是完成上游startup后应传入的值，不能由bind成功授予WRITABLE。
+
+关闭先退休新连接admission，stay-closed child group关闭现有及迟到member，再关闭parent native listener。parent关闭后在每个原worker queue中插入barrier，等待已accept而尚未register/init的socket完成交接，再复核/关闭child group并等原receive ledger实际归零。零connection count不能证明尚未入账的accepted fd已关闭；worker barrier不回收外部event loops，也不作为storage、远端abort或FREE。
+
+原 `ProfileReceiveBudget.closeAdmissionAndDrain` 拒绝新connection与新unowned reserve，不调整任何已持有credit/slot。已接纳、尚未close的connection继续按原上限申请charged TLS close/output backing，不能靠退休绕过分配记账或拒绝必要的closing buffer；closed connection仍不能新reserve。frame/source/response/backing/derived view独立等最后实际归还，所有lane bytes与connection slots为零才实际完成。完成callback在内部ledger monitor之外，不引入轮询或额外调度队列；future副本避免caller伪造actual完成。
+
+本终态覆盖owned native listener/child channels及原ledger可见的network/cold/response custody；存储pool/DATA I/O/owner仍须由caller随后执行original graph drain/close，cold pool和borrowed loops在其所属全部工作终结后再关闭。它不补齐JDK/native TLS内部对象、kernel buffers、全索引/storage bytes或完整总账，也不保证远端未写入。关闭/barrier失败传播而不宣告成功排空；borrowed worker不得在本drain前主动停掉。
+
+真实mTLS测试让initial INSTALL的actual authority read在原bounded cold pool中挂起，然后close listener：socket已关闭、caller等待100ms超时、future副本complete均不能回收仍持有的frame/workspace。cold实际返回后network credit drain完成，原worker/cold未被关闭；旧port拒绝连接。bind原已用port的失败不损坏borrowed graph，其原endpoint仍能完成真实all-E initialize。另在两个actual worker上暂停，使parent已accept的plain TCP socket尚未入账；connection slots全零但close仍pending，release后queued socket实际关闭，peer读到EOF。allocator回归同时持有direct parent/view与charged closing heap buffer，断连后最后view才完成drain；原decoder DATA frame在channel finish后仍保留credit直到release。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileByteBufAllocatorTest,ProfileReceiveDecoderTest,SegmentProfileInitialSocketClientTest#ownedProfileListener*+ordinaryDataClient*+ordinarySourceQuota*+ordinaryDataRejection*+ordinaryTimeout*+ordinaryServerForce*+ordinaryReply*+writerStop*+ordinaryWriterClose*+readinessBridge*+automaticDeletePublication*'
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix a-profile-listener-drain --config-prefix ce-profile-listener-drain --config-prefix a-profile-backing-budget --config-prefix ce-profile-backing-budget
+mvn -o -P '!cargo-zigbuild' -pl bookkeeper-server -am spotless:check checkstyle:check
+mvn -o -P '!cargo-zigbuild' apache-rat:check
+```
+
+父源码 `23b40fdaf89c0a50a911afa23a8534c9c6b2179b`；最初budget及listener尝试是test import缺失的compile失败，不计PASS/生产bug红。最小31项green在accept race新增前，UELuQrk8三listener/32项包含该竞争；最终LuMqtKxW三类46项（allocator7/decoder22/socket17）零failure/error/skip，1095当前inputs匹配，normal DATA/UNKNOWN、writer stop/close及原readiness/delete consumer共享回归也执行。最终style exit0；RAT仍exit1/443父HEAD历史路径，无新增，不改许可规则、不称CI全绿。
+
+新有限 `ProfileListenerDrain` 投影将native parent/child close、worker queue交接与actual cold/output/backing事件作为Java输入；retire后重新admit、disconnect早还credit、caller完成actual、早drain和漏worker barrier五条错误规则均取得指定反例。首次hwqwy6f2的新六配置为TLA precedence SANY失败，保留为INCONCLUSIVE、不计PASS；补齐括号后最终07__nh2q十三配置为2正向完整探索/11指定反例，986当前inputs匹配。新正向374 generated/127 distinct、queue0、depth12、0.768秒/peak RSS107724800 bytes属于checker消耗，非服务性能。TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、无symmetry/state constraint、CHECK_DEADLOCK FALSE；catalog634/完整A+C+D未全跑，模型不生产TLS/fsync/native fd或完整活性事实。
+
+archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-listener-evidence-2xq840r1` 保留stage source/config/command/checker/compile/style失败及receipt/checksum。当前完成显式listener owner与实际network credit drain，后续仍需把original required-authority/physical facts、pre-storage-open、listener端口与registration及graph一起接入完整startup owner；default bootstrap/SDK routing/full-bytes/stock matrix与综合Gate继续OPEN。步骤11/12/14/15和生产Gate保持PARTIAL/OPEN，Linux NUMA/真实掉电/正式性能本轮NOT_EXECUTED，完整目标继续active。

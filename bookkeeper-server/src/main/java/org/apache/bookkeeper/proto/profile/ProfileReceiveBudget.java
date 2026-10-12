@@ -17,6 +17,8 @@
  */
 package org.apache.bookkeeper.proto.profile;
 
+import java.util.concurrent.CompletableFuture;
+
 /** One bounded receive ledger shared by unclassified, DATA and reserved CONTROL connections. */
 public final class ProfileReceiveBudget {
     public enum Lane { UNCLASSIFIED, DATA, CONTROL }
@@ -52,7 +54,7 @@ public final class ProfileReceiveBudget {
                 if (closed || byteLimit == 0 || requested > byteLimit - bytes) {
                     return null;
                 }
-                Credit credit = ProfileReceiveBudget.this.reserve(lane, requested);
+                Credit credit = ProfileReceiveBudget.this.reserveOwned(lane, requested);
                 if (credit != null) {
                     credit.connection = this;
                     bytes += requested;
@@ -69,6 +71,7 @@ public final class ProfileReceiveBudget {
                     usedConnections[lane.ordinal()]--;
                 }
             }
+            completeDrainIfIdle();
         }
     }
 
@@ -116,6 +119,7 @@ public final class ProfileReceiveBudget {
                     connection.bytes -= bytes;
                 }
             }
+            completeDrainIfIdle();
         }
     }
 
@@ -123,6 +127,8 @@ public final class ProfileReceiveBudget {
     private final long[] usedBytes = new long[Lane.values().length];
     private final int[] connectionLimits = new int[Lane.values().length];
     private final int[] usedConnections = new int[Lane.values().length];
+    private boolean accepting = true;
+    private final CompletableFuture<Void> drained = new CompletableFuture<>();
 
     public ProfileReceiveBudget(long totalBytes, long reservedControlBytes, long unclassifiedBytes,
                          int maxUnclassifiedConnections, int maxDataConnections, int maxControlConnections) {
@@ -142,7 +148,7 @@ public final class ProfileReceiveBudget {
     /** Called before a TLS handler is created for the accepted channel. */
     synchronized ConnectionPermit admitUnclassified() {
         int index = Lane.UNCLASSIFIED.ordinal();
-        if (usedConnections[index] >= connectionLimits[index]) {
+        if (!accepting || usedConnections[index] >= connectionLimits[index]) {
             return null;
         }
         usedConnections[index]++;
@@ -153,12 +159,45 @@ public final class ProfileReceiveBudget {
         if (lane == null || bytes < 0) {
             throw new IllegalArgumentException("Invalid receive credit request");
         }
+        return accepting ? reserveOwned(lane, bytes) : null;
+    }
+
+    // Existing connections may need charged TLS close/output buffers during retirement.
+    // Their slot prevents idle completion; a closed connection cannot reserve again.
+    private Credit reserveOwned(Lane lane, int bytes) {
+        if (lane == null || bytes < 0) {
+            throw new IllegalArgumentException("Invalid receive credit request");
+        }
         int index = lane.ordinal();
         if (bytes > limits[index] - usedBytes[index]) {
             return null;
         }
         usedBytes[index] += bytes;
         return new Credit(lane, bytes);
+    }
+
+    /** Retire new connections and copy actual tracked byte/slot drain; executor resources remain caller-owned. */
+    public CompletableFuture<Void> closeAdmissionAndDrain() {
+        synchronized (this) {
+            accepting = false;
+        }
+        completeDrainIfIdle();
+        return drained.copy();
+    }
+
+    private void completeDrainIfIdle() {
+        synchronized (this) {
+            if (accepting) {
+                return;
+            }
+            for (int lane = 0; lane < usedBytes.length; lane++) {
+                if (usedBytes[lane] != 0 || usedConnections[lane] != 0) {
+                    return;
+                }
+            }
+        }
+        // User callbacks must not execute under the receive ledger monitor.
+        drained.complete(null);
     }
 
     /** Move existing ownership without a release-and-reserve gap. A failed move leaves every credit unchanged. */

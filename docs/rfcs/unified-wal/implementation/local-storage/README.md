@@ -909,3 +909,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 
 2026-10-12 [owned旧Classic episode→真实replay](../startup-readiness/README.md#实际旧-classic-episode-的有序关闭与-new-scope-组合)先验证实际old UID service完成SDK写/读及原stack/storage/journal/driver关闭、actual JVM退出和原registration absence，再将canonical old roots/observed DRAINED/actual Unix access接到new target graph replay。并非首次创建迁移、native Classic incarnation或永久退役；原fixture setup的new dataset/初始安装仍存在，default Bookie pre-storage hook与整体Gate继续OPEN。
+
+
+2026-10-12 [显式网络listener owner](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)持有native listener/channels及original receive budget，复用opened graph的既有Profile pipeline；network credit drain与borrowed storage pool/DATA I/O/owner drain分开，caller先完成listener再执行original graph close，不把channel close或零连接数当queued accepted fd/cold/backing已归还。actual mTLS与worker queue竞争有覆盖，default startup与full-bytes/生产Gate仍OPEN。

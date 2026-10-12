@@ -122,10 +122,14 @@ public class ProfileReceiveDecoderTest {
         ProfileInboundFrame received = channel.readInbound();
         assertEquals(1024, received.body().readableBytes());
         assertEquals(64 + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+        var retired = budget.closeAdmissionAndDrain();
+        assertFalse(retired.isDone());
         channel.finish();
         assertEquals(add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertFalse(retired.isDone());
         received.close();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertTrue(retired.isDone());
         assertThrows(IllegalStateException.class, received::body);
     }
 

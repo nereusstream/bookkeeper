@@ -19,6 +19,7 @@ package org.apache.bookkeeper.proto.profile;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -35,6 +36,32 @@ import org.junit.Test;
 public class ProfileByteBufAllocatorTest {
     private static ProfileReceiveBudget budget() {
         return new ProfileReceiveBudget(1024, 256, 256, 2, 2, 1);
+    }
+
+    @Test
+    public void retirementWaitsForActualBackingAndKeepsExistingCloseAllocationCharged() throws Exception {
+        var budget = budget();
+        var permit = budget.admitUnclassified();
+        permit.limit(256);
+        var allocator = new ProfileByteBufAllocator(permit);
+        var backing = allocator.directBuffer(128, 128);
+        var view = backing.retainedSlice(0, 64);
+        var caller = budget.closeAdmissionAndDrain();
+        assertFalse(caller.isDone());
+        assertNull(budget.admitUnclassified());
+        assertNull(budget.reserve(ProfileReceiveBudget.Lane.DATA, 1));
+        caller.complete(null); // A returned copy cannot complete actual ownership.
+        assertFalse(budget.closeAdmissionAndDrain().isDone());
+        var closeOutput = allocator.heapBuffer(32, 32);
+        assertEquals(160, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        permit.close();
+        backing.release();
+        closeOutput.release();
+        assertFalse(budget.closeAdmissionAndDrain().isDone());
+        view.release();
+        budget.closeAdmissionAndDrain().get(5, java.util.concurrent.TimeUnit.SECONDS);
+        assertNull(budget.admitUnclassified());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
     @Test
