@@ -96,7 +96,7 @@ final class SegmentProfileListener {
     /** Network/cold/response credit drain. Original storage I/O/owner drain remains the caller's next step. */
     CompletableFuture<Void> closeAsync() {
         if (closing.compareAndSet(false, true)) {
-            var credits = budget.closeAdmissionAndDrain();
+            var credits = budget.closeConnectionsAndDrain();
             // Stay-closed membership rejects a child even if registration was already queued on a worker.
             children.close();
             listener.close().addListener(parent -> {

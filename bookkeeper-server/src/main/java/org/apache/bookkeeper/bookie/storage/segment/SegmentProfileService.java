@@ -251,6 +251,7 @@ public final class SegmentProfileService implements AutoCloseable {
 
     private final Object gate = new Object();
     private final Object closeGate = new Object();
+    private ProfileReceiveBudget.DataWorkingSet dataWorkingSet;
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
     private final SecretKey key;
@@ -326,6 +327,14 @@ public final class SegmentProfileService implements AutoCloseable {
             requireStorageRoots(policy.newScopeFallback());
             startup.publisher().bindStartupRequirements(startup.requirements(), observed);
             requireLive();
+            synchronized (gate) {
+                requireLive();
+                try {
+                    dataWorkingSet = transport.budget().reserveDataWorkingSet(execution.reservedBufferBytes());
+                } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
+                    throw new IOException("Profile DATA quota cannot reserve its aligned storage buffers", exhausted);
+                }
+            }
             storage = new IsolatedSegmentStorage(config, identity, key, validator, execution, limits);
             startup.publisher().bindDeleteDelivery(startup.reservations(), identity.incarnation(),
                     storage::profileDeleteProgress);
@@ -637,6 +646,10 @@ public final class SegmentProfileService implements AutoCloseable {
             }
             if (local != null) {
                 local.close();
+            }
+            if (dataWorkingSet != null) {
+                dataWorkingSet.close();
+                dataWorkingSet = null;
             }
             if (demotionFailure != null) {
                 throw demotionFailure;

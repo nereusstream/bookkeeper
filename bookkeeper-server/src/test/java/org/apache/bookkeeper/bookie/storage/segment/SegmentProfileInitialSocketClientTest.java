@@ -2527,6 +2527,27 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void ownedProfileServiceRefusesStorageBuffersBeforeOpenWhenSharedDataQuotaIsFull() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                try (var held = episode.budget.reserveDataWorkingSet(131072)) {
+                    assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                    assertNull(episode.storage());
+                    assertFalse(Files.exists(config.directory()));
+                    assertEquals(131072, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
+                    assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+                }
+                assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
+            }
+        }
+    }
+
+    @Test
     public void embeddedProfileServiceRunsSdkWithoutClassicOpenAndRetainsStackUntilActualDrain() throws Exception {
         runOwnedProfileService(true);
     }
@@ -2685,6 +2706,8 @@ public class SegmentProfileInitialSocketClientTest {
                 }, null);
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
                 assertFalse(episodes.get(0).service.close(Duration.ofMillis(100)));
+                assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA) >= 2L * (4096 + 4095));
+                assertFalse(episodes.get(0).budget.closeAdmissionAndDrain().isDone());
                 if (ownsResources) {
                     episodes.get(0).assertOwnedResourcesTerminal(false);
                 }
@@ -2708,6 +2731,8 @@ public class SegmentProfileInitialSocketClientTest {
                 release.countDown();
                 assertEquals(1, second.get(5, TimeUnit.SECONDS).longValue());
                 assertTrue(episodes.get(0).service.close(Duration.ofSeconds(5)));
+                assertTrue(episodes.get(0).budget.closeAdmissionAndDrain().isDone());
+                assertEquals(0, episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA));
                 if (ownsResources) {
                     episodes.get(0).assertOwnedResourcesTerminal(true);
                 }

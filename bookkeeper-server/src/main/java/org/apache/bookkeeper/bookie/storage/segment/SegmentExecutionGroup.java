@@ -48,6 +48,10 @@ final class SegmentExecutionGroup {
                         "Source and aligned buffer allocations exceed the DATA buffer budget");
             }
         }
+
+        long reservedBufferBytes() {
+            return Math.multiplyExact((long) buffers, Math.addExact(bufferBytes, 4095));
+        }
     }
 
     @FunctionalInterface
@@ -364,7 +368,7 @@ final class SegmentExecutionGroup {
     }
 
     long reservedBufferBytes() {
-        return Math.multiplyExact((long) settings.buffers(), settings.bufferBytes() + 4095L);
+        return settings.reservedBufferBytes();
     }
 
     void stopAdmission() {

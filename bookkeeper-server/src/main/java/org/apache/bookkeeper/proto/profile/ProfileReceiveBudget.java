@@ -70,6 +70,7 @@ public final class ProfileReceiveBudget {
                     credit.connection = this;
                     credit.workspace = workspace;
                     bytes += requested;
+                    connectionBytes += requested;
                     if (workspace) {
                         workspaceBytes += requested;
                         usedWorkspaceBytes[lane.ordinal()] += requested;
@@ -89,6 +90,7 @@ public final class ProfileReceiveBudget {
                 }
             }
             completeConnectionDrainIfIdle();
+            completeConnectionsDrainIfIdle();
             completeDrainIfIdle();
         }
 
@@ -105,12 +107,12 @@ public final class ProfileReceiveBudget {
     final class Credit implements AutoCloseable {
         private final ProfileReceiveBudget owner = ProfileReceiveBudget.this;
         private Lane lane;
-        private int bytes;
+        private long bytes;
         private ConnectionPermit connection;
         private boolean workspace;
         private boolean closed;
 
-        private Credit(Lane lane, int bytes) {
+        private Credit(Lane lane, long bytes) {
             this.lane = lane;
             this.bytes = bytes;
         }
@@ -162,6 +164,7 @@ public final class ProfileReceiveBudget {
                 usedBytes[lane.ordinal()] -= bytes;
                 if (connection != null) {
                     connection.bytes -= bytes;
+                    connectionBytes -= bytes;
                     if (workspace) {
                         connection.workspaceBytes -= bytes;
                         usedWorkspaceBytes[lane.ordinal()] -= bytes;
@@ -171,6 +174,7 @@ public final class ProfileReceiveBudget {
             if (connection != null) {
                 connection.completeConnectionDrainIfIdle();
             }
+            completeConnectionsDrainIfIdle();
             completeDrainIfIdle();
         }
     }
@@ -181,6 +185,8 @@ public final class ProfileReceiveBudget {
     private final int[] connectionLimits = new int[Lane.values().length];
     private final int[] usedConnections = new int[Lane.values().length];
     private boolean accepting = true;
+    private long connectionBytes;
+    private final CompletableFuture<Void> connectionsDrained = new CompletableFuture<>();
     private final CompletableFuture<Void> drained = new CompletableFuture<>();
 
     public ProfileReceiveBudget(long totalBytes, long reservedControlBytes, long unclassifiedBytes,
@@ -303,7 +309,7 @@ public final class ProfileReceiveBudget {
 
     // Existing connections may need charged TLS close/output buffers during retirement.
     // Their slot prevents idle completion; a closed connection cannot reserve again.
-    private Credit reserveOwned(Lane lane, int bytes) {
+    private Credit reserveOwned(Lane lane, long bytes) {
         if (lane == null || bytes < 0) {
             throw new IllegalArgumentException("Invalid receive credit request");
         }
@@ -315,13 +321,72 @@ public final class ProfileReceiveBudget {
         return new Credit(lane, bytes);
     }
 
+    /** Fixed storage capacity shares the DATA quota and remains held until its actual storage owner drains. */
+    public final class DataWorkingSet implements AutoCloseable {
+        private final Credit credit;
+
+        private DataWorkingSet(Credit credit) {
+            this.credit = credit;
+        }
+
+        @Override
+        public void close() {
+            credit.close();
+        }
+    }
+
+    /** Reserve before allocating fixed storage buffers; no connection slot or remote authority is granted. */
+    public DataWorkingSet reserveDataWorkingSet(long bytes) {
+        if (bytes < 1) {
+            throw new IllegalArgumentException("Positive DATA working set required");
+        }
+        Credit credit;
+        synchronized (this) {
+            credit = accepting ? reserveOwned(Lane.DATA, bytes) : null;
+        }
+        if (credit == null) {
+            throw new CapacityExceededException();
+        }
+        try {
+            return new DataWorkingSet(credit);
+        } catch (RuntimeException | Error failure) {
+            credit.close();
+            throw failure;
+        }
+    }
+
+    /** Retire admission and wait only for network owners; storage retains its reserved completion capacity. */
+    public CompletableFuture<Void> closeConnectionsAndDrain() {
+        synchronized (this) {
+            accepting = false;
+        }
+        completeConnectionsDrainIfIdle();
+        completeDrainIfIdle();
+        return connectionsDrained.copy();
+    }
+
     /** Retire new connections and copy actual tracked byte/slot drain; executor resources remain caller-owned. */
     public CompletableFuture<Void> closeAdmissionAndDrain() {
         synchronized (this) {
             accepting = false;
         }
+        completeConnectionsDrainIfIdle();
         completeDrainIfIdle();
         return drained.copy();
+    }
+
+    private void completeConnectionsDrainIfIdle() {
+        synchronized (this) {
+            if (accepting || connectionBytes != 0) {
+                return;
+            }
+            for (int count : usedConnections) {
+                if (count != 0) {
+                    return;
+                }
+            }
+        }
+        connectionsDrained.complete(null);
     }
 
     private void completeDrainIfIdle() {

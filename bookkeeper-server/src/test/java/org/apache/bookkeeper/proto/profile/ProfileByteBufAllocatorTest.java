@@ -35,6 +35,58 @@ import org.junit.Test;
 
 public class ProfileByteBufAllocatorTest {
     @Test
+    public void fixedStorageSharesDataQuotaAndDrainsAfterLastConnectionBacking() {
+        var budget = new ProfileReceiveBudget(2048, 512, 512, 1, 1, 1);
+        var storage = budget.reserveDataWorkingSet(768);
+        var data = budget.admitClient(ProfileReceiveBudget.Lane.DATA, 1024);
+        ByteBuf root = data.allocator().directBuffer(256, 256);
+        ByteBuf view = root.retainedDuplicate();
+        try {
+            assertEquals(1024, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                    () -> data.allocator().directBuffer(1, 1));
+            assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                    () -> budget.reserveDataWorkingSet(1));
+            var control = budget.admitClient(ProfileReceiveBudget.Lane.CONTROL, 64);
+            ByteBuf controlRoot = control.allocator().directBuffer(64, 64);
+            controlRoot.release();
+            control.close();
+            root.release();
+            data.close();
+            assertFalse(budget.closeConnectionsAndDrain().isDone());
+            view.release();
+            assertTrue(budget.closeConnectionsAndDrain().isDone());
+            assertFalse(budget.closeAdmissionAndDrain().isDone());
+            assertEquals(768, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                    () -> budget.reserveDataWorkingSet(1));
+        } finally {
+            if (root.refCnt() > 1) {
+                root.release();
+            }
+            if (view.refCnt() > 0) {
+                view.release();
+            }
+            data.close();
+            storage.close();
+        }
+        assertTrue(budget.closeAdmissionAndDrain().isDone());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+    }
+
+    @Test
+    public void fixedStorageReservationKeepsLongCapacityWithoutTruncation() {
+        var budget = new ProfileReceiveBudget(5_000_000_000L, 1, 1, 1, 1, 1);
+        var storage = budget.reserveDataWorkingSet(3_000_000_000L);
+        assertEquals(3_000_000_000L, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                () -> budget.reserveDataWorkingSet(2_000_000_000L));
+        storage.close();
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertTrue(budget.closeAdmissionAndDrain().isDone());
+    }
+
+    @Test
     public void codecWorkspaceSharesQuotaAndDrainsSeparatelyFromBacking() {
         var budget = budget();
         var client = budget.admitClient(ProfileReceiveBudget.Lane.DATA, 512);
