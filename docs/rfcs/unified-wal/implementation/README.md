@@ -12,7 +12,7 @@
 
 已冻结、延期验证的模块：
 
-- [`Experimental Profile wire 与冻结的 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard、pure codec 与610-vector corpus 已实现；真实4.14.8 decoder发现并冻结原`0x0FFE4250`反例，replacement `0x0FF04250`与authoritative corpus已通过new-codec定向回归。2026-10-13 fresh run的四版本610-vector released-decoder/localhost stock网络矩阵已通过原probe Oracle，stock文件/namespace不变、Classic sentinel可读，状态`PASS_SCOPED`；内部handle/master-key/allocation尚无直接观测，完整G1保持`BLOCKED_UNVERIFIED`。历史反例与延期回执保留原绑定。
+- [`Experimental Profile wire 与冻结的 old-decoder/stock-binary harness`](profile-wire/README.md)：Block D scope guard、pure codec 与610-vector corpus 已实现；真实4.14.8 decoder发现并冻结原`0x0FFE4250`反例，replacement `0x0FF04250`与authoritative corpus已通过new-codec定向回归。2026-10-13当前fresh run的四版本611-vector released-decoder/localhost stock网络及JDI内部effect观测已通过，611条channel实际终结、stock文件/namespace不变、前后Classic sentinel正常，状态`PASS_SCOPED`；完整current control-body/mixed-version/auth/semantic/startup Gate仍未闭合，G1保持`BLOCKED_UNVERIFIED`。历史反例与延期回执保留原绑定。
 
 输入锁见 [`manifest.json`](manifest.json)。每个模块自己的source/test/artifact范围、复现命令、证据结论和剩余BLOCK由模块目录拥有。实现证据不能自动提升四份owner RFC或三个Spike的状态。
 
@@ -699,3 +699,5 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 2026-10-13 [默认 SDK open 的 Profile 拒绝边界](profile-wire/README.md#默认-sdk-open-的-profile-拒绝边界)已在原LedgerOpenOp密码/digest验证后、Classic handle/listener/recovery创建前识别mandatory Profile backlink，返回原IllegalOpException，避免当前SDK误用Classic路径。真实CLOSED旧行为红、新OPEN/CLOSED/valid-CRC future marker拒绝绿及三Bookie Classic兼容，最终2类17项通过；Main/外部issuer、默认Profile routing、released stock矩阵及全16步Gate仍OPEN，默认OFF/SYSTEM/PARK与disabled不变。
 
 2026-10-13 [恢复执行的 released compatibility 矩阵](profile-wire/README.md#恢复执行的-released-compatibility-矩阵)：父源码ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3上四个released decoder和真实私有loopback stock Main各跑610向量，原probe Oracle均通过；Classic sentinel成功、stock文件/native namespace快照不变、原旧magic控制在四个decoder均预期FAIL。636个输入/实际JAR/JDK/class-load与312 raw文件归档核验，所有自有进程终结/端口释放。当前PASS_SCOPED，内部handle/master-key/allocation无直接观测使完整G1仍BLOCKED_UNVERIFIED；步骤11/12/14/15、生产Gate与16步验收仍OPEN，默认OFF/SYSTEM/PARK及disabled不变。继续其余兼容effect、Main/default routing/required authority、full-bytes、backup/restore/accepted退役/GC、正式性能与运维；不重绑历史回执。
+
+2026-10-13 [released stock内部effect与corpus补齐](profile-wire/README.md#released-stock-内部-effect-与-corpus-补齐)：父源码55388d6da0上新增外部JDI方法/channel观测，四版本最终611向量的Classic effect为零、611连接实际终结，前后Classic控制触发实际路径。当前生成器要求RECOVERY_TERMINAL_CLOSE而committed corpus缺失的三项RED已用现有生成器补资源，原610 raw bytes和14补充fixtures不变；当前Profile五类37项通过，observer定向Checkstyle通过。639 stock/corpus及1116 Java输入/三阶段raw/checker归档见profile-wire记录，旧610结果不移绑。PASS_SCOPED完成固定reference corpus的内部effect观察；完整current control-body/mixed-version/auth/semantic/startup与16步其余验收仍OPEN，G1 BLOCKED_UNVERIFIED、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。继续其余兼容、Main/default routing/required authority、full-bytes、backup/restore/accepted退役/GC、正式性能与运维；目标active。

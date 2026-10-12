@@ -1,10 +1,25 @@
 # Profile Wire Compatibility Harness
 
-本目录保留 Wave 0 Block D 的 released-decoder/stock-binary probe、artifact lock 与源代码。2026-10-13 按完整16步持续目标恢复了隔离验证；四个版本的610-vector decoder与loopback stock网络矩阵均通过原probe Oracle，状态为 `PASS_SCOPED`。G1仍为 `BLOCKED_UNVERIFIED`：内部 handle/master-key/allocation effect 尚无直接观测，不能把磁盘和metadata快照不变解释成完整G1通过。
+本目录保留 Wave 0 Block D 的 released-decoder/stock-binary probe、artifact lock 与源代码。2026-10-13 按完整16步持续目标恢复了隔离验证；当前四版本611-vector decoder、loopback stock网络与内部effect观测均通过，状态为 `PASS_SCOPED`。先前610-vector矩阵保留原身份。完整G1仍为 `BLOCKED_UNVERIFIED`：这里验证固定reference corpus与Classic Interleaved backend，未完成全部当前control-body、mixed-version/auth/semantic/startup接受范围。
 
-本harness仍不属于常规Maven reactor或CI。候选、610-vector corpus、probe Oracle和冻结反例均未修改。每次执行使用fresh run identity、私有loopback端口/ZooKeeper namespace/可丢弃数据目录；stock classpath只来自锁定released artifact，不包含当前checkout的classes。
+本harness仍不属于常规Maven reactor或CI。候选、原probe Oracle和冻结反例未修改；现有生成器补齐RECOVERY_TERMINAL_CLOSE后当前corpus为611个，原610个raw bytes保持一致。每次执行使用fresh run identity、私有loopback端口/ZooKeeper namespace/可丢弃数据目录；stock classpath只来自锁定released artifact，不包含当前checkout的classes。
 
 本次源提交 `ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3`，run `uw-stock-compatibility-Mftgib2k`，证据目录 `/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU` 保存636个原始source/corpus输入、全部classpath JAR SHA256、server JAR SHA256/SHA512、Zulu17.0.6 executable SHA、class-load来源、逐vector JSONL、命令/退出码、配置、namespace/storage前后快照、进程终态、原始失败诊断及本次辅助脚本。`verified-results.json`汇总已逐项核验的范围，`raw-sha256.json`锁定原始输出。原冻结反例在全部四个decoder上各识别一个 `ParsedAddRequest`、exit1，作为预期失败控制。
+
+后续源父提交 `55388d6da00d9662cfaa890ede2dd24abde64769`，run `uw-stock-effect-611-oc3r_rd3`；新observer/生成资源以 `stock-effect-evidence-aakgx616/stage3-preflight.json` 的639个输入SHA绑定，证据目录 `/Users/liusinan/.codex/artifacts/unified-wal/stock-effect-evidence-aakgx616`。四个decoder各611项PASS、原反例各预期FAIL；真实stock各611连接、零响应、零内部effect、文件和namespace快照相同，前后Classic sentinel正常。当前Profile五类37项通过；此前三项corpus失败证明生成器要求新增subtype而committed corpus缺失，修复仅从现有生成器补资源，没有弱化测试。第一次observer Checkstyle发现default-package文档缺失；新增 `package-info.java` 后定向9.3检查两文件均零违规。两处行折叠的observer编译bytecode与被测stage2逐项一致，最终611矩阵又使用最终编译版本。
+
+`StockEffectObserver`使用JDK17自带JDI；只允许连接本run拥有的loopback JDWP端口。以 `-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:<private-port>` 启动真实Main，外部observer注册class-prepare与方法入口断点，随后恢复VM；不替换类、不mock route/store、不访问参数中的credential/payload。4.14.8观测Bookie，后三版观测BookieImpl；记录精确signature覆盖processRequest、read/write HandleFactory、descriptor/FileInfo构造、Interleaved/LedgerCache master-key、Bookie/Interleaved Add及Journal logAddEntry。前后正常写/读必须实际触发这些路径，才能把corpus阶段零计数作为证据。
+
+```bash
+"$UW_COMPAT_JDK/bin/javac" --add-modules jdk.jdi -d "$UW_COMPAT_RUN/observer-classes" \
+  tests/profile-wire-compatibility/src/StockEffectObserver.java \
+  tests/profile-wire-compatibility/src/package-info.java
+"$UW_COMPAT_JDK/bin/java" --add-modules jdk.jdi \
+  -cp "$UW_COMPAT_RUN/observer-classes" StockEffectObserver \
+  "$UW_COMPAT_JDWP_PORT" "$UW_COMPAT_RUN/effect-events.jsonl"
+```
+
+observer标准输入接受 `phase:<unique-name>`、`snapshot`、`finish`；每条返回一行JSON。phase cut会暂停VM、消费已排队debug事件，并拒绝跨越尚存channel context；channelActive/channelInactive的context identity配对另记，不能混入Classic effect。driver保持corpus阶段直到611 opened/611 closed和零尚存context，随后才开始控制请求；前后正向effect hits分别为4.14/4.15的18/21和4.16/4.17的17/20。`finish`也拒绝尚存连接，异常/VM终止不可计PASS。该JDI运行只验证行为，暂停/断点开销不用于性能测量。run-owned完整driver/helper/config/命令与原始阶段tar、SHA在证据中；前两个610阶段分别验证方法effect及补强channel drain，最后611阶段同时重跑decoder、冻结控制和完整网络/effect组合。
 
 复现decoder层（先建立新的 `UW_COMPAT_RUN`；保留现有输出）：
 

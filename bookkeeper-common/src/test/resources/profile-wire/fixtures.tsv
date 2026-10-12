@@ -372,6 +372,7 @@ valid/control-header-install	valid/control-header-install.bin	ESTABLISHED	ACCEPT
 valid/control-header-operation-status	valid/control-header-operation-status.bin	ESTABLISHED	ACCEPT	-	BLOCKED_CONTROL	BLOCKED_UNFROZEN_CONTROL_BODY	false	36
 valid/control-header-recovery-grant	valid/control-header-recovery-grant.bin	ESTABLISHED	ACCEPT	-	BLOCKED_CONTROL	BLOCKED_UNFROZEN_CONTROL_BODY	false	36
 valid/control-header-recovery-grant-close	valid/control-header-recovery-grant-close.bin	ESTABLISHED	ACCEPT	-	BLOCKED_CONTROL	BLOCKED_UNFROZEN_CONTROL_BODY	false	36
+valid/control-header-recovery-terminal-close	valid/control-header-recovery-terminal-close.bin	ESTABLISHED	ACCEPT	-	BLOCKED_CONTROL	BLOCKED_UNFROZEN_CONTROL_BODY	false	36
 valid/control-header-tombstone-or-delete-apply	valid/control-header-tombstone-or-delete-apply.bin	ESTABLISHED	ACCEPT	-	BLOCKED_CONTROL	BLOCKED_UNFROZEN_CONTROL_BODY	false	36
 valid/fence-ledger	valid/fence-ledger.bin	ESTABLISHED	ACCEPT	-	DATA	-	false	136
 valid/force-ledger	valid/force-ledger.bin	ESTABLISHED	ACCEPT	-	DATA	-	false	112

@@ -9,7 +9,7 @@
   "preV3OpcodeOracle": "original, XOR-0xFF, and every single-bit flip remain outside Classic opcodes 1..7",
   "supersededCandidate": "0x0FFE4250",
   "frozenCounterexample": "CE-20260831T105059Z",
-  "corpusVectors": 610,
+  "corpusVectors": 611,
   "fuzzSeedHex": "505746555a5a0001",
   "newCodecTests": {
     "status": "PASS",
@@ -22,6 +22,27 @@
   "matrixExecution": "ISOLATED_FRESH_RUN_OUTSIDE_REACTOR_AND_CI",
   "g1": "BLOCKED_UNVERIFIED",
   "matrixRun": {
+    "sourceParent": "55388d6da00d9662cfaa890ede2dd24abde64769",
+    "sourceInputsSha256": "f2fd23591162b4c678a2fddc988b3939d60309ccb8b9d42d8499c93e1c94842b",
+    "runIdentity": "uw-stock-effect-611-oc3r_rd3",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-effect-evidence-aakgx616",
+    "vectorsPerVersion": 611,
+    "releasedDecoderOracle": "PASS",
+    "stockBinaryProbeOracle": "PASS",
+    "stockInternalEffectObservation": "ZERO_WITH_BEFORE_AND_AFTER_CLASSIC_CONTROLS",
+    "stockChannelLifecycle": "611_ACTIVE_611_INACTIVE_ZERO_REMAINING",
+    "stockStorageAndNamespaceSnapshots": "UNCHANGED",
+    "frozenCounterexampleControl": "EXPECTED_FAIL_ALL_FOUR_DECODERS",
+    "currentProfileTests": {
+      "classes": 5,
+      "tests": 37,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "g1Remaining": "Fixed reference corpus/Classic Interleaved backend only; complete current control-body, mixed-version/auth/semantic/startup acceptance remains open"
+  },
+  "previousMatrixRun": {
     "sourceCommit": "ea98f8b20bebcf639c3ddf07effdeae2aebfd7e3",
     "runIdentity": "uw-stock-compatibility-Mftgib2k",
     "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU",

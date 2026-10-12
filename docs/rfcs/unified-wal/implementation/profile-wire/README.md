@@ -4,7 +4,7 @@
 
 本目录保留原 Unified WAL Wave 0 Block D 的实现锁、byte corpus、冻结的旧 decoder 反例与 compatibility harness；原 Block D 回执只覆盖纯 codec。后续步骤11～15在本目录记录隔离真实 TLS/socket/storage/SDK/恢复/删除接线的独立增量，以及 [恢复执行的 released compatibility 矩阵](#恢复执行的-released-compatibility-矩阵)。这些隔离实现不授予生产启动、注册、ACK、恢复完成或删除权限。
 
-当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX PASS_SCOPED — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 的四版本 released-decoder/localhost stock-binary 610-vector矩阵已通过原probe Oracle。内部 handle/master-key/allocation effect 仍无直接观测，完整G1保持 `BLOCKED_UNVERIFIED`，不是stable wire**。
+当前状态：**REPLACEMENT CORPUS PASS / COMPATIBILITY MATRIX PASS_SCOPED — 原 candidate `0x0FFE4250` 的反例已冻结；replacement `0x0FF04250` 的当前四版本611-vector released-decoder/localhost stock-binary矩阵已通过，真实JDI观测内部effect为零且611条连接实际终结，见[当前增量](#released-stock-内部-effect-与-corpus-补齐)。完整current control-body/mixed-version/auth/semantic/startup接受仍待完成，G1保持 `BLOCKED_UNVERIFIED`，不是stable wire**。
 
 后续步骤11已有下文的[真实隔离普通 Add 接线](#真实隔离普通-add-接线)。它复用本目录冻结的实验字节合同；原 Block D 回执、corpus、历史compatibility延期和G1状态保留原绑定，不移绑本次结果。
 
@@ -32,7 +32,7 @@ guard 只允许本模块的 pure codec、test corpus、冻结 harness 和 owner 
 
 ## Authoritative byte corpus milestone
 
-`bookkeeper-common/src/test/resources/profile-wire/` 冻结保留610个authoritative vectors：259 valid、86 invalid、9 adversarial old-protocol/TLS prefixes、256 fixed-seed fuzz。全部vector共享同一 `fixtures.tsv`，逐项固定phase、frame accept/reject reason、typed decode/status、close结果和byte count；`checksums.sha256` 锁定每个binary、fixture和manifest。
+`bookkeeper-common/src/test/resources/profile-wire/` 当前保留611个authoritative vectors：260 valid、86 invalid、9 adversarial old-protocol/TLS prefixes、256 fixed-seed fuzz。原阶段610-vector身份与回执不变；新增RECOVERY_TERMINAL_CLOSE header只补齐现有生成器枚举，原610个raw bytes与另14个补充fixture均未改。全部vector共享同一 `fixtures.tsv`，逐项固定phase、frame accept/reject reason、typed decode/status、close结果和byte count；`checksums.sha256` 锁定每个binary、fixture和manifest。
 
 覆盖包括：每个subtype、client/server HELLO、全部240个status/retry/durable组合、normal/recovery distinct bodies、magic逐byte flip、1..31-byte header truncation、body truncation、outer/body mismatch、三个oversize边界、version/header/flags/reserved/subtype、malformed HELLO/status/data、normal/recovery interchange、TLS ClientHello、v3/pre-v3 adversarial prefixes、Profile后接legacy-like ADD prefix，以及seed `0x505746555a5a0001` 的256个arbitrary vectors。strict new-codec corpus test同时断言全部frame reject在body allocation前发生。
 
@@ -62,6 +62,37 @@ replacement `0x0FF04250` 已重建同一组610个vector及全部checksums；新�
 证据 `/Users/liusinan/.codex/artifacts/unified-wal/stock-compatibility-evidence-ajegDRwU` 保存636个原始输入、312个raw文件、逐vector JSONL/summary、所有命令/config/class-load/进程/快照/辅助源码及失败诊断。`verified-results.json`校验每版本610个ID完整且顺序相同、原输入/全部JAR不变、namespace/storage字节相同、sentinel及精确PID终结/端口释放；`raw-sha256.json`锁定归档。复现见 [`tests/profile-wire-compatibility/README.md`](../../../../../tests/profile-wire-compatibility/README.md)。原生产Java与TLA模型未改，本次未重跑无新验证目的的storage/model/style矩阵。
 
 当前 `matrixStatus=PASS_SCOPED`，完整 `G1=BLOCKED_UNVERIFIED`：已观察decoder产物、有限200ms网络读取、持久文件及namespace；未直接观测stock进程内handle/master-key/allocation effect，快照不变不证明这些内部行为为零，也不证明所有storage backend、长期负载、完整Profile parse/no-fallback面或stable wire。继续补齐该范围、Main/default Profile routing/其他required authority、full-bytes、backup/restore/accepted decommission/history GC、正式性能/运维与16步综合验收。默认OFF/SYSTEM/PARK、disabled能力及生产Gate OPEN保持；Linux NUMA/真实掉电/正式性能/canary仍NOT_EXECUTED。
+
+## Released stock 内部 effect 与 corpus 补齐
+
+2026-10-13，父提交 `55388d6da00d9662cfaa890ede2dd24abde64769`。上一节610-vector结果保留原身份。本轮先在真实released Main上增加外部JDK17 JDI观测，随后补强actual channel drain，再因当前codec定向测试发现缺失RECOVERY_TERMINAL_CLOSE而恢复当前611-vector canonical corpus。三个stage均有独立run/input/raw身份，不把先前610 PASS移绑611。
+
+当前生成器枚举已有RECOVERY_TERMINAL_CLOSE，但committed corpus缺其36-byte control header：`unified-wal-local-0SEqsaMc`的13项common测试中3项corpus断言RED，分别为缺resource、fixtures/manifest不等于生成器、checksum数量612而预期613。使用原ProfileWireCorpusGenerator在fresh目录生成并只复制缺失binary与fixture/manifest/checksums；611中原610个raw bytes全部一致，另14个补充fixture不删不改，fuzz seed/iteration与candidate保持。无需修改生产枚举、生成逻辑或测试断言。
+
+`StockEffectObserver`只在自有loopback JDWP端口附加真实stock Main，使用class-prepare和方法入口断点，不替换类或依赖，不访问credential/payload参数。4.14.8监测Bookie，后三版监测BookieImpl；实际signature分别绑定processRequest、HandleFactory读/写handle、descriptor/FileInfo构造、Interleaved/LedgerCache setMasterKey、Bookie/Interleaved Add及Journal logAddEntry。正常Classic写/读在corpus前后各触发这些实际路径；corpus期间零事件，因此不是只依靠持久快照间接推断零handle/ledger allocation。这里的allocation是ledger资源分配，未声称Netty/JVM零内存分配。
+
+另以channelActive/channelInactive的原handler context identity配对观察网络终结。phase cut暂停VM并消费已排队debug事件，若有active context则拒绝跨phase；driver等待611 opened/611 closed/zero remaining后才开始后续控制请求，避免200ms客户端read timeout把迟到effect挪到control-after。finish也拒绝尚存连接。原probe网络Oracle保持零response bytes/保守ACK计数/connection failure；JDI暂停带来的耗时不用于性能结论。
+
+| version | final vectors / Classic effect | server channels opened / closed / remaining | installed breakpoints | before / after control effect hits |
+| --- | --- | --- | --- | --- |
+| 4.14.8 | 611 / 0 | 611 / 611 / 0 | 16 | 18 / 21 |
+| 4.15.5 | 611 / 0 | 611 / 611 / 0 | 16 | 18 / 21 |
+| 4.16.7 | 611 / 0 | 611 / 611 / 0 | 15 | 17 / 20 |
+| 4.17.2 | 611 / 0 | 611 / 611 / 0 | 15 | 17 / 20 |
+
+最终run `uw-stock-effect-611-oc3r_rd3`：四个released decoder各307 extracted、303 incomplete、307 exceptions、306 fallback transitions、零recognized/route claim/fallback-followed-by-effect；原magic反例四版各识别一个ParsedAddRequest、expected exit1。四个真实Classic Interleaved stock矩阵各611连接、零响应/ACK/connection failure、decoder/probe/observer/driver均exit0；namespace及journal/ledger size/SHA完全不变。原sentinel可读，新sentinel可写；正向控制的effect分别属于其独立phase。所有精确自有Bookie/ZK/observer终结并释放端口。
+
+当前Profile canonical/HELLO/frame、receive deadline/bounds/budget/error close与实际mTLS pipeline的最终五类37项全部通过、零skip；新corpus被缺失resource/manifest/checksum三个独立断言保护。observer定向Checkstyle9.3最终两文件零违规：首次缺default-package文档失败已保留，补package-info后通过；两处line wrap的编译bytecode与被测stage2完全相同，最终611再用最终编译版本。未改生产Java或模型，未新增Maven module、后台生产线程或通用测试框架。 最终Java/stock/checker终结后的独立RAT exit1，443个unapproved路径均存在父提交、无新增；不称完整CI通过。625个Java/stock重合输入SHA逐项相同，1130个唯一输入已归档，test后仅文档改变。
+
+证据 `/Users/liusinan/.codex/artifacts/unified-wal/stock-effect-evidence-aakgx616`：stage1为方法effect，stage2增加channel drain，stage3为当前611；639个stock/corpus输入与1116个Java runner输入分别冻结，全部released JAR/JDK/class-load/bytecode出处、raw JSONL/config/命令/退出码/事件/快照/进程终态、RED/GREEN XML及checkers均归档核验。`verified-611-results.json`逐项校验611 ID、内部零effect、匹配channel pairs、正向控制、native快照及PID/端口；stage3输入hash清单的canonical SHA256为 `f2fd23591162b4c678a2fddc988b3939d60309ccb8b9d42d8499c93e1c94842b`。原反例、历史sourceCommit/designInputs/receipts不改写。
+
+复现stock/JDI见原harness README；current Profile回归：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'ProfileFrameCodecTest,ProfileHelloStatusTest,ProfileWireCorpusTest,ProfileReceiveDecoderTest,ProfileInboundPipelineSocketTest'
+```
+
+当前compatibility `PASS_SCOPED`已包含固定611 reference corpus的旧stock内部effect；完整current control-body、mixed-version/auth/semantic/startup及其余Spike接受仍未完成，A25完整范围与G1保持OPEN/BLOCKED_UNVERIFIED，不晋升stable wire或production authority。默认OFF/SYSTEM/PARK、disabled能力及生产Gate OPEN保持；Linux NUMA/真实掉电/正式性能/canary未执行。后续继续完整16步剩余实现与综合验收。
 
 ## Frozen counterexample
 
