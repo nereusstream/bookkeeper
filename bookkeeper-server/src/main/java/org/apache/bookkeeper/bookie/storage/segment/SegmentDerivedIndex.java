@@ -58,6 +58,8 @@ final class SegmentDerivedIndex implements AutoCloseable {
     private static final long LOCATION_MAGIC = 0x55574944584c3031L; // UWIDXL01
     private static final long COVERAGE_MAGIC = 0x555749434f563031L; // UWICOV01
     private static final int LOCATION_BYTES = 160;
+    private static final int LOCATION_KEY_BYTES = 77;
+    private static final int BINDING_BYTES = 64;
     private static final int BATCH_ENTRIES = 256;
 
     record Coverage(long publication, UUID indexGeneration, long arenaCut, long bookieCut,
@@ -130,7 +132,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
                 throw new IOException("Derived index directory is a symbolic link");
             }
             db = RocksDB.open(options, directory(config).toString());
-            byte[] binding = db.get(BINDING_KEY);
+            byte[] binding = getExact(BINDING_KEY, BINDING_BYTES);
             if (binding == null) {
                 if (existing) {
                     throw new IOException("Incomplete derived index binding; a full rebuild is required");
@@ -152,7 +154,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
     }
 
     private byte[] binding() {
-        return ByteBuffer.allocate(64).putLong(BINDING_MAGIC).putInt(1).putInt(LOCATION_BYTES)
+        return ByteBuffer.allocate(BINDING_BYTES).putLong(BINDING_MAGIC).putInt(1).putInt(LOCATION_BYTES)
                 .putLong(indexGeneration.getMostSignificantBits()).putLong(indexGeneration.getLeastSignificantBits())
                 .put(scope).array();
     }
@@ -177,7 +179,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
             throws IOException {
         requireOpen();
         try {
-            byte[] bytes = db.get(key(context, entryId));
+            byte[] bytes = getExact(key(context, entryId), LOCATION_BYTES);
             if (bytes == null) {
                 return Optional.empty();
             }
@@ -214,9 +216,9 @@ final class SegmentDerivedIndex implements AutoCloseable {
             }
             List<SegmentPointRead.Location> entries = new ArrayList<>();
             try (RocksIterator cursor = db.newIterator()) {
-                for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+                for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && boundedKey(cursor)[0] == LOCATION_BEGIN[0];
                         cursor.next()) {
-                    SegmentPointRead.Location location = decode(cursor.value());
+                    SegmentPointRead.Location location = decode(boundedValue(cursor));
                     SegmentBatchFormat.Address address = location.address();
                     SegmentDataRecovery.StreamCoverage stream = streams[address.shard()];
                     if (stream == null || !address.streamGeneration().equals(stream.generation())
@@ -327,11 +329,11 @@ final class SegmentDerivedIndex implements AutoCloseable {
         try {
             try (WriteBatch retired = new WriteBatch(); RocksIterator cursor = db.newIterator()) {
                 int count = 0;
-                for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+                for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && boundedKey(cursor)[0] == LOCATION_BEGIN[0];
                         cursor.next()) {
-                    SegmentPointRead.Location location = decode(cursor.value());
+                    SegmentPointRead.Location location = decode(boundedValue(cursor));
                     if (!bookie.locallyReadableContext(location.context())) {
-                        retired.delete(cursor.key());
+                        retired.delete(boundedKey(cursor));
                         if (++count == BATCH_ENTRIES) {
                             db.write(writes, retired);
                             retired.clear();
@@ -416,9 +418,10 @@ final class SegmentDerivedIndex implements AutoCloseable {
         long bookieCut = bookie.indexAppliedCut(config, identity);
         int[] counts = new int[selected.length];
         try (RocksIterator cursor = db.newIterator()) {
-            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0]; cursor.next()) {
-                SegmentPointRead.Location location = decode(cursor.value());
-                if (!Arrays.equals(cursor.key(), key(location.context(), location.entryId()))) {
+            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && boundedKey(cursor)[0] == LOCATION_BEGIN[0];
+                    cursor.next()) {
+                SegmentPointRead.Location location = decode(boundedValue(cursor));
+                if (!Arrays.equals(boundedKey(cursor), key(location.context(), location.entryId()))) {
                     throw new IOException("Runtime index row differs from its key");
                 }
                 SegmentBatchFormat.Address address = location.address();
@@ -455,14 +458,15 @@ final class SegmentDerivedIndex implements AutoCloseable {
         try (WriteBatch retired = new WriteBatch(); RocksIterator cursor = db.newIterator()) {
             int count = 0;
             int seen = 0;
-            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && boundedKey(cursor)[0] == LOCATION_BEGIN[0];
                     cursor.next()) {
-                SegmentPointRead.Location location = decode(cursor.value());
-                if (++seen > maxEntries || !Arrays.equals(cursor.key(), key(location.context(), location.entryId()))) {
+                SegmentPointRead.Location location = decode(boundedValue(cursor));
+                if (++seen > maxEntries
+                        || !Arrays.equals(boundedKey(cursor), key(location.context(), location.entryId()))) {
                     throw new IOException("Terminal cleanup encountered an invalid bounded index row");
                 }
                 if (authority.terminalAtCut(location.context())) {
-                    retired.delete(cursor.key());
+                    retired.delete(boundedKey(cursor));
                     if (++count == BATCH_ENTRIES) {
                         db.write(writes, retired);
                         retired.clear();
@@ -495,10 +499,10 @@ final class SegmentDerivedIndex implements AutoCloseable {
         try (WriteBatch moved = new WriteBatch(); RocksIterator cursor = db.newIterator()) {
             int count = 0;
             int seen = 0;
-            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0];
+            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && boundedKey(cursor)[0] == LOCATION_BEGIN[0];
                     cursor.next()) {
-                SegmentPointRead.Location old = decode(cursor.value());
-                if (++seen > maxEntries || !Arrays.equals(cursor.key(), key(old.context(), old.entryId()))) {
+                SegmentPointRead.Location old = decode(boundedValue(cursor));
+                if (++seen > maxEntries || !Arrays.equals(boundedKey(cursor), key(old.context(), old.entryId()))) {
                     throw new IOException("MOVE maintenance encountered an invalid bounded index row");
                 }
                 if (arena.currentSelectorSequence(old.context(), old.entryId()) < 0) {
@@ -509,7 +513,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
                         target, workspace);
                 arena.validateSelectedRecord(target, verified.record());
                 validate(target);
-                moved.put(cursor.key(), encodeLocation(indexGeneration, target));
+                moved.put(boundedKey(cursor), encodeLocation(indexGeneration, target));
                 if (++count == BATCH_ENTRIES) {
                     db.write(writes, moved);
                     moved.clear();
@@ -547,7 +551,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
             for (SegmentPointRead.Location location : locations) {
                 byte[] key = key(location.context(), location.entryId());
                 byte[] value = encodeLocation(indexGeneration, location);
-                byte[] old = db.get(key);
+                byte[] old = getExact(key, LOCATION_BYTES);
                 if (old != null && !Arrays.equals(old, value)) {
                     throw new IOException("Derived append would replace an existing coordinate");
                 }
@@ -677,16 +681,46 @@ final class SegmentDerivedIndex implements AutoCloseable {
         }
     }
 
+    private byte[] getExact(byte[] key, int size) throws IOException, RocksDBException {
+        byte[] value = new byte[size];
+        int actual = db.get(key, value);
+        if (actual == RocksDB.NOT_FOUND) {
+            return null;
+        }
+        if (actual != size) {
+            throw new IOException("Derived index value has an invalid bounded length");
+        }
+        return value;
+    }
+
+    private static byte[] boundedKey(RocksIterator cursor) throws IOException {
+        byte[] key = new byte[LOCATION_KEY_BYTES];
+        int actual = cursor.key(key);
+        if (actual < 1 || key[0] == LOCATION_BEGIN[0] && actual != key.length) {
+            throw new IOException("Derived index location key has an invalid bounded length");
+        }
+        return key;
+    }
+
+    private static byte[] boundedValue(RocksIterator cursor) throws IOException {
+        byte[] value = new byte[LOCATION_BYTES];
+        if (cursor.value(value) != value.length) {
+            throw new IOException("Derived index location value has an invalid bounded length");
+        }
+        return value;
+    }
+
     private Contents contents() throws IOException, RocksDBException {
         MessageDigest hash = digest();
         long count = 0;
         try (RocksIterator cursor = db.newIterator()) {
-            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && cursor.key()[0] == LOCATION_BEGIN[0]; cursor.next()) {
+            for (cursor.seek(LOCATION_BEGIN); cursor.isValid() && boundedKey(cursor)[0] == LOCATION_BEGIN[0];
+                    cursor.next()) {
                 if (++count > maxEntries) {
                     throw new IOException("Derived contents exceed declared rebuild capacity");
                 }
-                byte[] key = cursor.key();
-                byte[] value = cursor.value();
+                byte[] key = boundedKey(cursor);
+                byte[] value = boundedValue(cursor);
                 SegmentPointRead.Location location = decode(value);
                 if (!Arrays.equals(key, key(location.context(), location.entryId()))) {
                     throw new IOException("Derived contents key differs from its location");
@@ -703,7 +737,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
         if (entryId < 0) {
             throw new IllegalArgumentException("Negative index coordinate");
         }
-        return ByteBuffer.allocate(77).put(LOCATION_BEGIN[0]).putLong(KEY_MAGIC)
+        return ByteBuffer.allocate(LOCATION_KEY_BYTES).put(LOCATION_BEGIN[0]).putLong(KEY_MAGIC)
                 .put(context.encode()).putLong(entryId).array();
     }
 

@@ -521,3 +521,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'AbstractZkLedgerManagerTest
 ```
 
 完成的是同一owned服务的合法drain调用边界。Main/default SDK路由、外部required authority producer、full-bytes、backup/restore/accepted永久退役/history GC、mixed/rolling与正式性能/运维和完整16步继续推进；默认OFF/SYSTEM/PARK及disabled不变，生产/稳定Gate仍OPEN，Linux NUMA/真实掉电/正式性能/canary仍NOT_EXECUTED。
+
+
+2026-10-13 [派生 index 的有界 Java 读取](../local-storage/README.md#派生-index-的有界-java-读取)已限制原native Get/iterator返回到Java的复制尺寸，正常和损坏的derived数据仍保留原语义；真实父Get分配RED与18项storage/index GREEN/style拥有实际证据。此为固定池/cache之外的Java输入边界，不把memtable/native/locator/control对象计入已闭合预算，也不提升startup或生产Gate，默认OFF/SYSTEM/PARK及disabled不变。

@@ -957,3 +957,20 @@ ProfileService在实际storage构造、index/native cache及pool打开前，以�
 最终覆盖原独立key/location/coverage字节向量、实际flush/publication、派生database删除重建/tombstone保留、进程退出恢复/不提升未CLOSED DATA、异步Put/Get/duplicate/coverage/UNKNOWN及held native lock、SDK/注册发现/EmbeddedServer/owned resources、quota拒绝、force期间close和健康restart。1115 Java inputs逐项匹配最终source；red与green分别冻结，不移绑旧PASS。原模型未改、也未覆盖strict cache/WBM malloc，本轮不重跑TLC；既有模型结果保持原source绑定。
 
 证据`/Users/liusinan/.codex/artifacts/unified-wal/index-cache-budget-evidence-Y97dhGYQ`保存raw stage输入/命令/XML、red/green源码、同tag依赖source及jar SHA、最终文档与checker诊断。Spotless/Checkstyle exit0；所有Java/checker终止后的独立RAT exit1，443 unapproved逐项存在父HEAD、无新增，不称CI全绿。这里仅完成block cache charge政策与ProfileService reservation；bare storage/listener的独立pool实验、memtable/Java队列/locator对象/控制状态/MetadataStore/JDK/opaque TLS/kernel/caller reply/outbound cohort统一总账、Linux NUMA/真实掉电/正式性能/canary、完整兼容/其他16步验收继续OPEN，默认OFF/SYSTEM/PARK及disabled能力不变。
+
+
+## 派生 index 的有界 Java 读取
+
+2026-10-13，接续父提交 `69699cd8866d6e115b1d26321beb3b05efd9537a`。原 RocksDB get/iterator key/value 返回完整数组，随后才验证固定格式；损坏或外来KV可能在拒绝前按其长度分配Java数组。SegmentDerivedIndex改用本地依赖9.9.3的fixed-output Get/key/value overload，按返回的完整长度验证：binding64、location key77、location value160字节。NOT_FOUND仍返回empty，已有但长度不符的value抛IOException，不伪造missing或裁剪后继续解析。迭代只对原LOCATION前缀要求完整key尺寸，范围外key仍停止原扫描。Get、append旧坐标检查、coverage/recovery/runtime checkpoint、terminal retirement与MOVE校验沿用原格式/CRC/scope/physical grant约束。
+
+真实RED `unified-wal-local-jmDJI9EI` 使用完整父SegmentDerivedIndex源码：拒绝8MiB坏value前当前线程分配8,390,664 Java bytes，2MiB上界断言预期失败。新实现最小GREEN `0fsbTtex` 2项，最终 `unified-wal-local-qqtiEHdc` 单个真实storage/index类18项零failure/error/skip。最终同一Corretto HotSpot计量的Get/value iterator/key iterator/binding-open分别为2144/14104/13832/11280 bytes；这是故障路径Java分配，不是吞吐、RSS或native总内存结论。原独立key/location/coverage向量、实际RocksDB/flush/publication、删除重建/tombstone、健康退出恢复、runtime ticket/UNKNOWN/cancel、terminal cleanup与MOVE/republish均通过。
+
+最初 `KZSG7EnO` 的注入大行刷SST后触发既有strict cache失败，原source/输出保留。测试仅把自己打开的DB mutable write-buffer窗口改64MiB，使8MiB注入行留memtable、独立验证Java复制行为；生产1MiB cache/原write buffer及全budget不提高、不关闭strict cache。ThreadMXBean分配计量在支持该能力的JVM执行，本轮无skip；其他JVM不能据此获证。最小命令：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest#derivedIndexRejectsOversizedNativeRowsWithoutJavaCopiesOfTheirSize+derivedIndexPutIsQueryableButCoverageRequiresActualFlushAndPublication'
+```
+
+完整最终命令由inputs.json保存，1170 Java输入已按测试stage冻结SHA；测试后仅三处换行修正，非空字符SHA一致，旧PASS不移绑当前源码，format-only-check和最终source另存。最终Spotless/Checkstyle exit0，首次三项line-length失败保留；Java/style终态后的独立RAT exit1，443 unapproved均存在父HEAD、无新增；不称CI全绿。RocksDB9.9.3 source jar及Get/iterator/MutableColumnFamilyOptions源码按SHA归档，验证完整长度返回和截断输出API；原有限模型未覆盖JNI数组分配、没有改动或重跑，也不宣称完整A+C+D/byte总账已证明。证据 `/Users/liusinan/.codex/artifacts/unified-wal/index-bounded-read-evidence-dyaiw04a` 保存原native/Java stage/source/inputs/XML/RED/GREEN、分配计量及依赖源码/checker。
+
+本增量限制派生KV造成的Java数组复制，不新增预算账本/allocator/配置、线程/队列、公共接口或持久格式。RocksDB memtable/table-reader/native、Java locator/control/MetadataStore对象、JDK/opaque TLS/kernel、caller/legacy/observation和统一full-bytes仍OPEN，Linux NUMA/真实掉电/正式性能/canary未执行。默认SDK/observe释放公共约定仍待答复；Main/required producer、backup-restore/accepted退役/GC/mixed/运维及全16步验收继续推进，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

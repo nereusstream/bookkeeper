@@ -10646,6 +10646,64 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void derivedIndexRejectsOversizedNativeRowsWithoutJavaCopiesOfTheirSize() throws Exception {
+        var standard = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.Assume.assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        var memory = (com.sun.management.ThreadMXBean) standard;
+        org.junit.Assume.assumeTrue(memory.isThreadAllocatedMemorySupported());
+        boolean enabled = memory.isThreadAllocatedMemoryEnabled();
+        if (!enabled) {
+            memory.setThreadAllocatedMemoryEnabled(true);
+        }
+        try {
+            IsolatedSegmentConfig config = config();
+            createIndexData(config);
+            byte[] oversized = new byte[8 * 1024 * 1024];
+            byte[] coordinate = SegmentDerivedIndex.key(context(), 1);
+            try (IndexFixture source = new IndexFixture(config, identity());
+                    SegmentDerivedIndex index = SegmentDerivedIndex.open(config, identity(), 16)) {
+                index.rebuild(source.inventory, source.arena, source.bookie);
+                assertTrue(index.get(context(), 1).isPresent());
+                assertTrue(index.coverage().isPresent());
+                var field = SegmentDerivedIndex.class.getDeclaredField("db");
+                field.setAccessible(true);
+                var nativeDb = (org.rocksdb.RocksDB) field.get(index);
+                // Keep injected large rows in the memtable: this isolates Java copy size from strict SST cache limits.
+                nativeDb.setOptions(org.rocksdb.MutableColumnFamilyOptions.builder()
+                        .setWriteBufferSize(64 * 1024 * 1024).build());
+                byte[] original = nativeDb.get(coordinate);
+                nativeDb.put(coordinate, oversized);
+                assertBoundedIndexFailure(memory, oversized.length / 4, () -> index.get(context(), 1));
+                assertBoundedIndexFailure(memory, oversized.length / 4, index::coverage);
+                nativeDb.put(coordinate, original);
+                oversized[0] = coordinate[0];
+                nativeDb.put(oversized, original);
+                assertBoundedIndexFailure(memory, oversized.length / 4, index::coverage);
+                nativeDb.delete(oversized);
+                assertTrue(index.get(context(), 1).isPresent());
+                assertTrue(index.coverage().isPresent());
+                nativeDb.put(new byte[] {0}, oversized);
+            }
+            assertBoundedIndexFailure(memory, oversized.length / 4,
+                    () -> SegmentDerivedIndex.open(config, identity(), 16));
+        } finally {
+            if (!enabled) {
+                memory.setThreadAllocatedMemoryEnabled(false);
+            }
+        }
+    }
+
+    private static void assertBoundedIndexFailure(com.sun.management.ThreadMXBean memory, int bound,
+            org.junit.function.ThrowingRunnable read) {
+        long thread = Thread.currentThread().getId();
+        long before = memory.getThreadAllocatedBytes(thread);
+        assertThrows(IOException.class, read);
+        long allocated = memory.getThreadAllocatedBytes(thread) - before;
+        System.out.println("Invalid index read allocated Java bytes: " + allocated);
+        assertTrue("Invalid native row caused a large Java allocation: " + allocated, allocated < bound);
+    }
+
+    @Test
     public void derivedIndexReplacementRetiresOldCoverageBeforeDestructiveEdits() throws Exception {
         IsolatedSegmentConfig config = config();
         createIndexData(config);

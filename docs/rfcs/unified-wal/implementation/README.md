@@ -722,3 +722,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-13 [Normal quorum probe 的 owned candidate](profile-wire/README.md#normal-quorum-probe-的-owned-candidate)：父af791ffb69上新增原Listener/fencing/quorum算法的retained candidate入口，caller关闭或取消未交付时释放，legacy接口保持。真实heap分支RED、最终10项Java/style与16有限模型3正向/13指定反例通过，2005 unique输入核验；Java/model/style终态后的独立RAT exit1，443 unapproved全部存在父HEAD，无新增；不称CI全绿。此为observation接线的基础，observe()列表本身尚未切换，释放约定按AGENTS公共接口要求待答复；统一full-bytes、默认SDK/Main和全16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+2026-10-13 [派生 index 的有界 Java 读取](local-storage/README.md#派生-index-的有界-java-读取)：父69699cd886上将原RocksDB完整数组Get/iterator改为fixed-output并检查完整长度，binding/key/location格式64/77/160不变，坏value保持IOException。真实父源码8MiB→8,390,664B分配RED、新Get2144B与最终18项storage/index/style通过，1170 stage输入及format-only source分开归档；Java/style终态后的独立RAT exit1，443 unapproved均存在父HEAD、无新增；不称CI全绿。未改/重跑不覆盖JNI分配的TLC，native/object/统一full-bytes、默认SDK/observe公共约定及其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
