@@ -144,3 +144,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-13继续full-bytes：父58b942ee53上原标准V3 digest提供explicit header allocator，内部repair header已计入目标DATA原quota，payload保持source credit。额度不足DEFERRED且不写DATA/发布membership，checksum失败与最后header view的实际释放已验证；默认旧入口兼容。最终17项/style、17有限模型及2016 unique输入/receipt由profile-wire/README.md“Repair packing header 的 DATA 预算”拥有，未冒充跨source-target byte组合模型。其余SDK/header/legacy/observation/caller及统一总预算，默认SDK公开runtime/Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维与全16步验收继续OPEN；目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+2026-10-13继续full-bytes：父af791ffb69后已接原normal quorum probe的owned candidate primitive，Listener entry、caller取消/未交付与最后backing释放已真实验证；保持原首个payload/缺失阈值，required-hole all-source入口独立。最终10项/style与16有限模型、2005 unique输入由profile-wire/README.md“Normal quorum probe 的 owned candidate”拥有。observe()实际列表仍heap、需明确其结果释放公共契约（AGENTS §1），原默认SDK runtime选择也待答复；不把新primitive冒充实际observation预算闭合。其余统一预算、Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维和全16步继续OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

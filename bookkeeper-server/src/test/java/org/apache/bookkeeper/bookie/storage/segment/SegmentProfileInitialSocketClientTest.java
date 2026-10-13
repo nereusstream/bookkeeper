@@ -6941,6 +6941,35 @@ public class SegmentProfileInitialSocketClientTest {
                     var evidence = handle.readLacEvidence().get(5, TimeUnit.SECONDS);
                     assertEquals(99, evidence.prefixEntryId());
                     assertEquals(1000, evidence.prefixLength());
+                    fixture.replyFault.set(21);
+                    var cancelled = handle.probeBuffer(100);
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertFalse(fixture.heldReplies.isEmpty());
+                    assertTrue(cancelled.cancel(false));
+                    var busy = assertThrows(ExecutionException.class,
+                            () -> handle.probeBuffer(100).get(5, TimeUnit.SECONDS));
+                    assertEquals(BKException.Code.TooManyRequestsException,
+                            BKException.getExceptionCode(busy.getCause()));
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    ProfileRecoveryReadHandle.Probe afterCancel = null;
+                    do {
+                        try {
+                            afterCancel = handle.probeBuffer(101).get(5, TimeUnit.SECONDS);
+                        } catch (ExecutionException pending) {
+                            assertEquals(BKException.Code.TooManyRequestsException,
+                                    BKException.getExceptionCode(pending.getCause()));
+                            assertTrue(System.nanoTime() < until);
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                    } while (afterCancel == null);
+                    try (var absent = afterCancel) {
+                        assertEquals(ProfileRecoveryReadHandle.ProbeOutcome.ABSENT, absent.outcome());
+                    }
+                    assertTrue(cancelled.isCancelled());
                     var candidate = handle.probe(100).get(5, TimeUnit.SECONDS);
                     assertEquals(org.apache.bookkeeper.client.ProfileRecoveryReadHandle.ProbeOutcome.CANDIDATE,
                             candidate.outcome());
@@ -6954,6 +6983,22 @@ public class SegmentProfileInitialSocketClientTest {
                     assertThrows(ExecutionException.class,
                             () -> handle.appendAsync(java.nio.ByteBuffer.wrap(bytes(16, 3))).get(5, TimeUnit.SECONDS));
                     assertEquals(-1, handle.getLastAddConfirmed());
+                    try (var retained = handle.probeBuffer(100).get(5, TimeUnit.SECONDS)) {
+                        assertEquals(ProfileRecoveryReadHandle.ProbeOutcome.CANDIDATE, retained.outcome());
+                        assertEquals(1100, retained.length());
+                        assertEquals(100, retained.payload().remaining());
+                        assertTrue(retained.payload().isReadOnly());
+                        var closed = CompletableFuture.allOf(data.values().stream()
+                                .map(ProfileNormalDataClient::closeAsync).toArray(CompletableFuture[]::new));
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> closed.get(150, TimeUnit.MILLISECONDS));
+                        assertTrue(data.values().stream()
+                                .mapToLong(ProfileNormalDataClient::backingBytes).sum() >= 100);
+                        retained.close();
+                        assertThrows(IllegalStateException.class, retained::payload);
+                        closed.get(5, TimeUnit.SECONDS);
+                        assertEquals(0, data.values().stream().mapToLong(ProfileNormalDataClient::backingBytes).sum());
+                    }
                 } finally {
                     handle.closeAsync().get(5, TimeUnit.SECONDS);
                 }

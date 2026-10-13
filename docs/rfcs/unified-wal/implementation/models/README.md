@@ -1476,3 +1476,6 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-13 [Repair packing header 的 DATA 预算](../profile-wire/README.md#repair-packing-header-的-data-预算)复用未修改的ProfileBackingBudget/ProfileRepairCopy，mciqyqqx共17配置、2完整正向/15指定反例。1170 Java加11未改动checksum/Classic helper与1106模型去重2016，共有271路径SHA一致，附加输入与父HEAD一致、各stage保持原绑定。catalog730仅目录统计，完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、原CHECK_DEADLOCK FALSE；原root/repair为独立投影，未新增explicit SDK header allocator及跨source-target byte组合，native交接由Java验证，不证明所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。
+
+
+2026-10-13 [Normal quorum probe 的 owned candidate](../profile-wire/README.md#normal-quorum-probe-的-owned-candidate)复用未修改的ProfileBackingBudget/ProfileRecoveryObservation，6wvvuc26共16配置、3完整正向/13指定反例。1170 Java与1106模型去重2005，共有271路径SHA一致、各stage原绑定保留。catalog730仅目录统计、完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、原CHECK_DEADLOCK FALSE；原root/observation独立投影未枚举新Listener entry/candidate引用或caller交付，actual custody由Java验证，observe()列表本身尚未owned接线，不证明组合/所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。

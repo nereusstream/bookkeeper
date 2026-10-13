@@ -301,6 +301,15 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
 
     /** Original recovery read aggregation; every missing source is fenced with this instance before its point read. */
     public CompletableFuture<Probe> probe(long entryId) {
+        return probe(entryId, false);
+    }
+
+    /** Original quorum probe with an owned candidate. Caller closes it; payload views borrow its backing. */
+    public CompletableFuture<Probe> probeBuffer(long entryId) {
+        return probe(entryId, true);
+    }
+
+    private CompletableFuture<Probe> probe(long entryId, boolean owned) {
         if (!fencingReads) {
             return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
         }
@@ -315,8 +324,22 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
                     new ListenerBasedPendingReadOp(this, clientCtx, entryId, entryId,
                     (code, handle, entry, ignored) -> {
                         if (code == BKException.Code.OK) {
-                            actual.complete(new Probe(ProbeOutcome.CANDIDATE,
-                                    entryId, entry.getLength(), entry.getEntry(), probeOwner));
+                            if (owned) {
+                                ByteBuf payload = entry.getEntryBuffer();
+                                try {
+                                    Probe candidate = new Probe(entryId, entry.getLength(), payload, probeOwner);
+                                    if (!actual.complete(candidate)) {
+                                        candidate.close();
+                                    }
+                                } catch (RuntimeException failure) {
+                                    actual.completeExceptionally(failure);
+                                } finally {
+                                    payload.release();
+                                }
+                            } else {
+                                actual.complete(new Probe(ProbeOutcome.CANDIDATE,
+                                        entryId, entry.getLength(), entry.getEntry(), probeOwner));
+                            }
                         } else if (code == BKException.Code.NoSuchEntryException) {
                             actual.complete(new Probe(ProbeOutcome.ABSENT, entryId, 0, new byte[0], probeOwner));
                         } else {
@@ -330,7 +353,19 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         } catch (java.util.concurrent.RejectedExecutionException shutdown) {
             actual.completeExceptionally(BKException.create(BKException.Code.InterruptedException));
         }
-        return actual.whenComplete((result, failure) -> active.set(false)).copy();
+        if (!owned) {
+            return actual.whenComplete((result, failure) -> active.set(false)).copy();
+        }
+        var caller = new CompletableFuture<Probe>();
+        actual.whenComplete((value, failure) -> {
+            active.set(false);
+            if (failure != null) {
+                caller.completeExceptionally(failure);
+            } else if (!caller.complete(value)) {
+                value.close();
+            }
+        });
+        return caller;
     }
 
     /** Required-hole verification cannot stop at the normal-tail missing threshold or the first valid payload. */

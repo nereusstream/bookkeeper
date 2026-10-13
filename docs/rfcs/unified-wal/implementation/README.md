@@ -719,3 +719,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-13 [Repair packing header 的 DATA 预算](profile-wire/README.md#repair-packing-header-的-data-预算)：父58b942ee53上标准V3新增explicit header allocator，原内部repair使用目标DATA预算，source payload credit保持原归属；quota不足DEFERRED、不写DATA/发布membership，最后header view释放后target close才drain。真实原Unpooled分支RED、最终两类17项（含Classic digest6）/style与17有限模型2正向/15指定反例通过，2016 unique输入SHA核验；Java/model/style终态后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。默认/legacy/observation/caller及full-bytes总账、默认SDK/Main/其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+2026-10-13 [Normal quorum probe 的 owned candidate](profile-wire/README.md#normal-quorum-probe-的-owned-candidate)：父af791ffb69上新增原Listener/fencing/quorum算法的retained candidate入口，caller关闭或取消未交付时释放，legacy接口保持。真实heap分支RED、最终10项Java/style与16有限模型3正向/13指定反例通过，2005 unique输入核验；Java/model/style终态后的独立RAT exit1，443 unapproved全部存在父HEAD，无新增；不称CI全绿。此为observation接线的基础，observe()列表本身尚未切换，释放约定按AGENTS公共接口要求待答复；统一full-bytes、默认SDK/Main和全16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

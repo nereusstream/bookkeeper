@@ -2007,3 +2007,20 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 最终完整命令由inputs.json保存，Spotless/Checkstyle exit0；Java/model/style终态后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。原 ProfileBackingBudget/ProfileRepairCopy 未修改，`unified-wal-model-mciqyqqx` 17配置为2完整正向/15指定反例；没有新增SDK header allocator/跨source-target byte组合模型。1170 runner Java加11个未改动checksum/Classic helper输入均已冻结SHA，后者与父HEAD逐项一致；与1106模型输入共有271、去重2016，重叠SHA一致。catalog730仅目录统计，完整A+C+D未全跑，有限模型不证明所有字节/RSS/TLS/kernel/性能或liveness。证据 `/Users/liusinan/.codex/artifacts/unified-wal/repair-header-evidence-k3gsebun` 保留各stage source/input/XML/命令、编译失败/真实RED/GREEN、附加inputs/TLC与checker。
 
 闭合的是实际内部 repair packing header 的 DATA credit交接。默认Classic/Profile其他SDK digest/header、legacy heap reply/probe、normal-tail observation列表、caller数组、对象/JDK/opaque TLS/kernel以及存储/index/control/cold统一总账仍OPEN，性能未测。默认SDK公开runtime选择仍待明确；Main/required producer、backup-restore/accepted退役/GC/mixed兼容/正式性能/运维和全16步综合验收继续推进，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+
+## Normal quorum probe 的 owned candidate
+
+2026-10-13，接续父提交 `af791ffb6974be992822177754e5e34247cc5990`。原 normal-tail probe 通过 ListenerBasedPendingReadOp 的同一 fencing read/quorum/缺失阈值返回 heap candidate；新增 probeBuffer 仅把成功payload改为retain原SDK entry backing，交付AutoCloseable Probe，关闭后拒绝再取borrowed view。legacy probe仍生成独立heap结果。新入口继续首个合法payload/原缺失阈值语义，没有改用required-hole的all-source aggregation，也不把logical probe完成当作所有相关socket排空。
+
+Listener entry原ref在callback finally归还；candidate自己的ref交由caller关闭。取消只停止caller等待，active保持到实际quorum结果；未交付结果立即关闭，late actual completion不能泄漏candidate。该路径复用先前已计费的READ_ENTRY→SDK backing，无新allocator/预算、线程、队列、格式、authority或MetadataStore写入。
+
+真实RED `unified-wal-local-XHBYaiKz` 将新入口切回保留的heap分支，candidate尚可用时all DATA close已完成，TimeoutException断言预期失败。最小GREEN `RnFIbGyT` 2项与最终 `unified-wal-local-GOzpquYl` actual socket/SDK单类10项均零failure/error/skip。native mTLS/原SDK/文件验证取消时single query保留、实际回复后可继续probe、未交付candidate释放、retained candidate阻止actual close；legacyprobe/observe、durable fence要求、length/context拒绝、all-source evidence/prefix、whole recovery与historical copy回归保持。最小命令：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#recoveryReadonlySessionUsesTheOriginalFencingReadAndDoesNotWriteOrCloseMetadata+recoveryMissingDoesNotCountASourceWithoutItsOwnDurableFence'
+```
+
+最终完整命令由inputs.json保存，Spotless/Checkstyle exit0；Java/model/style终态后的独立RAT exit1，443 unapproved全部存在父HEAD，无新增；不称CI全绿。原 ProfileBackingBudget/ProfileRecoveryObservation 未修改，`unified-wal-model-6wvvuc26` 16配置为3完整正向/13指定反例。1170 Java与1106模型共有271、去重2005，重叠SHA一致、各stage原绑定保留。catalog730仅目录统计，未全跑A+C+D；原投影未枚举新Listener entry/candidate引用及caller交付，native ownership由Java验证，不宣称组合/所有字节/RSS/TLS/kernel/性能/liveness证明。证据 `/Users/liusinan/.codex/artifacts/unified-wal/quorum-probe-evidence-bhs8gudd` 保留source/input/XML/命令/真实RED/GREEN/TLC/checker。
+
+本次只交付normal-tail owned primitive；生产observe()仍使用原heap路径，candidate列表尚未切换，不能称observation总预算已闭合。AGENTS.md §1要求未明确公共接口先澄清，已请求确定observe()直接返回需close结果或保留旧接口新增owned入口；没有把未答复视作批准。默认SDK runtime入口的原选择也继续待明确。其他SDK/header/legacy/caller和存储/index/control/cold统一预算、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维及全16步继续OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
