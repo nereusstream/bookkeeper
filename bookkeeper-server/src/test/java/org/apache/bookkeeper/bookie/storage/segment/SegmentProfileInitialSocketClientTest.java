@@ -13532,7 +13532,7 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
-    public void closeWaitsForQueuedDataBorrowAndDoesNotChangeTheOriginalInput() throws Exception {
+    public void closeWaitsForQueuedDataSnapshotAndDoesNotChangeTheOriginalInput() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
             fixture.connectAll(Duration.ofSeconds(5));
             fixture.initialize().get(5, TimeUnit.SECONDS);
@@ -13549,6 +13549,7 @@ public class SegmentProfileInitialSocketClientTest {
             byte[] original = new byte[source.readableBytes()];
             source.getBytes(original);
             int forces = files(fixture.nodes.get(0)).dataIo.forces;
+            long backing = client.backingBytes();
             try {
                 channel.eventLoop().execute(() -> {
                     queued.countDown();
@@ -13556,7 +13557,9 @@ public class SegmentProfileInitialSocketClientTest {
                 });
                 assertTrue(queued.await(5, TimeUnit.SECONDS));
                 var pending = client.addNormal(fixture.context(), fixture.credential, 0, source);
-                assertEquals(2, source.getBuffer(0).refCnt());
+                assertEquals(1, source.refCnt());
+                assertEquals(1, source.getBuffer(0).refCnt());
+                assertEquals(backing + source.readableBytes(), client.backingBytes());
                 var closed = client.closeAsync();
                 assertThrows(java.util.concurrent.TimeoutException.class,
                         () -> closed.get(150, TimeUnit.MILLISECONDS));
@@ -13564,6 +13567,7 @@ public class SegmentProfileInitialSocketClientTest {
                 closed.get(5, TimeUnit.SECONDS);
                 assertThrows(ExecutionException.class, () -> pending.get(5, TimeUnit.SECONDS));
                 assertEquals(1, source.getBuffer(0).refCnt());
+                assertEquals(0, client.backingBytes());
                 byte[] after = new byte[source.readableBytes()];
                 source.getBytes(after);
                 assertArrayEquals(original, after);

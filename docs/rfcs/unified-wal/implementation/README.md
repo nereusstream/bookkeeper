@@ -725,3 +725,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-13 [派生 index 的有界 Java 读取](local-storage/README.md#派生-index-的有界-java-读取)：父69699cd886上将原RocksDB完整数组Get/iterator改为fixed-output并检查完整长度，binding/key/location格式64/77/160不变，坏value保持IOException。真实父源码8MiB→8,390,664B分配RED、新Get2144B与最终18项storage/index/style通过，1170 stage输入及format-only source分开归档；Java/style终态后的独立RAT exit1，443 unapproved均存在父HEAD、无新增；不称CI全绿。未改/重跑不覆盖JNI分配的TLC，native/object/统一full-bytes、默认SDK/observe公共约定及其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[声明模型目录与现有 Java 测试整轮验证](profile-wire/README.md#声明模型目录与现有-java-测试整轮验证)：2026-10-13父fd3b1be724上的声明目录完整验证：730配置全部终结，118正向完整搜索PASS/612指定反例；现有Unified WAL Java43类整轮866项原exit1（2个遗留契约断言失败、0错误、5个Linux条件跳过），已修正两处测试并独立补验失败方法2项通过。四类补验首次被会话中断、回执为INCONCLUSIVE；新阶段253项全部通过，style通过；终态后独立RAT exit1/443父HEAD路径无新增，不称CI全绿，原失败/模型回执和修正stage分别保留，不改称整轮全绿。完整A+C+D组合、全字节、默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维和16步验收继续OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

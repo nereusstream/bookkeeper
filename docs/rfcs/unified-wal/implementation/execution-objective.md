@@ -150,3 +150,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-13继续full-bytes/index：父69699cd886后原derived RocksDB Get/key/value改为fixed-output，完整长度不符仍拒绝、不假missing，格式/恢复和cleanup/MOVE约束沿用。父源码真实大行分配RED与当前18项/storage/style、1170 stage输入/format-only检查及同版本依赖源码由local-storage/README.md“派生 index 的有界 Java 读取”拥有。未把有界Java复制当作native/对象/统一总账或性能证明，原模型不覆盖此JNI分配、不重跑或移绑。默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维和全16步继续OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+2026-10-13父fd3b1be724上的声明目录完整验证：730配置全部终结，118正向完整搜索PASS/612指定反例；现有Unified WAL Java43类整轮866项原exit1（2个遗留契约断言失败、0错误、5个Linux条件跳过），已修正两处测试并独立补验失败方法2项通过。四类补验首次被会话中断、回执为INCONCLUSIVE；新阶段253项全部通过，style通过；终态后独立RAT exit1/443父HEAD路径无新增，不称CI全绿，原失败/模型回执和修正stage分别保留，不改称整轮全绿。完整A+C+D组合、全字节、默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维和16步验收继续OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。 当前证据由profile-wire/README.md“声明模型目录与现有 Java 测试整轮验证”和models/README.md“当前声明目录的完整验证”拥有；继续完整合同，不因验证里程碑或本地提交结束目标。

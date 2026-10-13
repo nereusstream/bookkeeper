@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为729配置，不把历史59正向/237反例或后续分阶段计数扩张成完整 Model A/C/D、A+C 或 Block G 验收；历史回执保留当时范围。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为730配置；2026-10-13在fd3b1be724源码上首次完整运行该声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -1479,3 +1479,12 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-13 [Normal quorum probe 的 owned candidate](../profile-wire/README.md#normal-quorum-probe-的-owned-candidate)复用未修改的ProfileBackingBudget/ProfileRecoveryObservation，6wvvuc26共16配置、3完整正向/13指定反例。1170 Java与1106模型去重2005，共有271路径SHA一致、各stage原绑定保留。catalog730仅目录统计、完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、原CHECK_DEADLOCK FALSE；原root/observation独立投影未枚举新Listener entry/candidate引用或caller交付，actual custody由Java验证，observe()列表本身尚未owned接线，不证明组合/所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。
+
+
+## 当前声明目录的完整验证
+
+2026-10-13，源码 `fd3b1be7244f112ee668f2b9afe169e4a347bda7`，原 `run-storage-models.py` 不传 config prefix，完整执行 manifest 的730配置。`unified-wal-model-chaadhyx` 已终结 exit0：118个正向均 complete=true、exit0、queue0；612个负向均为 EXPECTED_COUNTEREXAMPLE，实际违反的 invariant 与每项指定值相同。负向在反例处停止、complete=false，不将它们描述为完整搜索。正向合计3,773,379 generated / 1,351,621 distinct states；各配置分别探索，不把求和视为组合状态图。
+
+TLC1.7.4、Corretto21.0.10、单worker、heap512MiB/direct64MiB、seed1/fp0、每配置120秒上限，无symmetry或额外state constraint，原CHECK_DEADLOCK FALSE；没有fairness/liveness检查。1106模型输入与同父源码1170 Java输入有271项相同路径且SHA完全一致，去重2005。原manifest、冻结源码、全部checker输出/反例/coverage/checksums与原运行目录逐文件核验后归档到 `/Users/liusinan/.codex/artifacts/unified-wal/declared-model-matrix-evidence-2m98x0oo`。
+
+同源码Java43类整轮866项的原结果为2失败/0错误/5个Linux条件跳过；两个失败的契约核对及独立补验由[实现验证记录](../profile-wire/README.md#声明模型目录与现有-java-测试整轮验证)拥有，后续测试修正不移绑本次模型回执。此轮完成当前声明的有限配置目录验证；完整A+C+D组合、native持久化/掉电、全部字节、混合滚动版本、正式性能/运维与全16步综合验收继续OPEN，生产Gate不提升。

@@ -2024,3 +2024,16 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 最终完整命令由inputs.json保存，Spotless/Checkstyle exit0；Java/model/style终态后的独立RAT exit1，443 unapproved全部存在父HEAD，无新增；不称CI全绿。原 ProfileBackingBudget/ProfileRecoveryObservation 未修改，`unified-wal-model-6wvvuc26` 16配置为3完整正向/13指定反例。1170 Java与1106模型共有271、去重2005，重叠SHA一致、各stage原绑定保留。catalog730仅目录统计，未全跑A+C+D；原投影未枚举新Listener entry/candidate引用及caller交付，native ownership由Java验证，不宣称组合/所有字节/RSS/TLS/kernel/性能/liveness证明。证据 `/Users/liusinan/.codex/artifacts/unified-wal/quorum-probe-evidence-bhs8gudd` 保留source/input/XML/命令/真实RED/GREEN/TLC/checker。
 
 本次只交付normal-tail owned primitive；生产observe()仍使用原heap路径，candidate列表尚未切换，不能称observation总预算已闭合。AGENTS.md §1要求未明确公共接口先澄清，已请求确定observe()直接返回需close结果或保留旧接口新增owned入口；没有把未答复视作批准。默认SDK runtime入口的原选择也继续待明确。其他SDK/header/legacy/caller和存储/index/control/cold统一预算、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维及全16步继续OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+
+## 声明模型目录与现有 Java 测试整轮验证
+
+2026-10-13，父源码 `fd3b1be7244f112ee668f2b9afe169e4a347bda7`。此次扩展验证范围，复用原runner执行全部730声明模型配置及现有Unified WAL Java测试43类；没有新增runner、模型或生产行为。Java选择包括common/profile、server storage/segment、discover/profile、proto/profile的全部`*Test.java`及ProfileTlsContextFactoryTest，精确列表保存在artifact的java-suite-selection.json；native Rust cross-build关闭，Maven离线，无测试重试。
+
+`unified-wal-local-nQ9slMmB` 原整轮已终结exit1：866项，2失败、0错误、5个SegmentExecutionGroupTest Linux affinity/quota条件跳过。两项失败是已有生产契约更新后遗留的测试断言：DATA Add在入队前取得已计费私有snapshot，旧queued-borrow测试却要求caller buffer引用加一；delete assignment已允许1..64代，旧codec测试却要求G2拒绝。当前只修正两处测试：snapshot必须精确计费、caller引用保持不变、实际close前仍等待、结束后backing归零，原输入及DATA force数量不变；codec验证G2/G3/64 round-trip并拒绝0/65代，原stream generation/event上限、固定长度、独立CRC和全部截断拒绝保持。
+
+修正后的两个失败方法在 `unified-wal-local-rQ8rLJ6f` 独立补验2项全部通过、0跳过。四个相关类的首次补验 `unified-wal-local-tIJsJIQD` 在会话中断后句柄消失、无对应进程且未生成exit-code，记INTERRUPTED/INCONCLUSIVE；原log及已终结三类55项XML保留。随后新建 `unified-wal-local-yMsyQyWX` 执行同四类，已终结exit0：253项全部通过、0错误/失败/跳过（socket198、lifecycle51、snapshot1、handoff3），1170当前stage输入逐项SHA核验一致。两处测试源码与2项定向补验完全相同；生产源码未变，无新模型语义或无目的整轮重跑。不得将中断当PASS、将原866项exit1改称全绿或把补验移绑原整轮。原模型整轮730项已exit0，118正向完整PASS/612预期反例，范围由[模型记录](../models/README.md#当前声明目录的完整验证)拥有。
+
+最终Spotless/Checkstyle exit0，1170 stage输入未变；Java/model/style实际终结后独立 `mvn -o apache-rat:check` exit1，443 unknown/unapproved路径全部存在父HEAD，无新增。原失败报告保留，不称CI全绿。
+
+原model1106/Java1170输入共有271路径且SHA相同、去重2005；另对runner未列出的直接继承ProfileZKTestBase补充父HEAD完全一致的源码/hash，不改动原manifest。原manifest/source/XML/log/coverage/checksums及失败栈保存在 `/Users/liusinan/.codex/artifacts/unified-wal/declared-model-matrix-evidence-2m98x0oo`，后续修正stage单独冻结。默认OFF/SYSTEM/PARK、disabled能力保持；完整A+C+D组合、Linux NUMA、真实掉电、mixed rolling versions、正式性能/canary、full-bytes总账、默认SDK/observe公共约定与其余16步验收仍OPEN，目标active、生产Gate不提升。

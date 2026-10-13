@@ -154,8 +154,15 @@ public class ZKProfileLifecycleStoreTest extends ProfileZKTestBase {
         }
         assertThrows(IllegalArgumentException.class,
                 () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 2, 1, 0, target));
+        for (int generation : new int[] {2, 3, ProfileDeleteSnapshot.MAX_GENERATIONS}) {
+            var reassigned = new ProfileDeleteDelivery.Head(bytes(16, 1), 1, generation, 0, target);
+            assertEquals(reassigned, ProfileDeleteDelivery.Head.decode(reassigned.encode()));
+        }
         assertThrows(IllegalArgumentException.class,
-                () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 1, 2, 0, target));
+                () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 1, 0, 0, target));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 1,
+                        ProfileDeleteSnapshot.MAX_GENERATIONS + 1, 0, target));
         assertThrows(IllegalArgumentException.class,
                 () -> new ProfileDeleteDelivery.Head(bytes(16, 1), 1, 1, 4097, target));
     }
