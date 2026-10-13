@@ -666,6 +666,27 @@ final class ProfileSocketClient implements AutoCloseable {
         return held.readReply;
     }
 
+    CompletableFuture<ProfileNormalDataClient.ReadEntryBuffer> readEntryBuffer(
+            ProfileLedgerContext context, long entryId) {
+        Objects.requireNonNull(context, "context");
+        if (!normalData || entryId < 0) {
+            throw new IllegalArgumentException("Point read requires DATA and a nonnegative coordinate");
+        }
+        if (!hello().capabilities().contains(ProfileReadEntryReplyCodec.CAPABILITY)) {
+            return CompletableFuture.completedFuture(ProfileNormalDataClient.ReadEntryBuffer.refused(
+                    ProfileStatus.unsupported()));
+        }
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(unknown());
+        }
+        if (!slots.tryAcquire()) {
+            return CompletableFuture.completedFuture(ProfileNormalDataClient.ReadEntryBuffer.refused(transientNone()));
+        }
+        Pending held = new Pending(context, entryId, true);
+        enqueue(held);
+        return held.ownedReadReply;
+    }
+
     CompletableFuture<ProfileLacReplyCodec.Reply> readLac(ProfileLedgerContext context) {
         Objects.requireNonNull(context, "context");
         if (!normalData) {
@@ -968,16 +989,28 @@ final class ProfileSocketClient implements AutoCloseable {
                             || (readHeader.flags() & ProfileFrameHeader.END_OF_STREAM) != 0) {
                         throw invalidReply();
                     }
-                    var received = ProfileReadEntryReplyCodec.decode(bytes.nioBuffer(bytes.readerIndex() + 36,
+                    var received = ProfileReadEntryReplyCodec.decodeView(bytes.nioBuffer(bytes.readerIndex() + 36,
                             readHeader.bodyLength()), held.context, held.entryId, maxEntryBytes);
                     if (readHeader.isError() != (received.status().statusClass() != ProfileStatus.StatusClass.OK)) {
                         throw invalidReply();
                     }
+                    var copied = held.readReply == null ? null : ProfileReadEntryReplyCodec.decode(
+                            bytes.nioBuffer(bytes.readerIndex() + 36, readHeader.bodyLength()),
+                            held.context, held.entryId, maxEntryBytes);
+                    var response = held.ownedReadReply == null ? null
+                            : new ProfileNormalDataClient.ReadEntryBuffer(received, bytes,
+                                    bytes.readerIndex() + 36 + readHeader.bodyLength() - received.entry().remaining());
                     pending.remove(readHeader.requestId());
                     held.wireDone = true;
                     held.deadline.cancel(false);
                     held.releaseIfTerminal();
-                    held.readReply.complete(received);
+                    if (held.ownedReadReply != null) {
+                        if (!held.ownedReadReply.complete(response)) {
+                            response.close();
+                        }
+                    } else {
+                        held.readReply.complete(copied);
+                    }
                     return;
                 }
                 var header = readHeader;
@@ -1088,6 +1121,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private final CompletableFuture<ProfileControlResult> reply;
         private final CompletableFuture<ProfileStatus> dataReply;
         private final CompletableFuture<ProfileReadEntryReplyCodec.Reply> readReply;
+        private CompletableFuture<ProfileNormalDataClient.ReadEntryBuffer> ownedReadReply;
         private final CompletableFuture<ProfileLacReplyCodec.Reply> lacReply;
         private ProfileControlRequest controlRequest;
         private ProfilePhysicalDeleteCodec.Request physicalRequest;
@@ -1164,11 +1198,16 @@ final class ProfileSocketClient implements AutoCloseable {
         }
 
         private Pending(ProfileLedgerContext context, long entryId) {
+            this(context, entryId, false);
+        }
+
+        private Pending(ProfileLedgerContext context, long entryId, boolean owned) {
             scope = null;
             operation = ProfileOperation.READ_ENTRY;
             reply = null;
             dataReply = null;
-            readReply = new CompletableFuture<>();
+            readReply = owned ? null : new CompletableFuture<>();
+            ownedReadReply = owned ? new CompletableFuture<>() : null;
             lacReply = null;
             this.context = context;
             this.entryId = entryId;
@@ -1186,6 +1225,7 @@ final class ProfileSocketClient implements AutoCloseable {
 
         private boolean cancelled() {
             return physicalReply != null ? physicalReply.isCancelled()
+                    : ownedReadReply != null ? ownedReadReply.isCancelled()
                     : lacReply != null ? lacReply.isCancelled() : readReply != null ? readReply.isCancelled()
                     : dataReply == null ? reply.isCancelled() : dataReply.isCancelled();
         }
@@ -1210,6 +1250,8 @@ final class ProfileSocketClient implements AutoCloseable {
             releaseIfTerminal();
             if (physicalReply != null) {
                 physicalReply.completeExceptionally(failure);
+            } else if (ownedReadReply != null) {
+                ownedReadReply.completeExceptionally(failure);
             } else if (lacReply != null) {
                 lacReply.completeExceptionally(failure);
             } else if (readReply != null) {

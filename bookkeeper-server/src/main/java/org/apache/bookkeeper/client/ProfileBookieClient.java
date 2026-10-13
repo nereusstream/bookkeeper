@@ -20,7 +20,6 @@
  */
 package org.apache.bookkeeper.client;
 
-import io.netty.buffer.Unpooled;
 import io.netty.util.ReferenceCounted;
 import java.time.Duration;
 import java.util.Arrays;
@@ -485,38 +484,44 @@ final class ProfileBookieClient implements BookieClient {
                         status != null && status.statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED
                             ? BKException.Code.UnauthorizedAccessException : BKException.Code.ReadException));
             }
-            return peer.readEntry(ledger, entryId);
+            return peer.readEntryBuffer(ledger, entryId);
         }).whenComplete((reply, failure) -> {
             Runnable completed = () -> {
-                var current = readPeers.get(address);
-                if (failure != null || reply == null || current == null
-                        || !Arrays.equals(peer.hello().storageIncarnation(), current.hello().storageIncarnation())) {
-                    cb.readEntryComplete(BKException.getExceptionCode(failure)
-                            == BKException.Code.UnauthorizedAccessException
-                            ? BKException.Code.UnauthorizedAccessException : BKException.Code.ReadException,
-                            ledgerId, entryId, null, ctx);
-                    return;
-                }
-                switch (reply.outcome()) {
-                    case FOUND -> {
-                        var bytes = Unpooled.wrappedBuffer(reply.entry());
-                        try {
-                            cb.readEntryComplete(BKException.Code.OK, ledgerId, entryId, bytes, ctx);
-                        } finally {
-                            bytes.release();
-                        }
+                try (reply) {
+                    var current = readPeers.get(address);
+                    if (failure != null || reply == null || current == null
+                            || !Arrays.equals(peer.hello().storageIncarnation(),
+                                    current.hello().storageIncarnation())) {
+                        cb.readEntryComplete(BKException.getExceptionCode(failure)
+                                == BKException.Code.UnauthorizedAccessException
+                                ? BKException.Code.UnauthorizedAccessException : BKException.Code.ReadException,
+                                ledgerId, entryId, null, ctx);
+                        return;
                     }
-                    case MISSING -> cb.readEntryComplete(BKException.Code.NoSuchEntryException,
-                            ledgerId, entryId, null, ctx);
-                    case REFUSED -> cb.readEntryComplete(reply.status().statusClass()
-                            == ProfileStatus.StatusClass.UNAUTHORIZED ? BKException.Code.UnauthorizedAccessException
-                                : BKException.Code.ReadException, ledgerId, entryId, null, ctx);
-                    default -> throw new IllegalStateException("Unknown Profile point-read result");
+                    switch (reply.outcome()) {
+                        case FOUND -> {
+                            var bytes = reply.entry();
+                            try {
+                                cb.readEntryComplete(BKException.Code.OK, ledgerId, entryId, bytes, ctx);
+                            } finally {
+                                bytes.release();
+                            }
+                        }
+                        case MISSING -> cb.readEntryComplete(BKException.Code.NoSuchEntryException,
+                                ledgerId, entryId, null, ctx);
+                        case REFUSED -> cb.readEntryComplete(reply.status().statusClass()
+                                == ProfileStatus.StatusClass.UNAUTHORIZED ? BKException.Code.UnauthorizedAccessException
+                                    : BKException.Code.ReadException, ledgerId, entryId, null, ctx);
+                        default -> throw new IllegalStateException("Unknown Profile point-read result");
+                    }
                 }
             };
             try {
                 ordered(completed);
             } catch (RejectedExecutionException shutdown) {
+                if (reply != null) {
+                    reply.close();
+                }
                 cb.readEntryComplete(BKException.Code.InterruptedException, ledgerId, entryId, null, ctx);
             }
         });

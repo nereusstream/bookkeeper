@@ -16,6 +16,8 @@
  */
 package org.apache.bookkeeper.discover.profile;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.ssl.SslContext;
 import io.netty.util.ReferenceCounted;
@@ -104,6 +106,57 @@ public final class ProfileNormalDataClient implements AutoCloseable {
     /** Explicit point read; NOT_READY/UNKNOWN refusals are not missing evidence and never cause activation. */
     public CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
         return socket.readEntry(context, entryId);
+    }
+
+    /** Owns the accounted response backing; each retained entry view must also be released by its caller. */
+    public static final class ReadEntryBuffer implements AutoCloseable {
+        private final ProfileStatus status;
+        private final ProfileReadEntryReplyCodec.Outcome outcome;
+        private ByteBuf frame;
+        private final int offset;
+        private final int length;
+
+        ReadEntryBuffer(ProfileReadEntryReplyCodec.View decoded, ByteBuf frame, int offset) {
+            status = decoded.status();
+            outcome = decoded.outcome();
+            this.offset = offset;
+            length = decoded.entry().remaining();
+            this.frame = frame.retain();
+        }
+
+        static ReadEntryBuffer refused(ProfileStatus status) {
+            var reply = ProfileReadEntryReplyCodec.refused(status);
+            return new ReadEntryBuffer(new ProfileReadEntryReplyCodec.View(reply.status(), reply.outcome(),
+                    reply.entry()), Unpooled.EMPTY_BUFFER, 0);
+        }
+
+        public ProfileStatus status() {
+            return status;
+        }
+
+        public ProfileReadEntryReplyCodec.Outcome outcome() {
+            return outcome;
+        }
+
+        public synchronized ByteBuf entry() {
+            if (frame == null) {
+                throw new IllegalStateException("Read response has been released");
+            }
+            return frame.retainedSlice(offset, length).asReadOnly();
+        }
+
+        @Override
+        public synchronized void close() {
+            if (frame != null) {
+                frame.release();
+                frame = null;
+            }
+        }
+    }
+
+    /** The response and all retained entry views keep their original transport backing charged. */
+    public CompletableFuture<ReadEntryBuffer> readEntryBuffer(ProfileLedgerContext context, long entryId) {
+        return socket.readEntryBuffer(context, entryId);
     }
 
     /** Return source provenance; sourceLength is not permission to close a prefix at piggybackLac. */

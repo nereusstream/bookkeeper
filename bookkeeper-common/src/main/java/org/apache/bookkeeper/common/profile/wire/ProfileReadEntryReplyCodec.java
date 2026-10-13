@@ -69,6 +69,18 @@ public final class ProfileReadEntryReplyCodec {
 
     private ProfileReadEntryReplyCodec() { }
 
+    /** Validated borrowed payload view. The input owner must remain live while any view is used. */
+    public record View(ProfileStatus status, Outcome outcome, ByteBuffer entry) {
+        public View {
+            entry = entry.asReadOnlyBuffer();
+        }
+
+        @Override
+        public ByteBuffer entry() {
+            return entry.asReadOnlyBuffer();
+        }
+    }
+
     public static Reply refused(ProfileStatus status) {
         requireRefusal(status);
         return new Reply(status, Outcome.REFUSED, new byte[0]);
@@ -91,6 +103,16 @@ public final class ProfileReadEntryReplyCodec {
     /** Validate shape, scope and coordinate before allocating the bounded entry copy. */
     public static Reply decode(ByteBuffer input, ProfileLedgerContext expected, long entryId,
             int installedEntryBound) {
+        View view = decodeView(input, expected, entryId, installedEntryBound);
+        ByteBuffer source = view.entry();
+        byte[] entry = new byte[source.remaining()];
+        source.get(entry);
+        return new Reply(view.status(), view.outcome(), entry);
+    }
+
+    /** The same strict decode without an entry copy; ownership stays with the input. */
+    public static View decodeView(ByteBuffer input, ProfileLedgerContext expected, long entryId,
+            int installedEntryBound) {
         Objects.requireNonNull(input, "input");
         Objects.requireNonNull(expected, "expected");
         if (entryId < 0 || installedEntryBound < MIN_ENTRY_BYTES || installedEntryBound > MAX_ENTRY_BYTES) {
@@ -107,7 +129,8 @@ public final class ProfileReadEntryReplyCodec {
             if (body.hasRemaining()) {
                 throw new IllegalArgumentException("READ_ENTRY refusal cannot carry an entry");
             }
-            return refused(status);
+            requireRefusal(status);
+            return new View(status, Outcome.REFUSED, ByteBuffer.allocate(0));
         }
         if (!status.equals(QUERY_OK) || body.remaining() < PREFIX_BYTES - ProfileStatus.ENCODED_LENGTH
                 || body.getInt() != MAGIC || Short.toUnsignedInt(body.getShort()) != SCHEMA) {
@@ -127,9 +150,7 @@ public final class ProfileReadEntryReplyCodec {
                 || body.getLong(body.position() + Long.BYTES) != coordinate)) {
             throw new IllegalArgumentException("READ_ENTRY payload is bound to another ledger or entry");
         }
-        byte[] entry = new byte[(int) size];
-        body.get(entry);
-        return new Reply(status, outcome, entry);
+        return new View(status, outcome, body.slice());
     }
 
     private static void requireShape(long entryId, Outcome outcome, int size, int bound) {

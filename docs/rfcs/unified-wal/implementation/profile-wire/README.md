@@ -1933,3 +1933,22 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 ```
 
 完整16步、默认SDK/完整Main与required authority、full-bytes/backup-restore/accepted退役/GC/mixed及正式性能/运维继续OPEN；默认OFF/SYSTEM/PARK及disabled不变，生产Gate不提升，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## SDK 读响应的 backing 所有权交接
+
+2026-10-13，接续父提交 `eda1d7d7603a3ff74e01583d0d4669b40144ffdb`。原 READ_ENTRY decoder 新增相同 scope/coordinate/status/shape 校验的 borrowed read-only View，旧 decode 仍返回独立堆副本、原 wire bytes/capability 不变。ProfileNormalDataClient.readEntryBuffer 的 AutoCloseable response 持有原已计费网络 frame；每次 entry() 返回独立 retained read-only slice。response 关闭不能释放仍由 entry view 持有的 backing，最后 view 归还才解除该 credit。构造完成前不移除 pending；取消或其他提前终结使 complete 返回 false 时立即关闭未交付 response。
+
+原 ProfileBookieClient.readEntry 改用这一 response，ordered callback 的成功、MISSING/REFUSED、失败及 incarnation 不匹配均关闭 response；executor 拒绝时也关闭。标准 ReadOp/LedgerEntry 的 retain 与 CRC32C 验证沿用原实现，caller retainedDuplicate 可在 entries.close 与 transport close 后继续读，客户端 closeAsync 等待其最后引用。没有新 allocator、线程、队列、持久化格式、MetadataStore 往返或 authority。
+
+真实 RED `unified-wal-local-8eu0GlUx` 将仅 SDK adapter 换回父 HEAD：caller 仍保留 entry buffer 时 close 已完成，新增 TimeoutException 断言如预期失败。最小 GREEN `lZLYKT8A` 4项、扩大 GREEN `RYKvHqKc` 45项均零失败/错误/skip；最终 `unified-wal-local-IIYTYunj` 四个实际类45项同样通过（common codec2、allocator11、decoder23、socket9）。覆盖 actual mTLS/socket/文件读取、原 SDK retained entry、取消后实际回复丢弃、slot 满额拒绝、capability/scope refusal、fenced MISSING、malformed replies、真实 I/O timeout/pin、writer close/restart、损坏源审计与历史缺口修复。未把测试内故障注入器当作生产 authority，也没有以 mock 替代持久化。
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'ProfileReadEntryReplyCodecTest,ProfileByteBufAllocatorTest,ProfileReceiveDecoderTest,SegmentProfileInitialSocketClientTest#ownedPointReadKeepsBackingUntilLastViewAndDiscardsCancelledDelivery+actualProfilePointReadReturnsStoredBytesThroughTheOriginalSdkWithoutControlIo'
+```
+
+完整扩大验证命令由最终 inputs.json 保存；上面给出最小相关命令。最终 Spotless/Checkstyle exit0。首次编译变量放错 READ_LAC 分支与两项 style 失败均保留原输出，不计通过。Java/model/style终态后的独立 RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。
+
+复用未修改的 ProfileBackingBudget，`unified-wal-model-g_nk2lwm` 7配置得到1完整正向/6指定反例；只投影 root capacity/refcount/workspace/close，未新增 SDK response future 或 callback ownership 模型。1170 Java与1106模型输入共有271路径、去重2005；模型 stage 与最终 Java 的三个生产文件不同，分别归档并核验 SHA，不移绑模型 receipt。证据 `/Users/liusinan/.codex/artifacts/unified-wal/read-payload-evidence-skoocx13` 拥有阶段输入/源码、原 XML/命令/RED/GREEN/model/checker 与失败记录。
+
+本增量只接 READ_ENTRY → SDK ByteBuf 的长期 backing custody。旧兼容 readEntry 的 heap reply、READ_LAC/caller arrays、对象开销、JDK/opaque TLS/kernel、存储/index/control/cold 的统一总预算与正式性能继续 OPEN。默认 SDK 公开 Profile runtime 入口选择仍待明确；完整 Main/required producer、backup-restore/accepted 退役/GC/mixed 兼容/性能/运维及全16步验收仍 OPEN。默认 OFF/SYSTEM/PARK、disabled 能力与生产 Gate 不提升，Linux NUMA/真实掉电/正式性能/canary 未执行。

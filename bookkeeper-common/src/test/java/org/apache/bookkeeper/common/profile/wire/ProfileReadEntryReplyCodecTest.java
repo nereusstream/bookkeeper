@@ -53,8 +53,14 @@ public class ProfileReadEntryReplyCodecTest {
         assertEquals(ProfileReadEntryReplyCodec.Outcome.FOUND, found.outcome());
         assertEquals(entry.flip(), found.entry());
         assertFalse(found.entry().hasArray());
+        var borrowed = ProfileReadEntryReplyCodec.decodeView(body, CONTEXT, 7, 40);
+        assertEquals(found.entry(), borrowed.entry());
+        assertFalse(borrowed.entry().hasArray());
+        borrowed.entry().position(10);
+        assertEquals(0, borrowed.entry().position());
         body.put(127, (byte) 0);
         assertEquals(0x09080706, found.entry().getInt(36));
+        assertEquals(0x09080700, borrowed.entry().getInt(36));
 
         ByteBuffer missing = ByteBuffer.allocate(88);
         ProfileReadEntryReplyCodec.writePrefix(missing, CONTEXT, 7,
@@ -86,6 +92,8 @@ public class ProfileReadEntryReplyCodecTest {
             ByteBuffer bad = ByteBuffer.wrap(body.array().clone());
             bad.put(offset, (byte) (bad.get(offset) ^ 1));
             assertThrows(IllegalArgumentException.class, () -> ProfileReadEntryReplyCodec.decode(bad, CONTEXT, 7, 40));
+            assertThrows(IllegalArgumentException.class,
+                    () -> ProfileReadEntryReplyCodec.decodeView(bad, CONTEXT, 7, 40));
         }
         assertThrows(IllegalArgumentException.class,
                 () -> ProfileReadEntryReplyCodec.decode(body.slice(0, 127), CONTEXT, 7, 40));

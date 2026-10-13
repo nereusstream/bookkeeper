@@ -10256,6 +10256,31 @@ public class SegmentProfileInitialSocketClientTest {
                     assertFalse(entries.hasMoreElements());
                     assertEquals(reads, fixture.authorityReads.get());
                     assertEquals(forces, fixture.nodeIo.stream().map(io -> io.forces).toList());
+                    ByteBuf retained;
+                    try (var owned = handle.readAsync(0, 0).get(5, TimeUnit.SECONDS)) {
+                        retained = owned.getEntry(0).getEntryBuffer().retainedDuplicate();
+                    }
+                    try {
+                        handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                        var closed = CompletableFuture.allOf(fixture.dataClients.stream()
+                                .map(ProfileNormalDataClient::closeAsync).toArray(CompletableFuture[]::new));
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> closed.get(150, TimeUnit.MILLISECONDS));
+                        assertTrue(fixture.dataClients.stream().mapToLong(ProfileNormalDataClient::backingBytes).sum()
+                                >= retained.readableBytes());
+                        byte[] payload = new byte[retained.readableBytes()];
+                        retained.getBytes(retained.readerIndex(), payload);
+                        assertArrayEquals(bytes(16, 8), payload);
+                        retained.release();
+                        retained = null;
+                        closed.get(5, TimeUnit.SECONDS);
+                        assertEquals(0, fixture.dataClients.stream()
+                                .mapToLong(ProfileNormalDataClient::backingBytes).sum());
+                    } finally {
+                        if (retained != null) {
+                            retained.release();
+                        }
+                    }
                 } finally {
                     handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 }
@@ -10296,12 +10321,87 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.MISSING,
                     missing.outcome());
             assertEquals(0, missing.entry().remaining());
+            try (var ownedMissing = client.readEntryBuffer(fixture.context(), 99).get(5, TimeUnit.SECONDS)) {
+                assertEquals(missing.outcome(), ownedMissing.outcome());
+                var empty = ownedMissing.entry();
+                try {
+                    assertEquals(0, empty.readableBytes());
+                } finally {
+                    empty.release();
+                }
+            }
             assertEquals(force, fixture.nodeIo.get(0).forces);
             assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
                     client.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
             fixture.readAllowed.set(false);
             assertEquals(ProfileStatus.StatusClass.UNAUTHORIZED,
                     client.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).status().statusClass());
+        }
+    }
+
+    @Test
+    public void ownedPointReadKeepsBackingUntilLastViewAndDiscardsCancelledDelivery() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var client = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+            var source = entry(fixture, 0, 16);
+            try {
+                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                        client.addNormal(fixture.context(), fixture.credential, 0, source)
+                                .get(5, TimeUnit.SECONDS).durableResult());
+            } finally {
+                source.release();
+            }
+            fixture.replyFault.set(21);
+            var cancelled = client.readEntryBuffer(fixture.context(), 0);
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertEquals(1, fixture.heldReplies.size());
+            assertTrue(cancelled.cancel(false));
+            try (var refused = client.readEntryBuffer(fixture.context(), 0).get(5, TimeUnit.SECONDS)) {
+                assertEquals(ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE, refused.status().statusClass());
+            }
+            fixture.replyFault.set(0);
+            fixture.releaseReplies();
+            ProfileNormalDataClient.ReadEntryBuffer response;
+            do {
+                response = client.readEntryBuffer(fixture.context(), 0).get(5, TimeUnit.SECONDS);
+                if (response.outcome()
+                        == org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED) {
+                    response.close();
+                    assertTrue(System.nanoTime() < until);
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+            } while (response.outcome()
+                    == org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED);
+            ByteBuf view = response.entry();
+            try {
+                assertTrue(view.isReadOnly());
+                assertEquals(44, view.getLong(view.readerIndex()));
+                response.close();
+                response.close();
+                var released = response;
+                assertThrows(IllegalStateException.class, released::entry);
+                var closed = client.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closed.get(150, TimeUnit.MILLISECONDS));
+                assertTrue(client.backingBytes() >= view.readableBytes());
+                assertTrue(client.backingBytes() <= client.backingLimitBytes());
+                assertEquals(0, view.getLong(view.readerIndex() + 8));
+                view.release();
+                view = null;
+                closed.get(5, TimeUnit.SECONDS);
+                assertEquals(0, client.backingBytes());
+                assertTrue(cancelled.isCancelled());
+            } finally {
+                response.close();
+                if (view != null) {
+                    view.release();
+                }
+            }
         }
     }
 
@@ -10324,6 +10424,10 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.REFUSED,
                         reply.outcome());
                 assertEquals(0, reply.entry().remaining());
+                try (var ownedRefusal = client.readEntryBuffer(requested, 0).get(5, TimeUnit.SECONDS)) {
+                    assertEquals(reply.status(), ownedRefusal.status());
+                    assertEquals(reply.outcome(), ownedRefusal.outcome());
+                }
                 assertEquals(force, fixture.nodeIo.get(0).forces);
                 assertEquals(authorities, fixture.authorityReads.get());
                 var lac = client.readLac(fixture.context()).get(5, TimeUnit.SECONDS);
@@ -10362,7 +10466,7 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.replyFault.set(fault);
                 assertThrows(ExecutionException.class,
                         () -> (latest ? client.readLac(fixture.context())
-                                : client.readEntry(fixture.context(), 0)).get(5, TimeUnit.SECONDS));
+                                : client.readEntryBuffer(fixture.context(), 0)).get(5, TimeUnit.SECONDS));
             }
         }
     }
@@ -10477,7 +10581,7 @@ public class SegmentProfileInitialSocketClientTest {
             }));
             try {
                 assertTrue(blocked.await(5, TimeUnit.SECONDS));
-                var pending = latest ? client.readLac(fixture.context()) : client.readEntry(fixture.context(), 0);
+                var pending = latest ? client.readLac(fixture.context()) : client.readEntryBuffer(fixture.context(), 0);
                 var ioField = IsolatedSegmentFiles.class.getDeclaredField("activeIo");
                 ioField.setAccessible(true);
                 long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
