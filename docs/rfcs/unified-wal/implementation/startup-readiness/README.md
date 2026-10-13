@@ -501,3 +501,23 @@ Java`unified-wal-local-vgpTyehj`首轮4类38项0 failure/error/skip。最终`uni
 2026-10-13 [派生 index block cache 与共享 DATA 预算](../local-storage/README.md#派生-index-block-cache-与共享-data-预算)已将原1 MiB index block cache启用strict capacity，并在ProfileService storage open前与固定池合并预留于原DATA额度；原缓存大小与协议/格式不变。旧service只预留池的真实quota红、当前拒绝绿及最终2类34项真实Java通过；memtable/WBM并非hard native上限，所有native/对象总账与正式性能仍OPEN。本轮不重跑不覆盖该native政策的TLC，旧模型保持原绑定，默认OFF/SYSTEM/PARK及16步生产Gate不提升。
 
 2026-10-13 [默认 SDK open 的 Profile 拒绝边界](../profile-wire/README.md#默认-sdk-open-的-profile-拒绝边界)已在原LedgerOpenOp密码/digest验证后、Classic handle/listener/recovery创建前识别mandatory Profile backlink，返回原IllegalOpException，避免当前SDK误用Classic路径。真实CLOSED旧行为红、新OPEN/CLOSED/valid-CRC future marker拒绝绿及三Bookie Classic兼容，最终2类17项通过；Main/外部issuer、默认Profile routing、released stock矩阵及全16步Gate仍OPEN，默认OFF/SYSTEM/PARK与disabled不变。
+
+## Owned lifecycle 的实际 self-drain 拒绝
+
+2026-10-13，父提交 `54800228d88d044972684c51e9f3e8d096ea849c`。原service的external caller检查只识别Netty loops，transport建立后还绕过owned resource检查。由owned cold/delete executor、原metadata scheduler或ZK event callback调用close时，旧逻辑先退休admission/registration/storage，再等待调用者自己的executor/thread终结；无法在该调用返回前完成，变成超时和非预期服务退休。直接AbstractZkLedgerManager.closeAndAwaitTermination在自己的scheduler上也先shutdown再等自己。
+
+当前owned resources在已有DefaultThreadFactory上记录cold/delete实际运行Thread，结束后移除，保持原executor/queue/线程数；native ZooKeeper默认watcher仅先捕获当前event Thread再委托原ZooKeeperWatcherBase，session/child watchers合同不变。原AbstractZkLedgerManager同一single scheduler记录实际Thread，新增明确external drain caller检查；其legacy close()保持非阻塞行为。service在退休任何state前统一检查owned caller，已有transport后不绕过。由这些实际managed contexts及原Netty loops调用立即IllegalStateException；不以名称/prefix或caller枚举判断，不先demote/shutdown再表示等待失败。合法external close仍按原实际frame/storage/I/O/pool/metadata/ZK/network终态推进，UNKNOWN、held task、timeout和中断不变。
+
+新增真实owned service回归先在旧代码 `unified-wal-local-aPMtbYaZ` RED：cold task没有抛IllegalStateException而等自身排空后返回，Future以断言失败终结。修正后最小一项通过；最终覆盖actual cold、delete scheduler、metadata scheduler和native ZK getData callback，直接metadata self-await也拒绝且不shutdown。每次非法调用后fresh真实peer仍可读、各owned resource未终结；外部调用者故意使用与metadata scheduler相同的线程名，仍能正常关闭并确认全部终态，证明检查是identity而非名字。
+
+最终 `unified-wal-local-wYFERfkw`：metadata manager26项、真实ledger metadata创建/删除12项、selected owned socket/service6项，共44 registered/42 PASS/2既有Assume skip（ParentNodeDeletion只适用于两种hierarchical manager），零failure/error。selected范围保留三目标真实SDK/注册/mTLS/重启、held DATA force、held metadata task、部分初始化失败和Embedded lifecycle。1170个runner源码/输入SHA与最终实现逐项匹配；另补充6个与父提交相同的metadata test/base输入，合计1176份冻结源码/输入；Spotless/Checkstyle exit0；Java/checker实际终结后的独立RAT exit1，443 unapproved均在父提交、无新增。
+
+证据 `/Users/liusinan/.codex/artifacts/unified-wal/drain-caller-evidence-htwcwae_` 保存RED/focus/final的source/input、原命令/XML、checker及诊断，旧源码与结果不移绑。没有新增线程、executor、生产队列、重试、格式或authority issuer，ordinary Add无新增metadata/hash/control调用。本次caller identity由真实Java上下文验证，现有形式模型没有这些thread identities；未重跑或移绑TLC，不声称完整A/C/D或liveness证明。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'AbstractZkLedgerManagerTest,LedgerMetadataCreationTest,SegmentProfileInitialSocketClientTest#ownedProfileResources*+ownedProfileInitializationFailure*+ownedProfileServicePublishes*+embeddedProfileServiceRuns*'
+```
+
+完成的是同一owned服务的合法drain调用边界。Main/default SDK路由、外部required authority producer、full-bytes、backup/restore/accepted永久退役/history GC、mixed/rolling与正式性能/运维和完整16步继续推进；默认OFF/SYSTEM/PARK及disabled不变，生产/稳定Gate仍OPEN，Linux NUMA/真实掉电/正式性能/canary仍NOT_EXECUTED。

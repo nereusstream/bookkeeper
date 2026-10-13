@@ -83,6 +83,7 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
             new ConcurrentHashMap<Long, Set<LedgerMetadataListener>>();
     // we use this to prevent long stack chains from building up in callbacks
     protected ScheduledExecutorService scheduler;
+    private volatile Thread schedulerThread;
 
     /**
      * ReadLedgerMetadataTask class.
@@ -184,8 +185,12 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
         this.conf = conf;
         this.zk = zk;
         this.ledgerRootPath = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf);
-        this.scheduler = Executors
-                .newSingleThreadScheduledExecutor(new DefaultThreadFactory("ZkLedgerManagerScheduler"));
+        var threadFactory = new DefaultThreadFactory("ZkLedgerManagerScheduler");
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = threadFactory.newThread(task);
+            schedulerThread = thread;
+            return thread;
+        });
         log.debug().attr("ledgerRootPath", ledgerRootPath).log("Using AbstractZkLedgerManager");
     }
 
@@ -721,7 +726,15 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
         if (timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("Positive metadata scheduler drain timeout required");
         }
+        requireExternalDrainCaller();
         scheduler.shutdown();
         return scheduler.awaitTermination(timeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    /** Validate an explicit owner drain before it retires any resources used by this scheduler. */
+    public void requireExternalDrainCaller() {
+        if (Thread.currentThread() == schedulerThread) {
+            throw new IllegalStateException("Metadata scheduler cannot await its own termination");
+        }
     }
 }

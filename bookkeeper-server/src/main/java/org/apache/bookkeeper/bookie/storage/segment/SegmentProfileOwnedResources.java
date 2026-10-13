@@ -26,8 +26,11 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
@@ -110,6 +113,8 @@ public final class SegmentProfileOwnedResources {
     private boolean managerClosed;
     private boolean driverClosed;
     private boolean zkClosed;
+    private final Set<Thread> drainThreads = ConcurrentHashMap.newKeySet();
+    private volatile Thread zkEventThread;
 
     SegmentProfileOwnedResources(ServerConfiguration configuration, Settings settings, TLSContextFactory tls,
             ProfileReceiveBudget budget, int connectionBytes, int connectionBaseBytes, String trustDomain,
@@ -137,6 +142,19 @@ public final class SegmentProfileOwnedResources {
                 new Id(acl.getId().getScheme(), acl.getId().getId()))).toList();
     }
 
+    private ThreadFactory drainThreadFactory(String name) {
+        var factory = new DefaultThreadFactory(name);
+        return task -> factory.newThread(() -> {
+            Thread thread = Thread.currentThread();
+            drainThreads.add(thread);
+            try {
+                task.run();
+            } finally {
+                drainThreads.remove(thread);
+            }
+        });
+    }
+
     @SuppressWarnings("deprecation")
     Environment open() throws IOException, InterruptedException {
         try {
@@ -148,12 +166,15 @@ public final class SegmentProfileOwnedResources {
             acceptor = new NioEventLoopGroup(1, new DefaultThreadFactory("profile-acceptor"));
             worker = new NioEventLoopGroup(settings.networkWorkers(), new DefaultThreadFactory("profile-worker"));
             cold = new ThreadPoolExecutor(settings.coldWorkers(), settings.coldWorkers(), 0, TimeUnit.MILLISECONDS,
-                    new ArrayBlockingQueue<>(settings.coldQueueSlots()), new DefaultThreadFactory("profile-cold"));
-            scheduler = new ScheduledThreadPoolExecutor(1, new DefaultThreadFactory("profile-delete"));
+                    new ArrayBlockingQueue<>(settings.coldQueueSlots()), drainThreadFactory("profile-cold"));
+            scheduler = new ScheduledThreadPoolExecutor(1, drainThreadFactory("profile-delete"));
             scheduler.setRemoveOnCancelPolicy(true);
             scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
             var watcher = new ZooKeeperWatcherBase(configuration.getZkTimeout(), false);
-            zk = new ZooKeeper(connect, configuration.getZkTimeout(), watcher);
+            zk = new ZooKeeper(connect, configuration.getZkTimeout(), event -> {
+                zkEventThread = Thread.currentThread();
+                watcher.process(event);
+            });
             watcher.waitForConnection();
             var client = new ClientConfiguration(configuration);
             client.setZkLedgersRootPath(uri.getPath());
@@ -209,6 +230,12 @@ public final class SegmentProfileOwnedResources {
     }
 
     void requireExternalThread() {
+        if (drainThreads.contains(Thread.currentThread()) || Thread.currentThread() == zkEventThread) {
+            throw new IllegalStateException("Owned Profile resources cannot drain their current executing thread");
+        }
+        if (manager != null) {
+            manager.requireExternalDrainCaller();
+        }
         for (var group : new EventLoopGroup[] {acceptor, worker}) {
             if (group != null) {
                 for (var loop : group) {

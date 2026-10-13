@@ -575,10 +575,11 @@ public final class SegmentProfileService implements AutoCloseable {
     }
 
     private void requireExternalThread() {
+        if (ownedResources != null) {
+            ownedResources.requireExternalThread();
+            return;
+        }
         if (transport == null) {
-            if (ownedResources != null) {
-                ownedResources.requireExternalThread();
-            }
             return;
         }
         for (var loop : transport.worker()) {

@@ -2694,6 +2694,62 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void ownedProfileResourcesRejectSelfDrainBeforeRetiringLiveService() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("owned-self-drain"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
+                episode.replaceNode(fixture, 0, false, true);
+                var manager = (AbstractZkLedgerManager) episode.ownedField("manager");
+                var field = AbstractZkLedgerManager.class.getDeclaredField("scheduler");
+                field.setAccessible(true);
+                var metadataScheduler = (java.util.concurrent.ScheduledExecutorService) field.get(manager);
+                for (var executor : List.of((java.util.concurrent.ExecutorService) episode.ownedField("cold"),
+                        (java.util.concurrent.ExecutorService) episode.ownedField("scheduler"), metadataScheduler)) {
+                    executor.submit(() -> {
+                        assertThrows(IllegalStateException.class,
+                                () -> episode.service.close(Duration.ofMillis(200)));
+                    }).get(5, TimeUnit.SECONDS);
+                    assertNotNull(episode.persistent.readPeer(fixture.identities.get(0).bookieId().toString()).peer());
+                    episode.assertOwnedResourcesTerminal(false);
+                }
+                metadataScheduler.submit(() -> {
+                    assertThrows(IllegalStateException.class,
+                            () -> manager.closeAndAwaitTermination(Duration.ofMillis(200)));
+                }).get(5, TimeUnit.SECONDS);
+                assertFalse(metadataScheduler.isShutdown());
+                var callback = new java.util.concurrent.CompletableFuture<Void>();
+                var ownedZk = (ZooKeeper) episode.ownedField("zk");
+                ownedZk.getData("/", false, (rc, path, context, data, stat) -> {
+                    try {
+                        assertEquals(org.apache.zookeeper.KeeperException.Code.OK.intValue(), rc);
+                        assertThrows(IllegalStateException.class,
+                                () -> episode.service.close(Duration.ofMillis(200)));
+                        callback.complete(null);
+                    } catch (Throwable failure) {
+                        callback.completeExceptionally(failure);
+                    }
+                }, null);
+                callback.get(5, TimeUnit.SECONDS);
+                assertNotNull(episode.persistent.readPeer(fixture.identities.get(0).bookieId().toString()).peer());
+                episode.assertOwnedResourcesTerminal(false);
+                String schedulerName = metadataScheduler.submit(() -> Thread.currentThread().getName())
+                        .get(5, TimeUnit.SECONDS);
+                String originalName = Thread.currentThread().getName();
+                try {
+                    Thread.currentThread().setName(schedulerName);
+                    assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                } finally {
+                    Thread.currentThread().setName(originalName);
+                }
+                episode.assertOwnedResourcesTerminal(true);
+            }
+        }
+    }
+
+    @Test
     public void ownedProfileInitializationFailureRetainsHandleAndDrainsActualPartialResources() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
             var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("owned-unopened"),
