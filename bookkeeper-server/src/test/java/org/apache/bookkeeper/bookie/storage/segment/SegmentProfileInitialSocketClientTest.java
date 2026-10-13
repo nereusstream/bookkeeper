@@ -8726,8 +8726,11 @@ public class SegmentProfileInitialSocketClientTest {
                                 ZooDefs.Ids.OPEN_ACL_UNSAFE,
                                 Duration.ofSeconds(5));
                         var heldCoordinator = new ProfileRecoveryCoordinator(heldStore, heldMetadata, fixture.cold);
-                        var pending = heldCoordinator.openReadOnly(44, sdk.getClientCtx(), fixture.password, data, 3);
+                        var operation = heldCoordinator.beginOpenReadOnly(
+                                44, sdk.getClientCtx(), fixture.password, data, 3);
+                        var pending = operation.completion();
                         assertTrue(held.held.await(5, TimeUnit.SECONDS));
+                        assertFalse(operation.drained().isDone());
                         if (mode == 0) {
                             assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
                                     fixture.reservations.cutDelete(fixture.reservations.read(44).snapshot(),
@@ -8737,8 +8740,13 @@ public class SegmentProfileInitialSocketClientTest {
                                     BKException.getExceptionCode(assertThrows(
                                     java.util.concurrent.ExecutionException.class,
                                             () -> pending.get(5, TimeUnit.SECONDS))));
+                            operation.drained().get(5, TimeUnit.SECONDS);
                         } else {
                             assertTrue(pending.cancel(false));
+                            assertTrue(pending.isCancelled());
+                            assertFalse(operation.drained().isDone());
+                            assertThrows(java.util.concurrent.TimeoutException.class,
+                                    () -> operation.drained().get(20, TimeUnit.MILLISECONDS));
                             assertEquals(BKException.Code.TooManyRequestsException,
                                     BKException.getExceptionCode(assertThrows(
                                     java.util.concurrent.ExecutionException.class,
@@ -8746,22 +8754,24 @@ public class SegmentProfileInitialSocketClientTest {
                                                 fixture.password, data, 3)
                                             .get(5, TimeUnit.SECONDS))));
                             held.release.run();
-                            boolean reopened = false;
-                            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                            while (!reopened && System.nanoTime() < until) {
-                                try (var reader = heldCoordinator.openReadOnly(44, sdk.getClientCtx(), fixture.password,
-                                        data, 3).get(5, TimeUnit.SECONDS)) {
-                                    assertEquals(-1, reader.getLastAddConfirmed());
-                                    reopened = true;
-                                } catch (java.util.concurrent.ExecutionException busy) {
-                                    if (BKException.getExceptionCode(busy)
-                                            != BKException.Code.TooManyRequestsException) {
-                                        throw busy;
-                                    }
-                                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
-                                }
+                            operation.drained().get(5, TimeUnit.SECONDS);
+                            var successful = heldCoordinator.beginOpenReadOnly(
+                                    44, sdk.getClientCtx(), fixture.password, data, 3);
+                            var nested = new java.util.concurrent.atomic.AtomicReference<
+                                    ProfileRecoveryCoordinator.ReadOnlyOperation>();
+                            var delivered = successful.completion().thenAccept(reader -> {
+                                assertTrue(successful.drained().isDone());
+                                successful.drained().join();
+                                assertFalse(successful.completion().cancel(false));
+                                nested.set(heldCoordinator.beginOpenReadOnly(
+                                        44, sdk.getClientCtx(), fixture.password, data, 3));
+                            });
+                            delivered.get(5, TimeUnit.SECONDS);
+                            try (var reader = successful.completion().get(5, TimeUnit.SECONDS);
+                                    var next = nested.get().completion().get(5, TimeUnit.SECONDS)) {
+                                assertEquals(-1, reader.getLastAddConfirmed());
+                                assertEquals(-1, next.getLastAddConfirmed());
                             }
-                            assertTrue(reopened);
                         }
                     }
                 }

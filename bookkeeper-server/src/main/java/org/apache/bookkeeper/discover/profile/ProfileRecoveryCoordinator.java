@@ -1506,19 +1506,110 @@ public final class ProfileRecoveryCoordinator {
         });
     }
 
-    /** Independent closed open; supplied clients remain borrowed. Cancellation closes an undelivered handle. */
+    /** Cold open custody; a delivered handle and its borrowed peers remain the caller's responsibility. */
+    public final class ReadOnlyOperation {
+        private boolean claimed;
+        private boolean stopped;
+        private final CompletableFuture<org.apache.bookkeeper.client.LedgerHandle> completion =
+                new CompletableFuture<>() {
+                    @Override
+                    public boolean cancel(boolean mayInterruptIfRunning) {
+                        synchronized (ReadOnlyOperation.this) {
+                            if (claimed) {
+                                return false;
+                            }
+                            stopped = true;
+                        }
+                        return super.cancel(mayInterruptIfRunning);
+                    }
+                };
+        private final CompletableFuture<Void> drained = new CompletableFuture<>();
+        private org.apache.bookkeeper.client.LedgerHandle undelivered;
+
+        public CompletableFuture<org.apache.bookkeeper.client.LedgerHandle> completion() {
+            return completion;
+        }
+
+        /** Cold work and any undelivered local handle are terminal; caller cancellation is not this signal. */
+        public CompletableFuture<Void> drained() {
+            return drained;
+        }
+
+        public void cancel() {
+            completion.cancel(false);
+        }
+
+        private void finish(boolean release) {
+            if (release) {
+                active.release();
+            }
+            drained.complete(null);
+        }
+
+        private void resolved(org.apache.bookkeeper.client.LedgerHandle handle, Throwable failure) {
+            boolean deliver;
+            synchronized (this) {
+                deliver = failure == null && !stopped && !completion.isDone();
+                if (deliver) {
+                    claimed = true;
+                }
+            }
+            if (deliver) {
+                undelivered = null;
+                finish(true);
+                if (!completion.complete(handle)) {
+                    handle.asyncClose((code, ignored, ctx) -> { }, null);
+                }
+                return;
+            }
+            if (undelivered == null) {
+                finish(true);
+                completion.completeExceptionally(failure == null
+                        ? new java.util.concurrent.CancellationException() : failure);
+                return;
+            }
+            try {
+                undelivered.asyncClose((code, ignored, ctx) -> {
+                    if (code == BKException.Code.OK) {
+                        undelivered = null;
+                        finish(true);
+                        completion.completeExceptionally(failure == null
+                                ? new java.util.concurrent.CancellationException() : failure);
+                    } else {
+                        drained.completeExceptionally(BKException.create(code));
+                        completion.completeExceptionally(failure == null ? BKException.create(code) : failure);
+                    }
+                }, null);
+            } catch (RuntimeException closeFailure) {
+                drained.completeExceptionally(closeFailure);
+                completion.completeExceptionally(failure == null ? closeFailure : failure);
+            }
+        }
+    }
+
+    /** Compatibility entry point. Owners needing actual custody use beginOpenReadOnly. */
     public CompletableFuture<org.apache.bookkeeper.client.LedgerHandle> openReadOnly(long ledger, ClientContext sdk,
+            byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries) {
+        return beginOpenReadOnly(ledger, sdk, password, supplied, maxReadEntries).completion();
+    }
+
+    /** Independent closed open; supplied clients remain borrowed through cold drain and delivered-handle use. */
+    public ReadOnlyOperation beginOpenReadOnly(long ledger, ClientContext sdk,
             byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries) {
         if (supplied.size() > 64 || maxReadEntries < 1 || maxReadEntries > 256) {
             throw new IllegalArgumentException("Readonly pool or request bound is invalid");
         }
+        var operation = new ReadOnlyOperation();
         if (sdk.isClientClosed()) {
-            return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+            operation.completion.completeExceptionally(BKException.create(BKException.Code.ClientClosedException));
+            operation.finish(false);
+            return operation;
         }
         if (!active.tryAcquire()) {
-            return CompletableFuture.failedFuture(BKException.create(BKException.Code.TooManyRequestsException));
+            operation.completion.completeExceptionally(BKException.create(BKException.Code.TooManyRequestsException));
+            operation.finish(false);
+            return operation;
         }
-        var caller = new CompletableFuture<org.apache.bookkeeper.client.LedgerHandle>();
         try {
             byte[] owned = password.clone();
             var peers = Map.copyOf(supplied);
@@ -1531,6 +1622,7 @@ public final class ProfileRecoveryCoordinator {
                 try {
                     handle = org.apache.bookkeeper.client.ProfileLedgerHandle.fromClosedRead(sdk, read.snapshot(),
                             owned, peers, maxReadEntries);
+                    operation.undelivered = handle;
                     var after = reservations.readClosedForOpen(metadata, ledger);
                     if (after.snapshot() == null) {
                         throw readOnlyFailure(after.status());
@@ -1552,22 +1644,12 @@ public final class ProfileRecoveryCoordinator {
                     }
                     return handle;
                 } catch (Exception rejected) {
-                    if (handle != null) {
-                        handle.asyncClose((code, ignored, ctx) -> { }, null);
-                    }
                     throw new java.util.concurrent.CompletionException(rejected);
                 }
-            }, cold).whenComplete((handle, failure) -> {
-                active.release();
-                if (failure != null) {
-                    caller.completeExceptionally(failure);
-                } else if (!caller.complete(handle)) {
-                    handle.asyncClose((code, ignored, ctx) -> { }, null);
-                }
-            });
-            return caller;
+            }, cold).whenComplete(operation::resolved);
+            return operation;
         } catch (RuntimeException failedAdmission) {
-            active.release();
+            operation.finish(true);
             throw failedAdmission;
         }
     }

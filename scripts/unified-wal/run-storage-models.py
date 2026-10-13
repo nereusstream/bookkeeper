@@ -338,6 +338,7 @@ MATRIX = {
     'ce-profile-readonly-gate': 'OpenHadFinalGate',
     'ce-profile-readonly-cancel-open': 'CancelledOpenNotReturned',
     'ce-profile-readonly-cancel-read': 'ActualReadOwnsPermit',
+    'ce-profile-readonly-drain': 'DrainNeedsActualOpenTerminal',
     'ce-profile-readonly-boundary': 'ReadonlyHasFixedBoundary',
     'ce-profile-readonly-suffix': 'ReadonlyDoesNotExposeSuffix',
     'ce-profile-readonly-mutation': 'ReadonlyDoesNotMutate',

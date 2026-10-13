@@ -1910,3 +1910,26 @@ s89_2h20原retention有限模型扩展共9配置、1完整正向/8指定反例�
 1115个最终Java输入逐项匹配源码并冻结；所有red/早期green保持其原stage绑定。原有限模型未涵盖默认LedgerOpenOp的marker分支，模型语义未改，本轮不重跑TLC或移绑旧PASS。最终Spotless/Checkstyle exit0；所有Java/checker终止后的独立RAT exit1，443 unapproved逐项存在父HEAD、无新增，不称CI全绿。证据`/Users/liusinan/.codex/artifacts/unified-wal/default-open-boundary-evidence-X2uFHs1v`保存实际输入/命令/XML、源码和checker诊断。
 
 本增量只关闭当前checkout默认open的Classic误用入口；不是默认Profile routing、所有旧二进制支持、缺marker全身份反查或完整兼容矩阵。Main裸ISOLATED配置仍需要外部bootstrap/authority/resource环境并保持原fail-closed边界；明确provider装配、完整external issuer/默认SDK routing、released stock、backup/restore接受/accepted退役/remaining history GC、full-bytes/正式性能/运维及全16步Gate继续OPEN，默认OFF/SYSTEM/PARK和disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+## CLOSED readonly open 的独立 actual-drain 信号
+
+2026-10-13，父提交 `9cbeb5e2e7a41792feecea698337fea435db6e92`。原openReadOnly仅返回可取消的caller future；虽然原quota已保持到cold任务终结，但pool owner不能从被cancel的future判断何时可安全释放借用peers，也没有观察未交付本地handle关闭的信号。当前beginOpenReadOnly返回同一coordinator的ReadOnlyOperation，分开completion/cancel与drained；原openReadOnly委托completion，保留已有调用方式、参数范围、closed validation和borrowed资源规则。
+
+caller cancel不取消已提交cold工作、不提前释放active permit；实际cold lookup/revalidation和未交付handle的local close callback都结束后才成功drained。未admit的client-closed/too-many-requests信号不持有permit。成功路径先claim delivery，再释放cold quota、发出drain并发布handle；cancel不能跨已claim的handoff。completion callback可以检查drain并继续open，不因caller callback尚未返回误报coordinator busy。失败/已取消路径关闭未交付handle后才释放；close失败以异常drain报告并保持custody，不能视为可释放borrowed peers。交付后的handle、其read生命周期及peers仍归caller，drained不是关闭这些资源的授权。
+
+复用真实HeldFinalClosedSnapshotClient：metadata最后实际callback仍hold时，completion已cancel而drained未完成，20ms观察超时且second open仍TooManyRequests；释放原callback后等待actual drain，再一次open成功。delete赢后的late handle不交付，metadata物理出生ABA仍quarantine。新增success callback读取已完成drain、reject late cancel，并在同一callback提交另一个open，两handle均正常获得。没有增加线程、executor、队列、自动重试或新的wire/disk格式。
+
+最终Java `unified-wal-local-IolCXRCE` 是8项真实场景全部PASS/零skip：普通writer固定cut/历史replacement/lost CLOSED reply、逻辑删除/manifest ABA/共享delete stream、last-fragment写回、readonly recovery observation及当前取消/交接场景。先前focus/related阶段保留自己的input/run，不能累加成额外独立测试。最终Spotless/Checkstyle exit0；实际Java/模型/checker终结后的独立RAT仍exit1，443父提交unapproved、无新增。
+
+原ProfileReadonlyOpen投影新增drained和DrainNeedsActualOpenTerminal，取消假冒drain的指定反例单独声明。最终 `unified-wal-model-ah0_3lf5` 只跑11相关配置：1正向完整PASS（192 generated/112 distinct、queue0）及10指定反例，新drain反例11 generated/11 distinct，明确违反该不变量。catalog730，其余配置未重跑；模型输入的实际cold/read completion、crypto/TLS/byte和handle-local close事实由Java提供，不证明liveness、掉电或完整A/C/D。
+
+证据 `/Users/liusinan/.codex/artifacts/unified-wal/readonly-drain-evidence-hfkcwh48` 保存各stage原input/source/XML/model/raw/命令/checker；最终Java1170与模型1106输入的271个重合SHA一致，2005个unique inputs冻结核验。历史sourceCommit/designInputs/receipts不移绑，最终handoff源码与早期observer-only源码分别保存。默认SDK的公开Profile入口仍需选择；本增量交付的是其可独立复用的cold资源契约，不把它描述为已完成默认路由。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#readonlyOpenRechecksDeleteAfterHandleConstructionAndRejectsMetadataRecreation+ordinaryWriterCloseFreezesConfirmedPrefixAndIgnoresPhysicalUnconfirmedTail+ordinaryWriterClosePreservesHistoricalReplacementAndReconcilesLostClosedReply+logicalDeleteKeepsOfflineObligationsAndDoesNotPromiseAnOldReaderBarrier+logicalDeleteCannotReuseARecreatedManifestOrLoseItsPublishedObligation+committedDeleteDeliveriesShareOneIncarnationStreamAcrossTwoActualLedgers+selectedLastFragmentWritesBackToTheExistingMembersWithoutChangingMembership+recoveryReadonlySessionUsesTheOriginalFencingReadAndDoesNotWriteOrCloseMetadata'
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-readonly --config-prefix ce-profile-readonly
+```
+
+完整16步、默认SDK/完整Main与required authority、full-bytes/backup-restore/accepted退役/GC/mixed及正式性能/运维继续OPEN；默认OFF/SYSTEM/PARK及disabled不变，生产Gate不提升，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

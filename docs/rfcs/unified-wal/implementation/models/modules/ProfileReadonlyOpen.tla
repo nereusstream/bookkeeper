@@ -28,19 +28,20 @@ Init == s \in [phase : {"idle"}, deleted : {FALSE}, birth : {0}, peer : {0, 1},
                gate : {FALSE}, gateDeleted : {FALSE}, gateBirth : {0}, gatePeer : {0},
                stopped : {FALSE}, permit : {FALSE}, delivered : {FALSE}, prefix : {2}, length : {48},
                mutation : {FALSE}, read : {"idle"}, io : {0}, readPermit : {FALSE},
-               cancelledRead : {FALSE}, exposed : {FALSE}]
+               cancelledRead : {FALSE}, exposed : {FALSE}, drained : {FALSE}]
 Start == /\ s.phase = "idle" /\ s' = [s EXCEPT !.phase = "construct", !.permit = TRUE]
 Delete == /\ ~s.deleted /\ s' = [s EXCEPT !.deleted = TRUE]
 Restore == /\ s.birth = 0 /\ s' = [s EXCEPT !.birth = 1]
 CancelOpen == /\ s.phase \in {"construct", "checked"} /\ ~s.stopped
-              /\ s' = [s EXCEPT !.stopped = TRUE, !.permit = IF ReleaseOnCancel THEN FALSE ELSE @]
+              /\ s' = [s EXCEPT !.stopped = TRUE, !.permit = IF ReleaseOnCancel THEN FALSE ELSE @,
+                        !.drained = IF ReleaseOnCancel THEN TRUE ELSE @]
 Check == /\ s.phase = "construct"
          /\ s' = [s EXCEPT !.phase = "checked",
                    !.gate = (~s.deleted \/ IgnoreDelete) /\ (s.birth = 0 \/ IgnoreBirth)
                                /\ (s.peer = 0 \/ IgnoreIncarnation),
                    !.gateDeleted = s.deleted, !.gateBirth = s.birth, !.gatePeer = s.peer]
 Publish == /\ s.phase = "checked" \/ (SkipFinalGate /\ s.phase = "construct")
-           /\ s' = [s EXCEPT !.phase = "done", !.permit = FALSE,
+           /\ s' = [s EXCEPT !.phase = "done", !.permit = FALSE, !.drained = TRUE,
                      !.delivered = (s.gate \/ SkipFinalGate) /\ (~s.stopped \/ ReturnCancelled),
                      !.prefix = IF WrongBoundary THEN 3 ELSE @, !.length = IF WrongBoundary THEN 64 ELSE @]
 Read == /\ s.delivered /\ s.read = "idle"
@@ -60,6 +61,7 @@ OpenHadSameBirth == s.delivered => s.gateBirth = 0
 OpenHadExpectedIncarnation == s.delivered => s.gatePeer = 0
 CancelledOpenNotReturned == s.delivered => ~s.stopped
 ActualOpenOwnsPermit == s.phase \in {"construct", "checked"} => s.permit
+DrainNeedsActualOpenTerminal == s.drained => s.phase = "done" /\ ~s.permit
 ActualReadOwnsPermit == s.io = 1 => s.readPermit
 ReadonlyHasFixedBoundary == s.delivered => s.prefix = 2 /\ s.length = 48
 ReadonlyDoesNotExposeSuffix == ~s.exposed
