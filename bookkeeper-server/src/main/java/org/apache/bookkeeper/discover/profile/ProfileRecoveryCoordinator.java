@@ -2692,7 +2692,10 @@ public final class ProfileRecoveryCoordinator {
                     }
                     ReferenceCounted packed;
                     try {
-                        packed = reader.packageRecoveryEntry(probe);
+                        packed = reader.packageRecoveryEntry(probe, target.allocator());
+                    } catch (org.apache.bookkeeper.proto.profile.ProfileReceiveBudget.CapacityExceededException full) {
+                        done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+                        return;
                     } catch (RuntimeException invalid) {
                         done.completeExceptionally(invalid);
                         return;

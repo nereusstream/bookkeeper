@@ -7036,6 +7036,7 @@ public class SegmentProfileInitialSocketClientTest {
                 var nextField = socket.getClass().getDeclaredField("nextId");
                 nextField.setAccessible(true);
                 org.apache.bookkeeper.util.ByteBufList packed = null;
+                ByteBuf headerView = null;
                 try {
                     long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                     while (fixture.heldReplies.isEmpty() || !channel.eventLoop().submit(() ->
@@ -7067,7 +7068,37 @@ public class SegmentProfileInitialSocketClientTest {
                             assertEquals(16, candidate.length());
                             assertTrue(candidate.payload().isReadOnly());
                             assertEquals(16, candidate.payload().remaining());
-                            packed = (org.apache.bookkeeper.util.ByteBufList) reader.packageRecoveryEntry(candidate);
+                            var target = data.get(fixture.identities.get(1).bookieId());
+                            dataChannel(target).eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
+                            long before = target.backingBytes();
+                            var releasedPayload = Unpooled.buffer(16, 16).writeZero(16);
+                            releasedPayload.release();
+                            var digest = DigestManager.instantiate(44, fixture.password,
+                                    org.apache.bookkeeper.proto.LedgerMetadataFormat.DigestType.CRC32C,
+                                    UnpooledByteBufAllocator.DEFAULT, false);
+                            assertThrows(io.netty.util.IllegalReferenceCountException.class,
+                                    () -> digest.computeDigestAndPackageForSendingV3(
+                                            0, -1, 16, releasedPayload, target.allocator()));
+                            assertEquals(before, target.backingBytes());
+                            int free = Math.toIntExact(target.backingLimitBytes() - before);
+                            ByteBuf occupied = target.allocator().heapBuffer(free, free);
+                            var unexpected = new AtomicReference<io.netty.util.ReferenceCounted>();
+                            try {
+                                assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                                        () -> unexpected.set(reader.packageRecoveryEntry(candidate,
+                                                target.allocator())));
+                                assertEquals(16, candidate.payload().remaining());
+                                assertEquals(target.backingLimitBytes(), target.backingBytes());
+                            } finally {
+                                if (unexpected.get() != null) {
+                                    unexpected.get().release();
+                                }
+                                occupied.release();
+                            }
+                            packed = (org.apache.bookkeeper.util.ByteBufList)
+                                    reader.packageRecoveryEntry(candidate, target.allocator());
+                            assertEquals(before + 36, target.backingBytes());
+                            headerView = packed.getBuffer(0).retainedDuplicate();
                             evidence.close();
                             assertThrows(IllegalStateException.class, candidate::payload);
                             assertFalse(closed.isDone());
@@ -7076,6 +7107,16 @@ public class SegmentProfileInitialSocketClientTest {
                             assertArrayEquals(bytes(16, 8), payload);
                             packed.release();
                             packed = null;
+                            var targetClosed = target.closeAsync();
+                            assertThrows(java.util.concurrent.TimeoutException.class,
+                                    () -> targetClosed.get(150, TimeUnit.MILLISECONDS));
+                            assertEquals(0, source.backingBytes());
+                            assertEquals(44, headerView.getLong(0));
+                            assertTrue(target.backingBytes() >= 36);
+                            headerView.release();
+                            headerView = null;
+                            targetClosed.get(5, TimeUnit.SECONDS);
+                            assertEquals(0, target.backingBytes());
                         }
                     } else if (mode == 2) {
                         var failed = assertThrows(ExecutionException.class, () -> caller.get(5, TimeUnit.SECONDS));
@@ -7093,6 +7134,9 @@ public class SegmentProfileInitialSocketClientTest {
                 } finally {
                     if (packed != null) {
                         packed.release();
+                    }
+                    if (headerView != null) {
+                        headerView.release();
                     }
                     reader.closeAsync().get(5, TimeUnit.SECONDS);
                     fixture.replyFault.set(0);
@@ -9421,6 +9465,11 @@ public class SegmentProfileInitialSocketClientTest {
         coordinatedHistoricalRepair(3);
     }
 
+    @Test
+    public void historicalRepairHeaderQuotaDefersWithoutDataOrMembershipPublication() throws Exception {
+        coordinatedHistoricalRepair(4);
+    }
+
     private void coordinatedHistoricalRepair(int fault) throws Exception {
         boolean cancel = fault == 1;
         try (Fixture fixture = new Fixture(false, false, true, 5, 2, true)) {
@@ -9478,6 +9527,25 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.replyFault.set(18);
             }
             try (BookKeeper sdk = sdk(fixture)) {
+                if (fault == 4) {
+                    var target = data.get(identity.bookieId());
+                    dataChannel(target).eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
+                    int free = Math.toIntExact(target.backingLimitBytes() - target.backingBytes());
+                    ByteBuf occupied = target.allocator().heapBuffer(free, free);
+                    try {
+                        int writes = files(fixture.nodes.get(4)).dataIo.writes;
+                        var refused = coordinator.repairHistorical(entered, prepared, sdk.getClientCtx(),
+                                DESCRIPTOR_BYTES, fixture.credential, data, fixture.clients, bytes(16, 43))
+                                .get(10, TimeUnit.SECONDS);
+                        assertEquals(ProfileRecoveryCoordinator.RepairStatus.DEFERRED, refused.status());
+                        assertEquals(0, refused.copiedEntries());
+                        assertEquals(writes, files(fixture.nodes.get(4)).dataIo.writes);
+                        assertEquals(entered.metadata().metadata().getVersion(),
+                                metadata.readMembership(44).snapshot().metadata().getVersion());
+                    } finally {
+                        occupied.release();
+                    }
+                }
                 var pending = coordinator.repairHistorical(entered, prepared, sdk.getClientCtx(), DESCRIPTOR_BYTES,
                         fixture.credential, data, fixture.clients, bytes(16, 43));
                 if (cancel) {

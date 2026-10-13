@@ -22,6 +22,7 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.FastThreadLocal;
 import java.security.GeneralSecurityException;
@@ -168,16 +169,29 @@ public abstract class DigestManager {
 
     private ByteBufList computeDigestAndPackageForSendingV3(long entryId, long lastAddConfirmed, long length,
                                                             ByteBuf data) {
-        ByteBuf headersBuffer = Unpooled.buffer(METADATA_LENGTH + macCodeLength);
-        headersBuffer.writeLong(ledgerId);
-        headersBuffer.writeLong(entryId);
-        headersBuffer.writeLong(lastAddConfirmed);
-        headersBuffer.writeLong(length);
+        return computeDigestAndPackageForSendingV3(entryId, lastAddConfirmed, length, data,
+                UnpooledByteBufAllocator.DEFAULT);
+    }
 
-        int digest = update(0, headersBuffer, 0, METADATA_LENGTH);
-        digest = update(digest, data, data.readerIndex(), data.readableBytes());
-        populateValueAndReset(digest, headersBuffer);
-        return ByteBufList.get(headersBuffer, data);
+    /** Allocates the standard V3 header with the supplied allocator. Success transfers both buffers to the list;
+     * failure releases only the header, leaving the caller's payload ownership unchanged. */
+    public ByteBufList computeDigestAndPackageForSendingV3(long entryId, long lastAddConfirmed, long length,
+                                                          ByteBuf data, ByteBufAllocator headerAllocator) {
+        ByteBuf headersBuffer = headerAllocator.heapBuffer(METADATA_LENGTH + macCodeLength);
+        try {
+            headersBuffer.writeLong(ledgerId);
+            headersBuffer.writeLong(entryId);
+            headersBuffer.writeLong(lastAddConfirmed);
+            headersBuffer.writeLong(length);
+
+            int digest = update(0, headersBuffer, 0, METADATA_LENGTH);
+            digest = update(digest, data, data.readerIndex(), data.readableBytes());
+            populateValueAndReset(digest, headersBuffer);
+            return ByteBufList.get(headersBuffer, data);
+        } catch (RuntimeException | Error failure) {
+            headersBuffer.release();
+            throw failure;
+        }
     }
 
     /**

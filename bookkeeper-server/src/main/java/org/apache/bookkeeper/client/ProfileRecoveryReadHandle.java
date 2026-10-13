@@ -21,6 +21,7 @@
 package org.apache.bookkeeper.client;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
@@ -490,11 +491,20 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
 
     /** Original SDK recovery packing of this handle's validated probe. Serialization performs no Add or activation. */
     public io.netty.util.ReferenceCounted packageRecoveryEntry(Probe probe) {
+        return packageRecoveryEntry(probe, null);
+    }
+
+    /** Uses the target DATA allocator for the standard header; the retained source payload keeps its own credit. */
+    public io.netty.util.ReferenceCounted packageRecoveryEntry(Probe probe, ByteBufAllocator headerAllocator) {
         if (!fencingReads || probe.owner != probeOwner || probe.outcome() != ProbeOutcome.CANDIDATE) {
             throw new IllegalArgumentException("Recovery packing requires this handle's candidate");
         }
         ByteBuf payload = probe.payloadBuffer();
         try {
+            if (headerAllocator != null) {
+                return getDigestManager().computeDigestAndPackageForSendingV3(probe.entryId(), getLastAddConfirmed(),
+                        probe.length(), payload, headerAllocator);
+            }
             return getDigestManager().computeDigestAndPackageForSending(probe.entryId(), getLastAddConfirmed(),
                     probe.length(), payload, getLedgerKey(),
                     org.apache.bookkeeper.proto.BookieProtocol.FLAG_RECOVERY_ADD);

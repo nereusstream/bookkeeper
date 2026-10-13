@@ -1473,3 +1473,6 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-13 [Recovery candidate 的 backing 所有权](../profile-wire/README.md#recovery-candidate-的-backing-所有权)复用未修改的ProfileBackingBudget/ProfileRecoveryPrefix/ProfileRepairCopy/ProfileReplicaHealth，5nsca88i共40配置、5完整正向/35指定反例。1170 Java与1106模型输入去重2005，共有271路径SHA一致，各阶段receipt保持原绑定。catalog730仅目录统计、完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，原CHECK_DEADLOCK FALSE；原root/refcount及prefix/repair/health均为独立投影，未新增Probe/packed引用或caller交付状态，实际byte custody由native Java验证，不证明组合/所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。
+
+
+2026-10-13 [Repair packing header 的 DATA 预算](../profile-wire/README.md#repair-packing-header-的-data-预算)复用未修改的ProfileBackingBudget/ProfileRepairCopy，mciqyqqx共17配置、2完整正向/15指定反例。1170 Java加11未改动checksum/Classic helper与1106模型去重2016，共有271路径SHA一致，附加输入与父HEAD一致、各stage保持原绑定。catalog730仅目录统计，完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、原CHECK_DEADLOCK FALSE；原root/repair为独立投影，未新增explicit SDK header allocator及跨source-target byte组合，native交接由Java验证，不证明所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。

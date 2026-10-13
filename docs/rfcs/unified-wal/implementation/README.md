@@ -716,3 +716,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-13 [Recovery candidate 的 backing 所有权](profile-wire/README.md#recovery-candidate-的-backing-所有权)：父2719623ab6后新增显式owned point-evidence入口，原source ByteBuf延续至candidate/标准packed payload最后引用释放；原worker/prefix/health/repair内部调用已交接并关闭，旧heap接口兼容。真实legacy分支RED、最终21项Java/style与40有限模型5正向/35指定反例通过，2005 unique输入SHA核验一致；独立RAT父443无新增。legacy/observation/header/caller及统一full-bytes、默认SDK/Main/其余16步验收仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+2026-10-13 [Repair packing header 的 DATA 预算](profile-wire/README.md#repair-packing-header-的-data-预算)：父58b942ee53上标准V3新增explicit header allocator，原内部repair使用目标DATA预算，source payload credit保持原归属；quota不足DEFERRED、不写DATA/发布membership，最后header view释放后target close才drain。真实原Unpooled分支RED、最终两类17项（含Classic digest6）/style与17有限模型2正向/15指定反例通过，2016 unique输入SHA核验；Java/model/style终态后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。默认/legacy/observation/caller及full-bytes总账、默认SDK/Main/其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

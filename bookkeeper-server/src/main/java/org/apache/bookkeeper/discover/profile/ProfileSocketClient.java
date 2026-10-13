@@ -1357,6 +1357,10 @@ final class ProfileSocketClient implements AutoCloseable {
         return backing.usedBytes();
     }
 
+    io.netty.buffer.ByteBufAllocator allocator() {
+        return backing.allocator();
+    }
+
     public int backingLimitBytes() {
         return backingLimitBytes;
     }

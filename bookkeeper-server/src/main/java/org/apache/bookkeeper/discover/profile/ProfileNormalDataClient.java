@@ -17,6 +17,7 @@
 package org.apache.bookkeeper.discover.profile;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.ssl.SslContext;
@@ -259,6 +260,11 @@ public final class ProfileNormalDataClient implements AutoCloseable {
 
     public long backingBytes() {
         return socket.backingBytes();
+    }
+
+    /** Allocations share this DATA connection's quota and keep closeAsync pending until their last release. */
+    public ByteBufAllocator allocator() {
+        return socket.allocator();
     }
 
     public int backingLimitBytes() {

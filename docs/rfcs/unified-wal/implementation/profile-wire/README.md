@@ -1990,3 +1990,20 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 完整最终命令由 inputs.json 保存。最终 Spotless/Checkstyle exit0；Java/model/style终态后的独立 RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。原 ProfileBackingBudget/ProfileRecoveryPrefix/ProfileRepairCopy/ProfileReplicaHealth 未修改，`unified-wal-model-5nsca88i` 40配置得到5完整正向/35指定反例。1170 Java与1106模型输入共有271、去重2005，当前重叠SHA一致；catalog730仅目录统计，未全跑A+C+D，原有限投影未新增Probe/packed ByteBuf引用或caller交付状态，不宣称其组合模型或完整memory/liveness证明。证据 `/Users/liusinan/.codex/artifacts/unified-wal/recovery-payload-evidence-09ydzwle` 保存各阶段source/inputs/命令/XML、真实RED/GREEN、TLC与checker。
 
 该增量只接上述内部 point-evidence candidate 的长期 payload custody；legacy heap probe/reply、normal-tail observation candidates列表、SDK V3 packing header、caller数组、对象/JDK/opaque TLS/kernel与存储/index/control/cold统一总账仍OPEN，性能未测。默认SDK公开runtime选择仍待明确；Main/required producer、backup-restore/accepted退役/GC/mixed兼容/正式性能/运维与全16步验收继续推进，目标active、生产Gate OPEN。默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+
+## Repair packing header 的 DATA 预算
+
+2026-10-13，接续父提交 `58b942ee53fe26a981d35e641acbe22747905e66`。原标准 V3 DigestManager 始终通过 Unpooled 分配独立 header；新增显式 headerAllocator overload，保留同一 metadata/digest writer。默认 V3 仍用原 Unpooled heap allocator，V2 未改变。成功把 header/payload 转交原 ByteBufList；失败释放已分配 header，payload ownership 仍归 caller。CRC32C Profile header 为原32-byte metadata加4-byte digest，不改 wire/CRC、LAC/length字段或格式。
+
+原 DATA client 公开其 existing ClientAllocation allocator，其分配计入同一 connection quota并保留到最后ref归还。ProfileRecoveryReadHandle.packageRecoveryEntry 新overload将该allocator用于header，payload仍retain原source backing；原无allocator入口保持兼容。coordinator repair copy使用目标 DATA allocator，header额度不足投影DEFERRED/0 new copies，不发送DATA或发布membership；其他packing失败仍传播，caller归还payload loan。没有新allocator实现、预算账本、线程、队列或配置开关。
+
+真实 RED `unified-wal-local-nGzwHvpR` 把 explicit overload 的header分配临时切回原 Unpooled：目标quota满仍成功，CapacityExceeded断言预期失败。最小 GREEN `hgevJfB9` 2项，最终 `unified-wal-local-73Usn0Ay` 两个实际类17项零failure/error/skip（Classic MAC/CRC32/CRC32C/autodetection6，Profile socket/recovery/repair11）。native mTLS/文件/原SDK验证36-byte header增量计费、target full quota拒绝后probe仍可重试、header已分配但checksum读取失败的credit归还、最后retained header阻止target close而source payload可先drain；实际repair quota拒绝无DATA写/metadata publication，释放额度后原同intent复制与续接成功。原historical/closed repair、UNKNOWN/cancel、whole recovery与writer close/restart覆盖保留。fPlxV3Ca的测试package-private访问编译失败保留，改用现有公开DigestManager.instantiate，未扩大生产可见性。最小命令：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#recoveryEvidenceKeepsSourceBackingThroughPackingCancellationAndFailedDelivery+historicalRepairHeaderQuotaDefersWithoutDataOrMembershipPublication'
+```
+
+最终完整命令由inputs.json保存，Spotless/Checkstyle exit0；Java/model/style终态后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。原 ProfileBackingBudget/ProfileRepairCopy 未修改，`unified-wal-model-mciqyqqx` 17配置为2完整正向/15指定反例；没有新增SDK header allocator/跨source-target byte组合模型。1170 runner Java加11个未改动checksum/Classic helper输入均已冻结SHA，后者与父HEAD逐项一致；与1106模型输入共有271、去重2016，重叠SHA一致。catalog730仅目录统计，完整A+C+D未全跑，有限模型不证明所有字节/RSS/TLS/kernel/性能或liveness。证据 `/Users/liusinan/.codex/artifacts/unified-wal/repair-header-evidence-k3gsebun` 保留各stage source/input/XML/命令、编译失败/真实RED/GREEN、附加inputs/TLC与checker。
+
+闭合的是实际内部 repair packing header 的 DATA credit交接。默认Classic/Profile其他SDK digest/header、legacy heap reply/probe、normal-tail observation列表、caller数组、对象/JDK/opaque TLS/kernel以及存储/index/control/cold统一总账仍OPEN，性能未测。默认SDK公开runtime选择仍待明确；Main/required producer、backup-restore/accepted退役/GC/mixed兼容/正式性能/运维和全16步综合验收继续推进，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。

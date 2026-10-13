@@ -141,3 +141,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-13继续full-bytes：父2719623ab6后新增owned point-evidence candidate，原worker/probeLast、required prefix/health/repair都延续原source backing credit并关闭，标准packed payload独立retain到实际发送链归还；取消与失败交付释放已验证。最终21项/style与40有限模型及阶段source/receipt由profile-wire/README.md“Recovery candidate 的 backing 所有权”拥有，有限模型未枚举新Probe/packed引用或组合。legacy probe/reply、observation列表、SDK header/caller数组和全部统一总预算，默认SDK公开runtime/Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维与全16步验收继续OPEN；目标active，生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+2026-10-13继续full-bytes：父58b942ee53上原标准V3 digest提供explicit header allocator，内部repair header已计入目标DATA原quota，payload保持source credit。额度不足DEFERRED且不写DATA/发布membership，checksum失败与最后header view的实际释放已验证；默认旧入口兼容。最终17项/style、17有限模型及2016 unique输入/receipt由profile-wire/README.md“Repair packing header 的 DATA 预算”拥有，未冒充跨source-target byte组合模型。其余SDK/header/legacy/observation/caller及统一总预算，默认SDK公开runtime/Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维与全16步验收继续OPEN；目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
