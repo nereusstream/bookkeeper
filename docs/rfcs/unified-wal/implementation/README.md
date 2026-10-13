@@ -728,3 +728,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [声明模型目录与现有 Java 测试整轮验证](profile-wire/README.md#声明模型目录与现有-java-测试整轮验证)：2026-10-13父fd3b1be724上的声明目录完整验证：730配置全部终结，118正向完整搜索PASS/612指定反例；现有Unified WAL Java43类整轮866项原exit1（2个遗留契约断言失败、0错误、5个Linux条件跳过），已修正两处测试并独立补验失败方法2项通过。四类补验首次被会话中断、回执为INCONCLUSIVE；新阶段253项全部通过，style通过；终态后独立RAT exit1/443父HEAD路径无新增，不称CI全绿，原失败/模型回执和修正stage分别保留，不改称整轮全绿。完整A+C+D组合、全字节、默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维和16步验收继续OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[C+D local FREE 组合与实际边界验证](profile-wire/README.md#cd-local-free-组合与实际边界验证)：2026-10-13父36163d9908后在原WholeAllocationFree新增CDSpec，直接组合两个原ProfileLogicalDelete实例与共享allocation的tombstone force/apply、旧I/O/reader drain、FREE force/apply；新四个指定反例覆盖早投递、无force、丢邻居和部分effect伪FREE。最终10配置2完整正向/8指定反例与实际两类6项Java通过，2010 unique source匹配；原Spec五配置保持原计数，catalog735尚未全跑、原730回执不移绑。style通过，实际终态后的独立RAT exit1/443父HEAD路径无新增，不称CI全绿。该单target/两ledger组合不冒充完整A+C+D，继续全16步及其余OPEN范围，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

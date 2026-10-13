@@ -2037,3 +2037,12 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 最终Spotless/Checkstyle exit0，1170 stage输入未变；Java/model/style实际终结后独立 `mvn -o apache-rat:check` exit1，443 unknown/unapproved路径全部存在父HEAD，无新增。原失败报告保留，不称CI全绿。
 
 原model1106/Java1170输入共有271路径且SHA相同、去重2005；另对runner未列出的直接继承ProfileZKTestBase补充父HEAD完全一致的源码/hash，不改动原manifest。原manifest/source/XML/log/coverage/checksums及失败栈保存在 `/Users/liusinan/.codex/artifacts/unified-wal/declared-model-matrix-evidence-2m98x0oo`，后续修正stage单独冻结。默认OFF/SYSTEM/PARK、disabled能力保持；完整A+C+D组合、Linux NUMA、真实掉电、mixed rolling versions、正式性能/canary、full-bytes总账、默认SDK/observe公共约定与其余16步验收仍OPEN，目标active、生产Gate不提升。
+
+
+## C+D local FREE 组合与实际边界验证
+
+2026-10-13，父源码 `36163d9908883d927d31f129fe2b301833df3d1e`。本轮仅增加现有模型中的组合spec/config与runner条目，Java生产/测试源码未改。复用原真实测试验证与组合对应的合同：混合allocation物理删除仍保留并读取其他ledger；FREE等待真实writer/read quiescence；FREE force UNKNOWN不能发布healthy close/reopen；logical delete保留offline义务且不承诺旧reader即时barrier；同committed event的实际FREE和held force期间receive/server custody保持。`unified-wal-local-bAAmsNCW` 两类6项全部通过、0 failure/error/skip，1170原stage输入SHA逐项核验；六项不等于完整集群删除/重启/掉电或全部测试通过。
+
+[模型记录](../models/README.md#cd-的-logical-到共享-allocation-free-组合)拥有最终10配置2完整正向/8指定反例、1111 model与Java共有271/去重2010 source；新spec实际INSTANCE两个原logical状态机并连接本地tombstone force/apply与原FREE状态机，不把独立模型PASS相加当组合证明。原730配置整轮保留fd3b1be724绑定，新增catalog735未全量运行。两轮建模INCONCLUSIVE及后续各stage原输出/source均保留，证据目录 `/Users/liusinan/.codex/artifacts/unified-wal/cd-composition-evidence-a6fepgxb`。
+
+最终Spotless/Checkstyle exit0，Java/model输入SHA保持原阶段；实际Java/model/style终结后独立RAT exit1，443 unknown/unapproved路径全部存在父HEAD、无新增，原失败报告保留，不称CI全绿。本组合限于单retained target与一个共享allocation的两个fenced CLOSED ledger；Java实际native字节/force、ZK、mTLS与模型有限状态分别给出证据，没有完整A+C、多目标restart/rejoin/MOVE/reuse/history GC或A+C+D组合/性能/liveness证明。继续默认SDK/observe公共约定、Main/required producer、full-bytes、backup-restore/accepted退役/GC/mixed/正式性能/运维与全部16步验收；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

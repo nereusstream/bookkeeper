@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为730配置；2026-10-13在fd3b1be724源码上首次完整运行该声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为735配置；新增C+D五配置仅有定向结果。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,11 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `cd-whole-free` | 原ProfileLogicalDelete的两个实例与原WholeAllocationFree共用实际状态展开；logical不产生local effect，逐ledger delivery→tombstone force/apply→全部旧I/O/pin排空→FREE force/apply；仅一个retained target、一个共享allocation |
+| `ce-cd-whole-free-delivery` | 提前投递须违反CDDeliveryHasLogicalObligation |
+| `ce-cd-whole-free-force` | 跳过tombstone force须违反CDLocalEffectHasForce |
+| `ce-cd-whole-free-neighbour` | 单ledger tombstone清空共享alive须违反CDRemainingLedgerStaysAllocated |
+| `ce-cd-whole-free-quorum` | 仅一个ledger local effect就FREE须违反CDFreeHasEveryLogicalAndLocalEffect |
 | `a-profile-delete-publication` | 两个target有序publication prefix、logical activation及单consumer停收/actual cold+I/O终结；真实ZK/force为输入，不含1088-target/GC/handoff/TLS/A+C+D |
 | `ce-profile-delete-publication-prefix` | PrefixBeforeIndex mutation须违反 `LogicalHasEveryDelivery` |
 | `ce-profile-delete-publication-activation` | EarlyLogical mutation须违反 `LogicalHasEveryDelivery` |
@@ -1488,3 +1493,20 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 TLC1.7.4、Corretto21.0.10、单worker、heap512MiB/direct64MiB、seed1/fp0、每配置120秒上限，无symmetry或额外state constraint，原CHECK_DEADLOCK FALSE；没有fairness/liveness检查。1106模型输入与同父源码1170 Java输入有271项相同路径且SHA完全一致，去重2005。原manifest、冻结源码、全部checker输出/反例/coverage/checksums与原运行目录逐文件核验后归档到 `/Users/liusinan/.codex/artifacts/unified-wal/declared-model-matrix-evidence-2m98x0oo`。
 
 同源码Java43类整轮866项的原结果为2失败/0错误/5个Linux条件跳过；两个失败的契约核对及独立补验由[实现验证记录](../profile-wire/README.md#声明模型目录与现有-java-测试整轮验证)拥有，后续测试修正不移绑本次模型回执。此轮完成当前声明的有限配置目录验证；完整A+C+D组合、native持久化/掉电、全部字节、混合滚动版本、正式性能/运维与全16步综合验收继续OPEN，生产Gate不提升。
+
+
+## C+D 的 logical 到共享 allocation FREE 组合
+
+2026-10-13，父源码 `36163d9908883d927d31f129fe2b301833df3d1e`。在原WholeAllocationFree模块中新增CDSpec，直接INSTANCE原ProfileLogicalDelete两次，未复制其状态机或把logical safety作为外部假设；两个fenced CLOSED ledger、每个完整initial/retired/repair义务与offline/caller cancel、cold terminal、manifest recreate/query均继续展开。共享allocation有两个原ledger occupant；两个实例共享同一target offline状态；offline允许logical success但阻止本地delivery。每个target本地delivery只在matching manifest birth和完整logical obligation后发生，tombstone force/apply分开，force UNKNOWN使当前本地episode停收、不生成applied事实。旧I/O/reader、quiescence gate、FREE提交/force/apply/UNKNOWN、caller等待取消与crash使用原allocator动作。
+
+logical success不等待local FREE；只删除L1不能移除L2，全部local tombstone都force/apply、旧I/O与reader排空后才可FREE。四个mutation分别提前delivery、跳过tombstone force、丢共享邻居、用部分local effect授权FREE，均须命中各自指定invariant。原Spec初始化三个组合变量为0并保持不变，原五配置行为和状态计数不变；组合变量只由CDSpec展开，不变更Java实现、wire或持久格式。
+
+最终 `unified-wal-model-224si3wd` 共10配置：2完整正向PASS/8指定反例；新组合正向441,506 generated/63,360 distinct、queue0、depth/diameter27，4.237秒、peak RSS297,598,976 bytes。覆盖输出的原FREE Apply与local tombstone apply均非零，正向确实到达generation2；四个指定反例分别命中原配置invariant，不是凭语法成功或不可达FREE得到PASS。TLC1.7.4/Corretto21.0.10、单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE，未检查fairness/liveness或性能。
+
+复现仍使用原runner：
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix cd-whole-free --config-prefix ce-cd-whole-free --config-prefix c-whole-free --config-prefix ce-whole-free
+```
+
+两轮初始化/子表达式赋值错误的bn9jti0_/mrwr9v0d保留INCONCLUSIVE；修正后cys5hub8与_82frj3x属于各自阶段，随后unaxbl7j加入manifest birth准入、tombstone UNKNOWN与runner scope说明，仍保留原结果；最终将offline绑定同一target并阻止local delivery，224si3wd拥有上述结果。1111最终模型输入与1170 Java输入共有271、去重2010，重叠SHA一致；source/manifest/config/checker/全部反例/XML及stage overrides保留在 `/Users/liusinan/.codex/artifacts/unified-wal/cd-composition-evidence-a6fepgxb`。对应实际六项Java由[实现记录](../profile-wire/README.md#cd-local-free-组合与实际边界验证)拥有。catalog735未全量重跑，原730整轮仍绑定fd3b1be724；此为一个target/两个ledger/单allocation的C+D组合，local durable/fence字节、ZK原子性仍由Java产生，未覆盖完整多target、MOVE/reuse、restart/rejoin/history GC、A+C或完整A+C+D。生产Gate及全16步验收保持OPEN。
