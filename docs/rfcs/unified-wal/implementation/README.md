@@ -713,3 +713,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-13 [SDK LAC evidence 的 backing 所有权](profile-wire/README.md#sdk-lac-evidence-的-backing-所有权)：父73b67bc6e9上将 URL1/URL2 的 source/explicit payload 和 matching READ_ENTRY anchor 交给原已计费 frame，fan-in/ordered 等待期间保留，最终 evidence 前或失败/拒绝时释放。真实父consumer RED、最终三类24项与style通过；原17配置模型3正向/14指定反例按独立stage保留，2005 unique输入核验。独立RAT父443无新增；该切片不闭合 full-bytes 总账、默认SDK公开入口或全16步Gate，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变。
+
+
+2026-10-13 [Recovery candidate 的 backing 所有权](profile-wire/README.md#recovery-candidate-的-backing-所有权)：父2719623ab6后新增显式owned point-evidence入口，原source ByteBuf延续至candidate/标准packed payload最后引用释放；原worker/prefix/health/repair内部调用已交接并关闭，旧heap接口兼容。真实legacy分支RED、最终21项Java/style与40有限模型5正向/35指定反例通过，2005 unique输入SHA核验一致；独立RAT父443无新增。legacy/observation/header/caller及统一full-bytes、默认SDK/Main/其余16步验收仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

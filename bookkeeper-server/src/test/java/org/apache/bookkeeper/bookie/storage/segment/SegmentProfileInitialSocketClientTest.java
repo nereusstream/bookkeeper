@@ -6995,6 +6995,117 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void recoveryEvidenceKeepsSourceBackingThroughPackingCancellationAndFailedDelivery() throws Exception {
+        for (int mode = 0; mode < 3; mode++) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                Map<BookieId, ProfileNormalDataClient> data = new HashMap<>();
+                Map<BookieId, ProfileInitialControlClient> controls = new HashMap<>();
+                for (int target = 0; target < 3; target++) {
+                    var peer = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                    data.put(fixture.identities.get(target).bookieId(), peer);
+                    controls.put(fixture.identities.get(target).bookieId(),
+                            fixture.clients.get("socket" + target + ":3181"));
+                    if (target == 0) {
+                        evidenceEntry(fixture, peer, 0, -1, 16, 16);
+                    }
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var plan = fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan();
+                var entered = fixture.reservations.beginRecovery(metadata, plan);
+                var coordinator = new org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator(
+                        fixture.reservations, metadata, fixture.cold);
+                coordinator.fence(entered, fixture.clients, fixture.credential).get(5, TimeUnit.SECONDS);
+                var reader = ProfileRecoveryReadHandle.fromContext(sdk.getClientCtx(), entered,
+                        available.ready().page().installs(), data, controls);
+                fixture.faultTarget.set(2);
+                fixture.replyFault.set(19);
+                var caller = reader.probeBufferEvidence(0);
+                var source = data.get(fixture.identities.get(0).bookieId());
+                var socketField = ProfileNormalDataClient.class.getDeclaredField("socket");
+                socketField.setAccessible(true);
+                Object socket = socketField.get(source);
+                var channelField = socket.getClass().getDeclaredField("channel");
+                channelField.setAccessible(true);
+                Channel channel = (Channel) channelField.get(socket);
+                var pendingField = socket.getClass().getDeclaredField("pending");
+                pendingField.setAccessible(true);
+                var nextField = socket.getClass().getDeclaredField("nextId");
+                nextField.setAccessible(true);
+                org.apache.bookkeeper.util.ByteBufList packed = null;
+                try {
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (fixture.heldReplies.isEmpty() || !channel.eventLoop().submit(() ->
+                            nextField.getLong(socket) > 3 && ((Map<?, ?>) pendingField.get(socket)).isEmpty())
+                                    .get(5, TimeUnit.SECONDS)) {
+                        assertTrue(System.nanoTime() < until);
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    sdk.getClientCtx().getMainWorkerPool().submitOrdered(44, () -> null).get(5, TimeUnit.SECONDS);
+                    var closed = source.closeAsync();
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> closed.get(150, TimeUnit.MILLISECONDS));
+                    assertTrue(source.backingBytes() >= 52);
+                    if (mode == 1) {
+                        assertTrue(caller.cancel(false));
+                        var busy = assertThrows(ExecutionException.class,
+                                () -> reader.probeBufferEvidence(0).get(5, TimeUnit.SECONDS));
+                        assertEquals(BKException.Code.TooManyRequestsException,
+                                BKException.getExceptionCode(busy.getCause()));
+                    } else if (mode == 2) {
+                        reader.closeAsync().get(5, TimeUnit.SECONDS);
+                    }
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    if (mode == 0) {
+                        try (var evidence = caller.get(5, TimeUnit.SECONDS)) {
+                            var candidate = evidence.candidate();
+                            assertNotNull(candidate);
+                            assertEquals(16, candidate.length());
+                            assertTrue(candidate.payload().isReadOnly());
+                            assertEquals(16, candidate.payload().remaining());
+                            packed = (org.apache.bookkeeper.util.ByteBufList) reader.packageRecoveryEntry(candidate);
+                            evidence.close();
+                            assertThrows(IllegalStateException.class, candidate::payload);
+                            assertFalse(closed.isDone());
+                            byte[] payload = new byte[16];
+                            packed.getBuffer(1).getBytes(packed.getBuffer(1).readerIndex(), payload);
+                            assertArrayEquals(bytes(16, 8), payload);
+                            packed.release();
+                            packed = null;
+                        }
+                    } else if (mode == 2) {
+                        var failed = assertThrows(ExecutionException.class, () -> caller.get(5, TimeUnit.SECONDS));
+                        assertEquals(BKException.Code.ReadException, BKException.getExceptionCode(failed.getCause()));
+                    }
+                    closed.get(5, TimeUnit.SECONDS);
+                    assertEquals(0, source.backingBytes());
+                    if (mode == 1) {
+                        assertTrue(caller.isCancelled());
+                        try (var missing = reader.probeBufferEvidence(99).get(5, TimeUnit.SECONDS)) {
+                            assertNull(missing.candidate());
+                            assertTrue(missing.absenceCovered());
+                        }
+                    }
+                } finally {
+                    if (packed != null) {
+                        packed.release();
+                    }
+                    reader.closeAsync().get(5, TimeUnit.SECONDS);
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    if (caller.isDone() && !caller.isCompletedExceptionally()) {
+                        caller.join().close();
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     public void recoveryObservationRejectsAdjacentLengthConflictAndChangedContext() throws Exception {
         for (boolean changed : List.of(false, true)) {
             try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {

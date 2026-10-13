@@ -317,15 +317,18 @@ public final class ProfileRecoveryCoordinator {
                     });
                 }
                 return probeLast(plan.recovery()).thenCompose(evidence -> {
-                    if (evidence == null) {
-                        return emptyUnavailable(plan.recovery(), key).thenCompose(sources -> selectRepair(
-                                plan.recovery(), value.getAllEnsembles().lastKey(), sources, key));
+                    try (evidence) {
+                        if (evidence == null) {
+                            return emptyUnavailable(plan.recovery(), key).thenCompose(sources -> selectRepair(
+                                    plan.recovery(), value.getAllEnsembles().lastKey(), sources, key));
+                        }
+                        if (evidence.conflict()) {
+                            finish(WorkerStatus.QUARANTINED);
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return selectRepair(plan.recovery(), value.getAllEnsembles().lastKey(),
+                                evidence.sources(), key);
                     }
-                    if (evidence.conflict()) {
-                        finish(WorkerStatus.QUARANTINED);
-                        return CompletableFuture.completedFuture(null);
-                    }
-                    return selectRepair(plan.recovery(), value.getAllEnsembles().lastKey(), evidence.sources(), key);
                 });
             });
         }
@@ -370,7 +373,7 @@ public final class ProfileRecoveryCoordinator {
                     var value = ready.recovery().metadata().metadata().getValue();
                     var reader = ProfileRecoveryReadHandle.fromContext(sdk, ready.recovery(), ready.permitted(),
                             workerData(value, null), controls);
-                    return reader.probeEvidence(value.getAllEnsembles().lastKey())
+                    return reader.probeBufferEvidence(value.getAllEnsembles().lastKey())
                             .whenComplete((result, failure) -> reader.closeAsync());
                 } catch (java.security.GeneralSecurityException invalid) {
                     return CompletableFuture.failedFuture(invalid);
@@ -933,34 +936,36 @@ public final class ProfileRecoveryCoordinator {
                 finish(PrefixStatus.DEFERRED, stopped.get() ? PrefixReason.CANCELLED : PrefixReason.LIMIT, List.of());
                 return;
             }
-            reader.probeEvidence(next).whenComplete((evidence, failure) -> {
-                if (failure != null && !(cause(failure) instanceof BKException)) {
-                    done.completeExceptionally(failure);
-                } else if (failure != null || stopped.get()) {
-                    finish(PrefixStatus.DEFERRED, stopped.get() ? PrefixReason.CANCELLED
-                            : PrefixReason.SOURCE_UNAVAILABLE, List.of());
-                } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
-                        == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
-                    finish(PrefixStatus.CONFLICT, PrefixReason.PERMISSION, evidence.sources());
-                } else if (evidence.conflict()) {
-                    finish(PrefixStatus.QUARANTINED, PrefixReason.PAYLOAD_CONFLICT, evidence.sources());
-                } else if (evidence.candidate() != null) {
-                    var candidate = evidence.candidate();
-                    int bytes = candidate.payload().remaining();
-                    if (length > Long.MAX_VALUE - bytes || candidate.length() != length + bytes) {
-                        finish(PrefixStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT, evidence.sources());
+            reader.probeBufferEvidence(next).whenComplete((evidence, failure) -> {
+                try (evidence) {
+                    if (failure != null && !(cause(failure) instanceof BKException)) {
+                        done.completeExceptionally(failure);
+                    } else if (failure != null || stopped.get()) {
+                        finish(PrefixStatus.DEFERRED, stopped.get() ? PrefixReason.CANCELLED
+                                : PrefixReason.SOURCE_UNAVAILABLE, List.of());
+                    } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                            == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                        finish(PrefixStatus.CONFLICT, PrefixReason.PERMISSION, evidence.sources());
+                    } else if (evidence.conflict()) {
+                        finish(PrefixStatus.QUARANTINED, PrefixReason.PAYLOAD_CONFLICT, evidence.sources());
+                    } else if (evidence.candidate() != null) {
+                        var candidate = evidence.candidate();
+                        int bytes = candidate.payload().remaining();
+                        if (length > Long.MAX_VALUE - bytes || candidate.length() != length + bytes) {
+                            finish(PrefixStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT, evidence.sources());
+                        } else {
+                            length = candidate.length();
+                            next++;
+                            start(); // Each probe uses the original ordered executor; no range-sized future chain.
+                        }
+                    } else if (next <= required) {
+                        finish(evidence.exhausted() ? PrefixStatus.DATA_LOSS : PrefixStatus.DEFERRED,
+                                PrefixReason.REQUIRED_HOLE, evidence.sources());
                     } else {
-                        length = candidate.length();
-                        next++;
-                        start(); // Each probe uses the original ordered executor; no range-sized future chain.
+                        finish(evidence.absenceCovered() ? PrefixStatus.VERIFIED_NORMAL_TAIL : PrefixStatus.DEFERRED,
+                                evidence.absenceCovered() ? PrefixReason.NORMAL_TAIL : PrefixReason.SOURCE_UNAVAILABLE,
+                                evidence.sources());
                     }
-                } else if (next <= required) {
-                    finish(evidence.exhausted() ? PrefixStatus.DATA_LOSS : PrefixStatus.DEFERRED,
-                            PrefixReason.REQUIRED_HOLE, evidence.sources());
-                } else {
-                    finish(evidence.absenceCovered() ? PrefixStatus.VERIFIED_NORMAL_TAIL : PrefixStatus.DEFERRED,
-                            evidence.absenceCovered() ? PrefixReason.NORMAL_TAIL : PrefixReason.SOURCE_UNAVAILABLE,
-                            evidence.sources());
                 }
             });
         }
@@ -2189,38 +2194,40 @@ public final class ProfileRecoveryCoordinator {
                         : new ReplicaScanResult(ReplicaHealthStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT,
                                 next, List.of()));
             } else {
-                reader.probeEvidence(next).whenComplete((evidence, failure) -> {
-                    if (failure != null) {
-                        if (cause(failure) instanceof BKException) {
+                reader.probeBufferEvidence(next).whenComplete((evidence, failure) -> {
+                    try (evidence) {
+                        if (failure != null) {
+                            if (cause(failure) instanceof BKException) {
+                                done.complete(new ReplicaScanResult(ReplicaHealthStatus.DEFERRED,
+                                        PrefixReason.SOURCE_UNAVAILABLE, next, List.of()));
+                            } else {
+                                done.completeExceptionally(failure);
+                            }
+                        } else if (stopped.get()) {
                             done.complete(new ReplicaScanResult(ReplicaHealthStatus.DEFERRED,
-                                    PrefixReason.SOURCE_UNAVAILABLE, next, List.of()));
+                            PrefixReason.CANCELLED, next, List.of()));
+                        } else if (evidence.conflict()) {
+                            finish(ReplicaHealthStatus.QUARANTINED, PrefixReason.PAYLOAD_CONFLICT, evidence);
+                        } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                                == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                            finish(ReplicaHealthStatus.CONFLICT, PrefixReason.PERMISSION, evidence);
+                        } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                                == ProfileRecoveryReadHandle.SourceOutcome.MISSING || source.outcome()
+                                    == ProfileRecoveryReadHandle.SourceOutcome.CORRUPT)) {
+                            finish(ReplicaHealthStatus.UNDERREPLICATED, PrefixReason.REQUIRED_HOLE, evidence);
+                        } else if (evidence.candidate() == null || evidence.sources().stream().anyMatch(source ->
+                                source.outcome() != ProfileRecoveryReadHandle.SourceOutcome.FOUND)) {
+                            finish(ReplicaHealthStatus.DEFERRED, PrefixReason.SOURCE_UNAVAILABLE, evidence);
                         } else {
-                            done.completeExceptionally(failure);
-                        }
-                    } else if (stopped.get()) {
-                        done.complete(new ReplicaScanResult(ReplicaHealthStatus.DEFERRED,
-                        PrefixReason.CANCELLED, next, List.of()));
-                    } else if (evidence.conflict()) {
-                        finish(ReplicaHealthStatus.QUARANTINED, PrefixReason.PAYLOAD_CONFLICT, evidence);
-                    } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
-                            == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
-                        finish(ReplicaHealthStatus.CONFLICT, PrefixReason.PERMISSION, evidence);
-                    } else if (evidence.sources().stream().anyMatch(source -> source.outcome()
-                            == ProfileRecoveryReadHandle.SourceOutcome.MISSING || source.outcome()
-                                == ProfileRecoveryReadHandle.SourceOutcome.CORRUPT)) {
-                        finish(ReplicaHealthStatus.UNDERREPLICATED, PrefixReason.REQUIRED_HOLE, evidence);
-                    } else if (evidence.candidate() == null || evidence.sources().stream().anyMatch(source ->
-                            source.outcome() != ProfileRecoveryReadHandle.SourceOutcome.FOUND)) {
-                        finish(ReplicaHealthStatus.DEFERRED, PrefixReason.SOURCE_UNAVAILABLE, evidence);
-                    } else {
-                        var candidate = evidence.candidate();
-                        int bytes = candidate.payload().remaining();
-                        if (length > Long.MAX_VALUE - bytes || candidate.length() != length + bytes) {
-                            finish(ReplicaHealthStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT, evidence);
-                        } else {
-                            length = candidate.length();
-                            next++;
-                            step();
+                            var candidate = evidence.candidate();
+                            int bytes = candidate.payload().remaining();
+                            if (length > Long.MAX_VALUE - bytes || candidate.length() != length + bytes) {
+                                finish(ReplicaHealthStatus.QUARANTINED, PrefixReason.LENGTH_CONFLICT, evidence);
+                            } else {
+                                length = candidate.length();
+                                next++;
+                                step();
+                            }
                         }
                     }
                 });
@@ -2658,57 +2665,60 @@ public final class ProfileRecoveryCoordinator {
                 done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
                 return;
             }
-            reader.probeEvidence(next).whenComplete((evidence, readFailure) -> {
-                if (readFailure != null && !(cause(readFailure) instanceof BKException)) {
-                    done.completeExceptionally(readFailure);
-                    return;
-                }
-                if (readFailure != null || stopped.get()) {
-                    done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
-                    return;
-                }
-                if (evidence.conflict()) {
-                    done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
-                    return;
-                }
-                if (evidence.sources().stream().anyMatch(source -> source.outcome()
-                        == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
-                    done.complete(new RepairResult(RepairStatus.CONFLICT, copied, null));
-                    return;
-                }
-                var probe = evidence.candidate();
-                if (probe == null) {
-                    done.complete(new RepairResult(evidence.exhausted() ? RepairStatus.DATA_LOSS
-                            : RepairStatus.DEFERRED, copied, null));
-                    return;
-                }
-                ReferenceCounted packed;
-                try {
-                    packed = reader.packageRecoveryEntry(probe);
-                } catch (RuntimeException invalid) {
-                    done.completeExceptionally(invalid);
-                    return;
-                }
-                try {
-                    target.addRecovery(intent, credential, next, packed).whenComplete((reply, failure) -> {
+            reader.probeBufferEvidence(next).whenComplete((evidence, readFailure) -> {
+                try (evidence) {
+                    if (readFailure != null && !(cause(readFailure) instanceof BKException)) {
+                        done.completeExceptionally(readFailure);
+                        return;
+                    }
+                    if (readFailure != null || stopped.get()) {
+                        done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+                        return;
+                    }
+                    if (evidence.conflict()) {
+                        done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
+                        return;
+                    }
+                    if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                            == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                        done.complete(new RepairResult(RepairStatus.CONFLICT, copied, null));
+                        return;
+                    }
+                    var probe = evidence.candidate();
+                    if (probe == null) {
+                        done.complete(new RepairResult(evidence.exhausted() ? RepairStatus.DATA_LOSS
+                                : RepairStatus.DEFERRED, copied, null));
+                        return;
+                    }
+                    ReferenceCounted packed;
+                    try {
+                        packed = reader.packageRecoveryEntry(probe);
+                    } catch (RuntimeException invalid) {
+                        done.completeExceptionally(invalid);
+                        return;
+                    }
+                    try {
+                        target.addRecovery(intent, credential, next, packed).whenComplete((reply, failure) -> {
+                            packed.release();
+                            if (failure != null || reply.statusClass() != ProfileStatus.StatusClass.OK
+                                    || reply.durableResult() != ProfileStatus.DurableResult.APPLIED
+                                        && reply.durableResult() != ProfileStatus.DurableResult.ALREADY_APPLIED) {
+                                done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+                                return;
+                            }
+                            copied++;
+                            if (next == intent.range().lastEntryId()) {
+                                done.complete(new RepairResult(RepairStatus.REPAIRED_HISTORICAL_FRAGMENT,
+                                        copied, null));
+                            } else {
+                                next++;
+                                step(); // Each probe schedules on the original ordered executor.
+                            }
+                        });
+                    } catch (RuntimeException failure) {
                         packed.release();
-                        if (failure != null || reply.statusClass() != ProfileStatus.StatusClass.OK
-                                || reply.durableResult() != ProfileStatus.DurableResult.APPLIED
-                                    && reply.durableResult() != ProfileStatus.DurableResult.ALREADY_APPLIED) {
-                            done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
-                            return;
-                        }
-                        copied++;
-                        if (next == intent.range().lastEntryId()) {
-                            done.complete(new RepairResult(RepairStatus.REPAIRED_HISTORICAL_FRAGMENT, copied, null));
-                        } else {
-                            next++;
-                            step(); // probe schedules on the original SDK ordered executor; no growing future chain.
-                        }
-                    });
-                } catch (RuntimeException failure) {
-                    packed.release();
-                    done.completeExceptionally(failure);
+                        done.completeExceptionally(failure);
+                    }
                 }
             });
         }

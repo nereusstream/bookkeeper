@@ -1470,3 +1470,6 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-13 [SDK LAC evidence 的 backing 所有权](../profile-wire/README.md#sdk-lac-evidence-的-backing-所有权)复用未修改的 ProfileBackingBudget/ProfileLacEvidence，zeilqhjh 共17配置、3完整正向/14指定反例。1106模型与最终1170 Java去重2005、共有271路径，仅socket测试故障目标修正有stage差异，分别核验归档、不移绑receipt。catalog730仅目录统计，完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，原CHECK_DEADLOCK FALSE；root credit与原A2/A3 evidence语义为独立投影，未枚举SDK response/fan-in/ordered callback所有权或其组合，native实际byte custody由Java验证，不证明所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。
+
+
+2026-10-13 [Recovery candidate 的 backing 所有权](../profile-wire/README.md#recovery-candidate-的-backing-所有权)复用未修改的ProfileBackingBudget/ProfileRecoveryPrefix/ProfileRepairCopy/ProfileReplicaHealth，5nsca88i共40配置、5完整正向/35指定反例。1170 Java与1106模型输入去重2005，共有271路径SHA一致，各阶段receipt保持原绑定。catalog730仅目录统计、完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，原CHECK_DEADLOCK FALSE；原root/refcount及prefix/repair/health均为独立投影，未新增Probe/packed引用或caller交付状态，实际byte custody由native Java验证，不证明组合/所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。

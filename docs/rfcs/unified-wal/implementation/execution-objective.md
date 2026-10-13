@@ -138,3 +138,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-13继续full-bytes：父73b67bc6e9后已接 actual SDK LAC fan-in 与 matching anchor 的原 frame credit，URL1/URL2旧heap decoder保持兼容；source/explicit retained view、取消回复丢弃及collector拒绝释放均有真实验证。最终三类24项/style、17个有限模型配置及阶段source/receipt由profile-wire/README.md“SDK LAC evidence 的 backing 所有权”拥有；没有把有限root/evidence投影当作组合模型。legacy reply/caller数组、对象/TLS/kernel及存储/index/control/cold总账、默认SDK公开runtime选择、Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维和全16步验收继续OPEN；目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+2026-10-13继续full-bytes：父2719623ab6后新增owned point-evidence candidate，原worker/probeLast、required prefix/health/repair都延续原source backing credit并关闭，标准packed payload独立retain到实际发送链归还；取消与失败交付释放已验证。最终21项/style与40有限模型及阶段source/receipt由profile-wire/README.md“Recovery candidate 的 backing 所有权”拥有，有限模型未枚举新Probe/packed引用或组合。legacy probe/reply、observation列表、SDK header/caller数组和全部统一总预算，默认SDK公开runtime/Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维与全16步验收继续OPEN；目标active，生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

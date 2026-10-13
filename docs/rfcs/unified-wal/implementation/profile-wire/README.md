@@ -1971,3 +1971,22 @@ scripts/unified-wal/run-local-storage-tests.sh 'ProfileLacReplyCodecTest,Segment
 未修改的 ProfileBackingBudget/ProfileLacEvidence 在 `unified-wal-model-zeilqhjh` 的17配置得到3完整正向/14指定反例。1170 Java与1106模型输入共有271路径、去重2005；只有 socket 测试的上述故障目标修正造成 stage 差异，原模型 input/receipt 与最终 Java 分别归档核验 SHA。原模型未枚举 response future、fan-in payload 或 SDK callback 的 byte ownership，不把两个有限投影宣称为其组合或完整 A+C+D；catalog730仅目录统计。证据 `/Users/liusinan/.codex/artifacts/unified-wal/lac-payload-evidence-qv9iszn_` 保留实际阶段 input/source/命令/XML、RED、所有失败、TLC 与 checker。
 
 该增量接通实际 SDK LAC/anchor 的长期 payload custody；legacy heap reply、caller 数组、对象/JDK/opaque TLS/kernel 开销及存储/index/control/cold 统一总账仍 OPEN，性能未测。默认 SDK 的公开 runtime 入口选择仍待明确，完整 Main/required producer、backup-restore/accepted 退役/GC/mixed 兼容/正式性能/运维及全16步综合验收继续 OPEN；目标 active，默认 OFF/SYSTEM/PARK、disabled 能力和生产 Gate 不提升，Linux NUMA/真实掉电/正式性能/canary 未执行。
+
+
+## Recovery candidate 的 backing 所有权
+
+2026-10-13，接续父提交 `2719623ab67c22a5605da128a47a04d2b5234d08`。原 ProfileRecoveryReadHandle.EvidenceRead 在第一个已验证 source 上复制 candidate 到无 credit 的 byte[]；新增 probeBufferEvidence 复用原完全相同的 all-write-set/fence/digest/metadata 检查，把 candidate 保留为原已计费 read-only source ByteBuf。PointEvidence/Probe 支持 idempotent close，新入口的 payload() 仅借用其存活 backing，关闭后拒绝再取 view。原 probe/probeEvidence 的 heap 结果保持兼容，legacy close 不改变原 payload 可读语义。
+
+caller cancellation 不提前释放 active read round；全部实际 source 回调结束后才关闭未交付 evidence，成功交付后由 caller 关闭。失败或 reader/metadata/peer identity 变化在 exceptional completion 前释放 candidate。packageRecoveryEntry 复用标准 V3 CRC32C packing，retained payload 交给原 ByteBufList；evidence 关闭不提前释放尚由 packed data 持有的 source backing，最后引用归还才结束 source close。pack 构造失败时归还 payload loan。
+
+原 coordinator 的 worker probeLast、required-prefix verifier、replica health scan 和 historical/closed repair copy 改用新入口并关闭 evidence；只保留 scalar/source facts或把已 retained payload交给原发送链。拒绝/UNKNOWN、同坐标幂等、finite loss与absence coverage、原ACK/来源/fenced-close/metadata发布契约不变。没有新 allocator/预算账本、线程、队列、wire/持久格式或 authority；ordinary Add没有新增MetadataStore往返、控制fsync或handshake。
+
+真实 RED `unified-wal-local-ImxyRLQb` 在新入口中显式选择保留的 legacy EvidenceRead(false) 分支：其他 source 的真实 READ reply 尚未释放时，candidate来源节点 closeAsync 已完成，新增 TimeoutException 断言预期失败。最小 GREEN `zYUUpQzK` 2项与最终 `unified-wal-local-mqArYWAO` 单个 actual socket/SDK 类21项均零 failure/error/skip。新增用例验证 actual mTLS/文件 payload custody、packing retained loan、取消仍保留 single round 到最后回复、取消丢弃与 reader close后失败交付释放；原 prefix A2/A3、required loss/UNKNOWN/conflict、whole recovery、closed/history repair与丢回复续接、health/worker marker、writer close/restart及OPEN audit/drain均通过。最小命令：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#recoveryEvidenceKeepsSourceBackingThroughPackingCancellationAndFailedDelivery+historicalRepairCoordinatorCopiesMultipleEntriesAndResumesPublishedCloseWithoutRecopy'
+```
+
+完整最终命令由 inputs.json 保存。最终 Spotless/Checkstyle exit0；Java/model/style终态后的独立 RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。原 ProfileBackingBudget/ProfileRecoveryPrefix/ProfileRepairCopy/ProfileReplicaHealth 未修改，`unified-wal-model-5nsca88i` 40配置得到5完整正向/35指定反例。1170 Java与1106模型输入共有271、去重2005，当前重叠SHA一致；catalog730仅目录统计，未全跑A+C+D，原有限投影未新增Probe/packed ByteBuf引用或caller交付状态，不宣称其组合模型或完整memory/liveness证明。证据 `/Users/liusinan/.codex/artifacts/unified-wal/recovery-payload-evidence-09ydzwle` 保存各阶段source/inputs/命令/XML、真实RED/GREEN、TLC与checker。
+
+该增量只接上述内部 point-evidence candidate 的长期 payload custody；legacy heap probe/reply、normal-tail observation candidates列表、SDK V3 packing header、caller数组、对象/JDK/opaque TLS/kernel与存储/index/control/cold统一总账仍OPEN，性能未测。默认SDK公开runtime选择仍待明确；Main/required producer、backup-restore/accepted退役/GC/mixed兼容/正式性能/运维与全16步验收继续推进，目标active、生产Gate OPEN。默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。

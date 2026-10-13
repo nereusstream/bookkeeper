@@ -20,6 +20,8 @@
  */
 package org.apache.bookkeeper.client;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
@@ -47,12 +49,13 @@ import org.apache.bookkeeper.versioning.LongVersion;
 public final class ProfileRecoveryReadHandle extends LedgerHandle {
     public enum ProbeOutcome { CANDIDATE, ABSENT }
 
-    public static final class Probe {
+    public static final class Probe implements AutoCloseable {
         private final ProbeOutcome outcome;
         private final long entryId;
         private final long length;
         private final byte[] bytes;
         private final Object owner;
+        private ByteBuf backing;
 
         private Probe(ProbeOutcome outcome, long entryId, long length, byte[] bytes, Object owner) {
             this.outcome = outcome;
@@ -60,6 +63,15 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
             this.length = length;
             this.bytes = bytes;
             this.owner = owner;
+        }
+
+        private Probe(long entryId, long length, ByteBuf payload, Object owner) {
+            outcome = ProbeOutcome.CANDIDATE;
+            this.entryId = entryId;
+            this.length = length;
+            bytes = null;
+            this.owner = owner;
+            backing = payload.asReadOnly().retain();
         }
 
         public ProbeOutcome outcome() {
@@ -71,8 +83,32 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         public long length() {
             return length;
         }
-        public ByteBuffer payload() {
-            return ByteBuffer.wrap(bytes).asReadOnlyBuffer();
+        public synchronized ByteBuffer payload() {
+            if (bytes != null) {
+                return ByteBuffer.wrap(bytes).asReadOnlyBuffer();
+            }
+            if (backing == null) {
+                throw new IllegalStateException("Recovery candidate has been released");
+            }
+            return backing.nioBuffer(backing.readerIndex(), backing.readableBytes()).asReadOnlyBuffer();
+        }
+
+        private synchronized ByteBuf payloadBuffer() {
+            if (bytes != null) {
+                return Unpooled.wrappedBuffer(bytes).asReadOnly();
+            }
+            if (backing == null) {
+                throw new IllegalStateException("Recovery candidate has been released");
+            }
+            return backing.retainedDuplicate();
+        }
+
+        @Override
+        public synchronized void close() {
+            if (backing != null) {
+                backing.release();
+                backing = null;
+            }
         }
     }
 
@@ -86,7 +122,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
     public record SourceEvidence(BookieId bookie, String storageIncarnation, SourceOutcome outcome) { }
 
     /** All exact write-set sources terminated. Absence coverage and finite exhaustion are separate facts. */
-    public static final class PointEvidence {
+    public static final class PointEvidence implements AutoCloseable {
         private final Probe candidate;
         private final List<SourceEvidence> sources;
         private final boolean absenceCovered;
@@ -115,6 +151,13 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         public boolean exhausted() {
             return sources.stream().allMatch(source -> source.outcome() == SourceOutcome.MISSING
                     || source.outcome() == SourceOutcome.CORRUPT);
+        }
+
+        @Override
+        public void close() {
+            if (candidate != null) {
+                candidate.close();
+            }
         }
     }
 
@@ -291,6 +334,15 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
 
     /** Required-hole verification cannot stop at the normal-tail missing threshold or the first valid payload. */
     public CompletableFuture<PointEvidence> probeEvidence(long entryId) {
+        return probeEvidence(entryId, false);
+    }
+
+    /** Caller closes the evidence; candidate payload views borrow its original accounted source backing. */
+    public CompletableFuture<PointEvidence> probeBufferEvidence(long entryId) {
+        return probeEvidence(entryId, true);
+    }
+
+    private CompletableFuture<PointEvidence> probeEvidence(long entryId, boolean owned) {
         if (entryId < 0 || !active.compareAndSet(false, true)) {
             return CompletableFuture.failedFuture(BKException.create(entryId < 0 ? BKException.Code.IllegalOpException
                     : BKException.Code.TooManyRequestsException));
@@ -299,7 +351,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         try {
             executeOrdered(() -> {
                 try {
-                    new EvidenceRead(entryId, actual).start();
+                    new EvidenceRead(entryId, actual, owned).start();
                 } catch (RuntimeException failure) {
                     actual.completeExceptionally(failure);
                 }
@@ -307,7 +359,19 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         } catch (java.util.concurrent.RejectedExecutionException shutdown) {
             actual.completeExceptionally(BKException.create(BKException.Code.InterruptedException));
         }
-        return actual.whenComplete((value, failure) -> active.set(false)).copy();
+        if (!owned) {
+            return actual.whenComplete((value, failure) -> active.set(false)).copy();
+        }
+        var caller = new CompletableFuture<PointEvidence>();
+        actual.whenComplete((value, failure) -> {
+            active.set(false);
+            if (failure != null) {
+                caller.completeExceptionally(failure);
+            } else if (!caller.complete(value)) {
+                value.close();
+            }
+        });
+        return caller;
     }
 
     private final class EvidenceRead {
@@ -317,15 +381,17 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         private final Map<BookieId, ProfileNormalDataClient> peers;
         private final List<SourceEvidence> sources = new ArrayList<>();
         private final DistributionSchedule.AckSet absent;
+        private final boolean owned;
         private Probe candidate;
         private boolean covered;
         private boolean conflict;
         private Throwable failure;
         private int remaining;
 
-        EvidenceRead(long entryId, CompletableFuture<PointEvidence> done) {
+        EvidenceRead(long entryId, CompletableFuture<PointEvidence> done, boolean owned) {
             this.entryId = entryId;
             this.done = done;
+            this.owned = owned;
             expected = getVersionedLedgerMetadata();
             peers = transport.readPeers();
             var value = expected.getValue();
@@ -375,9 +441,13 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
                     var payload = getDigestManager().verifyDigestAndReturnData(entryId, raw);
                     long length = raw.getLong(24);
                     if (candidate == null) {
-                        byte[] bytes = new byte[payload.readableBytes()];
-                        payload.getBytes(payload.readerIndex(), bytes);
-                        candidate = new Probe(ProbeOutcome.CANDIDATE, entryId, length, bytes, probeOwner);
+                        if (owned) {
+                            candidate = new Probe(entryId, length, payload, probeOwner);
+                        } else {
+                            byte[] bytes = new byte[payload.readableBytes()];
+                            payload.getBytes(payload.readerIndex(), bytes);
+                            candidate = new Probe(ProbeOutcome.CANDIDATE, entryId, length, bytes, probeOwner);
+                        }
                     } else if (candidate.length() != length || !candidate.payload().equals(
                             payload.nioBuffer(payload.readerIndex(), payload.readableBytes()))) {
                         conflict = true;
@@ -399,13 +469,21 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
             if (--remaining == 0) {
                 absent.recycle();
                 if (failure != null) {
+                    closeCandidate();
                     done.completeExceptionally(failure);
                 } else if (transport.isClosed() || getVersionedLedgerMetadata() != expected
                         || transport.readPeers() != peers) {
+                    closeCandidate();
                     done.completeExceptionally(BKException.create(BKException.Code.ReadException));
                 } else {
                     done.complete(new PointEvidence(candidate, sources, covered, conflict));
                 }
+            }
+        }
+
+        private void closeCandidate() {
+            if (candidate != null) {
+                candidate.close();
             }
         }
     }
@@ -415,9 +493,15 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         if (!fencingReads || probe.owner != probeOwner || probe.outcome() != ProbeOutcome.CANDIDATE) {
             throw new IllegalArgumentException("Recovery packing requires this handle's candidate");
         }
-        return getDigestManager().computeDigestAndPackageForSending(probe.entryId(), getLastAddConfirmed(),
-                probe.length(), io.netty.buffer.Unpooled.wrappedBuffer(probe.bytes).asReadOnly(), getLedgerKey(),
-                org.apache.bookkeeper.proto.BookieProtocol.FLAG_RECOVERY_ADD);
+        ByteBuf payload = probe.payloadBuffer();
+        try {
+            return getDigestManager().computeDigestAndPackageForSending(probe.entryId(), getLastAddConfirmed(),
+                    probe.length(), payload, getLedgerKey(),
+                    org.apache.bookkeeper.proto.BookieProtocol.FLAG_RECOVERY_ADD);
+        } catch (RuntimeException | Error failure) {
+            payload.release();
+            throw failure;
+        }
     }
 
     @Override
