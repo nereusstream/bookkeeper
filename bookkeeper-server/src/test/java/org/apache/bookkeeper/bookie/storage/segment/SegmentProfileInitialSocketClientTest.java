@@ -9965,6 +9965,150 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void ownedLacRetainsBothPayloadViewsAfterResponseAndTransportClose() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+            evidenceEntry(fixture, data, 100, 99, 1100, 100);
+            persistExplicitLac(fixture, 0, 101, false);
+            fixture.faultTarget.set(0);
+            fixture.replyFault.set(17);
+            var cancelled = data.readLacBuffer(fixture.context());
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
+            assertEquals(1, fixture.heldReplies.size());
+            assertTrue(cancelled.cancel(false));
+            try (var refused = data.readLacBuffer(fixture.context()).get(5, TimeUnit.SECONDS)) {
+                assertEquals(ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE, refused.status().statusClass());
+            }
+            fixture.replyFault.set(0);
+            fixture.releaseReplies();
+            ProfileNormalDataClient.LacBuffer response;
+            do {
+                response = data.readLacBuffer(fixture.context()).get(5, TimeUnit.SECONDS);
+                if (response.outcome()
+                        == org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.Outcome.REFUSED) {
+                    response.close();
+                    assertTrue(System.nanoTime() < until);
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+            } while (response.outcome()
+                    == org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.Outcome.REFUSED);
+            ByteBuf entry = response.entry();
+            ByteBuf explicit = response.explicitBody();
+            try {
+                assertEquals(100, response.sourceEntryId());
+                assertEquals(99, response.piggybackLac());
+                assertEquals(1100, response.sourceLength());
+                assertEquals(101, response.explicitLac());
+                assertTrue(entry.isReadOnly());
+                assertTrue(explicit.isReadOnly());
+                assertEquals(44, explicit.getLong(0));
+                response.close();
+                response.close();
+                var released = response;
+                assertThrows(IllegalStateException.class, released::entry);
+                var closed = data.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closed.get(150, TimeUnit.MILLISECONDS));
+                assertTrue(data.backingBytes() >= entry.readableBytes() + explicit.readableBytes());
+                entry.release();
+                entry = null;
+                assertFalse(closed.isDone());
+                assertEquals(101, explicit.getLong(8));
+                explicit.release();
+                explicit = null;
+                closed.get(5, TimeUnit.SECONDS);
+                assertEquals(0, data.backingBytes());
+                assertTrue(cancelled.isCancelled());
+            } finally {
+                response.close();
+                if (entry != null) {
+                    entry.release();
+                }
+                if (explicit != null) {
+                    explicit.release();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkLacKeepsCompletedPeerBackingAndReleasesItOnCollectorRejection() throws Exception {
+        for (boolean reject : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                for (int target : List.of(0, 1)) {
+                    var data = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                    evidenceEntry(fixture, data, 99, 98, 1000, 16);
+                    evidenceEntry(fixture, data, 100, 99, 1100, 100);
+                }
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                fixture.faultTarget.set(0);
+                fixture.replyFault.set(17);
+                var caller = handle.readLacEvidence();
+                var readyPeer = fixture.dataClients.get(fixture.dataClients.size() - 2);
+                var socketField = ProfileNormalDataClient.class.getDeclaredField("socket");
+                socketField.setAccessible(true);
+                Object socket = socketField.get(readyPeer);
+                var channelField = socket.getClass().getDeclaredField("channel");
+                channelField.setAccessible(true);
+                Channel channel = (Channel) channelField.get(socket);
+                var pendingField = socket.getClass().getDeclaredField("pending");
+                pendingField.setAccessible(true);
+                var nextField = socket.getClass().getDeclaredField("nextId");
+                nextField.setAccessible(true);
+                CompletableFuture<Void> closed = null;
+                try {
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (fixture.heldReplies.isEmpty() || !channel.eventLoop().submit(() ->
+                            nextField.getLong(socket) > 2 && ((Map<?, ?>) pendingField.get(socket)).isEmpty())
+                                    .get(5, TimeUnit.SECONDS)) {
+                        assertTrue(System.nanoTime() < until);
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    // Synchronize on actual wire completion, then observe public backing/drain behavior.
+                    closed = readyPeer.closeAsync();
+                    var retainedClose = closed;
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> retainedClose.get(150, TimeUnit.MILLISECONDS));
+                    assertTrue(readyPeer.backingBytes() >= 136);
+                    if (reject) {
+                        sdk.getClientCtx().getMainWorkerPool().shutdown();
+                        assertThrows(java.util.concurrent.RejectedExecutionException.class,
+                                () -> sdk.getClientCtx().getMainWorkerPool().executeOrdered(44, () -> { }));
+                    }
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    if (reject) {
+                        var failed = assertThrows(ExecutionException.class, () -> caller.get(5, TimeUnit.SECONDS));
+                        assertEquals(BKException.Code.InterruptedException,
+                                BKException.getExceptionCode(failed.getCause()));
+                    } else {
+                        var proof = caller.get(5, TimeUnit.SECONDS);
+                        assertEquals(99, proof.prefixEntryId());
+                        assertEquals(1000, proof.prefixLength());
+                    }
+                    closed.get(5, TimeUnit.SECONDS);
+                    assertEquals(0, readyPeer.backingBytes());
+                } finally {
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    if (closed != null) {
+                        closed.get(5, TimeUnit.SECONDS);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     public void explicitOnlyLacDoesNotBecomeWholeLedgerEmptyOrInventPrefixLength() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true)) {
             fixture.connectAll(Duration.ofSeconds(5));
@@ -10465,7 +10609,7 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.faultTarget.set(0);
                 fixture.replyFault.set(fault);
                 assertThrows(ExecutionException.class,
-                        () -> (latest ? client.readLac(fixture.context())
+                        () -> (latest ? client.readLacBuffer(fixture.context())
                                 : client.readEntryBuffer(fixture.context(), 0)).get(5, TimeUnit.SECONDS));
             }
         }
@@ -10581,7 +10725,8 @@ public class SegmentProfileInitialSocketClientTest {
             }));
             try {
                 assertTrue(blocked.await(5, TimeUnit.SECONDS));
-                var pending = latest ? client.readLac(fixture.context()) : client.readEntryBuffer(fixture.context(), 0);
+                var pending = latest ? client.readLacBuffer(fixture.context())
+                        : client.readEntryBuffer(fixture.context(), 0);
                 var ioField = IsolatedSegmentFiles.class.getDeclaredField("activeIo");
                 ioField.setAccessible(true);
                 long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);

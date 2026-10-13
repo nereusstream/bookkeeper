@@ -710,3 +710,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-13 [SDK 读响应的 backing 所有权交接](profile-wire/README.md#sdk-读响应的-backing-所有权交接)：父 eda1d7d760 上把原 READ_ENTRY response backing 通过 AutoCloseable/retained slice 交给标准 SDK ReadOp，取消丢弃和 ordered executor 拒绝均释放未交付 custody，最后 caller view 归还前 closeAsync 继续等待。父 SDK adapter 的真实 retained-entry RED 与最终四类45项 GREEN、style通过；原 backing 模型7配置按自己的阶段源码保留，2005 unique输入分别核验。独立RAT父443无新增；full-bytes总预算、默认SDK公开入口及全16步验收仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK与disabled不变。
+
+
+2026-10-13 [SDK LAC evidence 的 backing 所有权](profile-wire/README.md#sdk-lac-evidence-的-backing-所有权)：父73b67bc6e9上将 URL1/URL2 的 source/explicit payload 和 matching READ_ENTRY anchor 交给原已计费 frame，fan-in/ordered 等待期间保留，最终 evidence 前或失败/拒绝时释放。真实父consumer RED、最终三类24项与style通过；原17配置模型3正向/14指定反例按独立stage保留，2005 unique输入核验。独立RAT父443无新增；该切片不闭合 full-bytes 总账、默认SDK公开入口或全16步Gate，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变。

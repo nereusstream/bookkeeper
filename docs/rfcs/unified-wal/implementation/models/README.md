@@ -1467,3 +1467,6 @@ TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint�
 
 
 2026-10-13 [SDK 读响应的 backing 所有权交接](../profile-wire/README.md#sdk-读响应的-backing-所有权交接)复用未修改的 ProfileBackingBudget；g_nk2lwm 共7配置、1完整正向/6指定反例。1106模型与最终1170 Java输入去重2005，共有271路径中三个生产文件有stage差异，分别核验归档，不移绑原receipt。catalog仍730，仅目录统计；完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0、原CHECK_DEADLOCK FALSE；actual SDK response/caller refcount与取消交接由Java回归验证，模型未枚举response future/callback，不证明所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。
+
+
+2026-10-13 [SDK LAC evidence 的 backing 所有权](../profile-wire/README.md#sdk-lac-evidence-的-backing-所有权)复用未修改的 ProfileBackingBudget/ProfileLacEvidence，zeilqhjh 共17配置、3完整正向/14指定反例。1106模型与最终1170 Java去重2005、共有271路径，仅socket测试故障目标修正有stage差异，分别核验归档、不移绑receipt。catalog730仅目录统计，完整A+C+D未全跑。TLC1.7.4/单worker/heap512/direct64MiB/seed1/fp0，原CHECK_DEADLOCK FALSE；root credit与原A2/A3 evidence语义为独立投影，未枚举SDK response/fan-in/ordered callback所有权或其组合，native实际byte custody由Java验证，不证明所有字节/RSS/TLS/kernel/性能或liveness，生产Gate OPEN。

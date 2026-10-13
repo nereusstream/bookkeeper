@@ -1952,3 +1952,22 @@ scripts/unified-wal/run-local-storage-tests.sh 'ProfileReadEntryReplyCodecTest,P
 复用未修改的 ProfileBackingBudget，`unified-wal-model-g_nk2lwm` 7配置得到1完整正向/6指定反例；只投影 root capacity/refcount/workspace/close，未新增 SDK response future 或 callback ownership 模型。1170 Java与1106模型输入共有271路径、去重2005；模型 stage 与最终 Java 的三个生产文件不同，分别归档并核验 SHA，不移绑模型 receipt。证据 `/Users/liusinan/.codex/artifacts/unified-wal/read-payload-evidence-skoocx13` 拥有阶段输入/源码、原 XML/命令/RED/GREEN/model/checker 与失败记录。
 
 本增量只接 READ_ENTRY → SDK ByteBuf 的长期 backing custody。旧兼容 readEntry 的 heap reply、READ_LAC/caller arrays、对象开销、JDK/opaque TLS/kernel、存储/index/control/cold 的统一总预算与正式性能继续 OPEN。默认 SDK 公开 Profile runtime 入口选择仍待明确；完整 Main/required producer、backup-restore/accepted 退役/GC/mixed 兼容/性能/运维及全16步验收仍 OPEN。默认 OFF/SYSTEM/PARK、disabled 能力与生产 Gate 不提升，Linux NUMA/真实掉电/正式性能/canary 未执行。
+
+
+## SDK LAC evidence 的 backing 所有权
+
+2026-10-13，接续父提交 `73b67bc6e969075dfe51966ea39169da42157daa`。READ_LAC 的 URL1/URL2 decoder 新增同一严格解析下的 borrowed View；旧 decode/decodeExplicit 仍生成独立 heap reply，schema、capability 与固定向量 bytes 不变。ProfileNormalDataClient.readLacBuffer 返回 AutoCloseable response，原网络 frame credit 保留到 response 和所有 retained entry/explicit digest view 均释放。scalar source/explicit 字段在持有输入时读取；sourceLength 仍只属于 sourceEntryId，没有移作 piggyback/explicit LAC 的 prefix length。
+
+ProfileLacEvidenceRead 的 source fan-in 与 matching anchor READ_ENTRY 改用原已计费 backing。等待其他节点或 ordered executor 时保留各 response；完成 CRC32C/coverage/anchor 验证后、发布最终 evidence 前关闭 response。permission/digest/metadata/coverage 等失败和 executor 拒绝也释放全部已完成 reply。原单 query reservation、caller copy cancellation、metadata/peer identity、whole-endpoint explicit digest 排除、A2/A3 coverage、prefix length conflict 和 UNKNOWN 语义沿用。没有新 allocator/ledger、线程、队列、持久化格式或 authority。
+
+真实 RED `unified-wal-local-Z6qapbVI` 仅把 LAC evidence SDK consumer 换回父 HEAD：其他节点回复尚被实际 server writer 持有时，已完成节点的 closeAsync 立即成功，新增 retained-backing 断言如预期失败。最终 `unified-wal-local-CW9PuTOq` 三个实际类24项全部通过、零 failure/error/skip（LAC codec4、point codec2、actual socket/SDK18）。native mTLS/文件路径验证取消回复丢弃、slot 满额拒绝、source/explicit 两个独立 retained view、最后 view 阻止实际关闭、fan-in 中已完成 peer 的 custody、ordered collector 拒绝/成功清理；原 explicit-only/损坏endpoint/empty coverage/length conflict/caller cancel、malformed/held native I/O、READ_ENTRY retained caller、writer close/restart 与 OPEN audit/lease drain 均保留。最小相关命令：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'ProfileLacReplyCodecTest,SegmentProfileInitialSocketClientTest#ownedLacRetainsBothPayloadViewsAfterResponseAndTransportClose+sdkLacKeepsCompletedPeerBackingAndReleasesItOnCollectorRejection'
+```
+
+完整实际扩展命令由最终 inputs.json 保存。a1oDeeJg 的不相关 executor 全终结前置、cBbRn9cg 的缺测试 import、L3VJf174 的故障注入节点未指定均保留原 source/输出；仅最终修正后结果计通过，未跳过测试或弱化目标断言。最终 Spotless/Checkstyle exit0；Java/model/style终态后的独立 RAT exit1，443 unapproved路径全部存在父HEAD，无新增；不称CI全绿。
+
+未修改的 ProfileBackingBudget/ProfileLacEvidence 在 `unified-wal-model-zeilqhjh` 的17配置得到3完整正向/14指定反例。1170 Java与1106模型输入共有271路径、去重2005；只有 socket 测试的上述故障目标修正造成 stage 差异，原模型 input/receipt 与最终 Java 分别归档核验 SHA。原模型未枚举 response future、fan-in payload 或 SDK callback 的 byte ownership，不把两个有限投影宣称为其组合或完整 A+C+D；catalog730仅目录统计。证据 `/Users/liusinan/.codex/artifacts/unified-wal/lac-payload-evidence-qv9iszn_` 保留实际阶段 input/source/命令/XML、RED、所有失败、TLC 与 checker。
+
+该增量接通实际 SDK LAC/anchor 的长期 payload custody；legacy heap reply、caller 数组、对象/JDK/opaque TLS/kernel 开销及存储/index/control/cold 统一总账仍 OPEN，性能未测。默认 SDK 的公开 runtime 入口选择仍待明确，完整 Main/required producer、backup-restore/accepted 退役/GC/mixed 兼容/正式性能/运维及全16步综合验收继续 OPEN；目标 active，默认 OFF/SYSTEM/PARK、disabled 能力和生产 Gate 不提升，Linux NUMA/真实掉电/正式性能/canary 未执行。

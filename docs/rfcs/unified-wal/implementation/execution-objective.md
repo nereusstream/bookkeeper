@@ -135,3 +135,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-13继续full-bytes：父eda1d7d760上新增相同严格decoder的borrowed view与owned READ_ENTRY response，原SDK读取保留原网络backing credit到最后caller view释放。取消丢弃/失败/ordered拒绝释放未交付response，actual close不因caller callback终结而提前完成。真实RED与最终45项GREEN/style、原7配置模型的阶段source/receipt由profile-wire/README.md“SDK 读响应的 backing 所有权交接”拥有；总预算、其他reply/caller数组、默认SDK公开入口/Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维及综合验收继续OPEN。目标active，默认OFF/SYSTEM/PARK、disabled及生产Gate不提升。
+
+
+2026-10-13继续full-bytes：父73b67bc6e9后已接 actual SDK LAC fan-in 与 matching anchor 的原 frame credit，URL1/URL2旧heap decoder保持兼容；source/explicit retained view、取消回复丢弃及collector拒绝释放均有真实验证。最终三类24项/style、17个有限模型配置及阶段source/receipt由profile-wire/README.md“SDK LAC evidence 的 backing 所有权”拥有；没有把有限root/evidence投影当作组合模型。legacy reply/caller数组、对象/TLS/kernel及存储/index/control/cold总账、默认SDK公开runtime选择、Main/required producer、backup-restore/accepted退役/GC/mixed/性能/运维和全16步验收继续OPEN；目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

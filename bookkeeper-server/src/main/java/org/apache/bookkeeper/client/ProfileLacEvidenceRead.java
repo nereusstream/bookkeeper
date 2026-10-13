@@ -21,7 +21,6 @@
 package org.apache.bookkeeper.client;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -63,15 +62,23 @@ final class ProfileLacEvidenceRead {
     }
 
     private void ordered(Runnable task) {
+        ordered(task, () -> { });
+    }
+
+    private void ordered(Runnable task, Runnable release) {
         try {
             handle.executeOrdered(() -> {
                 try {
                     task.run();
                 } catch (RuntimeException failure) {
+                    release.run();
                     result.completeExceptionally(failure);
+                } finally {
+                    release.run();
                 }
             });
         } catch (RejectedExecutionException shutdown) {
+            release.run();
             result.completeExceptionally(BKException.create(BKException.Code.InterruptedException));
         }
     }
@@ -88,7 +95,7 @@ final class ProfileLacEvidenceRead {
             throw error(BKException.Code.IllegalOpException);
         }
         List<BookieId> ensemble = metadata.getAllEnsembles().lastEntry().getValue();
-        List<CompletableFuture<Sample<ProfileLacReplyCodec.Reply>>> pending = new ArrayList<>();
+        List<CompletableFuture<Sample<ProfileNormalDataClient.LacBuffer>>> pending = new ArrayList<>();
         for (BookieId bookie : ensemble) {
             ProfileNormalDataClient peer = peers.get(bookie);
             if (peer == null) {
@@ -96,86 +103,92 @@ final class ProfileLacEvidenceRead {
                         error(BKException.Code.ReadException))));
             } else {
                 try {
-                    pending.add(peer.readLac(context)
+                    pending.add(peer.readLacBuffer(context)
                             .handle((reply, failure) -> new Sample<>(bookie, reply, failure)));
                 } catch (RuntimeException refused) {
                     pending.add(CompletableFuture.completedFuture(new Sample<>(bookie, null, refused)));
                 }
             }
         }
-        CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).whenComplete((unused, failure) ->
-                ordered(() -> collect(pending.stream().map(CompletableFuture::join).toList())));
+        CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).whenComplete((unused, failure) -> {
+            var replies = pending.stream().map(CompletableFuture::join).toList();
+            ordered(() -> collect(replies), () -> closeLacReplies(replies));
+        });
     }
 
-    private void collect(List<Sample<ProfileLacReplyCodec.Reply>> replies) {
-        requireCurrent();
-        var coverage = handle.distributionSchedule.getCoverageSet();
-        int lastError = BKException.Code.ReadException;
-        for (int i = 0; i < replies.size(); i++) {
-            var sample = replies.get(i);
-            int code = BKException.Code.ReadException;
-            if (sample.failure == null && sample.reply != null) {
-                var reply = sample.reply;
-                if (reply.status().statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED) {
-                    throw error(BKException.Code.UnauthorizedAccessException);
-                }
-                long explicitValue = -1;
-                boolean valid = true;
-                if (reply.hasExplicitLac()) {
-                    ByteBuf raw = Unpooled.wrappedBuffer(reply.explicitBody());
-                    try {
-                        long value = handle.macManager.verifyDigestAndReturnLac(raw);
-                        if (value != reply.explicitLac()) {
-                            throw error(BKException.Code.DigestMatchException);
-                        }
-                        explicitValue = value;
-                    } catch (BKException.BKDigestMatchException invalid) {
-                        valid = false;
-                        lastError = BKException.Code.DigestMatchException;
-                    } finally {
-                        raw.release();
+    private void collect(List<Sample<ProfileNormalDataClient.LacBuffer>> replies) {
+        try {
+            requireCurrent();
+            var coverage = handle.distributionSchedule.getCoverageSet();
+            int lastError = BKException.Code.ReadException;
+            for (int i = 0; i < replies.size(); i++) {
+                var sample = replies.get(i);
+                int code = BKException.Code.ReadException;
+                if (sample.failure == null && sample.reply != null) {
+                    var reply = sample.reply;
+                    if (reply.status().statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED) {
+                        throw error(BKException.Code.UnauthorizedAccessException);
                     }
-                }
-                ProfileLedgerHandle.LacSource verifiedSource = null;
-                if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.EMPTY) {
-                    sources.add(source(sample.bookie, -1, -1, 0, 0));
-                    code = BKException.Code.NoSuchEntryException;
-                } else if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.EXPLICIT) {
-                    code = BKException.Code.OK;
-                } else if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.SOURCE) {
-                    ByteBuf raw = Unpooled.wrappedBuffer(reply.entry());
-                    try {
-                        int payload = handle.macManager.verifyDigestAndReturnData(reply.sourceEntryId(), raw)
-                                .readableBytes();
-                        verifiedSource = source(sample.bookie, reply.sourceEntryId(), reply.piggybackLac(),
-                                reply.sourceLength(), payload);
-                        code = BKException.Code.OK;
-                    } catch (BKException.BKDigestMatchException invalid) {
-                        lastError = BKException.Code.DigestMatchException;
-                    } finally {
-                        raw.release();
-                    }
-                }
-                if (code == BKException.Code.OK) {
-                    if (verifiedSource != null) {
-                        sources.add(verifiedSource);
-                        lac = Math.max(lac, verifiedSource.piggybackLac());
-                    }
+                    long explicitValue = -1;
+                    boolean valid = true;
                     if (reply.hasExplicitLac()) {
-                        explicitSources.add(new ProfileLedgerHandle.ExplicitLacSource(sample.bookie,
-                                HexFormat.of().formatHex(peers.get(sample.bookie).hello().storageIncarnation()),
-                                explicitValue));
-                        lac = Math.max(lac, explicitValue);
+                        ByteBuf raw = reply.explicitBody();
+                        try {
+                            long value = handle.macManager.verifyDigestAndReturnLac(raw);
+                            if (value != reply.explicitLac()) {
+                                throw error(BKException.Code.DigestMatchException);
+                            }
+                            explicitValue = value;
+                        } catch (BKException.BKDigestMatchException invalid) {
+                            valid = false;
+                            lastError = BKException.Code.DigestMatchException;
+                        } finally {
+                            raw.release();
+                        }
+                    }
+                    ProfileLedgerHandle.LacSource verifiedSource = null;
+                    if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.EMPTY) {
+                        sources.add(source(sample.bookie, -1, -1, 0, 0));
+                        code = BKException.Code.NoSuchEntryException;
+                    } else if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.EXPLICIT) {
+                        code = BKException.Code.OK;
+                    } else if (valid && reply.outcome() == ProfileLacReplyCodec.Outcome.SOURCE) {
+                        ByteBuf raw = reply.entry();
+                        try {
+                            int payload = handle.macManager.verifyDigestAndReturnData(reply.sourceEntryId(), raw)
+                                    .readableBytes();
+                            verifiedSource = source(sample.bookie, reply.sourceEntryId(), reply.piggybackLac(),
+                                    reply.sourceLength(), payload);
+                            code = BKException.Code.OK;
+                        } catch (BKException.BKDigestMatchException invalid) {
+                            lastError = BKException.Code.DigestMatchException;
+                        } finally {
+                            raw.release();
+                        }
+                    }
+                    if (code == BKException.Code.OK) {
+                        if (verifiedSource != null) {
+                            sources.add(verifiedSource);
+                            lac = Math.max(lac, verifiedSource.piggybackLac());
+                        }
+                        if (reply.hasExplicitLac()) {
+                            explicitSources.add(new ProfileLedgerHandle.ExplicitLacSource(sample.bookie,
+                                    HexFormat.of().formatHex(peers.get(sample.bookie).hello().storageIncarnation()),
+                                    explicitValue));
+                            lac = Math.max(lac, explicitValue);
+                        }
                     }
                 }
+                // A source enters coverage only after scope/coordinate and the original digest are valid.
+                coverage.addBookie(i, code);
             }
-            // A source enters coverage only after scope/coordinate and the original digest are valid.
-            coverage.addBookie(i, code);
+            if (!coverage.checkCovered()) {
+                throw error(lastError);
+            }
+            prefix = Math.max(lac, expected.getValue().getAllEnsembles().lastKey() - 1);
+        } finally {
+            closeLacReplies(replies);
         }
-        if (!coverage.checkCovered()) {
-            throw error(lastError);
-        }
-        prefix = Math.max(lac, expected.getValue().getAllEnsembles().lastKey() - 1);
         if (prefix < 0) {
             finish(0);
             return;
@@ -193,7 +206,7 @@ final class ProfileLacEvidenceRead {
         List<BookieId> ensemble = expected.getValue().getAllEnsembles().floorEntry(prefix).getValue();
         var writeSet = handle.distributionSchedule.getWriteSet(prefix);
         Map<BookieId, ProfileLedgerHandle.LacSource> anchors = new HashMap<>();
-        List<CompletableFuture<Sample<ProfileReadEntryReplyCodec.Reply>>> pending = new ArrayList<>();
+        List<CompletableFuture<Sample<ProfileNormalDataClient.ReadEntryBuffer>>> pending = new ArrayList<>();
         try {
             for (int i = 0; i < writeSet.size(); i++) {
                 BookieId bookie = ensemble.get(writeSet.get(i));
@@ -203,7 +216,7 @@ final class ProfileLacEvidenceRead {
                     anchors.put(bookie, known);
                 } else if (peers.containsKey(bookie)) {
                     try {
-                        pending.add(peers.get(bookie).readEntry(context, prefix)
+                        pending.add(peers.get(bookie).readEntryBuffer(context, prefix)
                                 .handle((reply, failure) -> new Sample<>(bookie, reply, failure)));
                     } catch (RuntimeException refused) {
                         pending.add(CompletableFuture.completedFuture(new Sample<>(bookie, null, refused)));
@@ -213,38 +226,44 @@ final class ProfileLacEvidenceRead {
         } finally {
             writeSet.recycle();
         }
-        CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).whenComplete((unused, failure) ->
-                ordered(() -> collectAnchors(anchors, pending.stream().map(CompletableFuture::join).toList())));
+        CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).whenComplete((unused, failure) -> {
+            var replies = pending.stream().map(CompletableFuture::join).toList();
+            ordered(() -> collectAnchors(anchors, replies), () -> closeReadReplies(replies));
+        });
     }
 
     private void collectAnchors(Map<BookieId, ProfileLedgerHandle.LacSource> anchors,
-            List<Sample<ProfileReadEntryReplyCodec.Reply>> replies) {
-        requireCurrent();
-        for (var sample : replies) {
-            if (sample.failure != null || sample.reply == null) {
-                continue;
-            }
-            var reply = sample.reply;
-            if (reply.status().statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED) {
-                throw error(BKException.Code.UnauthorizedAccessException);
-            }
-            if (reply.outcome() != ProfileReadEntryReplyCodec.Outcome.FOUND) {
-                continue;
-            }
-            ByteBuf raw = Unpooled.wrappedBuffer(reply.entry());
-            try {
-                long hint = raw.getLong(16);
-                long length = raw.getLong(24);
-                int payload = handle.macManager.verifyDigestAndReturnData(prefix, raw).readableBytes();
-                if (length < 0 || hint < -1) {
-                    throw error(BKException.Code.DigestMatchException);
+            List<Sample<ProfileNormalDataClient.ReadEntryBuffer>> replies) {
+        try {
+            requireCurrent();
+            for (var sample : replies) {
+                if (sample.failure != null || sample.reply == null) {
+                    continue;
                 }
-                anchors.put(sample.bookie, source(sample.bookie, prefix, hint, length, payload));
-            } catch (BKException.BKDigestMatchException invalid) {
-                // A corrupt or uncertain reply is not an anchor or an absence vote.
-            } finally {
-                raw.release();
+                var reply = sample.reply;
+                if (reply.status().statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED) {
+                    throw error(BKException.Code.UnauthorizedAccessException);
+                }
+                if (reply.outcome() != ProfileReadEntryReplyCodec.Outcome.FOUND) {
+                    continue;
+                }
+                ByteBuf raw = reply.entry();
+                try {
+                    long hint = raw.getLong(16);
+                    long length = raw.getLong(24);
+                    int payload = handle.macManager.verifyDigestAndReturnData(prefix, raw).readableBytes();
+                    if (length < 0 || hint < -1) {
+                        throw error(BKException.Code.DigestMatchException);
+                    }
+                    anchors.put(sample.bookie, source(sample.bookie, prefix, hint, length, payload));
+                } catch (BKException.BKDigestMatchException invalid) {
+                    // A corrupt or uncertain reply is not an anchor or an absence vote.
+                } finally {
+                    raw.release();
+                }
             }
+        } finally {
+            closeReadReplies(replies);
         }
         if (anchors.isEmpty()) {
             throw error(BKException.Code.ReadException);
@@ -266,6 +285,22 @@ final class ProfileLacEvidenceRead {
             }
         }
         finish(length);
+    }
+
+    private static void closeLacReplies(List<Sample<ProfileNormalDataClient.LacBuffer>> replies) {
+        for (var sample : replies) {
+            if (sample.reply != null) {
+                sample.reply.close();
+            }
+        }
+    }
+
+    private static void closeReadReplies(List<Sample<ProfileNormalDataClient.ReadEntryBuffer>> replies) {
+        for (var sample : replies) {
+            if (sample.reply != null) {
+                sample.reply.close();
+            }
+        }
     }
 
     private void finish(long length) {

@@ -36,6 +36,15 @@ public class ProfileLacReplyCodecTest {
     public void independentExplicitVectorsKeepTwoWitnessesAndDoNotInventLength() throws Exception {
         byte[] combined = vector("explicit-source");
         var reply = ProfileLacReplyCodec.decodeExplicit(ByteBuffer.wrap(combined), CONTEXT, 40);
+        var borrowed = ProfileLacReplyCodec.decodeExplicitView(ByteBuffer.wrap(combined), CONTEXT, 40);
+        assertEquals(reply.entry(), borrowed.entry());
+        assertEquals(reply.explicitBody(), borrowed.explicitBody());
+        assertTrue(borrowed.entry().isReadOnly());
+        assertTrue(borrowed.explicitBody().isReadOnly());
+        borrowed.entry().position(10);
+        borrowed.explicitBody().position(10);
+        assertEquals(0, borrowed.entry().position());
+        assertEquals(0, borrowed.explicitBody().position());
         assertEquals(100, reply.sourceEntryId());
         assertEquals(99, reply.piggybackLac());
         assertEquals(1100, reply.sourceLength());
@@ -77,6 +86,7 @@ public class ProfileLacReplyCodecTest {
                 () -> ProfileLacReplyCodec.decodeExplicit(ByteBuffer.wrap(oversizedExplicit), CONTEXT, 40));
         combined[combined.length - 1] ^= 1;
         assertEquals(vector("explicit-source")[159], reply.explicitBody().get(19));
+        assertEquals(combined[159], borrowed.explicitBody().get(19));
     }
 
     @Test
@@ -100,6 +110,11 @@ public class ProfileLacReplyCodecTest {
     public void independentVectorsPreserveSourceLengthAsSourceLength() throws Exception {
         byte[] source = vector("source");
         var decoded = ProfileLacReplyCodec.decode(ByteBuffer.wrap(source), CONTEXT, 40);
+        var borrowed = ProfileLacReplyCodec.decodeView(ByteBuffer.wrap(source), CONTEXT, 40);
+        assertEquals(decoded.entry(), borrowed.entry());
+        assertEquals(decoded.sourceEntryId(), borrowed.sourceEntryId());
+        assertEquals(decoded.piggybackLac(), borrowed.piggybackLac());
+        assertEquals(decoded.sourceLength(), borrowed.sourceLength());
         assertEquals(ProfileLacReplyCodec.Outcome.SOURCE, decoded.outcome());
         assertEquals(100, decoded.sourceEntryId());
         assertEquals(99, decoded.piggybackLac());
@@ -119,6 +134,7 @@ public class ProfileLacReplyCodecTest {
         assertArrayEquals(vector("empty"), emptyOutput.array());
         source[127] = 0;
         assertEquals(0x09080706, decoded.entry().getInt(36));
+        assertEquals(0x09080700, borrowed.entry().getInt(36));
     }
 
     @Test

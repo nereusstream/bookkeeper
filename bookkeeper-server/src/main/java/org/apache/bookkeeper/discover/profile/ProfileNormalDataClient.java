@@ -164,6 +164,95 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         return socket.readLac(context);
     }
 
+    /** Owns the accounted LAC response; callers must release each retained entry or explicit digest view. */
+    public static final class LacBuffer implements AutoCloseable {
+        private final ProfileStatus status;
+        private final ProfileLacReplyCodec.Outcome outcome;
+        private final long sourceEntryId;
+        private final long piggybackLac;
+        private final long sourceLength;
+        private final long explicitLac;
+        private final int offset;
+        private final int entryBytes;
+        private final int explicitBytes;
+        private ByteBuf frame;
+
+        LacBuffer(ProfileLacReplyCodec.View decoded, ByteBuf frame, int offset) {
+            status = decoded.status();
+            outcome = decoded.outcome();
+            sourceEntryId = decoded.sourceEntryId();
+            piggybackLac = decoded.piggybackLac();
+            sourceLength = decoded.sourceLength();
+            explicitLac = decoded.explicitLac();
+            entryBytes = decoded.entry().remaining();
+            explicitBytes = decoded.explicitBody().remaining();
+            this.offset = offset;
+            this.frame = frame.retain();
+        }
+
+        static LacBuffer refused(ProfileStatus status) {
+            var reply = ProfileLacReplyCodec.refused(status);
+            return new LacBuffer(new ProfileLacReplyCodec.View(reply.status(), reply.outcome(), reply.entry(),
+                    reply.explicitBody(), reply.explicitLac()), Unpooled.EMPTY_BUFFER, 0);
+        }
+
+        public ProfileStatus status() {
+            return status;
+        }
+
+        public ProfileLacReplyCodec.Outcome outcome() {
+            return outcome;
+        }
+
+        public long sourceEntryId() {
+            return sourceEntryId;
+        }
+
+        public long piggybackLac() {
+            return piggybackLac;
+        }
+
+        public long sourceLength() {
+            return sourceLength;
+        }
+
+        public long explicitLac() {
+            return explicitLac;
+        }
+
+        public boolean hasExplicitLac() {
+            return explicitBytes != 0;
+        }
+
+        public ByteBuf entry() {
+            return payload(offset, entryBytes);
+        }
+
+        public ByteBuf explicitBody() {
+            return payload(offset + entryBytes, explicitBytes);
+        }
+
+        private synchronized ByteBuf payload(int start, int size) {
+            if (frame == null) {
+                throw new IllegalStateException("LAC response has been released");
+            }
+            return frame.retainedSlice(start, size).asReadOnly();
+        }
+
+        @Override
+        public synchronized void close() {
+            if (frame != null) {
+                frame.release();
+                frame = null;
+            }
+        }
+    }
+
+    /** The response and its payload views keep the original transport backing charged. */
+    public CompletableFuture<LacBuffer> readLacBuffer(ProfileLedgerContext context) {
+        return socket.readLacBuffer(context);
+    }
+
     public CompletableFuture<Void> closeAsync() {
         return socket.closeAsync();
     }

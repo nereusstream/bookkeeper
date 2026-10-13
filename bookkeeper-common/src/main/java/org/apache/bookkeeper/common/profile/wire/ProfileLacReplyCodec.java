@@ -100,6 +100,50 @@ public final class ProfileLacReplyCodec {
 
     private ProfileLacReplyCodec() { }
 
+    /** Strictly validated borrowed payloads; their input owner must remain live while a view is used. */
+    public record View(ProfileStatus status, Outcome outcome, ByteBuffer entry, ByteBuffer explicitBody,
+                       long explicitLac) {
+        public View {
+            entry = entry.asReadOnlyBuffer();
+            explicitBody = explicitBody.asReadOnlyBuffer();
+        }
+
+        @Override
+        public ByteBuffer entry() {
+            return entry.asReadOnlyBuffer();
+        }
+
+        @Override
+        public ByteBuffer explicitBody() {
+            return explicitBody.asReadOnlyBuffer();
+        }
+
+        public long sourceEntryId() {
+            return outcome == Outcome.SOURCE ? entry.getLong(8) : -1;
+        }
+
+        public long piggybackLac() {
+            return outcome == Outcome.SOURCE ? entry.getLong(16) : -1;
+        }
+
+        public long sourceLength() {
+            return outcome == Outcome.SOURCE ? entry.getLong(24) : 0;
+        }
+    }
+
+    private static Reply copy(View view) {
+        byte[] entry = new byte[view.entry.remaining()];
+        byte[] explicit = new byte[view.explicitBody.remaining()];
+        view.entry().get(entry);
+        view.explicitBody().get(explicit);
+        return new Reply(view.status(), view.outcome(), entry, explicit, view.explicitLac());
+    }
+
+    private static View refusedView(ProfileStatus status) {
+        ProfileReadEntryReplyCodec.refused(status);
+        return new View(status, Outcome.REFUSED, ByteBuffer.allocate(0), ByteBuffer.allocate(0), -1);
+    }
+
     public static Reply refused(ProfileStatus status) {
         ProfileReadEntryReplyCodec.refused(status);
         return new Reply(status, Outcome.REFUSED, new byte[0]);
@@ -118,6 +162,10 @@ public final class ProfileLacReplyCodec {
     }
 
     public static Reply decode(ByteBuffer input, ProfileLedgerContext expected, int bound) {
+        return copy(decodeView(input, expected, bound));
+    }
+
+    public static View decodeView(ByteBuffer input, ProfileLedgerContext expected, int bound) {
         Objects.requireNonNull(input, "input");
         Objects.requireNonNull(expected, "expected");
         if (bound < 36 || bound > ProfileReadEntryReplyCodec.MAX_ENTRY_BYTES) {
@@ -134,7 +182,7 @@ public final class ProfileLacReplyCodec {
             if (body.hasRemaining()) {
                 throw new IllegalArgumentException("READ_LAC refusal carries a payload");
             }
-            return refused(status);
+            return refusedView(status);
         }
         if (!status.equals(QUERY_OK) || body.remaining() < PREFIX_BYTES - 8
                 || body.getInt() != MAGIC || Short.toUnsignedInt(body.getShort()) != SCHEMA) {
@@ -154,9 +202,7 @@ public final class ProfileLacReplyCodec {
                 || body.getLong(body.position() + 16) < -1 || body.getLong(body.position() + 24) < 0)) {
             throw new IllegalArgumentException("Invalid READ_LAC source identity or metadata");
         }
-        byte[] entry = new byte[(int) size];
-        body.get(entry);
-        return new Reply(status, outcome, entry);
+        return new View(status, outcome, body.slice(), ByteBuffer.allocate(0), -1);
     }
 
     public static void writeExplicitPrefix(ByteBuffer output, ProfileLedgerContext context, long sourceEntryId,
@@ -172,6 +218,10 @@ public final class ProfileLacReplyCodec {
     }
 
     public static Reply decodeExplicit(ByteBuffer input, ProfileLedgerContext expected, int bound) {
+        return copy(decodeExplicitView(input, expected, bound));
+    }
+
+    public static View decodeExplicitView(ByteBuffer input, ProfileLedgerContext expected, int bound) {
         ByteBuffer in = input.asReadOnlyBuffer().order(ByteOrder.BIG_ENDIAN);
         if (in.remaining() < 8) {
             throw new IllegalArgumentException("Truncated explicit READ_LAC reply");
@@ -183,7 +233,7 @@ public final class ProfileLacReplyCodec {
             if (in.hasRemaining()) {
                 throw new IllegalArgumentException("Explicit READ_LAC refusal carries body");
             }
-            return refused(status);
+            return refusedView(status);
         }
         if (!status.equals(QUERY_OK) || in.remaining() < EXPLICIT_PREFIX_BYTES - 8 || in.getInt() != MAGIC
                 || Short.toUnsignedInt(in.getShort()) != EXPLICIT_SCHEMA) {
@@ -206,14 +256,14 @@ public final class ProfileLacReplyCodec {
                 || in.getLong(in.position() + 24) < 0)) {
             throw new IllegalArgumentException("Explicit READ_LAC tags/source disagree");
         }
-        byte[] entry = new byte[(int) entryBytes];
-        byte[] explicit = new byte[(int) explicitBytes];
-        in.get(entry).get(explicit);
-        if (explicit.length != 0 && (ByteBuffer.wrap(explicit).getLong() != expected.ledgerId()
-                || ByteBuffer.wrap(explicit).getLong(8) != lac)) {
+        ByteBuffer entry = in.slice(in.position(), (int) entryBytes);
+        ByteBuffer explicit = in.slice(in.position() + (int) entryBytes, (int) explicitBytes);
+        if (explicit.hasRemaining() && (explicit.getLong() != expected.ledgerId()
+                || explicit.getLong(8) != lac)) {
             throw new IllegalArgumentException("Explicit LAC body does not bind ledger/value");
         }
-        return new Reply(status, entry.length != 0 ? Outcome.SOURCE : explicit.length != 0 ? Outcome.EXPLICIT
+        explicit.position(0);
+        return new View(status, entry.hasRemaining() ? Outcome.SOURCE : explicit.hasRemaining() ? Outcome.EXPLICIT
                 : Outcome.EMPTY, entry, explicit, lac);
     }
 
