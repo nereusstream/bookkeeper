@@ -787,3 +787,6 @@ Segment production candidate 的最低 Gate：
 
 
 [C+D local FREE 组合与实际边界验证](rfcs/unified-wal/implementation/profile-wire/README.md#cd-local-free-组合与实际边界验证)：2026-10-13父36163d9908后在原WholeAllocationFree新增CDSpec，直接组合两个原ProfileLogicalDelete实例与共享allocation的tombstone force/apply、旧I/O/reader drain、FREE force/apply；新四个指定反例覆盖早投递、无force、丢邻居和部分effect伪FREE。最终10配置2完整正向/8指定反例与实际两类6项Java通过，2010 unique source匹配；原Spec五配置保持原计数，catalog735尚未全跑、原730回执不移绑。style通过，实际终态后的独立RAT exit1/443父HEAD路径无新增，不称CI全绿。该单target/两ledger组合不冒充完整A+C+D，继续全16步及其余OPEN范围，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[A+C local publication 到 SDK ACK 的实际验证](rfcs/unified-wal/implementation/profile-wire/README.md#ac-local-publication-到-sdk-ack-的实际验证)：2026-10-22父30377492f4后在原ProfileSdkBridge新增ACSpec，直接由两个独立SegmentAllocator实例的local publication供给原A2 SDK ACK，slot2保留验证过的remote响应输入；已发请求可在caller超时后进入owner，取消不取消accepted I/O，恢复同步不mint原live ACK。最终17配置4完整正向/13指定反例、旧11配置计数不变，两阶段8+2原Java与最终新增1项真实队列/独立force测试通过，2016 unique路径按stage冻结，1项测试强化差异分别保留；catalog741未全跑，历史receipt不移绑。Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。该单entry/每episode一个batch/pair内一次crash组合仍未闭合同批fence/冲突重试/跨batch UNKNOWN/多Arena/连续两次故障与完整A+C+D；继续全16步，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

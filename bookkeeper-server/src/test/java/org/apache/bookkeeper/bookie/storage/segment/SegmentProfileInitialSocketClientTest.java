@@ -1124,6 +1124,71 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void ordinaryTimeoutBeforeOwnerExecutionKeepsQueuedWriteAndReconcilesSameCoordinate() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            fixture.initialize().get(5, TimeUnit.SECONDS);
+            var client = dataClient(fixture, 0, 1, Duration.ofMillis(300));
+            var field = IsolatedSegmentStorage.class.getDeclaredField("execution");
+            field.setAccessible(true);
+            var execution = (SegmentExecutionGroup) field.get(fixture.nodes.get(0));
+            var owner = execution.owner(0);
+            var blocked = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var failure = new AtomicReference<Throwable>();
+            var source = entry(fixture, 0, 16);
+            var io = files(fixture.nodes.get(0)).dataIo;
+            int forces = io.forces;
+            int writes = io.writes;
+            assertTrue(owner.submit(0, new SegmentOwnerLoop.Command() {
+                @Override
+                public void run(SegmentOwnerLoop.Ticket ticket) {
+                    blocked.countDown();
+                    await(release);
+                    ticket.complete(() -> { });
+                }
+
+                @Override
+                public void failed(Throwable cause) {
+                    failure.set(cause);
+                }
+            }));
+            try {
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                var unknown = client.addNormal(fixture.context(), fixture.credential, 0, source);
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (owner.pending() < 2 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(2, owner.pending());
+                assertThrows(ExecutionException.class, () -> unknown.get(5, TimeUnit.SECONDS));
+                assertEquals(writes, io.writes);
+                assertEquals(forces, io.forces);
+                release.countDown();
+                until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (owner.pending() != 0 && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(0, owner.pending());
+                assertEquals(forces + 1, io.forces);
+                int originalWrites = io.writes;
+                assertTrue(originalWrites > writes);
+                var retrying = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+                var resolved = retrying.addNormal(fixture.context(), fixture.credential, 0, source)
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileStatus.DurableResult.APPLIED, resolved.durableResult());
+                assertEquals(forces + 1, io.forces);
+                assertEquals(originalWrites, io.writes);
+                assertTrue(unknown.isCompletedExceptionally());
+                assertNull(failure.get());
+            } finally {
+                release.countDown();
+                source.release();
+            }
+        }
+    }
+
+    @Test
     public void ordinaryServerForceFailureKeepsFullUnknownStatusAndNeverAcks() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
             fixture.connectAll(Duration.ofSeconds(5));

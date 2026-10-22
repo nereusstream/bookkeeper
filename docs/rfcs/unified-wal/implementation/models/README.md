@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为735配置；新增C+D五配置仅有定向结果。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为741配置；新增A+C六配置和C+D五配置仅有定向结果。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,12 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `ac-profile-sdk-bridge` | 原SDK单entry/A2与两个独立SegmentAllocator实例共同展开，slot0/1的ACK必须有各自live publication；slot2仍是已验证remote响应输入，pair内最多一次crash，每episode一个batch |
+| `ce-ac-profile-sdk-bridge-late-submit` | caller超时后禁止已发请求进入存储须违反ACSentCanReachStorageAfterWait |
+| `ce-ac-profile-sdk-bridge-early` | 只有written就ACK须违反ACAcknowledgmentHasOwnLocalPublication |
+| `ce-ac-profile-sdk-bridge-peer` | 使用另一副本publication须违反ACAcknowledgmentHasOwnLocalPublication |
+| `ce-ac-profile-sdk-bridge-recovery` | recovery sync生成原live请求ACK须违反ACAcknowledgmentCameFromLiveEpisode |
+| `ce-ac-profile-sdk-bridge-cancel` | caller停止等待即清空inflight须违反ACCancellationKeepsStorageProtection |
 | `cd-whole-free` | 原ProfileLogicalDelete的两个实例与原WholeAllocationFree共用实际状态展开；logical不产生local effect，逐ledger delivery→tombstone force/apply→全部旧I/O/pin排空→FREE force/apply；仅一个retained target、一个共享allocation |
 | `ce-cd-whole-free-delivery` | 提前投递须违反CDDeliveryHasLogicalObligation |
 | `ce-cd-whole-free-force` | 跳过tombstone force须违反CDLocalEffectHasForce |
@@ -1510,3 +1516,20 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 ```
 
 两轮初始化/子表达式赋值错误的bn9jti0_/mrwr9v0d保留INCONCLUSIVE；修正后cys5hub8与_82frj3x属于各自阶段，随后unaxbl7j加入manifest birth准入、tombstone UNKNOWN与runner scope说明，仍保留原结果；最终将offline绑定同一target并阻止local delivery，224si3wd拥有上述结果。1111最终模型输入与1170 Java输入共有271、去重2010，重叠SHA一致；source/manifest/config/checker/全部反例/XML及stage overrides保留在 `/Users/liusinan/.codex/artifacts/unified-wal/cd-composition-evidence-a6fepgxb`。对应实际六项Java由[实现记录](../profile-wire/README.md#cd-local-free-组合与实际边界验证)拥有。catalog735未全量重跑，原730整轮仍绑定fd3b1be724；此为一个target/两个ledger/单allocation的C+D组合，local durable/fence字节、ZK原子性仍由Java产生，未覆盖完整多target、MOVE/reuse、restart/rejoin/history GC、A+C或完整A+C+D。生产Gate及全16步验收保持OPEN。
+
+
+## A+C 的 local publication 到 SDK ACK 组合
+
+2026-10-22，父源码 `30377492f4a71c066364e6dfc7ce1fb6f31516b4`。在原ProfileSdkBridge模块新增ACSpec，直接INSTANCE原SegmentAllocator两次；两个managed storage episode分别提供原SDK slot0/1的local publication，slot2继续以经过完整校验的remote response作为输入。每episode一个stream/file/batch、固定身份和payload、单entry 3/3/2、pair内最多一次process crash；power loss与process crash仍是原C的分开动作。两份存储session的control/DATA barrier独立。Bookie install/fence authority仍是输入，同Bookie多Arena及全部replica的物理状态待展开。
+
+已发请求独立于caller timeout/stop保留，允许它稍后进入存储队列；明确NONE结束该次attempt，原同坐标Retry才重新建立sent状态。已受理后，原C的write/barrier/连续prefix/publication、故障隔离、close、crash/power loss与recovery继续独立推进。原SDK的sticky UNKNOWN、source、单次callback和A2门槛保留；组合另检查backoff后Retry仍enabled、caller结束等待后sent请求仍可Submit。这是enabledness安全性质，没有公平性或最终完成保证。slot0/1的Durable必须有matching C实例的live publication及DATA durability；原episode已交付的合法ACK可跨之后的crash保留，新进程的可读/已同步candidate不产生原live请求ACK。两个C实例的control barrier、连续prefix、故障隔离、恢复同步与session authority也在组合状态检查。
+
+五个mutation分别阻止晚到Submit、以written提前ACK、借另一副本publication、以recovered ready产生ACK、caller放弃后删除inflight。最终 `unified-wal-model-wx72mjgk` 17配置为4完整正向PASS/13指定反例，均命中指定invariant。新组合3,163,772 generated/635,286 distinct、queue0、depth/diameter36，46.728秒、peak RSS675,725,312 bytes（checker进程观测，不是产品内存或性能结论）。正向coverage中原SDK Quorum成功更新42,144次，两份DATA barrier更新各12,936次、recovery sync更新各48,292次；成功与恢复均实际可达。其余11个原配置status及generated/distinct计数与fd3b1be724的原730整轮相同：原SDK仍9613/2476，managed shared/split仍95530/44007及125075/50859。旧Spec初始化并冻结新增C变量，原SDK转移及原C模块保持。
+
+TLC1.7.4/Corretto21.0.10、单worker/heap512MiB/direct64MiB/seed1/fp0，无symmetry/state constraint、CHECK_DEADLOCK FALSE；单crash是明确的有限故障预算，未检查fairness/liveness或完整两次故障。356ow8ha的definition-order错误、3qtdkuiv的TLA缩进错误、x7nak9d7的不完整赋值/被多余UNCHANGED限制的Retry均保留INCONCLUSIVE/被取代阶段；ryjxi8yx与e8s6_5xd的结果保留原source。最终使用ac-/ce-ac-前缀，避免扩大旧SDK prefix命令范围；增加sent lifetime、Retry enabledness和晚Submit反例后，wx72mjgk拥有当前结果，旧PASS不移绑。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix ac-profile-sdk-bridge --config-prefix ce-ac-profile-sdk-bridge --config-prefix a-profile-sdk-bridge --config-prefix ce-profile-sdk-bridge --config-prefix c-managed --config-prefix ce-data-before-barrier --config-prefix ce-control-before-sync --config-prefix ce-open-replay-after-error
+```
+
+1117最终model与1170最终Java输入共有271路径，270项SHA一致；socket测试随后补强“retry前原请求已独立完成force”的1项stage差异分别保存，路径去重2016，不将旧模型回执移绑最终测试源码。source/stage overrides/manifest/config/checker/反例/coverage/XML/完整命令在 `/Users/liusinan/.codex/artifacts/unified-wal/ac-ack-composition-evidence-ncf_zb1h`；[实际边界验证](../profile-wire/README.md#ac-local-publication-到-sdk-ack-的实际验证)拥有8+2项原阶段及最终新增1项Java结果。catalog741未全跑，原730与C+D回执保持原绑定。A3仅有Java定向覆盖，本模型只展开A2；同批L1/L2 fence、K/X与K/Y冲突、11 UNKNOWN/12完成、全部replica/多Arena、连续两次故障、placement/replacement、完整A+C/A+C+D及全部16步验收仍OPEN，生产Gate不提升。

@@ -2046,3 +2046,16 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 [模型记录](../models/README.md#cd-的-logical-到共享-allocation-free-组合)拥有最终10配置2完整正向/8指定反例、1111 model与Java共有271/去重2010 source；新spec实际INSTANCE两个原logical状态机并连接本地tombstone force/apply与原FREE状态机，不把独立模型PASS相加当组合证明。原730配置整轮保留fd3b1be724绑定，新增catalog735未全量运行。两轮建模INCONCLUSIVE及后续各stage原输出/source均保留，证据目录 `/Users/liusinan/.codex/artifacts/unified-wal/cd-composition-evidence-a6fepgxb`。
 
 最终Spotless/Checkstyle exit0，Java/model输入SHA保持原阶段；实际Java/model/style终结后独立RAT exit1，443 unknown/unapproved路径全部存在父HEAD、无新增，原失败报告保留，不称CI全绿。本组合限于单retained target与一个共享allocation的两个fenced CLOSED ledger；Java实际native字节/force、ZK、mTLS与模型有限状态分别给出证据，没有完整A+C、多目标restart/rejoin/MOVE/reuse/history GC或A+C+D组合/性能/liveness证明。继续默认SDK/observe公共约定、Main/required producer、full-bytes、backup-restore/accepted退役/GC/mixed/正式性能/运维与全部16步验收；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## A+C local publication 到 SDK ACK 的实际验证
+
+2026-10-22，父源码 `30377492f4a71c066364e6dfc7ce1fb6f31516b4`。本轮增加既有SDK模型中的ACSpec/config、runner条目及一个真实队列窗口测试；Java生产、wire和持久格式未改。实际映射继续由SegmentDataPhysicalDriver.prepareNormal/PhysicalCommand的prefix.completed→hot.publish→逐entry LOCAL_DURABLE、ProfileBookieClient.Delivery的完整status校验和原PendingAddOp.profileWriteComplete/ackSet提供。重启physical candidate、caller停止等待均不提供新ACK authority；已发请求可以在caller超时后进入owner执行。
+
+`unified-wal-local-voYtnr36` 两类8项通过：真实DATA force/owner completion在durable fence前、NONE/refusal与I/O UNKNOWN/后续seal、真实digest/durable status进入原ACK set、超时后server I/O与同坐标reconcile、force失败不ACK、错误reply/fake OK/NONE/flags拒绝、原SDK quorum/连续callback及A3等待第三个actual durable replica。随后pfmlteYw仅补2项：旧force错误后的recovered bytes仍只是physical evidence，failed prefix不在后续I/O实际终结前释放ticket。两阶段均0 failure/error/skip，1170 Java输入相同；不移绑到随后新增测试的文件。
+
+新增ordinaryTimeoutBeforeOwnerExecutionKeepsQueuedWriteAndReconcilesSameCoordinate通过真实mTLS/SDK/文件路径阻塞server owner，确认请求已进入owner队列但尚无DATA write/force；caller先超时后释放owner。最终kJQNhSV9的1项通过：在任何retry之前，原请求已实际排空并独立完成恰好一次force；随后同坐标reconcile成功且DATA writes/forces不增加，原future继续保持exceptional。初版0eOGg5sI也通过，但未独立排除retry本身造成写入，原回执保留，随后加强因果断言并仅重跑该方法，没有将初版PASS替代最终证明。
+
+[模型记录](../models/README.md#ac-的-local-publication-到-sdk-ack-组合)拥有17配置4完整正向/13指定反例，两个原C实例与SDK共用状态空间，slot2仍是验证过的响应输入；A2单entry/每episode一个batch/pair内一次crash。1117 model与1170最终Java共有271路径，270 SHA相同、socket测试加强有1项stage差异，2016 unique路径；原阶段与最终source/checker/XML均分别保留在 `/Users/liusinan/.codex/artifacts/unified-wal/ac-ack-composition-evidence-ncf_zb1h`。原11配置状态计数保持原730结果；catalog741不是全量新结果。
+
+最终Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。此切片不闭合完整多Arena/所有replica、同批fence、冲突重试、跨batch UNKNOWN/连续两次故障或完整A+C+D、全部字节/性能Gate。默认SDK/observe公共约定、Main/required producer、full-bytes、backup-restore/accepted退役/GC/mixed/正式性能/运维和全16步验收继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
