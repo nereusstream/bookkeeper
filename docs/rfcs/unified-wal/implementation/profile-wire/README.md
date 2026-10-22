@@ -2168,3 +2168,18 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 [repair output 有限投影](../models/README.md#repair-copy-的-reply-与实际-output-终结) 最终12配置为2完整正向/10指定反例；只有 reply/actual output 终结新增转移，native restore authority/digest/force/delete 仍是 Java 输入，不称完整 backup acceptance 或 A+C+D。1171 Java与1134模型输入的2033个唯一路径逐项冻结，共有272路径 SHA 一致。证据 `/Users/liusinan/.codex/artifacts/unified-wal/backup-repair-evidence-jb34qbt0` 保存各阶段原命令、源码差异、XML、失败、模型 trace 与最终输入。Spotless/Checkstyle exit0；Java/model/style终结后独立RAT最初445项，补两份新cfg完整Apache注释后回到443项，全部为父HEAD路径、无新增；模型配置有效内容未变，原TLC输入与最终license-only版本分别保存，不移绑历史结果。
 
 该切片接通 CLOSED 导入与 membership，不等于新目标整体恢复接受：新目标自己的 assignment/snapshot＋无洞 suffix/required-through/readiness/registration、ledgerId reuse 的 restore 专属组合、copy/cursor/registration crash/lost reply、完整恢复运维与接受下界仍须实施。旧 incarnation/Manifest/events/physical receipts/lineage/物理清理义务保持原绑定，WINDOW_ELAPSED 无 restore/GC/退役权限。同 incarnation 原地恢复、同 BookieId 切换、MetadataStore 回滚、在线一致性备份继续禁用。默认SDK/observe公共约定、Main/其他required producer/full-bytes/兼容/正式性能及完整16步继续OPEN，目标active、生产Gate OPEN；默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## 恢复目标的首次 service bootstrap 组合验证
+
+2026-10-23，父源码 `389b49fadaa265ba4d2b03afab0699372948caf2`。复用原ServiceEpisode、SegmentProfileService与ZK startup requirements/assignment/head/readiness/registration，在上一节真实镜像copy测试中补入两个恢复专属生命周期；不新增生产入口、控制协议或第二套bootstrap。目标使用原新BookieId/incarnation/目录，镜像仍只作历史source；通过当前repair获得的数据在目标本地恢复后，由目标自己的当前authority决定服务资格。
+
+第一条是copy/membership/close实际排空后，停止目标原listener/storage，以原service重新打开目标目录，核验真实零cut/head及当前注册，再通过实际mTLS连接读出导入entry；目标仍无normal writer authority。第二条是copy成功后、目标首次service启动前逻辑删除该instance，取得当前目标自己的完整snapshot（cut1），在可丢弃测试中移除原event-1行，迫使bootstrap经snapshot恢复prefix；没有改写源snapshot身份或将该故障注入称为受支持GC。原service先完成目标的local delete force/apply，再请求readiness发布。复用原HeldServicePublicationClient暂停真实ZK publication，观察注册尚不存在、目标cursor1和terminal tombstone已具备，放行后才注册；删除Manifest完整字节不变，旧source/incarnation清理义务仍在。
+
+最初 `unified-wal-local-M8Cq6wJ6` 因测试误假定零cut必有local cursor而失败；原协议从当前native head验证零cut，不需要伪造本地delete record。修正测试后3EBczkds扩展九场景通过；再补publication前观察点，最终 `unified-wal-local-87GrHC8k` 三方法全部通过，0 failure/error/skip：该九场景方法、原owned service实际drain/restart方法、原snapshot缺prefix后继续真实suffix且不跳tombstone方法。后两项复用既有风险覆盖，不能将独立suffix测试称为新目标多event组合。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy+ownedProfileServicePublishesBoundEndpointSupportsSdkAndRetainsDrainAcrossRestart+deleteSnapshotReplaysMissingPrefixThenActualSuffixWithoutSkippingTombstones'
+```
+
+1171个Java输入及各stage test源码差异、原命令/XML与失败报告保留在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-bootstrap-evidence-5mbv2jop`。本轮仅改测试与当前文档，生产Java和TLA转移未改，不重复TLC或移绑旧模型receipt。最终Spotless/Checkstyle exit0；Java/style终结后独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。当前补齐新目标verified-zero和snapshot-prefix首次注册的正常组合；不证明restore接受下界、ledgerId reuse、crash/lost reply、writable竞争的全部交错、多目标或完整bootstrap运维交付。完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

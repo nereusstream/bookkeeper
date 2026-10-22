@@ -1050,3 +1050,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest
 1171个最终Java输入逐项SHA冻结，各red/green/补强阶段保留原source/命令/XML；`/Users/liusinan/.codex/artifacts/unified-wal/backup-image-evidence-pr4l1kz4`拥有完整证据。最终Spotless/Checkstyle exit0，Java/style终结后独立RAT exit1，443 unapproved全部存在父HEAD、无新增。model runner只补新源码输入登记并检查Python语法；TLA转移未改、不重跑或移绑旧TLC receipt，旧A+C+D不视为backup-copy/force证明。
 
 仍须接镜像作为repair来源、新身份inactive install/RepairIntent/recovery-only copy/current metadata验证与membership、required-through/readiness，以及backup后delete、ledgerId reuse、admission/writable竞争与force/cursor/registration crash/lost-reply的恢复专属组合。线上一致性备份、原地restore、同BookieId身份切换、MetadataStore随镜像回滚继续不支持；旧incarnation/Manifest/events/receipts/lineage/物理义务全部原绑定，WINDOW_ELAPSED不授予GC。完整16步目标active、生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+[恢复目标的首次 service bootstrap 组合验证](../profile-wire/README.md#恢复目标的首次-service-bootstrap-组合验证)：2026-10-23父389b49fada上，仅补原真实restore fixture的组合覆盖。新目标copy完成后可经当前verified-zero/head重启注册并mTLS读出原数据；首次注册前删除则用该目标自己的完整snapshot追赶，publication实际提交前已有cursor1/tombstone且尚无注册，旧Manifest/目标义务不变。最终三方法0 failure/error/skip（扩展restore方法九场景＋既有service drain/restart及snapshot/suffix），1171输入和早期零cursor测试假设失败各自冻结，无生产Java/TLA改动、不重跑TLC。完整restore的reuse/crash/lost reply/接受下界及其余16步验收仍OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变。

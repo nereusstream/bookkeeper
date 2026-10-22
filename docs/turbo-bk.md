@@ -823,3 +823,6 @@ Segment production candidate 的最低 Gate：
 
 
 [离线镜像接入当前 CLOSED repair-copy](rfcs/unified-wal/implementation/profile-wire/README.md#离线镜像接入当前-closed-repair-copy)：2026-10-23父b7c9e32bc6上，镜像仅作附加source，经current CLOSED/context/birth/retained source校验，复用inactive install/admit/grant/copy/membership/close；缺项取当前副本，冲突隔离，不降frontier或授normal。原copy同时等待reply与actual output终结，caller cancel保持实际资源；新增七场景及既有路径共12方法全部通过，reply-only敏感性RED保留。repair模型12配置2正向/10指定反例，catalog756未全跑；1171 Java/1134模型输入去重2033，各stage保持原绑定。style通过；RAT补两新cfg许可证后回到443父HEAD既有路径，无新增。新目标assignment/snapshot/no-hole suffix/required-through/readiness/registration、restore reuse/crash/lost reply及完整接受仍OPEN，旧目标义务不解除。完整16步目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+
+[恢复目标的首次 service bootstrap 组合验证](rfcs/unified-wal/implementation/profile-wire/README.md#恢复目标的首次-service-bootstrap-组合验证)：2026-10-23父389b49fada上，仅补原真实restore fixture的组合覆盖。新目标copy完成后可经当前verified-zero/head重启注册并mTLS读出原数据；首次注册前删除则用该目标自己的完整snapshot追赶，publication实际提交前已有cursor1/tombstone且尚无注册，旧Manifest/目标义务不变。最终三方法0 failure/error/skip（扩展restore方法九场景＋既有service drain/restart及snapshot/suffix），1171输入和早期零cursor测试假设失败各自冻结，无生产Java/TLA改动、不重跑TLC。完整restore的reuse/crash/lost reply/接受下界及其余16步验收仍OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变。
