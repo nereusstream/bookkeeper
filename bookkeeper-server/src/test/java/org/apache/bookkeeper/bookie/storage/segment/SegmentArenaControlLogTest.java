@@ -425,6 +425,70 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void checkpointStreamsExistingRecordsWithoutPayloadSizedCopies() throws Exception {
+        var standard = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.Assume.assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        var memory = (com.sun.management.ThreadMXBean) standard;
+        org.junit.Assume.assumeTrue(memory.isThreadAllocatedMemorySupported());
+        boolean enabled = memory.isThreadAllocatedMemoryEnabled();
+        if (!enabled) {
+            memory.setThreadAllocatedMemoryEnabled(true);
+        }
+        try {
+            IsolatedSegmentConfig config = config();
+            ByteBuffer record = ByteBuffer.allocate(65536);
+            for (int i = 0; i < record.capacity(); i++) {
+                record.put(i, (byte) (i * 31));
+            }
+            record.position(7).limit(record.capacity() - 3);
+            var operations = new java.util.ArrayList<SegmentControlCheckpoint.Operation>();
+            for (int i = 0; i < 128; i++) {
+                operations.add(new SegmentControlCheckpoint.Operation(i, i % 4 + 1, record));
+            }
+            var snapshot = new SegmentControlCheckpoint.Snapshot(127, 4096, operations, true);
+            ByteBuffer expected = ByteBuffer.allocate(operations.size() * (16 + record.remaining()));
+            for (var operation : operations) {
+                expected.putLong(operation.sequence()).putInt(operation.status()).putInt(record.remaining())
+                        .put(record.duplicate());
+            }
+            String expectedDigest = HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(expected.array()));
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+                // Warm the digest, identity and file backend before measuring codec work on the existing records.
+                var warm = new SegmentControlCheckpoint.Snapshot(0, 4096, operations.subList(0, 1), true);
+                var warmReference = SegmentControlCheckpoint.reference(1, 0, warm, 16 * 1024 * 1024);
+                SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        warmReference, warm, new SegmentFileIo());
+                long thread = Thread.currentThread().getId();
+                long before = memory.getThreadAllocatedBytes(thread);
+                var reference = SegmentControlCheckpoint.reference(2, 0, snapshot, 16 * 1024 * 1024);
+                long digestBytes = memory.getThreadAllocatedBytes(thread) - before;
+                assertEquals(expected.capacity(), reference.payloadBytes());
+                assertEquals(expectedDigest, reference.digest());
+                var io = new SegmentFileIo();
+                before = memory.getThreadAllocatedBytes(thread);
+                SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        reference, snapshot, io);
+                long writeBytes = memory.getThreadAllocatedBytes(thread) - before;
+                System.out.println("Checkpoint Java allocation: digest=" + digestBytes + ", write=" + writeBytes);
+                byte[] written = Files.readAllBytes(SegmentControlCheckpoint.path(
+                        config, SegmentControlFormat.Owner.ARENA, 0));
+                assertArrayEquals(expected.array(), java.util.Arrays.copyOfRange(written, 4224, written.length));
+                assertEquals(1, io.forces);
+                assertEquals(7, record.position());
+                assertEquals(record.capacity() - 3, record.limit());
+                int bound = expected.capacity() / 4;
+                assertTrue("Checkpoint digest copied payload bytes: " + digestBytes, digestBytes < bound);
+                assertTrue("Checkpoint writer copied payload bytes: " + writeBytes, writeBytes < bound);
+            }
+        } finally {
+            if (!enabled) {
+                memory.setThreadAllocatedMemoryEnabled(false);
+            }
+        }
+    }
+
+    @Test
     public void emptyCheckpointAndCommitMatchIndependentFixedByteVectors() throws Exception {
         IsolatedSegmentConfig config = config();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
@@ -608,13 +672,25 @@ public class SegmentArenaControlLogTest {
             assertThrows(IOException.class, () -> log.checkpoint(
                     new SegmentFileIo(Integer.MAX_VALUE, 1, -1, false)));
             assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            var snapshot = SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    first, 1024 * 1024);
+            var next = SegmentControlCheckpoint.reference(2, 1, snapshot, 1024 * 1024);
+            // Header and record prefix are complete; a partial record body must never become a valid image.
+            assertThrows(IOException.class, () -> SegmentControlCheckpoint.write(config, identity(),
+                    SegmentControlFormat.Owner.ARENA, next, snapshot, new SegmentFileIo(64, 70, -1, false)));
+            assertThrows(IOException.class, () -> SegmentControlCheckpoint.read(config, identity(),
+                    SegmentControlFormat.Owner.ARENA, next, 1024 * 1024));
+            assertEquals(first, log.publishedCheckpoint().orElseThrow());
+            assertEquals(snapshot, SegmentControlCheckpoint.read(config, identity(),
+                    SegmentControlFormat.Owner.ARENA, first, 1024 * 1024));
             assertThrows(IOException.class, () -> log.checkpoint(
                     new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false)));
             assertEquals(first, log.publishedCheckpoint().orElseThrow());
             assertTrue(granted(log, 4096, 1, 1, 1));
+            // The frozen image contains ALLOC and the retained first CHECKPOINT_COMMIT: two writes per record.
             // Payload is forced and the commit applied; publication write then fails before touching its page.
             assertThrows(IOException.class, () -> log.checkpoint(
-                    new SegmentFileIo(Integer.MAX_VALUE, 5, -1, false)));
+                    new SegmentFileIo(Integer.MAX_VALUE, 7, -1, false)));
             assertThrows(IOException.class, () -> log.submitBatch(List.of(alloc(2, 4096))));
         }
         try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {

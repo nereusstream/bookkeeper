@@ -71,13 +71,15 @@ final class SegmentControlCheckpoint {
     static Reference reference(long generation, int slot, Snapshot snapshot, long maxLogBytes) throws IOException {
         MessageDigest digest = sha256();
         long length = 0;
+        ByteBuffer prefix = ByteBuffer.allocate(16);
         for (Operation operation : snapshot.operations()) {
-            ByteBuffer bytes = encode(operation);
-            length += bytes.remaining();
+            ByteBuffer record = operation.record();
+            length += 16L + record.remaining();
             if (length > Integer.MAX_VALUE || length - maxLogBytes > maxLogBytes) {
                 throw new IOException("Control checkpoint exceeds its control-state budget");
             }
-            digest.update(bytes);
+            digest.update(prefix(prefix, operation, record.remaining()));
+            digest.update(record);
         }
         return new Reference(generation, slot, snapshot.through(), snapshot.logOffset(), (int) length,
                 HexFormat.of().formatHex(digest.digest()));
@@ -96,10 +98,12 @@ final class SegmentControlCheckpoint {
             checksum(header);
             io.writeFully(file, header, 4096);
             long offset = 4224;
+            ByteBuffer prefix = ByteBuffer.allocate(16);
             for (Operation operation : snapshot.operations()) {
-                ByteBuffer bytes = encode(operation);
-                io.writeFully(file, bytes, offset);
-                offset += bytes.remaining();
+                ByteBuffer record = operation.record();
+                io.writeFully(file, prefix(prefix, operation, record.remaining()), offset);
+                io.writeFully(file, record, offset + 16);
+                offset += 16L + record.remaining();
             }
             io.force(file, true);
         }
@@ -222,10 +226,8 @@ final class SegmentControlCheckpoint {
         }
     }
 
-    private static ByteBuffer encode(Operation operation) {
-        ByteBuffer record = operation.record();
-        return ByteBuffer.allocate(16 + record.remaining()).putLong(operation.sequence())
-                .putInt(operation.status()).putInt(record.remaining()).put(record).flip();
+    private static ByteBuffer prefix(ByteBuffer bytes, Operation operation, int recordBytes) {
+        return bytes.clear().putLong(operation.sequence()).putInt(operation.status()).putInt(recordBytes).flip();
     }
 
     private static ByteBuffer envelope(int size, long magic, Reference reference) {

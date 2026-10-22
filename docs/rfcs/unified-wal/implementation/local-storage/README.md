@@ -974,3 +974,22 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest#deri
 完整最终命令由inputs.json保存，1170 Java输入已按测试stage冻结SHA；测试后仅三处换行修正，非空字符SHA一致，旧PASS不移绑当前源码，format-only-check和最终source另存。最终Spotless/Checkstyle exit0，首次三项line-length失败保留；Java/style终态后的独立RAT exit1，443 unapproved均存在父HEAD、无新增；不称CI全绿。RocksDB9.9.3 source jar及Get/iterator/MutableColumnFamilyOptions源码按SHA归档，验证完整长度返回和截断输出API；原有限模型未覆盖JNI数组分配、没有改动或重跑，也不宣称完整A+C+D/byte总账已证明。证据 `/Users/liusinan/.codex/artifacts/unified-wal/index-bounded-read-evidence-dyaiw04a` 保存原native/Java stage/source/inputs/XML/RED/GREEN、分配计量及依赖源码/checker。
 
 本增量限制派生KV造成的Java数组复制，不新增预算账本/allocator/配置、线程/队列、公共接口或持久格式。RocksDB memtable/table-reader/native、Java locator/control/MetadataStore对象、JDK/opaque TLS/kernel、caller/legacy/observation和统一full-bytes仍OPEN，Linux NUMA/真实掉电/正式性能/canary未执行。默认SDK/observe释放公共约定仍待答复；Main/required producer、backup-restore/accepted退役/GC/mixed/运维及全16步验收继续推进，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+## Checkpoint record 的流式摘要与写入
+
+2026-10-22，父源码 `830918cbb227147d14b3af3b57ac827586f36df6`。原SegmentControlCheckpoint.reference/write都调用encode，为已有record分配并复制完整16-byte framing+record；Bookie checkpointState已有的record及Arena freeze产生的record之外，每阶段又分配约整个image的payload字节。现在每次reference/write只复用一个16-byte framing buffer，摘要依次消费prefix/原record只读view，文件按相同offset顺序写prefix/record。原record的position/limit不变；payload长度/字节/SHA、v1/v2 image、双owner publication/reference/commit、image force→目录同步→重读→commit→publication的顺序和控制状态预算保持原合同。无新账本、配置、线程、队列、公共API或持久格式。
+
+新增checkpointStreamsExistingRecordsWithoutPayloadSizedCopies以128条已存在record、非零position/limit和独立拼装的8,389,376-byte payload核对完整文件字节及SHA，再通过JVM ThreadMXBean分别测reference和真实FileChannel write的Java分配。此项直接测共享codec的原始record view，不把填充字节当作有效控制命令；有效命令及恢复语义由下述现有双owner测试验证。`unified-wal-local-q5zNNiPq` 保持父生产源码：digest=8,407,640、write=8,421,296 bytes，新增digest bound断言失败（1 failure/0 error/skip），完整byte/SHA检查先通过。流式实现9vRo4ACQ两项通过；随后补部分record body写入失败及旧published image仍可完整读取的断言，最终 `unified-wal-local-QO7dgEEb` 两类20项全部通过、0 failure/error/skip。最终相同workload digest=12,992、write=29,704 bytes；计量包含该线程实际JDK codec/文件调用分配，不代表native/direct/全进程RSS或统一总账。无ThreadMXBean支持的JVM会条件跳过该计量，本机没有skip。
+
+现有Arena publication故障注入由第5次write改第7次：image含ALLOC和保留的CHECKPOINT_COMMIT，每record拆成prefix/body两次write，因此仍验证image已force且commit已apply之后、publication页尚未触及时失败；没有把失败前移以获得通过。新增64-byte短写注入在完整header/prefix之后、record body中途失败，坏image拒绝，原published reference/image保持。最终20项还覆盖两个owner固定独立向量、applied cut/条件结果、sealed credential/FENCE/LAC/grant、损坏回退/必要suffix、image/publication force失败、原DATA图点读/幂等/append健康restart，以及两owner checkpoint和Arena rotation的子进程退出各阶段。进程退出不是掉电证明。
+
+复现使用原runner：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentArenaControlLogTest#checkpoint*+emptyCheckpoint*+originalJournalRestoresLatestCompactedCheckpointAndCorruptionFallback+rotationHeaderAndPublicationMatchIndependentByteVectors+rotationForceFailureDoesNotReturnSuccessAndCanRecover+rotationProcessExitAtFileAndRootBarriersRetainsAuthority,SegmentBookieControlLogTest#bookieCheckpoint*+bookieEmptyCheckpoint*+realBookieCheckpointProcessExitAtEachPublicationBarrierRetainsFence+bookieRotationHeaderAndThirdPageMatchIndependentByteVectors+bothControlCheckpointsPreserveTheStorageGraphReadDuplicateAndAppendAcrossRestart'
+```
+
+1170个最终Java输入逐项SHA核验并冻结，red/早期green/final三个stage保持各自source/命令/XML，不移绑；证据在 `/Users/liusinan/.codex/artifacts/unified-wal/checkpoint-stream-evidence-_zgyx_k2`。Spotless/Checkstyle exit0；Java/style实际终结后独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。模型无字节分配/分段write结构、语义未改，本轮不重跑TLC或把旧PASS作为分配证明。分段write增加每record的FileChannel调用，I/O吞吐/CPU/latency影响尚未测量；只报告上述同条件分配变化。
+
+该改动消除两个阶段的完整临时payload复制；Snapshot retained records、Arena freeze编码、reader/parser恢复副本、控制状态/索引/native/MetadataStore/JDK/TLS/kernel/对象及统一full-bytes仍OPEN。默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed兼容、完整A+C+D/正式性能/运维及全16步继续实施，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

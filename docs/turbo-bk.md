@@ -799,3 +799,6 @@ Segment production candidate 的最低 Gate：
 
 
 [超时后同坐标重试的身份验证](rfcs/unified-wal/implementation/profile-wire/README.md#超时后同坐标重试的身份验证)：2026-10-22父c60271c0f7上加强已有真实socket测试：原force在途且caller已超时，payload-only/length-only改变都冲突，LAC-only变化续接原操作、只发生一次force；该项及assembling/pending/index三项现有回归全部通过。原A+C增加同坐标cut与四个指定反例，最终25配置6完整正向/19指定反例、原20计数不变，2024 unique source/重叠SHA一致；owner为坐标保护oracle，不宣称第二个Y物理写、hot/index或restart冲突恢复已建模。Spotless/Checkstyle通过；终态后独立RAT exit1/443父HEAD路径无新增。catalog749未全跑，历史receipt保持绑定；生产/wire/格式未改，完整冲突恢复/multi-Arena/fence/两次故障/A+C+D和其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Checkpoint record 的流式摘要与写入](rfcs/unified-wal/implementation/local-storage/README.md#checkpoint-record-的流式摘要与写入)：2026-10-22父830918cbb2上去掉原双owner image摘要/写入阶段的完整record临时复制，改为一个16-byte prefix和原record只读view，字节/SHA/force与publication合同不变。相同约8MiB workload旧digest/write分配8,407,640/8,421,296 bytes触发真实RED，新为12,992/29,704 bytes；最终两类20项全部通过，含向量、partial body失败、force/损坏回退/子进程退出及DATA图restart。1170输入按stage冻结，style通过；终态后独立RAT exit1/443父HEAD路径无新增。额外分段write的I/O成本未测，不宣称性能/full-bytes闭合；模型无变化不重跑。其他required范围与全16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
