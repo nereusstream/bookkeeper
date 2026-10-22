@@ -1027,6 +1027,8 @@ java -cp microbenchmarks/target/benchmarks.jar org.openjdk.jmh.Main \
 
 ## 离线 backup image 与不可服务输入
 
+当前接线更新见 [离线镜像接入当前 CLOSED repair-copy](../profile-wire/README.md#离线镜像接入当前-closed-repair-copy)：2026-10-23已接原repair admission、recovery-only copy及membership；新 allocator overload持整个对齐scratch额度直至返回的owned entry最后释放。以下2026-10-22输入层结果保持其原阶段绑定，尚未接线的说明是当时状态。新目标整体bootstrap/registration及完整restore接受仍OPEN。
+
 2026-10-22，父源码 `4b1ba0889d74927f1bfc95b0e502a0acc3442861`，按 [RFC-0004 §15.1](../../RFC-0004-range-recovery-delete.md#151-首版-backuprestore-接受边界) 的新身份恢复决策，新增包内 `SegmentBackupImage`。这是导出/验证/逐点读取的离线输入层，尚未接新目标 repair admission/membership/bootstrap，不声称 backup/restore 已验收。没有新线程、队列、配置开关、Maven模块或默认SDK入口，OFF/SYSTEM/PARK及disabled不变。
 
 capture首先取得原DATA排他锁，再复用原Arena/Bookie控制日志的独立native锁、完整重放及原DATA恢复扫描；活动服务/另一个控制writer占用时拒绝。原控制恢复及DATA扫描保留其force，文件逻辑字节不因导出重写。新输出目录只能CREATE_NEW且独立于源目录；不能覆盖已有目录或在原scope内嵌套。复制任何原生文件前先写并force `backup-input` 标记、空DATA锁文件及目录，后续失败留下可诊断的marked input，不自动删除或冒充正常storage。`IsolatedSegmentStorage.startNew/restart`在control replay、DATA恢复与owner建立前拒绝任何该标记（含损坏/不完整标记），避免将旧身份镜像挂载为服务。

@@ -16,7 +16,10 @@
  */
 package org.apache.bookkeeper.discover.profile;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.util.ReferenceCounted;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -446,7 +449,8 @@ public final class ProfileRecoveryCoordinator {
             var value = plan.recovery().metadata().metadata().getValue();
             boolean last = value.getAllEnsembles().higherKey(plan.prepared().intent().fragmentStart()) == null;
             return repairFragmentOnce(plan.recovery(), plan.prepared(), sdk, options.descriptor(), key,
-                    workerData(value, target), options.controls(), plan.closeId(), last, stopped).thenAccept(result -> {
+                    workerData(value, target), options.controls(), plan.closeId(), last, stopped, null)
+                    .thenAccept(result -> {
                 copied += result.copiedEntries();
                 if (result.status() == RepairStatus.REPAIRED_HISTORICAL_FRAGMENT
                         || result.status() == RepairStatus.REPAIRED_LAST_FRAGMENT) {
@@ -1412,7 +1416,7 @@ public final class ProfileRecoveryCoordinator {
                                 ? new RepairResult(RepairStatus.REPAIRED_LAST_FRAGMENT, 0, result.publication())
                                 : result)
                         : repairFragmentOnce(plan.recovery(), plan.prepared(), sdk, descriptor, key, data, controls,
-                            plan.closeOperationId(), true, stopped);
+                            plan.closeOperationId(), true, stopped, null);
                 return repairedTarget.thenCompose(repaired -> {
                     if (repaired.status() != RepairStatus.REPAIRED_LAST_FRAGMENT) {
                         return CompletableFuture.completedFuture(new RecoveryResult(context.ledger().ledgerId(),
@@ -2305,6 +2309,37 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
+    /** Verified offline input, borrowed until RepairAttempt.completion. A missing entry is not absence evidence.
+     * Reads run on the original bounded cold executor and return one owned, allocator-accounted BK entry. */
+    public interface BackupSource {
+        BookieId bookieId();
+        byte[] storageIncarnation();
+        ByteBuf readEntry(org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext context,
+                long entryId, ByteBufAllocator allocator) throws IOException;
+    }
+
+    /** Caller cancellation never completes actual mirror, peer, metadata or output work. */
+    public record RepairAttempt(CompletableFuture<RepairResult> result, CompletableFuture<Void> completion) { }
+
+    /** Import into a different identity through the unchanged current CLOSED repair admission and publication. */
+    public RepairAttempt beginRestoreClosedFragment(ZKProfileReservationStore.ReadOnlySnapshot accepted,
+            ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk, byte[] descriptor,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> data,
+            Map<String, ProfileInitialControlClient> controls, byte[] closeId, BackupSource source) {
+        Objects.requireNonNull(source, "source");
+        var value = accepted.closed().metadata().metadata().getValue();
+        var target = prepared.intent().install();
+        if (value.getState() != org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED
+                || source.bookieId().toString().equals(target.targetBookie())
+                || Arrays.equals(source.storageIncarnation(), target.targetStorageIncarnation())) {
+            throw new IllegalArgumentException("Offline restore requires CLOSED and a new target identity");
+        }
+        return beginRepairFragment(new ZKProfileReservationStore.RecoveryResult(
+                ProfileLedgerMetadataStore.Outcome.ALREADY_APPLIED, accepted.context(), accepted.closed().metadata()),
+                prepared, sdk, descriptor, credential, data, controls, closeId,
+                value.getAllEnsembles().higherKey(prepared.intent().fragmentStart()) == null, source);
+    }
+
     /** One frozen intent. Copy is sequential and only retains one entry/RPC; caller cancellation stops future work,
      * never the child RPC already using buffers. Retry/resume reuses accepted, prepared and closeOperationId. */
     public CompletableFuture<RepairResult> repairHistorical(ZKProfileReservationStore.RecoveryResult accepted,
@@ -2346,6 +2381,16 @@ public final class ProfileRecoveryCoordinator {
             byte[] canonicalDescriptor, ProtectedProfileCredential credential,
             Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId, boolean last) {
+        return beginRepairFragment(accepted, prepared, sdk, canonicalDescriptor, credential,
+                suppliedData, suppliedControl, closeOperationId, last, null).result();
+    }
+
+    private RepairAttempt beginRepairFragment(ZKProfileReservationStore.RecoveryResult accepted,
+            ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk,
+            byte[] canonicalDescriptor, ProtectedProfileCredential credential,
+            Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId, boolean last,
+            BackupSource backup) {
         if (accepted.context() == null || !accepted.context().equals(prepared.intent().recovery())
                 || suppliedData.size() > 64 || suppliedControl.size() > 64) {
             throw new IllegalArgumentException("Historical repair requires its frozen context and bounded peers");
@@ -2355,19 +2400,24 @@ public final class ProfileRecoveryCoordinator {
             throw new IllegalArgumentException("Repair descriptor exceeds its canonical bound");
         }
         if (!active.tryAcquire()) {
-            return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
+            return new RepairAttempt(CompletableFuture.completedFuture(
+                    new RepairResult(RepairStatus.DEFERRED, 0, null)), CompletableFuture.completedFuture(null));
         }
         var stopped = new AtomicBoolean();
+        var terminal = new CompletableFuture<Void>();
         try {
             var actual = repairFragmentOnce(accepted, prepared, sdk, canonicalDescriptor, credential,
-                    suppliedData, suppliedControl, closeOperationId, last, stopped);
-            var caller = actual.whenComplete((value, failure) -> active.release()).copy();
+                    suppliedData, suppliedControl, closeOperationId, last, stopped, backup);
+            var caller = actual.whenComplete((value, failure) -> {
+                active.release();
+                terminal.complete(null);
+            }).copy();
             caller.whenComplete((value, failure) -> {
                 if (caller.isCancelled()) {
                     stopped.set(true);
                 }
             });
-            return caller;
+            return new RepairAttempt(caller, terminal.copy());
         } catch (RuntimeException failure) {
             active.release();
             throw failure;
@@ -2378,7 +2428,7 @@ public final class ProfileRecoveryCoordinator {
             ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk, byte[] canonicalDescriptor,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId, boolean last,
-            AtomicBoolean stopped) {
+            AtomicBoolean stopped, BackupSource backup) {
         var input = accepted.metadata().metadata().getValue();
         boolean closedRepair = input.getState() == org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED;
         var custom = new java.util.TreeMap<String, byte[]>();
@@ -2409,7 +2459,7 @@ public final class ProfileRecoveryCoordinator {
         byte[] descriptor = canonicalDescriptor.clone();
         byte[] closeId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
         var key = credential.copy();
-        if (intent.empty()) {
+        if (intent.empty() && backup == null) {
             return repairEmptyOnce(frozen, prepared, descriptor, key, controls, control, closeId, stopped);
         }
         CompletableFuture<RepairResult> actual;
@@ -2420,6 +2470,19 @@ public final class ProfileRecoveryCoordinator {
                 }
                 var current = source.recovery();
                 var value = current.metadata().metadata().getValue();
+                if (backup != null && source.permitted().stream().noneMatch(receipt ->
+                        receipt.scope().targetBookie().equals(backup.bookieId().toString())
+                        && Arrays.equals(receipt.scope().targetStorageIncarnation(), backup.storageIncarnation())
+                        && receipt.scope().ledgerId() == frozen.context().ledger().ledgerId()
+                        && Arrays.equals(receipt.scope().ledgerInstanceId(),
+                            frozen.context().ledger().ledgerInstanceId())
+                        && Arrays.equals(receipt.scope().descriptorIdentity().toBytes(),
+                            frozen.context().ledger().descriptorIdentity()))) {
+                    return CompletableFuture.completedFuture(new RepairResult(RepairStatus.CONFLICT, 0, null));
+                }
+                if (intent.empty()) {
+                    return repairEmptyOnce(frozen, prepared, descriptor, key, controls, control, closeId, stopped);
+                }
                 Long end = value.getAllEnsembles().higherKey(intent.fragmentStart());
                 if (last != (end == null && intent.fragmentStart() == value.getAllEnsembles().lastKey())) {
                     return CompletableFuture.completedFuture(new RepairResult(RepairStatus.CONFLICT, 0, null));
@@ -2462,8 +2525,13 @@ public final class ProfileRecoveryCoordinator {
                         || intent.range().lastEntryId() != end - 1 || stopped.get()) {
                     return CompletableFuture.completedFuture(new RepairResult(RepairStatus.CONFLICT, 0, null));
                 }
-                return fenceOnce(current, controls, key).thenCompose(fenced -> {
-                    if (fenced.status() != Status.FENCED_CONTEXT || stopped.get()) {
+                // CLOSED's fresh native boundary/context is already terminal. Offline bytes do not create
+                // a new fence result, and the original target admission/grant still supplies write authority.
+                var authorized = backup != null && closedRepair ? CompletableFuture.completedFuture(true)
+                        : fenceOnce(current, controls, key)
+                            .thenApply(fenced -> fenced.status() == Status.FENCED_CONTEXT);
+                return authorized.thenCompose(fenced -> {
+                    if (!fenced || stopped.get()) {
                         return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
                     }
                     return control.install(ProfileControlRequest.install(
@@ -2495,7 +2563,7 @@ public final class ProfileRecoveryCoordinator {
                                 return CompletableFuture.supplyAsync(
                                         () -> readers(frozen.context(), closedRepair), cold)
                                         .thenCompose(ready -> copyRepair(frozen, prepared, sdk, data, controls,
-                                                target, control, key, closeId, stopped, ready));
+                                                target, control, key, closeId, stopped, ready, backup));
                             });
                         });
                     });
@@ -2604,7 +2672,7 @@ public final class ProfileRecoveryCoordinator {
             Map<BookieId, ProfileNormalDataClient> data,
             Map<String, ProfileInitialControlClient> controls, ProfileNormalDataClient target,
             ProfileInitialControlClient control, ProtectedProfileCredential credential, byte[] closeId,
-            AtomicBoolean stopped, Readers ready) {
+            AtomicBoolean stopped, Readers ready, BackupSource backup) {
         if (ready.recovery().context() == null || !accepted.context().equals(ready.recovery().context())
                 || !ready.recovery().metadata().metadata().getVersion()
                     .equals(accepted.metadata().metadata().getVersion())) {
@@ -2623,7 +2691,7 @@ public final class ProfileRecoveryCoordinator {
         } catch (java.security.GeneralSecurityException invalid) {
             return CompletableFuture.failedFuture(invalid);
         }
-        var copy = new Copy(reader, target, prepared.intent(), credential, stopped);
+        var copy = new Copy(reader, target, prepared.intent(), credential, stopped, backup, cold);
         copy.step();
         return afterReaderDrain(reader, copy.done.thenCompose(result -> {
             if (result.status() != RepairStatus.REPAIRED_HISTORICAL_FRAGMENT || stopped.get()) {
@@ -2673,10 +2741,14 @@ public final class ProfileRecoveryCoordinator {
         private final CompletableFuture<RepairResult> done = new CompletableFuture<>();
         private long next;
         private long copied;
+        private final BackupSource backup;
+        private final ThreadPoolExecutor cold;
 
         Copy(ProfileRecoveryReadHandle reader, ProfileNormalDataClient target,
                 ProfileRepairIntent intent, ProtectedProfileCredential credential,
-                AtomicBoolean stopped) {
+                AtomicBoolean stopped, BackupSource backup, ThreadPoolExecutor cold) {
+            this.backup = backup;
+            this.cold = cold;
             this.reader = reader;
             this.target = target;
             this.intent = intent;
@@ -2690,65 +2762,117 @@ public final class ProfileRecoveryCoordinator {
                 done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
                 return;
             }
-            reader.probeBufferEvidence(next).whenComplete((evidence, readFailure) -> {
-                try (evidence) {
-                    if (readFailure != null && !(cause(readFailure) instanceof BKException)) {
-                        done.completeExceptionally(readFailure);
-                        return;
+            reader.probeBufferEvidence(next).whenComplete((evidence, failure) -> {
+                if (failure != null) {
+                    if (evidence != null) {
+                        evidence.close();
                     }
-                    if (readFailure != null || stopped.get()) {
+                    if (cause(failure) instanceof BKException) {
                         done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
-                        return;
-                    }
-                    if (evidence.conflict()) {
-                        done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
-                        return;
-                    }
-                    if (evidence.sources().stream().anyMatch(source -> source.outcome()
-                            == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
-                        done.complete(new RepairResult(RepairStatus.CONFLICT, copied, null));
-                        return;
-                    }
-                    var probe = evidence.candidate();
-                    if (probe == null) {
-                        done.complete(new RepairResult(evidence.exhausted() ? RepairStatus.DATA_LOSS
-                                : RepairStatus.DEFERRED, copied, null));
-                        return;
-                    }
-                    ReferenceCounted packed;
-                    try {
-                        packed = reader.packageRecoveryEntry(probe, target.allocator());
-                    } catch (org.apache.bookkeeper.proto.profile.ProfileReceiveBudget.CapacityExceededException full) {
-                        done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
-                        return;
-                    } catch (RuntimeException invalid) {
-                        done.completeExceptionally(invalid);
-                        return;
-                    }
-                    try {
-                        target.addRecovery(intent, credential, next, packed).whenComplete((reply, failure) -> {
-                            packed.release();
-                            if (failure != null || reply.statusClass() != ProfileStatus.StatusClass.OK
-                                    || reply.durableResult() != ProfileStatus.DurableResult.APPLIED
-                                        && reply.durableResult() != ProfileStatus.DurableResult.ALREADY_APPLIED) {
-                                done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
-                                return;
-                            }
-                            copied++;
-                            if (next == intent.range().lastEntryId()) {
-                                done.complete(new RepairResult(RepairStatus.REPAIRED_HISTORICAL_FRAGMENT,
-                                        copied, null));
-                            } else {
-                                next++;
-                                step(); // Each probe schedules on the original ordered executor.
-                            }
-                        });
-                    } catch (RuntimeException failure) {
-                        packed.release();
+                    } else {
                         done.completeExceptionally(failure);
+                    }
+                } else if (backup == null) {
+                    consume(evidence, null, null);
+                } else {
+                    try {
+                        CompletableFuture.supplyAsync(() -> {
+                            try {
+                                return stopped.get() ? null : backup.readEntry(intent.recovery().ledger(),
+                                        next, target.allocator());
+                            } catch (IOException invalid) {
+                                throw new java.util.concurrent.CompletionException(invalid);
+                            }
+                        }, cold).whenComplete((entry, readFailure) -> consume(evidence, entry, readFailure));
+                    } catch (RejectedExecutionException full) {
+                        evidence.close();
+                        done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
                     }
                 }
             });
+        }
+
+        private void consume(ProfileRecoveryReadHandle.PointEvidence evidence, ByteBuf entry, Throwable failure) {
+            ProfileRecoveryReadHandle.Probe mirror = null;
+            try (evidence) {
+                if (stopped.get()) {
+                    done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+                    return;
+                }
+                if (failure != null) {
+                    if (cause(failure) instanceof org.apache.bookkeeper.proto.profile
+                            .ProfileReceiveBudget.CapacityExceededException) {
+                        done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+                    } else if (cause(failure) instanceof IOException) {
+                        done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
+                    } else {
+                        done.completeExceptionally(failure);
+                    }
+                    return;
+                }
+                if (evidence.conflict()) {
+                    done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
+                    return;
+                }
+                if (evidence.sources().stream().anyMatch(source -> source.outcome()
+                        == ProfileRecoveryReadHandle.SourceOutcome.UNAUTHORIZED)) {
+                    done.complete(new RepairResult(RepairStatus.CONFLICT, copied, null));
+                    return;
+                }
+                var probe = evidence.candidate();
+                if (entry != null) {
+                    mirror = reader.backupCandidate(next, entry);
+                    if (probe != null && (probe.length() != mirror.length()
+                            || !probe.payload().equals(mirror.payload()))) {
+                        done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
+                        return;
+                    }
+                    probe = mirror;
+                }
+                if (probe == null) {
+                    done.complete(new RepairResult(evidence.exhausted() ? RepairStatus.DATA_LOSS
+                            : RepairStatus.DEFERRED, copied, null));
+                    return;
+                }
+                ReferenceCounted packed = reader.packageRecoveryEntry(probe, target.allocator());
+                try {
+                    var attempt = target.beginAddRecovery(intent, credential, next, packed);
+                    attempt.result().handle((reply, problem) -> problem == null ? reply : null)
+                            .thenCombine(attempt.completion(), (reply, unused) -> reply)
+                            .whenComplete((reply, problem) -> {
+                        packed.release();
+                        if (problem != null || reply == null || reply.statusClass() != ProfileStatus.StatusClass.OK
+                                || reply.durableResult() != ProfileStatus.DurableResult.APPLIED
+                                    && reply.durableResult() != ProfileStatus.DurableResult.ALREADY_APPLIED) {
+                            done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+                            return;
+                        }
+                        copied++;
+                        if (next == intent.range().lastEntryId()) {
+                            done.complete(new RepairResult(RepairStatus.REPAIRED_HISTORICAL_FRAGMENT, copied, null));
+                        } else {
+                            next++;
+                            step();
+                        }
+                    });
+                } catch (RuntimeException problem) {
+                    packed.release();
+                    throw problem;
+                }
+            } catch (org.apache.bookkeeper.proto.profile.ProfileReceiveBudget.CapacityExceededException full) {
+                done.complete(new RepairResult(RepairStatus.DEFERRED, copied, null));
+            } catch (BKException.BKDigestMatchException invalid) {
+                done.complete(new RepairResult(RepairStatus.QUARANTINED, copied, null));
+            } catch (RuntimeException problem) {
+                done.completeExceptionally(problem);
+            } finally {
+                if (mirror != null) {
+                    mirror.close();
+                }
+                if (entry != null) {
+                    entry.release();
+                }
+            }
         }
     }
 

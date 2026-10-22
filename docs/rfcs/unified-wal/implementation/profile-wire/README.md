@@ -2150,3 +2150,21 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 
 [离线 backup image 与不可服务输入](../local-storage/README.md#离线-backup-image-与不可服务输入)：2026-10-22父4b1ba0889d上复用原DATA/双control锁和完整恢复扫描，建立有界manifest/外部SHA reference、全native文件复制/force/重读及借用scratch的instance点读；marked input在服务replay前拒绝，旧权限不作新授权。新启动拒绝RED，最终两类六项0 failure/error/skip、style通过；1171输入各stage冻结，独立RAT443父HEAD既有无新增。仅完成离线输入层，repair来源/新目标导入/membership/bootstrap及恢复专属组合仍OPEN，未称restore完成；旧目标义务保留，全16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled不变。
+
+## 离线镜像接入当前 CLOSED repair-copy
+
+2026-10-23，父源码 `b7c9e32bc6670fb168c47f56336bf6047271ab47`，按已冻结的 [首版接受语义](#backuprestore-的首版接受语义)，`SegmentBackupImage.Image` 接入原 `ProfileRecoveryCoordinator`，作为当前 CLOSED fragment 的附加数据源。要求不同 BookieId、不同 incarnation 的目标；当前 native metadata/context/birth 与 retained install 必须精确包含源身份及 ledgerInstanceId/descriptor，镜像旧权限不成为新 authority。当前 CLOSED 边界已是 terminal，不要求离线旧源再生产 fence RPC；目标仍走原 inactive install → RepairIntent admission → recovery-only grant → copy → native membership CAS → recovery close，不开放 normal writer，也不改变原 CLOSED P/length/cut。
+
+每个坐标先取原 reader 的当前 point evidence，再在原有界 cold executor 读取镜像。镜像缺项由当前副本补齐，不能降低所需范围；当前 source conflict/UNAUTHORIZED 不因镜像存在而绕过。镜像经原物理 parser、完整 context 与 SDK CRC32C/ledger/entry digest 验证，再检查 CLOSED length 上界和 terminal length，与可用当前副本的 payload/length 不一致则 QUARANTINED。无可用完整数据则保留原 DEFERRED/DATA_LOSS 分类，不发布 membership。原库的 OPEN/historical/empty/worker 路径保持原 authority 生产者。
+
+`BackupSource` 是借用输入，调用方须持有至 `RepairAttempt.completion()`；其同步读取返回一个 owned、由目标 DATA allocator 计费的 BK entry。Image 用该 allocator 承担整个对齐 scratch，readonly retained slice 最后释放才归还 backing credit；原标准 V3 packing 继续计费 header，无第二套编码/队列。result 的取消只停止后续工作，completion 表示实际镜像/peer/output/metadata 排空。原 repair copy 同时改为等待 recovery Add 的逻辑 reply 和 `AddAttempt.completion()`，实际 output/source 尚未终结不能释放 packed entry、permit 或提前发布。
+
+新真实 ZK/mTLS/文件测试在同一方法覆盖七种交错：旧源离线且镜像完整；删除先赢 admission；admission 先赢且实际 DATA force 被 hold 时 caller cancel/delete（新目标留在删除历史，busy permit 不提前释放）；镜像缺项由当前 peer 补齐；镜像与 live payload 冲突；缺项先 DEFERRED、同 intent 重试不重拷已 durable 项；镜像 terminal length 不匹配。完整镜像场景用原 output promise 的 hold 观察到 wire reply 已完成而 result/completion/membership 尚未结束，release 后才成功。敏感性 RED 仅撤掉新增 actual-terminal await，复现提前完成断言失败；不是把整个旧源码称为支持新 restore API。最终原源码恢复后 `unified-wal-local-kFypXsFk` 两类12方法全部通过，0 failure/error/skip，含新方法七场景、原 CLOSED/historical/empty/worker/取消/close-resume/header-quota 与三个离线镜像测试。早期 fixture 的缺 target control、错误 wire operation offset、Pending 已移除后才观察 reply 等失败原样保留，不计为产品 RED。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy+closedRepairCopiesToNewTargetsPreservingOriginalCloseAcrossRepeatedMembershipChanges+historicalRepairCoordinator*+historicalRepairHeaderQuotaDefersWithoutDataOrMembershipPublication+replicationWorkerRepairsEmptyLedgerAndEmptyLastWithoutDataOrGrantForA2AndA3+replicationWorkerNewCoordinatorResumesPublishedCloseWithoutRecopyAndRepairsLaterLoss,SegmentBookieControlLogTest#offlineBackup*'
+```
+
+[repair output 有限投影](../models/README.md#repair-copy-的-reply-与实际-output-终结) 最终12配置为2完整正向/10指定反例；只有 reply/actual output 终结新增转移，native restore authority/digest/force/delete 仍是 Java 输入，不称完整 backup acceptance 或 A+C+D。1171 Java与1134模型输入的2033个唯一路径逐项冻结，共有272路径 SHA 一致。证据 `/Users/liusinan/.codex/artifacts/unified-wal/backup-repair-evidence-jb34qbt0` 保存各阶段原命令、源码差异、XML、失败、模型 trace 与最终输入。Spotless/Checkstyle exit0；Java/model/style终结后独立RAT最初445项，补两份新cfg完整Apache注释后回到443项，全部为父HEAD路径、无新增；模型配置有效内容未变，原TLC输入与最终license-only版本分别保存，不移绑历史结果。
+
+该切片接通 CLOSED 导入与 membership，不等于新目标整体恢复接受：新目标自己的 assignment/snapshot＋无洞 suffix/required-through/readiness/registration、ledgerId reuse 的 restore 专属组合、copy/cursor/registration crash/lost reply、完整恢复运维与接受下界仍须实施。旧 incarnation/Manifest/events/physical receipts/lineage/物理清理义务保持原绑定，WINDOW_ELAPSED 无 restore/GC/退役权限。同 incarnation 原地恢复、同 BookieId 切换、MetadataStore 回滚、在线一致性备份继续禁用。默认SDK/observe公共约定、Main/其他required producer/full-bytes/兼容/正式性能及完整16步继续OPEN，目标active、生产Gate OPEN；默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

@@ -61,7 +61,8 @@ final class SegmentBackupImage {
     private record FileSeal(String name, long bytes, byte[] digest) { }
 
     /** Native locks and a bounded original recovery inventory; returned records borrow the caller's scratch. */
-    static final class Image implements AutoCloseable {
+    static final class Image implements AutoCloseable,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.BackupSource {
         private final IsolatedSegmentConfig config;
         private final SegmentFileHeader identity;
         private final SegmentDataFileLock lock;
@@ -79,6 +80,40 @@ final class SegmentBackupImage {
             this.arena = arena;
             this.bookie = bookie;
             this.inventory = inventory;
+        }
+
+        @Override
+        public org.apache.bookkeeper.net.BookieId bookieId() {
+            return identity.bookieId();
+        }
+
+        @Override
+        public byte[] storageIncarnation() {
+            return identity.incarnation().value();
+        }
+
+        /** One target-accounted aligned input; the retained entry keeps that capacity until its last release. */
+        @Override
+        public synchronized io.netty.buffer.ByteBuf readEntry(ProfileLedgerContext context, long entryId,
+                io.netty.buffer.ByteBufAllocator allocator) throws IOException {
+            if (closed) {
+                throw new IOException("Backup input is closed");
+            }
+            if (inventory.entries().stream().noneMatch(value -> value.context().equals(context)
+                    && value.entryId() == entryId)) {
+                return null;
+            }
+            var location = inventory.uniqueLocation(arena, context, entryId);
+            int bytes = SegmentPointRead.scratchBytes(location);
+            var scratch = allocator.buffer(bytes, bytes);
+            try {
+                var record = SegmentPointRead.readWithScratch(config, identity, arena,
+                        location, scratch.nioBuffer(0, bytes)).record();
+                int offset = Math.toIntExact(location.recordOffset() % 4096) + SegmentBatchFormat.RECORD_HEADER;
+                return scratch.retainedSlice(offset, record.entry().remaining()).asReadOnly();
+            } finally {
+                scratch.release();
+            }
         }
 
         List<ProfileLedgerContext> contexts() {

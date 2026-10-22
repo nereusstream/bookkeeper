@@ -529,6 +529,21 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         return packageRecoveryEntry(probe, null);
     }
 
+    /** Validate one externally verified mirror entry against this current CLOSED SDK digest/coordinate. */
+    public Probe backupCandidate(long entryId, ByteBuf entry) throws BKException.BKDigestMatchException {
+        if (!fencingReads || getLedgerMetadata().getState() != LedgerMetadata.State.CLOSED
+                || entryId < 0 || entryId > getLedgerMetadata().getLastEntryId()) {
+            throw new IllegalArgumentException("Backup candidates require the unchanged CLOSED coordinate range");
+        }
+        var payload = getDigestManager().verifyDigestAndReturnData(entryId, entry.duplicate());
+        long length = entry.getLong(entry.readerIndex() + 24);
+        if (length < payload.readableBytes() || length > getLedgerMetadata().getLength()
+                || entryId == getLedgerMetadata().getLastEntryId() && length != getLedgerMetadata().getLength()) {
+            throw new BKException.BKDigestMatchException();
+        }
+        return new Probe(entryId, length, payload, probeOwner);
+    }
+
     /** Uses the target DATA allocator for the standard header; the retained source payload keeps its own credit. */
     public io.netty.util.ReferenceCounted packageRecoveryEntry(Probe probe, ByteBufAllocator headerAllocator) {
         if (!fencingReads || probe.owner != probeOwner || probe.outcome() != ProbeOutcome.CANDIDATE) {

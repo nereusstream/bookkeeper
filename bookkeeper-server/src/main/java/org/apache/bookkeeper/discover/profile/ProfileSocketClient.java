@@ -547,11 +547,16 @@ final class ProfileSocketClient implements AutoCloseable {
 
     CompletableFuture<ProfileStatus> addRecovery(ProfileRepairIntent intent, ProtectedProfileCredential credential,
             long entryId, ReferenceCounted entry) {
+        return beginAddRecovery(intent, credential, entryId, entry).result();
+    }
+
+    ProfileNormalDataClient.AddAttempt beginAddRecovery(ProfileRepairIntent intent,
+            ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {
         Objects.requireNonNull(intent, "intent");
         if (entryId < intent.range().firstEntryId() || entryId > intent.range().lastEntryId()) {
             throw new IllegalArgumentException("Recovery entry lies outside its frozen intent range");
         }
-        return sendEntry(intent.recovery().ledger(), credential, entryId, entry, intent).result();
+        return sendEntry(intent.recovery().ledger(), credential, entryId, entry, intent);
     }
 
     private ProfileNormalDataClient.AddAttempt sendEntry(ProfileLedgerContext context,

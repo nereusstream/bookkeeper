@@ -96,6 +96,12 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         return socket.addRecovery(intent, credential, entryId, entry);
     }
 
+    /** Recovery result and original source/output/wire terminal, on the same bounded DATA socket. */
+    public AddAttempt beginAddRecovery(ProfileRepairIntent intent, ProtectedProfileCredential credential,
+            long entryId, ReferenceCounted entry) {
+        return socket.beginAddRecovery(intent, credential, entryId, entry);
+    }
+
     /** Explicit LAC result and actual source/output terminal, using the same bounded DATA socket. */
     public record LacWriteAttempt(CompletableFuture<ProfileStatus> result, CompletableFuture<Void> completion) { }
 

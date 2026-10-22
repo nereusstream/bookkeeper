@@ -410,6 +410,8 @@ MATRIX = {
     'ce-profile-recovery-prefix-source': 'EvidenceHasBoundFencedSources',
     'ce-profile-recovery-prefix-close': 'NoClosedPublication',
     'a-profile-repair-copy': None,
+    'a-profile-repair-copy-output': None,
+    'ce-profile-repair-copy-output-return': 'ActualCopyRetainsOutputCustody',
     'ce-profile-repair-copy-sources': 'CopyHasSources',
     'ce-profile-repair-copy-grant': 'CopyHasGrant',
     'ce-profile-repair-copy-copies': 'PublicationHasAllCopies',

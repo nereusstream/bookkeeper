@@ -189,3 +189,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [离线 backup image 与不可服务输入](local-storage/README.md#离线-backup-image-与不可服务输入)：2026-10-22父4b1ba0889d上复用原DATA/双control锁和完整恢复扫描，建立有界manifest/外部SHA reference、全native文件复制/force/重读及借用scratch的instance点读；marked input在服务replay前拒绝，旧权限不作新授权。新启动拒绝RED，最终两类六项0 failure/error/skip、style通过；1171输入各stage冻结，独立RAT443父HEAD既有无新增。仅完成离线输入层，repair来源/新目标导入/membership/bootstrap及恢复专属组合仍OPEN，未称restore完成；旧目标义务保留，全16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled不变。
+
+
+[离线镜像接入当前 CLOSED repair-copy](profile-wire/README.md#离线镜像接入当前-closed-repair-copy)：2026-10-23父b7c9e32bc6上，镜像仅作附加source，经current CLOSED/context/birth/retained source校验，复用inactive install/admit/grant/copy/membership/close；缺项取当前副本，冲突隔离，不降frontier或授normal。原copy同时等待reply与actual output终结，caller cancel保持实际资源；新增七场景及既有路径共12方法全部通过，reply-only敏感性RED保留。repair模型12配置2正向/10指定反例，catalog756未全跑；1171 Java/1134模型输入去重2033，各stage保持原绑定。style通过；RAT补两新cfg许可证后回到443父HEAD既有路径，无新增。新目标assignment/snapshot/no-hole suffix/required-through/readiness/registration、restore reuse/crash/lost reply及完整接受仍OPEN，旧目标义务不解除。完整16步目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。

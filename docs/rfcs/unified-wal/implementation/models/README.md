@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为754配置；新增A+C/C+D及A+C+D生命周期配置只有各自定向结果，未重跑当前全目录。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为756配置；新增A+C/C+D及A+C+D生命周期配置和repair output投影只有各自定向结果，未重跑当前全目录。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -1609,3 +1609,17 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 ```
 
 1131个最终模型/Java/runner输入SHA逐项冻结，原ProfileSdkBridge/SegmentAllocator/WholeAllocationFree/ProfileLogicalDelete字节与父HEAD一致；未改生产Java，因此本轮不重复Java测试或将旧receipt称为本组合native验收。Python语法及实际TLC运行已验证，独立终态RAT仍443父HEAD路径无新增。源码、全部诊断/中断/完整运行、runner各阶段精确源码、反例与witness、当前规划恢复裁决在 `/Users/liusinan/.codex/artifacts/unified-wal/acd-lifecycle-evidence-sm953rej`。catalog754未全跑，旧730全矩阵及其他有限receipt保持原source绑定；完整A+C+D、字节预算、真实掉电、Linux NUMA、正式性能/运维/canary及全16步仍OPEN，目标active、生产Gate不提升，OFF/SYSTEM/PARK及disabled不变。
+
+
+## Repair copy 的 reply 与实际 output 终结
+
+2026-10-23，父源码 `b7c9e32bc6670fb168c47f56336bf6047271ab47`。原 `ProfileRepairCopy` 保留原 source/grant、两entry顺序copy、UNKNOWN、caller cancel、published resume/no recopy、one-inflight及不授normal性质；原Init/Next仅加常量output=0，原十配置的generated/distinct/queue计数与此前一致。新增OutputSpec在同一原动作上区分wire reply、实际output/source return及成功，只有两者都终结才推进copy/durable计数、释放lease。`ActualCopyRetainsOutputCustody`检查已计copy不超过实际成功terminal、pending output始终持lease；新mutation只凭reply推进时命中该性质。
+
+最终 `unified-wal-model-iqci7g_m` exit0，共12配置：2正向完整PASS、10指定性质反例。原正向67 generated/51 distinct/queue0，新增正向105/73/queue0；新增reply-only反例52/43/queue6。原九个mutation仍命中原指定性质；所有反例按性质停止，不称完整搜索。首轮SANY表达式优先级错误保留为INCONCLUSIVE；后续曾新增一个重复cancel配置，但它先命中原InFlightHasPermit而非新性质，保留该诊断并删除任务自建的重复配置，原cancel反例及其断言没有弱化。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar \
+  --config-prefix a-profile-repair-copy --config-prefix ce-profile-repair-copy
+```
+
+TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、原120秒上限及CHECK_DEADLOCK FALSE，无state constraint、symmetry或VIEW。该投影没有生成CLOSED/current identity/retained install、RepairIntent/delete CAS、digest、真实DATA force、镜像完整性或bytes事实；这些由[当前原生接线与测试](../profile-wire/README.md#离线镜像接入当前-closed-repair-copy)验证，不构成完整backup acceptance、restart/bootstrap、A+C+D或liveness证明。1134个最终model输入原样冻结，两份新cfg之后仅补全Apache许可证注释，有效配置内容逐项相同、两版本分别保存；1171 Java/模型共有272路径SHA一致，合计2033唯一路径。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/backup-repair-evidence-jb34qbt0`，保留三轮model各自完整modules/configs/runner/source、coverage及trace。catalog756未全跑，完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled能力不变。
