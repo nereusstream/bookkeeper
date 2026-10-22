@@ -112,6 +112,14 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return socket.physicalDelete(request);
     }
 
+    public record FenceAttempt(CompletableFuture<ProfileStatus> result, CompletableFuture<Void> completion) { }
+
+    /** The caller may drain this request without closing the borrowed CONTROL connection. */
+    public FenceAttempt beginFence(ProfileLedgerContext context, byte[] operationId,
+            ProtectedProfileCredential credential) {
+        return socket.beginFence(context, operationId, credential);
+    }
+
     /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */
     public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {

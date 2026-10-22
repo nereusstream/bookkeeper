@@ -492,6 +492,11 @@ final class ProfileSocketClient implements AutoCloseable {
 
     CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {
+        return beginFence(context, operationId, credential).result();
+    }
+
+    ProfileInitialControlClient.FenceAttempt beginFence(ProfileLedgerContext context, byte[] operationId,
+            ProtectedProfileCredential credential) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(credential, "credential");
         byte[] owned = ProfileLifecycleHead.fixed(operationId, 16, true);
@@ -499,14 +504,16 @@ final class ProfileSocketClient implements AutoCloseable {
             throw new IllegalArgumentException("Fence requires a verified CONTROL connection");
         }
         if (closed.get()) {
-            return CompletableFuture.failedFuture(unknown());
+            return new ProfileInitialControlClient.FenceAttempt(CompletableFuture.failedFuture(unknown()),
+                    CompletableFuture.completedFuture(null));
         }
         if (!slots.tryAcquire()) {
-            return CompletableFuture.completedFuture(transientNone());
+            return new ProfileInitialControlClient.FenceAttempt(CompletableFuture.completedFuture(transientNone()),
+                    CompletableFuture.completedFuture(null));
         }
         Pending held = new Pending(context, owned, credential);
         enqueue(held);
-        return held.dataReply;
+        return new ProfileInitialControlClient.FenceAttempt(held.dataReply, held.completion.copy());
     }
 
     private ByteBuf encodeFence(Pending held, long id) {
@@ -668,23 +675,32 @@ final class ProfileSocketClient implements AutoCloseable {
 
     CompletableFuture<ProfileNormalDataClient.ReadEntryBuffer> readEntryBuffer(
             ProfileLedgerContext context, long entryId) {
+        return beginReadEntryBuffer(context, entryId).result();
+    }
+
+    ProfileNormalDataClient.ReadAttempt<ProfileNormalDataClient.ReadEntryBuffer> beginReadEntryBuffer(
+            ProfileLedgerContext context, long entryId) {
         Objects.requireNonNull(context, "context");
         if (!normalData || entryId < 0) {
             throw new IllegalArgumentException("Point read requires DATA and a nonnegative coordinate");
         }
         if (!hello().capabilities().contains(ProfileReadEntryReplyCodec.CAPABILITY)) {
-            return CompletableFuture.completedFuture(ProfileNormalDataClient.ReadEntryBuffer.refused(
-                    ProfileStatus.unsupported()));
+            return new ProfileNormalDataClient.ReadAttempt<>(CompletableFuture.completedFuture(
+                    ProfileNormalDataClient.ReadEntryBuffer.refused(ProfileStatus.unsupported())),
+                    CompletableFuture.completedFuture(null));
         }
         if (closed.get()) {
-            return CompletableFuture.failedFuture(unknown());
+            return new ProfileNormalDataClient.ReadAttempt<>(CompletableFuture.failedFuture(unknown()),
+                    CompletableFuture.completedFuture(null));
         }
         if (!slots.tryAcquire()) {
-            return CompletableFuture.completedFuture(ProfileNormalDataClient.ReadEntryBuffer.refused(transientNone()));
+            return new ProfileNormalDataClient.ReadAttempt<>(CompletableFuture.completedFuture(
+                    ProfileNormalDataClient.ReadEntryBuffer.refused(transientNone())),
+                    CompletableFuture.completedFuture(null));
         }
         Pending held = new Pending(context, entryId, true);
         enqueue(held);
-        return held.ownedReadReply;
+        return new ProfileNormalDataClient.ReadAttempt<>(held.ownedReadReply, held.completion.copy());
     }
 
     CompletableFuture<ProfileLacReplyCodec.Reply> readLac(ProfileLedgerContext context) {
@@ -708,24 +724,33 @@ final class ProfileSocketClient implements AutoCloseable {
     }
 
     CompletableFuture<ProfileNormalDataClient.LacBuffer> readLacBuffer(ProfileLedgerContext context) {
+        return beginReadLacBuffer(context).result();
+    }
+
+    ProfileNormalDataClient.ReadAttempt<ProfileNormalDataClient.LacBuffer> beginReadLacBuffer(
+            ProfileLedgerContext context) {
         Objects.requireNonNull(context, "context");
         if (!normalData) {
             throw new IllegalArgumentException("LAC source query requires DATA");
         }
         if (!hello().capabilities().contains(ProfileLacReplyCodec.CAPABILITY)
                 && !hello().capabilities().contains(ProfileLacReplyCodec.EXPLICIT_CAPABILITY)) {
-            return CompletableFuture.completedFuture(ProfileNormalDataClient.LacBuffer.refused(
-                    ProfileStatus.unsupported()));
+            return new ProfileNormalDataClient.ReadAttempt<>(CompletableFuture.completedFuture(
+                    ProfileNormalDataClient.LacBuffer.refused(ProfileStatus.unsupported())),
+                    CompletableFuture.completedFuture(null));
         }
         if (closed.get()) {
-            return CompletableFuture.failedFuture(unknown());
+            return new ProfileNormalDataClient.ReadAttempt<>(CompletableFuture.failedFuture(unknown()),
+                    CompletableFuture.completedFuture(null));
         }
         if (!slots.tryAcquire()) {
-            return CompletableFuture.completedFuture(ProfileNormalDataClient.LacBuffer.refused(transientNone()));
+            return new ProfileNormalDataClient.ReadAttempt<>(CompletableFuture.completedFuture(
+                    ProfileNormalDataClient.LacBuffer.refused(transientNone())),
+                    CompletableFuture.completedFuture(null));
         }
         Pending held = new Pending(context, true);
         enqueue(held);
-        return held.ownedLacReply;
+        return new ProfileNormalDataClient.ReadAttempt<>(held.ownedLacReply, held.completion.copy());
     }
 
     private ByteBuf encodeWriteLac(Pending held, long id) {
@@ -1223,6 +1248,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private Pending(ProfileLedgerContext context, byte[] fenceId, ProtectedProfileCredential credential) {
             scope = null;
             operation = ProfileOperation.FENCE_LEDGER;
+            completion = new CompletableFuture<>();
             reply = null;
             dataReply = new CompletableFuture<>();
             readReply = null;
@@ -1239,6 +1265,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private Pending(ProfileLedgerContext context, long entryId, boolean owned) {
             scope = null;
             operation = ProfileOperation.READ_ENTRY;
+            completion = new CompletableFuture<>();
             reply = null;
             dataReply = null;
             readReply = owned ? null : new CompletableFuture<>();
@@ -1255,6 +1282,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private Pending(ProfileLedgerContext context, boolean owned) {
             scope = null;
             operation = ProfileOperation.READ_LAC;
+            completion = new CompletableFuture<>();
             reply = null;
             dataReply = null;
             readReply = null;

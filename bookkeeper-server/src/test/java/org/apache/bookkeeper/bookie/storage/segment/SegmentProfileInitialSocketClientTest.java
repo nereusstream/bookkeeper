@@ -108,6 +108,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
+import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
@@ -7225,6 +7226,116 @@ public class SegmentProfileInitialSocketClientTest {
                 }
                 assertEquals(LedgerMetadata.State.IN_RECOVERY,
                         fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+            }
+        }
+    }
+
+    @Test
+    public void recoveryReaderCloseWaitsForItsReadFenceAndLacWritePromises() throws Exception {
+        for (int mode = 0; mode < 5; mode++) {
+            var operation = mode == 1 ? ProfileOperation.FENCE_LEDGER
+                    : mode == 2 ? ProfileOperation.READ_LAC : ProfileOperation.READ_ENTRY;
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                fixture.connectAll(Duration.ofSeconds(5));
+                var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                Map<BookieId, ProfileNormalDataClient> data = new HashMap<>();
+                Map<BookieId, ProfileInitialControlClient> controls = new HashMap<>();
+                for (int target = 0; target < 3; target++) {
+                    var peer = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                    data.put(fixture.identities.get(target).bookieId(), peer);
+                    controls.put(fixture.identities.get(target).bookieId(),
+                            fixture.clients.get("socket" + target + ":3181"));
+                    evidenceEntry(fixture, peer, 0, -1, 16, 16);
+                    evidenceEntry(fixture, peer, 1, 0, 32, 16);
+                }
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var plan = fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan();
+                var entered = fixture.reservations.beginRecovery(metadata, plan);
+                var reader = ProfileRecoveryReadHandle.fromContext(sdk.getClientCtx(), entered,
+                        available.ready().page().installs(), data, controls);
+                Channel channel;
+                if (operation != ProfileOperation.FENCE_LEDGER) {
+                    channel = dataChannel(data.get(fixture.identities.get(0).bookieId()));
+                } else {
+                    var socketField = ProfileInitialControlClient.class.getDeclaredField("socket");
+                    socketField.setAccessible(true);
+                    Object socket = socketField.get(controls.get(fixture.identities.get(0).bookieId()));
+                    var channelField = socket.getClass().getDeclaredField("channel");
+                    channelField.setAccessible(true);
+                    channel = (Channel) channelField.get(socket);
+                }
+                var held = new AtomicReference<ChannelPromise>();
+                channel.eventLoop().submit(() -> channel.pipeline().addAfter(
+                        channel.pipeline().context(SslHandler.class).name(), "holdReaderWritePromise",
+                        new ChannelOutboundHandlerAdapter() {
+                            @Override
+                            public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+                                ByteBuf body = (ByteBuf) message;
+                                if (body.getUnsignedShort(body.readerIndex() + 14) == operation.wireValue()
+                                        && held.compareAndSet(null, promise)) {
+                                    ctx.write(body, ctx.newPromise());
+                                } else {
+                                    ctx.write(body, promise);
+                                }
+                            }
+                        })).get(5, TimeUnit.SECONDS);
+                CompletableFuture<ProfileRecoveryReadHandle.PointEvidence> cancelledRead = null;
+                try {
+                    if (mode == 4) {
+                        fixture.replyFault.set(21); // Server READ replies after the actual native point read.
+                        cancelledRead = reader.probeBufferEvidence(0);
+                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (fixture.heldReplies.size() < 3 && System.nanoTime() < until) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                        assertEquals(3, fixture.heldReplies.size());
+                        assertTrue(cancelledRead.cancel(false));
+                    } else if (mode < 2) {
+                        try (var evidence = reader.probeBufferEvidence(0).get(5, TimeUnit.SECONDS)) {
+                            assertNotNull(evidence.candidate());
+                            assertEquals(16, evidence.candidate().payload().remaining());
+                        }
+                    } else {
+                        var cut = reader.readLacEvidence().get(5, TimeUnit.SECONDS);
+                        assertEquals(0, cut.prefixEntryId());
+                        assertEquals(16, cut.prefixLength());
+                    }
+                    assertNotNull(held.get());
+                    var closing = reader.closeAsync();
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> closing.get(150, TimeUnit.MILLISECONDS));
+                    assertTrue(closing.cancel(false));
+                    var anotherWaiter = reader.closeAsync();
+                    assertFalse(anotherWaiter.isDone());
+                    if (mode == 4) {
+                        fixture.replyFault.set(0);
+                        fixture.releaseReplies();
+                    }
+                    held.get().setSuccess();
+                    anotherWaiter.get(5, TimeUnit.SECONDS);
+                    assertTrue(closing.isCancelled());
+                    if (cancelledRead != null) {
+                        assertTrue(cancelledRead.isCancelled());
+                    }
+                    // The reader borrowed its peers; closing it cannot retire the shared connections.
+                    try (var reply = data.get(fixture.identities.get(0).bookieId())
+                            .readEntryBuffer(fixture.context(), 0).get(5, TimeUnit.SECONDS)) {
+                        assertEquals(ProfileReadEntryReplyCodec.Outcome.FOUND, reply.outcome());
+                    }
+                    assertEquals(mode < 2 || mode == 4 ? ProfileStatus.DurableResult.ALREADY_APPLIED
+                            : ProfileStatus.DurableResult.APPLIED, controls.get(fixture.identities.get(0).bookieId())
+                                    .fence(fixture.context(), entered.context().operationId(), fixture.credential)
+                                    .get(5, TimeUnit.SECONDS).durableResult());
+                } finally {
+                    fixture.replyFault.set(0);
+                    fixture.releaseReplies();
+                    if (held.get() != null) {
+                        held.get().trySuccess();
+                    }
+                    reader.closeAsync().get(5, TimeUnit.SECONDS);
+                }
             }
         }
     }

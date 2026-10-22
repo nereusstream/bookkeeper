@@ -103,7 +103,7 @@ final class ProfileLacEvidenceRead {
                         error(BKException.Code.ReadException))));
             } else {
                 try {
-                    pending.add(peer.readLacBuffer(context)
+                    pending.add(transport.readLacBuffer(peer)
                             .handle((reply, failure) -> new Sample<>(bookie, reply, failure)));
                 } catch (RuntimeException refused) {
                     pending.add(CompletableFuture.completedFuture(new Sample<>(bookie, null, refused)));
@@ -216,7 +216,7 @@ final class ProfileLacEvidenceRead {
                     anchors.put(bookie, known);
                 } else if (peers.containsKey(bookie)) {
                     try {
-                        pending.add(peers.get(bookie).readEntryBuffer(context, prefix)
+                        pending.add(transport.readEntryBuffer(peers.get(bookie), prefix)
                                 .handle((reply, failure) -> new Sample<>(bookie, reply, failure)));
                     } catch (RuntimeException refused) {
                         pending.add(CompletableFuture.completedFuture(new Sample<>(bookie, null, refused)));

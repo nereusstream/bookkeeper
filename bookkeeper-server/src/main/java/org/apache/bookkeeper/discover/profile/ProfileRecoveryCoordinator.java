@@ -373,8 +373,7 @@ public final class ProfileRecoveryCoordinator {
                     var value = ready.recovery().metadata().metadata().getValue();
                     var reader = ProfileRecoveryReadHandle.fromContext(sdk, ready.recovery(), ready.permitted(),
                             workerData(value, null), controls);
-                    return reader.probeBufferEvidence(value.getAllEnsembles().lastKey())
-                            .whenComplete((result, failure) -> reader.closeAsync());
+                    return afterReaderDrain(reader, reader.probeBufferEvidence(value.getAllEnsembles().lastKey()));
                 } catch (java.security.GeneralSecurityException invalid) {
                     return CompletableFuture.failedFuture(invalid);
                 }
@@ -649,14 +648,14 @@ public final class ProfileRecoveryCoordinator {
                 } catch (java.security.GeneralSecurityException invalid) {
                     return CompletableFuture.failedFuture(invalid);
                 }
-                return reader.readLacEvidence().thenCompose(lac -> scan(reader, context, lac,
+                return afterReaderDrain(reader, reader.readLacEvidence().thenCompose(lac -> scan(reader, context, lac,
                         new ArrayList<>(), lac.prefixEntryId(), lac.prefixLength(), maxCandidates))
                         .thenCompose(observation -> CompletableFuture.supplyAsync(() -> {
                             var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
                             return current.context() != null && context.equals(current.context()) ? observation
                                     : new Observation(observationStatus(failureStatus(current.outcome())), context,
                                             observation.lac(), observation.candidates(), -1);
-                        }, cold)).whenComplete((value, failure) -> reader.closeAsync());
+                        }, cold)));
             });
         });
     }
@@ -855,7 +854,7 @@ public final class ProfileRecoveryCoordinator {
                         return verify.done;
                     }).thenCompose(value -> value);
                 }
-                return checked.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
+                return afterReaderDrain(reader, checked.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
                     var current = reservations.readRecovery(metadata, context.ledger().ledgerId());
                     if (current.context() == null || !context.equals(current.context())
                             || current.metadata().birthZxid() != result.metadata().birthZxid()
@@ -874,7 +873,7 @@ public final class ProfileRecoveryCoordinator {
                                 result.sources());
                     }
                     return result;
-                }, cold)).whenComplete((result, failure) -> reader.closeAsync());
+                }, cold)));
             });
         });
     }
@@ -893,6 +892,32 @@ public final class ProfileRecoveryCoordinator {
             case QUARANTINED -> PrefixReason.AUTHORITY_UNRECOVERABLE;
             default -> PrefixReason.AUTHORITY_CHANGED;
         };
+    }
+
+    /** A logical result cannot release the coordinator slot before its borrowed reader's own RPCs drain. */
+    private static <T> CompletableFuture<T> afterReaderDrain(ProfileRecoveryReadHandle reader,
+            CompletableFuture<T> result) {
+        var terminal = new CompletableFuture<T>();
+        result.whenComplete((value, failure) -> reader.closeAsync().whenComplete((unused, closeFailure) -> {
+            if (closeFailure != null) {
+                if (value instanceof AutoCloseable owned) {
+                    try {
+                        owned.close();
+                    } catch (Exception releaseFailure) {
+                        closeFailure.addSuppressed(releaseFailure);
+                    }
+                }
+                if (failure != null && failure != closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+            if (failure != null || closeFailure != null) {
+                terminal.completeExceptionally(failure != null ? failure : closeFailure);
+            } else {
+                terminal.complete(value);
+            }
+        }));
+        return terminal;
     }
 
     private static Throwable cause(Throwable failure) {
@@ -1945,7 +1970,7 @@ public final class ProfileRecoveryCoordinator {
             return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.CONFLICT,
                     PrefixReason.AUTHORITY_CHANGED));
         }
-        return reader.readLacEvidence().thenCompose(cut -> {
+        return afterReaderDrain(reader, reader.readLacEvidence().thenCompose(cut -> {
             if (stopped.get() || cut.prefixEntryId() >= maxCoordinates) {
                 return CompletableFuture.completedFuture(replicaFailure(ReplicaHealthStatus.DEFERRED,
                         stopped.get() ? PrefixReason.CANCELLED : PrefixReason.LIMIT));
@@ -1975,7 +2000,7 @@ public final class ProfileRecoveryCoordinator {
                             ? PrefixReason.PERMISSION : PrefixReason.LAC_UNAVAILABLE);
             }
             throw new java.util.concurrent.CompletionException(actual);
-        }).whenComplete((result, failure) -> reader.closeAsync());
+        }));
     }
 
     private CompletableFuture<ReplicaHealthResult> verifyClosedReplicasOnce(
@@ -2053,7 +2078,7 @@ public final class ProfileRecoveryCoordinator {
             }
             var scan = new ReplicaScan(reader, snapshot, stopped);
             scan.step();
-            return scan.done.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
+            return afterReaderDrain(reader, scan.done.thenCompose(result -> CompletableFuture.supplyAsync(() -> {
                 if (stopped.get()) {
                     return replicaFailure(ReplicaHealthStatus.DEFERRED, PrefixReason.CANCELLED);
                 }
@@ -2069,7 +2094,7 @@ public final class ProfileRecoveryCoordinator {
                                 new ReplicaHealthProof(fresh.snapshot(), this, deadline, task))
                         : new ReplicaHealthResult(result.status(), result.reason(), result.unresolvedEntry(),
                                 result.sources(), null);
-            }, cold)).whenComplete((result, failure) -> reader.closeAsync());
+            }, cold)));
         });
     }
 
@@ -2600,7 +2625,7 @@ public final class ProfileRecoveryCoordinator {
         }
         var copy = new Copy(reader, target, prepared.intent(), credential, stopped);
         copy.step();
-        return copy.done.thenCompose(result -> {
+        return afterReaderDrain(reader, copy.done.thenCompose(result -> {
             if (result.status() != RepairStatus.REPAIRED_HISTORICAL_FRAGMENT || stopped.get()) {
                 return CompletableFuture.completedFuture(stopped.get()
                         ? new RepairResult(RepairStatus.DEFERRED, result.copiedEntries(), null) : result);
@@ -2610,7 +2635,7 @@ public final class ProfileRecoveryCoordinator {
                         ? CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED,
                                 result.copiedEntries(), null))
                         : closeRepair(published, prepared.intent(), control, result.copiedEntries()));
-        }).whenComplete((result, failure) -> reader.closeAsync());
+        }));
     }
 
     private CompletableFuture<RepairResult> closeRepair(ZKProfileReservationStore.RepairCommitResult published,

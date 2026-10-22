@@ -1583,3 +1583,6 @@ TLC1.7.4/Corretto21.0.10、单worker/heap512MiB/direct64MiB/seed1/fp0、每配�
 ```bash
 python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix ac-coordinate-profile-sdk-bridge --config-prefix ce-ac-coordinate-profile-sdk-bridge --config-prefix ac-prefix-profile-sdk-bridge --config-prefix ce-ac-prefix-profile-sdk-bridge --config-prefix ce-prefix-before-earlier-io-return --config-prefix ac-profile-sdk-bridge --config-prefix ce-ac-profile-sdk-bridge --config-prefix a-profile-sdk-bridge --config-prefix ce-profile-sdk-bridge --config-prefix c-managed --config-prefix ce-data-before-barrier --config-prefix ce-control-before-sync --config-prefix ce-open-replay-after-error
 ```
+
+
+2026-10-22 [Recovery reader 的本地 RPC 实际排空](../profile-wire/README.md#recovery-reader-的本地-rpc-实际排空)复用原未修改ProfileNormalClientSource/ProfileBackingBudget，4tbofuyk共15配置、2完整正向/13指定反例，原wire/output/credit/stop关系保持。新reader自己的READ/FENCE/LAC/anchor actual terminal、关闭快照及parent coordinator等待由23项真实Java验证；有限模型没有新增这组多请求状态，不将旧投影视作组合证明。1125 model/1170最终Java共有271路径、270 SHA一致，socket测试四到五窗口的1项stage差异与最终import-only排序分别冻结，2024 unique路径；source/receipt原绑定见实现记录。catalog749未全跑，完整A+C+D/全部字节/性能/liveness及生产Gate保持OPEN。

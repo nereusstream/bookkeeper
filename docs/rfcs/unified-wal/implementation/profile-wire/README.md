@@ -2094,3 +2094,26 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 [模型记录](../models/README.md#ac-同坐标重试的逻辑身份)拥有最终25配置6完整正向/19指定反例，原20配置状态计数不变；新窗口在实际C Submit之后展开caller timeout/stop、匹配/冲突重试与C physical publication。坐标owner是抽象oracle，忽略payload/length导致借原X publication伪成功、取消释放导致Y冲突准入、LAC比较导致误拒绝分别命中指定invariant；没有第二个Y物理写或hot/index/restart重建模型。1125 model/1170 Java共有271路径且SHA一致、去重2024，全部原始回执和冻结source在 `/Users/liusinan/.codex/artifacts/unified-wal/coordinate-conflict-evidence-2pu_z2ze`，原历史回执保持原绑定，catalog749未全跑。
 
 Spotless/Checkstyle exit0；Java/model/style实际终结后独立RAT exit1，443 unapproved路径均存在父HEAD、无新增，不称CI全绿。完整冲突恢复、multi-Arena/fence/两次故障/A+C+D、full-bytes、默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维与全16步验收继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Recovery reader 的本地 RPC 实际排空
+
+2026-10-22，父源码 `f115cd7d2244881b041964e0f8d2ee72d1a0c71b`。原ProfileRecoveryReadHandle.asyncCloseInternal调用transport.close后立即回OK，原ProfileBookieClient.closeCompletion只收集Add/WRITE_LAC的actual completion。点读即使已有合法回复，其原client write promise仍可能未终结；逐来源FENCE、LAC source查询及boundary anchor也有同样的本地custody边界。此时reader关闭和coordinator并发名额不能只依赖逻辑回复。
+
+现在沿原ProfileSocketClient.Pending的writeDone+wireDone+slot终态，为owned READ_ENTRY/READ_LAC和FENCE提供explicit attempt completion，旧result接口继续委托同一请求；completion均为不可污染原终态的独立等待副本。ProfileBookieClient复用原Add集合/锁为requestDrains/requestLifecycle，登记自己的读/FENCE/LAC/anchor请求，并在关闭快照的同一锁内拒绝新阶段；点读另登记原ordered callback终态，失败交付或executor拒绝在finally归还。ProfileLacEvidenceRead沿相同adapter登记，未改变coverage、endpoint排除、digest或P/L语义。reader关闭回调等待adapter.closeCompletion，各caller等待者取消不改变共享关闭终态。
+
+原coordinator的六处reader.closeAsync曾丢弃future；当前afterReaderDrain让probe-last、observe、required-prefix、OPEN/CLOSED health及copy的实际完成在reader自身RPC排空后才归还原active名额。原结果失败不被close失败覆盖，若close失败导致已得到的owned PointEvidence无法交付则关闭它；没有新增executor、重试、队列、字节账本、wire或持久格式。只等待这个reader登记的本地请求，不关闭借用的DATA/CONTROL连接；已交付caller的candidate/retained view仍按原owned合同释放，最后backing credit独立延续。该本地terminal不证明remote I/O已中止，timeout/UNKNOWN及未终结服务端I/O继续按原合同处理。
+
+`unified-wal-local-tiwsYsJR` 真实RED保持父生产源码：三节点mTLS/文件点读及完整evidence已成功、client READ_ENTRY原write promise仍被持有时，reader.closeAsync竟立即完成，新增expected TimeoutException断言失败（1 failure/0 error/skip）。CEnjemjz为测试新增import遗漏导致testCompile失败，1IMRRkkT为coordinator括号错误导致compile失败，均保留诊断、不是生产RED或PASS。AshEP7Gw最小两窗口通过；NY8YSGAX扩为四窗口通过；xgZt5NR6接parent actual drain后的三项通过。最终 `unified-wal-local-j9tkP9rU` 23项全部通过、0 failure/error/skip。
+
+新增一项测试含五个确定性窗口：point READ_ENTRY、其source FENCE、READ_LAC、matching anchor READ_ENTRY均在合法回复后hold原client output promise；另在真实native point read后hold三条server回复并取消probe等待，reader关闭同时等待回复和output终态。每个窗口取消第一关闭等待者、第二等待者仍未完成，释放实际promise/回复后才关闭成功；原borrowed DATA仍可读、CONTROL仍可解析同一FENCE。23项还复用原fencing/缺失、owned candidate packing/取消/ordered拒绝、observation长度/context、全恢复/required hole/deadline、worker health/marker、OPEN/CLOSED审计actual lease、LAC fan-in/缺anchor/coverage/cancel、writer stop/固定cut close/adoption及普通SDK quorum/有序callback。
+
+复现：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#recoveryReaderCloseWaitsForItsReadFenceAndLacWritePromises+recoveryReadonlySession*+recoveryMissing*+recoveryEvidence*+recoveryObservation*+wholePointRecovery*+wholeRecoveryCancel*+wholeRecoveryPreserves*+replicationWorkerUsesActualProfileRecoveryCopyHealthAndGuardedMarkerRemoval+profileReplicaAuditDeadline*+openReplicaAuditDeadline*+sdkLacKeepsCompletedPeerBackingAndReleasesItOnCollectorRejection+sdkLacEvidence*+writerStop*+ordinaryWriterClose*+originalSdkAllocatesEntriesQuorumAndContiguousCallbacksOverActualProfileSockets'
+```
+
+原未改动的normal-client-source/backing-budget有限投影 `unified-wal-model-4tbofuyk` 15配置2完整正向PASS/13指定反例，结果全部符合原invariant；它们检查原wire/output/credit/stop关系，没有新增reader/coordinator多请求组合状态，不能代替上述native验证。1125 model与1170最终测试stage共有271路径，其中270 SHA一致；1项socket测试从四窗口补到五窗口，分别冻结，去重2024路径。最终style前仅新增import排序修正，实际断言/生产token未变，test-stage与format-only交付源码分开保留。Spotless/Checkstyle最终exit0；Java/model/style实际终结后独立RAT exit1/443父HEAD路径无新增，不称CI全绿。全部原始stage source/命令/XML/模型输出/编译诊断/checker在 `/Users/liusinan/.codex/artifacts/unified-wal/reader-rpc-drain-evidence-vhfj7ft4`，历史sourceCommit/designInputs/receipt不移绑。
+
+本增量补reader自身本地请求与父coordinator actual-terminal接线；observe()返回列表仍是heap，既有结果释放公共约定待答复，未将其换成新owned API。默认SDK公开runtime/Main/required producer、统一full-bytes/对象/TLS/kernel、backup-restore/accepted退役/history GC/mixed兼容、完整A+C+D/正式性能/运维与全16步验收仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled能力不变。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

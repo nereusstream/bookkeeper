@@ -77,9 +77,9 @@ final class ProfileBookieClient implements BookieClient {
     private final Map<BookieId, Integer> counts = new ConcurrentHashMap<>();
     // Original ledger executor owns delivery state; shutdown completion uses a terminal CAS.
     private final Set<Delivery> pending = ConcurrentHashMap.newKeySet();
-    // A logical Add/LAC delivery may expire or reach A while its socket still owns source/output custody.
-    private final Set<CompletableFuture<Void>> addDrains = ConcurrentHashMap.newKeySet();
-    private final Object addLifecycle = new Object();
+    // A logical result may finish while its own socket request still owns source/output custody.
+    private final Set<CompletableFuture<Void>> requestDrains = ConcurrentHashMap.newKeySet();
+    private final Object requestLifecycle = new Object();
     private final CompletableFuture<Void> closeCompletion = new CompletableFuture<>();
 
     ProfileBookieClient(ClientContext base, ProfileLedgerContext ledger, ProtectedProfileCredential credential,
@@ -227,7 +227,7 @@ final class ProfileBookieClient implements BookieClient {
                 inFlight = true;
                 CompletableFuture<ProfileStatus> result;
                 CompletableFuture<Void> completion;
-                synchronized (addLifecycle) {
+                synchronized (requestLifecycle) {
                     // Also covers the synchronous close fallback after the original executor rejects work.
                     if (closed.get()) {
                         finish(BKException.Code.ClientClosedException);
@@ -242,9 +242,8 @@ final class ProfileBookieClient implements BookieClient {
                         result = actual.result();
                         completion = actual.completion();
                     }
-                    addDrains.add(completion);
+                    retainRequest(completion);
                 }
-                completion.whenComplete((unused, failure) -> addDrains.remove(completion));
                 result.whenComplete((status, failure) -> {
                     try {
                         ordered(() -> classify(status, failure));
@@ -404,7 +403,7 @@ final class ProfileBookieClient implements BookieClient {
 
     @Override
     public void close() {
-        synchronized (addLifecycle) {
+        synchronized (requestLifecycle) {
             if (!closed.compareAndSet(false, true)) {
                 return;
             }
@@ -423,7 +422,7 @@ final class ProfileBookieClient implements BookieClient {
                 }
             }
             Throwable failure = callbackFailure;
-            CompletableFuture.allOf(addDrains.toArray(CompletableFuture[]::new))
+            CompletableFuture.allOf(requestDrains.toArray(CompletableFuture[]::new))
                     .whenComplete((unused, terminalFailure) -> {
                         if (failure != null || terminalFailure != null) {
                             closeCompletion.completeExceptionally(failure != null ? failure : terminalFailure);
@@ -457,6 +456,35 @@ final class ProfileBookieClient implements BookieClient {
                 (code, id, entry, peer, ignored) -> cb.writeLacComplete(code, id, peer, ctx),
                 ctx, 0, EnumSet.noneOf(WriteFlag.class), true);
     }
+    /** Admission and the close snapshot share requestLifecycle; completion never closes a borrowed peer. */
+    private void retainRequest(CompletableFuture<Void> completion) {
+        requestDrains.add(completion);
+        completion.whenComplete((unused, failure) -> requestDrains.remove(completion));
+    }
+
+    CompletableFuture<ProfileNormalDataClient.ReadEntryBuffer> readEntryBuffer(
+            ProfileNormalDataClient peer, long entryId) {
+        synchronized (requestLifecycle) {
+            if (closed.get()) {
+                return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+            }
+            var attempt = peer.beginReadEntryBuffer(ledger, entryId);
+            retainRequest(attempt.completion());
+            return attempt.result();
+        }
+    }
+
+    CompletableFuture<ProfileNormalDataClient.LacBuffer> readLacBuffer(ProfileNormalDataClient peer) {
+        synchronized (requestLifecycle) {
+            if (closed.get()) {
+                return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+            }
+            var attempt = peer.beginReadLacBuffer(ledger);
+            retainRequest(attempt.completion());
+            return attempt.result();
+        }
+    }
+
     @Override
     public void readEntry(BookieId address, long ledgerId, long entryId, ReadEntryCallback cb, Object ctx,
             int flags, byte[] key, boolean failFast) {
@@ -474,18 +502,33 @@ final class ProfileBookieClient implements BookieClient {
             ordered(() -> cb.readEntryComplete(BKException.Code.ReadException, ledgerId, entryId, null, ctx));
             return;
         }
-        CompletableFuture<ProfileStatus> fence = fencing ? fenceSource(address)
-                : CompletableFuture.completedFuture(null);
-        fence.thenCompose(status -> {
-            if (fencing && (status == null || status.statusClass() != ProfileStatus.StatusClass.OK
-                    || status.durableResult() != ProfileStatus.DurableResult.APPLIED
-                        && status.durableResult() != ProfileStatus.DurableResult.ALREADY_APPLIED)) {
-                return CompletableFuture.failedFuture(BKException.create(
-                        status != null && status.statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED
-                            ? BKException.Code.UnauthorizedAccessException : BKException.Code.ReadException));
+        var callbackDone = new CompletableFuture<Void>();
+        synchronized (requestLifecycle) {
+            if (closed.get()) {
+                ordered(() -> cb.readEntryComplete(BKException.Code.ClientClosedException,
+                        ledgerId, entryId, null, ctx));
+                return;
             }
-            return peer.readEntryBuffer(ledger, entryId);
-        }).whenComplete((reply, failure) -> {
+            retainRequest(callbackDone);
+        }
+        CompletableFuture<ProfileNormalDataClient.ReadEntryBuffer> actual;
+        try {
+            CompletableFuture<ProfileStatus> fence = fencing ? fenceSource(address)
+                    : CompletableFuture.completedFuture(null);
+            actual = fence.thenCompose(status -> {
+                if (fencing && (status == null || status.statusClass() != ProfileStatus.StatusClass.OK
+                        || status.durableResult() != ProfileStatus.DurableResult.APPLIED
+                            && status.durableResult() != ProfileStatus.DurableResult.ALREADY_APPLIED)) {
+                    return CompletableFuture.failedFuture(BKException.create(
+                            status != null && status.statusClass() == ProfileStatus.StatusClass.UNAUTHORIZED
+                                ? BKException.Code.UnauthorizedAccessException : BKException.Code.ReadException));
+                }
+                return readEntryBuffer(peer, entryId);
+            });
+        } catch (RuntimeException failure) {
+            actual = CompletableFuture.failedFuture(failure);
+        }
+        actual.whenComplete((reply, failure) -> {
             Runnable completed = () -> {
                 try (reply) {
                     var current = readPeers.get(address);
@@ -514,15 +557,21 @@ final class ProfileBookieClient implements BookieClient {
                                     : BKException.Code.ReadException, ledgerId, entryId, null, ctx);
                         default -> throw new IllegalStateException("Unknown Profile point-read result");
                     }
+                } finally {
+                    callbackDone.complete(null);
                 }
             };
             try {
                 ordered(completed);
             } catch (RejectedExecutionException shutdown) {
-                if (reply != null) {
-                    reply.close();
+                try {
+                    if (reply != null) {
+                        reply.close();
+                    }
+                    cb.readEntryComplete(BKException.Code.InterruptedException, ledgerId, entryId, null, ctx);
+                } finally {
+                    callbackDone.complete(null);
                 }
-                cb.readEntryComplete(BKException.Code.InterruptedException, ledgerId, entryId, null, ctx);
             }
         });
     }
@@ -534,7 +583,14 @@ final class ProfileBookieClient implements BookieClient {
                     data.hello().storageIncarnation()) || !control.hello().bookieId().equals(bookie.toString())) {
                 return CompletableFuture.failedFuture(BKException.create(BKException.Code.ReadException));
             }
-            return control.fence(ledger, recoveryContext.operationId(), credential);
+            synchronized (requestLifecycle) {
+                if (closed.get()) {
+                    return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+                }
+                var attempt = control.beginFence(ledger, recoveryContext.operationId(), credential);
+                retainRequest(attempt.completion());
+                return attempt.result();
+            }
         });
     }
 

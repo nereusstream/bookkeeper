@@ -155,6 +155,17 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         }
     }
 
+    /** Reply ownership and the request's actual local wire/output terminal are separate. */
+    public record ReadAttempt<T>(CompletableFuture<T> result, CompletableFuture<Void> completion) { }
+
+    public ReadAttempt<ReadEntryBuffer> beginReadEntryBuffer(ProfileLedgerContext context, long entryId) {
+        return socket.beginReadEntryBuffer(context, entryId);
+    }
+
+    public ReadAttempt<LacBuffer> beginReadLacBuffer(ProfileLedgerContext context) {
+        return socket.beginReadLacBuffer(context);
+    }
+
     /** The response and all retained entry views keep their original transport backing charged. */
     public CompletableFuture<ReadEntryBuffer> readEntryBuffer(ProfileLedgerContext context, long entryId) {
         return socket.readEntryBuffer(context, entryId);

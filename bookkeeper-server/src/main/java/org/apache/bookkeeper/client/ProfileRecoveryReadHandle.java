@@ -560,6 +560,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
             timeoutFuture.cancel(false);
         }
         transport.close();
-        callback.closeComplete(BKException.Code.OK, this, ctx);
+        transport.closeCompletion().whenComplete((unused, failure) -> callback.closeComplete(
+                failure == null ? BKException.Code.OK : BKException.getExceptionCode(failure), this, ctx));
     }
 }

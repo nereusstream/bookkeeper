@@ -171,3 +171,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [Checkpoint record 的流式摘要与写入](local-storage/README.md#checkpoint-record-的流式摘要与写入)：2026-10-22父830918cbb2上去掉原双owner image摘要/写入阶段的完整record临时复制，改为一个16-byte prefix和原record只读view，字节/SHA/force与publication合同不变。相同约8MiB workload旧digest/write分配8,407,640/8,421,296 bytes触发真实RED，新为12,992/29,704 bytes；最终两类20项全部通过，含向量、partial body失败、force/损坏回退/子进程退出及DATA图restart。1170输入按stage冻结，style通过；终态后独立RAT exit1/443父HEAD路径无新增。额外分段write的I/O成本未测，不宣称性能/full-bytes闭合；模型无变化不重跑。其他required范围与全16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Recovery reader 的本地 RPC 实际排空](profile-wire/README.md#recovery-reader-的本地-rpc-实际排空)：2026-10-22父f115cd7d22上修复reader已回逻辑结果却未等自身READ/FENCE/LAC/anchor output终态即关闭的真实缺口；复用原request drain锁/集合，parent coordinator六处等待close完成才归还名额，borrowed peers保持可用。真实旧源码RED、最终五窗口及相关23项零failure/error/skip，15原有限模型配置符合预期；模型没有新reader组合，2024路径按stage冻结、import-only排序单列。style通过；终态后独立RAT exit1/443父HEAD路径无新增。observe结果公共约定/默认SDK/Main/required producer/full-bytes/backup-restore/accepted退役/GC/mixed/完整模型/正式性能/运维与全16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
