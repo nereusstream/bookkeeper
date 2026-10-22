@@ -19,6 +19,11 @@ import time
 
 
 MATRIX = {
+    'ac-coordinate-profile-sdk-bridge': None,
+    'ce-ac-coordinate-profile-sdk-bridge-cancel': 'ACCoordinateRejectsConflictingAdmission',
+    'ce-ac-coordinate-profile-sdk-bridge-payload': 'ACCoordinateRejectsConflictingSuccess',
+    'ce-ac-coordinate-profile-sdk-bridge-length': 'ACCoordinateRejectsConflictingSuccess',
+    'ce-ac-coordinate-profile-sdk-bridge-lac': 'ACCoordinateIgnoresLacOnlyChange',
     'ac-prefix-profile-sdk-bridge': None,
     'ce-ac-prefix-profile-sdk-bridge-suffix': 'ACSuccessHasReturnedQuorum',
     'ce-prefix-before-earlier-io-return': 'PhysicalSuccessWaitsIoReturn',

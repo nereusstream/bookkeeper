@@ -740,3 +740,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [跨 batch suffix 的真实 quorum](profile-wire/README.md#跨-batch-suffix-的真实-quorum)：2026-10-22父85716ef7f3后在原A+C新增suffix pending操作的分布式ACK窗口，完整DATA prefix durable仍必须等待predecessor实际返回；错误suffix DURABLE一直传播到SDK success的反例已命中。最终20配置5完整正向/15指定反例、旧18配置计数不变；两项新增真实A2/A3双batch与两项默认夹具回归通过，2019 unique路径/重叠SHA一致。两轮fixture未进入目标窗口的失败保留，当前hold在原Obligation终态交接，生产代码/wire/持久格式与旧fixture默认不变。catalog744未全跑，历史receipt不移绑。Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。完整多peer/多SDK操作/multi-Arena/fence/冲突/恢复/两次故障/A+C+D及其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[超时后同坐标重试的身份验证](profile-wire/README.md#超时后同坐标重试的身份验证)：2026-10-22父c60271c0f7上加强已有真实socket测试：原force在途且caller已超时，payload-only/length-only改变都冲突，LAC-only变化续接原操作、只发生一次force；该项及assembling/pending/index三项现有回归全部通过。原A+C增加同坐标cut与四个指定反例，最终25配置6完整正向/19指定反例、原20计数不变，2024 unique source/重叠SHA一致；owner为坐标保护oracle，不宣称第二个Y物理写、hot/index或restart冲突恢复已建模。Spotless/Checkstyle通过；终态后独立RAT exit1/443父HEAD路径无新增。catalog749未全跑，历史receipt保持绑定；生产/wire/格式未改，完整冲突恢复/multi-Arena/fence/两次故障/A+C+D和其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

@@ -2083,3 +2083,14 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 [组合模型](../models/README.md#ac-suffix-的分布式-ack)拥有当前20配置5完整正向/15指定反例：新反例在完整文件durability已成立、suffix实际返回而predecessor仍在途时，错误DURABLE reply导致SDK user success。模型只展开A2的一个pending suffix操作、一个active C peer及固定无ACK/已验证response输入；两条实际SDK entry/A3/剩余第三节点custody由上述Java验证，不能扩张为完整A+C+D。1120 model/1170 Java共有271且SHA一致，路径去重2019；各stage source/输入/错误/原始XML/checker在 `/Users/liusinan/.codex/artifacts/unified-wal/suffix-quorum-evidence-9w4u6zyh`。
 
 最终Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。默认SDK/observe公共约定、Main/required producer、full-bytes、multi-Arena/fence/冲突/两次故障的完整组合、backup-restore/accepted退役/GC/mixed/正式性能/运维与全16步验收继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## 超时后同坐标重试的身份验证
+
+2026-10-22，父源码 `c60271c0f7e1fa51184982800262a6a276ddd4cc`。现有SegmentEntryIdentity在CRC32C验证后比较context/entryId、累计ledgerLength与payload，LAC/digest属于传输事实。SegmentDataPhysicalDriver先查询assembling/pending，已占坐标继续由hot/occupied及fresh index point read保护，caller超时不撤销原I/O。本轮无需生产补丁；仅加强ordinaryTimeoutAfterSubmissionKeepsServerIoAliveAndSameCoordinateCanReconcile，并扩展原A+C模型/config及runner，无wire/持久格式/default变化。
+
+真实三节点mTLS/文件夹具在node0的原DATA force入口hold，原caller已超时、文件锁仍由server持有时，依次发送CRC有效的payload-only和length-only变化；两者都返回PROFILE_IDENTITY_CONFLICT/NONE，实际attempt completion排空后DATA writes不增加、force仍0。仅改变LAC的同payload/length重试续接原操作；释放原force后APPLIED，恰好一次force、writes不增加，旧future仍exceptional。`unified-wal-local-OGMbfkOF` 此项通过；`unified-wal-local-gDKBGnSf` 复用三项现有真实测试覆盖assembling合批/同force、pending及published point read、hot到RocksDB index handoff后normal/recovery duplicate，三项通过。合计4项0 failure/error/skip，不把已有生产正确行为称为新修复或RED/GREEN。
+
+[模型记录](../models/README.md#ac-同坐标重试的逻辑身份)拥有最终25配置6完整正向/19指定反例，原20配置状态计数不变；新窗口在实际C Submit之后展开caller timeout/stop、匹配/冲突重试与C physical publication。坐标owner是抽象oracle，忽略payload/length导致借原X publication伪成功、取消释放导致Y冲突准入、LAC比较导致误拒绝分别命中指定invariant；没有第二个Y物理写或hot/index/restart重建模型。1125 model/1170 Java共有271路径且SHA一致、去重2024，全部原始回执和冻结source在 `/Users/liusinan/.codex/artifacts/unified-wal/coordinate-conflict-evidence-2pu_z2ze`，原历史回执保持原绑定，catalog749未全跑。
+
+Spotless/Checkstyle exit0；Java/model/style实际终结后独立RAT exit1，443 unapproved路径均存在父HEAD、无新增，不称CI全绿。完整冲突恢复、multi-Arena/fence/两次故障/A+C+D、full-bytes、默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维与全16步验收继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

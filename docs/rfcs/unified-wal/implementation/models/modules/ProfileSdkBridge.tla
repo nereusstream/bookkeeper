@@ -11,13 +11,13 @@ VARIABLES ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1S
     ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, ac2Phase, ac2ControlLength, ac2ControlDurable,
     ac2ControlApplied, ac2Submitted, ac2Inflight, ac2Written, ac2DataDurable, ac2Successes, ac2RuntimeFault,
     ac2FaultSeen, ac2FaultDurable, ac2ControlSynced, ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount,
-    acLiveReplies, acSentRequests, ac1IoReturned, ac2IoReturned
+    acLiveReplies, acSentRequests, ac1IoReturned, ac2IoReturned, acCoordinate
 ACStorageVars == <<ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1Submitted, ac1Inflight,
     ac1Written, ac1DataDurable, ac1Successes, ac1RuntimeFault, ac1FaultSeen, ac1FaultDurable, ac1ControlSynced,
     ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, ac2Phase, ac2ControlLength, ac2ControlDurable,
     ac2ControlApplied, ac2Submitted, ac2Inflight, ac2Written, ac2DataDurable, ac2Successes, ac2RuntimeFault,
     ac2FaultSeen, ac2FaultDurable, ac2ControlSynced, ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount,
-    acLiveReplies, acSentRequests, ac1IoReturned, ac2IoReturned>>
+    acLiveReplies, acSentRequests, ac1IoReturned, ac2IoReturned, acCoordinate>>
 vars == <<s, ACStorageVars>>
 Targets == 0..2
 MaxAttempts == 2
@@ -159,7 +159,7 @@ ACSecondVars == <<ac2Phase, ac2ControlLength, ac2ControlDurable, ac2ControlAppli
     ac2Written, ac2DataDurable, ac2Successes, ac2RuntimeFault, ac2FaultSeen, ac2FaultDurable, ac2ControlSynced,
     ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount, ac2IoReturned>>
 
-Init == SdkInit /\ ACFirst!Init /\ ACSecond!Init /\ acLiveReplies = {} /\ acSentRequests = {0, 1}
+Init == SdkInit /\ ACFirst!Init /\ ACSecond!Init /\ acLiveReplies = {} /\ acSentRequests = {0, 1} /\ acCoordinate = 0
 Next == SdkNext /\ UNCHANGED ACStorageVars
 Spec == Init /\ [][Next]_vars
 
@@ -170,13 +170,13 @@ ACPhysicalFirst ==
     /\ (ACBatch(0) \in ac1Submitted' \ ac1Submitted => 0 \in acSentRequests
         /\ (ACMutation # "block-late-submit" \/ s.phase[0] = "running"))
     /\ ac1CrashCount' + ac2CrashCount <= 1
-    /\ UNCHANGED <<s, ACSecondVars, acLiveReplies, acSentRequests>>
+    /\ UNCHANGED <<s, ACSecondVars, acLiveReplies, acSentRequests, acCoordinate>>
 ACPhysicalSecond ==
     /\ ACSecond!Next
     /\ (ACBatch(1) \in ac2Submitted' \ ac2Submitted => 1 \in acSentRequests
         /\ (ACMutation # "block-late-submit" \/ s.phase[1] = "running"))
     /\ ac2CrashCount' + ac1CrashCount <= 1
-    /\ UNCHANGED <<s, ACFirstVars, acLiveReplies, acSentRequests>>
+    /\ UNCHANGED <<s, ACFirstVars, acLiveReplies, acSentRequests, acCoordinate>>
 ACPublished(target) == ACBatch(target) \in IF target = 0 THEN ac1Successes ELSE ac2Successes
 ACWritten(target) == ACBatch(target) \in IF target = 0 THEN ac1Written ELSE ac2Written
 ACDurable(target) == ACBatch(target) \in IF target = 0 THEN ac1DataDurable ELSE ac2DataDurable
@@ -205,16 +205,16 @@ ACReply(target) ==
     /\ acLiveReplies' = IF ACLive(target) /\ ACPublished(target)
                         THEN acLiveReplies \cup {target} ELSE acLiveReplies
     /\ acSentRequests' = acSentRequests \ {target}
-    /\ UNCHANGED <<ACFirstVars, ACSecondVars>>
+    /\ UNCHANGED <<ACFirstVars, ACSecondVars, acCoordinate>>
 ACRemoteReply == /\ Durable(2) /\ UNCHANGED ACStorageVars
 ACRetry(target) ==
     /\ Retry(target)
     /\ acSentRequests' = acSentRequests \cup {target}
-    /\ UNCHANGED <<ACFirstVars, ACSecondVars, acLiveReplies>>
+    /\ UNCHANGED <<ACFirstVars, ACSecondVars, acLiveReplies, acCoordinate>>
 ACKnownNone(target) ==
     /\ Refused(target, "NONE") /\ ~ACSubmitted(target) /\ target \in acSentRequests
     /\ acSentRequests' = acSentRequests \ {target}
-    /\ UNCHANGED <<ACFirstVars, ACSecondVars, acLiveReplies>>
+    /\ UNCHANGED <<ACFirstVars, ACSecondVars, acLiveReplies, acCoordinate>>
 ACSdkStep ==
     /\ Quorum \/ Stop
        \/ (\E target \in {0, 1} : Expire(target)
@@ -226,7 +226,7 @@ ACAbandonFirst ==
     /\ ac1Inflight' = {}
     /\ UNCHANGED <<ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1Submitted, ac1Written,
                   ac1DataDurable, ac1Successes, ac1RuntimeFault, ac1FaultSeen, ac1FaultDurable, ac1ControlSynced,
-                  ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, s, ACSecondVars, acLiveReplies, acSentRequests, ac1IoReturned>>
+                  ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, s, ACSecondVars, acLiveReplies, acSentRequests, ac1IoReturned, acCoordinate>>
 
 ACNext == ACPhysicalFirst \/ ACPhysicalSecond \/ ACRemoteReply \/ ACSdkStep \/ ACAbandonFirst
           \/ (\E target \in {0, 1} : ACReply(target) \/ ACRetry(target) \/ ACKnownNone(target))
@@ -274,9 +274,82 @@ ACCancellationKeepsStorageProtection ==
 ACPrefixInit ==
     /\ s = [SdkInitialState EXCEPT !.phase[1] = "failed", !.source[1] = FALSE]
     /\ ACFirst!Init /\ ACSecond!Init
-    /\ acLiveReplies = {} /\ acSentRequests = {0}
+    /\ acLiveReplies = {} /\ acSentRequests = {0} /\ acCoordinate = 0
 ACPrefixNext == ACPhysicalFirst \/ ACRemoteReply \/ ACSdkStep \/ ACAbandonFirst
                 \/ ACReply(0) \/ ACRetry(0) \/ ACKnownNone(0)
 ACPrefixSpec == ACPrefixInit /\ [][ACPrefixNext]_vars
+
+
+(* One K/X has reached the original C Submit action. This cut is reachable
+   through AppendOpen, ForceControl, ApplyControl, Submit. Fixed validated
+   context/key/eligibility inputs; one competing K/Y differs in payload OR
+   cumulative length. A matching retry changes only LAC/digest transport.
+   owner is a pending/hot/occupied-coordinate oracle, not replay authority.
+   Fresh attempts after close/fault/crash remain UNKNOWN in this window.
+   The release mutation shows conflicting admission, not two physical writes. *)
+ACReleaseCoordinate == "release-coordinate"
+ACIgnorePayload == "ignore-payload"
+ACIgnoreLength == "ignore-length"
+ACCompareLac == "compare-lac"
+ACCoordinateOtherVars == <<s, ACFirstVars, ACSecondVars, acLiveReplies, acSentRequests>>
+ACCoordinateInit ==
+    /\ s = [SdkInitialState EXCEPT !.phase[1] = "failed", !.source[1] = FALSE]
+    /\ ac1Phase = "live"
+    /\ ac1ControlLength = 1 /\ ac1ControlDurable = 1 /\ ac1ControlApplied = 1
+    /\ ac1Submitted = {<<1, 1>>} /\ ac1Inflight = {<<1, 1>>}
+    /\ ac1Written = {} /\ ac1DataDurable = {} /\ ac1Successes = {} /\ ac1IoReturned = {}
+    /\ ac1RuntimeFault = {} /\ ac1FaultDurable = {} /\ ac1FaultSeen = FALSE
+    /\ ac1ControlSynced = FALSE /\ ac1Validated = FALSE /\ ac1DataSynced = FALSE
+    /\ ac1CrashCount = 0 /\ ac1PowerCount = 0
+    /\ ACSecond!Init /\ acLiveReplies = {} /\ acSentRequests = {0}
+    /\ \E kind \in {"payload", "length"} :
+        acCoordinate = [owner |-> "X", kind |-> kind, same |-> "new", different |-> "new"]
+ACCoordinateOpen == ACLive(0) /\ ac1RuntimeFault = {} /\ ac1FaultDurable = {}
+ACCoordinateDifferent ==
+    /\ acCoordinate.different = "new"
+    /\ LET matches == (ACMutation = "ignore-payload" /\ acCoordinate.kind = "payload")
+                       \/ (ACMutation = "ignore-length" /\ acCoordinate.kind = "length")
+       IN acCoordinate' = [acCoordinate EXCEPT
+           !.different = IF ~ACCoordinateOpen THEN "unknown"
+                         ELSE IF acCoordinate.owner = "none" THEN "accepted"
+                         ELSE IF matches THEN "waiting" ELSE "conflict",
+           !.owner = IF ACCoordinateOpen /\ @ = "none" THEN "Y" ELSE @]
+    /\ UNCHANGED ACCoordinateOtherVars
+ACCoordinateSame ==
+    /\ acCoordinate.same = "new"
+    /\ acCoordinate' = [acCoordinate EXCEPT !.same =
+         IF ~ACCoordinateOpen \/ acCoordinate.owner # "X" THEN "unknown"
+         ELSE IF ACMutation = "compare-lac" THEN "conflict" ELSE "waiting"]
+    /\ UNCHANGED ACCoordinateOtherVars
+ACCoordinateCancelSame ==
+    /\ acCoordinate.same = "waiting"
+    /\ acCoordinate' = [acCoordinate EXCEPT !.same = "cancelled"]
+    /\ UNCHANGED ACCoordinateOtherVars
+ACCoordinateComplete(which) ==
+    /\ acCoordinate[which] = "waiting"
+    /\ ACPublished(0) \/ ~ACCoordinateOpen
+    /\ acCoordinate' = [acCoordinate EXCEPT ![which] =
+         IF ACCoordinateOpen /\ acCoordinate.owner = "X" THEN "durable" ELSE "unknown"]
+    /\ UNCHANGED ACCoordinateOtherVars
+ACCoordinateDrop ==
+    /\ ACMutation = "release-coordinate" /\ acCoordinate.owner = "X"
+    /\ (s.phase[0] = "failed" \/ s.stopped \/ acCoordinate.same = "cancelled")
+    /\ ACCoordinateOpen /\ ACBatch(0) \in ac1Inflight
+    /\ acCoordinate' = [acCoordinate EXCEPT !.owner = "none"]
+    /\ UNCHANGED ACCoordinateOtherVars
+ACCoordinateNext == ACPhysicalFirst \/ ACRemoteReply \/ ACSdkStep \/ ACReply(0) \/ ACRetry(0)
+    \/ ACCoordinateDifferent \/ ACCoordinateSame \/ ACCoordinateCancelSame \/ ACCoordinateDrop
+    \/ ACCoordinateComplete("same") \/ ACCoordinateComplete("different")
+ACCoordinateSpec == ACCoordinateInit /\ [][ACCoordinateNext]_vars
+ACCoordinateTypeOK == /\ ACTypeOK /\ acCoordinate.owner \in {"X", "Y", "none"}
+    /\ acCoordinate.kind \in {"payload", "length"}
+    /\ \A which \in {"same", "different"} : acCoordinate[which] \in
+        {"new", "waiting", "accepted", "conflict", "durable", "unknown", "cancelled"}
+ACCoordinateKeepsOriginalOwner == acCoordinate.owner = "X"
+ACCoordinateRejectsConflictingAdmission == acCoordinate.different # "accepted"
+ACCoordinateRejectsConflictingSuccess == acCoordinate.different # "durable"
+ACCoordinateIgnoresLacOnlyChange == acCoordinate.same # "conflict"
+ACCoordinateSameWaitsOriginalDurability == acCoordinate.same = "durable" =>
+    ACPublished(0) /\ ACDurable(0) /\ acCoordinate.owner = "X"
 
 ==============================================================================

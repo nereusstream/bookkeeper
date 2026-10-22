@@ -1102,6 +1102,16 @@ public class SegmentProfileInitialSocketClientTest {
             });
             var client = dataClient(fixture, 0, 1, Duration.ofMillis(100));
             ReferenceCounted source = entry(fixture, 0, 16);
+            var digest = DigestManager.instantiate(44, fixture.password,
+                    org.apache.bookkeeper.client.BookKeeper.DigestType.toProtoDigestType(
+                            org.apache.bookkeeper.client.BookKeeper.DigestType.CRC32C),
+                    UnpooledByteBufAllocator.DEFAULT, false);
+            var changedPayload = digest.computeDigestAndPackageForSending(0, -1, 16,
+                    Unpooled.wrappedBuffer(bytes(16, 9)), DigestManager.generateMasterKey(fixture.password), 0);
+            var changedLength = digest.computeDigestAndPackageForSending(0, -1, 17,
+                    Unpooled.wrappedBuffer(bytes(16, 8)), DigestManager.generateMasterKey(fixture.password), 0);
+            var changedLac = digest.computeDigestAndPackageForSending(0, 0, 16,
+                    Unpooled.wrappedBuffer(bytes(16, 8)), DigestManager.generateMasterKey(fixture.password), 0);
             try {
                 var unknown = client.addNormal(fixture.context(), fixture.credential, 0, source);
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
@@ -1111,8 +1121,18 @@ public class SegmentProfileInitialSocketClientTest {
                 configField.setAccessible(true);
                 Path ownedDirectory = ((IsolatedSegmentConfig) configField.get(fixture.nodes.get(0))).directory();
                 assertThrows(java.io.IOException.class, () -> SegmentDataFileLock.open(ownedDirectory));
+                int originalWrites = files(fixture.nodes.get(0)).dataIo.writes;
                 var retrying = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
-                var originalCoordinate = retrying.addNormal(fixture.context(), fixture.credential, 0, source);
+                for (var conflicting : List.of(changedPayload, changedLength)) {
+                    var rejected = retrying.beginNormalAdd(fixture.context(), fixture.credential, 0, conflicting);
+                    var status = rejected.result().get(5, TimeUnit.SECONDS);
+                    rejected.completion().get(5, TimeUnit.SECONDS);
+                    assertEquals(ProfileStatus.StatusClass.PROFILE_IDENTITY_CONFLICT, status.statusClass());
+                    assertEquals(ProfileStatus.DurableResult.NONE, status.durableResult());
+                    assertEquals(originalWrites, files(fixture.nodes.get(0)).dataIo.writes);
+                    assertEquals(0, files(fixture.nodes.get(0)).dataIo.forces);
+                }
+                var originalCoordinate = retrying.addNormal(fixture.context(), fixture.credential, 0, changedLac);
                 ProfileStatus currentNone = retrying.addNormal(fixture.context(), fixture.credential, 0, source).get();
                 assertEquals(ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE, currentNone.statusClass());
                 assertEquals(ProfileStatus.DurableResult.NONE, currentNone.durableResult());
@@ -1120,10 +1140,15 @@ public class SegmentProfileInitialSocketClientTest {
                 release.countDown();
                 ProfileStatus resolved = originalCoordinate.get(5, TimeUnit.SECONDS);
                 assertEquals(ProfileStatus.DurableResult.APPLIED, resolved.durableResult());
+                assertEquals(1, files(fixture.nodes.get(0)).dataIo.forces);
+                assertEquals(originalWrites, files(fixture.nodes.get(0)).dataIo.writes);
                 assertTrue(unknown.isCompletedExceptionally());
             } finally {
                 release.countDown();
                 source.release();
+                changedPayload.release();
+                changedLength.release();
+                changedLac.release();
             }
         }
     }

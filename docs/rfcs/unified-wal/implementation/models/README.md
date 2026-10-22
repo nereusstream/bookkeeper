@@ -1568,3 +1568,18 @@ TLC1.7.4/Corretto21.0.10、单worker/heap512MiB/direct64MiB/seed1/fp0，无symme
 ```bash
 python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix ac-prefix-profile-sdk-bridge --config-prefix ce-ac-prefix-profile-sdk-bridge --config-prefix ce-prefix-before-earlier-io-return --config-prefix ac-profile-sdk-bridge --config-prefix ce-ac-profile-sdk-bridge --config-prefix a-profile-sdk-bridge --config-prefix ce-profile-sdk-bridge --config-prefix c-managed --config-prefix ce-data-before-barrier --config-prefix ce-control-before-sync --config-prefix ce-open-replay-after-error
 ```
+
+
+## A+C 同坐标重试的逻辑身份
+
+2026-10-22，父源码 `c60271c0f7e1fa51184982800262a6a276ddd4cc`。原ProfileSdkBridge新增ACCoordinateSpec，从原C已完成OPEN control force/apply、K/X已Submit而I/O未返回的可达cut开始；slot0为一个active C实例，slot1固定failed/无ACK，slot2仍是经过验证的remote response输入。一个K/Y仅改变payload或累计ledgerLength；同逻辑重试仅改变LAC及其digest。acCoordinate.owner抽象pending/hot/occupied坐标保护，caller timeout/stop及重试取消都不释放它；它不是持久日志、index重建或新进程写者authority。原C的write/barrier/actual-return/publication/close/crash/recovery继续展开，新的重试在原live episode不健康或已结束后只得到UNKNOWN，不凭恢复candidate产生新live ACK。
+
+matching retry只在原X的local publication后得到durable；不同payload/length不能新占坐标或借X的成功返回durable。四个mutation分别在caller停止后释放坐标、忽略payload、忽略length、错误比较LAC。取消反例保留ac1Inflight={1}、ioReturned={}，却已让Y获得accepted；它证明冲突准入，不表示模型已经执行第二个Y物理写。payload/length反例在X真正durable/returned/published后错误地把Y返回durable；LAC反例拒绝合法matching retry。Java的实际CRC、byte比较与hot/index迁移由[实际验证](../profile-wire/README.md#超时后同坐标重试的身份验证)拥有，模型没有展开这些数据结构或崩溃后冲突重建。
+
+初次5配置 `unified-wal-model-y9xnljwk` 与最终25配置 `unified-wal-model-_3q5vu6a` 均exit0；最终6完整正向PASS/19指定反例全部匹配expectedInvariant，正向complete=true/queue0，负向在指定反例停止、complete=false。新正向198384 generated/51044 distinct、queue0、depth/diameter23，4.105秒、peak RSS369164288 bytes；coverage中matching completion的durable分支104次、retry取消11764次，成功路径与取消均可达。原20配置的status/generated/distinct全部与1bwjq2tb相同，旧Spec冻结新变量为0。当前catalog749未全量执行，原730及其他历史回执保持原source绑定。
+
+TLC1.7.4/Corretto21.0.10、单worker/heap512MiB/direct64MiB/seed1/fp0、每配置120秒，无symmetry/state constraint、CHECK_DEADLOCK FALSE，无fairness/liveness或性能结论。1125 model与1170 Java共有271路径且SHA一致、去重2024；原source/manifest/config/checker/反例/coverage/XML/命令在 `/Users/liusinan/.codex/artifacts/unified-wal/coordinate-conflict-evidence-2pu_z2ze`。本窗口不闭合两个冲突物理写者、hot/index/restart冲突恢复、多peer/多SDK操作、同批fence/多Arena/连续两次故障或完整A+C+D，生产Gate和全16步仍OPEN。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix ac-coordinate-profile-sdk-bridge --config-prefix ce-ac-coordinate-profile-sdk-bridge --config-prefix ac-prefix-profile-sdk-bridge --config-prefix ce-ac-prefix-profile-sdk-bridge --config-prefix ce-prefix-before-earlier-io-return --config-prefix ac-profile-sdk-bridge --config-prefix ce-ac-profile-sdk-bridge --config-prefix a-profile-sdk-bridge --config-prefix ce-profile-sdk-bridge --config-prefix c-managed --config-prefix ce-data-before-barrier --config-prefix ce-control-before-sync --config-prefix ce-open-replay-after-error
+```
