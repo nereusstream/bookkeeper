@@ -177,3 +177,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [LAC collector 排队期间的关闭排空](profile-wire/README.md#lac-collector-排队期间的关闭排空)：2026-10-22父36eb57665d后补原RPC终态之外的collector排队窗口；LAC内部result在原request drain登记，caller取消不提前释放，executor关闭兜底也等待owned reply清理。真实旧源码RED、新窗口通过；24项相关回归原23通过/1旧hold清理失败，已按actual-drain合同修正该方法并定向补验两项通过，原失败保留、不改称整轮全绿。1170输入按四stage冻结，style通过，终态后独立RAT443父HEAD路径无新增。模型未改不重跑，其他16步验收/生产Gate仍OPEN，目标active，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Checkpoint 流式写入的本地 JMH 对照](local-storage/README.md#checkpoint-流式写入的本地-jmh-对照)：2026-10-22父bc2f189186上新增原microbenchmarks入口，以相同有效1/64条ALLOC image、digest/open/truncate/write/file force/目录同步对照830918旧codec与当前流式codec。旧→新→新→旧的8个fork均核验所加载class及完整image字节一致。64条Java分配约50–52KB/op→25.8–25.9KB/op，write66→130/op，worker CPU上升；短运行延迟波动不支持稳定延迟/吞吐提升结论。141相关输入、冻结jar/旧class、原始JMH/环境与复现脚本归档，package/style通过，独立终态RAT443父HEAD路径无新增。无生产改动，不提升B18/正式性能或其他Gate；全16步目标active，生产Gate OPEN，Linux NUMA/掉电/正式性能/canary仍NOT_EXECUTED，默认OFF/SYSTEM/PARK及disabled不变。

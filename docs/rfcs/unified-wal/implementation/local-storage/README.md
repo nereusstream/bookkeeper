@@ -993,3 +993,34 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentArenaControlLogTest#
 1170个最终Java输入逐项SHA核验并冻结，red/早期green/final三个stage保持各自source/命令/XML，不移绑；证据在 `/Users/liusinan/.codex/artifacts/unified-wal/checkpoint-stream-evidence-_zgyx_k2`。Spotless/Checkstyle exit0；Java/style实际终结后独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。模型无字节分配/分段write结构、语义未改，本轮不重跑TLC或把旧PASS作为分配证明。分段write增加每record的FileChannel调用，I/O吞吐/CPU/latency影响尚未测量；只报告上述同条件分配变化。
 
 该改动消除两个阶段的完整临时payload复制；Snapshot retained records、Arena freeze编码、reader/parser恢复副本、控制状态/索引/native/MetadataStore/JDK/TLS/kernel/对象及统一full-bytes仍OPEN。默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed兼容、完整A+C+D/正式性能/运维及全16步继续实施，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+## Checkpoint 流式写入的本地 JMH 对照
+
+2026-10-22，在父源码 `bc2f189186de62b1a281bfb755a90e8c9f7d7212` 上复用原 `microbenchmarks` 模块新增 `ControlCheckpointBenchmark`，补上前述 `f115cd7d22` 分段 write 的局部测量。无生产代码、格式、默认配置或持久化顺序变化。基线仅取流式改动前 `830918cbb227147d14b3af3b57ac827586f36df6` 的 `SegmentControlCheckpoint.java`，以相同 release17/JDK 编译，class path 优先覆盖原 codec；其他依赖及 benchmark 均来自同一新构建的 shaded jar，不切换仓库。每个 fork 输出所加载 codec class 的 SHA-256，已与对应编译产物逐项核验。
+
+冻结 workload 为相同有效 ALLOC image：1 或64条192-byte控制record，framing后payload为208或13,312 bytes；同一Bookie/incarnation/Arena、代、序号及状态。每次计时操作包含reference摘要、文件open/truncate、identity/envelope/payload写入、一次image `FileChannel.force(true)`、close与原目录同步。输入record在trial setup建立，最后重读实际image、验证exact Snapshot及整个文件SHA-256；所有8个fork同参数的payload和完整image摘要相同，实际image force数等于完成operation数。未将CONTROL COMMIT、publication、DATA、网络/quorum、长期churn或掉电恢复纳入该workload。
+
+环境为macOS14.8.9 arm64、MacBookPro18,3、10核/32GiB、Corretto21.0.10、JMH1.37、SYSTEM不绑核。同一OS文件系统上的每trial独立临时目录，反复替换同一image，正常OS cache、不驱逐缓存；实际mount输出归档，设备型号/固件未冻结。单线程SampleTime，固定heap512MiB/direct64MiB，每参数一fork、3×1s warmup及5×1s measurement、GC profiler；顺序为旧→新→新→旧，即每实现/参数两个独立fork。下表分别列两个fork的观测范围，不是置信区间，不合并成正式Gate结果。
+
+| ALLOC条数 | codec | Java分配 bytes/op | worker CPU µs/op | FileChannel write/op | image force/op | sample均值 ms/op | sample p99 ms/op |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 旧复制 | 11,647–11,763 | 556–623 | 3 | 1 | 4.771–4.888 | 8.809–11.173 |
+| 1 | 当前流式 | 11,306–11,633 | 573–616 | 4 | 1 | 4.680–5.311 | 8.789–11.466 |
+| 64 | 旧复制 | 50,359–52,341 | 761–950 | 66 | 1 | 5.230–6.998 | 11.245–13.513 |
+| 64 | 当前流式 | 25,837–25,915 | 911–986 | 130 | 1 | 5.441–5.446 | 9.945–10.078 |
+
+分配来自JMH `gc.alloc.rate.norm`，包括此workload/JMH在短、低operation-rate运行中的计量开销，不代表native/direct/RSS/full-bytes；worker CPU由同iteration `cpuNanos/operations` 计算，含原JMH worker循环。write/force由原 `SegmentFileIo` 实际计数差值取得；image force计数不包含另行真实执行的目录force，也不等于设备barrier/syscall总数。64条时分配下降约一半，但write次数增加、worker CPU成本上升；单条记录减少复制的收益很小。延迟受本地force与调度波动影响，两fork和短运行不足以判断稳定延迟/吞吐收益或满足数值阈值，不据此改变生产路径。
+
+复现当前版：
+
+```bash
+mvn -o -P '!cargo-zigbuild' -pl microbenchmarks -am -DskipTests package
+java -cp microbenchmarks/target/benchmarks.jar org.openjdk.jmh.Main \
+  ControlCheckpointBenchmark.digestAndForceImage -f 1 -wi 3 -i 5 -w 1s -r 1s -t 1 \
+  -prof gc -foe true -rf json -rff /tmp/checkpoint-current.json \
+  -jvmArgs '-Xms512m -Xmx512m -XX:MaxDirectMemorySize=64m'
+```
+
+完整旧/新对照使用归档内 `run-comparison.py`，直接消费冻结jar/旧class并逐fork核对binding和image；保存每次完整命令、终态exit、raw log/JSON、source/class/jar摘要、环境及派生数值。证据目录 `/Users/liusinan/.codex/artifacts/unified-wal/checkpoint-jmh-evidence-4sz6lswt`，141个最终直接相关source/pom输入保持SHA一致；初次build的缺package-info和超长行Checkstyle失败原样保留，修正后package及Spotless/Checkstyle exit0。全部测量实际终结后独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增；未称CI全绿。benchmark trial自行清理image和独立目录，四个runner临时根为空并移除；冻结runtime jar、旧class及source是复现所需而保留。
+
+这是同持久化调用语义的本地codec对照，补充前述“尚未测量”的局部范围，不提升B18/步骤16正式性能Gate；没有改动模型语义，不重跑TLC或将历史模型PASS移绑当前benchmark。普通Add、真实TLS/quorum、可持续索引/回收性能及统一full-bytes仍须独立验证。持续16步目标active，生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED，OFF/SYSTEM/PARK与disabled能力不变。
