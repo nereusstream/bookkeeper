@@ -199,7 +199,10 @@ public final class SegmentProfileOwnedResources {
             var delete = source.deleteAuthorityReader(bookie, policy.compatibility().storageIncarnation().value(),
                     metadata);
             ProfileControlStore authorities = key -> switch (key.purpose()) {
-                case PREPARING_INSTALL -> install.read(key);
+                case PREPARING_INSTALL -> {
+                    var initial = install.read(key);
+                    yield initial.status() == ProfileControlStore.ReadStatus.NOT_FOUND ? repair.read(key) : initial;
+                }
                 case POST_MEMBERSHIP_REPLACEMENT -> replacement.read(key);
                 case TOMBSTONE_OR_DELETE -> delete.read(key);
                 case RECOVERY_GRANT, RECOVERY_GRANT_CLOSE, RECOVERY_TERMINAL_CLOSE -> repair.read(key);

@@ -832,3 +832,6 @@ Segment production candidate 的最低 Gate：
 
 
 [镜像导入丢回复后的同 intent 续接](rfcs/unified-wal/implementation/profile-wire/README.md#镜像导入丢回复后的同-intent-续接)：2026-10-23父796582579f上，真实首条recovery DATA force后丢回复/断DATA，目标经正常停止和service重启、新coordinator同intent续接仅为缺项新增一次force；membership后grant-close丢回复/断CONTROL，新coordinator续接copy0/零新增DATA force。13场景restore方法与原historical lost-close两方法通过，原CLOSED及权限保持；1171输入/两轮fixture假设失败分别冻结，无生产Java/TLA改动、不重跑TLC。仅验证正常restart及上述回复丢失，非进程kill/掉电；恢复crash/cursor/readiness/registration丢回复/接受下界/运维与完整16步仍OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变。
+
+
+[Owned service 的 repair INSTALL 与崩溃目标隔离](rfcs/unified-wal/implementation/profile-wire/README.md#owned-service-的-repair-install-与崩溃目标隔离)：2026-10-23父3e233f324b上，修复owned PREPARING_INSTALL漏查repair authority：仅initial NOT_FOUND时查原repair reader。真实owned/ZK/mTLS INSTALL NOT_FOUND RED已复现；修复后子JVM首条recovery DATA OK/APPLIED前halt23、无Java cleanup，原target因unclosed DATA session拒绝重开/注册；另新身份可完成copy/member/close，随后删除仍保留崩溃及新target义务。最终两方法通过（restore14场景及原owned SDK/drain），1171输入/五阶段保持原绑定，TLA未改不移绑旧receipt。**同target/同intent的unclean-session crash resume及新target4注册闭环尚未验收，不能以新身份重建替代该完整目标**；cursor/readiness/registration恢复、接受下界/运维及全16步仍OPEN、目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变，真实掉电/Linux NUMA/正式性能/canary未执行。

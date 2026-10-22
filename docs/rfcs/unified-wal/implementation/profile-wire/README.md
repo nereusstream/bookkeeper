@@ -2213,3 +2213,20 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ```
 
 1171个Java输入及三阶段各自source/命令/XML/失败记录保存在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-reply-evidence-hom_fc5z`。本轮只改测试及当前docs，生产Java/TLA转移未改，不重跑或移绑旧TLC结果；最终Spotless/Checkstyle exit0；Java/style实际终结后独立RAT exit1，443 unapproved路径均存在父HEAD、无新增，不称CI全绿。恢复专属进程crash、cursor/readiness/registration丢回复与全部交错、接受下界/恢复运维及其余16步验收继续OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## Owned service 的 repair INSTALL 与崩溃目标隔离
+
+2026-10-23，父源码 `3e233f324bea8b4cf10059b065222e86f3d6a956`。真实子进程恢复目标暴露 `SegmentProfileOwnedResources` 的PREPARING_INSTALL分发缺口：它只查initial install authority，而既有fixture在NOT_FOUND后还查原repair intent。当前CLOSED的prepared repair在owned service因而收到INSTALL NOT_FOUND/durable=false。`unified-wal-local-28nXiX7L` 通过实际ZK/owned listener/mTLS的直接INSTALL断言复现RED。最小修复仅在initial reader明确NOT_FOUND时查询原repair reader；FOUND/UNAVAILABLE/CORRUPT等原结果不被替代，后者仍执行原native intent/context/birth/admission约束，不增加或伪造授权，不改变普通Add热路径。
+
+原restore测试增设固定用途的forked-JVM目标，复用原owned service、TLS、真实ZK和文件目录，父进程继续运行当前coordinator/镜像来源。子进程只在首条ADD_RECOVERY响应的ProfileStatus已是OK/APPLIED时打印marker并Runtime.halt(23)，既不转发该回复也不执行Java关闭清理。最终原始XML保留child日志和唯一 `RESTORE_RECOVERY_DATA_DURABLE_HALT`；父进程取得DEFERRED/copy0、metadata未发布，等待原ephemeral registration的native NOT_FOUND后才尝试重开。
+
+该次无清理退出后，同目标文件恢复被原 `Unclosed DATA writer session` guard明确拒绝，且未重新注册。没有清除sessionOpen/quarantine、伪造健康CLOSED尾部或放弃旧target。测试随后在另一个新BookieId/incarnation/目录，用当前authority准备新的intent并从仍验证有效的原镜像完成recovery-only copy/membership/close，原CLOSED P/length/cut不变、点读成功、无normal权限；之后逻辑删除的完整Manifest仍含崩溃target及新target。此处证明的是崩溃隔离与新身份再重建的copy/member路径，**不是原target、原intent的unclean-session crash resume，也未另验新target4的service注册闭环**。后两项不得从此结果升级，普通同身份crash recovery仍是完整16步的真实缺口。
+
+最初e748UXnJ因owned INSTALL未接repair而未到halt；补直接断言得到上述原源码RED。修复分发后的FE1Fi9RH已实际halt，但测试误期望unclosed session可重开而error；保留该原保护和失败证据。改为断言隔离且新身份重建，9dbgQyOB两项通过；最终收紧具体拒绝原因及registration NOT_FOUND，`unified-wal-local-gCcoL2PS` 两方法全部0 failure/error/skip：restore方法14场景和原owned service SDK/实际资源排空。后一方法保留initial install/create、SDK DATA及关闭行为回归，不把其结果移绑为新crash同身份恢复证明。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy+ownedProfileResourcesRunSdkAndWaitForActualExecutorsMetadataAndNetworkDrain'
+```
+
+1171个Java输入、五阶段原source及精确overrides/命令/XML/child输出/失败报告在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-crash-evidence-bms4scie`。只有cold authority分发改变；TLA转移未改，授权来源及真实force/halt事实由本Java验证，不重跑/移绑旧TLC或宣称全A+C+D。最终Spotless/Checkstyle exit0；Java/style终结后独立RAT exit1，443 unapproved路径均为父HEAD既有、无新增，不称CI全绿。unclean DATA session的安全recovery/尾部与reuse解析、原intent在原target crash续接、cursor/readiness/registration全部恢复交错、完整恢复接受下界/运维及其余16步继续OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变。这里执行了真实进程halt；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

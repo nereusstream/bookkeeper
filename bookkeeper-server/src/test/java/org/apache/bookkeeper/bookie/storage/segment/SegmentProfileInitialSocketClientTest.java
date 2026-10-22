@@ -2489,6 +2489,161 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private final class RestoreCrashTarget implements AutoCloseable {
+        final Process process;
+        final Path output;
+        final InetSocketAddress address;
+
+        RestoreCrashTarget(Fixture fixture, ServiceEpisode episode) throws Exception {
+            fixture.listeners.get(3).close().sync();
+            fixture.nodes.get(3).close();
+            Path directory = temporary.newFolder().toPath();
+            Path properties = directory.resolve("target.properties");
+            Path ready = directory.resolve("ready");
+            output = directory.resolve("child.log");
+            var values = new java.util.Properties();
+            episode.bootstrapConfiguration.getKeys().forEachRemaining(name -> values.setProperty(name,
+                    episode.bootstrapConfiguration.getString(name)));
+            try (var stream = Files.newOutputStream(properties)) {
+                values.store(stream, "Disposable restore crash target");
+            }
+            process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-Xmx128m", "-XX:MaxDirectMemorySize=64m", "-cp", System.getProperty("java.class.path"),
+                    RestoreTargetCrashProbe.class.getName(), properties.toString(), ready.toString())
+                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+                while (!Files.exists(ready) && process.isAlive() && System.nanoTime() < deadline) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+                }
+                assertTrue(Files.readString(output), Files.exists(ready) && process.isAlive());
+                address = new InetSocketAddress("127.0.0.1", Integer.parseInt(Files.readString(ready)));
+            } catch (Exception | Error failure) {
+                close();
+                throw failure;
+            }
+        }
+
+        void awaitCrash(ServiceEpisode episode) throws Exception {
+            assertTrue(Files.readString(output), process.waitFor(15, TimeUnit.SECONDS));
+            String log = Files.readString(output);
+            System.out.println("UW_RESTORE_CRASH_CHILD " + log);
+            assertEquals(log, 23, process.exitValue());
+            assertTrue(log, log.contains("RESTORE_RECOVERY_DATA_DURABLE_HALT"));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (episode.persistent.readPeer("socket3:3181").status()
+                    != org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.ReadStatus.NOT_FOUND
+                    && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+            }
+            assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.ReadStatus.NOT_FOUND,
+                    episode.persistent.readPeer("socket3:3181").status());
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                assertTrue(Files.readString(output), process.waitFor(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    /** The real target service halts after its first successful recovery DATA result, without Java cleanup. */
+    public static final class RestoreTargetCrashProbe {
+        public static void main(String[] args) throws Exception {
+            if (args.length != 2) {
+                throw new IllegalArgumentException("Expected target properties and ready file");
+            }
+            var configuration = new ServerConfiguration();
+            configuration.loadConf(Path.of(args[0]).toUri().toURL());
+            var directory = Path.of(configuration.getString(SegmentProfileService.CONFIG_PREFIX + "Directory"));
+            var config = new IsolatedSegmentConfig(directory, 1, 1, 1, 4L * 1024 * 1024,
+                    4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var identity = new SegmentFileHeader(new StorageIncarnation(bytes(16, 8)),
+                    new UUID(0, 9), BookieId.parse("socket3:3181"));
+            var policy = servicePolicy(config, identity, 1);
+            var settings = new SegmentProfileOwnedResources.Settings(policy,
+                    "/socket-service-required-3-" + Integer.toUnsignedString(directory.hashCode()),
+                    "/socket-service-readiness", "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    "ledger-profile", 4, Duration.ofSeconds(5), Duration.ofMillis(100), 2, 4, 64);
+            var tlsConfiguration = new ServerConfiguration();
+            tlsConfiguration.setTLSKeyStoreType("PEM");
+            tlsConfiguration.setTLSKeyStore(certificate("server-key.pem"));
+            tlsConfiguration.setTLSCertificatePath(certificate("server-san-cert.pem"));
+            tlsConfiguration.setTLSTrustStoreType("PEM");
+            tlsConfiguration.setTLSTrustStore(certificate("client-cert.pem"));
+            var tls = TLSContextFactory.forProfileServer();
+            tls.init(SecurityHandlerFactory.NodeType.Server, tlsConfiguration, UnpooledByteBufAllocator.DEFAULT);
+            java.security.cert.X509Certificate certificate;
+            try (var input = Files.newInputStream(Path.of(certificate("client-cert.pem")))) {
+                certificate = (java.security.cert.X509Certificate)
+                        java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(input);
+            }
+            var principal = new ProfilePrincipal(ProfilePrincipal.MappingMode.TRUST_DOMAIN_ISSUER_PLUS_SUBJECT,
+                    "socket-test", certificate.getIssuerX500Principal().getName(
+                            javax.security.auth.x500.X500Principal.CANONICAL),
+                    certificate.getSubjectX500Principal().getName(javax.security.auth.x500.X500Principal.CANONICAL));
+            var read = new SegmentProfileReadConfig((caller, query) -> caller.equals(principal),
+                    (caller, query) -> caller.equals(principal));
+            var service = SegmentProfileService.withOwnedResources(configuration,
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, tls,
+                    new ProfileReceiveBudget(2L * 1024 * 1024, 131072, 262144, 8, 8, 8),
+                    131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
+                    (caller, operation) -> caller.equals(principal),
+                    (caller, scope, authority) -> caller.equals(principal) && scope.equals(authority.scope())
+                            ? Decision.ALLOW : Decision.DENY, read);
+            var address = service.start(true);
+            var listenerField = SegmentProfileService.class.getDeclaredField("listener");
+            listenerField.setAccessible(true);
+            var channelField = SegmentProfileListener.class.getDeclaredField("listener");
+            channelField.setAccessible(true);
+            var listener = (Channel) channelField.get(listenerField.get(service));
+            listener.eventLoop().submit(() -> listener.pipeline().addFirst("observeCrashTarget",
+                    new io.netty.channel.ChannelInboundHandlerAdapter() {
+                        @Override
+                        public void channelRead(ChannelHandlerContext context, Object message) throws Exception {
+                            var child = (Channel) message;
+                            child.pipeline().addLast(new io.netty.channel.ChannelInboundHandlerAdapter() {
+                                @Override
+                                public void channelActive(ChannelHandlerContext active) throws Exception {
+                                    var ssl = active.pipeline().context(SslHandler.class);
+                                    active.pipeline().addAfter(ssl.name(), "haltDurableRecovery",
+                                            new ChannelOutboundHandlerAdapter() {
+                                                @Override
+                                                public void write(ChannelHandlerContext ctx, Object response,
+                                                        ChannelPromise promise) throws Exception {
+                                                    if (response instanceof ByteBuf frame
+                                                            && frame.getUnsignedShort(frame.readerIndex() + 14)
+                                                                == ProfileOperation.ADD_RECOVERY.wireValue()) {
+                                                        byte[] body = new byte[ProfileStatus.ENCODED_LENGTH];
+                                                        frame.getBytes(frame.readerIndex() + 36, body);
+                                                        var status = ProfileStatus.decode(body);
+                                                        if (status.statusClass() == ProfileStatus.StatusClass.OK
+                                                                && status.durableResult()
+                                                                    == ProfileStatus.DurableResult.APPLIED) {
+                                                            System.out.println("RESTORE_RECOVERY_DATA_DURABLE_HALT");
+                                                            System.out.flush();
+                                                            Runtime.getRuntime().halt(23);
+                                                        }
+                                                    }
+                                                    ctx.write(response, promise);
+                                                }
+                                            });
+                                    active.fireChannelActive();
+                                }
+                            });
+                            context.fireChannelRead(message);
+                        }
+                    })).get(5, TimeUnit.SECONDS);
+            Path ready = Path.of(args[1]);
+            Path pending = ready.resolveSibling("ready.pending");
+            Files.writeString(pending, Integer.toString(address.getPort()));
+            Files.move(pending, ready, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            new CountDownLatch(1).await();
+        }
+    }
+
     private final class ServiceEpisode implements AutoCloseable {
         private static final long DATA_BYTES = 2L * 1024 * 1024 - 131072 - 262144;
         final ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
@@ -8133,8 +8288,8 @@ public class SegmentProfileInitialSocketClientTest {
     @Test
     public void backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy() throws Exception {
         // Offline/partial/conflicting inputs, delete races, drain, bootstrap, metadata identity and lost replies.
-        for (int scenario = 0; scenario < 13; scenario++) {
-            try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true);
+        for (int scenario = 0; scenario < 14; scenario++) {
+            try (Fixture fixture = new Fixture(false, false, true, scenario == 13 ? 5 : 4, 2, true, true);
                     BookKeeper sdk = sdk(fixture)) {
                 fixture.connectAll(Duration.ofSeconds(5));
                 fixture.initialize().get(5, TimeUnit.SECONDS);
@@ -8225,18 +8380,34 @@ public class SegmentProfileInitialSocketClientTest {
                     fixture.nodes.get(2).close();
                 }
                 var supplied = scenario == 0 || scenario == 5 || scenario == 6 ? Map.of(target.bookieId(), peer) : data;
-                if (scenario >= 11) {
+                if (scenario == 11 || scenario == 12) {
                     fixture.faultTarget.set(3);
                     fixture.replyFault.set(scenario == 11 ? 18 : 31);
                 }
                 var restartConfig = files(fixture.nodes.get(3)).config();
-                var restartPolicy = scenario == 12 ? servicePolicy(restartConfig, target, 1) : null;
+                var restartPolicy = scenario >= 12 ? servicePolicy(restartConfig, target, 1) : null;
                 try (var image = SegmentBackupImage.open(sourceConfig, fixture.identities.get(0),
                         new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, 1024 * 1024, 16,
                         "cluster/profile", "device-0", directory, reference);
-                        var restart = scenario == 12 ? new ServiceEpisode(fixture, 3, restartConfig, restartPolicy,
+                        var restart = scenario >= 12 ? new ServiceEpisode(fixture, 3, restartConfig, restartPolicy,
                                 restartPolicy.compatibility(), new InetSocketAddress("127.0.0.1", 0),
-                                sdk.getClientCtx().getScheduler()) : null) {
+                                sdk.getClientCtx().getScheduler(), false, scenario == 13) : null;
+                        var crashed = scenario == 13 ? new RestoreCrashTarget(fixture, restart) : null) {
+                    if (crashed != null) {
+                        var control = ProfileInitialControlClient.connect(fixture.clientGroup, fixture.peerTls,
+                                crashed.address, "apache.bookkeeper.org", target.bookieId().toString(),
+                                target.incarnation().value(), 4, Duration.ofSeconds(5)).get(5, TimeUnit.SECONDS);
+                        fixture.clients.put(target.bookieId().toString(), control).close();
+                        var replacement = ProfileNormalDataClient.connect(fixture.clientGroup, fixture.peerTls,
+                                crashed.address, "apache.bookkeeper.org", target.bookieId().toString(),
+                                target.incarnation().value(), 4, 1060, Duration.ofSeconds(5)).get(5, TimeUnit.SECONDS);
+                        fixture.dataClients.add(replacement);
+                        data.put(target.bookieId(), replacement);
+                        var installed = control.install(ProfileControlRequest.install(intent.install(),
+                                fixture.descriptorBytes, EngineProfile.SEGMENT_WAL_ENGINE, fixture.credential))
+                                    .get(5, TimeUnit.SECONDS);
+                        assertTrue("Owned restore INSTALL rejected: " + installed, installed.durable());
+                    }
                     if (scenario == 1) {
                         var deleted = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
                                 .deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(10))
@@ -8382,9 +8553,62 @@ public class SegmentProfileInitialSocketClientTest {
                         if (scenario == 12) {
                             assertEquals(1, files(fixture.nodes.get(3)).dataIo.forces);
                             restart.replaceNode(fixture, 3, true);
+                        } else if (scenario == 13) {
+                            crashed.awaitCrash(restart);
+                            var refused = assertThrows(java.io.IOException.class,
+                                    () -> restart.replaceNode(fixture, 3, true));
+                            assertTrue(refused.getMessage(), refused.getMessage().contains("Unclosed DATA writer"));
+                            assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore
+                                            .ReadStatus.NOT_FOUND,
+                                    restart.persistent.readPeer(target.bookieId().toString()).status());
+                            var fresh = fixture.identities.get(4);
+                            var freshInstall = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                                    ProfileAuthorityPurpose.PREPARING_INSTALL, 44, context.ledger().ledgerInstanceId(),
+                                    ProfileDescriptorCodec.identityOf(fixture.descriptor, VALIDATOR),
+                                    fresh.bookieId().toString(), fresh.incarnation().value(), "restore-repair",
+                                    context.controlGeneration(), bytes(16, 83), bytes(32, 83), null);
+                            var freshIntent = new org.apache.bookkeeper.discover.profile.ProfileRepairIntent(context, 4,
+                                    bytes(16, 93), 0, 2, ZKProfileReservationStore.repairEnsembleDigest(original, 0),
+                                    freshInstall, bytes(16, 103),
+                                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 1));
+                            var freshPrepared = fixture.reservations.prepareRepair(metadata, freshIntent).snapshot();
+                            assertNotNull(freshPrepared);
+                            fixture.connect(4, 4, Duration.ofSeconds(5));
+                            var freshPeer = dataClient(fixture, 4, 4, Duration.ofSeconds(5));
+                            data.put(fresh.bookieId(), freshPeer);
+                            var freshCoordinator = new ProfileRecoveryCoordinator(
+                                    fixture.reservations, metadata, fixture.cold);
+                            var rebuilt = freshCoordinator.beginRestoreClosedFragment(accepted, freshPrepared,
+                                    sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data,
+                                    fixture.clients, bytes(16, 113), image);
+                            assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT,
+                                    rebuilt.result().get(30, TimeUnit.SECONDS).status());
+                            rebuilt.completion().get(10, TimeUnit.SECONDS);
+                            var restored = fixture.manager.readLedgerMetadata(44).get().getValue();
+                            assertEquals(fresh.bookieId(), restored.getAllEnsembles().get(0L).get(2));
+                            assertEquals(original.getLastEntryId(), restored.getLastEntryId());
+                            assertEquals(original.getLength(), restored.getLength());
+                            assertArrayEquals(original.getCustomMetadata().get(
+                                    org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.CLOSE_KEY),
+                                    restored.getCustomMetadata().get(
+                                        org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.CLOSE_KEY));
+                            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome
+                                            .FOUND,
+                                    freshPeer.readEntry(fixture.context(), 1).get(5, TimeUnit.SECONDS).outcome());
+                            assertFalse(fixture.normal(4));
+                            var removed = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                                    .deleteLedgerAsync(44, bytes(16, 123), sdk.getClientCtx(), Duration.ofSeconds(10))
+                                        .get(10, TimeUnit.SECONDS);
+                            assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, removed.status());
+                            for (var retained : List.of(target, fresh)) {
+                                assertTrue(removed.manifest().targets().stream().anyMatch(value ->
+                                        value.bookie().equals(retained.bookieId().toString())
+                                            && Arrays.equals(value.incarnation(), retained.incarnation().value())));
+                            }
+                            continue;
                         }
                         fixture.connect(3, 4, Duration.ofSeconds(5));
-                        if (scenario == 12) {
+                        if (scenario >= 12) {
                             var replacement = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
                             data.put(target.bookieId(), replacement);
                             assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome
