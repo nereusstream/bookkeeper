@@ -1024,3 +1024,27 @@ java -cp microbenchmarks/target/benchmarks.jar org.openjdk.jmh.Main \
 完整旧/新对照使用归档内 `run-comparison.py`，直接消费冻结jar/旧class并逐fork核对binding和image；保存每次完整命令、终态exit、raw log/JSON、source/class/jar摘要、环境及派生数值。证据目录 `/Users/liusinan/.codex/artifacts/unified-wal/checkpoint-jmh-evidence-4sz6lswt`，141个最终直接相关source/pom输入保持SHA一致；初次build的缺package-info和超长行Checkstyle失败原样保留，修正后package及Spotless/Checkstyle exit0。全部测量实际终结后独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增；未称CI全绿。benchmark trial自行清理image和独立目录，四个runner临时根为空并移除；冻结runtime jar、旧class及source是复现所需而保留。
 
 这是同持久化调用语义的本地codec对照，补充前述“尚未测量”的局部范围，不提升B18/步骤16正式性能Gate；没有改动模型语义，不重跑TLC或将历史模型PASS移绑当前benchmark。普通Add、真实TLS/quorum、可持续索引/回收性能及统一full-bytes仍须独立验证。持续16步目标active，生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED，OFF/SYSTEM/PARK与disabled能力不变。
+
+## 离线 backup image 与不可服务输入
+
+2026-10-22，父源码 `4b1ba0889d74927f1bfc95b0e502a0acc3442861`，按 [RFC-0004 §15.1](../../RFC-0004-range-recovery-delete.md#151-首版-backuprestore-接受边界) 的新身份恢复决策，新增包内 `SegmentBackupImage`。这是导出/验证/逐点读取的离线输入层，尚未接新目标 repair admission/membership/bootstrap，不声称 backup/restore 已验收。没有新线程、队列、配置开关、Maven模块或默认SDK入口，OFF/SYSTEM/PARK及disabled不变。
+
+capture首先取得原DATA排他锁，再复用原Arena/Bookie控制日志的独立native锁、完整重放及原DATA恢复扫描；活动服务/另一个控制writer占用时拒绝。原控制恢复及DATA扫描保留其force，文件逻辑字节不因导出重写。新输出目录只能CREATE_NEW且独立于源目录；不能覆盖已有目录或在原scope内嵌套。复制任何原生文件前先写并force `backup-input` 标记、空DATA锁文件及目录，后续失败留下可诊断的marked input，不自动删除或冒充正常storage。`IsolatedSegmentStorage.startNew/restart`在control replay、DATA恢复与owner建立前拒绝任何该标记（含损坏/不完整标记），避免将旧身份镜像挂载为服务。
+
+输入文件范围为全部固定容量DATA、两个superblock、两个原控制日志及存在的两owner A/B checkpoint/rotation generation；已重建派生index、coverage/readiness/registration不作为新目标权限而复制。当前原生名称之外的DATA/control/superblock文件、软链接、缺失必要文件及超过原control-state预算的文件拒绝，不静默省略未知原生扩展。每个文件以64KiB buffer完整复制、SHA-256并独立file force，随后manifest force和目录/父目录同步；返回前另用原native parser、完整恢复inventory及全部文件摘要重新验证目标。索引不用于缩短该扫描，扫描及contexts受调用方显式maximumEntries/固定shard上限约束；这不是统一full-bytes/RSS证明。
+
+实验manifest schema1最大1MiB，包含UWBACK01/version、随机image UUID、两个显式有界cluster/Profile与device/storage scope字段、原4096-byte file identity（含Bookie/incarnation/Arena与物理配置/generation）、两个owner的applied cut、按完整60-byte context排序的ledgerInstanceId/descriptor inventory，以及按文件名排序的完整文件长度/SHA-256。scope字段是调用方明确提供、封入镜像且验证时必须匹配的来源范围，不是本层生产的cluster/device attestation。24-byte marker绑定相同UUID；返回的外部Reference包含UUID与完整manifest SHA，open不能凭镜像自行选择另一reference。原wire、Bookie/Arena持久格式与credential不变；此容器为隔离实验格式，未晋升stable/G1。
+
+open只交付持原锁与原完整扫描inventory的Image，现有native控制校验、完整文件范围/长度/hash、scope、applied cut、contexts及marker/reference均匹配才成功。逐点read使用原point parser/selector，完整context匹配，结果借用调用方scratch且不授予writer资格；close与读取串行并归还原控制/DATA锁。未找到坐标仅表示镜像中没有该项，不是quorum absence、当前confirmed frontier或降低required prefix的许可。镜像包含的旧控制/credential/cursor始终是历史输入，后续导入必须重验当前未回滚集群、delete/history与RepairIntent，不能恢复旧grant或免除旧目标义务。
+
+新增三项真实文件测试复用原storage fixture：两个ledger实际DATA/close、两owner rotation/checkpoint后导出、完整DATA字节比对与逐点instance读取；活动source拒绝、wrong cluster/device/Bookie/incarnation、extra native file、移走checkpoint、DATA symlink、原native parser可回退的旧checkpoint字节被修改仍按seal拒绝；输入锁持有/归还、caller scratch及关闭后拒绝；marker force、复制中途force与64-byte短写失败不返回seal、不覆盖既有目录/源scope；原身份启动在修改arena日志前拒绝。`unified-wal-local-INa6mur1`新增启动拒绝断言在旧start上RED（3项中2通过/1预期断言失败），这是新容器的拒绝契约，不将其称为既有已发布备份格式缺陷。补guard后gsW7y65k三项通过。补范围故障后yULiF8zg六项通过；最终又给空锁文件显式force并修正一处121-character行，`unified-wal-local-vcVqaC6P`两类六项全部0 failure/error/skip，含既有双owner健康restart及实际ZK/mTLS/SDK/服务owner restart路径。
+
+复现最终范围：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest#offlineBackup*+bothControlCheckpointsPreserveTheStorageGraphReadDuplicateAndAppendAcrossRestart+storageGraphBootstrapsAllShardsAndRestartsLocalResults,SegmentProfileInitialSocketClientTest#ownedProfileServicePublishesBoundEndpointSupportsSdkAndRetainsDrainAcrossRestart'
+```
+
+1171个最终Java输入逐项SHA冻结，各red/green/补强阶段保留原source/命令/XML；`/Users/liusinan/.codex/artifacts/unified-wal/backup-image-evidence-pr4l1kz4`拥有完整证据。最终Spotless/Checkstyle exit0，Java/style终结后独立RAT exit1，443 unapproved全部存在父HEAD、无新增。model runner只补新源码输入登记并检查Python语法；TLA转移未改、不重跑或移绑旧TLC receipt，旧A+C+D不视为backup-copy/force证明。
+
+仍须接镜像作为repair来源、新身份inactive install/RepairIntent/recovery-only copy/current metadata验证与membership、required-through/readiness，以及backup后delete、ledgerId reuse、admission/writable竞争与force/cursor/registration crash/lost-reply的恢复专属组合。线上一致性备份、原地restore、同BookieId身份切换、MetadataStore随镜像回滚继续不支持；旧incarnation/Manifest/events/receipts/lineage/物理义务全部原绑定，WINDOW_ELAPSED不授予GC。完整16步目标active、生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

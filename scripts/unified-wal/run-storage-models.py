@@ -834,6 +834,7 @@ def main():
     inputs.extend((root / "bookkeeper-common/src/test/java/org/apache/bookkeeper/common/profile/wire").glob("*.java"))
     inputs.append(root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/tls/TLSContextFactory.java")
     inputs.extend(sources / name for name in ["IsolatedSegmentStorage.java", "IsolatedSegmentFiles.java",
+                  "SegmentBackupImage.java",
                   "SegmentArenaControlLog.java", "SegmentBookieControlLog.java", "SegmentControlCapacityException.java",
                   "SegmentDataPhysicalDriver.java", "SegmentPhysicalPrefix.java", "SegmentHotDirectory.java", "SegmentControlCheckpoint.java", "SegmentControlFormat.java",
                   "SegmentControlRotation.java", "SegmentDataFileLock.java", "SegmentDerivedIndex.java",

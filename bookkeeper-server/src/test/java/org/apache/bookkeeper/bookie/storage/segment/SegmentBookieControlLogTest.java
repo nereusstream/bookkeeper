@@ -9840,6 +9840,140 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void offlineBackupRetainsNativeRangesInstancesAndReadOnlyOwnership() throws Exception {
+        IsolatedSegmentConfig config = config();
+        Path output = temporary.getRoot().toPath().resolve("backup");
+        try (IsolatedSegmentStorage source = storage(config, 2, 6, 16)) {
+            source.startNew();
+            installStorage(source, install(44, 1, (byte) 5), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4));
+            storageWrite(source, context(44), 1);
+            storageWrite(source, context(45), 1);
+            assertThrows(IOException.class, () -> SegmentBackupImage.capture(config, identity(), key((byte) 3),
+                    VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output));
+            assertFalse(Files.exists(output));
+        }
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            arena.rotate();
+            bookie.rotate();
+        }
+        var reference = SegmentBackupImage.capture(config, identity(), key((byte) 3), VALIDATOR,
+                1024 * 1024, 16, "cluster/profile", "device-1", output);
+        assertEquals(-1, Files.mismatch(config.directory().resolve("data-0"), output.resolve("data-0")));
+        assertTrue(Files.exists(output.resolve("arena-control-generation-a")));
+        assertTrue(Files.exists(output.resolve("bookie-checkpoint-b")));
+        assertFalse(Files.exists(output.resolve("derived-index")));
+        var image = SegmentBackupImage.open(config, identity(), key((byte) 3), VALIDATOR, 1024 * 1024, 16,
+                "cluster/profile", "device-1", output, reference);
+        try (image) {
+            assertEquals(List.of(context(44), context(45)), image.contexts());
+            ByteBuffer scratch = ByteBuffer.allocate(4096);
+            for (long ledger : new long[] {44, 45}) {
+                var record = image.readEntry(context(ledger), 1, scratch).orElseThrow();
+                assertEquals(context(ledger), record.context());
+                assertEquals(1, record.entryId());
+            }
+            var otherInstance = new ProfileLedgerContext(44, filled(16, (byte) 9),
+                    DESCRIPTOR_IDENTITY.toBytes());
+            assertTrue(image.readEntry(otherInstance, 1, scratch).isEmpty());
+            assertTrue(image.readEntry(context(44), 2, scratch).isEmpty());
+            assertThrows(IOException.class, () -> SegmentDataFileLock.open(output));
+        }
+        assertThrows(IOException.class, () -> image.readEntry(context(44), 1, ByteBuffer.allocate(4096)));
+        try (var ignored = SegmentDataFileLock.open(output)) {
+            assertTrue(ignored.lock().isValid());
+        }
+        assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "other-cluster/profile", "device-1", output, reference));
+        assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "other-device", output, reference));
+        Path extra = output.resolve("data-1");
+        Files.write(extra, new byte[] {1});
+        assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output, reference));
+        Files.delete(extra);
+        Path displaced = output.getParent().resolve("displaced-data");
+        Files.move(output.resolve("data-0"), displaced);
+        Files.createSymbolicLink(output.resolve("data-0"), displaced);
+        assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output, reference));
+        Files.delete(output.resolve("data-0"));
+        Files.move(displaced, output.resolve("data-0"));
+        Path checkpoint = output.resolve("bookie-checkpoint-a");
+        Path missing = output.getParent().resolve("displaced-checkpoint");
+        Files.move(checkpoint, missing);
+        assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output, reference));
+        Files.move(missing, checkpoint);
+        var otherIdentity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 8)),
+                identity().arenaId(), BookieId.parse("new:3181"));
+        assertThrows(IOException.class, () -> SegmentBackupImage.open(config, otherIdentity, key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output, reference));
+        // A parser may fall back from this old checkpoint; a sealed mirror must still reject altered bytes.
+        try (FileChannel file = FileChannel.open(output.resolve("bookie-checkpoint-a"),
+                StandardOpenOption.WRITE)) {
+            file.write(ByteBuffer.wrap(new byte[] {1}), 0);
+            file.force(true);
+        }
+        IOException corrupt = assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(),
+                key((byte) 3), VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output, reference));
+        assertTrue(corrupt.getMessage(), corrupt.getMessage().contains("Backup file digest differs"));
+    }
+
+    @Test
+    public void offlineBackupInputCannotRestartAsTheOriginalService() throws Exception {
+        IsolatedSegmentConfig config = config();
+        Path output = temporary.getRoot().toPath().resolve("backup");
+        try (IsolatedSegmentStorage source = storage(config, 2, 6, 16)) {
+            source.startNew();
+            installStorage(source, install(44, 1, (byte) 5), activate(44, 2));
+            storageWrite(source, context(44), 1);
+        }
+        SegmentBackupImage.capture(config, identity(), key((byte) 3), VALIDATOR,
+                1024 * 1024, 16, "cluster/profile", "device-1", output);
+        var mirror = new IsolatedSegmentConfig(output, 1, 4, 1, config.bytesPerFile(),
+                4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        byte[] original = Files.readAllBytes(output.resolve("arena-control"));
+        try (IsolatedSegmentStorage service = storage(mirror, 2, 6, 16)) {
+            assertThrows(IOException.class, service::restart);
+        }
+        assertArrayEquals(original, Files.readAllBytes(output.resolve("arena-control")));
+    }
+
+    @Test
+    public void offlineBackupForceFailureLeavesOnlyMarkedUnacceptedInputAndDoesNotReplaceDirectories()
+            throws Exception {
+        IsolatedSegmentConfig config = config();
+        Path output = temporary.getRoot().toPath().resolve("failed-backup");
+        try (IsolatedSegmentStorage source = storage(config, 2, 6, 16)) {
+            source.startNew();
+        }
+        for (int failForce : new int[] {1, 4}) {
+            Path failed = output.resolveSibling("failed-backup-" + failForce);
+            assertThrows(IOException.class, () -> SegmentBackupImage.capture(config, identity(), key((byte) 3),
+                    VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", failed,
+                    new SegmentFileIo(64, -1, failForce, false)));
+            assertTrue(Files.exists(failed.resolve(SegmentBackupImage.MARKER)));
+            assertFalse(Files.exists(failed.resolve("backup-manifest")));
+        }
+        // A partial native-file write also leaves an explicitly unaccepted input, never a seal.
+        assertThrows(IOException.class, () -> SegmentBackupImage.capture(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output,
+                new SegmentFileIo(64, 3, -1, false)));
+        assertTrue(Files.exists(output.resolve(SegmentBackupImage.MARKER)));
+        assertFalse(Files.exists(output.resolve("backup-manifest")));
+        assertThrows(IOException.class, () -> SegmentBackupImage.capture(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output));
+        assertThrows(IOException.class, () -> SegmentBackupImage.capture(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", config.directory().resolve("nested")));
+        try (var ignored = SegmentDataFileLock.open(config.directory())) {
+            assertTrue(ignored.lock().isValid());
+        }
+    }
+
+    @Test
     public void bothControlCheckpointsPreserveTheStorageGraphReadDuplicateAndAppendAcrossRestart() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("checkpoint"),
                 1, 4, 1, 16L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

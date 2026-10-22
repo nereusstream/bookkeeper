@@ -20,6 +20,8 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import io.netty.buffer.ByteBuf;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -887,6 +889,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 startAttempted = true;
             }
             try {
+                if (Files.exists(config.directory().resolve(SegmentBackupImage.MARKER), LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("Offline backup input cannot start a storage service");
+                }
                 if (!existing) {
                     files = IsolatedSegmentFiles.create(config, identity);
                 } else {
