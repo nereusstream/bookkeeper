@@ -883,6 +883,18 @@ all historical targets acknowledged or durably decommissioned
 
 具体时间不是硬编码常量；它属于集群 policy，并进入 immutable delete receipt。永久或长周期 compact tombstone 用于防止极晚重返和 ledgerId reuse ABA。
 
+### 15.1 首版 backup/restore 接受边界
+
+2026-10-22，经用户指定的「Unified WAL 总体规划与实施检查」会话裁决，首版只支持新 BookieId、新 storage incarnation、新目录的 verified export/rebuild，再由未随本地备份回滚的当前集群 bootstrap 获得服务资格。原 incarnation 原地 restore、同 BookieId 身份切换、整集群 MetadataStore 回滚及在线一致性备份不在首版范围。这里冻结接受语义，不表示导出/导入实现或恢复专属验收已经完成。
+
+备份清单须绑定 cluster/Profile scope、源 Bookie/incarnation、device/storage 范围、镜像身份/摘要、已应用控制 checkpoint cut、完整 DATA 文件及 generation，逐 ledger 保留 ledgerInstanceId。备份中的 metadata、cursor、readiness、registration、activation/grant 只作历史输入，不恢复为当前权限。由当前 MetadataStore 重验身份、history/birth/lineage 与仍有效的恢复范围；备份缺少的已确认数据须由当前副本补齐，缺失时保持未完成，不降低 required frontier 或伪造 CLOSED。
+
+镜像先在不可服务的隔离输入中验证，仍有效数据复用 inactive install → RepairIntent admission → recovery-only copy → 验证及 membership 提交。delete 先于 admission 时不得导入该 instance；admission 先赢时，新目标进入后续删除的完整历史目标。源 snapshot 不能改写 target/incarnation 后授权新目标；新目标必须取得当前 assignment，完成自己的 verified snapshot＋无洞 suffix、required-through 及本地持久 apply。经原协议核验的空新目标可使用零 cut，缺失 head 不等于空历史。
+
+旧目标 incarnation、Manifest、delete events、physical receipts 与 lineage 保留原绑定；新目标恢复、replacement、新盘为空及 WINDOW_ELAPSED 都不解除旧目标的物理义务或授予 GC。解除仍须旧 scope 的真实终态或未来 cluster-accepted wipe/decommission proof。首版依赖当前仍完整可验证的历史；未来删除历史前须先实现集群权威控制的恢复接受下界，使更旧镜像不能绕过已经回收的义务。原地 restore 若以后启用，须另有独立于备份回滚域的外部 authority/epoch；随镜像恢复的本地记录不足以承担它。
+
+恢复专属最小验收复用真实文件/ZK/mTLS/SDK/restart fixture：备份后删除不复活；ledgerId reuse 不混淆 instance；delete 与 admission/writable 两种先后均保留目标和 required-through；缺页/断 suffix/错误 scope 或 generation/recreated birth/旧权限重放 fail closed；copy force、cursor/readiness 与 registration 的 crash/lost-reply 重试幂等且 actual I/O 先排空；旧目标 offline、窗口已到期且新目标已恢复时，旧义务仍保留。未知 authority/timeout/UNKNOWN 不证明无义务，必要数据不足或历史不完整保持隔离/RECOVERING、不发布 writable。既有等价覆盖复用，不按场景数重复扩矩阵。
+
 ## 16. 安全不变量
 
 ### 16.1 Range/Recovery

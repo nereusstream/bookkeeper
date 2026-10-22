@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为744配置；新增A+C八配置、C+D五配置和逐I/O终态反例仅有定向结果。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为754配置；新增A+C/C+D及A+C+D生命周期配置只有各自定向结果，未重跑当前全目录。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -10,7 +10,7 @@
 python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 ```
 
-工具固定为[TLA+ 1.7.4 官方发行](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4)的`tla2tools.jar`，发行SHA-1为`bee4a54f3ee3d4afc347c3240ec2d9e93b075104`；runner验证它并记录实际SHA-256，不自动下载或改Maven依赖。本次取得的完整文件为2,274,532 bytes，SHA-256为`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`，manifest记录工具版本和checksum。使用当前Java，1 worker、512 MiB heap、64 MiB direct上限、固定fingerprint polynomial 0与seed 1；每config最多120秒，无symmetry或额外state constraint。安全性检查不增加fairness；有界停止/隔离状态允许无后继，未检查deadlock或liveness。
+工具固定为[TLA+ 1.7.4 官方发行](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4)的`tla2tools.jar`，发行SHA-1为`bee4a54f3ee3d4afc347c3240ec2d9e93b075104`；runner验证它并记录实际SHA-256，不自动下载或改Maven依赖。本次取得的完整文件为2,274,532 bytes，SHA-256为`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`，manifest记录工具版本和checksum。使用当前Java，1 worker、512 MiB heap、64 MiB direct上限、固定fingerprint polynomial 0与seed 1；每config最多120秒，无symmetry或额外state constraint；显式TLC VIEW由config和manifest的tlcViews逐项记录，新增生命周期配置的合并边界见末节。安全性检查不增加fairness；有界停止/隔离状态允许无后继，未检查deadlock或liveness。
 
 每次运行在独立临时目录冻结modules/configs，保存manifest、命令、JDK/平台、源码哈希、父提交处的合同哈希、checker输出、完整负向trace、coverage-summary及checksums。统计记录generated/distinct states、剩余queue、searchDepth、仅完整探索时的diameter、elapsed及`time`测得的进程peak RSS。负向检查在发现反例时停止，其搜索深度不是完整图直径。超时终止本次checker进程组并标INCONCLUSIVE；语法/工具错误及未完整探索都不是PASS。正式配置或源码改变须新建run，不能改绑定旧结果。
 
@@ -1586,3 +1586,26 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 
 
 2026-10-22 [Recovery reader 的本地 RPC 实际排空](../profile-wire/README.md#recovery-reader-的本地-rpc-实际排空)复用原未修改ProfileNormalClientSource/ProfileBackingBudget，4tbofuyk共15配置、2完整正向/13指定反例，原wire/output/credit/stop关系保持。新reader自己的READ/FENCE/LAC/anchor actual terminal、关闭快照及parent coordinator等待由23项真实Java验证；有限模型没有新增这组多请求状态，不将旧投影视作组合证明。1125 model/1170最终Java共有271路径、270 SHA一致，socket测试四到五窗口的1项stage差异与最终import-only排序分别冻结，2024 unique路径；source/receipt原绑定见实现记录。catalog749未全跑，完整A+C+D/全部字节/性能/liveness及生产Gate保持OPEN。
+
+## SDK ACK 到 CLOSED 删除及共享 FREE 的生命周期组合
+
+2026-10-22，父源码 `b0710fd09cdcc2fe4a0c0259f0090619c8e097e1`。新增 `ProfileSdkDeleteFree` 直接 INSTANCE 原 `ProfileSdkBridge`（原SDK＋两个独立 SegmentAllocator storage episode）和原 `WholeAllocationFree`（两份原 ProfileLogicalDelete＋同一 allocation），没有复制另一套SDK/allocator/delete转移。固定一个entry、3/3/2；slot2仍是已校验remote输入，slot0的真实模型Submit/actual-return与allocation的StartIo/FinishIo为同一步，caller cancel不释放后者。邻居ledger已fenced-CLOSED，第一ledger先ACK成功并等原sent请求及两storage inflight归零，才接收其validated fenced-CLOSED输入并允许原logical/delete-delivery/tombstone force/apply/读pin排空/FREE。没有把SDK quorum当local tombstone或FREE authority。
+
+这是live SDK episode到CLOSED删除的有限生命周期组合：删除阶段从第一ledger的close后开始，SDK状态随后冻结；两个storage episode的process/power failure和restart在本组合不展开，FREE allocator仍保留原单次Crash动作。native fence、metadata版本/birth、实际UIC7/local force等继续由现有Java提供，不把模型输入称为新的生产实现；没有OPEN/delete并发、replacement、默认SDK入口、全部replica、多Arena或完整A+C+D/生产Gate结论。
+
+`LifecycleView` 仅在第一ledger已经closed且原sent/inflight全部drained时，把永不再变化的SDK历史合并为同一fingerprint；所有delete/allocator变量、全部Next动作及不变量保留，未drain的premature-close mutation仍保留完整SDK变量。此后每个动作均UNCHANGED sdkVars，delete转移只依赖deleteVars，原SDK/storage性质在进入该class前已验证、此后冻结；相关inflight/sent恒为空，所以合并不改变各后继启用或被检查性质。它是显式TLC VIEW，不是state constraint或symmetry，manifest逐config记录，不能把原未合并搜索称作完整通过。
+
+最终 `unified-wal-model-96kpf9fv` 五配置：1正向完整PASS、3个mutation指定反例和1个成功路径可达性witness，runner exit0。正向529,798 generated/99,442 distinct、queue0、depth/diameter40，16.613秒；peak RSS366,379,008 bytes是checker观测，不是产品资源/性能结论。三个mutation分别提前关闭、caller stop后释放allocation I/O、只凭ACK发起删除，命中ACDClosedHasOriginalDrain/ACDActualIoMatchesSdk/ACDLocalDeleteHasFencedClose。witness保留全部正向不变量，另查询“完整FREE永不可达”的否定性质；32步轨迹实际到SDK success、sent/两inflight/readers/actualIo全空、两ledger logical与delivered/forced/applied齐全、FREE force成功、alive空及generation2。该指定反例是成功可达证明，不是生产缺陷；其余负向搜索也按指定性质停止，complete=false。
+
+最初两个stage有跨模块变量元组求值错误；随后补齐FREE分支遗漏的UNCHANGED。修正后的未合并组合在120秒触及上限，保留INCONCLUSIVE；更大的未合并诊断在显式600秒预算内由本任务停止并以VIEW版本接替，不计PASS。曾临时增加runner timeout选项，VIEW后已撤掉，最终仍用原120秒上限、单worker/heap512MiB/direct64MiB/seed1/fp0。早期四配置VIEW通过、交付runner四配置通过、最终增加非空验收witness后的五配置保持各自source/command/coverage/log/trace，未把早期stage移绑最终新增operator。
+
+复现最终配置：
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar \
+  --config-prefix acd-profile-sdk-delete-free \
+  --config-prefix ce-acd-profile-sdk-delete-free \
+  --config-prefix witness-acd-profile-sdk-delete-free
+```
+
+1131个最终模型/Java/runner输入SHA逐项冻结，原ProfileSdkBridge/SegmentAllocator/WholeAllocationFree/ProfileLogicalDelete字节与父HEAD一致；未改生产Java，因此本轮不重复Java测试或将旧receipt称为本组合native验收。Python语法及实际TLC运行已验证，独立终态RAT仍443父HEAD路径无新增。源码、全部诊断/中断/完整运行、runner各阶段精确源码、反例与witness、当前规划恢复裁决在 `/Users/liusinan/.codex/artifacts/unified-wal/acd-lifecycle-evidence-sm953rej`。catalog754未全跑，旧730全矩阵及其他有限receipt保持原source绑定；完整A+C+D、字节预算、真实掉电、Linux NUMA、正式性能/运维/canary及全16步仍OPEN，目标active、生产Gate不提升，OFF/SYSTEM/PARK及disabled不变。

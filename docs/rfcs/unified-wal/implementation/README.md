@@ -755,3 +755,9 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [Checkpoint 流式写入的本地 JMH 对照](local-storage/README.md#checkpoint-流式写入的本地-jmh-对照)：2026-10-22父bc2f189186上新增原microbenchmarks入口，以相同有效1/64条ALLOC image、digest/open/truncate/write/file force/目录同步对照830918旧codec与当前流式codec。旧→新→新→旧的8个fork均核验所加载class及完整image字节一致。64条Java分配约50–52KB/op→25.8–25.9KB/op，write66→130/op，worker CPU上升；短运行延迟波动不支持稳定延迟/吞吐提升结论。141相关输入、冻结jar/旧class、原始JMH/环境与复现脚本归档，package/style通过，独立终态RAT443父HEAD路径无新增。无生产改动，不提升B18/正式性能或其他Gate；全16步目标active，生产Gate OPEN，Linux NUMA/掉电/正式性能/canary仍NOT_EXECUTED，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Backup/restore 首版接受语义](profile-wire/README.md#backuprestore-的首版接受语义)已按用户指定规划会话的2026-10-22裁决冻结：只支持新 BookieId/incarnation/目录的 verified export/rebuild，由当前未回滚集群授予 repair/membership 与新目标 bootstrap；旧控制/cursor/grant 不恢复为权限，旧 incarnation 删除及物理义务原样保留。原地 restore/同 BookieId 切换/MetadataStore 回滚继续 disabled；恢复接受下界未实现前不据窗口到期 GC。owner RFC 已同步，导出/导入及恢复专属验收仍 OPEN；后续据此实施，非语义完成即实现完成，完整目标 active、生产 Gate OPEN。
+
+
+[SDK ACK→CLOSED删除→共享FREE组合](models/README.md#sdk-ack-到-closed-删除及共享-free-的生命周期组合)：2026-10-22父b0710fd09c上直接组合原SDK/两个storage episode与两logical-delete/原allocation。最终五配置为1完整正向（529798/99442、queue0）、3指定mutation反例及1完整成功路径witness；只合并closed且drained后冻结SDK历史的显式TLC VIEW，原动作/性质保留，无state constraint或symmetry。1131输入/全部早期求值失败、未完成搜索及最终源码各自冻结；Python/TLC通过，独立RAT443父HEAD既有无新增。无生产Java改动，不重复Java测试，不将原receipt升级本组合native验收；catalog754未全跑，完整A+C+D及16步/生产Gate仍OPEN、目标active、默认OFF/SYSTEM/PARK与disabled不变。

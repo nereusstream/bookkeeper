@@ -452,6 +452,8 @@ same-scope candidate migration只能按drain旧writer/connection → exclusive s
 
 新Profile scope出现任一local success、route/install/activation、fence/grant/tombstone、Arena allocation/control或durability-unknown outcome后，old binary都不能再解释同一scope。恢复只允许roll-forward、verified export/rebuild、irreversible wipe/decommission或new-incarnation rejoin；exact reverse/wipe CLI继续BLOCK。required device移除也必须由cluster-authorized新incarnation/device-manifest generation完成。
 
+2026-10-22 首版 backup/restore 语义按 [RFC-0004 §15.1](RFC-0004-range-recovery-delete.md#151-首版-backuprestore-接受边界)：新 BookieId/incarnation/目录的隔离 verified export/rebuild，经当前未回滚 MetadataStore 的 repair admission、membership 与新目标 bootstrap 后重新获得资格。旧控制/cursor/readiness/grant 不直接作为当前 authority，源 snapshot 不改写 scope，新目标成功不解除旧 incarnation 的删除/物理义务。原地 restore、同 BookieId 切换及 MetadataStore 同步回滚继续 disabled；语义已冻结，导出/导入实现和恢复专属验收仍 OPEN。
+
 ## 10. 性能边界
 
 必须保持：

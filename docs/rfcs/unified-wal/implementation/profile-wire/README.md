@@ -2136,3 +2136,14 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 四个stage各1170输入/SHA、命令/XML、RED与原广度失败、最终源码分别冻结于 `/Users/liusinan/.codex/artifacts/unified-wal/lac-collector-drain-evidence-ckkoosa2`；最终Spotless/Checkstyle exit0，Java/style实际终结后独立RAT exit1/443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。没有修改TLA状态，本轮不重复运行原投影或移绑其旧PASS；原15配置仍保持上一节source绑定，未提供新的reader/collector组合模型、全部字节或性能结论。
 
 此增量闭合已排队LAC collector的owner关闭等待；默认SDK/observe公共约定、Main/required producer、统一full-bytes、backup-restore/accepted退役/GC/mixed兼容、完整A+C+D/正式性能/运维及全16步仍OPEN。目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+## Backup/restore 的首版接受语义
+
+2026-10-22，用户要求由「Unified WAL 总体规划与实施检查」（01a0c84a-11d9-7951-80a4-8f2a6933c139，turn 01a163ff-3dbd-70c1-b3a2-0e395ecfc28a）裁决，本实施会话已取得只读裁决并同步 [RFC-0004 §15.1](../../RFC-0004-range-recovery-delete.md#151-首版-backuprestore-接受边界) 与 RFC-0005。首个实现范围是新 BookieId、新 incarnation、新目录的 verified export/rebuild，使用当前未回滚集群的 inactive install/RepairIntent/recovery-only copy/membership 及新目标自己的 snapshot＋无洞 suffix/required-through bootstrap；不复用旧控制状态、旧 cursor/readiness/registration/grant 或改写源 snapshot 的身份。真实零 cut 仍须核验，缺失 head 不视为空。
+
+旧 target/incarnation/Manifest/events/physical receipts/lineage 和物理义务继续原绑定。备份后删除、ledgerId reuse、delete 与 admission/writable 竞争、坏/缺范围和 birth、copy/cursor/readiness/registration 的 crash/lost reply、旧目标 offline 且窗口到期均按 owner RFC 的最小验收执行；必要数据须从当前副本补齐，未完成不得降低 required frontier。WINDOW_ELAPSED 不授予 restore/GC/退役；当前历史仍完整保留，未来 GC 前须先实现权威恢复接受下界。原地 restore、同 BookieId 切换、整集群 MetadataStore 回滚、在线一致性备份及尚未实现的 accepted terminal/剩余 history GC 均不因裁决开放。
+
+本次只冻结语义；导出/导入代码、恢复镜像清单与恢复专属 native 验收尚未实现，不将已有 recovery/rejoin 测试移称为 backup restore 已验收。生产 Gate OPEN、完整目标 active，默认 OFF/SYSTEM/PARK 与其他 disabled 能力不变。规划会话未修改共享仓库或运行测试，当前会话仍为唯一实施者。
+
+
+[SDK ACK→CLOSED删除→共享FREE组合](../models/README.md#sdk-ack-到-closed-删除及共享-free-的生命周期组合)：2026-10-22父b0710fd09c上直接组合原SDK/两个storage episode与两logical-delete/原allocation。最终五配置为1完整正向（529798/99442、queue0）、3指定mutation反例及1完整成功路径witness；只合并closed且drained后冻结SDK历史的显式TLC VIEW，原动作/性质保留，无state constraint或symmetry。1131输入/全部早期求值失败、未完成搜索及最终源码各自冻结；Python/TLC通过，独立RAT443父HEAD既有无新增。无生产Java改动，不重复Java测试，不将原receipt升级本组合native验收；catalog754未全跑，完整A+C+D及16步/生产Gate仍OPEN、目标active、默认OFF/SYSTEM/PARK与disabled不变。
