@@ -7231,6 +7231,97 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void recoveryReaderCloseWaitsForQueuedLacCollectorAfterExecutorShutdown() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int target = 0; target < 3; target++) {
+                var peer = dataClient(fixture, target, 4, Duration.ofSeconds(5));
+                data.put(fixture.identities.get(target).bookieId(), peer);
+                evidenceEntry(fixture, peer, 0, -1, 16, 16);
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var reader = ProfileRecoveryReadHandle.fromOpenAudit(sdk.getClientCtx(),
+                    metadata.readMembership(44).snapshot(), fixture.context(),
+                    available.ready().page().installs(), data);
+            var blocked = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            try {
+                fixture.faultTarget.set(0);
+                fixture.replyFault.set(17);
+                var reading = reader.readLacEvidence();
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertEquals(1, fixture.heldReplies.size());
+                sdk.getClientCtx().getMainWorkerPool().executeOrdered(44, () -> {
+                    blocked.countDown();
+                    await(release);
+                });
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                fixture.replyFault.set(0);
+                fixture.releaseReplies();
+                for (var peer : data.values()) {
+                    var socketField = ProfileNormalDataClient.class.getDeclaredField("socket");
+                    socketField.setAccessible(true);
+                    Object socket = socketField.get(peer);
+                    var pendingField = socket.getClass().getDeclaredField("pending");
+                    pendingField.setAccessible(true);
+                    var nextField = socket.getClass().getDeclaredField("nextId");
+                    nextField.setAccessible(true);
+                    Channel channel = dataChannel(peer);
+                    until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (!channel.eventLoop().submit(() -> nextField.getLong(socket) > 2
+                            && ((Map<?, ?>) pendingField.get(socket)).isEmpty()).get(5, TimeUnit.SECONDS)) {
+                        assertTrue(System.nanoTime() < until);
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                }
+                assertFalse(reading.isDone()); // All actual replies reached the queued collector.
+                assertTrue(reading.cancel(false)); // The internal collector still owns every response.
+                var retainedPeer = data.get(fixture.identities.get(0).bookieId());
+                var peerClosed = retainedPeer.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> peerClosed.get(150, TimeUnit.MILLISECONDS));
+                sdk.getClientCtx().getMainWorkerPool().shutdown();
+                assertThrows(java.util.concurrent.RejectedExecutionException.class,
+                        () -> sdk.getClientCtx().getMainWorkerPool().executeOrdered(44, () -> { }));
+                var closing = reader.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closing.get(150, TimeUnit.MILLISECONDS));
+                assertTrue(closing.cancel(false));
+                var actualClose = reader.closeAsync();
+                assertFalse(actualClose.isDone());
+                release.countDown();
+                actualClose.get(5, TimeUnit.SECONDS);
+                peerClosed.get(5, TimeUnit.SECONDS);
+                assertEquals(0, retainedPeer.backingBytes());
+                assertTrue(reading.isCancelled());
+                assertTrue(closing.isCancelled());
+                assertThrows(ExecutionException.class,
+                        () -> reader.readLacEvidence().get(5, TimeUnit.SECONDS));
+                for (var peer : data.values()) {
+                    if (peer == retainedPeer) {
+                        continue;
+                    }
+                    try (var reply = peer.readEntryBuffer(fixture.context(), 0).get(5, TimeUnit.SECONDS)) {
+                        assertEquals(ProfileReadEntryReplyCodec.Outcome.FOUND, reply.outcome());
+                    }
+                }
+            } finally {
+                release.countDown();
+                fixture.replyFault.set(0);
+                fixture.releaseReplies();
+                reader.closeAsync().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
     public void recoveryReaderCloseWaitsForItsReadFenceAndLacWritePromises() throws Exception {
         for (int mode = 0; mode < 5; mode++) {
             var operation = mode == 1 ? ProfileOperation.FENCE_LEDGER
@@ -7414,6 +7505,7 @@ public class SegmentProfileInitialSocketClientTest {
                 nextField.setAccessible(true);
                 org.apache.bookkeeper.util.ByteBufList packed = null;
                 ByteBuf headerView = null;
+                CompletableFuture<Void> readerClosed = null;
                 try {
                     long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                     while (fixture.heldReplies.isEmpty() || !channel.eventLoop().submit(() ->
@@ -7434,10 +7526,16 @@ public class SegmentProfileInitialSocketClientTest {
                         assertEquals(BKException.Code.TooManyRequestsException,
                                 BKException.getExceptionCode(busy.getCause()));
                     } else if (mode == 2) {
-                        reader.closeAsync().get(5, TimeUnit.SECONDS);
+                        readerClosed = reader.closeAsync();
+                        var waitingForReply = readerClosed;
+                        assertThrows(java.util.concurrent.TimeoutException.class,
+                                () -> waitingForReply.get(150, TimeUnit.MILLISECONDS));
                     }
                     fixture.replyFault.set(0);
                     fixture.releaseReplies();
+                    if (readerClosed != null) {
+                        readerClosed.get(5, TimeUnit.SECONDS);
+                    }
                     if (mode == 0) {
                         try (var evidence = caller.get(5, TimeUnit.SECONDS)) {
                             var candidate = evidence.candidate();
@@ -7515,9 +7613,9 @@ public class SegmentProfileInitialSocketClientTest {
                     if (headerView != null) {
                         headerView.release();
                     }
-                    reader.closeAsync().get(5, TimeUnit.SECONDS);
                     fixture.replyFault.set(0);
                     fixture.releaseReplies();
+                    reader.closeAsync().get(5, TimeUnit.SECONDS);
                     if (caller.isDone() && !caller.isCompletedExceptionally()) {
                         caller.join().close();
                     }

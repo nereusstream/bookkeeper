@@ -57,7 +57,11 @@ final class ProfileLacEvidenceRead {
     }
 
     CompletableFuture<ProfileLedgerHandle.LacEvidence> start() {
-        ordered(this::query);
+        if (transport.retainLacRead(result)) {
+            ordered(this::query);
+        } else {
+            result.completeExceptionally(BKException.create(BKException.Code.ClientClosedException));
+        }
         return result;
     }
 

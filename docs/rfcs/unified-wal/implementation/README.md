@@ -749,3 +749,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [Recovery reader 的本地 RPC 实际排空](profile-wire/README.md#recovery-reader-的本地-rpc-实际排空)：2026-10-22父f115cd7d22上修复reader已回逻辑结果却未等自身READ/FENCE/LAC/anchor output终态即关闭的真实缺口；复用原request drain锁/集合，parent coordinator六处等待close完成才归还名额，borrowed peers保持可用。真实旧源码RED、最终五窗口及相关23项零failure/error/skip，15原有限模型配置符合预期；模型没有新reader组合，2024路径按stage冻结、import-only排序单列。style通过；终态后独立RAT exit1/443父HEAD路径无新增。observe结果公共约定/默认SDK/Main/required producer/full-bytes/backup-restore/accepted退役/GC/mixed/完整模型/正式性能/运维与全16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[LAC collector 排队期间的关闭排空](profile-wire/README.md#lac-collector-排队期间的关闭排空)：2026-10-22父36eb57665d后补原RPC终态之外的collector排队窗口；LAC内部result在原request drain登记，caller取消不提前释放，executor关闭兜底也等待owned reply清理。真实旧源码RED、新窗口通过；24项相关回归原23通过/1旧hold清理失败，已按actual-drain合同修正该方法并定向补验两项通过，原失败保留、不改称整轮全绿。1170输入按四stage冻结，style通过，终态后独立RAT443父HEAD路径无新增。模型未改不重跑，其他16步验收/生产Gate仍OPEN，目标active，默认OFF/SYSTEM/PARK及disabled不变。

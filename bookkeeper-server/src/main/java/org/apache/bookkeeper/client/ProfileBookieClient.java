@@ -462,6 +462,17 @@ final class ProfileBookieClient implements BookieClient {
         completion.whenComplete((unused, failure) -> requestDrains.remove(completion));
     }
 
+    /** LAC collectors release their owned replies before completing this internal, uncancelled result. */
+    boolean retainLacRead(CompletableFuture<ProfileLedgerHandle.LacEvidence> result) {
+        synchronized (requestLifecycle) {
+            if (closed.get()) {
+                return false;
+            }
+            retainRequest(result.handle((unused, failure) -> null));
+            return true;
+        }
+    }
+
     CompletableFuture<ProfileNormalDataClient.ReadEntryBuffer> readEntryBuffer(
             ProfileNormalDataClient peer, long entryId) {
         synchronized (requestLifecycle) {

@@ -2117,3 +2117,22 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 原未改动的normal-client-source/backing-budget有限投影 `unified-wal-model-4tbofuyk` 15配置2完整正向PASS/13指定反例，结果全部符合原invariant；它们检查原wire/output/credit/stop关系，没有新增reader/coordinator多请求组合状态，不能代替上述native验证。1125 model与1170最终测试stage共有271路径，其中270 SHA一致；1项socket测试从四窗口补到五窗口，分别冻结，去重2024路径。最终style前仅新增import排序修正，实际断言/生产token未变，test-stage与format-only交付源码分开保留。Spotless/Checkstyle最终exit0；Java/model/style实际终结后独立RAT exit1/443父HEAD路径无新增，不称CI全绿。全部原始stage source/命令/XML/模型输出/编译诊断/checker在 `/Users/liusinan/.codex/artifacts/unified-wal/reader-rpc-drain-evidence-vhfj7ft4`，历史sourceCommit/designInputs/receipt不移绑。
 
 本增量补reader自身本地请求与父coordinator actual-terminal接线；observe()返回列表仍是heap，既有结果释放公共约定待答复，未将其换成新owned API。默认SDK公开runtime/Main/required producer、统一full-bytes/对象/TLS/kernel、backup-restore/accepted退役/history GC/mixed兼容、完整A+C+D/正式性能/运维与全16步验收仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled能力不变。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## LAC collector 排队期间的关闭排空
+
+2026-10-22，父源码 `36eb57665dcd0848a1a46349bccbdf9dc01c8951`。上一节登记的READ/FENCE/LAC/anchor RPC终态仍不足以覆盖LAC fan-in：全部回复和output已终结后，持有owned reply的collector可能仍排在原SDK ordered executor中。若此时executor停收，transport.close的同步兜底会看到空RPC集合并提前完成reader关闭。现在ProfileLacEvidenceRead.start在任何排队之前，用原requestLifecycle/requestDrains登记其内部result；collector沿原路径释放全部owned回复后才完成该result。外部caller拿到的copy取消不会提前归还此登记；关闭后的新LAC读直接失败。没有新增队列/线程/重试、公共API、wire、持久格式或预算，coverage/digest/P/L和borrowed peer所有权不变。
+
+新增recoveryReaderCloseWaitsForQueuedLacCollectorAfterExecutorShutdown在真实mTLS/文件回复后hold原SDK worker，通过每个native channel的顺序屏障与pending表确认RPC已终结、collector已入队；随后shutdown SDK executor，明确确认新任务拒绝，再触发reader.close的同步兜底。`unified-wal-local-kN4ZTSyC`保持父生产源码，expected close TimeoutException断言失败（1 failure/0 error/skip），为实际RED；7zi6MGi5最小GREEN。最终测试另取消LAC caller与第一个close等待者，主动关闭一个peer确认owned LAC frame仍阻止其backing drain；collector实际执行清理后第二关闭等待者和peer close才完成、backing归零，另外两个borrowed DATA peer仍可读取，关闭后的新LAC查询拒绝。
+
+`unified-wal-local-6TOGz9qp`相关24项原exit1：23通过/1失败/0 error/skip，失败为recoveryEvidenceKeepsSourceBackingThroughPackingCancellationAndFailedDelivery在fixture.close检查到1612未归还字节。该旧测试mode2仍在hold服务端回复时同步等待reader close，finally也先等close再释放回复，与上一节actual-drain合同不一致且依赖socket timeout。当前仅把该场景改为close应保持pending，随后释放回复再等actual close；finally同样先释放测试hold，原source/packing/header/预算归零断言全部保留。最终 `unified-wal-local-XMZp62x7`仅补验新增与修正的两项，全部通过、零skip。两轮生产源码完全相同，socket测试除这个方法外逐项字节一致；保留原24项失败，不称整轮全绿、不无目的重跑其他23项。
+
+实际补验命令：
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#recoveryReaderCloseWaitsForQueuedLacCollectorAfterExecutorShutdown+recoveryEvidenceKeepsSourceBackingThroughPackingCancellationAndFailedDelivery'
+```
+
+四个stage各1170输入/SHA、命令/XML、RED与原广度失败、最终源码分别冻结于 `/Users/liusinan/.codex/artifacts/unified-wal/lac-collector-drain-evidence-ckkoosa2`；最终Spotless/Checkstyle exit0，Java/style实际终结后独立RAT exit1/443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。没有修改TLA状态，本轮不重复运行原投影或移绑其旧PASS；原15配置仍保持上一节source绑定，未提供新的reader/collector组合模型、全部字节或性能结论。
+
+此增量闭合已排队LAC collector的owner关闭等待；默认SDK/observe公共约定、Main/required producer、统一full-bytes、backup-restore/accepted退役/GC/mixed兼容、完整A+C+D/正式性能/运维及全16步仍OPEN。目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
