@@ -583,6 +583,13 @@ public class SegmentProfileInitialSocketClientTest {
                                                         ctx.close();
                                                         return;
                                                     }
+                                                    if (fault == 31
+                                                            && op == ProfileOperation.ADD_RECOVERY.wireValue()) {
+                                                        frame.release();
+                                                        promise.setSuccess();
+                                                        ctx.close();
+                                                        return;
+                                                    }
                                                     if (op == ProfileOperation.INSTALL.wireValue()) {
                                                         if (fault == 2) {
                                                             frame.setLong(frame.readerIndex() + 20, 99);
@@ -8125,8 +8132,8 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy() throws Exception {
-        // Offline/partial/conflicting inputs, delete races, drain, bootstrap, and current metadata identity.
-        for (int scenario = 0; scenario < 11; scenario++) {
+        // Offline/partial/conflicting inputs, delete races, drain, bootstrap, metadata identity and lost replies.
+        for (int scenario = 0; scenario < 13; scenario++) {
             try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true);
                     BookKeeper sdk = sdk(fixture)) {
                 fixture.connectAll(Duration.ofSeconds(5));
@@ -8218,9 +8225,18 @@ public class SegmentProfileInitialSocketClientTest {
                     fixture.nodes.get(2).close();
                 }
                 var supplied = scenario == 0 || scenario == 5 || scenario == 6 ? Map.of(target.bookieId(), peer) : data;
+                if (scenario >= 11) {
+                    fixture.faultTarget.set(3);
+                    fixture.replyFault.set(scenario == 11 ? 18 : 31);
+                }
+                var restartConfig = files(fixture.nodes.get(3)).config();
+                var restartPolicy = scenario == 12 ? servicePolicy(restartConfig, target, 1) : null;
                 try (var image = SegmentBackupImage.open(sourceConfig, fixture.identities.get(0),
                         new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, 1024 * 1024, 16,
-                        "cluster/profile", "device-0", directory, reference)) {
+                        "cluster/profile", "device-0", directory, reference);
+                        var restart = scenario == 12 ? new ServiceEpisode(fixture, 3, restartConfig, restartPolicy,
+                                restartPolicy.compatibility(), new InetSocketAddress("127.0.0.1", 0),
+                                sdk.getClientCtx().getScheduler()) : null) {
                     if (scenario == 1) {
                         var deleted = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
                                 .deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(10))
@@ -8315,7 +8331,7 @@ public class SegmentProfileInitialSocketClientTest {
                     }
                     var result = attempt.result().get(30, TimeUnit.SECONDS);
                     attempt.completion().get(10, TimeUnit.SECONDS);
-                    if (scenario >= 9) {
+                    if (scenario == 9 || scenario == 10) {
                         assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED, result.status());
                         assertEquals(0, result.copiedEntries());
                         assertEquals(beforeWrites, files(fixture.nodes.get(3)).dataIo.writes);
@@ -8353,6 +8369,38 @@ public class SegmentProfileInitialSocketClientTest {
                         resumed.completion().get(10, TimeUnit.SECONDS);
                         assertEquals(forced + 1, files(fixture.nodes.get(3)).dataIo.forces);
                     }
+                    if (scenario >= 11) {
+                        assertEquals(ProfileRecoveryCoordinator.RepairStatus.DEFERRED, result.status());
+                        assertEquals(scenario == 11 ? 2 : 0, result.copiedEntries());
+                        if (scenario == 11) {
+                            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, result.publication().status());
+                        } else {
+                            assertEquals(original.getAllEnsembles(), fixture.manager.readLedgerMetadata(44).get()
+                                    .getValue().getAllEnsembles());
+                        }
+                        fixture.replyFault.set(0);
+                        if (scenario == 12) {
+                            assertEquals(1, files(fixture.nodes.get(3)).dataIo.forces);
+                            restart.replaceNode(fixture, 3, true);
+                        }
+                        fixture.connect(3, 4, Duration.ofSeconds(5));
+                        if (scenario == 12) {
+                            var replacement = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
+                            data.put(target.bookieId(), replacement);
+                            assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome
+                                            .REFUSED,
+                                    replacement.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS).outcome());
+                        }
+                        int forced = files(fixture.nodes.get(3)).dataIo.forces;
+                        var reloaded = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                        var resumed = reloaded.beginRestoreClosedFragment(accepted, prepared, sdk.getClientCtx(),
+                                fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                                bytes(16, 73), image);
+                        result = resumed.result().get(30, TimeUnit.SECONDS);
+                        resumed.completion().get(10, TimeUnit.SECONDS);
+                        assertEquals(scenario == 11 ? 0 : 2, result.copiedEntries());
+                        assertEquals(forced + (scenario == 11 ? 0 : 1), files(fixture.nodes.get(3)).dataIo.forces);
+                    }
                     assertEquals("scenario " + scenario, ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT,
                             result.status());
                     var current = fixture.manager.readLedgerMetadata(44).get().getValue();
@@ -8365,9 +8413,10 @@ public class SegmentProfileInitialSocketClientTest {
                                 org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.CLOSE_KEY));
                     assertEquals(target.bookieId(), current.getAllEnsembles().get(0L).get(2));
                     assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
-                            peer.readEntry(fixture.context(), 1).get(5, TimeUnit.SECONDS).outcome());
+                            data.get(target.bookieId()).readEntry(fixture.context(), 1)
+                                    .get(5, TimeUnit.SECONDS).outcome());
                     assertFalse(fixture.normal(3));
-                    if (scenario >= 7) {
+                    if (scenario == 7 || scenario == 8) {
                         var targetConfig = files(fixture.nodes.get(3)).config();
                         var deleteTarget = new ProfileDeleteRecord.Target(target.bookieId().toString(),
                                 target.incarnation().value());

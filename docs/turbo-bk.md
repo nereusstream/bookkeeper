@@ -829,3 +829,6 @@ Segment production candidate 的最低 Gate：
 
 
 [旧恢复输入与当前 metadata 身份隔离](rfcs/unified-wal/implementation/profile-wire/README.md#旧恢复输入与当前-metadata-身份隔离)：2026-10-23父7021519bb3上，仅补真实restore当前metadata身份覆盖：相同body/version重建但native birth不同、同ledgerId非法替换instance/backlink，两者均QUARANTINED且零DATA/零copy/metadata不变/不授normal；既有镜像context隔离和wrong-instance tombstone原native/replay验证复用。最终两类三方法通过，restore方法11场景；两轮fixture/API与分类假设失败分别保留，1171输入冻结，无生产Java/TLA变更、不重跑TLC。该结果不授予合法reuse/原地restore；恢复crash/lost reply/接受下界/运维及完整16步继续OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变。
+
+
+[镜像导入丢回复后的同 intent 续接](rfcs/unified-wal/implementation/profile-wire/README.md#镜像导入丢回复后的同-intent-续接)：2026-10-23父796582579f上，真实首条recovery DATA force后丢回复/断DATA，目标经正常停止和service重启、新coordinator同intent续接仅为缺项新增一次force；membership后grant-close丢回复/断CONTROL，新coordinator续接copy0/零新增DATA force。13场景restore方法与原historical lost-close两方法通过，原CLOSED及权限保持；1171输入/两轮fixture假设失败分别冻结，无生产Java/TLA改动、不重跑TLC。仅验证正常restart及上述回复丢失，非进程kill/掉电；恢复crash/cursor/readiness/registration丢回复/接受下界/运维与完整16步仍OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变。

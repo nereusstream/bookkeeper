@@ -2198,3 +2198,18 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ```
 
 1171个Java输入、三阶段各自test源码/命令/XML及原失败保留在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-identity-evidence-etlax5ts`。本轮只改测试及当前docs，不重跑或移绑TLC；最终Spotless/Checkstyle exit0；Java/style终结后独立RAT exit1，443 unapproved路径均为父HEAD既有、无新增，不称CI全绿。恢复专属crash/lost reply、完整接受下界/运维、其余full-bytes/默认SDK/Main/required producer/兼容/性能与全部16步仍OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## 镜像导入丢回复后的同 intent 续接
+
+2026-10-23，父源码 `796582579fb1934c79e36a82fcaa0b7948296028`。原restore fixture补两条真实响应丢失路径；生产copy/admission/publication/grant-close算法不变，复用现有socket响应故障及ServiceEpisode。第一条在membership已提交、目标RECOVERY_GRANT_CLOSE实际持久化后丢弃回复并关闭CONTROL连接；首次DEFERRED且已copy两项，换新coordinator/CONTROL连接用同accepted/prepared intent与close operation续接，确认copy0、DATA force不增加、原CLOSED P/length/cut及无normal权限保持。第二条只在目标的首个ADD_RECOVERY响应已经生成后丢弃它并关闭DATA连接：真实DATA已force1，caller只能DEFERRED/copy0，membership仍原值，不能把UNKNOWN当作未写入或成功。
+
+第二条随后正常停止目标原listener/storage，经原service重新打开同一新目标目录，使用当前assignment/verified-zero与readiness注册，并重建CONTROL/DATA连接；membership尚未提交时普通点读仍REFUSED。新coordinator用同一intent和同一镜像重新复制两坐标，已持久化的entry0幂等命中，仅为缺失entry1增加一次DATA force，然后发布membership并close；此后实际mTLS点读entry1成功，原CLOSED边界及无normal权限保持。这里是导入目标的正常停止/文件恢复，不是原source incarnation原地restore，也不是进程kill、真实掉电或复制中途crash证明。
+
+最终 `unified-wal-local-tUse3Kyw` 两方法0 failure/error/skip：扩展restore方法现在13场景，另复用原historical repair丢close回复、新coordinator无recopy测试。最初lFaR0dIk被原身份隔离分支误捕获新scenario编号，FFsoBMgy错误期望未发布目标可普通读取；两轮fixture失败与精确源码保留，不作为生产缺陷RED。修正分支边界、保留REFUSED权限断言并加入上述目标实际restart后通过，未削弱幂等/force/metadata/CLOSED断言。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy+historicalRepairCoordinatorNewInstanceResolvesLostCloseReplyWithoutRecopy'
+```
+
+1171个Java输入及三阶段各自source/命令/XML/失败记录保存在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-reply-evidence-hom_fc5z`。本轮只改测试及当前docs，生产Java/TLA转移未改，不重跑或移绑旧TLC结果；最终Spotless/Checkstyle exit0；Java/style实际终结后独立RAT exit1，443 unapproved路径均存在父HEAD、无新增，不称CI全绿。恢复专属进程crash、cursor/readiness/registration丢回复与全部交错、接受下界/恢复运维及其余16步验收继续OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
