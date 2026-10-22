@@ -195,3 +195,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [恢复目标的首次 service bootstrap 组合验证](profile-wire/README.md#恢复目标的首次-service-bootstrap-组合验证)：2026-10-23父389b49fada上，仅补原真实restore fixture的组合覆盖。新目标copy完成后可经当前verified-zero/head重启注册并mTLS读出原数据；首次注册前删除则用该目标自己的完整snapshot追赶，publication实际提交前已有cursor1/tombstone且尚无注册，旧Manifest/目标义务不变。最终三方法0 failure/error/skip（扩展restore方法九场景＋既有service drain/restart及snapshot/suffix），1171输入和早期零cursor测试假设失败各自冻结，无生产Java/TLA改动、不重跑TLC。完整restore的reuse/crash/lost reply/接受下界及其余16步验收仍OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变。
+
+
+[旧恢复输入与当前 metadata 身份隔离](profile-wire/README.md#旧恢复输入与当前-metadata-身份隔离)：2026-10-23父7021519bb3上，仅补真实restore当前metadata身份覆盖：相同body/version重建但native birth不同、同ledgerId非法替换instance/backlink，两者均QUARANTINED且零DATA/零copy/metadata不变/不授normal；既有镜像context隔离和wrong-instance tombstone原native/replay验证复用。最终两类三方法通过，restore方法11场景；两轮fixture/API与分类假设失败分别保留，1171输入冻结，无生产Java/TLA变更、不重跑TLC。该结果不授予合法reuse/原地restore；恢复crash/lost reply/接受下界/运维及完整16步继续OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变。

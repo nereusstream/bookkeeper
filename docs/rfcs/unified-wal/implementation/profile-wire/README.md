@@ -2183,3 +2183,18 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ```
 
 1171个Java输入及各stage test源码差异、原命令/XML与失败报告保留在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-bootstrap-evidence-5mbv2jop`。本轮仅改测试与当前文档，生产Java和TLA转移未改，不重复TLC或移绑旧模型receipt。最终Spotless/Checkstyle exit0；Java/style终结后独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。当前补齐新目标verified-zero和snapshot-prefix首次注册的正常组合；不证明restore接受下界、ledgerId reuse、crash/lost reply、writable竞争的全部交错、多目标或完整bootstrap运维交付。完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## 旧恢复输入与当前 metadata 身份隔离
+
+2026-10-23，父源码 `7021519bb3d8f521d9a7d8fcfc871713523ce1b9`。在原backup restore真实文件/ZK/mTLS测试中补入两条当前metadata身份交错，复用原readMembership/readClosedForOpen/readClosedRecovery与copy pipeline，无生产Java或TLA转移变更。先取得CLOSED接受快照与prepared RepairIntent，再分别：(1) 将标准metadata连同原子guard字节删除重建，恢复相同body和data version，但native czxid不同；(2) 给同ledgerId注入不同instance/sidecar backlink，同时保留旧CLOSED证明。两者均QUARANTINED，复制数0、目标DATA写次数不增加、标准metadata的version/完整序列化字节不变、无normal权限；旧接受快照不能越过当前native身份检查继续导入。
+
+公开 `ProfileMetadataBacklink.attachTo` 自身拒绝覆盖既有backlink，原reservation也按ledgerId保留不可覆盖的instance绑定；第二种操作明确是可丢弃测试中的非法metadata替换，不是新增合法reuse/迁移协议。已有 `wrongInstanceTombstoneDoesNotCutActiveRoute` 覆盖原native控制日志拒绝不同instance tombstone并保留当前route、匹配删除后重启不复活；已有 `offlineBackupRetainsNativeRangesInstancesAndReadOnlyOwnership` 验证镜像完整context索引不会按同ledgerId向另一instance返回entry。本轮直接复用这两项，不另建mock或降低旧tombstone合同；不把拒绝畸形当前历史称为合法新instance全生命周期验收完成。
+
+最终 `unified-wal-local-3nONU56k` 两类三方法0 failure/error/skip，restore方法现在含11场景，原七种copy/冲突/删除/actual drain及两条service bootstrap路径仍在同方法执行。首轮oPZwwYN5被不可变backlink API提前拒绝；改为明确故障注入后59bX9zMO已拒绝导入，但测试误期望普通CONFLICT。源码将无法验证的CLOSED native证明归QUARANTINED，最终仅修正该分类断言，零写入/metadata不变等契约断言全部保留。两轮早期失败原样归档，不计为生产缺陷RED或绿。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy,SegmentBookieControlLogTest#wrongInstanceTombstoneDoesNotCutActiveRoute+offlineBackupRetainsNativeRangesInstancesAndReadOnlyOwnership'
+```
+
+1171个Java输入、三阶段各自test源码/命令/XML及原失败保留在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-identity-evidence-etlax5ts`。本轮只改测试及当前docs，不重跑或移绑TLC；最终Spotless/Checkstyle exit0；Java/style终结后独立RAT exit1，443 unapproved路径均为父HEAD既有、无新增，不称CI全绿。恢复专属crash/lost reply、完整接受下界/运维、其余full-bytes/默认SDK/Main/required producer/兼容/性能与全部16步仍OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

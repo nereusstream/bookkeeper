@@ -8125,8 +8125,8 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy() throws Exception {
-        // Offline/partial/conflicting inputs, delete races, actual drain, and new-target service bootstrap.
-        for (int scenario = 0; scenario < 9; scenario++) {
+        // Offline/partial/conflicting inputs, delete races, drain, bootstrap, and current metadata identity.
+        for (int scenario = 0; scenario < 11; scenario++) {
             try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true);
                     BookKeeper sdk = sdk(fixture)) {
                 fixture.connectAll(Duration.ofSeconds(5));
@@ -8229,6 +8229,40 @@ public class SegmentProfileInitialSocketClientTest {
                         assertFalse(deleted.manifest().targets().stream()
                                 .anyMatch(value -> value.bookie().equals(target.bookieId().toString())));
                     }
+                    if (scenario == 9) {
+                        String path = ((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44);
+                        var before = new org.apache.zookeeper.data.Stat();
+                        byte[] body = fixture.zk.getData(path, false, before);
+                        var guards = new java.util.TreeMap<String, byte[]>();
+                        for (String child : fixture.zk.getChildren(path, false)) {
+                            assertTrue(fixture.zk.getChildren(path + "/" + child, false).isEmpty());
+                            guards.put(child, fixture.zk.getData(path + "/" + child, false, null));
+                        }
+                        org.apache.zookeeper.ZKUtil.deleteRecursive(fixture.zk, path);
+                        fixture.zk.create(path, body, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                        for (var guard : guards.entrySet()) {
+                            fixture.zk.create(path + "/" + guard.getKey(), guard.getValue(),
+                                    ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                        }
+                        for (int version = 0; version < before.getVersion(); version++) {
+                            fixture.zk.setData(path, body, -1);
+                        }
+                        var after = new org.apache.zookeeper.data.Stat();
+                        assertArrayEquals(body, fixture.zk.getData(path, false, after));
+                        assertEquals(before.getVersion(), after.getVersion());
+                        assertNotEquals(before.getCzxid(), after.getCzxid());
+                    } else if (scenario == 10) {
+                        // Disposable metadata replacement; never a supported reservation/instance migration.
+                        var backlink = new ProfileMetadataBacklink(44, bytes(16, 111), bytes(16, 112));
+                        assertThrows(IllegalArgumentException.class, () -> backlink.attachTo(original));
+                        var custom = new java.util.TreeMap<>(original.getCustomMetadata());
+                        custom.put(ProfileMetadataBacklink.KEY, backlink.encode());
+                        var replaced = LedgerMetadataBuilder.from(original).withCToken(original.getCToken())
+                                .withCustomMetadata(custom).build();
+                        fixture.manager.writeLedgerMetadata(44, replaced,
+                                accepted.closed().metadata().metadata().getVersion()).get(5, TimeUnit.SECONDS);
+                    }
+                    var beforeImport = fixture.manager.readLedgerMetadata(44).get();
                     int beforeWrites = files(fixture.nodes.get(3)).dataIo.writes;
                     var attempt = coordinator.beginRestoreClosedFragment(accepted, prepared, sdk.getClientCtx(),
                             fixture.descriptorBytes, fixture.credential, supplied, fixture.clients,
@@ -8281,6 +8315,18 @@ public class SegmentProfileInitialSocketClientTest {
                     }
                     var result = attempt.result().get(30, TimeUnit.SECONDS);
                     attempt.completion().get(10, TimeUnit.SECONDS);
+                    if (scenario >= 9) {
+                        assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED, result.status());
+                        assertEquals(0, result.copiedEntries());
+                        assertEquals(beforeWrites, files(fixture.nodes.get(3)).dataIo.writes);
+                        var afterImport = fixture.manager.readLedgerMetadata(44).get();
+                        assertEquals(beforeImport.getVersion(), afterImport.getVersion());
+                        var serde = new org.apache.bookkeeper.meta.LedgerMetadataSerDe();
+                        assertArrayEquals(serde.serialize(beforeImport.getValue()),
+                                serde.serialize(afterImport.getValue()));
+                        assertFalse(fixture.normal(3));
+                        continue;
+                    }
                     if (scenario == 6) {
                         assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED, result.status());
                         assertEquals(original.getAllEnsembles(), fixture.manager.readLedgerMetadata(44).get()
