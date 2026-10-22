@@ -258,6 +258,11 @@ public class SegmentProfileInitialSocketClientTest {
 
         Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum,
                 boolean enableRead, boolean enableLac) throws Exception {
+            this(blockInstall, blockActivate, enableControl, count, ackQuorum, enableRead, enableLac, 2);
+        }
+
+        Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum,
+                boolean enableRead, boolean enableLac, int ioThreads) throws Exception {
             descriptor = new ProfileDescriptor(EngineProfile.SEGMENT_WAL_ENGINE,
                     PayloadFormat.OPAQUE_LEDGER, DurabilityMode.SYNC_ON_ACK, 3, 3, ackQuorum, 0, 7, 11, List.of());
             descriptorBytes = ProfileDescriptorCodec.encode(descriptor, VALIDATOR);
@@ -308,7 +313,7 @@ public class SegmentProfileInitialSocketClientTest {
                             fixtureDirectory.resolve("node-" + index), 1, 1, 1, 4L * 1024 * 1024,
                             4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
                     var storage = new IsolatedSegmentStorage(config, identity, new SecretKeySpec(bytes(32, 7), "AES"),
-                            VALIDATOR, new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                            VALIDATOR, new SegmentExecutionGroup.Settings(1, ioThreads, 6, 2, 4096, 4096,
                             2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
                             new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
                                     new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
@@ -1518,6 +1523,132 @@ public class SegmentProfileInitialSocketClientTest {
                 } finally {
                     release.countDown();
                     fixture.releaseReplies();
+                    handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void sdkTwoOfThreeWaitsForEarlierBatchIoBeforeCountingDurableSuffix() throws Exception {
+        sdkWaitsForEarlierBatchIoBeforeCountingDurableSuffix(2);
+    }
+
+    @Test
+    public void sdkThreeOfThreeWaitsForEarlierBatchIoBeforeCountingDurableSuffix() throws Exception {
+        sdkWaitsForEarlierBatchIoBeforeCountingDurableSuffix(3);
+    }
+
+    private void sdkWaitsForEarlierBatchIoBeforeCountingDurableSuffix(int ackQuorum) throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, ackQuorum, false, false, 3)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var firstForces = new CountDownLatch(2);
+            var suffixForces = new CountDownLatch(2);
+            var releases = List.of(new CountDownLatch(1), new CountDownLatch(1));
+            for (int target = 0; target < 2; target++) {
+                int selected = target;
+                var calls = new AtomicInteger();
+                files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    if (calls.incrementAndGet() == 1) {
+                        firstForces.countDown();
+                        await(releases.get(selected));
+                    } else {
+                        suffixForces.countDown();
+                    }
+                });
+            }
+            try (BookKeeper sdk = sdk(fixture)) {
+                var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(10), Duration.ofMillis(5));
+                var callbacks = new CopyOnWriteArrayList<Long>();
+                try {
+                    var first = sdkAdd(handle, bytes(16, 8)).thenApply(id -> {
+                        callbacks.add(id);
+                        return id;
+                    });
+                    assertTrue(firstForces.await(5, TimeUnit.SECONDS));
+                    var executionField = IsolatedSegmentStorage.class.getDeclaredField("execution");
+                    executionField.setAccessible(true);
+                    var driversField = IsolatedSegmentStorage.class.getDeclaredField("drivers");
+                    driversField.setAccessible(true);
+                    var pendingField = SegmentDataPhysicalDriver.class.getDeclaredField("pending");
+                    pendingField.setAccessible(true);
+                    var executorField = SegmentIoExecutor.class.getDeclaredField("executor");
+                    executorField.setAccessible(true);
+                    var executions = new ArrayList<SegmentExecutionGroup>();
+                    var held = new ArrayList<Object>();
+                    for (int target = 0; target < 2; target++) {
+                        var storage = fixture.nodes.get(target);
+                        var execution = (SegmentExecutionGroup) executionField.get(storage);
+                        executions.add(execution);
+                        var driver = ((SegmentDataPhysicalDriver[]) driversField.get(storage))[0];
+                        var observed = new java.util.concurrent.FutureTask<Object>(() ->
+                                ((Map<?, ?>) pendingField.get(driver)).values().iterator().next());
+                        assertTrue(execution.owner(0).control(observed::run));
+                        held.add(observed.get(5, TimeUnit.SECONDS));
+                    }
+                    CompletableFuture<Long> second;
+                    Object later;
+                    java.lang.reflect.Field completed;
+                    // Release the file gates, but pause the first tasks at their original physicalTerminal monitor.
+                    synchronized (held.get(1)) {
+                        synchronized (held.get(0)) {
+                            releases.forEach(CountDownLatch::countDown);
+                            second = sdkAdd(handle, bytes(16, 9)).thenApply(id -> {
+                                callbacks.add(id);
+                                return id;
+                            });
+                            assertTrue(suffixForces.await(5, TimeUnit.SECONDS));
+                            for (int target = 0; target < 2; target++) {
+                                var execution = executions.get(target);
+                                var executor = (ThreadPoolExecutor) executorField.get(execution.io());
+                                // The other DATA worker is held; this sentinel follows the suffix's actual return.
+                                executor.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                                for (int turn = 0; turn < 2; turn++) {
+                                    var observed = new CompletableFuture<Void>();
+                                    assertTrue(execution.owner(0).control(() -> observed.complete(null)));
+                                    observed.get(5, TimeUnit.SECONDS);
+                                }
+                                assertEquals(2, files(fixture.nodes.get(target)).dataIo.forces);
+                                assertTrue(fixture.dataResults.get(target).isEmpty());
+                            }
+                            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                            while (fixture.dataResults.get(2).size() < 2 && System.nanoTime() < until) {
+                                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                            }
+                            assertEquals(2, fixture.dataResults.get(2).size());
+                            assertFalse(first.isDone());
+                            assertFalse(second.isDone());
+                            later = handle.getPendingAddOps().stream().skip(1).findFirst().orElseThrow();
+                            completed = later.getClass().getDeclaredField("completed");
+                            completed.setAccessible(true);
+                            synchronized (later) {
+                                assertFalse(completed.getBoolean(later));
+                            }
+                        }
+                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (fixture.dataResults.get(0).size() < 2 && System.nanoTime() < until) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                        assertEquals(2, fixture.dataResults.get(0).size());
+                        assertTrue(fixture.dataResults.get(1).isEmpty());
+                        if (ackQuorum == 3) {
+                            assertThrows(java.util.concurrent.TimeoutException.class,
+                                    () -> first.get(150, TimeUnit.MILLISECONDS));
+                            assertFalse(second.isDone());
+                            synchronized (later) {
+                                assertFalse(completed.getBoolean(later));
+                            }
+                        } else {
+                            assertEquals(Long.valueOf(0), first.get(5, TimeUnit.SECONDS));
+                            assertEquals(Long.valueOf(1), second.get(5, TimeUnit.SECONDS));
+                        }
+                    }
+                    assertEquals(Long.valueOf(0), first.get(5, TimeUnit.SECONDS));
+                    assertEquals(Long.valueOf(1), second.get(5, TimeUnit.SECONDS));
+                    assertEquals(List.of(0L, 1L), callbacks);
+                } finally {
+                    releases.forEach(CountDownLatch::countDown);
                     handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 }
             }

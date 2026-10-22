@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为742配置；新增A+C六配置、C+D五配置和逐I/O终态反例仅有定向结果。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为744配置；新增A+C八配置、C+D五配置和逐I/O终态反例仅有定向结果。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -18,6 +18,8 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 
 | 配置 | 有界结构与目的 |
 | --- | --- |
+| `ac-prefix-profile-sdk-bridge` | 原A+C映射SDK pending操作到slot0的batch2，slot1固定无ACK、slot2为验证过的response；physical predecessor未实际返回不能被suffix自己的完成替代 |
+| `ce-ac-prefix-profile-sdk-bridge-suffix` | 完整DATA prefix已durable、只等自身task返回就回DURABLE并触发SDK success，须违反ACSuccessHasReturnedQuorum |
 | `ce-prefix-before-earlier-io-return` | 两个batch的字节均durable、第二个任务已返回但第一个仍在途；仅检查自身返回即发布suffix须违反PhysicalSuccessWaitsIoReturn |
 | `ac-profile-sdk-bridge` | 原SDK单entry/A2与两个独立SegmentAllocator实例共同展开，slot0/1的ACK必须有各自live publication；slot2仍是已验证remote响应输入，pair内最多一次crash，每episode一个batch |
 | `ce-ac-profile-sdk-bridge-late-submit` | caller超时后禁止已发请求进入存储须违反ACSentCanReachStorageAfterWait |
@@ -1550,4 +1552,19 @@ TLC1.7.4/Corretto21.0.10、单worker/heap512MiB/direct64MiB/seed1/fp0，无symme
 
 ```bash
 python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix ce-prefix-before-earlier-io-return --config-prefix ac-profile-sdk-bridge --config-prefix ce-ac-profile-sdk-bridge --config-prefix a-profile-sdk-bridge --config-prefix ce-profile-sdk-bridge --config-prefix c-managed --config-prefix ce-data-before-barrier --config-prefix ce-control-before-sync --config-prefix ce-open-replay-after-error
+```
+
+
+## A+C suffix 的分布式 ACK
+
+2026-10-22，父源码 `85716ef7f3a3cfb729d1fd79e949c3e476d387f5`。原ProfileSdkBridge的两个C实例现在允许分别选择有限batch数，默认仍各1；SdkInitialState抽出同一原record。既有ACSpec/旧Spec行为保持，新ACPrefixSpec将一个pending SDK操作映射到slot0的batch2，前序batch1由原C的同stream动作展开。slot1固定failed/无有效ACK，slot2仍是已验证response输入，A2成功必须包含slot0的真实prefix publication。slot1的实际pending custody、前序batch的SDK callback未由这个有限配置展开；真实两entry/A2/A3由[测试记录](../profile-wire/README.md#跨-batch-suffix-的真实-quorum)拥有。
+
+只有选定的batch需要对应sent请求，前序batch可独立继续；late-submit enabledness检查同时包含“前序已提交”的物理前置条件。正常ACK继续检查matching local publication，且新的ACSuccessHasReturnedQuorum要求SDK success有至少两个actual-return prefix有效的ACK。新mutation保留完整DATA prefix durability、要求suffix自身已实际返回，却绕过前序actual-return/publication；指定反例最后为ac1DataDurable={1,2}、ac1IoReturned={2}、ac1Inflight={1}、ac1Successes={}，SDK user却已success。该反例把无效local ACK一直传播到分布式成功，不能用“前一批字节尚不durable”解释。
+
+最终 `unified-wal-model-1bwjq2tb` 20配置：5完整正向PASS/15指定反例，全部命中指定invariant；新正向40661 generated/13088 distinct、queue0、depth/diameter28，1.790秒、peak RSS309444608 bytes。正向原SDK Quorum更新168次，成功路径实际可达。此前18配置的status/generated/distinct计数与x58c6_75全部相同。7sw60b0o/1mdqilxn保留原阶段；随后把negative从“仅suffix durable”收紧为完整DATA prefix durable，当前结果由1bwjq2tb拥有，不移绑旧回执。
+
+TLC1.7.4/Corretto21.0.10、单worker/heap512MiB/direct64MiB/seed1/fp0，无symmetry/state constraint、原CHECK_DEADLOCK FALSE，无fairness/liveness/性能结论。1120 model与1170最终Java共有271、去重2019路径，重叠SHA一致；stage source/各config/checker/所有反例/coverage/XML/完整命令在 `/Users/liusinan/.codex/artifacts/unified-wal/suffix-quorum-evidence-9w4u6zyh`。catalog744未全跑，原730及其他历史结果保持原绑定。当前是固定ACK mapping、一个suffix SDK操作的有限窗口；全部replica/两个SDK pending操作的完整模型、Bookie多Arena、fence/冲突/恢复/两次故障及完整A+C+D继续OPEN，生产Gate不提升。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-prefix ac-prefix-profile-sdk-bridge --config-prefix ce-ac-prefix-profile-sdk-bridge --config-prefix ce-prefix-before-earlier-io-return --config-prefix ac-profile-sdk-bridge --config-prefix ce-ac-profile-sdk-bridge --config-prefix a-profile-sdk-bridge --config-prefix ce-profile-sdk-bridge --config-prefix c-managed --config-prefix ce-data-before-barrier --config-prefix ce-control-before-sync --config-prefix ce-open-replay-after-error
 ```

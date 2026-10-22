@@ -2070,3 +2070,16 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 [模型记录](../models/README.md#physical-prefix-的逐-batch-io-终态)拥有最终18配置4完整正向/14指定反例：包括“batch2实际完成且字节已覆盖，但batch1实际I/O未返回，仍不可发布batch2”的指定反例。A+C直接消费新的actual-return与inflight保护；1118 model/1170 Java共有271且SHA一致，路径去重2017。原C/A+C计数随状态空间细化改变、六个旧SDK bridge配置计数不变；历史receipt不移绑，证据在 `/Users/liusinan/.codex/artifacts/unified-wal/physical-io-return-evidence-buzco6_t`。
 
 最终Spotless/Checkstyle通过；Java/model/style实际终结后的独立RAT exit1，443父HEAD路径无新增，不称CI全绿。当前推进C的跨batch实际终结边界和既有单entry A+C的资源保护；分布式双batch ACK、同批fence/multi-Arena/K-X冲突的完整组合、kernel/native/所有字节、连续两次故障、默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维与全16步验收继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## 跨 batch suffix 的真实 quorum
+
+2026-10-22，父源码 `85716ef7f3a3cfb729d1fd79e949c3e476d387f5`。新增sdkTwoOfThreeWaitsForEarlierBatchIoBeforeCountingDurableSuffix和sdkThreeOfThreeWaitsForEarlierBatchIoBeforeCountingDurableSuffix，复用同三节点真实mTLS/SDK/ZK/文件图。private Fixture仅对新用例显式ioThreads=3，即两DATA/一CONTROL线程；旧constructor仍默认2（一DATA/一CONTROL），生产配置/defaults、Java生产代码、wire及持久格式未改。
+
+两个节点的第一批先在force入口暂停；取得原pending Obligation后，测试持有其physicalTerminal同步边界，再释放force入口。因此真实文件gate/force均完成，第一批I/O task仍停在原终态交接前，第二批可以在同文件实际force并返回。通过空闲DATA worker的sentinel及两次owner turn确认suffix实际返回/owner处理后，两个节点都已有两次force但没有local DATA reply；第三节点的两条reply已存在，原SDK第二个PendingAddOp仍无quorum，两个caller future均未完成。只释放一个predecessor时，A2完成且另一节点仍无reply；A3继续等待该节点。全部释放后两条callback future按0、1完成，不以SDK callback前缀阻塞掩盖一个提前满足的suffix quorum。
+
+初轮eUzTiGdc的2失败来自夹具只有一DATA线程；第二轮K2cJ6Elr改为两DATA线程仍2失败，因为同文件DATA gate跨write+force，停在force内部本来就不能让suffix先返回。两阶段源码/失败保留，未当作生产bug。将hold移到file gate外的原Obligation终态交接后，99yGK71r的新增2项全部通过。随后yKnVoFcv仅补原默认夹具的originalSdkAllocatesEntriesQuorumAndContiguousCallbacksOverActualProfileSockets和sdkThreeOfThreeRequiresTheThirdActualDurableReplica，两项通过；最终4项0 failure/error/skip。没有修改原断言、生产锁、fsync或引入新的executor/生产hook。
+
+[组合模型](../models/README.md#ac-suffix-的分布式-ack)拥有当前20配置5完整正向/15指定反例：新反例在完整文件durability已成立、suffix实际返回而predecessor仍在途时，错误DURABLE reply导致SDK user success。模型只展开A2的一个pending suffix操作、一个active C peer及固定无ACK/已验证response输入；两条实际SDK entry/A3/剩余第三节点custody由上述Java验证，不能扩张为完整A+C+D。1120 model/1170 Java共有271且SHA一致，路径去重2019；各stage source/输入/错误/原始XML/checker在 `/Users/liusinan/.codex/artifacts/unified-wal/suffix-quorum-evidence-9w4u6zyh`。
+
+最终Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。默认SDK/observe公共约定、Main/required producer、full-bytes、multi-Arena/fence/冲突/两次故障的完整组合、backup-restore/accepted退役/GC/mixed/正式性能/运维与全16步验收继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

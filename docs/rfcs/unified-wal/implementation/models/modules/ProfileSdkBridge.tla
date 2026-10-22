@@ -26,11 +26,12 @@ MaxAttempts == 2
    the existing source/dispatch projections and actual socket tests. Time is
    an explicit expiry event, not a real clock. No replacement, recovery,
    metadata lease, fairness, byte/kernel totals, or full A+C+D claim. *)
-SdkInit == s = [phase |-> [t \in Targets |-> "running"],
+SdkInitialState == [phase |-> [t \in Targets |-> "running"],
              attempts |-> [t \in Targets |-> 1], source |-> [t \in Targets |-> TRUE],
              unknown |-> [t \in Targets |-> FALSE], everUnknown |-> [t \in Targets |-> FALSE],
              coordinate |-> [t \in Targets |-> 0], callbacks |-> 0,
              user |-> "pending", stopped |-> FALSE, metadata |-> "OPEN"]
+SdkInit == s = SdkInitialState
 Durable(t) == /\ s.phase[t] = "running" /\ ~s.stopped
               /\ s' = [s EXCEPT !.phase[t] = "durable", !.source[t] = FALSE]
 Refused(t, result) ==
@@ -89,6 +90,10 @@ ACWrongPeer == "wrong-peer"
 ACRecoveryReply == "recovery-reply"
 ACCancelIo == "cancel-io"
 ACBlockLateSubmit == "block-late-submit"
+ACSuffixOnly == "suffix-only"
+ACFirstBatches == 1
+ACSecondBatches == 1
+ACTwoBatches == 2
 ACFirst == INSTANCE SegmentAllocator WITH
     ioReturned <- ac1IoReturned,
     RequirePrefixIoReturn <- TRUE,
@@ -110,7 +115,7 @@ ACFirst == INSTANCE SegmentAllocator WITH
     crashCount <- ac1CrashCount,
     powerCount <- ac1PowerCount,
     Streams <- 1,
-    Batches <- 1,
+    Batches <- ACFirstBatches,
     Files <- 1,
     Epochs <- 1,
     Crashes <- 1,
@@ -139,7 +144,7 @@ ACSecond == INSTANCE SegmentAllocator WITH
     crashCount <- ac2CrashCount,
     powerCount <- ac2PowerCount,
     Streams <- 1,
-    Batches <- 1,
+    Batches <- ACSecondBatches,
     Files <- 1,
     Epochs <- 1,
     Crashes <- 1,
@@ -158,29 +163,40 @@ Init == SdkInit /\ ACFirst!Init /\ ACSecond!Init /\ acLiveReplies = {} /\ acSent
 Next == SdkNext /\ UNCHANGED ACStorageVars
 Spec == Init /\ [][Next]_vars
 
-ACBatch == <<1, 1>>
+ACBatch(target) == <<1, IF target = 0 THEN ACFirstBatches ELSE ACSecondBatches>>
 ACInit == Init
 ACPhysicalFirst ==
     /\ ACFirst!Next
-    /\ (ac1Submitted' # ac1Submitted => 0 \in acSentRequests
+    /\ (ACBatch(0) \in ac1Submitted' \ ac1Submitted => 0 \in acSentRequests
         /\ (ACMutation # "block-late-submit" \/ s.phase[0] = "running"))
     /\ ac1CrashCount' + ac2CrashCount <= 1
     /\ UNCHANGED <<s, ACSecondVars, acLiveReplies, acSentRequests>>
 ACPhysicalSecond ==
     /\ ACSecond!Next
-    /\ (ac2Submitted' # ac2Submitted => 1 \in acSentRequests
+    /\ (ACBatch(1) \in ac2Submitted' \ ac2Submitted => 1 \in acSentRequests
         /\ (ACMutation # "block-late-submit" \/ s.phase[1] = "running"))
     /\ ac2CrashCount' + ac1CrashCount <= 1
     /\ UNCHANGED <<s, ACFirstVars, acLiveReplies, acSentRequests>>
-ACPublished(target) == ACBatch \in IF target = 0 THEN ac1Successes ELSE ac2Successes
-ACWritten(target) == ACBatch \in IF target = 0 THEN ac1Written ELSE ac2Written
-ACDurable(target) == ACBatch \in IF target = 0 THEN ac1DataDurable ELSE ac2DataDurable
+ACPublished(target) == ACBatch(target) \in IF target = 0 THEN ac1Successes ELSE ac2Successes
+ACWritten(target) == ACBatch(target) \in IF target = 0 THEN ac1Written ELSE ac2Written
+ACDurable(target) == ACBatch(target) \in IF target = 0 THEN ac1DataDurable ELSE ac2DataDurable
 ACLive(target) == IF target = 0 THEN ac1Phase = "live" /\ ac1CrashCount = 0
                  ELSE ac2Phase = "live" /\ ac2CrashCount = 0
 ACRecovered(target) == IF target = 0 THEN ac1Phase = "ready" ELSE ac2Phase = "ready"
-ACSubmitted(target) == ACBatch \in IF target = 0 THEN ac1Submitted ELSE ac2Submitted
+ACSubmitted(target) == ACBatch(target) \in IF target = 0 THEN ac1Submitted ELSE ac2Submitted
+ACReturned(target) ==
+    \A sequence \in 1..ACBatch(target)[2] :
+        <<1, sequence>> \in IF target = 0 THEN ac1IoReturned ELSE ac2IoReturned
+ACPrefixDurable(target) ==
+    \A sequence \in 1..ACBatch(target)[2] :
+        <<1, sequence>> \in IF target = 0 THEN ac1DataDurable ELSE ac2DataDurable
+ACPredecessorSubmitted(target) ==
+    ACBatch(target)[2] = 1 \/ <<1, ACBatch(target)[2] - 1>> \in
+        IF target = 0 THEN ac1Submitted ELSE ac2Submitted
 ACReply(target) ==
-    /\ IF ACMutation = "early-reply" THEN ACWritten(target) /\ ACLive(target)
+    /\ IF ACMutation = "suffix-only" THEN ACPrefixDurable(target) /\ ACLive(target)
+               /\ ACBatch(target) \in IF target = 0 THEN ac1IoReturned ELSE ac2IoReturned
+       ELSE IF ACMutation = "early-reply" THEN ACWritten(target) /\ ACLive(target)
        ELSE IF ACMutation = "wrong-peer" THEN ACPublished(0) /\ ACLive(0)
        ELSE IF ACMutation = "recovery-reply" THEN
                     (ACPublished(target) /\ ACLive(target)) \/ ACRecovered(target)
@@ -206,7 +222,7 @@ ACSdkStep ==
     /\ UNCHANGED ACStorageVars
 ACAbandonFirst ==
     /\ ACMutation = "cancel-io" /\ s.phase[0] # "running"
-    /\ ac1Phase = "live" /\ ACBatch \in ac1Inflight
+    /\ ac1Phase = "live" /\ ACBatch(0) \in ac1Inflight
     /\ ac1Inflight' = {}
     /\ UNCHANGED <<ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1Submitted, ac1Written,
                   ac1DataDurable, ac1Successes, ac1RuntimeFault, ac1FaultSeen, ac1FaultDurable, ac1ControlSynced,
@@ -214,8 +230,8 @@ ACAbandonFirst ==
 
 ACNext == ACPhysicalFirst \/ ACPhysicalSecond \/ ACRemoteReply \/ ACSdkStep \/ ACAbandonFirst
           \/ (\E target \in {0, 1} : ACReply(target) \/ ACRetry(target) \/ ACKnownNone(target))
-ACSubmitFirst == ACPhysicalFirst /\ ACFirst!Submit(ACBatch)
-ACSubmitSecond == ACPhysicalSecond /\ ACSecond!Submit(ACBatch)
+ACSubmitFirst == ACPhysicalFirst /\ ACFirst!Submit(ACBatch(0))
+ACSubmitSecond == ACPhysicalSecond /\ ACSecond!Submit(ACBatch(1))
 ACSpec == ACInit /\ [][ACNext]_vars
 ACTypeOK == /\ TypeOK /\ ACFirst!TypeOK /\ ACSecond!TypeOK /\ acLiveReplies \subseteq {0, 1}
             /\ acSentRequests \subseteq {0, 1}
@@ -223,9 +239,9 @@ ACRetryRemainsEnabled ==
     \A target \in {0, 1} : s.phase[target] = "backoff" /\ ~s.stopped => ENABLED ACRetry(target)
 ACSentCanReachStorageAfterWait ==
     /\ (0 \in acSentRequests /\ s.phase[0] = "failed" /\ ac1Phase = "live"
-        /\ ~ACSubmitted(0) /\ ac1RuntimeFault = {} /\ ac1FaultDurable = {} => ENABLED ACSubmitFirst)
+        /\ ~ACSubmitted(0) /\ ACPredecessorSubmitted(0) /\ ac1RuntimeFault = {} /\ ac1FaultDurable = {} => ENABLED ACSubmitFirst)
     /\ (1 \in acSentRequests /\ s.phase[1] = "failed" /\ ac2Phase = "live"
-        /\ ~ACSubmitted(1) /\ ac2RuntimeFault = {} /\ ac2FaultDurable = {} => ENABLED ACSubmitSecond)
+        /\ ~ACSubmitted(1) /\ ACPredecessorSubmitted(1) /\ ac2RuntimeFault = {} /\ ac2FaultDurable = {} => ENABLED ACSubmitSecond)
 ACOriginalSdkContract == KnownNoneNeverClearsUnknown /\ RetryKeepsSource /\ RetryKeepsCoordinate
                          /\ OneOriginalCallback /\ SuccessRequiresOriginalQuorum /\ LocalStopNeverPublishesClosed
 ACOriginalStorageContract ==
@@ -243,8 +259,24 @@ ACAcknowledgmentCameFromLiveEpisode ==
 ACSuccessHasPhysicalQuorum == s.user = "success" =>
     Cardinality({target \in {0, 1} : s.phase[target] = "durable" /\ ACDurable(target)}
                 \cup (IF s.phase[2] = "durable" THEN {2} ELSE {})) >= 2
+ACSuccessHasReturnedQuorum == s.user = "success" =>
+    Cardinality({target \in {0, 1} : s.phase[target] = "durable" /\ ACReturned(target)}
+                \cup (IF s.phase[2] = "durable" THEN {2} ELSE {})) >= 2
 ACCancellationKeepsStorageProtection ==
     /\ (ac1CrashCount = 0 => ac1Submitted \ ac1IoReturned \subseteq ac1Inflight)
     /\ (ac2CrashCount = 0 => ac2Submitted \ ac2IoReturned \subseteq ac2Inflight)
+
+
+(* A pending SDK operation is mapped to batch 2 at slot 0. Slot 1 is
+   already unavailable; slot 2 is the same verified remote response input.
+   Both callbacks of a real two-entry SDK are covered by the socket test;
+   this bounded window directly checks the suffix's distributed quorum. *)
+ACPrefixInit ==
+    /\ s = [SdkInitialState EXCEPT !.phase[1] = "failed", !.source[1] = FALSE]
+    /\ ACFirst!Init /\ ACSecond!Init
+    /\ acLiveReplies = {} /\ acSentRequests = {0}
+ACPrefixNext == ACPhysicalFirst \/ ACRemoteReply \/ ACSdkStep \/ ACAbandonFirst
+                \/ ACReply(0) \/ ACRetry(0) \/ ACKnownNone(0)
+ACPrefixSpec == ACPrefixInit /\ [][ACPrefixNext]_vars
 
 ==============================================================================

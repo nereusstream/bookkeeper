@@ -793,3 +793,6 @@ Segment production candidate 的最低 Gate：
 
 
 [Physical prefix 的实际 I/O 排空验证](rfcs/unified-wal/implementation/profile-wire/README.md#physical-prefix-的实际-io-排空验证)：2026-10-22父098838a574后在原C中分开file durability与逐batch actual I/O return，只有完整actual-return prefix才可local publication，未返回任务继续保留inflight；原A+C实例直接消费该事实。新增suffix提前发布反例精确命中“两批字节durable、仅第二批返回、第一批仍在途”。最终18配置4完整正向/14指定反例及现有4项真实排空/fence/mixed测试通过，2017 unique路径与重叠SHA核验一致；C/A+C状态计数细化，旧SDK6配置计数未变，catalog742未全跑、历史结果不移绑。Spotless/Checkstyle通过；Java/model/style实际终结后的独立RAT exit1，443父HEAD路径无新增，不称CI全绿。Java/wire/持久格式未改，分布式双batch/multi-Arena/冲突/完整A+C+D及其他16步验收仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[跨 batch suffix 的真实 quorum](rfcs/unified-wal/implementation/profile-wire/README.md#跨-batch-suffix-的真实-quorum)：2026-10-22父85716ef7f3后在原A+C新增suffix pending操作的分布式ACK窗口，完整DATA prefix durable仍必须等待predecessor实际返回；错误suffix DURABLE一直传播到SDK success的反例已命中。最终20配置5完整正向/15指定反例、旧18配置计数不变；两项新增真实A2/A3双batch与两项默认夹具回归通过，2019 unique路径/重叠SHA一致。两轮fixture未进入目标窗口的失败保留，当前hold在原Obligation终态交接，生产代码/wire/持久格式与旧fixture默认不变。catalog744未全跑，历史receipt不移绑。Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。完整多peer/多SDK操作/multi-Arena/fence/冲突/恢复/两次故障/A+C+D及其余16步仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
