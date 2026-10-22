@@ -790,3 +790,6 @@ Segment production candidate 的最低 Gate：
 
 
 [A+C local publication 到 SDK ACK 的实际验证](rfcs/unified-wal/implementation/profile-wire/README.md#ac-local-publication-到-sdk-ack-的实际验证)：2026-10-22父30377492f4后在原ProfileSdkBridge新增ACSpec，直接由两个独立SegmentAllocator实例的local publication供给原A2 SDK ACK，slot2保留验证过的remote响应输入；已发请求可在caller超时后进入owner，取消不取消accepted I/O，恢复同步不mint原live ACK。最终17配置4完整正向/13指定反例、旧11配置计数不变，两阶段8+2原Java与最终新增1项真实队列/独立force测试通过，2016 unique路径按stage冻结，1项测试强化差异分别保留；catalog741未全跑，历史receipt不移绑。Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。该单entry/每episode一个batch/pair内一次crash组合仍未闭合同批fence/冲突重试/跨batch UNKNOWN/多Arena/连续两次故障与完整A+C+D；继续全16步，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Physical prefix 的实际 I/O 排空验证](rfcs/unified-wal/implementation/profile-wire/README.md#physical-prefix-的实际-io-排空验证)：2026-10-22父098838a574后在原C中分开file durability与逐batch actual I/O return，只有完整actual-return prefix才可local publication，未返回任务继续保留inflight；原A+C实例直接消费该事实。新增suffix提前发布反例精确命中“两批字节durable、仅第二批返回、第一批仍在途”。最终18配置4完整正向/14指定反例及现有4项真实排空/fence/mixed测试通过，2017 unique路径与重叠SHA核验一致；C/A+C状态计数细化，旧SDK6配置计数未变，catalog742未全跑、历史结果不移绑。Spotless/Checkstyle通过；Java/model/style实际终结后的独立RAT exit1，443父HEAD路径无新增，不称CI全绿。Java/wire/持久格式未改，分布式双batch/multi-Arena/冲突/完整A+C+D及其他16步验收仍OPEN，目标active、生产Gate不提升，默认OFF/SYSTEM/PARK及disabled不变。

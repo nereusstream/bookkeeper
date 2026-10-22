@@ -11,13 +11,13 @@ VARIABLES ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1S
     ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, ac2Phase, ac2ControlLength, ac2ControlDurable,
     ac2ControlApplied, ac2Submitted, ac2Inflight, ac2Written, ac2DataDurable, ac2Successes, ac2RuntimeFault,
     ac2FaultSeen, ac2FaultDurable, ac2ControlSynced, ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount,
-    acLiveReplies, acSentRequests
+    acLiveReplies, acSentRequests, ac1IoReturned, ac2IoReturned
 ACStorageVars == <<ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1Submitted, ac1Inflight,
     ac1Written, ac1DataDurable, ac1Successes, ac1RuntimeFault, ac1FaultSeen, ac1FaultDurable, ac1ControlSynced,
     ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, ac2Phase, ac2ControlLength, ac2ControlDurable,
     ac2ControlApplied, ac2Submitted, ac2Inflight, ac2Written, ac2DataDurable, ac2Successes, ac2RuntimeFault,
     ac2FaultSeen, ac2FaultDurable, ac2ControlSynced, ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount,
-    acLiveReplies, acSentRequests>>
+    acLiveReplies, acSentRequests, ac1IoReturned, ac2IoReturned>>
 vars == <<s, ACStorageVars>>
 Targets == 0..2
 MaxAttempts == 2
@@ -90,6 +90,8 @@ ACRecoveryReply == "recovery-reply"
 ACCancelIo == "cancel-io"
 ACBlockLateSubmit == "block-late-submit"
 ACFirst == INSTANCE SegmentAllocator WITH
+    ioReturned <- ac1IoReturned,
+    RequirePrefixIoReturn <- TRUE,
     phase <- ac1Phase,
     controlLength <- ac1ControlLength,
     controlDurable <- ac1ControlDurable,
@@ -117,6 +119,8 @@ ACFirst == INSTANCE SegmentAllocator WITH
     RequireControlSync <- TRUE,
     RequireClosedSession <- TRUE
 ACSecond == INSTANCE SegmentAllocator WITH
+    ioReturned <- ac2IoReturned,
+    RequirePrefixIoReturn <- TRUE,
     phase <- ac2Phase,
     controlLength <- ac2ControlLength,
     controlDurable <- ac2ControlDurable,
@@ -145,10 +149,10 @@ ACSecond == INSTANCE SegmentAllocator WITH
     RequireClosedSession <- TRUE
 ACFirstVars == <<ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1Submitted, ac1Inflight,
     ac1Written, ac1DataDurable, ac1Successes, ac1RuntimeFault, ac1FaultSeen, ac1FaultDurable, ac1ControlSynced,
-    ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount>>
+    ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, ac1IoReturned>>
 ACSecondVars == <<ac2Phase, ac2ControlLength, ac2ControlDurable, ac2ControlApplied, ac2Submitted, ac2Inflight,
     ac2Written, ac2DataDurable, ac2Successes, ac2RuntimeFault, ac2FaultSeen, ac2FaultDurable, ac2ControlSynced,
-    ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount>>
+    ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount, ac2IoReturned>>
 
 Init == SdkInit /\ ACFirst!Init /\ ACSecond!Init /\ acLiveReplies = {} /\ acSentRequests = {0, 1}
 Next == SdkNext /\ UNCHANGED ACStorageVars
@@ -206,7 +210,7 @@ ACAbandonFirst ==
     /\ ac1Inflight' = {}
     /\ UNCHANGED <<ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1Submitted, ac1Written,
                   ac1DataDurable, ac1Successes, ac1RuntimeFault, ac1FaultSeen, ac1FaultDurable, ac1ControlSynced,
-                  ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, s, ACSecondVars, acLiveReplies, acSentRequests>>
+                  ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, s, ACSecondVars, acLiveReplies, acSentRequests, ac1IoReturned>>
 
 ACNext == ACPhysicalFirst \/ ACPhysicalSecond \/ ACRemoteReply \/ ACSdkStep \/ ACAbandonFirst
           \/ (\E target \in {0, 1} : ACReply(target) \/ ACRetry(target) \/ ACKnownNone(target))
@@ -230,6 +234,8 @@ ACOriginalStorageContract ==
     /\ ACFirst!KnownErrorRemainsIsolated /\ ACSecond!KnownErrorRemainsIsolated
     /\ ACFirst!RecoveredDataIsDurable /\ ACSecond!RecoveredDataIsDurable
     /\ ACFirst!LiveWriterHasOpenAuthority /\ ACSecond!LiveWriterHasOpenAuthority
+    /\ ACFirst!PhysicalSuccessWaitsIoReturn /\ ACSecond!PhysicalSuccessWaitsIoReturn
+    /\ ACFirst!ProtectionWaitsActualIoReturn /\ ACSecond!ProtectionWaitsActualIoReturn
 ACAcknowledgmentHasOwnLocalPublication ==
     \A target \in {0, 1} : s.phase[target] = "durable" => ACPublished(target) /\ ACDurable(target)
 ACAcknowledgmentCameFromLiveEpisode ==
@@ -238,9 +244,7 @@ ACSuccessHasPhysicalQuorum == s.user = "success" =>
     Cardinality({target \in {0, 1} : s.phase[target] = "durable" /\ ACDurable(target)}
                 \cup (IF s.phase[2] = "durable" THEN {2} ELSE {})) >= 2
 ACCancellationKeepsStorageProtection ==
-    /\ (ACBatch \in ac1Submitted /\ ac1CrashCount = 0 =>
-           ACBatch \in ac1Inflight \/ ACBatch \in ac1DataDurable \/ 1 \in ac1RuntimeFault)
-    /\ (ACBatch \in ac2Submitted /\ ac2CrashCount = 0 =>
-           ACBatch \in ac2Inflight \/ ACBatch \in ac2DataDurable \/ 1 \in ac2RuntimeFault)
+    /\ (ac1CrashCount = 0 => ac1Submitted \ ac1IoReturned \subseteq ac1Inflight)
+    /\ (ac2CrashCount = 0 => ac2Submitted \ ac2IoReturned \subseteq ac2Inflight)
 
 ==============================================================================

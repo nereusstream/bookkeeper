@@ -2059,3 +2059,14 @@ scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClien
 [模型记录](../models/README.md#ac-的-local-publication-到-sdk-ack-组合)拥有17配置4完整正向/13指定反例，两个原C实例与SDK共用状态空间，slot2仍是验证过的响应输入；A2单entry/每episode一个batch/pair内一次crash。1117 model与1170最终Java共有271路径，270 SHA相同、socket测试加强有1项stage差异，2016 unique路径；原阶段与最终source/checker/XML均分别保留在 `/Users/liusinan/.codex/artifacts/unified-wal/ac-ack-composition-evidence-ncf_zb1h`。原11配置状态计数保持原730结果；catalog741不是全量新结果。
 
 最终Spotless/Checkstyle通过；Java/model/style实际终结后独立RAT exit1，443父HEAD路径无新增，不称CI全绿。此切片不闭合完整多Arena/所有replica、同批fence、冲突重试、跨batch UNKNOWN/连续两次故障或完整A+C+D、全部字节/性能Gate。默认SDK/observe公共约定、Main/required producer、full-bytes、backup-restore/accepted退役/GC/mixed/正式性能/运维和全16步验收继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## Physical prefix 的实际 I/O 排空验证
+
+2026-10-22，父源码 `098838a5746f8c3f71b53a1001350c4067b72e9a`。真实SegmentDataPhysicalDriver.physicalFinished只在对应reservation的I/O终态交回owner后推进SegmentPhysicalPrefix；file barrier、连续publication、逐entry eligibility/result与资源实际终结分别处理。本轮不修改Java生产/测试、wire或持久格式，只把原C/A+C模型中“file覆盖即任务返回”的合并拆开，增加逐batch actual-return oracle、完整prefix门槛与定向反例。
+
+`unified-wal-local-Kqxoe7t4` 四项现有真实测试全部通过、0 failure/error/skip：failedPrefixDoesNotReleaseLaterTicketBeforeItsIoTerminates在第一批force失败、第二任务实际I/O仍被hold时已报告UNKNOWN，但只归还已结束任务的pool资源，fence/CLOSE继续等待；第二任务实际返回后才能归还全部资源并完成fence。sharedDataBatchDrainsBothPrecutAdmissionsBeforeFence及realDataForceAndOwnerCompletionPrecedeDurableFence按现行drain-precut合同验证，不启用“主动终止precut”模式；automaticMixedBatchAndCrossRetriesRecheckEachAdmission保留normal/recovery各自的资格重查。没有为模型添加mock成功或修改原断言。
+
+[模型记录](../models/README.md#physical-prefix-的逐-batch-io-终态)拥有最终18配置4完整正向/14指定反例：包括“batch2实际完成且字节已覆盖，但batch1实际I/O未返回，仍不可发布batch2”的指定反例。A+C直接消费新的actual-return与inflight保护；1118 model/1170 Java共有271且SHA一致，路径去重2017。原C/A+C计数随状态空间细化改变、六个旧SDK bridge配置计数不变；历史receipt不移绑，证据在 `/Users/liusinan/.codex/artifacts/unified-wal/physical-io-return-evidence-buzco6_t`。
+
+最终Spotless/Checkstyle通过；Java/model/style实际终结后的独立RAT exit1，443父HEAD路径无新增，不称CI全绿。当前推进C的跨batch实际终结边界和既有单entry A+C的资源保护；分布式双batch ACK、同批fence/multi-Arena/K-X冲突的完整组合、kernel/native/所有字节、连续两次故障、默认SDK/observe公共约定、Main/required producer、backup-restore/accepted退役/GC/mixed/正式性能/运维与全16步验收继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

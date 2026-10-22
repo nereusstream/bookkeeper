@@ -19,6 +19,7 @@ import time
 
 
 MATRIX = {
+    'ce-prefix-before-earlier-io-return': 'PhysicalSuccessWaitsIoReturn',
     'ac-profile-sdk-bridge': None,
     'ce-ac-profile-sdk-bridge-late-submit': 'ACSentCanReachStorageAfterWait',
     'ce-ac-profile-sdk-bridge-early': 'ACAcknowledgmentHasOwnLocalPublication',

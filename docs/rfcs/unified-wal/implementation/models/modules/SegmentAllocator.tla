@@ -17,23 +17,24 @@ EXTENDS UnifiedWalTypes, FiniteSets
    Grants, identity, framing and immutable Bookie eligibility are validated
    inputs, not conclusions of this model. No MOVE/FREE/index/quorum model. *)
 CONSTANTS Streams, Batches, Files, Epochs, Crashes, PowerLosses,
-          RequireDataBarrier, RequireControlSync, RequireClosedSession
+          RequireDataBarrier, RequireControlSync, RequireClosedSession, RequirePrefixIoReturn
 ASSUME /\ Streams >= 1 /\ Batches >= 1 /\ Files >= 1
        /\ Epochs >= 1 /\ Crashes >= 1 /\ PowerLosses >= 1
        /\ RequireDataBarrier \in BOOLEAN
        /\ RequireControlSync \in BOOLEAN
        /\ RequireClosedSession \in BOOLEAN
+       /\ RequirePrefixIoReturn \in BOOLEAN
 BatchSet == (1..Streams) \X (1..Batches)
 Phases == {"new", "opening", "live", "closing", "closed", "crashed", "scan", "ready"}
 
 VARIABLES phase, controlLength, controlDurable, controlApplied,
           submitted, inflight, written, dataDurable, successes,
           runtimeFault, faultSeen, faultDurable, controlSynced, validated,
-          dataSynced, crashCount, powerCount
+          dataSynced, crashCount, powerCount, ioReturned
 vars == <<phase, controlLength, controlDurable, controlApplied,
           submitted, inflight, written, dataDurable, successes,
           runtimeFault, faultSeen, faultDurable, controlSynced, validated,
-          dataSynced, crashCount, powerCount>>
+          dataSynced, crashCount, powerCount, ioReturned>>
 
 Init == /\ phase = "new"
         /\ controlLength = 0 /\ controlDurable = 0 /\ controlApplied = 0
@@ -41,7 +42,7 @@ Init == /\ phase = "new"
         /\ dataDurable = {} /\ successes = {}
         /\ runtimeFault = {} /\ faultSeen = FALSE /\ faultDurable = {}
         /\ controlSynced = FALSE /\ validated = FALSE /\ dataSynced = FALSE
-        /\ crashCount = 0 /\ powerCount = 0
+        /\ crashCount = 0 /\ powerCount = 0 /\ ioReturned = {}
 
 AppendOpen ==
     /\ phase \in {"new", "ready"}
@@ -50,14 +51,14 @@ AppendOpen ==
     /\ controlLength' = controlLength + 1 /\ phase' = "opening"
     /\ UNCHANGED <<controlDurable, controlApplied, submitted, inflight, written,
                    dataDurable, successes, runtimeFault, faultSeen, faultDurable,
-                   controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 ForceControl ==
     /\ phase \in {"opening", "closing"} /\ controlDurable < controlLength
     /\ controlDurable' = controlLength
     /\ UNCHANGED <<phase, controlLength, controlApplied, submitted, inflight,
                    written, dataDurable, successes, runtimeFault, faultSeen,
-                   faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 ApplyControl ==
     /\ phase \in {"opening", "closing"} /\ controlDurable = controlLength
@@ -65,7 +66,7 @@ ApplyControl ==
     /\ phase' = IF OpenControl(controlLength) THEN "live" ELSE "closed"
     /\ UNCHANGED <<controlLength, controlDurable, submitted, inflight, written,
                    dataDurable, successes, runtimeFault, faultSeen, faultDurable,
-                   controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 Submit(batch) ==
     /\ phase = "live" /\ FileOf(batch, Files) \notin runtimeFault
@@ -75,39 +76,51 @@ Submit(batch) ==
     /\ submitted' = submitted \cup {batch} /\ inflight' = inflight \cup {batch}
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied, written,
                    dataDurable, successes, runtimeFault, faultSeen, faultDurable,
-                   controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 WriteComplete(batch) ==
     /\ phase = "live" /\ batch \in inflight /\ batch \notin written
     /\ written' = written \cup {batch}
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied, submitted,
                    inflight, dataDurable, successes, runtimeFault, faultSeen,
-                   faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 CoverFileBarrier(file) ==
     LET covered == {b \in written \cap inflight : FileOf(b, Files) = file}
-    IN /\ phase = "live" /\ covered # {}
+    IN /\ phase = "live" /\ covered \ dataDurable # {}
        /\ dataDurable' = dataDurable \cup covered
-       /\ inflight' = inflight \ covered
        /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied,
-                      submitted, written, successes, runtimeFault, faultSeen,
-                      faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
+                      submitted, inflight, written, successes, runtimeFault, faultSeen,
+                      faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
+
+(* File coverage does not terminate another task's force or return its loan.
+   CompleteIo and FailData are actual task-return events, independent from
+   the file-level durability fact and later owner publication. *)
+CompleteIo(batch) ==
+    /\ phase = "live" /\ batch \in inflight
+    /\ IF RequireDataBarrier THEN batch \in dataDurable ELSE batch \in written
+    /\ ioReturned' = ioReturned \cup {batch}
+    /\ inflight' = inflight \ {batch}
+    /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied, submitted,
+                   written, dataDurable, successes, runtimeFault, faultSeen,
+                   faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
 
 PublishLive(batch) ==
     /\ phase = "live" /\ FileOf(batch, Files) \notin runtimeFault
     /\ FileOf(batch, Files) \notin faultDurable
-    /\ batch \in written /\ batch \notin successes
+    /\ batch \in written /\ batch \notin successes /\ batch \in ioReturned
+    /\ (~RequirePrefixIoReturn \/ PrefixInSet(batch, ioReturned))
     /\ IF RequireDataBarrier THEN PrefixInSet(batch, dataDurable)
        ELSE PrefixInSet(batch, written)
     /\ successes' = successes \cup {batch}
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied,
                    submitted, inflight, written, dataDurable, runtimeFault,
-                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 FailData(batch) ==
     /\ phase = "live" /\ batch \in inflight
     /\ runtimeFault' = runtimeFault \cup {FileOf(batch, Files)} /\ faultSeen' = TRUE
-    /\ inflight' = inflight \ {batch}
+    /\ inflight' = inflight \ {batch} /\ ioReturned' = ioReturned \cup {batch}
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied, submitted,
                    written, dataDurable, successes, faultDurable, controlSynced,
                    validated, dataSynced, crashCount, powerCount>>
@@ -117,7 +130,7 @@ PersistFault(file) ==
     /\ faultDurable' = faultDurable \cup {file}
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied, submitted,
                    inflight, written, dataDurable, successes, runtimeFault, faultSeen,
-                   controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 AppendClose ==
     /\ phase = "live" /\ runtimeFault = {} /\ faultDurable = {} /\ inflight = {}
@@ -125,7 +138,7 @@ AppendClose ==
     /\ controlLength' = controlLength + 1 /\ phase' = "closing"
     /\ UNCHANGED <<controlDurable, controlApplied, submitted, inflight, written,
                    dataDurable, successes, runtimeFault, faultSeen, faultDurable,
-                   controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 CrashProcess ==
     /\ phase # "crashed" /\ phase # "new" /\ crashCount < Crashes
@@ -134,7 +147,7 @@ CrashProcess ==
     /\ controlSynced' = FALSE /\ validated' = FALSE /\ dataSynced' = FALSE
     (* faultSeen is a test oracle, unavailable to the new process. *)
     /\ UNCHANGED <<controlLength, controlDurable, submitted, written, dataDurable,
-                   successes, faultSeen, faultDurable, powerCount>>
+                   successes, faultSeen, faultDurable, powerCount, ioReturned>>
 
 PowerLoss ==
     /\ phase = "crashed" /\ powerCount < PowerLosses
@@ -142,14 +155,14 @@ PowerLoss ==
     /\ powerCount' = powerCount + 1
     /\ UNCHANGED <<phase, controlDurable, controlApplied, submitted, inflight,
                    dataDurable, successes, runtimeFault, faultSeen, faultDurable,
-                   controlSynced, validated, dataSynced, crashCount>>
+                   controlSynced, validated, dataSynced, crashCount, ioReturned>>
 
 StartRecovery ==
     /\ phase = "crashed" /\ controlLength > 0 /\ faultDurable = {}
     /\ phase' = "scan"
     /\ UNCHANGED <<controlLength, controlDurable, controlApplied, submitted,
                    inflight, written, dataDurable, successes, runtimeFault,
-                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 RecoverControl ==
     /\ phase = "scan" /\ ~controlSynced
@@ -157,7 +170,7 @@ RecoverControl ==
     /\ controlApplied' = controlLength /\ controlSynced' = TRUE
     /\ UNCHANGED <<phase, controlLength, submitted, inflight, written, dataDurable,
                    successes, runtimeFault, faultSeen, faultDurable, validated,
-                   dataSynced, crashCount, powerCount>>
+                   dataSynced, crashCount, powerCount, ioReturned>>
 
 ValidateData ==
     /\ phase = "scan" /\ controlSynced /\ ~validated
@@ -165,14 +178,14 @@ ValidateData ==
     /\ validated' = TRUE
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied, submitted,
                    inflight, written, dataDurable, successes, runtimeFault, faultSeen,
-                   faultDurable, controlSynced, dataSynced, crashCount, powerCount>>
+                   faultDurable, controlSynced, dataSynced, crashCount, powerCount, ioReturned>>
 
 RecoverDataBarrier ==
     /\ phase = "scan" /\ validated /\ ~dataSynced
     /\ dataDurable' = dataDurable \cup written /\ dataSynced' = TRUE
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied, submitted,
                    inflight, written, successes, runtimeFault, faultSeen, faultDurable,
-                   controlSynced, validated, crashCount, powerCount>>
+                   controlSynced, validated, crashCount, powerCount, ioReturned>>
 
 QualifyRecovered ==
     /\ phase = "scan" /\ controlSynced /\ validated /\ dataSynced /\ faultDurable = {}
@@ -180,26 +193,26 @@ QualifyRecovered ==
     /\ phase' = "ready"
     /\ UNCHANGED <<controlLength, controlDurable, controlApplied, submitted,
                    inflight, written, dataDurable, successes, runtimeFault,
-                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 PublishRecovered(batch) ==
     /\ phase = "ready" /\ batch \in written /\ batch \notin successes
     /\ successes' = successes \cup {batch}
     /\ UNCHANGED <<phase, controlLength, controlDurable, controlApplied,
                    submitted, inflight, written, dataDurable, runtimeFault,
-                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount>>
+                   faultSeen, faultDurable, controlSynced, validated, dataSynced, crashCount, powerCount, ioReturned>>
 
 Next == AppendOpen \/ ForceControl \/ ApplyControl \/ AppendClose
         \/ CrashProcess \/ PowerLoss \/ StartRecovery \/ RecoverControl
         \/ ValidateData \/ RecoverDataBarrier \/ QualifyRecovered
-        \/ (\E b \in BatchSet : Submit(b) \/ WriteComplete(b) \/ PublishLive(b)
+        \/ (\E b \in BatchSet : Submit(b) \/ WriteComplete(b) \/ CompleteIo(b) \/ PublishLive(b)
                                \/ FailData(b) \/ PublishRecovered(b))
         \/ (\E f \in 1..Files : CoverFileBarrier(f) \/ PersistFault(f))
 
 TypeOK == /\ phase \in Phases
           /\ controlLength \in 0..(2 * Epochs)
           /\ controlDurable \in 0..(2 * Epochs) /\ controlApplied \in 0..(2 * Epochs)
-          /\ \A set \in {submitted, inflight, written, dataDurable, successes} : set \subseteq BatchSet
+          /\ \A set \in {submitted, inflight, written, dataDurable, successes, ioReturned} : set \subseteq BatchSet
           /\ runtimeFault \subseteq 1..Files /\ faultDurable \subseteq 1..Files
           /\ \A flag \in {faultSeen, controlSynced, validated, dataSynced} :
                     flag \in BOOLEAN
@@ -207,6 +220,8 @@ TypeOK == /\ phase \in Phases
 ControlHasBarrier == controlApplied <= controlDurable /\ controlDurable <= controlLength
 DataSuccessHasBarrier == successes \subseteq dataDurable
 PhysicalSuccessIsContiguous == \A batch \in successes : PrefixInSet(batch, dataDurable)
+PhysicalSuccessWaitsIoReturn == \A batch \in successes : PrefixInSet(batch, ioReturned)
+ProtectionWaitsActualIoReturn == crashCount = 0 => submitted \ ioReturned \subseteq inflight
 KnownErrorRemainsIsolated == phase = "ready" => ~faultSeen
 RecoveredDataIsDurable == phase = "ready" => written \subseteq dataDurable
 LiveWriterHasOpenAuthority == phase = "live" =>
