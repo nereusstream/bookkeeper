@@ -338,9 +338,9 @@ public final class SegmentProfileService implements AutoCloseable {
                             exhausted);
                 }
                 try {
-                    // Arena replay precedes execution; later, one rotation verifies both owners sequentially.
+                    // Arena replay precedes execution; rotation encodes and verifies one image at a time.
                     controlWorkingSet = transport.budget().reserveControlWorkingSet(
-                            SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES);
+                            SegmentControlCheckpoint.WORKING_SET_BYTES);
                 } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
                     throw new IOException("Profile CONTROL quota cannot reserve checkpoint verification buffers",
                             exhausted);

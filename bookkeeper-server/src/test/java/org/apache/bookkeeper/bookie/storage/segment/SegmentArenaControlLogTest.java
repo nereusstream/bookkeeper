@@ -563,7 +563,7 @@ public class SegmentArenaControlLogTest {
             var latest = log.checkpoint();
             var snapshot = SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.ARENA,
                     latest, 1024 * 1024);
-            var changed = new java.util.ArrayList<>(snapshot.operations());
+            var changed = new java.util.ArrayList<SegmentControlCheckpoint.ImageRecord>(snapshot.operations());
             var last = changed.get(changed.size() - 1);
             var ghost = alloc(3, 4096 + SegmentArenaControlLog.BLOCK_BYTES);
             var record = SegmentControlFormat.encode(ghost.type(), new Generation(1), last.sequence(),

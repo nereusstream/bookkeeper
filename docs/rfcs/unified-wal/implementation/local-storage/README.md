@@ -1183,3 +1183,22 @@ native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 u
 本轮去掉Arena恢复的整份serialized payload临时副本；typed状态、运行期冻结Snapshot、Bookie retained Snapshot、其他CONTROL/JDK/native/cohort预算仍未闭合。未改TLA、未执行TLC，不升级原模型或完整A+C+D证明。默认SDK/observe、同incarnation unclosed-session接受、多Arena持久路由及完整16步继续OPEN，目标active、生产Gate OPEN；默认OFF/SYSTEM/PARK与disabled保持，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
 
 本轮 `mvn -o apache-rat:check` terminal exit1，报告443条未批准路径；逐项核实均已存在于父提交 `8579d1e2116b7949ddf3dda026be4b90cd0e3c18`，新增路径为0。原命令、完整日志、报告与父对象核对保存在同一证据目录的 `rat/`；这是已知基线失败，不能据此称CI全绿。
+
+
+## Arena checkpoint 的按需编码与持有态
+
+2026-10-23，父提交 `e1fb23a0fa3ffaa67e8db664996ae3a457fff255` 上，Arena checkpoint 继续冻结同一 applied cut 的命令、结果与序号，但不再一次性编码并持有全部 canonical record。原 `Snapshot` 使用 package-local `ImageRecord` 区分两种既有所有权：Bookie 的 `Operation` 保留独立原始字节，Arena 的 `CheckpointOperation` 只持有原不可变 `AppliedOperation`，在摘要、写出及逐条验证时按需编码当前记录。冻结列表仍独立于后续 map 更新；FREE/MOVE 使用原已分离 runtime guard 的事实，session tails/context/hash/list 不借用外部 buffer。原排序、状态、applied cut、完整 digest、写后比较、force/commit/publication、必要 suffix 与恢复拒绝保持，持久格式和公共 API 未改。
+
+这移除了 Arena 冻结 image 的整份 serialized payload 持有，但保留 O(n) 命令引用/包装与排序列表。每条 body 和 record 各不超过64 KiB；与 verification scratch 同时存在的容量由 Service 启动前原 CONTROL working-set 统一预留，改为 `69776 + 2 × 65536 = 200848 bytes`，保持至实际 storage 关闭。该新值替代前节的 Service 69776-byte 预留；不足时在 storage open 前拒绝。测试 fixture 仅相应增加固定容量，原 DATA 及网络 CONTROL 131072 bytes 保持，生产 quota 不自动扩容。
+
+持有态对照使用同一 JDK 21.0.10、`-Xint -Xms64m -Xmx64m -XX:MaxDirectMemorySize=32m` 的两个独立 JVM；父版三份原 control source 与当前对应 source 分别编译到独立目录，class-load 日志逐项核对真实加载路径。相同16,000个有效 ALLOC 控制结果中，首项 APPLIED、其余同位置竞争为 CONDITION_FAILED，不能称为16,000个已授予 allocation。各 JVM 在命令全部 apply 后、checkpoint 前及首次 image force 前的阻塞 callback 分别执行一次 `jcmd GC.class_histogram`。
+
+相对各自 baseline，父版/新版存活 `HeapByteBufferR` 增量为16,000/0，`byte[]` 总增量为3,393,904/66,064 bytes；该数组增量也含 codec/JDK 初始化等，不能当作纯 payload 或完整预算。旧16,000个 `Operation` 包装变为16,000个较小 typed 包装，列表和 typed authority 仍持有。两版3,328,000-byte payload 的完整 native image SHA-256 相同（`5c786d84bd4a0b181849f6f37739f75116dd880f8bad46a2b399b43d2f281c89`），各自完成真实 force/publication、关闭及重开并核对恢复 cut/grant。原 source、probe、编译命令、class bytes/load log、全部 histogram、image/journal 与终态位于 `/Users/liusinan/.codex/artifacts/unified-wal/arena-lazy-image-evidence-e1fb23a0/heap-probe`。这是特定输入/阻塞点经全 GC 后的持有态测量，不是累计分配、峰值 heap/RSS、native 总账或性能结论；三个阶段重复编码的 CPU/分配成本未测。
+
+仅将 Service 的新预留退回旧 verification-only 大小的敏感性变体，使原 `profileServiceRejectsMissingCheckpointControlCapacityBeforeOpen` 因额度不足却启动成功而按预期失败；最终源码已恢复。定向9项通过，含并发 applied cut、旧格式、精确冻结状态比较、晚 digest 损坏 fallback、重复 rotation、原 storage 图重启及实际 owned-service 关闭排空。首轮 wildcard 可变测试列表的编译失败、独立 probe 缺少 import 的编译失败及 hidden lambda class-load 后处理修正均保留；父版原测量进程已正常终结，后处理未重启它。
+
+最终 `7dYmDbhs` 为Arena整类39、Bookie相关14、Service7及原allocator整类12，共 **72 PASS、0 failure/error/skip**；全部1172源码/资源输入与最终Java一致，Spotless/Checkstyle exit0。该scope包含原独立字节向量、冻结cut并发、损坏/必要suffix、真实控制进程退出、FREE/reuse/MOVE/ABA、SDK/Embedded/owned drain与启动失败清理；不重复或合并定向9项计数。原命令、Maven/XML、各stage输入与敏感性失败保持独立绑定。
+
+本轮未改TLA、未运行TLC，不提升旧模型receipt；未测Linux NUMA/掉电/正式性能/canary。完整CONTROL/typed authority、Bookie retained state、引用/排序及其他JDK/native/caller预算仍OPEN；默认SDK/observe、同incarnation unclosed-session语义、多Arena持久路由及全16步继续待完成，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。
+
+本轮独立 `mvn -o apache-rat:check` terminal exit1，443条未批准路径逐项均为父 `e1fb23a0fa3ffaa67e8db664996ae3a457fff255` 的既有blob，与前轮完整路径集合相同，无新增；命令/log/rat.txt/父对象验证在同一证据目录 `rat/`。保留基线失败，不称CI全绿。

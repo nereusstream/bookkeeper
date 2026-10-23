@@ -353,6 +353,26 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private record AppliedOperation(Command command, Status status, long sequence) { }
 
+    /** Applied commands own immutable fields; image generation need not retain another serialized copy. */
+    private record CheckpointOperation(AppliedOperation applied) implements SegmentControlCheckpoint.ImageRecord {
+        @Override
+        public long sequence() {
+            return applied.sequence();
+        }
+
+        @Override
+        public int status() {
+            return applied.status().ordinal() + 1;
+        }
+
+        @Override
+        public ByteBuffer record() {
+            Command command = applied.command();
+            return SegmentControlFormat.encode(command.type(), LOG_GENERATION, applied.sequence(),
+                    command.operationId(), command.operationGeneration(), command.expectedGeneration(), command.body());
+        }
+    }
+
     private record EntryKey(ProfileLedgerContext context, long entryId) { }
 
     private record CopyKey(SegmentPointRead.Location location, UUID moveId, long moveGeneration) { }
@@ -1031,13 +1051,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                             !(operation.command() instanceof CheckpointCommit)
                                     || operation.status() != Status.APPLIED_DURABLE
                                     || retainedCheckpoints.contains(operation.command().operationId()))
-                            .map(operation -> new SegmentControlCheckpoint.Operation(
-                                    operation.sequence(), operation.status().ordinal() + 1,
-                                    SegmentControlFormat.encode(operation.command().type(), LOG_GENERATION,
-                                            operation.sequence(), operation.command().operationId(),
-                                            operation.command().operationGeneration(),
-                                            operation.command().expectedGeneration(),
-                                            operation.command().body()))).toList(), true);
+                            .map(CheckpointOperation::new).toList(), true);
             generation = checkpointGeneration + 1;
             slot = publishedCheckpoint == null ? 0 : 1 - publishedCheckpoint.slot();
             checkpointing = true;
@@ -1046,7 +1060,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         try {
             snapshot = new SegmentControlCheckpoint.Snapshot(snapshot.through(), snapshot.logOffset(),
                     snapshot.operations().stream().sorted(Comparator.comparingLong(
-                            SegmentControlCheckpoint.Operation::sequence)).toList(),
+                            SegmentControlCheckpoint.ImageRecord::sequence)).toList(),
                     snapshot.compactedCheckpointHistory());
             SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.reference(
                     generation, slot, snapshot, maxLogBytes);

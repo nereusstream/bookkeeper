@@ -915,7 +915,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             snapshot = new SegmentControlCheckpoint.Snapshot(snapshot.through(), snapshot.logOffset(),
                     snapshot.operations().stream().sorted(Comparator.comparingLong(
-                            SegmentControlCheckpoint.Operation::sequence)).toList(),
+                            SegmentControlCheckpoint.ImageRecord::sequence)).toList(),
                     snapshot.compactedCheckpointHistory());
             SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.reference(
                     generation, slot, snapshot, maxLogBytes);
@@ -2542,7 +2542,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(
                 config, identity, SegmentControlFormat.Owner.BOOKIE, reference, maxLogBytes);
         resetRecoveredState();
-        for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
+        for (SegmentControlCheckpoint.ImageRecord operation : snapshot.operations()) {
             if (snapshot.compactedCheckpointHistory()) {
                 SegmentControlParser.Command parsed = parse(operation.record(), operation.sequence());
                 if (parsed.type() == SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT) {

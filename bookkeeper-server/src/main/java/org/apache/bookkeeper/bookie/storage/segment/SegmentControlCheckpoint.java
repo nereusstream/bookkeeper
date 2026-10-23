@@ -36,6 +36,8 @@ import org.apache.bookkeeper.common.profile.startup.Generation;
 final class SegmentControlCheckpoint {
     private static final int MAX_RECORD_BYTES = 65536;
     static final int VERIFICATION_BUFFER_BYTES = 4096 + 128 + 16 + MAX_RECORD_BYTES;
+    // Verification scratch plus one on-demand Arena body and its canonical physical record.
+    static final int WORKING_SET_BYTES = VERIFICATION_BUFFER_BYTES + 2 * MAX_RECORD_BYTES;
 
     record Reference(long generation, int slot, long through, long logOffset, int payloadBytes, String digest) {
         Reference {
@@ -51,7 +53,14 @@ final class SegmentControlCheckpoint {
         }
     }
 
-    record Operation(long sequence, int status, ByteBuffer record) {
+    /** A frozen result whose canonical bytes may be encoded on demand, independently of later owner state. */
+    interface ImageRecord {
+        long sequence();
+        int status();
+        ByteBuffer record();
+    }
+
+    record Operation(long sequence, int status, ByteBuffer record) implements ImageRecord {
         Operation {
             record = record.asReadOnlyBuffer();
         }
@@ -62,8 +71,9 @@ final class SegmentControlCheckpoint {
         }
     }
 
-    record Snapshot(long through, long logOffset, List<Operation> operations, boolean compactedCheckpointHistory) {
-        Snapshot(long through, long logOffset, List<Operation> operations) {
+    record Snapshot(long through, long logOffset, List<? extends ImageRecord> operations,
+                    boolean compactedCheckpointHistory) {
+        Snapshot(long through, long logOffset, List<? extends ImageRecord> operations) {
             this(through, logOffset, operations, false);
         }
 
@@ -76,7 +86,7 @@ final class SegmentControlCheckpoint {
         MessageDigest digest = sha256();
         long length = 0;
         ByteBuffer prefix = ByteBuffer.allocate(16);
-        for (Operation operation : snapshot.operations()) {
+        for (ImageRecord operation : snapshot.operations()) {
             ByteBuffer record = operation.record();
             length += 16L + record.remaining();
             if (length > Integer.MAX_VALUE || length - maxLogBytes > maxLogBytes) {
@@ -103,7 +113,7 @@ final class SegmentControlCheckpoint {
             io.writeFully(file, header, 4096);
             long offset = 4224;
             ByteBuffer prefix = ByteBuffer.allocate(16);
-            for (Operation operation : snapshot.operations()) {
+            for (ImageRecord operation : snapshot.operations()) {
                 ByteBuffer record = operation.record();
                 io.writeFully(file, prefix(prefix, operation, record.remaining()), offset);
                 io.writeFully(file, record, offset + 16);
@@ -198,7 +208,7 @@ final class SegmentControlCheckpoint {
                 if (retain) {
                     operations.add(new Operation(nextSequence, status, record));
                 } else if (expected != null) {
-                    Operation frozen = expected.operations().get(index);
+                    ImageRecord frozen = expected.operations().get(index);
                     if (frozen.sequence() != nextSequence || frozen.status() != status
                             || !frozen.record().equals(record)) {
                         throw new IOException("Control checkpoint record differs from its frozen applied state");
@@ -278,7 +288,7 @@ final class SegmentControlCheckpoint {
         }
     }
 
-    private static ByteBuffer prefix(ByteBuffer bytes, Operation operation, int recordBytes) {
+    private static ByteBuffer prefix(ByteBuffer bytes, ImageRecord operation, int recordBytes) {
         return bytes.clear().putLong(operation.sequence()).putInt(operation.status()).putInt(recordBytes).flip();
     }
 
