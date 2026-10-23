@@ -1165,3 +1165,21 @@ native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 u
 这是 Profile Service 的 verification ByteBuffer capacity预留；standalone checkpoint入口、冻结/恢复Snapshot、长期control对象、其他codec/MetadataStore/JDK/native/TLS/kernel/cohort总账仍未闭合，不是RSS硬上限或整个CONTROL/full-bytes完成。未改TLA、未执行TLC；旧有限模型不证明新增固定CONTROL/同步回调窗口。默认SDK/observe、同incarnation unclosed-session接受条件、多Arena持久路由及完整16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
 native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径全部存在父提交，无新增；原报告和逐路径 Git 对象核验保留，不称 CI 全绿。
+
+## Arena checkpoint 的借用记录恢复
+
+2026-10-23，父提交 `8579d1e2116b7949ddf3dda026be4b90cd0e3c18` 上，将 Arena 的 checkpoint 恢复从整份 Snapshot 物化后解码，改为原 codec 的同步 `replayRecords` 借用回调。每条记录经原 physical parser/CRC检查后，在同一最多64 KiB scratch中交给Arena解码；回调返回后可复用，不能保留record view。Arena仅持有独立的scalar/context/hash/list等typed command字段，ALLOC、session/quarantine、MOVE、FREE与checkpoint前驱条件仍由原decoder/apply核对。Bookie需要保留原始canonical record，继续使用返回独立backing的`read`；写后`verify`也保留冻结状态逐条比较。
+
+`open`完整恢复成功前，对象不向调用方返回，Graph也在Arena/Bookie/index打开后才启动execution和准入。回调内的状态是未发布候选：最终digest、完整文件与前驱generation检查成功后才设置恢复cut/offset/published checkpoint；错误候选仍由原recover guard清空全部状态并尝试旧image或完整原journal。该apply路径只改候选内存，不写DATA/控制结果，不发布成功。原必要suffix、recovery sync、只读inspection、unclosed-session/quarantine拒绝保持，没有放行原incarnation crash恢复。
+
+读回仍是一遍image I/O，共用原identity/envelope/reference、count/顺序/长度/零扩展、CRC与最终digest检查，不为流式恢复跳过body或信任caller。codec的ByteBuffer capacity仍最多69776 bytes。Service已在storage open前保留这份CONTROL容量；启动Arena replay发生在execution创建前，运行期control rotation仍单次顺序验证两个owner，因此不新增固定预留、线程、队列、配置或格式。
+
+`checkpointReplayConsumesRecordsWithoutMaterializingTheWholeImage` 用64个最大合法物理frame构成4,195,328-byte payload，回调只消费header/计数并验证64条和4,194,304 record bytes；这些是physical framing向量，不是64个可授予的ALLOC。经新replay入口保留原整份read算法的 `e3uHpKKE` 额外Java分配4,269,832 bytes，分配断言按预期失败，不能称为整个父版本原样运行。流式定向 `HgazN8nE` 为135,592 bytes，最终 `JCgdjOPz` 为135,536 bytes；完整retained read另作内容oracle。这里只报告该有限输入/当前JDK的同步Java分配，不是峰值heap/RSS、CPU、延迟或吞吐结论。
+
+`lateCheckpointDigestFailureDiscardsTentativeAllocationBeforeFallback` 使用真实Arena两个checkpoint，将最新image最后的ALLOC替换为合法CRC/语义但错误最终digest的allocation3，保留原committed reference。新reader会在检查最终digest前形成私有候选；恢复必须清空它、选择旧checkpoint并重放当前完整suffix，恢复真实allocation1/2，allocation3不可见，随后真实提交id3到新块仍能APPLIED。该用例同时防止跳过最终digest、过度拒绝合法fallback和遗留候选issued-id/allocator状态。
+
+最终 `JCgdjOPz` 为Arena整类39、Bookie相关14及真实Service3方法，共 **56 PASS、0 failure/error/skip**，包含旧格式、字节向量、applied cut、损坏fallback/必要suffix、真实控制日志进程退出、MOVE链/整块FREE/reuse/ABA及owned SDK/control-drain重启。全部1172源码/资源输入与最终Java精确一致，Spotless/Checkstyle exit0。原算法RED、定向两项、最终56项及源码/命令/Maven/XML/分配输出分层保存于 `/Users/liusinan/.codex/artifacts/unified-wal/arena-stream-replay-evidence-8579d1e2`，不合并数量或移绑旧receipt。
+
+本轮去掉Arena恢复的整份serialized payload临时副本；typed状态、运行期冻结Snapshot、Bookie retained Snapshot、其他CONTROL/JDK/native/cohort预算仍未闭合。未改TLA、未执行TLC，不升级原模型或完整A+C+D证明。默认SDK/observe、同incarnation unclosed-session接受、多Arena持久路由及完整16步继续OPEN，目标active、生产Gate OPEN；默认OFF/SYSTEM/PARK与disabled保持，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+本轮 `mvn -o apache-rat:check` terminal exit1，报告443条未批准路径；逐项核实均已存在于父提交 `8579d1e2116b7949ddf3dda026be4b90cd0e3c18`，新增路径为0。原命令、完整日志、报告与父对象核对保存在同一证据目录的 `rat/`；这是已知基线失败，不能据此称CI全绿。

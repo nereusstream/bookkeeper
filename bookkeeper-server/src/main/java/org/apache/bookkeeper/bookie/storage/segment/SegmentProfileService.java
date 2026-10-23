@@ -338,7 +338,7 @@ public final class SegmentProfileService implements AutoCloseable {
                             exhausted);
                 }
                 try {
-                    // One graph rotation verifies its Bookie and Arena checkpoint cuts sequentially.
+                    // Arena replay precedes execution; later, one rotation verifies both owners sequentially.
                     controlWorkingSet = transport.budget().reserveControlWorkingSet(
                             SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES);
                 } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {

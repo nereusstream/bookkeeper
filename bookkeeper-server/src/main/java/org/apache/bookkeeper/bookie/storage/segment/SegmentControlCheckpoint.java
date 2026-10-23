@@ -116,18 +116,30 @@ final class SegmentControlCheckpoint {
 
     static void verify(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
                        Reference reference, Snapshot expected, long maxLogBytes) throws IOException {
-        read(config, identity, owner, reference, maxLogBytes, Objects.requireNonNull(expected, "expected"));
+        read(config, identity, owner, reference, maxLogBytes, Objects.requireNonNull(expected, "expected"), null);
+    }
+
+    @FunctionalInterface
+    interface RecordReplay {
+        void accept(Operation operation, boolean compactedHistory) throws IOException;
+    }
+
+    /** Loan each record only until its callback returns; recovery state is tentative until full validation. */
+    static void replayRecords(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                              SegmentControlFormat.Owner owner, Reference reference, long maxLogBytes,
+                              RecordReplay replay) throws IOException {
+        read(config, identity, owner, reference, maxLogBytes, null, Objects.requireNonNull(replay, "replay"));
     }
 
     static Snapshot read(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
                          Reference reference, long maxLogBytes) throws IOException {
-        return read(config, identity, owner, reference, maxLogBytes, null);
+        return read(config, identity, owner, reference, maxLogBytes, null, null);
     }
 
-    /** Verification consumes each parsed record before reusing scratch; recovery retains independent records. */
+    /** Retained reads own records; verification and replay consume scratch before reuse. */
     private static Snapshot read(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                  SegmentControlFormat.Owner owner, Reference reference, long maxLogBytes,
-                                 Snapshot expected) throws IOException {
+                                 Snapshot expected, RecordReplay replay) throws IOException {
         if (reference.payloadBytes() - maxLogBytes > maxLogBytes) {
             throw new IOException("Control checkpoint exceeds its control-state budget");
         }
@@ -157,8 +169,9 @@ final class SegmentControlCheckpoint {
                 throw new IOException("Control checkpoint differs from its frozen applied state");
             }
             MessageDigest digest = sha256();
-            List<Operation> operations = expected == null ? new ArrayList<>(count) : null;
-            ByteBuffer scratch = expected == null || count == 0 ? null
+            boolean retain = expected == null && replay == null;
+            List<Operation> operations = retain ? new ArrayList<>(count) : null;
+            ByteBuffer scratch = retain || count == 0 ? null
                     : ByteBuffer.allocate(Math.min(MAX_RECORD_BYTES, reference.payloadBytes() - 16));
             ByteBuffer prefix = ByteBuffer.allocate(16);
             long offset = 4224;
@@ -178,24 +191,29 @@ final class SegmentControlCheckpoint {
                         || length < 144 || length > MAX_RECORD_BYTES || length > file.size() - offset - 16) {
                     throw new IOException("Invalid Control checkpoint operation");
                 }
-                ByteBuffer record = expected == null ? ByteBuffer.allocate(length) : scratch.clear().limit(length);
+                ByteBuffer record = retain ? ByteBuffer.allocate(length) : scratch.clear().limit(length);
                 SegmentFileIo.readFully(file, record, offset + 16);
                 digest.update(record.duplicate());
                 SegmentControlParser.parse(record, owner, new Generation(1), nextSequence);
-                if (expected == null) {
+                if (retain) {
                     operations.add(new Operation(nextSequence, status, record));
-                } else {
+                } else if (expected != null) {
                     Operation frozen = expected.operations().get(index);
                     if (frozen.sequence() != nextSequence || frozen.status() != status
                             || !frozen.record().equals(record)) {
                         throw new IOException("Control checkpoint record differs from its frozen applied state");
                     }
+                } else {
+                    replay.accept(new Operation(nextSequence, status, record), compactedHistory);
                 }
                 offset += 16L + length;
                 sequence = nextSequence;
             }
             if (offset != file.size() || !reference.digest().equals(HexFormat.of().formatHex(digest.digest()))) {
                 throw new IOException("Control checkpoint payload digest mismatch");
+            }
+            if (replay != null) {
+                return null; // The replay callback owns decoded fields, never the borrowed record backing.
             }
             return expected != null ? expected
                     : new Snapshot(reference.through(), reference.logOffset(), operations, compactedHistory);

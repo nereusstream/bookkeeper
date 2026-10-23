@@ -489,6 +489,109 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void checkpointReplayConsumesRecordsWithoutMaterializingTheWholeImage() throws Exception {
+        var standard = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.Assume.assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        var memory = (com.sun.management.ThreadMXBean) standard;
+        org.junit.Assume.assumeTrue(memory.isThreadAllocatedMemorySupported());
+        boolean enabled = memory.isThreadAllocatedMemoryEnabled();
+        if (!enabled) {
+            memory.setThreadAllocatedMemoryEnabled(true);
+        }
+        try {
+            IsolatedSegmentConfig config = config();
+            ByteBuffer body = ByteBuffer.allocate(65536 - 144);
+            for (int i = 0; i < body.capacity(); i++) {
+                body.put(i, (byte) (i * 31));
+            }
+            var operations = new java.util.ArrayList<SegmentControlCheckpoint.Operation>();
+            for (int i = 0; i < 64; i++) {
+                // Physical framing vector; the callback consumes fields, not semantic ALLOC authority.
+                var record = SegmentControlFormat.encode(SegmentControlFormat.Type.ALLOC, new Generation(1), i,
+                        new UUID(0, i + 1), new Generation(1), 0, body);
+                operations.add(new SegmentControlCheckpoint.Operation(i, i % 4 + 1, record));
+            }
+            var snapshot = new SegmentControlCheckpoint.Snapshot(63, 4096, operations, true);
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+                var warm = new SegmentControlCheckpoint.Snapshot(0, 4096, operations.subList(0, 1), true);
+                var warmReference = SegmentControlCheckpoint.reference(1, 0, warm, 8 * 1024 * 1024);
+                SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        warmReference, warm, new SegmentFileIo());
+                SegmentControlCheckpoint.replayRecords(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        warmReference, 8 * 1024 * 1024, (operation, compacted) -> { });
+                var reference = SegmentControlCheckpoint.reference(2, 0, snapshot, 8 * 1024 * 1024);
+                SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        reference, snapshot, new SegmentFileIo());
+                long[] visited = new long[2];
+                SegmentControlCheckpoint.RecordReplay replay = (operation, compacted) -> {
+                    assertTrue(compacted);
+                    var record = operation.record();
+                    assertEquals(operation.sequence(), record.getLong(24));
+                    visited[0]++;
+                    visited[1] += record.remaining();
+                };
+                long thread = Thread.currentThread().getId();
+                long before = memory.getThreadAllocatedBytes(thread);
+                SegmentControlCheckpoint.replayRecords(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        reference, 8 * 1024 * 1024, replay);
+                long allocated = memory.getThreadAllocatedBytes(thread) - before;
+                System.out.println("Checkpoint replay Java allocation: payload=" + reference.payloadBytes()
+                        + ", allocated=" + allocated);
+                assertEquals(64, visited[0]);
+                assertEquals(64L * 65536, visited[1]);
+                assertTrue("Checkpoint replay materialized payload: " + allocated,
+                        allocated < reference.payloadBytes() / 4);
+                assertEquals(snapshot, SegmentControlCheckpoint.read(config, identity(),
+                        SegmentControlFormat.Owner.ARENA, reference, 8 * 1024 * 1024));
+            }
+        } finally {
+            if (!enabled) {
+                memory.setThreadAllocatedMemoryEnabled(false);
+            }
+        }
+    }
+
+    @Test
+    public void lateCheckpointDigestFailureDiscardsTentativeAllocationBeforeFallback() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentControlCheckpoint.Reference first;
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            log.submitBatch(List.of(alloc(1, 4096)));
+            first = log.checkpoint();
+            log.submitBatch(List.of(alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES)));
+            var latest = log.checkpoint();
+            var snapshot = SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    latest, 1024 * 1024);
+            var changed = new java.util.ArrayList<>(snapshot.operations());
+            var last = changed.get(changed.size() - 1);
+            var ghost = alloc(3, 4096 + SegmentArenaControlLog.BLOCK_BYTES);
+            var record = SegmentControlFormat.encode(ghost.type(), new Generation(1), last.sequence(),
+                    ghost.operationId(), ghost.operationGeneration(), ghost.expectedGeneration(), ghost.body());
+            changed.set(changed.size() - 1, new SegmentControlCheckpoint.Operation(
+                    last.sequence(), last.status(), record));
+            var invalid = new SegmentControlCheckpoint.Snapshot(snapshot.through(), snapshot.logOffset(),
+                    changed, snapshot.compactedCheckpointHistory());
+            var recalculated = SegmentControlCheckpoint.reference(latest.generation(), latest.slot(), invalid,
+                    1024 * 1024);
+            assertEquals(latest.payloadBytes(), recalculated.payloadBytes());
+            assertFalse(latest.digest().equals(recalculated.digest()));
+            // Keep the committed reference but replace the final operation with a valid CRC/semantic frame.
+            SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    latest, invalid, new SegmentFileIo());
+        }
+        try (var recovered = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(first, recovered.publishedCheckpoint().orElseThrow());
+            assertEquals(4096, recovered.currentAllocation(1).offset());
+            assertEquals(4096 + SegmentArenaControlLog.BLOCK_BYTES, recovered.currentAllocation(2).offset());
+            assertThrows(IOException.class, () -> recovered.currentAllocation(3));
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    recovered.submitBatch(List.of(alloc(3, 4096 + 2 * SegmentArenaControlLog.BLOCK_BYTES)))
+                            .get(0).status());
+        }
+    }
+
+    @Test
     public void checkpointVerificationDoesNotMaterializeTheFrozenPayloadAgain() throws Exception {
         var standard = java.lang.management.ManagementFactory.getThreadMXBean();
         org.junit.Assume.assumeTrue(standard instanceof com.sun.management.ThreadMXBean);

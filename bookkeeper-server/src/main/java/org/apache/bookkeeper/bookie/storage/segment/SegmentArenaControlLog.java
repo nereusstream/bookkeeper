@@ -1822,17 +1822,16 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     private void restoreSnapshot(SegmentControlCheckpoint.Reference reference) throws IOException {
-        SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(
-                config, identity, SegmentControlFormat.Owner.ARENA, reference, maxLogBytes);
         resetRecoveredState();
-        for (SegmentControlCheckpoint.Operation operation : snapshot.operations()) {
+        SegmentControlCheckpoint.replayRecords(config, identity, SegmentControlFormat.Owner.ARENA,
+                reference, maxLogBytes, (operation, compactedHistory) -> {
             Command command = decodeCommand(operation.record(), operation.sequence());
             validateCommand(command);
             if (appliedOperations.containsKey(command.operationId())) {
                 throw new IOException("Repeated operation in Arena checkpoint");
             }
             appliedThrough = operation.sequence();
-            if (snapshot.compactedCheckpointHistory() && command instanceof CheckpointCommit commit
+            if (compactedHistory && command instanceof CheckpointCommit commit
                     && operation.status() == Status.APPLIED_DURABLE.ordinal() + 1) {
                 if (commit.operationGeneration().value() <= checkpointGeneration
                         || commit.operationGeneration().value() >= reference.generation()) {
@@ -1843,13 +1842,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (apply(command).ordinal() + 1 != operation.status()) {
                 throw new IOException("Arena checkpoint conditional result mismatch");
             }
-        }
+        });
         if (checkpointGeneration != reference.generation() - 1) {
             throw new IOException("Arena checkpoint does not retain its committed predecessor");
         }
-        appliedThrough = snapshot.through();
-        durableThrough = snapshot.through();
-        appliedOffset = snapshot.logOffset();
+        appliedThrough = reference.through();
+        durableThrough = reference.through();
+        appliedOffset = reference.logOffset();
         publishedCheckpoint = reference;
     }
 
