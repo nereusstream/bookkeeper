@@ -2230,3 +2230,18 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ```
 
 1171个Java输入、五阶段原source及精确overrides/命令/XML/child输出/失败报告在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-crash-evidence-bms4scie`。只有cold authority分发改变；TLA转移未改，授权来源及真实force/halt事实由本Java验证，不重跑/移绑旧TLC或宣称全A+C+D。最终Spotless/Checkstyle exit0；Java/style终结后独立RAT exit1，443 unapproved路径均为父HEAD既有、无新增，不称CI全绿。unclean DATA session的安全recovery/尾部与reuse解析、原intent在原target crash续接、cursor/readiness/registration全部恢复交错、完整恢复接受下界/运维及其余16步继续OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变。这里执行了真实进程halt；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 崩溃后新身份目标的注册与在线删除闭环
+
+2026-10-23，父源码 `807f78579aa3f21673ed0b4506d39dbfcdd910cd`。在上一节真实child halt/原target隔离/新身份copy-member路径上，继续复用原owned ServiceEpisode完成新target4自己的首次bootstrap：正常关闭其原隔离writer，重开该新身份目录，通过当前startup requirements、assignment/verified-zero、真实readiness及ephemeral registration，再由 `connectRegistered` 完成fresh native revalidation与mTLS/HELLO，实际读出导入entry。旧source/崩溃target3的控制、cursor或grant没有被复制为新target4权限，原CLOSED P/length/cut及无normal权限断言保留。
+
+随后实际逻辑删除该ledger，新target4原有delete follower取得事件、执行local durable apply到cursor1及terminal tombstone，注册连接再次点读得到REFUSED。删除Manifest完整字节在投递前后保持一致，仍包含崩溃target3与新target4的准确incarnation。这个组合补齐上一节明确未验的新target4服务注册及在线删除，不解除崩溃target3、旧source或任何物理清理义务，不把logical success称为全目标physical completion/GC。
+
+`unified-wal-local-Wa1PA8bb` 原restore方法14场景全部完成，1方法0 failure/error/skip，唯一child durable-halt marker和实际owned注册/投递输出保留。只改该测试的组合覆盖，生产Java/TLA转移未改，无须重复其他独立测试或TLC。1171个native输入原样冻结，随后只有测试代码换行；非空白字符逐项相同，native原source与最终format-only override分别保存，不移绑原XML。初次style仍有一条122-character行，补换行后Spotless/Checkstyle exit0；Java/style终结后独立RAT exit1，443 unapproved路径均存在父HEAD、无新增，不称CI全绿。证据 `/Users/liusinan/.codex/artifacts/unified-wal/restore-service-cycle-evidence-_w7g9gy6` 保留原命令/输入/XML/child日志与format-only证明。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy'
+```
+
+同incarnation未关闭DATA session的恢复接受条件仍未冻结：现有OPEN记录也可能来自DATA I/O失败、quarantine尚未持久的退出；完整扫描或再次sync不能自行清除旧unknown/恢复旧normal route。已按AGENTS.md §1询问新增数据语义由规划会话裁决，或先以当前集群fence/CLOSED全部受影响实例为条件，或引入独立持久边界/错误证据保留OPEN语义；未答复不视为授权，不修改原refusal。该新身份组合不替代原target/原intent crash resume。完整恢复/接受下界/运维、full-bytes/默认SDK/Main/其他required producer/兼容/性能与全部16步仍OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变；Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

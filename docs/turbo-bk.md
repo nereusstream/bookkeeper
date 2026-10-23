@@ -835,3 +835,6 @@ Segment production candidate 的最低 Gate：
 
 
 [Owned service 的 repair INSTALL 与崩溃目标隔离](rfcs/unified-wal/implementation/profile-wire/README.md#owned-service-的-repair-install-与崩溃目标隔离)：2026-10-23父3e233f324b上，修复owned PREPARING_INSTALL漏查repair authority：仅initial NOT_FOUND时查原repair reader。真实owned/ZK/mTLS INSTALL NOT_FOUND RED已复现；修复后子JVM首条recovery DATA OK/APPLIED前halt23、无Java cleanup，原target因unclosed DATA session拒绝重开/注册；另新身份可完成copy/member/close，随后删除仍保留崩溃及新target义务。最终两方法通过（restore14场景及原owned SDK/drain），1171输入/五阶段保持原绑定，TLA未改不移绑旧receipt。**同target/同intent的unclean-session crash resume及新target4注册闭环尚未验收，不能以新身份重建替代该完整目标**；cursor/readiness/registration恢复、接受下界/运维及全16步仍OPEN、目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变，真实掉电/Linux NUMA/正式性能/canary未执行。
+
+
+[崩溃后新身份目标的注册与在线删除闭环](rfcs/unified-wal/implementation/profile-wire/README.md#崩溃后新身份目标的注册与在线删除闭环)：2026-10-23父807f78579a上，只扩展原restore测试。真实child halt后原target3保持隔离，新身份target4完成当前owned startup/registration/fresh peer+mTLS点读，再由原follower投递实际删除到cursor1/tombstone并拒绝后续读；Manifest完整字节与旧、新target义务保持。原14场景方法通过，1171 native输入及最终format-only换行分开保存；生产Java/TLA未改，不重跑TLC。补齐上一阶段新target4注册缺口，**不替代原target/原intent的unclean-session恢复**；相关新增数据语义已提请用户选择，未答复不放行。完整16步仍OPEN、目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。

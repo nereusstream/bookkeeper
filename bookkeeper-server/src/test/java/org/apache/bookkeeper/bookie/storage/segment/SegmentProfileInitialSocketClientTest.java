@@ -8596,14 +8596,49 @@ public class SegmentProfileInitialSocketClientTest {
                                             .FOUND,
                                     freshPeer.readEntry(fixture.context(), 1).get(5, TimeUnit.SECONDS).outcome());
                             assertFalse(fixture.normal(4));
-                            var removed = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
-                                    .deleteLedgerAsync(44, bytes(16, 123), sdk.getClientCtx(), Duration.ofSeconds(10))
-                                        .get(10, TimeUnit.SECONDS);
-                            assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, removed.status());
-                            for (var retained : List.of(target, fresh)) {
-                                assertTrue(removed.manifest().targets().stream().anyMatch(value ->
-                                        value.bookie().equals(retained.bookieId().toString())
-                                            && Arrays.equals(value.incarnation(), retained.incarnation().value())));
+                            var freshConfig = files(fixture.nodes.get(4)).config();
+                            var freshPolicy = servicePolicy(freshConfig, fresh, 1);
+                            try (var service = new ServiceEpisode(fixture, 4, freshConfig, freshPolicy,
+                                    freshPolicy.compatibility(), new InetSocketAddress("127.0.0.1", 0),
+                                    sdk.getClientCtx().getScheduler(), false, true)) {
+                                service.replaceNode(fixture, 4, true);
+                                var registered = service.persistent.readPeer(fresh.bookieId().toString()).peer();
+                                assertNotNull(registered);
+                                var connection = ProfileNormalDataClient.connectRegistered(fixture.clientGroup,
+                                        fixture.peerTls, service.persistent, registered, fixture.cold,
+                                        4, 1060, Duration.ofSeconds(5));
+                                var registeredData = connection.completion().get(5, TimeUnit.SECONDS);
+                                fixture.dataClients.add(registeredData);
+                                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec
+                                                .Outcome.FOUND,
+                                        registeredData.readEntry(fixture.context(), 1)
+                                                .get(5, TimeUnit.SECONDS).outcome());
+                                assertFalse(fixture.normal(4));
+                                var removed = new ProfileDeleteCoordinator(
+                                        fixture.reservations, metadata, fixture.cold)
+                                        .deleteLedgerAsync(44, bytes(16, 123), sdk.getClientCtx(),
+                                                Duration.ofSeconds(10))
+                                            .get(10, TimeUnit.SECONDS);
+                                assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
+                                        removed.status());
+                                for (var retained : List.of(target, fresh)) {
+                                    assertTrue(removed.manifest().targets().stream().anyMatch(value ->
+                                            value.bookie().equals(retained.bookieId().toString())
+                                                && Arrays.equals(value.incarnation(), retained.incarnation().value())));
+                                }
+                                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                                while (!bookie(service.storage()).hasTerminalTombstone(fixture.context())
+                                        && System.nanoTime() < deadline) {
+                                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+                                }
+                                assertTrue(bookie(service.storage()).hasTerminalTombstone(fixture.context()));
+                                assertEquals(1, service.storage().profileDeleteProgress().sequence());
+                                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec
+                                                .Outcome.REFUSED,
+                                        registeredData.readEntry(fixture.context(), 1)
+                                                .get(5, TimeUnit.SECONDS).outcome());
+                                assertArrayEquals(removed.manifest().encode(), fixture.reservations
+                                        .readLogicalDeletion(metadata, 44, bytes(16, 123)).manifest().encode());
                             }
                             continue;
                         }
