@@ -9976,6 +9976,145 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void recoveryScanQuotaRefusesOversizedBatchBeforeNewDataSession() throws Exception {
+        var base = config();
+        int payloadBytes = 16 * 1024;
+        var config = new IsolatedSegmentConfig(base.directory(), 1, 4, 1, base.bytesPerFile(),
+                4096, payloadBytes, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        try (var source = recoveryStorage(config, null)) {
+            source.startNew();
+            installStorage(source, install(44, 1, (byte) 5), activate(44, 2));
+            var written = storageWriteReply(source, context(44), 1,
+                    entry(context(44), 1, -1, payloadBytes, (byte) 9, payloadBytes));
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, written.status());
+        }
+        int batchBytes;
+        try (var file = FileChannel.open(config.directory().resolve("data-0"), StandardOpenOption.READ)) {
+            var header = ByteBuffer.allocate(SegmentBatchFormat.HEADER);
+            SegmentFileIo.readFully(file, header, 4096);
+            batchBytes = header.getInt(72);
+            assertTrue(batchBytes > 8192);
+        }
+        var original = new java.util.HashMap<String, byte[]>();
+        for (String name : List.of("arena-control", "bookie-control", "data-0")) {
+            original.put(name, Files.readAllBytes(config.directory().resolve(name)));
+        }
+        // This case deliberately requires a full scan rather than a persisted coverage shortcut.
+        org.apache.commons.io.FileUtils.deleteDirectory(config.directory().resolve("derived-index").toFile());
+        var insufficient = new ProfileReceiveBudget(batchBytes + 1L, 1, 1, 1, 1, 1);
+        try (var denied = recoveryStorage(config, insufficient)) {
+            assertThrows(ProfileReceiveBudget.CapacityExceededException.class, denied::restart);
+            assertThrows(IllegalStateException.class, denied::controls);
+            assertEquals(0, insufficient.used(ProfileReceiveBudget.Lane.DATA));
+            assertTrue(insufficient.closeAdmissionAndDrain().isDone());
+        }
+        for (var entry : original.entrySet()) {
+            assertArrayEquals(entry.getKey(), entry.getValue(),
+                    Files.readAllBytes(config.directory().resolve(entry.getKey())));
+        }
+        try (var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertFalse(arena.hasUnclosedDataSession());
+            assertEquals(1, arena.dataSessionEpoch());
+        }
+        var bounded = new ProfileReceiveBudget(2L * batchBytes + 8194, 1, 1, 1, 1, 1);
+        try (var replay = recoveryStorage(config, bounded)) {
+            replay.restart();
+            assertEquals(0, bounded.used(ProfileReceiveBudget.Lane.DATA));
+            ReadReply reply = storageRead(replay, context(44), 1);
+            try (var entry = reply.result()) {
+                assertEquals(1, entry.result().record().entryId());
+            }
+        }
+        assertTrue(bounded.closeAdmissionAndDrain().isDone());
+    }
+
+    @Test
+    public void recoveryScanCancellationAndCorruptBodyReturnCredits() throws Exception {
+        var config = config();
+        try (var source = storage(config, 2, 6, 16)) {
+            source.startNew();
+            installStorage(source, install(44, 1, (byte) 5), activate(44, 2));
+            storageWrite(source, context(44), 1);
+        }
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                var bookie = SegmentBookieControlLog.open(config, identity(), 1024 * 1024,
+                        key((byte) 3), VALIDATOR)) {
+            var budget = new ProfileReceiveBudget(64 * 1024L + 2, 1, 1, 1, 1, 1);
+            var syncing = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var terminal = new CountDownLatch(1);
+            var result = new AtomicReference<SegmentDataRecovery.PhysicalInventory>();
+            var failed = new AtomicReference<Throwable>();
+            var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try {
+                var caller = executor.submit(() -> {
+                    try {
+                        result.set(SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(
+                                config, identity(), arena, bookie,
+                                new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                                    syncing.countDown();
+                                    await(release);
+                                }), 16, config.logicalShards(), lock.lock(), null, budget));
+                    } catch (Throwable failure) {
+                        failed.set(failure);
+                    } finally {
+                        terminal.countDown();
+                    }
+                });
+                assertTrue(syncing.await(5, TimeUnit.SECONDS));
+                assertTrue(caller.cancel(false));
+                assertNull(result.get());
+                assertEquals(1, terminal.getCount());
+                var drain = budget.closeAdmissionAndDrain();
+                release.countDown();
+                assertTrue(terminal.await(5, TimeUnit.SECONDS));
+                assertNull(failed.get());
+                drain.get(5, TimeUnit.SECONDS);
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            } finally {
+                release.countDown();
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            }
+            var location = result.get().uniqueLocation(arena, context(44), 1);
+            long offset = location.recordOffset() + SegmentBatchFormat.RECORD_HEADER
+                    + SegmentBatchFormat.ENTRY_OVERHEAD;
+            try (var data = FileChannel.open(config.directory().resolve("data-0"),
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                var original = ByteBuffer.allocate(1);
+                SegmentFileIo.readFully(data, original, offset);
+                byte value = original.get(0);
+                try {
+                    assertEquals(1, data.write(ByteBuffer.wrap(new byte[] {(byte) (value ^ 1)}), offset));
+                    data.force(true);
+                    var failureBudget = new ProfileReceiveBudget(64 * 1024L + 2, 1, 1, 1, 1, 1);
+                    var sync = new SegmentFileIo();
+                    IOException invalid = assertThrows(IOException.class, () ->
+                            SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(
+                                    config, identity(), arena, bookie, sync, 16, config.logicalShards(),
+                                    lock.lock(), null, failureBudget));
+                    assertTrue(invalid.getMessage(), invalid.getMessage().contains("CRC"));
+                    assertEquals(0, sync.forces);
+                    assertEquals(0, failureBudget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertTrue(failureBudget.closeAdmissionAndDrain().isDone());
+                } finally {
+                    assertEquals(1, data.write(ByteBuffer.wrap(new byte[] {value}), offset));
+                    data.force(true);
+                }
+            }
+        }
+    }
+
+    private IsolatedSegmentStorage recoveryStorage(IsolatedSegmentConfig config, ProfileReceiveBudget budget) {
+        return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
+                new SegmentExecutionGroup.Settings(2, 2, 6, 4, 32768, 32768,
+                        4 * (32768L + 4095) + 32768, Duration.ofSeconds(5)),
+                new IsolatedSegmentStorage.Limits(1024 * 1024, 16, 16, 1, 1,
+                        new SegmentDataPhysicalDriver.BatchLimits(32768, 1, Duration.ofSeconds(30))), budget);
+    }
+
+    @Test
     public void bothControlCheckpointsPreserveTheStorageGraphReadDuplicateAndAppendAcrossRestart() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("checkpoint"),
                 1, 4, 1, 16L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

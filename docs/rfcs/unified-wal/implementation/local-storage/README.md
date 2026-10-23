@@ -1111,3 +1111,19 @@ Arena 的原 journal/checkpoint/rotation parser、顺序 apply、坏 image fallb
 本轮交付的是离线文件/Arena状态观察入口，不是完整运维验收或backup/restore完成。DATA/Bookie语义诊断、运行中采集、同身份unclean-session接受语义、统一full-bytes、兼容与其余16步仍OPEN，目标active、生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary未执行，默认OFF/SYSTEM/PARK与disabled能力保持。
 
 [SDK 迟到 DATA 到删除复用及健康重启的原生组合](../profile-wire/README.md#sdk-迟到-data-到删除复用及健康重启的原生组合)：2026-10-23父bf9c813280上，新增一方法串联实际3/3/2 SDK ACK、第三副本force跨越stop、固定P/L普通close、三目标delete/本地FREE、ledger45复用generation2及逐节点健康restart/mTLS点读。最终1 PASS、1172输入匹配、生产Java/TLA未改、style通过；旧Manifest/三target义务保留。仅单Arena顺序复用的有限组合，非crash、多Arena、持久physical receipt/GC或完整16步验收；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+## Profile 启动恢复扫描的 DATA 字节额度
+
+2026-10-23，父提交 `66e860ea322e27f17ce58d18a6e47305031ba496` 上，将原 `SegmentProfileService` 的 `ProfileReceiveBudget` 经 storage/files 传给 DATA recovery scan。此前固定 pool 与派生 index 的配置容量已经预留，但恢复过程的临时 `ByteBuffer` 未从同一 DATA lane 计费。本次在分配前预留 immutable header、扫描 page/header、未被持久 coverage 覆盖的完整 batch 容量；covered MOVE 校验复用原 `readWithScratch`，对单份 scratch 容量预留。每份 credit 随其实际使用 scope 退出归还，解析 payload view 不逃逸到启动 inventory，inventory 仍只保留 location 元数据。
+
+额度不足直接中止启动，不能发布可用 graph 或开启下一 DATA writer session。原 CRC、grant/generation、stream 连续性、selector、control cut 与 recovery force 检查保持；持久 coverage 仍只读必要 header，不能因计费退化为每次读取全部 body。重开文件时再次校验的 header 也计费。原 standalone 实验入口仍可使用无 Profile budget 的重载，不能将它们算作已完成统一预算。
+
+新增两个真实文件方法，复用原 fixture：`recoveryScanQuotaRefusesOversizedBatchBeforeNewDataSession` 写入 16 KiB payload、健康关闭并移除派生 index，读取实际持久 batch 长度；DATA 额度小于该 batch 时拒绝 restart，三个 native 文件完整字节不变、session 仍 CLOSED/epoch1、credit 归零；足够额度时重建并点读成功。`recoveryScanCancellationAndCorruptBodyReturnCredits` 在真实 recovery force 前暂停，取消 caller future 后扫描仍未终结；放行后取得 inventory 并实际归还额度。再破坏一个 payload 字节，CRC 拒绝且不执行 recovery force、归还全部本次 credit，最后恢复测试文件。该测试不把 caller cancel 当作 native I/O abort，也不规定 buffer 必须保留到不再使用它的 force 阶段。
+
+最终 `unified-wal-local-suZOJFIe` 为上述两方法、原 covered MOVE/restart 和原 owned service SDK/drain/restart 共 **4 PASS、0 failure/error/skip**，1172 个源码/资源输入均与最终 Java 一致。仅把 storage 到 recovery 的 budget 转发改为 null 的敏感性运行 `wR5iHM7l` 在新大 batch 方法中出现预期的“未抛 CapacityExceededException”；这是局部绕过计费的反例，不能称为完整旧版本 RED。早期小 batch 的 green/同类 RED、初版 style 与中间四方法结果各按当时源码独立保留，不移绑到最终测试。
+
+原命令、各阶段输入与源码覆盖、完整 Maven/XML、失败和最终结果位于 `/Users/liusinan/.codex/artifacts/unified-wal/recovery-scratch-evidence-y983ttp2`。最终 Java 的 Spotless/Checkstyle exit0；只改文档后不重复 Java 测试。TLA 转移未变，没有重跑 TLC 或重绑旧 receipt。
+
+这是 Profile graph/service 的启动 DATA buffer capacity 计费；没有改变固定 pool/index 配置、增加线程/配置/格式，也没有为普通 Add 增加 metadata 往返、控制 force 或 handshake。控制重放与 inventory 对象、standalone backup、其他 heap/native/JDK/TLS/kernel 及全局 full-bytes 仍未闭合；buffer credit 归还也不是 RSS 下降证明。默认 SDK/observe 公共约定、同 incarnation unclosed-session 接受条件、多 Arena 持久路由及其余完整16步继续 OPEN，目标 active、生产 Gate OPEN，默认 OFF/SYSTEM/PARK 和 disabled 能力保持。Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
+
+最终 native/style 终结后的独立 `mvn -o apache-rat:check` exit1，443 个 unapproved 路径全部存在父提交，无新增；原报告和逐路径 Git 对象核验保留，不称 CI 全绿。

@@ -224,6 +224,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private final ProfileDescriptorValidator validator;
     private final SegmentExecutionGroup.Settings executionSettings;
     private final Limits limits;
+    private final ProfileReceiveBudget recoveryBudget;
     private final SegmentDataPhysicalDriver.NormalBatcher[] writes;
     private final SegmentPointRead.Reader[] reads;
     private final SegmentHotDirectory[] hotDirectories;
@@ -270,6 +271,13 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     IsolatedSegmentStorage(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
                            ProfileDescriptorValidator validator, SegmentExecutionGroup.Settings executionSettings,
                            Limits limits) {
+        this(config, identity, key, validator, executionSettings, limits, null);
+    }
+
+    IsolatedSegmentStorage(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
+                           ProfileDescriptorValidator validator, SegmentExecutionGroup.Settings executionSettings,
+                           Limits limits, ProfileReceiveBudget recoveryBudget) {
+        this.recoveryBudget = recoveryBudget;
         this.config = Objects.requireNonNull(config, "config");
         this.identity = Objects.requireNonNull(identity, "identity");
         this.key = Objects.requireNonNull(key, "key");
@@ -903,7 +911,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 index = SegmentDerivedIndex.open(config, identity, limits.indexedEntries());
                 if (existing) {
                     files = IsolatedSegmentFiles.openForLocalResults(config, identity, arena, bookie,
-                            new SegmentFileIo(), limits.indexedEntries(), config.logicalShards(), index, startupLock);
+                            new SegmentFileIo(), limits.indexedEntries(), config.logicalShards(), index, startupLock,
+                            recoveryBudget);
                     startupLock = null; // The same native lock now belongs to files.
                 } else {
                     files.startSession(arena);

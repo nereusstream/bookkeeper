@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Objects;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 
 /** Disposable fixed-capacity files only. Physical batch durability is not local entry success. */
 final class IsolatedSegmentFiles implements AutoCloseable {
@@ -450,9 +451,18 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                     SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
                                                     SegmentDerivedIndex index, SegmentDataFileLock startupLock)
             throws IOException {
+        return openForLocalResults(config, identity, authority, bookie,
+                recoveryIo, maxEntries, maxStreams, index, startupLock, null);
+    }
+
+    static IsolatedSegmentFiles openForLocalResults(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                    SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
+                                                    SegmentDerivedIndex index, SegmentDataFileLock startupLock,
+                                                    ProfileReceiveBudget recoveryBudget) throws IOException {
         try {
             return openLocalResultsWhileExcluded(config, identity, authority, bookie,
-                    recoveryIo, maxEntries, maxStreams, index, startupLock);
+                    recoveryIo, maxEntries, maxStreams, index, startupLock, recoveryBudget);
         } catch (IOException | RuntimeException | Error failure) {
             if (startupLock != null) {
                 try {
@@ -468,7 +478,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private static IsolatedSegmentFiles openLocalResultsWhileExcluded(
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
             SegmentBookieControlLog bookie, SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
-            SegmentDerivedIndex index, SegmentDataFileLock startupLock) throws IOException {
+            SegmentDerivedIndex index, SegmentDataFileLock startupLock,
+            ProfileReceiveBudget recoveryBudget) throws IOException {
         Objects.requireNonNull(bookie, "bookie");
         if (maxEntries < 1 || maxStreams < 1) {
             throw new IllegalArgumentException("Positive restart locator and stream capacities required");
@@ -483,7 +494,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             }
             long cut = bookie.recoveryReadCut(config, identity);
             IsolatedSegmentFiles result = openAppendOnly(config, identity, authority, bookie,
-                    recoveryIo, maxEntries, maxStreams, index, startupLock);
+                    recoveryIo, maxEntries, maxStreams, index, startupLock, recoveryBudget);
             try {
                 if (index != null) {
                     if (result.startupInventory.usesIndexCoverage()) {
@@ -529,6 +540,15 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                        SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
                                                        SegmentDerivedIndex index, SegmentDataFileLock startupLock)
             throws IOException {
+        return openAppendOnly(config, identity, authority, bookie,
+                recoveryIo, maxEntries, maxStreams, index, startupLock, null);
+    }
+
+    private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                       SegmentArenaControlLog authority, SegmentBookieControlLog bookie,
+                                                       SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
+                                                       SegmentDerivedIndex index, SegmentDataFileLock startupLock,
+                                                       ProfileReceiveBudget recoveryBudget) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(authority, "authority");
@@ -551,7 +571,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                     SegmentDerivedIndex.RecoveryCoverage seed = index == null ? null
                             : index.recoveryCoverage(authority, bookie).orElse(null);
                     inventory = SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(config, identity,
-                            authority, bookie, recoveryIo, maxEntries, maxStreams, guard.lock(), seed);
+                            authority, bookie, recoveryIo, maxEntries, maxStreams, guard.lock(), seed, recoveryBudget);
                 }
                 result = new IsolatedSegmentFiles(config, identity, guard, true, inventory);
                 for (int file = 0; file < config.dataFiles(); file++) {
@@ -561,9 +581,12 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                     if (data.size() != config.bytesPerFile()) {
                         throw new IOException("DATA file size changed during restart");
                     }
-                    ByteBuffer header = ByteBuffer.allocate(4096);
-                    SegmentFileIo.readFully(data, header, 0);
-                    identity.validate(header, config, file);
+                    try (var headerCredit = recoveryBudget == null ? null
+                            : recoveryBudget.reserveDataWorkingSet(4096)) {
+                        ByteBuffer header = ByteBuffer.allocate(4096);
+                        SegmentFileIo.readFully(data, header, 0);
+                        identity.validate(header, config, file);
+                    }
                     long next = authority.grantedHighWatermark(file);
                     if (next < 4096 || next > config.bytesPerFile() || next % config.alignment() != 0) {
                         throw new IOException("Invalid durable allocation high watermark");

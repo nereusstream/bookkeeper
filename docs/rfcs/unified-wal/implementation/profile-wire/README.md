@@ -2315,3 +2315,5 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 各阶段完整输入、测试源码、原Maven/XML、失败及最终结果保存在 `/Users/liusinan/.codex/artifacts/unified-wal/native-acd-lifecycle-evidence-cwjn_km8`。当前是同主机三Bookie、每Bookie单Arena、一个旧ledger删除后由新ledger顺序复用的有限组合；不替代共享allocation内多个存活/删除邻居、全部lost-reply/fence/故障窗口、多Arena、进程crash、真实掉电、owned服务readiness/rejoin或完整A+C+D/Gate验收。同incarnation unclosed-session接受条件、默认SDK/observe公共约定、多Arena持久路由及其他16步剩余项继续保留，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled能力不变。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
 本轮native与style实际终结后的独立 `mvn -o apache-rat:check` exit1：443个unapproved路径均存在父HEAD，无新增；原报告与逐路径Git对象核验保留，不称CI全绿。
+
+[Profile 启动恢复扫描的 DATA 字节额度](../local-storage/README.md#profile-启动恢复扫描的-data-字节额度)：2026-10-23父66e860ea32上，将原 service DATA quota 传给 restart scan，在分配 header/page/batch/covered MOVE scratch 前计费，实际 scope 结束归还；额度不足不启动新 DATA session。真实大 batch 拒绝、caller cancel/实际 force、CRC 失败回收及原 covered MOVE/owned SDK restart 共4方法通过，1172输入匹配、最终style通过；绕过 budget 转发的敏感性RED独立保留。只闭合启动DATA buffer计费，全字节、同身份crash/多Arena待决语义和完整16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

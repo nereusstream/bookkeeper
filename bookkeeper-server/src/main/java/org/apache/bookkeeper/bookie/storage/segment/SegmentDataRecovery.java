@@ -38,6 +38,7 @@ import java.util.Optional;
 import java.util.TreeMap;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
@@ -846,13 +847,22 @@ final class SegmentDataRecovery {
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
             SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
             FileLock writerLock, SegmentDerivedIndex.RecoveryCoverage seed) throws IOException {
+        return recoverLocallyReadableInventoryWhileLocked(config, identity, authority, bookie,
+                syncIo, maxEntries, maxStreams, writerLock, seed, null);
+    }
+
+    static PhysicalInventory recoverLocallyReadableInventoryWhileLocked(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
+            SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
+            FileLock writerLock, SegmentDerivedIndex.RecoveryCoverage seed, ProfileReceiveBudget recoveryBudget)
+            throws IOException {
         if (syncIo == null || maxEntries < 1 || maxStreams < 1 || writerLock == null) {
             throw new IllegalArgumentException("Bounded DATA inventory, sync and writer lock required");
         }
         long readCut = bookie.recoveryReadCut(config, identity);
         long arenaCut = authority.appliedThrough();
         PhysicalInventory inventory = scanWhileLocked(config, identity, authority, syncIo,
-                maxEntries, maxStreams, null, bookie, writerLock, seed);
+                maxEntries, maxStreams, null, bookie, writerLock, seed, recoveryBudget);
         if (readCut != bookie.recoveryReadCut(config, identity) || arenaCut != authority.appliedThrough()) {
             throw new IOException("Recovery control cut changed before locator publication");
         }
@@ -962,6 +972,16 @@ final class SegmentDataRecovery {
                                                     int maxEntries, int maxStreams, StreamProbe stream,
                                                     SegmentBookieControlLog bookie, FileLock writerLock,
                                                     SegmentDerivedIndex.RecoveryCoverage seed) throws IOException {
+        return scanWhileLocked(config, identity, authority, syncIo, maxEntries, maxStreams,
+                stream, bookie, writerLock, seed, null);
+    }
+
+    private static PhysicalInventory scanWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                                    SegmentArenaControlLog authority, SegmentFileIo syncIo,
+                                                    int maxEntries, int maxStreams, StreamProbe stream,
+                                                    SegmentBookieControlLog bookie, FileLock writerLock,
+                                                    SegmentDerivedIndex.RecoveryCoverage seed,
+                                                    ProfileReceiveBudget recoveryBudget) throws IOException {
         if (!writerLock.isValid() || !authority.matchesScope(config, identity)) {
             throw new IOException("Arena authority does not match the DATA scope");
         }
@@ -1014,10 +1034,16 @@ final class SegmentDataRecovery {
                 }
                 if (bookie.locallyReadableCoordinate(location.context(), location.entryId())) {
                     if (authority.currentSelectorSequence(location.context(), location.entryId()) >= 0) {
-                        SegmentPointRead.Result verified = SegmentPointRead.read(config, identity, authority, location);
-                        authority.validateSelectedRecord(location, verified.record());
-                        readBytes += verified.bytesRead();
-                        foundMoves.add(location);
+                        int scratchBytes = SegmentPointRead.scratchBytes(location);
+                        try (var scratchCredit = recoveryBudget == null ? null
+                                : recoveryBudget.reserveDataWorkingSet(scratchBytes)) {
+                            ByteBuffer scratch = ByteBuffer.allocate(scratchBytes);
+                            SegmentPointRead.Result verified = SegmentPointRead.readWithScratch(
+                                    config, identity, authority, location, scratch);
+                            authority.validateSelectedRecord(location, verified.record());
+                            readBytes += verified.bytesRead();
+                            foundMoves.add(location);
+                        }
                     }
                     entries.add(location);
                 }
@@ -1028,7 +1054,9 @@ final class SegmentDataRecovery {
                     ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
                             StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
                     : FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
-                            StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                            StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                    var headerCredit = recoveryBudget == null ? null
+                            : recoveryBudget.reserveDataWorkingSet(4096)) {
                 if (data.size() != config.bytesPerFile()) {
                     throw new IOException("DATA file size mismatch");
                 }
@@ -1056,112 +1084,122 @@ final class SegmentDataRecovery {
                         offset += 4096;
                         continue;
                     }
-                    ByteBuffer page = ByteBuffer.allocate(seed == null ? 4096 : SegmentBatchFormat.HEADER);
-                    SegmentFileIo.readFully(data, page, offset);
-                    readBytes += page.remaining();
-                    if (allZero(page)) {
-                        if (reused.isPresent()) {
-                            throw new IOException("Healthy CLOSED reused DATA prefix contains an unwritten page");
-                        }
-                        if (seed != null) {
-                            page = ByteBuffer.allocate(4096);
-                            SegmentFileIo.readFully(data, page, offset);
-                            readBytes += 4096;
-                            if (!allZero(page)) {
-                                throw new IOException("Zero DATA header has nonzero required body");
+                    try (var pageCredit = recoveryBudget == null ? null
+                            : recoveryBudget.reserveDataWorkingSet(seed == null ? 4096 : SegmentBatchFormat.HEADER)) {
+                        ByteBuffer page = ByteBuffer.allocate(seed == null ? 4096 : SegmentBatchFormat.HEADER);
+                        SegmentFileIo.readFully(data, page, offset);
+                        readBytes += page.remaining();
+                        if (allZero(page)) {
+                            if (reused.isPresent()) {
+                                throw new IOException("Healthy CLOSED reused DATA prefix contains an unwritten page");
                             }
-                        }
-                        zeroPages++;
-                        offset += 4096;
-                        continue;
-                    }
-                    SegmentBatchFormat.Address address = address(page, offset);
-                    if (address.fileIndex() != file
-                            || address.shard() % config.dataFiles() != file) {
-                        throw new IOException("DATA batch claims a different physical file");
-                    }
-                    int length = SegmentBatchParser.batchLength(page.slice(0, 128), address,
-                            config.bytesPerFile());
-                    if (reused.isPresent() && length > reused.get().usedEnd() - offset) {
-                        throw new IOException("Current reused DATA exceeds its healthy CLOSED tail");
-                    }
-                    if (!authority.hasAppliedGrant(file, offset, length, address.shard(),
-                            address.streamGeneration().value(), address.allocation(),
-                            address.generation().value())) {
-                        throw new IOException("DATA batch has no matching applied grant");
-                    }
-                    if (maxStreams > 0) {
-                        StreamKey key = new StreamKey(address.shard(), address.streamGeneration());
-                        StreamProgress progress = streams.get(key);
-                        if (progress == null) {
-                            if (streams.size() == maxStreams) {
-                                throw new IOException("Physical recovery stream capacity exhausted");
-                            }
-                            long first = authority.streamFirstSequence(address.shard(),
-                                    address.streamGeneration().value()).orElse(-1);
-                            if (first < 0) {
-                                throw new IOException("Physical stream start has no applied Arena authority");
-                            }
-                            progress = new StreamProgress(first);
-                            streams.put(key, progress);
-                        }
-                        long order = authority.appliedAllocationOrder(address);
-                        if (order < 0) {
-                            throw new IOException("Physical allocation has no applied control order");
-                        }
-                        progress.observe(order, address.sequence());
-                    }
-                    StreamCoverage cut = covered.get(new StreamKey(address.shard(), address.streamGeneration()));
-                    if (cut != null && address.sequence() >= cut.firstSequence()
-                            && address.sequence() <= cut.through()) {
-                        Integer expected = expectedHeaders.remove(address);
-                        if (expected != null && expected != length) {
-                            throw new IOException("Covered DATA header disagrees with indexed batch length");
-                        }
-                        coveredBatches++;
-                        skippedBodyBytes += length - SegmentBatchFormat.HEADER;
-                        offset += length;
-                        continue;
-                    }
-                    ByteBuffer content = ByteBuffer.allocate(length);
-                    SegmentFileIo.readFully(data, content, offset);
-                    readBytes += length;
-                    SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
-                            config.bytesPerFile());
-                    for (SegmentBatchParser.Record record : parsed.records()) {
-                        if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
-                                != address.shard()) {
-                            throw new IOException("DATA record belongs to another logical shard");
-                        }
-                    }
-                    List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
-                    for (int i = 0; i < parsed.records().size(); i++) {
-                        if (authority.isSelectedRecord(locations.get(i), parsed.records().get(i))
-                                && parsed.records().get(i).origin() == SegmentBatchFormat.RELOCATION_COPY) {
-                            foundMoves.add(locations.get(i));
-                        }
-                    }
-                    if (stream != null) {
-                        stream.observe(address);
-                    }
-                    if (maxEntries > 0) {
-                        for (int i = 0; i < parsed.records().size(); i++) {
-                            SegmentBatchParser.Record record = parsed.records().get(i);
-                            if (authority.isSelectedRecord(locations.get(i), record)
-                                    && (stream == null || stream.matches(address))
-                                    && (bookie == null || bookie.locallyReadableCoordinate(
-                                        record.context(), record.entryId()))) {
-                                if (entries.size() == maxEntries) {
-                                    throw new IOException("Physical recovery inventory capacity exhausted");
+                            if (seed != null) {
+                                try (var zeroCredit = recoveryBudget == null ? null
+                                        : recoveryBudget.reserveDataWorkingSet(4096)) {
+                                    ByteBuffer zero = ByteBuffer.allocate(4096);
+                                    SegmentFileIo.readFully(data, zero, offset);
+                                    readBytes += 4096;
+                                    if (!allZero(zero)) {
+                                        throw new IOException("Zero DATA header has nonzero required body");
+                                    }
                                 }
-                                entries.add(locations.get(i));
                             }
+                            zeroPages++;
+                            offset += 4096;
+                            continue;
+                        }
+                        SegmentBatchFormat.Address address = address(page, offset);
+                        if (address.fileIndex() != file
+                                || address.shard() % config.dataFiles() != file) {
+                            throw new IOException("DATA batch claims a different physical file");
+                        }
+                        int length = SegmentBatchParser.batchLength(page.slice(0, 128), address,
+                                config.bytesPerFile());
+                        if (reused.isPresent() && length > reused.get().usedEnd() - offset) {
+                            throw new IOException("Current reused DATA exceeds its healthy CLOSED tail");
+                        }
+                        if (!authority.hasAppliedGrant(file, offset, length, address.shard(),
+                                address.streamGeneration().value(), address.allocation(),
+                                address.generation().value())) {
+                            throw new IOException("DATA batch has no matching applied grant");
+                        }
+                        if (maxStreams > 0) {
+                            StreamKey key = new StreamKey(address.shard(), address.streamGeneration());
+                            StreamProgress progress = streams.get(key);
+                            if (progress == null) {
+                                if (streams.size() == maxStreams) {
+                                    throw new IOException("Physical recovery stream capacity exhausted");
+                                }
+                                long first = authority.streamFirstSequence(address.shard(),
+                                        address.streamGeneration().value()).orElse(-1);
+                                if (first < 0) {
+                                    throw new IOException("Physical stream start has no applied Arena authority");
+                                }
+                                progress = new StreamProgress(first);
+                                streams.put(key, progress);
+                            }
+                            long order = authority.appliedAllocationOrder(address);
+                            if (order < 0) {
+                                throw new IOException("Physical allocation has no applied control order");
+                            }
+                            progress.observe(order, address.sequence());
+                        }
+                        StreamCoverage cut = covered.get(new StreamKey(address.shard(), address.streamGeneration()));
+                        if (cut != null && address.sequence() >= cut.firstSequence()
+                                && address.sequence() <= cut.through()) {
+                            Integer expected = expectedHeaders.remove(address);
+                            if (expected != null && expected != length) {
+                                throw new IOException("Covered DATA header disagrees with indexed batch length");
+                            }
+                            coveredBatches++;
+                            skippedBodyBytes += length - SegmentBatchFormat.HEADER;
+                            offset += length;
+                            continue;
+                        }
+                        // Parsed payload views remain inside this scope; inventory retains only locations.
+                        try (var contentCredit = recoveryBudget == null ? null
+                                : recoveryBudget.reserveDataWorkingSet(length)) {
+                            ByteBuffer content = ByteBuffer.allocate(length);
+                            SegmentFileIo.readFully(data, content, offset);
+                            readBytes += length;
+                            SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
+                                    config.bytesPerFile());
+                            for (SegmentBatchParser.Record record : parsed.records()) {
+                                if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
+                                        != address.shard()) {
+                                    throw new IOException("DATA record belongs to another logical shard");
+                                }
+                            }
+                            List<SegmentPointRead.Location> locations = SegmentPointRead.locations(parsed);
+                            for (int i = 0; i < parsed.records().size(); i++) {
+                                if (authority.isSelectedRecord(locations.get(i), parsed.records().get(i))
+                                        && parsed.records().get(i).origin() == SegmentBatchFormat.RELOCATION_COPY) {
+                                    foundMoves.add(locations.get(i));
+                                }
+                            }
+                            if (stream != null) {
+                                stream.observe(address);
+                            }
+                            if (maxEntries > 0) {
+                                for (int i = 0; i < parsed.records().size(); i++) {
+                                    SegmentBatchParser.Record record = parsed.records().get(i);
+                                    if (authority.isSelectedRecord(locations.get(i), record)
+                                            && (stream == null || stream.matches(address))
+                                            && (bookie == null || bookie.locallyReadableCoordinate(
+                                                record.context(), record.entryId()))) {
+                                        if (entries.size() == maxEntries) {
+                                            throw new IOException("Physical recovery inventory capacity exhausted");
+                                        }
+                                        entries.add(locations.get(i));
+                                    }
+                                }
+                            }
+                            batches++;
+                            records += parsed.records().size();
+                            validatedBytes += length;
+                            offset += length;
                         }
                     }
-                    batches++;
-                    records += parsed.records().size();
-                    validatedBytes += length;
-                    offset += length;
                 }
                 if (syncIo != null) {
                     syncIo.force(data, false);

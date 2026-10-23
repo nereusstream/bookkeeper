@@ -337,7 +337,8 @@ public final class SegmentProfileService implements AutoCloseable {
                             exhausted);
                 }
             }
-            storage = new IsolatedSegmentStorage(config, identity, key, validator, execution, limits);
+            storage = new IsolatedSegmentStorage(config, identity, key, validator, execution, limits,
+                    transport.budget());
             startup.publisher().bindDeleteDelivery(startup.reservations(), identity.incarnation(),
                     storage::profileDeleteProgress);
             synchronized (gate) {
