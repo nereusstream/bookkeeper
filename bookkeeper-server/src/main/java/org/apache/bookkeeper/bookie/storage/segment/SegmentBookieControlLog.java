@@ -488,9 +488,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private HandoffWrite pendingHandoff;
     private final Map<UUID, AppliedOperation> operations = new HashMap<>();
     private final Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
-    // First applied outcomes plus the latest LAC per ledger, bounded by the retained control log.
+    // First applied outcomes plus the latest LAC per ledger, bounded by image plus current journal.
     private final Map<UUID, SegmentControlCheckpoint.Operation> checkpointState = new HashMap<>();
     private final Map<Long, SegmentControlCheckpoint.Operation> checkpointLacs = new HashMap<>();
+
     private final HashSet<UUID> checkpointIds = new HashSet<>();
     private long nextOffset = FIRST_RECORD;
     private boolean rotationRequested;
@@ -563,6 +564,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
         this.channel = channel;
         this.originalChannel = channel;
         this.writerLock = writerLock;
+    }
+
+    /** One validated image (at most two journal capacities), plus its current journal suffix. */
+    static long retainedRecordCapacity(long maxLogBytes) {
+        return Math.multiplyExact(3L, maxLogBytes);
     }
 
     static SegmentBookieControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -3163,6 +3169,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 first.addSuppressed(failure);
             }
         }
+        // No replay/checkpoint owner remains; the closed graph may itself still be referenced by its service.
+        checkpointState.clear();
+        checkpointLacs.clear();
         if (first != null) {
             throw first;
         }

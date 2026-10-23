@@ -810,3 +810,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [Arena checkpoint 的按需编码与持有态](local-storage/README.md#arena-checkpoint-的按需编码与持有态)：2026-10-23父e1fb23a0fa上，Arena只冻结原不可变命令/状态/序号，摘要、写出及精确读回比较时按需编码单条record；Bookie retained原始字节保持。实际两个JVM在同16,000控制结果/首次image force前的full-GC histogram中，只读buffer增量16,000→0、byte[]增量3,393,904→66,064，完整image字节相同且各自重开；非RSS/峰值/性能结论，重复编码成本未测。Service原CONTROL预留扩为200848 bytes并保持至实际storage关闭，生产quota不自动增加；不足启动的敏感性RED和原始失败分层保留；最终四类72项通过、1172输入一致、style通过，TLA未改不重跑TLC。typed/Bookie/其他full-bytes及完整16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Bookie control 原始记录的容量预留与关闭释放](local-storage/README.md#bookie-control-原始记录的容量预留与关闭释放)：2026-10-23父8b245c0ce5上，原Service CONTROL working-set在storage open前增加3倍journal的Bookie canonical backing容量，合计200848＋3×controlLogBytes，实际storage终结后归还；原raw map在close路径清空，durable字节/cut/closed拒绝保持。父版2RED、同选择修复2PASS；同4096实际INSTALL文件的两JVM在保留closed对象时，父版仍4096个只读buffer，新版降至0，磁盘字节相同且重开成功；最终三类37项通过、1172输入一致、style通过，TLA未改不重跑TLC。仅raw backing预留/生命周期与有限full-GC持有态，typed/JDK/native等完整full-bytes未闭合；全部16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

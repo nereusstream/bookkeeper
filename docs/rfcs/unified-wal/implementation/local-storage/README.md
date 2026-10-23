@@ -1202,3 +1202,22 @@ native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 u
 本轮未改TLA、未运行TLC，不提升旧模型receipt；未测Linux NUMA/掉电/正式性能/canary。完整CONTROL/typed authority、Bookie retained state、引用/排序及其他JDK/native/caller预算仍OPEN；默认SDK/observe、同incarnation unclosed-session语义、多Arena持久路由及全16步继续待完成，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。
 
 本轮独立 `mvn -o apache-rat:check` terminal exit1，443条未批准路径逐项均为父 `e1fb23a0fa3ffaa67e8db664996ae3a457fff255` 的既有blob，与前轮完整路径集合相同，无新增；命令/log/rat.txt/父对象验证在同一证据目录 `rat/`。保留基线失败，不称CI全绿。
+
+
+## Bookie control 原始记录的容量预留与关闭释放
+
+2026-10-23，父提交 `8b245c0ce5a342130830012bda32a14c508cc049` 上，Service 在任何 storage open 前，将 Bookie 保留的 canonical record backing 容量接入原 CONTROL working-set。预留值为 `200848 + 3 × limits.controlLogBytes()`，经原 quota 一次取得并保持到实际 storage 关闭；容量不足时在目录/控制日志打开前拒绝，生产 quota 不自动扩容。测试 fixture 的 1 MiB control journal 对应3,346,576-byte storage CONTROL 预留，另有原131072-byte网络容量；只增加固定预留，原DATA 3,801,088 bytes与网络份额保持。
+
+`retainedRecordCapacity` 的三倍界限来自既有格式：已校验 checkpoint payload 最多两份 journal 容量，当前 suffix 所在 journal 文件最多一份容量。image record 的16-byte prefix不形成 retained backing；rotation root 补放的两条208-byte commit也小于已计入的4096/8192-byte文件header余量。Bookie 冻结 Snapshot 共享原 backing，LAC/terminal更新期间被旧cut保留的记录仍属于该cut加suffix；候选失败仍按原guard清空后fallback，没有叠加多份可服务image。这里只计 raw ByteBuffer backing capacity；typed credential/authority、map/包装/数组header、caller与其他JDK/native总账仍待闭合。
+
+另修复关闭后仍持有 raw image 缓存：原写者/准入/checkpoint排空guard通过后的关闭路径清空 `checkpointState` 和 `checkpointLacs`，因此仍被Service引用的closed Bookie不再持有这些canonical字节。durable journal、checkpoint、已观察cut和其他typed状态不变；closed guard仍拒绝新checkpoint/写入，后续恢复继续从磁盘验证。Service归还额度的实际drain条件、同步回调重入处理与连接/存储分离保持。
+
+同两项真实Service测试先用最终fixture配额期望运行父生产代码：`vva12Gw6` 为2条明确RED，缺额却启动，以及只持有200848而非3346576 bytes；修复后同选择的 `bgTHYWZI` 两项通过，实际held checkpoint force、caller关闭超时、网络排空、storage终结及重入归还均保持。没有通过降低DATA/网络容量或放宽断言获得通过。
+
+关闭持有态对照使用同一份真实文件输入，4096个不同ledger的INSTALL均经实际control write/force/apply；authority是隔离fixture构造的PREPARING事实，不是集群MetadataStore发布器验收。父版与当前Bookie source分别编译，两JVM以相同JDK21.0.10、`-Xint -Xms128m -Xmx128m -XX:MaxDirectMemorySize=32m` 重放同样字节，静态字段始终保留关闭对象；open完成及close完成后各取一次 `jcmd GC.class_histogram`。父版只读buffer/Operation为4096→4096，新版均4096→0；新版byte[]总量减少1,998,792 bytes，父版增加56 bytes。后者包含JDK等额外数组，不能当作纯backing或完整heap预算。两版均拒绝closed对象checkpoint，随后再次重开cut4095成功；全部native文件SHA始终与共享输入相同。
+
+源码/每阶段1172输入、红绿Maven/XML、独立probe/编译class及加载来源、共享native输入/文件SHA、完整histogram和终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/bookie-record-budget-evidence-8b245c0c`。该有限持有态测量不是峰值heap/RSS、吞吐或完整CONTROL总账；没有新增format、配置开关、线程/队列、后台重试或authority。完整full-bytes、默认SDK/observe、同incarnation unclosed-session接受条件、多Arena持久路由及全部16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。
+
+最终 `KdX6H3Fz` 为Bookie17、Service8（含原14场景backup/restore方法）与原allocator12，共 **37 PASS、0 failure/error/skip**；覆盖原checkpoint/rotation/replay及LAC/handoff/unapplied force不确定窗口、实际owned/Embedded drain、SDK/恢复重启和启动失败清理。全部1172源码/资源输入与最终Java精确一致，Spotless/Checkstyle exit0。模型转移未改、未运行TLC，不移绑旧receipt；Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。控制批次临时编码空间及其余full-bytes/16步验收仍OPEN。
+
+独立终态 `mvn -o apache-rat:check` exit1，443条未批准路径均核实为父 `8b245c0ce5a342130830012bda32a14c508cc049` 的既有blob，与前轮路径集合相同，无新增；完整命令/log/报告/父对象验证保存在同一证据目录 `rat/`，不称CI全绿。

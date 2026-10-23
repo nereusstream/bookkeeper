@@ -338,11 +338,12 @@ public final class SegmentProfileService implements AutoCloseable {
                             exhausted);
                 }
                 try {
-                    // Arena replay precedes execution; rotation encodes and verifies one image at a time.
-                    controlWorkingSet = transport.budget().reserveControlWorkingSet(
-                            SegmentControlCheckpoint.WORKING_SET_BYTES);
+                    // Retained Bookie records coexist with one image's encoding/verification buffers.
+                    controlWorkingSet = transport.budget().reserveControlWorkingSet(Math.addExact(
+                            SegmentControlCheckpoint.WORKING_SET_BYTES,
+                            SegmentBookieControlLog.retainedRecordCapacity(limits.controlLogBytes())));
                 } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
-                    throw new IOException("Profile CONTROL quota cannot reserve checkpoint verification buffers",
+                    throw new IOException("Profile CONTROL quota cannot reserve control records and checkpoint buffers",
                             exhausted);
                 }
             }
