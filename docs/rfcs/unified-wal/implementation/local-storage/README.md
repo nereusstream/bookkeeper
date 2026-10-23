@@ -1127,3 +1127,5 @@ Arena 的原 journal/checkpoint/rotation parser、顺序 apply、坏 image fallb
 这是 Profile graph/service 的启动 DATA buffer capacity 计费；没有改变固定 pool/index 配置、增加线程/配置/格式，也没有为普通 Add 增加 metadata 往返、控制 force 或 handshake。控制重放与 inventory 对象、standalone backup、其他 heap/native/JDK/TLS/kernel 及全局 full-bytes 仍未闭合；buffer credit 归还也不是 RSS 下降证明。默认 SDK/observe 公共约定、同 incarnation unclosed-session 接受条件、多 Arena 持久路由及其余完整16步继续 OPEN，目标 active、生产 Gate OPEN，默认 OFF/SYSTEM/PARK 和 disabled 能力保持。Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
 
 最终 native/style 终结后的独立 `mvn -o apache-rat:check` exit1，443 个 unapproved 路径全部存在父提交，无新增；原报告和逐路径 Git 对象核验保留，不称 CI 全绿。
+
+[共享 allocation 存活邻居的搬迁与复用](../profile-wire/README.md#共享-allocation-存活邻居的搬迁与复用)：2026-10-23父c8483d3549上，原三副本SDK生命周期加入同块未删除ledger45；第三COPY force未返回时无MOVE/FREE，实际搬迁后邻居可读，ledger46的256条普通Add经合法尾部耗尽后复用旧块generation2。三节点健康restart后邻居/新首末entry仍可读、44拒绝、历史义务保持。三方法通过，1172输入/三轮fixture假设失败/最终纯换行分别保留，style通过；生产Java/TLA未改，不重跑模型。仅闭合该有限组合，完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

@@ -2317,3 +2317,23 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 本轮native与style实际终结后的独立 `mvn -o apache-rat:check` exit1：443个unapproved路径均存在父HEAD，无新增；原报告与逐路径Git对象核验保留，不称CI全绿。
 
 [Profile 启动恢复扫描的 DATA 字节额度](../local-storage/README.md#profile-启动恢复扫描的-data-字节额度)：2026-10-23父66e860ea32上，将原 service DATA quota 传给 restart scan，在分配 header/page/batch/covered MOVE scratch 前计费，实际 scope 结束归还；额度不足不启动新 DATA session。真实大 batch 拒绝、caller cancel/实际 force、CRC 失败回收及原 covered MOVE/owned SDK restart 共4方法通过，1172输入匹配、最终style通过；绕过 budget 转发的敏感性RED独立保留。只闭合启动DATA buffer计费，全字节、同身份crash/多Arena待决语义和完整16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+## 共享 allocation 存活邻居的搬迁与复用
+
+2026-10-23，父提交 `c8483d3549e7fda7093e11efcf75c8a08107b02e` 上扩展原 `sdkQuorumLateDataDrainClosesDeletesAndReusesReplicaAllocationsAcrossRestart`，把同一 allocation 内的存活邻居接入真实三 Bookie、3/3/2 SDK、当前 ZK authority、mTLS、本地 COPY/MOVE/FREE 和健康重启。生产 Java 与 TLA 转移均未改；原单 ledger 版本的 receipt 保持原源码绑定。
+
+原 ledger44 的第三副本 DATA force 跨越 A=2 ACK、caller close 取消与实际 stop/close，固定 P0/L16 和未排空前 metadata 不变的检查保留。随后通过原 SDK 安装、写入并正常关闭 ledger45；它仍是未删除的存活 instance。三个节点的原 index checkpoint 实际完成后，以 native locator 验证 44/45 位于同 file、同 allocation/generation、不同 batch offset，不能仅凭“在同一 DATA 文件”宣称共享块。
+
+逻辑删除44并投递完整目标事件后，真实 physical-delete 会搬走45。第三节点的 COPY force 被暂停时，whole-target result 仍未完成；该节点原 allocation 仍 generation1、没有 retired allocation，45尚无 MOVE selector，44已 tombstone、45未 tombstone。其他节点可按自身实际进度完成，本测试不声称三节点都暂停。放行后，三个目标分别报告 source 1 MiB retired、destination 1 MiB、一次 FREE；45经当前 MOVE 位置仍可 mTLS 读到原 payload，metadata版本/CLOSED状态不变，没有45的删除记录。物理删除允许这次零净容量收益搬迁；它不改变原容量维护只接受正净收益的策略，也不表示文件系统缩小或安全擦除。
+
+新 ledger46 经普通 SDK 逐条成功写入256条16-byte payload：先消耗 COPY destination 的合法剩余尾部，再由原 refill 复用 offset4096/generation2 的旧 source。首条和最后一条采用不同 payload，逐目标读回；普通 close 的实际 metadata 为 P255/L4096。本用例显式配置512个 index 行及256个 close 坐标，以容纳这批有限负载；其他 fixture 仍是原16行，原 helper 调用仍保留4坐标上限，没有改 allocator 或默认预算来强制选块。
+
+逐节点健康关闭并以原 storage identity 重开后，确认44的 tombstone、45的存活 MOVE、旧 source 的 generation2 保持；新建显式只读 mTLS listener，45 payload、46首/末 entry 均 FOUND，44为 REFUSED，DATA文件大小不变。44 Manifest完整字节和三个历史目标义务保留，45的三个 activation历史目标也未被删除。该过程是健康 CLOSED session 的 restart，不是 unclosed-session crash resume、owned service readiness/rejoin 或持久 physical receipt/GC。
+
+`unified-wal-local-2f9B9PLv` 实际执行扩展方法、原 `physicalDeleteControlUsesSameCommittedEventAndActualFreeWithoutGlobalCompletion` 和原 `deleteSnapshotReplaysMissingPrefixThenActualSuffixWithoutSkippingTombstones`，共 **3 PASS、0 failure/error/skip**。1172个源码/资源输入与该阶段完整快照一致。之后仅把一条121列断言换成两行，精确替换及非空白字节一致性另存；最终 Spotless/Checkstyle exit0，没有为换行重复 native 测试或把原输入 receipt 改绑成格式后字节。
+
+前三轮的实际失败分别是：把合法搬迁误写成 PENDING、假定单条新 Add 必须立即申请已释放块、256条负载仍使用原4坐标 close 上限。它们属于测试合同/容量假设，不能称为产品 RED；全部原日志/XML/输入及对应源码独立保留。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/shared-neighbor-evidence-c8483d35`，含最终格式差异、源码及原命令。TLA 未改，没有执行 TLC、扩大原有限模型结论或重绑历史 PASS。
+
+本轮补齐同主机、每 Bookie 单 Arena、一个存活邻居经实际 COPY/MOVE 后保留，以及原块被后续 SDK 写入复用的组合证据；没有覆盖全部 lost-reply/fence/并发删除窗口、多 Arena、进程 crash、掉电、长期容量或完整 A+C+D/Gate。默认 SDK/observe 公共约定、同 incarnation unclosed-session 接受条件、多 Arena 持久路由与完整 full-bytes/其他16步继续 OPEN，目标 active、生产 Gate OPEN；默认 OFF/SYSTEM/PARK 及 disabled 能力保持，Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
+
+native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径全部存在父提交，无新增；原报告与逐路径 Git 对象核验保留，不称 CI 全绿。

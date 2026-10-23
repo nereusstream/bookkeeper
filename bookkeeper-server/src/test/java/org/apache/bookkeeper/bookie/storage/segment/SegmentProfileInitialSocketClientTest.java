@@ -264,6 +264,11 @@ public class SegmentProfileInitialSocketClientTest {
 
         Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum,
                 boolean enableRead, boolean enableLac, int ioThreads) throws Exception {
+            this(blockInstall, blockActivate, enableControl, count, ackQuorum, enableRead, enableLac, ioThreads, 16);
+        }
+
+        Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum,
+                boolean enableRead, boolean enableLac, int ioThreads, int indexedEntries) throws Exception {
             descriptor = new ProfileDescriptor(EngineProfile.SEGMENT_WAL_ENGINE,
                     PayloadFormat.OPAQUE_LEDGER, DurabilityMode.SYNC_ON_ACK, 3, 3, ackQuorum, 0, 7, 11, List.of());
             descriptorBytes = ProfileDescriptorCodec.encode(descriptor, VALIDATOR);
@@ -316,7 +321,7 @@ public class SegmentProfileInitialSocketClientTest {
                     var storage = new IsolatedSegmentStorage(config, identity, new SecretKeySpec(bytes(32, 7), "AES"),
                             VALIDATOR, new SegmentExecutionGroup.Settings(1, ioThreads, 6, 2, 4096, 4096,
                             2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
-                            new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                            new IsolatedSegmentStorage.Limits(1024 * 1024, 8, indexedEntries, 1, 1,
                                     new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
                     nodes.add(storage);
                     storage.startNew();
@@ -4366,7 +4371,8 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void sdkQuorumLateDataDrainClosesDeletesAndReusesReplicaAllocationsAcrossRestart() throws Exception {
-        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true, 2, 512);
+                BookKeeper sdk = sdk(fixture)) {
             fixture.connectAll(Duration.ofSeconds(5));
             var available = fixture.initialize().get(5, TimeUnit.SECONDS);
             var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
@@ -4419,6 +4425,49 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(16, closed.getLength());
                 assertReadPayload(data.get(fixture.identities.get(2).bookieId()), fixture.context(), bytes(16, 8));
 
+                byte[] neighborPayload = bytes(16, 63);
+                var neighbor = openHandoffTestLedger(fixture, sdk, metadata, 45, data);
+                try {
+                    assertEquals(0, neighbor.appendAsync(Unpooled.wrappedBuffer(neighborPayload))
+                            .get(5, TimeUnit.SECONDS).longValue());
+                    neighbor.closeAsync().get(30, TimeUnit.SECONDS);
+                } finally {
+                    neighbor.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+                var neighborContext = fixture.additionalReadContext;
+                var neighborMetadata = fixture.manager.readLedgerMetadata(45).get(5, TimeUnit.SECONDS);
+                var arenaField = IsolatedSegmentStorage.class.getDeclaredField("arena");
+                arenaField.setAccessible(true);
+                var indexField = IsolatedSegmentStorage.class.getDeclaredField("index");
+                indexField.setAccessible(true);
+                for (int target = 0; target < 3; target++) {
+                    var node = fixture.nodes.get(target);
+                    var checkpoint = new CompletableFuture<IsolatedSegmentStorage.IndexCheckpointResult>();
+                    var terminal = new CompletableFuture<Void>();
+                    assertTrue(node.checkpointIndex(new IsolatedSegmentStorage.IndexCheckpointRequest(
+                            (result, cause) -> {
+                                if (cause == null) {
+                                    checkpoint.complete(result);
+                                } else {
+                                    checkpoint.completeExceptionally(cause);
+                                }
+                            }, () -> terminal.complete(null))));
+                    assertEquals(IsolatedSegmentStorage.IndexCheckpointStatus.PERSISTED,
+                            checkpoint.get(5, TimeUnit.SECONDS).status());
+                    terminal.get(5, TimeUnit.SECONDS);
+                    var index = (SegmentDerivedIndex) indexField.get(node);
+                    var original = index.get(fixture.context(), 0).orElseThrow().address();
+                    var shared = index.get(neighborContext, 0).orElseThrow().address();
+                    assertEquals(original.fileIndex(), shared.fileIndex());
+                    assertEquals(original.allocation(), shared.allocation());
+                    assertEquals(original.generation(), shared.generation());
+                    assertNotEquals(original.offset(), shared.offset());
+                    assertEquals(4096, ((SegmentArenaControlLog) arenaField.get(node))
+                            .currentAllocation(original.allocation()).offset());
+                    assertReadPayload(data.get(fixture.identities.get(target).bookieId()), neighborContext,
+                            neighborPayload);
+                }
+
                 var deleting = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
                 var deleted = deleting.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(),
                         Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
@@ -4434,8 +4483,28 @@ public class SegmentProfileInitialSocketClientTest {
                             .get(5, TimeUnit.SECONDS).outcome());
                     controls.put(target, client);
                 }
+                var copying = new CountDownLatch(1);
+                var releaseCopy = new CountDownLatch(1);
+                files(fixture.nodes.get(2)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    copying.countDown();
+                    await(releaseCopy);
+                });
                 var physical = deleting.beginObservePhysicalDeletion(manifest, controls, sdk.getClientCtx(),
                         64, 8, Duration.ofSeconds(10));
+                try {
+                    assertTrue(copying.await(5, TimeUnit.SECONDS));
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> physical.result().get(150, TimeUnit.MILLISECONDS));
+                    var held = fixture.nodes.get(2);
+                    var arena = (SegmentArenaControlLog) arenaField.get(held);
+                    assertEquals(1, arena.allocationGeneration(0, 4096));
+                    assertTrue(arena.retiredAllocations().isEmpty());
+                    assertEquals(-1, arena.currentSelectorSequence(neighborContext, 0));
+                    assertTrue(bookie(held).hasTerminalTombstone(fixture.context()));
+                    assertFalse(bookie(held).hasTerminalTombstone(neighborContext));
+                } finally {
+                    releaseCopy.countDown();
+                }
                 var reclaimed = physical.result().get(15, TimeUnit.SECONDS);
                 physical.completion().get(5, TimeUnit.SECONDS);
                 assertEquals(ProfileDeleteCoordinator.PhysicalStatus.REUSABLE_EVERY_TARGET, reclaimed.status());
@@ -4443,31 +4512,59 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(1, reclaimed.targets().get(target).reply().freedAllocations());
                     assertEquals(SegmentArenaControlLog.BLOCK_BYTES,
                             reclaimed.targets().get(target).reply().sourceBytesRetired());
+                    assertEquals(SegmentArenaControlLog.BLOCK_BYTES,
+                            reclaimed.targets().get(target).reply().destinationBytes());
                 }
-                var arenaField = IsolatedSegmentStorage.class.getDeclaredField("arena");
-                arenaField.setAccessible(true);
                 for (var node : fixture.nodes) {
                     assertTrue(bookie(node).hasTerminalTombstone(fixture.context()));
+                    assertFalse(bookie(node).hasTerminalTombstone(neighborContext));
                     assertFalse(node.profileReadVisible(fixture.context(), 0));
+                    assertTrue(node.profileReadVisible(neighborContext, 0));
+                    var moved = ((SegmentArenaControlLog) arenaField.get(node)).currentMoveLocations();
+                    assertEquals(1, moved.size());
+                    assertEquals(neighborContext, moved.get(0).context());
+                    assertNotEquals(4096, ((SegmentArenaControlLog) arenaField.get(node))
+                            .currentAllocation(moved.get(0).address().allocation()).offset());
+                    assertReadPayload(data.get(files(node).identity().bookieId()), neighborContext, neighborPayload);
                     assertEquals(2, ((SegmentArenaControlLog) arenaField.get(node)).allocationGeneration(0, 4096));
                 }
 
                 byte[] replacementPayload = bytes(16, 79);
-                var replacement = openHandoffTestLedger(fixture, sdk, metadata, 45, data);
+                byte[] reusedPayload = bytes(16, 91);
+                int replacementEntries = Math.toIntExact(SegmentArenaControlLog.BLOCK_BYTES / 4096);
+                var replacement = openHandoffTestLedger(fixture, sdk, metadata, 46, data,
+                        fixture.scopes, replacementEntries);
                 try {
-                    assertEquals(0, replacement.appendAsync(Unpooled.wrappedBuffer(replacementPayload))
-                            .get(5, TimeUnit.SECONDS).longValue());
+                    // The live COPY owns the current tail. Consume it through ordinary SDK Add before refill.
+                    for (int entry = 0; entry < replacementEntries; entry++) {
+                        byte[] payload = entry == replacementEntries - 1 ? reusedPayload : replacementPayload;
+                        assertEquals(entry, replacement.appendAsync(Unpooled.wrappedBuffer(payload))
+                                .get(5, TimeUnit.SECONDS).longValue());
+                    }
+                    assertEquals(replacementEntries - 1, replacement.getLastAddConfirmed());
+                    assertEquals((long) replacementEntries * replacementPayload.length, replacement.getLength());
                     replacement.closeAsync().get(30, TimeUnit.SECONDS);
                 } finally {
                     replacement.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 }
                 var replacementContext = fixture.additionalReadContext;
+                var replacementMetadata = fixture.manager.readLedgerMetadata(46).get(5, TimeUnit.SECONDS).getValue();
+                assertEquals(LedgerMetadata.State.CLOSED, replacementMetadata.getState());
+                assertEquals(replacementEntries - 1, replacementMetadata.getLastEntryId());
+                assertEquals((long) replacementEntries * replacementPayload.length, replacementMetadata.getLength());
                 assertArrayEquals(originalManifest, deleting.deleteLedgerAsync(44, bytes(16, 101),
                         sdk.getClientCtx(), Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS).manifest().encode());
+                var surviving = fixture.manager.readLedgerMetadata(45).get(5, TimeUnit.SECONDS);
+                assertEquals(neighborMetadata.getVersion(), surviving.getVersion());
+                assertEquals(LedgerMetadata.State.CLOSED, surviving.getValue().getState());
+                assertFalse(surviving.getValue().getCustomMetadata().containsKey(ProfileDeleteRecord.TOMBSTONE_KEY));
                 assertEquals(3, fixture.reservations.retainedActivationTargets(44).targets().size());
+                assertEquals(3, fixture.reservations.retainedActivationTargets(45).targets().size());
                 for (int target = 0; target < 3; target++) {
                     assertReadPayload(data.get(fixture.identities.get(target).bookieId()), replacementContext,
                             replacementPayload);
+                    assertReadPayload(data.get(fixture.identities.get(target).bookieId()), replacementContext,
+                            replacementEntries - 1, reusedPayload);
                     var node = fixture.nodes.get(target);
                     var config = files(node).config();
                     var reused = ((SegmentArenaControlLog) arenaField.get(node)).currentReusedAllocations();
@@ -4479,11 +4576,15 @@ public class SegmentProfileInitialSocketClientTest {
                             new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
                             new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
                                     2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
-                            new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                            new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 512, 1, 1,
                                     new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
                         replay.restart();
                         assertTrue(bookie(replay).hasTerminalTombstone(fixture.context()));
+                        assertFalse(bookie(replay).hasTerminalTombstone(neighborContext));
                         assertFalse(replay.profileReadVisible(fixture.context(), 0));
+                        assertTrue(replay.profileReadVisible(neighborContext, 0));
+                        assertEquals(1, ((SegmentArenaControlLog) arenaField.get(replay))
+                                .currentMoveLocations().size());
                         assertEquals(2, ((SegmentArenaControlLog) arenaField.get(replay))
                                 .allocationGeneration(0, 4096));
                         var budget = new ProfileReceiveBudget(4L * 1024 * 1024, 131072, 262144, 8, 8, 8);
@@ -4492,6 +4593,7 @@ public class SegmentProfileInitialSocketClientTest {
                                 new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker, null,
                                 new SegmentProfileReadConfig((caller, query) ->
                                         query.context().equals(fixture.context())
+                                                || query.context().equals(neighborContext)
                                                 || query.context().equals(replacementContext)));
                         try {
                             var identity = fixture.identities.get(target);
@@ -4500,7 +4602,9 @@ public class SegmentProfileInitialSocketClientTest {
                                     address, "apache.bookkeeper.org", identity.bookieId().toString(),
                                     identity.incarnation().value(), 8, 1060, Duration.ofSeconds(5))
                                     .get(5, TimeUnit.SECONDS)) {
+                                assertReadPayload(peer, neighborContext, neighborPayload);
                                 assertReadPayload(peer, replacementContext, replacementPayload);
+                                assertReadPayload(peer, replacementContext, replacementEntries - 1, reusedPayload);
                                 try (var old = peer.readEntryBuffer(fixture.context(), 0).get(5, TimeUnit.SECONDS)) {
                                     assertEquals(ProfileReadEntryReplyCodec.Outcome.REFUSED, old.outcome());
                                 }
@@ -4520,7 +4624,12 @@ public class SegmentProfileInitialSocketClientTest {
 
     private static void assertReadPayload(ProfileNormalDataClient client, ProfileLedgerContext context,
             byte[] payload) throws Exception {
-        try (var reply = client.readEntryBuffer(context, 0).get(5, TimeUnit.SECONDS)) {
+        assertReadPayload(client, context, 0, payload);
+    }
+
+    private static void assertReadPayload(ProfileNormalDataClient client, ProfileLedgerContext context,
+            long entryId, byte[] payload) throws Exception {
+        try (var reply = client.readEntryBuffer(context, entryId).get(5, TimeUnit.SECONDS)) {
             assertEquals(ProfileReadEntryReplyCodec.Outcome.FOUND, reply.outcome());
             var entry = reply.entry();
             try {
@@ -5424,6 +5533,12 @@ public class SegmentProfileInitialSocketClientTest {
     private ProfileLedgerHandle openHandoffTestLedger(Fixture fixture, BookKeeper sdk,
             ProfileLedgerMetadataStore metadata, long ledger, Map<BookieId, ProfileNormalDataClient> data,
             List<ProfileControlScope> targets) throws Exception {
+        return openHandoffTestLedger(fixture, sdk, metadata, ledger, data, targets, 4);
+    }
+
+    private ProfileLedgerHandle openHandoffTestLedger(Fixture fixture, BookKeeper sdk,
+            ProfileLedgerMetadataStore metadata, long ledger, Map<BookieId, ProfileNormalDataClient> data,
+            List<ProfileControlScope> targets, int closeCoordinates) throws Exception {
         byte[] instance = java.nio.ByteBuffer.allocate(16).putLong(ledger).putLong(1).array();
         byte[] sidecar = java.nio.ByteBuffer.allocate(16).putLong(ledger).putLong(2).array();
         byte[] installId = java.nio.ByteBuffer.allocate(16).putLong(ledger).putLong(3).array();
@@ -5455,7 +5570,7 @@ public class SegmentProfileInitialSocketClientTest {
         var writer = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
                 1024, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
         writer.enableWriterClose(new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold),
-                fixture.descriptorBytes, VALIDATOR, fixture.clients, 4, Duration.ofSeconds(30))
+                fixture.descriptorBytes, VALIDATOR, fixture.clients, closeCoordinates, Duration.ofSeconds(30))
                     .get(5, TimeUnit.SECONDS);
         return writer;
     }
