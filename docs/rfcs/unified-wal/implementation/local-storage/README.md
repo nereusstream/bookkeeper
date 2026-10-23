@@ -1242,3 +1242,45 @@ native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 u
 最终生产backend `nmoiDfxE` 为Arena整类40、Bookie相关22、Service8（含原14场景backup/restore）及原allocator12，共 **82 PASS、0 failure/error/skip**。覆盖新两条预检/第二write失败、同batch状态顺序、tombstone cut、既有force UNKNOWN、控制进程退出/rotation/必要suffix、MOVE/FREE/reuse、实际owned/Embedded/SDK drain与重启。全部1172源码/资源与最终Java精确一致，Spotless/Checkstyle exit0；没有将observer模式结果充作生产backend测试，也不合并定向6项计数。TLA未改、未执行TLC或移绑历史receipt；Linux NUMA/掉电/正式性能/canary本轮NOT_EXECUTED，完整模型/兼容/full-bytes与16步验收保持OPEN。
 
 独立终态 `mvn -o apache-rat:check` exit1，443条未批准路径均为父 `ab44b475a5bd5c19b0babd231ea02dc1c7f1f1e0` 的既有blob，与前轮完整路径集合一致，无新增；完整命令/log/报告/父对象核对保存在同一证据目录 `rat/`，不称CI全绿。
+
+
+## 控制批次流式编码的本地 JMH 对照
+
+2026-10-23，父提交 `ed036afd8381996672d72788d0356a05d5213502` 上，仅在原microbenchmarks模块新增 `ControlBatchBenchmark`，补前节重复编码尚未测量的局部范围。对照生产实现为 materialized `ab44b475a5bd5c19b0babd231ea02dc1c7f1f1e0` 与 streamed `ed036afd8381996672d72788d0356a05d5213502`；本轮没有修改生产Java。冻结jar中的四个核心class与上一轮已验证构建字节一致，旧82项receipt保持其原source/范围，不重复运行或移绑新benchmark结果。
+
+每iteration新建独立目录、真实4 MiB DATA文件和空控制日志，16 MiB journal上限，固定256个顺序批次，每批1或64条，调用原append/force/apply。Arena是不同operation竞争同一block，只有首条APPLIED，其余CONDITION_FAILED，不能称为64条成功分配；Bookie为每条不同ledger的fixture INSTALL，均APPLIED但不ACTIVATE，非MetadataStore producer验收。没有在计量区间内清空/回绕journal、减弱force或替换backend。每轮完成后关闭并重开核对cut、Arena winner或所有Bookie context/credential，再清理全部自建文件。
+
+JMH1.37、单线程SingleShotTime、每次invocation内256批并用OperationsPerInvocation=256归一化，5轮warmup＋5轮measurement；每owner/records/实现两个独立fork。顺序父→新→新→父，共16个有效fork。固定heap512 MiB/direct64 MiB，macOS14.8.9 arm64、MacBookPro18,3/M1 Pro、10核/32 GiB、Corretto21.0.10；不绑核，不启动owner执行组/NUMA池，保留默认OS cache，不驱逐缓存或隔离宿主后台负载。设备固件/温控/CPU频率未冻结；直接调用实验control owner，不代表服务、普通DATA、TLS/quorum或可持续索引回收性能。
+
+CPU和Java分配用原ThreadMXBean在append/force/apply及统一结果检查的区间内直接计量；不含输入构造、建文件、重开和删除，也不含其他线程CPU、GC线程CPU、native/RSS。IO write/force由原SegmentFileIo计数差值取得，每批实测1/64 write、1 file force；创建/目录同步/恢复sync在区间外，不把该force计数当作整个设备barrier总数。JMH wall score是256个顺序批次的归一化平均，不是逐请求尾延迟。
+
+初轮16 fork语义与class绑定通过，但随后核实旧独立javac默认major65、新Maven jar为major61，标为 `NOT_ACCEPTED_FOR_PERFORMANCE_COMPARISON`。原始日志/JSON/class保留，不混入下表。有效对照将两版三个owner/codec source都用同一JDK、`--release 17 -g -parameters -proc:none`编译，全部64 class均major61；当前版64 class的指令流逐项与冻结Maven jar一致（忽略constant-pool索引）。每iteration输出的三实现class与原IO class摘要均匹配所选冻结版本。
+
+下表为两个有效fork各自五个计量iteration均值的范围，**不是置信区间或稳定阈值**。数据单位均为每控制批次；分配是本线程累计Java分配，不是前节full-GC后的持有量。
+
+| Owner | records/batch | Java bytes/batch：父→新 | worker CPU µs/batch：父→新 |
+| --- | ---: | --- | --- |
+| ARENA | 1 | 1,203–1,204 → 1,865–1,866 | 131.7–291.1 → 120.9–246.2 |
+| ARENA | 64 | 59,494 → 78,166–96,598 | 631.2–696.8 → 704.5–710.1 |
+| BOOKIE | 1 | 12,874–12,924 → 14,182–14,272 | 206.2–444.1 → 408.7–413.2 |
+| BOOKIE | 64 | 699,575–701,623 → 802,703–803,727 | 514.4–1,303.7 → 1,187.5–1,290.0 |
+
+所有有效fork的160个warmup/measurement iteration均完成实际校验，20,480个measurement批次；每records配置的Arena journal在两版间字节完全相同。Bookie密封credential nonce按JVM独立，不要求ciphertext相同，各自重开逐项核对安装身份和正确/错误凭据分类；没有用mock成功代替实际force/恢复。CPU与wall的fork间波动明显，不支持稳定CPU/延迟/吞吐收益结论；但本负载累计Java分配上升已实测，64条Arena为59.5 KB→78.2–96.6 KB、Bookie为699.6–701.6 KB→802.7–803.7 KB。前节减少serialized payload持有量不等于减少累计分配。
+
+当前预检再次构造完整frame，是下一处可直接消除的额外分配：后续应在原codec中复用完整字段校验/尺寸计算，保留所有pre-I/O拒绝、整批坐标预留、真实write/force及UNKNOWN合同，再用相同入口复核；本轮先交付真实对照，不将未实现的优化写成完成。完整full-bytes、正式性能/B18/步骤16与其他16步范围仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持；Linux NUMA、掉电、正式环境/canary本轮NOT_EXECUTED。
+
+复现当前实现（仍为上述实验负载）：
+
+```bash
+mvn -o -P '!cargo-zigbuild' -pl microbenchmarks -am -DskipTests package
+java -cp microbenchmarks/target/benchmarks.jar org.openjdk.jmh.Main \
+  ControlBatchBenchmark.appendForceAndApply -bm ss -f 1 -wi 5 -i 5 -t 1 \
+  -p owner=ARENA -p records=64 -foe true -to 30s -rf json -rff /tmp/control-batch-current.json \
+  -jvmArgs '-Xms512m -Xmx512m -XX:MaxDirectMemorySize=64m'
+```
+
+完整冻结对照、原始编译命令/source/class/jar/环境、所有迭代log/JSON、计量stub、排除的首轮及有效结果分别位于 `/Users/liusinan/.codex/artifacts/unified-wal/control-batch-jmh-evidence-ed036afd`。`matched-measure-verification.json`/`summary.json`拥有有效范围，`acceptance-status.json`明确排除首轮。`run-comparison.py measure <新的空输出目录>`只消费冻结输入，不依赖工作树回退；新增source/build共1176输入全部SHA核对，未改历史receipt。
+
+本轮离线package与microbenchmarks/依赖模块Spotless/Checkstyle均exit0。仅改benchmark及其package说明、既有五份文档，没有改生产Java或TLA；不重复运行无变化的生产测试/TLC，也不将旧PASS升级到本对照。RAT在全部fork/build/style真实终结后独立执行，结果单独记录。
+
+独立终态 `mvn -o apache-rat:check` exit1，443条未批准路径均存在于父 `ed036afd8381996672d72788d0356a05d5213502`，与前轮完整路径集合一致，无新增；完整命令/log/报告/父对象核对保存在同一证据目录 `rat/`，不称CI全绿。

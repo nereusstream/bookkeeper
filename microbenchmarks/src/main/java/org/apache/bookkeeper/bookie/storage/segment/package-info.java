@@ -15,5 +15,5 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/** Local control checkpoint microbenchmarks. */
+/** Local control log and checkpoint microbenchmarks. */
 package org.apache.bookkeeper.bookie.storage.segment;

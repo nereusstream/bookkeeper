@@ -2352,3 +2352,6 @@ native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 u
 
 
 [控制批次的逐条编码与完整预检](../local-storage/README.md#控制批次的逐条编码与完整预检)：2026-10-23父ab44b475a5上，双owner在任何I/O前逐条完整预检/累计整批长度，预留原坐标后逐条编码writeFully、整批一次force及原逐序apply；去掉整批serialized列表，写者排他/UNKNOWN/partial前缀恢复保持。新两项后段拒绝/第二write失败与既有定向共6项通过；相同observer的四JVM在首次write前只读buffer增量均4096→1，Arena journal字节相同，Bookie逐项重开核对context/credential。codec预留331920＋既有3倍journal的raw backing，实际inline值核对；最终四类82项通过、1172输入一致、style通过，TLA未改不重跑TLC。CPU/累计分配未测，typed/JDK/native等完整full-bytes未闭合。全部16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[控制批次流式编码的本地 JMH 对照](../local-storage/README.md#控制批次流式编码的本地-jmh-对照)：2026-10-23父ed036afd83上，原microbench新增固定256批append/force/apply入口；每批1/64条，Arena同块竞争/Bookie新INSTALL。两版相同release17编译、16有效fork按父→新→新→父完成真实force及每轮重开/class校验；初轮major65/61混用的16 fork保留且不作性能对照。累计分配上升已实测（64条Arena59.5→78.2–96.6KB，Bookie约700→803KB），CPU/wall波动不支持稳定收益。生产Java未改，后续复用原codec校验/尺寸以消除预检frame额外构造；完整full-bytes/正式性能与16步目标仍active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
