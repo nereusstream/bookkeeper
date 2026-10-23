@@ -55,6 +55,8 @@ import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.WriteCallback;
 class PendingAddOp implements WriteCallback {
 
     ByteBuf payload;
+    // Explicit Profile writer reserves this before assigning entryId; Classic leaves it null.
+    ByteBuf profileHeader;
     ReferenceCounted toSend;
     AddCallbackWithLatency cb;
     Object ctx;
@@ -249,9 +251,15 @@ class PendingAddOp implements WriteCallback {
         checkNotNull(lh.macManager);
 
         int flags = isRecoveryAdd ? FLAG_RECOVERY_ADD | FLAG_HIGH_PRIORITY : FLAG_NONE;
-        this.toSend = lh.macManager.computeDigestAndPackageForSending(
-                entryId, lh.lastAddConfirmed, currentLedgerLength,
-                payload, lh.ledgerKey, flags);
+        if (profileHeader == null) {
+            this.toSend = lh.macManager.computeDigestAndPackageForSending(
+                    entryId, lh.lastAddConfirmed, currentLedgerLength, payload, lh.ledgerKey, flags);
+        } else {
+            ByteBuf header = profileHeader;
+            profileHeader = null;
+            this.toSend = lh.macManager.computeDigestAndPackageForSendingV3(
+                    entryId, lh.lastAddConfirmed, currentLedgerLength, payload, header);
+        }
         // ownership of RefCounted ByteBuf was passed to computeDigestAndPackageForSending
         payload = null;
 
@@ -531,6 +539,8 @@ class PendingAddOp implements WriteCallback {
     public synchronized void recyclePendAddOpObject() {
         entryId = LedgerHandle.INVALID_ENTRY_ID;
         currentLedgerLength = -1;
+        ReferenceCountUtil.release(profileHeader);
+        profileHeader = null;
         if (payload != null) {
             ReferenceCountUtil.release(payload);
             payload = null;

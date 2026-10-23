@@ -178,6 +178,13 @@ public abstract class DigestManager {
     public ByteBufList computeDigestAndPackageForSendingV3(long entryId, long lastAddConfirmed, long length,
                                                           ByteBuf data, ByteBufAllocator headerAllocator) {
         ByteBuf headersBuffer = headerAllocator.heapBuffer(METADATA_LENGTH + macCodeLength);
+        return computeDigestAndPackageForSendingV3(entryId, lastAddConfirmed, length, data, headersBuffer);
+    }
+
+    /** Same V3 encoding using an already reserved, empty header buffer. Success transfers both buffers;
+     * failure releases the header only, leaving the caller's payload ownership unchanged. */
+    public ByteBufList computeDigestAndPackageForSendingV3(long entryId, long lastAddConfirmed, long length,
+                                                          ByteBuf data, ByteBuf headersBuffer) {
         try {
             headersBuffer.writeLong(ledgerId);
             headersBuffer.writeLong(entryId);
@@ -208,13 +215,25 @@ public abstract class DigestManager {
         } else {
             headersBuffer = Unpooled.buffer(LAC_METADATA_LENGTH + macCodeLength);
         }
-        headersBuffer.writeLong(ledgerId);
-        headersBuffer.writeLong(lac);
+        return packageLac(lac, headersBuffer);
+    }
 
-        int digest = update(0, headersBuffer, 0, LAC_METADATA_LENGTH);
-        populateValueAndReset(digest, headersBuffer);
+    /** Same LAC encoding, charging its complete generated header to the supplied allocator. */
+    public ByteBufList computeDigestAndPackageForSendingLac(long lac, ByteBufAllocator headerAllocator) {
+        return packageLac(lac, headerAllocator.heapBuffer(LAC_METADATA_LENGTH + macCodeLength));
+    }
 
-        return ByteBufList.get(headersBuffer);
+    private ByteBufList packageLac(long lac, ByteBuf headersBuffer) {
+        try {
+            headersBuffer.writeLong(ledgerId);
+            headersBuffer.writeLong(lac);
+            int digest = update(0, headersBuffer, 0, LAC_METADATA_LENGTH);
+            populateValueAndReset(digest, headersBuffer);
+            return ByteBufList.get(headersBuffer);
+        } catch (RuntimeException | Error failure) {
+            headersBuffer.release();
+            throw failure;
+        }
     }
 
     private void verifyDigest(ByteBuf dataReceived) throws BKDigestMatchException {

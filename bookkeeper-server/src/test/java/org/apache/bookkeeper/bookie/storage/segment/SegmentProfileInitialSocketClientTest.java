@@ -1700,6 +1700,7 @@ public class SegmentProfileInitialSocketClientTest {
             }
             var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
                     1024, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
+            var headers = sdkHeaderAllocation(handle);
             Channel channel = dataChannel(data.get(fixture.identities.get(0).bookieId()));
             var held = new AtomicReference<ChannelPromise>();
             var observed = new AtomicReference<ByteBuf>();
@@ -1725,6 +1726,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(0, handle.appendAsync(Unpooled.wrappedBuffer(bytes(16, 8)))
                         .get(5, TimeUnit.SECONDS).longValue());
                 assertTrue(written.await(5, TimeUnit.SECONDS));
+                assertEquals(36, headers.peakBytes());
                 var firstStop = handle.stopLocalWrites();
                 assertThrows(java.util.concurrent.TimeoutException.class,
                         () -> firstStop.get(150, TimeUnit.MILLISECONDS));
@@ -1734,8 +1736,11 @@ public class SegmentProfileInitialSocketClientTest {
                         () -> actualStop.get(150, TimeUnit.MILLISECONDS));
                 assertTrue(channel.isActive()); // The handle borrows this peer; it must not close its socket.
                 assertTrue(observed.get().getInt(4) != 0);
+                // The socket already copied the source; its own output quota still pins the pending stop.
+                assertEquals(0, headers.usedBytes());
                 held.get().setSuccess();
                 actualStop.get(5, TimeUnit.SECONDS);
+                assertEquals(0, headers.usedBytes());
                 for (int offset = 0; offset < observed.get().capacity(); offset++) {
                     assertEquals(0, observed.get().getByte(offset));
                 }
@@ -1755,6 +1760,60 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void sdkHeaderQuotaRejectsBeforeEntryAssignmentAndReturnsPayloadOwnership() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var handle = writer(fixture, sdk, available, 1, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
+            var headers = sdkHeaderAllocation(handle);
+            List<ByteBuf> held = new ArrayList<>();
+            try {
+                boolean exhausted = false;
+                for (int count = 0; count < 1024; count++) {
+                    try {
+                        held.add(headers.allocator().heapBuffer(36, 36));
+                    } catch (ProfileReceiveBudget.CapacityExceededException expected) {
+                        exhausted = true;
+                        break;
+                    }
+                }
+                assertTrue("The writer's generated header storage must have a finite byte bound", exhausted);
+                long before = handle.getLastAddPushed();
+                List<SegmentFileIo> dataIo = new ArrayList<>();
+                for (var node : fixture.nodes) {
+                    dataIo.add(files(node).dataIo);
+                }
+                int forces = dataIo.stream().mapToInt(io -> io.forces).sum();
+                ByteBuf payload = Unpooled.wrappedBuffer(bytes(16, 8));
+                var rejected = assertThrows(java.util.concurrent.ExecutionException.class,
+                        () -> handle.appendAsync(payload).get(5, TimeUnit.SECONDS));
+                assertEquals(BKException.Code.TooManyRequestsException,
+                        BKException.getExceptionCode(rejected.getCause()));
+                sdk.getClientCtx().getMainWorkerPool().submitOrdered(44L, () -> null).get(5, TimeUnit.SECONDS);
+                assertEquals(0, payload.refCnt());
+                assertEquals(before, handle.getLastAddPushed());
+                assertEquals(forces, dataIo.stream().mapToInt(io -> io.forces).sum());
+                held.forEach(ByteBuf::release);
+                held.clear();
+                assertEquals(0, headers.usedBytes());
+                assertEquals(0L, handle.appendAsync(Unpooled.wrappedBuffer(bytes(16, 9)))
+                        .get(5, TimeUnit.SECONDS).longValue());
+            } finally {
+                held.forEach(ByteBuf::release);
+                handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+            assertEquals(0, headers.usedBytes());
+        }
+    }
+
+    private static ProfileReceiveBudget.ClientAllocation sdkHeaderAllocation(ProfileLedgerHandle handle)
+            throws Exception {
+        var field = ProfileLedgerHandle.class.getDeclaredField("sdkHeaders");
+        field.setAccessible(true);
+        return (ProfileReceiveBudget.ClientAllocation) field.get(handle);
+    }
+
+    @Test
     public void writerStopWaitsForQueuedDataBorrowAndFailsPendingAppend() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
             fixture.connectAll(Duration.ofSeconds(5));
@@ -1767,6 +1826,7 @@ public class SegmentProfileInitialSocketClientTest {
             var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
                     1024, 1, Duration.ofSeconds(3), Duration.ofMillis(5));
             Channel channel = dataChannel(data.get(fixture.identities.get(0).bookieId()));
+            var headers = sdkHeaderAllocation(handle);
             var queued = new CountDownLatch(1);
             var release = new CountDownLatch(1);
             try {
@@ -1779,10 +1839,12 @@ public class SegmentProfileInitialSocketClientTest {
                 sdk.getClientCtx().getMainWorkerPool().submitOrdered(44L, () -> null).get(5, TimeUnit.SECONDS);
                 assertFalse(append.isDone());
                 assertTrue(fixture.dataResults.get(0).isEmpty());
+                assertEquals(36, headers.usedBytes());
                 var stopping = handle.stopLocalWrites();
                 assertThrows(java.util.concurrent.TimeoutException.class,
                         () -> stopping.get(150, TimeUnit.MILLISECONDS));
                 assertThrows(ExecutionException.class, () -> append.get(5, TimeUnit.SECONDS));
+                assertEquals(0, headers.usedBytes());
                 assertTrue(handle.hasUncertainWrites());
                 release.countDown();
                 stopping.get(5, TimeUnit.SECONDS);
@@ -11171,6 +11233,7 @@ public class SegmentProfileInitialSocketClientTest {
                         }
                         var pending = handle.flushConfirmedLac();
                         assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                        assertTrue(sdkHeaderAllocation(handle).usedBytes() >= 20);
                         assertThrows(java.util.concurrent.TimeoutException.class,
                                 () -> pending.get(150, TimeUnit.MILLISECONDS));
                         if (cancel) {
@@ -11183,8 +11246,11 @@ public class SegmentProfileInitialSocketClientTest {
                         assertThrows(java.util.concurrent.TimeoutException.class,
                                 () -> stopped.get(150, TimeUnit.MILLISECONDS));
                         assertFalse(sdk.getClientCtx().isClientClosed());
+                        // Stop drops SDK deliveries after their sources were copied into socket-owned backing.
+                        assertEquals(0, sdkHeaderAllocation(handle).usedBytes());
                         releases.forEach(CountDownLatch::countDown);
                         stopped.get(5, TimeUnit.SECONDS);
+                        assertEquals(0, sdkHeaderAllocation(handle).usedBytes());
                         assertEquals(LedgerMetadata.State.OPEN,
                                 fixture.manager.readLedgerMetadata(44).get().getValue().getState());
                     } finally {

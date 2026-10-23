@@ -55,6 +55,7 @@ import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.BookieClient;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.versioning.Versioned;
 
 /**
@@ -64,7 +65,11 @@ import org.apache.bookkeeper.versioning.Versioned;
  * Local stop is never a metadata CLOSED receipt or cancellation of remote I/O.
  */
 public final class ProfileLedgerHandle extends LedgerHandle {
+    private static final int MAX_REPLACEMENT_TARGETS = 32;
+    private static final int SDK_HEADER_BYTES = DigestManager.METADATA_LENGTH + Integer.BYTES;
     private final ProfileBookieClient transport;
+    private final ProfileReceiveBudget.ClientAllocation sdkHeaders;
+    private final CompletableFuture<Void> localResourcesClosed;
     private final Semaphore entries;
     private final int maxPayloadBytes;
     private final AtomicBoolean stopped = new AtomicBoolean();
@@ -92,6 +97,17 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         base = context.base;
         entries = new Semaphore(maxPendingEntries);
         this.maxPayloadBytes = maxPayloadBytes;
+        // Each live header is either in the original pending queue, or retained by at least one bounded
+        // per-target Delivery. The one fixed replacement pool can add at most 32 distinct target owners.
+        // One further header covers the current explicit-LAC submission before its deliveries are recorded.
+        int headers = Math.addExact(Math.multiplyExact(maxPendingEntries,
+                1 + initial.metadata().getValue().getEnsembleSize() + MAX_REPLACEMENT_TARGETS), 1);
+        int bytes = Math.multiplyExact(headers, SDK_HEADER_BYTES);
+        var budget = new ProfileReceiveBudget(bytes + 2L, 1, 1, 1, 1, 1);
+        sdkHeaders = Objects.requireNonNull(budget.admitClient(ProfileReceiveBudget.Lane.DATA, bytes));
+        var transportClosed = transport.closeCompletion();
+        transportClosed.whenComplete((unused, failure) -> sdkHeaders.close());
+        localResourcesClosed = CompletableFuture.allOf(transportClosed, sdkHeaders.drained());
     }
 
     public static ProfileLedgerHandle fromInitialAvailability(ClientContext base,
@@ -331,7 +347,8 @@ public final class ProfileLedgerHandle extends LedgerHandle {
             throw new IllegalArgumentException("Replacement descriptor exceeds the canonical bound");
         }
         byte[] ownedDescriptor = descriptor.clone();
-        if (pool.isEmpty() || pool.size() > 32 || maxChanges < 1 || maxChanges > 32
+        if (pool.isEmpty() || pool.size() > MAX_REPLACEMENT_TARGETS
+                || maxChanges < 1 || maxChanges > MAX_REPLACEMENT_TARGETS
                 || pool.stream().map(ProfileReplacementCoordinator.Target::bookie).distinct().count() != pool.size()) {
             throw new IllegalArgumentException("Invalid bounded Profile replacement pool");
         }
@@ -447,7 +464,8 @@ public final class ProfileLedgerHandle extends LedgerHandle {
                         }
                     }, null);
                     operation.setLac(confirmed);
-                    operation.initiate(getDigestManager().computeDigestAndPackageForSendingLac(confirmed));
+                    operation.initiate(getDigestManager().computeDigestAndPackageForSendingLac(
+                            confirmed, sdkHeaders.allocator()));
                 } catch (RuntimeException failure) {
                     result.completeExceptionally(failure);
                 }
@@ -470,7 +488,7 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     /** Local resource stop only. Metadata remains OPEN and needs the proper Profile close/recovery protocol. */
     public CompletableFuture<Void> stopLocalWrites() {
         handleUnrecoverableErrorDuringAdd(BKException.Code.ClientClosedException);
-        return transport.closeCompletion();
+        return localResourcesClosed.copy();
     }
 
     @Override
@@ -480,9 +498,19 @@ public final class ProfileLedgerHandle extends LedgerHandle {
 
     @Override
     protected void doAsyncAddEntry(PendingAddOp op) {
-        if (op.payload.readableBytes() > maxPayloadBytes || !entries.tryAcquire()) {
-            int code = op.payload.readableBytes() > maxPayloadBytes ? BKException.Code.IllegalOpException
-                    : BKException.Code.TooManyRequestsException;
+        int rejectedCode = op.payload.readableBytes() > maxPayloadBytes ? BKException.Code.IllegalOpException
+                : !entries.tryAcquire() ? BKException.Code.TooManyRequestsException : BKException.Code.OK;
+        if (rejectedCode == BKException.Code.OK) {
+            try {
+                op.profileHeader = sdkHeaders.allocator().heapBuffer(SDK_HEADER_BYTES, SDK_HEADER_BYTES);
+            } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
+                entries.release();
+                rejectedCode = stopped.get() ? BKException.Code.LedgerClosedException
+                        : BKException.Code.TooManyRequestsException;
+            }
+        }
+        if (rejectedCode != BKException.Code.OK) {
+            final int code = rejectedCode;
             Runnable rejected = () -> {
                 try {
                     op.cb.addCompleteWithLatency(code, this, INVALID_ENTRY_ID, 0, op.ctx);
@@ -657,7 +685,7 @@ public final class ProfileLedgerHandle extends LedgerHandle {
                     executeOrdered(() -> closeWriter(settings, code));
                 } catch (RejectedExecutionException unavailable) {
                     handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
-                    transport.closeCompletion().whenComplete((unused, failure) ->
+                    localResourcesClosed.whenComplete((unused, failure) ->
                             durableClose.completeExceptionally(
                                 BKException.create(BKException.Code.InterruptedException)));
                 }
@@ -695,7 +723,7 @@ public final class ProfileLedgerHandle extends LedgerHandle {
             transport.close();
         }
         Throwable stopFailure = localFailure;
-        transport.closeCompletion().whenComplete((unused, failure) -> {
+        localResourcesClosed.whenComplete((unused, failure) -> {
             if (failure != null || stopFailure != null) {
                 durableClose.completeExceptionally(failure != null ? failure : stopFailure);
                 return;

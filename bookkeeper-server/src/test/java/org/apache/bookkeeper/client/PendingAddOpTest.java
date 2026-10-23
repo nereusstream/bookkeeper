@@ -112,6 +112,20 @@ public class PendingAddOpTest {
         assertNull(op.lh);
     }
 
+    @Test
+    public void testCancelledBeforeInitiateReleasesReservedProfileHeader() {
+        PendingAddOp op = PendingAddOp.create(lh, mockClientContext, lh.getCurrentEnsemble(),
+                payload, WriteFlag.NONE, (rc, handle, entryId, latency, ctx) -> { }, null);
+        ByteBuf header = Unpooled.buffer(36, 36);
+        op.profileHeader = header;
+        op.submitCallback(Code.NotEnoughBookiesException);
+        assertEquals(1, header.refCnt());
+        op.initiate();
+        assertEquals(0, header.refCnt());
+        assertNull(op.profileHeader);
+        assertNull(op.lh);
+    }
+
     /**
      * Verify that {@link PendingAddOp#maybeTimeout()} returns {@code false} without throwing
      * {@link NullPointerException} when {@code clientCtx} is {@code null}.

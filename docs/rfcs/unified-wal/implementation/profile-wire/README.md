@@ -2271,3 +2271,22 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ```
 
 仅闭合上述restore bootstrap/同session丢回复组合，原target/同intent的unclean-session crash接受语义仍待裁决，不绕过session/quarantine gate，也不以本次通过替代真实掉电、新session窗口、完整恢复运维/接受下界或全部16步验收。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled能力不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 显式 SDK writer 的 generated header 字节额度
+
+2026-10-23，父源码 `9a9aa9cd793e397c2f8bae0284d5c074d07e1e79`。原普通V3 packing默认使用Unpooled header，WRITE_LAC也未计入既有budget。本轮仅把显式 `ProfileLedgerHandle` 的这两类SDK生成buffer接到原 `ProfileReceiveBudget.ClientAllocation`；复用既有digest编码和PendingAddOp/WRITE_LAC路径，不新增预算框架、线程、配置、MetadataStore往返或控制force。默认SDK runtime选择与observe公共约定仍待明确，未据此改变默认Classic/Profile路由。
+
+普通Add先通过原entry semaphore，再向该handle的DATA额度预分配固定36-byte CRC32C header，之后才进入原LedgerHandle的entryId/length分配。额度不足以原TooManyRequests拒绝，回调及payload回收仍走原SDK；不推进P/length、不发DATA。`PendingAddOp`的可选Profile header由原digest函数填充并与payload一并转移给ByteBufList；Classic字段为null，保持原packing/分配方式。取消先于initiate时也由原recycler释放该header并清空字段。WRITE_LAC生成的20-byte header使用同一handle额度，字节及quorum/fence语义不变；原Classic LAC仍使用原allocator选择。
+
+当前header容量政策是 `36 × (N × (1 + E + 32) + 1)`：N为原最大pending/per-target delivery数，E为初始ensemble数，32为只可配置一次的原replacement pool上限，另留一次当前LAC提交的空间。它为实际生成的buffer root capacity计费，容量不是启动时的全量分配，也不是对象、allocator bookkeeping、caller payload/backing、默认SDK/cohort、JVM或RSS硬上限。预算拒绝可以背压，不能分配entryId后再以临时额度失败留下hole。
+
+source与output分别交接：socket复制源数据后，SDK header可以随原delivery终结归还；已复制的entry/frame继续由原socket额度持有，实际output/wire未终结时stop仍不完成。handle停止/普通close同时等待原transport terminal与SDK header实际drain，取消外部等待者不取消这两个内部事实。没有人为把已复制的旧header扣留到网络结束。
+
+真实文件/ZK/mTLS/SDK验证覆盖：占满header额度后append拒绝、payload归还、P和DATA force不变，释放额度后首条entryId仍为0；普通Add实际36-byte peak、排队source持有及已复制source在output promise仍held时归还；WRITE_LAC force/cancel/ACK门槛与header交接；cancel-before-initiate的原op回收。仅将普通header预分配改回Unpooled的敏感性RED `unified-wal-local-Nd0OQ1ij` 两项均按预期失败：额度满时竟然Add成功，以及计费peak0而非36。该反例只代表这一个计费接缝，不冒充整份旧源码历史回执。
+
+首轮三项绿色 `unified-wal-local-ZL1yh87s` 与最终 `unified-wal-local-E8SJa86L` 各自保持输入绑定。最终三类37项（PendingAddOp 20、三种Classic digest实际读写6、Profile socket/SDK 11）全部0 failure/error/skip；包含普通close/replacement/恢复packing及实际source/output排空。初次测试编译错误和把source应持续持有到output结束的错误断言分别保留；原实现的源复制交接是正确的，没有为该测试假设延长实际source custody。
+
+原始命令、XML/log、敏感性修改及恢复后的源码、每阶段1172个源码/资源输入位于 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-header-budget-evidence-b4l9btvo`。最终Spotless/Checkstyle exit0；TLA转移未改，不重跑或移绑旧有限模型PASS。本轮没有性能测量，不能声称新计费零开销或普通Add性能不变。统一full-bytes、其他native/对象/caller/codec/MetadataStore/JDK/TLS/kernel预算，以及Main/外部proof、默认SDK/observe语义、原incarnation crash接受条件、兼容/正式性能/运维和完整16步仍OPEN，目标active、生产Gate OPEN；默认OFF/SYSTEM/PARK及disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+Java/style实际终结后的独立RAT exit1：443 unapproved路径逐项存在父HEAD，无新增；原报告保留，不称CI全绿。完整目标保持active，不以这一计费接缝或本地提交替代统一预算/生产验收。
