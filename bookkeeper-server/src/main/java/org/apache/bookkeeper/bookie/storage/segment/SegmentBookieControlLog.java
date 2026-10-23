@@ -785,7 +785,6 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private DurableBatch appendCommands(List<Command> commands) throws IOException {
-        List<ByteBuffer> records = new ArrayList<>(commands.size());
         long first;
         long start;
         synchronized (this) {
@@ -810,12 +809,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
             long bytes = 0;
             first = durableThrough + 1;
+            long sequence = first;
+            // Validate the complete immutable batch before I/O without retaining its serialized payload.
             for (Command command : commands) {
-                ByteBuffer record = SegmentControlFormat.encode(command.type, LOG_GENERATION,
-                        first + records.size(), command.operationId(),
-                        new Generation(command.scope.authorityGeneration()), 0, body(command));
-                bytes = Math.addExact(bytes, record.remaining());
-                records.add(record);
+                bytes = Math.addExact(bytes, encode(command, sequence++).remaining());
             }
             requireCapacity(bytes);
             start = nextOffset;
@@ -836,7 +833,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         try {
             long position = start;
-            for (ByteBuffer record : records) {
+            long sequence = first;
+            for (Command command : commands) {
+                ByteBuffer record = encode(command, sequence++);
                 io.writeFully(channel, physicalRecord(record), position);
                 position += record.remaining();
             }

@@ -1427,6 +1427,34 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void streamedBatchRejectsLateInvalidCommandAndRecoversOnlyTheCompleteWrittenPrefix() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, 2, -1, false);
+        var first = alloc(1, 4096);
+        var second = alloc(2, 4096 + SegmentArenaControlLog.BLOCK_BYTES);
+        var invalid = new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC, new UUID(0, 3),
+                new Generation(1), 0, config.dataFiles(), 1, new Generation(1), 3, 4096, 1, 1);
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024, io)) {
+            assertThrows(IllegalArgumentException.class, () -> log.appendDurably(List.of(first, invalid)));
+            assertEquals(4096, Files.size(config.directory().resolve("arena-control")));
+            assertThrows(IOException.class, () -> log.appendDurably(List.of(first, second)));
+            assertEquals(0, io.forces);
+            assertEquals(-1, log.durableThrough());
+            assertEquals(-1, log.appliedThrough());
+            assertFalse(granted(log, 4096, 1, 1, 1));
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(first)));
+        }
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(0, replay.appliedThrough());
+            assertTrue(granted(replay, 4096, 1, 1, 1));
+            assertFalse(granted(replay, second.offset(), 1, 1, 2));
+            assertEquals(SegmentArenaControlLog.Status.ALREADY_DURABLE,
+                    replay.submitBatch(List.of(first)).get(0).status());
+        }
+    }
+
+    @Test
     public void failedForceIsUnknownUntilReplayAndPartialTailRemainsNonWritable() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

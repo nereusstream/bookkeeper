@@ -1221,3 +1221,24 @@ native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 u
 最终 `KdX6H3Fz` 为Bookie17、Service8（含原14场景backup/restore方法）与原allocator12，共 **37 PASS、0 failure/error/skip**；覆盖原checkpoint/rotation/replay及LAC/handoff/unapplied force不确定窗口、实际owned/Embedded drain、SDK/恢复重启和启动失败清理。全部1172源码/资源输入与最终Java精确一致，Spotless/Checkstyle exit0。模型转移未改、未运行TLC，不移绑旧receipt；Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。控制批次临时编码空间及其余full-bytes/16步验收仍OPEN。
 
 独立终态 `mvn -o apache-rat:check` exit1，443条未批准路径均核实为父 `8b245c0ce5a342130830012bda32a14c508cc049` 的既有blob，与前轮路径集合相同，无新增；完整命令/log/报告/父对象验证保存在同一证据目录 `rat/`，不称CI全绿。
+
+
+## 控制批次的逐条编码与完整预检
+
+2026-10-23，父提交 `ab44b475a5bd5c19b0babd231ea02dc1c7f1f1e0` 上，Bookie/Arena 的批次 append 去掉整批 encoded ByteBuffer 列表。仍先冻结原typed command输入，在原写者锁内完成全部权限/几何/guard及每条canonical frame编码检查，并累计整批长度；容量允许后才预留原journal坐标、设置writing。实际I/O阶段保持同一writer排他，对不可变command逐条重编码、同步writeFully，全部写完仍只force一次，再提供durable batch供原逐序apply。控制owner、字节格式、序号、tombstone前置cut、失败后UNKNOWN与拒绝续写、partial journal恢复及原幂等结果均保持。普通DATA路径未增加控制fsync/MetadataStore调用。
+
+预检不持有serialized payload，只留下整批长度；相同command的body/frame检查在首次I/O前全部完成。第二次编码复用原codec，原sealed credential只在command构建时生成一次，预检/写入不会重新生成nonce。逐条额外编码的CPU及累计分配成本尚未测量；本轮只报告当前记录持有态，不宣称吞吐/延迟改善。typed command列表、复制的scope/credential/JCA与其他对象容量仍OPEN。
+
+原Service codec working-set改为 `69776 + 4 × 65536 = 331920 bytes`，为两个独立control writer各保留body/record对，并包含原verification scratch；Graph maintenance仍先排空两个writer后顺序处理双owner image。连同既有Bookie retained raw backing，实际storage CONTROL预留为 `331920 + 3 × controlLogBytes`。1 MiB journal fixture对应3,477,648 bytes，原DATA 3,801,088及网络CONTROL 131072保持；生产quota不自动增大，不足时仍在storage open前拒绝。实际Service与fixture class的javap常量均已核对，避免旧inline值误作验证。
+
+新增两项真实文件回归覆盖后段错误与部分写：Arena第二命令几何错误、Bookie第二authority不匹配均在任何I/O前拒绝，原journal仍4096 bytes；随后注入第二条write失败，第一条完整frame已写但force为0，当前进程无apply且拒绝续写。重开先验证并sync完整前缀，只恢复第一条；Arena重试first为ALREADY，Bookie可激活已恢复的ledger44而未写ledger45仍CONDITION_FAILED。首次测试编译误用了Bookie不存在的durableThrough查询，修正后两新增与既有同批顺序/Service额度共六项通过，原编译失败保留。
+
+持有态对照为相同JDK21.0.10、`-Xint -Xms128m -Xmx128m -XX:MaxDirectMemorySize=32m` 的四个独立JVM，分别测父/新Arena和父/新Bookie。两版使用相同的临时IO observer：只在首次真实write前调用不接收buffer/command的阻塞hook，生产 `SegmentFileIo` 源码未改；observer class bytes一致，全部owner/codec实际class加载路径与冻结source核对。初始typed输入与空log就绪及首次write前分别执行 `jcmd GC.class_histogram`，阻塞时控制文件仍4096 bytes。每owner输入4096条：Arena首项APPLIED、其余同位置竞争CONDITION_FAILED；Bookie为4096个不同ledger的fixture INSTALL，非MetadataStore producer验收。
+
+相对各自baseline，两个owner的只读ByteBuffer增量均从4096降至1。新Arena byte[]增量为1216 bytes，新Bookie仍为5,877,784 bytes；后者混合typed command/sealed credential/JCA/JDK数组，不能当作pure record或整个预算。四进程均完成初次batch一次force、force前无apply、全部预期按序结果及重开验证。Arena还对首/末operation作一次独立重试batch，验证ALREADY/CONDITION_FAILED；两版最终含该重试的790912-byte journal字节完全一致。Bookie的每JVM credential nonce独立，未要求ciphertext相同；各自重开后逐项验证4096个installed context的正确/错误credential分类，journal长度均1,937,408 bytes。
+
+原source/每阶段1172输入、编译失败与定向Maven/XML、javap、只读observer补丁/source/class、四进程class-load/histogram/完整native文件与终态分层保存在 `/Users/liusinan/.codex/artifacts/unified-wal/control-streaming-batch-evidence-ab44b475`。持有态是在指定观测点经full GC后的结果，不是累计分配、峰值heap/RSS或完整CONTROL总账；observer模式不代替生产backend的原生功能验证。默认SDK/observe、同incarnation unclosed-session接受条件、多Arena持久路由及其余full-bytes/全部16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。
+
+最终生产backend `nmoiDfxE` 为Arena整类40、Bookie相关22、Service8（含原14场景backup/restore）及原allocator12，共 **82 PASS、0 failure/error/skip**。覆盖新两条预检/第二write失败、同batch状态顺序、tombstone cut、既有force UNKNOWN、控制进程退出/rotation/必要suffix、MOVE/FREE/reuse、实际owned/Embedded/SDK drain与重启。全部1172源码/资源与最终Java精确一致，Spotless/Checkstyle exit0；没有将observer模式结果充作生产backend测试，也不合并定向6项计数。TLA未改、未执行TLC或移绑历史receipt；Linux NUMA/掉电/正式性能/canary本轮NOT_EXECUTED，完整模型/兼容/full-bytes与16步验收保持OPEN。
+
+独立终态 `mvn -o apache-rat:check` exit1，443条未批准路径均为父 `ab44b475a5bd5c19b0babd231ea02dc1c7f1f1e0` 的既有blob，与前轮完整路径集合一致，无新增；完整命令/log/报告/父对象核对保存在同一证据目录 `rat/`，不称CI全绿。

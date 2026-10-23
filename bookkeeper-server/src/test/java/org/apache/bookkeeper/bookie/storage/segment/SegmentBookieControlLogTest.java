@@ -1449,6 +1449,38 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void streamedBookieBatchPreflightsEveryAuthorityAndRecoversOnlyTheCompleteWrittenPrefix() throws Exception {
+        IsolatedSegmentConfig config = config();
+        var first = install(44, 1, (byte) 5);
+        var second = install(45, 2, (byte) 5);
+        var foreign = scope(45, ProfileControlOperation.INSTALL, 3, 1);
+        var invalid = new ProtectedProfileStateStore.Transition(second.request(),
+                new CommittedProfileAuthority(foreign, CommittedProfileAuthority.State.PREPARING,
+                        EngineProfile.SEGMENT_WAL_ENGINE, 1, true), DESCRIPTOR);
+        SegmentFileIo io = new SegmentFileIo(Integer.MAX_VALUE, 2, -1, false);
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(), 1024 * 1024,
+                        key((byte) 3), VALIDATOR, io)) {
+            assertThrows(IllegalArgumentException.class, () -> log.appendDurably(List.of(first, invalid)));
+            assertEquals(4096, Files.size(config.directory().resolve("bookie-control")));
+            assertThrows(IOException.class, () -> log.appendDurably(List.of(first, second)));
+            assertEquals(0, io.forces);
+            assertEquals(-1, log.appliedThrough());
+            assertFalse(log.normalAdmission(context(44), filled(20, (byte) 5)));
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(activate(44, 4))));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity(), 1024 * 1024,
+                key((byte) 3), VALIDATOR)) {
+            assertEquals(0, replay.appliedThrough());
+            var results = replay.submitBatch(List.of(activate(44, 4), activate(45, 5)));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, results.get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED, results.get(1).status());
+            assertTrue(replay.normalAdmission(context(44), filled(20, (byte) 5)));
+            assertFalse(replay.normalAdmission(context(45), filled(20, (byte) 5)));
+        }
+    }
+
+    @Test
     public void oneForceCanCoverOrderedInstallAndActivation() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

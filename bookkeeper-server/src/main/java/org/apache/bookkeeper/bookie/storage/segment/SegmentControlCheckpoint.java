@@ -36,8 +36,8 @@ import org.apache.bookkeeper.common.profile.startup.Generation;
 final class SegmentControlCheckpoint {
     private static final int MAX_RECORD_BYTES = 65536;
     static final int VERIFICATION_BUFFER_BYTES = 4096 + 128 + 16 + MAX_RECORD_BYTES;
-    // Verification scratch plus one on-demand Arena body and its canonical physical record.
-    static final int WORKING_SET_BYTES = VERIFICATION_BUFFER_BYTES + 2 * MAX_RECORD_BYTES;
+    // Verification scratch plus body/record pairs for both independent control writers.
+    static final int WORKING_SET_BYTES = VERIFICATION_BUFFER_BYTES + 4 * MAX_RECORD_BYTES;
 
     record Reference(long generation, int slot, long through, long logOffset, int payloadBytes, String digest) {
         Reference {

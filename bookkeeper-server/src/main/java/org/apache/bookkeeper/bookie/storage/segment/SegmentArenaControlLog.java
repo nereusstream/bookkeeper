@@ -523,17 +523,17 @@ final class SegmentArenaControlLog implements AutoCloseable {
     /** One physical force covers the whole batch; no result is applied before that force returns. */
     DurableBatch appendDurably(List<? extends Command> commands) throws IOException {
         List<Command> batch = List.copyOf(commands);
-        List<ByteBuffer> encoded;
-        long sequence;
+        long first;
         long start;
         synchronized (this) {
             requireControlWritable();
             if (writing || pending != null || batch.isEmpty() || batch.size() > config.maxPendingEntries()) {
                 throw new IllegalArgumentException("Invalid or unresolved control batch");
             }
-            encoded = new ArrayList<>(batch.size());
             long bytes = 0;
-            sequence = durableThrough + 1;
+            first = durableThrough + 1;
+            long sequence = first;
+            // Validate the complete immutable batch before I/O without retaining its serialized payload.
             for (Command command : batch) {
                 validateCommand(command);
                 if (command instanceof Free free) {
@@ -545,11 +545,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         && command != preparedClose) {
                     throw new IOException("Reused allocation tails require the actual healthy writer close");
                 }
-                ByteBuffer record = SegmentControlFormat.encode(command.type(), physicalGeneration, sequence++,
+                bytes = Math.addExact(bytes, SegmentControlFormat.encode(command.type(), physicalGeneration, sequence++,
                         command.operationId(), command.operationGeneration(), command.expectedGeneration(),
-                        command.body());
-                bytes = Math.addExact(bytes, record.remaining());
-                encoded.add(record);
+                        command.body()).remaining());
             }
             long reserved = sessionCloseReserved && batch.stream().noneMatch(command ->
                     command instanceof DataSession session && !session.open())
@@ -577,14 +575,18 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         try {
             long position = start;
-            for (ByteBuffer record : encoded) {
+            long sequence = first;
+            for (Command command : batch) {
+                ByteBuffer record = SegmentControlFormat.encode(command.type(), physicalGeneration, sequence++,
+                        command.operationId(), command.operationGeneration(), command.expectedGeneration(),
+                        command.body());
                 io.writeFully(channel, record, position);
                 position += record.remaining();
             }
             io.force(channel, true);
             synchronized (this) {
-                durableThrough = sequence - 1;
-                pending = new DurableBatch(durableThrough - batch.size() + 1, batch);
+                durableThrough = first + batch.size() - 1;
+                pending = new DurableBatch(first, batch);
                 return pending;
             }
         } catch (IOException | RuntimeException | Error failure) {
