@@ -1145,3 +1145,23 @@ Arena 的原 journal/checkpoint/rotation parser、顺序 apply、坏 image fallb
 本轮消除了 checkpoint 写后校验再次物化整份 payload 的临时工作集；冻结状态与恢复 Snapshot 的持有量、控制日志长期对象、统一 CONTROL quota 以及其他 full-bytes 仍 OPEN，不能将这份 scratch 上限写成完整内存总账。默认 SDK/observe 公共约定、同 incarnation unclosed-session 接受条件、多 Arena 持久路由和其余完整16步仍待闭合，目标 active、生产 Gate OPEN；默认 OFF/SYSTEM/PARK 与 disabled 能力保持。Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
 
 native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径全部存在父提交，无新增；原报告和逐路径 Git 对象核验保留，不称 CI 全绿。
+
+## Profile checkpoint 校验的 CONTROL 容量预留
+
+2026-10-23，父提交 `a533d249d27b819cafc88cc1ec5cce39250562a8` 上，将上一节 checkpoint verification 的69776-byte ByteBuffer capacity（4096 identity＋128 header＋16 prefix＋65536 record）接入原 `ProfileReceiveBudget` CONTROL lane。`SegmentProfileService` 在构造/open storage graph 前取得独立于连接 slot 的固定预留。原 graph 一次只接纳一个 control rotation，同一 CONTROL I/O procedure 顺序处理 Bookie/Arena cuts，因而预留一份；没有增加线程、队列、格式或普通 Add 操作。record 上限与 scratch 分配复用同一常量。
+
+预留不足以 IOException 拒绝启动，不创建 graph/目录或发布 writable；已取得的 DATA pool/index 预留沿原 cleanup 归还。生产预算不自动增加，配置须同时容纳这份固定容量和实际 CONTROL 网络/codec 工作集。ServiceEpisode 与 restore 子进程的测试预算显式将 total 和 CONTROL 各增加69776 bytes：DATA仍为3801088、未分类仍为262144，固定预留后 CONTROL 网络空间仍为原131072 bytes。不是通过挤占 DATA 或缩小已有网络工作集取得通过。
+
+该 credit 随 storage owner 保留至实际关闭；listener/network retirement 只等待原连接资源，不能归还它，也不能在已停止准入后为已接受的 rotation 重新竞争额度。`ControlWorkingSet` 复用原 Credit/limit/drain 机制，不占连接 slot、不授 remote authority。allocator 用例把固定 CONTROL 与实际 Netty backing 放在同一 lane，验证额度不足、DATA隔离、最后 retained view 和 storage token 分别结束后的 network/full drain。
+
+真实缺口反例 `orylnXEt` 保留父 Service 的未接线实现，新增 API/fixture 已具备；CONTROL可用量比固定需求少1 byte仍能启动，预期 IOException 未抛。接线后同用例在 storage open前拒绝，DATA归零、外部held CONTROL credit保留到其owner归还。该反例不是整个父版本源码原样执行。
+
+`ownedProfileServiceKeepsCheckpointControlCapacityUntilActualRotationAndClose` 启动真实 owned service，暂停首个 checkpoint image 的实际 force，并验证第二个 rotation 不准入、caller仍等待。Service close退休准入后返回未完成，固定 CONTROL 仍保留，owned依赖尚未终结；放行后两个owner完成真实轮转/verification，实际storage关闭后额度归零，owned资源终结。随后重新打开原生 Bookie/Arena control，确认两个 published checkpoint 和健康 DATA CLOSE 均可重放。原 owned SDK/EmbeddedServer用例同时保留held DATA force时的CONTROL预留及关闭后归零检查，bind失败也归还两类预留。
+
+实现阶段还由同步 drain callback 重入 `service.close()` 复现 `V3dL2mDs` 的 `Receive credit returned twice`：Credit归还触发回调时，service字段仍指向已归还token。最终在归还 DATA/CONTROL前先移走字段引用；相同callback可完成重入关闭。该失败与修复独立保留，不能把此前没有callback的19 PASS当作已覆盖这个窗口。
+
+最终 `Jmg7MOWo` 为 allocator整类12方法与7个Service方法，共 **19 PASS、0 failure/error/skip**，涵盖新额度/实际rotation/drain重入及原index拒绝、requirements/bind cleanup、SDK/EmbeddedServer/owned资源重启。全部1172个源码/资源输入与最终Java精确一致，Spotless/Checkstyle exit0。未接线RED、早期3项/19项green、重入RED与最终结果及源码分层保存在 `/Users/liusinan/.codex/artifacts/unified-wal/control-verify-budget-evidence-a533d249`，各阶段保留原命令/Maven/XML，不合并测试数量或移绑历史结果。
+
+这是 Profile Service 的 verification ByteBuffer capacity预留；standalone checkpoint入口、冻结/恢复Snapshot、长期control对象、其他codec/MetadataStore/JDK/native/TLS/kernel/cohort总账仍未闭合，不是RSS硬上限或整个CONTROL/full-bytes完成。未改TLA、未执行TLC；旧有限模型不证明新增固定CONTROL/同步回调窗口。默认SDK/observe、同incarnation unclosed-session接受条件、多Arena持久路由及完整16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径全部存在父提交，无新增；原报告和逐路径 Git 对象核验保留，不称 CI 全绿。

@@ -355,6 +355,40 @@ public final class ProfileReceiveBudget {
         }
     }
 
+    /** Fixed CONTROL capacity has a storage owner independent of connection slots and network retirement. */
+    public final class ControlWorkingSet implements AutoCloseable {
+        private final Credit credit;
+
+        private ControlWorkingSet(Credit credit) {
+            this.credit = credit;
+        }
+
+        @Override
+        public void close() {
+            credit.close();
+        }
+    }
+
+    /** Reserve before opening the storage owner; no connection slot or remote authority is granted. */
+    public ControlWorkingSet reserveControlWorkingSet(long bytes) {
+        if (bytes < 1) {
+            throw new IllegalArgumentException("Positive CONTROL working set required");
+        }
+        Credit credit;
+        synchronized (this) {
+            credit = accepting ? reserveOwned(Lane.CONTROL, bytes) : null;
+        }
+        if (credit == null) {
+            throw new CapacityExceededException();
+        }
+        try {
+            return new ControlWorkingSet(credit);
+        } catch (RuntimeException | Error failure) {
+            credit.close();
+            throw failure;
+        }
+    }
+
     /** Retire admission and wait only for network owners; storage retains its reserved completion capacity. */
     public CompletableFuture<Void> closeConnectionsAndDrain() {
         synchronized (this) {

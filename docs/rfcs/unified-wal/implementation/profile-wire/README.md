@@ -2339,3 +2339,5 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径全部存在父提交，无新增；原报告与逐路径 Git 对象核验保留，不称 CI 全绿。
 
 [控制 checkpoint 的流式读回校验](../local-storage/README.md#控制-checkpoint-的流式读回校验)：2026-10-23父b03297b919上，Bookie/Arena 写后验证复用原 parser，用最多64 KiB record scratch逐条比较冻结状态；恢复仍返回独立record，格式/force/commit/publication不变。8 MiB有限image的旧比较额外Java分配8,535,328 bytes，新版本最终185,200 bytes；最终两类48方法通过、1172输入匹配、style通过，旧算法RED独立保留。不是RSS/吞吐或统一CONTROL总账证明；完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+[Profile checkpoint 校验的 CONTROL 容量预留](../local-storage/README.md#profile-checkpoint-校验的-control-容量预留)：2026-10-23父a533d249d2上，Service在storage open前从原CONTROL额度保留69776 bytes，保持至实际storage关闭；未接线启动缺口及同步drain回调重入重复归还两次RED分别保留，最终先移走token引用再归还。最终两类19方法通过、1172输入匹配、style通过，覆盖真实held checkpoint force、停止准入后verification、原SDK/Embedded/owned restart与bind cleanup。测试只增加固定容量，原DATA/网络空间保持；统一CONTROL/full-bytes和其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

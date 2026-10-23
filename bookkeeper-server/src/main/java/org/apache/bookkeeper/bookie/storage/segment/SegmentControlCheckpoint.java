@@ -34,6 +34,9 @@ import org.apache.bookkeeper.common.profile.startup.Generation;
 
 /** Shared bounded control image codec; each owner retains its own commit order and publication page. */
 final class SegmentControlCheckpoint {
+    private static final int MAX_RECORD_BYTES = 65536;
+    static final int VERIFICATION_BUFFER_BYTES = 4096 + 128 + 16 + MAX_RECORD_BYTES;
+
     record Reference(long generation, int slot, long through, long logOffset, int payloadBytes, String digest) {
         Reference {
             if (generation < 1 || slot < 0 || slot > 1 || through < -1 || logOffset < 4096
@@ -156,7 +159,7 @@ final class SegmentControlCheckpoint {
             MessageDigest digest = sha256();
             List<Operation> operations = expected == null ? new ArrayList<>(count) : null;
             ByteBuffer scratch = expected == null || count == 0 ? null
-                    : ByteBuffer.allocate(Math.min(65536, reference.payloadBytes() - 16));
+                    : ByteBuffer.allocate(Math.min(MAX_RECORD_BYTES, reference.payloadBytes() - 16));
             ByteBuffer prefix = ByteBuffer.allocate(16);
             long offset = 4224;
             long sequence = -1;
@@ -172,7 +175,7 @@ final class SegmentControlCheckpoint {
                 int length = prefix.getInt();
                 if (nextSequence <= sequence || nextSequence > reference.through()
                         || (header.getInt(8) == 1 && index == 0 && nextSequence != 0) || status < 1 || status > 4
-                        || length < 144 || length > 65536 || length > file.size() - offset - 16) {
+                        || length < 144 || length > MAX_RECORD_BYTES || length > file.size() - offset - 16) {
                     throw new IOException("Invalid Control checkpoint operation");
                 }
                 ByteBuffer record = expected == null ? ByteBuffer.allocate(length) : scratch.clear().limit(length);

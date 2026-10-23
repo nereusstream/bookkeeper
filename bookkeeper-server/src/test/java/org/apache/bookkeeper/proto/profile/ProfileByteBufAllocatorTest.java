@@ -35,6 +35,46 @@ import org.junit.Test;
 
 public class ProfileByteBufAllocatorTest {
     @Test
+    public void fixedControlCapacitySharesQuotaAndWaitsForItsStorageOwner() {
+        var budget = new ProfileReceiveBudget(2048, 512, 512, 1, 1, 1);
+        var checkpoint = budget.reserveControlWorkingSet(384);
+        var control = budget.admitClient(ProfileReceiveBudget.Lane.CONTROL, 512);
+        ByteBuf root = control.allocator().directBuffer(128, 128);
+        ByteBuf view = root.retainedDuplicate();
+        try {
+            assertEquals(512, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                    () -> control.allocator().directBuffer(1, 1));
+            assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                    () -> budget.reserveControlWorkingSet(1));
+            try (var data = budget.reserveDataWorkingSet(1024)) {
+                assertEquals(1024, budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(512, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            }
+            root.release();
+            control.close();
+            assertFalse(budget.closeConnectionsAndDrain().isDone());
+            view.release();
+            assertTrue(budget.closeConnectionsAndDrain().isDone());
+            assertFalse(budget.closeAdmissionAndDrain().isDone());
+            assertEquals(384, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            assertThrows(ProfileReceiveBudget.CapacityExceededException.class,
+                    () -> budget.reserveControlWorkingSet(1));
+        } finally {
+            if (root.refCnt() > 1) {
+                root.release();
+            }
+            if (view.refCnt() > 0) {
+                view.release();
+            }
+            control.close();
+            checkpoint.close();
+        }
+        assertTrue(budget.closeAdmissionAndDrain().isDone());
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    @Test
     public void fixedStorageSharesDataQuotaAndDrainsAfterLastConnectionBacking() {
         var budget = new ProfileReceiveBudget(2048, 512, 512, 1, 1, 1);
         var storage = budget.reserveDataWorkingSet(768);

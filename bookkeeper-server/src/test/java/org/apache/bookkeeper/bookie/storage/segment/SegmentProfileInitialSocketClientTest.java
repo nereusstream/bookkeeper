@@ -2681,7 +2681,8 @@ public class SegmentProfileInitialSocketClientTest {
                     (caller, query) -> caller.equals(principal));
             var service = SegmentProfileService.withOwnedResources(configuration,
                     new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, tls,
-                    new ProfileReceiveBudget(4L * 1024 * 1024, 131072, 262144, 8, 8, 8),
+                    new ProfileReceiveBudget(ServiceEpisode.TOTAL_BYTES, ServiceEpisode.CONTROL_BYTES,
+                            262144, 8, 8, 8),
                     131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
                     (caller, operation) -> caller.equals(principal),
                     (caller, scope, authority) -> caller.equals(principal) && scope.equals(authority.scope())
@@ -2738,14 +2739,16 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private final class ServiceEpisode implements AutoCloseable {
-        private static final long DATA_BYTES = 4L * 1024 * 1024 - 131072 - 262144;
+        private static final long TOTAL_BYTES = 4L * 1024 * 1024 + SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES;
+        private static final long CONTROL_BYTES = 131072 + SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES;
+        private static final long DATA_BYTES = TOTAL_BYTES - CONTROL_BYTES - 262144;
         final ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
         final ZooKeeper client;
         final ZKProfileStartupRequirementsStore requirements;
         final ZKProfileRegistrationStore persistent;
         final ZKProfileEphemeralRegistrationStore publisher;
         final SegmentProfileService service;
-        final ProfileReceiveBudget budget = new ProfileReceiveBudget(4L * 1024 * 1024, 131072, 262144, 8, 8, 8);
+        final ProfileReceiveBudget budget = new ProfileReceiveBudget(TOTAL_BYTES, CONTROL_BYTES, 262144, 8, 8, 8);
         final IsolatedSegmentConfig config;
         final ServerConfiguration bootstrapConfiguration;
         final SegmentProfileService.Startup startup;
@@ -3034,6 +3037,9 @@ public class SegmentProfileInitialSocketClientTest {
                             sdk.getClientCtx().getScheduler())) {
                         assertThrows(java.io.IOException.class, () -> episode.service.start(false));
                         assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                        assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                        assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                        assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
                         assertTrue(episode.persistent.read(identity.bookieId().toString()).versionedRecord().isEmpty());
                         try (var reopened = new IsolatedSegmentStorage(config, identity,
                                 new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
@@ -3099,6 +3105,97 @@ public class SegmentProfileInitialSocketClientTest {
     @Test
     public void ownedProfileServicePublishesBoundEndpointSupportsSdkAndRetainsDrainAcrossRestart() throws Exception {
         runOwnedProfileService(false);
+    }
+
+    @Test
+    public void profileServiceRejectsMissingCheckpointControlCapacityBeforeOpen() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                long heldBytes = ServiceEpisode.CONTROL_BYTES - SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES + 1;
+                try (var held = episode.budget.reserveControlWorkingSet(heldBytes)) {
+                    assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                    assertNull(episode.storage());
+                    assertFalse(Files.exists(config.directory()));
+                    assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(heldBytes, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                    assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
+                    assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+                }
+                assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileServiceKeepsCheckpointControlCapacityUntilActualRotationAndClose() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var identity = fixture.identities.get(0);
+            var requested = servicePolicy(config, identity, 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
+                episode.replaceNode(fixture, 0, false);
+                assertEquals(SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES,
+                        episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                var forcing = new CountDownLatch(1);
+                var release = new CountDownLatch(1);
+                var result = new CompletableFuture<IsolatedSegmentStorage.ControlRotationResult>();
+                try {
+                    assertTrue(episode.storage().rotateControls(new IsolatedSegmentStorage.ControlRotationRequest(
+                            (rotated, failure) -> {
+                                if (failure == null) {
+                                    result.complete(rotated);
+                                } else {
+                                    result.completeExceptionally(failure);
+                                }
+                            }), new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                                forcing.countDown();
+                                await(release);
+                            }), new SegmentFileIo()));
+                    assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                    assertFalse(episode.storage().rotateControls(new IsolatedSegmentStorage.ControlRotationRequest(
+                            (ignored, failure) -> { })));
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> result.get(150, TimeUnit.MILLISECONDS));
+                    assertFalse(episode.service.close(Duration.ofMillis(100)));
+                    assertEquals(SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES,
+                            episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                    assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
+                    assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+                    episode.assertOwnedResourcesTerminal(false);
+                    var reentrantClose = episode.budget.closeAdmissionAndDrain().thenRun(() -> {
+                        try {
+                            episode.service.close();
+                        } catch (java.io.IOException failure) {
+                            throw new java.io.UncheckedIOException(failure);
+                        }
+                    });
+                    release.countDown();
+                    assertEquals(IsolatedSegmentStorage.ControlRotationStatus.ROTATED,
+                            result.get(5, TimeUnit.SECONDS).status());
+                    assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                    reentrantClose.get(5, TimeUnit.SECONDS);
+                    assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
+                    assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                    episode.assertOwnedResourcesTerminal(true);
+                } finally {
+                    release.countDown();
+                }
+                try (var bookie = SegmentBookieControlLog.open(config, identity, 1024 * 1024,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR);
+                        var arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+                    assertTrue(bookie.publishedCheckpoint().isPresent());
+                    assertTrue(arena.publishedCheckpoint().isPresent());
+                    assertFalse(arena.hasUnclosedDataSession());
+                }
+            }
+        }
     }
 
     @Test
@@ -3341,6 +3438,8 @@ public class SegmentProfileInitialSocketClientTest {
                 assertFalse(episodes.get(0).service.close(Duration.ofMillis(100)));
                 assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA)
                         >= 2L * (4096 + 4095) + SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES);
+                assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.CONTROL)
+                        >= SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES);
                 assertFalse(episodes.get(0).budget.closeAdmissionAndDrain().isDone());
                 if (ownsResources) {
                     episodes.get(0).assertOwnedResourcesTerminal(false);
@@ -3367,6 +3466,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertTrue(episodes.get(0).service.close(Duration.ofSeconds(5)));
                 assertTrue(episodes.get(0).budget.closeAdmissionAndDrain().isDone());
                 assertEquals(0, episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(0, episodes.get(0).budget.used(ProfileReceiveBudget.Lane.CONTROL));
                 if (ownsResources) {
                     episodes.get(0).assertOwnedResourcesTerminal(true);
                 }

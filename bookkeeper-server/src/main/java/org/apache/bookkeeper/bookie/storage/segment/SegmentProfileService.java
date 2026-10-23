@@ -252,6 +252,7 @@ public final class SegmentProfileService implements AutoCloseable {
     private final Object gate = new Object();
     private final Object closeGate = new Object();
     private ProfileReceiveBudget.DataWorkingSet dataWorkingSet;
+    private ProfileReceiveBudget.ControlWorkingSet controlWorkingSet;
     private final IsolatedSegmentConfig config;
     private final SegmentFileHeader identity;
     private final SecretKey key;
@@ -334,6 +335,14 @@ public final class SegmentProfileService implements AutoCloseable {
                             execution.reservedBufferBytes(), SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES));
                 } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
                     throw new IOException("Profile DATA quota cannot reserve storage buffers and index capacities",
+                            exhausted);
+                }
+                try {
+                    // One graph rotation verifies its Bookie and Arena checkpoint cuts sequentially.
+                    controlWorkingSet = transport.budget().reserveControlWorkingSet(
+                            SegmentControlCheckpoint.VERIFICATION_BUFFER_BYTES);
+                } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
+                    throw new IOException("Profile CONTROL quota cannot reserve checkpoint verification buffers",
                             exhausted);
                 }
             }
@@ -651,9 +660,16 @@ public final class SegmentProfileService implements AutoCloseable {
             if (local != null) {
                 local.close();
             }
-            if (dataWorkingSet != null) {
-                dataWorkingSet.close();
-                dataWorkingSet = null;
+            var dataCapacity = dataWorkingSet;
+            dataWorkingSet = null;
+            if (dataCapacity != null) {
+                dataCapacity.close();
+            }
+            // Returning the final credit may synchronously reenter close through a caller's drain callback.
+            var controlCapacity = controlWorkingSet;
+            controlWorkingSet = null;
+            if (controlCapacity != null) {
+                controlCapacity.close();
             }
             if (demotionFailure != null) {
                 throw demotionFailure;
