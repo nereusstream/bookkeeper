@@ -98,4 +98,51 @@ public class SegmentControlFormatTest {
         assertThrows(IllegalArgumentException.class, () -> SegmentControlFormat.encode(SegmentControlFormat.Type.ALLOC,
                 new Generation(1), 0, new UUID(1, 2), new Generation(1), 0, ByteBuffer.allocate(65536)));
     }
+
+    @Test
+    public void preflightPreservesTheBodyAtAlignmentAndMaximumLengthBoundaries() throws Exception {
+        for (int length : new int[] {0, 1, 7, 8, 9, 65385, 65391, 65392}) {
+            ByteBuffer body = ByteBuffer.allocate(length + 3).position(3).asReadOnlyBuffer();
+            body.mark();
+            int size = SegmentControlFormat.encodedLength(SegmentControlFormat.Type.FENCE,
+                    new Generation(3), 9, new UUID(1, 2), new Generation(1), 0, body);
+            assertEquals(144 + (length + 7) / 8 * 8, size);
+            assertEquals(3, body.position());
+            assertEquals(length, body.remaining());
+            body.reset();
+            ByteBuffer encoded = SegmentControlFormat.encode(SegmentControlFormat.Type.FENCE,
+                    new Generation(3), 9, new UUID(1, 2), new Generation(1), 0, body);
+            assertEquals(size, encoded.remaining());
+            assertEquals(body, SegmentControlParser.parse(encoded, SegmentControlFormat.Owner.BOOKIE,
+                    new Generation(3), 9).body());
+            assertEquals(3, body.position());
+            body.reset();
+        }
+    }
+
+    @Test
+    public void preflightRejectsInvalidFramingInputs() {
+        var type = SegmentControlFormat.Type.FENCE;
+        var generation = new Generation(1);
+        var operation = new UUID(1, 2);
+        ByteBuffer body = ByteBuffer.allocate(0);
+        assertThrows(IllegalArgumentException.class, () -> SegmentControlFormat.encodedLength(
+                type, generation, -1, operation, generation, 0, body));
+        assertThrows(IllegalArgumentException.class, () -> SegmentControlFormat.encodedLength(
+                type, generation, 0, operation, generation, -1, body));
+        assertThrows(IllegalArgumentException.class, () -> SegmentControlFormat.encodedLength(
+                type, generation, 0, new UUID(0, 0), generation, 0, body));
+        assertThrows(IllegalArgumentException.class, () -> SegmentControlFormat.encodedLength(
+                type, generation, 0, operation, generation, 0, ByteBuffer.allocate(65393)));
+        assertThrows(NullPointerException.class, () -> SegmentControlFormat.encodedLength(
+                null, generation, 0, operation, generation, 0, body));
+        assertThrows(NullPointerException.class, () -> SegmentControlFormat.encodedLength(
+                type, null, 0, operation, generation, 0, body));
+        assertThrows(NullPointerException.class, () -> SegmentControlFormat.encodedLength(
+                type, generation, 0, null, generation, 0, body));
+        assertThrows(NullPointerException.class, () -> SegmentControlFormat.encodedLength(
+                type, generation, 0, operation, null, 0, body));
+        assertThrows(NullPointerException.class, () -> SegmentControlFormat.encodedLength(
+                type, generation, 0, operation, generation, 0, null));
+    }
 }

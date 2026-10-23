@@ -56,16 +56,9 @@ final class SegmentControlFormat {
 
     static ByteBuffer encode(Type type, Generation logGeneration, long sequence, UUID operationId,
                              Generation operationGeneration, long expectedGeneration, ByteBuffer body) {
-        Objects.requireNonNull(type, "type");
-        Objects.requireNonNull(logGeneration, "logGeneration");
-        Objects.requireNonNull(operationId, "operationId");
-        Objects.requireNonNull(operationGeneration, "operationGeneration");
-        if (sequence < 0 || expectedGeneration < 0 || operationId.equals(new UUID(0, 0))
-                || body.remaining() > 65536 - 128 - 16) {
-            throw new IllegalArgumentException("Invalid control record");
-        }
+        int length = encodedLength(type, logGeneration, sequence, operationId, operationGeneration,
+                expectedGeneration, body);
         int bodyLength = body.remaining();
-        int length = Math.multiplyExact(Math.floorDiv(128 + bodyLength + 16 + 7, 8), 8);
         ByteBuffer b = ByteBuffer.allocate(length);
         b.putLong(0x555743544c303031L).putInt(1).putInt(type.owner.code).putInt(type.code).putInt(length)
                 .putLong(sequence).putLong(operationId.getMostSignificantBits())
@@ -78,6 +71,21 @@ final class SegmentControlFormat {
         b.position(footer).putInt(0x43544c45).putInt(crc(b, 128, footer - 128)).putLong(sequence);
         b.clear();
         return b.asReadOnlyBuffer();
+    }
+
+    /** The same complete framing validation as encoding, without constructing the frame or consuming the body. */
+    static int encodedLength(Type type, Generation logGeneration, long sequence, UUID operationId,
+                             Generation operationGeneration, long expectedGeneration, ByteBuffer body) {
+        Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(logGeneration, "logGeneration");
+        Objects.requireNonNull(operationId, "operationId");
+        Objects.requireNonNull(operationGeneration, "operationGeneration");
+        if (sequence < 0 || expectedGeneration < 0 || operationId.equals(new UUID(0, 0))
+                || body.remaining() > 65536 - 128 - 16) {
+            throw new IllegalArgumentException("Invalid control record");
+        }
+        int bodyLength = body.remaining();
+        return Math.multiplyExact(Math.floorDiv(128 + bodyLength + 16 + 7, 8), 8);
     }
 
     private static int crc(ByteBuffer b, int from, int length) {

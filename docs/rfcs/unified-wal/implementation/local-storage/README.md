@@ -1284,3 +1284,29 @@ java -cp microbenchmarks/target/benchmarks.jar org.openjdk.jmh.Main \
 本轮离线package与microbenchmarks/依赖模块Spotless/Checkstyle均exit0。仅改benchmark及其package说明、既有五份文档，没有改生产Java或TLA；不重复运行无变化的生产测试/TLC，也不将旧PASS升级到本对照。RAT在全部fork/build/style真实终结后独立执行，结果单独记录。
 
 独立终态 `mvn -o apache-rat:check` exit1，443条未批准路径均存在于父 `ed036afd8381996672d72788d0356a05d5213502`，与前轮完整路径集合一致，无新增；完整命令/log/报告/父对象核对保存在同一证据目录 `rat/`，不称CI全绿。
+
+
+## 控制批次预检的校验与尺寸复用
+
+2026-10-24，父提交 `3c99a1f92c63eddb9ad757f50e63ad2e88bef8b5` 上，按前节实测分配回退，在原 `SegmentControlFormat` 提取 package-local `encodedLength`，原encode也直接复用。保留原非空字段、非负sequence/expected generation、非零operation ID、最大body及8-byte alignment检查；预检仍完整构造不可变命令body并校验其尺寸，但不再构造frame或计算CRC。Arena/Bookie整批预检只累计该长度，之后原坐标预留、逐条完整encode/write、一次force和原顺序apply不变；实际frame的header/body CRC、padding和持久格式均未改变。失败仍沿原UNKNOWN/当前writer不可写及完整前缀重放路径，未减少CONTROL工作集预留或放宽预算。
+
+新增两项纯codec边界测试，覆盖只读body的position/mark保留、空/非对齐/最大长度、超长及非法头部。先跑11项最小相关集通过；因codec由两owner和checkpoint/rotation共享，再跑五类87项全部通过（Arena40、Bookie22、服务8、allocator12、format5），零failure/error/skip，包含真实文件/网络/ZK/restore及原失败窗口。现有golden vector、每字节损坏、后段预检拒绝、第二write失败、force UNKNOWN、rotation/checkpoint和restart覆盖均保留。Spotless/Checkstyle通过，TLA/逻辑合同未改，不重复运行或移绑旧模型receipt。
+
+本轮对照为该父版本与当前冻结Java，复用前节完全相同的 `ControlBatchBenchmark`、依赖和jar（SHA-256 `9e457bc659396c89c89a2a20cb8ec779fe424a098c3b96c59a4da3c013c5ec99`）。两版四份owner/checkpoint/format source均按同一Corretto21.0.10、`--release 17 -g -parameters -proc:none -sourcepath ''` 编译67 class，全部major61；当前全部指令流与本轮Maven实际构建一致（忽略constant-pool索引）。两版class overlay置于原jar前，每fork保留class-load日志核对format及两owner/checkpoint类的实际来源，并沿原每iteration marker核对三class和原IO class摘要；没有使用IO observer替换生产类。
+
+固定256批/iteration、1或64条/批、单线程、5 warmup＋5 measurement、每配置两个独立fork，顺序父→新→新→父。16个有效fork/160次完整校验/20,480个measurement批次，另两次smoke只作加载与语义检查。每批实测1/64 write、1 file force，所有iteration均真实关闭/重开核对cut、Arena winner或Bookie安装身份及凭据分类；每records配置的Arena journal在两版间字节相同，Bookie的随机密封nonce仍各自验证，不要求密文相同。Arena仍是同块竞争、仅首个operation APPLIED；Bookie仍为不同ledger的fixture inactive INSTALL，不冒充MetadataStore producer或普通DATA负载。
+
+下表为两个fork各自五次measurement均值的范围，单位均为每控制批次；不是置信区间、持有量或稳定阈值。
+
+| Owner | records/batch | Java bytes/batch：父→新 | worker CPU µs/batch：父→新 |
+| --- | ---: | --- | --- |
+| ARENA | 1 | 1,866 → 1,268–1,270 | 308.2–320.6 → 49.8–120.7 |
+| ARENA | 64 | 96,598 → 63,318 | 718.2–722.3 → 266.2–491.1 |
+| BOOKIE | 1 | 14,077–14,177 → 13,621–13,633 | 353.5–408.6 → 207.8–417.3 |
+| BOOKIE | 64 | 803,727–808,335 → 747,407–749,967 | 983.9–1,371.1 → 514.9–1,347.9 |
+
+这组负载累计Java分配下降已实测：64条Arena96.6→63.3 KB，Bookie803.7–808.3→747.4–750.0 KB。CPU/wall在独立fork间仍波动，特别是Bookie，没有稳定吞吐、延迟或CPU收益结论。计量只包含当前线程append/force/apply及统一结果检查；不含输入构造、建文件、重开/删除、其他线程、GC CPU、native/RSS，不是完整full-bytes。仍为同一macOS14.8.9/M1 Pro、10核/32 GiB、heap512 MiB/direct64 MiB、未绑核/未隔离后台负载/温控/频率的pilot；新增class-load日志两版一致启用。其余实验限制同前节，不将不同轮次均值混为统一对照。
+
+冻结1176个native/benchmark输入、4份改动源码、67 class编译/指令流、native输入及两阶段receipt、原始JMH/实际加载日志、环境/汇总/复现脚本位于 `/Users/liusinan/.codex/artifacts/unified-wal/control-preflight-size-evidence-3c99a1f9`。`run-comparison.py measure <新的空输出目录>`只消费冻结镜像和jar，无须切回旧工作树；同目录`summary.json`与`measured-runs/measure-verification.json`拥有本轮有效范围，历史receipt保持原绑定。
+
+Java/test/style及全部fork实际终结后，独立 `mvn -o apache-rat:check` exit1：443条均为父3c99a1f92c既有路径，与上一轮完整集合一致，无新增；命令/log/报告/父blob核对保存在`rat/`，不称CI全绿。typed对象、Bookie body/credential和apply retained state、JDK/native及统一预算的剩余full-bytes、正式性能/B18/步骤16与其他16步范围继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。Linux NUMA、真实掉电、正式环境和canary本轮NOT_EXECUTED，不以本次分配优化关闭这些Gate。

@@ -545,9 +545,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         && command != preparedClose) {
                     throw new IOException("Reused allocation tails require the actual healthy writer close");
                 }
-                bytes = Math.addExact(bytes, SegmentControlFormat.encode(command.type(), physicalGeneration, sequence++,
+                bytes = Math.addExact(bytes, SegmentControlFormat.encodedLength(
+                        command.type(), physicalGeneration, sequence++,
                         command.operationId(), command.operationGeneration(), command.expectedGeneration(),
-                        command.body()).remaining());
+                        command.body()));
             }
             long reserved = sessionCloseReserved && batch.stream().noneMatch(command ->
                     command instanceof DataSession session && !session.open())

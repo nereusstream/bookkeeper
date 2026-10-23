@@ -812,7 +812,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
             long sequence = first;
             // Validate the complete immutable batch before I/O without retaining its serialized payload.
             for (Command command : commands) {
-                bytes = Math.addExact(bytes, encode(command, sequence++).remaining());
+                bytes = Math.addExact(bytes, SegmentControlFormat.encodedLength(command.type, LOG_GENERATION,
+                        sequence++, command.operationId(), new Generation(command.scope.authorityGeneration()),
+                        0, body(command)));
             }
             requireCapacity(bytes);
             start = nextOffset;
