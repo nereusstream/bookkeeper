@@ -50,6 +50,10 @@ import org.rocksdb.WriteOptions;
 /** Rebuildable, WAL-disabled locator store. Calls belong to startup/maintenance I/O, never an append owner. */
 final class SegmentDerivedIndex implements AutoCloseable {
     static final long BLOCK_CACHE_BYTES = 1024 * 1024;
+    private static final long WRITE_BUFFER_BYTES = 1024 * 1024;
+    private static final int MAX_WRITE_BUFFERS = 2;
+    // Configured capacities only; RocksDB memtable overshoot and other native overhead remain separate.
+    static final long CONFIGURED_CAPACITY_BYTES = BLOCK_CACHE_BYTES + WRITE_BUFFER_BYTES * MAX_WRITE_BUFFERS;
     private static final byte[] BINDING_KEY = {0};
     private static final byte[] LOCATION_BEGIN = {16};
     private static final byte[] LOCATION_END = {17};
@@ -121,7 +125,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
         RocksDB.loadLibrary();
         cache = new LRUCache(BLOCK_CACHE_BYTES, -1, true);
         options = new Options().setCreateIfMissing(true).setUseFsync(true)
-                .setWriteBufferSize(1024 * 1024).setMaxWriteBufferNumber(2)
+                .setWriteBufferSize(WRITE_BUFFER_BYTES).setMaxWriteBufferNumber(MAX_WRITE_BUFFERS)
                 .setMaxBackgroundJobs(2).setMaxOpenFiles(32)
                 .setTableFormatConfig(new BlockBasedTableConfig().setBlockCache(cache));
         writes = new WriteOptions().setSync(false).setDisableWAL(true);

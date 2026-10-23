@@ -782,3 +782,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [崩溃后新身份目标的注册与在线删除闭环](profile-wire/README.md#崩溃后新身份目标的注册与在线删除闭环)：2026-10-23父807f78579a上，只扩展原restore测试。真实child halt后原target3保持隔离，新身份target4完成当前owned startup/registration/fresh peer+mTLS点读，再由原follower投递实际删除到cursor1/tombstone并拒绝后续读；Manifest完整字节与旧、新target义务保持。原14场景方法通过，1171 native输入及最终format-only换行分开保存；生产Java/TLA未改，不重跑TLC。补齐上一阶段新target4注册缺口，**不替代原target/原intent的unclean-session恢复**；相关新增数据语义已提请用户选择，未答复不放行。完整16步仍OPEN、目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+
+[派生 index 的 write-buffer 配置容量预留](local-storage/README.md#派生-index-的-write-buffer-配置容量预留)：2026-10-23父a08d52884a上，原shared DataWorkingSet启动前预留扩展为固定pool＋1 MiB cache＋两份1 MiB write-buffer配置容量，实际RocksDB选项值不变。真实quota缺口RED已复现；最终三方法通过，含原owned SDK/drain及恢复14场景，1171输入/red-green/同版依赖源码分别冻结。测试fixture显式4 MiB total，生产quota不自动增大；reservation保持至实际storage/index关闭。只是配置容量预留，不宣称memtable/native/RSS硬上限或full-bytes闭合。TLA转移未改；统一预算、同身份unclean-session恢复待决语义及其余16步继续OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。

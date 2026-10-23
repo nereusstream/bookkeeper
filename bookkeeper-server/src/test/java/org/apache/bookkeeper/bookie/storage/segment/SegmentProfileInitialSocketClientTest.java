@@ -2588,7 +2588,7 @@ public class SegmentProfileInitialSocketClientTest {
                     (caller, query) -> caller.equals(principal));
             var service = SegmentProfileService.withOwnedResources(configuration,
                     new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, tls,
-                    new ProfileReceiveBudget(2L * 1024 * 1024, 131072, 262144, 8, 8, 8),
+                    new ProfileReceiveBudget(4L * 1024 * 1024, 131072, 262144, 8, 8, 8),
                     131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
                     (caller, operation) -> caller.equals(principal),
                     (caller, scope, authority) -> caller.equals(principal) && scope.equals(authority.scope())
@@ -2645,14 +2645,14 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private final class ServiceEpisode implements AutoCloseable {
-        private static final long DATA_BYTES = 2L * 1024 * 1024 - 131072 - 262144;
+        private static final long DATA_BYTES = 4L * 1024 * 1024 - 131072 - 262144;
         final ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
         final ZooKeeper client;
         final ZKProfileStartupRequirementsStore requirements;
         final ZKProfileRegistrationStore persistent;
         final ZKProfileEphemeralRegistrationStore publisher;
         final SegmentProfileService service;
-        final ProfileReceiveBudget budget = new ProfileReceiveBudget(2L * 1024 * 1024, 131072, 262144, 8, 8, 8);
+        final ProfileReceiveBudget budget = new ProfileReceiveBudget(4L * 1024 * 1024, 131072, 262144, 8, 8, 8);
         final IsolatedSegmentConfig config;
         final ServerConfiguration bootstrapConfiguration;
         final SegmentProfileService.Startup startup;
@@ -3009,14 +3009,15 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
-    public void ownedProfileServiceRefusesIndexCacheBeforeOpenWhenSharedDataQuotaOnlyFitsBuffers() throws Exception {
+    public void ownedProfileServiceRejectsMissingIndexWriteBufferBudgetBeforeOpen() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
             var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
                     1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
             var requested = servicePolicy(config, fixture.identities.get(0), 1);
             try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
                     new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
-                long heldBytes = ServiceEpisode.DATA_BYTES - 2L * (4096 + 4095);
+                long heldBytes = ServiceEpisode.DATA_BYTES - 2L * (4096 + 4095)
+                        - SegmentDerivedIndex.BLOCK_CACHE_BYTES;
                 try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
                     assertThrows(java.io.IOException.class, () -> episode.service.start(false));
                     assertNull(episode.storage());
@@ -3246,7 +3247,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
                 assertFalse(episodes.get(0).service.close(Duration.ofMillis(100)));
                 assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA)
-                        >= 2L * (4096 + 4095) + SegmentDerivedIndex.BLOCK_CACHE_BYTES);
+                        >= 2L * (4096 + 4095) + SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES);
                 assertFalse(episodes.get(0).budget.closeAdmissionAndDrain().isDone());
                 if (ownsResources) {
                     episodes.get(0).assertOwnedResourcesTerminal(false);

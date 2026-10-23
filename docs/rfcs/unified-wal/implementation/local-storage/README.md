@@ -946,6 +946,8 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 ## 派生 index block cache 与共享 DATA 预算
 
+当前配置容量预留已扩展至 [派生 index 的 write-buffer 配置容量预留](#派生-index-的-write-buffer-配置容量预留)。以下block-cache切片保留原2026-10-13源码/2 MiB测试fixture绑定；新service测试显式使用4 MiB total，生产调用方quota不自动扩容。
+
 2026-10-13，接续父提交`868469df472ff42fe466fb085f16812bed9da6e5`。原SegmentDerivedIndex使用1 MiB LRUCache的默认非strict配置，且这份native cache policy未计入ProfileService DATA账本。现在保持原容量和自动shard选择，使用LRUCache(BLOCK_CACHE_BYTES, -1, true)；按[RocksDB9.9.3 LRUCache](https://github.com/facebook/rocksdb/blob/v9.9.3/java/src/main/java/org/rocksdb/LRUCache.java)契约，cache满时拒绝插入，而不隐含允许越过其charge容量。该约束针对cache charge，不是整个native allocator/进程RSS或所有RocksDB对象的hard cap。
 
 ProfileService在实际storage构造、index/native cache及pool打开前，以原DataWorkingSet一次保留`buffers * (bufferBytes + 4095) + BLOCK_CACHE_BYTES`。拒绝整个start时不打开目录/storage或发布WRITABLE；原total/control/unclassified quota不增加。shared working set继续保留到实际storage/index/cache/pool关闭，caller timeout、held force和异步索引任务不能提前归还；listener connection-only drain与storage/full drain次序不改变。真实service测试fixture显式提供2 MiB total以容纳新增必需cache allowance，生产quota不自动扩容；原source snapshot仍按其allocator计费，不再次固定预留input cap。
@@ -1065,3 +1067,20 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest
 
 
 [崩溃后新身份目标的注册与在线删除闭环](../profile-wire/README.md#崩溃后新身份目标的注册与在线删除闭环)：2026-10-23父807f78579a上，只扩展原restore测试。真实child halt后原target3保持隔离，新身份target4完成当前owned startup/registration/fresh peer+mTLS点读，再由原follower投递实际删除到cursor1/tombstone并拒绝后续读；Manifest完整字节与旧、新target义务保持。原14场景方法通过，1171 native输入及最终format-only换行分开保存；生产Java/TLA未改，不重跑TLC。补齐上一阶段新target4注册缺口，**不替代原target/原intent的unclean-session恢复**；相关新增数据语义已提请用户选择，未答复不放行。完整16步仍OPEN、目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+
+## 派生 index 的 write-buffer 配置容量预留
+
+2026-10-23，父源码 `a08d52884ad82c0e1b2095251dd0ab1f1ce29a97`。`SegmentDerivedIndex` 已配置1 MiB strict block cache、1 MiB write-buffer size及max-write-buffer-number=2，但ProfileService启动仅预留cache。将后两项原字面值提成同类private constants，原Options使用这些常量，实际RocksDB配置值/持久格式/线程数均不变。新增包内 `CONFIGURED_CAPACITY_BYTES = cache + writeBufferSize * maxWriteBufferNumber`，目前3 MiB，原DataWorkingSet在storage/index构造前连同固定pool一次预留；caller quota不足则保持原fail-closed startup，不打开目录/storage、不发布WRITABLE。该reservation仍到实际storage/index关闭后归还，connection-only drain不提前释放。
+
+这是配置容量的显式预留，不是完整native内存硬上限。依赖仍为当前pom的RocksDB9.9.3，同版本sources jar的MutableColumnFamilyOptionsInterface/AdvancedMutableColumnFamilyOptionsInterface说明write-buffer size是内存累积到flush的目标，max-number允许flush与新写使用多份buffer。没有引入WriteBufferManager，不将target size乘数量说成对arena分配粒度、memtable overshoot、pinned/table-reader/compaction/native对象/RSS的hard cap；这些实际开销及统一总预算继续OPEN。原cache strict charge合同保持，既有WBM caveat不变。
+
+原quota测试改为“DATA只容纳固定pool＋cache，却容不下write-buffer配置容量”，保持目录/storage未打开、原credit不泄漏及full-drain等待断言。原生产service的真实RED `unified-wal-local-jZkaH8Ml` 在该条件下竟然完成启动，expected IOException断言失败；不是OOM实测，也不声称已观察到2 MiB native峰值。service及forked-crash fixture现在显式提供4 MiB total以容纳3 MiB index policy和transport余量；CONTROL/UNCLASSIFIED保留份额不变，生产quota不自动提高。原owned SDK/drain测试同时收紧actual hold期间的容量保留断言，caller timeout不能归还新增reservation。
+
+最终 `unified-wal-local-8NMJhT3Y` 三方法0 failure/error/skip：quota拒绝、原owned资源/SDK实际排空，以及含真实child halt、新身份重建/注册/在线删除的原14场景方法。复用已有行为，不新增mock或性能结论。1171 Java输入按red/green各自冻结；依赖匹配的两份Java接口源码及原sources jar SHA保存在 `/Users/liusinan/.codex/artifacts/unified-wal/index-capacity-evidence-90k700c4`，含原命令/XML/源码差异。最终Spotless/Checkstyle exit0；Java/style实际终结后独立RAT exit1，443 unapproved路径全部存在父HEAD、无新增，不称CI全绿。TLA转移未改，配置取值及实际JNI路径由Java与依赖契约验证，不重跑或移绑旧有限模型结果。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#ownedProfileServiceRejectsMissingIndexWriteBufferBudgetBeforeOpen+ownedProfileResourcesRunSdkAndWaitForActualExecutorsMetadataAndNetworkDrain+backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy'
+```
+
+本轮同时核对server response credit已使用原workspace账本，并由Pending保持至cold/control/output实际终结；未完成所有间接codec/MetadataStore数组的上界审计，不据此称server full-bytes完成。统一native/对象/TLS/kernel/control/cold预算、未关闭session同身份恢复接受语义、默认SDK/observe公共约定及完整16步仍OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

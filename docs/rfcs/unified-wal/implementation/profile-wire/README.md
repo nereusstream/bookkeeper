@@ -2245,3 +2245,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ```
 
 同incarnation未关闭DATA session的恢复接受条件仍未冻结：现有OPEN记录也可能来自DATA I/O失败、quarantine尚未持久的退出；完整扫描或再次sync不能自行清除旧unknown/恢复旧normal route。已按AGENTS.md §1询问新增数据语义由规划会话裁决，或先以当前集群fence/CLOSED全部受影响实例为条件，或引入独立持久边界/错误证据保留OPEN语义；未答复不视为授权，不修改原refusal。该新身份组合不替代原target/原intent crash resume。完整恢复/接受下界/运维、full-bytes/默认SDK/Main/其他required producer/兼容/性能与全部16步仍OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变；Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+[派生 index 的 write-buffer 配置容量预留](../local-storage/README.md#派生-index-的-write-buffer-配置容量预留)：2026-10-23父a08d52884a上，原shared DataWorkingSet启动前预留扩展为固定pool＋1 MiB cache＋两份1 MiB write-buffer配置容量，实际RocksDB选项值不变。真实quota缺口RED已复现；最终三方法通过，含原owned SDK/drain及恢复14场景，1171输入/red-green/同版依赖源码分别冻结。测试fixture显式4 MiB total，生产quota不自动增大；reservation保持至实际storage/index关闭。只是配置容量预留，不宣称memtable/native/RSS硬上限或full-bytes闭合。TLA转移未改；统一预算、同身份unclean-session恢复待决语义及其余16步继续OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
