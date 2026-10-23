@@ -68,7 +68,9 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -10492,6 +10494,203 @@ public class SegmentBookieControlLogTest {
                     config, identity(), replay, syncIo, 1, 1));
             assertEquals(0, syncIo.forces);
             assertEquals(config.bytesPerFile(), Files.size(IsolatedSegmentFiles.dataPath(config, 0)));
+        }
+    }
+
+    @Test
+    public void storageInspectorReplaysRotatedFilesWithoutChangingReadOnlySources() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("normal-clean-close", config.directory(), 0, "SESSION_CLOSED");
+        var original = SegmentStorageInspector.inspect(config.directory(), 1024 * 1024);
+        var beforeRotation = (SegmentArenaControlLog.Inspection) original.get("observedArena");
+        assertEquals(1, beforeRotation.sessionEpoch());
+        assertFalse(beforeRotation.sessionOpen());
+        assertEquals(1, beforeRotation.currentAllocations());
+        long expectedSequence;
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            arena.rotate();
+            arena.rotate();
+            arena.submitBatch(List.of(new SegmentArenaControlLog.FileQuarantine(new UUID(0, 900),
+                    new Generation(1), 0)));
+            expectedSequence = arena.appliedThrough();
+        }
+        Map<String, byte[]> before = inspectionImage(config.directory());
+        for (String name : before.keySet()) {
+            if (!name.endsWith(".lock")) {
+                Files.setPosixFilePermissions(config.directory().resolve(name),
+                        java.nio.file.attribute.PosixFilePermissions.fromString("r--r--r--"));
+            }
+        }
+        var observed = SegmentStorageInspector.inspect(config.directory(), 1024 * 1024);
+        var arena = (SegmentArenaControlLog.Inspection) observed.get("observedArena");
+        assertEquals(3, arena.physicalGeneration());
+        assertEquals(expectedSequence, arena.appliedSequence());
+        assertEquals(4, arena.checkpointGeneration());
+        assertEquals(List.of(0), arena.recordedQuarantineFiles());
+        assertEquals(false, observed.get("authority"));
+        assertEquals(false, observed.get("writable"));
+        assertEquals(false, observed.get("recoverySyncExecuted"));
+        assertEquals(false, observed.get("bookieControlBodyChecked"));
+        assertEquals(false, observed.get("dataBodyChecked"));
+        String output = runStorageInspector(config.directory(), 1024 * 1024, 0);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(output.trim());
+        assertEquals("isolated:3181", json.path("observedIdentity").path("bookieId").asText());
+        assertEquals(expectedSequence, json.path("observedArena").path("appliedSequence").asLong());
+        assertFalse(json.path("authority").asBoolean(true));
+        assertInspectionImage(before, config.directory());
+    }
+
+    @Test
+    public void storageInspectorUsesCheckpointFallbackAndRejectsMissingRotatedHistory() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("normal-clean-close", config.directory(), 0, "SESSION_CLOSED");
+        SegmentControlRotation.Root root;
+        long expectedSequence;
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            root = arena.rotate();
+            arena.submitBatch(List.of(new SegmentArenaControlLog.FileQuarantine(new UUID(0, 901),
+                    new Generation(1), 0)));
+            expectedSequence = arena.appliedThrough();
+        }
+        Path latest = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, root.second().slot());
+        byte[] saved = Files.readAllBytes(latest);
+        byte[] corrupt = saved.clone();
+        corrupt[corrupt.length - 1] ^= 1;
+        Files.write(latest, corrupt);
+        Map<String, byte[]> before = inspectionImage(config.directory());
+        var observation = SegmentStorageInspector.inspect(config.directory(), 1024 * 1024);
+        var arena = (SegmentArenaControlLog.Inspection) observation.get("observedArena");
+        assertEquals(expectedSequence, arena.appliedSequence());
+        assertEquals(List.of(0), arena.recordedQuarantineFiles());
+        assertInspectionImage(before, config.directory());
+        Path older = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, root.first().slot());
+        byte[] oldBytes = Files.readAllBytes(older);
+        byte[] badOlder = oldBytes.clone();
+        badOlder[badOlder.length - 1] ^= 1;
+        Files.write(older, badOlder);
+        before = inspectionImage(config.directory());
+        assertThrows(IOException.class, () -> SegmentStorageInspector.inspect(config.directory(), 1024 * 1024));
+        assertInspectionImage(before, config.directory());
+        Files.write(latest, saved);
+        Files.write(older, oldBytes);
+        Path journal = SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, root.generation());
+        try (FileChannel file = FileChannel.open(journal, StandardOpenOption.WRITE)) {
+            file.truncate(file.size() - 1);
+        }
+        before = inspectionImage(config.directory());
+        assertThrows(IOException.class, () -> SegmentStorageInspector.inspect(config.directory(), 1024 * 1024));
+        assertInspectionImage(before, config.directory());
+    }
+
+    @Test
+    public void storageInspectorReportsUnclosedSessionWithoutAuthorizingRestart() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("session-force-error", config.directory(), 86, "DATA_FORCE_FAILED");
+        // This writer never needed the Bookie owner; inspection requires its pre-existing native lock.
+        try (SegmentDataFileLock ignored = SegmentDataFileLock.openControl(
+                config.directory().resolve("bookie-control.lock"))) {
+            // No Bookie control state is manufactured.
+        }
+        Map<String, byte[]> before = inspectionImage(config.directory());
+        var observation = SegmentStorageInspector.inspect(config.directory(), 1024 * 1024);
+        var arena = (SegmentArenaControlLog.Inspection) observation.get("observedArena");
+        assertEquals(1, arena.sessionEpoch());
+        assertTrue(arena.sessionOpen());
+        assertTrue(arena.recordedQuarantineFiles().isEmpty());
+        assertEquals(false, observation.get("writable"));
+        assertInspectionImage(before, config.directory());
+        try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertTrue(assertThrows(IOException.class, () -> IsolatedSegmentFiles.openAppendOnly(
+                    config, identity(), replay, new SegmentFileIo())).getMessage().contains("Unclosed DATA writer"));
+        }
+        assertInspectionImage(before, config.directory());
+    }
+
+    @Test
+    public void storageInspectorRejectsActiveOwnersWithoutDroppingTheirNativeLocks() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("normal-clean-close", config.directory(), 0, "SESSION_CLOSED");
+        Map<String, byte[]> before = inspectionImage(config.directory());
+        for (String name : List.of("isolated.lock", "bookie-control.lock", "arena-control.lock")) {
+            try (SegmentDataFileLock held = name.equals("isolated.lock") ? SegmentDataFileLock.open(config.directory())
+                    : SegmentDataFileLock.openExistingControl(config.directory().resolve(name))) {
+                assertThrows(IOException.class, () -> SegmentStorageInspector.inspect(config.directory(), 1024 * 1024));
+                // After the failed same-process inspection, a different process must still see the owner's lock.
+                assertTrue(runStorageInspector(config.directory(), 1024 * 1024, 1).contains("already has a writer"));
+            }
+        }
+        assertInspectionImage(before, config.directory());
+        runStorageInspector(config.directory(), 1024 * 1024, 0);
+    }
+
+    @Test
+    public void storageInspectorRejectsMissingLocksAndInvalidNativeBytesWithoutRepair() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("normal-clean-close", config.directory(), 0, "SESSION_CLOSED");
+        for (String name : List.of("isolated.lock", "bookie-control.lock", "arena-control.lock")) {
+            Path lock = config.directory().resolve(name);
+            byte[] saved = Files.readAllBytes(lock);
+            Files.delete(lock);
+            Map<String, byte[]> missing = inspectionImage(config.directory());
+            assertThrows(IOException.class, () -> SegmentStorageInspector.inspect(config.directory(), 1024 * 1024));
+            assertInspectionImage(missing, config.directory());
+            assertFalse(Files.exists(lock));
+            Files.write(lock, saved);
+        }
+        for (String name : List.of("data-0", "arena-control")) {
+            Path path = config.directory().resolve(name);
+            byte[] saved = Files.readAllBytes(path);
+            if (name.equals("data-0")) {
+                byte[] corrupt = saved.clone();
+                corrupt[4092] ^= 1;
+                Files.write(path, corrupt);
+            } else {
+                Files.write(path, new byte[] {1}, StandardOpenOption.APPEND);
+            }
+            Map<String, byte[]> invalid = inspectionImage(config.directory());
+            assertThrows(IOException.class, () -> SegmentStorageInspector.inspect(config.directory(), 1024 * 1024));
+            runStorageInspector(config.directory(), 1024 * 1024, 1);
+            assertInspectionImage(invalid, config.directory());
+            Files.write(path, saved);
+        }
+        Map<String, byte[]> before = inspectionImage(config.directory());
+        assertThrows(IOException.class, () -> SegmentStorageInspector.inspect(config.directory(), 4288));
+        assertInspectionImage(before, config.directory());
+    }
+
+    private static Map<String, byte[]> inspectionImage(Path directory) throws IOException {
+        Map<String, byte[]> image = new TreeMap<>();
+        try (var files = Files.walk(directory)) {
+            for (Path path : files.filter(Files::isRegularFile).toList()) {
+                image.put(directory.relativize(path).toString(), Files.readAllBytes(path));
+            }
+        }
+        return image;
+    }
+
+    private static void assertInspectionImage(Map<String, byte[]> expected, Path directory) throws IOException {
+        Map<String, byte[]> actual = inspectionImage(directory);
+        assertEquals(expected.keySet(), actual.keySet());
+        for (String name : expected.keySet()) {
+            assertArrayEquals(name, expected.get(name), actual.get(name));
+        }
+    }
+
+    private String runStorageInspector(Path directory, long maxControlBytes, int expectedExit) throws Exception {
+        Path output = temporary.getRoot().toPath().resolve("storage-inspector.log");
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), SegmentStorageInspector.class.getName(),
+                directory.toString(), Long.toString(maxControlBytes))
+                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        try {
+            assertTrue(child.waitFor(15, TimeUnit.SECONDS));
+            String log = Files.readString(output);
+            assertEquals(log, expectedExit, child.exitValue());
+            return log;
+        } finally {
+            if (child.isAlive()) {
+                child.destroyForcibly().waitFor(5, TimeUnit.SECONDS);
+            }
         }
     }
 

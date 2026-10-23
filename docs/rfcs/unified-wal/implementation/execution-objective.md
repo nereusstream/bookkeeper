@@ -210,3 +210,5 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [派生 index 的 write-buffer 配置容量预留](local-storage/README.md#派生-index-的-write-buffer-配置容量预留)：2026-10-23父a08d52884a上，原shared DataWorkingSet启动前预留扩展为固定pool＋1 MiB cache＋两份1 MiB write-buffer配置容量，实际RocksDB选项值不变。真实quota缺口RED已复现；最终三方法通过，含原owned SDK/drain及恢复14场景，1171输入/red-green/同版依赖源码分别冻结。测试fixture显式4 MiB total，生产quota不自动增大；reservation保持至实际storage/index关闭。只是配置容量预留，不宣称memtable/native/RSS硬上限或full-bytes闭合。TLA转移未改；统一预算、同身份unclean-session恢复待决语义及其余16步继续OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+[只读磁盘状态诊断](local-storage/README.md#只读磁盘状态诊断)：2026-10-23父4907120bff上，实验 main 复用原 Arena replay，以既有三类排他锁和READ-only内容channel报告观察到的身份/布局、session/quarantine与分配状态，不执行恢复sync或授予服务/restore权限；原正常恢复与unclosed gate保持。真实文件/独立JVM/锁、fallback与坏suffix验证由该节拥有。这里只交付离线诊断，完整运维/同身份crash接受语义/16步验收仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

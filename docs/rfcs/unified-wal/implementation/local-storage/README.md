@@ -1084,3 +1084,28 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 ```
 
 本轮同时核对server response credit已使用原workspace账本，并由Pending保持至cold/control/output实际终结；未完成所有间接codec/MetadataStore数组的上界审计，不据此称server full-bytes完成。统一native/对象/TLS/kernel/control/cold预算、未关闭session同身份恢复接受语义、默认SDK/observe公共约定及完整16步仍OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## 只读磁盘状态诊断
+
+2026-10-23，父源码 `4907120bff6ce237647ca163b47fd840e9a70f6b`。新增实验命令 `SegmentStorageInspector`，沿用 `bin/bookkeeper` 已有的任意 main class 入口，不改 launcher、默认服务配置或持久格式。对已停止的单 Arena 目录运行：
+
+```bash
+bin/bookkeeper org.apache.bookkeeper.bookie.storage.segment.SegmentStorageInspector /absolute/path/to/arena 1048576
+```
+
+第二个参数是调用方明确给出的 control journal 字节上限，必须容纳该目录的原/当前旋转 Arena journal；原 checkpoint reader 继续按该预算校验 image。它不是总堆内存/RSS硬上限。成功向 stdout 输出一条实验 JSON；缺少参数、锁被占用、缺锁、必要文件损坏/缺失或日志超过预算时以非零退出。launcher 自身按原配置产生运行日志；日志目录应放在诊断源目录之外。
+
+命令首先通过原 `SegmentDataFileLock` 取得既有 DATA 与 Bookie 控制排他锁，再由原 Arena replay 取得既有 Arena 控制锁。锁文件仅为排他锁以 READ/WRITE 打开，需要相应权限；不 CREATE、不写锁字节，同进程 ACTIVE tracking 防止失败检查关闭第二个 channel 而释放原 POSIX owner 的锁。活动 owner 或缺锁时立即拒绝，不自动补齐/修复目录。目录内的原生内容文件用 READ-only channel 打开。身份和固定布局从 data-0 的不可变 header 读取，再用原 header codec 验证全体 DATA、两个 superblock、Bookie/Arena control header；这些是镜像自报身份，不是当前集群 authority。
+
+Arena 的原 journal/checkpoint/rotation parser、顺序 apply、坏 image fallback 和必要 suffix 校验全部复用。内部 inspection-only replay 跳过恢复 force/publication sync，且不暴露 log、grant 或可服务对象；原正常恢复仍执行原 force 和 session/quarantine gate。JSON 的 `observedArena` 报告观察到的 physical generation、applied sequence、checkpoint generation、session epoch/open、当前 allocation/retired slot 数及记录中的 quarantine 文件。`appliedSequence` 仅是本次解析重放位置；没有执行 recovery sync，不能作为 durability proof。没有观察到 quarantine 记录也不证明健康崩溃或无 I/O 错误。
+
+输出固定标明 `authority=false`、`writable=false`、`recoverySyncExecuted=false`。Bookie control body/credential 语义、DATA body/inventory、当前 MetadataStore、restore 接受与服务资格均未检查，对应检查字段为 false；成功退出只证明所列文件与 Arena replay 范围。观察到 unclosed session 可以成功输出，但不会解除原 incarnation 的重开拒绝。本命令不 repair/truncate、不 sync、不写 checkpoint、不清 quarantine/session，也不发布 registration。
+
+真实文件验证覆盖正常 DATA/clean close、两次 Arena rotation、持久 quarantine、只读源权限、独立 JVM JSON、force-error 后 halt86 且未持久 quarantine 的 unclosed session；检查前后逐文件名/完整字节一致。缺少任一锁、同进程活动三类 owner（失败后再由独立 JVM 确认原锁仍有效）、header CRC 损坏、control 截断/预算不足、最新 checkpoint 坏而 fallback 成功、双 image 损坏和旋转 suffix 截断都有确定结果。原 unclosed restart 拒绝保持。
+
+最终源码的 `unified-wal-local-AaMrRON2` 实际运行42项（5项新诊断、原unclosed拒绝、35项原Arena控制及原owned SDK/drain），`unified-wal-local-z8QUVWpt` 另跑3项实际offline backup回归，两阶段均0 failure/error/skip。原命令/inputs/XML保持原样；第一条selector曾包含不存在的 `SegmentBackupImageTest`，该名字没有运行，不计作覆盖，实际备份覆盖来自后一阶段的3个具名方法。首轮 `m0agHSDQ` 4项成功与后续补充fallback前的源码单独保留。最终两个阶段各1172个Java输入都与当前文件匹配。首轮4行超长Checkstyle失败及修复也单独保留，最终Spotless/Checkstyle exit0；独立RAT exit1、443路径均存在父HEAD，无新增，不称CI全绿。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/storage-inspector-evidence-1de2hsow`，含各阶段完整原始日志/XML、原/最终源码、父提交许可路径核验和校验和。模型runner仅把新诊断文件加入源码输入绑定，Python语法与756项配置文件目录核对通过；首次辅助核对漏写 `.cfg` 的路径错误已保留。未改任何TLA转移，没有执行TLC或把历史模型PASS移绑本轮。
+
+本轮交付的是离线文件/Arena状态观察入口，不是完整运维验收或backup/restore完成。DATA/Bookie语义诊断、运行中采集、同身份unclean-session接受语义、统一full-bytes、兼容与其余16步仍OPEN，目标active、生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary未执行，默认OFF/SYSTEM/PARK与disabled能力保持。

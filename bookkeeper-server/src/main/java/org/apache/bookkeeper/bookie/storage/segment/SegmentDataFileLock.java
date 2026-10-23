@@ -59,6 +59,11 @@ final class SegmentDataFileLock implements AutoCloseable {
         return acquireFile(path.getParent().toRealPath().resolve(path.getFileName()), false, true);
     }
 
+    /** Inspection must not create a missing lock or open a second channel for an active in-process owner. */
+    static SegmentDataFileLock openExistingControl(Path path) throws IOException {
+        return acquireFile(path.getParent().toRealPath().resolve(path.getFileName()), false, false);
+    }
+
     private static SegmentDataFileLock acquireFile(Path scope, boolean create, boolean control) throws IOException {
         synchronized (ACTIVE) {
             if (!ACTIVE.add(scope)) {

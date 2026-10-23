@@ -367,6 +367,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private FileChannel channel;
     private final FileChannel originalChannel;
     private final SegmentDataFileLock writerLock;
+    private final boolean inspectionOnly;
     private SegmentControlRotation.Root rotationRoot;
     private Thread rotating;
     private Generation physicalGeneration = LOG_GENERATION;
@@ -406,7 +407,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private SegmentArenaControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                    long maxLogBytes, SegmentFileIo io,
-                                   FileChannel channel, SegmentDataFileLock writerLock) {
+                                   FileChannel channel, SegmentDataFileLock writerLock, boolean inspectionOnly) {
         this.config = config;
         this.identity = identity;
         this.maxLogBytes = maxLogBytes;
@@ -414,6 +415,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         this.channel = channel;
         this.originalChannel = channel;
         this.writerLock = writerLock;
+        this.inspectionOnly = inspectionOnly;
         dataBlocked = new boolean[config.dataFiles()];
         spacePressure = new boolean[config.dataFiles()];
         durableQuarantine = new boolean[config.dataFiles()];
@@ -427,20 +429,50 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     static SegmentArenaControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                        long maxLogBytes, SegmentFileIo io) throws IOException {
+        return open(config, identity, maxLogBytes, io, false);
+    }
+
+    /** Observed replay state only. No recovery sync or usable allocation authority escapes this method. */
+    record Inspection(long physicalGeneration, long appliedSequence, long checkpointGeneration,
+                      long sessionEpoch, boolean sessionOpen, int currentAllocations, int retiredSlots,
+                      List<Integer> recordedQuarantineFiles) { }
+
+    static Inspection inspect(IsolatedSegmentConfig config, SegmentFileHeader identity, long maxLogBytes)
+            throws IOException {
+        try (SegmentArenaControlLog observed = open(config, identity, maxLogBytes, new SegmentFileIo(), true)) {
+            List<Integer> quarantine = new ArrayList<>();
+            for (int file = 0; file < observed.durableQuarantine.length; file++) {
+                if (observed.durableQuarantine[file]) {
+                    quarantine.add(file);
+                }
+            }
+            return new Inspection(observed.physicalGeneration.value(), observed.appliedThrough,
+                    observed.checkpointGeneration, observed.sessionEpoch, observed.sessionOpen,
+                    observed.currentAllocations.size(), observed.retiredSlots.size(), List.copyOf(quarantine));
+        }
+    }
+
+    private static SegmentArenaControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                               long maxLogBytes, SegmentFileIo io, boolean inspectionOnly)
+            throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(io, "io");
         if (maxLogBytes < FIRST_RECORD + 192) {
             throw new IllegalArgumentException("Control log capacity cannot hold one record");
         }
-        SegmentDataFileLock writerLock = SegmentDataFileLock.openControl(
-                config.directory().resolve("arena-control.lock"));
+        Path lockPath = config.directory().resolve("arena-control.lock");
+        SegmentDataFileLock writerLock = inspectionOnly ? SegmentDataFileLock.openExistingControl(lockPath)
+                : SegmentDataFileLock.openControl(lockPath);
         FileChannel original = null;
         SegmentArenaControlLog result = null;
         try {
-            original = FileChannel.open(config.directory().resolve("arena-control"),
-                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-            result = new SegmentArenaControlLog(config, identity, maxLogBytes, io, original, writerLock);
+            Path path = config.directory().resolve("arena-control");
+            original = inspectionOnly ? FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                    : FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS);
+            result = new SegmentArenaControlLog(config, identity, maxLogBytes, io, original, writerLock,
+                    inspectionOnly);
             result.validateStorageFiles(identity);
             result.recover(identity);
             return result;
@@ -1620,7 +1652,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized boolean matchesScope(IsolatedSegmentConfig otherConfig, SegmentFileHeader otherIdentity) {
-        return !closed && !failed && config.equals(otherConfig) && identity.equals(otherIdentity);
+        return !inspectionOnly && !closed && !failed && config.equals(otherConfig) && identity.equals(otherIdentity);
     }
 
     synchronized void requireQuiescentRecovery(IsolatedSegmentConfig otherConfig,
@@ -1682,9 +1714,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
         }
         if (rotationRoot != null) {
-            channel = FileChannel.open(SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA,
-                    rotationRoot.generation()),
-                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            Path path = SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA,
+                    rotationRoot.generation());
+            channel = inspectionOnly ? FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                    : FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS);
             ByteBuffer header = ByteBuffer.allocate(4096);
             SegmentFileIo.readFully(channel, header, 0);
             identity.validate(header, config, -4);
@@ -1717,7 +1751,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             } catch (IOException invalidPublication) {
                 // Recovery still has to validate one complete publication and every current suffix record.
             }
-            if (valid) {
+            if (valid && !inspectionOnly) {
                 SegmentControlCheckpoint.syncPublication(config, slot);
             }
         }
@@ -1745,7 +1779,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
             offset += length;
             sequence++;
         }
-        channel.force(true);
+        if (!inspectionOnly) {
+            channel.force(true);
+        }
         candidates.sort(Comparator.comparingLong(SegmentControlCheckpoint.Reference::generation).reversed());
         boolean restored = false;
         for (SegmentControlCheckpoint.Reference reference : candidates) {
@@ -1869,7 +1905,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
             sequence++;
         }
         // Complete records can include a lost response. Establish durability before exposing replayed grants.
-        channel.force(true);
+        if (!inspectionOnly) {
+            channel.force(true);
+        }
         recoverCheckpoint(checkpoints);
         sequence = appliedThrough + 1;
         for (long offset = appliedOffset; offset < size;) {
@@ -1899,7 +1937,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 continue;
             }
             // A complete but formerly unsynced publication must not be exposed before recovery sync.
-            SegmentControlCheckpoint.syncPublication(config, reference.slot());
+            if (!inspectionOnly) {
+                SegmentControlCheckpoint.syncPublication(config, reference.slot());
+            }
             return;
         }
         // All original control bytes remain mandatory and were verified above; full replay is the final fallback.
@@ -2410,6 +2450,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     private void requireWritable() throws IOException {
+        if (inspectionOnly) {
+            throw new IOException("Arena inspection does not provide writable authority");
+        }
         if (closed || failed) {
             throw new IOException("Arena control log is closed or has uncertain I/O");
         }
