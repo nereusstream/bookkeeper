@@ -2358,3 +2358,24 @@ native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 u
 
 
 [控制批次预检的校验与尺寸复用](../local-storage/README.md#控制批次预检的校验与尺寸复用)：2026-10-24父3c99a1f92c上，双owner整批预检改为原codec共享字段校验/尺寸，移除预检frame/CRC构造；实际完整编码、整批坐标预留、write/一次force/顺序apply及UNKNOWN不变。两项codec边界与既有五类最终87项、style通过，独立RAT443父路径无新增。同一benchmark/依赖、同release17编译67 class并核对实际加载/Maven指令流；16有效fork实测64条分配Arena96.6→63.3 KB、Bookie803.7–808.3→747.4–750.0 KB，CPU/wall波动仍不支持稳定收益。未改格式/模型或缩减CONTROL预留，完整full-bytes/正式性能与16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+## 当前 Java 整轮与注册池排空观察
+
+2026-10-24，父源码 `5a16759da1b8902134238d7c950acdc1c5ba9cfd`。近期共享CONTROL容量、启动扫描和codec变化后，复用原runner执行现有Unified WAL Java整轮：common/profile、server storage/segment、discover/profile、proto/profile全部`*Test.java`及ProfileTlsContextFactoryTest，精确43类；Maven离线、Rust cross-build关闭、无测试重试。43类均有本次新XML，无缺项或额外类；不是仅凭wildcard或整轮命令已发出判断覆盖。
+
+原 `unified-wal-local-TDQAlFm6` 实际exit1：**897项，891通过、0 failure、1 error、5 skip**。唯一错误为 `registeredPoolDrainPrecedesOriginalTaskAndMarkerRemoval` 在扣住READ输出promise后等待channel close超时；其余平台skip均为SegmentExecutionGroupTest的五个Linux cpuset/quota/binding条件用例，当前macOS未执行这些Linux验证。原43类完整输入/日志/XML与897项结果保持该父源码绑定，不改称整轮全绿。
+
+独立运行旧方法 `unified-wal-local-P3hadT8Y` 再次在同一channel-close等待处超时，排除了依赖整个suite顺序才能触发的解释。现有 `afterReaderDrain` 明确先等reader自己的RPC实际终结，健康proof才能继续到lease.closeAsync及原task/marker清除。旧测试却在故意扣住该RPC输出promise时，先等下游channel关闭，观察顺序与该既有合同相冲突；这是遗留测试观察点，不计为新产品缺陷RED，也不放宽生产排空约束或扩大超时。
+
+只修正此测试方法：在原event-loop outbound hold中按实际requestId借用该READ的logical reply/completion future；先确认真实回复已到，再断言actual completion、channel close和worker completion均未结束，原task锁仍被持有、marker仍在、6个连接名额仍保留，并新增提前releaseTask必须拒绝的检查。放行原promise后，actual completion、REPLICATED、channel关闭、marker清除及名额归零才依次检查。原网络写入、原reader/coordinator/pool/任务实现及最终关闭断言保持，未用mock成功或更大超时代替实际终结。
+
+修正后 `unified-wal-local-fEPeoZiy` 四方法全部通过、0 failure/error/skip：修正方法，以及原pool acquisition queued-cold shutdown、worker实际READ drain/borrowed pool可继续使用、interrupt/concurrent shutdown保留原task的三项回归。初始1176个native/benchmark冻结输入中仅此一个测试文件改变，且方法之前/之后的所有字节完全一致；两次原输入和修正后的1172个runner输入各自逐项核对。生产Java、其他测试方法、TLA/wire/持久格式均未改；没有重跑13分钟整轮或把四项补验拼成同一当前源码的43类全绿回执。最终整体验收仍须按其真实源码和范围判断，原失败结果完整保留。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#registeredPoolDrainPrecedesOriginalTaskAndMarkerRemoval+registeredPoolAcquisitionShutdownKeepsTaskAndCapacityWhileColdWorkIsQueued+replicationWorkerShutdownWaitsForActualReadDrainAndLeavesBorrowedPoolsUsable+replicationWorkerInterruptedAndConcurrentShutdownKeepsOriginalTaskUntilActualDrain'
+```
+
+完整43类选择/可复现命令、初始镜像、原整轮和独立失败、修正method边界证明、最终四项与源码、平台skip明细，由 `/Users/liusinan/.codex/artifacts/unified-wal/unified-java-suite-evidence-5a16759d` 拥有。最终Spotless/Checkstyle exit0；native/style真实终结后的独立 `mvn -o apache-rat:check` exit1，443 unapproved均为父5a16759da1既有路径，与上一轮集合一致，无新增，不称CI全绿。TLA未改，不执行TLC或移绑旧模型PASS。
+
+本轮闭合该遗留测试观察错误，并提供当前43类真实整轮结果；不宣称完整Java整轮/模型/兼容/生产Gate已通过。默认SDK/observe公共约定、同incarnation未关闭DATA session恢复、多Arena持久路由、完整full-bytes、剩余authority/删除历史/正式性能/运维及16步验收继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled能力不变，Linux NUMA、真实掉电、正式环境/canary本轮NOT_EXECUTED。

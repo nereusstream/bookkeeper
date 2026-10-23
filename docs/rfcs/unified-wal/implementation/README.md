@@ -822,3 +822,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [控制批次预检的校验与尺寸复用](local-storage/README.md#控制批次预检的校验与尺寸复用)：2026-10-24父3c99a1f92c上，双owner整批预检改为原codec共享字段校验/尺寸，移除预检frame/CRC构造；实际完整编码、整批坐标预留、write/一次force/顺序apply及UNKNOWN不变。两项codec边界与既有五类最终87项、style通过，独立RAT443父路径无新增。同一benchmark/依赖、同release17编译67 class并核对实际加载/Maven指令流；16有效fork实测64条分配Arena96.6→63.3 KB、Bookie803.7–808.3→747.4–750.0 KB，CPU/wall波动仍不支持稳定收益。未改格式/模型或缩减CONTROL预留，完整full-bytes/正式性能与16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[当前 Java 整轮与注册池排空观察](profile-wire/README.md#当前-java-整轮与注册池排空观察)：2026-10-24父5a16759da1上的43类整轮实际897项，891通过/1 error/5个Linux条件skip；唯一旧pool测试在hold输出promise时提前等channel close，独立单方法亦复现。按原reader actual-drain先于lease关闭合同，仅修正该方法的观察顺序并加强task拒绝提前释放；最终四项回归通过，其他方法字节及生产Java/TLA不变。原整轮exit1和全部输入/回执保留，不把补验改称整轮全绿；style通过、独立RAT443父路径无新增。其余16步/完整验收继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

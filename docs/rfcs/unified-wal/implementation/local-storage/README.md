@@ -1310,3 +1310,6 @@ java -cp microbenchmarks/target/benchmarks.jar org.openjdk.jmh.Main \
 冻结1176个native/benchmark输入、4份改动源码、67 class编译/指令流、native输入及两阶段receipt、原始JMH/实际加载日志、环境/汇总/复现脚本位于 `/Users/liusinan/.codex/artifacts/unified-wal/control-preflight-size-evidence-3c99a1f9`。`run-comparison.py measure <新的空输出目录>`只消费冻结镜像和jar，无须切回旧工作树；同目录`summary.json`与`measured-runs/measure-verification.json`拥有本轮有效范围，历史receipt保持原绑定。
 
 Java/test/style及全部fork实际终结后，独立 `mvn -o apache-rat:check` exit1：443条均为父3c99a1f92c既有路径，与上一轮完整集合一致，无新增；命令/log/报告/父blob核对保存在`rat/`，不称CI全绿。typed对象、Bookie body/credential和apply retained state、JDK/native及统一预算的剩余full-bytes、正式性能/B18/步骤16与其他16步范围继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。Linux NUMA、真实掉电、正式环境和canary本轮NOT_EXECUTED，不以本次分配优化关闭这些Gate。
+
+
+[当前 Java 整轮与注册池排空观察](../profile-wire/README.md#当前-java-整轮与注册池排空观察)：2026-10-24父5a16759da1上的43类整轮实际897项，891通过/1 error/5个Linux条件skip；唯一旧pool测试在hold输出promise时提前等channel close，独立单方法亦复现。按原reader actual-drain先于lease关闭合同，仅修正该方法的观察顺序并加强task拒绝提前释放；最终四项回归通过，其他方法字节及生产Java/TLA不变。原整轮exit1和全部输入/回执保留，不把补验改称整轮全绿；style通过、独立RAT443父路径无新增。其余16步/完整验收继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

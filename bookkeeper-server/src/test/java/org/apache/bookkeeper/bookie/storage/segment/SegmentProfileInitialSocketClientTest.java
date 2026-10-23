@@ -14375,17 +14375,30 @@ public class SegmentProfileInitialSocketClientTest {
             var channelField = owner.getClass().getDeclaredField("channel");
             channelField.setAccessible(true);
             Channel channel = (Channel) channelField.get(owner);
+            var pendingField = owner.getClass().getDeclaredField("pending");
+            pendingField.setAccessible(true);
+            var pendingEntries = (Map<?, ?>) pendingField.get(owner);
             var held = new AtomicReference<ChannelPromise>();
+            var actualReply = new AtomicReference<CompletableFuture<?>>();
+            var actualCompletion = new AtomicReference<CompletableFuture<?>>();
             var written = new CountDownLatch(1);
             channel.eventLoop().submit(() -> channel.pipeline().addAfter(
                     channel.pipeline().context(SslHandler.class).name(), "holdPoolReadWritePromise",
                     new ChannelOutboundHandlerAdapter() {
                         @Override
-                        public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+                        public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise)
+                                throws Exception {
                             ByteBuf bytes = (ByteBuf) message;
                             if (bytes.getUnsignedShort(bytes.readerIndex() + 14)
                                     == ProfileOperation.READ_ENTRY.wireValue()
                                     && held.compareAndSet(null, promise)) {
+                                Object request = pendingEntries.get(bytes.getLong(bytes.readerIndex() + 20));
+                                var replyField = request.getClass().getDeclaredField("ownedReadReply");
+                                replyField.setAccessible(true);
+                                actualReply.set((CompletableFuture<?>) replyField.get(request));
+                                var completionField = request.getClass().getDeclaredField("completion");
+                                completionField.setAccessible(true);
+                                actualCompletion.set((CompletableFuture<?>) completionField.get(request));
                                 var actual = ctx.newPromise();
                                 actual.addListener(done -> written.countDown());
                                 ctx.write(bytes, actual);
@@ -14404,15 +14417,20 @@ public class SegmentProfileInitialSocketClientTest {
                 var attempt = coordinator.beginWorker(44, sdk.getClientCtx(), options, tasks, lease);
                 try {
                     assertTrue(written.await(5, TimeUnit.SECONDS));
-                    channel.closeFuture().get(5, TimeUnit.SECONDS); // Health reached the lease drain barrier.
+                    actualReply.get().get(5, TimeUnit.SECONDS);
+                    assertFalse(actualCompletion.get().isDone());
+                    assertFalse(channel.closeFuture().isDone()); // Reader drain precedes lease close.
                     assertThrows(java.util.concurrent.TimeoutException.class,
                             () -> attempt.completion().get(150, TimeUnit.MILLISECONDS));
+                    assertThrows(IllegalStateException.class, attempt::releaseTask);
                     assertTrue(tasks.isLedgerBeingReplicated(44));
                     assertNotNull(tasks.getLedgerUnreplicationInfo(44));
                     assertEquals(6, pool.usage().reservedConnections());
                     held.get().setSuccess();
+                    actualCompletion.get().get(5, TimeUnit.SECONDS);
                     assertEquals(ProfileRecoveryCoordinator.WorkerStatus.REPLICATED,
                             attempt.completion().get(5, TimeUnit.SECONDS).status());
+                    channel.closeFuture().get(5, TimeUnit.SECONDS);
                     assertNull(tasks.getLedgerUnreplicationInfo(44));
                     assertEquals(0, pool.usage().reservedConnections());
                     attempt.releaseTask();
