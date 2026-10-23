@@ -95,6 +95,16 @@ ThirdDiscardedReply ==
     /\ thirdSent' = FALSE
     /\ UNCHANGED <<sdkVars, deleteVars, thirdVars, thirdLiveReply>>
 
+(* Caller delivery is already terminal. Its original request can settle only
+   after accepted I/O has actually returned; this never supplies an SDK ACK. *)
+OriginalDiscardedReply(target) ==
+    /\ ACDMutation # "omit-discard" /\ ~dfCdFirst.closed /\ s.stopped
+    /\ target \in acSentRequests /\ s.phase[target] = "failed"
+    /\ Sdk!ACSubmitted(target)
+    /\ (Sdk!ACReturned(target) \/ ACDMutation = "discard-before-return")
+    /\ acSentRequests' = acSentRequests \ {target}
+    /\ UNCHANGED <<s, ac1Phase, ac1ControlLength, ac1ControlDurable, ac1ControlApplied, ac1Submitted, ac1Inflight, ac1Written, ac1DataDurable, ac1Successes, ac1RuntimeFault, ac1FaultSeen, ac1FaultDurable, ac1ControlSynced, ac1Validated, ac1DataSynced, ac1CrashCount, ac1PowerCount, ac2Phase, ac2ControlLength, ac2ControlDurable, ac2ControlApplied, ac2Submitted, ac2Inflight, ac2Written, ac2DataDurable, ac2Successes, ac2RuntimeFault, ac2FaultSeen, ac2FaultDurable, ac2ControlSynced, ac2Validated, ac2DataSynced, ac2CrashCount, ac2PowerCount, acLiveReplies, ac1IoReturned, ac2IoReturned, acCoordinate, deleteVars, thirdVars, thirdSent, thirdLiveReply>>
+
 (* Native writer close stops the original SDK first, and then waits for every
    original request and accepted task. ACK quorum is neither of those facts. *)
 CloseAll ==
@@ -105,6 +115,7 @@ CloseAll ==
 DeleteAllStep == DeleteStep /\ UNCHANGED <<thirdVars, thirdSent, thirdLiveReply>>
 NextAll == SdkStepAll \/ ThirdPhysicalStep \/ ThirdKnownNone \/ ThirdUnknown \/ ThirdRetry
            \/ ThirdExpire \/ ThirdDiscardedReply \/ CloseAll \/ DeleteAllStep
+           \/ (\E target \in {0, 1} : OriginalDiscardedReply(target))
 SpecAll == InitAll /\ [][NextAll]_allReplicaVars
 
 (* At this cut every SDK/storage variable is frozen by all successors. Delete
@@ -113,10 +124,17 @@ SpecAll == InitAll /\ [][NextAll]_allReplicaVars
 AllAcknowledgedHistory ==
     s.user = "success" /\ s.stopped /\ (\A target \in 0..2 : s.phase[target] = "durable")
     /\ thirdLiveReply
-(* Keep the exact frozen SDK predicate used by the reachability query. *)
+AllDiscardedHistory(target) ==
+    s.user = "success" /\ s.stopped /\ s.phase[target] = "failed" /\ s.everUnknown[target]
+    /\ Sdk!ACSubmitted(target) /\ Sdk!ACReturned(target) /\ Sdk!ACPublished(target)
+    /\ target \notin acLiveReplies /\ target \notin acSentRequests
+    /\ s.phase[1 - target] = "durable" /\ s.phase[2] = "durable" /\ thirdLiveReply
+(* Keep every exact frozen SDK predicate used by the reachability queries. *)
 AllLifecycleView ==
     <<IF dfCdFirst.closed /\ EveryRequestDrained /\ s.stopped
-      THEN <<"all-replicas-drained", AllAcknowledgedHistory>> ELSE <<sdkVars, thirdVars, thirdSent, thirdLiveReply>>, deleteVars>>
+      THEN <<"all-replicas-drained", AllAcknowledgedHistory,
+             AllDiscardedHistory(0), AllDiscardedHistory(1)>>
+      ELSE <<sdkVars, thirdVars, thirdSent, thirdLiveReply>>, deleteVars>>
 AllTypeOK == ACDTypeOK /\ Third!TypeOK /\ thirdSent \in BOOLEAN /\ thirdLiveReply \in BOOLEAN
 AllThirdStorageContract ==
     Third!ControlHasBarrier /\ Third!PhysicalSuccessIsContiguous /\ Third!KnownErrorRemainsIsolated
@@ -125,7 +143,16 @@ AllThirdStorageContract ==
 AllThirdAckHasOwnPublication == s.phase[2] = "durable" => thirdLiveReply /\ ThirdPublished
 AllClosedHasEverySourceAndIoDrain ==
     dfCdFirst.closed => EveryRequestDrained /\ s.stopped /\ (\A target \in 0..2 : ~s.source[target])
-AllNoCompletedFree ==
-    ~(dfGeneration = 2 /\ dfCd.applied = {1, 2} /\ dfCdFirst.logical /\ dfCdSecond.logical
-      /\ AllAcknowledgedHistory)
+AllDiscardWaitsForActualReturn ==
+    \A target \in {0, 1} : s.stopped /\ s.phase[target] = "failed" /\ Sdk!ACSubmitted(target)
+        /\ target \notin acSentRequests => Sdk!ACReturned(target)
+AllDiscardCanSettle ==
+    \A target \in {0, 1} : ~dfCdFirst.closed /\ s.stopped /\ s.phase[target] = "failed"
+        /\ target \in acSentRequests /\ Sdk!ACSubmitted(target) /\ Sdk!ACReturned(target)
+        => ENABLED OriginalDiscardedReply(target)
+AllCompletedLocalDeleteFree ==
+    dfGeneration = 2 /\ dfCd.applied = {1, 2} /\ dfCdFirst.logical /\ dfCdSecond.logical
+AllNoCompletedFree == ~(AllCompletedLocalDeleteFree /\ AllAcknowledgedHistory)
+AllNoCompletedFreeAfterFirstDiscard == ~(AllCompletedLocalDeleteFree /\ AllDiscardedHistory(0))
+AllNoCompletedFreeAfterSecondDiscard == ~(AllCompletedLocalDeleteFree /\ AllDiscardedHistory(1))
 =============================================================================

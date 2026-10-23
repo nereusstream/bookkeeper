@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为762配置；新增A+C/C+D及A+C+D生命周期配置和repair output投影只有各自定向结果，未重跑当前全目录。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为766配置；新增A+C/C+D及A+C+D生命周期配置和repair output投影只有各自定向结果，未重跑当前全目录。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -1656,6 +1656,51 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 
 原始最终 runs 为 `unified-wal-model-8ccnhrb6`、`c4pl8h22`、`jddu6702`，完整 source/config/manifest/log/trace 和各阶段差异保存在 `/Users/liusinan/.codex/artifacts/unified-wal/acd-all-replicas-evidence-7o7q7gyh`。初始 tuple 求值错误、120秒 INCONCLUSIVE、旧 VIEW 中断搜索均保留原绑定，不计入 PASS。runner 的 Python 语法、762配置目录和超时0/3601在启动 checker 前拒绝已验证；未重跑当前全目录。1172个既有 native 输入逐项不变，不重跑 Java 测试或移绑原 native receipt。
 
-live SDK episode 仍排除进程/掉电故障，原本地 FREE episode 只保留原一次 crash；第三副本没有接入自己的 D/FREE。原 slot 0/1 bridge 尚未覆盖 SDK 终止后丢弃迟到回复的所有结算路径，不证明这些路径最终 close。多 entry、全部取消/超时、实际 metadata/fence/CLOSED、multi-Arena、全目标物理完成、完整 A+C+D 及16步/生产 Gate 仍 OPEN，目标 active，默认 OFF/SYSTEM/PARK 与 disabled 能力不变。本轮无性能测量，Linux NUMA、真实掉电、正式性能/canary 为 NOT_EXECUTED。
+live SDK episode 仍排除进程/掉电故障，原本地 FREE episode 只保留原一次 crash；第三副本没有接入自己的 D/FREE。该回执绑定的原 slot 0/1 bridge 尚未覆盖 SDK 终止后丢弃迟到回复的所有结算路径，不证明这些路径最终 close。多 entry、全部取消/超时、实际 metadata/fence/CLOSED、multi-Arena、全目标物理完成、完整 A+C+D 及16步/生产 Gate 仍 OPEN，目标 active，默认 OFF/SYSTEM/PARK 与 disabled 能力不变。本轮无性能测量，Linux NUMA、真实掉电、正式性能/canary 为 NOT_EXECUTED。
 
 本轮 model 与静态检查实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径逐项存在父HEAD，无新增；原报告和父提交对象核验保留。不称CI全绿。
+
+
+## SDK 停止后丢弃回复的实际请求结算
+
+2026-10-23，父源码 `1fef8057fc75850310e6307bfd394aa59f67f8ec`。当前生产 `ProfileBookieClient.Delivery` 在 caller terminal 后忽略迟到 result，但 `retainRequest(completion)` 独立保留实际请求，close 等待 `requestDrains`。前一组合模型只有 slot 2 的 discarded reply 动作；slot 0/1 已停止的 delivery 即使存储实际返回，也无法释放 acSentRequests。这是模型缺失转移，不是已发现的生产缺陷。
+
+`ProfileSdkAllDeleteFree` 增加参数化 `OriginalDiscardedReply(0/1)`：SDK 已 stopped、该 slot failed、请求已提交且实际 I/O 返回后，只移除 sent；SDK 状态、ACK 历史、源坐标、存储及删除变量全部不变。原五个 SDK/存储/删除模块字节不变。新增两个性质分别检查未返回不能结算，以及符合条件后结算动作确实 enabled；后者不增加 fairness 或最终进展保证。
+
+两个负向 reachability 查询分别要求 slot 0 或 slot 1 未得到 SDK durable ACK、保持 UNKNOWN，而其原 storage 已 publication/actual-return，其他两个 slot durable、A=2 success、SDK stopped，并到达原两次 logical delete/local generation2。VIEW 在冻结 cut 保留这两个查询及原三副本全成功查询的精确布尔值；不会合并 witness 的真假历史。本地 slot 0 的 D/FREE、native metadata/fence/CLOSED 仍为原范围，不能推成三目标物理完成。
+
+本轮模型输入1146项，各 run SHA一致，native1172项未变，既有 native receipt不移绑、不重复Java测试。新指定mutation先以默认120秒得到指定反例，实际统计见本节最终结果。
+
+提前结算反例中 slot 0 仍有真实 inflight、ioReturned为空，但请求已从 sent 删除；省略动作的反例中 actual I/O 已返回且 SDK停止，但原请求仍不能结算。两者均 user failed，不称其已覆盖 A=2 成功后的 FREE；该组合由独立 witness 检查。
+
+本轮最终九配置为1完整正向、6指定mutation反例、2个成功路径witness，五个runner均实际exit0。新mutation使用原默认120秒，其余run显式每配置3600秒；平台/工具/worker/heap/direct/seed/fp不变。原三副本全成功witness保留前一提交交付的历史输入绑定，本轮未重跑或移绑它。完整结果如下：
+
+| 配置 | 结果／指定性质 | generated / distinct / queue | depth | 秒 |
+|---|---|---|---|---|
+| `ce-acd-profile-sdk-all-delete-free-discard-early` | EXPECTED_COUNTEREXAMPLE: `AllDiscardWaitsForActualReturn` | 4997 / 1641 / 992 | 7 | 1.377 |
+| `ce-acd-profile-sdk-all-delete-free-discard-omitted` | EXPECTED_COUNTEREXAMPLE: `AllDiscardCanSettle` | 4974 / 1623 / 976 | 7 | 1.585 |
+| `acd-profile-sdk-all-delete-free` | PASS | 44131126 / 6740125 / 0 | 57 | 1761.191 |
+| `witness-acd-profile-sdk-all-delete-free-discard-first` | EXPECTED_COUNTEREXAMPLE: `AllNoCompletedFreeAfterFirstDiscard` | 44033955 / 6728069 / 6048 | 49 | 1817.685 |
+| `witness-acd-profile-sdk-all-delete-free-discard-second` | EXPECTED_COUNTEREXAMPLE: `AllNoCompletedFreeAfterSecondDiscard` | 44016628 / 6726055 / 6876 | 49 | 1769.279 |
+| `ce-acd-profile-sdk-all-delete-free-early` | EXPECTED_COUNTEREXAMPLE: `AllThirdAckHasOwnPublication` | 11683 / 3405 / 1853 | 7 | 2.960 |
+| `ce-acd-profile-sdk-all-delete-free-peer` | EXPECTED_COUNTEREXAMPLE: `AllThirdAckHasOwnPublication` | 54494 / 14066 / 6728 | 10 | 4.522 |
+| `ce-acd-profile-sdk-all-delete-free-drain` | EXPECTED_COUNTEREXAMPLE: `AllClosedHasEverySourceAndIoDrain` | 9497366 / 1662609 / 352799 | 22 | 384.078 |
+| `ce-acd-profile-sdk-all-delete-free-source` | EXPECTED_COUNTEREXAMPLE: `AllClosedHasEverySourceAndIoDrain` | 9497378 / 1662615 / 352803 | 22 | 403.513 |
+
+正向日志明确 `Model checking completed. No error has been found.`，queue0，depth/diameter57。两个新witness各49步：第29步SDK stopped，第30步只删除对应sent、SDK/ACK/源/存储/删除变量不变，第31步接受原fenced-CLOSED输入，第49步两次logical delete已apply且本地allocation generation2。slot0/slot1的actual I/O分别在第8/16步已返回，因而这两条具体轨迹证明停止后丢弃回复可结算，不单独证明“停止后I/O才返回”的成功路径；提前释放mutation另有SDK stopped且原I/O仍inflight的反例。
+
+两条witness终态均为A=2 success、对应目标failed且UNKNOWN、另外两个slot durable、三storage的publication/ioReturned齐全、sent/inflight/readers/actualIo为空；两份logical-delete的physical/reported仍false，不等于全目标物理删除完成。SDK metadata字段仍OPEN，fence/CLOSED authority继续是已验证输入。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar \
+  --timeout-seconds 3600 \
+  --config-prefix acd-profile-sdk-all-delete-free \
+  --config-prefix witness-acd-profile-sdk-all-delete-free-discard \
+  --config-prefix ce-acd-profile-sdk-all-delete-free
+```
+
+最终原始run为 `3qxlgzvb`（新mutation）、`bmkfy833`（正向）、`qqoi4gpt`/`zrvvv5od`（两个witness）、`3q7knyv5`（原mutation）。1146个source/config/runner输入逐项相同且与当前源码匹配，完整manifest/log/trace/checksums、前后源码与校验保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-late-reply-evidence-3yv86x52`。本轮只改组合模型、其cfg/runner和既有文档，不重复Java测试、style或移绑既有1172输入的native结果。
+
+当前766配置目录未全跑；其他timeout/backoff/connection-loss结算、multi-entry、multi-Arena、实际authority/crash与全目标物理清理、完整A+C+D和16步验收仍OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+本轮所有model实际终结后的独立 `mvn -o apache-rat:check` exit1：443个unapproved路径逐项存在父HEAD，无新增；原报告与Git对象核验保留。不称CI全绿。
