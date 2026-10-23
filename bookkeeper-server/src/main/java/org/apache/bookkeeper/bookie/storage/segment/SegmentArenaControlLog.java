@@ -1052,10 +1052,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     generation, slot, snapshot, maxLogBytes);
             SegmentControlCheckpoint.write(config, identity, SegmentControlFormat.Owner.ARENA,
                     reference, snapshot, checkpointIo);
-            if (!snapshot.equals(SegmentControlCheckpoint.read(
-                    config, identity, SegmentControlFormat.Owner.ARENA, reference, maxLogBytes))) {
-                throw new IOException("Arena checkpoint verification differs from its frozen state");
-            }
+            SegmentControlCheckpoint.verify(config, identity, SegmentControlFormat.Owner.ARENA,
+                    reference, snapshot, maxLogBytes);
             Result result = submitBatch(List.of(new CheckpointCommit(UUID.randomUUID(), reference))).get(0);
             if (result.status() != Status.APPLIED_DURABLE) {
                 throw new IOException("Arena checkpoint was not committed");

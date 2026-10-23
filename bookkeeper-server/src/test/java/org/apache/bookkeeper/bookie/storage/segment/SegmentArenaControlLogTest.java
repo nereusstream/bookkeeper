@@ -489,6 +489,106 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void checkpointVerificationDoesNotMaterializeTheFrozenPayloadAgain() throws Exception {
+        var standard = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.Assume.assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        var memory = (com.sun.management.ThreadMXBean) standard;
+        org.junit.Assume.assumeTrue(memory.isThreadAllocatedMemorySupported());
+        boolean enabled = memory.isThreadAllocatedMemoryEnabled();
+        if (!enabled) {
+            memory.setThreadAllocatedMemoryEnabled(true);
+        }
+        try {
+            IsolatedSegmentConfig config = config();
+            ByteBuffer body = ByteBuffer.allocate(65536 - 144);
+            for (int i = 0; i < body.capacity(); i++) {
+                body.put(i, (byte) (i * 31));
+            }
+            var operations = new java.util.ArrayList<SegmentControlCheckpoint.Operation>();
+            for (int i = 0; i < 128; i++) {
+                // Physical codec vector; semantic ALLOC validation remains with the Arena owner.
+                var record = SegmentControlFormat.encode(SegmentControlFormat.Type.ALLOC, new Generation(1), i,
+                        new UUID(0, i + 1), new Generation(1), 0, body);
+                operations.add(new SegmentControlCheckpoint.Operation(i, i % 4 + 1, record));
+            }
+            var snapshot = new SegmentControlCheckpoint.Snapshot(127, 4096, operations, true);
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+                var warm = new SegmentControlCheckpoint.Snapshot(0, 4096, operations.subList(0, 1), true);
+                var warmReference = SegmentControlCheckpoint.reference(1, 0, warm, 16 * 1024 * 1024);
+                SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        warmReference, warm, new SegmentFileIo());
+                SegmentControlCheckpoint.verify(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        warmReference, warm, 16 * 1024 * 1024);
+                var reference = SegmentControlCheckpoint.reference(2, 0, snapshot, 16 * 1024 * 1024);
+                SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        reference, snapshot, new SegmentFileIo());
+                long thread = Thread.currentThread().getId();
+                long before = memory.getThreadAllocatedBytes(thread);
+                SegmentControlCheckpoint.verify(config, identity(), SegmentControlFormat.Owner.ARENA,
+                        reference, snapshot, 16 * 1024 * 1024);
+                long allocated = memory.getThreadAllocatedBytes(thread) - before;
+                System.out.println("Checkpoint verification Java allocation: payload=" + reference.payloadBytes()
+                        + ", allocated=" + allocated);
+                assertTrue("Checkpoint verification materialized payload: " + allocated,
+                        allocated < reference.payloadBytes() / 4);
+                assertEquals(reference, SegmentControlCheckpoint.reference(2, 0, snapshot, 16 * 1024 * 1024));
+                assertEquals(snapshot, SegmentControlCheckpoint.read(config, identity(),
+                        SegmentControlFormat.Owner.ARENA, reference, 16 * 1024 * 1024));
+            }
+        } finally {
+            if (!enabled) {
+                memory.setThreadAllocatedMemoryEnabled(false);
+            }
+        }
+    }
+
+    @Test
+    public void checkpointVerificationRequiresExactFrozenStateAndRejectsCorruptImage() throws Exception {
+        IsolatedSegmentConfig config = config();
+        var operations = new java.util.ArrayList<SegmentControlCheckpoint.Operation>();
+        for (int i = 0; i < 2; i++) {
+            var command = alloc(i + 1, 4096 + i * SegmentArenaControlLog.BLOCK_BYTES);
+            var record = SegmentControlFormat.encode(command.type(), new Generation(1), i, command.operationId(),
+                    command.operationGeneration(), command.expectedGeneration(), command.body());
+            operations.add(new SegmentControlCheckpoint.Operation(i, 1, record));
+        }
+        var snapshot = new SegmentControlCheckpoint.Snapshot(1, 4480, operations, true);
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            var reference = SegmentControlCheckpoint.reference(1, 0, snapshot, 1024 * 1024);
+            SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    reference, snapshot, new SegmentFileIo());
+            SegmentControlCheckpoint.verify(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    reference, snapshot, 1024 * 1024);
+            var wrongStatus = List.of(new SegmentControlCheckpoint.Operation(0, 2, operations.get(0).record()),
+                    operations.get(1));
+            var changed = alloc(3, 4096);
+            var changedRecord = SegmentControlFormat.encode(changed.type(), new Generation(1), 0,
+                    changed.operationId(), changed.operationGeneration(), changed.expectedGeneration(), changed.body());
+            var wrongRecord = List.of(new SegmentControlCheckpoint.Operation(0, 1, changedRecord), operations.get(1));
+            for (var mismatch : List.of(
+                    new SegmentControlCheckpoint.Snapshot(0, 4480, operations, true),
+                    new SegmentControlCheckpoint.Snapshot(1, 4488, operations, true),
+                    new SegmentControlCheckpoint.Snapshot(1, 4480, operations, false),
+                    new SegmentControlCheckpoint.Snapshot(1, 4480, operations.subList(0, 1), true),
+                    new SegmentControlCheckpoint.Snapshot(1, 4480, wrongStatus, true),
+                    new SegmentControlCheckpoint.Snapshot(1, 4480, wrongRecord, true))) {
+                assertThrows(IOException.class, () -> SegmentControlCheckpoint.verify(config, identity(),
+                        SegmentControlFormat.Owner.ARENA, reference, mismatch, 1024 * 1024));
+            }
+            corruptCheckpointByte(SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, 0),
+                    4224 + 16 + 128);
+            assertThrows(IOException.class, () -> SegmentControlCheckpoint.verify(config, identity(),
+                    SegmentControlFormat.Owner.ARENA, reference, snapshot, 1024 * 1024));
+            var empty = new SegmentControlCheckpoint.Snapshot(-1, 4096, List.of(), true);
+            var emptyReference = SegmentControlCheckpoint.reference(2, 1, empty, 1024 * 1024);
+            SegmentControlCheckpoint.write(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    emptyReference, empty, new SegmentFileIo());
+            SegmentControlCheckpoint.verify(config, identity(), SegmentControlFormat.Owner.ARENA,
+                    emptyReference, empty, 1024 * 1024);
+        }
+    }
+
+    @Test
     public void emptyCheckpointAndCommitMatchIndependentFixedByteVectors() throws Exception {
         IsolatedSegmentConfig config = config();
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());

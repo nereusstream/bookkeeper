@@ -921,10 +921,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     generation, slot, snapshot, maxLogBytes);
             SegmentControlCheckpoint.write(config, identity, SegmentControlFormat.Owner.BOOKIE,
                     reference, snapshot, checkpointIo);
-            if (!snapshot.equals(SegmentControlCheckpoint.read(config, identity, SegmentControlFormat.Owner.BOOKIE,
-                    reference, maxLogBytes))) {
-                throw new IOException("Bookie checkpoint differs from its frozen applied state");
-            }
+            SegmentControlCheckpoint.verify(config, identity, SegmentControlFormat.Owner.BOOKIE,
+                    reference, snapshot, maxLogBytes);
             commitCheckpoint(reference);
             committed = true;
             if (rotationRoot == null) {

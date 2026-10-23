@@ -28,6 +28,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
@@ -110,8 +111,20 @@ final class SegmentControlCheckpoint {
         IsolatedSegmentFiles.syncDirectory(config.directory());
     }
 
+    static void verify(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
+                       Reference reference, Snapshot expected, long maxLogBytes) throws IOException {
+        read(config, identity, owner, reference, maxLogBytes, Objects.requireNonNull(expected, "expected"));
+    }
+
     static Snapshot read(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
                          Reference reference, long maxLogBytes) throws IOException {
+        return read(config, identity, owner, reference, maxLogBytes, null);
+    }
+
+    /** Verification consumes each parsed record before reusing scratch; recovery retains independent records. */
+    private static Snapshot read(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                                 SegmentControlFormat.Owner owner, Reference reference, long maxLogBytes,
+                                 Snapshot expected) throws IOException {
         if (reference.payloadBytes() - maxLogBytes > maxLogBytes) {
             throw new IOException("Control checkpoint exceeds its control-state budget");
         }
@@ -134,15 +147,24 @@ final class SegmentControlCheckpoint {
                 throw new IOException("Invalid Control checkpoint operation count");
             }
             zero(header, 84, 124);
+            boolean compactedHistory = header.getInt(8) == 2;
+            if (expected != null && (expected.through() != reference.through()
+                    || expected.logOffset() != reference.logOffset() || expected.operations().size() != count
+                    || expected.compactedCheckpointHistory() != compactedHistory)) {
+                throw new IOException("Control checkpoint differs from its frozen applied state");
+            }
             MessageDigest digest = sha256();
-            List<Operation> operations = new ArrayList<>(count);
+            List<Operation> operations = expected == null ? new ArrayList<>(count) : null;
+            ByteBuffer scratch = expected == null || count == 0 ? null
+                    : ByteBuffer.allocate(Math.min(65536, reference.payloadBytes() - 16));
+            ByteBuffer prefix = ByteBuffer.allocate(16);
             long offset = 4224;
             long sequence = -1;
             for (int index = 0; index < count; index++) {
                 if (file.size() - offset < 16) {
                     throw new IOException("Truncated Control checkpoint operation");
                 }
-                ByteBuffer prefix = ByteBuffer.allocate(16);
+                prefix.clear();
                 SegmentFileIo.readFully(file, prefix, offset);
                 digest.update(prefix.duplicate());
                 long nextSequence = prefix.getLong();
@@ -153,18 +175,27 @@ final class SegmentControlCheckpoint {
                         || length < 144 || length > 65536 || length > file.size() - offset - 16) {
                     throw new IOException("Invalid Control checkpoint operation");
                 }
-                ByteBuffer record = ByteBuffer.allocate(length);
+                ByteBuffer record = expected == null ? ByteBuffer.allocate(length) : scratch.clear().limit(length);
                 SegmentFileIo.readFully(file, record, offset + 16);
                 digest.update(record.duplicate());
                 SegmentControlParser.parse(record, owner, new Generation(1), nextSequence);
-                operations.add(new Operation(nextSequence, status, record));
+                if (expected == null) {
+                    operations.add(new Operation(nextSequence, status, record));
+                } else {
+                    Operation frozen = expected.operations().get(index);
+                    if (frozen.sequence() != nextSequence || frozen.status() != status
+                            || !frozen.record().equals(record)) {
+                        throw new IOException("Control checkpoint record differs from its frozen applied state");
+                    }
+                }
                 offset += 16L + length;
                 sequence = nextSequence;
             }
             if (offset != file.size() || !reference.digest().equals(HexFormat.of().formatHex(digest.digest()))) {
                 throw new IOException("Control checkpoint payload digest mismatch");
             }
-            return new Snapshot(reference.through(), reference.logOffset(), operations, header.getInt(8) == 2);
+            return expected != null ? expected
+                    : new Snapshot(reference.through(), reference.logOffset(), operations, compactedHistory);
         }
     }
 

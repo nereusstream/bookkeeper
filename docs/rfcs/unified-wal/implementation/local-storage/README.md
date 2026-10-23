@@ -1129,3 +1129,19 @@ Arena 的原 journal/checkpoint/rotation parser、顺序 apply、坏 image fallb
 最终 native/style 终结后的独立 `mvn -o apache-rat:check` exit1，443 个 unapproved 路径全部存在父提交，无新增；原报告和逐路径 Git 对象核验保留，不称 CI 全绿。
 
 [共享 allocation 存活邻居的搬迁与复用](../profile-wire/README.md#共享-allocation-存活邻居的搬迁与复用)：2026-10-23父c8483d3549上，原三副本SDK生命周期加入同块未删除ledger45；第三COPY force未返回时无MOVE/FREE，实际搬迁后邻居可读，ledger46的256条普通Add经合法尾部耗尽后复用旧块generation2。三节点健康restart后邻居/新首末entry仍可读、44拒绝、历史义务保持。三方法通过，1172输入/三轮fixture假设失败/最终纯换行分别保留，style通过；生产Java/TLA未改，不重跑模型。仅闭合该有限组合，完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+## 控制 checkpoint 的流式读回校验
+
+2026-10-23，父提交 `b03297b9198a76c33fa94b6b5f6d265ad7f0dce9` 上，将 Bookie/Arena checkpoint 写入后的完整 Snapshot 读回比较改为原 codec 的 `verify`。两种读取共用同一文件/parser 循环：恢复仍为每个 retained record 分配独立 backing 并返回 Snapshot；验证使用一份最多65536-byte record scratch，逐条比较冻结 sequence、status、完整 record bytes，消费结束后复用，不构造第二份完整操作表或 payload。固定 identity/header/prefix buffer 仍分别为4096/128/16 bytes；该验证路径的这些 ByteBuffer capacity 合计最多69776 bytes，不是所有 Java/JDK/native 分配或 RSS 的上限。
+
+完整文件长度、storage identity、envelope/CRC、reference、operation count/顺序/长度/范围、canonical control parser、record CRC、零扩展及最终 payload digest 检查继续执行。另核对 frozen through、logOffset、compacted-history flag 和操作数，任一记录差异均拒绝。空 image 使用原空状态语义。两个 owner 仍在实际 image write/file force/目录同步与读回验证成功后，才进入原 CHECKPOINT_COMMIT/apply/publication；没有改变格式、force 数量、权限、fallback 或当前 suffix 的必需性。普通 Add 路径未改。
+
+`checkpointVerificationDoesNotMaterializeTheFrozenPayloadAgain` 以128个最大合法物理 frame 构造8,390,656-byte payload，预热后用当前 JDK ThreadMXBean 统计同步 verification 的 Java 分配；这些是物理 framing 向量，不是可交给 Arena semantic apply 的128个 ALLOC 授权。原完整 Snapshot 读回比较置于同一新 verify 入口的阶段 `NYuc2w4o` 分配8,535,328 bytes，分配断言按预期失败；这保留了旧算法，不能称为整个父版本原样运行。流式版本定向 `jnuABALR` 分配185,256 bytes，最终扩展阶段 `zT3lSDcv` 为185,200 bytes。测试另用原完整 read 作为内容 oracle，并确认冻结输入保持不变。这里只报告这一真实文件/有限输入/当前 JDK 的分配观察，没有吞吐、CPU、延迟或 RSS 性能结论。
+
+`checkpointVerificationRequiresExactFrozenStateAndRejectsCorruptImage` 覆盖合法 image、错误 through/logOffset/history flag/count/status/record、真实文件 payload 字节损坏和空 image。最终扩展运行原 Arena 控制日志整类37方法与 Bookie 的11个相关方法，共 **48 PASS、0 failure/error/skip**：包括独立字节向量、旧格式、applied cut、sealed permissions/LAC/关闭 grant、损坏 fallback/必要 suffix、真实子进程退出及双控制日志 storage restart。早期定向两项和失败阶段各自保留，不能相加成50个独立验收。
+
+各阶段1172个源码/资源输入、父源码与4个 Java override、原命令/Maven/XML、分配输出及最终源码保存在 `/Users/liusinan/.codex/artifacts/unified-wal/checkpoint-verify-evidence-b03297b9`。最终 Java 与48项运行的全部输入精确一致，Spotless/Checkstyle exit0。TLA 转移未改，没有重跑 TLC 或把旧模型 receipt 移绑新源码。
+
+本轮消除了 checkpoint 写后校验再次物化整份 payload 的临时工作集；冻结状态与恢复 Snapshot 的持有量、控制日志长期对象、统一 CONTROL quota 以及其他 full-bytes 仍 OPEN，不能将这份 scratch 上限写成完整内存总账。默认 SDK/observe 公共约定、同 incarnation unclosed-session 接受条件、多 Arena 持久路由和其余完整16步仍待闭合，目标 active、生产 Gate OPEN；默认 OFF/SYSTEM/PARK 与 disabled 能力保持。Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
+
+native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径全部存在父提交，无新增；原报告和逐路径 Git 对象核验保留，不称 CI 全绿。

@@ -2337,3 +2337,5 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 本轮补齐同主机、每 Bookie 单 Arena、一个存活邻居经实际 COPY/MOVE 后保留，以及原块被后续 SDK 写入复用的组合证据；没有覆盖全部 lost-reply/fence/并发删除窗口、多 Arena、进程 crash、掉电、长期容量或完整 A+C+D/Gate。默认 SDK/observe 公共约定、同 incarnation unclosed-session 接受条件、多 Arena 持久路由与完整 full-bytes/其他16步继续 OPEN，目标 active、生产 Gate OPEN；默认 OFF/SYSTEM/PARK 及 disabled 能力保持，Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
 
 native/style 实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径全部存在父提交，无新增；原报告与逐路径 Git 对象核验保留，不称 CI 全绿。
+
+[控制 checkpoint 的流式读回校验](../local-storage/README.md#控制-checkpoint-的流式读回校验)：2026-10-23父b03297b919上，Bookie/Arena 写后验证复用原 parser，用最多64 KiB record scratch逐条比较冻结状态；恢复仍返回独立record，格式/force/commit/publication不变。8 MiB有限image的旧比较额外Java分配8,535,328 bytes，新版本最终185,200 bytes；最终两类48方法通过、1172输入匹配、style通过，旧算法RED独立保留。不是RSS/吞吐或统一CONTROL总账证明；完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
