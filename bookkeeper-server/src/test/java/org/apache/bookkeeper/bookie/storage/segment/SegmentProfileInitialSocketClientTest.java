@@ -4365,6 +4365,175 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void sdkQuorumLateDataDrainClosesDeletesAndReusesReplicaAllocationsAcrossRestart() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            fixture.connectAll(Duration.ofSeconds(5));
+            var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var data = new HashMap<BookieId, ProfileNormalDataClient>();
+            for (int target = 0; target < 3; target++) {
+                data.put(fixture.identities.get(target).bookieId(), dataClient(fixture, target, 8,
+                        Duration.ofSeconds(10)));
+            }
+            var writer = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, data, 8,
+                    1024, 1, Duration.ofSeconds(10), Duration.ofMillis(5));
+            writer.enableWriterClose(new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold),
+                    fixture.descriptorBytes, VALIDATOR, fixture.clients, 4, Duration.ofSeconds(30))
+                    .get(5, TimeUnit.SECONDS);
+            var forcing = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            files(fixture.nodes.get(2)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(release);
+            });
+            try {
+                var added = sdkAdd(writer, bytes(16, 8));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(0, added.get(5, TimeUnit.SECONDS).longValue());
+                assertEquals(0, writer.getLastAddConfirmed());
+                assertEquals(16, writer.getLength());
+                assertTrue(fixture.dataResults.get(2).isEmpty());
+                var firstClose = writer.closeAsync();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> firstClose.get(150, TimeUnit.MILLISECONDS));
+                assertEquals(0, writer.writerCloseRequest().prefixEntryId());
+                assertEquals(16, writer.writerCloseRequest().prefixLength());
+                assertTrue(firstClose.cancel(false));
+                var actualClose = writer.closeAsync();
+                var actualStop = writer.stopLocalWrites();
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> actualStop.get(150, TimeUnit.MILLISECONDS));
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> actualClose.get(150, TimeUnit.MILLISECONDS));
+                assertEquals(available.metadata().getVersion(),
+                        fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getVersion());
+                assertThrows(ExecutionException.class,
+                        () -> sdkAdd(writer, bytes(16, 9)).get(5, TimeUnit.SECONDS));
+                release.countDown();
+                actualStop.get(5, TimeUnit.SECONDS);
+                actualClose.get(30, TimeUnit.SECONDS);
+                var closed = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue();
+                assertEquals(LedgerMetadata.State.CLOSED, closed.getState());
+                assertEquals(0, closed.getLastEntryId());
+                assertEquals(16, closed.getLength());
+                assertReadPayload(data.get(fixture.identities.get(2).bookieId()), fixture.context(), bytes(16, 8));
+
+                var deleting = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+                var deleted = deleting.deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(),
+                        Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, deleted.status());
+                var manifest = deleted.manifest();
+                byte[] originalManifest = manifest.encode();
+                assertEquals(3, manifest.targets().size());
+                var controls = new HashMap<ProfileDeleteRecord.Target, ProfileInitialControlClient>();
+                for (var target : manifest.targets()) {
+                    var client = fixture.clients.get(target.bookie());
+                    var delivered = fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target);
+                    assertEquals(Outcome.APPLIED, client.deleteApply(delivered.event().deleteApply("ledger-profile"))
+                            .get(5, TimeUnit.SECONDS).outcome());
+                    controls.put(target, client);
+                }
+                var physical = deleting.beginObservePhysicalDeletion(manifest, controls, sdk.getClientCtx(),
+                        64, 8, Duration.ofSeconds(10));
+                var reclaimed = physical.result().get(15, TimeUnit.SECONDS);
+                physical.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileDeleteCoordinator.PhysicalStatus.REUSABLE_EVERY_TARGET, reclaimed.status());
+                for (var target : manifest.targets()) {
+                    assertEquals(1, reclaimed.targets().get(target).reply().freedAllocations());
+                    assertEquals(SegmentArenaControlLog.BLOCK_BYTES,
+                            reclaimed.targets().get(target).reply().sourceBytesRetired());
+                }
+                var arenaField = IsolatedSegmentStorage.class.getDeclaredField("arena");
+                arenaField.setAccessible(true);
+                for (var node : fixture.nodes) {
+                    assertTrue(bookie(node).hasTerminalTombstone(fixture.context()));
+                    assertFalse(node.profileReadVisible(fixture.context(), 0));
+                    assertEquals(2, ((SegmentArenaControlLog) arenaField.get(node)).allocationGeneration(0, 4096));
+                }
+
+                byte[] replacementPayload = bytes(16, 79);
+                var replacement = openHandoffTestLedger(fixture, sdk, metadata, 45, data);
+                try {
+                    assertEquals(0, replacement.appendAsync(Unpooled.wrappedBuffer(replacementPayload))
+                            .get(5, TimeUnit.SECONDS).longValue());
+                    replacement.closeAsync().get(30, TimeUnit.SECONDS);
+                } finally {
+                    replacement.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+                var replacementContext = fixture.additionalReadContext;
+                assertArrayEquals(originalManifest, deleting.deleteLedgerAsync(44, bytes(16, 101),
+                        sdk.getClientCtx(), Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS).manifest().encode());
+                assertEquals(3, fixture.reservations.retainedActivationTargets(44).targets().size());
+                for (int target = 0; target < 3; target++) {
+                    assertReadPayload(data.get(fixture.identities.get(target).bookieId()), replacementContext,
+                            replacementPayload);
+                    var node = fixture.nodes.get(target);
+                    var config = files(node).config();
+                    var reused = ((SegmentArenaControlLog) arenaField.get(node)).currentReusedAllocations();
+                    assertEquals(1, reused.size());
+                    assertEquals(4096, reused.get(0).offset());
+                    assertEquals(2, reused.get(0).generation());
+                    node.close();
+                    try (var replay = new IsolatedSegmentStorage(config, fixture.identities.get(target),
+                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                            new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                                    2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                            new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                                    new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                        replay.restart();
+                        assertTrue(bookie(replay).hasTerminalTombstone(fixture.context()));
+                        assertFalse(replay.profileReadVisible(fixture.context(), 0));
+                        assertEquals(2, ((SegmentArenaControlLog) arenaField.get(replay))
+                                .allocationGeneration(0, 4096));
+                        var budget = new ProfileReceiveBudget(4L * 1024 * 1024, 131072, 262144, 8, 8, 8);
+                        var listener = new SegmentProfileListener(replay, fixture.serverTls, budget,
+                                new SegmentProfileListener.Settings(131072, 64, "socket-test", 0),
+                                new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker, null,
+                                new SegmentProfileReadConfig((caller, query) ->
+                                        query.context().equals(fixture.context())
+                                                || query.context().equals(replacementContext)));
+                        try {
+                            var identity = fixture.identities.get(target);
+                            var address = listener.bound().get(5, TimeUnit.SECONDS);
+                            try (var peer = ProfileNormalDataClient.connect(fixture.clientGroup, fixture.peerTls,
+                                    address, "apache.bookkeeper.org", identity.bookieId().toString(),
+                                    identity.incarnation().value(), 8, 1060, Duration.ofSeconds(5))
+                                    .get(5, TimeUnit.SECONDS)) {
+                                assertReadPayload(peer, replacementContext, replacementPayload);
+                                try (var old = peer.readEntryBuffer(fixture.context(), 0).get(5, TimeUnit.SECONDS)) {
+                                    assertEquals(ProfileReadEntryReplyCodec.Outcome.REFUSED, old.outcome());
+                                }
+                            }
+                        } finally {
+                            listener.closeAsync().get(10, TimeUnit.SECONDS);
+                        }
+                        assertEquals(config.bytesPerFile(), Files.size(config.directory().resolve("data-0")));
+                    }
+                }
+            } finally {
+                release.countDown();
+                writer.stopLocalWrites().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static void assertReadPayload(ProfileNormalDataClient client, ProfileLedgerContext context,
+            byte[] payload) throws Exception {
+        try (var reply = client.readEntryBuffer(context, 0).get(5, TimeUnit.SECONDS)) {
+            assertEquals(ProfileReadEntryReplyCodec.Outcome.FOUND, reply.outcome());
+            var entry = reply.entry();
+            try {
+                byte[] actual = new byte[payload.length];
+                entry.getBytes(entry.writerIndex() - payload.length, actual);
+                assertArrayEquals(payload, actual);
+            } finally {
+                entry.release();
+            }
+        }
+    }
+
+    @Test
     public void physicalDeleteControlUsesSameCommittedEventAndActualFreeWithoutGlobalCompletion() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
             var metadata = preparePhysicalDelete(fixture, sdk, false);

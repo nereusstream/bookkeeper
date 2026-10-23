@@ -1704,3 +1704,5 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 当前766配置目录未全跑；其他timeout/backoff/connection-loss结算、multi-entry、multi-Arena、实际authority/crash与全目标物理清理、完整A+C+D和16步验收仍OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled能力不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
 
 本轮所有model实际终结后的独立 `mvn -o apache-rat:check` exit1：443个unapproved路径逐项存在父HEAD，无新增；原报告与Git对象核验保留。不称CI全绿。
+
+[SDK 迟到 DATA 到删除复用及健康重启的原生组合](../profile-wire/README.md#sdk-迟到-data-到删除复用及健康重启的原生组合)：2026-10-23父bf9c813280上，新增一方法串联实际3/3/2 SDK ACK、第三副本force跨越stop、固定P/L普通close、三目标delete/本地FREE、ledger45复用generation2及逐节点健康restart/mTLS点读。最终1 PASS、1172输入匹配、生产Java/TLA未改、style通过；旧Manifest/三target义务保留。仅单Arena顺序复用的有限组合，非crash、多Arena、持久physical receipt/GC或完整16步验收；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

@@ -2294,3 +2294,24 @@ Java/style实际终结后的独立RAT exit1：443 unapproved路径逐项存在�
 [三副本 SDK 到本地删除 FREE 的组合](../models/README.md#三副本-sdk-到本地删除-free-的组合)：2026-10-23父f5fc64ace4上，原SDK/两个storage与delete/FREE保持，第三slot新增自己的原allocator publication/actual I/O return；close输入还须SDK停止及三请求/source/I/O排空。六配置为1完整正向（41770502/6170077、queue0）、4指定反例和1三副本成功路径witness，1142输入相同、显式3600秒预算；762目录未全跑。仍只有一个本地allocation的D/FREE，metadata/fenced-CLOSED为输入，旧slot迟到回复的全部close路径与完整A+C+D/16步验收继续OPEN；无Java变更，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK及disabled不变。
 
 [SDK 停止后丢弃回复的实际请求结算](../models/README.md#sdk-停止后丢弃回复的实际请求结算)：2026-10-23父1fef8057fc上，组合模型补原slot0/1在SDK停止且实际I/O返回后的sent结算，不生成ACK。九配置为1完整正向（44131126/6740125、queue0）、6指定反例、2个49步A=2成功后停止/丢弃回复/local FREE witness；1146模型输入相同，native1172未变、不重跑Java。具体witness的I/O在stop前返回；仍非全目标物理完成、全部timeout/故障或完整A+C+D。766目录未全跑，16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+## SDK 迟到 DATA 到删除复用及健康重启的原生组合
+
+2026-10-23，父源码 `bf9c81328028d59669f8c7738a44ae0609bd36ca`。本轮补一个真实文件/ZK/mTLS/SDK生命周期用例，串联此前各自验证的writer stop/普通close、logical delete、native FREE/reuse及健康restart；只新增测试和私有读取断言，不修改生产实现、共享fixture、wire或持久格式。
+
+三个独立Bookie目录各一个Arena，3/3/2，ledger44写一条16-byte payload。第三副本在真实DATA force前被持有，另两副本已经满足原SDK A=2。此时普通close冻结P=0/length=16；取消首个close等待者后，重复close与stop仍等待实际DATA请求，标准metadata版本不变，新append被拒绝。释放第三force后，actual stop及原普通close完成，当前标准metadata为matching CLOSED(0,16)，第三副本经实际DATA socket点读返回原payload。这补入了I/O跨越SDK停止的原生交错，不把此前模型中I/O先于stop的具体witness改写为另一条路径。
+
+随后原delete coordinator提交同一ledger的logical delete，三个历史target/incarnation分别消费自己的真实delete event并durable apply。原physical observer经CONTROL连接观察三目标均REUSABLE，每目标确实FREE一个BLOCK_BYTES的allocation，native generation从1到2，原context不可再读。这里是exact-event的即时physical observation，不是持久terminal receipt、retention到期、GC或decommission授权。
+
+新ledger45经原inactive install/activation与普通SDK写入不同payload，再正常close。三个节点都实际使用offset4096、generation2的reused allocation，DATA socket读取新payload；ledger44的Manifest完整字节及三个retained activation targets仍保留。随后逐个正常关闭原storage graph、按原incarnation重开同目录，并用新的隔离mTLS listener/连接验证：ledger45可读且payload相同，ledger44返回REFUSED，原tombstone/generation2保留、DATA文件长度不变。新listener的显式read policy同时允许两个context，旧数据拒绝来自重放后的本地状态，不能靠policy把断言提前挡住。
+
+最终 `unified-wal-local-UsUTazFY` 1方法0 failure/error/skip。最初 `s6Qt1Qzg` 是测试误用TargetObservation accessor的testCompile失败；`Yvwk4a9o` 已跑到新ledger复用，但误把operationGeneration当allocation generation而断言失败。修正为读取原Allocation.generation，仍要求2；两阶段原源码/输出保留，不计产品缺陷RED或PASS。最终1172个native输入逐项匹配，仅该测试文件变化；生产Java及TLA转移均未改，不重复TLC或移绑历史native/model receipt。Spotless/Checkstyle实际exit0。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#sdkQuorumLateDataDrainClosesDeletesAndReusesReplicaAllocationsAcrossRestart'
+```
+
+各阶段完整输入、测试源码、原Maven/XML、失败及最终结果保存在 `/Users/liusinan/.codex/artifacts/unified-wal/native-acd-lifecycle-evidence-cwjn_km8`。当前是同主机三Bookie、每Bookie单Arena、一个旧ledger删除后由新ledger顺序复用的有限组合；不替代共享allocation内多个存活/删除邻居、全部lost-reply/fence/故障窗口、多Arena、进程crash、真实掉电、owned服务readiness/rejoin或完整A+C+D/Gate验收。同incarnation unclosed-session接受条件、默认SDK/observe公共约定、多Arena持久路由及其他16步剩余项继续保留，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled能力不变。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+本轮native与style实际终结后的独立 `mvn -o apache-rat:check` exit1：443个unapproved路径均存在父HEAD，无新增；原报告与逐路径Git对象核验保留，不称CI全绿。

@@ -1109,3 +1109,5 @@ Arena 的原 journal/checkpoint/rotation parser、顺序 apply、坏 image fallb
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/storage-inspector-evidence-1de2hsow`，含各阶段完整原始日志/XML、原/最终源码、父提交许可路径核验和校验和。模型runner仅把新诊断文件加入源码输入绑定，Python语法与756项配置文件目录核对通过；首次辅助核对漏写 `.cfg` 的路径错误已保留。未改任何TLA转移，没有执行TLC或把历史模型PASS移绑本轮。
 
 本轮交付的是离线文件/Arena状态观察入口，不是完整运维验收或backup/restore完成。DATA/Bookie语义诊断、运行中采集、同身份unclean-session接受语义、统一full-bytes、兼容与其余16步仍OPEN，目标active、生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary未执行，默认OFF/SYSTEM/PARK与disabled能力保持。
+
+[SDK 迟到 DATA 到删除复用及健康重启的原生组合](../profile-wire/README.md#sdk-迟到-data-到删除复用及健康重启的原生组合)：2026-10-23父bf9c813280上，新增一方法串联实际3/3/2 SDK ACK、第三副本force跨越stop、固定P/L普通close、三目标delete/本地FREE、ledger45复用generation2及逐节点健康restart/mTLS点读。最终1 PASS、1172输入匹配、生产Java/TLA未改、style通过；旧Manifest/三target义务保留。仅单Arena顺序复用的有限组合，非crash、多Arena、持久physical receipt/GC或完整16步验收；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
