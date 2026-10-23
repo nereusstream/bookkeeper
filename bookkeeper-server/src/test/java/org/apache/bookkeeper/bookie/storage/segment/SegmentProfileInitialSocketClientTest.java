@@ -2469,6 +2469,10 @@ public class SegmentProfileInitialSocketClientTest {
         final CountDownLatch submitted = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
         volatile boolean armed;
+        volatile boolean loseReadinessReply;
+        volatile boolean loseWritableReply;
+        final AtomicInteger lostReadinessReplies = new AtomicInteger();
+        final AtomicInteger lostWritableReplies = new AtomicInteger();
 
         HeldServicePublicationClient(String connect, ZooKeeperWatcherBase watcher) throws Exception {
             super(connect, 10000, watcher);
@@ -2485,7 +2489,29 @@ public class SegmentProfileInitialSocketClientTest {
                 submitted.countDown();
                 await(release);
             }
-            super.multi(copied, callback, context);
+            boolean readiness = copied.stream().anyMatch(op ->
+                    (op.getType() == org.apache.zookeeper.ZooDefs.OpCode.create
+                            || op.getType() == org.apache.zookeeper.ZooDefs.OpCode.setData)
+                            && op.getPath().startsWith("/socket-service-readiness/")
+                            && op.getPath().substring("/socket-service-readiness/".length()).indexOf('/') < 0);
+            boolean writable = copied.stream().anyMatch(op ->
+                    op.getType() == org.apache.zookeeper.ZooDefs.OpCode.create && op.getPath().endsWith("/writable"));
+            super.multi(copied, (code, path, ignored, results) -> {
+                boolean lost = false;
+                if (code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
+                    if (readiness && loseReadinessReply) {
+                        loseReadinessReply = false;
+                        lostReadinessReplies.incrementAndGet();
+                        lost = true;
+                    } else if (writable && loseWritableReply) {
+                        loseWritableReply = false;
+                        lostWritableReplies.incrementAndGet();
+                        lost = true;
+                    }
+                }
+                callback.processResult(lost ? org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue()
+                        : code, path, context, results);
+            }, context);
         }
     }
 
@@ -5161,11 +5187,17 @@ public class SegmentProfileInitialSocketClientTest {
     private ProfileLedgerHandle openHandoffTestLedger(Fixture fixture, BookKeeper sdk,
             ProfileLedgerMetadataStore metadata, long ledger, Map<BookieId, ProfileNormalDataClient> data)
             throws Exception {
+        return openHandoffTestLedger(fixture, sdk, metadata, ledger, data, fixture.scopes);
+    }
+
+    private ProfileLedgerHandle openHandoffTestLedger(Fixture fixture, BookKeeper sdk,
+            ProfileLedgerMetadataStore metadata, long ledger, Map<BookieId, ProfileNormalDataClient> data,
+            List<ProfileControlScope> targets) throws Exception {
         byte[] instance = java.nio.ByteBuffer.allocate(16).putLong(ledger).putLong(1).array();
         byte[] sidecar = java.nio.ByteBuffer.allocate(16).putLong(ledger).putLong(2).array();
         byte[] installId = java.nio.ByteBuffer.allocate(16).putLong(ledger).putLong(3).array();
         byte[] activeId = java.nio.ByteBuffer.allocate(16).putLong(ledger).putLong(4).array();
-        var scopes = fixture.scopes.stream().map(scope -> new ProfileControlScope(scope.operation(),
+        var scopes = targets.stream().map(scope -> new ProfileControlScope(scope.operation(),
                 scope.purpose(), ledger, instance, scope.descriptorIdentity(), scope.targetBookie(),
                 scope.targetStorageIncarnation(), scope.authorityDomain(), scope.authorityGeneration(),
                 installId, bytes(32, 74), null)).toList();
@@ -5176,7 +5208,9 @@ public class SegmentProfileInitialSocketClientTest {
                     .toList()).build();
         var installs = new HashMap<String, ProfileInitialMetadataCoordinator.Target>();
         var activations = new HashMap<String, ProfileInitialLifecycleCoordinator.Target>();
-        fixture.clients.forEach((name, client) -> {
+        scopes.forEach(scope -> {
+            String name = scope.targetBookie();
+            var client = fixture.clients.get(name);
             installs.put(name, new ProfileInitialMetadataCoordinator.Target(client.hello(), client));
             activations.put(name, new ProfileInitialLifecycleCoordinator.Target(client.hello(), client));
         });
@@ -8288,8 +8322,17 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy() throws Exception {
+        assertBackupRestoreScenarios(java.util.stream.IntStream.range(0, 14).boxed().toList());
+    }
+
+    @Test
+    public void backupRestoreBootstrapRequiresActualSnapshotSuffixAndReconcilesPublicationReplies() throws Exception {
+        assertBackupRestoreScenarios(List.of(14, 15, 16));
+    }
+
+    private void assertBackupRestoreScenarios(List<Integer> scenarios) throws Exception {
         // Offline/partial/conflicting inputs, delete races, drain, bootstrap, metadata identity and lost replies.
-        for (int scenario = 0; scenario < 14; scenario++) {
+        for (int scenario : scenarios) {
             try (Fixture fixture = new Fixture(false, false, true, scenario == 13 ? 5 : 4, 2, true, true);
                     BookKeeper sdk = sdk(fixture)) {
                 fixture.connectAll(Duration.ofSeconds(5));
@@ -8386,11 +8429,12 @@ public class SegmentProfileInitialSocketClientTest {
                     fixture.replyFault.set(scenario == 11 ? 18 : 31);
                 }
                 var restartConfig = files(fixture.nodes.get(3)).config();
-                var restartPolicy = scenario >= 12 ? servicePolicy(restartConfig, target, 1) : null;
+                var restartPolicy = scenario == 12 || scenario == 13 ? servicePolicy(restartConfig, target, 1) : null;
                 try (var image = SegmentBackupImage.open(sourceConfig, fixture.identities.get(0),
                         new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, 1024 * 1024, 16,
                         "cluster/profile", "device-0", directory, reference);
-                        var restart = scenario >= 12 ? new ServiceEpisode(fixture, 3, restartConfig, restartPolicy,
+                        var restart = restartPolicy != null ? new ServiceEpisode(fixture, 3, restartConfig,
+                                restartPolicy,
                                 restartPolicy.compatibility(), new InetSocketAddress("127.0.0.1", 0),
                                 sdk.getClientCtx().getScheduler(), false, scenario == 13) : null;
                         var crashed = scenario == 13 ? new RestoreCrashTarget(fixture, restart) : null) {
@@ -8541,7 +8585,7 @@ public class SegmentProfileInitialSocketClientTest {
                         resumed.completion().get(10, TimeUnit.SECONDS);
                         assertEquals(forced + 1, files(fixture.nodes.get(3)).dataIo.forces);
                     }
-                    if (scenario >= 11) {
+                    if (scenario >= 11 && scenario <= 13) {
                         assertEquals(ProfileRecoveryCoordinator.RepairStatus.DEFERRED, result.status());
                         assertEquals(scenario == 11 ? 2 : 0, result.copiedEntries());
                         if (scenario == 11) {
@@ -8676,12 +8720,15 @@ public class SegmentProfileInitialSocketClientTest {
                             data.get(target.bookieId()).readEntry(fixture.context(), 1)
                                     .get(5, TimeUnit.SECONDS).outcome());
                     assertFalse(fixture.normal(3));
-                    if (scenario == 7 || scenario == 8) {
+                    boolean snapshotBootstrap = scenario == 8 || scenario >= 14;
+                    if (scenario == 7 || snapshotBootstrap) {
                         var targetConfig = files(fixture.nodes.get(3)).config();
                         var deleteTarget = new ProfileDeleteRecord.Target(target.bookieId().toString(),
                                 target.incarnation().value());
                         ProfileDeleteRecord.Manifest deleted = null;
-                        if (scenario == 8) {
+                        ProfileDeleteRecord.Manifest suffixDeleted = null;
+                        ProfileLedgerContext suffixContext = null;
+                        if (snapshotBootstrap) {
                             var removal = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
                                     .deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(10))
                                         .get(10, TimeUnit.SECONDS);
@@ -8692,13 +8739,66 @@ public class SegmentProfileInitialSocketClientTest {
                             assertEquals(ZKProfileReservationStore.DeleteSnapshotStatus.FOUND, snapshot.status());
                             assertEquals(deleteTarget, snapshot.snapshot().value().cut().target());
                             assertEquals(1, snapshot.snapshot().value().cut().committedThrough());
+                            if (scenario >= 14) {
+                                // This second real CLOSED/delete targets the restored member, after its snapshot cut.
+                                var targets = new ArrayList<>(fixture.scopes);
+                                var old = targets.get(0);
+                                targets.set(0, new ProfileControlScope(old.operation(), old.purpose(), old.ledgerId(),
+                                        old.ledgerInstanceId(), old.descriptorIdentity(), target.bookieId().toString(),
+                                        target.incarnation().value(), old.authorityDomain(), old.authorityGeneration(),
+                                        old.operationId(), old.publicSemanticPayloadIdentity(), old.exactRange()));
+                                var writer = openHandoffTestLedger(fixture, sdk, metadata, 45, data, targets);
+                                writer.closeAsync().get(30, TimeUnit.SECONDS);
+                                byte[] deleteId = java.nio.ByteBuffer.allocate(16).putLong(45).putLong(5).array();
+                                var suffix = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                                        .deleteLedgerAsync(45, deleteId, sdk.getClientCtx(), Duration.ofSeconds(30))
+                                            .get(30, TimeUnit.SECONDS);
+                                assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, suffix.status());
+                                suffixDeleted = suffix.manifest();
+                                var event = fixture.reservations.readDeleteDelivery(metadata, deleteTarget, 2).event();
+                                assertNotNull(event);
+                                suffixContext = event.ledger();
+                                assertEquals(45, suffixContext.ledgerId());
+                                assertEquals(2, fixture.reservations.readDeleteHead(deleteTarget).head()
+                                        .committedThrough());
+                                if (scenario == 15) {
+                                    fixture.zk.delete(actualDeleteStreamPath(fixture, deleteTarget) + "/event-2", 0);
+                                }
+                            }
                             // Disposable prefix fault: bootstrap must use this target's verified snapshot.
                             fixture.zk.delete(actualDeleteStreamPath(fixture, deleteTarget) + "/event-1", 0);
                         }
                         var requested = servicePolicy(targetConfig, target, 1);
                         try (var episode = new ServiceEpisode(fixture, 3, targetConfig, requested,
                                 requested.compatibility(), new InetSocketAddress("127.0.0.1", 0),
-                                sdk.getClientCtx().getScheduler(), scenario == 8)) {
+                                sdk.getClientCtx().getScheduler(), snapshotBootstrap)) {
+                            if (scenario == 16) {
+                                var publication = (HeldServicePublicationClient) episode.client;
+                                publication.loseReadinessReply = true;
+                                publication.loseWritableReply = true;
+                            }
+                            if (scenario == 15) {
+                                var failure = assertThrows(java.io.IOException.class,
+                                        () -> episode.replaceNode(fixture, 3, true));
+                                assertTrue(failure.getMessage(), failure.getMessage().contains("not writable"));
+                                assertNull(episode.persistent.readPeer(target.bookieId().toString()).peer());
+                                var observer = new ZKProfileEphemeralRegistrationStore(fixture.zk,
+                                        "/socket-service-readiness", target.bookieId().toString(),
+                                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                                assertTrue(observer.readWritable(target.bookieId().toString()).isEmpty());
+                                try (var replay = SegmentBookieControlLog.open(targetConfig, target, 1024 * 1024,
+                                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR)) {
+                                    assertEquals(1, replay.deleteAppliedCursor().sequence());
+                                    assertTrue(replay.hasTerminalTombstone(fixture.context()));
+                                    assertFalse(replay.hasTerminalTombstone(suffixContext));
+                                }
+                                assertArrayEquals(deleted.encode(), fixture.reservations.readLogicalDeletion(
+                                        metadata, 44, bytes(16, 101)).manifest().encode());
+                                byte[] deleteId = java.nio.ByteBuffer.allocate(16).putLong(45).putLong(5).array();
+                                assertArrayEquals(suffixDeleted.encode(), fixture.reservations.readLogicalDeletion(
+                                        metadata, 45, deleteId).manifest().encode());
+                                continue;
+                            }
                             if (scenario == 8) {
                                 var publication = (HeldServicePublicationClient) episode.client;
                                 publication.armed = true;
@@ -8722,14 +8822,32 @@ public class SegmentProfileInitialSocketClientTest {
                             var progress = episode.storage().profileDeleteProgress();
                             var required = fixture.reservations.readDeleteHead(deleteTarget).head();
                             assertEquals(deleteTarget, required.target());
-                            assertEquals(scenario == 8 ? 1 : 0, required.committedThrough());
+                            assertEquals(scenario >= 14 ? 2 : snapshotBootstrap ? 1 : 0, required.committedThrough());
                             assertFalse(fixture.normal(3));
-                            if (scenario == 8) {
-                                assertEquals(1, progress.sequence());
+                            if (snapshotBootstrap) {
+                                assertEquals(required.committedThrough(), progress.sequence());
                                 assertArrayEquals(required.streamId(), progress.streamId());
                                 assertTrue(bookie(episode.storage()).hasTerminalTombstone(fixture.context()));
                                 var retained = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101));
                                 assertArrayEquals(deleted.encode(), retained.manifest().encode());
+                                if (scenario >= 14) {
+                                    assertTrue(bookie(episode.storage()).hasTerminalTombstone(suffixContext));
+                                    byte[] deleteId = java.nio.ByteBuffer.allocate(16).putLong(45).putLong(5).array();
+                                    assertArrayEquals(suffixDeleted.encode(), fixture.reservations.readLogicalDeletion(
+                                            metadata, 45, deleteId).manifest().encode());
+                                    var fresh = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
+                                    assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec
+                                                    .Outcome.REFUSED,
+                                            fresh.readEntry(fixture.context(), 1).get(5, TimeUnit.SECONDS).outcome());
+                                    assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec
+                                                    .Outcome.REFUSED,
+                                            fresh.readEntry(suffixContext, 0).get(5, TimeUnit.SECONDS).outcome());
+                                }
+                                if (scenario == 16) {
+                                    var publication = (HeldServicePublicationClient) episode.client;
+                                    assertEquals(1, publication.lostReadinessReplies.get());
+                                    assertEquals(1, publication.lostWritableReplies.get());
+                                }
                             } else {
                                 var reopened = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
                                 assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec

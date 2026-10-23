@@ -2248,3 +2248,26 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 
 [派生 index 的 write-buffer 配置容量预留](../local-storage/README.md#派生-index-的-write-buffer-配置容量预留)：2026-10-23父a08d52884a上，原shared DataWorkingSet启动前预留扩展为固定pool＋1 MiB cache＋两份1 MiB write-buffer配置容量，实际RocksDB选项值不变。真实quota缺口RED已复现；最终三方法通过，含原owned SDK/drain及恢复14场景，1171输入/red-green/同版依赖源码分别冻结。测试fixture显式4 MiB total，生产quota不自动增大；reservation保持至实际storage/index关闭。只是配置容量预留，不宣称memtable/native/RSS硬上限或full-bytes闭合。TLA转移未改；统一预算、同身份unclean-session恢复待决语义及其余16步继续OPEN，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK和disabled不变，Linux NUMA/真实掉电/正式性能/canary未执行。
+
+
+## 恢复 bootstrap 的 snapshot suffix 与发布丢回复
+
+2026-10-23，父源码 `d4a3e3811421dcdae3d2a941a1a3be6db751e459`。本轮补齐恢复专属首次service bootstrap组合，没有改变生产Java、wire或持久格式。原14场景测试保留；把同一实际restore流程抽成私有fixture方法，新增独立测试只选择三个新场景，不复制一套恢复实现。
+
+新目标仍由当前CLOSED repair-copy导入镜像数据、提交membership并关闭原grant。随后通过真实logical delete删除恢复的ledger44，在该目标自己的delivery stream发布完整snapshot cut=1；再用原initial coordinator与SDK在当前三个目标（包含恢复目标）上创建并普通close空ledger45，真实logical delete产生该目标的event-2/head=2。45不伪造DATA或CLOSED，只用它的真实独立生命周期形成snapshot之后的删除suffix。删除原event-1是可丢弃fixture中的缺prefix故障，不是历史GC授权。
+
+- 完整snapshot＋event-2时，原service startup按本目标身份追赶到cursor2，两个instance都具有实际terminal tombstone，然后才发布registration。fresh mTLS DATA连接对恢复的44和空45均返回REFUSED；两份删除Manifest完整字节保持，旧与新目标义务不解除。
+- 再删除必要event-2时，startup明确报not writable。原service实际cleanup后，由独立observer检查无writable注册；重新打开原Bookie control可见cursor仅为1，44的tombstone存在而45尚未应用，不能把snapshot cut当作当前head。两份Manifest仍完整保留，不通过重建缺失节点解除gap/birth检查。
+- 完整suffix路径中，复用原ZK client子类，在persistent readiness multi和writable create multi各自实际OK之后，仅向调用方回报一次CONNECTIONLOSS。两项fault计数必须各为1，原exact-read/同session reconciliation随后完成startup；不是mock提交、真实网络断链或新session/crash恢复证明。
+
+原snapshot helper新增显式目标列表重载，install/activation peers严格按该reservation的目标构造，避免把已退出的旧source或其他连接混入initial E；原调用继续使用原三个target。publication hold子类的丢回复开关默认关闭，保留原hold/actual-drain窗口。本轮早期缺import/错误Outcome名字的编译失败、supplied-targets集合不匹配和读取已退休publisher的fixture假设失败均保留；这些不是产品缺陷RED，未为其修改生产校验。
+
+首个完整新场景运行 `unified-wal-local-1B6b80qg` 通过，无failure/error/skip。证据由 `/Users/liusinan/.codex/artifacts/unified-wal/restore-suffix-evidence-11p902kd` 保存，各阶段源码/1172输入/原始日志XML分别绑定。TLA转移未改，不重跑TLC或移绑旧模型PASS。
+
+最终 `unified-wal-local-1KhMNvvF` 四方法均0 failure/error/skip：原14场景、独立新增3场景、原snapshot＋suffix和原publication-stop实际排空回归。1172输入与最终源码逐项SHA一致；Spotless/Checkstyle exit0。Java/style实际终结后的独立RAT exit1，443 unapproved均存在父HEAD，无新增，不称CI全绿。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreBootstrapRequiresActualSnapshotSuffixAndReconcilesPublicationReplies+backupRestoreUsesCurrentAdmissionRetainsDeleteTargetsAndDrainsActualCopy+deleteSnapshotReplaysMissingPrefixThenActualSuffixWithoutSkippingTombstones+ownedProfileServiceStopDuringPublicationKeepsActualOwnerUntilLateRpcTerminates'
+```
+
+仅闭合上述restore bootstrap/同session丢回复组合，原target/同intent的unclean-session crash接受语义仍待裁决，不绕过session/quarantine gate，也不以本次通过替代真实掉电、新session窗口、完整恢复运维/接受下界或全部16步验收。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled能力不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
