@@ -19,6 +19,12 @@ import time
 
 
 MATRIX = {
+    'acd-profile-sdk-all-delete-free': None,
+    'witness-acd-profile-sdk-all-delete-free': 'AllNoCompletedFree',
+    'ce-acd-profile-sdk-all-delete-free-early': 'AllThirdAckHasOwnPublication',
+    'ce-acd-profile-sdk-all-delete-free-peer': 'AllThirdAckHasOwnPublication',
+    'ce-acd-profile-sdk-all-delete-free-drain': 'AllClosedHasEverySourceAndIoDrain',
+    'ce-acd-profile-sdk-all-delete-free-source': 'AllClosedHasEverySourceAndIoDrain',
     'acd-profile-sdk-delete-free': None,
     'witness-acd-profile-sdk-delete-free': 'ACDNoCompletedFree',
     'ce-acd-profile-sdk-delete-free-drain': 'ACDClosedHasOriginalDrain',
@@ -810,7 +816,11 @@ def main():
     parser.add_argument("--tool", required=True, type=Path, help="Official tla2tools.jar from release 1.7.4")
     parser.add_argument("--config-prefix", action="append", default=[],
                         help="Run declared configurations matching this prefix; repeat for related slices")
+    parser.add_argument("--timeout-seconds", type=int, default=120,
+                        help="Finite checker wall-time budget per configuration (1..3600, default 120)")
     args = parser.parse_args()
+    if not 1 <= args.timeout_seconds <= 3600:
+        parser.error("Checker timeout must be within 1..3600 seconds")
     for prefix in args.config_prefix:
         if not any(name.startswith(prefix) for name in MATRIX):
             parser.error(f"No declared configuration matches {prefix!r}")
@@ -925,7 +935,7 @@ def main():
         "toolRelease": "1.7.4", "toolSha1": TOOL_SHA1, "toolSha256": sha256(tool),
         "java": subprocess.run(["java", "-version"], capture_output=True, text=True, check=True).stderr,
         "platform": platform.platform(), "workers": 1, "heapMiB": 512, "directMiB": 64,
-        "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": 120,
+        "fingerprintPolynomial": 0, "seed": 1, "timeoutSecondsPerConfig": args.timeout_seconds,
         "scope": "Finite Model A historical-repair-copy-two-entry-source-grant-one-inflight-full-copy-before-publication-sticky-unknown-caller-cancel-permit-published-close-resume-no-normal and bounded-historical-repair-membership-atomic-CAS-birth-admission-head-inverse-context-retention-close-authority and independent-close-authority-UIC4-precut-cut-force-terminal-custody-no-normal and fixed-repair-slot-inert-installed-admitted-retained-delete-birth-exact-auth-local-force-recovery-data-no-normal and readonly-fresh-context-recovery-observation-per-source-fenced-bound-missing-budget-reservation-no-add-close and recovery-same-record-context-physical-birth-guards-published-authority-frozen-operation-and-verified-durable-fence-coverage-not-CLOSED and LAC-evidence-A2-A3-URL2-independent-explicit-digest-entire-endpoint-exclusion-max-frontier-verified-coverage-matching-boundary-length-conflict-metadata-snapshot-and-caller-cancel-reservation and LAC-source-entryId-piggyback-LAC-source-length-provenance-URL1-URL2-explicit-separate-whole-ledger-empty-not-prefix-anchor and point-read-permission-complete-stable-fenced-missing-native-get-io-owner-terminal-queued-loan-output-write-reply-binding and original-sdk-two-entry-two-slot-A2-A3-one-two-same-start-completion-gate-replacement-activation-retired-replica-contiguous-callback and replacement-preparation-inactive-install-UIC2-schema-force-owner and replacement-lifecycle-page-birth-metadata-atomic-cut-retained-prefix-current-authority and guarded-standard-metadata-physical-birth-CAS-exact-version-immutable-fields and fixed-initial-sdk-bounded-retry-sticky-unknown-source-coordinate-original-A2-callback-local-stop and normal-client-source-quota-cancel-encoding-write-wire and initial-client-correlation-slot-custody and initial-socket-dispatch and resumable-initial-all-E-availability and initial-READY-lifecycle-birth-CAS-retention and initial-metadata-all-E-gate physical-INSTALL-dispatch PREPARING-reservation-authority and standard-metadata-create and Bookie applied metadata checkpoint and Model C session/prefix/barriers/publication/derived-coverage/index-maintenance/runtime-coverage/tail-recovery/allocation-order/whole-allocation-FREE/healthy-CLOSED-reuse/terminal-index-cleanup/relocation-completion/conditional-MOVE/MOVE-FREE-reuse/native-MOVE-coverage/compaction-group/compaction-selection/compaction-sweep/pooled-compaction-capture/retained-compaction-tail/maintenance-reserve/runtime-control-rotation/control-capacity-recovery/cold-control-startup/arena-space-maintenance/internal-checkpoint-history/retired-sequence-ranges/arena-state-indices/current-copy-facts/readiness-cas/registration-publication/registration-consumer-peer-discovery/registered-connection-actual-drain/worker-service-shutdown-actual-child-join-interrupt/registered-peer-pool-task-lease-reservations-drain/owned-service-bootstrap/local-readiness-publication/authority-read/registration-admission/startup-data-exclusion/profile-normal-dispatch/profile-fence-dispatch/profile-recovery-dispatch/profile-backing-budget slices and composed two-logical-ledger-one-retained-target-tombstone-force-apply-old-I/O-reader-drain-whole-allocation-FREE C+D and composed two-independent-storage-episodes-original-SDK-A2-ACK-live-response-no-recovery-mint A+C and original-SDK-live-storage-actual-drain-then-fenced-CLOSED-logical-delete-shared-FREE A+C+D with explicit post-drain-frozen-SDK VIEW",
         "stateConstraint": "None; finite constants in copied configs; no symmetry reduction",
         "tlcViews": {name: match.group(1) for name in selected
@@ -994,6 +1004,7 @@ def main():
                    else "ProfileLacSource.tla" if "profile-lac-source" in name
                    else "ProfilePointReadDispatch.tla" if "profile-point-read" in name
                    else "ProfileSdkReplacement.tla" if "profile-sdk-replacement" in name
+                   else "ProfileSdkAllDeleteFree.tla" if "profile-sdk-all-delete-free" in name
                    else "ProfileSdkDeleteFree.tla" if "profile-sdk-delete-free" in name
                    else "ProfileSdkBridge.tla" if "profile-sdk-bridge" in name
                    else "ProfileNormalClientSource.tla" if "profile-normal-client-source" in name
@@ -1051,7 +1062,7 @@ def main():
                                        stderr=subprocess.STDOUT, env={**os.environ, "LC_ALL": "C"},
                                        start_new_session=True)
             try:
-                code = process.wait(timeout=120)
+                code = process.wait(timeout=args.timeout_seconds)
             except subprocess.TimeoutExpired:
                 # Stop this exact checker before declaring an incomplete result or releasing its state files.
                 os.killpg(process.pid, signal.SIGKILL)

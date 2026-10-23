@@ -1,6 +1,6 @@
 # Spike C 有限模型实施
 
-状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为756配置；新增A+C/C+D及A+C+D生命周期配置和repair output投影只有各自定向结果，未重跑当前全目录。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
+状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / FINITE_SLICE_PASS。历史首轮 Model A Bookie权限快照、registration/readiness、authority cold-read、本地 session 准入、startup DATA 排他、resumable all-E availability、initial READY/birth CAS/retention、初始all-E metadata门槛、physical INSTALL、PREPARING reservation authority 与 Profile 标准metadata创建、普通 Add/FENCE/恢复分发与backing额度投影及 Model C 既有切片，共 59 个完整正向配置、237 个指定性质反例，并包含固定初始 SDK bridge、guarded membership CAS、replacement lifecycle、inactive preparation/UIC2及原SDK replacement整体gate投影；各阶段实际范围/源码绑定见末节。当前catalog为762配置；新增A+C/C+D及A+C+D生命周期配置和repair output投影只有各自定向结果，未重跑当前全目录。2026-10-13在fd3b1be724源码上首次完整运行当时730配置的声明目录，118个正向完整搜索通过、612个指定性质反例均命中预期invariant，详见末节。历史59正向/237反例保留原范围；声明目录全量通过不等同完整 Model A/C/D、A+C+D 组合或 Block G 验收。
 
 合同由[RFC-0003](../../RFC-0003-segment-storage-allocator.md)、[RFC-0005](../../RFC-0005-segment-bookie-state.md)及[Spike C](../../spikes/SPIKE-C-no-object-tla.md)拥有。`UnifiedWalTypes.tla`仅定义纯函数；`SegmentAllocator.tla`按可读写入、文件barrier、连续前缀发布、控制durable/apply、CLOSE和恢复阶段分别建模；`ArenaCheckpoint.tla`单独检查applied快照、payload force、控制commit、A/B发布及保留完整日志时的恢复；`BookieCheckpoint.tla`检查固定权限轨迹的快照、后缀及已发布image覆盖的prefix回收；`ArenaRotation.tla`检查双根、新文件/目录同步及旧prefix回收，`DerivedCoverage.tla`检查重建代/单CF flush后才发布coverage，`IndexMaintenance.tla`检查有界hot与共享DATA执行中的索引停顿/失败、query-visible接管/热淘汰、坐标占用及控制预留，`RuntimeCoverage.tla`另检查同一index generation内冻结cut、flush、A/B发布及连续publication序号；`TailRecovery.tla`检查内容匹配的持久覆盖、固定头/缺口、必要tail同步及当前tombstone选择；`AllocationOrder.tla`检查原分配顺序与旧尾部隔离，`WholeAllocationFree.tla`检查全死proof、实际I/O/pin排空、提交保护与FREE barrier/generation；`WholeAllocationReuse.tla`检查实际旧I/O终结、FREE前序、当前grant与健康CLOSED末端区分旧残留；`TerminalIndexCleanup.tla`检查捕获准确终态、实际旧Put/读义务、native删除先于坐标释放、取消及有界容量恢复；`RelocationCompletion.tla`检查copy实际barrier、连续前缀、内部结果与原池两方终结；`ConditionalMove.tla`检查COPY事实、前驱条件、CONTROL durable/apply、同批双坐标原子选择、读保护与metadata-only重放；`MoveFreeReuse.tla`另检查当前目标、selector cut、源/orphan退役、grant generation复用与控制定位恢复；不使用对象存储。
 
@@ -10,7 +10,7 @@
 python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar
 ```
 
-工具固定为[TLA+ 1.7.4 官方发行](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4)的`tla2tools.jar`，发行SHA-1为`bee4a54f3ee3d4afc347c3240ec2d9e93b075104`；runner验证它并记录实际SHA-256，不自动下载或改Maven依赖。本次取得的完整文件为2,274,532 bytes，SHA-256为`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`，manifest记录工具版本和checksum。使用当前Java，1 worker、512 MiB heap、64 MiB direct上限、固定fingerprint polynomial 0与seed 1；每config最多120秒，无symmetry或额外state constraint；显式TLC VIEW由config和manifest的tlcViews逐项记录，新增生命周期配置的合并边界见末节。安全性检查不增加fairness；有界停止/隔离状态允许无后继，未检查deadlock或liveness。
+工具固定为[TLA+ 1.7.4 官方发行](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4)的`tla2tools.jar`，发行SHA-1为`bee4a54f3ee3d4afc347c3240ec2d9e93b075104`；runner验证它并记录实际SHA-256，不自动下载或改Maven依赖。本次取得的完整文件为2,274,532 bytes，SHA-256为`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`，manifest记录工具版本和checksum。使用当前Java，1 worker、512 MiB heap、64 MiB direct上限、固定fingerprint polynomial 0与seed 1；每config默认最多120秒，可用 `--timeout-seconds` 显式选择1..3600秒；历史回执预算保持原绑定。无symmetry或额外state constraint；显式TLC VIEW由config和manifest的tlcViews逐项记录，新增生命周期配置的合并边界见末节。安全性检查不增加fairness；有界停止/隔离状态允许无后继，未检查deadlock或liveness。
 
 每次运行在独立临时目录冻结modules/configs，保存manifest、命令、JDK/平台、源码哈希、父提交处的合同哈希、checker输出、完整负向trace、coverage-summary及checksums。统计记录generated/distinct states、剩余queue、searchDepth、仅完整探索时的diameter、elapsed及`time`测得的进程peak RSS。负向检查在发现反例时停止，其搜索深度不是完整图直径。超时终止本次checker进程组并标INCONCLUSIVE；语法/工具错误及未完整探索都不是PASS。正式配置或源码改变须新建run，不能改绑定旧结果。
 
@@ -1623,3 +1623,39 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 ```
 
 TLC1.7.4、单worker、heap512/direct64MiB、seed1/fp0、原120秒上限及CHECK_DEADLOCK FALSE，无state constraint、symmetry或VIEW。该投影没有生成CLOSED/current identity/retained install、RepairIntent/delete CAS、digest、真实DATA force、镜像完整性或bytes事实；这些由[当前原生接线与测试](../profile-wire/README.md#离线镜像接入当前-closed-repair-copy)验证，不构成完整backup acceptance、restart/bootstrap、A+C+D或liveness证明。1134个最终model输入原样冻结，两份新cfg之后仅补全Apache许可证注释，有效配置内容逐项相同、两版本分别保存；1171 Java/模型共有272路径SHA一致，合计2033唯一路径。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/backup-repair-evidence-jb34qbt0`，保留三轮model各自完整modules/configs/runner/source、coverage及trace。catalog756未全跑，完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled能力不变。
+
+
+## 三副本 SDK 到本地删除 FREE 的组合
+
+2026-10-23，父源码 `f5fc64ace4b3abecd08f871a123f1bc9ef9d899e`。`ProfileSdkAllDeleteFree` 直接扩展原 `ProfileSdkDeleteFree`，把此前作为已验证远端输入的 slot 2 接到第三个原 `SegmentAllocator` 实例；原 SDK、slot 0/1、两次 logical delete 和共享 allocation 的模块字节不变。仍是一个 entry、3/3/2：SDK 成功门槛仍为 A=2，slot 2 的成功回复现在必须来自自己的 durable/ordered publication 和实际 I/O return，不能借用另一个副本或只有 write-complete 的状态。第三请求复用原 NONE/UNKNOWN、retry/expire 动作，丢弃迟到回复只结算真实已返回的请求，不生成 SDK 成功。
+
+进入原已验证 fenced-CLOSED 输入前，除原两个请求及本地实际 I/O 排空外，还要求 SDK stopped、所有 source 归还、第三请求与其 accepted I/O 排空。这里只接这三个 storage episode；metadata、birth、fence/CLOSED authority 仍是已验证输入，没有在模型中生产实际 close RPC/CAS。SDK 模型里的 metadata 字段仍为 OPEN，不能把局部 close 输入称为真实 metadata CLOSED 验证。
+
+`AllLifecycleView` 仅在 CLOSED、全部请求/I/O 已排空且 SDK stopped 后合并已冻结的 SDK/storage 历史，保留 deleteVars 和 witness 使用的精确 `AllAcknowledgedHistory` 布尔值。此 cut 后所有后继冻结被省略的变量，删除动作只依赖 deleteVars；未满足 drain 的 mutation 不使用该合并。早期 VIEW 未保留这个 witness 区分，已停止其搜索并将日志标为诊断，结果不晋升。没有 state constraint、symmetry 或 fairness，CHECK_DEADLOCK FALSE；不是 liveness 证明。
+
+三个最终 run 的1142个输入 SHA 完全相同，TLC 1.7.4、单 worker、heap512/direct64MiB、seed1/fp0；本切片显式使用每配置3600秒预算，默认仍为120秒。六配置实际结果如下，时间仅为本次 checker 消耗，不作性能结论。
+
+| 配置 | 结果／指定性质 | generated / distinct / queue | depth | 秒 |
+|---|---|---|---|---|
+| `acd-profile-sdk-all-delete-free` | 完整 PASS | 41770502 / 6170077 / 0 | 57 | 1495.564 |
+| `witness-acd-profile-sdk-all-delete-free` | EXPECTED_COUNTEREXAMPLE: `AllNoCompletedFree` | 41737915 / 6166049 / 2072 | 49 | 1494.067 |
+| `ce-acd-profile-sdk-all-delete-free-early` | EXPECTED_COUNTEREXAMPLE: `AllThirdAckHasOwnPublication` | 11683 / 3405 / 1853 | 7 | 2.419 |
+| `ce-acd-profile-sdk-all-delete-free-peer` | EXPECTED_COUNTEREXAMPLE: `AllThirdAckHasOwnPublication` | 54466 / 14047 / 6712 | 10 | 3.997 |
+| `ce-acd-profile-sdk-all-delete-free-drain` | EXPECTED_COUNTEREXAMPLE: `AllClosedHasEverySourceAndIoDrain` | 9303657 / 1602096 / 335489 | 22 | 366.098 |
+| `ce-acd-profile-sdk-all-delete-free-source` | EXPECTED_COUNTEREXAMPLE: `AllClosedHasEverySourceAndIoDrain` | 9303669 / 1602102 / 335493 | 22 | 341.746 |
+
+正向日志明确 `Model checking completed. No error has been found.`。witness 是可达性查询的预期反例：终态三个 slot 都 durable、各自 submitted/dataDurable/successes/ioReturned 包含同一 batch，SDK success/stopped、sources 全 false、sent/inflight/readers/actualIo 为空，两次删除均 applied/logical，原 allocation generation 从1变2。它只证明 slot 0 的本地共享 allocation 可复用；两份 logical-delete 的 physical/reported 仍为 false，不代表全目标物理删除完成。drain mutation 的最短反例是第三请求仍 sent、尚未提交 I/O；source mutation 的反例是 SDK 未 stopped、第三 source 仍被持有。不能把这两条 trace 扩大称为已命中所有 in-flight I/O 窗口。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar \
+  --timeout-seconds 3600 \
+  --config-prefix acd-profile-sdk-all-delete-free \
+  --config-prefix witness-acd-profile-sdk-all-delete-free \
+  --config-prefix ce-acd-profile-sdk-all-delete-free
+```
+
+原始最终 runs 为 `unified-wal-model-8ccnhrb6`、`c4pl8h22`、`jddu6702`，完整 source/config/manifest/log/trace 和各阶段差异保存在 `/Users/liusinan/.codex/artifacts/unified-wal/acd-all-replicas-evidence-7o7q7gyh`。初始 tuple 求值错误、120秒 INCONCLUSIVE、旧 VIEW 中断搜索均保留原绑定，不计入 PASS。runner 的 Python 语法、762配置目录和超时0/3601在启动 checker 前拒绝已验证；未重跑当前全目录。1172个既有 native 输入逐项不变，不重跑 Java 测试或移绑原 native receipt。
+
+live SDK episode 仍排除进程/掉电故障，原本地 FREE episode 只保留原一次 crash；第三副本没有接入自己的 D/FREE。原 slot 0/1 bridge 尚未覆盖 SDK 终止后丢弃迟到回复的所有结算路径，不证明这些路径最终 close。多 entry、全部取消/超时、实际 metadata/fence/CLOSED、multi-Arena、全目标物理完成、完整 A+C+D 及16步/生产 Gate 仍 OPEN，目标 active，默认 OFF/SYSTEM/PARK 与 disabled 能力不变。本轮无性能测量，Linux NUMA、真实掉电、正式性能/canary 为 NOT_EXECUTED。
+
+本轮 model 与静态检查实际终结后的独立 `mvn -o apache-rat:check` exit1：443个 unapproved 路径逐项存在父HEAD，无新增；原报告和父提交对象核验保留。不称CI全绿。
