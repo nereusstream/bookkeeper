@@ -162,6 +162,20 @@ public final class SegmentProfileService implements AutoCloseable {
                 parameters.execution(), parameters.limits(), startup, transport);
     }
 
+    /**
+     * Bind offline backup/import to trusted historical source identity, scopes and local bounds.
+     * This creates no startup, metadata, listener or execution resources. Historical policy and images never
+     * grant current restore authority; import still requires current metadata and its frozen RepairIntent.
+     */
+    public static SegmentProfileBackup offlineBackup(ServerConfiguration configuration, SecretKey key,
+            ProfileDescriptorValidator validator, StartupReadinessInput sourcePolicy,
+            String clusterScope, String deviceScope) {
+        var parameters = localParameters(configuration, sourcePolicy);
+        return new SegmentProfileBackup(parameters.config(), parameters.identity(), key, validator,
+                parameters.limits().controlLogBytes(), parameters.limits().indexedEntries(),
+                clusterScope, deviceScope);
+    }
+
     private record LocalParameters(IsolatedSegmentConfig config, SegmentFileHeader identity,
             SegmentExecutionGroup.Settings execution, IsolatedSegmentStorage.Limits limits) { }
 

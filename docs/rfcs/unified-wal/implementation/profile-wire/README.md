@@ -2421,3 +2421,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 
 [CONTROL typed 状态与工作集的启动预留](../local-storage/README.md#control-typed-状态与工作集的启动预留)：2026-10-25父0e63840b99上，以支持布局的typed/history/index、快照/recovery及预检前pending模型替代旧3L金额，仍在原service open前单次预留、实际close后释放，生产quota不自动扩大。支持64位HotSpot17/21与8..256对齐，其他布局拒绝启用实验服务；默认OFF/Classic不变。旧额度可启动的真实RED保留；8项定向和六类597项全部通过，source/用例匹配、style通过。四JVM实测所选类型shallow≤模型；1MiB日志/P16/S4保守预留96,518,568B，128MiB对应11,534,644,136B，不等于实际驻留。模型不闭合任意Throwable/JCA/native或完整状态计数证明；B11/full-bytes及16步目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[显式离线 backup/restore 运维入口](../local-storage/README.md#显式离线-backuprestore-运维入口)：2026-10-25父86c9259dd7上，公开 offlineBackup factory 复用原 ISOLATED 配置冻结历史身份/bounds，capture 交付独立 CREATE_NEW/force 的56 B外部reference；import 复用当前 CLOSED/RepairIntent 授权与原复制/bootstrap，私有 image 只在实际 completion 后关闭。17个既有恢复场景改走公开入口，覆盖源目录丢失、坏reference、同步失败清理、取消及外部完成future不能提前释放native锁；定向5方法及扩大三类215项全部通过，输入/用例身份匹配。最终三处换行有非空白相同证明，style通过、独立RAT仍443父路径无新增；原失败与源码绑定保留，详细证据由上述 canonical 节拥有。仍为显式Java运维API，默认SDK/Main、完整恢复接受下界、同incarnation unclosed-session接受、B11/full-bytes及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled保持。

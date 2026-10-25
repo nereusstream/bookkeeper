@@ -46,6 +46,7 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.util.ReferenceCounted;
 import java.io.File;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -2891,19 +2892,7 @@ public class SegmentProfileInitialSocketClientTest {
             transport = new SegmentProfileService.Transport(fixture.serverTls, budget,
                     131072, 64, "socket-test", requested.targetReadinessGeneration().value(),
                     address, fixture.acceptor, fixture.worker, control, read);
-            Map<String, Object> settings = Map.ofEntries(
-                    Map.entry("Mode", "ISOLATED"), Map.entry("Directory", config.directory().toString()),
-                    Map.entry("LogicalShards", config.logicalShards()), Map.entry("DataFiles", config.dataFiles()),
-                    Map.entry("BytesPerFile", config.bytesPerFile()),
-                    Map.entry("MaxPayloadBytes", config.maxPayloadBytes()),
-                    Map.entry("MaxPendingEntries", config.maxPendingEntries()), Map.entry("Workers", 1),
-                    Map.entry("IoThreads", 2), Map.entry("ControlSlots", 6), Map.entry("Buffers", 2),
-                    Map.entry("BufferBytes", 4096), Map.entry("InputBudgetBytes", 4096),
-                    Map.entry("BufferBudgetBytes", 2 * (4096L + 4095) + 4096), Map.entry("StartupTimeoutMillis", 5000),
-                    Map.entry("ControlLogBytes", CONTROL_LOG_BYTES), Map.entry("HotEntries", 8),
-                    Map.entry("IndexedEntries", 16),
-                    Map.entry("PoolBlocks", 1), Map.entry("MaintenanceBlocks", 1), Map.entry("BatchBytes", 4096),
-                    Map.entry("BatchEntries", 1), Map.entry("BatchDelayMillis", 30000));
+            Map<String, Object> settings = serviceSettings(config);
             var properties = new java.util.Properties();
             settings.forEach((name, value) -> properties.setProperty(
                     SegmentProfileService.CONFIG_PREFIX + name, value.toString()));
@@ -3038,6 +3027,22 @@ public class SegmentProfileInitialSocketClientTest {
             service.close();
             client.close();
         }
+    }
+
+    private static Map<String, Object> serviceSettings(IsolatedSegmentConfig config) {
+        return Map.ofEntries(
+                Map.entry("Mode", "ISOLATED"), Map.entry("Directory", config.directory().toString()),
+                Map.entry("LogicalShards", config.logicalShards()), Map.entry("DataFiles", config.dataFiles()),
+                Map.entry("BytesPerFile", config.bytesPerFile()),
+                Map.entry("MaxPayloadBytes", config.maxPayloadBytes()),
+                Map.entry("MaxPendingEntries", config.maxPendingEntries()), Map.entry("Workers", 1),
+                Map.entry("IoThreads", 2), Map.entry("ControlSlots", 6), Map.entry("Buffers", 2),
+                Map.entry("BufferBytes", 4096), Map.entry("InputBudgetBytes", 4096),
+                Map.entry("BufferBudgetBytes", 2 * (4096L + 4095) + 4096), Map.entry("StartupTimeoutMillis", 5000),
+                Map.entry("ControlLogBytes", ServiceEpisode.CONTROL_LOG_BYTES), Map.entry("HotEntries", 8),
+                Map.entry("IndexedEntries", 16),
+                Map.entry("PoolBlocks", 1), Map.entry("MaintenanceBlocks", 1), Map.entry("BatchBytes", 4096),
+                Map.entry("BatchEntries", 1), Map.entry("BatchDelayMillis", 30000));
     }
 
     private static StartupReadinessInput servicePolicy(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -8852,6 +8857,21 @@ public class SegmentProfileInitialSocketClientTest {
         assertBackupRestoreScenarios(List.of(14, 15, 16));
     }
 
+    private static void awaitBackupImageReleased(Path directory) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (true) {
+            try (var ignored = SegmentDataFileLock.open(directory)) {
+                assertTrue(ignored.lock().isValid());
+                return;
+            } catch (IOException held) {
+                if (System.nanoTime() >= deadline) {
+                    throw held;
+                }
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+            }
+        }
+    }
+
     private void assertBackupRestoreScenarios(List<Integer> scenarios) throws Exception {
         // Offline/partial/conflicting inputs, delete races, drain, bootstrap, metadata identity and lost replies.
         for (int scenario : scenarios) {
@@ -8880,9 +8900,35 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals("scenario " + scenario, ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
                         closed.status());
                 Path directory = temporary.getRoot().toPath().resolve("restore-image-" + scenario);
-                var reference = SegmentBackupImage.capture(sourceConfig, fixture.identities.get(0),
-                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, 1024 * 1024, 16,
-                        "cluster/profile", "device-0", directory);
+                var backupConfiguration = new ServerConfiguration();
+                serviceSettings(sourceConfig).forEach((name, value) -> backupConfiguration.setProperty(
+                        SegmentProfileService.CONFIG_PREFIX + name, value));
+                var backup = SegmentProfileService.offlineBackup(backupConfiguration,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                        servicePolicy(sourceConfig, fixture.identities.get(0), 1), "cluster/profile", "device-0");
+                Path reference = directory.resolveSibling("restore-reference-" + scenario);
+                if (scenario == 0) {
+                    var disabled = new ServerConfiguration(backupConfiguration);
+                    disabled.setProperty(SegmentProfileService.CONFIG_PREFIX + "Mode", "OFF");
+                    assertThrows(IllegalArgumentException.class, () -> SegmentProfileService.offlineBackup(disabled,
+                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                            servicePolicy(sourceConfig, fixture.identities.get(0), 1), "cluster/profile", "device-0"));
+                    assertThrows(IOException.class, () -> backup.capture(directory, directory.resolve("reference")));
+                    assertFalse(Files.exists(directory));
+                    assertThrows(IOException.class, () -> backup.capture(directory,
+                            sourceConfig.directory().resolve("reference")));
+                    assertFalse(Files.exists(directory));
+                }
+                backup.capture(directory, reference);
+                if (scenario == 0) {
+                    assertEquals(56, Files.size(reference));
+                    byte[] sealed = Files.readAllBytes(reference);
+                    Path unused = directory.resolveSibling("unaccepted-second-image");
+                    assertThrows(IOException.class, () -> backup.capture(unused, reference));
+                    assertFalse(Files.exists(unused));
+                    assertArrayEquals(sealed, Files.readAllBytes(reference));
+                    Files.move(sourceConfig.directory(), sourceConfig.directory().resolveSibling("lost-source"));
+                }
                 var accepted = fixture.reservations.readClosedForOpen(metadata, 44).snapshot();
                 var original = accepted.closed().metadata().metadata().getValue();
                 var context = accepted.context();
@@ -8952,10 +8998,7 @@ public class SegmentProfileInitialSocketClientTest {
                 }
                 var restartConfig = files(fixture.nodes.get(3)).config();
                 var restartPolicy = scenario == 12 || scenario == 13 ? servicePolicy(restartConfig, target, 1) : null;
-                try (var image = SegmentBackupImage.open(sourceConfig, fixture.identities.get(0),
-                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, 1024 * 1024, 16,
-                        "cluster/profile", "device-0", directory, reference);
-                        var restart = restartPolicy != null ? new ServiceEpisode(fixture, 3, restartConfig,
+                try (var restart = restartPolicy != null ? new ServiceEpisode(fixture, 3, restartConfig,
                                 restartPolicy,
                                 restartPolicy.compatibility(), new InetSocketAddress("127.0.0.1", 0),
                                 sdk.getClientCtx().getScheduler(), false, scenario == 13) : null;
@@ -9018,9 +9061,34 @@ public class SegmentProfileInitialSocketClientTest {
                     }
                     var beforeImport = fixture.manager.readLedgerMetadata(44).get();
                     int beforeWrites = files(fixture.nodes.get(3)).dataIo.writes;
-                    var attempt = coordinator.beginRestoreClosedFragment(accepted, prepared, sdk.getClientCtx(),
+                    if (scenario == 0) {
+                        byte[] sealed = Files.readAllBytes(reference);
+                        for (int malformed = 0; malformed < 4; malformed++) {
+                            byte[] changed = malformed == 0 ? Arrays.copyOf(sealed, sealed.length - 1)
+                                    : sealed.clone();
+                            if (malformed > 0) {
+                                changed[malformed == 1 ? 0 : malformed == 2 ? 8 : 24] ^= 1;
+                            }
+                            Files.write(reference, changed);
+                            assertThrows(IOException.class, () -> backup.beginRestoreClosedFragment(
+                                    directory, reference, coordinator, accepted, prepared, sdk.getClientCtx(),
+                                    fixture.descriptorBytes, fixture.credential, supplied, fixture.clients,
+                                    bytes(16, 73)));
+                        }
+                        Files.write(reference, sealed);
+                        assertThrows(IllegalArgumentException.class, () -> backup.beginRestoreClosedFragment(
+                                directory, reference, coordinator, accepted, prepared, sdk.getClientCtx(),
+                                new byte[ProfileDescriptorCodec.MAX_CANONICAL_LENGTH + 1], fixture.credential,
+                                supplied, fixture.clients, bytes(16, 73)));
+                        try (var ignored = SegmentDataFileLock.open(directory)) {
+                            assertTrue(ignored.lock().isValid());
+                        }
+                        assertEquals(beforeWrites, files(fixture.nodes.get(3)).dataIo.writes);
+                    }
+                    var attempt = backup.beginRestoreClosedFragment(directory, reference, coordinator,
+                            accepted, prepared, sdk.getClientCtx(),
                             fixture.descriptorBytes, fixture.credential, supplied, fixture.clients,
-                            bytes(16, 73), image);
+                            bytes(16, 73));
                     if (scenario == 0) {
                         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                         boolean replied;
@@ -9035,6 +9103,7 @@ public class SegmentProfileInitialSocketClientTest {
                         assertThrows(java.util.concurrent.TimeoutException.class,
                                 () -> attempt.result().get(150, TimeUnit.MILLISECONDS));
                         assertFalse(attempt.completion().isDone());
+                        assertThrows(IOException.class, () -> SegmentDataFileLock.open(directory));
                         assertEquals(original.getAllEnsembles(), fixture.manager.readLedgerMetadata(44).get()
                                 .getValue().getAllEnsembles());
                         heldOutput.get().setSuccess();
@@ -9045,11 +9114,13 @@ public class SegmentProfileInitialSocketClientTest {
                             assertTrue(attempt.result().cancel(false));
                             assertThrows(java.util.concurrent.TimeoutException.class,
                                     () -> attempt.completion().get(150, TimeUnit.MILLISECONDS));
-                            var busy = coordinator.beginRestoreClosedFragment(accepted, prepared, sdk.getClientCtx(),
+                            assertThrows(IOException.class, () -> backup.beginRestoreClosedFragment(
+                                    directory, reference, coordinator, accepted, prepared, sdk.getClientCtx(),
                                     fixture.descriptorBytes, fixture.credential, supplied, fixture.clients,
-                                    bytes(16, 73), image);
-                            assertEquals(ProfileRecoveryCoordinator.RepairStatus.DEFERRED,
-                                    busy.result().get().status());
+                                    bytes(16, 73)));
+                            // Completing the caller's terminal view cannot release native input ownership.
+                            assertTrue(attempt.completion().complete(null));
+                            assertThrows(IOException.class, () -> SegmentDataFileLock.open(directory));
                             var deleted = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
                                     .deleteLedgerAsync(44, bytes(16, 101), sdk.getClientCtx(), Duration.ofSeconds(10))
                                         .get(10, TimeUnit.SECONDS);
@@ -9060,7 +9131,7 @@ public class SegmentProfileInitialSocketClientTest {
                         } finally {
                             releaseForce.countDown();
                         }
-                        attempt.completion().get(10, TimeUnit.SECONDS);
+                        awaitBackupImageReleased(directory);
                         assertTrue(attempt.result().isCancelled());
                         assertNotNull(fixture.manager.readLedgerMetadata(44).get().getValue().getCustomMetadata()
                                 .get(ProfileDeleteRecord.TOMBSTONE_KEY));
@@ -9069,6 +9140,9 @@ public class SegmentProfileInitialSocketClientTest {
                     }
                     var result = attempt.result().get(30, TimeUnit.SECONDS);
                     attempt.completion().get(10, TimeUnit.SECONDS);
+                    try (var ignored = SegmentDataFileLock.open(directory)) {
+                        assertTrue(ignored.lock().isValid());
+                    }
                     if (scenario == 9 || scenario == 10) {
                         assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED, result.status());
                         assertEquals(0, result.copiedEntries());
@@ -9100,9 +9174,10 @@ public class SegmentProfileInitialSocketClientTest {
                         assertEquals(original.getAllEnsembles(), fixture.manager.readLedgerMetadata(44).get()
                                 .getValue().getAllEnsembles());
                         int forced = files(fixture.nodes.get(3)).dataIo.forces;
-                        var resumed = coordinator.beginRestoreClosedFragment(accepted, prepared, sdk.getClientCtx(),
+                        var resumed = backup.beginRestoreClosedFragment(directory, reference, coordinator,
+                                accepted, prepared, sdk.getClientCtx(),
                                 fixture.descriptorBytes, fixture.credential, data, fixture.clients,
-                                bytes(16, 73), image);
+                                bytes(16, 73));
                         result = resumed.result().get(30, TimeUnit.SECONDS);
                         resumed.completion().get(10, TimeUnit.SECONDS);
                         assertEquals(forced + 1, files(fixture.nodes.get(3)).dataIo.forces);
@@ -9145,9 +9220,10 @@ public class SegmentProfileInitialSocketClientTest {
                             data.put(fresh.bookieId(), freshPeer);
                             var freshCoordinator = new ProfileRecoveryCoordinator(
                                     fixture.reservations, metadata, fixture.cold);
-                            var rebuilt = freshCoordinator.beginRestoreClosedFragment(accepted, freshPrepared,
+                            var rebuilt = backup.beginRestoreClosedFragment(directory, reference, freshCoordinator,
+                                    accepted, freshPrepared,
                                     sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data,
-                                    fixture.clients, bytes(16, 113), image);
+                                    fixture.clients, bytes(16, 113));
                             assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT,
                                     rebuilt.result().get(30, TimeUnit.SECONDS).status());
                             rebuilt.completion().get(10, TimeUnit.SECONDS);
@@ -9219,9 +9295,10 @@ public class SegmentProfileInitialSocketClientTest {
                         }
                         int forced = files(fixture.nodes.get(3)).dataIo.forces;
                         var reloaded = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
-                        var resumed = reloaded.beginRestoreClosedFragment(accepted, prepared, sdk.getClientCtx(),
+                        var resumed = backup.beginRestoreClosedFragment(directory, reference, reloaded,
+                                accepted, prepared, sdk.getClientCtx(),
                                 fixture.descriptorBytes, fixture.credential, data, fixture.clients,
-                                bytes(16, 73), image);
+                                bytes(16, 73));
                         result = resumed.result().get(30, TimeUnit.SECONDS);
                         resumed.completion().get(10, TimeUnit.SECONDS);
                         assertEquals(scenario == 11 ? 0 : 2, result.copiedEntries());

@@ -1515,3 +1515,20 @@ service rotation仍顺序处理两个owner，模型保守相加各自一份snaps
 代码/输入、RED/最终Java、命令/XML、四JVM源码/class/实际加载/flags/终态、容量矩阵及清理记录位于 `/Users/liusinan/.codex/artifacts/unified-wal/control-capacity-evidence-0e63840b`；布局有效回执为 `capacity-layout/runs/20261025T095915684300Z/{verification,layout-summary}.json`。只验证所选类型的布局上界与本模型计算，不把它提升为完整状态/操作计数的形式证明或全部native账本。TLA转移未改，不执行或移绑历史TLC；B11、其余full-bytes及完整16步目标继续OPEN/active，生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
 全部Java/布局probe/style终态后独立RAT实际exit1，443条未批准路径均存在父提交且与前轮集合相同，无新增，不称CI全绿。仅清理三个已终态、无句柄且逐文件同inode/SHA核对的native测试临时根；hardlink归档全部保留，常规文件数据实际回收0 B。准备失败、稳定RED、GREEN及布局诊断均保留，不释放活动资源。
+
+
+## 显式离线 backup/restore 运维入口
+
+2026-10-25，父源码 `86c9259dd7708d2f6abae3b5840796c10c1c1bf4`。`SegmentProfileService.offlineBackup(configuration, key, validator, sourcePolicy, clusterScope, deviceScope)` 复用原显式 ISOLATED 配置解析，冻结历史源 BookieId/incarnation/Arena、控制日志和扫描上限；不创建 service、MetadataStore、listener 或执行线程。sourcePolicy 与两个 scope 由调用方的可信历史配置提供，不能从未校验镜像反向推导 authority。此处是公开 Java 运维入口，裸 Main/默认 SDK 不会自动开启备份或恢复。
+
+`SegmentProfileBackup.capture(imageDirectory, referencePath)` 复用原离线 exclusive lock、native 文件复制/force、manifest 与重读校验。两个输出都必须是新路径且父目录已经存在；reference 位于源目录和镜像目录之外，不覆盖既有输出。仅在镜像完成验证后写独立的 56 B `UWBREF01` 文件（8 B magic/version、16 B image UUID、32 B 原 manifest SHA-256），使用 CREATE_NEW/NOFOLLOW、文件 force(true) 和父目录 force。该文件是原外部 reference 的持久交付封装，不改变镜像/native 格式。复制、reference 写入或 force 失败均向外抛错，可能留下不确定输出，入口不删除现场或报告成功；reference 的独立可信保存仍由运维调用方负责。
+
+`beginRestoreClosedFragment(imageDirectory, referencePath, coordinator, accepted, prepared, sdk, descriptor, credential, data, controls, closeId)` 先有界读取固定长度/version/非零 UUID/digest 的外部 reference，再校验原镜像。原源目录可以已经丢失。随后直接进入原当前 CLOSED metadata/RepairIntent 的 inactive INSTALL、admission、recovery-only copy、membership 与 recovery close；不同 BookieId/incarnation、新目标目录以及目标自身 snapshot＋无洞 suffix/required-through/readiness/registration 的要求保持。重试沿用原 accepted/prepared intent 和 closeId；历史输入不恢复旧 grant/cursor/readiness，也不降低当前 required frontier。
+
+入口私有持有 image，不向调用方暴露可提前关闭的 handle。只有协调器实际 completion 后才关闭 native 输入锁；公开 result 保留原取消语义，公开 completion 是独立副本，外部 cancel/complete 不会关闭 image 或释放已提交 I/O 的 buffer。同步 begin 异常先关闭 image，清理异常以 suppressed 保留；异步关闭失败进入实际 completion。capture 和镜像 open 都含同步文件工作，应由原运维冷路径调用，不在网络 event loop 执行。
+
+原两项恢复测试的17场景全部改走公开 factory/capture/import：保留当前身份/出生校验、删除竞争、peer 补齐与冲突、同 intent 续接、丢回复、真实目标进程 halt、新身份重建以及 snapshot＋suffix 首次注册。新增断言只覆盖入口差异：Mode OFF 与输出独立性/不覆盖在复制前拒绝；原源目录移走后仍能恢复；截断/magic/UUID/digest 错误拒绝；超长 descriptor 同步异常后锁可重新获得；实际 output 或 DATA force 尚未终结时锁仍持有。force-hold 场景取消 result 后，调用方直接 complete 返回的 completion，第二次导入及直接锁获取仍被拒绝；只有 release force 后的实际完成才释放输入。
+
+首轮测试辅助抽取遗漏常量作用域和 IOException import，停在 testCompile、未执行测试；原失败及源码独立保留。修正后的定向5方法（两恢复方法及原三个 offlineBackup 测试）全部通过；扩大回归实际为完整 SDK/服务209项、offlineBackup三项和容量三项，共 **215项全部通过、0 failure/error/skip**，与父轮用例身份逐项匹配，不计入未运行的 InstallStore 类。原1175 runner 输入与1179个包含 addon 的冻结输入全部 SHA 匹配；随后仅修正三处测试换行，非空白字符相同，原测试源码/结果保持原绑定。最终 Spotless/Checkstyle exit0；全部 Java/style 终态后的独立 RAT exit1，443条未批准路径均存在父HEAD且集合未变，无新增，不称 CI 全绿。源码、各阶段输入、原命令/XML/实际终态及格式证明保存于 `/Users/liusinan/.codex/artifacts/unified-wal/backup-operation-evidence-86c9259d`。 三个原运行临时根仅在终态、无句柄、逐文件同inode/SHA核对后移除；hardlink归档全部保留，常规文件数据实际回收0 B。
+
+本次只接公开运维操作和输入生命周期，不增加 prepareRepair/authority producer、CLI 或默认路由，不改变当前元数据/复制/bootstrap 算法、协议和镜像 native 格式。reference force 失败的真实故障注入、本轮完整恢复运维接受下界、同 incarnation unclosed-session crash 接受、全量字节账本/B11、默认 SDK/Main、兼容、正式性能及其余16步仍未闭合。TLA 转移未改，不重跑或移绑旧模型 PASS；目标 active、生产 Gate OPEN，默认 OFF/SYSTEM/PARK 与 disabled 能力保持，Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
