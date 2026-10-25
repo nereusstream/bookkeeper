@@ -65,4 +65,94 @@ AdoptionNeedsBoundCut == s.adopted => s.adoptedBound
 ClosedMatchesWriterPrefix == s.closed => s.prefix = s.p /\ s.prefixLength = s.len
 AdoptionNeedsSupportedKind == s.adopted => s.adoptedKind
 CompletionWaitsData == s.done => ~s.held
+
+(* SDK ownership prerequisite only; the original Spec remains the ordinary-close projection.
+   An accepted ordered close can precede its local freeze/request. Bounded result replies
+   are separate from actual recovery termination, and socket drain belongs to the lease.
+   Actual DATA/cold/lease terminals and SDK admission state are inputs; no writer create,
+   fairness, liveness or full A/C/D is modeled. *)
+OwnerInit == \E p \in {-1, 0}, held, badLength, oldReader \in BOOLEAN :
+    s = [phase |-> "writing", p |-> p, len |-> IF p = -1 THEN 0 ELSE 16,
+         held |-> held, badLength |-> badLength, oldReader |-> oldReader, adoptedKind |-> FALSE, stopped |-> FALSE,
+         entered |-> FALSE, enteredDrained |-> FALSE, enteredCut |-> FALSE,
+         cutPresent |-> FALSE, digestMatches |-> TRUE, adopted |-> FALSE,
+         adoptedBound |-> FALSE, prefix |-> -2, prefixLength |-> 0,
+         verified |-> FALSE, closed |-> FALSE, done |-> FALSE, cancelled |-> FALSE,
+         ownerClose |-> "none", ownerCold |-> "none", ownerActual |-> FALSE,
+         ownerStopping |-> FALSE, ownerStopWon |-> FALSE, ownerLateRejected |-> FALSE,
+         ownerLease |-> "held", ownerReply |-> "none", ownerCallback |-> "none",
+         ownerSdkClosed |-> FALSE, ownerEnteredLive |-> FALSE]
+OwnerQueueClose == /\ s.ownerClose = "none" /\ ~s.ownerStopping
+                   /\ s' = [s EXCEPT !.ownerClose = "queued"]
+OwnerFreezeRequest == /\ s.ownerClose = "queued"
+                      /\ s' = [s EXCEPT !.phase = "stopping", !.stopped = TRUE, !.ownerClose = "request"]
+OwnerSdkClosed == /\ ~s.ownerSdkClosed /\ s' = [s EXCEPT !.ownerSdkClosed = TRUE]
+OwnerStopLocal(omitQueued) ==
+    /\ ~s.ownerStopping
+    /\ s' = [s EXCEPT !.ownerStopping = TRUE, !.stopped = TRUE,
+                      !.phase = IF @ = "writing" THEN "stopping" ELSE @,
+                      !.ownerStopWon = s.ownerClose = "none",
+                      !.ownerActual = IF s.ownerClose = "none"
+                                         \/ (omitQueued /\ s.ownerClose = "queued") THEN TRUE ELSE @]
+OwnerRejectLateClose == /\ s.ownerStopping /\ s.ownerClose = "none" /\ ~s.ownerLateRejected
+                        /\ s' = [s EXCEPT !.ownerLateRejected = TRUE,
+                                          !.ownerReply = "failure", !.ownerCallback = "failure"]
+OwnerEnter == /\ s.ownerClose = "request" /\ ~s.held /\ ~s.ownerSdkClosed
+              /\ s' = [s EXCEPT !.phase = "recovery", !.entered = TRUE,
+                                !.enteredDrained = TRUE, !.enteredCut = ~OmitAtomicCut,
+                                !.cutPresent = ~OmitAtomicCut, !.ownerEnteredLive = ~s.ownerSdkClosed,
+                                !.ownerClose = "recovery", !.ownerCold = "pending"]
+OwnerRejectAdmission == /\ s.ownerClose = "request" /\ ~s.held /\ s.ownerSdkClosed
+                        /\ s' = [s EXCEPT !.ownerClose = "terminal", !.ownerActual = TRUE,
+                                          !.ownerReply = "failure", !.ownerCallback = "failure"]
+OwnerBoundedFailure(earlyResult) ==
+    /\ s.ownerClose = "recovery" /\ s.ownerReply = "none"
+    /\ \E reply \in {"deadline", "cancelled"} :
+        s' = [s EXCEPT !.ownerReply = reply, !.ownerCallback = "failure",
+                       !.cancelled = reply = "cancelled",
+                       !.ownerActual = IF earlyResult THEN TRUE ELSE @]
+OwnerActualFailure == /\ s.ownerClose = "recovery"
+                      /\ s' = [s EXCEPT !.ownerClose = "terminal", !.ownerCold = "terminal",
+                                        !.ownerActual = TRUE,
+                                        !.ownerReply = IF @ = "none" THEN "failure" ELSE @,
+                                        !.ownerCallback = "failure"]
+OwnerDurableClose == /\ s.ownerClose = "recovery" /\ s.verified /\ ~s.closed
+                     /\ s' = [s EXCEPT !.closed = TRUE, !.done = TRUE,
+                                       !.ownerClose = "terminal", !.ownerCold = "terminal", !.ownerActual = TRUE,
+                                       !.ownerReply = IF @ = "none" THEN "success" ELSE @]
+OwnerReleaseLease == /\ s.ownerActual /\ ~s.held /\ s.ownerLease = "held"
+                     /\ s' = [s EXCEPT !.ownerLease = "closing"]
+OwnerLeaseTerminal == /\ s.ownerLease = "closing"
+                      /\ s' = [s EXCEPT !.ownerLease = "terminal"]
+OwnerSuccessCallback(earlyCallback) ==
+    /\ s.ownerReply = "success" /\ s.ownerCallback = "none"
+    /\ (s.ownerLease = "terminal" \/ earlyCallback)
+    /\ s' = [s EXCEPT !.ownerCallback = "success"]
+OwnerRecoveryStep == /\ s.ownerClose = "recovery" /\ (LoseOrChangeCut \/ Adopt \/ Verify)
+OwnerNext(earlyResult, omitQueued, earlyCallback) ==
+    OwnerQueueClose \/ OwnerFreezeRequest \/ OwnerSdkClosed \/ OwnerStopLocal(omitQueued)
+    \/ OwnerRejectLateClose \/ DataTerminal \/ OwnerEnter \/ OwnerRejectAdmission
+    \/ OwnerRecoveryStep \/ OwnerBoundedFailure(earlyResult)
+    \/ OwnerActualFailure \/ OwnerDurableClose \/ OwnerReleaseLease \/ OwnerLeaseTerminal
+    \/ OwnerSuccessCallback(earlyCallback)
+OwnerSpec == OwnerInit /\ [][OwnerNext(FALSE, FALSE, FALSE)]_vars
+OwnerEarlyResultSpec == OwnerInit /\ [][OwnerNext(TRUE, FALSE, FALSE)]_vars
+OwnerOmitQueuedSpec == OwnerInit /\ [][OwnerNext(FALSE, TRUE, FALSE)]_vars
+OwnerEarlyCallbackSpec == OwnerInit /\ [][OwnerNext(FALSE, FALSE, TRUE)]_vars
+OwnerTypeOK == TypeOK
+               /\ s.ownerClose \in {"none", "queued", "request", "recovery", "terminal"}
+               /\ s.ownerCold \in {"none", "pending", "terminal"}
+               /\ s.ownerLease \in {"held", "closing", "terminal"}
+               /\ s.ownerReply \in {"none", "deadline", "cancelled", "failure", "success"}
+               /\ s.ownerCallback \in {"none", "failure", "success"}
+               /\ \A name \in {"ownerActual", "ownerStopping", "ownerStopWon", "ownerLateRejected",
+                               "ownerSdkClosed", "ownerEnteredLive"} : s[name] \in BOOLEAN
+OwnerActualNeedsColdTerminal == s.ownerActual => s.ownerCold # "pending"
+OwnerAcceptedClosePinsActual == s.ownerClose \in {"queued", "request", "recovery"} => ~s.ownerActual
+OwnerLeaseWaitsActual == s.ownerLease # "held" => s.ownerActual /\ ~s.held /\ s.ownerCold # "pending"
+OwnerSuccessWaitsLease == s.ownerCallback = "success" => s.ownerLease = "terminal" /\ s.ownerReply = "success"
+OwnerFailureKeepsEarlyReply == s.ownerReply \in {"deadline", "cancelled", "failure"}
+                             => s.ownerCallback = "failure"
+OwnerLocalStopHasNoClosedAuthority == s.ownerStopWon => ~s.entered /\ ~s.closed /\ ~s.cutPresent
+OwnerSdkClosedAdmissionIsRejected == s.entered => s.ownerEnteredLive
 =============================================================================

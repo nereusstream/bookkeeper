@@ -85,6 +85,12 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     private final AtomicBoolean closeStarted = new AtomicBoolean();
     private final CompletableFuture<Void> durableClose = new CompletableFuture<>();
     private volatile ProfileRecoveryCoordinator.WriterCloseRequest writerCloseRequest;
+    private final Object writerCloseLifecycle = new Object();
+    private final CompletableFuture<Void> writerCloseActual = new CompletableFuture<>();
+    private final CompletableFuture<Void> writerActualTerminal;
+    private volatile CompletableFuture<Void> ownerLeaseTerminal;
+    private BooleanSupplier ownerCannotWait;
+    private boolean ownerStopping;
 
     private record CloseSettings(ProfileRecoveryCoordinator coordinator, byte[] descriptor,
             org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
@@ -109,6 +115,7 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         var transportClosed = transport.closeCompletion();
         transportClosed.whenComplete((unused, failure) -> sdkHeaders.close());
         localResourcesClosed = CompletableFuture.allOf(transportClosed, sdkHeaders.drained());
+        writerActualTerminal = CompletableFuture.allOf(localResourcesClosed, writerCloseActual);
     }
 
     public static ProfileLedgerHandle fromInitialAvailability(ClientContext base,
@@ -512,6 +519,47 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         return localResourcesClosed.copy();
     }
 
+    /** Adopt before publication. Actual scope includes local DATA/headers and any accepted explicit-close phases;
+     * the owner must subsequently close/drain its peer lease to settle CONTROL and socket outputs. */
+    CompletableFuture<Void> adoptWriterOwnership(CompletableFuture<Void> leaseTerminal, BooleanSupplier cannotWait) {
+        Objects.requireNonNull(leaseTerminal, "ownerLeaseTerminal");
+        Objects.requireNonNull(cannotWait, "cannotWait");
+        synchronized (writerCloseLifecycle) {
+            if (ownerLeaseTerminal != null || closeStarted.get() || stopped.get()) {
+                throw new IllegalStateException("Adopt an unused writer before close or local stop");
+            }
+            ownerCannotWait = cannotWait;
+            ownerLeaseTerminal = leaseTerminal;
+        }
+        return writerActualTerminal.copy();
+    }
+
+    /** SDK shutdown stops local writes without starting close/recovery or manufacturing a CLOSED receipt. */
+    CompletableFuture<Void> stopOwnedWrites() {
+        boolean noExplicitClose;
+        synchronized (writerCloseLifecycle) {
+            if (ownerLeaseTerminal == null) {
+                throw new IllegalStateException("Writer has no SDK owner");
+            }
+            ownerStopping = true;
+            noExplicitClose = !closeStarted.get();
+        }
+        if (noExplicitClose) {
+            writerCloseActual.complete(null);
+        }
+        handleUnrecoverableErrorDuringAdd(BKException.Code.ClientClosedException);
+        return writerActualTerminal.copy();
+    }
+
+    @Override
+    public void close() throws InterruptedException, BKException {
+        CompletableFuture<Void> owned = ownerLeaseTerminal;
+        if (owned != null && !owned.isDone() && ownerCannotWait.getAsBoolean()) {
+            throw BKException.create(BKException.Code.IllegalOpException);
+        }
+        super.close();
+    }
+
     @Override
     boolean isHandleWritable() {
         return !stopped.get() && super.isHandleWritable();
@@ -699,16 +747,36 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     void asyncCloseInternal(CloseCallback callback, Object ctx, int code) {
         var settings = closeSettings;
         if (settings != null) {
-            durableClose.whenComplete((unused, failure) -> callback.closeComplete(failure == null ? BKException.Code.OK
-                    : BKException.getExceptionCode(failure, BKException.Code.UnexpectedConditionException), this, ctx));
-            if (closeStarted.compareAndSet(false, true)) {
+            boolean rejected;
+            boolean start;
+            synchronized (writerCloseLifecycle) {
+                rejected = ownerStopping && !closeStarted.get();
+                start = !rejected && closeStarted.compareAndSet(false, true);
+            }
+            if (rejected) {
+                callback.closeComplete(BKException.Code.ClientClosedException, this, ctx);
+                return;
+            }
+            durableClose.whenComplete((unused, failure) -> {
+                CompletableFuture<Void> owned = ownerLeaseTerminal;
+                if (failure != null || owned == null) {
+                    callback.closeComplete(failure == null ? BKException.Code.OK
+                            : BKException.getExceptionCode(failure, BKException.Code.UnexpectedConditionException),
+                            this, ctx);
+                } else {
+                    owned.whenComplete((ignored, ownerFailure) -> callback.closeComplete(ownerFailure == null
+                            ? BKException.Code.OK : BKException.getExceptionCode(ownerFailure), this, ctx));
+                }
+            });
+            if (start) {
                 try {
                     executeOrdered(() -> closeWriter(settings, code));
                 } catch (RejectedExecutionException unavailable) {
                     handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
-                    localResourcesClosed.whenComplete((unused, failure) ->
-                            durableClose.completeExceptionally(
-                                BKException.create(BKException.Code.InterruptedException)));
+                    localResourcesClosed.whenComplete((unused, failure) -> {
+                        completeWriterCloseActual(failure);
+                        durableClose.completeExceptionally(BKException.create(BKException.Code.InterruptedException));
+                    });
                 }
             }
             return;
@@ -746,14 +814,17 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         Throwable stopFailure = localFailure;
         localResourcesClosed.whenComplete((unused, failure) -> {
             if (failure != null || stopFailure != null) {
+                completeWriterCloseActual(failure != null ? failure : stopFailure);
                 durableClose.completeExceptionally(failure != null ? failure : stopFailure);
                 return;
             }
             try {
-                settings.coordinator().closeWriter(writerCloseRequest, base, settings.descriptor(),
+                var attempt = settings.coordinator().beginCloseWriter(writerCloseRequest, base, settings.descriptor(),
                         settings.validator(), ProtectedProfileCredential.of(1, ledgerKey), transport.readPeers(),
-                        settings.controls(), settings.coordinates(), settings.duration())
-                            .whenComplete((result, error) -> {
+                        settings.controls(), settings.coordinates(), settings.duration());
+                attempt.actualCompleted().whenComplete((ignored, actualFailure) ->
+                        completeWriterCloseActual(actualFailure));
+                attempt.result().whenComplete((result, error) -> {
                     if (error != null) {
                         durableClose.completeExceptionally(error);
                         return;
@@ -778,9 +849,18 @@ public final class ProfileLedgerHandle extends LedgerHandle {
                     }
                 });
             } catch (RuntimeException unavailable) {
+                completeWriterCloseActual(null);
                 durableClose.completeExceptionally(unavailable);
             }
         });
+    }
+
+    private void completeWriterCloseActual(Throwable failure) {
+        if (failure == null) {
+            writerCloseActual.complete(null);
+        } else {
+            writerCloseActual.completeExceptionally(failure);
+        }
     }
 
     record ProfileContext(ClientContext base, ProfileBookieClient transport) implements ClientContext {

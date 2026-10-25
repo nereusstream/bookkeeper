@@ -1721,3 +1721,16 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 ```
 
 声明增加4配置不表示重新执行整个目录。1151模型输入与同轮Java的274重合SHA一致；Java实际3项定向与相关23项提供metadata、TLS、输出promise、线程分类和中断/继续关闭事实。有限投影不验证密码学、对象/内核字节账本、fsync、liveness、任意外部executor调用或完整A+C+D。命令、源码、manifest、coverage、指定trace与原终态在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-readonly-owner-evidence-cc7b8cdd/models`；完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+## Writer close owner 的实际终态
+
+2026-10-25，父源码 `4910d16933cd2b53cbf72038d8bbd1e12c12960e`。[独立实际终态](../profile-wire/README.md#writer-close-的实际终态与排队关闭)为显式SDK writer-create提供必要custody信号。本轮在原ProfileWriterClose末尾追加独立OwnerInit/OwnerSpec与三个guard-only mutation；原普通close的Spec正文和8个cfg字节不变，旧结果保持原绑定。状态区分已接受但尚未freeze的queued close、request/recovery/terminal、bounded result/callback、actual cold、local DATA及lease。SDK-local-stop先赢不进入恢复/发布CLOSED；SDK已关闭时保留原admission拒绝，未增加bypass。
+
+本轮只执行新增4配置。`a-profile-writer-close-owner`完整PASS，3032 generated/1472 distinct、queue0，检查原7条与新增8条有限不变量。`ce-profile-writer-close-owner-result`以cancelled result错标actual，在recovery/cold=pending时违反OwnerActualNeedsColdTerminal（441/255）；`ce-profile-writer-close-owner-queued`在request还未形成的queued状态由stop错标actual，违反OwnerAcceptedClosePinsActual（75/67）；`ce-profile-writer-close-owner-callback`在lease仍held时发布success callback，违反OwnerSuccessWaitsLease（1528/805）。三者实际TLC exit12且有对应trace，不作为正向PASS或完整状态搜索。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-writer-close-owner --config-prefix ce-profile-writer-close-owner
+```
+
+1155模型输入与同轮Java的274重合SHA匹配；Java新增3项及相关14项以真实file/ZK/mTLS、暂停cold/ordered工作、实际CONTROL output promise和lease提供输入事实。模型不区分Java异常清理策略、不证明fsync、TLS、完整字节账本、liveness或writer create。命令、raw output、coverage、指定trace及源绑定在 `/Users/liusinan/.codex/artifacts/unified-wal/writer-close-actual-evidence-4910d169/models`；声明目录增加4配置不代表本轮执行全部目录。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。

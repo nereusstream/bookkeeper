@@ -2,6 +2,8 @@
 
 运行方式：按用户2026-10-25最新授权，本会话作为唯一实施主会话，可以使用多 agent 处理职责边界明确的子任务，由主会话统一变更集、验证和本地提交。模型与推理档按用户2026-10-25最新指定，主会话及后续agent统一使用 `gpt-6.1-sol` / `xhigh`（极高）；新agent显式指定该配置，不恢复旧模型agent继续执行。下文历史迁移记录中的旧型号及禁止子agent安排保留为历史。子agent应明确文件或只读职责边界，保护彼此改动；不通过另一CLI启动第二个编码agent，不另开独立实施会话。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 继续负责总体规划与只读检查。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
 
+SDK接入方式：按用户2026-10-25答复，首版采用显式 Profile create/open，先接CLOSED只读open与实际排空。默认Classic行为和缺少可信Profile环境时的拒绝保持；这不授予same-ledger writer takeover。继续实现public create时，必须持有自身取得的原子fresh reservation/lifecycle birth，不把control的matching READY续接当作新writer发行。
+
 源码与文档交接：
 - 项目是 nereusstream/bookkeeper，保存的项目名 turbo-bk，源工作区 /Users/liusinan/apps/ideaproject/nereusstream/bookkeeper。不要误用 /Users/liusinan/apps/ideaproject/GITHUB/bookkeeper。
 - 用户确认的源码基线是 e8b162076fd8cfa84a11351a82caac8c5ac1f939，源分支 turbo-bk。原工作区现有三份未提交规划文档变更是本次明确的输入，不能丢弃，也不能把 origin 上旧版顺序当成最新版。
@@ -282,3 +284,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [显式 SDK CLOSED 只读入口与依赖关闭顺序](profile-wire/README.md#显式-sdk-closed-只读入口与依赖关闭顺序)：2026-10-25父cc7b8cdd82上，BookKeeper显式enable/open复用原registered pool与CLOSED coordinator，单个open/handle持有lease到实际read/output终结；SDK close先排空Profile再关闭原metadata/executors，中断可继续，self-drain提前拒绝。三项真实服务定向与相关两类23项全部通过、输入匹配，style通过；新增有限模型1正向/3指定反例符合预期，旧Spec/11cfg保持原绑定；独立RAT仍443父路径无新增，原证据由上述canonical节拥有。默认builder拒绝保持，writer create/默认routing/Main可信issuer/full-bytes及其余16步继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[Writer close 的实际终态与排队关闭](profile-wire/README.md#writer-close-的实际终态与排队关闭)：2026-10-25父4910d16933上，beginCloseWriter分开bounded result与actualCompleted；包内writer owner将已接受但尚未freeze的close纳入实际排空，local-stop先赢不发布CLOSED，成功callback等待lease、失败/deadline保持原回复。三项真实定向与相关14项全部通过、style通过，新增有限模型1正向/3指定反例符合预期，旧Spec/8cfg保持原绑定；独立RAT仍443既有路径无新增，原证据由上述canonical节拥有。用户已选择显式create/open；public create下一项需要原子fresh reservation归属，不能以matching READY重发writer。该入口仍待接入，完整目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

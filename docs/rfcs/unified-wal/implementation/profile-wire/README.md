@@ -2441,3 +2441,22 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 定向3项及相关两类 **23项全部通过、0 failure/error/skip**（SDK11、Classic LedgerRecovery12），1176 runner 输入与1180个含 addon 的冻结输入逐项匹配。相关回归保留原 delete/birth 重核、默认 Profile 拒绝/密码次序、legacy registered pool 的 pin/drain/queued-cold/rejoin 与真实 Classic recovery。Spotless/Checkstyle exit0。现有 ProfileReadonlyOpen 只追加独立 SDKSpec；原 Spec 正文和11个旧cfg逐字节保持，不重跑或移绑旧PASS。新4配置为1正向完整PASS（7942 generated/2152 distinct、queue0）及3指定反例，分别违反 SDKColdOpenPinsLease、SDKActualReadPinsLease、SDKDependenciesWaitForPool；实际终态与线程分类仍由Java提供，不是liveness、full-bytes或完整A+C+D证明。1176 runner/1180冻结Java输入与1151模型输入的274个重合路径SHA相同，合并2057个unique输入；新增owner源码纳入原模型runner输入锁。源码、原命令/XML/TLC trace/实际终态由 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-readonly-owner-evidence-cc7b8cdd` 保存；全部Java/style/模型终态后的独立RAT exit1，443条未批准路径均存在父HEAD、集合未变，无新增，不称CI全绿。仅在终态/无句柄/逐文件同inode与SHA核对后移除三个原临时运行根；全部hardlink归档保留，常规文件数据实际回收0 B。
 
 此处接通显式 CLOSED readonly SDK 路径及 owner 依赖顺序；公开 writer create、配置后的默认 routing、多 ledger 并发 SDK pool、Main 的真实可信 commissioning/OS隔离/credential/exact-policy 输入渠道、完整 full-bytes/B11、恢复/GC/mixed兼容/正式性能及其余16步仍OPEN。Main 的现有显式 Java bootstrap 已可调用，CLI 仍需上述可信输入渠道。默认 OFF/SYSTEM/PARK 与 disabled 能力保持，完整目标 active、生产 Gate OPEN；Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
+
+
+## Writer close 的实际终态与排队关闭
+
+2026-10-25，父源码 `4910d16933cd2b53cbf72038d8bbd1e12c12960e`。用户已选定显式 Profile create/open 入口；已交付的 CLOSED readonly SDK 路径继续保留。本轮补 writer create 接入前核实缺少的实际终止信号：原 closeWriter 的 caller 可以因 deadline/scheduler rejection 先收到 DEFERRED，而私有 recoverOnce 仍使用 cold/metadata/control。原 stopLocalWrites 只覆盖本地 DATA/header；不能用这两种结果推导借用 peer 已不再使用。
+
+新增具体 `beginCloseWriter(...).WriterCloseAttempt`，分别提供 result()/actualCompleted() 的保护副本。result 保留原 deadline/取消行为；actualCompleted 只在原实际恢复链终结并归还 coordinator gate 后完成，算法异常仍进入该信号。修改/取消某个观察副本不影响内部实际状态或其他观察者。原 closeWriter 继续委托 result，recover 的控制算法、固定 P/length、旧权限、UNKNOWN 与普通 Add 热路径不变。actualCompleted 表示该算法链已结束，最终 socket/source/output 排空仍由原 peer lease.closeAsync 收口。
+
+ProfileLedgerHandle 增加包内 adoptWriterOwnership/stopOwnedWrites，将 close admission 与 SDK-local stop 通过同一小型锁串行化。已接受但尚在 ordered queue 的 close 也持有实际 leg，不能以 writerCloseRequest 仍为空视为没有操作。SDK-local stop 先赢时，仅停止本地写并拒绝后来 close，不制造 IN_RECOVERY/CLOSED；显式 close 先赢时，等待本地 DATA/header 与该已接受 close 的实际恢复链。成功 close callback 再等待 owner 的实际 lease terminal，失败/deadline 仍可先返回。原借用 handle 的 stopLocalWrites 和 close 行为保持；包内 owner hook 尚未由公开 writer-create 消费，当前不宣称 SDK writer 路由已经完成。
+
+sdk.isClientClosed 的准入没有绕过：显式 close 虽已被本地接受，若尚未进入 coordinator 而 SDK 已关闭，仍可能得到 ClientClosed；owner 等待这个实际拒绝/终结，不能据此报告 CLOSED。blocking owned-writer close 通过 supplied thread guard 提前拒绝 self-drain；该信号不授予新 authority、writer takeover 或 grant。
+
+新增三项真实文件/ZK/mTLS与registered pool验证：八个 cold worker 实际被占住时，100ms deadline 只结束 result；改写/取消 actual 观察副本后 fresh 观察仍 pending，另一 attempt 仍 LIMIT，release 后实际终结且 metadata 仍原 OPEN/version。第二项把已接受 close 的 ordered freeze 挡住，在 request 仍为空时执行 owner stop，实际 leg 继续等待；随后持有一条已发送 CONTROL 的原输出 promise，close callback 与六个连接容量不能提前结束，释放后才 CLOSED/归零。第三项 local-stop 先赢，后续 close 返回 ClientClosed，request为空、metadata完整序列化字节/version不变、保持OPEN。测试 owner 把包内 hook 接到原真实 lease drain，不把该 fixture 称为公开 writer-create。
+
+定向3项及相关 **14项全部通过、0 failure/error/skip**，含原四项普通writer close、三项public readonly SDK、整体空/非空恢复、取消/deadline/gate与limit/hole和SDK deadline边界。所有阶段Java源码保持原输入绑定，Spotless/Checkstyle exit0。原ProfileWriterClose仅追加独立OwnerSpec，旧Spec正文和8个旧cfg保持原字节。新增4模型配置为1正向完整PASS（3032 generated/1472 distinct、queue0）与3指定反例，分别检查result不冒充actual、排队close不能遗漏、success callback等待lease；实际DATA/cold/lease终态、异常分类和SDK admission由Java提供，不是liveness、完整A+C+D或writer-create证明。1176 runner/1180冻结Java与1155模型输入的274重合SHA相同，合并2061个unique输入；全部Java/model/style终态后的独立RAT exit1，443条未批准路径集合与父轮相同，无新增；442条与父HEAD字节相同，本轮改动的原模型runner脚本保留相同许可证头，仍按既有未批准路径报告，不称CI全绿。三个原临时运行根在终态、无句柄、逐文件同inode/SHA检查后移除，全部hardlink归档保留，常规数据实际回收0 B。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/writer-close-actual-evidence-4910d169`。
+
+下一步显式 create 必须区分 control续接与 writer发行：依据 RFC-0001 §6.4 的 no-takeover 合同和原 Classic create 语义，新 owner 只能消费自己取得的原子 reservation APPLIED/fresh lifecycle birth；matching metadata/CToken/READY/activation、空LAC或只读未找到DATA都不授予重新发行 writer。仅同 SDK、同 fresh-origin、从未进入writer交接的操作可续接；reservation UNKNOWN 不得靠 matching 重读自认新 owner，已有OPEN进入原恢复/只读路径。当前尚未实现这一public create gate，不把相同READY重放变成 P=-1/length0 的新 normal writer。
+
+本轮没有新 wire/持久格式、SDK-closed bypass 或默认路由，完整create/Main可信issuer/full-bytes/B11/恢复GC/兼容/正式性能及其余16步继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

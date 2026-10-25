@@ -1060,7 +1060,7 @@ public final class ProfileRecoveryCoordinator {
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration) {
         return recover(ledger, operationId, sdk, canonicalDescriptor, validator, credential, suppliedData,
-                suppliedControl, maxCoordinates, maxDuration, null);
+                suppliedControl, maxCoordinates, maxDuration, null, null);
     }
 
     /** Local SDK stop supplies this one immutable confirmed cut; durable publication remains separate. */
@@ -1089,20 +1089,58 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
+    /** A bounded reply and independent algorithm termination; socket output drain still belongs to the peer lease. */
+    public static final class WriterCloseAttempt {
+        private final CompletableFuture<RecoveryResult> result;
+        private final CompletableFuture<Void> actualCompleted;
+
+        private WriterCloseAttempt(CompletableFuture<RecoveryResult> result,
+                CompletableFuture<Void> actualCompleted) {
+            this.result = result;
+            this.actualCompleted = actualCompleted;
+        }
+
+        public CompletableFuture<RecoveryResult> result() {
+            var waiter = result.copy();
+            waiter.whenComplete((value, failure) -> {
+                if (waiter.isCancelled()) {
+                    result.cancel(false);
+                }
+            });
+            return waiter;
+        }
+
+        /** All queued/running recovery phases terminated, after releasing the coordinator gate. */
+        public CompletableFuture<Void> actualCompleted() {
+            return actualCompleted.copy();
+        }
+    }
+
     /** Ordinary close freezes P/L in the same IN_RECOVERY CAS, then reuses fixed-prefix terminal close. */
     public CompletableFuture<RecoveryResult> closeWriter(WriterCloseRequest request, ClientContext sdk,
             byte[] canonicalDescriptor, org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration) {
-        return recover(request.ledger().ledgerId(), request.operationId(), sdk, canonicalDescriptor, validator,
-                credential, suppliedData, suppliedControl, maxCoordinates, maxDuration, request);
+        return beginCloseWriter(request, sdk, canonicalDescriptor, validator, credential, suppliedData,
+                suppliedControl, maxCoordinates, maxDuration).result();
+    }
+
+    /** Retain the peer lease through actualCompleted, then close/drain its sockets before releasing custody. */
+    public WriterCloseAttempt beginCloseWriter(WriterCloseRequest request, ClientContext sdk,
+            byte[] canonicalDescriptor, org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
+            ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
+            Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration) {
+        var actualCompleted = new CompletableFuture<Void>();
+        var result = recover(request.ledger().ledgerId(), request.operationId(), sdk, canonicalDescriptor, validator,
+                credential, suppliedData, suppliedControl, maxCoordinates, maxDuration, request, actualCompleted);
+        return new WriterCloseAttempt(result, actualCompleted);
     }
 
     private CompletableFuture<RecoveryResult> recover(long ledger, byte[] operationId, ClientContext sdk,
             byte[] canonicalDescriptor, org.apache.bookkeeper.common.profile.ProfileDescriptorValidator validator,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, int maxCoordinates, Duration maxDuration,
-            WriterCloseRequest writerRequest) {
+            WriterCloseRequest writerRequest, CompletableFuture<Void> actualCompleted) {
         long duration = maxDuration.toNanos();
         if (ledger < 0 || maxCoordinates < 1 || suppliedData.size() > 64 || suppliedControl.size() > 64
                 || duration <= 0 || maxDuration.compareTo(Duration.ofMinutes(1)) > 0
@@ -1112,9 +1150,15 @@ public final class ProfileRecoveryCoordinator {
         }
         ProfileRecoveryReadHandle.requireCompatibleSdk(sdk);
         if (sdk.isClientClosed()) {
+            if (actualCompleted != null) {
+                actualCompleted.complete(null);
+            }
             return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
         }
         if (!active.tryAcquire()) {
+            if (actualCompleted != null) {
+                actualCompleted.complete(null);
+            }
             return CompletableFuture.completedFuture(new RecoveryResult(ledger, RecoveryStatus.DEFERRED,
                     PrefixReason.LIMIT, null, -1, 0, null, null));
         }
@@ -1140,6 +1184,13 @@ public final class ProfileRecoveryCoordinator {
                     scheduled.cancel(false);
                 }
                 active.release();
+                if (actualCompleted != null) {
+                    if (failure == null) {
+                        actualCompleted.complete(null);
+                    } else {
+                        actualCompleted.completeExceptionally(failure);
+                    }
+                }
                 if (failure != null) {
                     caller.completeExceptionally(failure);
                 } else {
@@ -1170,6 +1221,9 @@ public final class ProfileRecoveryCoordinator {
             return caller;
         } catch (RuntimeException invalid) {
             active.release();
+            if (actualCompleted != null) {
+                actualCompleted.complete(null);
+            }
             throw invalid;
         }
     }

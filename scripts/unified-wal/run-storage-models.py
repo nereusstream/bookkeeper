@@ -198,6 +198,10 @@ MATRIX = {
     'ce-profile-writer-close-cancel': 'CompletionWaitsData',
     'ce-profile-writer-close-length': 'ClosedMatchesWriterPrefix',
     'ce-profile-writer-close-kind': 'AdoptionNeedsSupportedKind',
+    'a-profile-writer-close-owner': None,
+    'ce-profile-writer-close-owner-result': 'OwnerActualNeedsColdTerminal',
+    'ce-profile-writer-close-owner-queued': 'OwnerAcceptedClosePinsActual',
+    'ce-profile-writer-close-owner-callback': 'OwnerSuccessWaitsLease',
 
     'a-profile-replica-audit': None,
     'a-open-replica-audit': None,

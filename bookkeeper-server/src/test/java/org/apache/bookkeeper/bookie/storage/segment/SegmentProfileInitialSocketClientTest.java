@@ -1933,6 +1933,210 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private record OwnedWriterForTest(ProfileLedgerHandle handle,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool pool,
+            org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Lease lease,
+            CompletableFuture<Void> actual, CompletableFuture<Void> released) implements AutoCloseable {
+        @Override
+        public void close() throws Exception {
+            stopOwnedWriter(handle).get(30, TimeUnit.SECONDS);
+            released.get(10, TimeUnit.SECONDS);
+            pool.closeAsync().get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static CompletableFuture<Void> stopOwnedWriter(ProfileLedgerHandle handle) throws Exception {
+        var method = ProfileLedgerHandle.class.getDeclaredMethod("stopOwnedWrites");
+        method.setAccessible(true);
+        return (CompletableFuture<Void>) method.invoke(handle);
+    }
+
+    @SuppressWarnings("unchecked")
+    private OwnedWriterForTest ownedWriter(Fixture fixture, BookKeeper sdk,
+            ProfileRecoveryCoordinator coordinator) throws Exception {
+        fixture.helloReadinessGeneration = 1;
+        fixture.connectAll(Duration.ofSeconds(5));
+        var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+        ZKProfileRegistrationStore registry = null;
+        for (int node = 0; node < 3; node++) {
+            registry = registeredPeer(fixture, fixture.zk, node, "tls://127.0.0.1:"
+                    + ((InetSocketAddress) fixture.listeners.get(node).localAddress()).getPort(), 1,
+                    fixture.identities.get(node).incarnation().value());
+        }
+        var pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(registry,
+                fixture.clientGroup, fixture.peerTls, fixture.cold,
+                fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
+                new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
+                        6, 12, 2, 1060, Duration.ofSeconds(5)));
+        var lease = pool.acquire().completion().get(5, TimeUnit.SECONDS);
+        var handle = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available, lease.data(),
+                8, 1024, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+        handle.enableWriterClose(coordinator, fixture.descriptorBytes, VALIDATOR, lease.controls(),
+                4, Duration.ofSeconds(30)).get(5, TimeUnit.SECONDS);
+        assertEquals(0, handle.addEntry(bytes(16, 8)));
+        var released = new CompletableFuture<Void>();
+        var adopt = ProfileLedgerHandle.class.getDeclaredMethod("adoptWriterOwnership",
+                CompletableFuture.class, java.util.function.BooleanSupplier.class);
+        adopt.setAccessible(true);
+        var actual = (CompletableFuture<Void>) adopt.invoke(handle, released,
+                (java.util.function.BooleanSupplier) () -> false);
+        actual.whenComplete((unused, failure) -> {
+            if (failure != null) {
+                released.completeExceptionally(failure);
+            } else {
+                lease.closeAsync().whenComplete((ignored, closeFailure) -> {
+                    if (closeFailure == null) {
+                        released.complete(null);
+                    } else {
+                        released.completeExceptionally(closeFailure);
+                    }
+                });
+            }
+        });
+        return new OwnedWriterForTest(handle, pool, lease, actual, released);
+    }
+
+    @Test
+    public void writerCloseAttemptDeadlineAndMutableViewsDoNotReleaseActualColdWork() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            try (var owned = ownedWriter(fixture, sdk, coordinator)) {
+                owned.handle().stopLocalWrites().get(5, TimeUnit.SECONDS);
+                var before = fixture.manager.readLedgerMetadata(44).get();
+                var request = new ProfileRecoveryCoordinator.WriterCloseRequest(fixture.context(), before,
+                        0, 16, bytes(16, 31));
+                var busy = new CountDownLatch(8);
+                var release = new CountDownLatch(1);
+                for (int thread = 0; thread < 8; thread++) {
+                    fixture.cold.execute(() -> {
+                        busy.countDown();
+                        await(release);
+                    });
+                }
+                ProfileRecoveryCoordinator.WriterCloseAttempt attempt = null;
+                try {
+                    assertTrue(busy.await(5, TimeUnit.SECONDS));
+                    attempt = coordinator.beginCloseWriter(request, sdk.getClientCtx(), fixture.descriptorBytes,
+                            VALIDATOR, fixture.credential, owned.lease().data(), owned.lease().controls(),
+                            4, Duration.ofMillis(100));
+                    assertEquals(ProfileRecoveryCoordinator.PrefixReason.DEADLINE,
+                            attempt.result().get(5, TimeUnit.SECONDS).reason());
+                    var first = attempt.actualCompleted();
+                    assertTrue(first.complete(null));
+                    assertTrue(attempt.actualCompleted().cancel(false));
+                    assertFalse(attempt.actualCompleted().isDone());
+                    var refused = coordinator.beginCloseWriter(request, sdk.getClientCtx(), fixture.descriptorBytes,
+                            VALIDATOR, fixture.credential, owned.lease().data(), owned.lease().controls(),
+                            4, Duration.ofSeconds(5));
+                    assertEquals(ProfileRecoveryCoordinator.PrefixReason.LIMIT,
+                            refused.result().get(5, TimeUnit.SECONDS).reason());
+                    refused.actualCompleted().get(5, TimeUnit.SECONDS);
+                    assertEquals(6, owned.pool().usage().reservedConnections());
+                } finally {
+                    release.countDown();
+                    if (attempt != null) {
+                        attempt.actualCompleted().get(10, TimeUnit.SECONDS);
+                    }
+                }
+                var after = fixture.manager.readLedgerMetadata(44).get();
+                assertEquals(before.getVersion(), after.getVersion());
+                assertEquals(LedgerMetadata.State.OPEN, after.getValue().getState());
+            }
+        }
+    }
+
+    @Test
+    public void ownedWriterStopKeepsAnAcceptedQueuedCloseAndActualControlOutput() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            try (var owned = ownedWriter(fixture, sdk, coordinator)) {
+                var held = new AtomicReference<ChannelPromise>();
+                var output = new CountDownLatch(1);
+                for (var control : owned.lease().controls().values()) {
+                    var socketField = ProfileInitialControlClient.class.getDeclaredField("socket");
+                    socketField.setAccessible(true);
+                    Object socket = socketField.get(control);
+                    var channelField = socket.getClass().getDeclaredField("channel");
+                    channelField.setAccessible(true);
+                    Channel channel = (Channel) channelField.get(socket);
+                    channel.eventLoop().submit(() -> channel.pipeline().addAfter(
+                            channel.pipeline().context(SslHandler.class).name(), "holdOwnedWriterControlOutput",
+                            new ChannelOutboundHandlerAdapter() {
+                                @Override
+                                public void write(ChannelHandlerContext ctx, Object body, ChannelPromise promise) {
+                                    if (held.compareAndSet(null, promise)) {
+                                        output.countDown();
+                                        ctx.write(body, ctx.newPromise());
+                                    } else {
+                                        ctx.write(body, promise);
+                                    }
+                                }
+                            })).get(5, TimeUnit.SECONDS);
+                }
+                var queued = new CountDownLatch(1);
+                var release = new CountDownLatch(1);
+                sdk.getClientCtx().getMainWorkerPool().executeOrdered(44L, () -> {
+                    queued.countDown();
+                    await(release);
+                });
+                try {
+                    assertTrue(queued.await(5, TimeUnit.SECONDS));
+                    var closing = owned.handle().closeAsync();
+                    assertNull(owned.handle().writerCloseRequest());
+                    var stopping = stopOwnedWriter(owned.handle());
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> stopping.get(150, TimeUnit.MILLISECONDS));
+                    assertFalse(owned.released().isDone());
+                    release.countDown();
+                    assertTrue(output.await(5, TimeUnit.SECONDS));
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> closing.get(150, TimeUnit.MILLISECONDS));
+                    assertEquals(6, owned.pool().usage().reservedConnections());
+                    held.get().setSuccess();
+                    closing.get(30, TimeUnit.SECONDS);
+                    stopping.get(5, TimeUnit.SECONDS);
+                    owned.released().get(5, TimeUnit.SECONDS);
+                    assertEquals(0, owned.pool().usage().reservedConnections());
+                    assertEquals(LedgerMetadata.State.CLOSED,
+                            fixture.manager.readLedgerMetadata(44).get().getValue().getState());
+                } finally {
+                    release.countDown();
+                    if (held.get() != null) {
+                        held.get().trySuccess();
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void ownedWriterLocalStopWinsWithoutStartingCloseOrPublishingClosed() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            try (var owned = ownedWriter(fixture, sdk, coordinator)) {
+                var before = fixture.manager.readLedgerMetadata(44).get();
+                stopOwnedWriter(owned.handle()).get(5, TimeUnit.SECONDS);
+                owned.released().get(5, TimeUnit.SECONDS);
+                assertEquals(BKException.Code.ClientClosedException, BKException.getExceptionCode(assertThrows(
+                        ExecutionException.class, () -> owned.handle().closeAsync().get(5, TimeUnit.SECONDS))));
+                assertNull(owned.handle().writerCloseRequest());
+                var after = fixture.manager.readLedgerMetadata(44).get();
+                assertEquals(before.getVersion(), after.getVersion());
+                var serializer = new org.apache.bookkeeper.meta.LedgerMetadataSerDe();
+                assertArrayEquals(serializer.serialize(before.getValue()), serializer.serialize(after.getValue()));
+                assertEquals(LedgerMetadata.State.OPEN, after.getValue().getState());
+                assertEquals(0, owned.pool().usage().reservedConnections());
+            }
+        }
+    }
+
     @Test
     public void ordinaryWriterCloseFreezesConfirmedPrefixAndIgnoresPhysicalUnconfirmedTail() throws Exception {
         for (int ack : List.of(2, 3)) {
