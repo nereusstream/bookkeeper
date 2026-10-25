@@ -102,7 +102,7 @@ public final class ProfileMetadataBacklink {
         Map<String, byte[]> custom = new HashMap<>();
         metadata.getCustomMetadata().forEach((key, value) -> custom.put(key, value.clone()));
         custom.put(KEY, encode());
-        return LedgerMetadataBuilder.from(metadata).withCustomMetadata(custom).build();
+        return LedgerMetadataBuilder.from(metadata).withCToken(metadata.getCToken()).withCustomMetadata(custom).build();
     }
 
     public static ProfileMetadataBacklink from(LedgerMetadata metadata) {

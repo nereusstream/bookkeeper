@@ -19,6 +19,7 @@ package org.apache.bookkeeper.discover.profile;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -29,6 +30,7 @@ import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorIdentity;
@@ -37,8 +39,14 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore.CreateStatus;
+import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException.Code;
+import org.apache.zookeeper.Op;
+import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
 import org.junit.Test;
 
 public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
@@ -198,6 +206,110 @@ public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
                     .read(ProfileAuthorityKey.fromScope(wrongKey)).status());
         }
         assertEquals(List.of("2c"), second.getChildren(ROOT, false));
+    }
+
+    @Test
+    public void freshCreateIssuesOnlyThisAcknowledgedNativeBirth() throws Exception {
+        var writer = store(first);
+        var created = writer.createFresh(reservation());
+        assertEquals(CreateStatus.APPLIED, created.status());
+        var origin = created.claim().origin();
+        var physical = second.exists(writer.path(44), false);
+        assertEquals(physical.getCzxid(), origin.birthZxid());
+        assertEquals(physical.getMzxid(), origin.storeVersion());
+        assertEquals(0, physical.getVersion());
+        assertEquals(0, physical.getEphemeralOwner());
+        assertEquals(origin, store(second).read(44).snapshot());
+        assertTrue(created.claim().issuedBy(writer));
+        assertFalse(created.claim().issuedBy(store(second)));
+        assertEquals(List.of(ZooDefs.OpCode.create2, ZooDefs.OpCode.create2, ZooDefs.OpCode.create2),
+                first.lastOperations.get().stream().map(Op::getType).toList());
+
+        var duplicate = store(second).createFresh(reservation());
+        assertEquals(CreateStatus.CONFLICT, duplicate.status());
+        assertNull(duplicate.claim());
+        assertEquals(origin, writer.read(44).snapshot());
+    }
+
+    @Test
+    public void freshCreateWithoutNativeStatLeavesCommittedHistoryWithoutClaim() throws Exception {
+        CountDownLatch connected = new CountDownLatch(1);
+        try (ZooKeeper noStatClient = new ZooKeeper(cluster.getZooKeeperConnectString(), 10000, event -> {
+            if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+                connected.countDown();
+            }
+        }) {
+            @Override
+            public void multi(Iterable<Op> operations, MultiCallback callback, Object context) {
+                super.multi(operations, (code, path, ignored, results) -> {
+                    List<OpResult> delivered = results;
+                    if (code == Code.OK.intValue() && results != null && !results.isEmpty()
+                            && results.get(0) instanceof OpResult.CreateResult created) {
+                        delivered = new ArrayList<>(results);
+                        delivered.set(0, new OpResult.CreateResult(created.getPath(), null));
+                    }
+                    callback.processResult(code, path, context, delivered);
+                }, context);
+            }
+        }) {
+            assertTrue(connected.await(5, TimeUnit.SECONDS));
+            var writer = new ZKProfileReservationStore(noStatClient, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            var created = writer.createFresh(reservation());
+            assertEquals(CreateStatus.DURABILITY_UNKNOWN, created.status());
+            assertNull(created.claim());
+            var history = store(second).read(44);
+            assertEquals(ReadStatus.FOUND, history.status());
+            assertEquals(reservation(), history.snapshot().reservation());
+            assertEquals(0, second.exists(writer.path(44), false).getVersion());
+            var duplicate = store(second).createFresh(reservation());
+            assertEquals(CreateStatus.CONFLICT, duplicate.status());
+            assertNull(duplicate.claim());
+            assertEquals(history.snapshot(), writer.read(44).snapshot());
+        }
+    }
+
+    @Test
+    public void freshCreateWithLostCommittedReplyLeavesHistoryWithoutClaim() throws Exception {
+        var writer = store(first);
+        first.loseReply.set(true);
+        var created = writer.createFresh(reservation());
+        assertEquals(CreateStatus.DURABILITY_UNKNOWN, created.status());
+        assertNull(created.claim());
+        var history = store(second).read(44);
+        assertEquals(ReadStatus.FOUND, history.status());
+        assertEquals(reservation(), history.snapshot().reservation());
+        var duplicate = writer.createFresh(reservation());
+        assertEquals(CreateStatus.CONFLICT, duplicate.status());
+        assertNull(duplicate.claim());
+        assertEquals(history.snapshot(), store(second).read(44).snapshot());
+    }
+
+    @Test
+    public void freshCreateRejectsByteIdenticalRecreatedBirthBeforeAfterRead() throws Exception {
+        var writer = store(first);
+        first.holdReply.set(true);
+        var pending = CompletableFuture.supplyAsync(() -> writer.createFresh(reservation()));
+        assertTrue(first.replyHeld.await(5, TimeUnit.SECONDS));
+        var original = store(second).read(44).snapshot();
+        String root = writer.path(44);
+        String head = root + "/lifecycle";
+        String marker = head + "/birth-" + original.lifecycle().birthId();
+        byte[] rootBytes = second.getData(root, false, null);
+        byte[] headBytes = second.getData(head, false, null);
+        second.multi(List.of(Op.delete(marker, 0), Op.delete(head, 0), Op.delete(root, 0),
+                Op.create(root, rootBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                Op.create(head, headBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                Op.create(marker, new byte[0], ZooDefs.Ids.READ_ACL_UNSAFE, CreateMode.PERSISTENT)));
+        var recreated = store(second).read(44).snapshot();
+        assertEquals(original.reservation(), recreated.reservation());
+        assertEquals(original.lifecycle(), recreated.lifecycle());
+        assertTrue(original.birthZxid() != recreated.birthZxid());
+        first.lateReply.get().run();
+        var result = pending.get(5, TimeUnit.SECONDS);
+        assertEquals(CreateStatus.CONFLICT, result.status());
+        assertNull(result.claim());
+        assertEquals(recreated, store(second).read(44).snapshot());
     }
 
     @Test

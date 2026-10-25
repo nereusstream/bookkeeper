@@ -1684,6 +1684,19 @@ public final class ProfileRecoveryCoordinator {
     /** Independent closed open; supplied clients remain borrowed through cold drain and delivered-handle use. */
     public ReadOnlyOperation beginOpenReadOnly(long ledger, ClientContext sdk,
             byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries) {
+        return beginOpenReadOnly(ledger, sdk, password, supplied, maxReadEntries, false);
+    }
+
+    /** An owned cohort can include standbys; retain only source IDs from the fresh CLOSED observation.
+     * Retained members still undergo the factory's exact incarnation/context checks. */
+    public ReadOnlyOperation beginOpenReadOnly(long ledger, ClientContext sdk,
+            byte[] password, ProfileRecoveryPeerPool.Lease supplied, int maxReadEntries) {
+        return beginOpenReadOnly(ledger, sdk, password, supplied.data(), maxReadEntries, true);
+    }
+
+    private ReadOnlyOperation beginOpenReadOnly(long ledger, ClientContext sdk,
+            byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries,
+            boolean ownedCohort) {
         if (supplied.size() > 64 || maxReadEntries < 1 || maxReadEntries > 256) {
             throw new IllegalArgumentException("Readonly pool or request bound is invalid");
         }
@@ -1708,8 +1721,14 @@ public final class ProfileRecoveryCoordinator {
                 }
                 org.apache.bookkeeper.client.LedgerHandle handle = null;
                 try {
+                    var readers = ownedCohort ? peers.entrySet().stream().filter(entry -> read.snapshot().sources()
+                            .stream().anyMatch(source -> source.scope().targetBookie()
+                                .equals(entry.getKey().toString())))
+                            .collect(java.util.stream.Collectors.toUnmodifiableMap(
+                                Map.Entry::getKey, Map.Entry::getValue))
+                            : peers;
                     handle = org.apache.bookkeeper.client.ProfileLedgerHandle.fromClosedRead(sdk, read.snapshot(),
-                            owned, peers, maxReadEntries);
+                            owned, readers, maxReadEntries);
                     operation.undelivered = handle;
                     var after = reservations.readClosedForOpen(metadata, ledger);
                     if (after.snapshot() == null) {

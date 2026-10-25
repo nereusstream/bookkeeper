@@ -1734,3 +1734,16 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 ```
 
 1155模型输入与同轮Java的274重合SHA匹配；Java新增3项及相关14项以真实file/ZK/mTLS、暂停cold/ordered工作、实际CONTROL output promise和lease提供输入事实。模型不区分Java异常清理策略、不证明fsync、TLS、完整字节账本、liveness或writer create。命令、raw output、coverage、指定trace及源绑定在 `/Users/liusinan/.codex/artifacts/unified-wal/writer-close-actual-evidence-4910d169/models`；声明目录增加4配置不代表本轮执行全部目录。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+## SDK fresh create 的发行归属与实际排空
+
+2026-10-25，父源码 `9ef30669e407e913f0f3456d0470d853a9c689af`。[显式fresh create](../profile-wire/README.md#显式-sdk-fresh-create-与-writer-归属)在ProfileInitialAvailability末尾追加独立CreateSDKSpec；原Spec正文与8旧cfg字节保持，旧PASS不移绑。复用原all-E actions，不重复新增ack-only反例。有限范围为单ledger/同SDK最多两次attempt、三个target的active/refusal、opaque native APPLIED或uncertain/existing READY输入，以及private work/config、writer、lease/pool各自实际终态。相同完整请求重试、同ledger mismatch保留原claim、handoff消费claim及cancel/global stop保留实际依赖均有约束。
+
+只执行新增5配置。`a-profile-initial-availability-sdk-create`完整PASS（9442 generated/4059 distinct、queue0）。四CE的实际exit均12：`origin`以matching observation替代native proof，2058 distinct时违反CreateWriterHasNativeBirth；`claim`交付保留claim，2044状态时违反CreateHandoffConsumesClaim；`work`以caller stop提前释放lease，147状态时违反CreatePrivateWorkPinsLease；`writer`未交付writer尚closing便释放lease，2266状态时违反CreateUndeliveredWriterPinsLease。四者有指定trace，不是正向PASS或完整状态搜索；目录779配置不表示本轮执行779项。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-initial-availability-sdk- --config-prefix ce-profile-initial-availability-sdk-
+```
+
+1161模型输入与同轮1181冻结Java输入的275重合SHA相同，合并2067个unique输入。Java定向11项及扩大四类68项提供native ZK birth/ABA、真实文件/TLS/SDK/registration、丢回复、output promise与实际排空事实。投影没有实现原生ZK算法、密码学、显式CLOSED recovery、完整字节账本、任意外部executor、fairness/liveness或完整A+C+D。源码/命令/manifest、raw output/coverage/trace与终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-create-evidence-9ef30669/models`。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。

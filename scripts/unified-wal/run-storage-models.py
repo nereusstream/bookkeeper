@@ -588,6 +588,11 @@ MATRIX = {
     'ce-profile-initial-availability-rebuild': 'RequiredMetadataIsNeverRebuilt',
     'ce-profile-initial-availability-delete': 'AvailabilityObservesReadyNotDelete',
     'ce-profile-initial-availability-metadata': 'AvailabilityHasMatchingMetadataFact',
+    'a-profile-initial-availability-sdk-create': None,
+    'ce-profile-initial-availability-sdk-origin': 'CreateWriterHasNativeBirth',
+    'ce-profile-initial-availability-sdk-claim': 'CreateHandoffConsumesClaim',
+    'ce-profile-initial-availability-sdk-work': 'CreatePrivateWorkPinsLease',
+    'ce-profile-initial-availability-sdk-writer': 'CreateUndeliveredWriterPinsLease',
     'a-profile-ready-lifecycle': None,
     'ce-profile-ready-lifecycle-inert': 'ActivationHasPublishedReady',
     'ce-profile-ready-lifecycle-head-birth': 'BirthChecksProtectTheCurrentRoot',
@@ -903,7 +908,8 @@ def main():
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning").glob("*.java"))
     inputs.extend(root / name for name in [
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileBookieClient.java",
-        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileReadOnlyClient.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileCreateRequest.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileLedgerClient.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileLedgerHandle.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileLacEvidenceRead.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileRecoveryReadHandle.java",

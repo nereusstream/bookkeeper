@@ -36,6 +36,7 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -65,11 +66,13 @@ import org.apache.bookkeeper.client.api.ListLedgersResultBuilder;
 import org.apache.bookkeeper.client.api.OpenBuilder;
 import org.apache.bookkeeper.client.api.WriteFlag;
 import org.apache.bookkeeper.common.allocator.ByteBufAllocatorBuilder;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.common.util.OrderedScheduler;
 import org.apache.bookkeeper.common.util.ReflectionUtils;
 import org.apache.bookkeeper.conf.AbstractConfiguration;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool;
 import org.apache.bookkeeper.feature.FeatureProvider;
@@ -152,7 +155,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     // Close State
     boolean closed = false;
     final ReentrantReadWriteLock closeLock = new ReentrantReadWriteLock();
-    private ProfileReadOnlyClient profileReadOnly;
+    private ProfileLedgerClient profileLedgerClient;
     private boolean classicCloseStarted;
 
     /**
@@ -1535,12 +1538,50 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
             if (closed) {
                 throw BKException.create(BKException.Code.ClientClosedException);
             }
-            if (profileReadOnly != null) {
+            if (profileLedgerClient != null) {
                 throw BKException.create(BKException.Code.IllegalOpException);
             }
-            profileReadOnly = new ProfileReadOnlyClient(clientCtx, coordinator, ownedPool, maxReadEntries);
+            profileLedgerClient = new ProfileLedgerClient(clientCtx, coordinator, ownedPool, maxReadEntries);
         } finally {
             closeLock.writeLock().unlock();
+        }
+    }
+
+    /** Enable explicit initial Profile creates and CLOSED opens with one exclusively owned, unused peer pool.
+     * Create inputs must carry their own existing reservation identity; this SDK synthesizes no authority. */
+    public void enableProfile(ProfileInitialLifecycleCoordinator initializer, ProfileRecoveryCoordinator recovery,
+            ProfileDescriptorValidator validator, ProfileRecoveryPeerPool ownedPool, int maxReadEntries)
+            throws BKException {
+        Objects.requireNonNull(initializer, "initializer");
+        Objects.requireNonNull(validator, "validator");
+        closeLock.writeLock().lock();
+        try {
+            if (closed) {
+                throw BKException.create(BKException.Code.ClientClosedException);
+            }
+            if (profileLedgerClient != null) {
+                throw BKException.create(BKException.Code.IllegalOpException);
+            }
+            profileLedgerClient = new ProfileLedgerClient(clientCtx, initializer, recovery, validator,
+                    ownedPool, maxReadEntries);
+        } finally {
+            closeLock.writeLock().unlock();
+        }
+    }
+
+    /** Create only from this SDK's acknowledged fresh origin, then expose the existing bounded Profile writer. */
+    public CompletableFuture<LedgerHandle> createProfileLedger(ProfileCreateRequest request) {
+        closeLock.readLock().lock();
+        try {
+            if (closed) {
+                return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+            }
+            if (profileLedgerClient == null) {
+                return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
+            }
+            return profileLedgerClient.create(request);
+        } finally {
+            closeLock.readLock().unlock();
         }
     }
 
@@ -1551,10 +1592,10 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
             if (closed) {
                 return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
             }
-            if (profileReadOnly == null) {
+            if (profileLedgerClient == null) {
                 return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
             }
-            return profileReadOnly.open(ledgerId, password);
+            return profileLedgerClient.open(ledgerId, password);
         } finally {
             closeLock.readLock().unlock();
         }
@@ -1563,10 +1604,10 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     /** Shuts down client after any owned Profile work and peer lease actually drain. */
     @Override
     public void close() throws BKException, InterruptedException {
-        ProfileReadOnlyClient profile;
+        ProfileLedgerClient profile;
         closeLock.writeLock().lock();
         try {
-            profile = profileReadOnly;
+            profile = profileLedgerClient;
             if (closed && (profile == null || classicCloseStarted)) {
                 return;
             }

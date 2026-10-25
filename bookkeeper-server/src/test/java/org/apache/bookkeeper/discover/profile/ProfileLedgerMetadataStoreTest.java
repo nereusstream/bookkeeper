@@ -114,9 +114,11 @@ public class ProfileLedgerMetadataStoreTest extends ProfileZKTestBase {
         vector[20]++;
         assertThrows(IllegalArgumentException.class, () -> ProfileMetadataBacklink.decode(vector));
         assertThrows(IllegalArgumentException.class, () -> ProfileMetadataBacklink.decode(new byte[51]));
-        LedgerMetadata attached = value.attachTo(metadata());
+        LedgerMetadata attached = value.attachTo(LedgerMetadataBuilder.from(metadata()).withCToken(12003).build());
+        assertEquals(12003, attached.getCToken());
         assertArrayEquals(new byte[]{7}, attached.getCustomMetadata().get("user"));
         assertEquals(value, ProfileMetadataBacklink.from(value.attachTo(attached)));
+        assertEquals(12003, value.attachTo(attached).getCToken());
         assertThrows(IllegalArgumentException.class, () -> backlink(1, 3).attachTo(attached));
         assertThrows(IllegalArgumentException.class, () -> value.attachTo(
                 LedgerMetadataBuilder.from(metadata()).withId(45).build()));

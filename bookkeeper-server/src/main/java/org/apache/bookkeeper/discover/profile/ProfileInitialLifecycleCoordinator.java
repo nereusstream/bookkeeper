@@ -27,6 +27,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
+import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
@@ -107,6 +108,53 @@ public final class ProfileInitialLifecycleCoordinator {
             byte[] descriptor, ProtectedProfileCredential credential,
             Map<String, ProfileInitialMetadataCoordinator.Target> installers, Map<String, Target> suppliedActivators,
             byte[] readyOperationId, byte[] readyPayloadIdentity) {
+        return initialize(desired, reservation, descriptor, credential, installers, suppliedActivators,
+                readyOperationId, readyPayloadIdentity, null);
+    }
+
+    /** Only a definite absence of standard metadata permits an attempt to claim a fresh native birth. */
+    public CompletableFuture<ZKProfileReservationStore.FreshCreateResult> claimFresh(ProfileReservation reservation) {
+        Objects.requireNonNull(reservation, "reservation");
+        CompletableFuture<Versioned<LedgerMetadata>> current;
+        try {
+            current = Objects.requireNonNull(metadata.manager().readLedgerMetadata(reservation.backlink().ledgerId()),
+                    "metadata read future");
+        } catch (RuntimeException unavailable) {
+            return CompletableFuture.completedFuture(new ZKProfileReservationStore.FreshCreateResult(
+                    ZKProfileReservationStore.CreateStatus.DURABILITY_UNKNOWN, null));
+        }
+        return current.handle((existing, failed) -> {
+            if (failed == null) {
+                return CompletableFuture.completedFuture(new ZKProfileReservationStore.FreshCreateResult(
+                        ZKProfileReservationStore.CreateStatus.CONFLICT, null));
+            }
+            if (BKException.getExceptionCode(failed)
+                    != BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {
+                return CompletableFuture.completedFuture(new ZKProfileReservationStore.FreshCreateResult(
+                        ZKProfileReservationStore.CreateStatus.DURABILITY_UNKNOWN, null));
+            }
+            return cold(() -> reservations.createFresh(reservation));
+        }).thenCompose(future -> future).exceptionally(failed -> new ZKProfileReservationStore.FreshCreateResult(
+                ZKProfileReservationStore.CreateStatus.DURABILITY_UNKNOWN, null));
+    }
+
+    /** Resume only the same store's acknowledged fresh birth, without reconstructing or recreating its origin. */
+    public CompletableFuture<Result> initializeFresh(ZKProfileReservationStore.FreshInitialClaim claim,
+            LedgerMetadata desired, ProfileReservation reservation, byte[] descriptor,
+            ProtectedProfileCredential credential, Map<String, ProfileInitialMetadataCoordinator.Target> installers,
+            Map<String, Target> suppliedActivators, byte[] readyOperationId, byte[] readyPayloadIdentity) {
+        Objects.requireNonNull(claim, "claim");
+        if (!claim.issuedBy(reservations) || !claim.origin().reservation().equals(reservation)) {
+            return completed(Status.CONFLICT, null, List.of());
+        }
+        return initialize(desired, reservation, descriptor, credential, installers, suppliedActivators,
+                readyOperationId, readyPayloadIdentity, claim);
+    }
+
+    private CompletableFuture<Result> initialize(LedgerMetadata desired, ProfileReservation reservation,
+            byte[] descriptor, ProtectedProfileCredential credential,
+            Map<String, ProfileInitialMetadataCoordinator.Target> installers, Map<String, Target> suppliedActivators,
+            byte[] readyOperationId, byte[] readyPayloadIdentity, ZKProfileReservationStore.FreshInitialClaim claim) {
         var plan = initial.freeze(desired, reservation, descriptor, credential, installers);
         Map<String, Target> activators = Map.copyOf(suppliedActivators);
         byte[] operation = ProfileLifecycleHead.fixed(readyOperationId, 16, true);
@@ -131,12 +179,18 @@ public final class ProfileInitialLifecycleCoordinator {
                 return completed(Status.UNCERTAIN, null, List.of());
             }
             if (read.status() == ReadStatus.NOT_FOUND) {
+                if (claim != null) {
+                    return completed(Status.UNCERTAIN, null, List.of());
+                }
                 return cold(() -> reservations.createIfAbsent(reservation)).thenCompose(created ->
                         created.snapshot() == null ? completed(map(created.status()), null, List.of())
-                                : resume(plan, activators, operation, payload, created.snapshot()));
+                                : resume(plan, activators, operation, payload, created.snapshot(), null));
+            }
+            if (read.status() == ReadStatus.FOUND && claim != null && !sameOrigin(claim, read.snapshot())) {
+                return completed(Status.CONFLICT, null, List.of());
             }
             return read.status() == ReadStatus.FOUND
-                    ? resume(plan, activators, operation, payload, read.snapshot())
+                    ? resume(plan, activators, operation, payload, read.snapshot(), claim)
                     : completed(read.status() == ReadStatus.QUARANTINED ? Status.QUARANTINED : Status.UNCERTAIN,
                             null, List.of());
         }).thenCompose(future -> future).exceptionally(failed -> {
@@ -153,7 +207,8 @@ public final class ProfileInitialLifecycleCoordinator {
 
     private CompletableFuture<Result> resume(ProfileInitialMetadataCoordinator.Plan plan, Map<String,
             Target> activators,
-            byte[] operation, byte[] payload, ZKProfileReservationStore.Snapshot origin) {
+            byte[] operation, byte[] payload, ZKProfileReservationStore.Snapshot origin,
+            ZKProfileReservationStore.FreshInitialClaim claim) {
         if (!origin.reservation().equals(plan.reservation())) {
             return completed(Status.CONFLICT, null, List.of());
         }
@@ -175,7 +230,7 @@ public final class ProfileInitialLifecycleCoordinator {
                     if (!candidate.page().page().matchesMetadata(verified.metadata())) {
                         return completed(Status.CONFLICT, candidate.page(), List.of());
                     }
-                    return publishAndActivate(plan, activators, origin, candidate.page());
+                    return publishAndActivate(plan, activators, origin, candidate.page(), claim);
                 });
             }
             if (origin.lifecycle().state() != ProfileLifecycleHead.State.PREPARING) {
@@ -199,7 +254,8 @@ public final class ProfileInitialLifecycleCoordinator {
                                 ? Status.QUARANTINED : Status.UNCERTAIN, null, List.of());
                     }
                     if (!current.snapshot().reservation().equals(origin.reservation())
-                            || !current.snapshot().lifecycle().birthId().equals(origin.lifecycle().birthId())) {
+                            || !current.snapshot().lifecycle().birthId().equals(origin.lifecycle().birthId())
+                            || claim != null && !sameOrigin(claim, current.snapshot())) {
                         return completed(Status.CONFLICT, null, List.of());
                     }
                     if (current.snapshot().lifecycle().state() == ProfileLifecycleHead.State.DELETE_INTENT) {
@@ -209,7 +265,7 @@ public final class ProfileInitialLifecycleCoordinator {
                     return cold(() -> reservations.prepareReady(origin, page,
                             metadata.manager())).thenCompose(prepared ->
                             prepared.page() == null ? completed(map(prepared.status()), null, List.of())
-                                    : publishAndActivate(plan, activators, origin, prepared.page()));
+                                    : publishAndActivate(plan, activators, origin, prepared.page(), claim));
                 });
             });
         });
@@ -223,10 +279,13 @@ public final class ProfileInitialLifecycleCoordinator {
 
     private CompletableFuture<Result> publishAndActivate(ProfileInitialMetadataCoordinator.Plan plan,
             Map<String, Target> activators, ZKProfileReservationStore.Snapshot origin,
-            ZKProfileReservationStore.ReadySnapshot page) {
+            ZKProfileReservationStore.ReadySnapshot page, ZKProfileReservationStore.FreshInitialClaim claim) {
         return cold(() -> reservations.publishReady(origin, page, metadata.manager())).thenCompose(published -> {
             if (published.snapshot() == null) {
                 return completed(map(published.status()), page, List.of());
+            }
+            if (claim != null && !sameOrigin(claim, published.snapshot())) {
+                return completed(Status.CONFLICT, page, List.of());
             }
             if (published.snapshot().lifecycle().state() == ProfileLifecycleHead.State.DELETE_INTENT) {
                 return completed(Status.DELETED, page, List.of());
@@ -280,6 +339,9 @@ public final class ProfileInitialLifecycleCoordinator {
                             return result(read.status() == ReadStatus.QUARANTINED
                                     ? Status.QUARANTINED : Status.UNCERTAIN, page, active);
                         }
+                        if (claim != null && !sameOrigin(claim, read.snapshot())) {
+                            return result(Status.CONFLICT, page, active);
+                        }
                         ProfileLifecycleHead head = read.snapshot().lifecycle();
                         if (head.state() == ProfileLifecycleHead.State.DELETE_INTENT) {
                             return result(Status.DELETED, page, active);
@@ -295,6 +357,16 @@ public final class ProfileInitialLifecycleCoordinator {
                 });
             });
         });
+    }
+
+    private static boolean sameOrigin(ZKProfileReservationStore.FreshInitialClaim claim,
+            ZKProfileReservationStore.Snapshot current) {
+        var origin = claim.origin();
+        return current.birthZxid() == origin.birthZxid()
+                && current.storeVersion() == origin.storeVersion()
+                && current.rootDataVersion() == origin.rootDataVersion()
+                && current.reservation().equals(origin.reservation())
+                && current.lifecycle().birthId().equals(origin.lifecycle().birthId());
     }
 
     private <T> CompletableFuture<T> cold(Supplier<T> operation) {

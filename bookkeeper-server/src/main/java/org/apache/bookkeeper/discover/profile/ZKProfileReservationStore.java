@@ -42,8 +42,10 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStat
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.versioning.Versioned;
 import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.CreateOptions;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.Op;
+import org.apache.zookeeper.OpResult;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.common.PathUtils;
@@ -181,6 +183,34 @@ public final class ZKProfileReservationStore {
             Objects.requireNonNull(status, "status");
             if ((status == CreateStatus.APPLIED || status == CreateStatus.ALREADY_APPLIED) != (snapshot != null)) {
                 throw new IllegalArgumentException("Only proved lifecycle mutation carries a snapshot");
+            }
+        }
+    }
+
+    /** This store's acknowledged atomic birth, never a claim reconstructed from historical input. */
+    public static final class FreshInitialClaim {
+        private final ZKProfileReservationStore issuer;
+        private final Snapshot origin;
+
+        private FreshInitialClaim(ZKProfileReservationStore issuer, Snapshot origin) {
+            this.issuer = issuer;
+            this.origin = origin;
+        }
+
+        public Snapshot origin() {
+            return origin;
+        }
+
+        boolean issuedBy(ZKProfileReservationStore store) {
+            return issuer == store;
+        }
+    }
+
+    public record FreshCreateResult(CreateStatus status, FreshInitialClaim claim) {
+        public FreshCreateResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == CreateStatus.APPLIED) != (claim != null)) {
+                throw new IllegalArgumentException("Only an acknowledged fresh birth carries its claim");
             }
         }
     }
@@ -335,6 +365,55 @@ public final class ZKProfileReservationStore {
             return new CreateResult(submitted ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.UNAVAILABLE, null);
         } catch (TimeoutException timeout) {
             return new CreateResult(submitted ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.UNAVAILABLE, null);
+        }
+    }
+
+    /** Create this invocation's native origin; neither an ambiguous result nor a reread mints authority. */
+    public FreshCreateResult createFresh(ProfileReservation desired) {
+        Objects.requireNonNull(desired, "desired");
+        byte[] bytes = ProfileReservationCodec.encode(desired);
+        var first = desired.installs().get(0);
+        ProfileLifecycleHead head = new ProfileLifecycleHead(desired.backlink(), ProfileLifecycleCodec.digest(bytes),
+                UUID.randomUUID(), ProfileLifecycleHead.State.PREPARING, 1, 0, first.authorityGeneration(),
+                first.operationId(), first.publicSemanticPayloadIdentity(), -1, new byte[32]);
+        long ledger = desired.backlink().ledgerId();
+        List<String> paths = List.of(path(ledger), headPath(ledger), marker(headPath(ledger), head.birthId()));
+        long deadline = System.nanoTime() + timeoutNanos;
+        boolean submitted = false;
+        try {
+            ProfileZKReadClient.requireTime(deadline);
+            List<Op> operations = List.of(
+                    Op.create(paths.get(0), bytes, CreateOptions.newBuilder(acls, CreateMode.PERSISTENT).build()),
+                    Op.create(paths.get(1), ProfileLifecycleCodec.encode(head),
+                            CreateOptions.newBuilder(acls, CreateMode.PERSISTENT).build()),
+                    Op.create(paths.get(2), new byte[0],
+                            CreateOptions.newBuilder(immutableAcls, CreateMode.PERSISTENT).build()));
+            submitted = true;
+            FreshCreateReply reply = freshCreate(operations, paths, deadline);
+            if (reply.code() != Code.OK.intValue()) {
+                return new FreshCreateResult(reply.code() == Code.NODEEXISTS.intValue()
+                        ? CreateStatus.CONFLICT : CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            if (reply.birthZxid() < 0) {
+                return new FreshCreateResult(CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            ReadResult current = read(ledger, deadline);
+            if (current.status() != ReadStatus.FOUND) {
+                return new FreshCreateResult(current.status() == ReadStatus.QUARANTINED
+                        ? CreateStatus.QUARANTINED : CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            Snapshot origin = current.snapshot();
+            if (origin.birthZxid() != reply.birthZxid() || origin.rootDataVersion() != 0
+                    || origin.storeVersion() != reply.birthZxid()
+                    || !origin.reservation().equals(desired) || !origin.lifecycle().equals(head)) {
+                return new FreshCreateResult(CreateStatus.CONFLICT, null);
+            }
+            return new FreshCreateResult(CreateStatus.APPLIED, new FreshInitialClaim(this, origin));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new FreshCreateResult(submitted ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new FreshCreateResult(submitted ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.UNAVAILABLE, null);
         }
     }
 
@@ -5802,6 +5881,37 @@ public final class ZKProfileReservationStore {
         ProfileZKReadClient.requireTime(deadline);
         CompletableFuture<Integer> reply = new CompletableFuture<>();
         zk.multi(operations, (code, ignored, context, results) -> reply.complete(code), null);
+        return ProfileZKReadClient.await(reply, deadline);
+    }
+
+    private record FreshCreateReply(int code, long birthZxid) { }
+
+    private FreshCreateReply freshCreate(List<Op> operations, List<String> paths, long deadline)
+            throws InterruptedException, TimeoutException {
+        ProfileZKReadClient.requireTime(deadline);
+        CompletableFuture<FreshCreateReply> reply = new CompletableFuture<>();
+        zk.multi(operations, (code, ignored, context, results) -> {
+            long birth = -1;
+            if (code == Code.OK.intValue() && results != null && results.size() == 3) {
+                for (int index = 0; index < 3; index++) {
+                    if (!(results.get(index) instanceof OpResult.CreateResult created)
+                            || created.getType() != ZooDefs.OpCode.create2
+                            || !paths.get(index).equals(created.getPath())) {
+                        birth = -1;
+                        break;
+                    }
+                    Stat stat = created.getStat();
+                    if (stat == null || stat.getEphemeralOwner() != 0 || stat.getVersion() != 0
+                            || stat.getCzxid() <= 0 || stat.getMzxid() != stat.getCzxid()
+                            || index > 0 && stat.getCzxid() != birth) {
+                        birth = -1;
+                        break;
+                    }
+                    birth = stat.getCzxid();
+                }
+            }
+            reply.complete(new FreshCreateReply(code, birth));
+        }, null);
         return ProfileZKReadClient.await(reply, deadline);
     }
 

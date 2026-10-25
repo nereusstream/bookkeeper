@@ -2460,3 +2460,31 @@ sdk.isClientClosed 的准入没有绕过：显式 close 虽已被本地接受，
 下一步显式 create 必须区分 control续接与 writer发行：依据 RFC-0001 §6.4 的 no-takeover 合同和原 Classic create 语义，新 owner 只能消费自己取得的原子 reservation APPLIED/fresh lifecycle birth；matching metadata/CToken/READY/activation、空LAC或只读未找到DATA都不授予重新发行 writer。仅同 SDK、同 fresh-origin、从未进入writer交接的操作可续接；reservation UNKNOWN 不得靠 matching 重读自认新 owner，已有OPEN进入原恢复/只读路径。当前尚未实现这一public create gate，不把相同READY重放变成 P=-1/length0 的新 normal writer。
 
 本轮没有新 wire/持久格式、SDK-closed bypass 或默认路由，完整create/Main可信issuer/full-bytes/B11/恢复GC/兼容/正式性能及其余16步继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 显式 SDK fresh create 与 writer 归属
+
+2026-10-25，父源码 `9ef30669e407e913f0f3456d0470d853a9c689af`。按用户选择，具体 BookKeeper 新增 `enableProfile(initializer, recovery, validator, ownedPool, maxReadEntries)` 和 `createProfileLedger(ProfileCreateRequest)`；已有只读 enable/open 保留。默认 builder 继续 Classic，缺少显式可信环境时拒绝 Profile 操作。原单 owner 重命名为 ProfileLedgerClient，create、cold open、交付 writer/reader 共用一个活动槽位；没有新增 executor、自动 authority 或默认 routing。
+
+ProfileCreateRequest 在同步构造时深拷贝 metadata password/custom bytes、descriptor、credential 和 READY identities，并保留 ctime/CToken；getter 不暴露这些私有数组。请求明确给出 writer/retry/close bounds，校验初始 v3 OPEN/CRC32C、ordered E/W/A、backlink/credential 和 descriptor。SDK 要求已有受支持配置及未使用的独占 registered pool。先核对 reservation 全 E 的 CONTROL/DATA peer 与 HELLO/incarnation/capabilities，再产生持久副作用；额外 cohort 成员仅保留 lease，不安装、激活或参加 normal DATA。
+
+新 SDK 不能从 matching READY 或 metadata 再发行 P=-1 的 writer。claimFresh 先要求标准 metadata 确定不存在，再以原三个节点的原子 CREATE2 transaction 取得原生 Stat：三个结果必须具备同一 positive czxid、persistent/version0、mzxid=czxid 和正确路径。随后原读取必须仍匹配这个 native birth、minted lifecycle UUID 与完整 reservation，才交付由该 store 私有构造的 FreshInitialClaim。NODEEXISTS、空 Stat、提交后丢回复、UNKNOWN 或事后 matching reread 都不产生 claim；现有格式、根与历史保留不变，不做回滚或删除。
+
+initializeFresh 仅接受同一 store 发出的 claim，并在原初始化各边界核对原生 root birth/version 与 lifecycle birth。已持有起点只能重新检查，缺失时不再 createIfAbsent；相同字节、相同 UUID 的 native ABA 也不能成为原起点。仍复用全 E inactive INSTALL → 标准 metadata → READY → 全 E ACTIVATE 与最终 recheck。AVAILABLE 后先配置原 durable writer close，再安装 owner 实际终止 hook，最后才可能交付原 ProfileLedgerHandle。
+
+同 SDK 仅保留一个完整原请求与已确认 fresh claim，用于尚未进入 writer handoff 的失败/未知续接；同 ledger 不同请求拒绝且保留原请求，不覆盖旧 intent。不同 ledger 请求可以放弃这一个本地上下文，持久历史继续保留。一旦进入可能可见的 handoff，origin 即消费，外部修改公开 future 不能恢复它。SDK 停止会放弃本地续接资格；其他 SDK 对已有 OPEN/READY/CLOSED 只得到 exists，不能接管旧 writer。
+
+caller cancel 或 SDK close 不取消私有 claim/initialize/config 链。未交付 writer 本地停止；已交付 writer 复用 stopOwnedWrites，等待 DATA/header 和已接受显式 close 的实际终止，再释放 lease/pool，最后关闭 SDK metadata/executors。全局 SDK stop 不自动发布 IN_RECOVERY/CLOSED；普通显式 close 仍固定 P/length，成功 callback 等 lease 实际终态。同步 self-drain 依据原 SDK worker、单线程 scheduler 与 pool event loop 身份提前拒绝。CLOSED readonly 的 owned-lease overload 仅从 fresh CLOSED snapshot 过滤非 retained standby；保留成员仍执行原 incarnation/context 检查，原 map overload 的严格条件保持。
+
+新增六项真实网络方法：四台实际 ServiceEpisode/registration 上的 immutable request→fresh create→两项 normal DATA→固定P/length close→同SDK CLOSED readonly，第四standby的control cut/可读context/DATA未变化；双SDK在首个all-E INSTALL force尚未完成时竞争，只有fresh winner可交付writer，随后hold实际ADD output promise，SDK close保留六连接与metadata/executors至实际终结，metadata保持OPEN、另一SDK不重发writer；两阶段all-E与READY delete cut；丢ACTIVATE回复后的mismatch拒绝及原请求续接；cancel/SDK close等待实际activation force；已持claim后的missing root/原字节UUID native ABA首次和exact retry均拒绝、不重建、不发DATA。另新增四项真实ZK transaction方法覆盖fresh Stat/duplicate、空Stat/提交后丢回复及receipt后reread前ABA；现有backlink方法补非零CToken保留。调用方CToken仅为冻结请求内容，标准manager仍按原行为生成本次物理create的新CToken，不将caller token当作发行权。
+
+定向 **11项**及扩大四类 **68项**均为本次实际exit0、0 failure/error/skip；扩大结果包含前11项，分别为Socket20、Classic LedgerRecovery12、ProfileLedgerMetadataStore19、ZKProfileReservationStore17。1177个runner输入与1181个含addon的冻结Java输入逐项匹配；Spotless/Checkstyle exit0。ProfileInitialAvailability只追加独立CreateSDKSpec，原Spec正文与8旧cfg字节保持；只运行新增5配置，1正向完整PASS（9442 generated/4059 distinct、queue0），4指定CE分别违反CreateWriterHasNativeBirth、CreateHandoffConsumesClaim、CreatePrivateWorkPinsLease、CreateUndeliveredWriterPinsLease，均为实际TLC exit12与对应trace。1161模型输入与Java的275重合SHA相同，合并2067个unique输入。有限范围为单ledger/同SDK至多两attempt、三个target；原生birth/fsync/TLS/线程终态由真实Java路径提供，不证明完整字节账本、liveness或完整A+C+D。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#publicProfileCreate*,ZKProfileReservationStoreTest#freshCreate*,ProfileLedgerMetadataStoreTest#fixedBacklinkVectorAndImmutableCopyRejectMalformedOrDifferentScope'
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-initial-availability-sdk- --config-prefix ce-profile-initial-availability-sdk-
+```
+
+源码字节、完整扩大选择/用例身份、Java XML/log、模型manifest/raw output/trace与实际终态由 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-create-evidence-9ef30669` 保存。全部Java/style/模型终态后独立RAT实际exit1，443条均为父HEAD既有路径、集合无新增；441路径字节不变，原已未批准的ProfileInitialAvailability与model runner改动的license header不变，不称CI全绿。三个原临时根只在终态/无句柄/逐文件同inode与SHA检查后移除，hardlink归档全部保留，常规文件数据实际回收0 B。
+
+本节闭合显式fresh create/初始writer的可调用SDK入口；普通Add没有新增MetadataStore/handshake/control fsync。历史PASS保持原source绑定。默认routing、多ledger并发SDK pool、Main可信commissioning/OS隔离/credential/exact-policy输入、完整full-bytes/B11、恢复接受下界、历史GC/mixed兼容/正式性能及其余16步仍OPEN。完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

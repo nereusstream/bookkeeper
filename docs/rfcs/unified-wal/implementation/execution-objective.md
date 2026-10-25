@@ -1,5 +1,7 @@
 目标：按已经确认并写入现有文档的 Unified WAL 16 步施工顺序，在本会话持续实施、验证并同步文档，逐步达到首个可保留数据生产候选的可审查交付。先实施步骤1～4，紧接步骤5～7形成真实写入—点读—重启恢复闭环，再按依赖推进8～10索引/回收/长期运行、11～15网络/MetadataStore/客户端/恢复/删除/rejoin，以及16综合验收与运维交付。不要只给建议或再次整理计划，也不要在完成一个小模块后自行停止整个目标。
 
+SDK 入口决策：用户2026-10-25已选择显式 Profile create/open，先接 CLOSED 只读 open 与实际排空；不再为同一入口选择重复提问。normal writer create 必须有本次原子 fresh origin，不能从已有 READY/OPEN 重建 P=-1 writer。
+
 运行方式：按用户2026-10-25最新授权，本会话作为唯一实施主会话，可以使用多 agent 处理职责边界明确的子任务，由主会话统一变更集、验证和本地提交。模型与推理档按用户2026-10-25最新指定，主会话及后续agent统一使用 `gpt-6.1-sol` / `xhigh`（极高）；新agent显式指定该配置，不恢复旧模型agent继续执行。下文历史迁移记录中的旧型号及禁止子agent安排保留为历史。子agent应明确文件或只读职责边界，保护彼此改动；不通过另一CLI启动第二个编码agent，不另开独立实施会话。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 继续负责总体规划与只读检查。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
 
 SDK接入方式：按用户2026-10-25答复，首版采用显式 Profile create/open，先接CLOSED只读open与实际排空。默认Classic行为和缺少可信Profile环境时的拒绝保持；这不授予same-ledger writer takeover。继续实现public create时，必须持有自身取得的原子fresh reservation/lifecycle birth，不把control的matching READY续接当作新writer发行。
@@ -287,3 +289,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [Writer close 的实际终态与排队关闭](profile-wire/README.md#writer-close-的实际终态与排队关闭)：2026-10-25父4910d16933上，beginCloseWriter分开bounded result与actualCompleted；包内writer owner将已接受但尚未freeze的close纳入实际排空，local-stop先赢不发布CLOSED，成功callback等待lease、失败/deadline保持原回复。三项真实定向与相关14项全部通过、style通过，新增有限模型1正向/3指定反例符合预期，旧Spec/8cfg保持原绑定；独立RAT仍443既有路径无新增，原证据由上述canonical节拥有。用户已选择显式create/open；public create下一项需要原子fresh reservation归属，不能以matching READY重发writer。该入口仍待接入，完整目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[显式 SDK fresh create 与 writer 归属](profile-wire/README.md#显式-sdk-fresh-create-与-writer-归属)：2026-10-25父9ef30669e4上，接公开create与已选readonly入口共用单owner，原生fresh reservation/held birth复核约束writer发行；未交付原请求可在同SDK续接，handoff后不重发，SDK全局stop只本地排空并保留OPEN。定向11项及扩大四类68项全部通过、输入/用例身份匹配，style通过，新增有限模型1正向/4指定反例符合预期、旧Spec/8cfg保留；独立RAT仍443既有路径无新增。完整验收仍按canonical节实际结果判断。后续默认routing/Main可信authority输入、full-bytes/B11、其余恢复/历史GC/兼容/正式性能/综合验收继续OPEN；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。

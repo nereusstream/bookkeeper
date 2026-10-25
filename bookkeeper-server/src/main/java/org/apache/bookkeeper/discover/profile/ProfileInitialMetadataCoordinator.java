@@ -165,12 +165,24 @@ public final class ProfileInitialMetadataCoordinator {
         ProfileReservation reservation = plan.reservation();
         Map<String, Target> targets = plan.targets();
         List<ProfileControlRequest> requests = plan.requests();
-        return cold(() -> reservations.createIfAbsent(reservation)).handle((created, failed) -> {
+        return cold(() -> {
+            if (expected == null) {
+                return reservations.createIfAbsent(reservation);
+            }
+            // An already-held origin can only be checked, never recreated after deletion.
+            var current = reservations.read(reservation.backlink().ledgerId());
+            if (current.status() != ReadStatus.FOUND) {
+                return new ZKProfileReservationStore.CreateResult(current.status() == ReadStatus.QUARANTINED
+                        ? ZKProfileReservationStore.CreateStatus.QUARANTINED
+                        : ZKProfileReservationStore.CreateStatus.DURABILITY_UNKNOWN, null);
+            }
+            return new ZKProfileReservationStore.CreateResult(expected.equals(current.snapshot())
+                    ? ZKProfileReservationStore.CreateStatus.ALREADY_APPLIED
+                    : ZKProfileReservationStore.CreateStatus.CONFLICT,
+                    expected.equals(current.snapshot()) ? current.snapshot() : null);
+        }).handle((created, failed) -> {
             if (failed != null) {
                 return CompletableFuture.completedFuture(result(Status.RESERVATION_UNKNOWN, List.of()));
-            }
-            if (expected != null && created.snapshot() != null && !expected.equals(created.snapshot())) {
-                return CompletableFuture.completedFuture(result(Status.RESERVATION_CONFLICT, List.of()));
             }
             return switch (created.status()) {
                 case APPLIED, ALREADY_APPLIED -> installAll(frozen, reservation, created.snapshot(), targets, requests);
