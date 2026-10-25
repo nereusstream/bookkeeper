@@ -1706,3 +1706,18 @@ python3 scripts/unified-wal/run-storage-models.py --tool /path/to/tla2tools.jar 
 本轮所有model实际终结后的独立 `mvn -o apache-rat:check` exit1：443个unapproved路径逐项存在父HEAD，无新增；原报告与Git对象核验保留。不称CI全绿。
 
 [SDK 迟到 DATA 到删除复用及健康重启的原生组合](../profile-wire/README.md#sdk-迟到-data-到删除复用及健康重启的原生组合)：2026-10-23父bf9c813280上，新增一方法串联实际3/3/2 SDK ACK、第三副本force跨越stop、固定P/L普通close、三目标delete/本地FREE、ledger45复用generation2及逐节点健康restart/mTLS点读。最终1 PASS、1172输入匹配、生产Java/TLA未改、style通过；旧Manifest/三target义务保留。仅单Arena顺序复用的有限组合，非crash、多Arena、持久physical receipt/GC或完整16步验收；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+## SDK CLOSED readonly owner 的实际关闭顺序
+
+2026-10-25，父源码 `cc7b8cdd82610bc145897b477065a7428b8de17f`。[显式 SDK 入口](../profile-wire/README.md#显式-sdk-closed-只读入口与依赖关闭顺序)在原CLOSED coordinator、registered pool与ClosedReader之间增加实际custody；本投影在原ProfileReadonlyOpen模块末尾追加独立SDKInit/SDKNext/SDKSpec及三个单guard mutation。原Init/Next/Spec和既有invariant正文、11个旧cfg均保持原字节，不引入新constant使旧配置失效，不把旧结果移绑新source。
+
+状态分别表达冷打开/未交付handle的drained、交付handle与实际read/output、lease的held/closing/terminal、pool的open/closing/terminal和SDK依赖的held/releasing/terminal。公开open/read/close等待方的取消、外部完成或中断只改变caller状态；实际cold/read/handle/lease/pool终态仍为独立输入。self-thread拒绝在SDK停止前发生。只有实际lease与pool终结后才能开始metadata/executor teardown，不把cold-open drained解释为交付handle已经关闭。
+
+本轮只执行新增4配置：`a-profile-readonly-sdk-owner`完整PASS（7942 generated/2152 distinct、queue0），检查原12条与新增8条有限安全不变量。`ce-profile-readonly-sdk-cold`在phase=construct、drained=FALSE时将lease推进closing，86/58状态违反SDKColdOpenPinsLease；`ce-profile-readonly-sdk-read`在io=1、handle=closing时释放lease，2027/670状态违反SDKActualReadPinsLease；`ce-profile-readonly-sdk-pool`在pool仍closing时开始依赖释放，119/68状态违反SDKDependenciesWaitForPool。三者实际TLC exit12并有指定trace，不是checker错误或正向PASS；不以反例队列非零宣称完整搜索。三个mutant各只去掉对应实际终态guard，其他legacy flags全FALSE。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-readonly-sdk --config-prefix ce-profile-readonly-sdk
+```
+
+声明增加4配置不表示重新执行整个目录。1151模型输入与同轮Java的274重合SHA一致；Java实际3项定向与相关23项提供metadata、TLS、输出promise、线程分类和中断/继续关闭事实。有限投影不验证密码学、对象/内核字节账本、fsync、liveness、任意外部executor调用或完整A+C+D。命令、源码、manifest、coverage、指定trace与原终态在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-readonly-owner-evidence-cc7b8cdd/models`；完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。

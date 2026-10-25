@@ -70,6 +70,8 @@ import org.apache.bookkeeper.common.util.OrderedScheduler;
 import org.apache.bookkeeper.common.util.ReflectionUtils;
 import org.apache.bookkeeper.conf.AbstractConfiguration;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
+import org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool;
 import org.apache.bookkeeper.feature.FeatureProvider;
 import org.apache.bookkeeper.feature.SettableFeatureProvider;
 import org.apache.bookkeeper.meta.CleanupLedgerManager;
@@ -150,6 +152,8 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     // Close State
     boolean closed = false;
     final ReentrantReadWriteLock closeLock = new ReentrantReadWriteLock();
+    private ProfileReadOnlyClient profileReadOnly;
+    private boolean classicCloseStarted;
 
     /**
      * BookKeeper Client Builder to build client instances.
@@ -1520,19 +1524,76 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     }
 
     /**
-     * Shuts down client.
-     *
+     * Explicitly enable experimental CLOSED Profile opens with one exclusively owned, unused peer pool.
+     * Successful admission transfers pool custody to this SDK; its event loops and cold executor remain borrowed.
+     * Ordinary Classic open entry points keep their existing behavior.
      */
-    @Override
-    public void close() throws BKException, InterruptedException {
+    public void enableProfileReadOnly(ProfileRecoveryCoordinator coordinator, ProfileRecoveryPeerPool ownedPool,
+            int maxReadEntries) throws BKException {
         closeLock.writeLock().lock();
         try {
             if (closed) {
+                throw BKException.create(BKException.Code.ClientClosedException);
+            }
+            if (profileReadOnly != null) {
+                throw BKException.create(BKException.Code.IllegalOpException);
+            }
+            profileReadOnly = new ProfileReadOnlyClient(clientCtx, coordinator, ownedPool, maxReadEntries);
+        } finally {
+            closeLock.writeLock().unlock();
+        }
+    }
+
+    /** Open a verified CLOSED Profile ledger, retaining the SDK-owned peer lease until actual handle drain. */
+    public CompletableFuture<LedgerHandle> openProfileLedgerReadOnly(long ledgerId, byte[] password) {
+        closeLock.readLock().lock();
+        try {
+            if (closed) {
+                return CompletableFuture.failedFuture(BKException.create(BKException.Code.ClientClosedException));
+            }
+            if (profileReadOnly == null) {
+                return CompletableFuture.failedFuture(BKException.create(BKException.Code.IllegalOpException));
+            }
+            return profileReadOnly.open(ledgerId, password);
+        } finally {
+            closeLock.readLock().unlock();
+        }
+    }
+
+    /** Shuts down client after any owned Profile work and peer lease actually drain. */
+    @Override
+    public void close() throws BKException, InterruptedException {
+        ProfileReadOnlyClient profile;
+        closeLock.writeLock().lock();
+        try {
+            profile = profileReadOnly;
+            if (closed && (profile == null || classicCloseStarted)) {
                 return;
+            }
+            if (profile != null) {
+                profile.checkBlockingClose();
             }
             closed = true;
         } finally {
             closeLock.writeLock().unlock();
+        }
+
+        if (profile != null) {
+            try {
+                profile.closeAsync().get();
+            } catch (ExecutionException failure) {
+                throw BKException.create(BKException.getExceptionCode(failure));
+            }
+            // An interrupted Profile wait leaves this gate unclaimed so a later close can resume.
+            closeLock.writeLock().lock();
+            try {
+                if (classicCloseStarted) {
+                    return;
+                }
+                classicCloseStarted = true;
+            } finally {
+                closeLock.writeLock().unlock();
+            }
         }
 
         // Close bookie client so all pending bookie requests would be failed

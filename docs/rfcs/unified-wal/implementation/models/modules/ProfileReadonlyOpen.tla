@@ -66,4 +66,101 @@ ActualReadOwnsPermit == s.io = 1 => s.readPermit
 ReadonlyHasFixedBoundary == s.delivered => s.prefix = 2 /\ s.length = 48
 ReadonlyDoesNotExposeSuffix == ~s.exposed
 ReadonlyDoesNotMutate == ~s.mutation
+
+(* One SDK-owned open/reader. The original Spec and its cold-open drain retain their meaning.
+   Actual cold, READ output, handle, lease and pool terminals are abstract Java inputs;
+   caller future completion/cancellation and interrupted waits do not supply those facts.
+   This is finite safety only: no fairness, liveness, fsync, TLS or resource-budget claim. *)
+SDKInit == s \in [phase : {"idle"}, deleted : {FALSE}, birth : {0}, peer : {0, 1},
+                  gate : {FALSE}, gateDeleted : {FALSE}, gateBirth : {0}, gatePeer : {0},
+                  stopped : {FALSE}, permit : {FALSE}, delivered : {FALSE}, prefix : {2}, length : {48},
+                  mutation : {FALSE}, read : {"idle"}, io : {0}, readPermit : {FALSE},
+                  cancelledRead : {FALSE}, exposed : {FALSE}, drained : {FALSE},
+                  sdkClosing : {FALSE}, sdkHandle : {"none"}, sdkLease : {"none"}, sdkPool : {"open"},
+                  sdkDependencies : {"held"}, sdkClosed : {FALSE}, sdkOpenCallerDone : {FALSE},
+                  sdkCloseWait : {"none"}, sdkCloseSource : {"none"}]
+SDKStart == /\ ~s.sdkClosing /\ s.phase = "idle"
+            /\ s' = [s EXCEPT !.phase = "construct", !.permit = TRUE, !.sdkLease = "held"]
+SDKConstructHandle == /\ s.phase = "construct" /\ s.sdkHandle = "none"
+                      /\ s' = [s EXCEPT !.sdkHandle = "local"]
+SDKCheck == /\ s.sdkHandle = "local" /\ Check
+SDKCancelOpen == /\ s.phase \in {"construct", "checked"} /\ ~s.sdkOpenCallerDone
+                 /\ s' = [s EXCEPT !.stopped = TRUE, !.sdkOpenCallerDone = TRUE]
+SDKCompleteOpenCaller == /\ s.phase \in {"construct", "checked"} /\ ~s.sdkOpenCallerDone
+                         /\ s' = [s EXCEPT !.sdkOpenCallerDone = TRUE]
+SDKPublish == /\ s.phase = "checked"
+              /\ LET deliver == s.gate /\ ~s.stopped /\ ~s.sdkClosing /\ ~s.sdkOpenCallerDone
+                 IN s' = [s EXCEPT !.phase = "done", !.delivered = deliver,
+                           !.permit = ~deliver, !.drained = deliver, !.sdkOpenCallerDone = TRUE,
+                           !.sdkHandle = IF deliver THEN "live" ELSE "closing"]
+SDKRead == /\ ~s.sdkClosing /\ s.sdkHandle = "live" /\ Read
+SDKDetachReadCaller == /\ s.read = "pending" /\ ~s.cancelledRead
+                       /\ s' = [s EXCEPT !.cancelledRead = TRUE]
+SDKCloseHandle == /\ s.sdkHandle = "live"
+                  /\ s' = [s EXCEPT !.sdkHandle = "closing"]
+SDKHandleTerminal == /\ s.sdkHandle = "closing" /\ s.io = 0 /\ ~s.readPermit
+                     /\ s' = [s EXCEPT !.sdkHandle = "terminal",
+                               !.permit = IF ~s.delivered THEN FALSE ELSE @,
+                               !.drained = IF ~s.delivered THEN TRUE ELSE @]
+SDKRequestClose == /\ ~s.sdkClosed
+                   /\ s' = [s EXCEPT !.sdkClosing = TRUE, !.sdkCloseWait = "waiting",
+                             !.sdkCloseSource = "external",
+                             !.stopped = IF s.phase \in {"construct", "checked"} THEN TRUE ELSE @,
+                             !.sdkHandle = IF @ = "live" THEN "closing" ELSE @]
+SDKSelfCloseRejected == /\ ~s.sdkClosing /\ s.sdkLease \in {"held", "closing"}
+                       /\ s' = [s EXCEPT !.sdkCloseSource = "self-rejected"]
+SDKDetachCloseCaller == /\ s.sdkCloseWait = "waiting"
+                        /\ s' = [s EXCEPT !.sdkCloseWait = "detached"]
+SDKInterruptClose == /\ s.sdkCloseWait = "waiting"
+                     /\ s' = [s EXCEPT !.sdkCloseWait = "interrupted"]
+SDKColdTerminal == s.phase = "done" /\ s.drained /\ ~s.permit
+SDKDeliveredHandleTerminal == s.sdkHandle = "terminal" /\ s.io = 0 /\ ~s.readPermit
+SDKReleaseLease(earlyCold, earlyRead) ==
+    /\ s.sdkLease = "held" /\ (s.sdkClosing \/ s.sdkHandle = "terminal")
+    /\ (SDKColdTerminal \/ earlyCold)
+    /\ (~s.delivered \/ SDKDeliveredHandleTerminal
+          \/ (earlyRead /\ s.sdkHandle = "closing" /\ s.io = 1))
+    /\ s' = [s EXCEPT !.sdkLease = "closing"]
+SDKLeaseTerminal == /\ s.sdkLease = "closing"
+                    /\ s' = [s EXCEPT !.sdkLease = "terminal"]
+SDKClosePool == /\ s.sdkClosing /\ s.sdkLease \in {"none", "terminal"} /\ s.sdkPool = "open"
+                /\ s' = [s EXCEPT !.sdkPool = "closing"]
+SDKPoolTerminal == /\ s.sdkPool = "closing"
+                   /\ s' = [s EXCEPT !.sdkPool = "terminal"]
+SDKReleaseDependencies(earlyPool) ==
+    /\ s.sdkClosing /\ s.sdkLease \in {"none", "terminal"} /\ s.sdkDependencies = "held"
+    /\ (s.sdkPool = "terminal" \/ (earlyPool /\ s.sdkPool = "closing"))
+    /\ s' = [s EXCEPT !.sdkDependencies = "releasing"]
+SDKDependenciesTerminal == /\ s.sdkDependencies = "releasing"
+                           /\ s' = [s EXCEPT !.sdkDependencies = "terminal", !.sdkClosed = TRUE]
+SDKNext(earlyCold, earlyRead, earlyPool) ==
+    SDKStart \/ Delete \/ Restore \/ SDKConstructHandle \/ SDKCheck \/ SDKCancelOpen
+    \/ SDKCompleteOpenCaller \/ SDKPublish \/ SDKRead \/ SDKDetachReadCaller \/ FinishRead
+    \/ SDKCloseHandle \/ SDKHandleTerminal \/ SDKRequestClose \/ SDKSelfCloseRejected
+    \/ SDKDetachCloseCaller \/ SDKInterruptClose \/ SDKReleaseLease(earlyCold, earlyRead)
+    \/ SDKLeaseTerminal \/ SDKClosePool \/ SDKPoolTerminal \/ SDKReleaseDependencies(earlyPool)
+    \/ SDKDependenciesTerminal
+SDKSpec == SDKInit /\ [][SDKNext(FALSE, FALSE, FALSE)]_vars
+SDKEarlyColdSpec == SDKInit /\ [][SDKNext(TRUE, FALSE, FALSE)]_vars
+SDKEarlyReadSpec == SDKInit /\ [][SDKNext(FALSE, TRUE, FALSE)]_vars
+SDKEarlyPoolSpec == SDKInit /\ [][SDKNext(FALSE, FALSE, TRUE)]_vars
+SDKTypeOK == TypeOK /\ s.sdkClosing \in BOOLEAN /\ s.sdkClosed \in BOOLEAN
+             /\ s.sdkHandle \in {"none", "local", "live", "closing", "terminal"}
+             /\ s.sdkLease \in {"none", "held", "closing", "terminal"}
+             /\ s.sdkPool \in {"open", "closing", "terminal"}
+             /\ s.sdkDependencies \in {"held", "releasing", "terminal"}
+             /\ s.sdkOpenCallerDone \in BOOLEAN
+             /\ s.sdkCloseWait \in {"none", "waiting", "detached", "interrupted"}
+             /\ s.sdkCloseSource \in {"none", "external", "self-rejected"}
+SDKColdOpenPinsLease == (s.phase \in {"construct", "checked"}
+                         \/ (s.phase = "done" /\ ~s.delivered /\ s.sdkHandle = "closing"))
+                        => s.sdkLease = "held"
+SDKHandlePinsLease == s.sdkHandle \in {"local", "live", "closing"} => s.sdkLease = "held"
+SDKActualReadPinsLease == s.io = 1 => s.sdkLease = "held"
+SDKPoolWaitsForLease == s.sdkPool # "open" => s.sdkLease \in {"none", "terminal"}
+SDKDependenciesWaitForPool == s.sdkDependencies # "held" => s.sdkPool = "terminal"
+SDKClosedNeedsActualDependencies == s.sdkClosed => s.sdkDependencies = "terminal"
+SDKSelfCloseRejectsBeforeStop == s.sdkCloseSource = "self-rejected"
+                               => ~s.sdkClosing /\ s.sdkPool = "open"
+                                   /\ s.sdkDependencies = "held" /\ ~s.sdkClosed
 =============================================================================

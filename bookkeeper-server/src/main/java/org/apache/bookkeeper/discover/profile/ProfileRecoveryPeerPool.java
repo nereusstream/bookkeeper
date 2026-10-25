@@ -33,6 +33,19 @@ import org.apache.bookkeeper.net.BookieId;
 /** One bounded registered peer snapshot at a time. Group and cold executor remain borrowed.
  * Reservations include discovery, connecting, borrowed and actual draining work; no background retries. */
 public final class ProfileRecoveryPeerPool {
+    /** Exclusive custody transferred once to an SDK owner; borrowed executors remain external. */
+    public final class Owner {
+        private Owner() { }
+
+        public Acquisition acquire() {
+            return acquireOwned();
+        }
+
+        public CompletableFuture<Void> closeAsync() {
+            return closeOwned();
+        }
+    }
+
     public record Limits(int connections, int rpcSlots, int perConnectionSlots,
             int maxEntryBytes, Duration timeout) {
         public Limits {
@@ -132,6 +145,11 @@ public final class ProfileRecoveryPeerPool {
             }
             CompletableFuture.allOf(owned.stream().map(c -> c.closeAsync())
                     .toArray(CompletableFuture[]::new)).whenComplete((value, failure) -> {
+                        if (failure != null) {
+                            drained.completeExceptionally(failure);
+                            closed.completeExceptionally(failure);
+                            return;
+                        }
                         synchronized (ProfileRecoveryPeerPool.this) {
                             if (active == this) {
                                 active = null;
@@ -153,6 +171,8 @@ public final class ProfileRecoveryPeerPool {
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private Acquisition active;
     private boolean closing;
+    private boolean used;
+    private Owner owner;
 
     public ProfileRecoveryPeerPool(ZKProfileRegistrationStore registry, EventLoopGroup group, SslContext tls,
             ThreadPoolExecutor cold, List<BookieId> cohort, Limits limits) {
@@ -171,13 +191,43 @@ public final class ProfileRecoveryPeerPool {
         }
     }
 
+    /** Transfer only a pristine pool. Rejection leaves the caller's ownership intact. */
+    public synchronized Owner claimOwnership() {
+        if (owner != null || used || closing || active != null) {
+            throw new IllegalStateException("Recovery pool must be unused and exclusively owned");
+        }
+        owner = new Owner();
+        return owner;
+    }
+
+    /** A synchronous drain on one of these event loops would wait for itself. */
+    public boolean inEventLoop() {
+        for (var executor : group) {
+            if (executor.inEventLoop()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public Acquisition acquire() {
+        synchronized (this) {
+            if (owner != null) {
+                throw new IllegalStateException("Recovery pool ownership was transferred");
+            }
+            used = true;
+        }
+        return acquireOwned();
+    }
+
+    private Acquisition acquireOwned() {
         var acquisition = new Acquisition();
         synchronized (this) {
             if (closing || active != null) {
                 acquisition.actualDone = true;
                 acquisition.stopped = true;
             } else {
+                used = true;
                 active = acquisition; // Reserve the entire cohort before issuing any discovery/connect task.
             }
         }
@@ -186,8 +236,12 @@ public final class ProfileRecoveryPeerPool {
             return acquisition;
         }
         var flow = CompletableFuture.<Void>completedFuture(null);
-        for (var bookie : cohort) {
-            flow = flow.thenCompose(ignored -> connectPeer(acquisition, bookie));
+        try {
+            for (var bookie : cohort) {
+                flow = flow.thenCompose(ignored -> connectPeer(acquisition, bookie));
+            }
+        } catch (RuntimeException failedAdmission) {
+            flow = CompletableFuture.failedFuture(failedAdmission);
         }
         flow.whenComplete((value, failure) -> {
             Lease lease = null;
@@ -288,6 +342,16 @@ public final class ProfileRecoveryPeerPool {
 
     /** Pool close stops new acquisitions. A delivered lease remains pinned until its owner releases it. */
     public CompletableFuture<Void> closeAsync() {
+        synchronized (this) {
+            if (owner != null) {
+                throw new IllegalStateException("Recovery pool ownership was transferred");
+            }
+            closing = true;
+        }
+        return closeOwned();
+    }
+
+    private CompletableFuture<Void> closeOwned() {
         Acquisition stop;
         synchronized (this) {
             closing = true;

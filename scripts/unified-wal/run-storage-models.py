@@ -376,6 +376,10 @@ MATRIX = {
     'ce-profile-readonly-boundary': 'ReadonlyHasFixedBoundary',
     'ce-profile-readonly-suffix': 'ReadonlyDoesNotExposeSuffix',
     'ce-profile-readonly-mutation': 'ReadonlyDoesNotMutate',
+    'a-profile-readonly-sdk-owner': None,
+    'ce-profile-readonly-sdk-cold': 'SDKColdOpenPinsLease',
+    'ce-profile-readonly-sdk-read': 'SDKActualReadPinsLease',
+    'ce-profile-readonly-sdk-pool': 'SDKDependenciesWaitForPool',
     'a-profile-recovery-completion': None,
     'a-profile-recovery-completion-empty': None,
     'a-profile-recovery-completion-empty-threeofthree': None,
@@ -895,6 +899,7 @@ def main():
     inputs.extend((root / "bookkeeper-server/src/main/java/org/apache/bookkeeper/versioning").glob("*.java"))
     inputs.extend(root / name for name in [
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileBookieClient.java",
+        "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileReadOnlyClient.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileLedgerHandle.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileLacEvidenceRead.java",
         "bookkeeper-server/src/main/java/org/apache/bookkeeper/client/ProfileRecoveryReadHandle.java",

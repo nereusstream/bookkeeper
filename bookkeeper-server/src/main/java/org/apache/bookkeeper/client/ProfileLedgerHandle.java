@@ -36,6 +36,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import org.apache.bookkeeper.client.AsyncCallback.AddCallbackWithLatency;
 import org.apache.bookkeeper.client.AsyncCallback.CloseCallback;
 import org.apache.bookkeeper.client.api.DigestType;
@@ -200,12 +201,26 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         return new ClosedReader(new ProfileContext(base, transport), member.metadata(), maxReadEntries);
     }
 
+    /** Attach SDK custody before publication; direct factory handles continue to borrow their peers. */
+    static CompletableFuture<Void> adoptClosedRead(LedgerHandle handle, CompletableFuture<Void> ownerClosed,
+            BooleanSupplier cannotWait) {
+        ClosedReader reader = (ClosedReader) handle;
+        if (reader.ownerClosed != null) {
+            throw new IllegalStateException("Readonly handle already has an owner");
+        }
+        reader.cannotWait = cannotWait;
+        reader.ownerClosed = ownerClosed;
+        return reader.transport.closeCompletion();
+    }
+
     /** Original SDK readonly engine, frozen metadata, no writer tasks, fencing, grant or metadata listener. */
     private static final class ClosedReader extends ReadOnlyLedgerHandle {
         private final ProfileBookieClient transport;
         private final Semaphore reads;
         private final int maxReadEntries;
         private final long prefix;
+        private volatile CompletableFuture<Void> ownerClosed;
+        private BooleanSupplier cannotWait;
 
         ClosedReader(ProfileContext context, Versioned<LedgerMetadata> metadata, int maxReadEntries)
                 throws GeneralSecurityException {
@@ -323,9 +338,13 @@ public final class ProfileLedgerHandle extends LedgerHandle {
 
         @Override
         public void close() throws InterruptedException, BKException {
+            CompletableFuture<Void> owned = ownerClosed;
+            if (owned != null && !owned.isDone() && cannotWait.getAsBoolean()) {
+                throw BKException.create(BKException.Code.IllegalOpException);
+            }
             transport.close();
             try {
-                transport.closeCompletion().get();
+                (owned == null ? transport.closeCompletion() : owned).get();
             } catch (java.util.concurrent.ExecutionException failed) {
                 throw BKException.create(BKException.getExceptionCode(failed));
             }
@@ -334,7 +353,9 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         @Override
         public void asyncClose(CloseCallback callback, Object ctx) {
             transport.close();
-            transport.closeCompletion().whenComplete((unused, failure) -> callback.closeComplete(
+            CompletableFuture<Void> owned = ownerClosed;
+            CompletableFuture<Void> completion = owned == null ? transport.closeCompletion() : owned;
+            completion.whenComplete((unused, failure) -> callback.closeComplete(
                     failure == null ? BKException.Code.OK : BKException.getExceptionCode(failure), this, ctx));
         }
     }

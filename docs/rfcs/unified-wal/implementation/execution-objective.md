@@ -279,3 +279,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [显式离线 backup/restore 运维入口](local-storage/README.md#显式离线-backuprestore-运维入口)：2026-10-25父86c9259dd7上，公开 offlineBackup factory 复用原 ISOLATED 配置冻结历史身份/bounds，capture 交付独立 CREATE_NEW/force 的56 B外部reference；import 复用当前 CLOSED/RepairIntent 授权与原复制/bootstrap，私有 image 只在实际 completion 后关闭。17个既有恢复场景改走公开入口，覆盖源目录丢失、坏reference、同步失败清理、取消及外部完成future不能提前释放native锁；定向5方法及扩大三类215项全部通过，输入/用例身份匹配。最终三处换行有非空白相同证明，style通过、独立RAT仍443父路径无新增；原失败与源码绑定保留，详细证据由上述 canonical 节拥有。仍为显式Java运维API，默认SDK/Main、完整恢复接受下界、同incarnation unclosed-session接受、B11/full-bytes及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled保持。
+
+
+[显式 SDK CLOSED 只读入口与依赖关闭顺序](profile-wire/README.md#显式-sdk-closed-只读入口与依赖关闭顺序)：2026-10-25父cc7b8cdd82上，BookKeeper显式enable/open复用原registered pool与CLOSED coordinator，单个open/handle持有lease到实际read/output终结；SDK close先排空Profile再关闭原metadata/executors，中断可继续，self-drain提前拒绝。三项真实服务定向与相关两类23项全部通过、输入匹配，style通过；新增有限模型1正向/3指定反例符合预期，旧Spec/11cfg保持原绑定；独立RAT仍443父路径无新增，原证据由上述canonical节拥有。默认builder拒绝保持，writer create/默认routing/Main可信issuer/full-bytes及其余16步继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

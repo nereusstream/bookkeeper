@@ -2424,3 +2424,20 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 
 [显式离线 backup/restore 运维入口](../local-storage/README.md#显式离线-backuprestore-运维入口)：2026-10-25父86c9259dd7上，公开 offlineBackup factory 复用原 ISOLATED 配置冻结历史身份/bounds，capture 交付独立 CREATE_NEW/force 的56 B外部reference；import 复用当前 CLOSED/RepairIntent 授权与原复制/bootstrap，私有 image 只在实际 completion 后关闭。17个既有恢复场景改走公开入口，覆盖源目录丢失、坏reference、同步失败清理、取消及外部完成future不能提前释放native锁；定向5方法及扩大三类215项全部通过，输入/用例身份匹配。最终三处换行有非空白相同证明，style通过、独立RAT仍443父路径无新增；原失败与源码绑定保留，详细证据由上述 canonical 节拥有。仍为显式Java运维API，默认SDK/Main、完整恢复接受下界、同incarnation unclosed-session接受、B11/full-bytes及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled保持。
+
+
+## 显式 SDK CLOSED 只读入口与依赖关闭顺序
+
+2026-10-25，父源码 `cc7b8cdd82610bc145897b477065a7428b8de17f`。原 BookKeeper 默认 create/open builder 继续走 Classic，带 Profile backlink 的默认 open 仍按既有 password/digest 检查后明确拒绝；本轮在具体 `BookKeeper` 类提供显式 `enableProfileReadOnly(coordinator, ownedPool, maxReadEntries)` 与 `openProfileLedgerReadOnly(ledgerId, password)`。尚未配置时拒绝；只接受 v3、1..256 的 read bound、一个从未使用且未关闭的独占 registered pool。成功 enable 一次性转交该 pool 的 custody；无效参数、重复 enable 或已关闭 SDK 不接管调用方资源。没有增加默认开关、自动路由、writer-create、恢复权限或配置生成的 authority。
+
+内部 package-local `ProfileReadOnlyClient` 只保留一个 open 或交付 handle，busy 返回原 TooManyRequests；复用 `ProfileRecoveryPeerPool` 的 registry/HELLO/incarnation、连接与 RPC 限额及原 `ProfileRecoveryCoordinator.beginOpenReadOnly`。后者的当前 CLOSED、密码、context/metadata physical birth、retained source 与最终 recheck 保持原算法。pool 的小型 Owner token 只解决这一个实例的原子所有权转交，成功后原 acquire/close 入口拒绝绕过 SDK；cold executor、TLS 与 event loops 仍是借用资源。只读打开不要求所有副本在线，也不减少原 metadata 的 E/W/A 或创建阶段的 all-E 条件。
+
+成功交付仍是原 ClosedReader，持有 peer lease 直到本地 read adapter 的全部实际请求/输出终结，再关闭 lease/连接并清除 SDK 槽位，最后完成 handle 的 close callback；callback 可以立即发起下一次 open。失败或 caller cancel 时，私有 core completion/drained 与未交付 handle 的实际关闭先结束，随后才归还 lease，不能把可取消/可改写的公开结果当作实际终态。调用方拿到的 LedgerEntries 继续遵守原 close 契约；本轮不改变已交付 entry 的 backing 所有权或将关闭解释为全局访问屏障。
+
+`BookKeeper.close()` 先关闭新准入，停止并等待上述 open/handle、lease 与 pool 实际终结，之后才进入原 Classic transport、ledger manager、scheduler/worker 与 metadata driver 的关闭。等待被中断时保留资源，后续 close 可以继续，不因 SDK 已标 closed 而跳过这一步。同步 close 若来自当前 active ledger 的 SDK ordered worker 或该 pool 的网络 event loop，提前返回 IllegalOp，保持 SDK 可用；没有增加等待线程、队列或 executor。pool 的实际连接关闭失败也传播失败并保留 active custody，不把失败回调计作容量归还。
+
+新增三项真实服务测试使用三台原 ServiceEpisode 的真实启动、readiness/registration、mTLS、标准 metadata、writer durable close 与非空 DATA：公共 open/read 核对两项 payload，验证 wrong password、busy、默认 builder 拒绝、handle close callback 再次 open，以及 SDK worker/Netty loop 上的 self-drain 拒绝；SDK close 也会关闭仍交付的 reader。第二项持有 handle 构造后的最后 metadata callback，caller cancel 后 SDK close 仍等待，同 SDK 的 ledger manager 仍能实际读 metadata，worker/scheduler 尚未关闭。第三项让 READ 逻辑成功并关闭返回 LedgerEntries，但 hold 原实际 output promise；中断 SDK close 后六个连接及原 metadata/executor 继续保留，release promise 后再次 close 才排空。fixture 的 ZK/event-loop 是借用的，不宣称 SDK 关闭了这些外部资源。
+
+定向3项及相关两类 **23项全部通过、0 failure/error/skip**（SDK11、Classic LedgerRecovery12），1176 runner 输入与1180个含 addon 的冻结输入逐项匹配。相关回归保留原 delete/birth 重核、默认 Profile 拒绝/密码次序、legacy registered pool 的 pin/drain/queued-cold/rejoin 与真实 Classic recovery。Spotless/Checkstyle exit0。现有 ProfileReadonlyOpen 只追加独立 SDKSpec；原 Spec 正文和11个旧cfg逐字节保持，不重跑或移绑旧PASS。新4配置为1正向完整PASS（7942 generated/2152 distinct、queue0）及3指定反例，分别违反 SDKColdOpenPinsLease、SDKActualReadPinsLease、SDKDependenciesWaitForPool；实际终态与线程分类仍由Java提供，不是liveness、full-bytes或完整A+C+D证明。1176 runner/1180冻结Java输入与1151模型输入的274个重合路径SHA相同，合并2057个unique输入；新增owner源码纳入原模型runner输入锁。源码、原命令/XML/TLC trace/实际终态由 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-readonly-owner-evidence-cc7b8cdd` 保存；全部Java/style/模型终态后的独立RAT exit1，443条未批准路径均存在父HEAD、集合未变，无新增，不称CI全绿。仅在终态/无句柄/逐文件同inode与SHA核对后移除三个原临时运行根；全部hardlink归档保留，常规文件数据实际回收0 B。
+
+此处接通显式 CLOSED readonly SDK 路径及 owner 依赖顺序；公开 writer create、配置后的默认 routing、多 ledger 并发 SDK pool、Main 的真实可信 commissioning/OS隔离/credential/exact-policy 输入渠道、完整 full-bytes/B11、恢复/GC/mixed兼容/正式性能及其余16步仍OPEN。Main 的现有显式 Java bootstrap 已可调用，CLI 仍需上述可信输入渠道。默认 OFF/SYSTEM/PARK 与 disabled 能力保持，完整目标 active、生产 Gate OPEN；Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
