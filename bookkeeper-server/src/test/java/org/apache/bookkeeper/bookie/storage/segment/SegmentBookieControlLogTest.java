@@ -206,6 +206,13 @@ public class SegmentBookieControlLogTest {
         return install(44, operationId, verifier);
     }
 
+    private static ProfileControlScope scopeWithStorageAndDomain(ProfileControlScope base,
+            String targetBookie, byte[] incarnation, String domain) {
+        return new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(), base.ledgerInstanceId(),
+                base.descriptorIdentity(), targetBookie, incarnation, domain, base.authorityGeneration(),
+                base.operationId(), base.publicSemanticPayloadIdentity(), base.exactRange());
+    }
+
     private static ProtectedProfileStateStore.Transition install(long ledgerId, int operationId, byte verifier) {
         ProfileControlScope scope = scope(ledgerId, ProfileControlOperation.INSTALL, operationId, 1);
         return new ProtectedProfileStateStore.Transition(ProfileControlRequest.install(scope, DESCRIPTOR_BYTES,
@@ -9749,6 +9756,83 @@ public class SegmentBookieControlLogTest {
                         SegmentControlParser.parse(retainedClose.record(), SegmentControlFormat.Owner.BOOKIE,
                                 new Generation(1), 3).type());
             }
+        }
+    }
+
+    @Test
+    public void storedScopePreservesDistinctJavaDomainsWithIdenticalUtf8Bytes() throws Exception {
+        var config = config();
+        var base = scope(ProfileControlOperation.INSTALL, 1, 1);
+        List<ProtectedProfileStateStore.Transition> transitions = new ArrayList<>();
+        for (String domain : List.of("domain-\uD800", "domain-\uD801", "domain-?")) {
+            var exact = scopeWithStorageAndDomain(base, base.targetBookie(), base.targetStorageIncarnation(), domain);
+            transitions.add(new ProtectedProfileStateStore.Transition(
+                    ProfileControlRequest.install(exact, DESCRIPTOR_BYTES, EngineProfile.SEGMENT_WAL_ENGINE,
+                            ProtectedProfileCredential.of(ProtectedProfileCredential.BK_MASTER_KEY_SHA1,
+                                    filled(20, (byte) 5))),
+                    new CommittedProfileAuthority(exact, CommittedProfileAuthority.State.PREPARING,
+                            EngineProfile.SEGMENT_WAL_ENGINE, 1, true), DESCRIPTOR));
+        }
+        assertFalse(transitions.get(0).request().scope().equals(transitions.get(1).request().scope()));
+        assertArrayEquals(transitions.get(0).request().scope().authorityDomain().getBytes(StandardCharsets.UTF_8),
+                transitions.get(1).request().scope().authorityDomain().getBytes(StandardCharsets.UTF_8));
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitBatch(List.of(transitions.get(0))).get(0).status());
+            for (var conflicting : transitions.subList(1, 3)) {
+                assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                        log.submitBatch(List.of(conflicting)).get(0).status());
+            }
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(transitions.get(0))).get(0).status());
+            assertBookieCheckpointMatchesJournal(config, log.checkpoint());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            // Existing UTF-8 persistence replaces an unpaired surrogate; live equality must still use String.equals.
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    replay.submitBatch(List.of(transitions.get(0))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    replay.submitBatch(List.of(transitions.get(2))).get(0).status());
+            assertBookieCheckpointMatchesJournal(config, replay.checkpoint());
+        }
+    }
+
+    @Test
+    public void storedCloseScopeRejectsOtherStorageBeforeAndAfterCheckpointReplay() throws Exception {
+        var config = config();
+        var close = terminalBoundary(20, -1, 0);
+        var exact = close.request().scope();
+        var wrongTarget = scopeWithStorageAndDomain(exact, "other:3181", exact.targetStorageIncarnation(),
+                exact.authorityDomain());
+        var wrongIncarnation = scopeWithStorageAndDomain(exact, exact.targetBookie(), filled(16, (byte) 9),
+                exact.authorityDomain());
+        var wrongDomain = scopeWithStorageAndDomain(exact, exact.targetBookie(), exact.targetStorageIncarnation(),
+                exact.authorityDomain() + "-other");
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            var pending = log.prepareTerminalClose(close);
+            log.writeRecoveryCloseDurably(pending.write());
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    log.applyRecoveryCloseDurable(pending.write()));
+            assertTrue(log.recoveryClosedGeneration(exact) > 0);
+            for (var foreign : List.of(wrongTarget, wrongIncarnation, wrongDomain)) {
+                assertEquals(0, log.recoveryClosedGeneration(foreign));
+            }
+            assertBookieCheckpointMatchesJournal(config, log.checkpoint());
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            assertTrue(replay.recoveryClosedGeneration(exact) > 0);
+            for (var foreign : List.of(wrongTarget, wrongIncarnation, wrongDomain)) {
+                assertEquals(0, replay.recoveryClosedGeneration(foreign));
+            }
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE,
+                    replay.prepareTerminalClose(close).immediate());
         }
     }
 

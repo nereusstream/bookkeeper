@@ -1421,3 +1421,33 @@ typed两个100k阶段实际raw Operation/backing均为0，200000个CheckpointOpe
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/bookie-operation-index-evidence-bd3beb34`。索引对照为 `measurement/runs/20261025T073057003807Z/verification.json`，对象图为 `metadata-graph/runs/20261025T081423587863Z/verification.json`。current-source/current-inputs及index-only-inputs保留首轮索引源码绑定；final-java-source/final-java-inputs拥有helper修正后的最终592项，不覆盖首轮失败。仅清理已归档、终态且无句柄的task-owned临时路径，所有原始失败和测量证据保留。
 
 本轮未缩减CONTROL预留；下一项私有scope驻留压缩仍须保留原Java String等值、外部target/incarnation检查、原sealed与逐entry免解码的正常路径。默认SDK/observe、同incarnation unclosed-session接受条件、多Arena及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Bookie 私有 scope 的紧凑驻留
+
+2026-10-25，父提交 `a0f6d8217a344a3cc6e466138b54fc0df459e66f`。按前节对象图归因，Command及LedgerState.install改为私有不可变StoredScope：保留operation、缓存context/range、原domain String、authorityGeneration、UUID及payload，target使用已有不可变SegmentFileHeader共享身份，不持有control owner。公共ProfileControlScope/API保持，原authority、descriptor/digest、credential/AAD及durable-body验证完成后才构造私有值；recoveryClosedGeneration与hasAppliedDeleteEvent显式验证外部target/incarnation，避免原scope.equals中的条件因压缩丢失。
+
+INSTALL的LedgerState与command共享同一context；同batch后续命令构建早于INSTALL apply时，只在apply中对精确相等的context作不可变copy并共享，不修改已冻结snapshot。terminal upgrade复用原operations key UUID。原完整scope只作瞬时验证输入，普通DATA/recovery读权限直接使用原缓存context/range，不逐entry解析scope或新增MetadataStore/控制force。编码仍按原字段顺序，60-byte context等价替代原ledgerId/instance/descriptor组合，INSTALL保留原sealed49，不重新生成nonce；CONTROL预留、格式和UNKNOWN/真实排空合同保持。
+
+新增两项真实文件回归：未配对surrogate domain与另一个String可产生相同UTF-8 bytes，但live重试仍须按String.equals返回INCOMPATIBLE，不能按编码bytes合并；重开后保留原UTF-8替换语义，并核对checkpoint/journal canonical bytes。另一项在durable terminal close的checkpoint前后验证准确scope有结果、其他target/incarnation/domain均无结果。没有收紧原公共文本校验或改变历史恢复语义；这两项与8项原同batch、authority、grant、close、delete/checkpoint回归共10项先通过。
+
+相同冻结100k native seed的两个独立JVM分别复测父版和当前版，沿用前节Instrumentation实例字段/数组的identity/root-mask对象图计量；两版均为Corretto21.0.10、release17、Xint/1 GiB heap及原17模块不可变classpath，未访问target或复制cwd/PDF。两个进程实际terminal均0；全部100k active、cut199999/76804096、pending/admission0、write/force0、无不可访问字段、遍历helper经full GC回收及source/CP/JDK/native SHA前后不变均通过。
+
+| 100k fresh replay对象图 | 父版 → 当前 |
+| --- | ---: |
+| 九metadata根去重对象数 | 4,200,012 → 2,800,019 |
+| 九根实际shallow bytes之和 | 171,946,208 → 122,346,384 B |
+| route-only | 31,448,640 → 19,448,640 B |
+| route/history共享，计一次 | 60,800,000 → 51,200,176 B |
+| 额外history | 79,697,568 → 51,697,568 B |
+| 全部数组实际shallow bytes | 88,745,760 → 53,545,824 B |
+
+九根对象图减少49,599,824 B（28.85%），163.98→116.68 MiB。原200000个ProfileControlScope/14.4MB和ProfileDescriptorIdentity/4.8MB不再驻留，新增200000个StoredScope/9.6MB；ProfileLedgerContext仍为100000个/3.2MB，context backing改为route/history共享。String400000→200001，byte[]1900000/85,600,000 B→900002/50,400,064 B；两张HashMap table未变。operation UUID仍为200000个，新增一个共享header UUID，不能把本次压缩称为去掉operation UUID。新增可达的共享target/header相关7对象176 B已计入，不忽略其成本，也不宣称九根独占这些对象。
+
+当前route可达合计70,648,816 B，九根总数1223.46 B/ledger包含history；这两种平均值均不单独裁决1 KiB逐ledger Gate。图内共享只在ledgers与operations交叠，不得相加重复计数；Enum等全局共享endpoint另列排除，其他included对象也可能有图外引用。该结果仍是声明边界的reachable shallow之和，不是dominator retained size、独占ownership、峰值/RSS或完整Bookie账本。owner其他字段、MetadataStore/SDK/service/RocksDB/native/kernel等范围未补齐，低于128 MiB不能提升完整B11/full-bytes Gate。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/bookie-stored-scope-evidence-a0f6d821`，对象图对照由 `metadata-graph/comparison.json` 拥有；baseline/current为 `20261025T083153995690Z-baseline` / `20261025T083525355993Z-current`。baseline本次独立实跑恰与前节171,946,208 B一致，不移绑旧receipt。准备期一次manifest校验误把冻结docs当Java输入，未启动JVM；原失败目录保留，只收窄实际sourceSha256清单核对范围。模型/格式、生产Gate和全16步完成状态不因这份局部测量改变。
+
+最终五类 **594项全部通过、0 failure/error/skip**（Bookie281、Arena41、DATA format/session40、SDK/网络209、Profile install23）；原592加新增2项的用例身份与1172 runner输入全部匹配当前1176 source/resource/addon冻结集。Spotless/Checkstyle exit0；全部Java/测量/style终态后独立RAT实际exit1，443条未批准路径均存在父提交且与前轮集合一致，无新增，不称CI全绿。TLA转移/格式未改，未执行或移绑TLC；保留全部source/命令/class/GC/native/失败回执，只清理已归档、终态且无句柄的自有临时根。
+
+运行期typed/JDK/native及暂态对象的预算上界、完整Bookie B11资源账本、其余full-bytes、默认SDK/observe、同incarnation unclosed-session接受条件、多Arena及其他16步继续OPEN；完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED；驻留减少不作为吞吐、尾延迟或累计分配收益结论。

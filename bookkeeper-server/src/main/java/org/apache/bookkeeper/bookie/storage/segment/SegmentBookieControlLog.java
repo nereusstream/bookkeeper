@@ -334,9 +334,70 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
+    /** Validated command fields only; the fixed target is shared without retaining the control-log owner. */
+    private static final class StoredScope {
+        private final ProfileControlOperation operation;
+        private final ProfileLedgerContext context;
+        private final SegmentFileHeader target;
+        private final String authorityDomain;
+        private final long authorityGeneration;
+        private final UUID operationId;
+        private final byte[] publicSemanticPayloadIdentity;
+        private final ProfileExactRange exactRange;
+
+        private StoredScope(ProfileControlScope scope, SegmentFileHeader target) {
+            this(scope.operation(), context(scope), target, scope.authorityDomain(), scope.authorityGeneration(),
+                    SegmentBookieControlLog.operationId(scope.operationId()),
+                    scope.publicSemanticPayloadIdentity(), scope.exactRange());
+        }
+
+        private StoredScope(ProfileControlOperation operation, ProfileLedgerContext context, SegmentFileHeader target,
+                            String authorityDomain, long authorityGeneration, UUID operationId,
+                            byte[] publicSemanticPayloadIdentity, ProfileExactRange exactRange) {
+            this.operation = operation;
+            this.context = context;
+            this.target = target;
+            this.authorityDomain = authorityDomain;
+            this.authorityGeneration = authorityGeneration;
+            this.operationId = operationId;
+            this.publicSemanticPayloadIdentity = publicSemanticPayloadIdentity;
+            this.exactRange = exactRange;
+        }
+
+        private long ledgerId() {
+            return context.ledgerId();
+        }
+
+        private StoredScope canonicalize(ProfileLedgerContext sharedContext, UUID sharedOperationId) {
+            return context == sharedContext && operationId == sharedOperationId ? this
+                    : new StoredScope(operation, sharedContext, target, authorityDomain, authorityGeneration,
+                            sharedOperationId, publicSemanticPayloadIdentity, exactRange);
+        }
+
+        private boolean sameMeaning(StoredScope other) {
+            return operation == other.operation && context.equals(other.context)
+                    && target.bookieId().toString().equals(other.target.bookieId().toString())
+                    && target.incarnation().equals(other.target.incarnation())
+                    && authorityDomain.equals(other.authorityDomain)
+                    && authorityGeneration == other.authorityGeneration && operationId.equals(other.operationId)
+                    && Arrays.equals(publicSemanticPayloadIdentity, other.publicSemanticPayloadIdentity)
+                    && Objects.equals(exactRange, other.exactRange);
+        }
+
+        /** The caller separately checks the external target before using the owner's fixed target. */
+        private boolean matches(ProfileControlScope scope) {
+            return operation == scope.operation() && context.equals(context(scope))
+                    && authorityDomain.equals(scope.authorityDomain())
+                    && authorityGeneration == scope.authorityGeneration()
+                    && operationId.equals(SegmentBookieControlLog.operationId(scope.operationId()))
+                    && Arrays.equals(publicSemanticPayloadIdentity, scope.publicSemanticPayloadIdentity())
+                    && Objects.equals(exactRange, scope.exactRange());
+        }
+    }
+
     private static final class Command {
         private final SegmentControlFormat.Type type;
-        private final ProfileControlScope scope;
+        private final StoredScope scope;
         private final byte[] descriptor;
         private final ProtectedProfileCredential credential;
         private final ProtectedProfileCredential.SealedStorageValue sealed;
@@ -345,7 +406,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final ProfileControlRequest.TerminalBinding terminal;
         private final ProfileControlRequest.DeleteBinding deletion;
 
-        private Command(SegmentControlFormat.Type type, ProfileControlScope scope, byte[] descriptor,
+        private Command(SegmentControlFormat.Type type, StoredScope scope, byte[] descriptor,
                         ProtectedProfileCredential credential,
                         ProtectedProfileCredential.SealedStorageValue sealed) {
             this.deletion = null;
@@ -359,7 +420,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.closedGrantId = null;
         }
 
-        private Command(ProfileControlScope scope, GrantBinding grant) {
+        private Command(StoredScope scope, GrantBinding grant) {
             this.deletion = null;
             this.terminal = null;
             this.type = SegmentControlFormat.Type.RECOVERY_GRANT;
@@ -371,11 +432,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.closedGrantId = null;
         }
 
-        private Command(ProfileControlScope scope, GrantBinding grant, UUID closedGrantId) {
+        private Command(StoredScope scope, GrantBinding grant, UUID closedGrantId) {
             this(scope, grant, closedGrantId, false);
         }
 
-        private Command(ProfileControlScope scope, GrantBinding grant, UUID closedGrantId, boolean terminal) {
+        private Command(StoredScope scope, GrantBinding grant, UUID closedGrantId, boolean terminal) {
             this.deletion = null;
             this.terminal = null;
             this.type = terminal ? SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE
@@ -388,7 +449,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.closedGrantId = closedGrantId;
         }
 
-        private Command(ProfileControlScope scope, ProfileControlRequest.TerminalBinding terminal) {
+        private Command(StoredScope scope, ProfileControlRequest.TerminalBinding terminal) {
             this.type = SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY;
             this.scope = scope;
             this.deletion = null;
@@ -400,7 +461,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.closedGrantId = null;
         }
 
-        private Command(ProfileControlScope scope, ProfileControlRequest.DeleteBinding deletion) {
+        private Command(StoredScope scope, ProfileControlRequest.DeleteBinding deletion) {
             this.type = SegmentControlFormat.Type.DELETE_DELIVERY_APPLY;
             this.scope = scope;
             this.deletion = deletion;
@@ -412,13 +473,29 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.closedGrantId = null;
         }
 
+        private Command(Command original, StoredScope scope) {
+            this.type = original.type;
+            this.scope = scope;
+            this.descriptor = original.descriptor;
+            this.credential = original.credential;
+            this.sealed = original.sealed;
+            this.grant = original.grant;
+            this.closedGrantId = original.closedGrantId;
+            this.terminal = original.terminal;
+            this.deletion = original.deletion;
+        }
+
+        private Command canonicalize(ProfileLedgerContext context, UUID operationId) {
+            StoredScope canonical = scope.canonicalize(context, operationId);
+            return canonical == scope ? this : new Command(this, canonical);
+        }
+
         private UUID operationId() {
-            ByteBuffer bytes = ByteBuffer.wrap(scope.operationId());
-            return new UUID(bytes.getLong(), bytes.getLong());
+            return scope.operationId;
         }
 
         private boolean sameMeaning(Command other) {
-            return type == other.type && scope.equals(other.scope)
+            return type == other.type && scope.sameMeaning(other.scope)
                     && Arrays.equals(descriptor, other.descriptor)
                     && (credential == null ? other.credential == null : credential.matches(other.credential))
                     && (grant == null ? other.grant == null : grant.sameMeaning(other.grant))
@@ -453,7 +530,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private static final class LedgerState {
-        private final ProfileControlScope install;
+        private final StoredScope install;
         private final ProfileLedgerContext context;
         private final byte[] descriptor;
         private final ProtectedProfileCredential credential;
@@ -473,7 +550,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private LedgerState(Command command) {
             localInstallGeneration = localGeneration;
             install = command.scope;
-            context = context(command.scope);
+            context = command.scope.context;
             descriptor = command.descriptor;
             credential = command.credential;
         }
@@ -701,9 +778,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if ((command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY
                 || command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE
                     && grant != null && matchesClose(command, grant.command)) && state != null
-                && state.context.equals(context(command.scope))) {
+                && state.context.equals(command.scope.context)) {
             long prefix = command.terminal != null ? command.terminal.prefixEntryId()
-                    : command.scope.exactRange().lastEntryId();
+                    : command.scope.exactRange.lastEntryId();
             if (state.terminalPrefix != null && state.terminalPrefix != prefix
                     || state.pendingTerminalPrefix != null && state.pendingTerminalPrefix != prefix) {
                 return new RecoveryCloseAttempt(RecoveryCloseStatus.INCOMPATIBLE, null);
@@ -727,7 +804,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         long sequence = durableThrough + 1;
         ByteBuffer record = SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence,
-                command.operationId(), new Generation(command.scope.authorityGeneration()), 0, body(command));
+                command.operationId(), new Generation(command.scope.authorityGeneration), 0, body(command));
         requireCapacity(record.remaining());
         RecoveryCloseWrite write = new RecoveryCloseWrite(command, record, sequence, nextOffset);
         nextOffset += record.remaining();
@@ -826,7 +903,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             // Validate the complete immutable batch before I/O without retaining its serialized payload.
             for (Command command : commands) {
                 bytes = Math.addExact(bytes, SegmentControlFormat.encodedLength(command.type, LOG_GENERATION,
-                        sequence++, command.operationId(), new Generation(command.scope.authorityGeneration()),
+                        sequence++, command.operationId(), new Generation(command.scope.authorityGeneration),
                         0, body(command)));
             }
             requireCapacity(bytes);
@@ -838,8 +915,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                         && !fenceOperations.containsKey(command.operationId())
                         && !reservedOperation(command.operationId())) {
                     LedgerState state = ledgers.get(command.scope.ledgerId());
-                    if (state != null && state.context.equals(context(command.scope))
-                            && command.scope.authorityGeneration() >= state.install.authorityGeneration()) {
+                    if (state != null && state.context.equals(command.scope.context)
+                            && command.scope.authorityGeneration >= state.install.authorityGeneration) {
                         state.pendingTombstone = true;
                     }
                 }
@@ -1200,7 +1277,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private static ByteBuffer encode(Command command, long sequence) {
         return SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence, command.operationId(),
-                new Generation(command.scope.authorityGeneration()), 0, body(command));
+                new Generation(command.scope.authorityGeneration), 0, body(command));
     }
 
     private void retain(long sequence, UUID operationId, Status status, ByteBuffer record) {
@@ -1237,11 +1314,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
         ByteBuffer id = ByteBuffer.wrap(scope.operationId());
         AppliedOperation applied = operations.get(new UUID(id.getLong(), id.getLong()));
         LedgerState state = ledgers.get(scope.ledgerId());
-        if (closed || failed || state == null || state.pendingTombstone || tombstones.containsKey(scope.ledgerId())
+        if (closed || failed || !matchesTarget(scope)
+                || state == null || state.pendingTombstone || tombstones.containsKey(scope.ledgerId())
                 || !state.context.equals(context(scope)) || applied == null
                 || applied.outcome() != Status.APPLIED_DURABLE
                 || !isRecoveryClose(applied.command().type)
-                || !applied.command().scope.equals(scope)) {
+                || !applied.command().scope.matches(scope)) {
             return 0;
         }
         if (applied.command().terminal != null) {
@@ -1343,7 +1421,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return null;
         }
         for (GrantState grant : state.recoveryGrants.values()) {
-            ProfileExactRange range = grant.command.scope.exactRange();
+            ProfileExactRange range = grant.command.scope.exactRange;
             if (grant.pendingClose == null && !grant.committedReadable
                     && Arrays.equals(grant.command.grant.intentId(), request.repairIntentId())
                     && grant.command.grant.intentGeneration() == request.repairIntentGeneration()
@@ -1415,7 +1493,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         boolean coveredByClosedGrant = false;
         for (GrantState grant : state.recoveryGrants.values()) {
-            ProfileExactRange range = grant.command.scope.exactRange();
+            ProfileExactRange range = grant.command.scope.exactRange;
             if (entryId >= range.firstEntryId() && entryId <= range.lastEntryId()) {
                 if (!grant.committedReadable) {
                     return false;
@@ -1458,7 +1536,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return false;
         }
         for (GrantState grant : ledgers.get(context.ledgerId()).recoveryGrants.values()) {
-            ProfileExactRange range = grant.command.scope.exactRange();
+            ProfileExactRange range = grant.command.scope.exactRange;
             if ((entryId < 0 || entryId >= range.firstEntryId() && entryId <= range.lastEntryId())
                     && !grant.committedReadable) {
                 return false;
@@ -1496,7 +1574,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return false;
         }
         for (GrantState grant : admission.state.recoveryGrants.values()) {
-            ProfileExactRange range = grant.command.scope.exactRange();
+            ProfileExactRange range = grant.command.scope.exactRange;
             if ((entryId < 0 || entryId >= range.firstEntryId() && entryId <= range.lastEntryId())
                     && !grant.committedReadable) {
                 return false;
@@ -1591,10 +1669,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
     /** Exact persisted event and terminal context; a later applied cursor alone is insufficient. */
     synchronized boolean hasAppliedDeleteEvent(ProfileControlRequest request) {
         if (request.scope().operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
-                || request.deleteBinding().isEmpty() || !hasTerminalTombstone(context(request.scope()))) {
+                || !matchesTarget(request.scope()) || request.deleteBinding().isEmpty()
+                || !hasTerminalTombstone(context(request.scope()))) {
             return false;
         }
-        Command candidate = new Command(request.scope(), request.deleteBinding().orElseThrow());
+        Command candidate = new Command(new StoredScope(request.scope(), identity),
+                request.deleteBinding().orElseThrow());
         AppliedOperation applied = operations.get(candidate.operationId());
         return applied != null && (applied.outcome() == Status.APPLIED_DURABLE
                 || applied.outcome() == Status.ALREADY_DURABLE) && applied.command().sameMeaning(candidate);
@@ -1918,7 +1998,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     ProfileControlRequest.terminalPayloadIdentity(scope, terminal))) {
                 throw new IllegalArgumentException("Terminal close boundary binding mismatch");
             }
-            return new Command(scope, terminal);
+            return new Command(new StoredScope(scope, identity), terminal);
         }
         if (scope.operation() == ProfileControlOperation.INSTALL) {
             byte[] descriptor = transition.request().canonicalDescriptor().orElseThrow();
@@ -1930,20 +2010,21 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 throw new IllegalArgumentException("Bookie install descriptor mismatch");
             }
             ProtectedProfileCredential credential = transition.request().protectedCredential().orElseThrow();
-            return new Command(SegmentControlFormat.Type.INSTALL, scope, descriptor, credential,
+            return new Command(SegmentControlFormat.Type.INSTALL, new StoredScope(scope, identity),
+                    descriptor, credential,
                     credential.sealForStorage(key, storageBinding(scope)));
         }
         if (scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
                 || scope.operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT) {
-            return new Command(SegmentControlFormat.Type.ACTIVATE, scope, null, null, null);
+            return new Command(SegmentControlFormat.Type.ACTIVATE, new StoredScope(scope, identity), null, null, null);
         }
         if (scope.operation() == ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY) {
             if (transition.request().deleteBinding().isPresent()) {
                 var deletion = transition.request().deleteBinding().orElseThrow();
                 ProfileControlRequest.deleteApply(scope, deletion);
-                return new Command(scope, deletion);
+                return new Command(new StoredScope(scope, identity), deletion);
             }
-            return new Command(SegmentControlFormat.Type.TOMBSTONE, scope, null, null, null);
+            return new Command(SegmentControlFormat.Type.TOMBSTONE, new StoredScope(scope, identity), null, null, null);
         }
         throw new IllegalArgumentException("Bookie control operation is not implemented");
     }
@@ -1962,7 +2043,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                 grant.repairIntentGeneration(), grant.grantGeneration()))) {
             throw new IllegalArgumentException("Bookie recovery grant authority or binding mismatch");
         }
-        return new Command(scope, new GrantBinding(grant.repairIntentId(),
+        return new Command(new StoredScope(scope, identity), new GrantBinding(grant.repairIntentId(),
                 grant.repairIntentGeneration(), grant.grantGeneration()));
     }
 
@@ -1979,7 +2060,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                 close.repairIntentId(), close.repairIntentGeneration(), close.grantGeneration()))) {
             throw new IllegalArgumentException("Bookie recovery close authority or binding mismatch");
         }
-        return new Command(scope, new GrantBinding(close.repairIntentId(),
+        return new Command(new StoredScope(scope, identity), new GrantBinding(close.repairIntentId(),
                 close.repairIntentGeneration(), close.grantGeneration()), close.grantOperationId(),
                 authority.state() == CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED);
     }
@@ -1988,7 +2069,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         UUID operationId = command.operationId();
         LedgerState state = ledgers.get(command.scope.ledgerId());
         if (isTombstone(command.type) && state != null
-                && state.context.equals(context(command.scope))) {
+                && state.context.equals(command.scope.context)) {
             state.pendingTombstone = false;
         }
         if (fenceOperations.containsKey(operationId) || reservedOperation(operationId)) {
@@ -2000,6 +2081,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     ? prior.outcome() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.outcome()
                     : Status.INCOMPATIBLE;
         }
+        // A same-batch command may have been built before INSTALL applied. Share only an exact context,
+        // and preserve frozen commands by copying rather than changing their retained fields.
+        command = command.canonicalize(state != null && state.context.equals(command.scope.context)
+                ? state.context : command.scope.context, prior == null ? operationId : prior.command().operationId());
+        operationId = command.operationId();
         Status status;
         if (command.type == SegmentControlFormat.Type.INSTALL) {
             if (tombstones.containsKey(command.scope.ledgerId())) {
@@ -2008,22 +2094,22 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 state = new LedgerState(command);
                 ledgers.put(command.scope.ledgerId(), state);
                 status = Status.APPLIED_DURABLE;
-            } else if (state.context.equals(context(command.scope))
+            } else if (state.context.equals(command.scope.context)
                     && Arrays.equals(state.descriptor, command.descriptor)
                     && state.credential.matches(command.credential)
-                    && Arrays.equals(state.install.publicSemanticPayloadIdentity(),
-                            command.scope.publicSemanticPayloadIdentity())) {
+                    && Arrays.equals(state.install.publicSemanticPayloadIdentity,
+                            command.scope.publicSemanticPayloadIdentity)) {
                 status = Status.ALREADY_DURABLE;
             } else {
                 status = Status.CONDITION_FAILED;
             }
         } else if (isTombstone(command.type)) {
-            ProfileLedgerContext target = context(command.scope);
+            ProfileLedgerContext target = command.scope.context;
             ProfileLedgerContext terminal = tombstones.get(command.scope.ledgerId());
             if (terminal != null) {
                 status = terminal.equals(target) ? Status.ALREADY_DURABLE : Status.CONDITION_FAILED;
             } else if (state != null && (!state.context.equals(target)
-                    || command.scope.authorityGeneration() < state.install.authorityGeneration())) {
+                    || command.scope.authorityGeneration < state.install.authorityGeneration)) {
                 status = Status.CONDITION_FAILED;
             } else {
                 tombstones.put(command.scope.ledgerId(), target);
@@ -2037,9 +2123,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         } else if (command.type == SegmentControlFormat.Type.RECOVERY_GRANT) {
             if (tombstones.containsKey(command.scope.ledgerId()) || state == null
-                    || !state.context.equals(context(command.scope)) || state.pendingTombstone
+                    || !state.context.equals(command.scope.context) || state.pendingTombstone
                     || state.terminalPrefix != null
-                    || command.scope.authorityGeneration() < state.install.authorityGeneration()
+                    || command.scope.authorityGeneration < state.install.authorityGeneration
                     || state.recoveryGrants.size() >= config.maxPendingEntries()) {
                 status = Status.CONDITION_FAILED;
             } else {
@@ -2048,7 +2134,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         } else if (command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY) {
             if (tombstones.containsKey(command.scope.ledgerId()) || state == null
-                    || !state.context.equals(context(command.scope)) || state.pendingTombstone
+                    || !state.context.equals(command.scope.context) || state.pendingTombstone
                     || state.terminalPrefix != null && state.terminalPrefix != command.terminal.prefixEntryId()) {
                 status = Status.CONDITION_FAILED;
             } else {
@@ -2065,7 +2151,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         } else if (isRecoveryClose(command.type)) {
             GrantState grant = state == null ? null : state.recoveryGrants.get(command.closedGrantId);
             if (tombstones.containsKey(command.scope.ledgerId()) || state == null
-                    || !state.context.equals(context(command.scope)) || state.pendingTombstone
+                    || !state.context.equals(command.scope.context) || state.pendingTombstone
                     || grant == null || grant.committedReadable && command.type
                         != SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE || grant.inFlight != 0
                     || (grant.pendingClose != null && !grant.pendingClose.equals(operationId))
@@ -2075,7 +2161,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 grant.pendingClose = operationId;
                 grant.committedReadable = true;
                 if (command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE) {
-                    long prefix = command.scope.exactRange().lastEntryId();
+                    long prefix = command.scope.exactRange.lastEntryId();
                     if (state.inFlight != 0
                             || state.recoveryGrants.values().stream().anyMatch(active -> active.inFlight != 0)
                             || state.terminalPrefix != null && state.terminalPrefix != prefix) {
@@ -2090,16 +2176,16 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         } else {
             if (tombstones.containsKey(command.scope.ledgerId())
-                    || state == null || !state.context.equals(context(command.scope))
+                    || state == null || !state.context.equals(command.scope.context)
                     || state.fenced
-                    || command.scope.authorityGeneration() < state.install.authorityGeneration()
-                    || command.scope.authorityGeneration() <= state.activationGeneration
-                    || (command.scope.operation() == ProfileControlOperation.ACTIVATE_INITIAL
+                    || command.scope.authorityGeneration < state.install.authorityGeneration
+                    || command.scope.authorityGeneration <= state.activationGeneration
+                    || (command.scope.operation == ProfileControlOperation.ACTIVATE_INITIAL
                             && state.activationGeneration != 0)) {
                 status = Status.CONDITION_FAILED;
             } else {
                 state.active = true;
-                state.activationGeneration = command.scope.authorityGeneration();
+                state.activationGeneration = command.scope.authorityGeneration;
                 state.localGeneration++;
                 status = Status.APPLIED_DURABLE;
             }
@@ -2406,23 +2492,21 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         var state = ledgers.get(command.scope.ledgerId());
         var terminal = tombstones.get(command.scope.ledgerId());
-        var target = context(command.scope);
+        var target = command.scope.context;
         if (fenceOperations.containsKey(command.operationId()) || reservedOperation(command.operationId())
                 || terminal != null && !terminal.equals(target)
                 || state != null && (!state.context.equals(target)
-                    || command.scope.authorityGeneration() < state.install.authorityGeneration())) {
+                    || command.scope.authorityGeneration < state.install.authorityGeneration)) {
             throw new DeleteSequenceException(false);
         }
     }
 
     private static boolean matchesClose(Command close, Command grant) {
-        return grant.scope.ledgerId() == close.scope.ledgerId()
-                && Arrays.equals(grant.scope.ledgerInstanceId(), close.scope.ledgerInstanceId())
-                && grant.scope.descriptorIdentity().equals(close.scope.descriptorIdentity())
-                && grant.scope.targetBookie().equals(close.scope.targetBookie())
-                && Arrays.equals(grant.scope.targetStorageIncarnation(), close.scope.targetStorageIncarnation())
-                && grant.scope.authorityDomain().equals(close.scope.authorityDomain())
-                && grant.scope.exactRange().equals(close.scope.exactRange())
+        return grant.scope.context.equals(close.scope.context)
+                && grant.scope.target.bookieId().toString().equals(close.scope.target.bookieId().toString())
+                && grant.scope.target.incarnation().equals(close.scope.target.incarnation())
+                && grant.scope.authorityDomain.equals(close.scope.authorityDomain)
+                && grant.scope.exactRange.equals(close.scope.exactRange)
                 && grant.grant.sameMeaning(close.grant);
     }
 
@@ -2435,7 +2519,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private static boolean terminalUpgrade(Command before, Command after) {
         return before.type == SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE
                 && after.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE
-                && before.scope.equals(after.scope) && before.grant.sameMeaning(after.grant)
+                && before.scope.sameMeaning(after.scope) && before.grant.sameMeaning(after.grant)
                 && before.closedGrantId.equals(after.closedGrantId);
     }
 
@@ -2858,19 +2942,19 @@ final class SegmentBookieControlLog implements AutoCloseable {
                         || body.hasRemaining()) {
                     throw new IOException("Invalid activation body");
                 }
-                return new Command(parsed.type(), scope, null, null, null);
+                return new Command(parsed.type(), new StoredScope(scope, identity), null, null, null);
             }
             if (parsed.type() == SegmentControlFormat.Type.DELETE_DELIVERY_APPLY) {
                 var deletion = ProfileControlRequest.DeleteBinding.decode(body);
                 ProfileControlRequest.deleteApply(scope, deletion);
-                return new Command(scope, deletion);
+                return new Command(new StoredScope(scope, identity), deletion);
             }
             if (parsed.type() == SegmentControlFormat.Type.TOMBSTONE) {
                 if (scope.operation() != ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY
                         || body.hasRemaining()) {
                     throw new IOException("Invalid tombstone body");
                 }
-                return new Command(parsed.type(), scope, null, null, null);
+                return new Command(parsed.type(), new StoredScope(scope, identity), null, null, null);
             }
             if (parsed.type() == SegmentControlFormat.Type.RECOVERY_GRANT) {
                 if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT
@@ -2887,7 +2971,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                 recoveryGrantPayloadIdentity(scope, intentId, intentGeneration, grantGeneration))) {
                     throw new IOException("Invalid recovery grant binding");
                 }
-                return new Command(scope, new GrantBinding(intentId, intentGeneration, grantGeneration));
+                return new Command(new StoredScope(scope, identity),
+                        new GrantBinding(intentId, intentGeneration, grantGeneration));
             }
             if (parsed.type() == SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY) {
                 if (scope.operation() != ProfileControlOperation.RECOVERY_TERMINAL_CLOSE
@@ -2903,7 +2988,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                         ProfileControlRequest.terminalPayloadIdentity(scope, binding))) {
                     throw new IOException("Invalid terminal boundary identity");
                 }
-                return new Command(scope, binding);
+                return new Command(new StoredScope(scope, identity), binding);
             }
             if (isRecoveryClose(parsed.type())) {
                 if (scope.operation() != ProfileControlOperation.RECOVERY_GRANT_CLOSE
@@ -2921,7 +3006,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                         intentGeneration, grantGeneration))) {
                     throw new IOException("Invalid recovery close binding");
                 }
-                return new Command(scope, new GrantBinding(intentId, intentGeneration, grantGeneration),
+                return new Command(new StoredScope(scope, identity),
+                        new GrantBinding(intentId, intentGeneration, grantGeneration),
                         grantOperationId, parsed.type() == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE);
             }
             if (scope.operation() != ProfileControlOperation.INSTALL || body.remaining() < 2) {
@@ -2944,7 +3030,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
             ProtectedProfileCredential credential = ProtectedProfileCredential.openFromStorage(key,
                     storageBinding(scope), ProtectedProfileCredential.SealedStorageValue.fromBytes(encrypted));
-            return new Command(parsed.type(), scope, descriptor, credential,
+            return new Command(parsed.type(), new StoredScope(scope, identity), descriptor, credential,
                     ProtectedProfileCredential.SealedStorageValue.fromBytes(encrypted));
         } catch (BufferUnderflowException | IllegalArgumentException failure) {
             throw new IOException("Invalid Bookie control record", failure);
@@ -2981,10 +3067,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 .put(command.sealed.toBytes()).flip();
     }
 
-    private static ByteBuffer encodeScope(ProfileControlScope scope) {
-        byte[] target = scope.targetBookie().getBytes(StandardCharsets.UTF_8);
-        byte[] domain = scope.authorityDomain().getBytes(StandardCharsets.UTF_8);
-        int operation = switch (scope.operation()) {
+    private static ByteBuffer encodeScope(StoredScope scope) {
+        byte[] target = scope.target.bookieId().toString().getBytes(StandardCharsets.UTF_8);
+        byte[] domain = scope.authorityDomain.getBytes(StandardCharsets.UTF_8);
+        int operation = switch (scope.operation) {
             case INSTALL -> 1;
             case ACTIVATE_INITIAL -> 2;
             case ACTIVATE_REPLACEMENT -> 3;
@@ -2994,15 +3080,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
             case RECOVERY_TERMINAL_CLOSE -> 7;
             default -> throw new IllegalArgumentException("Unsupported Bookie control scope");
         };
-        int rangeBytes = scope.exactRange() == null ? 0 : 16;
+        int rangeBytes = scope.exactRange == null ? 0 : 16;
         ByteBuffer encoded = ByteBuffer.allocate(4 + 8 + 16 + 36 + 16 + 8 + 32
                         + 2 + target.length + 2 + domain.length + rangeBytes)
-                .putInt(operation).putLong(scope.ledgerId()).put(scope.ledgerInstanceId())
-                .put(scope.descriptorIdentity().toBytes()).put(scope.targetStorageIncarnation())
-                .putLong(scope.authorityGeneration()).put(scope.publicSemanticPayloadIdentity())
+                .putInt(operation).put(scope.context.encode()).put(scope.target.incarnation().value())
+                .putLong(scope.authorityGeneration).put(scope.publicSemanticPayloadIdentity)
                 .putShort((short) target.length).put(target).putShort((short) domain.length).put(domain);
-        if (scope.exactRange() != null) {
-            encoded.putLong(scope.exactRange().firstEntryId()).putLong(scope.exactRange().lastEntryId());
+        if (scope.exactRange != null) {
+            encoded.putLong(scope.exactRange.firstEntryId()).putLong(scope.exactRange.lastEntryId());
         }
         return encoded.flip();
     }

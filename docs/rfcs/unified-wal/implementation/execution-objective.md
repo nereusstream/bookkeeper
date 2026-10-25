@@ -267,3 +267,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [Bookie common 结果与 checkpoint 的单一索引](local-storage/README.md#bookie-common-结果与-checkpoint-的单一索引)：2026-10-25父bd3beb346f上，common AppliedOperation同时拥有原结果与checkpoint tuple，保留失败terminal upgrade的少量历史override及原bytes/status/sequence。首次592项TLS关闭清理error及原绑定保留；修正helper的actual closeFuture/最终drain观察后，最终同一五类592项全部通过、source/用例身份匹配、style通过，独立RAT443父路径无新增。100k同seed重放减少20万Map entries/UUID，整进程live增量减少19,845,032 B；补计的九根对象图171,946,208 B是去重reachable shallow，不是独占retained/B11 PASS。下一项继续私有scope驻留压缩，保留String等值、外部target/incarnation、原sealed、正常路径免解码及实际终态；尚未实现不称完成。full-bytes/其他16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+[Bookie 私有 scope 的紧凑驻留](local-storage/README.md#bookie-私有-scope-的紧凑驻留)：2026-10-25父a0f6d8217a上，私有StoredScope已共享准确context/固定target，保留String等值、外部target/incarnation、原sealed/canonical bytes与DATA免解码路径。10项定向及最终五类594项全部通过，source/用例身份匹配、style通过，独立RAT443父路径无新增。两JVM同100k seed的九根对象图171,946,208→122,346,384 B（163.98→116.68 MiB），减少约140万对象；reachable shallow不提升独占retained/完整Bookie B11。继续运行期/暂态typed预算上界、完整B11与其余full-bytes，以及默认SDK/observe、同incarnation unclosed-session接受、多Arena及其他16步。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持；不以本切片结束完整目标。

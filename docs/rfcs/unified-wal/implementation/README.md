@@ -840,3 +840,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [Bookie common 结果与 checkpoint 的单一索引](local-storage/README.md#bookie-common-结果与-checkpoint-的单一索引)：2026-10-25父bd3beb346f上，common AppliedOperation同时拥有原结果与checkpoint tuple，保留失败terminal upgrade的少量历史override及原bytes/status/sequence。首次592项出现TLS close操作promise清理error，原失败保留；只修正测试helper的actual closeFuture/最终drain观察，额度与生产allocator不变。最终同一五类592项全部通过、输入/用例身份匹配、style通过，独立RAT443父路径无新增。相同100k seed重放中Map entries50万→30万、UUID40万→20万，整进程live增量减少19,845,032 B；当前九metadata根去重对象图171,946,208 B包含数组头/包装/String，但不是独占retained size或B11 PASS。完整full-bytes/16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+[Bookie 私有 scope 的紧凑驻留](local-storage/README.md#bookie-私有-scope-的紧凑驻留)：2026-10-25父a0f6d8217a上，私有StoredScope共享准确context/固定target，保留原domain String等值、外部target/incarnation检查、原sealed与canonical bytes。新增2项真实文件回归及最终五类594项全部通过、source/用例身份匹配，style通过；独立RAT443父路径无新增。两独立JVM同100k native seed的九根去重对象图171,946,208→122,346,384 B（163.98→116.68 MiB），减少约140万对象；这是reachable shallow，未证明独占retained/完整Bookie B11。CONTROL预留和格式不变，完整full-bytes/16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。
