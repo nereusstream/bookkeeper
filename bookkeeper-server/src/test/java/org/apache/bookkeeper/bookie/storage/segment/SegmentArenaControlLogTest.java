@@ -911,7 +911,17 @@ public class SegmentArenaControlLogTest {
             log.submitBatch(List.of(new SegmentArenaControlLog.DataSession(new UUID(0, 1),
                     new Generation(1), 0, true), alloc(2, 4096),
                     new SegmentArenaControlLog.FileQuarantine(new UUID(0, 3), new Generation(1), 0)));
-            log.checkpoint();
+            SegmentControlCheckpoint.Reference checkpoint = log.checkpoint();
+            long durable = log.durableThrough();
+            long applied = log.appliedThrough();
+            log.close();
+            assertEquals(checkpoint, log.publishedCheckpoint().orElseThrow());
+            assertEquals(durable, log.durableThrough());
+            assertEquals(applied, log.appliedThrough());
+            assertEquals(1, log.dataSessionEpoch());
+            assertTrue(log.hasUnclosedDataSession());
+            assertTrue(log.hasDurableQuarantine(0));
+            assertFalse(log.dataFileAvailable(0));
         }
         try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             assertTrue(log.publishedCheckpoint().isPresent());
@@ -1114,6 +1124,8 @@ public class SegmentArenaControlLogTest {
                 new Thread(close).start();
                 assertTrue(close.get(1, TimeUnit.SECONDS) instanceof IOException);
                 assertEquals(-1, log.durableThrough());
+                assertEquals(0, log.allocationGeneration(0, 4096));
+                assertTrue(log.retiredStreamRanges().isEmpty());
             } finally {
                 release.countDown();
                 writer.join(5000);
@@ -1604,9 +1616,21 @@ public class SegmentArenaControlLogTest {
                 assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, log.applyDurable(first).get(0).status());
                 assertTrue(granted(log, 4096, 1, 1, 1));
                 assertFalse(log.dataFileAvailable(0));
-                log.appendDurably(List.of(new SegmentArenaControlLog.FileQuarantine(
-                        new UUID(0, 2), new Generation(1), 0)));
+                SegmentArenaControlLog.DurableBatch quarantine = log.appendDurably(
+                        List.of(new SegmentArenaControlLog.FileQuarantine(new UUID(0, 2), new Generation(1), 0)));
                 assertFalse(log.hasDurableQuarantine(0));
+                assertEquals(1, log.allocationGeneration(0, 4096));
+                log.close();
+                assertEquals(1, log.durableThrough());
+                assertEquals(0, log.appliedThrough());
+                assertFalse(log.hasDurableQuarantine(0));
+                assertFalse(log.matchesScope(config, identity));
+                assertFalse(granted(log, 4096, 1, 1, 1));
+                assertThrows(IOException.class, () -> log.applyDurable(quarantine));
+                assertThrows(IOException.class, () -> log.appendDurably(List.of(alloc(3, 4096))));
+                assertThrows(IllegalStateException.class, () -> log.allocationGeneration(0, 4096));
+                assertThrows(IllegalStateException.class, log::retiredStreamRanges);
+                assertThrows(IllegalStateException.class, log::currentMoveLocations);
             }
             try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
                 assertTrue(granted(replay, 4096, 1, 1, 1));

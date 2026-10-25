@@ -1199,6 +1199,13 @@ public class SegmentBookieControlLogTest {
             assertNull(log.deleteAppliedCursor());
             assertTrue(log.rollbackSafetyFacts().refusesOldBinarySameScopeRollback());
             log.checkpoint();
+            var facts = log.rollbackSafetyFacts();
+            log.close();
+            assertEquals(facts, log.rollbackSafetyFacts());
+            assertTrue(log.rollbackSafetyFacts().routeOrInstall());
+            assertArrayEquals(plan.encode(), log.adoptedDeleteHandoff().encode());
+            assertTrue(log.effectiveDeleteProgress().matches(plan.predecessor()));
+            assertNull(log.deleteAppliedCursor());
         }
         try (var replay = SegmentBookieControlLog.open(config, identity, 1024 * 1024, key((byte) 3), VALIDATOR)) {
             assertArrayEquals(plan.encode(), replay.adoptedDeleteHandoff().encode());
@@ -1535,14 +1542,25 @@ public class SegmentBookieControlLogTest {
         try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
                 SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity,
                         1024 * 1024, key((byte) 3), VALIDATOR)) {
-            log.appendDurably(List.of(install(1, (byte) 5)));
+            var durable = log.appendDurably(List.of(install(1, (byte) 5)));
             assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+            var facts = log.rollbackSafetyFacts();
+            long cut = log.appliedThrough();
+            log.close();
+            assertEquals(facts, log.rollbackSafetyFacts());
+            assertEquals(cut, log.appliedThrough());
+            assertThrows(IOException.class, () -> log.applyDurable(durable));
+            assertThrows(IOException.class, () -> log.appendDurably(List.of(install(1, (byte) 5))));
         }
         try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
                 1024 * 1024, key((byte) 3), VALIDATOR, new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false))) {
             assertFalse(replay.normalAdmission(context(), filled(20, (byte) 5)));
             assertThrows(IOException.class, () -> replay.submitBatch(List.of(activate(2))));
             assertFalse(replay.normalAdmission(context(), filled(20, (byte) 5)));
+            var facts = replay.rollbackSafetyFacts();
+            assertTrue(facts.durabilityUnknown());
+            replay.close();
+            assertEquals(facts, replay.rollbackSafetyFacts());
         }
         try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity,
                 1024 * 1024, key((byte) 3), VALIDATOR)) {
@@ -9626,6 +9644,18 @@ public class SegmentBookieControlLogTest {
                 byte[] image = Files.readAllBytes(SegmentControlCheckpoint.path(
                         config, SegmentControlFormat.Owner.BOOKIE, reference.slot()));
                 assertFalse(HexFormat.of().formatHex(image).contains("05".repeat(20)));
+                var facts = log.rollbackSafetyFacts();
+                assertTrue(facts.routeOrInstall());
+                assertTrue(facts.activation());
+                assertTrue(facts.fenceOrGrant());
+                assertTrue(facts.tombstone());
+                long cut = log.appliedThrough();
+                log.close();
+                assertEquals(facts, log.rollbackSafetyFacts());
+                assertEquals(cut, log.appliedThrough());
+                assertEquals(reference, log.publishedCheckpoint().orElseThrow());
+                assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+                assertTrue(log.admitRead(context()).isEmpty());
             }
             assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity(),
                     1024 * 1024, key((byte) 4), VALIDATOR));

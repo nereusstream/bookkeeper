@@ -54,6 +54,7 @@ import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
@@ -478,21 +479,21 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private SegmentControlRotation.Root rotationRoot;
     private Thread rotating;
     private Generation physicalGeneration = LOG_GENERATION;
-    private final Map<Long, LedgerState> ledgers = new HashMap<>();
-    private final Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
+    private Map<Long, LedgerState> ledgers = new HashMap<>();
+    private Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
     private ProfileControlRequest.DeleteBinding deleteApplied;
     private ProfileDeleteHandoff.Plan deleteHandoff;
     private ProfileDeleteHandoff.Effective deleteEffective;
-    private final Map<UUID, ProfileDeleteHandoff.Plan> handoffOperations = new HashMap<>();
-    private final Map<UUID, ProfileDeleteHandoff.Effective> effectiveOperations = new HashMap<>();
+    private Map<UUID, ProfileDeleteHandoff.Plan> handoffOperations = new HashMap<>();
+    private Map<UUID, ProfileDeleteHandoff.Effective> effectiveOperations = new HashMap<>();
     private HandoffWrite pendingHandoff;
-    private final Map<UUID, AppliedOperation> operations = new HashMap<>();
-    private final Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
+    private Map<UUID, AppliedOperation> operations = new HashMap<>();
+    private Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
     // First applied outcomes plus the latest LAC per ledger, bounded by image plus current journal.
-    private final Map<UUID, SegmentControlCheckpoint.Operation> checkpointState = new HashMap<>();
-    private final Map<Long, SegmentControlCheckpoint.Operation> checkpointLacs = new HashMap<>();
+    private Map<UUID, SegmentControlCheckpoint.Operation> checkpointState = new HashMap<>();
+    private Map<Long, SegmentControlCheckpoint.Operation> checkpointLacs = new HashMap<>();
 
-    private final HashSet<UUID> checkpointIds = new HashSet<>();
+    private HashSet<UUID> checkpointIds = new HashSet<>();
     private long nextOffset = FIRST_RECORD;
     private boolean rotationRequested;
     private long durableThrough = -1;
@@ -508,6 +509,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private boolean writing;
     private boolean failed;
     private boolean closed;
+    private RollbackSafetyFacts closedRollbackSafetyFacts;
     private int activeAdmissions;
     private ReclamationLease reclamation;
 
@@ -2098,8 +2100,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     /** Observed control authority only; absence of local-success receipts is not a rollback permission. */
-    synchronized org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts rollbackSafetyFacts() {
-        return new org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts(
+    synchronized RollbackSafetyFacts rollbackSafetyFacts() {
+        if (closedRollbackSafetyFacts != null) {
+            return closedRollbackSafetyFacts;
+        }
+        return new RollbackSafetyFacts(
                 false, !ledgers.isEmpty() || !handoffOperations.isEmpty(),
                 ledgers.values().stream().anyMatch(state -> state.activationGeneration != 0),
                 !fenceOperations.isEmpty() || ledgers.values().stream().anyMatch(state -> state.fenced
@@ -3143,6 +3148,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (writing || checkpointing || rotating != null || activeAdmissions != 0 || reclamation != null) {
             throw new IOException("Bookie control I/O or admissions are still in flight");
         }
+        closedRollbackSafetyFacts = rollbackSafetyFacts();
         closed = true;
         IOException first = null;
         try {
@@ -3170,9 +3176,21 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 first.addSuppressed(failure);
             }
         }
-        // No replay/checkpoint owner remains; the closed graph may itself still be referenced by its service.
-        checkpointState.clear();
-        checkpointLacs.clear();
+        // Keep bounded diagnostics, but release history and container backing from a retained closed service.
+        ledgers = new HashMap<>();
+        tombstones = new HashMap<>();
+        handoffOperations = new HashMap<>();
+        effectiveOperations = new HashMap<>();
+        operations = new HashMap<>();
+        fenceOperations = new HashMap<>();
+        checkpointState = new HashMap<>();
+        checkpointLacs = new HashMap<>();
+        checkpointIds = new HashSet<>();
+        pending = null;
+        pendingHandoff = null;
+        pendingFenceWrite = null;
+        pendingLacWrite = null;
+        pendingRecoveryCloseWrite = null;
         if (first != null) {
             throw first;
         }

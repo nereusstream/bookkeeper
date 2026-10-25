@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-05 当前增量为[restart 的 DATA 排他与控制恢复顺序](#restart-的-data-排他与控制恢复顺序)。既有同 Arena 多批 compaction、自动容量压力维护及其历史回执保留各自范围；当前仍用全图准入暂停、健康 CLOSED 管理会话恢复，长期净容量和多 Arena 尚未完成。
+2026-10-25 当前增量为[控制 owner 关闭后的历史状态释放](#控制-owner-关闭后的历史状态释放)。下文早期步骤记录及各阶段回执保留原范围；当前仍采用健康 CLOSED 管理会话恢复，同 incarnation 未关闭会话的恢复、多 Arena 与完整 full-bytes 尚未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -1316,3 +1316,27 @@ Java/test/style及全部fork实际终结后，独立 `mvn -o apache-rat:check` e
 
 
 [跨 batch quorum 的 durable 回复观察](../profile-wire/README.md#跨-batch-quorum-的-durable-回复观察)：2026-10-25父85d158c432上，原43类整轮暴露回复总数观察错误；真实input额度拒绝产生NONE后，旧总数断言的两个受控反例失败。最终仅统计durable结果，先完成第三副本entry0再对suffix拒绝，保留前两副本physicalTerminal与A2/A3屏障，三个节点使用原子force调用计数并结合实际终态。原尝试数3/退避5ms/deadline10s保持。最终同一43类整轮897项为892通过/0 failure/error/5个Linux条件skip，用例身份及1172输入一致；style通过、独立RAT443父路径无新增。所有先前失败分阶段保留；仅macOS Java PASS_SCOPED，生产/TLA未改，完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+## 控制 owner 关闭后的历史状态释放
+
+2026-10-25，父提交 `8d2b448a0b15fd58b28c272fb76637a2ae681f98`。被已停止 service 保留的 Bookie/Arena control owner 原先仍持有 typed 历史；Bookie 虽已 clear 两个 raw map，HashMap table 仍然保留。本轮在原 close 的在途 I/O、checkpoint/rotation、admission/reclamation、DATA session owner 和 quarantine 通知检查通过后，分别替换 Bookie 的9个、Arena的10个历史容器，并解除 pending 引用。原文件/锁关闭顺序及 IOException 传播不变；释放引用不代替 Free/MOVE protected-command settlement，也不允许提前结束真实 DATA custody。
+
+Bookie 在释放前缓存固定大小的 `RollbackSafetyFacts`，保留原 route/install、activation、fence/grant、tombstone、UNKNOWN 事实；delete cursor/handoff/effective 与 cut/checkpoint 诊断保留。Arena 保留 session epoch/open、durable quarantine、固定文件状态及 cut/checkpoint；不清除未关闭 DATA session，也不授予同 incarnation crash resume。Arena 原来未检查 closed 的16个历史查询现在明确抛出 IllegalStateException，防止容器释放后把旧 location hint、无 selector 或无退休历史当成有效结果；这些 package-local 查询只供仍存活 owner 使用，关闭后的完整状态须由新 owner 重放。独立 Inspection DTO 不受影响。
+
+扩展6个既有测试方法，无新增测试方法：检查 close 拒绝时仍可查询/继续 apply、关闭后操作与历史查询拒绝、固定诊断保留、durable 未 apply 的批次只在新 owner replay 后生效。先跑9项定向全部通过，再按共享关闭路径运行4类114项（Arena40、Bookie26、DATA format/session40、真实SDK/服务8），零 failure/error/skip；与既有用例身份逐项核对。原真实文件、ZK/mTLS、checkpoint/rotation、force UNKNOWN、保护资源和服务实际排空覆盖保持。1172 runner 输入与本轮1176 source/resource/addon 冻结集匹配；Spotless/Checkstyle exit0。TLA转移与持久/wire格式未改，未重跑模型或移绑历史PASS；父版本43类897项回执不视为当前源码的整轮验收。
+
+持有态对照复用已冻结的真实文件：Bookie为4096个不同ledger的 durable INSTALL；Arena为同槽位16000次ALLOC尝试（1次成功、15999次条件失败）及后续checkpoint。它们是隔离fixture的历史输入，本轮未重新生成workload，也不是当前MetadataStore授权验证。两版复制同一份输入，以同一Corretto21.0.10、`--release 17 -g -parameters -proc:none -sourcepath ''` 编译两owner及同一artifact-only probe，并置于同一已编译依赖之前；class-load日志核对实际来源。两JVM均用 `-Xint -Xms128m -Xmx128m -XX:MaxDirectMemorySize=32m`，open及close后执行full-GC histogram，静态强引用始终保留两个owner。
+
+| 观察项 | 父版 open → closed | 当前 open → closed |
+| --- | ---: | ---: |
+| Bookie LedgerState 实例 | 4096 → 4096 | 4096 → 0 |
+| Bookie AppliedOperation 实例 | 4096 → 4096 | 4096 → 0 |
+| Arena AppliedOperation 实例 | 16001 → 16001 | 16001 → 0 |
+| 被观察owner字段的HashMap table总槽位 | 57392 → 57392 | 57392 → 0 |
+
+当前19个旧容器及实际分配的7个HashMap table、1个TreeMap root弱引用均在full GC后清除。全进程histogram中的HashMap table数组减少7个/229680 bytes；该数字不是整个owner retained size或统一内存预算。Arena retiredRanges 在输入中为空，只验证容器替换，没有测量非空ArrayList backing；pending释放由行为测试及源码审查覆盖。两版关闭及新owner重开后，全部native文件SHA保持一致，cut、rollback/session/quarantine摘要不变。首次探针预检错误地要求旧Arena两个独立生成的完整journal一致而失败，未启动样本JVM；保留失败后改为冻结单一seed，本轮两版全目录同输入校验未放宽。
+
+当前源码、原始native回执、114项选择及身份、探针source/class/输入来源/full-GC日志和失败记录位于 `/Users/liusinan/.codex/artifacts/unified-wal/control-owner-close-evidence-8d2b448a`；探针成功回执为 `heap-probe/runs/20261025T052940831760Z/verification.json`。样式/测试/探针真实终态后的独立 `mvn -o apache-rat:check` exit1：443条未批准路径均存在于父提交，与前次路径集合相同，无新增，不称CI全绿。
+
+本切片只关闭 control owner 的历史引用保留问题；没有降低CONTROL预留，没有测量峰值heap/RSS、持续吞吐或完整full-bytes。运行期typed/JDK/native预算、默认SDK/observe约定、同incarnation unclosed-session恢复、多Arena持久路由及其余16步仍OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled能力保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

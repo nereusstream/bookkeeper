@@ -391,18 +391,18 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private SegmentControlRotation.Root rotationRoot;
     private Thread rotating;
     private Generation physicalGeneration = LOG_GENERATION;
-    private final Map<Slot, Grant> allocations = new HashMap<>();
-    private final Map<Long, Grant> currentAllocations = new HashMap<>();
-    private final TreeMap<Long, Long> issuedAllocationIds = new TreeMap<>();
+    private Map<Slot, Grant> allocations = new HashMap<>();
+    private Map<Long, Grant> currentAllocations = new HashMap<>();
+    private TreeMap<Long, Long> issuedAllocationIds = new TreeMap<>();
     private long allocationHighWatermark;
-    private final List<RetiredRange> retiredRanges = new ArrayList<>();
+    private List<RetiredRange> retiredRanges = new ArrayList<>();
     private long retiredBookieCut = -1;
-    private final Map<Slot, Free> retiredSlots = new HashMap<>();
-    private final Map<Long, AllocationTail> sealedTails = new HashMap<>();
-    private final Map<Stream, Long> streamStarts = new HashMap<>();
-    private final Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
-    private final Map<EntryKey, SelectedMove> selectedMoves = new HashMap<>();
-    private final Map<Long, Map<CopyKey, String>> committedCopies = new HashMap<>();
+    private Map<Slot, Free> retiredSlots = new HashMap<>();
+    private Map<Long, AllocationTail> sealedTails = new HashMap<>();
+    private Map<Stream, Long> streamStarts = new HashMap<>();
+    private Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
+    private Map<EntryKey, SelectedMove> selectedMoves = new HashMap<>();
+    private Map<Long, Map<CopyKey, String>> committedCopies = new HashMap<>();
     private final boolean[] dataBlocked;
     private final boolean[] durableQuarantine;
     private final boolean[] quarantineReserved;
@@ -678,34 +678,41 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized SegmentPointRead.Location resolveLocation(SegmentPointRead.Location hint) {
+        requireOpenHistory();
         SelectedMove selected = selectedMoves.get(new EntryKey(hint.context(), hint.entryId()));
         return selected == null ? hint : selected.target();
     }
 
     synchronized Optional<SegmentPointRead.Location> currentMoveLocation(ProfileLedgerContext context, long entryId) {
+        requireOpenHistory();
         SelectedMove selected = selectedMoves.get(new EntryKey(context, entryId));
         return selected == null ? Optional.empty() : Optional.of(selected.target());
     }
 
     synchronized long currentSelectorSequence(ProfileLedgerContext context, long entryId) {
+        requireOpenHistory();
         SelectedMove selected = selectedMoves.get(new EntryKey(context, entryId));
         return selected == null ? -1 : selected.sequence();
     }
 
     synchronized boolean hasMoves() {
+        requireOpenHistory();
         return !selectedMoves.isEmpty();
     }
 
     synchronized List<SegmentPointRead.Location> currentMoveLocations() {
+        requireOpenHistory();
         return selectedMoves.values().stream().map(selected -> selected.target()).toList();
     }
 
     synchronized long requiredMoveBookieCut() {
+        requireOpenHistory();
         return selectedMoves.values().stream().mapToLong(SelectedMove::bookieCut).max().orElse(-1);
     }
 
     /** Successful copies remain proven while their allocation is current, including superseded selectors. */
     synchronized boolean wasCommittedCopy(SegmentPointRead.Location location, SegmentBatchParser.Record record) {
+        requireOpenHistory();
         Map<CopyKey, String> copies = committedCopies.get(location.address().allocation());
         String digest = copies == null ? null : copies.get(new CopyKey(location, record.moveId(),
                 record.moveGeneration()));
@@ -714,6 +721,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized boolean isSelectedRecord(SegmentPointRead.Location location, SegmentBatchParser.Record record)
             throws IOException {
+        requireOpenHistory();
         SelectedMove selected = selectedMoves.get(new EntryKey(location.context(), location.entryId()));
         if (selected == null) {
             return record.origin() == SegmentBatchFormat.ENTRY_DATA;
@@ -741,6 +749,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     synchronized Optional<SegmentPointRead.Location> retirementSuccessor(SegmentPointRead.Location source,
                                                                          SegmentBatchParser.Record record)
             throws IOException {
+        requireOpenHistory();
         SelectedMove selected = selectedMoves.get(new EntryKey(source.context(), source.entryId()));
         if (selected == null || selected.target().equals(source)) {
             return Optional.empty();
@@ -926,6 +935,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized List<Free> retiredAllocations() {
+        requireOpenHistory();
         return appliedOperations.values().stream().filter(operation ->
                 operation.status() == Status.APPLIED_DURABLE && operation.command() instanceof Free)
                 .map(operation -> (Free) operation.command()).toList();
@@ -941,6 +951,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Consecutive retired DATA can share a recovery range, but never cross a current allocation's control order. */
     synchronized List<RetiredRange> retiredStreamRanges() {
+        requireOpenHistory();
         return List.copyOf(retiredRanges);
     }
 
@@ -988,24 +999,28 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     synchronized long retiredExtentEnd(int file, long offset) {
+        requireOpenHistory();
         Free free = retiredSlots.get(slot(file, offset));
         return free == null ? -1 : free.facts().allocation().offset()
                 + free.facts().allocation().blocks() * BLOCK_BYTES;
     }
 
     synchronized long allocationGeneration(int file, long offset) {
+        requireOpenHistory();
         Grant current = allocations.get(slot(file, offset));
         Free retired = retiredSlots.get(slot(file, offset));
         return current != null ? current.generation() : retired != null ? retired.operationGeneration().value() : 0;
     }
 
     synchronized List<Allocation> currentReusedAllocations() {
+        requireOpenHistory();
         return currentAllocations.values().stream().map(Grant::command)
                 .filter(allocation -> allocation.expectedGeneration() > 0)
                 .sorted(Comparator.comparingLong(Allocation::allocationId)).toList();
     }
 
     synchronized long sealedAllocationEnd(long allocationId) throws IOException {
+        requireOpenHistory();
         AllocationTail tail = sealedTails.get(allocationId);
         if (tail == null) {
             throw new IOException("Current reused allocation has no healthy CLOSED tail witness");
@@ -1016,6 +1031,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     record ReusedExtent(long usedEnd, long end) { }
 
     synchronized Optional<ReusedExtent> reusedExtent(int file, long offset) throws IOException {
+        requireOpenHistory();
         Grant grant = allocations.get(slot(file, offset));
         if (grant == null || grant.command().expectedGeneration() == 0) {
             return Optional.empty();
@@ -2456,6 +2472,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return new Slot(file, (offset - FIRST_RECORD) / BLOCK_BYTES);
     }
 
+    private void requireOpenHistory() {
+        if (closed) {
+            throw new IllegalStateException("Closed Arena control history must be replayed by a new owner");
+        }
+    }
+
     private void requireControlWritable() throws IOException {
         requireWritable();
         if (rotating != null && rotating != Thread.currentThread()) {
@@ -2515,6 +2537,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 first.addSuppressed(failure);
             }
         }
+        // A closed service may retain this owner, but replay needs a new owner and the durable files.
+        allocations = new HashMap<>();
+        currentAllocations = new HashMap<>();
+        issuedAllocationIds = new TreeMap<>();
+        retiredRanges = new ArrayList<>();
+        retiredSlots = new HashMap<>();
+        sealedTails = new HashMap<>();
+        streamStarts = new HashMap<>();
+        appliedOperations = new HashMap<>();
+        selectedMoves = new HashMap<>();
+        committedCopies = new HashMap<>();
+        pending = null;
+        preparedClose = null;
         if (first != null) {
             throw first;
         }

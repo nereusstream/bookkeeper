@@ -2400,3 +2400,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 当前阶段Spotless/Checkstyle exit0；全部native/style终结后独立 `mvn -o apache-rat:check` exit1，443条均为父85d158c432已有路径，与上一轮集合相同，无新增，不称CI全绿。TLA和生产Java未改，本轮没有执行TLC或性能基准。
 
 冻结的各阶段Java输入、两次整轮失败、受控反例、恢复的诊断XML、定向/style与最终整轮回执由 `/Users/liusinan/.codex/artifacts/unified-wal/unified-java-suite-repeat-evidence-85d158c4` 拥有。旧路径名称已改为中性的repeat并记录迁移，所有失败保持原绑定。生产Java、TLA/wire/持久格式未改，不重跑TLC或宣称性能收益。完整full-bytes、同incarnation未关闭session、默认SDK/observe、多Arena与其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+[控制 owner 关闭后的历史状态释放](../local-storage/README.md#控制-owner-关闭后的历史状态释放)：2026-10-25父8d2b448a0b上，Bookie/Arena在原close guard之后替换9/10个历史容器并释放pending，保留rollback/delete/session/quarantine/cut诊断；Arena关闭后的历史查询明确拒绝，原真实排空与protected settlement不变。扩展6个既有方法，9项定向及最终4类114项全部通过、输入/用例身份匹配、style通过；独立RAT仍443父路径无新增。相同冻结native输入与同JDK的两JVM持续持有closed owner：Bookie LedgerState4096→0、Arena AppliedOperation16001→0、被观察HashMap table57392→0槽位，重开及磁盘SHA不变；不是峰值/RSS或完整full-bytes。未改格式/模型或减少CONTROL预留，默认SDK/observe、同身份unclean-session恢复、多Arena及其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

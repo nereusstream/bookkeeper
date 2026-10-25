@@ -884,3 +884,6 @@ Segment production candidate 的最低 Gate：
 
 
 [跨 batch quorum 的 durable 回复观察](rfcs/unified-wal/implementation/profile-wire/README.md#跨-batch-quorum-的-durable-回复观察)：2026-10-25父85d158c432上，原43类整轮暴露回复总数观察错误；真实input额度拒绝产生NONE后，旧总数断言的两个受控反例失败。最终仅统计durable结果，先完成第三副本entry0再对suffix拒绝，保留前两副本physicalTerminal与A2/A3屏障，三个节点使用原子force调用计数并结合实际终态。原尝试数3/退避5ms/deadline10s保持。最终同一43类整轮897项为892通过/0 failure/error/5个Linux条件skip，用例身份及1172输入一致；style通过、独立RAT443父路径无新增。所有先前失败分阶段保留；仅macOS Java PASS_SCOPED，生产/TLA未改，完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[控制 owner 关闭后的历史状态释放](rfcs/unified-wal/implementation/local-storage/README.md#控制-owner-关闭后的历史状态释放)：2026-10-25父8d2b448a0b上，Bookie/Arena在原close guard之后替换9/10个历史容器并释放pending，保留rollback/delete/session/quarantine/cut诊断；Arena关闭后的历史查询明确拒绝，原真实排空与protected settlement不变。扩展6个既有方法，9项定向及最终4类114项全部通过、输入/用例身份匹配、style通过；独立RAT仍443父路径无新增。相同冻结native输入与同JDK的两JVM持续持有closed owner：Bookie LedgerState4096→0、Arena AppliedOperation16001→0、被观察HashMap table57392→0槽位，重开及磁盘SHA不变；不是峰值/RSS或完整full-bytes。未改格式/模型或减少CONTROL预留，默认SDK/observe、同身份unclean-session恢复、多Arena及其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
