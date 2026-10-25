@@ -334,7 +334,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    private record Slot(int file, long index) { }
+    private record Slot(int file, long index) implements Comparable<Slot> {
+        @Override
+        public int compareTo(Slot other) {
+            int byFile = Integer.compare(file, other.file);
+            return byFile == 0 ? Long.compare(index, other.index) : byFile;
+        }
+    }
 
     private record Stream(int shard, long generation) { }
 
@@ -391,13 +397,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private SegmentControlRotation.Root rotationRoot;
     private Thread rotating;
     private Generation physicalGeneration = LOG_GENERATION;
-    private Map<Slot, Grant> allocations = new HashMap<>();
+    // Whole allocations are installed, freed and reused atomically; one key names the entire extent.
+    private TreeMap<Slot, Grant> allocations = new TreeMap<>();
     private Map<Long, Grant> currentAllocations = new HashMap<>();
     private TreeMap<Long, Long> issuedAllocationIds = new TreeMap<>();
     private long allocationHighWatermark;
     private List<RetiredRange> retiredRanges = new ArrayList<>();
     private long retiredBookieCut = -1;
-    private Map<Slot, Free> retiredSlots = new HashMap<>();
+    private TreeMap<Slot, Free> retiredSlots = new TreeMap<>();
     private Map<Long, AllocationTail> sealedTails = new HashMap<>();
     private Map<Stream, Long> streamStarts = new HashMap<>();
     private Map<UUID, AppliedOperation> appliedOperations = new HashMap<>();
@@ -454,7 +461,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Observed replay state only. No recovery sync or usable allocation authority escapes this method. */
     record Inspection(long physicalGeneration, long appliedSequence, long checkpointGeneration,
-                      long sessionEpoch, boolean sessionOpen, int currentAllocations, int retiredSlots,
+                      long sessionEpoch, boolean sessionOpen, int currentAllocations, long retiredSlots,
                       List<Integer> recordedQuarantineFiles) { }
 
     static Inspection inspect(IsolatedSegmentConfig config, SegmentFileHeader identity, long maxLogBytes)
@@ -468,7 +475,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
             return new Inspection(observed.physicalGeneration.value(), observed.appliedThrough,
                     observed.checkpointGeneration, observed.sessionEpoch, observed.sessionOpen,
-                    observed.currentAllocations.size(), observed.retiredSlots.size(), List.copyOf(quarantine));
+                    observed.currentAllocations.size(), observed.retiredBlockCount(), List.copyOf(quarantine));
         }
     }
 
@@ -1000,15 +1007,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized long retiredExtentEnd(int file, long offset) {
         requireOpenHistory();
-        Free free = retiredSlots.get(slot(file, offset));
+        Free free = retiredExtentAt(slot(file, offset));
         return free == null ? -1 : free.facts().allocation().offset()
                 + free.facts().allocation().blocks() * BLOCK_BYTES;
     }
 
     synchronized long allocationGeneration(int file, long offset) {
         requireOpenHistory();
-        Grant current = allocations.get(slot(file, offset));
-        Free retired = retiredSlots.get(slot(file, offset));
+        Grant current = grantAt(slot(file, offset));
+        Free retired = retiredExtentAt(slot(file, offset));
         return current != null ? current.generation() : retired != null ? retired.operationGeneration().value() : 0;
     }
 
@@ -1032,7 +1039,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized Optional<ReusedExtent> reusedExtent(int file, long offset) throws IOException {
         requireOpenHistory();
-        Grant grant = allocations.get(slot(file, offset));
+        Grant grant = grantAt(slot(file, offset));
         if (grant == null || grant.command().expectedGeneration() == 0) {
             return Optional.empty();
         }
@@ -1453,18 +1460,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 || offset % config.alignment() != 0 || bytes <= 0 || bytes > config.bytesPerFile() - offset) {
             return false;
         }
-        long first = (offset - FIRST_RECORD) / BLOCK_BYTES;
-        long last = (offset - FIRST_RECORD + bytes - 1) / BLOCK_BYTES;
-        for (long block = first; block <= last; block++) {
-            Grant grant = allocations.get(new Slot(file, block));
-            if (grant == null || grant.command().ownerShard() != ownerShard
-                    || grant.command().ownerGeneration().value() != ownerGeneration
-                    || grant.command().allocationId() != allocationId
-                    || grant.generation() != allocationGeneration) {
-                return false;
-            }
-        }
-        return true;
+        Grant grant = currentAllocations.get(allocationId);
+        Allocation allocation = grant == null ? null : grant.command();
+        return allocation != null && allocation.file() == file && allocation.ownerShard() == ownerShard
+                && allocation.ownerGeneration().value() == ownerGeneration
+                && grant.generation() == allocationGeneration
+                && offset >= allocation.offset()
+                && bytes <= allocation.offset() + allocation.blocks() * BLOCK_BYTES - offset;
     }
 
     /** Select recovery pages from applied allocation ownership; full batch identity is checked separately. */
@@ -1474,7 +1476,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 || offset % config.alignment() != 0) {
             return false;
         }
-        Grant grant = allocations.get(new Slot(file, (offset - FIRST_RECORD) / BLOCK_BYTES));
+        Grant grant = grantAt(slot(file, offset));
         return grant != null && grant.command().ownerShard() == shard
                 && grant.command().ownerGeneration().value() == streamGeneration;
     }
@@ -1519,9 +1521,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
             offsets[file] = grantedHighWatermark(file);
             available[file] = (config.bytesPerFile() - offsets[file]) / BLOCK_BYTES;
         }
-        // Each retired slot is one whole block, even when one FREE covers a multi-block extent.
-        for (Slot slot : retiredSlots.keySet()) {
-            available[slot.file()]++;
+        for (Free free : retiredSlots.values()) {
+            AllocationIdentity allocation = free.facts().allocation();
+            available[allocation.file()] = Math.addExact(available[allocation.file()], allocation.blocks());
         }
         long id = allocationHighWatermark;
         List<Optional<Allocation>> planned = new ArrayList<>(requests.size());
@@ -1529,7 +1531,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         for (PoolRequest request : requests) {
             validatePoolRequest(request);
             int file = request.shard() % config.dataFiles();
-            Free reusable = retiredSlots.values().stream().distinct().filter(free ->
+            Free reusable = retiredSlots.values().stream().filter(free ->
                     free.facts().allocation().file() == file && free.facts().allocation().blocks() == request.blocks()
                             && !selectedRetirements.contains(free.facts().allocation().allocationId()))
                     .min(Comparator.comparingLong(free -> free.facts().allocation().offset())).orElse(null);
@@ -1575,9 +1577,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
     synchronized boolean restoreForegroundCapacity(int file, int blocks, int maintenanceBlocks) throws IOException {
         long fresh = (config.bytesPerFile() - grantedHighWatermark(file)) / BLOCK_BYTES;
         long available = fresh;
-        for (Slot slot : retiredSlots.keySet()) {
-            if (slot.file() == file) {
-                available++;
+        for (Free free : retiredSlots.values()) {
+            if (free.facts().allocation().file() == file) {
+                available = Math.addExact(available, free.facts().allocation().blocks());
             }
         }
         boolean reusable = retiredSlots.values().stream().anyMatch(free ->
@@ -1669,15 +1671,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
             throw new IllegalArgumentException("Invalid DATA file");
         }
         long end = FIRST_RECORD;
-        for (Slot slot : allocations.keySet()) {
-            if (slot.file() == file) {
-                end = Math.max(end, FIRST_RECORD + (slot.index() + 1) * BLOCK_BYTES);
-            }
+        Map.Entry<Slot, Grant> current = allocations.floorEntry(new Slot(file, Long.MAX_VALUE));
+        if (current != null && current.getKey().file() == file) {
+            Allocation allocation = current.getValue().command();
+            end = allocation.offset() + allocation.blocks() * BLOCK_BYTES;
         }
-        for (Slot slot : retiredSlots.keySet()) {
-            if (slot.file() == file) {
-                end = Math.max(end, FIRST_RECORD + (slot.index() + 1) * BLOCK_BYTES);
-            }
+        Map.Entry<Slot, Free> retired = retiredSlots.floorEntry(new Slot(file, Long.MAX_VALUE));
+        if (retired != null && retired.getKey().file() == file) {
+            AllocationIdentity allocation = retired.getValue().facts().allocation();
+            end = Math.max(end, allocation.offset() + allocation.blocks() * BLOCK_BYTES);
         }
         return end;
     }
@@ -2378,22 +2380,17 @@ final class SegmentArenaControlLog implements AutoCloseable {
         FreeFacts facts = free.facts();
         AllocationIdentity target = facts.allocation();
         Grant predecessor = currentAllocations.get(target.allocationId());
+        Slot start = slot(target.file(), target.offset());
         boolean allowed = predecessor != null && AllocationIdentity.of(predecessor.command()).equals(target)
                 && predecessor.generation() == free.expectedGeneration() && !durableQuarantine[target.file()]
                 && predecessor.allocationOrder() == facts.allocationOrder()
-                && (facts.arenaCut() < 0 || facts.arenaCut() == appliedThrough - 1);
-        for (int block = 0; allowed && block < target.blocks(); block++) {
-            Grant grant = allocations.get(slot(target.file(), target.offset() + block * BLOCK_BYTES));
-            allowed = predecessor.equals(grant);
-        }
+                && (facts.arenaCut() < 0 || facts.arenaCut() == appliedThrough - 1)
+                && predecessor.equals(allocations.get(start));
         Status status = allowed ? Status.APPLIED_DURABLE : Status.CONDITION_FAILED;
         Free retained = free.replayFacts();
         if (allowed) {
-            for (int block = 0; block < target.blocks(); block++) {
-                Slot slot = slot(target.file(), target.offset() + block * BLOCK_BYTES);
-                allocations.remove(slot);
-                retiredSlots.put(slot, retained);
-            }
+            allocations.remove(start);
+            retiredSlots.put(start, retained);
             currentAllocations.remove(target.allocationId());
             committedCopies.remove(target.allocationId());
             addRetirement(facts);
@@ -2419,25 +2416,26 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
             return Status.CONDITION_FAILED;
         }
-        for (int block = 0; block < command.blocks(); block++) {
-            Slot slot = slot(command.file(), command.offset() + block * BLOCK_BYTES);
-            Free retired = retiredSlots.get(slot);
-            boolean matching = command.expectedGeneration() == 0 ? retired == null
-                    : retired != null && retired.operationGeneration().value() == command.expectedGeneration()
-                            && retired.facts().allocation().offset() == command.offset()
-                            && retired.facts().allocation().blocks() == command.blocks();
-            if (allocations.containsKey(slot) || !matching) {
-                appliedOperations.put(command.operationId(),
-                        new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
-                return Status.CONDITION_FAILED;
-            }
+        Slot start = slot(command.file(), command.offset());
+        Slot last = new Slot(command.file(), start.index() + command.blocks() - 1);
+        Map.Entry<Slot, Grant> current = allocations.floorEntry(last);
+        boolean occupied = current != null && current.getKey().file() == command.file()
+                && current.getKey().index() + current.getValue().command().blocks() > start.index();
+        Map.Entry<Slot, Free> retired = retiredSlots.floorEntry(last);
+        boolean overlapsRetired = retired != null && retired.getKey().file() == command.file()
+                && retired.getKey().index() + retired.getValue().facts().allocation().blocks() > start.index();
+        boolean matching = command.expectedGeneration() == 0 ? !overlapsRetired
+                : overlapsRetired && retired.getKey().equals(start)
+                        && retired.getValue().operationGeneration().value() == command.expectedGeneration()
+                        && retired.getValue().facts().allocation().blocks() == command.blocks();
+        if (occupied || !matching) {
+            appliedOperations.put(command.operationId(),
+                    new AppliedOperation(command, Status.CONDITION_FAILED, appliedThrough));
+            return Status.CONDITION_FAILED;
         }
         Grant grant = new Grant(command, command.generation(), appliedThrough);
-        for (int block = 0; block < command.blocks(); block++) {
-            Slot slot = slot(command.file(), command.offset() + block * BLOCK_BYTES);
-            allocations.put(slot, grant);
-            retiredSlots.remove(slot);
-        }
+        allocations.put(start, grant);
+        retiredSlots.remove(start);
         currentAllocations.put(command.allocationId(), grant);
         recordIssuedAllocationId(command.allocationId());
         streamStarts.putIfAbsent(stream, command.streamFirstSequence());
@@ -2466,6 +2464,28 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         issuedAllocationIds.put(first, through);
         allocationHighWatermark = Math.max(allocationHighWatermark, id);
+    }
+
+    private Grant grantAt(Slot location) {
+        Map.Entry<Slot, Grant> entry = allocations.floorEntry(location);
+        return entry != null && entry.getKey().file() == location.file()
+                && location.index() - entry.getKey().index() < entry.getValue().command().blocks()
+                ? entry.getValue() : null;
+    }
+
+    private Free retiredExtentAt(Slot location) {
+        Map.Entry<Slot, Free> entry = retiredSlots.floorEntry(location);
+        return entry != null && entry.getKey().file() == location.file()
+                && location.index() - entry.getKey().index() < entry.getValue().facts().allocation().blocks()
+                ? entry.getValue() : null;
+    }
+
+    private long retiredBlockCount() {
+        long count = 0;
+        for (Free free : retiredSlots.values()) {
+            count = Math.addExact(count, free.facts().allocation().blocks());
+        }
+        return count;
     }
 
     private Slot slot(int file, long offset) {
@@ -2538,11 +2558,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
         }
         // A closed service may retain this owner, but replay needs a new owner and the durable files.
-        allocations = new HashMap<>();
+        allocations = new TreeMap<>();
         currentAllocations = new HashMap<>();
         issuedAllocationIds = new TreeMap<>();
         retiredRanges = new ArrayList<>();
-        retiredSlots = new HashMap<>();
+        retiredSlots = new TreeMap<>();
         sealedTails = new HashMap<>();
         streamStarts = new HashMap<>();
         appliedOperations = new HashMap<>();

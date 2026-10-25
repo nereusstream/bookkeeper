@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-25 当前增量为[控制 owner 关闭后的历史状态释放](#控制-owner-关闭后的历史状态释放)。下文早期步骤记录及各阶段回执保留原范围；当前仍采用健康 CLOSED 管理会话恢复，同 incarnation 未关闭会话的恢复、多 Arena 与完整 full-bytes 尚未完成。
+2026-10-25 当前增量为[按 allocation 索引当前与退休区间](#按-allocation-索引当前与退休区间)。下文早期步骤记录及各阶段回执保留原范围；当前仍采用健康 CLOSED 管理会话恢复，同 incarnation 未关闭会话的恢复、多 Arena 与完整 full-bytes 尚未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -1340,3 +1340,27 @@ Bookie 在释放前缓存固定大小的 `RollbackSafetyFacts`，保留原 route
 当前源码、原始native回执、114项选择及身份、探针source/class/输入来源/full-GC日志和失败记录位于 `/Users/liusinan/.codex/artifacts/unified-wal/control-owner-close-evidence-8d2b448a`；探针成功回执为 `heap-probe/runs/20261025T052940831760Z/verification.json`。样式/测试/探针真实终态后的独立 `mvn -o apache-rat:check` exit1：443条未批准路径均存在于父提交，与前次路径集合相同，无新增，不称CI全绿。
 
 本切片只关闭 control owner 的历史引用保留问题；没有降低CONTROL预留，没有测量峰值heap/RSS、持续吞吐或完整full-bytes。运行期typed/JDK/native预算、默认SDK/observe约定、同incarnation unclosed-session恢复、多Arena持久路由及其余16步仍OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled能力保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 按 allocation 索引当前与退休区间
+
+2026-10-25，父提交 `f51c412490c662e0ca83de1e26cbfcd379eb19b5`。Arena原来把一条48-byte ALLOC_POOL body展开成每个1 MiB block一个Slot和HashMap entry；同一Grant/Free本身共享，重复的是位置索引。内存随DATA文件几何放大，不能仅用control日志容量倍数覆盖。本轮将当前/退休位置索引改为按(file,start block)排序的每allocation单项TreeMap；原协议已经要求整段FREE、相同起点/长度/generation的reuse，部分reuse仍拒绝，没有新增区间拆分或格式。
+
+带allocationId的`hasAppliedGrant`直接使用原currentAllocations索引并核对file、owner、generation和完整范围，保持O(1)，跨两个相邻grant仍拒绝。按地址查询使用floorEntry并检查同file及exclusive end，复杂度按extent数增长；fresh allocation拒绝任何current/retired重叠。容量及高水位按完整extent长度计算；package-local Inspection.retiredSlots仍表示退休block数，内部类型改long并用Math.addExact求和。原sequence、condition结果、UNKNOWN、checkpoint/rotation、closed查询拒绝及Free/MOVE保护终结保持；普通DATA没有新增控制force或MetadataStore往返。
+
+新增一个Arena行为方法覆盖多block内部、末端、相邻段、gap、跨file与重叠拒绝，并在checkpoint/replay后复核。扩展原empty-allocation方法，实际执行2-block FREE、容量/退休block计数、部分reuse拒绝、checkpoint/replay、exact reuse、旧FREE重试拒绝及storage重启后的真实DATA写入。首轮7项中6通过，最后写入因原4 MiB文件扣除header只剩3个完整block，在新2-block reuse后不足以容纳fresh pool和maintenance而返回TRANSIENT_UNAVAILABLE；这是fixture容量假设，不计产品RED。只增加4096 bytes取得4个完整block，同时收紧退休容量断言，保留生产pool/maintenance限额和LOCAL_DURABLE/sequence=1断言；相同7项最终全部通过，原失败/source/日志保持独立绑定。
+
+最终5类590项全部通过（Arena41、DATA format/session40、Bookie control277、SDK/网络209、Profile install23），零failure/error/skip；原589项加新增1项的用例身份逐项匹配，1172 runner输入与1176 source/resource/addon冻结集一致。包含真实FREE/MOVE/reuse、fallback/rotation、旧scope、网络/SDK及故障/重启路径。Spotless/Checkstyle exit0；全部Java/探针/style终态后的独立RAT exit1，443条未批准路径均存在父提交且与前轮集合相同，无新增，不称CI全绿。
+
+持有态探针在相同Corretto21.0.10、`--release 17 -g -parameters -proc:none -sourcepath ''`编译父/新Arena，并以实际class-load核对overlay来源。每geometry使用同一冻结header/空control seed；四个独立JVM分别运行1或65536 blocks，先独立真实owner warm，再对被静态持有的owner测empty→单ALLOC_POOL真实write/force/apply后的full-GC histogram。每次恰有一条192-byte control frame和一次force，完整grant、interior、跨尾、错误generation等检查及关闭重开均成功；同geometry两版最终control文件逐字节摘要相同。
+
+| 单allocation大小 | 父版位置索引项 / Slot实例增量 | 当前位置索引项 / Slot实例增量 | 整进程live Java heap增量：父 → 新 |
+| --- | ---: | ---: | ---: |
+| 1 block | 1 / 1 | 1 / 1 | 624 → 528 bytes |
+| 65536 blocks | 65536 / 65536 | 1 / 1 | 4,713,624 → 520 bytes |
+
+heap增量为各JVM自身empty-warmed→populated两个full-GC观测点的全部live对象差，不是精确owner dominator size、峰值/RSS、吞吐或硬预算模型。该有限实测只覆盖current allocation的规模放大；退休区间由真实2-block FREE/reuse测试覆盖。大geometry的DATA只写身份头和末字节、保留零洞，**不是正常DATA预分配、DATA body恢复或service startup证据**；没有读取/哈希完整64 GiB DATA。保留完整control文件、DATA头尾原字节及摘要/size/st_blocks。10个本次生成DATA夹具在进程终态及lsof无句柄后按确切路径删除，删除前分配块合计14,770,176 bytes；逻辑206,176,296,960 bytes不作为实际回收量。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/arena-extent-state-evidence-f51c4124`，探针为 `heap-probe/runs/20261025T055515785254Z/verification.json`。实际控制文件、编译source/class、边界校验、histogram、失败阶段和清理记录分别保存。没有减少CONTROL预留或把日志record数量上界当typed/JDK heap字节上界；TLA转移/格式未改，不重复运行或移绑旧模型回执。
+
+完整full-bytes仍未闭合。并行静态核查确认，现有INSTALL+ACTIVATE fixture随每ledger保留的独立raw＋typed数组内容至少1173 bytes（472＋296 raw、160 scope、52 context、124 descriptor、20 plaintext credential、49 sealed），未计对象头/Map/String，且已排除LedgerState共享descriptor/credential的重复计数；不能用route shallow size声称B11已满足，100k/128 MiB retained实测尚未执行。后续消除ExplicitLac重复body时也须保留现有detached值对象语义，不能让consumer在read/storage终态后隐式持有已归还CONTROL credit的canonical backing。默认SDK/observe、同身份unclean-session恢复、多Arena持久路由及其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

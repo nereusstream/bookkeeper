@@ -1420,6 +1420,66 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void multiBlockPoolsRetainExactRangeOwnershipAcrossCheckpointReplay() throws Exception {
+        long block = SegmentArenaControlLog.BLOCK_BYTES;
+        IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("ranges"),
+                1, 4, 2, 4096 + 8 * block, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        var first = new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                new UUID(0, 1), new Generation(1), 0, 0, 0, new Generation(1), 1, 4096 + 2 * block, 2, 1);
+        var adjacent = new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                new UUID(0, 2), new Generation(1), 0, 0, 0, new Generation(1), 2, 4096 + 4 * block, 2, 1);
+        var otherFile = new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                new UUID(0, 3), new Generation(1), 0, 1, 1, new Generation(1), 3, 4096 + block, 2, 1);
+        var overlap = List.of(
+                new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, 10), new Generation(1), 0, 0, 0, new Generation(1), 10,
+                        4096 + block, 2, 1),
+                new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, 11), new Generation(1), 0, 0, 0, new Generation(1), 11,
+                        4096 + 3 * block, 2, 1),
+                new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, 12), new Generation(1), 0, 0, 0, new Generation(1), 12,
+                        4096 + block, 6, 1),
+                new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                        new UUID(0, 13), new Generation(1), 0, 0, 0, new Generation(1), 13,
+                        4096 + 2 * block, 1, 1));
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            for (int restart = 0; restart < 2; restart++) {
+                try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                    if (restart == 0) {
+                        for (var result : log.submitBatch(List.of(first, adjacent, otherFile))) {
+                            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, result.status());
+                        }
+                    } else {
+                        assertTrue(log.publishedCheckpoint().isPresent());
+                    }
+                    assertTrue(log.hasAppliedGrant(0, first.offset(), 2 * block, 0, 1, 1, 1));
+                    assertTrue(log.hasAppliedGrant(0, first.offset() + 4096, block, 0, 1, 1, 1));
+                    assertTrue(log.hasAppliedGrant(0, first.offset() + 2 * block - 4096, 4096, 0, 1, 1, 1));
+                    assertFalse(log.hasAppliedGrant(0, first.offset() - 4096, 4096, 0, 1, 1, 1));
+                    assertFalse(log.hasAppliedGrant(1, first.offset(), 4096, 0, 1, 1, 1));
+                    assertFalse(log.hasAppliedGrant(0, adjacent.offset(), 4096, 0, 1, 1, 1));
+                    assertTrue(log.hasAppliedGrant(0, adjacent.offset(), 2 * block, 0, 1, 2, 1));
+                    assertFalse(log.hasAppliedGrant(0, first.offset() + block, block + 4096, 0, 1, 1, 1));
+                    assertFalse(log.hasAppliedStreamAt(0, 4096 + 6 * block, 0, 1));
+                    assertFalse(log.hasAppliedStreamAt(1, 4096, 0, 1));
+                    assertTrue(log.hasAppliedStreamAt(1, otherFile.offset() + block, 1, 1));
+                    assertEquals(0, log.allocationGeneration(1, 4096));
+                    assertEquals(1, log.allocationGeneration(0, first.offset() + block));
+                    assertEquals(4096 + 6 * block, log.grantedHighWatermark(0));
+                    assertEquals(4096 + 3 * block, log.grantedHighWatermark(1));
+                    for (var result : log.submitBatch(overlap)) {
+                        assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED, result.status());
+                    }
+                    if (restart == 0) {
+                        log.checkpoint();
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     public void earlierAllocationBodyCannotBeReopenedAsTheNewStreamContract() throws Exception {
         IsolatedSegmentConfig config = config();
         SegmentFileHeader identity = identity();

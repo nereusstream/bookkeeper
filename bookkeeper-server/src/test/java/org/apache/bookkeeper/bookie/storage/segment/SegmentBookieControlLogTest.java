@@ -13680,13 +13680,17 @@ public class SegmentBookieControlLogTest {
 
     @Test
     public void emptyAllocationFreeDoesNotInventAStreamSequence() throws Exception {
-        IsolatedSegmentConfig config = coverageRecoveryConfig("free-empty-allocation");
+        long block = SegmentArenaControlLog.BLOCK_BYTES;
+        // Restart needs a fresh foreground block and its reserve beyond the two already issued blocks.
+        IsolatedSegmentConfig config = coverageRecoveryConfig("free-empty-allocation", 4096 + 4 * block);
+        long end = 4096 + 2 * block;
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity());
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity(),
                         1024 * 1024, key((byte) 3), VALIDATOR)) {
             files.startSession(arena);
-            arena.submitBatch(List.of(reclaimableAllocation(101, 4096)));
+            arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                    new UUID(0, 101), new Generation(1), 0, 0, 0, new Generation(1), 101, 4096, 2, 1)));
             try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
                     files, bookie, ByteBuffer.allocate(4096))) {
                 assertEquals(0, free.facts().records());
@@ -13695,8 +13699,55 @@ public class SegmentBookieControlLogTest {
                 assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
                         arena.submitBatch(List.of(free)).get(0).status());
             }
+            assertEquals(end, arena.retiredExtentEnd(0, 4096));
+            assertEquals(end, arena.retiredExtentEnd(0, 4096 + block));
+            assertEquals(-1, arena.retiredExtentEnd(0, end));
+            assertEquals(2, arena.allocationGeneration(0, end - 4096));
+            assertEquals(end, arena.grantedHighWatermark(0));
+            assertTrue(arena.restoreForegroundCapacity(0, 2, 2));
+            assertEquals(4096, arena.planPools(List.of(new SegmentArenaControlLog.PoolRequest(
+                    0, new Generation(1), 1, 2)), 2).get(0).orElseThrow().offset());
+            assertEquals(end, arena.planPools(List.of(new SegmentArenaControlLog.PoolRequest(
+                    0, new Generation(1), 1, 1)), 1).get(0).orElseThrow().offset());
+            var partial = List.of(
+                    new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                            new UUID(0, 401), new Generation(1), 2, 0, 0, new Generation(1), 401, 4096, 1, 1),
+                    new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                            new UUID(0, 402), new Generation(1), 2, 0, 0, new Generation(1), 402,
+                            4096 + block, 1, 1),
+                    new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                            new UUID(0, 403), new Generation(1), 2, 0, 0, new Generation(1), 403, 4096, 3, 1),
+                    new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC_POOL,
+                            new UUID(0, 404), new Generation(1), 0, 0, 0, new Generation(1), 404,
+                            4096 + block, 1, 1));
+            for (var result : arena.submitBatch(partial)) {
+                assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED, result.status());
+            }
+            arena.checkpoint();
             files.close();
         }
+        assertEquals(2, SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024).retiredSlots());
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
+                IsolatedSegmentFiles files = IsolatedSegmentFiles.openAppendOnly(
+                        config, identity(), arena, new SegmentFileIo())) {
+            assertTrue(arena.publishedCheckpoint().isPresent());
+            assertEquals(end, arena.retiredExtentEnd(0, 4096 + block));
+            assertEquals(2, arena.allocationGeneration(0, end - 4096));
+            files.startSession(arena);
+            var originalFree = arena.retiredAllocations().get(0);
+            var reused = arena.planPools(List.of(new SegmentArenaControlLog.PoolRequest(
+                    0, new Generation(1), 1, 2)), 1).get(0).orElseThrow();
+            assertEquals(4096, reused.offset());
+            assertEquals(2, reused.generation());
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    arena.submitBatch(List.of(reused)).get(0).status());
+            assertEquals(-1, arena.retiredExtentEnd(0, 4096 + block));
+            assertTrue(arena.hasAppliedGrant(0, 4096, 2 * block, 0, 1, reused.allocationId(), 2));
+            assertEquals(SegmentArenaControlLog.Status.CONDITION_FAILED,
+                    arena.submitBatch(List.of(originalFree)).get(0).status());
+            arena.checkpoint();
+        }
+        assertEquals(0, SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024).retiredSlots());
         try (IsolatedSegmentStorage storage = storage(config, 2, 6, 4, 32, 3)) {
             storage.restart();
             installStorage(storage, install(1, (byte) 5), activate(2));
