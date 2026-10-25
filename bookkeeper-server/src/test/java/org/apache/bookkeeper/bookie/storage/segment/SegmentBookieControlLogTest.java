@@ -7866,22 +7866,37 @@ public class SegmentBookieControlLogTest {
 
         @Override
         public void close() {
+            List<Channel> channels = new ArrayList<>();
             if (client != null) {
-                client.close().syncUninterruptibly();
+                channels.add(client);
             }
-            for (Channel peer : peers) {
-                peer.close().syncUninterruptibly();
-            }
-            for (Channel channel : acceptedChannels) {
-                channel.close().syncUninterruptibly();
-            }
+            channels.addAll(peers);
+            channels.addAll(acceptedChannels);
             if (listener != null) {
-                listener.close().syncUninterruptibly();
+                channels.add(listener);
             }
-            clientGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
-            worker.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
-            acceptor.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
-            assertBudgetZero();
+            try {
+                channels.forEach(Channel::close);
+                for (Channel channel : channels) {
+                    // TLS close-notify can fail under pressure before the transport actually closes.
+                    assertTrue("Expected actual channel termination",
+                            channel.closeFuture().awaitUninterruptibly(5, TimeUnit.SECONDS));
+                }
+            } finally {
+                var clients = clientGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS);
+                var workers = worker.shutdownGracefully(0, 5, TimeUnit.SECONDS);
+                var acceptors = acceptor.shutdownGracefully(0, 5, TimeUnit.SECONDS);
+                clients.awaitUninterruptibly();
+                workers.awaitUninterruptibly();
+                acceptors.awaitUninterruptibly();
+                try {
+                    assertTrue(clients.isSuccess());
+                    assertTrue(workers.isSuccess());
+                    assertTrue(acceptors.isSuccess());
+                } finally {
+                    assertBudgetZero();
+                }
+            }
         }
     }
 
@@ -9684,6 +9699,55 @@ public class SegmentBookieControlLogTest {
                 assertTrue(log.admitRecovery(recoveryAdd(3, 7, 9, 2, (byte) 5)).isEmpty());
                 assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
                         log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9)).status());
+            }
+        }
+    }
+
+    @Test
+    public void failedTerminalUpgradeRetainsLiveFailureAndOriginalCheckpointOutcome() throws Exception {
+        for (boolean checkpoint : List.of(false, true)) {
+            var config = checkpointConfig(temporary.newFolder("failed-upgrade-" + checkpoint)
+                    .toPath().resolve("bookie"));
+            var close = recoveryClose(4, 3, 3, 7, 9);
+            var terminal = terminalClose(4, 3);
+            try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                    SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                log.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+                log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        log.submitRecoveryClose(close));
+                log.submitBatch(List.of(tombstone(44, 5)));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.CONDITION_FAILED,
+                        log.submitRecoveryClose(terminal));
+                assertEquals(5, log.appliedThrough());
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.CONDITION_FAILED,
+                        log.prepareRecoveryClose(terminal).immediate());
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.INCOMPATIBLE,
+                        log.prepareRecoveryClose(close).immediate());
+                if (checkpoint) {
+                    log.checkpoint();
+                }
+            }
+            try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity(),
+                    1024 * 1024, key((byte) 3), VALIDATOR)) {
+                assertTrue(replay.hasTerminalTombstone(context()));
+                // Journal replay retains the live failed upgrade; checkpoint replay retains the original close.
+                assertEquals(checkpoint ? SegmentBookieControlLog.RecoveryCloseStatus.ALREADY_DURABLE
+                                : SegmentBookieControlLog.RecoveryCloseStatus.INCOMPATIBLE,
+                        replay.prepareRecoveryClose(close).immediate());
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.CONDITION_FAILED,
+                        replay.submitRecoveryClose(terminal));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.INCOMPATIBLE,
+                        replay.prepareRecoveryClose(close).immediate());
+                var image = assertBookieCheckpointMatchesJournal(config, replay.checkpoint());
+                assertEquals(checkpoint ? List.of(0L, 1L, 2L, 3L, 4L, 6L) : List.of(0L, 1L, 2L, 3L, 4L),
+                        image.operations().stream().map(SegmentControlCheckpoint.ImageRecord::sequence).toList());
+                var retainedClose = image.operations().get(3);
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE.ordinal() + 1, retainedClose.status());
+                assertEquals(SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE,
+                        SegmentControlParser.parse(retainedClose.record(), SegmentControlFormat.Owner.BOOKIE,
+                                new Generation(1), 3).type());
             }
         }
     }

@@ -1389,3 +1389,35 @@ typed两个100k阶段实际raw Operation/backing均为0，200000个CheckpointOpe
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/idle-ledger-residency-evidence-e227679f`。父版为 `measurement/runs/20261025T062918333505Z/verification.json`，typed为 `measurement/typed-runs/20261025T064430245979Z/verification.json`；功能source为typed-source/typed-inputs，initial/current-source及current-inputs保留父版原绑定。准备期脚本因末尾空classpath分量误复制了cwd仓库快照并在manifest键归一化处失败，未启动该轮JVM；失败和修正保留。成功测量复用已核验的copy，终态/posthash且确认无class来自该cwd、lsof无句柄后，只删除这份task-owned快照，保留SHA manifest及17个实际模块目录。删除前分配块724,611,072 bytes，逻辑695,493,959 bytes；原repo/PDF未修改。回执明确该历史cwd条目已删除，完整原classpath不再常驻，不能把清理后目录称为未变的完整复现环境。
 
 本轮减少了长期raw持有，未缩减CONTROL容量预留。typed对象/数组头/Map/String/包装及JDK/native的完整归因、metadata上界和100k完整B11仍OPEN；后续common索引合并须保留失败terminal upgrade与checkpoint历史的分叉，scope压缩须保留原String等值及外部target检查。默认SDK/observe约定、同incarnation unclosed-session恢复、多Arena持久路由及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Bookie common 结果与 checkpoint 的单一索引
+
+2026-10-25，父提交 `bd3beb346fc88bf1424918643de2d14384914209`。common operation 原来同时占用 applied-result 和 checkpoint 两个Map，本轮由原不可变AppliedOperation同时持有Command、实际outcome和首次sequence并实现ImageRecord；checkpoint直接选择这些tuple，special raw和latest LAC保持原索引。冻结snapshot继续引用旧不可变tuple，INSTALL使用原sealed49 bytes，格式、预算、权限、顺序apply、UNKNOWN及普通DATA路径保持。
+
+保留原失败terminal upgrade的历史分叉：GRANT_CLOSE成功后TOMBSTONE清除grant，同operation的TERMINAL_CLOSE失败时，live重试保留失败terminal结果，checkpoint仍须保留首次成功GRANT_CLOSE的bytes/status/sequence。这条实际可达路径使用checkpointState中的少量历史override；后续成功terminal才删除override。新真实文件方法分别验证pure journal与checkpoint重开后的原有差异，不把合并索引变成语义修正。原canonical frame、冻结cut、Unicode及不同nonce重试方法保持。
+
+先前9项定向通过；首次五类592项为591通过、0 failure、1 error：DATA额度压力测试的body断言完成，但旧测试helper在TLS close-notify额度异常后，因等待close操作promise失败而跳过剩余关闭。按Netty4.2.15.Final实际依赖检查，将helper改为先请求全部channel关闭，再有界等待各自actual closeFuture；finally启动并等待三个event loop终结，始终检查预算归零。没有放宽原16 KiB DATA额度、压力/body断言或修改生产allocator。这是关闭观察与清理修正，不作为产品故障RED。原失败source/XML/log保留。
+
+修正后7项定向及最终同一五类 **592项全部通过、0 failure/error/skip**：Bookie279、Arena41、DATA format/session40、SDK/网络209、Profile install23。592个用例身份及1172 runner输入逐项匹配1176 source/resource/addon冻结集；最终Java与先前计量生产Java一致，仅测试helper不同。Spotless/Checkstyle exit0；全部Java/计量/style终态后独立RAT实际exit1，443条未批准路径与前轮相同且均存在父提交，无新增，不称CI全绿。未改TLA转移或持久/wire格式，不重跑或移绑旧模型receipt。
+
+同一冻结100k INSTALL/ACTIVATE native seed在两独立JVM fresh replay，empty warm、全部active route、cut和pending排空均核对。相同Corretto21.0.10/release17、Xint/1 GiB heap、17个不可变模块快照及原JAR；两版明确移除上一轮已删除的cwd classpath条目，不复制repo/PDF。实际source/class-load/classpath及native输入输出SHA前后不变，两个进程terminal exit0。
+
+| 100k fresh replay归因 | 父版 → 当前 |
+| --- | ---: |
+| owner Map entries | 500000 → 300000 |
+| UUID key identities | 400000 → 200000 |
+| HashMap table slots | 1310720 → 786432 |
+| 数组payload＋专属对象shallow保守下界 | 75,700,000 → 70,900,000 B |
+| 再计实际Node/UUID shallow的保守下界 | 104,500,000 → 86,900,000 B |
+| 整进程live heap相对各自empty增量 | 192,115,240 → 172,270,208 B |
+
+两版raw backing均为0、typed独立数组payload均46,900,000 B。上述整进程live差19,845,032 B不是精确owner retained size；两个保守下界未包含全部包装对象/数组头，低于阈值不证明B11通过。
+
+另用小型premain Instrumentation.getObjectSize探针补计当前九个Bookie metadata根的实际对象图，按identity及root bitmask去重，只读实例字段和数组、不调用record/getter生成frame；Enum/Class/ClassLoader等共享endpoint单列停止，不跟随static图。empty为10对象/448 B；100k重放为4,200,012对象/**171,946,208 B（163.98 MiB）**，其中route-only31,448,640 B、route/history共享60,800,000 B、额外history79,697,568 B。route可达合计92,248,640 B，不能把两个root总和重复计量，也不将平均值提升为逐ledger Gate结论。
+
+全部数组实际shallow为88,745,760 B；其中1,900,000个byte[]实际85,600,000 B、length payload52,300,000 B，包含之前漏计的400000份String backing及其12,800,000 B实际容量；HashMap table为3,145,760 B。不可访问字段0，遍历helper返回后full GC，GraphWalk/Totals实例为0且五个临时结构弱引用清除；native/cuts/pending与全部100k active检查通过，进程exit0。首轮empty验证器误匹配VM缓存stateless lambda而停止，更正仅收窄helper类匹配，失败输入/源码/终态保留。该数字是声明边界内的可达对象shallow之和，**不是dominator retained size或独占ownership证明**；其他对象仍可能有外部引用。owner其他字段、MetadataStore/SDK/service/RocksDB及native/kernel/RSS不在计量边界内，B11/full-bytes仍OPEN。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/bookie-operation-index-evidence-bd3beb34`。索引对照为 `measurement/runs/20261025T073057003807Z/verification.json`，对象图为 `metadata-graph/runs/20261025T081423587863Z/verification.json`。current-source/current-inputs及index-only-inputs保留首轮索引源码绑定；final-java-source/final-java-inputs拥有helper修正后的最终592项，不覆盖首轮失败。仅清理已归档、终态且无句柄的task-owned临时路径，所有原始失败和测量证据保留。
+
+本轮未缩减CONTROL预留；下一项私有scope驻留压缩仍须保留原Java String等值、外部target/incarnation检查、原sealed与逐entry免解码的正常路径。默认SDK/observe、同incarnation unclosed-session接受条件、多Arena及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

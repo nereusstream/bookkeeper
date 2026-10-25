@@ -1,6 +1,6 @@
 目标：按已经确认并写入现有文档的 Unified WAL 16 步施工顺序，在本会话持续实施、验证并同步文档，逐步达到首个可保留数据生产候选的可审查交付。先实施步骤1～4，紧接步骤5～7形成真实写入—点读—重启恢复闭环，再按依赖推进8～10索引/回收/长期运行、11～15网络/MetadataStore/客户端/恢复/删除/rejoin，以及16综合验收与运维交付。不要只给建议或再次整理计划，也不要在完成一个小模块后自行停止整个目标。
 
-运行方式：按用户2026-10-25最新授权，本会话作为唯一实施主会话，可以使用多 agent 处理职责边界明确的子任务，由主会话统一变更集、验证和本地提交。模型与推理档采用当前会话配置；下文历史迁移记录中的固定型号及禁止子agent安排保留为历史。子agent应明确文件或只读职责边界，保护彼此改动；不通过另一CLI启动第二个编码agent，不另开独立实施会话。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 继续负责总体规划与只读检查。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
+运行方式：按用户2026-10-25最新授权，本会话作为唯一实施主会话，可以使用多 agent 处理职责边界明确的子任务，由主会话统一变更集、验证和本地提交。模型与推理档按用户2026-10-25最新指定，主会话及后续agent统一使用 `gpt-6.1-sol` / `xhigh`（极高）；新agent显式指定该配置，不恢复旧模型agent继续执行。下文历史迁移记录中的旧型号及禁止子agent安排保留为历史。子agent应明确文件或只读职责边界，保护彼此改动；不通过另一CLI启动第二个编码agent，不另开独立实施会话。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 继续负责总体规划与只读检查。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
 
 源码与文档交接：
 - 项目是 nereusstream/bookkeeper，保存的项目名 turbo-bk，源工作区 /Users/liusinan/apps/ideaproject/nereusstream/bookkeeper。不要误用 /Users/liusinan/apps/ideaproject/GITHUB/bookkeeper。
@@ -264,3 +264,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [Bookie checkpoint 的 typed 按需编码与 100k 驻留](local-storage/README.md#bookie-checkpoint-的-typed-按需编码与-100k-驻留)：2026-10-25父e227679ff2上，Bookie common checkpoint记录改为冻结Command/sequence/status的typed按需编码，保留原sealed、首次结果及terminal成功覆盖，special raw和CONTROL预留不变；checkpointId仅解析commit。新journal/image精确bytes及最终五类591项全部通过、source/用例身份匹配，style通过、独立RAT443父路径无新增。真实100k native-control驻留中raw backing降至0；metadata保守下界append146.1→69.3MB、replay152.5→75.7MB，整进程live增量约下降87MiB。下界不代替上界，完整B11/full-bytes仍OPEN；fixture不含MetadataStore/SDK/service/RocksDB。原始测量、失败准备和cwd误复制清理独立保留，未修改原PDF。完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Bookie common 结果与 checkpoint 的单一索引](local-storage/README.md#bookie-common-结果与-checkpoint-的单一索引)：2026-10-25父bd3beb346f上，common AppliedOperation同时拥有原结果与checkpoint tuple，保留失败terminal upgrade的少量历史override及原bytes/status/sequence。首次592项TLS关闭清理error及原绑定保留；修正helper的actual closeFuture/最终drain观察后，最终同一五类592项全部通过、source/用例身份匹配、style通过，独立RAT443父路径无新增。100k同seed重放减少20万Map entries/UUID，整进程live增量减少19,845,032 B；补计的九根对象图171,946,208 B是去重reachable shallow，不是独占retained/B11 PASS。下一项继续私有scope驻留压缩，保留String等值、外部target/incarnation、原sealed、正常路径免解码及实际终态；尚未实现不称完成。full-bytes/其他16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。

@@ -837,3 +837,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [Bookie checkpoint 的 typed 按需编码与 100k 驻留](local-storage/README.md#bookie-checkpoint-的-typed-按需编码与-100k-驻留)：2026-10-25父e227679ff2上，Bookie common checkpoint记录改为冻结Command/sequence/status的typed按需编码，保留原sealed、首次结果及terminal成功覆盖，special raw和CONTROL预留不变；checkpointId仅解析commit。新journal/image精确bytes及最终五类591项全部通过、source/用例身份匹配，style通过、独立RAT443父路径无新增。真实100k native-control驻留中raw backing降至0；metadata保守下界append146.1→69.3MB、replay152.5→75.7MB，整进程live增量约下降87MiB。下界不代替上界，完整B11/full-bytes仍OPEN；fixture不含MetadataStore/SDK/service/RocksDB。原始测量、失败准备和cwd误复制清理独立保留，未修改原PDF。完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Bookie common 结果与 checkpoint 的单一索引](local-storage/README.md#bookie-common-结果与-checkpoint-的单一索引)：2026-10-25父bd3beb346f上，common AppliedOperation同时拥有原结果与checkpoint tuple，保留失败terminal upgrade的少量历史override及原bytes/status/sequence。首次592项出现TLS close操作promise清理error，原失败保留；只修正测试helper的actual closeFuture/最终drain观察，额度与生产allocator不变。最终同一五类592项全部通过、输入/用例身份匹配、style通过，独立RAT443父路径无新增。相同100k seed重放中Map entries50万→30万、UUID40万→20万，整进程live增量减少19,845,032 B；当前九metadata根去重对象图171,946,208 B包含数组头/包装/String，但不是独占retained size或B11 PASS。完整full-bytes/16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。

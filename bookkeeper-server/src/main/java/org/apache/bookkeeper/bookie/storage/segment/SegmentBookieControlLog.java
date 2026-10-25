@@ -427,11 +427,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    private record AppliedOperation(Command command, Status status) { }
-
     /** Freeze the original command, including its sealed INSTALL bytes, independently of later outcomes. */
-    private record CheckpointOperation(Command command, long sequence, int status)
+    private record AppliedOperation(Command command, Status outcome, long sequence)
             implements SegmentControlCheckpoint.ImageRecord {
+        @Override
+        public int status() {
+            return outcome.ordinal() + 1;
+        }
+
         @Override
         public ByteBuffer record() {
             return encode(command, sequence);
@@ -498,7 +501,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private HandoffWrite pendingHandoff;
     private Map<UUID, AppliedOperation> operations = new HashMap<>();
     private Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
-    // First applied outcomes plus the latest LAC per ledger, bounded by image plus current journal.
+    // Special records and historical overrides; common outcomes are retained once in operations.
     private Map<UUID, SegmentControlCheckpoint.ImageRecord> checkpointState = new HashMap<>();
     private Map<Long, SegmentControlCheckpoint.Operation> checkpointLacs = new HashMap<>();
 
@@ -686,8 +689,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         AppliedOperation prior = operations.get(command.operationId());
         if (prior != null && !terminalUpgrade(prior.command(), command)) {
             return new RecoveryCloseAttempt(prior.command().sameMeaning(command)
-                    ? closeStatus(prior.status() == Status.APPLIED_DURABLE
-                            ? Status.ALREADY_DURABLE : prior.status())
+                    ? closeStatus(prior.outcome() == Status.APPLIED_DURABLE
+                            ? Status.ALREADY_DURABLE : prior.outcome())
                     : RecoveryCloseStatus.INCOMPATIBLE, null);
         }
         if (fenceOperations.containsKey(command.operationId()) || reservedOperation(command.operationId())) {
@@ -772,9 +775,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IllegalArgumentException("Only the next durable recovery close can be applied");
         }
         try {
-            Status status = apply(write.command);
+            Status status = apply(write.command, write.sequence);
             appliedThrough = write.sequence;
-            retain(write.sequence, write.command, status);
             appliedOffset = write.offset + write.record.remaining();
             return closeStatus(status);
         } catch (RuntimeException | Error failure) {
@@ -879,9 +881,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             for (Command command : batch.commands()) {
                 long sequence = ++appliedThrough;
-                Status status = apply(command);
+                Status status = apply(command, sequence);
                 ByteBuffer record = encode(command, sequence);
-                retain(sequence, command, status);
                 appliedOffset += record.remaining();
                 LedgerState state = ledgers.get(command.scope.ledgerId());
                 results.add(new Result(status, command.operationId(), sequence,
@@ -918,6 +919,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
             Set<UUID> retainedCheckpoints = retainedCheckpointIds();
             List<SegmentControlCheckpoint.ImageRecord> state = new ArrayList<>();
+            operations.forEach((id, operation) -> {
+                if (!checkpointState.containsKey(id)) {
+                    state.add(operation);
+                }
+            });
             checkpointState.forEach((id, operation) -> {
                 if (!checkpointIds.contains(id) || retainedCheckpoints.contains(id)) {
                     state.add(operation);
@@ -1207,15 +1213,6 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    private void retain(long sequence, Command command, Status status) {
-        var snapshot = new CheckpointOperation(command, sequence, status.ordinal() + 1);
-        if (command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE && status == Status.APPLIED_DURABLE) {
-            checkpointState.put(command.operationId(), snapshot);
-        } else {
-            checkpointState.putIfAbsent(command.operationId(), snapshot);
-        }
-    }
-
     /** Diagnostic predicate only; a DATA request must hold an {@link Admission} through physical termination. */
     synchronized boolean normalAdmission(ProfileLedgerContext context, byte[] wireVerifier) {
         LedgerState state = ledgers.get(context.ledgerId());
@@ -1242,7 +1239,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         LedgerState state = ledgers.get(scope.ledgerId());
         if (closed || failed || state == null || state.pendingTombstone || tombstones.containsKey(scope.ledgerId())
                 || !state.context.equals(context(scope)) || applied == null
-                || applied.status() != Status.APPLIED_DURABLE
+                || applied.outcome() != Status.APPLIED_DURABLE
                 || !isRecoveryClose(applied.command().type)
                 || !applied.command().scope.equals(scope)) {
             return 0;
@@ -1599,8 +1596,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         Command candidate = new Command(request.scope(), request.deleteBinding().orElseThrow());
         AppliedOperation applied = operations.get(candidate.operationId());
-        return applied != null && (applied.status() == Status.APPLIED_DURABLE
-                || applied.status() == Status.ALREADY_DURABLE) && applied.command().sameMeaning(candidate);
+        return applied != null && (applied.outcome() == Status.APPLIED_DURABLE
+                || applied.outcome() == Status.ALREADY_DURABLE) && applied.command().sameMeaning(candidate);
     }
 
     /** A durable suffix cut excludes only coordinates above P; pending cuts are never FREE authority. */
@@ -1987,7 +1984,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 authority.state() == CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED);
     }
 
-    private Status apply(Command command) {
+    private Status apply(Command command, long sequence) {
         UUID operationId = command.operationId();
         LedgerState state = ledgers.get(command.scope.ledgerId());
         if (isTombstone(command.type) && state != null
@@ -2000,7 +1997,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         AppliedOperation prior = operations.get(operationId);
         if (prior != null && !terminalUpgrade(prior.command(), command)) {
             return prior.command().sameMeaning(command)
-                    ? prior.status() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.status()
+                    ? prior.outcome() == Status.APPLIED_DURABLE ? Status.ALREADY_DURABLE : prior.outcome()
                     : Status.INCOMPATIBLE;
         }
         Status status;
@@ -2110,7 +2107,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (command.deletion != null && (status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE)) {
             deleteApplied = command.deletion;
         }
-        operations.put(operationId, new AppliedOperation(command, status));
+        if (prior != null && status != Status.APPLIED_DURABLE) {
+            // A failed terminal upgrade changes live retries but must preserve the first checkpoint outcome.
+            checkpointState.putIfAbsent(operationId, prior);
+        } else if (command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE
+                && status == Status.APPLIED_DURABLE) {
+            checkpointState.remove(operationId);
+        }
+        operations.put(operationId, new AppliedOperation(command, status, sequence));
         return status;
     }
 
@@ -2375,8 +2379,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         var prior = operations.get(command.operationId());
         if (prior != null) {
-            if (!prior.command().sameMeaning(command) || prior.status() != Status.APPLIED_DURABLE
-                    && prior.status() != Status.ALREADY_DURABLE) {
+            if (!prior.command().sameMeaning(command) || prior.outcome() != Status.APPLIED_DURABLE
+                    && prior.outcome() != Status.ALREADY_DURABLE) {
                 throw new DeleteSequenceException(false);
             }
             return;
@@ -2727,7 +2731,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private void replay(ByteBuffer bytes, long sequence, Integer frozenStatus) throws IOException {
         SegmentControlParser.Command parsed = parse(bytes, sequence);
         if (frozenStatus != null && parsed.type() != SegmentControlFormat.Type.EXPLICIT_LAC
-                && checkpointState.containsKey(parsed.operationId())) {
+                && (operations.containsKey(parsed.operationId())
+                    || checkpointState.containsKey(parsed.operationId()))) {
             throw new IOException("Repeated operation in Bookie checkpoint");
         }
         Status status = Status.APPLIED_DURABLE;
@@ -2750,8 +2755,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         } else {
             Command command = decode(parsed);
             verifyDeleteSequence(command);
-            status = apply(command);
-            retain(sequence, command, status);
+            status = apply(command, sequence);
         }
         if (frozenStatus != null && status.ordinal() + 1 != frozenStatus) {
             throw new IOException("Bookie checkpoint result differs from its applied outcome");
