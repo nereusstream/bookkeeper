@@ -32,6 +32,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
@@ -1584,29 +1585,84 @@ public class SegmentProfileInitialSocketClientTest {
             var firstForces = new CountDownLatch(2);
             var suffixForces = new CountDownLatch(2);
             var releases = List.of(new CountDownLatch(1), new CountDownLatch(1));
-            for (int target = 0; target < 2; target++) {
+            var forceCalls = List.of(new AtomicInteger(), new AtomicInteger(), new AtomicInteger());
+            java.util.function.IntToLongFunction durableReplies = target -> fixture.dataResults.get(target).stream()
+                    .filter(effect -> effect == ProfileStatus.DurableResult.APPLIED.wireValue()
+                            || effect == ProfileStatus.DurableResult.ALREADY_APPLIED.wireValue()).count();
+            for (int target = 0; target < 3; target++) {
                 int selected = target;
-                var calls = new AtomicInteger();
                 files(fixture.nodes.get(target)).dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
-                    if (calls.incrementAndGet() == 1) {
-                        firstForces.countDown();
-                        await(releases.get(selected));
-                    } else {
-                        suffixForces.countDown();
+                    int call = forceCalls.get(selected).incrementAndGet();
+                    if (selected < 2) {
+                        if (call == 1) {
+                            firstForces.countDown();
+                            await(releases.get(selected));
+                        } else {
+                            suffixForces.countDown();
+                        }
                     }
                 });
             }
             try (BookKeeper sdk = sdk(fixture)) {
                 var handle = writer(fixture, sdk, available, 8, 3, Duration.ofSeconds(10), Duration.ofMillis(5));
                 var callbacks = new CopyOnWriteArrayList<Long>();
+                var reservedInputs = new ArrayList<SegmentEntryInputs.Input>();
                 try {
+                    var executionField = IsolatedSegmentStorage.class.getDeclaredField("execution");
+                    executionField.setAccessible(true);
+                    var thirdExecution = (SegmentExecutionGroup) executionField.get(fixture.nodes.get(2));
+                    SegmentFileIo thirdDataIo = files(fixture.nodes.get(2)).dataIo;
+                    var refusedWrites = new AtomicInteger(-1);
+                    var refusalArmed = new java.util.concurrent.atomic.AtomicBoolean();
+                    var refused = new CompletableFuture<ProfileStatus>();
+                    var thirdFirstDurable = new CompletableFuture<Void>();
+                    var thirdDurableReplies = new CountDownLatch(2);
+                    Channel thirdChannel = dataChannel(fixture.dataClients.get(2));
+                    thirdChannel.eventLoop().submit(() -> thirdChannel.pipeline().addBefore(
+                            thirdChannel.pipeline().lastContext().name(), "releaseSourceAfterRefusal",
+                            new ChannelInboundHandlerAdapter() {
+                                @Override
+                                public void channelRead(ChannelHandlerContext ctx, Object message) throws Exception {
+                                    if (message instanceof ByteBuf frame && frame.getUnsignedShort(
+                                            frame.readerIndex() + 14) == ProfileOperation.ADD_NORMAL.wireValue()) {
+                                        byte[] encoded = new byte[ProfileStatus.ENCODED_LENGTH];
+                                        frame.getBytes(frame.readerIndex() + 36, encoded);
+                                        ProfileStatus status = ProfileStatus.decode(encoded);
+                                        if (status.durableResult() == ProfileStatus.DurableResult.NONE
+                                                && refusalArmed.compareAndSet(true, false)) {
+                                            refusedWrites.set(thirdDataIo.writes);
+                                            reservedInputs.forEach(SegmentEntryInputs.Input::close);
+                                            refused.complete(status);
+                                        } else if (status.statusClass() == ProfileStatus.StatusClass.OK
+                                                && (status.durableResult() == ProfileStatus.DurableResult.APPLIED
+                                                    || status.durableResult()
+                                                        == ProfileStatus.DurableResult.ALREADY_APPLIED)) {
+                                            thirdFirstDurable.complete(null);
+                                            thirdDurableReplies.countDown();
+                                        }
+                                    }
+                                    ctx.fireChannelRead(message);
+                                }
+                            })).get(5, TimeUnit.SECONDS);
                     var first = sdkAdd(handle, bytes(16, 8)).thenApply(id -> {
                         callbacks.add(id);
                         return id;
                     });
                     assertTrue(firstForces.await(5, TimeUnit.SECONDS));
-                    var executionField = IsolatedSegmentStorage.class.getDeclaredField("execution");
-                    executionField.setAccessible(true);
+                    thirdFirstDurable.get(5, TimeUnit.SECONDS);
+                    long inputDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (thirdExecution.inputs().usedBytes() != 0 && System.nanoTime() < inputDeadline) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    assertEquals(0, thirdExecution.inputs().usedBytes());
+                    // Refuse the suffix after this peer's first entry has drained, while the other peers stay held.
+                    while (thirdExecution.inputs().usedBytes() < thirdExecution.inputs().capacityBytes()) {
+                        var input = thirdExecution.inputs().acquire(fixture.context(), 1024);
+                        assertNotNull(input);
+                        reservedInputs.add(input);
+                    }
+                    int writesBeforeSuffix = thirdDataIo.writes;
+                    refusalArmed.set(true);
                     var driversField = IsolatedSegmentStorage.class.getDeclaredField("drivers");
                     driversField.setAccessible(true);
                     var pendingField = SegmentDataPhysicalDriver.class.getDeclaredField("pending");
@@ -1636,6 +1692,12 @@ public class SegmentProfileInitialSocketClientTest {
                                 callbacks.add(id);
                                 return id;
                             });
+                            ProfileStatus rejection = refused.get(5, TimeUnit.SECONDS);
+                            assertEquals(ProfileStatus.StatusClass.TRANSIENT_UNAVAILABLE, rejection.statusClass());
+                            assertEquals(ProfileStatus.RetryDisposition.SAME_PROFILE_OPERATION,
+                                    rejection.retryDisposition());
+                            assertEquals(ProfileStatus.DurableResult.NONE, rejection.durableResult());
+                            assertEquals(writesBeforeSuffix, refusedWrites.get());
                             assertTrue(suffixForces.await(5, TimeUnit.SECONDS));
                             for (int target = 0; target < 2; target++) {
                                 var execution = executions.get(target);
@@ -1647,14 +1709,14 @@ public class SegmentProfileInitialSocketClientTest {
                                     assertTrue(execution.owner(0).control(() -> observed.complete(null)));
                                     observed.get(5, TimeUnit.SECONDS);
                                 }
-                                assertEquals(2, files(fixture.nodes.get(target)).dataIo.forces);
-                                assertTrue(fixture.dataResults.get(target).isEmpty());
+                                assertEquals(2, forceCalls.get(target).get());
+                                assertEquals(0, durableReplies.applyAsLong(target));
                             }
-                            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                            while (fixture.dataResults.get(2).size() < 2 && System.nanoTime() < until) {
-                                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
-                            }
-                            assertEquals(2, fixture.dataResults.get(2).size());
+                            boolean thirdReplied = thirdDurableReplies.await(5, TimeUnit.SECONDS);
+                            assertTrue("Third effects=" + fixture.dataResults.get(2)
+                                    + ", first=" + first + ", suffix=" + second, thirdReplied);
+                            assertEquals(2, durableReplies.applyAsLong(2));
+                            assertEquals(2, forceCalls.get(2).get());
                             assertFalse(first.isDone());
                             assertFalse(second.isDone());
                             later = handle.getPendingAddOps().stream().skip(1).findFirst().orElseThrow();
@@ -1665,11 +1727,11 @@ public class SegmentProfileInitialSocketClientTest {
                             }
                         }
                         long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                        while (fixture.dataResults.get(0).size() < 2 && System.nanoTime() < until) {
+                        while (durableReplies.applyAsLong(0) < 2 && System.nanoTime() < until) {
                             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
                         }
-                        assertEquals(2, fixture.dataResults.get(0).size());
-                        assertTrue(fixture.dataResults.get(1).isEmpty());
+                        assertEquals(2, durableReplies.applyAsLong(0));
+                        assertEquals(0, durableReplies.applyAsLong(1));
                         if (ackQuorum == 3) {
                             assertThrows(java.util.concurrent.TimeoutException.class,
                                     () -> first.get(150, TimeUnit.MILLISECONDS));
@@ -1685,7 +1747,11 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(Long.valueOf(0), first.get(5, TimeUnit.SECONDS));
                     assertEquals(Long.valueOf(1), second.get(5, TimeUnit.SECONDS));
                     assertEquals(List.of(0L, 1L), callbacks);
+                    assertEquals(1, handle.getLastAddConfirmed());
+                    assertEquals(32, handle.getLength());
+                    assertFalse(handle.hasUncertainWrites());
                 } finally {
+                    reservedInputs.forEach(SegmentEntryInputs.Input::close);
                     releases.forEach(CountDownLatch::countDown);
                     handle.stopLocalWrites().get(5, TimeUnit.SECONDS);
                 }

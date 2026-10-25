@@ -2379,3 +2379,24 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 完整43类选择/可复现命令、初始镜像、原整轮和独立失败、修正method边界证明、最终四项与源码、平台skip明细，由 `/Users/liusinan/.codex/artifacts/unified-wal/unified-java-suite-evidence-5a16759d` 拥有。最终Spotless/Checkstyle exit0；native/style真实终结后的独立 `mvn -o apache-rat:check` exit1，443 unapproved均为父5a16759da1既有路径，与上一轮集合一致，无新增，不称CI全绿。TLA未改，不执行TLC或移绑旧模型PASS。
 
 本轮闭合该遗留测试观察错误，并提供当前43类真实整轮结果；不宣称完整Java整轮/模型/兼容/生产Gate已通过。默认SDK/observe公共约定、同incarnation未关闭DATA session恢复、多Arena持久路由、完整full-bytes、剩余authority/删除历史/正式性能/运维及16步验收继续OPEN；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled能力不变，Linux NUMA、真实掉电、正式环境/canary本轮NOT_EXECUTED。
+
+
+## 跨 batch quorum 的 durable 回复观察
+
+2026-10-25，父提交 `85d158c432a2bdd5a05ef7f54338929ba6507a49`。此前修正的注册池排空方法已在新的43类整轮通过；该轮实际897项、1 failure、0 error、5个Linux条件skip，新的失败是A2跨batch测试把第三副本的三条回复总数要求为二。原失败未记录三条回复的effect，不能追认为NONE。临时四次A2/一次A3诊断只观察到两个APPLIED，未复现额外回复；恢复工作时原临时回执目录已不存在，保留了恢复出的原Maven XML和当时冻结的诊断源码，没有重建缺失的输入/log冒充原回执。
+
+在原同一测试helper中，用第三节点真实SegmentEntryInputs额度制造拒绝，客户端观察到真实NONE后归还预占输入，让原SDK按same-operation路径重试；没有改服务器回复或生产实现。保留旧总回复数断言的两个受控反例分别观测到 `[NONE, APPLIED, APPLIED]` 和 `[NONE, NONE, APPLIED, APPLIED]`，均在原“总数等于2”断言失败。这证明原观察点会拒绝合法重试轨迹，不把未捕获的原偶发现象补写成已知effect或产品缺陷。
+
+修正只统计APPLIED/ALREADY_APPLIED。前两节点原首批physicalTerminal monitor、两个DATA worker的sentinel及owner回合、后批实际force和A2/A3不同完成边界保持；三个节点通过原beforeForce回调的AtomicInteger观察调用次数，避免普通int并发计数。次数本身不证明force完成，仍依赖真实OK/DURABLE回复及原实际I/O终态。最终还检查一次且顺序为0/1的SDK回调、LAC1、length32以及没有uncertain writes。
+
+最初把拒绝注入entry0的版本虽有定向通过，后续43类整轮仍在A3等待第三副本两个durable回复处失败。原三次总尝试包含被注入的NONE，且entry1可能先于entry0重试到达并触发原awaitingPool拒绝；XML记录约21ms内socket2/entry0失败并连带entry1失败，未记录每次完整status，不能仅凭时间认定最终rc或排除UNKNOWN。该失败和对应源码继续保留。
+
+当前fixture先等待第三副本entry0实际OK/DURABLE及input额度归零，再预占额度并仅对suffix/entry1 arm一次拒绝。这样前两副本仍停在首批I/O，第三副本已完成首次allocation；真实拒绝前后DATA writes没有增加。额度在拒绝回复交给原客户端分类器前释放，SDK使用原3次总尝试、5ms退避、10s deadline；未扩大这些参数。Input.close在budget锁下幂等，正常路径及finally都释放未提交的预占输入。当前A2/A3两项定向0 failure/error/skip，Spotless/Checkstyle exit0。
+
+独立子agent只读核查了quota拒绝、arm/list发布、Input生命周期、原子计数与原跨batch quorum屏障，未发现新的阻塞问题；未修改源码或运行测试。用户2026-10-25已授权多agent，本主会话继续统一源码、验证和提交，执行约束已同步到execution-objective.md；历史单agent及模型设置记录保留其历史身份。
+
+最终 `unified-wal-local-Ic6ZBRqO` 实际exit0：**43类、897项，892通过、0 failure/error、5个Linux条件skip**。全部897个用例身份及五个skip身份与原整轮一致，无缺类、无额外类；1172个runner输入逐项匹配当前冻结阶段，补充native/benchmark输入共1176个。当前原registered-pool方法及两个跨batch方法均在这次同一整轮通过。接受状态仅为macOS Java的`MACOS_JAVA_PASS_SCOPED`；五个Linux用例没有被转为PASS，旧整轮失败保持原source/receipt绑定。
+
+当前阶段Spotless/Checkstyle exit0；全部native/style终结后独立 `mvn -o apache-rat:check` exit1，443条均为父85d158c432已有路径，与上一轮集合相同，无新增，不称CI全绿。TLA和生产Java未改，本轮没有执行TLC或性能基准。
+
+冻结的各阶段Java输入、两次整轮失败、受控反例、恢复的诊断XML、定向/style与最终整轮回执由 `/Users/liusinan/.codex/artifacts/unified-wal/unified-java-suite-repeat-evidence-85d158c4` 拥有。旧路径名称已改为中性的repeat并记录迁移，所有失败保持原绑定。生产Java、TLA/wire/持久格式未改，不重跑TLC或宣称性能收益。完整full-bytes、同incarnation未关闭session、默认SDK/observe、多Arena与其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
