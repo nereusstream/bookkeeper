@@ -9689,6 +9689,112 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void bookieCheckpointKeepsCanonicalFirstResultsAndFrozenCommandsAcrossReplay() throws Exception {
+        IsolatedSegmentConfig config = config();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SegmentFileIo delayed = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            forcing.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Checkpoint force was not released");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+        });
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentBookieControlLog log = SegmentBookieControlLog.open(config, identity(),
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            log.submitBatch(List.of(install(1, (byte) 5), activate(2), tombstone(46, 8), activate(47, 9)));
+            log.submitRecoveryGrant(recoveryGrant(3, 3, 7, 9));
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    log.submitRecoveryClose(recoveryClose(4, 3, 3, 7, 9)));
+            assertEquals(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                    log.submitBatch(List.of(install(1, (byte) 5))).get(0).status());
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    log.submitBatch(List.of(install(1, (byte) 6))).get(0).status());
+            log.submitBatch(List.of(install(47, 10, (byte) 7)));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(activate(47, 9))).get(0).status());
+            var base = scope(48, ProfileControlOperation.INSTALL, 11, 1);
+            var unicode = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(),
+                    base.ledgerInstanceId(), base.descriptorIdentity(), base.targetBookie(),
+                    base.targetStorageIncarnation(), "账本-e\u0301", base.authorityGeneration(),
+                    base.operationId(), base.publicSemanticPayloadIdentity(), null);
+            log.submitBatch(List.of(new ProtectedProfileStateStore.Transition(
+                    ProfileControlRequest.install(unicode, DESCRIPTOR_BYTES, EngineProfile.SEGMENT_WAL_ENGINE,
+                            ProtectedProfileCredential.of(ProtectedProfileCredential.BK_MASTER_KEY_SHA1,
+                                    filled(20, (byte) 8))),
+                    new CommittedProfileAuthority(unicode, CommittedProfileAuthority.State.PREPARING,
+                            EngineProfile.SEGMENT_WAL_ENGINE, 1, true), DESCRIPTOR)));
+            FutureTask<SegmentControlCheckpoint.Reference> task = new FutureTask<>(() -> log.checkpoint(delayed));
+            Thread writer = new Thread(task);
+            writer.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                        log.submitRecoveryClose(terminalClose(4, 3)));
+            } finally {
+                release.countDown();
+                writer.join(5000);
+            }
+            assertFalse(writer.isAlive());
+            var frozen = assertBookieCheckpointMatchesJournal(config, task.get(1, TimeUnit.SECONDS));
+            assertEquals(10, frozen.through());
+            assertEquals(List.of(0L, 1L, 2L, 3L, 4L, 5L, 8L, 10L),
+                    frozen.operations().stream().map(SegmentControlCheckpoint.ImageRecord::sequence).toList());
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED.ordinal() + 1,
+                    frozen.operations().get(3).status());
+            assertEquals(SegmentControlFormat.Type.RECOVERY_GRANT_CLOSE,
+                    SegmentControlParser.parse(frozen.operations().get(5).record(),
+                            SegmentControlFormat.Owner.BOOKIE, new Generation(1), 5).type());
+            var terminal = log.prepareTerminalClose(terminalBoundary(12, 4, 80));
+            assertNull(terminal.immediate());
+            log.writeRecoveryCloseDurably(terminal.write());
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    log.applyRecoveryCloseDurable(terminal.write()));
+            log.submitBatch(List.of(delivery(45, 13, 1, (byte) 8)));
+            var latest = assertBookieCheckpointMatchesJournal(config, log.checkpoint());
+            assertEquals(List.of(0L, 1L, 2L, 3L, 4L, 8L, 10L, 11L, 12L, 13L, 14L),
+                    latest.operations().stream().map(SegmentControlCheckpoint.ImageRecord::sequence).toList());
+            assertFalse(log.normalAdmission(context(), filled(20, (byte) 5)));
+        }
+        try (SegmentBookieControlLog replay = SegmentBookieControlLog.open(config, identity(),
+                1024 * 1024, key((byte) 3), VALIDATOR)) {
+            var snapshot = assertBookieCheckpointMatchesJournal(config, replay.checkpoint());
+            assertEquals(0, snapshot.operations().get(0).sequence());
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED.ordinal() + 1,
+                    snapshot.operations().get(3).status());
+            assertTrue(replay.hasTerminalExclusion(context(), 9));
+            assertTrue(replay.hasTerminalTombstone(context(45)));
+            assertTrue(replay.locallyReadableContext(context(48)));
+        }
+    }
+
+    private SegmentControlCheckpoint.Snapshot assertBookieCheckpointMatchesJournal(
+            IsolatedSegmentConfig config, SegmentControlCheckpoint.Reference reference) throws IOException {
+        ByteBuffer journal = ByteBuffer.wrap(Files.readAllBytes(config.directory().resolve("bookie-control")));
+        journal.position(4096);
+        Map<Long, ByteBuffer> records = new TreeMap<>();
+        long sequence = 0;
+        while (journal.hasRemaining()) {
+            int length = SegmentControlParser.recordLength(journal, SegmentControlFormat.Owner.BOOKIE,
+                    new Generation(1), sequence);
+            records.put(sequence++, journal.slice(journal.position(), length));
+            journal.position(journal.position() + length);
+        }
+        var snapshot = SegmentControlCheckpoint.read(config, identity(), SegmentControlFormat.Owner.BOOKIE,
+                reference, 1024 * 1024);
+        for (var operation : snapshot.operations()) {
+            assertEquals("Checkpoint changed journal bytes at sequence " + operation.sequence(),
+                    records.get(operation.sequence()), operation.record());
+        }
+        return snapshot;
+    }
+
+    @Test
     public void bookieCheckpointCapturesAppliedCutWhileTombstoneIsDurableButUnapplied() throws Exception {
         IsolatedSegmentConfig config = config();
         CountDownLatch forcing = new CountDownLatch(1);

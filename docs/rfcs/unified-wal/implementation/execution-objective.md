@@ -261,3 +261,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [按 allocation 索引当前与退休区间](local-storage/README.md#按-allocation-索引当前与退休区间)：2026-10-25父f51c412490上，Arena current/retired位置索引从逐block展开改为每allocation单项区间，保留exact FREE/reuse、跨grant拒绝、generation和实际保护终结；有ID的grant查询继续O(1)，容量/Inspection仍按block计数。新增1方法及扩展真实2-block FREE/reuse方法；fixture仅补header占用的4096B后7项定向通过，原容量失败独立保留。最终5类590项零failure/error/skip，用例身份和1172输入匹配，style通过；独立RAT仍443父路径无新增。四JVM真实control对照中65536-block索引/Slot从65536降为1，control字节及replay一致；仅control metadata稀疏DATA夹具，不是完整预分配或服务证明。全部生成DATA已按终态/句柄检查清理，证据保留。完整full-bytes/B11/其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+[Bookie checkpoint 的 typed 按需编码与 100k 驻留](local-storage/README.md#bookie-checkpoint-的-typed-按需编码与-100k-驻留)：2026-10-25父e227679ff2上，Bookie common checkpoint记录改为冻结Command/sequence/status的typed按需编码，保留原sealed、首次结果及terminal成功覆盖，special raw和CONTROL预留不变；checkpointId仅解析commit。新journal/image精确bytes及最终五类591项全部通过、source/用例身份匹配，style通过、独立RAT443父路径无新增。真实100k native-control驻留中raw backing降至0；metadata保守下界append146.1→69.3MB、replay152.5→75.7MB，整进程live增量约下降87MiB。下界不代替上界，完整B11/full-bytes仍OPEN；fixture不含MetadataStore/SDK/service/RocksDB。原始测量、失败准备和cwd误复制清理独立保留，未修改原PDF。完整16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。

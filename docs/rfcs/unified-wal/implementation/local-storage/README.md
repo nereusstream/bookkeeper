@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-25 当前增量为[按 allocation 索引当前与退休区间](#按-allocation-索引当前与退休区间)。下文早期步骤记录及各阶段回执保留原范围；当前仍采用健康 CLOSED 管理会话恢复，同 incarnation 未关闭会话的恢复、多 Arena 与完整 full-bytes 尚未完成。
+2026-10-25 当前增量为[Bookie checkpoint 的 typed 按需编码与 100k 驻留](#bookie-checkpoint-的-typed-按需编码与-100k-驻留)。下文早期步骤记录及各阶段回执保留原范围；当前仍采用健康 CLOSED 管理会话恢复，同 incarnation 未关闭会话的恢复、多 Arena 与完整 full-bytes 尚未完成。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -1364,3 +1364,28 @@ heap增量为各JVM自身empty-warmed→populated两个full-GC观测点的全部
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/arena-extent-state-evidence-f51c4124`，探针为 `heap-probe/runs/20261025T055515785254Z/verification.json`。实际控制文件、编译source/class、边界校验、histogram、失败阶段和清理记录分别保存。没有减少CONTROL预留或把日志record数量上界当typed/JDK heap字节上界；TLA转移/格式未改，不重复运行或移绑旧模型回执。
 
 完整full-bytes仍未闭合。并行静态核查确认，现有INSTALL+ACTIVATE fixture随每ledger保留的独立raw＋typed数组内容至少1173 bytes（472＋296 raw、160 scope、52 context、124 descriptor、20 plaintext credential、49 sealed），未计对象头/Map/String，且已排除LedgerState共享descriptor/credential的重复计数；不能用route shallow size声称B11已满足，100k/128 MiB retained实测尚未执行。后续消除ExplicitLac重复body时也须保留现有detached值对象语义，不能让consumer在read/storage终态后隐式持有已归还CONTROL credit的canonical backing。默认SDK/observe、同身份unclean-session恢复、多Arena持久路由及其余16步仍OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Bookie checkpoint 的 typed 按需编码与 100k 驻留
+
+2026-10-25，父提交 `e227679ff2db9f2181ea622814750237ba714252`。Bookie common Command 已保留不可变scope、descriptor/credential及原sealed值，本轮将其checkpoint状态从长期canonical frame改为私有不可变ImageRecord，冻结Command、原sequence和实际status，在原reference/write/verify阶段按需编码。INSTALL仍使用原49-byte sealed，不重新生成nonce；普通重试以putIfAbsent保留首次结果，成功RECOVERY_TERMINAL_CLOSE仍是唯一覆盖例外。旧snapshot继续持有旧tuple，live terminal upgrade不会改变其bytes或结果。Fence、LAC、handoff、checkpoint commit维持原raw Operation；原restoreSnapshot完整校验、CONTROL预留和格式保持。checkpointId只遍历原checkpointIds，避免锁内重编码全部业务history；没有新增普通DATA I/O、控制force或MetadataStore往返。
+
+新增一个真实journal/image字节等价方法：覆盖首次INSTALL与同operation不同nonce重试、失败首结果、合法Unicode domain、冻结cut后的terminal upgrade、独立terminal boundary和delete delivery，重开后再次checkpoint仍逐项匹配原journal frame。新方法与六项相关checkpoint/rotation/终态方法先通过；最终五类591项（Bookie278、Arena41、DATA format/session40、SDK/网络209、Profile install23）零failure/error/skip，原590项加新增1项的用例身份和1172 runner输入均匹配本轮1176 source/resource/addon冻结集。Spotless/Checkstyle exit0。全部Java/测量/style终态后的独立RAT exit1：443条未批准路径均存在父提交且与前轮集合相同，无新增，不称CI全绿。TLA转移/持久及wire格式未改，历史模型receipt保持原绑定。
+
+B11测量使用同一打开control owner，从独立fixture warm后测empty→4096→100000，再关闭原owner、fresh replay100000。每批64个ledger/128个transition，使用唯一16-byte phase/id operation，逐项实际INSTALL/PREPARING和ACTIVATE/READY_INITIAL、完整write/force/apply，采样前helper返回、输入列表不留栈；全量normalAdmission和pending/admission排空检查通过。总共200000条record、1563次实际batch force，control journal为76,804,096 bytes。DATA始终4 MiB、Arena-control始终4096 bytes，未建立逐ledger DATA extent或block buffer。authority是显式fixture事实；MetadataStore、SDK/service、execution group和RocksDB未在该驻留fixture中实例化，完整Bookie总账仍须补齐。
+
+父版与typed版均为同一Corretto21.0.10、release17/g/parameters编译的冻结source overlay，固定-Xint、heap上限1 GiB及NMT summary，实际class-load、JDK/编译class/JAR与classpath内容hash分别绑定。各阶段在owner强引用存在时采full-GC live histogram，并保存BufferPool、Java线程、FD及NMT分项。typed为避开并行Maven重编，实际模块依赖目录以copy2独立冻结；两版原始回执独立，不重绑旧结果。两版加密nonce独立产生，比较的是相同语义/数量/长度的负载；各自replay及close前后native全目录字节SHA一致。
+
+metadata下界按实际owner字段读取和identity去重计算：raw实际backing payload＋typed独立数组payload＋Command/AppliedOperation/LedgerState及checkpoint record四类专属对象shallow bytes；未调用ImageRecord.record()制造临时frame。LedgerState与Command共享的descriptor/credential及其他共享数组只计一次。append父版方程为76,800,000＋40,500,000＋28,800,000＝146,100,000 bytes；route分区35,600,000、额外control history110,500,000，分区合计不重复。该保守下界已超过128 MiB，父版此metadata负载明确FAIL；route-only的1 KiB Gate不能由这个下界单独判断。
+
+| 阶段 | 父版metadata保守下界 | typed metadata保守下界 | 整进程live heap相对各自empty增量：父 → typed |
+| --- | ---: | ---: | ---: |
+| append 4096 | 5,984,256 B | 2,838,528 B | 见各自原始histogram |
+| append 100000 | 146,100,000 B | 69,300,000 B | 246,481,128 → 155,353,704 B |
+| replay 100000 | 152,500,000 B | 75,700,000 B | 283,135,480 → 191,918,592 B |
+
+typed两个100k阶段实际raw Operation/backing均为0，200000个CheckpointOperation共享applied state的原Command。保守下界分别为693/757 B每ledger；这些值不是上界，**B11仍未证明通过**。整进程live差也不等于精确metadata retained/dominator size、峰值heap或RSS。replay额外payload来自重新解码的scope digest，已覆盖append共享静态identity的最好情况之外的持有态。direct pool在四阶段均为1×65536 B、live Java线程7、FD181；native分配/所有线程栈等更完整范围由原NMT分项记录，不以这些固定数替代完整账。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/idle-ledger-residency-evidence-e227679f`。父版为 `measurement/runs/20261025T062918333505Z/verification.json`，typed为 `measurement/typed-runs/20261025T064430245979Z/verification.json`；功能source为typed-source/typed-inputs，initial/current-source及current-inputs保留父版原绑定。准备期脚本因末尾空classpath分量误复制了cwd仓库快照并在manifest键归一化处失败，未启动该轮JVM；失败和修正保留。成功测量复用已核验的copy，终态/posthash且确认无class来自该cwd、lsof无句柄后，只删除这份task-owned快照，保留SHA manifest及17个实际模块目录。删除前分配块724,611,072 bytes，逻辑695,493,959 bytes；原repo/PDF未修改。回执明确该历史cwd条目已删除，完整原classpath不再常驻，不能把清理后目录称为未变的完整复现环境。
+
+本轮减少了长期raw持有，未缩减CONTROL容量预留。typed对象/数组头/Map/String/包装及JDK/native的完整归因、metadata上界和100k完整B11仍OPEN；后续common索引合并须保留失败terminal upgrade与checkpoint历史的分叉，scope压缩须保留原String等值及外部target检查。默认SDK/observe约定、同incarnation unclosed-session恢复、多Arena持久路由及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

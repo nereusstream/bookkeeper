@@ -429,6 +429,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private record AppliedOperation(Command command, Status status) { }
 
+    /** Freeze the original command, including its sealed INSTALL bytes, independently of later outcomes. */
+    private record CheckpointOperation(Command command, long sequence, int status)
+            implements SegmentControlCheckpoint.ImageRecord {
+        @Override
+        public ByteBuffer record() {
+            return encode(command, sequence);
+        }
+    }
+
     private static final class GrantState {
         private final Command command;
         private int inFlight;
@@ -490,7 +499,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private Map<UUID, AppliedOperation> operations = new HashMap<>();
     private Map<UUID, ProfileLedgerContext> fenceOperations = new HashMap<>();
     // First applied outcomes plus the latest LAC per ledger, bounded by image plus current journal.
-    private Map<UUID, SegmentControlCheckpoint.Operation> checkpointState = new HashMap<>();
+    private Map<UUID, SegmentControlCheckpoint.ImageRecord> checkpointState = new HashMap<>();
     private Map<Long, SegmentControlCheckpoint.Operation> checkpointLacs = new HashMap<>();
 
     private HashSet<UUID> checkpointIds = new HashSet<>();
@@ -765,7 +774,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         try {
             Status status = apply(write.command);
             appliedThrough = write.sequence;
-            retain(write.sequence, write.command.operationId(), status, write.record);
+            retain(write.sequence, write.command, status);
             appliedOffset = write.offset + write.record.remaining();
             return closeStatus(status);
         } catch (RuntimeException | Error failure) {
@@ -872,7 +881,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 long sequence = ++appliedThrough;
                 Status status = apply(command);
                 ByteBuffer record = encode(command, sequence);
-                retain(sequence, command.operationId(), status, record);
+                retain(sequence, command, status);
                 appliedOffset += record.remaining();
                 LedgerState state = ledgers.get(command.scope.ledgerId());
                 results.add(new Result(status, command.operationId(), sequence,
@@ -908,7 +917,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 throw new IOException("Bookie checkpoint is active or its generation is exhausted");
             }
             Set<UUID> retainedCheckpoints = retainedCheckpointIds();
-            List<SegmentControlCheckpoint.Operation> state = new ArrayList<>();
+            List<SegmentControlCheckpoint.ImageRecord> state = new ArrayList<>();
             checkpointState.forEach((id, operation) -> {
                 if (!checkpointIds.contains(id) || retainedCheckpoints.contains(id)) {
                     state.add(operation);
@@ -1133,7 +1142,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private Set<UUID> retainedCheckpointIds() {
         Set<UUID> retained = new HashSet<>();
         checkpointState.entrySet().stream().filter(entry -> checkpointIds.contains(entry.getKey()))
-                .sorted(Comparator.comparingLong((Map.Entry<UUID, SegmentControlCheckpoint.Operation> entry) ->
+                .sorted(Comparator.comparingLong((Map.Entry<UUID, SegmentControlCheckpoint.ImageRecord> entry) ->
                         entry.getValue().sequence()).reversed()).limit(2)
                 .forEach(entry -> retained.add(entry.getKey()));
         if (rotationRoot != null) {
@@ -1144,11 +1153,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private synchronized UUID checkpointId(SegmentControlCheckpoint.Reference reference) throws IOException {
-        for (Map.Entry<UUID, SegmentControlCheckpoint.Operation> entry : checkpointState.entrySet()) {
-            SegmentControlParser.Command parsed = parse(entry.getValue().record(), entry.getValue().sequence());
+        for (UUID operationId : checkpointIds) {
+            SegmentControlCheckpoint.ImageRecord operation = checkpointState.get(operationId);
+            SegmentControlParser.Command parsed = parse(operation.record(), operation.sequence());
             if (parsed.type() == SegmentControlFormat.Type.BOOKIE_CHECKPOINT_COMMIT
-                    && reference.equals(decodeCheckpoint(parsed, entry.getValue().sequence()))) {
-                return entry.getKey();
+                    && reference.equals(decodeCheckpoint(parsed, operation.sequence()))) {
+                return operationId;
             }
         }
         throw new IOException("Bookie checkpoint commit is missing");
@@ -1182,7 +1192,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return rotating == null && maxLogBytes >= SegmentControlRotation.FIRST_RECORD + 416 + 2048 ? 416 : 0;
     }
 
-    private ByteBuffer encode(Command command, long sequence) {
+    private static ByteBuffer encode(Command command, long sequence) {
         return SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence, command.operationId(),
                 new Generation(command.scope.authorityGeneration()), 0, body(command));
     }
@@ -1194,6 +1204,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
             checkpointState.put(operationId, snapshot);
         } else {
             checkpointState.putIfAbsent(operationId, snapshot);
+        }
+    }
+
+    private void retain(long sequence, Command command, Status status) {
+        var snapshot = new CheckpointOperation(command, sequence, status.ordinal() + 1);
+        if (command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE && status == Status.APPLIED_DURABLE) {
+            checkpointState.put(command.operationId(), snapshot);
+        } else {
+            checkpointState.putIfAbsent(command.operationId(), snapshot);
         }
     }
 
@@ -2732,7 +2751,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             Command command = decode(parsed);
             verifyDeleteSequence(command);
             status = apply(command);
-            retain(sequence, parsed.operationId(), status, bytes);
+            retain(sequence, command, status);
         }
         if (frozenStatus != null && status.ordinal() + 1 != frozenStatus) {
             throw new IOException("Bookie checkpoint result differs from its applied outcome");
@@ -2928,7 +2947,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    private ByteBuffer body(Command command) {
+    private static ByteBuffer body(Command command) {
         ByteBuffer scope = encodeScope(command.scope);
         if (command.deletion != null) {
             return ByteBuffer.allocate(scope.remaining() + ProfileControlRequest.DeleteBinding.BYTES)
