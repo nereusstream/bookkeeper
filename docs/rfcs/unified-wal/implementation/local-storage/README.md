@@ -1451,3 +1451,35 @@ INSTALL的LedgerState与command共享同一context；同batch后续命令构建�
 最终五类 **594项全部通过、0 failure/error/skip**（Bookie281、Arena41、DATA format/session40、SDK/网络209、Profile install23）；原592加新增2项的用例身份与1172 runner输入全部匹配当前1176 source/resource/addon冻结集。Spotless/Checkstyle exit0；全部Java/测量/style终态后独立RAT实际exit1，443条未批准路径均存在父提交且与前轮集合一致，无新增，不称CI全绿。TLA转移/格式未改，未执行或移绑TLC；保留全部source/命令/class/GC/native/失败回执，只清理已归档、终态且无句柄的自有临时根。
 
 运行期typed/JDK/native及暂态对象的预算上界、完整Bookie B11资源账本、其余full-bytes、默认SDK/observe、同incarnation unclosed-session接受条件、多Arena及其他16步继续OPEN；完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED；驻留减少不作为吞吐、尾延迟或累计分配收益结论。
+
+
+## Managed storage 的 100k 账本与 Arena 短记录预留缺口
+
+2026-10-25，源码 `8a81b08fb457a4404e96d452a12c93f705da5fd4`。前节100k seed只有control owner，没有managed DATA session，epoch0不能经正常storage.restart接受。本轮使用新目录实际IsolatedSegmentStorage.startNew，经原controls driver每批64对INSTALL/ACTIVATE、128 transitions提交，正常close后新对象restart；未拼接日志、伪造CLOSE或修改旧seed。完整图包含files、双control owner、RocksDB派生index、execution、pool、allocator、drivers/readers/hot directory；authority仍为显式fixture事实，没有实例化100k MetadataStore/SDK/TLS service，不能提升为完整集群接受证据。
+
+固定4 MiB DATA、4 shards/1 worker/2 I/O、2个4096-byte buffer、maxPending128、hot8/index16、pool1/maintenance1、128 MiB control上限，OFF/SYSTEM/PARK。实际200000次control record write、1563次batch force及1563次CONTROL I/O完成，所有100k route/context/凭据检查通过。每阶段driver busy、owner/I/O credit、文件reservation、pending及active admission实际排空。DATA文件正常预创建；该idle负载的DATA driver write/force/allocation均0，next DATA offset4096，没有逐ledger extent或buffer。
+
+Instrumentation图以原九Bookie metadata根和storage第十根联合identity/root-mask去重，metadata均已在storage根内，不相加重复计量。只读实例字段，不调用body/record生成frame。Thread/ThreadGroup、direct ByteBuffer、Reference/ReferenceQueue及全局Enum/Class等为明确停止的端点，shallow另列；native容量、线程和FD分账。补足必要JDK opens后不可访问字段0，五个遍历helper弱引用均在full GC后清除。
+
+| managed storage阶段 | storage included reachable shallow | 其中九metadata根 | 整进程full-GC live heap |
+| --- | ---: | ---: | ---: |
+| empty | 24,000 B | 448 B | 11,992,896 B |
+| append4096 | 4,546,072 B | 4,522,696 B | 16,611,416 B |
+| append100000 | 111,169,816 B | 111,146,440 B | 123,621,584 B |
+| fresh restart100000 | **122,370,392 B** | **122,346,384 B** | **134,196,304 B** |
+
+fresh restart included图116.70 MiB，不是完整retained/dominator或RSS。整进程live heap只比128 MiB少21424 B，不能把它当ledger metadata或B11通过。重放比追加多约11.2MB，主要为真实decode产生的199999个String及对应byte[]，分别增加4,799,976和6,399,968 B；追加fixture共享domain字面量，不能用其较小值代替重放。当前storage-only图24008 B，另列端点1320 B；仍不声称所有对象独占属于该owner。
+
+重放阶段实际pool reserved16382 B/outstanding0；全进程direct MXBean为4个root allocation、memoryUsed81919 B/capacity81918 B，含FileChannel临时缓存，不能把slice capacity再加成native allocation。RocksDB实际cache542 B/pinned283 B、memtable2048 B、table readers3802 B；原3 MiB仅为配置容量，不代替所有JNI/native malloc。NMT分项、Java及macOS native线程快照、按路径FD清单均保留，未知opaque native继续OPEN。
+
+Bookie-control与DATA确切bytes在同一新managed seed的close/restart全过程保持；Arena真实epoch1 OPEN/cut0→CLOSED/cut1、epoch2 OPEN/cut2→CLOSED/cut3。最终close后DATA/CONTROL channel关闭，三个isolated WAL Java线程终结、相关storage FD全部消失，FD195→181、Java线程11→8、macOS native线程行35→31；closed full-GC heap11,617,568 B。不以FD消失代替所有JNI allocator释放证明，close后的JNI ownership位本轮未直接采样。成功进程actual exit0；准备期两次manifest范围、一次缺父目录和一次JDK opens失败均保留，后两轮各自actual terminal1/-9，未复用失败的未关闭session目录。10个冻结顶层类实际加载自本轮overlay，JDK21.0.10/release17/Xint/1 GiB/NMT、原17模块不可变classpath及1176源码输入分别绑定。
+
+另一锁定单场景验证当前CONTROL预留模型。源码service只预留 `331920 + 3L`：331920为原codec/verification工作集，3L来自Bookie image≤2L＋journal suffix≤L，不能据此认定Arena typed/index及snapshot已覆盖。采用L=1 MiB、实际原Arena driver.requestPool、4个不同shard合批，生成10000个唯一的一块ALLOC_POOL、2500次batch force；5000条后真实rotation，最终checkpoint payload2,080,448 B仍通过原2L限制。回调后还等待busy/owner credit实际终态，没有直接构造成功结果或减少force。
+
+正常与最终checkpoint beforeForce冻结时，Arena十根去重included图均 **3,812,536 B**，高于整个storage CONTROL公式 **3,477,648 B**，差334888 B；栈上snapshot未计入十根。冻结full-GC histogram另观测10002个CheckpointOperation/160032 B、一个Snapshot/40 B及新增Object[]/40024 B，整个进程live增量201736 B。该included图仍是可达shallow，不能称独占retained超额；严格排除UUID/Generation/Long等潜在共享对象后的结构类型保守subtotal2,772,128 B单独未超公式。源码确认未单列Arena及快照成本，实测给出其大小，不把有限样本改称完整heap上界证明。
+
+该控制专属夹具使用约10 GiB的稀疏DATA几何，只写身份头/末字节，不代表正常DATA预分配、恢复或service启动。重开逐项验证10000 grants、索引、高水位和sequence10002，进程exit0；零不可访问字段、helper回收、source/CP/JDK前后hash及实际force栈通过。JVM/执行线程终结且lsof无句柄后仅删除本次DATA，先保存头尾、size、st_blocks；逻辑10,487,861,248 B不计回收，实际分配20,480 B已回收，其他native journal/image/诊断全部保留。
+
+后续沿原单次storage reserve机制重算CONTROL金额，不能仅将3L改为6L。Arena有效最短frame160 B、image条目额外16 B；设C=min(2L,Integer.MAX_VALUE)，retained unique operations的保守数量上界为 `floor(C/176) + floor((L-4096)/160) + 2`，末项为rotation first-image fallback重放的两个root commits。失败结果也消耗有界journal，不无限增长，但checkpoint列表/排序早于reference容量检查。还须按ALLOC/FREE/MOVE rows/CLOSED tails、Map历史high-water、恢复预扫描和真实可并存的一个snapshot计量；源码结构数量上界不等于portable JVM字节上界，不能以本样本或任意倍数闭合它。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/storage-idle-ledger-residency-evidence-8a81b08f`：managed图为 `storage-measure/runs/20261025T090222052890Z/{verification,resource-summary}.json`，短记录为 `arena-budget/runs/20261025T090821676959Z/{verification,audit-receipt}.json`。本轮没有修改生产Java/测试/TLA；原594项和style PASS保持8a81源码原绑定，不无目的重跑或扩展为新范围，新增的是两组真实资源证据。B11、typed/暂态预算与其余full-bytes仍OPEN；完整16步目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。

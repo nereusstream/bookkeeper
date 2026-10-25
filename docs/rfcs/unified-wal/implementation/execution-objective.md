@@ -270,3 +270,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [Bookie 私有 scope 的紧凑驻留](local-storage/README.md#bookie-私有-scope-的紧凑驻留)：2026-10-25父a0f6d8217a上，私有StoredScope已共享准确context/固定target，保留String等值、外部target/incarnation、原sealed/canonical bytes与DATA免解码路径。10项定向及最终五类594项全部通过，source/用例身份匹配、style通过，独立RAT443父路径无新增。两JVM同100k seed的九根对象图171,946,208→122,346,384 B（163.98→116.68 MiB），减少约140万对象；reachable shallow不提升独占retained/完整Bookie B11。继续运行期/暂态typed预算上界、完整B11与其余full-bytes，以及默认SDK/observe、同incarnation unclosed-session接受、多Arena及其他16步。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled保持；不以本切片结束完整目标。
+
+
+[Managed storage 的 100k 账本与 Arena 短记录预留缺口](local-storage/README.md#managed-storage-的-100k-账本与-arena-短记录预留缺口)：2026-10-25源码8a81b08fb4上，新增正常startNew→原CONTROL driver填充100k→真实healthy close→fresh restart的完整isolated storage计量；200000 write/1563 force、全部route与drain通过，重放included图122,370,392 B（116.70 MiB）、整进程live134,196,304 B，FD/线程实际终结。另以原requestPool生成10000短记录、rotation和force冻结，Arena十根可达图3,812,536 B，高于整个storage CONTROL公式3,477,648 B，栈上snapshot另列；不是独占retained超额或portable bound证明。当前预留未单列Arena/快照成本，下一项按record/rows/high-water和真实并发重算，不以任意倍数替代。未改Java/TLA，原594/style PASS保持原绑定；B11/full-bytes及16步目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
