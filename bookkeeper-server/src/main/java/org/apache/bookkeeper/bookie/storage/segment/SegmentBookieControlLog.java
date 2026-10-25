@@ -59,6 +59,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 
 /** Isolated Bookie-owned control log; no production route, DATA or ACK authority. */
 final class SegmentBookieControlLog implements AutoCloseable {
@@ -657,9 +658,94 @@ final class SegmentBookieControlLog implements AutoCloseable {
         this.writerLock = writerLock;
     }
 
-    /** One validated image (at most two journal capacities), plus its current journal suffix. */
-    static long retainedRecordCapacity(long maxLogBytes) {
-        return Math.multiplyExact(3L, maxLogBytes);
+    /** Typed history/index and temporary-state envelope, independently of the retained wire byte count. */
+    static long controlCapacity(SegmentControlCapacity.Layout layout, long logBytes, int pendingEntries) {
+        long scope = SegmentControlCapacity.sum(layout.object(Command.class), layout.object(StoredScope.class),
+                layout.context(), layout.object(UUID.class), layout.bytes(32),
+                layout.string(ProfileControlScope.MAX_AUTHORITY_DOMAIN_BYTES), layout.object(ProfileExactRange.class));
+        long history = SegmentControlCapacity.sum(layout.object(AppliedOperation.class), layout.hashEntry());
+        long install = SegmentControlCapacity.sum(layout.bytes(ProfileDescriptorCodec.MAX_CANONICAL_LENGTH),
+                layout.object(ProtectedProfileCredential.class),
+                layout.bytes(ProtectedProfileCredential.CREDENTIAL_LENGTH),
+                layout.object(ProtectedProfileCredential.SealedStorageValue.class),
+                layout.bytes(ProtectedProfileCredential.SealedStorageValue.LENGTH));
+        long ledger = SegmentControlCapacity.sum(layout.object(LedgerState.class), layout.hashMap(),
+                layout.object(Long.class), layout.hashEntry());
+        long grant = SegmentControlCapacity.sum(layout.object(GrantBinding.class), layout.bytes(16));
+        long deletion = SegmentControlCapacity.sum(layout.object(ProfileControlRequest.DeleteBinding.class),
+                layout.bytes(16), layout.bytes(16), layout.bytes(32));
+        long terminal = SegmentControlCapacity.sum(layout.object(ProfileControlRequest.TerminalBinding.class),
+                layout.bytes(32), SegmentControlCapacity.times(2, layout.object(Long.class)));
+        long common = SegmentControlCapacity.sum(scope, history);
+        long perWire = SegmentControlCapacity.slope(common, 272); // ACTIVATE and ordinary TOMBSTONE.
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(common, install, ledger), 448));
+        // The cleanup cut may build HashSet/SetN storage from every tombstone, in addition to its live index.
+        long tombstone = SegmentControlCapacity.sum(layout.object(Long.class), layout.hashEntry(),
+                layout.hashEntry(), 4 * 8);
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(common, tombstone), 272));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(common, deletion, tombstone), 368));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(SegmentControlCapacity.sum(common, grant,
+                layout.object(GrantState.class), layout.hashMap(), layout.hashEntry()), 320));
+        // An image retains only the first outcome of a failed terminal upgrade, while the live map can
+        // still hold the newer command. Charge both graphs to that image record, even after suffix rotation.
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(SegmentControlCapacity.sum(
+                SegmentControlCapacity.times(2,
+                        SegmentControlCapacity.sum(common, grant, layout.object(UUID.class))), terminal), 320));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(common, terminal), 320));
+        long raw = SegmentControlCapacity.sum(layout.object(SegmentControlCheckpoint.Operation.class),
+                layout.buffer(), layout.bytes(0));
+        long fence = SegmentControlCapacity.sum(raw, 208, layout.context(), layout.object(UUID.class),
+                SegmentControlCapacity.times(2, layout.hashEntry()));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(fence, 208));
+        long lac = SegmentControlCapacity.sum(raw, 216, layout.context(), layout.object(ExplicitLac.class),
+                layout.bytes(0), layout.object(Long.class), layout.hashEntry());
+        // The LAC body is held once by the raw record and once by ExplicitLac; charge its variable bytes twice.
+        perWire = Math.max(perWire, Math.max(2, SegmentControlCapacity.slope(lac, 216)));
+        long checkpoint = SegmentControlCapacity.sum(raw, 208, layout.object(UUID.class),
+                SegmentControlCapacity.times(2, layout.hashEntry()), layout.reference());
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(checkpoint, 208));
+        long head = SegmentControlCapacity.sum(layout.object(ProfileDeleteDelivery.Head.class),
+                layout.bytes(16), layout.object(ProfileDeleteRecord.Target.class),
+                layout.bytes(16), layout.string(ProfileControlScope.MAX_TARGET_BOOKIE_BYTES));
+        long plan = SegmentControlCapacity.sum(layout.object(ProfileDeleteHandoff.Plan.class),
+                layout.bytes(16), layout.bytes(32), head);
+        long effective = SegmentControlCapacity.sum(plan,
+                layout.object(ProfileDeleteHandoff.Acknowledgement.class), layout.bytes(16),
+                layout.object(ProfileDeleteHandoff.Effective.class), layout.bytes(16));
+        // The raw handoff body contributes at most one additional byte per byte on the wire.
+        perWire = Math.max(perWire, SegmentControlCapacity.sum(1, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(plan, raw, layout.object(UUID.class),
+                        SegmentControlCapacity.times(2, layout.hashEntry())), 312)));
+        perWire = Math.max(perWire, SegmentControlCapacity.sum(1, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(effective, raw, layout.object(UUID.class),
+                        SegmentControlCapacity.times(2, layout.hashEntry())), 384)));
+        long count = SegmentControlCapacity.operations(logBytes, 224, 208);
+        long image = SegmentControlCapacity.imageBytes(logBytes);
+        // read() allocates its raw list before typed replay. Even a later-rejected image may use 144+16 bytes/row.
+        long rawCount = image / 160;
+        long recoveryImage = SegmentControlCapacity.sum(image,
+                SegmentControlCapacity.times(rawCount, SegmentControlCapacity.sum(
+                        layout.object(SegmentControlCheckpoint.Operation.class),
+                        SegmentControlCapacity.times(2, layout.buffer()), layout.bytes(0))),
+                layout.snapshot(rawCount, 0));
+        long fixed = SegmentControlCapacity.sum(layout.object(SegmentBookieControlLog.class),
+                SegmentControlCapacity.times(10, layout.hashMap()), layout.hashSet(),
+                SegmentControlCapacity.times(8, layout.reference()),
+                SegmentControlCapacity.times(2, layout.object(SegmentControlRotation.Root.class)),
+                SegmentControlCapacity.times(4, layout.list()));
+        // appendDurably projects the whole batch before requireCapacity; it is not bounded by remaining L.
+        long pending = SegmentControlCapacity.sum(SegmentControlCapacity.times(pendingEntries,
+                SegmentControlCapacity.sum(scope, Math.max(install, SegmentControlCapacity.sum(grant, terminal,
+                        deletion, layout.object(UUID.class))), layout.object(Result.class), 8 * 8)),
+                SegmentControlCapacity.times(4, layout.list()));
+        return SegmentControlCapacity.sum(fixed,
+                SegmentControlCapacity.times(perWire, SegmentControlCapacity.wireBytes(logBytes)),
+                layout.snapshot(count, 0), recoveryImage,
+                layout.scanner((logBytes - FIRST_RECORD) / 208 + 1), pending);
     }
 
     static SegmentBookieControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,

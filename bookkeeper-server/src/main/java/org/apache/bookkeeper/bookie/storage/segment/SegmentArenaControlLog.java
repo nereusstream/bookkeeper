@@ -454,6 +454,83 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return open(config, identity, maxLogBytes, new SegmentFileIo());
     }
 
+    /** One wire envelope for all histories; MOVE rows and CLOSED tails do not each receive a full log. */
+    static long controlCapacity(SegmentControlCapacity.Layout layout, long logBytes, int pendingEntries, int files) {
+        long history = SegmentControlCapacity.sum(layout.object(AppliedOperation.class),
+                layout.object(UUID.class), layout.object(Generation.class), layout.hashEntry());
+        long allocationGraph = SegmentControlCapacity.sum(layout.object(Allocation.class),
+                layout.object(Generation.class));
+        long allocation = SegmentControlCapacity.sum(history, allocationGraph, layout.object(Grant.class),
+                layout.object(Slot.class), layout.object(Stream.class),
+                SegmentControlCapacity.times(6, layout.object(Long.class)),
+                SegmentControlCapacity.times(2, layout.treeEntry()),
+                SegmentControlCapacity.times(4, layout.hashEntry()), layout.hashMap());
+        // Every successful copy/tail index belongs to a successfully issued allocation. Charge its outer
+        // committedCopies map and sealedTails slot here, rather than charging another whole map per MOVE row.
+        long freeGraph = SegmentControlCapacity.sum(layout.object(Free.class), layout.object(FreeFacts.class),
+                layout.object(AllocationIdentity.class), layout.object(Generation.class), layout.string(64),
+                SegmentControlCapacity.times(2, layout.object(AtomicBoolean.class)));
+        long free = SegmentControlCapacity.sum(history, freeGraph, layout.object(Slot.class), layout.treeEntry(),
+                // addRetirement can retain old/new ranges and lists while merging and sorting.
+                SegmentControlCapacity.times(2, layout.object(RetiredRange.class)), 8 * 8);
+        long session = SegmentControlCapacity.sum(history, layout.object(DataSession.class), layout.list());
+        long tail = SegmentControlCapacity.sum(layout.object(AllocationTail.class), 8);
+        long moveGraph = SegmentControlCapacity.sum(layout.object(SegmentArenaMove.class), layout.list());
+        long moveRowGraph = SegmentControlCapacity.sum(layout.object(SegmentArenaMove.Entry.class),
+                layout.object(SegmentArenaMove.Source.class),
+                SegmentControlCapacity.times(2, layout.object(SegmentPointRead.Location.class)),
+                SegmentControlCapacity.times(2, layout.object(SegmentBatchFormat.Address.class)),
+                SegmentControlCapacity.times(4, layout.object(Generation.class)),
+                // Runtime preparation accepts equal contexts; it does not require the same object identity.
+                SegmentControlCapacity.times(2, layout.context()),
+                layout.string(64), 8);
+        long moveRow = SegmentControlCapacity.sum(moveRowGraph, layout.object(EntryKey.class),
+                layout.object(SelectedMove.class), layout.object(CopyKey.class),
+                SegmentControlCapacity.times(2, layout.hashEntry()));
+        long quarantine = SegmentControlCapacity.sum(history, layout.object(FileQuarantine.class));
+        long checkpoint = SegmentControlCapacity.sum(history, layout.object(CheckpointCommit.class),
+                layout.reference());
+        long perWire = SegmentControlCapacity.slope(allocation, 192);
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(free, 272));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(session, 160));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(tail, 24));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(history, moveGraph), 160));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(moveRow, 252));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(quarantine, 160));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(checkpoint, 208));
+        long fixed = SegmentControlCapacity.sum(layout.object(SegmentArenaControlLog.class),
+                SegmentControlCapacity.times(6, layout.hashMap()),
+                SegmentControlCapacity.times(3, layout.object(TreeMap.class)), layout.list(),
+                SegmentControlCapacity.times(4, layout.bytes(files)),
+                SegmentControlCapacity.times(2, layout.longs(files)),
+                SegmentControlCapacity.times(8, layout.reference()),
+                SegmentControlCapacity.times(2, layout.object(SegmentControlRotation.Root.class)));
+        // Callers can prepare a full P-command batch before append's capacity precheck. The original
+        // command and replayFacts may coexist; never clip this workspace to the remaining journal bytes.
+        long maxMove = SegmentControlCapacity.sum(moveGraph,
+                SegmentControlCapacity.times(256, SegmentControlCapacity.sum(moveRowGraph,
+                        layout.object("org.apache.bookkeeper.bookie.storage.segment.SegmentArenaMove$Key"),
+                        layout.hashEntry())), layout.hashSet());
+        int maxTails = (SegmentControlCapacity.MAX_RECORD_BYTES - 144 - 24) / 24;
+        long maxSession = SegmentControlCapacity.sum(layout.object(DataSession.class), layout.list(),
+                SegmentControlCapacity.times(maxTails, tail));
+        long maxCommand = Math.max(Math.max(maxMove, maxSession), Math.max(freeGraph, allocationGraph));
+        long pendingCommands = SegmentControlCapacity.times(pendingEntries,
+                SegmentControlCapacity.sum(maxCommand, layout.object(UUID.class), layout.object(Generation.class),
+                        layout.object(Result.class), 8 * 8));
+        // prepareFrees has its own 16-member limit, which can exceed a small pendingEntries setting.
+        pendingCommands = Math.max(pendingCommands, SegmentControlCapacity.times(16,
+                SegmentControlCapacity.sum(freeGraph, layout.object(UUID.class), layout.object(Generation.class),
+                        layout.object(Result.class), 8 * 8)));
+        long pending = SegmentControlCapacity.sum(pendingCommands, SegmentControlCapacity.times(4, layout.list()));
+        return SegmentControlCapacity.sum(fixed,
+                SegmentControlCapacity.times(perWire, SegmentControlCapacity.wireBytes(logBytes)),
+                layout.snapshot(SegmentControlCapacity.operations(logBytes, 176, 160),
+                        layout.object(CheckpointOperation.class)),
+                layout.scanner((logBytes - FIRST_RECORD) / 160 + 1), pending);
+    }
+
     static SegmentArenaControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                        long maxLogBytes, SegmentFileIo io) throws IOException {
         return open(config, identity, maxLogBytes, io, false);

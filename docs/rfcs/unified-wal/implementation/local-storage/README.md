@@ -1483,3 +1483,35 @@ Bookie-control与DATA确切bytes在同一新managed seed的close/restart全过�
 后续沿原单次storage reserve机制重算CONTROL金额，不能仅将3L改为6L。Arena有效最短frame160 B、image条目额外16 B；设C=min(2L,Integer.MAX_VALUE)，retained unique operations的保守数量上界为 `floor(C/176) + floor((L-4096)/160) + 2`，末项为rotation first-image fallback重放的两个root commits。失败结果也消耗有界journal，不无限增长，但checkpoint列表/排序早于reference容量检查。还须按ALLOC/FREE/MOVE rows/CLOSED tails、Map历史high-water、恢复预扫描和真实可并存的一个snapshot计量；源码结构数量上界不等于portable JVM字节上界，不能以本样本或任意倍数闭合它。
 
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/storage-idle-ledger-residency-evidence-8a81b08f`：managed图为 `storage-measure/runs/20261025T090222052890Z/{verification,resource-summary}.json`，短记录为 `arena-budget/runs/20261025T090821676959Z/{verification,audit-receipt}.json`。本轮没有修改生产Java/测试/TLA；原594项和style PASS保持8a81源码原绑定，不无目的重跑或扩展为新范围，新增的是两组真实资源证据。B11、typed/暂态预算与其余full-bytes仍OPEN；完整16步目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
+
+
+## CONTROL typed 状态与工作集的启动预留
+
+2026-10-25，父提交 `0e63840b991c4305ee7d739015bc294e11b0d8b0`。原storage CONTROL金额只含codec scratch和Bookie的3L wire容量。本轮由package-local SegmentControlCapacity在原service.start冷路径计算双owner的typed/history/index、checkpoint/recovery及pending工作集，沿同一个reserveControlWorkingSet在storage open前一次预留。额度不足仍拒绝，不自动修改生产quota；释放仍等待原storage实际close成功。普通Add、控制write/force/apply、UNKNOWN、协议/持久格式及默认OFF/SYSTEM/PARK不变。
+
+模型显式限定64位HotSpot JDK17/21、8..256且为2次幂的实际object alignment；启动读取MXBean指针/对齐配置，未知布局拒绝启用该实验service。只按字段数量计算普通对象上界，不读对象内容、不使用生产Unsafe/JOL/agent；header16、array header24、field/reference slot8并包含继承packing余量，宽/压缩引用均使用保守宽引用金额，拒绝Contended类型。该支持边界不适用于Classic，也不宣称任意JVM portable。新模型保留原独立1..64 shards/files配置，不要求files≤shards。
+
+设C=min(2L,Integer.MAX_VALUE)、W=C+(L−4096)+2×208。每个owner按各类record base/minimum frame、MOVE row/252、CLOSED tail/24的最大向上取整斜率乘同一个W，不把N/R/T各自取满再冒充精确值。ALLOC承担issued ranges/stream、committedCopies outer map与sealed-tail索引；MOVE支付row/selector/inner entry，并允许source/target是两个相等但不同的context。FREE包括facts、原子状态及退休range/list合并暂态。所有status均计历史，Map按high-water计；node使用TreeNode上界及转换重叠，bucket slots包络含treeify前64桶和resize旧/新table。
+
+service rotation仍顺序处理两个owner，模型保守相加各自一份snapshot上限；另计wrappers、多组capture/filter/sort/toList/List.copyOf引用数组，恢复scanner HashSet和Bookie完整raw image。后者对语义校验前的raw rows按144+16=160 B计，不能使用合法typed record的更大下界。失败terminal upgrade的live command与checkpoint prior可同时存在，且旧suffix轮转后仍可驻留，因此两份完整图都归image record成本。预检前可构建完整P-command批次，pending按最大命令、MOVE256 rows/CLOSED tails上限计，不裁到剩余L；FREE另保留独立16-member准备边界。per-file bool/long数组、driver notice/Ticket/closure及pool submissions按几何计入。
+
+容量模型也保留现有真实维护互斥：底层Bookie只允许一个reclamation lease，files只允许一个guard；普通lease不复制tombstone，terminal cleanup最多一份Set。所有shard共用owner，FREE共享guard、MOVE批次串行，不按N×P复制整个owner快照。borrowed callback、任意Throwable图、opaque JCA/JDK/native及其余storage/index完整内存仍未由此闭合。
+
+金额是配置允许的最坏容量包络，**不是当前实测驻留**。下表为实际alignment8、files1、shards4时production required()的结果；默认compressed与wide引用金额相同。
+
+| L | pending | storage CONTROL预留 |
+| --- | ---: | ---: |
+| 1 MiB | 16 | 96,518,568 B |
+| 1 MiB | 128 | 139,943,208 B |
+| 128 MiB | 16 | 11,534,644,136 B |
+| 128 MiB | 128 | 11,578,068,776 B |
+
+因此旧3L配置不能继续当作充足容量；128 MiB日志可保留的最坏混合history与100k实测122MB不是同一个量。高对齐金额进一步增大，完整矩阵保存在required-summary.tsv；不能为适配旧quota而缩小上界，也不能据预留金额宣称实际resident或B11失败/通过。实际生产quota保持显式配置，可能在open前被拒绝；本轮未做累计分配、CPU或延迟收益测量。
+
+真实service回归先只改变测试额度：仅留旧wire预算时，父版成功start，得到1 failure/0 error的稳定RED（expected IOException but nothing thrown）。新代码对同一旧额度及新amount−1均在目录/index/storage open前拒绝；DATA credit实际归还、原held CONTROL仍保留。测试fixture按各自实际config显式提供新CONTROL金额，同时DATA、网络CONTROL余量和连接数保持原值，未替生产扩大quota。8项定向包括新3项容量逻辑及真实SDK/rotation/close/DATA预算；最终六类 **597项全部通过、0 failure/error/skip**，原594加3项用例身份及1174 runner输入逐项匹配1178 source/resource/addon冻结集。Spotless/Checkstyle exit0，RED及GREEN保持各自source绑定。
+
+另在四个独立小JVM验证支持布局：JDK21 compressed8、wide8、alignment256且CompactStrings关闭，以及本机JDK17.0.17 compressed8。每JVM选取75个相关具体类型、68个数组、19个含backing的ASCII/UTF16/emoji/未配对surrogate字符串及两种heap buffer，实际Instrumentation shallow均≤production Layout预算，真实flags识别和required重载一致，actual exit均0。仅artifact probe用未初始化对象测layout，不调用业务方法、不作为功能成功；生产无Unsafe。首次driver因要求未必加载的checkpoint outer class而在postcheck失败，更正为显式false-initialize加载以验证overlay来源，原失败保留；没有模型边界失配，也未移绑该轮结果。
+
+代码/输入、RED/最终Java、命令/XML、四JVM源码/class/实际加载/flags/终态、容量矩阵及清理记录位于 `/Users/liusinan/.codex/artifacts/unified-wal/control-capacity-evidence-0e63840b`；布局有效回执为 `capacity-layout/runs/20261025T095915684300Z/{verification,layout-summary}.json`。只验证所选类型的布局上界与本模型计算，不把它提升为完整状态/操作计数的形式证明或全部native账本。TLA转移未改，不执行或移绑历史TLC；B11、其余full-bytes及完整16步目标继续OPEN/active，生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+全部Java/布局probe/style终态后独立RAT实际exit1，443条未批准路径均存在父提交且与前轮集合相同，无新增，不称CI全绿。仅清理三个已终态、无句柄且逐文件同inode/SHA核对的native测试临时根；hardlink归档全部保留，常规文件数据实际回收0 B。准备失败、稳定RED、GREEN及布局诊断均保留，不释放活动资源。

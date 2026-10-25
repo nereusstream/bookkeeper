@@ -2418,3 +2418,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 
 [Managed storage 的 100k 账本与 Arena 短记录预留缺口](../local-storage/README.md#managed-storage-的-100k-账本与-arena-短记录预留缺口)：2026-10-25源码8a81b08fb4上，新增正常startNew→原CONTROL driver填充100k→真实healthy close→fresh restart的完整isolated storage计量；200000 write/1563 force、全部route与drain通过，重放included图122,370,392 B（116.70 MiB）、整进程live134,196,304 B，FD/线程实际终结。另以原requestPool生成10000短记录、rotation和force冻结，Arena十根可达图3,812,536 B，高于整个storage CONTROL公式3,477,648 B，栈上snapshot另列；不是独占retained超额或portable bound证明。当前预留未单列Arena/快照成本，下一项按record/rows/high-water和真实并发重算，不以任意倍数替代。未改Java/TLA，原594/style PASS保持原绑定；B11/full-bytes及16步目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[CONTROL typed 状态与工作集的启动预留](../local-storage/README.md#control-typed-状态与工作集的启动预留)：2026-10-25父0e63840b99上，以支持布局的typed/history/index、快照/recovery及预检前pending模型替代旧3L金额，仍在原service open前单次预留、实际close后释放，生产quota不自动扩大。支持64位HotSpot17/21与8..256对齐，其他布局拒绝启用实验服务；默认OFF/Classic不变。旧额度可启动的真实RED保留；8项定向和六类597项全部通过，source/用例匹配、style通过。四JVM实测所选类型shallow≤模型；1MiB日志/P16/S4保守预留96,518,568B，128MiB对应11,534,644,136B，不等于实际驻留。模型不闭合任意Throwable/JCA/native或完整状态计数证明；B11/full-bytes及16步目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

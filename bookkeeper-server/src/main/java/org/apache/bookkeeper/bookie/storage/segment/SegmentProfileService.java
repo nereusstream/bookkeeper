@@ -338,12 +338,10 @@ public final class SegmentProfileService implements AutoCloseable {
                             exhausted);
                 }
                 try {
-                    // Retained Bookie records coexist with one image's encoding/verification buffers.
-                    controlWorkingSet = transport.budget().reserveControlWorkingSet(Math.addExact(
-                            SegmentControlCheckpoint.WORKING_SET_BYTES,
-                            SegmentBookieControlLog.retainedRecordCapacity(limits.controlLogBytes())));
+                    controlWorkingSet = transport.budget().reserveControlWorkingSet(
+                            SegmentControlCapacity.required(config, limits.controlLogBytes()));
                 } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
-                    throw new IOException("Profile CONTROL quota cannot reserve control records and checkpoint buffers",
+                    throw new IOException("Profile CONTROL quota cannot reserve storage control state and workspaces",
                             exhausted);
                 }
             }

@@ -2745,9 +2745,10 @@ public class SegmentProfileInitialSocketClientTest {
                     certificate.getSubjectX500Principal().getName(javax.security.auth.x500.X500Principal.CANONICAL));
             var read = new SegmentProfileReadConfig((caller, query) -> caller.equals(principal),
                     (caller, query) -> caller.equals(principal));
+            long controlWorkingSet = SegmentControlCapacity.required(config, ServiceEpisode.CONTROL_LOG_BYTES);
             var service = SegmentProfileService.withOwnedResources(configuration,
                     new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, tls,
-                    new ProfileReceiveBudget(ServiceEpisode.TOTAL_BYTES, ServiceEpisode.CONTROL_BYTES,
+                    new ProfileReceiveBudget(4L * 1024 * 1024 + controlWorkingSet, 131072 + controlWorkingSet,
                             262144, 8, 8, 8),
                     131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
                     (caller, operation) -> caller.equals(principal),
@@ -2806,18 +2807,16 @@ public class SegmentProfileInitialSocketClientTest {
 
     private final class ServiceEpisode implements AutoCloseable {
         private static final long CONTROL_LOG_BYTES = 1024 * 1024;
-        private static final long CONTROL_WORKING_SET_BYTES = SegmentControlCheckpoint.WORKING_SET_BYTES
-                + 3 * CONTROL_LOG_BYTES;
-        private static final long TOTAL_BYTES = 4L * 1024 * 1024 + CONTROL_WORKING_SET_BYTES;
-        private static final long CONTROL_BYTES = 131072 + CONTROL_WORKING_SET_BYTES;
-        private static final long DATA_BYTES = TOTAL_BYTES - CONTROL_BYTES - 262144;
+        private static final long DATA_BYTES = 4L * 1024 * 1024 - 131072 - 262144;
+        final long controlWorkingSetBytes;
+        final long controlBytes;
         final ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
         final ZooKeeper client;
         final ZKProfileStartupRequirementsStore requirements;
         final ZKProfileRegistrationStore persistent;
         final ZKProfileEphemeralRegistrationStore publisher;
         final SegmentProfileService service;
-        final ProfileReceiveBudget budget = new ProfileReceiveBudget(TOTAL_BYTES, CONTROL_BYTES, 262144, 8, 8, 8);
+        final ProfileReceiveBudget budget;
         final IsolatedSegmentConfig config;
         final ServerConfiguration bootstrapConfiguration;
         final SegmentProfileService.Startup startup;
@@ -2844,6 +2843,10 @@ public class SegmentProfileInitialSocketClientTest {
                 boolean holdPublication, boolean ownsResources) throws Exception {
             this.config = config;
             this.ownsResources = ownsResources;
+            controlWorkingSetBytes = SegmentControlCapacity.required(config, CONTROL_LOG_BYTES);
+            controlBytes = 131072 + controlWorkingSetBytes;
+            budget = new ProfileReceiveBudget(4L * 1024 * 1024 + controlWorkingSetBytes, controlBytes,
+                    262144, 8, 8, 8);
             client = holdPublication
                     ? new HeldServicePublicationClient(fixture.cluster.getZooKeeperConnectString(), watcher)
                     : new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
@@ -3178,23 +3181,27 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void profileServiceRejectsMissingCheckpointControlCapacityBeforeOpen() throws Exception {
-        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
-            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
-                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
-            var requested = servicePolicy(config, fixture.identities.get(0), 1);
-            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
-                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
-                long heldBytes = ServiceEpisode.CONTROL_BYTES - ServiceEpisode.CONTROL_WORKING_SET_BYTES + 1;
-                try (var held = episode.budget.reserveControlWorkingSet(heldBytes)) {
-                    assertThrows(java.io.IOException.class, () -> episode.service.start(false));
-                    assertNull(episode.storage());
-                    assertFalse(Files.exists(config.directory()));
-                    assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
-                    assertEquals(heldBytes, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
-                    assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
-                    assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+        long wireOnly = SegmentControlCheckpoint.WORKING_SET_BYTES + 3 * ServiceEpisode.CONTROL_LOG_BYTES;
+        for (boolean oldWireOnly : List.of(true, false)) {
+            try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+                var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                        1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                var requested = servicePolicy(config, fixture.identities.get(0), 1);
+                try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                        new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                    long available = oldWireOnly ? wireOnly : episode.controlWorkingSetBytes - 1;
+                    long heldBytes = episode.controlBytes - available;
+                    try (var held = episode.budget.reserveControlWorkingSet(heldBytes)) {
+                        assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                        assertNull(episode.storage());
+                        assertFalse(Files.exists(config.directory()));
+                        assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                        assertEquals(heldBytes, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                        assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
+                        assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+                    }
+                    assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
                 }
-                assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
             }
         }
     }
@@ -3209,7 +3216,7 @@ public class SegmentProfileInitialSocketClientTest {
             try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
                     new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
                 episode.replaceNode(fixture, 0, false);
-                assertEquals(ServiceEpisode.CONTROL_WORKING_SET_BYTES,
+                assertEquals(episode.controlWorkingSetBytes,
                         episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
                 var forcing = new CountDownLatch(1);
                 var release = new CountDownLatch(1);
@@ -3232,7 +3239,7 @@ public class SegmentProfileInitialSocketClientTest {
                     assertThrows(java.util.concurrent.TimeoutException.class,
                             () -> result.get(150, TimeUnit.MILLISECONDS));
                     assertFalse(episode.service.close(Duration.ofMillis(100)));
-                    assertEquals(ServiceEpisode.CONTROL_WORKING_SET_BYTES,
+                    assertEquals(episode.controlWorkingSetBytes,
                             episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
                     assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
                     assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
@@ -3508,7 +3515,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.DATA)
                         >= 2L * (4096 + 4095) + SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES);
                 assertTrue(episodes.get(0).budget.used(ProfileReceiveBudget.Lane.CONTROL)
-                        >= ServiceEpisode.CONTROL_WORKING_SET_BYTES);
+                        >= episodes.get(0).controlWorkingSetBytes);
                 assertFalse(episodes.get(0).budget.closeAdmissionAndDrain().isDone());
                 if (ownsResources) {
                     episodes.get(0).assertOwnedResourcesTerminal(false);

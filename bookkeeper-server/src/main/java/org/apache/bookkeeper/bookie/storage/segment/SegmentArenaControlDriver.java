@@ -47,6 +47,26 @@ final class SegmentArenaControlDriver {
     private final FailureNotice[] notices;
     private final ArrayDeque<FailureNotice> waitingFailures = new ArrayDeque<>();
 
+    static long controlCapacity(SegmentControlCapacity.Layout layout, int pending, int files, int shards) {
+        long notices = SegmentControlCapacity.sum(layout.refs(files),
+                // ArrayDeque growth and a concurrently held previous array.
+                SegmentControlCapacity.times(2, layout.refs(SegmentControlCapacity.sum(2L * files, 16))),
+                SegmentControlCapacity.times(files, SegmentControlCapacity.sum(layout.object(FailureNotice.class),
+                        layout.object(SegmentOwnerLoop.Ticket.class),
+                        SegmentControlCapacity.times(4, layout.captured(8)))));
+        long pools = SegmentControlCapacity.sum(SegmentControlCapacity.times(6,
+                layout.refs(Math.min(pending, shards))), SegmentControlCapacity.times(Math.min(pending, shards),
+                SegmentControlCapacity.sum(layout.object(PoolSubmission.class),
+                        layout.object(SegmentArenaControlLog.PoolRequest.class),
+                        layout.object(Optional.class), layout.object(Generation.class))));
+        return SegmentControlCapacity.sum(layout.object(SegmentArenaControlDriver.class),
+                layout.object(AtomicBoolean.class), layout.object(Object.class), layout.object(ArrayDeque.class),
+                layout.object(PoolCommand.class), layout.list(), notices, pools,
+                layout.object(SegmentOwnerLoop.Ticket.class), layout.object(AtomicReference.class),
+                SegmentControlCapacity.times(8, layout.captured(8)),
+                SegmentControlCapacity.times(pending, layout.object(FailureLease.class)));
+    }
+
     boolean reserveMaintenance() {
         synchronized (poolGate) {
             for (FailureNotice notice : notices) {
