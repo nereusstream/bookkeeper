@@ -75,6 +75,7 @@ import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementCoordinator;
 import org.apache.bookkeeper.feature.FeatureProvider;
 import org.apache.bookkeeper.feature.SettableFeatureProvider;
 import org.apache.bookkeeper.meta.CleanupLedgerManager;
@@ -1566,6 +1567,13 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     public void enableProfile(ProfileInitialLifecycleCoordinator initializer, ProfileRecoveryCoordinator recovery,
             ProfileDescriptorValidator validator, ProfileRecoveryPeerPool ownedPool, int maxReadEntries,
             int maxOpenLedgers) throws BKException {
+        enableProfile(initializer, recovery, null, validator, ownedPool, maxReadEntries, maxOpenLedgers);
+    }
+
+    /** Enable explicit creates with optional bounded replacement using the same owned peer cohort. */
+    public void enableProfile(ProfileInitialLifecycleCoordinator initializer, ProfileRecoveryCoordinator recovery,
+            ProfileReplacementCoordinator replacement, ProfileDescriptorValidator validator,
+            ProfileRecoveryPeerPool ownedPool, int maxReadEntries, int maxOpenLedgers) throws BKException {
         Objects.requireNonNull(initializer, "initializer");
         Objects.requireNonNull(validator, "validator");
         closeLock.writeLock().lock();
@@ -1576,7 +1584,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
             if (profileLedgerClient != null) {
                 throw BKException.create(BKException.Code.IllegalOpException);
             }
-            profileLedgerClient = new ProfileLedgerClient(clientCtx, initializer, recovery, validator,
+            profileLedgerClient = new ProfileLedgerClient(clientCtx, initializer, recovery, replacement, validator,
                     ownedPool, maxReadEntries, maxOpenLedgers);
         } finally {
             closeLock.writeLock().unlock();

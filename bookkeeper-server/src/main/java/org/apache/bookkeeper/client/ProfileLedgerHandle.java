@@ -31,6 +31,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
@@ -87,6 +88,8 @@ public final class ProfileLedgerHandle extends LedgerHandle {
     private volatile ProfileRecoveryCoordinator.WriterCloseRequest writerCloseRequest;
     private final Object writerCloseLifecycle = new Object();
     private final CompletableFuture<Void> writerCloseActual = new CompletableFuture<>();
+    private final Set<Object> replacementWork = new HashSet<>();
+    private final CompletableFuture<Void> replacementStopped = new CompletableFuture<>();
     private final CompletableFuture<Void> writerActualTerminal;
     private volatile CompletableFuture<Void> ownerLeaseTerminal;
     private BooleanSupplier ownerCannotWait;
@@ -115,7 +118,8 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         var transportClosed = transport.closeCompletion();
         transportClosed.whenComplete((unused, failure) -> sdkHeaders.close());
         localResourcesClosed = CompletableFuture.allOf(transportClosed, sdkHeaders.drained());
-        writerActualTerminal = CompletableFuture.allOf(localResourcesClosed, writerCloseActual);
+        writerActualTerminal = CompletableFuture.allOf(localResourcesClosed, writerCloseActual, replacementStopped);
+        localResourcesClosed.whenComplete((unused, failure) -> completeReplacementStopIfIdle());
     }
 
     public static ProfileLedgerHandle fromInitialAvailability(ClientContext base,
@@ -519,7 +523,7 @@ public final class ProfileLedgerHandle extends LedgerHandle {
         return localResourcesClosed.copy();
     }
 
-    /** Adopt before publication. Actual scope includes local DATA/headers and any accepted explicit-close phases;
+    /** Adopt before publication. Actual scope includes local DATA/headers, replacement and explicit-close phases;
      * the owner must subsequently close/drain its peer lease to settle CONTROL and socket outputs. */
     CompletableFuture<Void> adoptWriterOwnership(CompletableFuture<Void> leaseTerminal, BooleanSupplier cannotWait) {
         Objects.requireNonNull(leaseTerminal, "ownerLeaseTerminal");
@@ -611,109 +615,177 @@ public final class ProfileLedgerHandle extends LedgerHandle {
 
     @Override
     void handleBookieFailure(Map<Integer, BookieId> failed) {
-        if (replacement == null || stopped.get()) {
+        Object work = null;
+        synchronized (writerCloseLifecycle) {
+            if (replacement != null && replacementAdmitting()) {
+                synchronized (metadataLock) {
+                    delayedWriteFailedBookies.putAll(failed);
+                    if (changingEnsemble) {
+                        return;
+                    }
+                    changingEnsemble = true;
+                }
+                work = new Object();
+                replacementWork.add(work);
+            }
+        }
+        if (work == null) {
             handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
             return;
         }
-        synchronized (metadataLock) {
-            delayedWriteFailedBookies.putAll(failed);
-            if (changingEnsemble) {
-                return;
-            }
-            changingEnsemble = true;
-        }
+        Object accepted = work;
         try {
-            executeOrdered(this::replaceNext);
+            executeOrdered(() -> replaceNext(accepted));
         } catch (RejectedExecutionException unavailable) {
-            handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
+            try {
+                handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
+            } finally {
+                replacementFinished(accepted);
+            }
         }
     }
 
-    private void replaceNext() {
-        if (stopped.get()) {
-            return;
-        }
-        Map<Integer, BookieId> failed;
-        synchronized (metadataLock) {
-            failed = new HashMap<>(delayedWriteFailedBookies);
-            delayedWriteFailedBookies.clear();
-        }
-        Versioned<LedgerMetadata> expected = getVersionedLedgerMetadata();
-        List<BookieId> ensemble = getCurrentEnsemble();
-        failed.entrySet().removeIf(entry -> !ensemble.get(entry.getKey()).equals(entry.getValue()));
-        if (failed.isEmpty()) {
-            synchronized (metadataLock) {
-                changingEnsemble = false;
-            }
-            sendAddSuccessCallbacks();
-            return;
-        }
-        if (numEnsembleChanges.incrementAndGet() > replacementLimit) {
-            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
-            return;
-        }
-        ensembleChangeCounter.inc();
-        Map<Integer, ProfileReplacementCoordinator.Target> selected = new HashMap<>();
-        var available = candidates.stream().filter(target -> !ensemble.contains(target.bookie())).iterator();
-        for (int slot : failed.keySet().stream().sorted().toList()) {
-            if (!available.hasNext()) {
-                handleUnrecoverableErrorDuringAdd(BKException.Code.NotEnoughBookiesException);
+    private void replaceNext(Object work) {
+        boolean asynchronous = false;
+        try {
+            if (!replacementAdmitting()) {
                 return;
             }
-            selected.put(slot, available.next());
-        }
-        long start = getLastAddConfirmed() + 1;
-        var credential = ProtectedProfileCredential.of(1, ledgerKey);
-        CompletableFuture<ProfileReplacementCoordinator.Operation> begun;
-        try {
-            begun = replacement.begin(expected, start, selected, replacementDescriptor, credential,
-                    identity(), identity());
-        } catch (RuntimeException refused) {
-            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
-            return;
-        }
-        begun.thenCompose(operation -> {
+            Map<Integer, BookieId> failed;
+            synchronized (metadataLock) {
+                failed = new HashMap<>(delayedWriteFailedBookies);
+                delayedWriteFailedBookies.clear();
+            }
+            Versioned<LedgerMetadata> expected = getVersionedLedgerMetadata();
+            List<BookieId> ensemble = getCurrentEnsemble();
+            failed.entrySet().removeIf(entry -> !ensemble.get(entry.getKey()).equals(entry.getValue()));
+            if (failed.isEmpty()) {
+                synchronized (metadataLock) {
+                    changingEnsemble = false;
+                }
+                sendAddSuccessCallbacks();
+                return;
+            }
+            if (numEnsembleChanges.incrementAndGet() > replacementLimit) {
+                handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+                return;
+            }
+            ensembleChangeCounter.inc();
+            Map<Integer, ProfileReplacementCoordinator.Target> selected = new HashMap<>();
+            var available = candidates.stream().filter(target -> !ensemble.contains(target.bookie())).iterator();
+            for (int slot : failed.keySet().stream().sorted().toList()) {
+                if (!available.hasNext()) {
+                    handleUnrecoverableErrorDuringAdd(BKException.Code.NotEnoughBookiesException);
+                    return;
+                }
+                selected.put(slot, available.next());
+            }
+            long start = getLastAddConfirmed() + 1;
+            var credential = ProtectedProfileCredential.of(1, ledgerKey);
+            CompletableFuture<ProfileReplacementCoordinator.Operation> begun;
+            synchronized (writerCloseLifecycle) {
+                if (!replacementAdmitting()) {
+                    return;
+                }
+                begun = replacement.begin(expected, start, selected, replacementDescriptor, credential,
+                        identity(), identity());
+            }
+            begun.thenCompose(operation -> {
+                synchronized (writerCloseLifecycle) {
                     currentReplacement = operation;
-                    return replacement.execute(operation, () -> !stopped.get());
-                }).whenComplete((result, failure) -> {
-                    Runnable completed = () -> {
-                        if (stopped.get()) {
-                            return;
-                        }
-                        if (failure != null || result == null
-                                || result.status() != ProfileReplacementCoordinator.Status.AVAILABLE) {
-                            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
-                            return;
-                        }
-                        Map<BookieId, ProfileNormalDataClient> current = new HashMap<>(transport.clients());
-                        failed.values().forEach(current::remove);
-                        current.putAll(result.clients());
-                        transport.switchClients(current);
-                        if (!setLedgerMetadata(expected, result.metadata())) {
-                            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
-                            return;
-                        }
-                        unsetSuccessAndSendWriteRequest(getCurrentEnsemble(), selected.keySet());
-                        currentReplacement = null;
-                        synchronized (metadataLock) {
-                            delayedWriteFailedBookies.entrySet().removeIf(entry ->
-                                    !getCurrentEnsemble().get(entry.getKey()).equals(entry.getValue()));
-                            if (delayedWriteFailedBookies.isEmpty()) {
-                                changingEnsemble = false;
+                    return replacementAdmitting()
+                            ? replacement.execute(operation, this::replacementAdmitting)
+                            : CompletableFuture.<ProfileReplacementCoordinator.Result>failedFuture(
+                                    BKException.create(BKException.Code.ClientClosedException));
+                }
+            }).whenComplete((result, failure) -> {
+                Runnable completed = () -> {
+                    boolean continued = false;
+                    try {
+                        boolean next;
+                        synchronized (writerCloseLifecycle) {
+                            if (!replacementAdmitting()) {
+                                return;
                             }
+                            if (failure != null || result == null
+                                    || result.status() != ProfileReplacementCoordinator.Status.AVAILABLE) {
+                                handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+                                return;
+                            }
+                            Map<BookieId, ProfileNormalDataClient> current = new HashMap<>(transport.clients());
+                            failed.values().forEach(current::remove);
+                            current.putAll(result.clients());
+                            transport.switchClients(current);
+                            if (!setLedgerMetadata(expected, result.metadata())) {
+                                handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+                                return;
+                            }
+                            unsetSuccessAndSendWriteRequest(getCurrentEnsemble(), selected.keySet());
+                            currentReplacement = null;
+                            synchronized (metadataLock) {
+                                delayedWriteFailedBookies.entrySet().removeIf(entry ->
+                                        !getCurrentEnsemble().get(entry.getKey()).equals(entry.getValue()));
+                                if (delayedWriteFailedBookies.isEmpty()) {
+                                    changingEnsemble = false;
+                                }
+                            }
+                            next = changingEnsemble;
                         }
-                        if (changingEnsemble) {
-                            replaceNext();
+                        if (next) {
+                            continued = true;
+                            replaceNext(work);
                         } else {
                             sendAddSuccessCallbacks();
                         }
-                    };
-                    try {
-                        executeOrdered(completed);
-                    } catch (RejectedExecutionException unavailable) {
-                        handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
+                    } catch (RuntimeException unavailable) {
+                        handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+                    } finally {
+                        if (!continued) {
+                            replacementFinished(work);
+                        }
                     }
-                });
+                };
+                try {
+                    executeOrdered(completed);
+                } catch (RejectedExecutionException unavailable) {
+                    try {
+                        handleUnrecoverableErrorDuringAdd(BKException.Code.InterruptedException);
+                    } finally {
+                        replacementFinished(work);
+                    }
+                }
+            });
+            asynchronous = true;
+        } catch (RuntimeException refused) {
+            handleUnrecoverableErrorDuringAdd(BKException.Code.WriteException);
+        } finally {
+            if (!asynchronous) {
+                replacementFinished(work);
+            }
+        }
+    }
+
+    private boolean replacementAdmitting() {
+        synchronized (writerCloseLifecycle) {
+            return !ownerStopping && !closeStarted.get() && !stopped.get();
+        }
+    }
+
+    private void replacementFinished(Object work) {
+        synchronized (writerCloseLifecycle) {
+            replacementWork.remove(work);
+        }
+        completeReplacementStopIfIdle();
+    }
+
+    private void completeReplacementStopIfIdle() {
+        boolean complete;
+        synchronized (writerCloseLifecycle) {
+            complete = localResourcesClosed.isDone() && replacementWork.isEmpty();
+        }
+        if (complete) {
+            replacementStopped.complete(null);
+        }
     }
 
     private static byte[] identity() {
@@ -724,7 +796,11 @@ public final class ProfileLedgerHandle extends LedgerHandle {
 
     @Override
     void handleUnrecoverableErrorDuringAdd(int code) {
-        if (stopped.compareAndSet(false, true)) {
+        boolean stopNow;
+        synchronized (writerCloseLifecycle) {
+            stopNow = stopped.compareAndSet(false, true);
+        }
+        if (stopNow) {
             if (timeoutFuture != null) {
                 timeoutFuture.cancel(false);
             }

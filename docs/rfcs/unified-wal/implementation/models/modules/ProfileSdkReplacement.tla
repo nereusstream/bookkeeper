@@ -96,4 +96,106 @@ OnlyAffectedSlotsResent == ~s.resentUnchanged
 OneOriginalCallback == \A e \in Entries : s.callbacks[e] <= 1
 CallbacksStayContiguous == s.user[1] = "success" => s.user[0] = "success"
 SuccessHasCurrentQuorum == \A e \in Entries : s.user[e] = "success" => Cardinality(s.acks[e] \cap s.mapping) >= AckQuorum
+
+(* Independent owner-lifecycle projection; the original Spec above is unchanged.
+   One replacementWork token is registered before the ordered task is queued. It covers
+   begin/cold work, INSTALL, metadata CAS, activation, final read, the ordered completed
+   callback, and at most two consecutive changes using the same episode token.
+   An accepted control phase can finish after stop; it cannot admit a new replacement or
+   adopt clients/metadata and resend normal writes after the lifecycle gate has closed.
+   Local DATA/header termination, accepted explicit-close actual termination and actual
+   replacement/callback termination are separate inputs. Raw local stop supplies only
+   the local resource terminal. ownerActual is the aggregate required before the SDK
+   starts draining its per-child DATA/CONTROL scopes; their output/lease/dependency drain
+   is covered by the shared-SDK slice. No new ACK, recovery/CLOSED, remote-abort, fairness,
+   liveness, fsync, TLS or native-allocation claim is made here. *)
+OwnerPendingPhases == {"queued", "begin", "install", "metadata", "activation", "read", "callback", "continuing"}
+OwnerColdAndCallbackPhases == OwnerPendingPhases \ {"queued"}
+OwnerAdmitting == ~s.ownerStopping /\ ~s.closeStarted /\ ~s.stopped
+OwnerInit == s = [phase |-> "idle", change |-> 0, token |-> FALSE, logicalDone |-> FALSE,
+                  stopped |-> FALSE, ownerStopping |-> FALSE, closeStarted |-> FALSE,
+                  localActual |-> FALSE, closeActual |-> "unsettled",
+                  replacementStopped |-> FALSE, ownerActual |-> FALSE,
+                  adoptions |-> 0, resends |-> 0, adoptedAfterStop |-> FALSE]
+OwnerQueueReplacement(omitQueueToken) ==
+    /\ OwnerAdmitting /\ s.phase = "idle" /\ s.change = 0
+    /\ s' = [s EXCEPT !.phase = "queued", !.change = 1, !.token = ~omitQueueToken]
+OwnerRunQueued ==
+    /\ s.phase = "queued"
+    /\ s' = [s EXCEPT !.phase = IF OwnerAdmitting THEN "begin" ELSE "done",
+                       !.token = OwnerAdmitting]
+OwnerControlPhase ==
+    /\ s.phase \in {"begin", "install", "metadata", "activation"}
+    /\ s' = [s EXCEPT !.phase = CASE @ = "begin" -> "install"
+                                      [] @ = "install" -> "metadata"
+                                      [] @ = "metadata" -> "activation"
+                                      [] OTHER -> "read"]
+OwnerFinalResult ==
+    /\ s.phase = "read"
+    /\ s' = [s EXCEPT !.phase = "callback", !.logicalDone = TRUE]
+OwnerRunCallback(continue, allowStoppedAdoption) ==
+    /\ s.phase = "callback"
+    /\ LET adopt == OwnerAdmitting \/ allowStoppedAdoption
+           next == adopt /\ continue /\ s.change < 2
+       IN s' = [s EXCEPT !.phase = IF next THEN "continuing" ELSE "done",
+                         !.change = IF next THEN @ + 1 ELSE @, !.token = next,
+                         !.adoptions = IF adopt THEN @ + 1 ELSE @,
+                         !.resends = IF adopt THEN @ + 1 ELSE @,
+                         !.adoptedAfterStop = @ \/ (adopt /\ ~OwnerAdmitting)]
+OwnerBeginConsecutive ==
+    /\ s.phase = "continuing"
+    /\ s' = [s EXCEPT !.phase = IF OwnerAdmitting THEN "begin" ELSE "done",
+                       !.token = OwnerAdmitting]
+OwnerRawLocalStop ==
+    /\ ~s.stopped
+    /\ s' = [s EXCEPT !.stopped = TRUE, !.logicalDone = TRUE]
+OwnerRequestStop ==
+    /\ ~s.ownerStopping
+    /\ s' = [s EXCEPT !.ownerStopping = TRUE, !.stopped = TRUE, !.logicalDone = TRUE,
+                       !.closeActual = IF s.closeStarted THEN @ ELSE "terminal"]
+OwnerAcceptExplicitClose ==
+    /\ ~s.ownerStopping /\ ~s.closeStarted
+    /\ s' = [s EXCEPT !.closeStarted = TRUE, !.closeActual = "pending"]
+OwnerRunExplicitClose ==
+    /\ s.closeStarted /\ ~s.stopped
+    /\ s' = [s EXCEPT !.stopped = TRUE, !.logicalDone = TRUE]
+OwnerLocalResourcesTerminal ==
+    /\ s.stopped /\ ~s.localActual
+    /\ s' = [s EXCEPT !.localActual = TRUE]
+OwnerExplicitCloseTerminal ==
+    /\ s.closeActual = "pending" /\ s.localActual
+    /\ s' = [s EXCEPT !.closeActual = "terminal"]
+OwnerReplacementTerminal(earlyActual) ==
+    /\ s.localActual /\ ~s.replacementStopped
+    /\ (~s.token \/ (earlyActual /\ s.logicalDone /\ s.phase \in OwnerColdAndCallbackPhases))
+    /\ s' = [s EXCEPT !.replacementStopped = TRUE]
+OwnerAggregateTerminal ==
+    /\ ~s.ownerActual /\ s.localActual /\ s.closeActual = "terminal" /\ s.replacementStopped
+    /\ s' = [s EXCEPT !.ownerActual = TRUE]
+OwnerNext(omitQueueToken, earlyActual, allowStoppedAdoption) ==
+    OwnerQueueReplacement(omitQueueToken) \/ OwnerRunQueued \/ OwnerControlPhase \/ OwnerFinalResult
+    \/ (\E continue \in BOOLEAN : OwnerRunCallback(continue, allowStoppedAdoption))
+    \/ OwnerBeginConsecutive \/ OwnerRawLocalStop \/ OwnerRequestStop
+    \/ OwnerAcceptExplicitClose \/ OwnerRunExplicitClose \/ OwnerLocalResourcesTerminal
+    \/ OwnerExplicitCloseTerminal \/ OwnerReplacementTerminal(earlyActual) \/ OwnerAggregateTerminal
+OwnerSpec == OwnerInit /\ [][OwnerNext(FALSE, FALSE, FALSE)]_vars
+OwnerOmittedQueueTokenSpec == OwnerInit /\ [][OwnerNext(TRUE, FALSE, FALSE)]_vars
+OwnerEarlyActualSpec == OwnerInit /\ [][OwnerNext(FALSE, TRUE, FALSE)]_vars
+OwnerStoppedAdoptionSpec == OwnerInit /\ [][OwnerNext(FALSE, FALSE, TRUE)]_vars
+OwnerTypeOK ==
+    /\ s.phase \in OwnerPendingPhases \cup {"idle", "done"} /\ s.change \in 0..2
+    /\ s.token \in BOOLEAN /\ s.logicalDone \in BOOLEAN /\ s.stopped \in BOOLEAN
+    /\ s.ownerStopping \in BOOLEAN /\ s.closeStarted \in BOOLEAN /\ s.localActual \in BOOLEAN
+    /\ s.closeActual \in {"unsettled", "pending", "terminal"}
+    /\ s.replacementStopped \in BOOLEAN /\ s.ownerActual \in BOOLEAN
+    /\ s.adoptions \in 0..2 /\ s.resends \in 0..2 /\ s.adoptedAfterStop \in BOOLEAN
+OwnerEpisodeIsBounded == s.adoptions <= s.change /\ s.resends = s.adoptions
+OwnerPendingEpisodeOwnsToken == s.phase \in OwnerPendingPhases => s.token
+OwnerReplacementStoppedNeedsActual == s.replacementStopped
+    => s.localActual /\ ~s.token /\ s.phase \in {"idle", "done"}
+OwnerActualWaitsForQueuedEpisode == s.ownerActual => s.phase # "queued"
+OwnerActualWaitsForReplacementEpisode == s.ownerActual => s.phase \in {"idle", "done"}
+OwnerActualJoinsLocalAndAcceptedClose == s.ownerActual
+    => s.localActual /\ s.closeActual = "terminal" /\ s.replacementStopped
+OwnerStoppedCallbackDoesNotAdopt == ~s.adoptedAfterStop
 =============================================================================

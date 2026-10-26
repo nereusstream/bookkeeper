@@ -13714,7 +13714,11 @@ public class SegmentProfileInitialSocketClientTest {
         }
 
         PublicProfileReadonlyEpisode(int cohortSize, boolean createClosed) throws Exception {
-            fixture = new Fixture(false, false, true, cohortSize, 2, true, true);
+            this(cohortSize, createClosed, 2);
+        }
+
+        PublicProfileReadonlyEpisode(int cohortSize, boolean createClosed, int ackQuorum) throws Exception {
+            fixture = new Fixture(false, false, true, cohortSize, ackQuorum, true, true);
             try {
                 sdk = sdk(fixture);
                 var data = new HashMap<BookieId, ProfileNormalDataClient>();
@@ -13825,6 +13829,42 @@ public class SegmentProfileInitialSocketClientTest {
         var desired = LedgerMetadataBuilder.from(fixture.metadata()).withId(ledger).build();
         return new ProfileCreateRequest(desired, reservation, fixture.descriptorBytes, fixture.credential,
                 activate, bytes(32, 76), publicCreateRequest(fixture).limits());
+    }
+
+    private static ProfileCreateRequest publicReplacementCreateRequest(Fixture fixture, int maxChanges) {
+        var original = publicCreateRequest(fixture);
+        return new ProfileCreateRequest(original.desired(), original.reservation(), original.descriptor(),
+                original.credential(), original.readyOperationId(), original.readyPayloadIdentity(),
+                original.limits(), maxChanges);
+    }
+
+    private static void assertPublicReplacementEntryAbsent(Fixture fixture, int target) throws Exception {
+        var storage = fixture.nodes.get(target);
+        var indexField = IsolatedSegmentStorage.class.getDeclaredField("index");
+        indexField.setAccessible(true);
+        var index = (SegmentDerivedIndex) indexField.get(storage);
+        var hotField = IsolatedSegmentStorage.class.getDeclaredField("hotDirectories");
+        hotField.setAccessible(true);
+        var hot = (SegmentHotDirectory[]) hotField.get(storage);
+        var executionField = IsolatedSegmentStorage.class.getDeclaredField("execution");
+        executionField.setAccessible(true);
+        var execution = (SegmentExecutionGroup) executionField.get(storage);
+        int shard = SegmentOwnerLoop.shardFor(fixture.context().ledgerId(), hot.length);
+        var absent = new java.util.concurrent.FutureTask<Boolean>(() ->
+                index.get(fixture.context(), 0).isEmpty() && hot[shard].provesAbsent(fixture.context(), 0));
+        assertTrue(execution.owner(shard).control(absent));
+        assertTrue(absent.get(5, TimeUnit.SECONDS));
+    }
+
+    private static Channel publicWriterDataChannel(ProfileLedgerHandle writer, BookieId bookie) throws Exception {
+        var transportField = ProfileLedgerHandle.class.getDeclaredField("transport");
+        transportField.setAccessible(true);
+        Object transport = transportField.get(writer);
+        var clientsField = transport.getClass().getDeclaredField("clients");
+        clientsField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        var clients = (Map<BookieId, ProfileNormalDataClient>) clientsField.get(transport);
+        return dataChannel(clients.get(bookie));
     }
 
     private static List<LedgerHandle> completePublicSharedCreates(BookKeeper sdk,
@@ -13946,6 +13986,296 @@ public class SegmentProfileInitialSocketClientTest {
                 reader.closeAsync().get(5, TimeUnit.SECONDS);
             }
             assertEquals(0, episode.pool.usage().reservedConnections());
+        }
+    }
+
+    @Test
+    public void publicProfileReplacementReplacesFailedDataPeerAndClosesThroughNewTarget() throws Exception {
+        try (var episode = new PublicProfileReadonlyEpisode(4, false, 3)) {
+            var fixture = episode.fixture;
+            var sdk = episode.sdk;
+            var request = publicReplacementCreateRequest(fixture, 1);
+            assertEquals(0, publicCreateRequest(fixture).maxEnsembleChanges());
+            assertThrows(IllegalArgumentException.class, () -> publicReplacementCreateRequest(fixture, -1));
+            assertThrows(IllegalArgumentException.class, () -> publicReplacementCreateRequest(
+                    fixture, ProfileReplacementPage.MAX_PUBLICATIONS + 1));
+            try (BookKeeper disabled = sdk(fixture)) {
+                var disabledPool = enablePublicCreate(disabled, fixture, episode.episodes.get(0).persistent,
+                        Duration.ofSeconds(5));
+                assertEquals(BKException.Code.IllegalOpException, BKException.getExceptionCode(assertThrows(
+                        ExecutionException.class, () -> disabled.createProfileLedger(request)
+                                .get(5, TimeUnit.SECONDS))));
+                assertEquals(0, disabledPool.usage().reservedConnections());
+                assertNull(fixture.zk.exists(((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44), false));
+                assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.NOT_FOUND,
+                        fixture.reservations.read(44).status());
+            }
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var replacement = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                    fixture.cold);
+            sdk.enableProfile(episode.initializer, episode.coordinator, replacement, VALIDATOR, episode.pool, 4, 1);
+            var writer = (ProfileLedgerHandle) sdk.createProfileLedger(request).get(10, TimeUnit.SECONDS);
+            assertEquals(8, episode.pool.usage().reservedConnections());
+            assertFalse(fixture.normal(3));
+            assertFalse(bookie(fixture.nodes.get(3)).locallyReadableContext(fixture.context()));
+            assertFalse(fixture.nodes.get(3).profileReadVisible(fixture.context(), 0));
+            var activating = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var phases = new AtomicInteger();
+            var ioField = SegmentBookieControlLog.class.getDeclaredField("io");
+            ioField.setAccessible(true);
+            ioField.set(bookie(fixture.nodes.get(3)), new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                if (phases.incrementAndGet() == 2) {
+                    activating.countDown();
+                    await(release);
+                }
+            }));
+            try {
+                publicWriterDataChannel(writer, fixture.identities.get(1).bookieId()).close().sync();
+                var callbacks = new CopyOnWriteArrayList<Long>();
+                var pending = sdkAdd(writer, bytes(16, 8), callbacks);
+                assertTrue(activating.await(5, TimeUnit.SECONDS));
+                assertFalse(pending.isDone());
+                assertEquals(-1, writer.getLastAddConfirmed());
+                assertFalse(fixture.normal(3));
+                assertPublicReplacementEntryAbsent(fixture, 3);
+                var changed = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue();
+                assertEquals(List.of("socket0:3181", "socket3:3181", "socket2:3181"),
+                        changed.getAllEnsembles().lastEntry().getValue().stream().map(Object::toString).toList());
+                var retained = fixture.reservations.retainedActivationTargets(44).targets();
+                assertEquals(4, retained.size());
+                assertTrue(retained.stream().anyMatch(target ->
+                        target.scope().targetBookie().equals(fixture.identities.get(1).bookieId().toString())));
+                release.countDown();
+                assertEquals(0, pending.get(10, TimeUnit.SECONDS).longValue());
+                assertEquals(List.of(0L), callbacks);
+                assertEquals(changed.getAllEnsembles(), writer.getLedgerMetadata().getAllEnsembles());
+                assertTrue(fixture.normal(3));
+                assertTrue(fixture.nodes.get(3).profileReadVisible(fixture.context(), 0));
+                assertEquals(1, sdkAdd(writer, bytes(16, 9), callbacks).get(5, TimeUnit.SECONDS).longValue());
+                writer.closeAsync().get(30, TimeUnit.SECONDS);
+                var closed = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue();
+                assertEquals(LedgerMetadata.State.CLOSED, closed.getState());
+                assertEquals(1, closed.getLastEntryId());
+                assertEquals(32, closed.getLength());
+                assertEquals(changed.getAllEnsembles(), closed.getAllEnsembles());
+                assertEquals(0, episode.pool.usage().reservedConnections());
+                var reader = sdk.openProfileLedgerReadOnly(44, fixture.password).get(10, TimeUnit.SECONDS);
+                try {
+                    try (var entries = reader.readAsync(0, 1).get(5, TimeUnit.SECONDS)) {
+                        assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+                        assertArrayEquals(bytes(16, 9), entries.getEntry(1).getEntryBytes());
+                    }
+                } finally {
+                    reader.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                assertEquals(0, episode.pool.usage().reservedConnections());
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void publicProfileReplacementSdkCloseWaitsForAcceptedQueuedColdWork() throws Exception {
+        try (var episode = new PublicProfileReadonlyEpisode(4, false, 3)) {
+            var fixture = episode.fixture;
+            var sdk = episode.sdk;
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var queued = new CountDownLatch(1);
+            var replacement = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR, work -> {
+                fixture.cold.execute(work);
+                queued.countDown();
+            });
+            sdk.enableProfile(episode.initializer, episode.coordinator, replacement, VALIDATOR, episode.pool, 4, 1);
+            var request = publicReplacementCreateRequest(fixture, 1);
+            var writer = (ProfileLedgerHandle) sdk.createProfileLedger(request).get(10, TimeUnit.SECONDS);
+            var before = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            var allBusy = new CountDownLatch(8);
+            var release = new CountDownLatch(1);
+            Thread stopper = null;
+            for (int thread = 0; thread < 8; thread++) {
+                fixture.cold.execute(() -> {
+                    allBusy.countDown();
+                    await(release);
+                });
+            }
+            try {
+                assertTrue(allBusy.await(5, TimeUnit.SECONDS));
+                publicWriterDataChannel(writer, fixture.identities.get(1).bookieId()).close().sync();
+                var pending = sdkAdd(writer, bytes(16, 8));
+                assertTrue(queued.await(5, TimeUnit.SECONDS));
+                assertFalse(pending.isDone());
+                var closed = new CompletableFuture<Void>();
+                var started = new CountDownLatch(1);
+                stopper = new Thread(() -> {
+                    started.countDown();
+                    try {
+                        sdk.close();
+                        closed.complete(null);
+                    } catch (Throwable failure) {
+                        closed.completeExceptionally(failure);
+                    }
+                }, "sdk-profile-queued-replacement-close");
+                stopper.start();
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closed.get(150, TimeUnit.MILLISECONDS));
+                assertThrows(ExecutionException.class, () -> pending.get(5, TimeUnit.SECONDS));
+                assertEquals(8, episode.pool.usage().reservedConnections());
+                assertFalse(sdk.getClientCtx().getMainWorkerPool().isShutdown());
+                assertFalse(sdk.getClientCtx().getScheduler().isShutdown());
+                assertEquals(before.getVersion(), sdk.getClientCtx().getLedgerManager()
+                        .readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getVersion());
+                release.countDown();
+                closed.get(15, TimeUnit.SECONDS);
+                stopper.join(5000);
+                assertFalse(stopper.isAlive());
+                assertNull(writer.writerCloseRequest());
+                var after = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue();
+                assertEquals(LedgerMetadata.State.OPEN, after.getState());
+                assertFalse(after.getCustomMetadata().containsKey(
+                        org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.WRITER_CLOSE_KEY));
+                assertEquals(0, episode.pool.usage().reservedConnections());
+                assertEquals(0, episode.pool.usage().reservedRpcSlots());
+                assertEquals(0, episode.pool.backingBytes());
+                try (BookKeeper fresh = sdk(fixture)) {
+                    var freshPool = new ProfileRecoveryPeerPool(episode.episodes.get(0).persistent,
+                            fixture.clientGroup, fixture.peerTls, fixture.cold,
+                            fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
+                            new ProfileRecoveryPeerPool.Limits(8, 16, 2, 1060, Duration.ofSeconds(5)));
+                    fresh.enableProfile(episode.initializer, episode.coordinator, replacement, VALIDATOR,
+                            freshPool, 4, 1);
+                    assertEquals(BKException.Code.LedgerExistException, BKException.getExceptionCode(assertThrows(
+                            ExecutionException.class, () -> fresh.createProfileLedger(request)
+                                    .get(10, TimeUnit.SECONDS))));
+                    assertEquals(0, freshPool.usage().reservedConnections());
+                }
+            } finally {
+                release.countDown();
+                if (stopper != null) {
+                    stopper.join(15000);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void publicProfileReplacementSdkCloseWaitsForInstallForceAndOriginalOutput() throws Exception {
+        try (var episode = new PublicProfileReadonlyEpisode(4, false, 3)) {
+            var fixture = episode.fixture;
+            var sdk = episode.sdk;
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var replacement = new ProfileReplacementCoordinator(fixture.reservations, metadata, VALIDATOR,
+                    fixture.cold);
+            sdk.enableProfile(episode.initializer, episode.coordinator, replacement, VALIDATOR, episode.pool, 4, 1);
+            var writer = (ProfileLedgerHandle) sdk.createProfileLedger(publicReplacementCreateRequest(fixture, 1))
+                    .get(10, TimeUnit.SECONDS);
+            var installing = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var ioField = SegmentBookieControlLog.class.getDeclaredField("io");
+            ioField.setAccessible(true);
+            ioField.set(bookie(fixture.nodes.get(3)), new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                installing.countDown();
+                await(release);
+            }));
+            var settingsField = ProfileLedgerHandle.class.getDeclaredField("closeSettings");
+            settingsField.setAccessible(true);
+            Object settings = settingsField.get(writer);
+            var controlsField = settings.getClass().getDeclaredField("controls");
+            controlsField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            var controls = (Map<String, ProfileInitialControlClient>) controlsField.get(settings);
+            var socketField = ProfileInitialControlClient.class.getDeclaredField("socket");
+            socketField.setAccessible(true);
+            Object socket = socketField.get(controls.get(fixture.identities.get(3).bookieId().toString()));
+            var channelField = socket.getClass().getDeclaredField("channel");
+            channelField.setAccessible(true);
+            Channel channel = (Channel) channelField.get(socket);
+            var held = new AtomicReference<ChannelPromise>();
+            var written = new CountDownLatch(1);
+            channel.eventLoop().submit(() -> channel.pipeline().addAfter(
+                    channel.pipeline().context(SslHandler.class).name(), "holdPublicReplacementInstallOutput",
+                    new ChannelOutboundHandlerAdapter() {
+                        @Override
+                        public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+                            ByteBuf body = (ByteBuf) message;
+                            if (body.getUnsignedShort(body.readerIndex() + 14) == ProfileOperation.INSTALL.wireValue()
+                                    && held.compareAndSet(null, promise)) {
+                                var actual = ctx.newPromise();
+                                actual.addListener(done -> written.countDown());
+                                ctx.write(body, actual);
+                            } else {
+                                ctx.write(body, promise);
+                            }
+                        }
+                    })).get(5, TimeUnit.SECONDS);
+            Thread stopper = null;
+            try {
+                publicWriterDataChannel(writer, fixture.identities.get(1).bookieId()).close().sync();
+                var pending = sdkAdd(writer, bytes(16, 8));
+                assertTrue(written.await(5, TimeUnit.SECONDS));
+                assertTrue(installing.await(5, TimeUnit.SECONDS));
+                assertNotNull(writer.unresolvedReplacement());
+                assertFalse(pending.isDone());
+                assertFalse(fixture.normal(3));
+                var closed = new CompletableFuture<Void>();
+                var started = new CountDownLatch(1);
+                stopper = new Thread(() -> {
+                    started.countDown();
+                    try {
+                        sdk.close();
+                        closed.complete(null);
+                    } catch (Throwable failure) {
+                        closed.completeExceptionally(failure);
+                    }
+                }, "sdk-profile-install-replacement-close");
+                stopper.start();
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                assertThrows(ExecutionException.class, () -> pending.get(5, TimeUnit.SECONDS));
+                var stoppedWriter = stopOwnedWriter(writer);
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> stoppedWriter.get(150, TimeUnit.MILLISECONDS));
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closed.get(150, TimeUnit.MILLISECONDS));
+                assertEquals(8, episode.pool.usage().reservedConnections());
+                assertFalse(sdk.getClientCtx().getMainWorkerPool().isShutdown());
+                assertFalse(sdk.getClientCtx().getScheduler().isShutdown());
+                assertEquals(LedgerMetadata.State.OPEN, sdk.getClientCtx().getLedgerManager()
+                        .readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+                release.countDown();
+                stoppedWriter.get(5, TimeUnit.SECONDS);
+                assertThrows(java.util.concurrent.TimeoutException.class,
+                        () -> closed.get(150, TimeUnit.MILLISECONDS));
+                assertEquals(8, episode.pool.usage().reservedConnections());
+                held.get().setSuccess();
+                closed.get(15, TimeUnit.SECONDS);
+                stopper.join(5000);
+                assertFalse(stopper.isAlive());
+                assertNull(writer.writerCloseRequest());
+                assertEquals(-1, writer.getLastAddConfirmed());
+                assertFalse(fixture.normal(3));
+                assertPublicReplacementEntryAbsent(fixture, 3);
+                assertEquals(LedgerMetadata.State.OPEN,
+                        fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+                var retained = fixture.reservations.retainedActivationTargets(44).targets();
+                assertTrue(retained.stream().map(target -> target.scope().targetBookie()).toList()
+                        .containsAll(fixture.scopes.stream().map(ProfileControlScope::targetBookie).toList()));
+                assertEquals(0, episode.pool.usage().reservedConnections());
+                assertEquals(0, episode.pool.usage().reservedRpcSlots());
+                assertEquals(0, episode.pool.backingBytes());
+            } finally {
+                release.countDown();
+                if (held.get() != null) {
+                    held.get().trySuccess();
+                }
+                if (stopper != null) {
+                    stopper.join(15000);
+                }
+            }
         }
     }
 

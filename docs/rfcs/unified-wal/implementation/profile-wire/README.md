@@ -2513,3 +2513,29 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 源码各阶段、原命令/XML、CONTROL早期断连与真实Known-NONE诊断、两个测试oracle修正前回执、queued observer的受控Java RED、最终Java/模型原输出及实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-shared-evidence-c5ec7316`。两个oracle修正依据为非空writer实际UIC4关闭，以及payload buffer的真实readerIndex；未修改payload、放宽关闭断言或跳过其他错误。全部Java/style/模型终态后独立RAT实际exit1：443条均为父HEAD既有路径、集合无新增；442路径字节不变，既有model runner仅增加MATRIX且license header不变，不称CI全绿。15个原临时根仅在实际终态、无句柄、逐文件同inode/SHA核对后移除，hardlink归档全部保留，常规文件数据实际回收0 B。
 
 Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。首版显式SDK接线不改变默认Classic builder或缺可信环境时的拒绝；Main可信commissioning/OS隔离/credential/exact-policy输入、full-bytes/B11、恢复接受下界、历史GC/mixed兼容/正式性能及其余16步仍OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+## 显式 SDK 写期换组与实际排空
+
+2026-10-26，父源码 `d232f2df644346704d6114b75d9132ee1025c475`。BookKeeper 的显式 enableProfile 增加带原 ProfileReplacementCoordinator 的重载；ProfileCreateRequest 增加冻结的 maxEnsembleChanges，范围0..32，旧构造仍为0。非零请求若缺 replacement 环境，在 pool admission 和持久副作用前返回 IllegalOp。候选来自同一已持有 cohort 中初始 E 以外的成员，按 BookieId 字符串排序；要求完整 CONTROL/DATA 对、相同 incarnation、SEGMENT engine、descriptor mandatory capabilities 与原 Target 的 UIC2。无候选或缺配对返回 NotEnoughBookies，超过32个拒绝而不截断，身份/能力不匹配拒绝。上述校验发生在 fresh claim 前；初始 writer DATA 仍严格只含 E，standby 不提前 INSTALL/ACTIVATE/写入。
+
+AVAILABLE 后，SDK 在交付 writer 前先配置原 enableReplacement，再配置普通 writer close 并接入 owner。启用换组时，close 保留整个 cohort 的 CONTROL 子视图，以便新 target 进入当前 ensemble 后仍能完成固定 P/length 关闭；max=0 沿用原初始 E。maxEnsembleChanges 只是本 writer 的变更上限，不保证有限 standby 足以完成每一次变更。仍复用原 inactive INSTALL、membership CAS、retained publication、全新成员 ACTIVATE、final recheck、PendingAddOp 整体 ACK 撤销与必要重发；没有新的 quorum、authority、发现/重连策略、格式、executor 或普通 Add 的逐 entry metadata/control fsync/handshake。
+
+ProfileLedgerHandle 在接受故障处理、向 ordered worker 入队前登记一个实际 replacement episode。该 token 覆盖排队的 begin、实际 cold/INSTALL/CAS/activation/final read、回投 ordered worker 的完成回调及连续下一次 replacement；同步拒绝、队列拒绝和停止后的回调也必须真正终结才移除。stop/close admission 与采纳新 metadata/clients、重发 DATA 使用同一生命周期锁，停止后保留 unresolved operation，不能继续采纳或重发。已接受的持久阶段仍可能在 stop 后结束；caller failure/cancel/deadline 不取消私有链，也不充当实际终态。
+
+owned writer 的实际终态聚合本地 DATA/header、已接受显式 close 的实际链与 replacement episode。SDK 随后仍须排空该子操作的 CONTROL/DATA scope，最后一个子操作才关闭父 lease/pool，再关闭 SDK metadata/executors。原 stopLocalWrites 继续只表示本地 DATA/header 结束。SDK-local stop 不发起普通 close 或制造 CLOSED，不授予新 SDK 重发已有 OPEN writer 的权限。
+
+新增三项真实四节点 service/ZK/registration/mTLS 验证均使用3/3/3，使旧两副本的 ACK 不能掩盖换组：关闭初始 DATA channel 后，在 standby ACTIVATE force 暂停期间，entry0 与整体 ACK 等待且新目标没有 DATA；释放后换组、两条连续写入、CLOSED P1/length32 与公共 readonly 重新打开后的 payload 通过。第二项占住全部八个 cold worker，SDK close 等待已入队 begin 并保留 pool/metadata/executors，释放后仍为 OPEN，新 SDK 不能重新发行。第三项分别扣住 INSTALL force 和已实际发送的原 CONTROL output promise，owner 与 SDK 分阶段等待；结束后新目标仍未激活、没有 DATA 重发且 retained 历史保留。
+
+首轮3项为1通过/2断言失败，保留原源码/回执：错误 oracle 将 profileReadVisible 的读取权限当作 DATA 存在。实际点读的 NOT_READY 也不能证明缺失。仅修正两处为真实 SegmentDerivedIndex.get 的空结果，加原 shard owner 上 hotDirectory.provesAbsent 的 occupied/pending/failed/prefix/move 检查；其余 normal admission、ACK、output 与停止断言未弱化，生产源码未改。修正后同3项通过。
+
+定向3项及扩大五类 **278项全部通过、0 failure/error/skip**（完整Socket228、Scope2、Metadata19、Reservation17、Classic LedgerRecovery12），完整用例身份等于父轮275项加本轮三项。1179个runner输入与1183个含addon的冻结Java输入逐项匹配，Spotless/Checkstyle实际exit0。ProfileSdkReplacement只追加独立OwnerSpec，原Spec/10旧cfg字节保持；只运行新增4配置，1正向完整PASS（632 generated/272 distinct、queue0）和3指定反例均符合预期。最终1173模型输入与Java的277重合SHA相同，合并2079 unique输入；模型边界及trace见[模型说明](../models/README.md#sdk-replacement-episode-与-owner-实际终态)，不提升liveness、full-bytes或完整A+C+D。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,ProfileNormalDataClientScopeTest,ProfileLedgerMetadataStoreTest,ZKProfileReservationStoreTest,LedgerRecoveryTest'
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-sdk-replacement-owner --config-prefix ce-profile-sdk-replacement-owner
+```
+
+源码各阶段、初次失败及 oracle 修正、命令/XML、模型 manifest/raw output/指定 trace 和实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-replacement-evidence-d232f2df`。首轮独立RAT实际exit1/447，新增四个cfg因短许可证头未批准；补齐四个完整ASF头后，模型按最终源码重新核验，规格与不变量正文未变。最终独立RAT仍实际exit1，但回到443条父HEAD既有路径、集合无新增；441路径字节不变，原已未批准的ProfileSdkReplacement与model runner头部保持，仍不称CI全绿。 六个原临时运行根仅在实际终态、无句柄、逐文件同inode/SHA核对后移除，hardlink归档全部保留，常规文件数据实际回收0 B。
+
+本轮接通显式 fresh-create writer 的可选换组与 owner 排空；默认 builder 继续 Classic，缺可信环境时的拒绝保持。Main 可信 commissioning/OS隔离/credential/exact-policy 输入、full-bytes/B11、恢复接受下界、历史 GC/mixed 兼容、正式性能及其余16步仍 OPEN；完整目标 active、生产 Gate OPEN，默认 OFF/SYSTEM/PARK 与 disabled 保持。Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。

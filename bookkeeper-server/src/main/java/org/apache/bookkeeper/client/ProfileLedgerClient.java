@@ -16,12 +16,16 @@
  */
 package org.apache.bookkeeper.client;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.apache.bookkeeper.common.profile.ProfileDescriptor;
@@ -33,6 +37,8 @@ import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementCoordinator;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementPage;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.net.BookieId;
 
@@ -41,6 +47,7 @@ final class ProfileLedgerClient {
     private final ClientContext sdk;
     private final ProfileInitialLifecycleCoordinator initializer;
     private final ProfileRecoveryCoordinator coordinator;
+    private final ProfileReplacementCoordinator replacement;
     private final ProfileRecoveryCoordinator.ReadOnlyAdmission readOnlyAdmission;
     private final ProfileDescriptorValidator validator;
     private final ProfileRecoveryPeerPool pool;
@@ -75,14 +82,22 @@ final class ProfileLedgerClient {
     ProfileLedgerClient(ClientContext sdk, ProfileInitialLifecycleCoordinator initializer,
             ProfileRecoveryCoordinator coordinator, ProfileDescriptorValidator validator,
             ProfileRecoveryPeerPool pool, int maxReadEntries, int maxOpenLedgers) {
+        this(sdk, initializer, coordinator, null, validator, pool, maxReadEntries, maxOpenLedgers);
+    }
+
+    ProfileLedgerClient(ClientContext sdk, ProfileInitialLifecycleCoordinator initializer,
+            ProfileRecoveryCoordinator coordinator, ProfileReplacementCoordinator replacement,
+            ProfileDescriptorValidator validator, ProfileRecoveryPeerPool pool, int maxReadEntries,
+            int maxOpenLedgers) {
         this.sdk = sdk;
         this.initializer = initializer;
         this.coordinator = Objects.requireNonNull(coordinator, "coordinator");
+        this.replacement = replacement;
         this.validator = validator;
         this.pool = Objects.requireNonNull(pool, "ownedPool");
         if (maxReadEntries < 1 || maxReadEntries > 256 || maxOpenLedgers < 1
                 || sdk.getConf().useV2WireProtocol
-                || (initializer == null) != (validator == null)
+                || (initializer == null) != (validator == null) || initializer == null && replacement != null
                 || initializer != null && (!sdk.getConf().delayEnsembleChange || sdk.getConf().explicitLacInterval != 0
                     || sdk.getConf().enforceMinNumFaultDomainsForWrite)) {
             throw new IllegalArgumentException("Profile requires bounded reads and the supported SDK configuration");
@@ -124,6 +139,9 @@ final class ProfileLedgerClient {
             }
             if (request == null) {
                 return failed(BKException.Code.IncorrectParameterException);
+            }
+            if (request.maxEnsembleChanges() > 0 && replacement == null) {
+                return failed(BKException.Code.IllegalOpException);
             }
             long ledger = request.desired().getLedgerId();
             if (active.containsKey(ledger) || active.size() >= maxOpenLedgers
@@ -411,6 +429,9 @@ final class ProfileLedgerClient {
                     activators.put(scope.targetBookie(), new ProfileInitialLifecycleCoordinator.Target(
                             controlPeer.hello(), controlPeer));
                 }
+                var candidates = replacementTargets(data.keySet());
+                var closeControls = request.maxEnsembleChanges() == 0 ? Map.copyOf(controls)
+                        : Map.copyOf(this.controls);
                 var claim = retainedClaim == null ? claimFresh()
                         : CompletableFuture.completedFuture(retainedClaim);
                 work = claim.thenCompose(fresh -> {
@@ -423,7 +444,7 @@ final class ProfileLedgerClient {
                     return initializer.initializeFresh(fresh, request.desired(), request.reservation(),
                             request.descriptor(), request.credential(), Map.copyOf(installers), Map.copyOf(activators),
                             request.readyOperationId(), request.readyPayloadIdentity());
-                }).thenCompose(initial -> configureWriter(initial, Map.copyOf(data), Map.copyOf(controls)));
+                }).thenCompose(initial -> configureWriter(initial, Map.copyOf(data), closeControls, candidates));
             } catch (Exception rejected) {
                 work = CompletableFuture.failedFuture(rejected);
             }
@@ -439,6 +460,39 @@ final class ProfileLedgerClient {
                     publish(created);
                 }
             });
+        }
+
+        private List<ProfileReplacementCoordinator.Target> replacementTargets(Set<BookieId> initial)
+                throws BKException {
+            if (request.maxEnsembleChanges() == 0) {
+                return List.of();
+            }
+            var extras = new TreeSet<BookieId>(Comparator.comparing(BookieId::toString));
+            extras.addAll(data.keySet());
+            controls.keySet().forEach(bookie -> extras.add(BookieId.parse(bookie)));
+            extras.removeAll(initial);
+            if (extras.isEmpty()) {
+                throw BKException.create(BKException.Code.NotEnoughBookiesException);
+            }
+            if (extras.size() > ProfileReplacementPage.MAX_PUBLICATIONS) {
+                throw BKException.create(BKException.Code.IncorrectParameterException);
+            }
+            var candidates = new ArrayList<ProfileReplacementCoordinator.Target>();
+            for (var bookie : extras) {
+                var dataPeer = data.get(bookie);
+                var controlPeer = controls.get(bookie.toString());
+                if (dataPeer == null || controlPeer == null) {
+                    throw BKException.create(BKException.Code.NotEnoughBookiesException);
+                }
+                requirePeer(controlPeer.hello(), bookie.toString(), controlPeer.hello().storageIncarnation());
+                requirePeer(dataPeer.hello(), bookie.toString(), controlPeer.hello().storageIncarnation());
+                try {
+                    candidates.add(new ProfileReplacementCoordinator.Target(controlPeer, dataPeer));
+                } catch (IllegalArgumentException invalid) {
+                    throw BKException.create(BKException.Code.MetadataVersionException);
+                }
+            }
+            return List.copyOf(candidates);
         }
 
         private CompletableFuture<ZKProfileReservationStore.FreshInitialClaim> claimFresh() {
@@ -479,7 +533,8 @@ final class ProfileLedgerClient {
         }
 
         private CompletableFuture<LedgerHandle> configureWriter(ProfileInitialLifecycleCoordinator.Result initial,
-                Map<BookieId, ProfileNormalDataClient> data, Map<String, ProfileInitialControlClient> controls) {
+                Map<BookieId, ProfileNormalDataClient> data, Map<String, ProfileInitialControlClient> controls,
+                List<ProfileReplacementCoordinator.Target> candidates) {
             if (initial.status() != ProfileInitialLifecycleCoordinator.Status.AVAILABLE) {
                 return failed(switch (initial.status()) {
                     case NOT_READY -> BKException.Code.NotEnoughBookiesException;
@@ -505,8 +560,11 @@ final class ProfileLedgerClient {
                 }
                 handle = writer;
             }
-            return writer.enableWriterClose(coordinator, request.descriptor(), validator, controls,
-                    limits.maxCloseCoordinates(), limits.closeDuration()).thenApply(unused -> {
+            var configured = request.maxEnsembleChanges() == 0 ? CompletableFuture.<Void>completedFuture(null)
+                    : writer.enableReplacement(replacement, candidates, request.descriptor(),
+                            request.maxEnsembleChanges());
+            return configured.thenCompose(unused -> writer.enableWriterClose(coordinator, request.descriptor(),
+                    validator, controls, limits.maxCloseCoordinates(), limits.closeDuration())).thenApply(unused -> {
                 CompletableFuture<Void> actual;
                 synchronized (ProfileLedgerClient.this) {
                     if (stopped || closing || result.isDone()) {

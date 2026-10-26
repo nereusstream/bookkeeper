@@ -920,3 +920,6 @@ Segment production candidate 的最低 Gate：
 
 
 [共享 cohort 的多 ledger SDK 与子视图排空](rfcs/unified-wal/implementation/profile-wire/README.md#共享-cohort-的多-ledger-sdk-与子视图排空)：2026-10-26父c5ec73163f上，显式SDK增加有界maxOpenLedgers、共享单Epoch/原6连接与独立CONTROL/DATA子视图；READ/LAC derived views按回复分离，最后子操作才关闭父lease/pool。首CONTROL复用已有pending等待实际授权，取消ready观察前不归还名额；原NONE背压与fresh归属保持。六项定向与五类275项全部通过、用例/输入匹配；最后一行纯换行有6个owner class指令一致证明且六项补验通过，style通过。新增有限模型1正向/5指定反例符合预期、原Spec/15cfg保持；独立RAT仍443既有路径无新增。各阶段源码/回执由canonical节拥有。首版默认builder继续Classic；完整目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[显式 SDK 写期换组与实际排空](rfcs/unified-wal/implementation/profile-wire/README.md#显式-sdk-写期换组与实际排空)：2026-10-26父d232f2df64上，显式enableProfile可提供原replacement coordinator，请求冻结0..32的maxEnsembleChanges、默认0；同cohort standby在fresh claim前验证，初始DATA仍只含E，close保留未来目标CONTROL。已接受换组从ordered排队到实际cold/完成callback及连续变更均持有episode，SDK stop等待实际终结及子视图输出，停止后不采纳/重发且不制造CLOSED。三项定向及五类278项全部通过、输入/用例匹配、style通过；新增有限模型1正向/3指定反例符合预期、旧Spec/10cfg保持。首轮两项权限/存在oracle错误及原源码回执保留，修正仅查实际hot/index空坐标。独立RAT仍443既有路径无新增，证据由canonical节拥有。完整目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持；Main可信输入/full-bytes/B11/恢复/GC/兼容/正式性能及其余16步继续OPEN。

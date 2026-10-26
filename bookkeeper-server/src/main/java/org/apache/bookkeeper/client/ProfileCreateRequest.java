@@ -32,6 +32,7 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary;
+import org.apache.bookkeeper.discover.profile.ProfileReplacementPage;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
 
@@ -60,10 +61,21 @@ public final class ProfileCreateRequest {
     private final byte[] readyOperationId;
     private final byte[] readyPayloadIdentity;
     private final WriterLimits limits;
+    private final int maxEnsembleChanges;
 
     public ProfileCreateRequest(LedgerMetadata desired, ProfileReservation reservation, byte[] descriptor,
             ProtectedProfileCredential credential, byte[] readyOperationId, byte[] readyPayloadIdentity,
             WriterLimits limits) {
+        this(desired, reservation, descriptor, credential, readyOperationId, readyPayloadIdentity, limits, 0);
+    }
+
+    public ProfileCreateRequest(LedgerMetadata desired, ProfileReservation reservation, byte[] descriptor,
+            ProtectedProfileCredential credential, byte[] readyOperationId, byte[] readyPayloadIdentity,
+            WriterLimits limits, int maxEnsembleChanges) {
+        if (maxEnsembleChanges < 0 || maxEnsembleChanges > ProfileReplacementPage.MAX_PUBLICATIONS) {
+            throw new IllegalArgumentException("Invalid bounded Profile ensemble changes");
+        }
+        this.maxEnsembleChanges = maxEnsembleChanges;
         this.desired = copyMetadata(Objects.requireNonNull(desired, "desired"));
         this.reservation = Objects.requireNonNull(reservation, "reservation");
         Objects.requireNonNull(descriptor, "descriptor");
@@ -131,6 +143,10 @@ public final class ProfileCreateRequest {
         return limits;
     }
 
+    public int maxEnsembleChanges() {
+        return maxEnsembleChanges;
+    }
+
     ProfileDescriptor validateDescriptor(ProfileDescriptorValidator validator) {
         var decoded = ProfileDescriptorCodec.decodeAndVerify(descriptor,
                 reservation.installs().get(0).descriptorIdentity(), validator);
@@ -166,7 +182,8 @@ public final class ProfileCreateRequest {
         return other instanceof ProfileCreateRequest that && sameMetadata(desired, that.desired)
                 && reservation.equals(that.reservation) && Arrays.equals(descriptor, that.descriptor)
                 && credential.matches(that.credential) && Arrays.equals(readyOperationId, that.readyOperationId)
-                && Arrays.equals(readyPayloadIdentity, that.readyPayloadIdentity) && limits.equals(that.limits);
+                && Arrays.equals(readyPayloadIdentity, that.readyPayloadIdentity) && limits.equals(that.limits)
+                && maxEnsembleChanges == that.maxEnsembleChanges;
     }
 
     private static boolean sameMetadata(LedgerMetadata left, LedgerMetadata right) {
@@ -196,6 +213,6 @@ public final class ProfileCreateRequest {
                 desired.getAckQuorumSize(), desired.hasPassword(), desired.getDigestType(),
                 Arrays.hashCode(desired.getPassword()), desired.getAllEnsembles(), custom, reservation,
                 Arrays.hashCode(descriptor), Arrays.hashCode(readyOperationId), Arrays.hashCode(readyPayloadIdentity),
-                limits);
+                limits, maxEnsembleChanges);
     }
 }

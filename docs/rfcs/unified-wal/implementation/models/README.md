@@ -1760,3 +1760,16 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 ```
 
 最终阶段1169个模型输入与1183个冻结Java输入的277个重合路径SHA相同，合并2075个unique输入；早期5配置及增加observer后的6配置回执保留其原source绑定，未将旧PASS移绑。本投影假定Java提供CONTROL首请求授权、实际TLS/slot/output、per-response derived ByteBuf引用与cold callback事实；不实现原生网络/decoder/授权算法、密码学、fsync、任意caller scratch、完整内核/对象字节账本或liveness，不证明完整A+C+D。六项定向与五类275项均通过、用例身份匹配；一行最终换行的6个owner class指令一致且六项补验通过，275项原source绑定与等价证明保留。最终scope与检查由上述canonical节收口。模型源码、命令/manifest、raw output/coverage/trace和实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-shared-evidence-c5ec7316/models`；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+## SDK replacement episode 与 owner 实际终态
+
+2026-10-26，父源码 `d232f2df644346704d6114b75d9132ee1025c475`。[显式 SDK 写期换组](../profile-wire/README.md#显式-sdk-写期换组与实际排空)在 ProfileSdkReplacement 末尾追加独立 OwnerSpec；原 Spec 正文及10个旧cfg字节保持，旧结果不移绑。一个 accepted episode 在 ordered queue 前取得 token，贯穿 begin、INSTALL、metadata、ACTIVATE、final read、回投 callback 和至多两次连续 change。local actual、accepted explicit-close actual、replacementStopped 分开聚合 ownerActual；已接受阶段可在 stop 后完成，callback 不得在 gate 关闭后采纳或重发。CONTROL 子视图的输出/父连接排空继续由前一 SharedSDK 投影承担，不增加重复的 socket 反例。
+
+本轮只运行新增4配置。`a-profile-sdk-replacement-owner`完整 PASS（632 generated/272 distinct、queue0）。三个 guard mutation 均实际 TLC exit12、指定 trace：queued 在65 distinct时违反 OwnerActualWaitsForQueuedEpisode；actual 在82状态时违反 OwnerActualWaitsForReplacementEpisode；stopped 在121状态时违反 OwnerStoppedCallbackDoesNotAdopt。反例不是正向 PASS 或完整状态搜索；目录789配置不表示本轮执行789项。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-sdk-replacement-owner --config-prefix ce-profile-sdk-replacement-owner
+```
+
+最终1173模型输入与1183冻结Java输入的277重合路径SHA一致，合并2079 unique 输入。初次 Java oracle 修正前的模型回执保留原绑定；最终4配置重新执行并核对当前输入。Java 三项真实网络及扩大五类278项提供实际 cold/force/CONTROL output/SDK dependency 事实；本投影不实现原生ZK/TLS/fsync/字节分配，不证明 liveness、完整A+C+D、完整B11/full-bytes、恢复或CLOSED权限。命令/manifest/raw output/coverage/trace与实际终态位于 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-replacement-evidence-d232f2df/models`。目标 active、生产 Gate OPEN，OFF/SYSTEM/PARK 与 disabled 保持。
