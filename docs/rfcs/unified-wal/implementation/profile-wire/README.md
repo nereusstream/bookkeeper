@@ -2539,3 +2539,25 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 源码各阶段、初次失败及 oracle 修正、命令/XML、模型 manifest/raw output/指定 trace 和实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-replacement-evidence-d232f2df`。首轮独立RAT实际exit1/447，新增四个cfg因短许可证头未批准；补齐四个完整ASF头后，模型按最终源码重新核验，规格与不变量正文未变。最终独立RAT仍实际exit1，但回到443条父HEAD既有路径、集合无新增；441路径字节不变，原已未批准的ProfileSdkReplacement与model runner头部保持，仍不称CI全绿。 六个原临时运行根仅在实际终态、无句柄、逐文件同inode/SHA核对后移除，hardlink归档全部保留，常规文件数据实际回收0 B。
 
 本轮接通显式 fresh-create writer 的可选换组与 owner 排空；默认 builder 继续 Classic，缺可信环境时的拒绝保持。Main 可信 commissioning/OS隔离/credential/exact-policy 输入、full-bytes/B11、恢复接受下界、历史 GC/mixed 兼容、正式性能及其余16步仍 OPEN；完整目标 active、生产 Gate OPEN，默认 OFF/SYSTEM/PARK 与 disabled 保持。Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
+
+
+## 已发布 repair intent 的跨进程续接
+
+2026-10-26，父源码 `4ba371d277d254c61a379cc5354ed7944bd92cd1`。原 prepareRepair 在查询既有持久 intent 前先检查 predecessor ensemble digest；membership 已由这个 intent 发布时，当前 ensemble 已变化，保存相同 canonical intent 的新协调器会得到 CONFLICT。先前 new coordinator 测试仍持有原 accepted/prepared Java 对象，绕过了这次重载。真实新 JVM 的定向 RED 已在第二进程复现 `expected ALREADY_APPLIED but was CONFLICT`，当时生产源码与父 HEAD 逐字节一致。
+
+本轮只重排原冷路径查询：继续先 readRepairable 并要求当前完整 recovery context 一致，随后 readRepair 校验原 immutable envelope、ledger/slot、birth marker/native czxid 与 mzxid；只有 canonical intent 全字节相同才返回原 ALREADY_APPLIED/RepairSnapshot。不存在原 intent 时仍执行原 ensemble predicate、lifecycle/root、membership checks 与 CREATE multi；同 slot 不同 grant 等字节仍 CONFLICT。返回值只是 inert preparation，后续 admitRepair、publication 和 resolveRepairClose 保留当前 metadata/root/DELETE/member/commit/head 的独立校验；没有新 writer/grant、公共 API、持久格式、线程或正常 Add 热路径变化。
+
+新增独立场景复用原公开 offlineBackup/capture/restore、真实文件/ZK/mTLS与现有 fixture。父进程保存 intent.encode、原 closeId、descriptor、源身份/配置、image/reference 及 peer 端点；两个子 JVM 各自建立新 ZK、metadata manager、SDK 和真实 peer 连接，再 fresh readClosedForOpen/prepareRepair，不传递 accepted/prepared Java 对象。第一进程完成两项 copy 和 membership publication，目标实际 durable APPLIED close 回复被丢弃恰好一次；它取得 DEFERRED 并等待实际 attempt completion 后打印绑定 nonce/PID/phase/intent/reference SHA 的 marker，直接 halt(23)。父进程检查目标 listener 仍运行且无 normal 权限，再放行回复；第二进程从相同保存输入重新取得原 birth/version，完成同 closeId/target/incarnation 的 ALREADY_APPLIED 关闭，copiedEntries=0、DATA force不增加。原 CLOSED P/length/CLOSE_KEY 不变，真实点读 payload 一致；同 slot 改 grant ID 的请求被拒且原 preparation 不变。
+
+该 halt 位于实际 attempt completion 之后，目标 Bookie 全程保持运行；它验证协调器内存对象丢失和不确定结果后的持久续接，不提供仍在途 I/O 的进程中断、目标 unclosed DATA session 重开或掉电证据。调用方仍须保存原 intent/closeId 和可信外部配置；DATA closeId 在发布前不包含于 intent，发布后已随原 committed record 持久化。本轮不创建自动发现或新的运维恢复框架。
+
+定向1项及扩大五类 **279项全部通过、0 failure/error/skip**（完整Socket229、Scope2、Metadata19、Reservation17、Classic LedgerRecovery12），完整用例身份等于父轮278项加本轮一项。两个绿色阶段均保留两个真实子进程的完整日志与绑定 marker；1179 runner输入与1183个含addon冻结Java输入逐项匹配。RED与最终测试代码仅有日志采集差异，故障/断言/timeout/输入流程未削弱，精确差异单独保留。Spotless/Checkstyle实际exit0。TLA/wire/native格式及恢复写入、publication/close转移未改，不重跑或移绑旧模型PASS；native birth/TLS/force/halt事实由本次Java路径提供，完整A+C+D仍未闭合。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#backupRestoreResumesCanonicalIntentAfterCoordinatorJvmHalt'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,ProfileNormalDataClientScopeTest,ProfileLedgerMetadataStoreTest,ZKProfileReservationStoreTest,LedgerRecoveryTest'
+```
+
+源码、原RED/最终命令/XML/child日志、nonce/PID/intent/reference绑定与实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-intent-reload-evidence-4ba371d2`。全部Java/style终态后独立RAT实际exit1，443条均为父HEAD既有路径、集合无新增，全部443路径字节未变，不称CI全绿。三个原临时运行根在实际终态、无句柄、逐文件同inode/SHA核对后移除，hardlink归档保留，常规文件数据实际回收0 B。
+
+恢复接受下界、历史GC、同incarnation未关闭DATA session接受、可信Main输入、full-bytes/B11、mixed兼容、正式性能与其余16步继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

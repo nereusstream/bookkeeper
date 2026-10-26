@@ -1860,14 +1860,15 @@ public final class ZKProfileReservationStore {
             if (current.context() == null || !desired.recovery().equals(current.context())) {
                 return new RepairResult(CreateStatus.CONFLICT, null);
             }
-            if (!repairMatchesMetadata(desired, current.metadata().metadata().getValue())) {
-                return new RepairResult(CreateStatus.CONFLICT, null);
-            }
             var previous = readRepair(desired.recovery().ledger().ledgerId(), desired.slot(), deadline);
             if (previous != null) {
                 return new RepairResult(previous.intent().equals(desired)
                         ? CreateStatus.ALREADY_APPLIED : CreateStatus.CONFLICT,
                         previous.intent().equals(desired) ? previous : null);
+            }
+            // Exact persisted preparation survives its own ensemble publication; it grants no admission.
+            if (!repairMatchesMetadata(desired, current.metadata().metadata().getValue())) {
+                return new RepairResult(CreateStatus.CONFLICT, null);
             }
             var lifecycle = read(desired.recovery().ledger().ledgerId(), deadline);
             if (lifecycle.status() != ReadStatus.FOUND || !desired.recovery().matchesRoot(lifecycle.snapshot())) {

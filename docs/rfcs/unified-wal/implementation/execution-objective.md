@@ -298,3 +298,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [显式 SDK 写期换组与实际排空](profile-wire/README.md#显式-sdk-写期换组与实际排空)：2026-10-26父d232f2df64上，显式enableProfile可提供原replacement coordinator，请求冻结0..32的maxEnsembleChanges、默认0；同cohort standby在fresh claim前验证，初始DATA仍只含E，close保留未来目标CONTROL。已接受换组从ordered排队到实际cold/完成callback及连续变更均持有episode，SDK stop等待实际终结及子视图输出，停止后不采纳/重发且不制造CLOSED。三项定向及五类278项全部通过、输入/用例匹配、style通过；新增有限模型1正向/3指定反例符合预期、旧Spec/10cfg保持。首轮两项权限/存在oracle错误及原源码回执保留，修正仅查实际hot/index空坐标。独立RAT仍443既有路径无新增，证据由canonical节拥有。完整目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持；Main可信输入/full-bytes/B11/恢复/GC/兼容/正式性能及其余16步继续OPEN。
+
+
+[已发布 repair intent 的跨进程续接](profile-wire/README.md#已发布-repair-intent-的跨进程续接)：2026-10-26父4ba371d277上，prepareRepair在当前完整recovery context校验后优先取回全字节相同的持久intent，只有新intent才要求predecessor ensemble匹配；后续admit/publication/close权限校验保持。原生产在第二新JVM重载时CONFLICT的真实RED已复现；修复后两个协调器JVM从保存输入独立重读，首进程在durable close丢回复后actual completion并halt23，第二进程同birth/version/closeId续接、copy0且无新增DATA force，目标持续运行。定向1项及五类279项全部通过、源码/用例/child绑定匹配，style通过；独立RAT仍443父路径且字节全同、无新增。TLA未改，不移绑旧PASS；源码回执由canonical节拥有。原unclosed-session隔离、恢复接受下界/GC/Main/full-bytes/B11/兼容/正式性能及其余16步仍OPEN，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
