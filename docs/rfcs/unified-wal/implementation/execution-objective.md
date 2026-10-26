@@ -292,3 +292,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [显式 SDK fresh create 与 writer 归属](profile-wire/README.md#显式-sdk-fresh-create-与-writer-归属)：2026-10-25父9ef30669e4上，接公开create与已选readonly入口共用单owner，原生fresh reservation/held birth复核约束writer发行；未交付原请求可在同SDK续接，handoff后不重发，SDK全局stop只本地排空并保留OPEN。定向11项及扩大四类68项全部通过、输入/用例身份匹配，style通过，新增有限模型1正向/4指定反例符合预期、旧Spec/8cfg保留；独立RAT仍443既有路径无新增。完整验收仍按canonical节实际结果判断。后续默认routing/Main可信authority输入、full-bytes/B11、其余恢复/历史GC/兼容/正式性能/综合验收继续OPEN；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[共享 cohort 的多 ledger SDK 与子视图排空](profile-wire/README.md#共享-cohort-的多-ledger-sdk-与子视图排空)：2026-10-26父c5ec73163f上，显式SDK增加有界maxOpenLedgers、共享单Epoch/原6连接与独立CONTROL/DATA子视图；READ/LAC derived views按回复分离，最后子操作才关闭父lease/pool。首CONTROL复用已有pending等待实际授权，取消ready观察前不归还名额；原NONE背压与fresh归属保持。六项定向与五类275项全部通过、用例/输入匹配；最后一行纯换行有6个owner class指令一致证明且六项补验通过，style通过。新增有限模型1正向/5指定反例符合预期、原Spec/15cfg保持；独立RAT仍443既有路径无新增。各阶段源码/回执由canonical节拥有。首版默认builder继续Classic；完整目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。

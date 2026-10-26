@@ -1596,6 +1596,7 @@ public final class ProfileRecoveryCoordinator {
 
     /** Cold open custody; a delivered handle and its borrowed peers remain the caller's responsibility. */
     public final class ReadOnlyOperation {
+        private final Semaphore permits;
         private boolean claimed;
         private boolean stopped;
         private final CompletableFuture<org.apache.bookkeeper.client.LedgerHandle> completion =
@@ -1614,6 +1615,14 @@ public final class ProfileRecoveryCoordinator {
         private final CompletableFuture<Void> drained = new CompletableFuture<>();
         private org.apache.bookkeeper.client.LedgerHandle undelivered;
 
+        public ReadOnlyOperation() {
+            this(active);
+        }
+
+        private ReadOnlyOperation(Semaphore permits) {
+            this.permits = permits;
+        }
+
         public CompletableFuture<org.apache.bookkeeper.client.LedgerHandle> completion() {
             return completion;
         }
@@ -1629,7 +1638,7 @@ public final class ProfileRecoveryCoordinator {
 
         private void finish(boolean release) {
             if (release) {
-                active.release();
+                permits.release();
             }
             drained.complete(null);
         }
@@ -1675,6 +1684,27 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
+    /** One SDK's bounded cold-read admission, independent of the coordinator's recovery gate. */
+    public final class ReadOnlyAdmission {
+        private final Semaphore permits;
+
+        private ReadOnlyAdmission(int maxOperations) {
+            if (maxOperations < 1) {
+                throw new IllegalArgumentException("Readonly admission requires a positive operation bound");
+            }
+            permits = new Semaphore(maxOperations);
+        }
+
+        public ReadOnlyOperation begin(long ledger, ClientContext sdk, byte[] password,
+                Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries) {
+            return beginOpenReadOnly(ledger, sdk, password, supplied, maxReadEntries, true, permits);
+        }
+    }
+
+    public ReadOnlyAdmission readOnlyAdmission(int maxOperations) {
+        return new ReadOnlyAdmission(maxOperations);
+    }
+
     /** Compatibility entry point. Owners needing actual custody use beginOpenReadOnly. */
     public CompletableFuture<org.apache.bookkeeper.client.LedgerHandle> openReadOnly(long ledger, ClientContext sdk,
             byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries) {
@@ -1697,16 +1727,22 @@ public final class ProfileRecoveryCoordinator {
     private ReadOnlyOperation beginOpenReadOnly(long ledger, ClientContext sdk,
             byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries,
             boolean ownedCohort) {
+        return beginOpenReadOnly(ledger, sdk, password, supplied, maxReadEntries, ownedCohort, active);
+    }
+
+    private ReadOnlyOperation beginOpenReadOnly(long ledger, ClientContext sdk,
+            byte[] password, Map<BookieId, ProfileNormalDataClient> supplied, int maxReadEntries,
+            boolean ownedCohort, Semaphore permits) {
         if (supplied.size() > 64 || maxReadEntries < 1 || maxReadEntries > 256) {
             throw new IllegalArgumentException("Readonly pool or request bound is invalid");
         }
-        var operation = new ReadOnlyOperation();
+        var operation = new ReadOnlyOperation(permits);
         if (sdk.isClientClosed()) {
             operation.completion.completeExceptionally(BKException.create(BKException.Code.ClientClosedException));
             operation.finish(false);
             return operation;
         }
-        if (!active.tryAcquire()) {
+        if (!permits.tryAcquire()) {
             operation.completion.completeExceptionally(BKException.create(BKException.Code.TooManyRequestsException));
             operation.finish(false);
             return operation;

@@ -1533,6 +1533,12 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
      */
     public void enableProfileReadOnly(ProfileRecoveryCoordinator coordinator, ProfileRecoveryPeerPool ownedPool,
             int maxReadEntries) throws BKException {
+        enableProfileReadOnly(coordinator, ownedPool, maxReadEntries, 1);
+    }
+
+    /** Enable a positive bounded number of distinct Profile ledgers sharing the owned peer cohort. */
+    public void enableProfileReadOnly(ProfileRecoveryCoordinator coordinator, ProfileRecoveryPeerPool ownedPool,
+            int maxReadEntries, int maxOpenLedgers) throws BKException {
         closeLock.writeLock().lock();
         try {
             if (closed) {
@@ -1541,7 +1547,8 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
             if (profileLedgerClient != null) {
                 throw BKException.create(BKException.Code.IllegalOpException);
             }
-            profileLedgerClient = new ProfileLedgerClient(clientCtx, coordinator, ownedPool, maxReadEntries);
+            profileLedgerClient = new ProfileLedgerClient(clientCtx, coordinator, ownedPool,
+                    maxReadEntries, maxOpenLedgers);
         } finally {
             closeLock.writeLock().unlock();
         }
@@ -1552,6 +1559,13 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
     public void enableProfile(ProfileInitialLifecycleCoordinator initializer, ProfileRecoveryCoordinator recovery,
             ProfileDescriptorValidator validator, ProfileRecoveryPeerPool ownedPool, int maxReadEntries)
             throws BKException {
+        enableProfile(initializer, recovery, validator, ownedPool, maxReadEntries, 1);
+    }
+
+    /** Enable a positive bounded number of distinct creates/opens sharing the owned peer cohort. */
+    public void enableProfile(ProfileInitialLifecycleCoordinator initializer, ProfileRecoveryCoordinator recovery,
+            ProfileDescriptorValidator validator, ProfileRecoveryPeerPool ownedPool, int maxReadEntries,
+            int maxOpenLedgers) throws BKException {
         Objects.requireNonNull(initializer, "initializer");
         Objects.requireNonNull(validator, "validator");
         closeLock.writeLock().lock();
@@ -1563,7 +1577,7 @@ public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
                 throw BKException.create(BKException.Code.IllegalOpException);
             }
             profileLedgerClient = new ProfileLedgerClient(clientCtx, initializer, recovery, validator,
-                    ownedPool, maxReadEntries);
+                    ownedPool, maxReadEntries, maxOpenLedgers);
         } finally {
             closeLock.writeLock().unlock();
         }

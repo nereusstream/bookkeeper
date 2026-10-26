@@ -163,4 +163,203 @@ SDKClosedNeedsActualDependencies == s.sdkClosed => s.sdkDependencies = "terminal
 SDKSelfCloseRejectsBeforeStop == s.sdkCloseSource = "self-rejected"
                                => ~s.sdkClosing /\ s.sdkPool = "open"
                                    /\ s.sdkDependencies = "held" /\ ~s.sdkClosed
+
+(* Independent, finite shared-SDK safety slice: two operation slots, two distinct ledger IDs,
+   one Epoch acquisition/lease, and one representative CONTROL and READ per child.
+   Private algorithm/handle drain, actual CONTROL wire/output terminal, READ wire terminal,
+   response roots/retained views, acquisition observation, cold work and transport terminal are inputs.
+   Each child's response root may retain the same native backing as its sibling's root;
+   readRefs counts only this child's response/retained-view custody, never a global refCnt.
+   A failed acquisition reply may precede actual cold drain after every child has stopped;
+   that Epoch blocks admission and its last slot still pins actual cold/transport termination.
+   Logical result/cancellation does not discharge any of those actual owners. A non-last
+   child can finish while its sibling retains a response; the last slot waits for the Epoch.
+   Fresh-origin consume-once remains in the existing model. This slice makes no liveness,
+   fsync, TLS, remote-abort, allocator or native-memory-budget claim. *)
+SharedSDKChildren == {1, 2}
+SharedSDKLedgers == {1, 2}
+SharedSDKEmptyChild == [phase |-> "idle", ledger |-> 0, logicalDone |-> FALSE,
+                        readyObserved |-> FALSE, privateWork |-> FALSE,
+                        control |-> "idle", read |-> "idle", readRefs |-> 0]
+SharedSDKActive == {i \in SharedSDKChildren : s.children[i].phase \in {"live", "stopping"}}
+SharedSDKActiveCount == (IF 1 \in SharedSDKActive THEN 1 ELSE 0)
+                       + (IF 2 \in SharedSDKActive THEN 1 ELSE 0)
+SharedSDKOtherActive(i) == SharedSDKActive \ {i}
+SharedSDKOwnActualTerminal(i, earlyControl, earlyRead, earlyObservation) ==
+    /\ s.children[i].logicalDone /\ ~s.children[i].privateWork
+    /\ (s.children[i].readyObserved \/ earlyObservation)
+    /\ (s.children[i].control # "pending" \/ earlyControl)
+    /\ s.children[i].read # "wire"
+    /\ (s.children[i].readRefs = 0 \/ earlyRead)
+SharedSDKAllActualTerminal ==
+    \A i \in SharedSDKChildren : SharedSDKOwnActualTerminal(i, FALSE, FALSE, FALSE)
+                                  \/ s.children[i].phase = "idle"
+SharedSDKInit == s = [children |-> [i \in SharedSDKChildren |-> SharedSDKEmptyChild],
+                      parent |-> "none", acquisition |-> "none", transportOpen |-> FALSE,
+                      coldActualPending |-> FALSE, retiring |-> FALSE,
+                      sdkClosing |-> FALSE, pool |-> "open", dependencies |-> "held"]
+SharedSDKAdmit(i, ledger) ==
+    /\ ~s.sdkClosing /\ ~s.retiring /\ s.parent \in {"none", "held"}
+    /\ s.children[i].phase = "idle" /\ SharedSDKActiveCount < 2
+    /\ \A j \in SharedSDKActive : s.children[j].ledger # ledger
+    /\ s' = [s EXCEPT !.children[i] = [@ EXCEPT !.phase = "live", !.ledger = ledger,
+                                               !.privateWork = TRUE],
+                       !.parent = "held", !.acquisition = IF @ = "none" THEN "cold" ELSE @,
+                       !.coldActualPending = IF s.acquisition = "none" THEN TRUE ELSE @,
+                       !.transportOpen = TRUE]
+SharedSDKAcquired == /\ s.parent = "held" /\ s.acquisition = "cold" /\ ~s.retiring
+                     /\ s' = [s EXCEPT !.acquisition = "ready", !.coldActualPending = FALSE]
+SharedSDKObserveReady(i) ==
+    /\ s.children[i].phase # "idle" /\ ~s.children[i].readyObserved
+    /\ s.acquisition \in {"ready", "terminal"}
+    /\ s' = [s EXCEPT !.children[i].readyObserved = TRUE]
+SharedSDKStopColdAcquisition ==
+    /\ s.parent = "held" /\ s.acquisition = "cold" /\ ~s.retiring
+    /\ SharedSDKActive # {}
+    /\ \A i \in SharedSDKActive : s.children[i].phase = "stopping"
+    /\ s' = [s EXCEPT !.retiring = TRUE, !.acquisition = "terminal"]
+SharedSDKLogicalResult(i) ==
+    /\ s.children[i].phase = "live" /\ ~s.children[i].logicalDone
+    /\ s' = [s EXCEPT !.children[i].logicalDone = TRUE]
+SharedSDKBeginControl(i) ==
+    /\ s.children[i].phase = "live" /\ s.acquisition = "ready"
+    /\ s.children[i].control = "idle"
+    /\ s' = [s EXCEPT !.children[i].control = "pending"]
+SharedSDKControlTerminal(i) ==
+    /\ s.children[i].control = "pending"
+    /\ s' = [s EXCEPT !.children[i].control = "terminal"]
+SharedSDKBeginRead(i) ==
+    /\ s.children[i].phase = "live" /\ s.acquisition = "ready"
+    /\ s.children[i].read = "idle"
+    /\ s' = [s EXCEPT !.children[i].read = "wire"]
+SharedSDKReadResponse(i) ==
+    /\ s.children[i].read = "wire"
+    /\ s' = [s EXCEPT !.children[i].read = "response", !.children[i].readRefs = 1]
+SharedSDKRetainReadView(i) ==
+    /\ s.children[i].read = "response" /\ s.children[i].readRefs = 1
+    /\ s' = [s EXCEPT !.children[i].readRefs = 2]
+SharedSDKReleaseReadView(i) ==
+    /\ s.children[i].readRefs > 0
+    /\ s' = [s EXCEPT !.children[i].readRefs = @ - 1]
+SharedSDKStopChild(i) ==
+    /\ s.children[i].phase = "live"
+    /\ s' = [s EXCEPT !.children[i].phase = "stopping", !.children[i].logicalDone = TRUE]
+SharedSDKPrivateTerminal(i, earlyObservation) ==
+    /\ s.children[i].phase = "stopping" /\ s.children[i].privateWork
+    /\ (s.children[i].readyObserved \/ earlyObservation)
+    /\ s' = [s EXCEPT !.children[i].privateWork = FALSE]
+SharedSDKNonLastChildTerminal(i, earlyControl, earlyRead, earlyObservation) ==
+    /\ s.parent = "held" /\ s.children[i].phase = "stopping"
+    /\ SharedSDKOwnActualTerminal(i, earlyControl, earlyRead, earlyObservation)
+    /\ SharedSDKOtherActive(i) # {}
+    /\ s' = [s EXCEPT !.children[i].phase = "terminal"]
+SharedSDKRetireEpoch(earlyControl, earlyRead, earlyLease, earlyObservation) ==
+    /\ s.parent = "held"
+    /\ \E i \in SharedSDKActive :
+           /\ s.children[i].phase = "stopping"
+           /\ SharedSDKOwnActualTerminal(i, earlyControl, earlyRead, earlyObservation)
+           /\ (SharedSDKOtherActive(i) = {} \/ earlyLease)
+    /\ s' = [s EXCEPT !.parent = "draining", !.retiring = TRUE]
+SharedSDKColdTerminal ==
+    /\ s.retiring /\ s.acquisition = "terminal" /\ s.coldActualPending
+    /\ s' = [s EXCEPT !.coldActualPending = FALSE, !.transportOpen = FALSE]
+SharedSDKTransportTerminal ==
+    /\ s.parent = "draining" /\ s.acquisition = "ready" /\ s.transportOpen
+    /\ s' = [s EXCEPT !.acquisition = "terminal", !.transportOpen = FALSE]
+SharedSDKParentTerminal ==
+    /\ s.parent = "draining" /\ s.acquisition = "terminal"
+    /\ ~s.coldActualPending /\ ~s.transportOpen
+    /\ s' = [s EXCEPT !.parent = "terminal"]
+SharedSDKLastChildTerminal(i) ==
+    /\ s.parent = "terminal" /\ s.children[i].phase = "stopping"
+    /\ SharedSDKOwnActualTerminal(i, FALSE, FALSE, FALSE) /\ SharedSDKOtherActive(i) = {}
+    /\ s' = [s EXCEPT !.children[i].phase = "terminal"]
+SharedSDKRequestClose ==
+    /\ ~s.sdkClosing
+    /\ s' = [s EXCEPT !.sdkClosing = TRUE,
+                       !.children = [i \in SharedSDKChildren |->
+                           IF s.children[i].phase = "live"
+                           THEN [s.children[i] EXCEPT !.phase = "stopping", !.logicalDone = TRUE]
+                           ELSE s.children[i]]]
+SharedSDKClosePool ==
+    /\ s.sdkClosing /\ SharedSDKActive = {} /\ s.parent \in {"none", "terminal"}
+    /\ s.pool = "open"
+    /\ s' = [s EXCEPT !.pool = "draining"]
+SharedSDKPoolTerminal == /\ s.pool = "draining" /\ s' = [s EXCEPT !.pool = "terminal"]
+SharedSDKReleaseDependencies(earlyDependencies) ==
+    /\ s.sdkClosing /\ s.dependencies = "held"
+    /\ (s.pool = "terminal" \/ (earlyDependencies /\ SharedSDKActive # {}))
+    /\ s' = [s EXCEPT !.dependencies = "released"]
+SharedSDKNext(earlyControl, earlyRead, earlyLease, earlyDependencies, earlyObservation) ==
+    (\E i \in SharedSDKChildren, ledger \in SharedSDKLedgers : SharedSDKAdmit(i, ledger))
+    \/ SharedSDKAcquired \/ SharedSDKStopColdAcquisition
+    \/ (\E i \in SharedSDKChildren :
+           SharedSDKObserveReady(i) \/ SharedSDKLogicalResult(i)
+           \/ SharedSDKBeginControl(i) \/ SharedSDKControlTerminal(i)
+           \/ SharedSDKBeginRead(i) \/ SharedSDKReadResponse(i) \/ SharedSDKRetainReadView(i)
+           \/ SharedSDKReleaseReadView(i) \/ SharedSDKStopChild(i)
+           \/ SharedSDKPrivateTerminal(i, earlyObservation)
+           \/ SharedSDKNonLastChildTerminal(i, earlyControl, earlyRead, earlyObservation)
+           \/ SharedSDKLastChildTerminal(i))
+    \/ SharedSDKRetireEpoch(earlyControl, earlyRead, earlyLease, earlyObservation)
+    \/ SharedSDKColdTerminal \/ SharedSDKTransportTerminal \/ SharedSDKParentTerminal
+    \/ SharedSDKRequestClose \/ SharedSDKClosePool \/ SharedSDKPoolTerminal
+    \/ SharedSDKReleaseDependencies(earlyDependencies)
+SharedSDKSpec == SharedSDKInit /\ [][SharedSDKNext(FALSE, FALSE, FALSE, FALSE, FALSE)]_vars
+SharedSDKEarlyControlSpec == SharedSDKInit /\ [][SharedSDKNext(TRUE, FALSE, FALSE, FALSE, FALSE)]_vars
+SharedSDKEarlyReadViewSpec == SharedSDKInit /\ [][SharedSDKNext(FALSE, TRUE, FALSE, FALSE, FALSE)]_vars
+SharedSDKEarlyLeaseSpec == SharedSDKInit /\ [][SharedSDKNext(FALSE, FALSE, TRUE, FALSE, FALSE)]_vars
+SharedSDKEarlyDependenciesSpec == SharedSDKInit /\ [][SharedSDKNext(FALSE, FALSE, FALSE, TRUE, FALSE)]_vars
+SharedSDKEarlyObservationSpec == SharedSDKInit /\ [][SharedSDKNext(FALSE, FALSE, FALSE, FALSE, TRUE)]_vars
+SharedSDKTypeOK ==
+    /\ s.children \in [SharedSDKChildren ->
+           [phase : {"idle", "live", "stopping", "terminal"}, ledger : {0, 1, 2}, logicalDone : BOOLEAN,
+            readyObserved : BOOLEAN, privateWork : BOOLEAN, control : {"idle", "pending", "terminal"},
+            read : {"idle", "wire", "response"}, readRefs : 0..2]]
+    /\ s.parent \in {"none", "held", "draining", "terminal"}
+    /\ s.acquisition \in {"none", "cold", "ready", "terminal"}
+    /\ s.transportOpen \in BOOLEAN /\ s.sdkClosing \in BOOLEAN
+    /\ s.coldActualPending \in BOOLEAN /\ s.retiring \in BOOLEAN
+    /\ s.pool \in {"open", "draining", "terminal"} /\ s.dependencies \in {"held", "released"}
+SharedSDKBoundedDistinctLedgers ==
+    /\ SharedSDKActiveCount <= 2
+    /\ \A i \in SharedSDKActive : s.children[i].ledger \in SharedSDKLedgers
+    /\ \A i, j \in SharedSDKActive : i # j => s.children[i].ledger # s.children[j].ledger
+SharedSDKSurvivorPinsAcquisition ==
+    (\E i \in SharedSDKChildren : s.children[i].phase = "live")
+    => s.parent = "held" /\ ~s.retiring /\ s.acquisition \in {"cold", "ready"} /\ s.transportOpen
+SharedSDKQueuedObservationPinsAdmission ==
+    \A i \in SharedSDKChildren : s.children[i].phase = "terminal" => s.children[i].readyObserved
+SharedSDKRetiringBlocksAdmission == s.retiring => ~ENABLED (\E i \in SharedSDKChildren,
+    ledger \in SharedSDKLedgers : SharedSDKAdmit(i, ledger))
+SharedSDKColdActualPinsLastSlot == s.coldActualPending
+    => SharedSDKActive # {} /\ s.parent \in {"held", "draining"}
+SharedSDKPrivateActualPinsChild ==
+    \A i \in SharedSDKChildren : s.children[i].privateWork
+       => i \in SharedSDKActive /\ s.parent = "held"
+SharedSDKControlActualPinsChild ==
+    \A i \in SharedSDKChildren : s.children[i].control = "pending"
+       => i \in SharedSDKActive /\ s.parent = "held"
+SharedSDKReadWirePinsChild ==
+    \A i \in SharedSDKChildren : s.children[i].read = "wire"
+       => i \in SharedSDKActive /\ s.parent = "held"
+SharedSDKReadViewsPinChild ==
+    \A i \in SharedSDKChildren : s.children[i].readRefs > 0
+       => i \in SharedSDKActive /\ s.parent = "held"
+SharedSDKChildCloseIndependent ==
+    \A i \in SharedSDKChildren :
+       (s.children[i].phase = "stopping" /\ SharedSDKOwnActualTerminal(i, FALSE, FALSE, FALSE)
+        /\ SharedSDKOtherActive(i) # {})
+       => ENABLED SharedSDKNonLastChildTerminal(i, FALSE, FALSE, FALSE)
+SharedSDKParentWaitsForActualChildren ==
+    s.parent \in {"draining", "terminal"} => SharedSDKAllActualTerminal
+SharedSDKParentWaitsForColdAndTransport ==
+    s.parent = "terminal" => s.acquisition = "terminal" /\ ~s.coldActualPending /\ ~s.transportOpen
+SharedSDKPoolWaitsForParent ==
+    s.pool # "open" => SharedSDKActive = {} /\ s.parent \in {"none", "terminal"}
+SharedSDKDependenciesWaitForActualChildren ==
+    s.dependencies = "released"
+    => SharedSDKActive = {} /\ s.parent \in {"none", "terminal"}
+        /\ s.acquisition \in {"none", "terminal"} /\ ~s.coldActualPending
+        /\ ~s.transportOpen /\ s.pool = "terminal"
 =============================================================================

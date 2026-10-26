@@ -861,3 +861,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [显式 SDK fresh create 与 writer 归属](profile-wire/README.md#显式-sdk-fresh-create-与-writer-归属)：2026-10-25父9ef30669e4上，公开enableProfile/createProfileLedger复用单owner、原all-E initializer和writer close；只有本次原生CREATE2 birth回执可取得fresh claim，matching READY/metadata不重发writer。同SDK只续接未交付的原完整请求，handoff消费origin；cancel/global stop等待实际init/config/DATA/lease，SDK stop保留OPEN。额外standby不安装/激活/DATA，CLOSED只读仅过滤非retained成员。定向11项及扩大四类68项全部通过、输入/用例身份匹配，style通过；新增有限模型1正向/4指定反例符合预期，旧Spec/8cfg保留，独立RAT仍443既有路径无新增。实际源码/回执由canonical节拥有，历史证据不移绑。默认builder/可信Main输入/full-bytes及其余16步边界保持，完整目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[共享 cohort 的多 ledger SDK 与子视图排空](profile-wire/README.md#共享-cohort-的多-ledger-sdk-与子视图排空)：2026-10-26父c5ec73163f上，显式SDK增加有界maxOpenLedgers、共享单Epoch/原6连接与独立CONTROL/DATA子视图；READ/LAC derived views按回复分离，最后子操作才关闭父lease/pool。首CONTROL复用已有pending等待实际授权，取消ready观察前不归还名额；原NONE背压与fresh归属保持。六项定向与五类275项全部通过、用例/输入匹配；最后一行纯换行有6个owner class指令一致证明且六项补验通过，style通过。新增有限模型1正向/5指定反例符合预期、原Spec/15cfg保持；独立RAT仍443既有路径无新增。各阶段源码/回执由canonical节拥有。首版默认builder继续Classic；完整目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。

@@ -1747,3 +1747,16 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 ```
 
 1161模型输入与同轮1181冻结Java输入的275重合SHA相同，合并2067个unique输入。Java定向11项及扩大四类68项提供native ZK birth/ABA、真实文件/TLS/SDK/registration、丢回复、output promise与实际排空事实。投影没有实现原生ZK算法、密码学、显式CLOSED recovery、完整字节账本、任意外部executor、fairness/liveness或完整A+C+D。源码/命令/manifest、raw output/coverage/trace与终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-create-evidence-9ef30669/models`。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+## 共享 SDK 子视图、queued observer 与父连接终态
+
+2026-10-26，父源码 `c5ec73163f4d387c50682e9871cb06d2769b2c0b`。[共享cohort的显式SDK](../profile-wire/README.md#共享-cohort-的多-ledger-sdk-与子视图排空)在ProfileReadonlyOpen末尾追加独立SharedSDKSpec，原Spec/SDKSpec正文与15个旧cfg字节保持。有限范围为两个不同ledger、一个Epoch、每子操作一次CONTROL与一次READ（response＋一个retained view），实际private work、CONTROL wire/output、READ wire/view引用各自独立。acquisition逻辑失败、readyObserved回调、实际cold终态分开；全体停止后retiring阻止新准入，最后子操作继续持有父lease到实际cold/transport终态。原生decoder backing可被两个回复共享，子视图ref计数仍独立。
+
+本轮最终只运行新增6配置。`a-profile-readonly-shared-sdk`完整PASS（177261 generated/30045 distinct、queue0）。五个指定CE实际exit12并有对应trace：control在1336 distinct时违反SharedSDKControlActualPinsChild；read-view在2705状态时违反SharedSDKReadViewsPinChild；lease在1001状态时违反SharedSDKSurvivorPinsAcquisition；dependencies在40状态时违反SharedSDKDependenciesWaitForActualChildren；observation在274状态时违反SharedSDKQueuedObservationPinsAdmission。它们只去掉对应guard，不作为正向PASS或完整状态搜索。声明目录785配置不表示本轮重跑785项。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/artifacts/unified-wal/tlc-1.7.4-bS3uKMgu/tla2tools.jar --config-prefix a-profile-readonly-shared-sdk --config-prefix ce-profile-readonly-shared-sdk
+```
+
+最终阶段1169个模型输入与1183个冻结Java输入的277个重合路径SHA相同，合并2075个unique输入；早期5配置及增加observer后的6配置回执保留其原source绑定，未将旧PASS移绑。本投影假定Java提供CONTROL首请求授权、实际TLS/slot/output、per-response derived ByteBuf引用与cold callback事实；不实现原生网络/decoder/授权算法、密码学、fsync、任意caller scratch、完整内核/对象字节账本或liveness，不证明完整A+C+D。六项定向与五类275项均通过、用例身份匹配；一行最终换行的6个owner class指令一致且六项补验通过，275项原source绑定与等价证明保留。最终scope与检查由上述canonical节收口。模型源码、命令/manifest、raw output/coverage/trace和实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-shared-evidence-c5ec7316/models`；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。

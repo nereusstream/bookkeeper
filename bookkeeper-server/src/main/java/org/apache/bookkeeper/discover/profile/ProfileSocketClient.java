@@ -107,6 +107,8 @@ final class ProfileSocketClient implements AutoCloseable {
     private volatile Channel channel;
     private ProfileHello.Server hello;
     private long nextId = 2;
+    private boolean controlReady; // Event-loop confined, after a correlated authorization proof.
+    private boolean firstControlPending;
     private io.netty.util.concurrent.ScheduledFuture<?> helloDeadline;
 
     private ProfileSocketClient(String bookie, byte[] incarnation, int maxPending, Duration timeout,
@@ -407,13 +409,21 @@ final class ProfileSocketClient implements AutoCloseable {
     }
 
     public CompletableFuture<ProfileControlResult> install(ProfileControlRequest request) {
+        return beginInstall(request).result();
+    }
+
+    ProfileInitialControlClient.ControlAttempt beginInstall(ProfileControlRequest request) {
         return send(request, ProfileControlOperation.INSTALL, ProfileOperation.INSTALL);
     }
 
     public CompletableFuture<ProfileControlResult> activate(ProfileControlRequest request) {
+        return beginActivate(request).result();
+    }
+
+    ProfileInitialControlClient.ControlAttempt beginActivate(ProfileControlRequest request) {
         if (request.scope().operation() == ProfileControlOperation.ACTIVATE_REPLACEMENT) {
             if (!hello().capabilities().contains(REPLACEMENT_CAPABILITY)) {
-                return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+                return completedControl(request.scope(), Outcome.UNSUPPORTED);
             }
             return send(request, ProfileControlOperation.ACTIVATE_REPLACEMENT, ProfileOperation.ACTIVATE_REPLACEMENT);
         }
@@ -421,29 +431,45 @@ final class ProfileSocketClient implements AutoCloseable {
     }
 
     CompletableFuture<ProfileControlResult> recoveryGrant(ProfileControlRequest request) {
+        return beginRecoveryGrant(request).result();
+    }
+
+    ProfileInitialControlClient.ControlAttempt beginRecoveryGrant(ProfileControlRequest request) {
         if (!hello().capabilities().contains(RECOVERY_CAPABILITY)) {
-            return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+            return completedControl(request.scope(), Outcome.UNSUPPORTED);
         }
         return send(request, ProfileControlOperation.RECOVERY_GRANT, ProfileOperation.RECOVERY_GRANT);
     }
 
     CompletableFuture<ProfileControlResult> recoveryClose(ProfileControlRequest request) {
+        return beginRecoveryClose(request).result();
+    }
+
+    ProfileInitialControlClient.ControlAttempt beginRecoveryClose(ProfileControlRequest request) {
         if (!hello().capabilities().contains(RECOVERY_CLOSE_CAPABILITY)) {
-            return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+            return completedControl(request.scope(), Outcome.UNSUPPORTED);
         }
         return send(request, ProfileControlOperation.RECOVERY_GRANT_CLOSE, ProfileOperation.RECOVERY_GRANT_CLOSE);
     }
 
     CompletableFuture<ProfileControlResult> terminalClose(ProfileControlRequest request) {
+        return beginTerminalClose(request).result();
+    }
+
+    ProfileInitialControlClient.ControlAttempt beginTerminalClose(ProfileControlRequest request) {
         if (!hello().capabilities().contains(ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY)) {
-            return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+            return completedControl(request.scope(), Outcome.UNSUPPORTED);
         }
         return send(request, ProfileControlOperation.RECOVERY_TERMINAL_CLOSE, ProfileOperation.RECOVERY_TERMINAL_CLOSE);
     }
 
     CompletableFuture<ProfileControlResult> deleteApply(ProfileControlRequest request) {
+        return beginDeleteApply(request).result();
+    }
+
+    ProfileInitialControlClient.ControlAttempt beginDeleteApply(ProfileControlRequest request) {
         if (!hello().capabilities().contains(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY)) {
-            return CompletableFuture.completedFuture(result(request.scope(), Outcome.UNSUPPORTED));
+            return completedControl(request.scope(), Outcome.UNSUPPORTED);
         }
         return send(request, ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY,
                 ProfileOperation.TOMBSTONE_OR_DELETE_APPLY);
@@ -470,7 +496,7 @@ final class ProfileSocketClient implements AutoCloseable {
         return new ProfileInitialControlClient.PhysicalAttempt(held.physicalReply, held.completion.copy());
     }
 
-    private CompletableFuture<ProfileControlResult> send(ProfileControlRequest request,
+    private ProfileInitialControlClient.ControlAttempt send(ProfileControlRequest request,
             ProfileControlOperation expectedOperation, ProfileOperation operation) {
         Objects.requireNonNull(request, "request");
         ProfileControlScope scope = request.scope();
@@ -479,15 +505,22 @@ final class ProfileSocketClient implements AutoCloseable {
             throw new IllegalArgumentException("Initial request is not bound to the verified peer and operation");
         }
         if (closed.get()) {
-            return CompletableFuture.failedFuture(unknown());
+            return new ProfileInitialControlClient.ControlAttempt(CompletableFuture.failedFuture(unknown()),
+                    CompletableFuture.completedFuture(null));
         }
         if (!slots.tryAcquire()) {
-            return CompletableFuture.completedFuture(result(scope, Outcome.TRANSIENT_RECONCILING));
+            return completedControl(scope, Outcome.TRANSIENT_RECONCILING);
         }
         Pending held = new Pending(scope, operation);
         held.controlRequest = request;
         enqueue(held);
-        return held.reply;
+        return new ProfileInitialControlClient.ControlAttempt(held.reply, held.completion.copy());
+    }
+
+    private static ProfileInitialControlClient.ControlAttempt completedControl(ProfileControlScope scope,
+            Outcome outcome) {
+        return new ProfileInitialControlClient.ControlAttempt(CompletableFuture.completedFuture(result(scope, outcome)),
+                CompletableFuture.completedFuture(null));
     }
 
     CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
@@ -840,38 +873,6 @@ final class ProfileSocketClient implements AutoCloseable {
                 pending.put(id, held);
                 try {
                     held.deadline = channel.eventLoop().schedule(this::close, timeoutNanos, TimeUnit.NANOSECONDS);
-                    ByteBuf bytes;
-                    try (var workspace = backing.reserveWorkspace(encodingWorkspaceBytes(held))) {
-                        bytes = held.operation == ProfileOperation.ADD_NORMAL
-                                || held.operation == ProfileOperation.ADD_RECOVERY
-                                ? encodeNormal(held, id)
-                                : held.operation == ProfileOperation.WRITE_LAC ? encodeWriteLac(held, id)
-                                : held.operation == ProfileOperation.FENCE_LEDGER ? encodeFence(held, id)
-                                : held.operation == ProfileOperation.READ_ENTRY ? encode(held.operation, id,
-                                        ProfileOperationCodec.encode(ProfileOperation.READ_ENTRY,
-                                                new ProfileOperationCodec.ReadEntry(held.context, held.entryId, 0)))
-                                : held.operation == ProfileOperation.READ_LAC ? encode(held.operation, id,
-                                        ProfileOperationCodec.encode(ProfileOperation.READ_LAC,
-                                                new ProfileOperationCodec.ReadLac(held.context)))
-                                : held.operation == ProfileOperation.OPERATION_STATUS ? encode(held.operation, id,
-                                        ProfilePhysicalDeleteCodec.encodeRequest(held.physicalRequest))
-                                : encode(held.operation, id,
-                                        ProfileInitialControlCodec.encodeRequest(held.controlRequest));
-                    } finally {
-                        held.controlRequest = null;
-                        held.discardSource();
-                    }
-                    held.plaintext = bytes.retainedDuplicate();
-                    channel.writeAndFlush(bytes).addListener(written -> {
-                        held.plaintext.setZero(0, held.plaintext.capacity());
-                        held.plaintext.release();
-                        held.plaintext = null;
-                        held.writeDone = true;
-                        held.releaseIfTerminal();
-                        if (!written.isSuccess()) {
-                            close();
-                        }
-                    });
                 } catch (RuntimeException | Error failure) {
                     held.writeDone = true;
                     pending.remove(id);
@@ -880,6 +881,14 @@ final class ProfileSocketClient implements AutoCloseable {
                     if (failure instanceof Error error) {
                         throw error;
                     }
+                    return;
+                }
+                if (normalData || controlReady) {
+                    writePending(id, held);
+                } else if (!firstControlPending) {
+                    // Additional bounded requests retain their source, slot and deadline in pending.
+                    firstControlPending = true;
+                    writePending(id, held);
                 }
             });
         } catch (RuntimeException shutdown) {
@@ -888,6 +897,79 @@ final class ProfileSocketClient implements AutoCloseable {
             close();
         }
         // Cancellation stops waiting only; both wire and output ownership still reach their actual terminal.
+    }
+
+    private void writePending(long id, Pending held) {
+        held.writeStarted = true;
+        try {
+            ByteBuf bytes;
+            try (var workspace = backing.reserveWorkspace(encodingWorkspaceBytes(held))) {
+                bytes = held.operation == ProfileOperation.ADD_NORMAL
+                        || held.operation == ProfileOperation.ADD_RECOVERY
+                        ? encodeNormal(held, id)
+                        : held.operation == ProfileOperation.WRITE_LAC ? encodeWriteLac(held, id)
+                        : held.operation == ProfileOperation.FENCE_LEDGER ? encodeFence(held, id)
+                        : held.operation == ProfileOperation.READ_ENTRY ? encode(held.operation, id,
+                                ProfileOperationCodec.encode(ProfileOperation.READ_ENTRY,
+                                        new ProfileOperationCodec.ReadEntry(held.context, held.entryId, 0)))
+                        : held.operation == ProfileOperation.READ_LAC ? encode(held.operation, id,
+                                ProfileOperationCodec.encode(ProfileOperation.READ_LAC,
+                                        new ProfileOperationCodec.ReadLac(held.context)))
+                        : held.operation == ProfileOperation.OPERATION_STATUS ? encode(held.operation, id,
+                                ProfilePhysicalDeleteCodec.encodeRequest(held.physicalRequest))
+                        : encode(held.operation, id,
+                                ProfileInitialControlCodec.encodeRequest(held.controlRequest));
+            } finally {
+                held.controlRequest = null;
+                held.discardSource();
+            }
+            held.plaintext = bytes.retainedDuplicate();
+            channel.writeAndFlush(bytes).addListener(written -> {
+                held.plaintext.setZero(0, held.plaintext.capacity());
+                held.plaintext.release();
+                held.plaintext = null;
+                held.writeDone = true;
+                held.releaseIfTerminal();
+                if (!written.isSuccess()) {
+                    close();
+                }
+            });
+        } catch (RuntimeException | Error failure) {
+            held.writeDone = true;
+            pending.remove(id);
+            held.fail(unknown());
+            close();
+            if (failure instanceof Error error) {
+                throw error;
+            }
+        }
+    }
+
+    /** HELLO does not authorize the server's CONTROL lane; a correlated authorization proof does. */
+    private void controlReplyReceived(boolean authorized) {
+        if (controlReady) {
+            return;
+        }
+        controlReady = authorized;
+        firstControlPending = false;
+        while (!closed.get()) {
+            long next = Long.MAX_VALUE;
+            Pending deferred = null;
+            for (var entry : pending.entrySet()) {
+                if (!entry.getValue().writeStarted && entry.getKey() < next) {
+                    next = entry.getKey();
+                    deferred = entry.getValue();
+                }
+            }
+            if (deferred == null) {
+                return;
+            }
+            firstControlPending = !controlReady;
+            writePending(next, deferred);
+            if (!controlReady) {
+                return;
+            }
+        }
     }
 
     private ByteBuf encode(ProfileOperation operation, long id, byte[] body) {
@@ -981,7 +1063,8 @@ final class ProfileSocketClient implements AutoCloseable {
                 var readHeader = inspected.header();
                 if (hello != null && readHeader.operation() == ProfileOperation.OPERATION_STATUS) {
                     Pending held = pending.get(readHeader.requestId());
-                    if (held == null || held.operation != ProfileOperation.OPERATION_STATUS || !readHeader.isResponse()
+                    if (held == null || !held.writeStarted || held.operation != ProfileOperation.OPERATION_STATUS
+                            || !readHeader.isResponse()
                             || (readHeader.flags() & ProfileFrameHeader.END_OF_STREAM) != 0) {
                         throw invalidReply();
                     }
@@ -1007,6 +1090,8 @@ final class ProfileSocketClient implements AutoCloseable {
                     held.wireDone = true;
                     held.deadline.cancel(false);
                     held.releaseIfTerminal();
+                    controlReplyReceived(received != null
+                            && received.status().statusClass() == ProfileStatus.StatusClass.OK);
                     if (refused != null) {
                         held.physicalReply.completeExceptionally(refused);
                     } else {
@@ -1104,7 +1189,7 @@ final class ProfileSocketClient implements AutoCloseable {
                     return;
                 }
                 Pending held = pending.get(header.requestId());
-                if (held == null || held.operation != header.operation()) {
+                if (held == null || held.operation != header.operation() || !normalData && !held.writeStarted) {
                     throw invalidReply();
                 }
                 if (held.operation == ProfileOperation.ADD_NORMAL || held.operation == ProfileOperation.ADD_RECOVERY
@@ -1122,6 +1207,9 @@ final class ProfileSocketClient implements AutoCloseable {
                     held.wireDone = true;
                     held.deadline.cancel(false);
                     held.releaseIfTerminal();
+                    if (held.operation == ProfileOperation.FENCE_LEDGER) {
+                        controlReplyReceived(status.statusClass() == ProfileStatus.StatusClass.OK);
+                    }
                     held.dataReply.complete(status);
                     return;
                 }
@@ -1153,6 +1241,7 @@ final class ProfileSocketClient implements AutoCloseable {
                 held.wireDone = true;
                 held.deadline.cancel(false);
                 held.releaseIfTerminal();
+                controlReplyReceived(received.durable());
                 held.reply.complete(received);
             } catch (RuntimeException invalid) {
                 close();
@@ -1201,6 +1290,7 @@ final class ProfileSocketClient implements AutoCloseable {
         private ReferenceCounted entry;
         private io.netty.util.concurrent.ScheduledFuture<?> deadline;
         private ByteBuf plaintext;
+        private boolean writeStarted;
         private boolean writeDone;
         private boolean wireDone;
         private boolean released;
@@ -1223,6 +1313,7 @@ final class ProfileSocketClient implements AutoCloseable {
             this.scope = scope;
             this.operation = operation;
             reply = new CompletableFuture<>();
+            completion = new CompletableFuture<>();
             dataReply = null;
             readReply = null;
             lacReply = null;
@@ -1316,6 +1407,9 @@ final class ProfileSocketClient implements AutoCloseable {
         }
 
         private void fail(IOException failure) {
+            if (!writeStarted) {
+                writeDone = true;
+            }
             wireDone = true;
             if (deadline != null) {
                 deadline.cancel(false);

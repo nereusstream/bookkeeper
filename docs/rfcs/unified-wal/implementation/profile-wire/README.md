@@ -2488,3 +2488,28 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 源码字节、完整扩大选择/用例身份、Java XML/log、模型manifest/raw output/trace与实际终态由 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-create-evidence-9ef30669` 保存。全部Java/style/模型终态后独立RAT实际exit1，443条均为父HEAD既有路径、集合无新增；441路径字节不变，原已未批准的ProfileInitialAvailability与model runner改动的license header不变，不称CI全绿。三个原临时根只在终态/无句柄/逐文件同inode与SHA检查后移除，hardlink归档全部保留，常规文件数据实际回收0 B。
 
 本节闭合显式fresh create/初始writer的可调用SDK入口；普通Add没有新增MetadataStore/handshake/control fsync。历史PASS保持原source绑定。默认routing、多ledger并发SDK pool、Main可信commissioning/OS隔离/credential/exact-policy输入、完整full-bytes/B11、恢复接受下界、历史GC/mixed兼容/正式性能及其余16步仍OPEN。完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 共享 cohort 的多 ledger SDK 与子视图排空
+
+2026-10-26，父源码 `c5ec73163f4d387c50682e9871cb06d2769b2c0b`。按已选择的显式create/open方案，enableProfile/enableProfileReadOnly增加正数maxOpenLedgers重载；原重载保留1。每ledger只接纳一个活动operation/handle，创建、cold open、已交付handle与实际关闭都占名额；不同ledger在同一上限内共享一个Epoch acquisition/lease。没有按ledger重复建立cohort；原连接/RPC/字节额度继续限制总请求，超限即时拒绝，未加executor、重试队列或持久格式。已确认fresh pending请求按ledger保留且数量有界，handoff消费origin、same-ledger mismatch保留原请求、放弃本地上下文不删除持久历史的合同保持。
+
+每个子操作借用自己的CONTROL/DATA视图。ProfileRpcScope只串行化该视图的准入与关闭快照，跟踪已接纳请求的实际终态；关闭子视图不关闭父socket。普通CONTROL补齐原wire＋write双终态，Fence/Physical观察副本不能改写scope实际状态。DATA保持原per-request终态；READ/LAC每个回复增加一个无payload复制、单component的CompositeByteBuf owner，全部derived retained视图共享该回复自己的引用计数。两个回复即使来自decoder的同一native allocation，A结束也不等B的视图；共享native backing仍由原连接额度保留到最后release。复制型便利入口始终消费并关闭实际回复，取消或外部完成公开结果不能释放尚未交付的实际回复。任意caller scratch allocator仍由原连接和实际调用方持有，RPC子视图不接管这类额外分配；现有public SDK普通写/只读路径没有通过它导出scratch。此处不宣称完成full-bytes/B11上界。
+
+caller cancel只停止对应子操作，其他ledger继续使用共同acquisition。子操作的ready callback实际结束前仍占名额；全体在lease交付前停止时，停止后续acquisition准入，但最后子操作仍等待真实cold/连接终结。此前去掉这个归属的受控Java反例会接纳第三个请求并在等待中超时；修正后第三个请求在cold被扣住时即时TooManyRequests，观察结束后可fresh retry。全局SDK close停止所有子操作，等待私有algorithm/config、各handle本地实际终态与子视图；非最后子操作排空即可完成自己的close callback，最后一个再实际关闭parent lease/pool，之后才进入SDK metadata/executors teardown。self-drain检查所有活动ledger的worker、原scheduler和pool event loop。
+
+cold只读复用原CLOSED/password/context/physical birth/retained source/final recheck算法，用每SDK的ReadOnlyAdmission将冷操作并发限制为同一maxOpenLedgers；legacy coordinator路径保留原单operation gate。正常Add没有新增MetadataStore、CONTROL fsync或handshake。
+
+真实双create首轮暴露CONTROL接入边界：HELLO不代表服务端CONTROL lane已完成授权，CONTROL_PENDING会拒绝提前到达的第二帧。客户端现把尚未发送的请求保留在已有有界pending map及原slot/source/deadline中，首个完整关联的durable普通CONTROL、合法OK Fence或identity匹配OK Physical回复才开启并发；其他合法回复仅放行下一个。未发送请求断连时也有实际终止，已发送请求仍等待wire/write；DATA继续直接分发。服务端安全门、配额和协议字节未改。之后的真实ACTIVATE TRANSIENT_RECONCILING来自Bookie原单batch busy gate，保持已有NOT_READY返回合同；测试等两个首轮调用实际终结，仅对Known-NONE/NotEnoughBookies按原完整请求顺序续接一次，UNKNOWN和其他错误继续失败。原失败、临时诊断和对应source输入分别保留，未把它们改称通过。
+
+六项定向实际通过：四项共享SDK网络方法与两项共享charged native backing的READ/LAC视图单测。扩大五类 **275项全部通过、0 failure/error/skip**（完整Socket225、Scope2、Metadata19、Reservation17、Classic LedgerRecovery12）；全部用例身份与源码发现一致，包含前六项。1179个runner输入与1183个含addon冻结Java输入逐项匹配。最后仅将owner一行按120列换行，非空白字节及6个实际owner class的javap -c/-p指令输出逐字节相同；格式后六项再次通过。275项保留格式前source绑定及等价证明，未伪造新整轮。Spotless/Checkstyle实际exit0。
+
+ProfileReadonlyOpen只追加独立SharedSDKSpec，原Spec/SDKSpec正文与15旧cfg字节保持；最终新增6配置为1完整正向PASS（177261 generated/30045 distinct、queue0）和5指定反例，分别针对CONTROL、READ view、surviving acquisition、SDK dependencies及queued observer，均有实际exit12和指定trace。最终1169模型输入与Java的277重合SHA相同，合并2075个unique输入；有限范围与精确命令见[模型说明](../models/README.md#共享-sdk-子视图queued-observer-与父连接终态)，不提升liveness/fsync/完整A+C+D。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest,ProfileNormalDataClientScopeTest,ProfileLedgerMetadataStoreTest,ZKProfileReservationStoreTest,LedgerRecoveryTest'
+```
+
+源码各阶段、原命令/XML、CONTROL早期断连与真实Known-NONE诊断、两个测试oracle修正前回执、queued observer的受控Java RED、最终Java/模型原输出及实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-shared-evidence-c5ec7316`。两个oracle修正依据为非空writer实际UIC4关闭，以及payload buffer的真实readerIndex；未修改payload、放宽关闭断言或跳过其他错误。全部Java/style/模型终态后独立RAT实际exit1：443条均为父HEAD既有路径、集合无新增；442路径字节不变，既有model runner仅增加MATRIX且license header不变，不称CI全绿。15个原临时根仅在实际终态、无句柄、逐文件同inode/SHA核对后移除，hardlink归档全部保留，常规文件数据实际回收0 B。
+
+Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。首版显式SDK接线不改变默认Classic builder或缺可信环境时的拒绝；Main可信commissioning/OS隔离/credential/exact-policy输入、full-bytes/B11、恢复接受下界、历史GC/mixed兼容/正式性能及其余16步仍OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。

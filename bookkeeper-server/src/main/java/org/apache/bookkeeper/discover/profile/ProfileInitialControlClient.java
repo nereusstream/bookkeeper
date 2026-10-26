@@ -34,9 +34,15 @@ import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 public final class ProfileInitialControlClient implements ProfileInitialMetadataCoordinator.InstallClient,
         ProfileInitialLifecycleCoordinator.ActivationClient, AutoCloseable {
     private final ProfileSocketClient socket;
+    private final ProfileRpcScope scope;
 
     private ProfileInitialControlClient(ProfileSocketClient socket) {
+        this(socket, null);
+    }
+
+    private ProfileInitialControlClient(ProfileSocketClient socket, ProfileRpcScope scope) {
         this.socket = socket;
+        this.scope = scope;
     }
 
     public static CompletableFuture<ProfileInitialControlClient> connect(EventLoopGroup group, SslContext tls,
@@ -73,61 +79,94 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
         return socket.hello();
     }
 
+    /** Borrow one admission/drain scope while the owning client retains the CONTROL connection. */
+    public ProfileInitialControlClient borrowScope() {
+        if (scope != null) {
+            throw new IllegalStateException("Only the CONTROL connection owner can lend an RPC scope");
+        }
+        return new ProfileInitialControlClient(socket, new ProfileRpcScope());
+    }
+
     @Override
     public CompletableFuture<ProfileControlResult> install(ProfileControlRequest request) {
-        return socket.install(request);
+        return scope == null ? socket.install(request)
+                : scope.admit(() -> socket.beginInstall(request), ControlAttempt::completion).result();
     }
 
     @Override
     public CompletableFuture<ProfileControlResult> activate(ProfileControlRequest request) {
-        return socket.activate(request);
+        return scope == null ? socket.activate(request)
+                : scope.admit(() -> socket.beginActivate(request), ControlAttempt::completion).result();
     }
 
     /** Distinct UIC3 grant; body fields do not themselves authorize recovery payload. */
     public CompletableFuture<ProfileControlResult> recoveryGrant(ProfileControlRequest request) {
-        return socket.recoveryGrant(request);
+        return scope == null ? socket.recoveryGrant(request)
+                : scope.admit(() -> socket.beginRecoveryGrant(request), ControlAttempt::completion).result();
     }
 
     /** Independent UIC4 close; the target must cold-read exact committed close authority. */
     public CompletableFuture<ProfileControlResult> recoveryClose(ProfileControlRequest request) {
-        return socket.recoveryClose(request);
+        return scope == null ? socket.recoveryClose(request)
+                : scope.admit(() -> socket.beginRecoveryClose(request), ControlAttempt::completion).result();
     }
 
     /** Standalone selected-boundary close, including (-1, 0); never creates a DATA grant. */
     public CompletableFuture<ProfileControlResult> terminalClose(ProfileControlRequest request) {
-        return socket.terminalClose(request);
+        return scope == null ? socket.terminalClose(request)
+                : scope.admit(() -> socket.beginTerminalClose(request), ControlAttempt::completion).result();
     }
 
     /** Apply one committed delete delivery; continuous local progress is durable with its TOMBSTONE. */
     public CompletableFuture<ProfileControlResult> deleteApply(ProfileControlRequest request) {
-        return socket.deleteApply(request);
+        return scope == null ? socket.deleteApply(request)
+                : scope.admit(() -> socket.beginDeleteApply(request), ControlAttempt::completion).result();
+    }
+
+    record ControlAttempt(CompletableFuture<ProfileControlResult> result, CompletableFuture<Void> completion) {
+        @Override
+        public CompletableFuture<Void> completion() {
+            return completion.copy();
+        }
     }
 
     /** Waiting result and actual local RPC/source/output termination are distinct. */
     public record PhysicalAttempt(CompletableFuture<ProfilePhysicalDeleteCodec.Reply> result,
-            CompletableFuture<Void> completion) { }
+            CompletableFuture<Void> completion) {
+        @Override
+        public CompletableFuture<Void> completion() {
+            return completion.copy();
+        }
+    }
 
     /** Independent UIC8 bounded local retirement; neither a target-set receipt nor global deletion. */
     public PhysicalAttempt physicalDelete(ProfilePhysicalDeleteCodec.Request request) {
-        return socket.physicalDelete(request);
+        return scope == null ? socket.physicalDelete(request)
+                : scope.admit(() -> socket.physicalDelete(request), PhysicalAttempt::completion);
     }
 
-    public record FenceAttempt(CompletableFuture<ProfileStatus> result, CompletableFuture<Void> completion) { }
+    public record FenceAttempt(CompletableFuture<ProfileStatus> result, CompletableFuture<Void> completion) {
+        @Override
+        public CompletableFuture<Void> completion() {
+            return completion.copy();
+        }
+    }
 
     /** The caller may drain this request without closing the borrowed CONTROL connection. */
     public FenceAttempt beginFence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {
-        return socket.beginFence(context, operationId, credential);
+        return scope == null ? socket.beginFence(context, operationId, credential)
+                : scope.admit(() -> socket.beginFence(context, operationId, credential), FenceAttempt::completion);
     }
 
     /** Frozen fence body; caller retains the operation ID across transient/UNKNOWN retries. */
     public CompletableFuture<ProfileStatus> fence(ProfileLedgerContext context, byte[] operationId,
             ProtectedProfileCredential credential) {
-        return socket.fence(context, operationId, credential);
+        return beginFence(context, operationId, credential).result();
     }
 
     public CompletableFuture<Void> closeAsync() {
-        return socket.closeAsync();
+        return scope == null ? socket.closeAsync() : scope.closeAsync();
     }
 
     public long backingBytes() {
@@ -148,6 +187,10 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
 
     @Override
     public void close() {
-        socket.close();
+        if (scope == null) {
+            socket.close();
+        } else {
+            scope.closeAsync();
+        }
     }
 }

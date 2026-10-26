@@ -18,6 +18,7 @@ package org.apache.bookkeeper.discover.profile;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.ssl.SslContext;
@@ -26,6 +27,9 @@ import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
 import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
@@ -36,9 +40,23 @@ import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 /** Actual frozen ADD_NORMAL transport; preserves the full status before any SDK failure handling. */
 public final class ProfileNormalDataClient implements AutoCloseable {
     private final ProfileSocketClient socket;
+    private final ProfileRpcScope scope;
 
     private ProfileNormalDataClient(ProfileSocketClient socket) {
+        this(socket, null);
+    }
+
+    private ProfileNormalDataClient(ProfileSocketClient socket, ProfileRpcScope scope) {
         this.socket = socket;
+        this.scope = scope;
+    }
+
+    /** One ledger's admission and actual RPC/response custody on this connection. */
+    public ProfileNormalDataClient borrowScope() {
+        if (scope != null) {
+            throw new IllegalStateException("Borrow a DATA scope from its connection owner");
+        }
+        return new ProfileNormalDataClient(socket, new ProfileRpcScope());
     }
 
     public static CompletableFuture<ProfileNormalDataClient> connect(EventLoopGroup group, SslContext tls,
@@ -81,25 +99,35 @@ public final class ProfileNormalDataClient implements AutoCloseable {
     /** Borrow one ordinary Add, exposing its actual terminal without closing the shared DATA connection. */
     public AddAttempt beginNormalAdd(ProfileLedgerContext context, ProtectedProfileCredential credential,
             long entryId, ReferenceCounted entry) {
-        return socket.beginNormalAdd(context, credential, entryId, entry);
+        if (scope == null) {
+            return socket.beginNormalAdd(context, credential, entryId, entry);
+        }
+        var attempt = scope.admit(() -> socket.beginNormalAdd(context, credential, entryId, entry),
+                AddAttempt::completion);
+        return new AddAttempt(attempt.result().copy(), attempt.completion().copy());
     }
 
     /** Borrow CRC32C/v3 BookKeeper entry bytes. Caller may release but must not modify them until the future ends. */
     public CompletableFuture<ProfileStatus> addNormal(ProfileLedgerContext context,
             ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {
-        return socket.addNormal(context, credential, entryId, entry);
+        return beginNormalAdd(context, credential, entryId, entry).result();
     }
 
     /** Borrow the original entry for the existing single-entry Profile recovery operation. */
     public CompletableFuture<ProfileStatus> addRecovery(ProfileRepairIntent intent,
             ProtectedProfileCredential credential, long entryId, ReferenceCounted entry) {
-        return socket.addRecovery(intent, credential, entryId, entry);
+        return beginAddRecovery(intent, credential, entryId, entry).result();
     }
 
     /** Recovery result and original source/output/wire terminal, on the same bounded DATA socket. */
     public AddAttempt beginAddRecovery(ProfileRepairIntent intent, ProtectedProfileCredential credential,
             long entryId, ReferenceCounted entry) {
-        return socket.beginAddRecovery(intent, credential, entryId, entry);
+        if (scope == null) {
+            return socket.beginAddRecovery(intent, credential, entryId, entry);
+        }
+        var attempt = scope.admit(() -> socket.beginAddRecovery(intent, credential, entryId, entry),
+                AddAttempt::completion);
+        return new AddAttempt(attempt.result().copy(), attempt.completion().copy());
     }
 
     /** Explicit LAC result and actual source/output terminal, using the same bounded DATA socket. */
@@ -107,12 +135,37 @@ public final class ProfileNormalDataClient implements AutoCloseable {
 
     public LacWriteAttempt beginWriteLac(ProfileLedgerContext context, ProtectedProfileCredential credential,
             long lac, org.apache.bookkeeper.util.ByteBufList digest) {
-        return socket.beginWriteLac(context, credential, lac, digest);
+        if (scope == null) {
+            return socket.beginWriteLac(context, credential, lac, digest);
+        }
+        var attempt = scope.admit(() -> socket.beginWriteLac(context, credential, lac, digest),
+                LacWriteAttempt::completion);
+        return new LacWriteAttempt(attempt.result().copy(), attempt.completion().copy());
     }
 
     /** Explicit point read; NOT_READY/UNKNOWN refusals are not missing evidence and never cause activation. */
     public CompletableFuture<ProfileReadEntryReplyCodec.Reply> readEntry(ProfileLedgerContext context, long entryId) {
-        return socket.readEntry(context, entryId);
+        if (scope == null) {
+            return socket.readEntry(context, entryId);
+        }
+        return copiedResult(beginReadEntryBuffer(context, entryId).result(),
+                response -> response.copyReply(context, entryId));
+    }
+
+    /** A reply's views have their own lifetime even when the decoder coalesces unrelated replies. */
+    private static final class ResponseBacking extends CompositeByteBuf {
+        private final CompletableFuture<Void> released = new CompletableFuture<>();
+
+        private ResponseBacking(ByteBuf source) {
+            super(source.alloc(), source.isDirect(), 1);
+            addComponent(true, source.retainedSlice(source.readerIndex(), source.readableBytes()));
+        }
+
+        @Override
+        protected void deallocate() {
+            super.deallocate();
+            released.complete(null);
+        }
     }
 
     /** Owns the accounted response backing; each retained entry view must also be released by its caller. */
@@ -122,13 +175,21 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         private ByteBuf frame;
         private final int offset;
         private final int length;
+        private final CompletableFuture<Void> released;
 
         ReadEntryBuffer(ProfileReadEntryReplyCodec.View decoded, ByteBuf frame, int offset) {
             status = decoded.status();
             outcome = decoded.outcome();
-            this.offset = offset;
+            this.offset = offset - frame.readerIndex();
             length = decoded.entry().remaining();
-            this.frame = frame.retain();
+            if (frame.isReadable()) {
+                var backing = new ResponseBacking(frame);
+                this.frame = backing;
+                released = backing.released;
+            } else {
+                this.frame = Unpooled.EMPTY_BUFFER;
+                released = CompletableFuture.completedFuture(null);
+            }
         }
 
         static ReadEntryBuffer refused(ProfileStatus status) {
@@ -152,6 +213,20 @@ public final class ProfileNormalDataClient implements AutoCloseable {
             return frame.retainedSlice(offset, length).asReadOnly();
         }
 
+        /** This response and all its retained views have released their share of the transport backing. */
+        public CompletableFuture<Void> released() {
+            return released.copy();
+        }
+
+        private synchronized ProfileReadEntryReplyCodec.Reply copyReply(ProfileLedgerContext context,
+                long entryId) {
+            if (outcome == ProfileReadEntryReplyCodec.Outcome.REFUSED) {
+                return ProfileReadEntryReplyCodec.refused(status);
+            }
+            return ProfileReadEntryReplyCodec.decode(frame.nioBuffer(36, frame.readableBytes() - 36),
+                    context, entryId, ProfileReadEntryReplyCodec.MAX_ENTRY_BYTES);
+        }
+
         @Override
         public synchronized void close() {
             if (frame != null) {
@@ -165,21 +240,76 @@ public final class ProfileNormalDataClient implements AutoCloseable {
     public record ReadAttempt<T>(CompletableFuture<T> result, CompletableFuture<Void> completion) { }
 
     public ReadAttempt<ReadEntryBuffer> beginReadEntryBuffer(ProfileLedgerContext context, long entryId) {
-        return socket.beginReadEntryBuffer(context, entryId);
+        return scope == null ? socket.beginReadEntryBuffer(context, entryId)
+                : scopedRead(() -> socket.beginReadEntryBuffer(context, entryId),
+                        ReadEntryBuffer::released, ReadEntryBuffer::close);
     }
 
     public ReadAttempt<LacBuffer> beginReadLacBuffer(ProfileLedgerContext context) {
-        return socket.beginReadLacBuffer(context);
+        return scope == null ? socket.beginReadLacBuffer(context)
+                : scopedRead(() -> socket.beginReadLacBuffer(context), LacBuffer::released, LacBuffer::close);
+    }
+
+    private <T> ReadAttempt<T> scopedRead(Supplier<ReadAttempt<T>> read,
+            Function<T, CompletableFuture<Void>> released, Consumer<T> close) {
+        var payloadTerminal = new CompletableFuture<Void>();
+        var callbackTerminal = new CompletableFuture<Void>();
+        var original = scope.admit(read, attempt -> CompletableFuture.allOf(
+                attempt.completion(), payloadTerminal, callbackTerminal));
+        var result = new CompletableFuture<T>();
+        original.result().whenComplete((response, failure) -> {
+            try {
+                if (failure != null) {
+                    payloadTerminal.complete(null);
+                    result.completeExceptionally(failure);
+                } else {
+                    released.apply(response).whenComplete((ignored, releaseFailure) -> {
+                        if (releaseFailure == null) {
+                            payloadTerminal.complete(null);
+                        } else {
+                            payloadTerminal.completeExceptionally(releaseFailure);
+                        }
+                    });
+                    if (!result.complete(response)) {
+                        close.accept(response);
+                    }
+                }
+            } finally {
+                callbackTerminal.complete(null);
+            }
+        });
+        return new ReadAttempt<>(result, original.completion().copy());
+    }
+
+    private static <T extends AutoCloseable, R> CompletableFuture<R> copiedResult(
+            CompletableFuture<T> original, Function<T, R> copy) {
+        var result = new CompletableFuture<R>();
+        original.whenComplete((response, failure) -> {
+            if (failure != null) {
+                result.completeExceptionally(failure);
+            } else {
+                try (response) {
+                    result.complete(copy.apply(response));
+                } catch (Exception | Error problem) {
+                    result.completeExceptionally(problem);
+                }
+            }
+        });
+        return result;
     }
 
     /** The response and all retained entry views keep their original transport backing charged. */
     public CompletableFuture<ReadEntryBuffer> readEntryBuffer(ProfileLedgerContext context, long entryId) {
-        return socket.readEntryBuffer(context, entryId);
+        return beginReadEntryBuffer(context, entryId).result();
     }
 
     /** Return source provenance; sourceLength is not permission to close a prefix at piggybackLac. */
     public CompletableFuture<ProfileLacReplyCodec.Reply> readLac(ProfileLedgerContext context) {
-        return socket.readLac(context);
+        if (scope == null) {
+            return socket.readLac(context);
+        }
+        boolean explicit = hello().capabilities().contains(ProfileLacReplyCodec.EXPLICIT_CAPABILITY);
+        return copiedResult(beginReadLacBuffer(context).result(), response -> response.copyReply(context, explicit));
     }
 
     /** Owns the accounted LAC response; callers must release each retained entry or explicit digest view. */
@@ -194,6 +324,7 @@ public final class ProfileNormalDataClient implements AutoCloseable {
         private final int entryBytes;
         private final int explicitBytes;
         private ByteBuf frame;
+        private final CompletableFuture<Void> released;
 
         LacBuffer(ProfileLacReplyCodec.View decoded, ByteBuf frame, int offset) {
             status = decoded.status();
@@ -204,8 +335,15 @@ public final class ProfileNormalDataClient implements AutoCloseable {
             explicitLac = decoded.explicitLac();
             entryBytes = decoded.entry().remaining();
             explicitBytes = decoded.explicitBody().remaining();
-            this.offset = offset;
-            this.frame = frame.retain();
+            this.offset = offset - frame.readerIndex();
+            if (frame.isReadable()) {
+                var backing = new ResponseBacking(frame);
+                this.frame = backing;
+                released = backing.released;
+            } else {
+                this.frame = Unpooled.EMPTY_BUFFER;
+                released = CompletableFuture.completedFuture(null);
+            }
         }
 
         static LacBuffer refused(ProfileStatus status) {
@@ -257,6 +395,21 @@ public final class ProfileNormalDataClient implements AutoCloseable {
             return frame.retainedSlice(start, size).asReadOnly();
         }
 
+        /** This response and both kinds of retained payload view have released their backing share. */
+        public CompletableFuture<Void> released() {
+            return released.copy();
+        }
+
+        private synchronized ProfileLacReplyCodec.Reply copyReply(ProfileLedgerContext context, boolean explicit) {
+            if (outcome == ProfileLacReplyCodec.Outcome.REFUSED) {
+                return ProfileLacReplyCodec.refused(status);
+            }
+            var payload = frame.nioBuffer(36, frame.readableBytes() - 36);
+            return explicit ? ProfileLacReplyCodec.decodeExplicit(payload, context,
+                    ProfileReadEntryReplyCodec.MAX_ENTRY_BYTES)
+                    : ProfileLacReplyCodec.decode(payload, context, ProfileReadEntryReplyCodec.MAX_ENTRY_BYTES);
+        }
+
         @Override
         public synchronized void close() {
             if (frame != null) {
@@ -268,18 +421,19 @@ public final class ProfileNormalDataClient implements AutoCloseable {
 
     /** The response and its payload views keep the original transport backing charged. */
     public CompletableFuture<LacBuffer> readLacBuffer(ProfileLedgerContext context) {
-        return socket.readLacBuffer(context);
+        return beginReadLacBuffer(context).result();
     }
 
     public CompletableFuture<Void> closeAsync() {
-        return socket.closeAsync();
+        return scope == null ? socket.closeAsync() : scope.closeAsync();
     }
 
     public long backingBytes() {
         return socket.backingBytes();
     }
 
-    /** Allocations share this DATA connection's quota and keep closeAsync pending until their last release. */
+    /** Borrow the physical connection's allocator. The caller owns scratch lifetimes; closing that connection
+     * waits for release, while an RPC child scope owns only its admitted requests and response views. */
     public ByteBufAllocator allocator() {
         return socket.allocator();
     }
@@ -298,6 +452,6 @@ public final class ProfileNormalDataClient implements AutoCloseable {
 
     @Override
     public void close() {
-        socket.close();
+        closeAsync();
     }
 }
