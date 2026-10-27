@@ -1764,3 +1764,16 @@ Input在原monitor内完成refCnt校验和ByteBuf release，成功后清context/
 Driver持久Entry/Data/UUID/Identity/views、preparation/parser局部图、任意caller/callback图不包含在本Input核心费用内，不能借用其他费用余量宣称关闭。批次completion、duplicates与waiters可能在源释放后继续持有整批Entry，不能据此直接套N或未经证明的P/owner/I/O公式；其终态退休和批次窗口仍需独立闭合。Thread/registry/ThreadLocal/Worker、AQS waiters、CPU/plan、cleaner/JCA/native、完整compaction/raw-unpooled及统一full-bytes/B11仍OPEN；本包不证明完整retained heap、实际live peak、GC、RSS或性能。TLA未改、TLC未执行；Main具体issuer/受保护输入、完整G1及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled边界保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
 验收后核对terminal、lsof、inode与SHA，移除8个本轮native临时运行根（40文件、13938393逻辑字节），全部硬链接归档保留，常规文件数据回收量为0。探针只建真实Group/原生pool，未创建文件storage/fixture目录；各尝试的原源码、class、错误和旧绑定均保留。
+
+
+## Driver 批次回调与重复请求引用退休
+
+2026-10-28在父源码 `2aadc71bb1c44ce2266703a45e40e7adf2f00736` 上，退休已交付的DATA回调与重复请求关系。此前旧actual I/O wrapper或ticket可继续经Obligation.completion捕获整批Entry，Entry.duplicates与PendingNormal.waiters又保留已交接的重复请求；source释放和票据返还本身没有摘掉这些内部根。
+
+首次deliver在原callback try/finally之前take并清completion，由当前局部变量执行原回调；重复消费或已ownerTerminal显式失败。原ownerTerminal finally、physical/owner/released双门及UNKNOWN义务不变。duplicates在refuse/complete两处成功交接全部ticket后一次clear；waiters仍先设status/selected，再交给保留的完成槽，全部post成功后clear。原用户callback异常继续汇总并完成后续请求；release/post抛错时不抵达clear，保留原表中的current/tail，不改变pendingNormals.remove时机或原异常语义。沿用原循环和容器，没有逐项移除造成的平方级搬移、新同步、线程、队列、fee或Add credit/atomic。
+
+两条真实RED均为assertion failure，零error/skip：成功批次原completion、duplicates、waiters全三处未退根；UNKNOWN已交付且第二个actual I/O仍held时completion仍保留。正常测试在force释放前验证三处等待关系完整，随后验证真实回调、单force、读回与Fence；UNKNOWN测试继续验证仅一buffer可复用、Fence等待、Bookie不能关闭，等第二I/O真实退出后才验证双buffer与Fence成功，未用提前退费换取清根。GREEN仅改变Driver生产文件，整份测试保持RED字节；三项定向通过，包含原callback抛错后仍完成followers并归还pool的覆盖。
+
+最终Bookie整类283项加四条真实SDK路径共287项全部通过，零failure/error/skip；原283项用例身份逐项匹配。SDK覆盖普通quorum/连续回调、普通close的actual DATA output与caller取消、恢复close的actual precut DATA、owned service的executor/metadata/network排空；未重复整份239项SDK，不扩大为全SDK当前验收。1194当前输入及每轮1179 native子集全部匹配，测试整文件保持RED字节。Spotless/Checkstyle exit0；独立RAT实际exit1，443路径及字节均与父2aadc71bb1一致，无新增、未改规则，不称CI全绿。源码、原RED与各stage命令/输入/XML由 `/Users/liusinan/.codex/artifacts/unified-wal/driver-callback-retirement-evidence-2aadc71b` 保留。
+
+本轮不新增布局测量或执行TLC，不将旧probe/model移绑到新源码。Driver源Data/UUID/Identity/NIO、持久Entry/request/列表容量、normals/admission及返回窗口的完整计数仍需独立付额；任意caller图、native/RSS、实际live peak与统一full-bytes/B11继续OPEN。Main首版仍限已有旧服务的受控部署，具体issuer/受保护输入、完整G1及其余16步继续OPEN；完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

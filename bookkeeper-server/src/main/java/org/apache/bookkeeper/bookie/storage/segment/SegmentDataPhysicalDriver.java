@@ -210,7 +210,7 @@ final class SegmentDataPhysicalDriver {
                                     AtomicReference<SegmentPointRead.Location> selected) { }
 
     private static final class Obligation {
-        private final Completion completion;
+        private Completion completion;
         private final List<SegmentBookieControlLog.Admission> admissions;
         private final List<SegmentBookieControlLog.RecoveryAdmission> recoveryAdmissions;
         private final List<PendingNormal> normals;
@@ -239,6 +239,15 @@ final class SegmentDataPhysicalDriver {
             this.admissions = List.copyOf(admissions);
             this.recoveryAdmissions = List.copyOf(recoveryAdmissions);
             this.normals = List.copyOf(normals);
+        }
+
+        private Completion takeCompletion() {
+            if (ownerTerminal || completion == null) {
+                throw new IllegalStateException("DATA result already terminal");
+            }
+            Completion result = completion;
+            completion = null;
+            return result;
         }
 
         synchronized void physicalTerminal() {
@@ -1401,6 +1410,7 @@ final class SegmentDataPhysicalDriver {
                 for (Entry joined : entry.duplicates) {
                     joined.refuse(status, failure);
                 }
+                entry.duplicates.clear();
             }
         }
 
@@ -1467,6 +1477,7 @@ final class SegmentDataPhysicalDriver {
                         joined.ticket.complete(() -> { });
                     }
                 }
+                entry.duplicates.clear();
             }
             if (callbackFailure != null) {
                 throw new IllegalStateException("Batched entry callback failed", callbackFailure);
@@ -1835,6 +1846,7 @@ final class SegmentDataPhysicalDriver {
                     }
                     waiter.ticket.complete(() -> deliverDuplicate(waiter.obligation, failure));
                 }
+                normal.waiters.clear();
             }
         }
     }
@@ -1943,8 +1955,9 @@ final class SegmentDataPhysicalDriver {
             candidates = null;
             failure = new IOException("DATA file has an unresolved failure");
         }
+        Completion completion = obligation.takeCompletion();
         try {
-            obligation.completion.complete(candidates, failure);
+            completion.complete(candidates, failure);
         } catch (Throwable callbackFailure) {
             if (previous == null) {
                 return callbackFailure;

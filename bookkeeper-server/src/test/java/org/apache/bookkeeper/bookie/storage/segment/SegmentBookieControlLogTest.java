@@ -435,6 +435,15 @@ public class SegmentBookieControlLogTest {
         return commandField.get(ticket);
     }
 
+    private static Object firstAssemblingEntry(SegmentDataPhysicalDriver.NormalBatcher batcher,
+                                               SegmentOwnerLoop owner) throws Exception {
+        var field = batcher.getClass().getDeclaredField("assembling");
+        field.setAccessible(true);
+        FutureTask<Object> selected = new FutureTask<>(() -> ((List<?>) field.get(batcher)).get(0));
+        assertTrue(owner.control(selected::run));
+        return selected.get(5, TimeUnit.SECONDS);
+    }
+
     private static void assertInputResourcesRetired(SegmentEntryInputs.Input input)
             throws ReflectiveOperationException {
         for (String name : List.of("context", "bytes")) {
@@ -2005,6 +2014,16 @@ public class SegmentBookieControlLogTest {
                 assertTrue(batcher.submit(sourceInput(group, context(), 1),
                         bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow(), stopped));
                 ownerBarrier(owner);
+                Object leader = firstAssemblingEntry(batcher, owner);
+                var ticketField = leader.getClass().getDeclaredField("ticket");
+                var physicalField = leader.getClass().getDeclaredField("physical");
+                var duplicatesField = leader.getClass().getDeclaredField("duplicates");
+                var commandField = SegmentOwnerLoop.Ticket.class.getDeclaredField("command");
+                for (var field : List.of(ticketField, physicalField, duplicatesField, commandField)) {
+                    field.setAccessible(true);
+                }
+                Object ticket = ticketField.get(leader);
+                assertSame(leader, commandField.get(ticket));
                 assertEquals(44, group.inputs().usedBytes());
                 assertEquals(4096, files.nextOffset(0));
                 assertEquals(0, files.dataIo.forces);
@@ -2034,12 +2053,40 @@ public class SegmentBookieControlLogTest {
                         collectNormal(results, failure, done)));
                 ownerBarrier(owner);
                 assertEquals(0, group.inputs().usedBytes());
+                Object physical = physicalField.get(leader);
+                var obligationField = physical.getClass().getDeclaredField("obligation");
+                obligationField.setAccessible(true);
+                Object obligation = obligationField.get(physical);
+                var completionField = obligation.getClass().getDeclaredField("completion");
+                var normalsField = obligation.getClass().getDeclaredField("normals");
+                completionField.setAccessible(true);
+                normalsField.setAccessible(true);
+                Object normal = ((List<?>) normalsField.get(obligation)).get(0);
+                var waitersField = normal.getClass().getDeclaredField("waiters");
+                waitersField.setAccessible(true);
+                assertNotNull(completionField.get(obligation));
+                assertEquals(1, ((List<?>) duplicatesField.get(leader)).size());
+                assertEquals(1, ((List<?>) waitersField.get(normal)).size());
                 release.countDown();
                 assertTrue(done.await(5, TimeUnit.SECONDS));
                 ownerBarrier(owner);
                 assertNull(failure.get());
                 assertEquals(0, stoppedCallbacks.get());
                 assertEquals(1, files.dataIo.forces);
+                assertSame(leader, commandField.get(ticket));
+                List<String> retained = new ArrayList<>();
+                if (completionField.get(obligation) != null) {
+                    retained.add("Obligation.completion");
+                }
+                Object duplicates = duplicatesField.get(leader);
+                if (duplicates != null && !((List<?>) duplicates).isEmpty()) {
+                    retained.add("Entry.duplicates");
+                }
+                Object waiters = waitersField.get(normal);
+                if (waiters != null && !((List<?>) waiters).isEmpty()) {
+                    retained.add("PendingNormal.waiters");
+                }
+                assertEquals("Delivered batch retains callback fan-out", List.of(), retained);
                 for (SegmentDataPhysicalDriver.NormalResult result : results) {
                     assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
                     assertEquals(1, result.candidate().address().sequence());
@@ -5644,6 +5691,13 @@ public class SegmentBookieControlLogTest {
                             firstFailure.set(failure);
                             callbacks.countDown();
                         }));
+                Object firstCommand = queuedDataCommand(owner, 0);
+                var obligationField = firstCommand.getClass().getDeclaredField("obligation");
+                obligationField.setAccessible(true);
+                Object firstObligation = obligationField.get(firstCommand);
+                var completionField = firstObligation.getClass().getDeclaredField("completion");
+                completionField.setAccessible(true);
+                assertNotNull(completionField.get(firstObligation));
                 owner.start();
                 assertTrue(firstForce.await(5, TimeUnit.SECONDS));
                 assertTrue(driver.checkPublishedNormalDuplicate(bookie,
@@ -5688,6 +5742,7 @@ public class SegmentBookieControlLogTest {
                 assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
                         bookie.submitFence(fence(3, (byte) 5)).status());
                 assertThrows(IOException.class, bookie::close);
+                boolean unknownCallbackRetired = completionField.get(firstObligation) == null;
                 releaseSecond.countDown();
                 io.shutdown();
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
@@ -5702,6 +5757,7 @@ public class SegmentBookieControlLogTest {
                 }
                 assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
                         bookie.submitFence(fence(3, (byte) 5)).status());
+                assertTrue("Delivered UNKNOWN retains its completion while later I/O is held", unknownCallbackRetired);
             } finally {
                 releaseSecond.countDown();
                 io.shutdown();
