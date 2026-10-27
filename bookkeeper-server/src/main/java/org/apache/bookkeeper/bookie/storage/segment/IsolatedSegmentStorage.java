@@ -565,7 +565,18 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(metadata, "metadata");
         Objects.requireNonNull(domain, "domain");
         if (maxEvents < 1 || maxEvents > 4096 || timeout.isNegative() || timeout.isZero()
-                || timeout.compareTo(Duration.ofMinutes(1)) > 0 || controls == null || controls.isOwnerThread()) {
+                || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
+            throw new IllegalArgumentException("Delete catch-up requires a bounded cold caller");
+        }
+        SegmentBookieControlDriver originalControls;
+        synchronized (gate) {
+            if (closed) {
+                return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, null,
+                        CompletableFuture.completedFuture(null));
+            }
+            originalControls = controls;
+        }
+        if (originalControls == null || originalControls.isOwnerThread()) {
             throw new IllegalArgumentException("Delete catch-up requires a bounded cold caller");
         }
         long deadline = System.nanoTime() + timeout.toNanos();
@@ -658,7 +669,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 }
                 actual = new CompletableFuture<>();
                 var terminal = actual;
-                var store = new SegmentProfileInstallStore(controls, identity, Duration.ofNanos(remaining));
+                var store = new SegmentProfileInstallStore(originalControls, identity, Duration.ofNanos(remaining));
                 var result = store.conditionalApply(new ProtectedProfileStateStore.Transition(
                         request, authority.authority(), null), () -> terminal.complete(null));
                 switch (result.outcome()) {
@@ -2669,6 +2680,13 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                         hot.retireClosedState(execution);
                     }
                 }
+                Arrays.fill(writes, null);
+                Arrays.fill(reads, null);
+                Arrays.fill(hotDirectories, null);
+                Arrays.fill(drivers, null);
+                controls = null;
+                allocator = null;
+                execution = null;
                 closed = true;
             }
             return true;

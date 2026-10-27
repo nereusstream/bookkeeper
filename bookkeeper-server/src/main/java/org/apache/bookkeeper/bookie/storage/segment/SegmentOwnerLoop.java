@@ -146,6 +146,21 @@ final class SegmentOwnerLoop {
     private Runnable placementCheck;
     private Runnable controlMaintenance;
 
+    /** Fixed owner containers only; admitted commands, callbacks and platform threads retain their own owners. */
+    static long metadataCapacity(SegmentControlCapacity.Layout layout, int logicalShards, int workerCount,
+                                 int workerId, int capacity, int controlCapacity) {
+        if (logicalShards < 1 || logicalShards > 64 || workerCount < 1 || workerCount > logicalShards
+                || workerId < 0 || workerId >= workerCount || capacity < 1 || controlCapacity < 1) {
+            throw new IllegalArgumentException("Invalid fixed owner bounds");
+        }
+        int shards = (logicalShards - 1 - workerId) / workerCount + 1;
+        return SegmentControlCapacity.sum(layout.object(SegmentOwnerLoop.class), layout.object(Object.class),
+                layout.refs(logicalShards), layout.longs(logicalShards),
+                SegmentControlCapacity.times(2, layout.refs(logicalShards)),
+                SegmentControlCapacity.times(shards, layout.blockingQueue(capacity)),
+                layout.blockingQueue(capacity), SegmentControlCapacity.times(2, layout.blockingQueue(controlCapacity)));
+    }
+
     SegmentOwnerLoop(int logicalShards, int workerCount, int workerId, int capacity, int controlCapacity) {
         this(logicalShards, workerCount, workerId, capacity, controlCapacity,
                 task -> new Thread(task, "isolated-wal-owner-" + workerId));

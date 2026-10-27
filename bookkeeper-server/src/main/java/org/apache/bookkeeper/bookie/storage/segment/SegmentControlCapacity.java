@@ -189,6 +189,24 @@ final class SegmentControlCapacity {
             return refs(length);
         }
 
+        /** Fixed nonfair lock shells only; contended AQS queue nodes have a separate owner. */
+        long reentrantLock(int conditions) {
+            if (conditions < 0) {
+                throw new IllegalArgumentException("Negative condition count");
+            }
+            return sum(object("java.util.concurrent.locks.ReentrantLock"),
+                    object("java.util.concurrent.locks.ReentrantLock$NonfairSync"),
+                    times(conditions, object("java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject")));
+        }
+
+        /** ArrayBlockingQueue's fixed graph, excluding elements, iterators and contended waiter nodes. */
+        long blockingQueue(long capacity) {
+            if (capacity < 1) {
+                throw new IllegalArgumentException("Positive queue capacity required");
+            }
+            return sum(object("java.util.concurrent.ArrayBlockingQueue"), refs(capacity), reentrantLock(2));
+        }
+
         long string(int maxUtf8Bytes) {
             // UTF-16 storage has at most two bytes per UTF-8 input byte, including replaced surrogates.
             return sum(object(String.class), bytes(times(2, maxUtf8Bytes)));

@@ -3000,8 +3000,8 @@ public class SegmentProfileInitialSocketClientTest {
             long controlWorkingSet = SegmentControlCapacity.required(config, ServiceEpisode.CONTROL_LOG_BYTES);
             var service = SegmentProfileService.withOwnedResources(configuration,
                     new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, tls,
-                    new ProfileReceiveBudget(4L * 1024 * 1024 + controlWorkingSet, 131072 + controlWorkingSet,
-                            262144, 8, 8, 8),
+                    new ProfileReceiveBudget(SegmentControlCapacity.sum(4L * 1024 * 1024, controlWorkingSet,
+                            serviceRestartHeadroom(config)), 131072 + controlWorkingSet, 262144, 8, 8, 8),
                     131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
                     (caller, operation) -> caller.equals(principal),
                     (caller, scope, authority) -> caller.equals(principal) && scope.equals(authority.scope())
@@ -3319,11 +3319,16 @@ public class SegmentProfileInitialSocketClientTest {
                 Map.entry("BatchEntries", 1), Map.entry("BatchDelayMillis", 30000));
     }
 
-    private static long serviceReadHeadroom(IsolatedSegmentConfig config) throws java.io.IOException {
+    private static long serviceRestartHeadroom(IsolatedSegmentConfig config) throws java.io.IOException {
         var settings = serviceSettings(config);
-        return SegmentPointRead.runtimeCapacity(SegmentControlCapacity.Layout.hotSpot(),
-                config.logicalShards(), config.maxPendingEntries(), (Integer) settings.get("Workers"),
-                (Integer) settings.get("IoThreads"), (Integer) settings.get("Buffers"));
+        var execution = new SegmentExecutionGroup.Settings((Integer) settings.get("Workers"),
+                (Integer) settings.get("IoThreads"), (Integer) settings.get("ControlSlots"),
+                (Integer) settings.get("Buffers"), (Integer) settings.get("BufferBytes"),
+                ((Number) settings.get("InputBudgetBytes")).longValue(),
+                ((Number) settings.get("BufferBudgetBytes")).longValue(),
+                Duration.ofMillis(((Number) settings.get("StartupTimeoutMillis")).longValue()));
+        return SegmentControlCapacity.sum(SegmentPointRead.runtimeCapacity(config, execution),
+                SegmentExecutionGroup.metadataCapacity(config, execution));
     }
 
     private static StartupReadinessInput servicePolicy(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -3577,7 +3582,8 @@ public class SegmentProfileInitialSocketClientTest {
                 SegmentHotDirectory.metadataCapacity(config, execution, hotEntries),
                 SegmentDataRecovery.inventoryCapacity(config, coordinates),
                 SegmentDataPhysicalDriver.parsingCapacity(config, execution),
-                SegmentPointRead.runtimeCapacity(config, execution));
+                SegmentPointRead.runtimeCapacity(config, execution),
+                SegmentExecutionGroup.metadataCapacity(config, execution));
     }
 
     @Test
@@ -3708,7 +3714,43 @@ public class SegmentProfileInitialSocketClientTest {
                         SegmentHotDirectory.occupiedCapacity(config.logicalShards(), coordinates),
                         SegmentHotDirectory.metadataCapacity(config, execution, hotEntries),
                         SegmentDataRecovery.inventoryCapacity(config, coordinates),
-                        SegmentDataPhysicalDriver.parsingCapacity(config, execution));
+                        SegmentDataPhysicalDriver.parsingCapacity(config, execution),
+                        SegmentExecutionGroup.metadataCapacity(config, execution));
+                long heldBytes = ServiceEpisode.DATA_BYTES - oldBytes;
+                try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
+                    assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                    assertNull(episode.storage());
+                    assertFalse(Files.exists(config.directory()));
+                    assertEquals(heldBytes, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                    assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
+                    assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+                }
+                assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
+                assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileServiceRejectsMissingExecutionMetadataBudgetBeforeOpen() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                var execution = serviceExecution(episode);
+                var settings = serviceSettings(config);
+                int coordinates = (Integer) settings.get("IndexedEntries");
+                int hotEntries = (Integer) settings.get("HotEntries");
+                long oldBytes = SegmentControlCapacity.sum(execution.reservedBufferBytes(),
+                        SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES,
+                        SegmentHotDirectory.occupiedCapacity(config.logicalShards(), coordinates),
+                        SegmentHotDirectory.metadataCapacity(config, execution, hotEntries),
+                        SegmentDataRecovery.inventoryCapacity(config, coordinates),
+                        SegmentDataPhysicalDriver.parsingCapacity(config, execution),
+                        SegmentPointRead.runtimeCapacity(config, execution));
                 long heldBytes = ServiceEpisode.DATA_BYTES - oldBytes;
                 try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
                     assertThrows(java.io.IOException.class, () -> episode.service.start(false));
@@ -4090,7 +4132,7 @@ public class SegmentProfileInitialSocketClientTest {
                 var requested = servicePolicy(episodes.get(0).config, fixture.identities.get(0), 2);
                 var restarted = new ServiceEpisode(fixture, 0, episodes.get(0).config, requested, null,
                         new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, ownsResources,
-                        serviceReadHeadroom(episodes.get(0).config));
+                        serviceRestartHeadroom(episodes.get(0).config));
                 episodes.add(restarted);
                 restarted.replaceNode(fixture, 0, true, embedded);
                 var peer = restarted.persistent.readPeer("socket0:3181").peer();
@@ -4226,7 +4268,8 @@ public class SegmentProfileInitialSocketClientTest {
             var requested = SegmentNewScopeAccessTest.actualFallback(
                     servicePolicy(config, fixture.identities.get(0), 1), config, old);
             try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
-                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, false,
+                    serviceRestartHeadroom(config))) {
                 episode.replaceNode(fixture, 0, true);
                 assertTrue(episode.service.close(Duration.ofSeconds(5)));
             }
@@ -9756,7 +9799,7 @@ public class SegmentProfileInitialSocketClientTest {
                                 restartPolicy,
                                 restartPolicy.compatibility(), new InetSocketAddress("127.0.0.1", 0),
                                 sdk.getClientCtx().getScheduler(), false, scenario == 13,
-                                scenario == 12 ? serviceReadHeadroom(restartConfig) : 0) : null;
+                                scenario == 12 ? serviceRestartHeadroom(restartConfig) : 0) : null;
                         var crashed = scenario == 13 ? new RestoreCrashTarget(fixture, restart) : null) {
                     if (crashed != null) {
                         var control = ProfileInitialControlClient.connect(fixture.clientGroup, fixture.peerTls,
@@ -9998,7 +10041,8 @@ public class SegmentProfileInitialSocketClientTest {
                             var freshPolicy = servicePolicy(freshConfig, fresh, 1);
                             try (var service = new ServiceEpisode(fixture, 4, freshConfig, freshPolicy,
                                     freshPolicy.compatibility(), new InetSocketAddress("127.0.0.1", 0),
-                                    sdk.getClientCtx().getScheduler(), false, true, serviceReadHeadroom(freshConfig))) {
+                                    sdk.getClientCtx().getScheduler(), false, true,
+                                    serviceRestartHeadroom(freshConfig))) {
                                 service.replaceNode(fixture, 4, true);
                                 var registered = service.persistent.readPeer(fresh.bookieId().toString()).peer();
                                 assertNotNull(registered);
@@ -10126,7 +10170,7 @@ public class SegmentProfileInitialSocketClientTest {
                         try (var episode = new ServiceEpisode(fixture, 3, targetConfig, requested,
                                 requested.compatibility(), new InetSocketAddress("127.0.0.1", 0),
                                 sdk.getClientCtx().getScheduler(), snapshotBootstrap, false,
-                                serviceReadHeadroom(targetConfig))) {
+                                serviceRestartHeadroom(targetConfig))) {
                             if (scenario == 16) {
                                 var publication = (HeldServicePublicationClient) episode.client;
                                 publication.loseReadinessReply = true;

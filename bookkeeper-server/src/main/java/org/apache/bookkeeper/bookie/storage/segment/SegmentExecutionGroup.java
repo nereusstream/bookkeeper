@@ -102,6 +102,44 @@ final class SegmentExecutionGroup {
     private volatile String degradation;
     private volatile String runtimeFailure;
 
+    /**
+     * Known fixed execution/pool Java metadata, separate from aligned backing bytes and operation fees.
+     * Dynamic Input graphs, thread tracking/ThreadLocal/CPU topology, executor Workers, AQS waiters,
+     * cleaners, leak trackers and native resources are outside this deliberately bounded component.
+     */
+    static long metadataCapacity(IsolatedSegmentConfig config, Settings settings) throws IOException {
+        return metadataCapacity(config, settings, SegmentControlCapacity.Layout.hotSpot());
+    }
+
+    static long metadataCapacity(IsolatedSegmentConfig config, Settings settings,
+                                 SegmentControlCapacity.Layout layout) {
+        if (settings.workers() > config.logicalShards() || settings.workers() > config.maxPendingEntries()) {
+            throw new IllegalArgumentException("Workers exceed logical shards or global pending capacity");
+        }
+        long containers = SegmentControlCapacity.sum(layout.object(SegmentExecutionGroup.class),
+                layout.object(SegmentEntryInputs.class),
+                layout.refs(settings.workers()), layout.object(CountDownLatch.class),
+                layout.object("java.util.concurrent.CountDownLatch$Sync"),
+                SegmentIoExecutor.metadataCapacity(layout, settings.ioThreads() - 1, config.maxPendingEntries(),
+                        1, settings.controlSlots()));
+        long pools = 0;
+        for (int worker = 0; worker < settings.workers(); worker++) {
+            int pending = share(config.maxPendingEntries(), settings.workers(), worker);
+            int controls = share(settings.controlSlots(), settings.workers(), worker);
+            int buffers = share(settings.buffers(), settings.workers(), worker);
+            long poolContainers = SegmentBufferPool.containerMetadataCapacity(layout, buffers);
+            containers = SegmentControlCapacity.sum(containers, poolContainers,
+                    SegmentOwnerLoop.metadataCapacity(layout, config.logicalShards(), settings.workers(), worker,
+                            pending, controls));
+            pools = SegmentControlCapacity.sum(pools,
+                    SegmentBufferPool.metadataCapacity(layout, buffers) - poolContainers);
+        }
+        // A PREFER binding failure retains its joined original group while constructing and returning fallback.
+        // Pool.close has released its Slots; the original group's empty owner/I/O/pool containers still coexist.
+        return SegmentControlCapacity.sum(layout.object(Settings.class), layout.object(Duration.class), pools,
+                SegmentControlCapacity.times(config.affinity().equals("PREFER") ? 2 : 1, containers));
+    }
+
     static SegmentExecutionGroup start(IsolatedSegmentConfig config, Settings settings) throws IOException {
         return start(config, settings, POOLS);
     }
@@ -555,6 +593,10 @@ final class SegmentExecutionGroup {
     }
 
     private int share(int total, int worker) {
-        return total / owners.length + (worker < total % owners.length ? 1 : 0);
+        return share(total, owners.length, worker);
+    }
+
+    private static int share(int total, int workers, int worker) {
+        return total / workers + (worker < total % workers ? 1 : 0);
     }
 }

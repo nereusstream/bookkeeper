@@ -76,6 +76,43 @@ final class SegmentBufferPool implements AutoCloseable {
     private volatile int outstanding;
     private boolean closed;
 
+    /**
+     * Fixed pool Java graph. Aligned backing bytes, leases/caller views, native allocation, cleaners and
+     * leak-tracker graphs retain their separate owners; a leak-aware ByteBuf wrapper shell is included.
+     */
+    static long metadataCapacity(SegmentControlCapacity.Layout layout, int count) {
+        if (count < 1) {
+            throw new IllegalArgumentException("Positive fixed pool capacity required");
+        }
+        long root = Math.max(layout.object("io.netty.buffer.UnpooledByteBufAllocator"
+                        + "$InstrumentedUnpooledUnsafeNoCleanerDirectByteBuf"),
+                Math.max(layout.object("io.netty.buffer.UnpooledByteBufAllocator"
+                                + "$InstrumentedUnpooledUnsafeDirectByteBuf"),
+                        layout.object("io.netty.buffer.UnpooledByteBufAllocator"
+                                + "$InstrumentedUnpooledDirectByteBuf")));
+        long leakWrapper = Math.max(layout.object("io.netty.buffer.SimpleLeakAwareByteBuf"),
+                layout.object("io.netty.buffer.AdvancedLeakAwareByteBuf"));
+        long nio = Math.max(layout.object("java.nio.DirectByteBuffer"), layout.object("java.nio.DirectByteBufferR"));
+        long slot = SegmentControlCapacity.sum(layout.object(Slot.class), root, leakWrapper,
+                layout.object("io.netty.util.internal.RefCnt"),
+                SegmentControlCapacity.times(2, nio)); // Netty root NIO and persistent Slot.view.
+        // Construction within one pool is sequential; old aligned and current region/aligned views may coexist.
+        return SegmentControlCapacity.sum(containerMetadataCapacity(layout, count),
+                SegmentControlCapacity.times(count, slot), SegmentControlCapacity.times(3, nio),
+                layout.object("java.util.ArrayDeque$DeqIterator"));
+    }
+
+    /** Successful close releases Slots but leaves these empty fixed containers on the closed pool. */
+    static long containerMetadataCapacity(SegmentControlCapacity.Layout layout, int count) {
+        if (count < 1) {
+            throw new IllegalArgumentException("Positive fixed pool capacity required");
+        }
+        // JDK 17/21 ArrayDeque(count) keeps count+1 slots, with a special Integer.MAX_VALUE branch.
+        long freeSlots = count == Integer.MAX_VALUE ? count : (long) count + 1;
+        return SegmentControlCapacity.sum(layout.object(SegmentBufferPool.class), layout.captured(1),
+                layout.object(ArrayDeque.class), layout.refs(freeSlots), layout.blockingQueue(count));
+    }
+
     SegmentBufferPool(int ownerId, long generation, int count, int bytesPerBuffer, int alignment,
                       boolean ownerTouch, Runnable wakeOwner) {
         if (ownerId < 0 || generation < 1 || count < 1 || bytesPerBuffer < 1

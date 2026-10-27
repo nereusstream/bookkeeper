@@ -38,6 +38,28 @@ final class SegmentIoExecutor {
     private final ThreadPoolExecutor controlExecutor;
     private final Runnable beforeOperation;
 
+    /** Known executor/container shells; Worker, Thread, thread registries and AQS waiters remain outside this fee. */
+    static long metadataCapacity(SegmentControlCapacity.Layout layout, int dataThreads, int dataQueueCapacity,
+                                 int controlThreads, int controlQueueCapacity) {
+        if (dataThreads < 1 || dataQueueCapacity < 1 || controlThreads < 0
+                || (controlThreads == 0 ? controlQueueCapacity != 0 : controlQueueCapacity < 1)) {
+            throw new IllegalArgumentException("Invalid I/O bounds");
+        }
+        // Both executors share the group's one thread factory and its sequence counter.
+        long fixed = SegmentControlCapacity.sum(layout.object(SegmentIoExecutor.class), layout.captured(8),
+                layout.object(AtomicInteger.class), layout.captured(1),
+                executorMetadataCapacity(layout, dataThreads, dataQueueCapacity));
+        return controlThreads == 0 ? fixed : SegmentControlCapacity.sum(fixed,
+                executorMetadataCapacity(layout, controlThreads, controlQueueCapacity));
+    }
+
+    private static long executorMetadataCapacity(SegmentControlCapacity.Layout layout, int threads, int capacity) {
+        return SegmentControlCapacity.sum(layout.object(ThreadPoolExecutor.class), layout.object(AtomicInteger.class),
+                layout.blockingQueue(capacity), layout.reentrantLock(1),
+                layout.object(ThreadPoolExecutor.AbortPolicy.class), layout.hashSet(),
+                SegmentControlCapacity.times(threads, layout.hashEntry()));
+    }
+
     SegmentIoExecutor(int threads, int queueCapacity) {
         this(threads, queueCapacity, defaultFactory(), null);
     }

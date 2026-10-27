@@ -1704,3 +1704,39 @@ owner 已失败时，driver 仅在原实际 I/O completion、或原 Command.fail
 本轮仅证明所列内部强引用按真实终态退休与原行为回归；测试自己保存的reservation/closed facade属于外部alias，不声称立即GC、独占retained heap、native释放量、RSS下降或性能收益。没有新增布局/JVM测量或执行TLC，历史probe/model不移绑；统一full-bytes/B11、Main具体issuer/受保护装载、完整G1及其余16步仍OPEN，完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
 验收后按实际终态、lsof、inode与SHA核对移除3个本轮native临时根（13文件、1223559逻辑字节），全部硬链接归档保留，常规文件数据回收量为0；失败回执、测试和原source绑定保留。
+
+
+## 执行与池的固定 Java 容量和关闭退根
+
+2026-10-28在父源码 `c47443123355be67b71f81396d239e37704d8752` 上，将原 execution/owner/I/O/pool 的已知固定 Java 元数据作为第八项加入同一个 service DATA 常驻预留；原 aligned backing、hot、inventory、parser、read 与 CONTROL 额度继续独立计费。没有新线程、队列、配置开关、normal Add 的逐条 credit/atomic 或 MetadataStore 往返，不扩大生产 quota。此前只预留 backing 字节，固定队列数组、Slot、实际 Netty/NIO header 等未列入同一启动合同。
+
+计量直接复用原 Layout。令 S为logicalShards、W为workers、P为全局pending、K为controlSlots、B为buffers，各owner的实际share为p_w/k_w/b_w，所属shard数为s_w。Owner/I/O共有 `S+3W+2` 个 ArrayBlockingQueue，items总容量为 `Σ(s_w*p_w)+2P+3K`；owner另有W份长度S的data目录、deadlines、due与maintenance数组。固定锁/sync/两个condition壳计入，元素与contended AQS waiter不混作固定容量。I/O另计两个executor的ctl、main lock/termination、AbortPolicy、worker-set容器及共享factory/counter壳，Worker/Thread实现图不在该费用内。
+
+Pool为W个池、总B个Slot；free ArrayDeque各有b_w+1 reference槽，returns各有b_w槽。每Slot计具体三种instrumented direct ByteBuf root的最大header、可能的leak-aware wrapper壳、独立 `io.netty.util.internal.RefCnt`、root NIO与持久Slot.view；每owner另留顺序构造临时view窗口。原 `B*(bufferBytes+4095)` 只付backing，不重复相加。Group额外汇总自身、单Inputs账本浅体、owners目录、latch/sync及Settings/Duration。PREFER绑定失败的原线程已join、pool已close后，旧空容器仍与fallback启动重叠，故额外付旧Group/Owner/I/O/Pool容器，不再乘已释放的Slot/backing；Linux实际fallback本轮未执行。
+
+新增费用同时要求原storage的内部执行根在成功关闭后退休：原实际execution termination、caller input归零和全部native close成功之后，先沿原inventory/hot退休，再在同一gate清空writes/reads/hotDirectories/drivers的元素及controls/allocator/execution。保留final数组空壳与诊断身份。超时、中断及本次关闭失败不触及这些别名；后续cleanup retry沿原语义，不新增sticky失败合同或改变failed DATA session的持久关闭/恢复接受条件。dataWorkingSet仍在storage成功返回之后摘除、归还，原重入与self-drain保护保持。
+
+RED阶段已有五个pure fee helper文件，但Service收费和Storage退根仍为父实现；三项真实验证实际2 failure、0 error/skip：旧service在仅有旧七项额度时仍能打开storage，成功关闭后execution仍非null。真实force失败分支保持执行图且closed=false，按原断言通过。接线和退根后两份整测试文件同字节，九项定向全部通过，包括原五条预算negative（仅缺各自目标费用，其余当前费用足额）、held loan/失败关闭和owned SDK实际drain/restart。默认4MiB夹具及不足额度没有扩容；仅原四个成功restart点按原read费加新增execution费精确补足恢复余量。
+
+四个独立JVM最终验证包含小型S4/W2/P16/K5/I3/B4、大型S4/W2/P256/K6/I3/B32和余数分摊S5/W3/P17/K7/I4/B8。各Owner/I/O/Pool子图、Group选定固定图及关闭后的空容器图均不超公式；每池RefCnt=b_w、全组RefCnt=B，持久NIO=2B。实际root为Netty4.2.15的InstrumentedUnpooledUnsafeDirectByteBuf；其他候选header的浅布局上界单列，未称实际走过全部allocator变体。大型图结果如下：
+
+| JVM | 选定固定图实际字节 | 模型字节 |
+| --- | ---: | ---: |
+| HotSpot21 compressed8 | 16280 | 41176 |
+| HotSpot21 wide8 | 25680 | 41176 |
+| HotSpot21 compressed256 | 79872 | 355264 |
+| HotSpot17 compressed8 | 16264 | 41160 |
+
+测量版本编译、四Java和runner均exit0、无超时或后处理错误；1194项测量输入、387个冻结class/target前后SHA、实际CodeSource及Netty buffer/common jar/class资源核对一致。12个OFF Group都真实shutdown/terminated，关闭选定图不再有Slot/Netty root/RefCnt/NIO。PREFER费用只与已关闭OFF容器图的静态差额核对，Linux真实fallback未执行，不能把它写成硬件/affinity验收。
+
+首轮探针在Owner/Pool已过后误走了已声明排除的JDK21 SharedThreadContainer线程注册图，Java/runner实际exit1；仅修边界的独立重试及其原输入保留。最终边界审计又确认Netty root.refCnt是每buffer独占的RefCnt（仅volatile int），初版过滤图没有分类；旧fee纳入Counter的观察也独立保留，未当作最终账本。生产公式显式补列该固定对象后，同一九项方法再次全部通过，并在最终class上独立重跑上述四JVM。旧scope、首轮错误和pre-counter源码绑定均保留；数值断言保持，线程注册图继续排除，独立Counter显式计费。
+
+首次完整SDK整类为238项、1 failure/4 error/0 skip，原回执保留。三项readiness bridge原本合法地在成功close后取得QUARANTINED；controls退根后旧cold-caller前置guard改抛IllegalArgumentException。修正将有效参数校验保留，在gate下对closed直接返回QUARANTINED，并捕获原controller供已开始的冷调用使用，避免并发退根后的null；不保留整个执行图来维持诊断。另两项是已有旧Classic受控重启、scenario13原native restore child自身的预算未补新固定费；仅在这两个成功restart预算点复用同配置的精确read+execution headroom，保持默认quota、负向方法、identity/policy、crash与unclosed断言。原五项失败加九项定向共14方法在修正后全部通过。
+
+上述四JVM仍绑定measurement manifest `9741af4b…`，未移绑为修正后的1194项源码直接执行。后续业务修正只变Storage与SDK测试，1192项源码（含全部费用模型）不变；最终target中376个class字节相同，11个差异均为原四JVM从未加载的Storage家族，14个实测加载的冻结生产class全部相同。另有8个overlay外CPU/native/Input异常类未留原binary SHA，等价审计只核其声明排除范围和可核源码，不声称整个classpath二进制等价。测量固定图及fee/header模型可复用，业务修正由新的实际回归验证，不重跑无变化的四JVM。
+
+修正后307项本地整类与238项SDK整类分别复验：合并545个用例身份全部匹配，540通过、零failure/error，仅五项Linux专属测试按平台条件跳过。Bookie整份RED测试、SDK六条缺费方法及LAC计费方法/observer保持原字节；SDK成功夹具的两个预算修正独立留档，不称整份SDK测试一直未变。最终1194输入/1179 native子集与实际源码一致，Spotless/Checkstyle exit0；独立RAT实际exit1，443个原路径与父c474431233字节全同，无新增。全部源码、阶段输入/命令/XML、失败、最终probe与等价审计位于 `/Users/liusinan/.codex/artifacts/unified-wal/execution-pool-metadata-evidence-c4744312`。
+
+此增量只闭合声明的固定队列/池Java组件与所列内部别名；不证明完整独占retained heap、实际同时峰值/状态数/寿命、native/RSS或性能。动态Input及Entry/bulk源图、释放后内部旧源引用、Thread/registry/ThreadLocal/Worker、AQS waiters、CPU/plan、cleaner/leak tracker/JCA/native及其余full-bytes/B11仍OPEN。下一Input包须同时计预admission的 `N=floor(inputBudgetBytes/36)` 和实际源退休，不能仅按P或refCnt0结案。TLA未改、TLC未执行，旧模型不移绑；Main issuer/受保护装载、完整G1及其余16步继续OPEN，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+验收后核对terminal、lsof、inode与SHA，移除8个本轮native临时运行根（40文件、13938393逻辑字节），全部硬链接归档保留，常规文件数据回收量为0。探针只建真实Group/原生pool，未创建文件storage/fixture目录；各尝试的原源码、class、错误和旧绑定均保留。

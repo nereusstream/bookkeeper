@@ -6678,8 +6678,20 @@ public class SegmentBookieControlLogTest {
                 assertTrue(io.writes > 0);
                 assertEquals(1, io.forces);
             }
+            List<Object> roots = storageExecutionRoots(storage);
+            for (Object root : roots) {
+                assertNotNull(root);
+            }
+            SegmentExecutionGroup execution = (SegmentExecutionGroup) roots.get(0);
             IOException failed = assertThrows(IOException.class, storage::close);
             assertTrue(failed.getMessage(), failed.getMessage().contains("Failed DATA session must remain unclosed"));
+            List<Object> retained = storageExecutionRoots(storage);
+            for (int i = 0; i < roots.size(); i++) {
+                assertSame(roots.get(i), retained.get(i));
+            }
+            assertFalse((boolean) storageField(storage, "closed"));
+            assertTrue(execution.terminated());
+            assertEquals(0, execution.inputs().usedBytes());
         }
     }
 
@@ -8585,6 +8597,17 @@ public class SegmentBookieControlLogTest {
         var field = IsolatedSegmentStorage.class.getDeclaredField(name);
         field.setAccessible(true);
         return field.get(storage);
+    }
+
+    private static List<Object> storageExecutionRoots(IsolatedSegmentStorage storage) throws Exception {
+        List<Object> roots = new ArrayList<>();
+        for (String name : List.of("execution", "controls", "allocator")) {
+            roots.add(storageField(storage, name));
+        }
+        for (String name : List.of("writes", "reads", "hotDirectories", "drivers")) {
+            roots.addAll(Arrays.asList((Object[]) storageField(storage, name)));
+        }
+        return roots;
     }
 
     private SegmentBatchFormat.Address storageWriteAfterControlRotation(IsolatedSegmentStorage storage, long entryId)
@@ -10963,9 +10986,18 @@ public class SegmentBookieControlLogTest {
             Object inventory = inventoryField.get(files);
             assertNotNull(inventory);
             SegmentBookieControlDriver controls = storage.controls();
+            List<Object> executionRoots = storageExecutionRoots(storage);
+            for (Object root : executionRoots) {
+                assertNotNull(root);
+            }
+            SegmentExecutionGroup execution = (SegmentExecutionGroup) executionRoots.get(0);
             ReadReply read = storageRead(storage, context(), 1);
             try (SegmentPointRead.LeasedResult result = read.result()) {
                 assertFalse(storage.close(Duration.ofMillis(50)));
+                List<Object> retained = storageExecutionRoots(storage);
+                for (int i = 0; i < executionRoots.size(); i++) {
+                    assertSame(executionRoots.get(i), retained.get(i));
+                }
                 coordinates = 0;
                 for (int shard = 0; shard < hot.length; shard++) {
                     for (int field = 0; field < fields.size(); field++) {
@@ -11006,6 +11038,14 @@ public class SegmentBookieControlLogTest {
                 }
             }
             assertNull(inventoryField.get(files));
+            assertTrue(execution.terminated());
+            assertEquals(0, execution.inputs().usedBytes());
+            for (Object root : storageExecutionRoots(storage)) {
+                assertNull(root);
+            }
+            assertThrows(IllegalStateException.class, storage::controls);
+            assertFalse(storage.submitRead(context(), 1, new SegmentPointRead.ReadRequest(
+                    (status, reply, cause) -> fail("Closed storage accepted a read"))));
             assertTrue(storage.close(Duration.ofSeconds(5)));
         }
         try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
