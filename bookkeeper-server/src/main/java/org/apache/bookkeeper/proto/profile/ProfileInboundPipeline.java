@@ -66,6 +66,16 @@ public final class ProfileInboundPipeline {
                            int maxNormalBodyBytes, int maxRecoveryBodyBytes,
                            ChannelInboundHandler application, boolean initialControl)
             throws SecurityException {
+        return install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
+                maxNormalBodyBytes, maxRecoveryBodyBytes, application, initialControl, 0);
+    }
+
+    /** The storage application supplies its computed frame metadata price before any fixed-header parse. */
+    public static boolean install(ChannelPipeline pipeline, TLSContextFactory tls,
+                           ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
+                           int maxNormalBodyBytes, int maxRecoveryBodyBytes,
+                           ChannelInboundHandler application, boolean initialControl, int frameMetadataBytes)
+            throws SecurityException {
         Objects.requireNonNull(pipeline, "pipeline");
         Objects.requireNonNull(tls, "tls");
         Objects.requireNonNull(budget, "budget");
@@ -77,7 +87,7 @@ public final class ProfileInboundPipeline {
         }
         try {
             ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(
-                    budget, permit, connectionLimit, connectionBaseBytes);
+                    budget, permit, connectionLimit, connectionBaseBytes, frameMetadataBytes);
             decoder.limitNormalBody(maxNormalBodyBytes);
             decoder.limitRecoveryBody(maxRecoveryBodyBytes);
             if (initialControl) {

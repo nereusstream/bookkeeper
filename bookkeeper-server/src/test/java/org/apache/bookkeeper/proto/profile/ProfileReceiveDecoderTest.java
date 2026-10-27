@@ -58,6 +58,15 @@ public class ProfileReceiveDecoderTest {
         return new ProfileReceiveDecoder(budget, permit, limit, base);
     }
 
+    private static EmbeddedChannel pricedChannel(ProfileReceiveBudget budget, int metadataBytes) {
+        var permit = budget.admitUnclassified();
+        assertNotNull(permit);
+        var channel = new EmbeddedChannel();
+        channel.config().setAllocator(new ProfileByteBufAllocator(permit));
+        channel.pipeline().addLast(new ProfileReceiveDecoder(budget, permit, 4096, 64, metadataBytes));
+        return channel;
+    }
+
     private static byte[] frame(ProfileOperation operation, int bodyBytes) {
         return ProfileFrameCodec.encode(ProfileFrame.request(operation, 1, new byte[bodyBytes]));
     }
@@ -97,6 +106,125 @@ public class ProfileReceiveDecoderTest {
         }
         assertTrue(serverTls.handshakeFuture().isSuccess());
         assertTrue(clientTls.handshakeFuture().isSuccess());
+    }
+
+    @Test
+    public void pricedHeaderAndFrameFollowDataLaneAndTheFinalRetainedView() {
+        var budget = new ProfileReceiveBudget(16384, 4096, 4096, 8, 8, 4);
+        int metadata = 128;
+        EmbeddedChannel channel = pricedChannel(budget, metadata);
+        io.netty.buffer.ByteBuf view = null;
+        try {
+            byte[] hello = hello();
+            assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(hello, 1))));
+            assertEquals(64 + metadata, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(hello, 1, hello.length))));
+            ProfileInboundFrame greeting = channel.readInbound();
+            greeting.close();
+            channel.pipeline().get(ProfileReceiveDecoder.class).markEstablished();
+            byte[] add = frame(ProfileOperation.ADD_NORMAL, 1024);
+            assertFalse(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(add, 36))));
+            assertEquals(64 + metadata + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOfRange(add, 36, add.length))));
+            ProfileInboundFrame received = channel.readInbound();
+            view = received.body().retainedSlice(0, 16);
+            received.close();
+            channel.finish();
+            assertEquals(metadata + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertFalse(budget.closeAdmissionAndDrain().isDone());
+            view.release();
+            view = null;
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertTrue(budget.closeAdmissionAndDrain().isDone());
+        } finally {
+            if (view != null && view.refCnt() > 0) {
+                view.release();
+            }
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void missingMetadataCreditRejectsTheFirstHeaderByte() {
+        int metadata = 128;
+        var budget = new ProfileReceiveBudget(4096, 1024, 64 + metadata - 1, 8, 8, 4);
+        EmbeddedChannel channel = pricedChannel(budget, metadata);
+        try {
+            assertThrows(IOException.class,
+                    () -> channel.writeInbound(Unpooled.wrappedBuffer(Arrays.copyOf(hello(), 1))));
+            assertFalse(channel.isActive());
+            assertNull(channel.readInbound());
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertTrue(budget.closeAdmissionAndDrain().isDone());
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void insufficientBackingGrowthReturnsThePrepaidHeaderMetadata() {
+        int metadata = 128;
+        byte[] hello = hello();
+        var budget = new ProfileReceiveBudget(4096, 1024, 64 + metadata + 2 * hello.length - 1, 8, 8, 4);
+        EmbeddedChannel channel = pricedChannel(budget, metadata);
+        try {
+            assertThrows(IOException.class, () -> channel.writeInbound(Unpooled.wrappedBuffer(hello)));
+            assertFalse(channel.isActive());
+            assertNull(channel.readInbound());
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertTrue(budget.closeAdmissionAndDrain().isDone());
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void controlAuthorizationTransfersOrRefusesTheWholeWeightedFrame() throws IOException {
+        int metadata = 128;
+        byte[] install = frame(ProfileOperation.INSTALL, 20);
+        int needed = 64 + metadata + install.length + 100;
+        for (boolean enough : List.of(false, true)) {
+            var budget = new ProfileReceiveBudget(16384, enough ? needed : needed - 1, 4096, 8, 8, 4);
+            EmbeddedChannel channel = pricedChannel(budget, metadata);
+            ProfileInboundFrame received = null;
+            ProfileInboundPipeline.ResponseCredit workspace = null;
+            try {
+                assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(hello())));
+                ProfileInboundFrame greeting = channel.readInbound();
+                greeting.close();
+                var receiver = channel.pipeline().get(ProfileReceiveDecoder.class);
+                receiver.markEstablished();
+                assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(install)));
+                received = channel.readInbound();
+                workspace = receiver.reserveResponse(100);
+                assertEquals(needed, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                if (enough) {
+                    receiver.markControlAuthorized(received, workspace);
+                    assertEquals(needed, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                    assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                } else {
+                    var request = received;
+                    var held = workspace;
+                    assertThrows(IOException.class, () -> receiver.markControlAuthorized(request, held));
+                    assertFalse(channel.isActive());
+                    assertEquals(needed - 64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(100, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                }
+            } finally {
+                if (received != null) {
+                    received.close();
+                }
+                if (workspace != null) {
+                    workspace.close();
+                }
+                channel.finishAndReleaseAll();
+            }
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            assertTrue(budget.closeAdmissionAndDrain().isDone());
+        }
     }
 
     @Test

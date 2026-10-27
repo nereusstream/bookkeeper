@@ -125,6 +125,28 @@ public final class ProfileReceiveBudget {
             }
         }
 
+        /** Extend one pre-header frame reservation before allocating its validated backing capacity. */
+        boolean grow(int requested) {
+            if (requested < 1) {
+                throw new IllegalArgumentException("Positive frame credit growth required");
+            }
+            synchronized (ProfileReceiveBudget.this) {
+                if (closed || workspace || connection == null || connection.closed) {
+                    throw new IllegalStateException("Frame growth requires a live backing reservation");
+                }
+                if (requested > connection.byteLimit - connection.bytes
+                        || requested > limits[lane.ordinal()] - usedBytes[lane.ordinal()]) {
+                    return false;
+                }
+                bytes += requested;
+                usedBytes[lane.ordinal()] += requested;
+                connection.bytes += requested;
+                connectionBytes += requested;
+                connection.peakBytes = Math.max(connection.peakBytes, connection.bytes - connection.workspaceBytes);
+                return true;
+            }
+        }
+
         Credit split(int size) {
             synchronized (ProfileReceiveBudget.this) {
                 if (closed || size < 0 || size > bytes) {

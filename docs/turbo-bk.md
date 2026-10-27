@@ -971,3 +971,6 @@ Segment production candidate 的最低 Gate：
 
 
 [Handler Pending 核心元数据](rfcs/unified-wal/implementation/local-storage/README.md#handler-pending-核心元数据)：2026-10-28父26ec583289上，原ResponseCredit在Pending/timeout创建前加计已知核心与回调壳，原CONTROL转移、终态门和quota不变。真实socket RED/GREEN与有限header witness由canonical拥有；decoder/codec/完整transport及raw入口、B11/Main issuer/完整G1仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[接收 frame 元数据与 backing 终态](rfcs/unified-wal/implementation/local-storage/README.md#接收-frame-元数据与-backing-终态)：2026-10-28父5331415a09上，service在首个header字节前用原credit预留已知metadata，完整校验后grow backing；CONTROL整帧转移、weighted resize及最后view归还均沿用原总账。原通用pipeline重载及quota不变，真实RED/GREEN与有限对象图由canonical拥有；full-bytes/B11、Main issuer、完整G1与生产Gate仍OPEN，完整目标active，OFF/SYSTEM/PARK与disabled保持。

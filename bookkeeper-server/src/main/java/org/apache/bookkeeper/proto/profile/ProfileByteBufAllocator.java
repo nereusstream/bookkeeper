@@ -63,8 +63,16 @@ final class ProfileByteBufAllocator extends AbstractByteBufAllocator {
 
     /** Caller retains its reservation if construction fails; the root owns it only on success. */
     ByteBuf adopt(ProfileReceiveBudget.Credit credit, int capacity) {
-        credit.require(connection, capacity);
-        return new ChargedDirect(capacity, capacity, credit);
+        return adopt(credit, capacity, 0);
+    }
+
+    /** The same backing owner retains the frame's priced metadata until its final view is released. */
+    ByteBuf adopt(ProfileReceiveBudget.Credit credit, int capacity, int metadataBytes) {
+        if (metadataBytes < 0) {
+            throw new IllegalArgumentException("Negative frame metadata capacity");
+        }
+        credit.require(connection, Math.addExact(capacity, metadataBytes));
+        return new ChargedDirect(capacity, capacity, credit, metadataBytes);
     }
 
     boolean owns(ByteBuf buffer) {
@@ -118,10 +126,17 @@ final class ProfileByteBufAllocator extends AbstractByteBufAllocator {
 
     private final class ChargedDirect extends UnpooledDirectByteBuf {
         private ProfileReceiveBudget.Credit credit;
+        private final int metadataBytes;
 
         private ChargedDirect(int initialCapacity, int maxCapacity, ProfileReceiveBudget.Credit credit) {
+            this(initialCapacity, maxCapacity, credit, 0);
+        }
+
+        private ChargedDirect(int initialCapacity, int maxCapacity, ProfileReceiveBudget.Credit credit,
+                              int metadataBytes) {
             super(ProfileByteBufAllocator.this, initialCapacity, maxCapacity);
             this.credit = credit;
+            this.metadataBytes = metadataBytes;
         }
 
         @Override
@@ -130,7 +145,7 @@ final class ProfileByteBufAllocator extends AbstractByteBufAllocator {
             if (capacity == capacity()) {
                 return this;
             }
-            ProfileReceiveBudget.Credit replacement = reserve(capacity);
+            ProfileReceiveBudget.Credit replacement = reserve(Math.addExact(capacity, metadataBytes));
             int reader = readerIndex();
             int writer = writerIndex();
             try {

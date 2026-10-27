@@ -66,6 +66,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
     private final ProfileReceiveBudget budget;
     private final ProfileReceiveBudget.ConnectionPermit connectionPermit;
     private final int connectionBaseBytes;
+    private final int frameMetadataBytes;
     private int maxNormalBodyBytes = ProfileFrameCodec.ABSOLUTE_FRAME_MAX;
     private int maxRecoveryBodyBytes = ProfileFrameCodec.ABSOLUTE_FRAME_MAX;
     private final byte[] fixedHeader = new byte[FIXED_HEADER_BYTES];
@@ -89,19 +90,29 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     ProfileReceiveDecoder(ProfileReceiveBudget budget, ProfileReceiveBudget.ConnectionPermit connectionPermit,
                           int connectionLimit, int connectionBaseBytes) {
+        this(budget, connectionPermit, connectionLimit, connectionBaseBytes, 0);
+    }
+
+    ProfileReceiveDecoder(ProfileReceiveBudget budget, ProfileReceiveBudget.ConnectionPermit connectionPermit,
+                          int connectionLimit, int connectionBaseBytes, int frameMetadataBytes) {
         this.budget = Objects.requireNonNull(budget, "budget");
         this.connectionPermit = Objects.requireNonNull(connectionPermit, "connectionPermit");
-        if (connectionBaseBytes < FIXED_HEADER_BYTES || connectionLimit <= connectionBaseBytes) {
+        if (connectionBaseBytes < FIXED_HEADER_BYTES || connectionLimit <= connectionBaseBytes
+                || frameMetadataBytes < 0) {
             throw new IllegalArgumentException("Invalid fixed connection or receive limit");
         }
         connectionPermit.limit(connectionLimit);
         this.connectionBaseBytes = connectionBaseBytes;
+        this.frameMetadataBytes = frameMetadataBytes;
     }
 
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
         context = ctx;
         try {
+            if (frameMetadataBytes != 0 && !(ctx.alloc() instanceof ProfileByteBufAllocator)) {
+                throw new IOException("Priced frame metadata requires the charged backing allocator");
+            }
             baseCredit = charge(connectionBaseBytes);
         } catch (IOException failure) {
             ctx.close();
@@ -267,6 +278,10 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 if (firstRequestDelivered && purpose == ConnectionPurpose.CONTROL_PENDING) {
                     throw new IOException("Profile control request is not authorized yet");
                 }
+                if (frameMetadataBytes != 0 && frameCredit == null) {
+                    // Reserve before copying or inspecting even an incomplete fixed header.
+                    frameCredit = charge(frameMetadataBytes);
+                }
                 if (headerRead == 0 && firstRequestDelivered
                         && (purpose == ConnectionPurpose.DATA || purpose == ConnectionPurpose.CONTROL)) {
                     armDeadline(FIRST_REQUEST_TIMEOUT_MILLIS);
@@ -280,17 +295,28 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 ProfileFrameCodec.InspectedHeader inspected = ProfileFrameCodec.inspectHeader(fixedHeader, phase);
                 validatePurpose(inspected.header());
                 classify(inspected.header());
-                HeldCredit reserved = charge(inspected.frameBytes());
+                HeldCredit reserved;
+                if (frameCredit == null) {
+                    reserved = charge(inspected.frameBytes());
+                } else {
+                    reserved = frameCredit;
+                    if (!reserved.shared.grow(inspected.frameBytes())) {
+                        throw new IOException("Connection or Bookie Profile receive capacity exhausted");
+                    }
+                }
                 ByteBuf allocated = null;
                 try {
                     if (ctx.alloc() instanceof ProfileByteBufAllocator allocator) {
-                        allocated = allocator.adopt(reserved.shared, inspected.frameBytes());
+                        allocated = allocator.adopt(reserved.shared, inspected.frameBytes(), frameMetadataBytes);
                         reserved.backingOwned = true;
                     } else {
                         allocated = ctx.alloc().buffer(inspected.frameBytes(), inspected.frameBytes());
                     }
                     allocated.writeBytes(fixedHeader);
                 } catch (RuntimeException | Error failure) {
+                    if (frameCredit == reserved) {
+                        frameCredit = null;
+                    }
                     if (allocated != null) {
                         allocated.release();
                     }
@@ -386,7 +412,11 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             purpose = ConnectionPurpose.CONTROL_PENDING;
             return;
         }
-        if (!budget.transfer(ProfileReceiveBudget.Lane.DATA, connectionPermit, baseCredit.shared)) {
+        boolean transferred = frameCredit == null
+                ? budget.transfer(ProfileReceiveBudget.Lane.DATA, connectionPermit, baseCredit.shared)
+                : budget.transfer(ProfileReceiveBudget.Lane.DATA, connectionPermit, baseCredit.shared,
+                        frameCredit.shared);
+        if (!transferred) {
             throw new IOException("Bookie Profile DATA receive capacity exhausted");
         }
         lane = ProfileReceiveBudget.Lane.DATA;

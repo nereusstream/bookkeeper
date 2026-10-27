@@ -1862,3 +1862,24 @@ JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩�
 静态调用核对显示，当前service的normal/recovery由 `SegmentProfileAddHandler → submitProfileNormal/Recovery → Input → NormalBatcher → encodePooled` 进入，compaction也使用原pool；raw `SegmentBatchFormat.encode`、FrozenBatch normal/recovery和bulk Input入口当前没有非测试调用。该可达性边界不替代包内raw API的预算，本轮仍将它们保留为独立OPEN范围。
 
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/transport-pending-metadata-evidence-26ec5832`。完整full-bytes/B11、Main实际issuer/受保护输入、完整G1及其余16步继续OPEN；历史100k B11、模型和兼容回执保持原source绑定，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 接收 frame 元数据与 backing 终态
+
+2026-10-28在父源码 `5331415a0930f7e1b24f11e53033f2e90a466c1b` 上，service为固定header解析与接收frame的已知Java对象预留额度。服务应用用原Layout计算frame价格，传给原pipeline的新增重载；原通用重载保留零应用附加价格，原SDK入口/配置/协议字节不变。该数字是本地受信预算输入，不是远程capability或身份/恢复authority；已有service入口自动提供计算值，quota不扩大。
+
+首个header字节到达时取得原frame的一份HeldCredit/Credit，先预留metadata，完整header校验和DATA分类后原credit在锁内grow backing容量，额度不足先拒绝且不分配frame backing。grow只增加同一存活、非workspace的连接credit，不新增每请求credit/atomic/队列/线程；同时检查连接和Bookie lane余额。partial header/body退出退回原owner；DATA首次分类同时转base与当前metadata credit，CONTROL授权继续把base、完整加权frame和原workspace整体转移，失败不留下半次转移。
+
+原allocator新增受检的weighted adopt：credit必须精确等于capacity＋metadata，direct root保存固定metadata价格。resize先预留旧＋新backing及对应额度，失败保留原容量/内容/credit；成功后新credit仍包含原metadata。原adopt与普通heap/direct分配仍为metadata0。frame.close或连接关闭不会退回仍被retained view持有的加权backing，最后一个backing引用释放才退款；不把逻辑frame结束当作物理backing终止。
+
+价格覆盖HeldCredit/Credit、frame/两个atomic、ProfileFrameHeader/InspectedHeader、ChargedDirect/RefCnt、root及潜在cached internal direct NIO、一个固定header heap NIO与release callback。固定decoder/连接图、固定header数组、调用方创建的body views、opaque cleaner/运行库/native与关闭后的外部别名另列，整个full-bytes/B11仍OPEN。模型不是完整保留图、dominator、实际同时峰值/GC/RSS或性能保证。
+
+五条针对旧有效reservation/resize的真实RED均fail、零error/skip：partial-header缺费、首字节缺额、body grow缺额、CONTROL整帧少计及resize漏metadata。首轮测试漏IOException声明的编译失败保留，不算语义RED。首轮GREEN四项通过，一项将CONTROL拒绝后的base仍计入旧连接；已按原关闭契约改为退64-byte base、继续保留frame/workspace并重做独立CONTROL RED。最终三类接收/allocator/真实TLS pipeline整类41项全部通过；潜在cached NIO纳入纯费用后同集合按最终源码再次通过，保留前一版41项原输入，不移绑。
+
+最终SDK整类240项全部通过，零failure/error/skip；与最终proto整类41项合计281项全部通过。原36个proto与240个SDK身份全部保留，新增5个proto用例。最终proto与SDK使用同一1194输入，分别1179份native子集匹配；SDK后407份冻结项目class与target逐SHA相同。allocator整份测试在所有阶段保持同字节；decoder测试自修正CONTROL关闭oracle后的独立RED起保持最终字节。首轮编译失败及旧oracle失败均留档，不将它们写成通过。
+
+独立四布局witness实际构造解析header、weighted direct root、frame及各自atomic/RefCnt、root/cached NIO，显式borrowed null decoder outer；无Unsafe，不执行TLS/receiver/authority或调度。缓存internal NIO在四个实际样本中均已创建；JDK21压缩/宽指针、JDK21的256-byte对齐与JDK17压缩指针的已知对象shallow合计分别504/704/3328/504 bytes，价格1120/1120/10496/1120。各布局还实测同一credit从metadata grow到backing，frame.close＋连接关闭后仍持额，最后retained view释放后真正归零。native backing字节不混入metadata合计，caller body view与opaque资源不计入上述有限对象图。
+
+仓库Spotless/Checkstyle实际exit0；独立RAT实际exit1，443个路径及字节与父5331415a09全部相同，无新增，不称CI全绿。七个终结run的33份文件逐SHA/uid/inode及无reader核对后保留硬链接归档，删除原临时目录，移除逻辑字节7414591，副本常规数据块回收0。必要源码、失败/oracle修正、命令/XML、冻结class与四布局证据保留。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/frame-metadata-evidence-5331415a`。历史模型、100k B11及兼容回执不移绑；Main实际issuer/受保护输入、完整G1与其余16步继续OPEN，完整目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

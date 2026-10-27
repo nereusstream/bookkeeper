@@ -1135,12 +1135,13 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
                     identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(),
                     capabilities);
+            SegmentProfileAddHandler handler = new SegmentProfileAddHandler(this, tls, trustDomain, hello,
+                    SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
+                    config.maxPendingEntries(), control, read);
             return ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
                     100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                     144 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
-                    new SegmentProfileAddHandler(this, tls, trustDomain, hello,
-                            SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
-                            config.maxPendingEntries(), control, read), control != null);
+                    handler, control != null, handler.frameMetadataBytes());
         }
     }
 

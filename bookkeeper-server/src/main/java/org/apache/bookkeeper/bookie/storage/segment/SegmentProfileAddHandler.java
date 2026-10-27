@@ -71,6 +71,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final int maxPending;
     private final int readLoanBytes;
     private final int pendingMetadataBytes;
+    private final int frameMetadataBytes;
     private final Set<Pending> pending = new HashSet<>();
     private final SegmentProfileControlConfig control;
     private final SegmentProfileInstallStore physicalControl;
@@ -107,7 +108,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                              SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
         this.read = read;
         readLoanBytes = read == null ? 0 : SegmentPointRead.loanMetadataBytes();
-        pendingMetadataBytes = pendingMetadataBytes();
+        var layout = metadataLayout();
+        pendingMetadataBytes = pendingMetadataBytes(layout);
+        frameMetadataBytes = frameMetadataBytes(layout);
         this.control = control;
         physicalControl = control == null ? null : storage.profileInstallStore(control.timeout());
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -118,12 +121,31 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         this.maxPending = maxPending;
     }
 
-    private static int pendingMetadataBytes() {
+    private static SegmentControlCapacity.Layout metadataLayout() {
         try {
-            return pendingMetadataBytes(SegmentControlCapacity.Layout.hotSpot());
+            return SegmentControlCapacity.Layout.hotSpot();
         } catch (IOException unsupported) {
             throw new IllegalStateException("Profile request metadata requires a supported heap layout", unsupported);
         }
+    }
+
+    int frameMetadataBytes() {
+        return frameMetadataBytes;
+    }
+
+    /** Known header/root/frame shells; caller body views and opaque cleaner/runtime state are separate. */
+    static int frameMetadataBytes(SegmentControlCapacity.Layout layout) {
+        return Math.toIntExact(SegmentControlCapacity.sum(
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveDecoder$HeldCredit"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveBudget$Credit"),
+                layout.object(ProfileInboundFrame.class),
+                SegmentControlCapacity.times(2, layout.object(AtomicBoolean.class)),
+                layout.object(ProfileFrameHeader.class), layout.object(ProfileFrameCodec.InspectedHeader.class),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileByteBufAllocator$ChargedDirect"),
+                layout.object("io.netty.util.internal.RefCnt"),
+                // Root/cached internal direct NIO, one fixed-header heap view and the release callback.
+                SegmentControlCapacity.times(2, layout.object("java.nio.DirectByteBuffer")),
+                layout.buffer(), layout.captured(1)));
     }
 
     /** Known application request shells; decoder/frame, codec bodies and opaque transport state are separate. */

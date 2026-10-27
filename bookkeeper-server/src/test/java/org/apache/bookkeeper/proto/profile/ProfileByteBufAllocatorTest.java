@@ -19,6 +19,7 @@ package org.apache.bookkeeper.proto.profile;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -179,6 +180,52 @@ public class ProfileByteBufAllocatorTest {
         reserved.release();
         assertTrue(control.drained().isDone());
         assertTrue(all.isDone());
+    }
+
+    @Test
+    public void weightedFrameBackingKeepsMetadataAcrossResizeAndFinalView() {
+        for (int limit : List.of(200, 512)) {
+            var budget = new ProfileReceiveBudget(2048, 512, 512, 1, 1, 1);
+            var permit = budget.admitUnclassified();
+            permit.limit(limit);
+            var allocator = new ProfileByteBufAllocator(permit);
+            var credit = permit.reserve(144);
+            assertNotNull(credit);
+            ByteBuf root = allocator.adopt(credit, 16, 128);
+            ByteBuf view = null;
+            try {
+                root.writeLong(42);
+                assertEquals(144, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                if (limit == 200) {
+                    assertThrows(ProfileReceiveBudget.CapacityExceededException.class, () -> root.capacity(8));
+                    assertEquals(16, root.capacity());
+                    assertEquals(144, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                } else {
+                    root.capacity(8);
+                    assertEquals(136, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    root.capacity(16);
+                    assertEquals(144, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                }
+                assertEquals(42, root.getLong(0));
+                view = root.retainedSlice(0, 8);
+                root.release();
+                permit.close();
+                assertEquals(144, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertFalse(budget.closeAdmissionAndDrain().isDone());
+                view.release();
+                view = null;
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertTrue(budget.closeAdmissionAndDrain().isDone());
+            } finally {
+                if (view != null && view.refCnt() > 0) {
+                    view.release();
+                }
+                if (root.refCnt() > 0) {
+                    root.release();
+                }
+                permit.close();
+            }
+        }
     }
 
     private static ProfileReceiveBudget budget() {
