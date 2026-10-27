@@ -7420,6 +7420,130 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void profileSocketRejectsMissingClientCertificateBeforeAuthorityAndReturnsActualBudget() throws Exception {
+        ThreadPoolExecutor executor = controlExecutor();
+        AtomicInteger reads = new AtomicInteger();
+        AtomicInteger staticChecks = new AtomicInteger();
+        AtomicInteger exactChecks = new AtomicInteger();
+        AtomicBoolean allowed = new AtomicBoolean(true);
+        try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
+            storage.startNew();
+            var base = initialConfig(executor, Duration.ofSeconds(5), allowed, reads);
+            var control = new SegmentProfileControlConfig(base.validator(), (principal, operation) -> {
+                staticChecks.incrementAndGet();
+                return base.staticAuthorizer().allows(principal, operation);
+            }, base.controlStore(), (principal, requested, authority) -> {
+                exactChecks.incrementAndGet();
+                return base.exactAuthorizer().authorize(principal, requested, authority);
+            }, executor, base.timeout());
+            SegmentBookieControlLog bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            SegmentFileIo io = bookieIo(bookie);
+            int writes = io.writes;
+            int forces = io.forces;
+            assertFalse(bookie.locallyReadableContext(context()));
+            try (ProfileSocket socket = new ProfileSocket(storage, initialBudget(), control, true)) {
+                socket.disconnect();
+                socket.assertBudgetZero();
+                int port = ((InetSocketAddress) socket.listener.localAddress()).getPort();
+                SslContext withoutCertificate = SslContextBuilder.forClient().sslProvider(SslProvider.JDK)
+                        .trustManager(new File(ProfileSocket.certificate("server-san-cert.pem")))
+                        .protocols("TLSv1.3").build();
+                AtomicInteger responseBytes = new AtomicInteger();
+                CountDownLatch anonymousInactive = new CountDownLatch(1);
+                Channel anonymous = new Bootstrap().group(socket.clientGroup).channel(NioSocketChannel.class)
+                        .handler(new ChannelInitializer<SocketChannel>() {
+                            @Override
+                            protected void initChannel(SocketChannel channel) {
+                                SslHandler ssl = withoutCertificate.newHandler(
+                                        channel.alloc(), "apache.bookkeeper.org", port);
+                                javax.net.ssl.SSLParameters parameters = ssl.engine().getSSLParameters();
+                                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                                ssl.engine().setSSLParameters(parameters);
+                                channel.pipeline().addLast(ssl);
+                                channel.pipeline().addLast(new SimpleChannelInboundHandler<ByteBuf>() {
+                                    @Override
+                                    protected void channelRead0(ChannelHandlerContext ctx, ByteBuf bytes) {
+                                        responseBytes.addAndGet(bytes.readableBytes());
+                                    }
+
+                                    @Override
+                                    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                                        ctx.close();
+                                    }
+
+                                    @Override
+                                    public void channelInactive(ChannelHandlerContext ctx) {
+                                        anonymousInactive.countDown();
+                                    }
+                                });
+                            }
+                        }).connect("127.0.0.1", port).sync().channel();
+                socket.peers.add(anonymous);
+                ByteBuf hello = Unpooled.wrappedBuffer(ProfileFrameCodec.encode(ProfileFrame.request(
+                        ProfileOperation.HELLO, 1, new ProfileHello.Client(List.of(
+                                new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1))).encode())));
+                ByteBuf install = Unpooled.wrappedBuffer(ProfileFrameCodec.encode(ProfileFrame.request(
+                        ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()))));
+                var helloWrite = anonymous.writeAndFlush(hello);
+                var installWrite = anonymous.writeAndFlush(install);
+                try {
+                    AcceptedProfileConnection server = socket.acceptedConnection();
+                    assertSame(socket.acceptedChannels.get(1), server.channel());
+                    var handshake = server.tls().handshakeFuture();
+                    assertTrue(handshake.await(5, TimeUnit.SECONDS));
+                    assertFalse("The server must require a client certificate", handshake.isSuccess());
+                    assertNotNull(handshake.cause());
+                    assertTrue(server.channel().closeFuture().await(5, TimeUnit.SECONDS));
+                    assertTrue(server.inactive().await(5, TimeUnit.SECONDS));
+                    assertTrue(anonymous.closeFuture().await(5, TimeUnit.SECONDS));
+                    assertTrue(anonymousInactive.await(5, TimeUnit.SECONDS));
+                    // A TLS 1.3 client can finish its handshake before receiving the server's certificate alert.
+                    assertTrue(helloWrite.await(5, TimeUnit.SECONDS));
+                    assertTrue(installWrite.await(5, TimeUnit.SECONDS));
+                    assertEquals(0, server.plaintextBytes().get());
+                    assertEquals(0, responseBytes.get());
+                    assertNull(socket.responses.poll());
+                    assertEquals(0, staticChecks.get());
+                    assertEquals(0, reads.get());
+                    assertEquals(0, exactChecks.get());
+                    assertEquals(writes, io.writes);
+                    assertEquals(forces, io.forces);
+                    assertFalse(bookie.locallyReadableContext(context()));
+                    assertFalse(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                    socket.assertBudgetZero();
+                    assertTrue(socket.listener.isActive());
+                } finally {
+                    anonymous.close();
+                    assertTrue(anonymous.closeFuture().awaitUninterruptibly(5, TimeUnit.SECONDS));
+                    assertTrue(helloWrite.awaitUninterruptibly(5, TimeUnit.SECONDS));
+                    assertTrue(installWrite.awaitUninterruptibly(5, TimeUnit.SECONDS));
+                    assertEquals(0, hello.refCnt());
+                    assertEquals(0, install.refCnt());
+                }
+                Channel authenticated = socket.peer(true, true);
+                socket.send(authenticated, ProfileOperation.INSTALL, 2,
+                        ProfileInitialControlCodec.encodeRequest(install(1, (byte) 5).request()));
+                ProfileControlResult installed = initialResponse(socket, ProfileOperation.INSTALL, 2);
+                assertEquals(ProfileControlResult.Outcome.APPLIED, installed.outcome());
+                assertTrue(installed.durable());
+                socket.send(authenticated, ProfileOperation.ACTIVATE_INITIAL, 3,
+                        ProfileInitialControlCodec.encodeRequest(activate(2).request()));
+                ProfileControlResult activated = initialResponse(socket, ProfileOperation.ACTIVATE_INITIAL, 3);
+                assertEquals(ProfileControlResult.Outcome.APPLIED, activated.outcome());
+                assertTrue(activated.durable());
+                assertTrue(bookie.normalAdmission(context(), filled(20, (byte) 5)));
+                assertEquals(2, reads.get());
+                assertEquals(2, exactChecks.get());
+                assertTrue(staticChecks.get() >= 2);
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     public void profileSocketInitialControlRejectsMissingCapabilityAndUnauthorizedFirstRequest() throws Exception {
         ThreadPoolExecutor executor = controlExecutor();
         AtomicInteger reads = new AtomicInteger();
@@ -7649,12 +7773,16 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private record AcceptedProfileConnection(Channel channel, SslHandler tls, CountDownLatch inactive,
+                                             AtomicInteger plaintextBytes) { }
+
     private final class ProfileSocket implements AutoCloseable {
         private final EventLoopGroup acceptor = new NioEventLoopGroup(1);
         private final EventLoopGroup worker = new NioEventLoopGroup(1);
         private final EventLoopGroup clientGroup = new NioEventLoopGroup(1);
         private final ProfileReceiveBudget budget;
         private final List<Channel> acceptedChannels = new CopyOnWriteArrayList<>();
+        private final ArrayBlockingQueue<AcceptedProfileConnection> acceptedConnections = new ArrayBlockingQueue<>(16);
         private final List<Channel> peers = new ArrayList<>();
         private Bootstrap clientBootstrap;
         private SslContext peerTls;
@@ -7698,12 +7826,28 @@ public class SegmentBookieControlLogTest {
                                         131072, 64, "test-domain", 0, control)) {
                                     return;
                                 }
+                                CountDownLatch channelInactive = new CountDownLatch(1);
+                                AtomicInteger plaintextBytes = new AtomicInteger();
+                                channel.pipeline().addAfter("profileTls", "profileTestPlaintext",
+                                        new ChannelInboundHandlerAdapter() {
+                                            @Override
+                                            public void channelRead(ChannelHandlerContext ctx, Object message) {
+                                                if (message instanceof ByteBuf bytes) {
+                                                    plaintextBytes.addAndGet(bytes.readableBytes());
+                                                }
+                                                ctx.fireChannelRead(message);
+                                            }
+                                        });
                                 channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
                                     @Override
                                     public void channelInactive(ChannelHandlerContext ctx) {
                                         inactive.countDown();
+                                        channelInactive.countDown();
                                     }
                                 });
+                                assertTrue(acceptedConnections.offer(new AcceptedProfileConnection(
+                                        channel, channel.pipeline().get(SslHandler.class), channelInactive,
+                                        plaintextBytes)));
                             }
                         }).bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
                 int port = ((InetSocketAddress) listener.localAddress()).getPort();
@@ -7742,6 +7886,7 @@ public class SegmentBookieControlLogTest {
                         });
                 client = clientBootstrap.connect("127.0.0.1", port).sync().channel();
                 client.pipeline().get(SslHandler.class).handshakeFuture().sync();
+                acceptedConnection();
                 send(ProfileOperation.HELLO, 1, new ProfileHello.Client(offerControl ? List.of(
                         new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1))
                         : List.of()).encode());
@@ -7780,6 +7925,10 @@ public class SegmentBookieControlLogTest {
         }
 
         private Channel peer(boolean hello) throws Exception {
+            return peer(hello, false);
+        }
+
+        private Channel peer(boolean hello, boolean offerControl) throws Exception {
             int port = ((InetSocketAddress) listener.localAddress()).getPort();
             Bootstrap bootstrap = hello ? clientBootstrap.clone()
                     : new Bootstrap().group(clientGroup).channel(NioSocketChannel.class)
@@ -7793,13 +7942,22 @@ public class SegmentBookieControlLogTest {
             Channel peer = bootstrap.connect("127.0.0.1", port).sync().channel();
             peers.add(peer);
             peer.pipeline().get(SslHandler.class).handshakeFuture().sync();
+            acceptedConnection();
             if (hello) {
-                send(peer, ProfileOperation.HELLO, 1, new ProfileHello.Client(List.of()).encode());
+                send(peer, ProfileOperation.HELLO, 1, new ProfileHello.Client(offerControl ? List.of(
+                        new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID, 1))
+                        : List.of()).encode());
                 ProfileFrame greeting = response();
                 assertEquals(ProfileOperation.HELLO, greeting.header().operation());
                 assertFalse(greeting.header().isError());
             }
             return peer;
+        }
+
+        private AcceptedProfileConnection acceptedConnection() throws Exception {
+            AcceptedProfileConnection connection = acceptedConnections.poll(5, TimeUnit.SECONDS);
+            assertNotNull("Expected the matching accepted Profile connection", connection);
+            return connection;
         }
 
         private void send(ProfileOperation operation, long requestId, byte[] body) throws Exception {

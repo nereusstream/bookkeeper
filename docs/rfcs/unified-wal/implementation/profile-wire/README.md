@@ -2564,3 +2564,19 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 
 [永久坐标根的 DATA 预留与关闭退休](../local-storage/README.md#永久坐标根的-data-预留与关闭退休)：2026-10-27父277f4d6514上，原DATA启动单次预留加入按logicalShards/indexedEntries计算的永久occupied HashSet/Key/context容量，复用既有HotSpot布局模型，quota不足在storage/index/目录open前拒绝。实际owner/I/O/pin及资源close成功后退休hot五容器与共享startup inventory，再退额度；false/异常close保持原状态。两个目标RED已复现，修正后测试源码相同；两项定向及六类618项全部通过、输入/用例匹配，四JVM碰撞Key图不超模型、style通过，独立RAT443父路径且字节全同、无新增。原夹具第二写拒绝单独保留，不称产品RED；证据由canonical节拥有。金额只覆盖该永久根，full-bytes/B11及其余16步仍OPEN；Main首版按用户选择限已有旧服务受控部署，issuer/装载/进程验收未完成。目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+## 无客户端证书的真实 TLS 拒绝与预算归还
+
+2026-10-27，父源码 `47ba97ef85fde7750adac8ba07f4a8d7414ce169` 上补充一个实际 loopback TLS1.3 认证边界测试。`SegmentBookieControlLogTest.profileSocketRejectsMissingClientCertificateBeforeAuthorityAndReturnsActualBudget` 复用原 storage、Profile listener、共享接收预算与控制路径；客户端信任既有 server SAN 证书并启用 HTTPS endpoint 校验，但不配置 keyManager/client certificate，实际排入 canonical HELLO/UIC1 与 INSTALL 字节。生产源码未改，本次没有产品缺陷 RED 或修复声明。
+
+拒绝依据是该次 accepted server channel 保存的 SslHandler handshakeFuture 失败、同一 channel closeFuture 与逐连接 channelInactive，以及客户端实际关闭。TLS1.3 客户端可能先完成自身握手，不能只据客户端 future 判拒绝。服务端解密明文字节与客户端 Profile 响应为零，static/exact AuthZ 和 authority read 为零，控制 writes/forces、本地可读 route 与 normal admission 保持未安装状态；queued write futures 已终结、两个 ByteBuf refCnt 为零后不再保留其 custody。连接实际终结后各 lane 接收字节和连接计数归零，同一 listener 仍 active；随后带证书、显式 UIC1 的 peer 完成 durable INSTALL/ACTIVATE_INITIAL 并取得 normal admission，证明预算可再次使用。逐连接观测仅在测试 helper 中转发原消息，不改变生产 pipeline；原 peer(boolean) 的 HELLO 默认能力保持。
+
+定向1项通过；相关三类285项通过（Bookie282、TLS factory2、入口 socket pipeline1），failures/errors/skipped 均0。原281项 Bookie 用例身份加本次1项与当前报告逐项匹配；1183份冻结输入、native runner 的1179份输入及本次测试源码均核验。命令及原始日志/报告保存在 `/Users/liusinan/.codex/artifacts/unified-wal/profile-mtls-rejection-evidence-47ba97ef`，原 run 为 `unified-wal-local-rbTiUrxi` 与 `unified-wal-local-ObTjL7ad`。Spotless/Checkstyle exit0；独立RAT实际exit1，仍443个既有未批准路径，路径及全部字节与父提交相同、无新增。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest#profileSocketRejectsMissingClientCertificateBeforeAuthorityAndReturnsActualBudget'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest,ProfileTlsContextFactoryTest,ProfileInboundPipelineSocketTest'
+```
+
+本切片只证明实际 TLS/socket 缺证书拒绝、零 authority/effect 与连接预算归还；不构成完整 mixed-version G1、TLS native/JDK 总内存、Main issuer/输入装载或受控部署进程验收。TLA 未改，旧模型 PASS 不重绑；full-bytes/B11、完整16步和生产 Gate 继续 OPEN，默认 OFF/SYSTEM/PARK 与 disabled 能力保持。

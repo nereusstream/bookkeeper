@@ -929,3 +929,6 @@ Segment production candidate 的最低 Gate：
 
 
 [永久坐标根的 DATA 预留与关闭退休](rfcs/unified-wal/implementation/local-storage/README.md#永久坐标根的-data-预留与关闭退休)：2026-10-27父277f4d6514上，原DATA启动单次预留加入按logicalShards/indexedEntries计算的永久occupied HashSet/Key/context容量，复用既有HotSpot布局模型，quota不足在storage/index/目录open前拒绝。实际owner/I/O/pin及资源close成功后退休hot五容器与共享startup inventory，再退额度；false/异常close保持原状态。两个目标RED已复现，修正后测试源码相同；两项定向及六类618项全部通过、输入/用例匹配，四JVM碰撞Key图不超模型、style通过，独立RAT443父路径且字节全同、无新增。原夹具第二写拒绝单独保留，不称产品RED；证据由canonical节拥有。金额只覆盖该永久根，full-bytes/B11及其余16步仍OPEN；Main首版按用户选择限已有旧服务受控部署，issuer/装载/进程验收未完成。目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[无客户端证书的真实 TLS 拒绝与预算归还](rfcs/unified-wal/implementation/profile-wire/README.md#无客户端证书的真实-tls-拒绝与预算归还)：2026-10-27父47ba97ef85上，新增真实TLS1.3无客户端证书拒绝测试；以exact accepted server握手失败及实际channel终止为准，验证零明文/响应、AuthZ/authority read与存储effect，预算归零后同listener带证书UIC1完成durable INSTALL/ACTIVATE及normal admission。生产源码未改；定向1项及三类285项通过、冻结输入与用例匹配。实际格式/RAT回执由canonical节拥有。仅补认证边界证据，完整G1、Main issuer/装载、TLS总内存/full-bytes/B11及其余16步仍OPEN；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
