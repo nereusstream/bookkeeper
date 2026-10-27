@@ -345,3 +345,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [Compaction 计划元数据与终态退休](local-storage/README.md#compaction-计划元数据与终态退休)：2026-10-28父3b78f0084d上，运行时计划在checkpoint前动态预留DATA额度，两代plan/capture及当前COPY/MOVE/FREE按已知几何计费；实际owner终态退根后退款，CONTROL旧wrapper先清根再交付，旧常驻金额与quota不变。真实RED/GREEN及有限对象图边界由canonical记录；full-bytes/B11、Main issuer、完整G1继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[Handler Pending 核心元数据](local-storage/README.md#handler-pending-核心元数据)：2026-10-28父26ec583289上，原ResponseCredit在Pending/timeout创建前加计已知核心与回调壳，原CONTROL转移、终态门和quota不变。真实socket RED/GREEN与有限header witness由canonical拥有；decoder/codec/完整transport及raw入口、B11/Main issuer/完整G1仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

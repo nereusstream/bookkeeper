@@ -1074,12 +1074,18 @@ public class SegmentProfileInitialSocketClientTest {
                 await(release);
             });
             var client = dataClient(fixture, 0, 1, Duration.ofSeconds(5));
+            var budget = fixture.budgets.get(0);
+            long pendingWorkspace = 100L + ProfileFrameCodec.OUTER_LENGTH_PREFIX
+                    + ProfileFrameHeader.ENCODED_LENGTH + ProfileStatus.ENCODED_LENGTH
+                    + SegmentProfileAddHandler.pendingMetadataBytes(SegmentControlCapacity.Layout.hotSpot());
             ReferenceCounted source = entry(fixture, 0, 16);
             try {
                 var pending = client.addNormal(fixture.context(), fixture.credential, 0, source);
                 source.release();
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertEquals(pendingWorkspace, budget.workspaceBytes(ProfileReceiveBudget.Lane.DATA));
                 assertTrue(pending.cancel(true));
+                assertEquals(pendingWorkspace, budget.workspaceBytes(ProfileReceiveBudget.Lane.DATA));
                 ReferenceCounted refusedSource = entry(fixture, 0, 16);
                 try {
                     ProfileStatus current = client.addNormal(fixture.context(), fixture.credential, 0,
@@ -13080,6 +13086,8 @@ public class SegmentProfileInitialSocketClientTest {
             long charged = observed.get(5, TimeUnit.SECONDS) - baseline;
             assertTrue("READ_LAC metadata was not charged before DATA submission: " + charged,
                     charged > oldRawBytes);
+            assertEquals(oldRawBytes + (long) SegmentPointRead.loanMetadataBytes()
+                    + SegmentProfileAddHandler.pendingMetadataBytes(SegmentControlCapacity.Layout.hotSpot()), charged);
         }
     }
 

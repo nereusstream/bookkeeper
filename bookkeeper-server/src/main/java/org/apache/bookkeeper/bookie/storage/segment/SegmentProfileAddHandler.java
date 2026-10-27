@@ -70,6 +70,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final int maxEntryBytes;
     private final int maxPending;
     private final int readLoanBytes;
+    private final int pendingMetadataBytes;
     private final Set<Pending> pending = new HashSet<>();
     private final SegmentProfileControlConfig control;
     private final SegmentProfileInstallStore physicalControl;
@@ -106,6 +107,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                              SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
         this.read = read;
         readLoanBytes = read == null ? 0 : SegmentPointRead.loanMetadataBytes();
+        pendingMetadataBytes = pendingMetadataBytes();
         this.control = control;
         physicalControl = control == null ? null : storage.profileInstallStore(control.timeout());
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -114,6 +116,33 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         this.hello = Objects.requireNonNull(hello, "hello");
         this.maxEntryBytes = maxEntryBytes;
         this.maxPending = maxPending;
+    }
+
+    private static int pendingMetadataBytes() {
+        try {
+            return pendingMetadataBytes(SegmentControlCapacity.Layout.hotSpot());
+        } catch (IOException unsupported) {
+            throw new IllegalStateException("Profile request metadata requires a supported heap layout", unsupported);
+        }
+    }
+
+    /** Known application request shells; decoder/frame, codec bodies and opaque transport state are separate. */
+    static int pendingMetadataBytes(SegmentControlCapacity.Layout layout) {
+        return Math.toIntExact(SegmentControlCapacity.sum(layout.object(Pending.class),
+                SegmentControlCapacity.times(2, layout.object(AtomicBoolean.class)),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveDecoder$HeldCredit"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveBudget$Credit"),
+                // HeldCredit.closed and the largest request's ReadRequest.terminalNotified.
+                SegmentControlCapacity.times(2, layout.object(AtomicBoolean.class)),
+                Math.max(layout.object(SegmentDataPhysicalDriver.NormalRequest.class),
+                        Math.max(layout.object(SegmentDataPhysicalDriver.RecoveryRequest.class),
+                                layout.object(SegmentPointRead.ReadRequest.class))),
+                layout.object(java.util.concurrent.atomic.AtomicReference.class),
+                layout.object("io.netty.util.concurrent.ScheduledFutureTask"),
+                layout.object("io.netty.util.concurrent.PromiseTask$RunnableAdapter"),
+                // Timeout, read/storage callback, read terminal, queued delivery and downstream write listener.
+                layout.captured(2), layout.captured(4), layout.captured(1), layout.captured(5), layout.captured(3),
+                layout.object(ProfileStatus.class), layout.hashEntry()));
     }
 
     @Override
@@ -147,7 +176,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                             : frame.header().operation() == ProfileOperation.FENCE_LEDGER
                             || frame.header().operation() == ProfileOperation.ADD_RECOVERY ? 200 : ADD_PREFIX_BYTES)
                             + RESPONSE_BYTES;
-            credit = ProfileInboundPipeline.reserveResponse(ctx.pipeline(), bytes);
+            credit = ProfileInboundPipeline.reserveResponse(ctx.pipeline(), Math.addExact(bytes, pendingMetadataBytes));
             request = new Pending(frame, credit);
             pending.add(request);
             Pending held = request;

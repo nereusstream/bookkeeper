@@ -1841,3 +1841,24 @@ JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩�
 仓库Spotless/Checkstyle实际exit0。独立RAT实际exit1，仍为443个既有路径，路径和字节均与父3b78f0084d一致，无新增，不称CI全绿。七个已终结run的30份文件逐SHA/uid/inode及无reader核对后保留硬链接归档并删除原临时目录；移除逻辑字节7429039，普通数据块回收0，必要的源码、失败、命令、报告、冻结class和测量证据保留。
 
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/compaction-metadata-evidence-3b78f008`。首轮接入的三个 owner-thread error 与一次占满 CONTROL slot 的测试准备失败也保留，均不记作语义 RED 或 PASS。任意 caller/callback/transport 图、opaque JDK/provider/native、空退休 shell 的外部别名、完整 retained heap/实际同时峰值/GC/RSS 与整个 full-bytes/B11 仍未关闭。TLA未改、TLC未执行，历史模型与兼容回执不移绑；Main实际 issuer/受保护输入、完整G1和其余16步继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Handler Pending 核心元数据
+
+2026-10-28在父源码 `26ec58328945d9c490b8834fd5e0c62996375914` 上，将 application Pending 的已知 Java 核心并入原 `ResponseCredit`。在创建 Pending、注册 timeout 或进入具体操作前，原 parse/response 数量加上一次固定 metadata 增量；沿用原接收总账、连接上限、CONTROL转移与失败拒绝，不新增每请求 working-set/credit/atomic、线程或队列，不扩大quota。布局在handler构造时计算一次；不支持的布局使初始化明确失败。
+
+增量支付 Pending 与其两个 atomic、原 HeldCredit/Credit及closed atomic、最大normal/recovery/read请求壳及其atomic、deadline ScheduledFutureTask/RunnableAdapter，以及源码中timeout、storage/read回调、read terminal、queued delivery、write listener的2/4/1/5/3引用壳、status及当前HashSet node。原wire/parse字节和read loan继续独立支付；固定连接图、历史HashSet table、decoder/frame、其他codec/transport/provider/native图、关闭后外部别名与完整同时峰值仍须分别闭合。该增量不宣称包揽整张Netty连接图。
+
+退款继续遵守原 Pending 的finished、writing、delivering、control/cold/read in-flight和resourcesReturned门。普通DATA的source已复制到原Input后归Driver负责；caller取消不等于DATA物理终止，也不改变原有两套所有权。没有修改source、DATA durability、协议字节、authority、默认行为或原取消/排空门。
+
+真实TLS/文件路径的两条原方法在缺少增量的旧reservation上均RED：普通Add force期间144 bytes少于1432，EMPTY READ_LAC的2104少于3392；增量1288均在DATA提交前预留。最终6项定向通过，覆盖normal caller取消、空LAC、拒绝、physical delete持有force、recovery close等待precut DATA与listener cold排空。首轮布局探测受检异常导致的编译失败保留，不记作语义RED。
+
+最终SDK整类240项全部通过，零failure/error/skip；旧240个用例身份全保留，没有新增测试方法或缩小选择器。整份SDK测试从编译失败、RED到最终GREEN保持同字节；最终定向与整类使用同一1194输入，1179份native子集分别匹配，SDK后407份冻结项目class与target仍逐SHA一致。由于本轮只改handler计费及SDK断言，未重新执行前一包的本地308项，也未移绑其PASS。
+
+独立header witness用实际构造的Pending、Credit/HeldCredit、request及其atomic、deadline/adapter、status/HashMap node与等宽捕获壳，未用Unsafe。JDK21压缩指针/宽指针与JDK17压缩指针的实测合计分别512/784/512 bytes，对照增量均1288；JDK21的256-byte对齐为4608/11840。Pending的frame/credit及HeldCredit outer用明确borrowed null，scheduler与callback后代借用，不执行协议、deadline或应用调度；因此这些仅是初始化对象壳与字段宽度witness，不是实际整连接驻留、生命周期、状态数、活峰值、GC/RSS或性能证明。实际ledger与终态由上述socket/file测试负责。
+
+仓库Spotless/Checkstyle实际exit0；独立RAT实际exit1，443个路径及字节均与父26ec583289相同，无新增，不称CI全绿。四个终结run的15份文件逐SHA/uid/inode及无reader核对后保留硬链接归档，移除原临时目录逻辑字节6321001，副本的普通数据块回收0。另移除一份与red-source.patch完全相同的5593-byte重复patch，原失败源码保留，未测该文件的实际物理回收量；必要的源、命令、失败、XML、class/header witness证据保留。
+
+静态调用核对显示，当前service的normal/recovery由 `SegmentProfileAddHandler → submitProfileNormal/Recovery → Input → NormalBatcher → encodePooled` 进入，compaction也使用原pool；raw `SegmentBatchFormat.encode`、FrozenBatch normal/recovery和bulk Input入口当前没有非测试调用。该可达性边界不替代包内raw API的预算，本轮仍将它们保留为独立OPEN范围。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/transport-pending-metadata-evidence-26ec5832`。完整full-bytes/B11、Main实际issuer/受保护输入、完整G1及其余16步继续OPEN；历史100k B11、模型和兼容回执保持原source绑定，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
