@@ -1589,3 +1589,30 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentArenaControlLogTest,
 源码/原始夹具失败/修正RED/GREEN、命令/XML、四JVM源码/class/原输出/实际终态与布局矩阵在 `/Users/liusinan/.codex/artifacts/unified-wal/hot-coordinate-capacity-evidence-277f4d65`。全部Java/布局/style终态后独立RAT实际exit1，443未批准路径均为父HEAD既有且字节完全相同，无新增，不称CI全绿。四个原临时运行根仅在实际终态、无句柄、逐文件同inode/SHA检查后移除；hardlink归档保留，常规文件数据实际回收0 B。
 
 Main首版已由用户选择仅已有旧服务的受控部署，具体issuer/受保护输入及Main进程验收继续OPEN，见[startup边界](../startup-readiness/README.md#main-首版受控部署边界)。统一full-bytes/B11、其余资源、同incarnation未关闭session接受、恢复接受下界/GC/兼容/正式性能及16步仍OPEN；目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Hot 与 restart inventory 的驻留元数据预算
+
+2026-10-27，父 `d4837e0ea7860a204937e160b424f75018e54358` 上，原 service DATA 启动预留加入 `SegmentHotDirectory.metadataCapacity` 与 `SegmentDataRecovery.inventoryCapacity`。此前源 InputBudget 只计源 ByteBuf capacity，encode 后即可归还；固定执行 buffer fee 只计 backing，扫描 credit 也只包围临时 ByteBuffer，不能覆盖仍驻留的 map、locator、admission 或 inventory。新费用仍在 storage/index/目录 open 前一次取得；quota 不足保留 IOException 并沿原 owner 清理。普通 Add 不增加逐 entry 记账、MetadataStore、控制 force、handshake、线程或队列。
+
+```text
+S=logicalShards, H=hotEntries, C=indexedEntries, P=maxPendingEntries
+W=workers, I=ioThreads (包含预留 CONTROL 线程，保守计入返回窗口)
+B=S*P; J=B+W+I; R=256*(W+I); N=S+2W+I
+DATA = execution backing + index configured + occupied(S,C)
+     + hot metadata(S,H,P,W,I) + inventory(S,F=dataFiles,C)
+```
+
+Hot 包计入自身 wrapper、两个普通 HashMap 各自的历史 H 高水位、两个 IdentityHashMap、B 份 Admission/两个不可变列表、共享 batch/Reservation/Lease/AtomicBoolean/readonly buffer view、Candidate/Location/Address/Generation，以及 index pump 的列表/浅层 captures 与返回窗口。pending failure 后其他 shard 仍能工作，不能将 B 缩成 global P；relocation admission 可以没有普通 key，不能用 H 限制 B。正常 Key/context 沿用 occupied fee，不再重复；已 terminal 的旧 owner ticket/IO runnable 可暂时延长 index snapshot 寿命，因此另外覆盖 R 份旧 Location/context 与 N 份 snapshot。有限图探针没有实例化这些返回窗口或证明业务状态数量；其上界来自原 owner/I/O 控制流的保守静态推导。
+
+Layout 仍限定 64-bit HotSpot 17/21，并使用 wide-reference/对象对齐上界。IdentityHashMap 没有 hash node：默认64引用槽、增长时旧新数组共存，用 `object(map)+2*refs(64+6P)`；List.copyOf 的 List12/ListN 和 Map.copyOf 的 Map1/MapN 分别有明确 wrapper/数组额度。只读 direct view 另外取 DirectByteBufferR 与原 heap buffer 模型之最大值。没有引入另一套 allocator、去重机制或通用容器框架。
+
+Inventory 常驻项为 Inventory/Scan、两个不可变列表、prefix map、C 份 Location/Address/两个 Generation/context、F 份水位 Long 及 S 份 StreamKey/StreamPrefix/额外 Generation。index seed 每条 coordinate 可重新解码 Address，不能仅按物理 batch 数计。**Inventory 的 C 份 context 必须独立收费**：bootstrap 时它们虽与 occupied 共享，实际 terminal native/index cleanup 能退休旧 Key，之后新 ledger 可填入新的 C 份 context，而 immutable inventory 到成功 close 才解除；整个 episode 可同时持有旧 C 和新 C。inventory 没有额外 HotDirectory.Key，不按 S*C 重复计 Location。
+
+一次 DATA WorkingSet 覆盖这些费用，继续保留至原 listener、storage I/O/pin/owner、native index 等实际关闭成功；原成功关闭会退休 hot 五容器和 files.startupInventory，随后 service 才归还预留。false/异常不借取消或 caller completion 伪造实际排空；未改原关闭/回收语义。本段是活动 episode 的容量 envelope，未证明 caller 持有的 closed handle、所有执行器/线程/native/JDK 图均已释放。
+
+新预算测试先只留足旧 buffer/index/occupied 收费：旧生产实际启动成功，命中 expected IOException 未抛出的 RED；新收费在构造 storage/目录前拒绝。修复前后该测试文件字节相同。初版按 bootstrap 共享 context 的费用得到6项定向、五类600项通过；寿命复核后只修改 inventory fee 及注释，原阶段 source/报告独立保留，不重绑最终结果。原 install-store 类名选择器误写，未命中项不计 PASS；最终选择真实 SegmentProfileInstallStoreTest 补验。最终三类260项全通过（SDK socket234、实际install-store23、capacity3），failures/errors/skipped均0；输入/用例身份匹配。Spotless/Checkstyle exit0；独立 RAT 实际exit1，仍443个既有未批准路径，路径及全部字节与父提交相同、无新增。
+
+最终独立 context 图在四个 JVM 全部通过：JDK21 compressed8/wide8/alignment256 与 JDK17 compressed8。S4/F3/H=C10000/P22 时，compressed8 整体7,312,112B≤19,312,160B，wide8 9,323,024B≤同模型，alignment256 46,567,680B≤165,443,072B；图明确有2C个内容/ledgerId/数组身份均不同的 context、4C份数组，inventory-only含C份context且不含Key。Identity table resize/高水位、List12/ListN/Map1/MapN、两个普通 map 的2万TreeNode，以及真实初始化的88份 Admission/Lease/AtomicBoolean/readonly view 已核验。1194份源码、387份冻结 class 与加载来源/hash 绑定；原共享阶段和首次 runner URL比较的后处理错误/Java exit0输出均保留。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/hot-metadata-capacity-evidence-d4837e0e`，有限图不等于 retained heap、RSS、native 分配、性能或完整状态数证明。
+
+服务 normal/recovery/compaction 都使用既有 pooled backing，故未按 J 再乘 payload；Slot、root ByteBuf/NIO view、pool queues、通用执行/I/O对象图及 native/opaque资源仍由各 owner 的其余预算闭合。包内 raw unpooled encoder 的 backing 在失败 admission 后没有现有 credit 接管，仍是真实剩余缺口，不能算本 fee 已覆盖。reserve/扫描解析临时图同样另列。TLA与wire/disk/authority未改，旧模型不重绑；B11/full-bytes、Main issuer/装载、完整G1、正式性能/掉电/NUMA及其余16步仍 OPEN/NOT_EXECUTED，生产 Gate OPEN，完整目标 active，OFF/SYSTEM/PARK与disabled保持。

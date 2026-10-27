@@ -17,6 +17,9 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.apache.bookkeeper.bookie.storage.segment.SegmentControlCapacity.sum;
+import static org.apache.bookkeeper.bookie.storage.segment.SegmentControlCapacity.times;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,8 +30,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Bounded owner-only physical candidates; Bookie permission, selector and entry success remain separate. */
@@ -82,6 +87,43 @@ final class SegmentHotDirectory {
         long entry = SegmentControlCapacity.sum(layout.hashEntry(), layout.object(Key.class), layout.context());
         return SegmentControlCapacity.sum(SegmentControlCapacity.times(shards, layout.hashSet()),
                 SegmentControlCapacity.times(coordinates, entry));
+    }
+
+    /** Service-owned pooled DATA metadata; backing, execution and native resources retain their own owners. */
+    static long metadataCapacity(IsolatedSegmentConfig config, SegmentExecutionGroup.Settings execution,
+                                 int entries) throws IOException {
+        if (entries < 1) {
+            throw new IllegalArgumentException("Positive hot locator geometry required");
+        }
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        long shards = config.logicalShards();
+        long pending = times(shards, config.maxPendingEntries());
+        long returning = sum(execution.workers(), execution.ioThreads());
+        long handles = sum(pending, returning);
+        // A terminal owner callback and its original I/O task can still retain the old 256-entry index batch.
+        long oldLocations = times(256, returning);
+        long snapshots = sum(shards, times(2, execution.workers()), execution.ioThreads());
+        long address = sum(layout.object(SegmentBatchFormat.Address.class),
+                times(2, layout.object(Generation.class)));
+        long batchHandle = sum(layout.object(SegmentBatchFormat.FrozenBatch.class),
+                layout.object(IsolatedSegmentFiles.Reservation.class), layout.object(SegmentBufferPool.Lease.class),
+                layout.object(AtomicBoolean.class),
+                Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR")));
+        long fixed = times(shards, sum(layout.object(SegmentHotDirectory.class), times(2, layout.hashMap()),
+                times(2, layout.object("java.util.HashMap$KeySet")), layout.object("java.util.HashMap$Values"),
+                layout.captured(8)));
+        // Both ordinary maps can independently retain their full historical table capacity.
+        long maps = sum(times(2L * entries, layout.hashEntry()),
+                times(2 * shards, layout.identityMap(config.maxPendingEntries())));
+        long admissions = sum(times(pending, sum(layout.object(Admission.class), times(2, layout.list()))),
+                times(2, layout.refs(entries)));
+        long locators = sum(times(entries, layout.object(Candidate.class)),
+                times(sum(entries, oldLocations), layout.object(SegmentPointRead.Location.class)),
+                times(oldLocations, layout.context()), times(sum(entries, oldLocations, handles), address));
+        long pump = times(snapshots, sum(times(2, layout.list()), times(4, layout.refs(256)),
+                layout.object(SegmentOwnerLoop.Ticket.class), times(8, layout.captured(8))));
+        // Normal Key/context instances are shared with occupied and are already in occupiedCapacity().
+        return sum(fixed, maps, admissions, locators, times(handles, batchHandle), pump);
     }
 
     /** The storage owner calls this only after successful resource close and actual execution termination. */

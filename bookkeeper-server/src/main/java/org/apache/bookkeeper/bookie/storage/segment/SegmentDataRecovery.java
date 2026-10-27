@@ -42,6 +42,24 @@ import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 
 /** Quiesced isolated DATA validation; zero pages and recovery sync never grant reuse or entry authority. */
 final class SegmentDataRecovery {
+    /** Inventory survives runtime coordinate retirement, so reserve its old contexts independently of hot keys. */
+    static long inventoryCapacity(IsolatedSegmentConfig config, int coordinates) throws IOException {
+        if (coordinates < 1) {
+            throw new IllegalArgumentException("Positive inventory coordinate geometry required");
+        }
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        long location = SegmentControlCapacity.sum(layout.object(SegmentPointRead.Location.class),
+                layout.object(SegmentBatchFormat.Address.class),
+                SegmentControlCapacity.times(2, layout.object(Generation.class)), layout.context());
+        long stream = SegmentControlCapacity.sum(layout.object(StreamKey.class), layout.object(StreamPrefix.class),
+                layout.object(Generation.class));
+        return SegmentControlCapacity.sum(layout.object(PhysicalInventory.class), layout.object(Scan.class),
+                layout.immutableList(coordinates), layout.immutableList(config.dataFiles()),
+                layout.immutableMap(config.logicalShards()), SegmentControlCapacity.times(coordinates, location),
+                SegmentControlCapacity.times(config.dataFiles(), layout.object(Long.class)),
+                SegmentControlCapacity.times(config.logicalShards(), stream));
+    }
+
     record CompactionEntry(SegmentArenaMove.Source source, String entrySha256) { }
     record CompactionBatch(List<CompactionEntry> entries, int bytes) {
         CompactionBatch {

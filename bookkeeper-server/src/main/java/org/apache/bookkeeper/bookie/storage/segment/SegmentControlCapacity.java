@@ -25,6 +25,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -219,6 +220,23 @@ final class SegmentControlCapacity {
 
         long hashSet() {
             return sum(object(HashSet.class), hashMap());
+        }
+
+        long identityMap(long entries) {
+            // Default table has 64 reference slots; growth before 3*size exceeds table length doubles it.
+            // Each high-water table fits 64+6m slots. Reserve both old/new arrays during resize, without nodes.
+            return sum(object(IdentityHashMap.class), times(2, refs(sum(64, times(6, entries)))));
+        }
+
+        long immutableList(long entries) {
+            return sum(Math.max(object("java.util.ImmutableCollections$ListN"),
+                    object("java.util.ImmutableCollections$List12")), refs(entries));
+        }
+
+        long immutableMap(long entries) {
+            // Map.copyOf uses either inline Map1 fields or a MapN table with four reference slots per entry.
+            return sum(Math.max(object("java.util.ImmutableCollections$MapN"),
+                    object("java.util.ImmutableCollections$Map1")), refs(times(4, entries)));
         }
 
         long treeEntry() {

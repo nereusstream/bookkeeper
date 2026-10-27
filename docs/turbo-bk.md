@@ -935,3 +935,6 @@ Segment production candidate 的最低 Gate：
 
 
 [Owned Profile TLS 的 native 引用与服务终态](rfcs/unified-wal/implementation/startup-readiness/README.md#owned-profile-tls-的-native-引用与服务终态)：2026-10-27父3414108da6上，明确无factory重载在原episode内创建TLS，实际listener/storage/credit/metadata/loops终结后释放；旧带factory重载仍borrowed。Profile handler选择/构造配置、refresh与close共用monitor，成功refresh释放旧owner、失败保留旧context，未交付engine异常归还；成功reinit拒绝，关闭幂等且拒绝新入口。相同probe字节在旧native context残留上RED、修复后2→1→0 GREEN；17项定向通过，五类540项中532通过/8为原Classic格式前置条件跳过、0失败错误。初次编译接线错误及原输入独立保留，源码/验证由canonical节拥有。仅补TLS实际ownership，不闭合Main issuer/装载、TLS总字节/full-bytes/B11、完整G1或其余16步；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[Hot 与 restart inventory 的驻留元数据预算](rfcs/unified-wal/implementation/local-storage/README.md#hot-与-restart-inventory-的驻留元数据预算)：2026-10-27父d4837e0ea7上，原DATA单次启动预留加入hot/pending元数据与restart inventory，复用Layout的identity/immutable容器及direct view上界；两map高水位、各shard失败admission、旧index返回窗口计入，正常Key/context沿occupied。Inventory寿命跨terminal退休/新ledger复用，另计旧C个context，不重复Key；quota不足在storage/目录前拒绝，原actual关闭/五容器与inventory退休后退费。预算RED已复现，阶段6/600项保留原绑定；最终费用修正仅inventory函数/注释，三类260项零失败/错误/跳过，style/RAT以canonical实际回执为准。四最终JVM独立2C context图不超模型，但不证明状态数/RSS/native/完整B11。raw-unpooled backing、解析/执行器/pool其余元数据、Main/完整G1与其余16步仍OPEN；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
