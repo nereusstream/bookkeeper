@@ -107,6 +107,17 @@ final class SegmentDerivedIndex implements AutoCloseable {
                 SegmentControlCapacity.times(8, layout.captured(8)));
     }
 
+    /** One fresh point lookup; selected locator ownership continues in its admitted read command. */
+    static long pointReadWorkspaceCapacity(SegmentControlCapacity.Layout layout) {
+        long locator = SegmentControlCapacity.sum(layout.object(SegmentPointRead.Location.class),
+                layout.object(SegmentBatchFormat.Address.class),
+                SegmentControlCapacity.times(2, layout.object(Generation.class)), layout.context());
+        return SegmentControlCapacity.sum(layout.bytes(LOCATION_KEY_BYTES), layout.bytes(LOCATION_BYTES),
+                SegmentControlCapacity.times(2, layout.bytes(60)), layout.bytes(16), layout.bytes(36),
+                SegmentControlCapacity.times(6, layout.buffer()), layout.object(java.util.zip.CRC32C.class),
+                layout.object(java.util.Optional.class), locator);
+    }
+
     private record Contents(long entries, byte[] digest) { }
     private record Published(Coverage coverage, byte[] digest) { }
 

@@ -368,10 +368,11 @@ public final class SegmentProfileService implements AutoCloseable {
                             SegmentHotDirectory.occupiedCapacity(config.logicalShards(), limits.indexedEntries()),
                             SegmentHotDirectory.metadataCapacity(config, execution, limits.hotEntries()),
                             SegmentDataRecovery.inventoryCapacity(config, limits.indexedEntries()),
-                            SegmentDataPhysicalDriver.parsingCapacity(config, execution)));
+                            SegmentDataPhysicalDriver.parsingCapacity(config, execution),
+                            SegmentPointRead.runtimeCapacity(config, execution)));
                 } catch (ProfileReceiveBudget.CapacityExceededException exhausted) {
                     throw new IOException("Profile DATA quota cannot reserve storage buffers, index"
-                            + " and hot/inventory/parser capacities", exhausted);
+                            + " and hot/inventory/parser/read capacities", exhausted);
                 }
                 try {
                     controlWorkingSet = transport.budget().reserveControlWorkingSet(

@@ -69,6 +69,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private final ProfileHello.Server hello;
     private final int maxEntryBytes;
     private final int maxPending;
+    private final int readLoanBytes;
     private final Set<Pending> pending = new HashSet<>();
     private final SegmentProfileControlConfig control;
     private final SegmentProfileInstallStore physicalControl;
@@ -104,6 +105,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                              ProfileHello.Server hello, int maxEntryBytes, int maxPending,
                              SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
         this.read = read;
+        readLoanBytes = read == null ? 0 : SegmentPointRead.loanMetadataBytes();
         this.control = control;
         physicalControl = control == null ? null : storage.profileInstallStore(control.timeout());
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -136,7 +138,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     : frame.header().operation() == ProfileOperation.READ_ENTRY
                             || frame.header().operation() == ProfileOperation.READ_LAC
                             ? 4 * 72 + ProfileLacReplyCodec.EXPLICIT_PREFIX_BYTES
-                                + ProfileLacReplyCodec.EXPLICIT_BYTES + maxEntryBytes + 36
+                                + ProfileLacReplyCodec.EXPLICIT_BYTES + maxEntryBytes + 36 + readLoanBytes
                     : frame.header().operation() == ProfileOperation.OPERATION_STATUS
                             ? 8 * (int) frame.header().bodyLength() + 2 * ProfilePhysicalDeleteCodec.REPLY_BYTES
                                 + RESPONSE_BYTES

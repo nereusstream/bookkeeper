@@ -26,12 +26,84 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Isolated physical point read; the caller still owns locator publication and Bookie read authority. */
 final class SegmentPointRead {
+    /** Resident readers and admitted pooled read state; caller/transport graphs retain their own owners. */
+    static long runtimeCapacity(IsolatedSegmentConfig config, SegmentExecutionGroup.Settings execution)
+            throws IOException {
+        return runtimeCapacity(SegmentControlCapacity.Layout.hotSpot(), config.logicalShards(),
+                config.maxPendingEntries(), execution.workers(), execution.ioThreads(), execution.buffers());
+    }
+
+    static long runtimeCapacity(SegmentControlCapacity.Layout layout, int shards, int pending, int workers,
+                                int ioThreads, int buffers) throws IOException {
+        if (shards < 1 || pending < 1 || workers < 1 || workers > shards || workers > pending
+                || ioThreads < 2 || buffers < workers) {
+            throw new IllegalArgumentException("Positive bounded read geometry required");
+        }
+        try {
+            long dataIo = ioThreads - 1L;
+            long returning = SegmentControlCapacity.sum(workers, dataIo);
+            long commands = SegmentControlCapacity.sum(pending, returning);
+            long results = SegmentControlCapacity.sum(buffers, returning);
+            long view = Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR"));
+            long locator = SegmentControlCapacity.sum(layout.object(Location.class),
+                    layout.object(SegmentBatchFormat.Address.class),
+                    SegmentControlCapacity.times(2, layout.object(Generation.class)), layout.context());
+            long command = SegmentControlCapacity.sum(layout.object(Reader.ReadCommand.class),
+                    layout.object(SegmentOwnerLoop.Ticket.class), layout.object(ReadRequest.class),
+                    layout.object(SegmentBookieControlLog.ReadAdmission.class),
+                    Math.max(layout.object(IsolatedSegmentFiles.DataReadLease.class),
+                            layout.object(IsolatedSegmentFiles.StartupInventoryLease.class)),
+                    layout.context(), SegmentControlCapacity.times(2, locator),
+                    SegmentControlCapacity.times(2, layout.object(AtomicReference.class)),
+                    SegmentControlCapacity.times(2, layout.object(AtomicBoolean.class)),
+                    // Fresh Get and DATA phases can overlap their original I/O return/callback stacks.
+                    SegmentControlCapacity.times(12, layout.captured(8)),
+                    SegmentControlCapacity.times(3, layout.object(java.util.Optional.class)));
+            long result = SegmentControlCapacity.sum(layout.object(Result.class),
+                    layout.object(SegmentBatchParser.Record.class), layout.object(UUID.class), layout.context(), view,
+                    layout.object(SegmentBufferPool.Lease.class), layout.object(AtomicBoolean.class));
+            long physicalWorkspace = SegmentControlCapacity.sum(SegmentBatchParser.workspaceCapacity(layout, 1),
+                    SegmentControlCapacity.times(8, view), SegmentControlCapacity.times(4, layout.bytes(0)));
+            // A DATA I/O thread executes either the native Get codec or the pooled physical parser at a time.
+            long workspace = Math.max(physicalWorkspace, SegmentDerivedIndex.pointReadWorkspaceCapacity(layout));
+            // Held DATA results consume B physical slots; completed owner/I/O frames have separate windows.
+            // No-buffer LAC loans are paid by the existing wire ResponseCredit, not bounded by B or P.
+            return SegmentControlCapacity.sum(layout.refs(shards),
+                    SegmentControlCapacity.times(shards, layout.object(Reader.class)),
+                    SegmentControlCapacity.times(commands, command),
+                    SegmentControlCapacity.times(results, result), SegmentControlCapacity.times(dataIo, workspace));
+        } catch (ArithmeticException | IllegalArgumentException unsupported) {
+            throw new IOException("Read metadata exceeds the supported heap model", unsupported);
+        }
+    }
+
+    /** A query can retain an older ExplicitLac after CONTROL replacement or retirement. */
+    static long loanMetadataCapacity(SegmentControlCapacity.Layout layout) {
+        long view = Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR"));
+        return SegmentControlCapacity.sum(layout.object(LeasedResult.class),
+                layout.object(SegmentBookieControlLog.ExplicitLac.class),
+                layout.bytes(ProfileLacReplyCodec.EXPLICIT_BYTES), SegmentControlCapacity.times(2, view),
+                SegmentControlCapacity.times(4, layout.bytes(0)));
+    }
+
+    /** Evaluated once per read-enabled connection, before any request workspace is reserved. */
+    static int loanMetadataBytes() {
+        try {
+            return Math.toIntExact(loanMetadataCapacity(SegmentControlCapacity.Layout.hotSpot()));
+        } catch (IOException | ArithmeticException | IllegalArgumentException unsupported) {
+            throw new IllegalStateException("Cannot establish Profile read-loan metadata capacity", unsupported);
+        }
+    }
+
     record Location(SegmentBatchFormat.Address address, int batchLength, long recordOffset, int recordLength,
                     ProfileLedgerContext context, long entryId) { }
 
@@ -48,10 +120,10 @@ final class SegmentPointRead {
 
     /** The consumer owns the successful result until close, including every view borrowed from it. */
     static final class LeasedResult implements AutoCloseable {
-        private final Result result;
-        private final SegmentBufferPool.Lease buffer;
-        private final SegmentBookieControlLog.ExplicitLac explicit;
-        private final AtomicBoolean closed = new AtomicBoolean();
+        private Result result;
+        private SegmentBufferPool.Lease buffer;
+        private SegmentBookieControlLog.ExplicitLac explicit;
+        private boolean closed;
 
         private LeasedResult(Result result, SegmentBufferPool.Lease buffer,
                 SegmentBookieControlLog.ExplicitLac explicit) {
@@ -60,15 +132,15 @@ final class SegmentPointRead {
             this.explicit = explicit;
         }
 
-        SegmentBookieControlLog.ExplicitLac explicitLac() {
-            if (closed.get()) {
+        synchronized SegmentBookieControlLog.ExplicitLac explicitLac() {
+            if (closed) {
                 throw new IllegalStateException("LAC result is closed");
             }
             return explicit;
         }
 
-        Result result() {
-            if (closed.get()) {
+        synchronized Result result() {
+            if (closed) {
                 throw new IllegalStateException("Point-read result is closed");
             }
             return result;
@@ -76,10 +148,19 @@ final class SegmentPointRead {
 
         @Override
         public void close() {
-            if (closed.compareAndSet(false, true)) {
-                if (buffer != null) {
-                    buffer.close();
+            SegmentBufferPool.Lease returned;
+            synchronized (this) {
+                if (closed) {
+                    return;
                 }
+                closed = true;
+                returned = buffer;
+                result = null;
+                buffer = null;
+                explicit = null;
+            }
+            if (returned != null) {
+                returned.close();
             }
         }
     }
@@ -418,6 +499,8 @@ final class SegmentPointRead {
                                     admission = null;
                                 }
                             } finally {
+                                result = null;
+                                selected = null;
                                 request.actualTerminal();
                             }
                         }

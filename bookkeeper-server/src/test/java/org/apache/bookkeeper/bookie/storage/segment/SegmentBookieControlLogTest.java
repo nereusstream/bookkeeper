@@ -480,6 +480,16 @@ public class SegmentBookieControlLogTest {
         return reply.get(5, TimeUnit.SECONDS);
     }
 
+    private static void assertReadResourcesRetired(SegmentPointRead.LeasedResult result) throws Exception {
+        assertThrows(IllegalStateException.class, result::result);
+        assertThrows(IllegalStateException.class, result::explicitLac);
+        for (String name : List.of("result", "buffer", "explicit")) {
+            var field = SegmentPointRead.LeasedResult.class.getDeclaredField(name);
+            field.setAccessible(true);
+            assertNull(name, field.get(result));
+        }
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             assertTrue(latch.await(5, TimeUnit.SECONDS));
@@ -2267,6 +2277,7 @@ public class SegmentBookieControlLogTest {
         List<SegmentDataPhysicalDriver.NormalResult> writes = new CopyOnWriteArrayList<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         SegmentPointRead.LeasedResult held = null;
+        SegmentPointRead.LeasedResult lacLoan = null;
         try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
                 SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
@@ -2318,15 +2329,66 @@ public class SegmentBookieControlLogTest {
                 assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
                         bookie.submitFence(fence(3, (byte) 5)).status());
                 held.close();
+                held.close();
                 assertThrows(IllegalStateException.class, first.result()::result);
+                List<SegmentPointRead.LeasedResult> retired = new ArrayList<>();
+                retired.add(held);
+                assertReadResourcesRetired(held);
+                for (int cycle = 0; cycle < 3; cycle++) {
+                    ReadReply reused = pointRead(reader, context(), 1);
+                    assertEquals(SegmentPointRead.ReadStatus.FOUND, reused.status());
+                    assertNull(reused.failure());
+                    held = reused.result();
+                    assertEquals(1, held.result().record().entryId());
+                    held.close();
+                    held.close();
+                    retired.add(held);
+                    for (var closed : retired) {
+                        assertReadResourcesRetired(closed);
+                    }
+                }
+                held = null;
+                ownerBarrier(owner);
+                var emptyContext = context(48);
+                bookie.submitBatch(List.of(install(48, 10, (byte) 5), activate(48, 11)));
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, bookie.submitExplicitLac(
+                        new ProfileOperationCodec.WriteLac(emptyContext, 9, filled(20, (byte) 5), new byte[] {1})));
+                byte[] emptyFenceId = new byte[16];
+                emptyFenceId[15] = 12;
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE, bookie.submitFence(
+                        new ProfileOperationCodec.FenceLedger(emptyContext, emptyFenceId, filled(20, (byte) 5)))
+                        .status());
+                CompletableFuture<ReadReply> explicitOnly = new CompletableFuture<>();
+                assertTrue(reader.submitLac(emptyContext, new SegmentPointRead.ReadRequest((status, result, cause) ->
+                        explicitOnly.complete(new ReadReply(status, result, cause)))));
+                ReadReply missing = explicitOnly.get(5, TimeUnit.SECONDS);
+                assertEquals(SegmentPointRead.ReadStatus.MISSING, missing.status());
+                assertNull(missing.failure());
+                lacLoan = missing.result();
+                assertNotNull(lacLoan);
+                assertNull(lacLoan.result());
+                assertEquals(9, lacLoan.explicitLac().lac());
+                assertSame(bookie.explicitLac(emptyContext).orElseThrow(), lacLoan.explicitLac());
+                FutureTask<Integer> outstanding = new FutureTask<>(() -> owner.pool().outstanding());
+                assertTrue(owner.control(outstanding));
+                assertEquals(0, outstanding.get(5, TimeUnit.SECONDS).intValue());
                 ReadReply afterFence = pointRead(reader, context(), -1);
                 assertEquals(SegmentPointRead.ReadStatus.FOUND, afterFence.status());
                 assertNull(afterFence.failure());
                 held = afterFence.result();
+                ownerBarrier(owner);
                 assertFalse(group.shutdown(Duration.ofMillis(50)));
                 assertEquals(1, held.result().record().entryId());
                 held.close();
+                assertReadResourcesRetired(held);
                 held = null;
+                bookie.close();
+                assertEquals(9, lacLoan.explicitLac().lac());
+                assertEquals(1, lacLoan.explicitLac().body()[0]);
+                lacLoan.close();
+                lacLoan.close();
+                assertReadResourcesRetired(lacLoan);
+                lacLoan = null;
                 assertTrue(group.shutdown(Duration.ofSeconds(5)));
                 assertFalse(reader.submit(context(), 1, new SegmentPointRead.ReadRequest(
                         (status, result, cause) -> {
@@ -2335,6 +2397,9 @@ public class SegmentBookieControlLogTest {
             } finally {
                 if (held != null) {
                     held.close();
+                }
+                if (lacLoan != null) {
+                    lacLoan.close();
                 }
                 assertTrue(group.shutdown(Duration.ofSeconds(5)));
             }
@@ -2467,6 +2532,7 @@ public class SegmentBookieControlLogTest {
                         }
                         if (mode == 4) {
                             assertThrows(IllegalStateException.class, reply.get().result()::result);
+                            assertReadResourcesRetired(reply.get().result());
                         } else {
                             assertNull(reply.get().result());
                         }

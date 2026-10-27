@@ -1662,3 +1662,26 @@ NormalBatcher 在 prepareBatch 解码出 context A，由 PendingNormal.key、Seg
 首次完整相关集实际终态为627项、5失败/2错误/0跳过，并触发Surefire fork超时；全部7项在SDK/socket类，另外五类392项与该类228项通过。1194个输入与1179个native输入保持冻结、全部627用例身份匹配父阶段；失败回执与两份只读线程dump独立保留，不能写成全绿。同一冻结源码对这7项的定向复核全部通过，随后完整SDK/socket类235项单独复验也全部通过，零失败/错误/跳过；原超时/断言/SDK quota均未改；source追踪区分了startNew、budget-null replay及backup场景的真实budgeted restart，不能笼统归因为环境。最终按整类回执合并为其他五类392项与SDK235项通过，全部627用例身份与输入匹配；这不是初次整集Maven全绿，初次失败的具体根因仍未证明。style实际exit0；独立RAT实际exit1，443个原路径且字节与父9a195f5b7f全同、无新增。
 
 本阶段输入、两次失败/最终四项回执、probe源码/命令/结果与源字节核对位于 `/Users/liusinan/.codex/artifacts/unified-wal/recovery-scan-workspace-evidence-9a195f5b`；原 RED 与首轮欠额源码可从各自 patch/父Git对象重建并已核对，最终目标方法保持同字节。TLA未改、TLC未执行，不移绑旧PASS。point-read结果、driver/执行器/pool、完整compaction、raw-unpooled、opaque JCA/native及整个full-bytes/B11继续OPEN；Main具体issuer/受保护装载、完整G1与其余16步继续推进，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled边界保持。
+
+
+## 点读元数据与 loan 资源退休
+
+2026-10-28在父源码 `c51f3ba9b5b4fe0e3017fdcc503d4aff2dc30229` 上，将已知的 pooled point-read Java 元数据加入原 service DATA 常驻预留，并在原 wire ResponseCredit 内支付每个 read loan。只修改原点读、派生索引费用、handler 和 service；没有新增预算对象、线程、格式、配置开关或 normal Add 的逐条 credit/atomic，生产 quota 不扩大。
+
+令 `S=logicalShards`、`P=maxPendingEntries`、`W=workers`、`D=ioThreads-1`、`B=buffers`，command 包络 `R=P+W+D`，result 包络 `T=B+W+D`。计费包括 S 个 Reader、R 份 command/Ticket/request/admission/pin、独立 context、locator 与返回闭包/atomic/Optional，以及 T 份 Result/Record/UUID/context/view/Lease。每个 DATA I/O 工作区取单记录 pooled parser 与 fresh RocksDB Get codec 两者较大值，后者使用原77/160字节key/value常量。`2*locator*R` 是跨阶段总容量包络，不能表述为每个 command 始终最多两份 locator：fresh Get、hot resolve 与 read resolve 的中间引用可重叠，另由 W 个当前 owner 与 D 个返回窗口承接。
+
+无 buffer 的 LAC loan 不受 B/P 的物理槽位上限约束，因此由既有 READ_ENTRY/READ_LAC ResponseCredit 另付 LeasedResult、可能独立存活的旧 ExplicitLac/body、views 与数组头；不能假定旧 LAC 在 CONTROL 替换或关闭后永远共享。HotSpot alignment8 费用为600 B、alignment256为5632 B，每个 read-enabled connection 仅计算一次。原 readInFlight/delivering/writing 继续持有额度至真实终态。
+
+`LeasedResult` getter 与 close 使用同一锁；close 在锁内摘取 buffer 并清空 result/buffer/explicit，在锁外恰好归还一次 Lease，保留幂等和已关闭 getter 拒绝。ReadCommand 在物理与 owner 双终态后清除 result/selected，再通知 actual terminal；caller cancel、callback 返回或逻辑 completion 不替代真实终态。任意外部调用者自己保留的 aliases/wrappers 仍属于调用者所有权，原 package Reader 本身不提供独立的无限 no-buffer 调用者额度。
+
+四条真实 RED 均复现：两条既有 pooled 读取/异常路径在 close 后仍保留 Result；缺少新增 read 费用的 service 仍启动；EMPTY LAC 在 DATA submission 前只付旧1504 B。首轮同四方法通过，随后加强四条旧不足预算 oracle，使其只缺目标费用、其他当前七项均付足，最终八项定向通过。新两条 SDK RED 方法与 observer、Bookie 整文件保持原 RED 字节；没有把后续 oracle 修正移绑成首次整文件同字节。
+
+四个独立 JVM（HotSpot17/21 compressed8、21 wide8、21 compressed256）的有限图均不超模型。较大 S4/P256/W2/I3/B32 图中816份独立context/1632数组、520份locator：compressed8实际247904 B、wide8实际311800 B均≤719512 B，256对齐实际1814784 B≤5990656 B。256个无buffer loan 的compressed8实际24576 B≤153600 B，close两次后只剩8192 B wrapper图、三个资源字段为空；较小图也通过。首次Java因缺atomic模块开放在费用断言前退出，原失败/fixture保留；独立重试仅补对应 `--add-opens` 与嵌套输入路径，编译、四Java和runner均exit0、无超时。12个closure与返回栈并未在真实同时状态中全部实例化，此图不是生命周期/状态数上界或live peak证明。
+
+首次两个整类实际519项、0失败/5错误/0跳过：Bookie282项全部通过，SDK237项中5个成功重启在cold scan的content+parser reserve不足，原回执保留。统一夹具 S1/P16/W1/I2/B2/H8/C16 下新增read fee为56504 B；DATA 3801088 B减resident后的余量由131794降为75290 B，模型中的完整扫描同时费用83016 B不足。仅四个成功restart构造点通过测试私有overload补同额read fee，精确恢复原headroom；默认4MiB、DATA_BYTES、五条不足预算方法、observer、超时和断言均保持。scenario13原unclosed拒绝构造点仍使用默认额度；其后fresh目标重启才补费用。该核算是已知模型费用，不是逐case实际live peak。
+
+修正后11项定向全部通过，覆盖原5个错误和6个SDK不足预算/计费用例。随后完整SDK/socket类237项全部通过、零失败/错误/跳过；Bookie282项复用同一生产源码与未变测试文件的原通过回执，最终按整类回执合并的519用例身份全部匹配。这不是首次519项整集Maven全绿，原5个错误及预算修正独立保留。最终Spotless/Checkstyle exit0；独立RAT实际exit1，443个原路径与父c51f3ba9b5字节全同，无新增。四JVM实测仍绑定原1194项输入；最终输入仅SDK成功夹具文件不同，其余1193项与原387个冻结生产class/最终target逐项SHA一致，另有source/class等价审计，未将旧probe改绑为最终输入上的新执行。
+
+本阶段源码、各次命令/输入/XML、原失败、费用witness、四布局与等价核验位于 `/Users/liusinan/.codex/artifacts/unified-wal/point-read-metadata-evidence-c51f3ba9`。这只覆盖所列已知元数据；pre-admission/transport Pending/任意callback图、driver/执行器/pool、完整compaction、raw-unpooled、opaque JCA/native、实际同时状态数/寿命/live peak、独占retained heap、RSS及完整full-bytes/B11继续OPEN。TLA未改、TLC未执行，不移绑旧PASS；Main issuer/受保护输入、完整G1及其余16步仍OPEN，持续目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled边界保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+验收后核对实际终态、lsof、inode与SHA，移除6个本轮native运行临时根（28文件、12609973逻辑字节）；全部硬链接归档保留，常规文件数据回收量为0。四个成功布局fixture已关闭并清理（16994098逻辑字节），首次模块访问失败的fixture仍保留（4248455逻辑字节），不删除失败证据。
