@@ -73,9 +73,7 @@ final class SegmentArenaControlDriver {
         long notices = SegmentControlCapacity.sum(layout.refs(files),
                 // ArrayDeque growth and a concurrently held previous array.
                 SegmentControlCapacity.times(2, layout.refs(SegmentControlCapacity.sum(2L * files, 16))),
-                SegmentControlCapacity.times(files, SegmentControlCapacity.sum(layout.object(FailureNotice.class),
-                        layout.object(SegmentOwnerLoop.Ticket.class),
-                        SegmentControlCapacity.times(4, layout.captured(8)))));
+                SegmentControlCapacity.times(files, failureNoticeCapacity(layout)));
         long pools = SegmentControlCapacity.sum(SegmentControlCapacity.times(6,
                 layout.refs(Math.min(pending, shards))), SegmentControlCapacity.times(Math.min(pending, shards),
                 SegmentControlCapacity.sum(layout.object(PoolSubmission.class),
@@ -87,6 +85,12 @@ final class SegmentArenaControlDriver {
                 layout.object(SegmentOwnerLoop.Ticket.class), layout.object(AtomicReference.class),
                 SegmentControlCapacity.times(8, layout.captured(8)),
                 SegmentControlCapacity.times(pending, layout.object(FailureLease.class)));
+    }
+
+    static long failureNoticeCapacity(SegmentControlCapacity.Layout layout) {
+        return SegmentControlCapacity.sum(layout.object(FailureNotice.class),
+                layout.object(SegmentOwnerLoop.Ticket.class),
+                SegmentControlCapacity.times(4, layout.captured(8)));
     }
 
     boolean reserveMaintenance() {

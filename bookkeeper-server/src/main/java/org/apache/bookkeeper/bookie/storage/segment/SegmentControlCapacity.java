@@ -190,7 +190,7 @@ final class SegmentControlCapacity {
         }
 
         /** Array contents have their backing owner; include the header and worst alignment tail separately. */
-        long byteArrayMetadata() {
+        long arrayMetadata() {
             return sum(24, alignment - 1L);
         }
 

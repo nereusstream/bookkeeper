@@ -44,6 +44,12 @@ final class SegmentEntryInputs {
             throw new IllegalArgumentException("Positive source budget required");
         }
         long inputs = inputBudgetBytes / SegmentBatchFormat.ENTRY_OVERHEAD;
+        return SegmentControlCapacity.sum(SegmentControlCapacity.times(inputs, inputMetadataCapacity(layout)),
+                layout.identityMap(inputs));
+    }
+
+    /** One known Input graph, without backing contents, the ledger shell or its shared claim workspace. */
+    static long inputMetadataCapacity(SegmentControlCapacity.Layout layout) {
         long defaultRoot = Math.max(layout.object("io.netty.buffer.UnpooledByteBufAllocator"
                         + "$InstrumentedUnpooledUnsafeHeapByteBuf"),
                 layout.object("io.netty.buffer.UnpooledByteBufAllocator$InstrumentedUnpooledHeapByteBuf"));
@@ -53,10 +59,9 @@ final class SegmentEntryInputs {
         long root = Math.max(defaultRoot,
                 Math.max(layout.object("io.netty.buffer.UnpooledHeapByteBuf"), chargedRoot));
         // Every nonempty heap root owns one RefCnt; internalNioBuffer may cache one heap NIO wrapper.
-        long input = SegmentControlCapacity.sum(layout.object(Input.class), layout.context(), root,
-                layout.object("io.netty.util.internal.RefCnt"), layout.byteArrayMetadata(),
+        return SegmentControlCapacity.sum(layout.object(Input.class), layout.context(), root,
+                layout.object("io.netty.util.internal.RefCnt"), layout.arrayMetadata(),
                 layout.object("java.nio.HeapByteBuffer"));
-        return SegmentControlCapacity.sum(SegmentControlCapacity.times(inputs, input), layout.identityMap(inputs));
     }
 
     final class Input implements AutoCloseable {

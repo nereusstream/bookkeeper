@@ -3001,7 +3001,8 @@ public class SegmentProfileInitialSocketClientTest {
             var service = SegmentProfileService.withOwnedResources(configuration,
                     new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, tls,
                     new ProfileReceiveBudget(SegmentControlCapacity.sum(4L * 1024 * 1024, controlWorkingSet,
-                            serviceRestartHeadroom(config), serviceInputMetadataBytes(config)),
+                            serviceRestartHeadroom(config), serviceInputMetadataBytes(config),
+                            serviceDriverMetadataBytes(config)),
                             131072 + controlWorkingSet, 262144, 8, 8, 8),
                     131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
                     (caller, operation) -> caller.equals(principal),
@@ -3109,9 +3110,12 @@ public class SegmentProfileInitialSocketClientTest {
             controlWorkingSetBytes = SegmentControlCapacity.required(config, CONTROL_LOG_BYTES);
             controlBytes = 131072 + controlWorkingSetBytes;
             long inputMetadataBytes = serviceInputMetadataBytes(config);
-            dataBytes = SegmentControlCapacity.sum(DATA_BYTES, additionalDataBytes, inputMetadataBytes);
+            long driverMetadataBytes = serviceDriverMetadataBytes(config);
+            dataBytes = SegmentControlCapacity.sum(DATA_BYTES, additionalDataBytes,
+                    inputMetadataBytes, driverMetadataBytes);
             budget = new ProfileReceiveBudget(SegmentControlCapacity.sum(4L * 1024 * 1024,
-                    controlWorkingSetBytes, additionalDataBytes, inputMetadataBytes), controlBytes, 262144, 8, 8, 8);
+                    controlWorkingSetBytes, additionalDataBytes, inputMetadataBytes, driverMetadataBytes),
+                    controlBytes, 262144, 8, 8, 8);
             client = holdPublication
                     ? new HeldServicePublicationClient(fixture.cluster.getZooKeeperConnectString(), watcher)
                     : new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
@@ -3326,6 +3330,17 @@ public class SegmentProfileInitialSocketClientTest {
     private static long serviceInputMetadataBytes(IsolatedSegmentConfig config) throws java.io.IOException {
         return SegmentEntryInputs.metadataCapacity(
                 ((Number) serviceSettings(config).get("InputBudgetBytes")).longValue());
+    }
+
+    private static long serviceDriverMetadataBytes(IsolatedSegmentConfig config) throws java.io.IOException {
+        var settings = serviceSettings(config);
+        var execution = new SegmentExecutionGroup.Settings((Integer) settings.get("Workers"),
+                (Integer) settings.get("IoThreads"), (Integer) settings.get("ControlSlots"),
+                (Integer) settings.get("Buffers"), (Integer) settings.get("BufferBytes"),
+                ((Number) settings.get("InputBudgetBytes")).longValue(),
+                ((Number) settings.get("BufferBudgetBytes")).longValue(),
+                Duration.ofMillis(((Number) settings.get("StartupTimeoutMillis")).longValue()));
+        return SegmentDataPhysicalDriver.metadataCapacity(config, execution);
     }
 
     private static long serviceRestartHeadroom(IsolatedSegmentConfig config) throws java.io.IOException {
@@ -3593,7 +3608,8 @@ public class SegmentProfileInitialSocketClientTest {
                 SegmentDataPhysicalDriver.parsingCapacity(config, execution),
                 SegmentPointRead.runtimeCapacity(config, execution),
                 SegmentExecutionGroup.metadataCapacity(config, execution),
-                SegmentEntryInputs.metadataCapacity(execution.inputBudgetBytes()));
+                SegmentEntryInputs.metadataCapacity(execution.inputBudgetBytes()),
+                SegmentDataPhysicalDriver.metadataCapacity(config, execution));
     }
 
     @Test
@@ -3726,7 +3742,8 @@ public class SegmentProfileInitialSocketClientTest {
                         SegmentDataRecovery.inventoryCapacity(config, coordinates),
                         SegmentDataPhysicalDriver.parsingCapacity(config, execution),
                         SegmentExecutionGroup.metadataCapacity(config, execution),
-                        SegmentEntryInputs.metadataCapacity(execution.inputBudgetBytes()));
+                        SegmentEntryInputs.metadataCapacity(execution.inputBudgetBytes()),
+                        SegmentDataPhysicalDriver.metadataCapacity(config, execution));
                 long heldBytes = episode.dataBytes - oldBytes;
                 try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
                     assertThrows(java.io.IOException.class, () -> episode.service.start(false));
@@ -3762,7 +3779,8 @@ public class SegmentProfileInitialSocketClientTest {
                         SegmentDataRecovery.inventoryCapacity(config, coordinates),
                         SegmentDataPhysicalDriver.parsingCapacity(config, execution),
                         SegmentPointRead.runtimeCapacity(config, execution),
-                        SegmentEntryInputs.metadataCapacity(execution.inputBudgetBytes()));
+                        SegmentEntryInputs.metadataCapacity(execution.inputBudgetBytes()),
+                        SegmentDataPhysicalDriver.metadataCapacity(config, execution));
                 long heldBytes = episode.dataBytes - oldBytes;
                 try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
                     assertThrows(java.io.IOException.class, () -> episode.service.start(false));
@@ -3798,7 +3816,45 @@ public class SegmentProfileInitialSocketClientTest {
                         SegmentDataRecovery.inventoryCapacity(config, coordinates),
                         SegmentDataPhysicalDriver.parsingCapacity(config, execution),
                         SegmentPointRead.runtimeCapacity(config, execution),
-                        SegmentExecutionGroup.metadataCapacity(config, execution));
+                        SegmentExecutionGroup.metadataCapacity(config, execution),
+                        SegmentDataPhysicalDriver.metadataCapacity(config, execution));
+                long heldBytes = episode.dataBytes - oldBytes;
+                try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
+                    assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                    assertNull(episode.storage());
+                    assertFalse(Files.exists(config.directory()));
+                    assertEquals(heldBytes, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                    assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
+                    assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+                }
+                assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
+                assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileServiceRejectsMissingDriverMetadataBudgetBeforeOpen() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                var execution = serviceExecution(episode);
+                var settings = serviceSettings(config);
+                int coordinates = (Integer) settings.get("IndexedEntries");
+                int hotEntries = (Integer) settings.get("HotEntries");
+                long oldBytes = SegmentControlCapacity.sum(execution.reservedBufferBytes(),
+                        SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES,
+                        SegmentHotDirectory.occupiedCapacity(config.logicalShards(), coordinates),
+                        SegmentHotDirectory.metadataCapacity(config, execution, hotEntries),
+                        SegmentDataRecovery.inventoryCapacity(config, coordinates),
+                        SegmentDataPhysicalDriver.parsingCapacity(config, execution),
+                        SegmentPointRead.runtimeCapacity(config, execution),
+                        SegmentExecutionGroup.metadataCapacity(config, execution),
+                        SegmentEntryInputs.metadataCapacity(execution.inputBudgetBytes()));
                 long heldBytes = episode.dataBytes - oldBytes;
                 try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
                     assertThrows(java.io.IOException.class, () -> episode.service.start(false));

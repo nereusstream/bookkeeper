@@ -2064,9 +2064,10 @@ public class SegmentBookieControlLogTest {
                 Object normal = ((List<?>) normalsField.get(obligation)).get(0);
                 var waitersField = normal.getClass().getDeclaredField("waiters");
                 waitersField.setAccessible(true);
+                Object originalWaiters = waitersField.get(normal);
                 assertNotNull(completionField.get(obligation));
                 assertEquals(1, ((List<?>) duplicatesField.get(leader)).size());
-                assertEquals(1, ((List<?>) waitersField.get(normal)).size());
+                assertEquals(1, ((List<?>) originalWaiters).size());
                 release.countDown();
                 assertTrue(done.await(5, TimeUnit.SECONDS));
                 ownerBarrier(owner);
@@ -2087,6 +2088,10 @@ public class SegmentBookieControlLogTest {
                     retained.add("PendingNormal.waiters");
                 }
                 assertEquals("Delivered batch retains callback fan-out", List.of(), retained);
+                assertNotSame("Completed normal retains waiter backing", originalWaiters, waiters);
+                assertNotNull(waiters);
+                assertTrue(((List<?>) waiters).isEmpty());
+                assertTrue("Old waiter list retains notified values", ((List<?>) originalWaiters).isEmpty());
                 for (SegmentDataPhysicalDriver.NormalResult result : results) {
                     assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
                     assertEquals(1, result.candidate().address().sequence());

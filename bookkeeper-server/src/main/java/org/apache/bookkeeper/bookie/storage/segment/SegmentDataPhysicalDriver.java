@@ -34,6 +34,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
@@ -197,7 +198,7 @@ final class SegmentDataPhysicalDriver {
     private static final class PendingNormal {
         private final NormalKey key;
         private final SegmentEntryIdentity identity;
-        private final List<WaitingDuplicate> waiters = new ArrayList<>();
+        private List<WaitingDuplicate> waiters = new ArrayList<>();
 
         private PendingNormal(SegmentBatchParser.Record record) throws IOException {
             key = new NormalKey(record.context(), record.entryId());
@@ -331,27 +332,176 @@ final class SegmentDataPhysicalDriver {
     private final Map<NormalKey, PendingNormal> pendingNormals = new HashMap<>();
     private NormalBatcher normalBatcher;
 
+    /** Known service normal/recovery Java graph; raw callers, compaction plans and opaque runtimes are separate. */
+    static long metadataCapacity(IsolatedSegmentConfig config, SegmentExecutionGroup.Settings execution)
+            throws IOException {
+        return metadataCapacity(config, execution, SegmentControlCapacity.Layout.hotSpot());
+    }
+
+    static long metadataCapacity(IsolatedSegmentConfig config, SegmentExecutionGroup.Settings execution,
+                                 SegmentControlCapacity.Layout layout) {
+        long shards = config.logicalShards();
+        long pending = config.maxPendingEntries();
+        long workers = execution.workers();
+        long dataThreads = execution.ioThreads() - 1L;
+        long records = Math.min(parsingRecords(execution), pending);
+        // Bookie admissions and owner tickets can terminate independently. A ready/failure owner snapshot
+        // can retain P records; a returning DATA I/O task retains one batch, rather than the whole snapshot.
+        long held = SegmentControlCapacity.sum(SegmentControlCapacity.times(2, pending),
+                SegmentControlCapacity.times(pending, workers), SegmentControlCapacity.times(records, dataThreads));
+        // A current pool/outer owner ticket and a gate caller can outlive their already completed Entry.
+        long commands = SegmentControlCapacity.sum(held, workers, 1);
+        long oldRecords = SegmentControlCapacity.sum(pending,
+                SegmentControlCapacity.times(workers, pending - records));
+        long parsingOverflow = SegmentControlCapacity.sum(
+                SegmentControlCapacity.times(oldRecords, pendingNormalMetadataCapacity(layout)),
+                SegmentControlCapacity.times(2, layout.refs(oldRecords)));
+        long hotOverflow = SegmentControlCapacity.times(SegmentControlCapacity.times(workers, pending - 1),
+                SegmentHotDirectory.batchHandleCapacity(layout));
+        long request = Math.max(layout.object(NormalRequest.class), layout.object(RecoveryRequest.class));
+        long admission = Math.max(layout.object(SegmentBookieControlLog.Admission.class),
+                layout.object(SegmentBookieControlLog.RecoveryAdmission.class));
+        long core = SegmentControlCapacity.sum(layout.object(NormalBatcher.Entry.class), request, admission,
+                layout.object(Obligation.class), layout.object(PhysicalCommand.class),
+                layout.object(WaitingDuplicate.class), layout.object(SegmentOwnerLoop.Ticket.class),
+                layout.object(ArrayList.class), SegmentControlCapacity.times(2, layout.object(AtomicBoolean.class)),
+                SegmentControlCapacity.times(3, layout.object(AtomicReference.class)),
+                // Batch/duplicate completion, source release, pool/index resume, physical operation/result,
+                // and the I/O return/rejection adapters have at most eight reference-width captures each.
+                SegmentControlCapacity.times(8, layout.captured(8)));
+        long fixed = SegmentControlCapacity.sum(layout.object(BatchLimits.class), layout.object(Duration.class),
+                SegmentControlCapacity.times(shards, SegmentControlCapacity.sum(
+                        layout.object(SegmentDataPhysicalDriver.class), layout.object(NormalBatcher.class),
+                        layout.object(SegmentPhysicalPrefix.class), layout.object(Generation.class),
+                        layout.hashMap(), layout.hashMap(),
+                        layout.identityMap(pending), layout.object("java.util.IdentityHashMap$Values"),
+                        layout.object("java.util.HashMap$Values"), layout.object(ArrayList.class), layout.captured(1))),
+                SegmentControlCapacity.times(SegmentControlCapacity.times(shards, pending),
+                        SegmentControlCapacity.sum(SegmentControlCapacity.times(2, layout.hashEntry()),
+                                layout.object(Long.class), layout.object("org.apache.bookkeeper.bookie.storage.segment."
+                                        + "SegmentPhysicalPrefix$Pending"))));
+        for (int shard = 0; shard < config.logicalShards(); shard++) {
+            int worker = shard % execution.workers();
+            long ownerCapacity = pending / workers + (worker < pending % workers ? 1 : 0);
+            long assembling = Math.min(records, ownerCapacity);
+            fixed = SegmentControlCapacity.sum(fixed, layout.hashMap(),
+                    listBackingCapacity(layout, 1, assembling), SegmentControlCapacity.times(assembling,
+                            SegmentControlCapacity.sum(layout.hashEntry(), layout.object(NormalKey.class))));
+        }
+        // Parent/child ticket ordering bounds duplicates' historical arrays. A removed PendingNormal
+        // drops its old waiter container after notification, so a late parent I/O cannot retain that array.
+        long historical = SegmentControlCapacity.times(pending,
+                SegmentControlCapacity.sum(2, workers, dataThreads));
+        long lists = SegmentControlCapacity.sum(listBackingCapacity(layout, commands, historical),
+                listBackingCapacity(layout, held, historical),
+                // Admission/recovery, failure-lease, captured Entry and returned-location list wrappers.
+                SegmentControlCapacity.times(SegmentControlCapacity.times(5, commands), layout.immutableList(0)),
+                SegmentControlCapacity.times(4, layout.refs(commands)));
+        // Closed leases can retain an older CONTROL notice after its active per-file reservation was reused.
+        long closedLeases = SegmentControlCapacity.sum(SegmentControlCapacity.times(commands - pending,
+                layout.object(SegmentArenaControlDriver.FailureLease.class)),
+                SegmentControlCapacity.times(commands, SegmentArenaControlDriver.failureNoticeCapacity(layout)));
+        // A returned location can outlive its evicted hot candidate. Its context/address are not the
+        // independently parsed PendingNormal identity already paid by parsingCapacity().
+        long returned = SegmentControlCapacity.times(commands, SegmentControlCapacity.sum(
+                Math.max(layout.object(NormalResult.class), layout.object(RecoveryResult.class)),
+                layout.object(SegmentPointRead.Location.class), layout.context(),
+                layout.object(SegmentBatchFormat.Address.class),
+                SegmentControlCapacity.times(2, layout.object(Generation.class))));
+        long ownerWorkspace = SegmentControlCapacity.times(workers, SegmentControlCapacity.sum(
+                SegmentControlCapacity.times(2, layout.list()), SegmentControlCapacity.times(8, layout.refs(pending)),
+                SegmentControlCapacity.times(8, layout.list()), SegmentControlCapacity.times(8, layout.refs(records)),
+                SegmentControlCapacity.times(4, layout.object("java.util.ArrayList$Itr")),
+                SegmentControlCapacity.times(4, layout.object("java.util.ImmutableCollections$ListItr")),
+                layout.object("java.util.IdentityHashMap$ValueIterator"),
+                layout.object("java.util.HashMap$ValueIterator"),
+                // Synchronous encoder context bytes, slices/CRC and its heap validator call-site temporaries.
+                layout.bytes(ProfileLedgerContext.ENCODED_LENGTH), layout.buffer(), layout.object(CRC32C.class),
+                SegmentControlCapacity.times(2,
+                        Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR"))),
+                layout.refs(4), SegmentControlCapacity.times(4, layout.object(Integer.class)),
+                SegmentControlCapacity.times(pending, SegmentControlCapacity.sum(layout.object(Delivery.class),
+                        layout.object("org.apache.bookkeeper.bookie.storage.segment."
+                                + "SegmentPhysicalPrefix$DurableBatch")))));
+        return SegmentControlCapacity.sum(sourceMetadataCapacity(config, execution, layout), fixed,
+                SegmentControlCapacity.times(commands, core), lists, closedLeases, returned, ownerWorkspace,
+                parsingOverflow, hotOverflow);
+    }
+
+    private static long listBackingCapacity(SegmentControlCapacity.Layout layout, long lists, long highWater) {
+        // ArrayList's default/growth old+new arrays fit 20+4m wide slots. Include a header and worst
+        // alignment tail for each array, even when the lists reach their historical peaks at different times.
+        return SegmentControlCapacity.sum(SegmentControlCapacity.times(SegmentControlCapacity.times(2, lists),
+                layout.arrayMetadata()), SegmentControlCapacity.times(8, SegmentControlCapacity.sum(
+                        SegmentControlCapacity.times(20, lists), SegmentControlCapacity.times(4, highWater))));
+    }
+
+    /**
+     * Service source descriptors and preparation workspaces, including one old source held by the gate caller.
+     * Input core state, pooled parsing, persistent commands and opaque checksum backend internals are separate.
+     */
+    static long sourceMetadataCapacity(IsolatedSegmentConfig config, SegmentExecutionGroup.Settings execution,
+                                       SegmentControlCapacity.Layout layout) {
+        long inputs = execution.inputBudgetBytes() / SegmentBatchFormat.ENTRY_OVERHEAD;
+        long heapBuffer = layout.buffer();
+        long buffer = Math.max(heapBuffer, Math.max(layout.object("java.nio.DirectByteBuffer"),
+                layout.object("java.nio.DirectByteBufferR")));
+        // Context, backing and the cached root NIO wrapper remain in Input core, rather than each descriptor.
+        long descriptor = SegmentControlCapacity.sum(layout.object(SegmentBatchFormat.Data.class),
+                layout.object(UUID.class), layout.object(SegmentEntryIdentity.class),
+                SegmentControlCapacity.times(2, heapBuffer));
+        long maxEntryBytes = SegmentControlCapacity.sum(SegmentBatchFormat.ENTRY_OVERHEAD,
+                SegmentBatchFormat.maxPayload(config));
+        // The owner can release the Input before submitEntry returns to its still-live caller frame.
+        long oldSource = SegmentControlCapacity.sum(SegmentEntryInputs.inputMetadataCapacity(layout),
+                descriptor, maxEntryBytes);
+        // The outer Profile preparse identity/view can remain while the inner heap source is prepared.
+        long outerParsed = SegmentControlCapacity.sum(layout.object(SegmentEntryIdentity.class), buffer);
+        // Each service preparation uses two singleton arguments: two Input-claim and two Bookie-claim loops.
+        long claims = SegmentControlCapacity.sum(layout.identityMap(1),
+                SegmentControlCapacity.times(2, layout.object("java.util.ImmutableCollections$List12")),
+                SegmentControlCapacity.times(4, layout.object("java.util.ImmutableCollections$ListItr")));
+        // Heap/direct slices and CRC32C belong to one gate preparation, including rejected inputs.
+        // Java9IntHash's reflective call site adds a four-slot argument array and three input/one result boxes.
+        long preparation = SegmentControlCapacity.sum(SegmentControlCapacity.times(6, buffer),
+                layout.object(CRC32C.class), claims, layout.refs(4),
+                SegmentControlCapacity.times(4, layout.object(Integer.class)));
+        // duplicateView is constructed on each owner, outside the storage gate, using two temporary heap views.
+        long duplicateViews = SegmentControlCapacity.times(SegmentControlCapacity.times(2, execution.workers()),
+                heapBuffer);
+        return SegmentControlCapacity.sum(SegmentControlCapacity.times(inputs, descriptor), oldSource, outerParsed,
+                preparation, duplicateViews);
+    }
+
     /** Service pooled parsing plus its separately decoded PendingNormal values; other driver state is separate. */
     static long parsingCapacity(IsolatedSegmentConfig config, SegmentExecutionGroup.Settings execution)
             throws IOException {
         var layout = SegmentControlCapacity.Layout.hotSpot();
-        int capacity = Math.min(SegmentBatchFormat.MAX_BATCH, execution.bufferBytes());
-        int records = Math.min(SegmentBatchFormat.MAX_RECORDS,
-                (capacity - SegmentBatchFormat.HEADER - SegmentBatchFormat.FOOTER)
-                        / (SegmentBatchFormat.RECORD_HEADER + SegmentBatchFormat.ENTRY_OVERHEAD));
+        int records = parsingRecords(execution);
         // Each owner parses synchronously; the storage gate permits one concurrent maintenance batch scan.
         long workspaces = SegmentControlCapacity.times(execution.workers() + 1L,
                 SegmentHotDirectory.parsingWorkspace(layout, records));
         long returning = SegmentControlCapacity.sum(execution.workers(), execution.ioThreads() - 1L);
         long held = SegmentControlCapacity.sum(config.maxPendingEntries(), SegmentControlCapacity.times(
                 Math.min(records, config.maxPendingEntries()), returning));
-        long value = SegmentControlCapacity.sum(layout.object(PendingNormal.class), layout.object(NormalKey.class),
-                layout.object(SegmentEntryIdentity.class), layout.context(),
-                Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR")),
-                SegmentControlCapacity.times(2, layout.list()));
+        long value = pendingNormalMetadataCapacity(layout);
         // Pool callbacks are consumed before invocation, so old CONTROL tasks retain no completed leader.
         return SegmentControlCapacity.sum(workspaces, SegmentControlCapacity.times(held, value),
                 SegmentControlCapacity.times(2, layout.refs(held)));
+    }
+
+    private static int parsingRecords(SegmentExecutionGroup.Settings execution) {
+        int capacity = Math.min(SegmentBatchFormat.MAX_BATCH, execution.bufferBytes());
+        return Math.min(SegmentBatchFormat.MAX_RECORDS,
+                (capacity - SegmentBatchFormat.HEADER - SegmentBatchFormat.FOOTER)
+                        / (SegmentBatchFormat.RECORD_HEADER + SegmentBatchFormat.ENTRY_OVERHEAD));
+    }
+
+    private static long pendingNormalMetadataCapacity(SegmentControlCapacity.Layout layout) {
+        return SegmentControlCapacity.sum(layout.object(PendingNormal.class), layout.object(NormalKey.class),
+                layout.object(SegmentEntryIdentity.class), layout.context(),
+                Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR")),
+                SegmentControlCapacity.times(2, layout.list()));
     }
 
     SegmentDataPhysicalDriver(int shard, SegmentOwnerLoop owner, SegmentIoExecutor io,
@@ -1366,8 +1516,7 @@ final class SegmentDataPhysicalDriver {
                     return;
                 }
                 clearAssembling();
-                batch = SegmentBatchFormat.encodePooled(files.config(), address,
-                        entries.stream().map(entry -> entry.data).toList(), owner.pool());
+                batch = encodeEntries(address, entries);
                 for (Entry entry : entries) {
                     entry.releaseSource();
                 }
@@ -1414,6 +1563,14 @@ final class SegmentDataPhysicalDriver {
             }
         }
 
+        private SegmentBatchFormat.FrozenBatch encodeEntries(SegmentBatchFormat.Address address, List<Entry> entries) {
+            List<SegmentBatchFormat.Data> sources = new ArrayList<>(entries.size());
+            for (Entry entry : entries) {
+                sources.add(entry.data);
+            }
+            return SegmentBatchFormat.encodePooled(files.config(), address, sources, owner.pool());
+        }
+
         private Obligation prepareBatch(List<Entry> entries, SegmentBatchFormat.FrozenBatch batch) throws IOException {
             SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(batch.bytes(), batch.address(), Long.MAX_VALUE);
             if (!bookie.matchesScope(files) || parsed.records().size() != entries.size()) {
@@ -1438,12 +1595,22 @@ final class SegmentDataPhysicalDriver {
                 finishPendingNormals(normals, candidates, failure);
                 completeBatch(entries, candidates, failure);
             };
-            Obligation obligation = new Obligation(completion,
-                    entries.stream().filter(entry -> entry.admission != null).map(entry -> entry.admission).toList(),
-                    entries.stream().filter(entry -> entry.recoveryAdmission != null)
-                            .map(entry -> entry.recoveryAdmission).toList(), normals);
-            obligation.failureLeases = entries.stream().map(entry -> entry.failureLease)
-                    .filter(Objects::nonNull).toList();
+            List<SegmentBookieControlLog.Admission> admissions = new ArrayList<>(entries.size());
+            List<SegmentBookieControlLog.RecoveryAdmission> recovery = new ArrayList<>(entries.size());
+            List<SegmentArenaControlDriver.FailureLease> failures = new ArrayList<>(entries.size());
+            for (Entry entry : entries) {
+                if (entry.admission != null) {
+                    admissions.add(entry.admission);
+                }
+                if (entry.recoveryAdmission != null) {
+                    recovery.add(entry.recoveryAdmission);
+                }
+                if (entry.failureLease != null) {
+                    failures.add(entry.failureLease);
+                }
+            }
+            Obligation obligation = new Obligation(completion, admissions, recovery, normals);
+            obligation.failureLeases = List.copyOf(failures);
             for (Entry entry : entries) {
                 entry.failureLease = null;
             }
@@ -1847,6 +2014,7 @@ final class SegmentDataPhysicalDriver {
                     waiter.ticket.complete(() -> deliverDuplicate(waiter.obligation, failure));
                 }
                 normal.waiters.clear();
+                normal.waiters = List.of();
             }
         }
     }
@@ -1949,11 +2117,14 @@ final class SegmentDataPhysicalDriver {
 
     private Throwable deliver(Obligation obligation, List<SegmentPointRead.Location> candidates,
                                Throwable failure, Throwable previous) {
-        if (failure == null && candidates != null
-                && candidates.stream().anyMatch(candidate ->
-                        !authority.dataFileAvailable(candidate.address().fileIndex()))) {
-            candidates = null;
-            failure = new IOException("DATA file has an unresolved failure");
+        if (failure == null && candidates != null) {
+            for (SegmentPointRead.Location candidate : candidates) {
+                if (!authority.dataFileAvailable(candidate.address().fileIndex())) {
+                    candidates = null;
+                    failure = new IOException("DATA file has an unresolved failure");
+                    break;
+                }
+            }
         }
         Completion completion = obligation.takeCompletion();
         try {

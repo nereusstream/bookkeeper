@@ -105,10 +105,7 @@ final class SegmentHotDirectory {
         long snapshots = sum(shards, times(2, execution.workers()), execution.ioThreads());
         long address = sum(layout.object(SegmentBatchFormat.Address.class),
                 times(2, layout.object(Generation.class)));
-        long batchHandle = sum(layout.object(SegmentBatchFormat.FrozenBatch.class),
-                layout.object(IsolatedSegmentFiles.Reservation.class), layout.object(SegmentBufferPool.Lease.class),
-                layout.object(AtomicBoolean.class),
-                Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR")));
+        long batchHandle = batchHandleCapacity(layout);
         long fixed = times(shards, sum(layout.object(SegmentHotDirectory.class), times(2, layout.hashMap()),
                 times(2, layout.object("java.util.HashMap$KeySet")), layout.object("java.util.HashMap$Values"),
                 layout.captured(8)));
@@ -124,6 +121,13 @@ final class SegmentHotDirectory {
                 layout.object(SegmentOwnerLoop.Ticket.class), times(8, layout.captured(8))));
         // Normal Key/context instances are shared with occupied and are already in occupiedCapacity().
         return sum(fixed, maps, admissions, locators, times(handles, batchHandle), pump);
+    }
+
+    static long batchHandleCapacity(SegmentControlCapacity.Layout layout) {
+        return sum(layout.object(SegmentBatchFormat.FrozenBatch.class),
+                layout.object(IsolatedSegmentFiles.Reservation.class), layout.object(SegmentBufferPool.Lease.class),
+                layout.object(AtomicBoolean.class),
+                Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR")));
     }
 
     /** Includes rejected batches: keys and temporary locators are built before the final capacity check. */

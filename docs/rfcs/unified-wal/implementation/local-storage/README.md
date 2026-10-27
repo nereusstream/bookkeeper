@@ -1777,3 +1777,44 @@ Driver持久Entry/Data/UUID/Identity/views、preparation/parser局部图、任�
 最终Bookie整类283项加四条真实SDK路径共287项全部通过，零failure/error/skip；原283项用例身份逐项匹配。SDK覆盖普通quorum/连续回调、普通close的actual DATA output与caller取消、恢复close的actual precut DATA、owned service的executor/metadata/network排空；未重复整份239项SDK，不扩大为全SDK当前验收。1194当前输入及每轮1179 native子集全部匹配，测试整文件保持RED字节。Spotless/Checkstyle exit0；独立RAT实际exit1，443路径及字节均与父2aadc71bb1一致，无新增、未改规则，不称CI全绿。源码、原RED与各stage命令/输入/XML由 `/Users/liusinan/.codex/artifacts/unified-wal/driver-callback-retirement-evidence-2aadc71b` 保留。
 
 本轮不新增布局测量或执行TLC，不将旧probe/model移绑到新源码。Driver源Data/UUID/Identity/NIO、持久Entry/request/列表容量、normals/admission及返回窗口的完整计数仍需独立付额；任意caller图、native/RSS、实际live peak与统一full-bytes/B11继续OPEN。Main首版仍限已有旧服务的受控部署，具体issuer/受保护输入、完整G1及其余16步继续OPEN；完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Driver normal 与 recovery 的已知 Java 容量
+
+2026-10-28在父源码 `16933ee74773704e9e400eb76a4a9d78c5440397` 上，将Service normal/recovery的已知Driver Java图作为第十项加入同一启动DATA预留。旧九项与CONTROL组件金额不改；Input单份core、PendingNormal和Hot batch handle、CONTROL failure notice抽纯component复用，新费支付明确额外的对象与返回窗口。服务在storage打开前拒绝欠额；没有新配置、线程、队列、逐Add credit/atomic或生产quota扩容。
+
+令 `S=logicalShards`、`P=maxPendingEntries`、`W=workers`、`D=ioThreads-1`，owner实际share满足总和P。`K=min(parsingRecords,P)`沿原pool buffer/MAX_RECORDS几何上限，不能只用配置的BatchEntries。正常与恢复共享全局Bookie activeAdmissions≤P，但Bookie终态与owner票据归还不同步：乱序I/O可先返leader票据，UNKNOWN也可先释放已physicalTerminal批的admission，而原IO completion仍排队。因此两个集合分别付额。
+
+| 已知窗口 | 计数 |
+| --- | --- |
+| 当前与queued两集合、整串owner ready/failure、单批DATA I/O返回 | `T=2P+PW+KD` |
+| 加当前outer/pool owner ticket与单gate prepared Entry | `C=T+W+1` |
+| 原parser已付`P+K(W+D)`之外的records | `deltaN=P+W(P-K)` |
+| 原Hot每owner一handle之外的整串旧handles | `deltaH=W(P-1)` |
+| duplicates/waiters历史元素数包络 | `H=P(2+W+D)` |
+
+每owner一次ready/deliveries或failPending snapshot最多P条原normal/recovery记录；其多批列表不能压成一批K。每DATA I/O线程最多保留一个当前/返回Runnable，其原批最多K。新增deltaN复用原PendingNormal/NormalKey/identity/context/list组件，deltaH复用原FrozenBatch/Reservation/Lease/returned-atomic/NIO组件，不借旧fee余量或把T套给所有对象。
+
+C支付已知Entry/request/normal或recovery admission、Obligation/PhysicalCommand/WaitingDuplicate/Ticket、独立request与duplicate状态atomic、duplicateStarted/operationStarted、八类有界回调cell及其非normals列表。state/grant/canonical context沿CONTROL；pooled PendingNormal图沿原parser与新增deltaN。每shard另付Driver/NormalBatcher/Prefix及fresh stream Generation、pending identity-map、pendingNormals/prefix maps的P高水位；assembling及其key-map按本owner的min(K,share(P))高水位。不同shard先后达到的table容量不能合成一个全局P。ArrayList old/new growth按20+4m宽引用slots及两个array header/最坏alignment尾部预留，保留空容器的历史容量也计费。
+
+H依赖一处真实退休：PendingNormal移除后完成全部status/selected赋值与ticket post，先clear旧waiters，再将父字段替换为空列表。迟到的父I/O不再保留历史array；当前owner局部与已post的单waiter仍有各自归属。任一post抛错不执行clear/换根，保留原current/tail。duplicates的parent先post于child，结合当前owner/I/O窗口计其历史backing。单纯clear原waiter容器不能证明H，旧实现已真实RED。
+
+源图另按 `N=floor(inputBudgetBytes/36)` 支付Data/逐次new零UUID/源EntryIdentity/两个heap NIO，context/backing/root cached NIO沿Input core；单gate额外旧源generation包含完整core、descriptor及一个maxEntryBytes内容上界，覆盖owner在caller返回前已消费源的窗口。外层Profile preparse可能来自ChargedDirect，held与临时NIO取heap/direct RW/RO上界；内层Input固定heap。另有CRC、四次claim迭代、Bookie独立IHM、singleton参数与Java9 checksum调用点的已知array/boxing，owner duplicateView构造及encoder context bytes/CRC/iterators单列。Service seal/prepareBatch/deliver改用直接list/loop，消除这些路径的Stream临时图；source编码helper在释放Input前已返回。
+
+关闭后的FailureLease可以保留旧CONTROL notice，返还的Location可以超过当前hot candidate寿命；新增费分别支付旧lease/notice与返回location/context/address的已知窗口，不把它们当作现有active-root已覆盖。
+
+两条真实RED均为assertion failure、无error/skip：旧service在只留旧九项额度时仍启动，已完成normal仍挂原waiter backing容器。接线与换根后四项Bookie、Input真实预算及八条独立缺费/owned SDK等共14项定向通过；测试两整文件保持RED字节。随后补列owner foreach及map-value迭代器的纯费用，原focused source单独保留，不改其回执身份；最终307项本地整类为302通过、五项Linux条件跳过、零failure/error。成功夹具与crash child仅按精确Driver费用补足DATA余量，4MiB base、原restart read/execution headroom及observer/deadline/EMPTY LAC不改；原七条negative继续只缺各自目标。
+
+JDK17/21压缩alignment8、JDK21宽指针alignment8、JDK21压缩alignment256四进程均compile/Java/runner exit0，无timeout。三条实际Source分支含old37/233 generation，P1/16/64及允许的W1/2、D1/2共十组历史JDK容器/费用矩阵均在模型内。每JVM以platform-parent独立旧overlay loader核对原parsing/Hot/CONTROL三组件，40组数值严格相等，方法实际CodeSource/resource与旧overlay绑定未改。406份冻结项目class、1194当前源码、JDK/agent及已加载类型来源留档；hidden/generated无resource项明确标识，不补造hash。
+
+| Source charged N113 + old233 | 实测已选元数据（B） | source费用（B） |
+| --- | ---: | ---: |
+| JDK17/21 压缩 alignment8 | 28288 | 55947 |
+| JDK21 宽指针 alignment8 | 33456 | 55947 |
+| JDK21 压缩 alignment256 | 155136 | 529211 |
+
+最终307项本地整类与240项SDK整类分别exit0，合并547个用例身份为542通过、五项Linux专属条件跳过、零failure/error；原用例全部保留，仅新增一条独立缺Driver费用oracle。1194当前输入与每轮1179 native子集全部匹配，两份测试整文件保持RED字节；406份所测class在SDK整类后仍同字节。Spotless/Checkstyle exit0；独立RAT实际exit1，443个路径及字节与父16933ee747全同，无新增、未改规则，不称CI全绿。
+
+十组矩阵的私有Driver/Admission等17种类型采用明确标记的零初始化shell浅大小witness，不是活Driver、协议或生命周期验证；Source和JDK容器另由实际构造图测量。这些有限图及源代码计数不证明所有history状态可同时达到或完整live peak。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/driver-metadata-evidence-16933ee7`，TLA未改、TLC未执行，旧模型与测量不移绑。
+
+任意callback/transport图、raw bulk/FrozenBatch normal/recovery入口、compaction plan/copy集合、opaque checksum/JDK/native、完整retained heap/同时峰值/GC/RSS与full-bytes/B11仍OPEN。Main具体issuer/受保护输入、完整G1及其余16步继续OPEN，完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
