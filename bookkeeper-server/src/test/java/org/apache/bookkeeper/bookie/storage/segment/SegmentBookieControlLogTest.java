@@ -425,6 +425,25 @@ public class SegmentBookieControlLogTest {
         return batcher.get();
     }
 
+    private static Object queuedDataCommand(SegmentOwnerLoop owner, int shard) throws ReflectiveOperationException {
+        var dataField = SegmentOwnerLoop.class.getDeclaredField("data");
+        dataField.setAccessible(true);
+        Object ticket = ((java.util.Queue<?>[]) dataField.get(owner))[shard].peek();
+        assertNotNull(ticket);
+        var commandField = SegmentOwnerLoop.Ticket.class.getDeclaredField("command");
+        commandField.setAccessible(true);
+        return commandField.get(ticket);
+    }
+
+    private static void assertInputResourcesRetired(SegmentEntryInputs.Input input)
+            throws ReflectiveOperationException {
+        for (String name : List.of("context", "bytes")) {
+            var field = SegmentEntryInputs.Input.class.getDeclaredField(name);
+            field.setAccessible(true);
+            assertNull(name, field.get(input));
+        }
+    }
+
     private static SegmentDataPhysicalDriver.NormalRequest collectNormal(
             List<SegmentDataPhysicalDriver.NormalResult> results, AtomicReference<Throwable> failure,
             CountDownLatch done) {
@@ -3983,6 +4002,13 @@ public class SegmentBookieControlLogTest {
                                             failure.set(cause);
                                             completed.countDown();
                                         }))));
+                Object command = queuedDataCommand(owner, 0);
+                var sourcesField = command.getClass().getDeclaredField("sources");
+                var dataField = command.getClass().getDeclaredField("data");
+                sourcesField.setAccessible(true);
+                dataField.setAccessible(true);
+                assertEquals(List.of(first, second), sourcesField.get(command));
+                assertEquals(2, ((List<?>) dataField.get(command)).size());
                 // Fill every remaining owner slot while its first command is still blocked.
                 List<SegmentOwnerLoop.Ticket> placeholders = new CopyOnWriteArrayList<>();
                 CountDownLatch placeholdersStarted = new CountDownLatch(config.maxPendingEntries() - 1);
@@ -4027,6 +4053,14 @@ public class SegmentBookieControlLogTest {
                     placeholder.complete(placeholdersDone::countDown);
                 }
                 assertTrue(placeholdersDone.await(5, TimeUnit.SECONDS));
+                Object retiredSources = sourcesField.get(command);
+                Object retiredData = dataField.get(command);
+                assertTrue("Converted bulk command retains source Inputs",
+                        retiredSources == null || ((List<?>) retiredSources).isEmpty());
+                assertTrue("Converted bulk command retains source Data",
+                        retiredData == null || ((List<?>) retiredData).isEmpty());
+                assertInputResourcesRetired(first);
+                assertInputResourcesRetired(second);
                 releaseForce.countDown();
                 assertTrue(completed.await(5, TimeUnit.SECONDS));
                 ownerBarrier(owner);
@@ -7261,6 +7295,19 @@ public class SegmentBookieControlLogTest {
                         LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
                     }
                     socket.accepted.get().eventLoop().submit(() -> { }).sync();
+                    Object command = queuedDataCommand(execution.owner(0), 0);
+                    var inputField = command.getClass().getDeclaredField("input");
+                    var contextField = command.getClass().getDeclaredField("context");
+                    var admissionField = command.getClass().getDeclaredField(
+                            operation == ProfileOperation.ADD_NORMAL ? "admission" : "recoveryAdmission");
+                    inputField.setAccessible(true);
+                    contextField.setAccessible(true);
+                    admissionField.setAccessible(true);
+                    SegmentEntryInputs.Input input = (SegmentEntryInputs.Input) inputField.get(command);
+                    assertNotNull(input);
+                    ProfileLedgerContext canonical = operation == ProfileOperation.ADD_NORMAL
+                            ? ((SegmentBookieControlLog.Admission) admissionField.get(command)).context()
+                            : ((SegmentBookieControlLog.RecoveryAdmission) admissionField.get(command)).context();
                     int workspace = operation == ProfileOperation.ADD_NORMAL ? 144 : 244;
                     assertEquals(64 + 36 + body.length + workspace + 1060,
                             socket.budget.used(ProfileReceiveBudget.Lane.DATA));
@@ -7272,8 +7319,13 @@ public class SegmentBookieControlLogTest {
                     releaseOwner.countDown();
                     assertTrue(forcing.await(5, TimeUnit.SECONDS));
                     assertEquals(0, execution.inputs().usedBytes());
+                    assertNull("Converted Entry retains its source Input", inputField.get(command));
+                    assertSame(canonical, contextField.get(command));
+                    assertInputResourcesRetired(input);
+                    assertEquals(0, io.forces);
                     socket.assertBudgetZero(); // The preallocated aligned pool now owns the copied bytes.
                     assertFalse(storage.close(Duration.ofMillis(50)));
+                    assertFalse(execution.terminated());
                     assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
                     releaseIo.countDown();
                     assertTrue(storage.close(Duration.ofSeconds(5)));

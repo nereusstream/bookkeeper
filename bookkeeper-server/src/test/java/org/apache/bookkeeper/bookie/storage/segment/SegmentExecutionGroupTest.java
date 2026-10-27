@@ -29,6 +29,7 @@ import io.netty.buffer.ByteBuf;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalDouble;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -486,6 +487,9 @@ public class SegmentExecutionGroupTest {
             ProfileLedgerContext context = new ProfileLedgerContext(0, instance, descriptor);
             SegmentEntryInputs.Input input = group.inputs().acquire(context, 2048);
             ByteBuf original = input.bytes();
+            ByteBuffer cached = original.internalNioBuffer(0, original.capacity());
+            assertSame(cached, original.internalNioBuffer(0, original.capacity()));
+            assertSame(original.array(), cached.array());
             assertEquals(2048, group.inputs().usedBytes());
             assertNull(group.inputs().acquire(context, 2049));
             assertThrows(IllegalArgumentException.class, () -> group.inputs().claim(List.of(input)));
@@ -501,12 +505,37 @@ public class SegmentExecutionGroupTest {
             input.releaseFromDriver();
             assertEquals(0, original.refCnt());
             assertEquals(0, group.inputs().usedBytes());
+            for (String name : List.of("context", "bytes")) {
+                var field = SegmentEntryInputs.Input.class.getDeclaredField(name);
+                field.setAccessible(true);
+                assertNull(name, field.get(input));
+            }
+            input.close();
+            input.close();
+            assertThrows(IllegalStateException.class, input::releaseFromDriver);
             assertThrows(IllegalArgumentException.class, () -> group.inputs().acquire(context, 0));
             assertThrows(IllegalArgumentException.class, () -> group.inputs().acquire(context,
                     SegmentBatchFormat.maxPayload(config("OFF", "SYSTEM")) + SegmentBatchFormat.ENTRY_OVERHEAD + 1));
             try (SegmentEntryInputs.Input full = group.inputs().acquire(context, 4096)) {
                 assertNotNull(full);
                 assertNull(group.inputs().acquire(context, 36));
+            }
+            assertEquals(0, group.inputs().usedBytes());
+            List<SegmentEntryInputs.Input> minimum = new ArrayList<>();
+            try {
+                int count = Math.toIntExact(group.inputs().capacityBytes() / SegmentBatchFormat.ENTRY_OVERHEAD);
+                for (int i = 0; i < count; i++) {
+                    SegmentEntryInputs.Input held = group.inputs().acquire(context, SegmentBatchFormat.ENTRY_OVERHEAD);
+                    assertNotNull(held);
+                    minimum.add(held);
+                }
+                assertTrue(minimum.size() > config("OFF", "SYSTEM").maxPendingEntries() * settings().workers());
+                assertEquals((long) count * SegmentBatchFormat.ENTRY_OVERHEAD, group.inputs().usedBytes());
+                assertNull(group.inputs().acquire(context, SegmentBatchFormat.ENTRY_OVERHEAD));
+            } finally {
+                for (SegmentEntryInputs.Input held : minimum) {
+                    held.close();
+                }
             }
             assertEquals(0, group.inputs().usedBytes());
         } finally {

@@ -189,6 +189,11 @@ final class SegmentControlCapacity {
             return refs(length);
         }
 
+        /** Array contents have their backing owner; include the header and worst alignment tail separately. */
+        long byteArrayMetadata() {
+            return sum(24, alignment - 1L);
+        }
+
         /** Fixed nonfair lock shells only; contended AQS queue nodes have a separate owner. */
         long reentrantLock(int conditions) {
             if (conditions < 0) {

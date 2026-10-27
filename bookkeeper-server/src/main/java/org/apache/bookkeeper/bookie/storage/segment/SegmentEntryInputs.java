@@ -21,6 +21,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
+import java.io.IOException;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
@@ -29,9 +30,38 @@ import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 
 /** Group-wide full-capacity source bytes for normal allocations or adopted private recovery snapshots. */
 final class SegmentEntryInputs {
+    /**
+     * Known Input metadata before owner admission, bounded by source bytes rather than DATA tickets.
+     * Backing contents, the ledger shell and driver descriptors keep their existing owners; additional
+     * graphs supplied by custom allocators remain caller-owned.
+     */
+    static long metadataCapacity(long inputBudgetBytes) throws IOException {
+        return metadataCapacity(inputBudgetBytes, SegmentControlCapacity.Layout.hotSpot());
+    }
+
+    static long metadataCapacity(long inputBudgetBytes, SegmentControlCapacity.Layout layout) {
+        if (inputBudgetBytes < 1) {
+            throw new IllegalArgumentException("Positive source budget required");
+        }
+        long inputs = inputBudgetBytes / SegmentBatchFormat.ENTRY_OVERHEAD;
+        long defaultRoot = Math.max(layout.object("io.netty.buffer.UnpooledByteBufAllocator"
+                        + "$InstrumentedUnpooledUnsafeHeapByteBuf"),
+                layout.object("io.netty.buffer.UnpooledByteBufAllocator$InstrumentedUnpooledHeapByteBuf"));
+        long chargedRoot = SegmentControlCapacity.sum(
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileByteBufAllocator$ChargedHeap"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveBudget$Credit"));
+        long root = Math.max(defaultRoot,
+                Math.max(layout.object("io.netty.buffer.UnpooledHeapByteBuf"), chargedRoot));
+        // Every nonempty heap root owns one RefCnt; internalNioBuffer may cache one heap NIO wrapper.
+        long input = SegmentControlCapacity.sum(layout.object(Input.class), layout.context(), root,
+                layout.object("io.netty.util.internal.RefCnt"), layout.byteArrayMetadata(),
+                layout.object("java.nio.HeapByteBuffer"));
+        return SegmentControlCapacity.sum(SegmentControlCapacity.times(inputs, input), layout.identityMap(inputs));
+    }
+
     final class Input implements AutoCloseable {
-        private final ProfileLedgerContext context;
-        private final ByteBuf bytes;
+        private ProfileLedgerContext context;
+        private ByteBuf bytes;
         private final int capacity;
         private boolean claimed;
         private boolean released;
@@ -81,6 +111,8 @@ final class SegmentEntryInputs {
             }
             bytes.release();
             released = true;
+            context = null;
+            bytes = null;
             usedBytes -= capacity;
         }
 

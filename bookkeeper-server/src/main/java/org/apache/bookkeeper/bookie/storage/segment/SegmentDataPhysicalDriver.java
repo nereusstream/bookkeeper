@@ -721,8 +721,8 @@ final class SegmentDataPhysicalDriver {
     private final class InputCommand implements SegmentOwnerLoop.Command {
         private final SegmentBookieControlLog bookie;
         private final SegmentBatchFormat.Address address;
-        private final List<SegmentEntryInputs.Input> sources;
-        private final List<SegmentBatchFormat.Data> data;
+        private List<SegmentEntryInputs.Input> sources;
+        private List<SegmentBatchFormat.Data> data;
         private final List<SegmentBookieControlLog.Admission> admissions;
         private final List<Long> entryIds;
         private final List<NormalRequest> requests;
@@ -784,7 +784,9 @@ final class SegmentDataPhysicalDriver {
 
         private void releaseSources() {
             if (!sourcesReleased) {
+                data = List.of();
                 releaseInputs(sources);
+                sources = List.of();
                 sourcesReleased = true;
             }
         }
@@ -1032,7 +1034,7 @@ final class SegmentDataPhysicalDriver {
         }
 
         private final class Entry implements SegmentOwnerLoop.Command {
-            private final SegmentEntryInputs.Input input;
+            private SegmentEntryInputs.Input input;
             private final SegmentBookieControlLog.Admission admission;
             private final SegmentBookieControlLog.RecoveryAdmission recoveryAdmission;
             private final NormalRequest request;
@@ -1065,7 +1067,7 @@ final class SegmentDataPhysicalDriver {
                 this.arrived = arrived;
                 this.data = data;
                 this.identity = identity;
-                context = data.context();
+                context = admission != null ? admission.context() : recoveryAdmission.context();
                 entryId = identity.entryId();
             }
 
@@ -1099,6 +1101,7 @@ final class SegmentDataPhysicalDriver {
                         lookupPin = null;
                     }
                     input.releaseFromDriver();
+                    input = null;
                     sourceReleased = true;
                 }
             }

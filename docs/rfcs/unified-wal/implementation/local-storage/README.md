@@ -1739,4 +1739,28 @@ RED阶段已有五个pure fee helper文件，但Service收费和Storage退根仍
 
 此增量只闭合声明的固定队列/池Java组件与所列内部别名；不证明完整独占retained heap、实际同时峰值/状态数/寿命、native/RSS或性能。动态Input及Entry/bulk源图、释放后内部旧源引用、Thread/registry/ThreadLocal/Worker、AQS waiters、CPU/plan、cleaner/leak tracker/JCA/native及其余full-bytes/B11仍OPEN。下一Input包须同时计预admission的 `N=floor(inputBudgetBytes/36)` 和实际源退休，不能仅按P或refCnt0结案。TLA未改、TLC未执行，旧模型不移绑；Main issuer/受保护装载、完整G1及其余16步继续OPEN，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
+## Input 核心元数据与源引用退休
+
+2026-10-28在父源码 `cab51e1c8eeffada7da7c48a5c2ba4d3b364d123` 上，将 `SegmentEntryInputs` 已知核心 Java 元数据作为第九项加入原 service DATA 常驻预留。`U=inputBudgetBytes`，最小完整 entry 为36字节，故预 owner admission 的数量按 `N=floor(U/36)` 计，不能用 DATA ticket 上限 P 代替；服务在 storage 打开前拒绝不足费用。没有新的逐 Add credit/atomic、线程、队列或生产 quota 扩容。
+
+每份包括 Input、独立 ProfileLedgerContext及其16/36字节身份数组、三种实际 heap root 路径的最大 header（默认 instrumented heap、Profile ChargedHeap及其Credit、恢复 adopted heap）、Netty RefCnt、body数组的header与最坏alignment尾部，以及可缓存的HeapByteBuffer；另付一份按N建表的claim IdentityHashMap工作区。body内容仍由现有backing/source额度支付，Input manager固定shell已由execution费用支付，均不重复计费。自定义allocator的额外对象图由调用者拥有。
+
+Input在原monitor内完成refCnt校验和ByteBuf release，成功后清context/bytes，最后才退usedBytes；校验或release抛错时不退费。Entry成功释放后清input，并使用已验证相等的Admission canonical context；bulk command在encode结束后先清data views，成功释放全部inputs后再清sources。调用者取消或断连不提前触发这些退休，实际owner消费/复制边界和I/O完成门保持原合同。
+
+四项真实RED分别暴露Input、Entry、bulk仍保留源根及service漏收新费，均为断言失败、无error/skip；GREEN仅改变Inputs、Driver与Service三个生产文件，三份测试文件保持RED字节。13项定向全部通过，包含NORMAL/RECOVERY真实socket、暂停owner与持有实际DATA force、source allocator拒绝、恢复压力、七条独立缺费oracle及owned SDK实际drain。既有成功夹具仅按新Input费用精确补足原DATA余量；旧六条negative同时付足其他八项费用，未改observer、EMPTY LAC、超时或恢复断言。
+
+四个独立JVM（JDK17/21压缩指针alignment8、JDK21宽指针alignment8、JDK21压缩指针alignment256）编译/运行均exit0。每进程测三条实际路径的N113/U4096、N1024/U36864及37/233字节单Input，共12份有限图；只减body数组内容，完整计其header/tail及context身份数组。实际RefCnt和缓存HeapNIO均为N，ChargedHeap另有N个Credit；实际claim flags通过，并计相同构造及N次put的独立IdentityHashMap对照图，不冒充生产局部map的resize瞬时峰值。两种release入口后，Input资源字段全null、source/DATA/client预算全归零。
+
+| 布局 | 默认heap N113 实测/费用（B） | ChargedHeap N1024 实测/费用（B） |
+| --- | ---: | ---: |
+| JDK17/21 压缩，alignment8 | 35100 / 84207 | 364600 / 753792 |
+| JDK21 宽指针，alignment8 | 47116 / 84207 | 503888 / 753792 |
+| JDK21 压缩，alignment256 | 229916 / 623143 | 2339328 / 5629184 |
+
+406份冻结项目class、实际加载的项目/JDK/Netty类型资源、命令、JDK/agent及1194输入均留档核验。probe保留的closed Input/ByteBuf/NIO属于外部alias；refCnt归零不等于外部alias中的数组立即不可达。完整证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/input-metadata-evidence-cab51e1c`。
+
+最终307项本地整类与239项SDK整类分别exit0，合并546个用例身份核对为541通过、零failure/error、五项Linux专属测试按平台条件跳过；原545项全部保留，仅新增一项独立Input缺费oracle。1194当前输入及每轮1179 native子集全部匹配，三份测试保持RED字节；406份所测class在整类后仍与probe一致。Spotless/Checkstyle exit0；独立RAT实际exit1，443个路径及其字节与父cab51e1c8e全同，无新增，未改规则、不称CI全绿。
+
+Driver持久Entry/Data/UUID/Identity/views、preparation/parser局部图、任意caller/callback图不包含在本Input核心费用内，不能借用其他费用余量宣称关闭。批次completion、duplicates与waiters可能在源释放后继续持有整批Entry，不能据此直接套N或未经证明的P/owner/I/O公式；其终态退休和批次窗口仍需独立闭合。Thread/registry/ThreadLocal/Worker、AQS waiters、CPU/plan、cleaner/JCA/native、完整compaction/raw-unpooled及统一full-bytes/B11仍OPEN；本包不证明完整retained heap、实际live peak、GC、RSS或性能。TLA未改、TLC未执行；Main具体issuer/受保护输入、完整G1及其余16步继续OPEN，目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled边界保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
 验收后核对terminal、lsof、inode与SHA，移除8个本轮native临时运行根（40文件、13938393逻辑字节），全部硬链接归档保留，常规文件数据回收量为0。探针只建真实Group/原生pool，未创建文件storage/fixture目录；各尝试的原源码、class、错误和旧绑定均保留。
