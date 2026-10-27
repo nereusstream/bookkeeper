@@ -2610,3 +2610,27 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest
 
 
 [Driver normal 与 recovery 的已知 Java 容量](../local-storage/README.md#driver-normal-与-recovery-的已知-java-容量)：2026-10-28父16933ee747上，第十项DATA预留支付源/preparation、独立Bookie/owner集合及整串返回窗口的已知Java图；waiter成功post后换空容器，旧九项金额保持。公式、实际验证及有限测量边界由canonical拥有；raw/compaction/JDK/native、Main issuer、G1和B11仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+## Released SDK 与当前 Classic Bookie 的互操作
+
+2026-10-28，当前服务端生产组件固定为源码 `28e4c4813829fe2296cd938fe66fb66129476657`，新增两个独立helper验证四版released SDK调用当前Classic EmbeddedServer。原四版本665-vector decoder/stock network/JDI零effect结果及其source/run身份保持；本轮没有重跑corpus或修改旧Oracle、observer、lock、pom，也未把current/current测试改称old binary。
+
+服务端使用17个显式项目classpath目录的私有JAR快照与已锁外部依赖，运行不再读取target；原测试CP末尾隐式cwd被排除，未把整个module塞入classpath。实际EmbeddedServer/BookieImpl/Interleaved类resource SHA与快照绑定。服务端为Corretto21.0.10，旧client及独立JDI observer为锁定Zulu17.0.6；旧client的BookKeeper/LedgerHandle/BookieClientImpl/resolver均来自各版released server JAR，SHA256/SHA512匹配原artifacts.lock，无当前classes混入。
+
+私有loopback ZooKeeper、UUID namespace、端口、可丢弃journal/ledger/index目录仅属于本run。配置显式InterleavedLedgerStorage、journalSyncData=true，autoRecovery/http/dataIntegrity关闭。每版用真实 `createLedger(1,1,1)` 写入两条37-byte CRC32C payload，确认entryId0/1并关闭；另一个全新旧SDK进程重读同一CLOSED ledger。全部client退出后，原服务执行matching CLOSE与EXIT并实际退出；第二服务复用相同cookie、roots、BookieId与metadata URI，绝不format，再由四个全新旧SDK进程逐个重读。
+
+| released SDK | create/write/close并重读 | 独立旧SDK重读 | 健康重启后独立重读 |
+| --- | --- | --- | --- |
+| 4.14.8 | PASS | PASS | PASS |
+| 4.15.5 | PASS | PASS | PASS |
+| 4.16.7 | PASS | PASS | PASS |
+| 4.17.2 | PASS | PASS | PASS |
+
+12个SDK进程均exit0，四个ledger每次读取均CLOSED、LAC1、length74、完整payload与SHA匹配。JDI逐phase观察到正向RPC/read，create phase另有handle/descriptor/FileInfo创建、master-key、Bookie/Interleaved Add及Journal effect；不固定脆弱的精确次数。每phase均零remaining channel，前后各一个observer实际exit0。两次server均exit0，CLOSE及EXIT后各自精确registration均为NONODE；ZK CLI实际exit1是该NONODE的预期结果，另有Bookie/JDWP端口关闭和原PID终止证明。registration session owner/birth在健康重启后更新，不把它解释成Profile incarnation/generation重协商。
+
+run `run-20261027T214732Z-a99a0951-4f97-41a0-b2ad-a9b979487062` 位于 `/Users/liusinan/.codex/artifacts/unified-wal/old-sdk-current-classic-evidence-28e4c481`。六次javac、12个SDK、两个server、两个observer、四个registration检查及ZK共27个子进程按角色终结，无timeout；最后ZK在测试完成后受控SIGTERM为143，不能写成所有子进程exit0。完整helper/source、JAR/JDK/加载来源、配置、原始stdout/stderr、effect/registration/closed receipt与PID/port证据保留。独立Checkstyle9.3按原仓库规则检查新helper及default-package描述并exit0；harness仍在常规Maven reactor/CI之外。
+
+最终审计核验原172份run文件SHA、12份回执与逐phase effect、所有27个PID已退出，冻结输入复核无变。cookie结论来自existing真实启动校验、相同三类实际Classic目录及末态cookie副本，未独立采集重启前cookie SHA，不冒充前后独立字节比较。已结束的current-data/zk-data逐文件SHA/uid/gid/mode与105847-byte压缩归档核对，两次无reader检查后才移除原目录；回执另有普通副本，原PASS/input绑定保留。仓库Spotless/Checkstyle exit0；独立RAT实际exit1，仍443个父28e4c48138既有路径且字节全同，无新增，不称CI全绿。
+
+本轮闭合四版旧SDK到当前Classic的有限正向路径与健康同roots重启，不产生Profile route authority、old-service退役或新scope权限证明。PROFILE/TOMBSTONED下的旧normal/recovery拒绝、new Profile/old、mixed ensemble、完整auth/principal/issuer、Profile restart/incarnation/generation/status与general stable control-body仍未全部验收。完整G1保持BLOCKED_UNVERIFIED，生产Gate OPEN；Main外部可信输入与full-bytes/B11继续OPEN，完整16步目标active，OFF/SYSTEM/PARK和disabled边界保持。

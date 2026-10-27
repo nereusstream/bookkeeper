@@ -79,5 +79,34 @@
       },
       "g1Remaining": "Fixed reference corpus/Classic Interleaved backend only; complete current control-body, mixed-version/auth/semantic/startup acceptance remains open"
     }
-  ]
+  ],
+  "releasedSdkToCurrentClassic": {
+    "status": "PASS_SCOPED",
+    "serverSourceCommit": "28e4c4813829fe2296cd938fe66fb66129476657",
+    "runIdentity": "run-20261027T214732Z-a99a0951-4f97-41a0-b2ad-a9b979487062",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/old-sdk-current-classic-evidence-28e4c481",
+    "clientVersions": [
+      "4.14.8",
+      "4.15.5",
+      "4.16.7",
+      "4.17.2"
+    ],
+    "sdkProcesses": 12,
+    "currentClassicEpisodes": 2,
+    "backend": "InterleavedLedgerStorage",
+    "journalSyncData": true,
+    "quorum": [
+      1,
+      1,
+      1
+    ],
+    "scope": [
+      "fresh Classic create/write/close",
+      "independent released SDK CLOSED reads",
+      "clean same-roots current Classic restart and released SDK re-read"
+    ],
+    "oracle": "CLOSED, LAC=1, length=74, entry IDs=0/1 and exact two 37-byte payloads; per-phase positive RPC/read and create/master-key/Add/Journal effects; zero remaining channels; actual registration/port/PID termination",
+    "productionAuthority": false,
+    "remaining": "PROFILE/TOMBSTONED rejection, new Profile/old, mixed ensemble, full auth/principal/issuer, Profile restart/incarnation/generation/status and general stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED"
+  }
 }

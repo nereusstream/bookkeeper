@@ -66,3 +66,15 @@ stock层使用真实 `org.apache.bookkeeper.server.Main -c <private-bookie.conf>
 新resolver检查使用对应released DefaultBookieAddressResolver和标准service-info future fixture，四版各4案例通过：endpoint两种排序只选bookie-rpc；known Profile-only的opaque/legacy-shaped ID均拒绝。它验证pure protocol selection，registration I/O/publication/advertisement不在该probe范围。全部JAR/JDK/class-load/SHA、实际命令/config/退出码/原始输出在上述证据；resolver与stock有独立input身份。
 
 复现resolver：以对应released classpath编译StockResolverProbe.java，并以该class目录加released classpath运行 `StockResolverProbe <version> <fresh-summary.json>`。JDK仍为锁定Zulu17.0.6；不要添加当前checkout target/classes。实际完整compile/run命令和class-load来源见run归档。
+
+
+## Released SDK to current Classic
+
+2026-10-28增加独立的 `src/StockClassicClientProbe.java` 与 `current/src/CurrentClassicEpisodeProbe.java`。current-only helper单独放置，保留原released `src/*.java`编译入口；旧Oracle、observer、corpus及lock不改。实际四版12进程、current健康同roots重启及JDI正向effect已通过，当前服务端binary绑定28e4c48138；完整G1仍BLOCKED_UNVERIFIED，范围与原始证据由[当前Classic互操作记录](../../docs/rfcs/unified-wal/implementation/profile-wire/README.md#released-sdk-与当前-classic-bookie-的互操作)拥有。
+
+```text
+CurrentClassicEpisodeProbe <fresh|existing> <root> <metadata-uri> <port> <nonce>
+StockClassicClientProbe <version> <create|read> <metadata-uri> <receipt.json> [ledger-id]
+```
+
+fresh仅接受不存在的私有root和matching `/uw-classic-interop-<nonce>` namespace，使用非强制format；existing要求前episode健康close、PID已退出且cookie/roots/URI/BookieId匹配，不format。服务端stdin依次接受 `CLOSE <nonce>`、`EXIT <nonce>`，二者分别验证。客户端运行必须仅含对应锁定released classpath与其独立helper classes；current server只使用冻结的当前classpath。复现脚本、实际完整javac/java命令、JDK/JAR锁及资源来源在上述run的 `run.py`、`inputs/manifest.json` 和各process receipt；复现必须生成新的run/namespace/port身份，不能覆盖已有结果。

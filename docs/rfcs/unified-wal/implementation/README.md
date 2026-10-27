@@ -906,3 +906,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [Driver normal 与 recovery 的已知 Java 容量](local-storage/README.md#driver-normal-与-recovery-的已知-java-容量)：2026-10-28父16933ee747上，第十项DATA预留支付源/preparation、独立Bookie/owner集合及整串返回窗口的已知Java图；waiter成功post后换空容器，旧九项金额保持。公式、实际验证及有限测量边界由canonical拥有；raw/compaction/JDK/native、Main issuer、G1和B11仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[Released SDK 与当前 Classic Bookie 的互操作](profile-wire/README.md#released-sdk-与当前-classic-bookie-的互操作)：四版released SDK对固定28e4c48138当前Classic完成真实create/write/close、独立重读及健康同roots重启后重读，12个SDK进程/两次server/JDI effect与实际排空由canonical记录。原665-vector不重跑、不移绑；此分支PASS_SCOPED，完整G1仍BLOCKED_UNVERIFIED，Main可信输入与B11仍OPEN，完整目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
