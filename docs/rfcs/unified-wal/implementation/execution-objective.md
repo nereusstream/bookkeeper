@@ -2,6 +2,8 @@
 
 SDK 入口决策：用户2026-10-25已选择显式 Profile create/open，先接 CLOSED 只读 open 与实际排空；不再为同一入口选择重复提问。normal writer create 必须有本次原子 fresh origin，不能从已有 READY/OPEN 重建 P=-1 writer。
 
+Main 首版部署决策：用户2026-10-27已选择先限已有旧服务的受控部署；要求已有 commissioned requirements、真实旧服务 episode 及明确外部信任输入。现有 properties 中的 DRAINED/FORMAT_READY 或 mTLS 成功不自行构成 old-service/Unix access/key/policy authority；具体 issuer 与受保护输入装载仍须实现并真实验证，不伪造从未存在的旧 scope。该选择冻结首版范围，不代表 Main 已交付。
+
 运行方式：按用户2026-10-25最新授权，本会话作为唯一实施主会话，可以使用多 agent 处理职责边界明确的子任务，由主会话统一变更集、验证和本地提交。模型与推理档按用户2026-10-25最新指定，主会话及后续agent统一使用 `gpt-6.1-sol` / `xhigh`（极高）；新agent显式指定该配置，不恢复旧模型agent继续执行。下文历史迁移记录中的旧型号及禁止子agent安排保留为历史。子agent应明确文件或只读职责边界，保护彼此改动；不通过另一CLI启动第二个编码agent，不另开独立实施会话。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 继续负责总体规划与只读检查。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
 
 SDK接入方式：按用户2026-10-25答复，首版采用显式 Profile create/open，先接CLOSED只读open与实际排空。默认Classic行为和缺少可信Profile环境时的拒绝保持；这不授予same-ledger writer takeover。继续实现public create时，必须持有自身取得的原子fresh reservation/lifecycle birth，不把control的matching READY续接当作新writer发行。
@@ -301,3 +303,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [已发布 repair intent 的跨进程续接](profile-wire/README.md#已发布-repair-intent-的跨进程续接)：2026-10-26父4ba371d277上，prepareRepair在当前完整recovery context校验后优先取回全字节相同的持久intent，只有新intent才要求predecessor ensemble匹配；后续admit/publication/close权限校验保持。原生产在第二新JVM重载时CONFLICT的真实RED已复现；修复后两个协调器JVM从保存输入独立重读，首进程在durable close丢回复后actual completion并halt23，第二进程同birth/version/closeId续接、copy0且无新增DATA force，目标持续运行。定向1项及五类279项全部通过、源码/用例/child绑定匹配，style通过；独立RAT仍443父路径且字节全同、无新增。TLA未改，不移绑旧PASS；源码回执由canonical节拥有。原unclosed-session隔离、恢复接受下界/GC/Main/full-bytes/B11/兼容/正式性能及其余16步仍OPEN，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[永久坐标根的 DATA 预留与关闭退休](local-storage/README.md#永久坐标根的-data-预留与关闭退休)：2026-10-27父277f4d6514上，原DATA启动单次预留加入按logicalShards/indexedEntries计算的永久occupied HashSet/Key/context容量，复用既有HotSpot布局模型，quota不足在storage/index/目录open前拒绝。实际owner/I/O/pin及资源close成功后退休hot五容器与共享startup inventory，再退额度；false/异常close保持原状态。两个目标RED已复现，修正后测试源码相同；两项定向及六类618项全部通过、输入/用例匹配，四JVM碰撞Key图不超模型、style通过，独立RAT443父路径且字节全同、无新增。原夹具第二写拒绝单独保留，不称产品RED；证据由canonical节拥有。金额只覆盖该永久根，full-bytes/B11及其余16步仍OPEN；Main首版按用户选择限已有旧服务受控部署，issuer/装载/进程验收未完成。目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。

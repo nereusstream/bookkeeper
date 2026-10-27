@@ -524,3 +524,11 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'AbstractZkLedgerManagerTest
 
 
 2026-10-13 [派生 index 的有界 Java 读取](../local-storage/README.md#派生-index-的有界-java-读取)已限制原native Get/iterator返回到Java的复制尺寸，正常和损坏的derived数据仍保留原语义；真实父Get分配RED与18项storage/index GREEN/style拥有实际证据。此为固定池/cache之外的Java输入边界，不把memtable/native/locator/control对象计入已闭合预算，也不提升startup或生产Gate，默认OFF/SYSTEM/PARK及disabled不变。
+
+
+## Main 首版受控部署边界
+
+2026-10-27，用户已选定首版先限已有旧服务的受控部署：已有 commissioned requirements、真实旧服务 episode 及明确外部信任输入。沿原 Main/EmbeddedServer/withOwnedResources 接线，commissioning 保持独立显式执行。旧服务处置、Unix 权限隔离、跨重启 AES key、principal/registry/ACL 等仍需要真实可信来源；配置中的 DRAINED/FORMAT_READY、注册消失或 mTLS 成功不能自行生成这些 authority。当前裸 Main 的 ISOLATED 缺 owner 拒绝继续保留，具体部署 adapter/issuer 与真实 Main 进程验收仍 OPEN；该范围选择不是可部署或生产 Gate 通过的声明。
+
+
+[永久坐标根的 DATA 启动预留](../local-storage/README.md#永久坐标根的-data-预留与关闭退休)：2026-10-27父277f4d6514上，沿原单次DATA额度预留永久坐标HashSet/Key/context，缺额在storage构造/目录与index打开前拒绝；实际关闭退休共享hot/inventory根后才归还。六类618项、四种JVM布局与style验证及范围见canonical节，不提升full-bytes或生产Gate。

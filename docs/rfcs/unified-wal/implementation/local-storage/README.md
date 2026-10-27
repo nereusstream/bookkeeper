@@ -1550,3 +1550,42 @@ service rotation仍顺序处理两个owner，模型保守相加各自一份snaps
 
 
 [已发布 repair intent 的跨进程续接](../profile-wire/README.md#已发布-repair-intent-的跨进程续接)：2026-10-26父4ba371d277上，prepareRepair在当前完整recovery context校验后优先取回全字节相同的持久intent，只有新intent才要求predecessor ensemble匹配；后续admit/publication/close权限校验保持。原生产在第二新JVM重载时CONFLICT的真实RED已复现；修复后两个协调器JVM从保存输入独立重读，首进程在durable close丢回复后actual completion并halt23，第二进程同birth/version/closeId续接、copy0且无新增DATA force，目标持续运行。定向1项及五类279项全部通过、源码/用例/child绑定匹配，style通过；独立RAT仍443父路径且字节全同、无新增。TLA未改，不移绑旧PASS；源码回执由canonical节拥有。原unclosed-session隔离、恢复接受下界/GC/Main/full-bytes/B11/兼容/正式性能及其余16步仍OPEN，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+## 永久坐标根的 DATA 预留与关闭退休
+
+2026-10-27，父源码 `277f4d6514f36ced67f86bdcb05f7a88c4dac2db`。原服务 DATA 启动金额只含 execution 对齐池与 RocksDB 配置容量，未计 SegmentHotDirectory.occupied 的永久坐标根。正常索引交接只删除 candidates，occupied 仍保留每个 Key/context；所有 logical shard 的 maxCoordinates 总和由 limits.indexedEntries 约束。原源码真实反例分别验证：额度仅够旧 pool＋index 仍成功启动；read lease 已实际归还且 storage.close 成功后，旧 occupied 根仍由 cached hot/driver/owner维护闭包保留。首次额外第二写在 submitNormal 提前拒绝，未记录唯一准入谓词；该次不作为退休缺陷RED。改回原单entry后，两项均在目标断言稳定失败，未放大quota、retry或timeout。
+
+沿原 reserveDataWorkingSet 在 storage/index/目录打开前新增一项固定配置预留。令 S=logicalShards、C=limits.indexedEntries，复用原 SegmentControlCapacity.Layout 的64位HotSpot17/21、8..256对齐和保守宽引用模型：
+
+```text
+occupied = S * hashSet()
+         + C * (hashEntry() + object(Key) + context())
+DATA startup reserve = reservedBufferBytes + CONFIGURED_CAPACITY_BYTES + occupied
+```
+
+hashSet/hashEntry 已覆盖 HashMap 高水位、resize旧/新table、TreeNode及转换重叠；context 含对象及16/36-byte数组。不按worker或NUMA node复制全局额度；现有CONTROL金额、RocksDB选项、准入坐标上限与生产quota不自动改变。默认alignment8时，S1/C16新增8768 B、S4/C16新增10112 B、S4/C100000新增52,001,792 B；alignment256的S4/C100000为390,409,216 B。金额是配置允许的永久根容量包络，不是当前实测驻留，也不涵盖其他hot/read/pending/索引codec/维护/JDK/native完整工作集。额度不足继续在实际storage打开与WRITABLE之前拒绝。
+
+实际退休与预留一同闭合：owner/I/O实际终结、read pin全部归还且资源close无异常后，五个hot容器 occupied/candidates/pendingKeys/pendingBatches/byPhysical 替换为空容器；不用 clear 留下高水位 backing。正常发布与失败Admission均可能共享同一 Key/context，故不能只丢occupied。recovered Location.context还由files.startupInventory持有；同一成功graph关闭点经原closed/activeIo/reservation/reclamation保护解除该引用。闭后inventory getter原本已拒绝，提前借出的immutable快照不被修改；offlineBackup使用自己的Image.inventory，不受此改变。关闭false、尚有I/O/pin或资源清理异常时保留原hot状态和额度，service只在上述退休之后退款。原error/quarantine/session诊断、持久记录、grant、selector与UNKNOWN语义保持，普通Add没有新增metadata/control fsync/handshake。
+
+修复后的两项定向通过，测试代码与修正后RED逐字节一致。扩展的原read-lease测试先写一条真实entry、健康close/restart，再在lease仍持有时检查close(false)、五根identity/坐标与inventory均保留；归还后成功close才替换根并清inventory，随后再次健康restart核对context、entryId与完整encoded entry bytes。预算测试验证旧额度不足时目录/storage未打开、本次预留归还且调用方held额度继续持有。最终六类 **618项全部通过、0 failure/error/skip**（Arena41、Batch40、Bookie281、Capacity3、Socket230、InstallStore23）；用例身份与对应历史类集及新增方法逐项匹配，1179 runner输入与1183含addon冻结输入全部SHA一致，Spotless/Checkstyle实际exit0。
+
+另复用既有无transform的Instrumentation agent，在四个独立JVM构造仅含标准HashSet、私有Key和固定context的metadata图；10000个Key具有不同context/backing身份但相同内容及碰撞long hash，实际全部成为TreeNode。13份当前compiled overlay及所测类型的实际加载来源、JDK binary/agent SHA与参数均固定，四进程actual exit0。
+
+| 布局 | 10000坐标可达shallow图 | production容量模型 |
+| --- | ---: | ---: |
+| JDK21 compressed / alignment8 | 2,065,632 B | 5,200,448 B |
+| JDK21 wide / alignment8 | 2,851,200 B | 5,200,448 B |
+| JDK21 compressed / alignment256 | 12,866,560 B | 39,042,304 B |
+| JDK17 compressed / alignment8 | 2,065,632 B | 5,200,448 B |
+
+Key shallow与context含backing图也逐项不高于模型。此有限合成图只核验所选布局/类型，不是实际storage驻留、独占retained heap、RSS、native释放或完整状态计数证明；未执行性能测量。TLA/wire/磁盘格式未改，不重跑或移绑旧模型PASS。
+
+```bash
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocketClientTest#ownedProfileServiceRejectsMissingOccupiedCoordinateBudgetBeforeOpen,SegmentBookieControlLogTest#storageGraphRetainsLocksUntilConsumerReturnsReadLease'
+bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentArenaControlLogTest,SegmentBatchFormatTest,SegmentBookieControlLogTest,SegmentControlCapacityTest,SegmentProfileInitialSocketClientTest,SegmentProfileInstallStoreTest'
+```
+
+源码/原始夹具失败/修正RED/GREEN、命令/XML、四JVM源码/class/原输出/实际终态与布局矩阵在 `/Users/liusinan/.codex/artifacts/unified-wal/hot-coordinate-capacity-evidence-277f4d65`。全部Java/布局/style终态后独立RAT实际exit1，443未批准路径均为父HEAD既有且字节完全相同，无新增，不称CI全绿。四个原临时运行根仅在实际终态、无句柄、逐文件同inode/SHA检查后移除；hardlink归档保留，常规文件数据实际回收0 B。
+
+Main首版已由用户选择仅已有旧服务的受控部署，具体issuer/受保护输入及Main进程验收继续OPEN，见[startup边界](../startup-readiness/README.md#main-首版受控部署边界)。统一full-bytes/B11、其余资源、同incarnation未关闭session接受、恢复接受下界/GC/兼容/正式性能及16步仍OPEN；目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

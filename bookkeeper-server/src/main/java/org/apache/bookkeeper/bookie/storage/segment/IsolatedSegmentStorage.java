@@ -2657,11 +2657,19 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     }
                 }
             }
-            synchronized (gate) {
-                closed = first == null;
-            }
             if (first != null) {
                 throw first;
+            }
+            synchronized (gate) {
+                if (files != null) {
+                    files.retireClosedInventory();
+                }
+                for (SegmentHotDirectory hot : hotDirectories) {
+                    if (hot != null) {
+                        hot.retireClosedState(execution);
+                    }
+                }
+                closed = true;
             }
             return true;
         }

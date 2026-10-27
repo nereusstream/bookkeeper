@@ -21,7 +21,9 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -10514,10 +10516,47 @@ public class SegmentBookieControlLogTest {
             storage.startNew();
             installStorage(storage, install(1, (byte) 5), activate(2));
             storageWrite(storage, context(), 1);
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
+            storage.restart();
+            var hotField = IsolatedSegmentStorage.class.getDeclaredField("hotDirectories");
+            hotField.setAccessible(true);
+            SegmentHotDirectory[] hot = ((SegmentHotDirectory[]) hotField.get(storage)).clone();
+            List<java.lang.reflect.Field> fields = new ArrayList<>();
+            for (String name : List.of("occupied", "candidates", "pendingKeys", "pendingBatches", "byPhysical")) {
+                var field = SegmentHotDirectory.class.getDeclaredField(name);
+                field.setAccessible(true);
+                fields.add(field);
+            }
+            Object[][] roots = new Object[hot.length][fields.size()];
+            int coordinates = 0;
+            for (int shard = 0; shard < hot.length; shard++) {
+                for (int field = 0; field < fields.size(); field++) {
+                    roots[shard][field] = fields.get(field).get(hot[shard]);
+                }
+                coordinates += ((Set<?>) roots[shard][0]).size();
+            }
+            assertEquals(1, coordinates);
+            var filesField = IsolatedSegmentStorage.class.getDeclaredField("files");
+            filesField.setAccessible(true);
+            IsolatedSegmentFiles files = (IsolatedSegmentFiles) filesField.get(storage);
+            var inventoryField = IsolatedSegmentFiles.class.getDeclaredField("startupInventory");
+            inventoryField.setAccessible(true);
+            Object inventory = inventoryField.get(files);
+            assertNotNull(inventory);
             SegmentBookieControlDriver controls = storage.controls();
             ReadReply read = storageRead(storage, context(), 1);
             try (SegmentPointRead.LeasedResult result = read.result()) {
                 assertFalse(storage.close(Duration.ofMillis(50)));
+                coordinates = 0;
+                for (int shard = 0; shard < hot.length; shard++) {
+                    for (int field = 0; field < fields.size(); field++) {
+                        assertSame(fields.get(field).getName(), roots[shard][field], fields.get(field).get(hot[shard]));
+                    }
+                    coordinates += ((Set<?>) roots[shard][0]).size();
+                }
+                assertEquals(1, coordinates);
+                assertSame(inventory, inventoryField.get(files));
                 assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
                 assertThrows(IllegalStateException.class, storage::controls);
                 assertFalse(controls.submitBatch(List.of(activateReplacement(44, 3)), (replies, cause) -> {
@@ -10540,7 +10579,24 @@ public class SegmentBookieControlLogTest {
                 assertEquals(1, result.result().record().entryId());
             }
             assertTrue(storage.close(Duration.ofSeconds(5)));
+            for (int shard = 0; shard < hot.length; shard++) {
+                for (int field = 0; field < fields.size(); field++) {
+                    Object retired = fields.get(field).get(hot[shard]);
+                    assertNotSame(fields.get(field).getName(), roots[shard][field], retired);
+                    assertTrue(fields.get(field).getName(), retired instanceof Set<?> set
+                            ? set.isEmpty() : ((Map<?, ?>) retired).isEmpty());
+                }
+            }
+            assertNull(inventoryField.get(files));
             assertTrue(storage.close(Duration.ofSeconds(5)));
+        }
+        try (IsolatedSegmentStorage storage = storage(config, 1, 2, 16)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(context(), read.result().record().context());
+                assertEquals(1, read.result().record().entryId());
+                assertEquals(entryBytes(context(), 1, -1, 8, (byte) 0), read.result().record().entry());
+            }
         }
         try (SegmentDataFileLock guard = SegmentDataFileLock.open(config.directory());
                 SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {

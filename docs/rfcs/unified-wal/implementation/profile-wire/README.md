@@ -2561,3 +2561,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 源码、原RED/最终命令/XML/child日志、nonce/PID/intent/reference绑定与实际终态保存在 `/Users/liusinan/.codex/artifacts/unified-wal/restore-intent-reload-evidence-4ba371d2`。全部Java/style终态后独立RAT实际exit1，443条均为父HEAD既有路径、集合无新增，全部443路径字节未变，不称CI全绿。三个原临时运行根在实际终态、无句柄、逐文件同inode/SHA核对后移除，hardlink归档保留，常规文件数据实际回收0 B。
 
 恢复接受下界、历史GC、同incarnation未关闭DATA session接受、可信Main输入、full-bytes/B11、mixed兼容、正式性能与其余16步继续OPEN。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+[永久坐标根的 DATA 预留与关闭退休](../local-storage/README.md#永久坐标根的-data-预留与关闭退休)：2026-10-27父277f4d6514上，原DATA启动单次预留加入按logicalShards/indexedEntries计算的永久occupied HashSet/Key/context容量，复用既有HotSpot布局模型，quota不足在storage/index/目录open前拒绝。实际owner/I/O/pin及资源close成功后退休hot五容器与共享startup inventory，再退额度；false/异常close保持原状态。两个目标RED已复现，修正后测试源码相同；两项定向及六类618项全部通过、输入/用例匹配，四JVM碰撞Key图不超模型、style通过，独立RAT443父路径且字节全同、无新增。原夹具第二写拒绝单独保留，不称产品RED；证据由canonical节拥有。金额只覆盖该永久根，full-bytes/B11及其余16步仍OPEN；Main首版按用户选择限已有旧服务受控部署，issuer/装载/进程验收未完成。目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。

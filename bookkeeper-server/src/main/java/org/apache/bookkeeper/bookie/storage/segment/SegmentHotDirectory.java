@@ -59,11 +59,11 @@ final class SegmentHotDirectory {
     private final int maxEntries;
     private final int maxCoordinates;
     // Occupancy survives locator eviction and unresolved DATA. It stores no locator or payload.
-    private final Set<Key> occupied = new HashSet<>();
-    private final Map<Key, Candidate> candidates = new HashMap<>();
-    private final Map<Key, Admission> pendingKeys = new HashMap<>();
-    private final Map<SegmentBatchFormat.FrozenBatch, Admission> pendingBatches = new IdentityHashMap<>();
-    private final Map<IsolatedSegmentFiles.Reservation, Admission> byPhysical = new IdentityHashMap<>();
+    private Set<Key> occupied = new HashSet<>();
+    private Map<Key, Candidate> candidates = new HashMap<>();
+    private Map<Key, Admission> pendingKeys = new HashMap<>();
+    private Map<SegmentBatchFormat.FrozenBatch, Admission> pendingBatches = new IdentityHashMap<>();
+    private Map<IsolatedSegmentFiles.Reservation, Admission> byPhysical = new IdentityHashMap<>();
     private SegmentDerivedIndex index;
     private SegmentIoExecutor indexIo;
     private boolean indexInFlight;
@@ -72,6 +72,30 @@ final class SegmentHotDirectory {
     private Throwable indexFailure;
     private SegmentPhysicalPrefix prefix;
     private SegmentArenaControlLog arena;
+
+    /** Permanent coordinates survive hot eviction; reserve their supported-layout high-water graph at startup. */
+    static long occupiedCapacity(int shards, int coordinates) throws IOException {
+        if (shards < 1 || shards > 64 || coordinates < 1) {
+            throw new IllegalArgumentException("Positive bounded coordinate geometry required");
+        }
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        long entry = SegmentControlCapacity.sum(layout.hashEntry(), layout.object(Key.class), layout.context());
+        return SegmentControlCapacity.sum(SegmentControlCapacity.times(shards, layout.hashSet()),
+                SegmentControlCapacity.times(coordinates, entry));
+    }
+
+    /** The storage owner calls this only after successful resource close and actual execution termination. */
+    void retireClosedState(SegmentExecutionGroup execution) {
+        if (!execution.terminated() || execution.inputs().usedBytes() != 0) {
+            throw new IllegalStateException("Hot coordinates still belong to live execution");
+        }
+        // Keys and contexts can also be shared by candidates or an unresolved admission after I/O failure.
+        occupied = Set.of();
+        candidates = Map.of();
+        pendingKeys = Map.of();
+        pendingBatches = Map.of();
+        byPhysical = Map.of();
+    }
 
     SegmentHotDirectory(SegmentOwnerLoop owner, IsolatedSegmentConfig config, SegmentFileHeader identity,
                         int maxEntries) {

@@ -318,7 +318,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private final boolean[] failed;
     private final SegmentDataFileLock writerLock;
     private final boolean appendOnlyRecovery;
-    private final SegmentDataRecovery.PhysicalInventory startupInventory;
+    private SegmentDataRecovery.PhysicalInventory startupInventory;
     private int pendingReservations;
     private int activeIo;
     private ReclamationGuard reclamation;
@@ -874,6 +874,14 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             throw new IllegalStateException("No retained DATA startup inventory");
         }
         return startupInventory;
+    }
+
+    /** Successful graph close retires shared recovered contexts after all readers and I/O have ended. */
+    synchronized void retireClosedInventory() {
+        if (!closed || activeIo != 0 || pendingReservations != 0 || reclamation != null) {
+            throw new IllegalStateException("DATA startup inventory still belongs to live files");
+        }
+        startupInventory = null;
     }
 
     synchronized StartupInventoryLease pinStartupInventory() throws IOException {

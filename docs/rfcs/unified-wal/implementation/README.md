@@ -870,3 +870,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [已发布 repair intent 的跨进程续接](profile-wire/README.md#已发布-repair-intent-的跨进程续接)：2026-10-26父4ba371d277上，prepareRepair在当前完整recovery context校验后优先取回全字节相同的持久intent，只有新intent才要求predecessor ensemble匹配；后续admit/publication/close权限校验保持。原生产在第二新JVM重载时CONFLICT的真实RED已复现；修复后两个协调器JVM从保存输入独立重读，首进程在durable close丢回复后actual completion并halt23，第二进程同birth/version/closeId续接、copy0且无新增DATA force，目标持续运行。定向1项及五类279项全部通过、源码/用例/child绑定匹配，style通过；独立RAT仍443父路径且字节全同、无新增。TLA未改，不移绑旧PASS；源码回执由canonical节拥有。原unclosed-session隔离、恢复接受下界/GC/Main/full-bytes/B11/兼容/正式性能及其余16步仍OPEN，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[永久坐标根的 DATA 预留与关闭退休](local-storage/README.md#永久坐标根的-data-预留与关闭退休)：2026-10-27父277f4d6514上，原DATA启动单次预留加入按logicalShards/indexedEntries计算的永久occupied HashSet/Key/context容量，复用既有HotSpot布局模型，quota不足在storage/index/目录open前拒绝。实际owner/I/O/pin及资源close成功后退休hot五容器与共享startup inventory，再退额度；false/异常close保持原状态。两个目标RED已复现，修正后测试源码相同；两项定向及六类618项全部通过、输入/用例匹配，四JVM碰撞Key图不超模型、style通过，独立RAT443父路径且字节全同、无新增。原夹具第二写拒绝单独保留，不称产品RED；证据由canonical节拥有。金额只覆盖该永久根，full-bytes/B11及其余16步仍OPEN；Main首版按用户选择限已有旧服务受控部署，issuer/装载/进程验收未完成。目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
