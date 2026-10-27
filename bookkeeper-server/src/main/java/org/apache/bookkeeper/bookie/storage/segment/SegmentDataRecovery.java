@@ -115,6 +115,106 @@ final class SegmentDataRecovery {
         }
     }
 
+    static long compactionCapacity(IsolatedSegmentConfig config, int coordinates, int bufferBytes) throws IOException {
+        return compactionCapacity(config, coordinates, bufferBytes, SegmentControlCapacity.Layout.hotSpot());
+    }
+
+    /**
+     * One compaction's private plans and bounded preparation graphs, excluding pooled backing and opaque runtimes.
+     * Applied MOVE/FREE facts may remain under the Arena CONTROL owner after the operation drops its own roots.
+     */
+    static long compactionCapacity(IsolatedSegmentConfig config, int coordinates, int bufferBytes,
+                                   SegmentControlCapacity.Layout layout) throws IOException {
+        if (coordinates < 1 || bufferBytes < config.alignment() || bufferBytes % config.alignment() != 0) {
+            throw new IllegalArgumentException("Positive compaction geometry and aligned workspace required");
+        }
+        try {
+            long entries = coordinates;
+            long victims = 16;
+            int capacity = Math.min(bufferBytes, SegmentBatchFormat.MAX_BATCH);
+            // Obsolete/terminal records still need parsing, even when the retained live plan has a small C.
+            int scanRecords = Math.min(SegmentBatchFormat.MAX_RECORDS,
+                    (capacity - SegmentBatchFormat.HEADER - SegmentBatchFormat.FOOTER)
+                            / (SegmentBatchFormat.RECORD_HEADER + SegmentBatchFormat.ENTRY_OVERHEAD));
+            long chunk = Math.min(entries, scanRecords);
+            long view = Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR"));
+            long location = SegmentControlCapacity.sum(layout.object(SegmentPointRead.Location.class),
+                    layout.object(SegmentBatchFormat.Address.class),
+                    SegmentControlCapacity.times(2, layout.object(Generation.class)), layout.context());
+            long source = SegmentControlCapacity.sum(layout.object(CompactionEntry.class),
+                    layout.object(SegmentArenaMove.Source.class), location, layout.string(64));
+            // Each nonempty batch owns one immutable entry-list shell; all batch arrays together hold C entries.
+            long plan = SegmentControlCapacity.sum(layout.object(CompactionPlan.class),
+                    layout.immutableList(victims), layout.immutableList(entries), layout.refs(entries),
+                    SegmentControlCapacity.times(entries, SegmentControlCapacity.sum(source,
+                            layout.object(CompactionBatch.class), layout.immutableList(0))));
+            // Tail measurement keeps the old field plan while making a new capture. Its final wrapper shares rows.
+            long plans = SegmentControlCapacity.sum(SegmentControlCapacity.times(2, plan),
+                    layout.object(CompactionPlan.class), layout.object(CompactionTail.class));
+            // The two growing ArrayLists retain at most old/new arrays of max(10, floor(1.5*C)) wide slots.
+            long grown = Math.max(10, SegmentControlCapacity.sum(entries, entries / 2));
+            long capture = SegmentControlCapacity.sum(layout.object(CompactionCapture.class), layout.hashSet(),
+                    SegmentControlCapacity.times(entries,
+                            SegmentControlCapacity.sum(layout.object(CompactionKey.class), layout.hashEntry())),
+                    SegmentControlCapacity.times(2, layout.list()),
+                    SegmentControlCapacity.times(4, layout.refs(grown)), layout.refs(entries), layout.refs(chunk),
+                    layout.object("java.util.ArrayList$SubList"));
+            // COPY destinations have independently parsed contexts/locations and newly measured digest strings.
+            long copy = SegmentControlCapacity.sum(layout.object(SegmentBatchFormat.RelocationBuilder.class), view,
+                    layout.object(Generation.class), layout.object(java.util.UUID.class),
+                    layout.object(SegmentDataPhysicalDriver.DurableRelocation.class), layout.immutableList(chunk),
+                    SegmentControlCapacity.times(chunk, SegmentControlCapacity.sum(
+                            layout.object(SegmentDataPhysicalDriver.RelocationCopy.class),
+                            location, layout.string(64))),
+                    layout.list(), SegmentControlCapacity.times(3, layout.refs(chunk)));
+            // MOVE rows borrow the plan Source and COPY target/digest; only the row, keys and list bridges are new.
+            long move = SegmentControlCapacity.sum(layout.object(SegmentArenaMove.class), layout.immutableList(chunk),
+                    layout.hashSet(), SegmentControlCapacity.times(chunk, SegmentControlCapacity.sum(
+                            layout.object(SegmentArenaMove.Entry.class),
+                            layout.object("org.apache.bookkeeper.bookie.storage.segment.SegmentArenaMove$Key"),
+                            layout.hashEntry())), SegmentControlCapacity.times(2, layout.list()),
+                    SegmentControlCapacity.times(4, layout.refs(chunk)));
+            long free = SegmentControlCapacity.sum(layout.immutableList(victims),
+                    SegmentControlCapacity.times(victims, SegmentControlCapacity.sum(
+                            layout.object(SegmentArenaControlLog.FreeTarget.class),
+                            layout.object(SegmentArenaControlLog.Free.class),
+                            SegmentControlCapacity.times(2, layout.object(SegmentArenaControlLog.FreeFacts.class)),
+                            layout.object(SegmentArenaControlLog.AllocationIdentity.class),
+                            layout.object(java.util.UUID.class), layout.object(Generation.class), layout.string(64),
+                            SegmentControlCapacity.times(2,
+                                    layout.object(java.util.concurrent.atomic.AtomicBoolean.class)))));
+            // ends/dead/deadEnds, then FREE victims/orders/commands; selection and immutable bridges coexist.
+            long victimLists = SegmentControlCapacity.sum(SegmentControlCapacity.times(6, layout.list()),
+                    SegmentControlCapacity.times(12, layout.refs(victims + victims / 2)),
+                    SegmentControlCapacity.times(3, layout.immutableList(victims)),
+                    SegmentControlCapacity.times(2 * victims, layout.object(Long.class)));
+            // A single maintenance batch parser is already reserved by Driver.parsingCapacity(). FREE can
+            // retain that victim batch while verifying one successor with another point-record parser.
+            long nestedRead = SegmentControlCapacity.sum(SegmentBatchParser.workspaceCapacity(layout, 1),
+                    layout.object(SegmentPointRead.Result.class), layout.hashSet(),
+                    SegmentControlCapacity.times(scanRecords, layout.hashEntry()),
+                    SegmentControlCapacity.times(2, layout.object(Optional.class)));
+            long fixed = SegmentControlCapacity.sum(
+                    layout.object("org.apache.bookkeeper.bookie.storage.segment."
+                            + "IsolatedSegmentStorage$CompactionOperation"),
+                    layout.object(IsolatedSegmentStorage.CompactionRequest.class),
+                    layout.object(IsolatedSegmentStorage.CompactionResult.class),
+                    layout.object(java.util.concurrent.atomic.AtomicReference.class),
+                    layout.object(ProfileReceiveBudget.DataWorkingSet.class),
+                    layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveBudget$Credit"),
+                    // A full capture rejects its next source before retaining it in entries/distinct.
+                    source,
+                    layout.object(SegmentArenaControlLog.Allocation.class),
+                    SegmentControlCapacity.times(2, layout.object(IsolatedSegmentFiles.ReclamationGuard.class)),
+                    SegmentControlCapacity.times(2, layout.object(SegmentBookieControlLog.ReclamationLease.class)),
+                    SegmentControlCapacity.times(2, layout.object(CompactionEnd.class)),
+                    layout.bytes(1), layout.bytes(32), layout.string(64));
+            return SegmentControlCapacity.sum(plans, capture, copy, move, free, victimLists, nestedRead, fixed);
+        } catch (ArithmeticException | IllegalArgumentException unsupported) {
+            throw new IOException("Compaction workspace exceeds the supported heap model", unsupported);
+        }
+    }
+
     record CompactionEntry(SegmentArenaMove.Source source, String entrySha256) { }
     record CompactionBatch(List<CompactionEntry> entries, int bytes) {
         CompactionBatch {

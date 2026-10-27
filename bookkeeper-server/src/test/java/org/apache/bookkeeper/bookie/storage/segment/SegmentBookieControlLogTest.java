@@ -435,6 +435,41 @@ public class SegmentBookieControlLogTest {
         return commandField.get(ticket);
     }
 
+    private static Object queuedControlCommand(SegmentOwnerLoop owner) throws ReflectiveOperationException {
+        var controls = SegmentOwnerLoop.class.getDeclaredField("controls");
+        controls.setAccessible(true);
+        Object task = ((java.util.Queue<?>) controls.get(owner)).peek();
+        assertNotNull(task);
+        var actionField = task.getClass().getDeclaredField("action");
+        actionField.setAccessible(true);
+        Object action = actionField.get(task);
+        for (var capture : action.getClass().getDeclaredFields()) {
+            if (capture.getType() == SegmentOwnerLoop.Ticket.class) {
+                capture.setAccessible(true);
+                var command = SegmentOwnerLoop.Ticket.class.getDeclaredField("command");
+                command.setAccessible(true);
+                return command.get(capture.get(action));
+            }
+        }
+        throw new AssertionError("Queued CONTROL action has no owner ticket");
+    }
+
+    private static Object retainedControlBatch(Object command) throws ReflectiveOperationException {
+        for (var field : command.getClass().getDeclaredFields()) {
+            field.setAccessible(true);
+            if (List.class.isAssignableFrom(field.getType())) {
+                return field.get(command);
+            }
+            if (field.getName().equals("write")) {
+                Object write = field.get(command);
+                var batch = write.getClass().getDeclaredField("batch");
+                batch.setAccessible(true);
+                return batch.get(write);
+            }
+        }
+        throw new AssertionError("Submitted CONTROL command has no batch owner");
+    }
+
     private static Object firstAssemblingEntry(SegmentDataPhysicalDriver.NormalBatcher batcher,
                                                SegmentOwnerLoop owner) throws Exception {
         var field = batcher.getClass().getDeclaredField("assembling");
@@ -6586,12 +6621,17 @@ public class SegmentBookieControlLogTest {
 
     private IsolatedSegmentStorage storage(IsolatedSegmentConfig config, int workers, int controlSlots,
                                            int hotEntries, int indexedEntries, int ioThreads) {
+        return storage(config, workers, controlSlots, hotEntries, indexedEntries, ioThreads, null);
+    }
+
+    private IsolatedSegmentStorage storage(IsolatedSegmentConfig config, int workers, int controlSlots,
+            int hotEntries, int indexedEntries, int ioThreads, ProfileReceiveBudget budget) {
         int buffers = workers * 2;
         return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
                 new SegmentExecutionGroup.Settings(workers, ioThreads, controlSlots, buffers, 4096, 4096,
                         buffers * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
                 new IsolatedSegmentStorage.Limits(1024 * 1024, hotEntries, indexedEntries, 1, 1,
-                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
+                        new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))), budget);
     }
 
     private static void installStorage(IsolatedSegmentStorage storage,
@@ -15420,6 +15460,53 @@ public class SegmentBookieControlLogTest {
         return response.get(5, TimeUnit.SECONDS);
     }
 
+    private static void assertCompactionMetadataRetired(Object operation) throws ReflectiveOperationException {
+        for (String name : List.of("plan", "destination", "move", "frees", "durableCopy", "ticket", "metadataCredit")) {
+            var field = operation.getClass().getDeclaredField(name);
+            field.setAccessible(true);
+            assertNull(name, field.get(operation));
+        }
+        var victims = operation.getClass().getDeclaredField("victims");
+        victims.setAccessible(true);
+        Object retained = victims.get(operation);
+        assertTrue("Retired compaction retains victims", retained == null || ((List<?>) retained).isEmpty());
+    }
+
+    @Test
+    public void compactionRejectsMissingMetadataBudgetBeforeCheckpointOrPlan() throws Exception {
+        IsolatedSegmentConfig config = coverageRecoveryConfig("compaction-missing-metadata-budget");
+        createCompactionVictims(config, false);
+        long fee = SegmentDataRecovery.compactionCapacity(config, 16, 32768);
+        assertTrue(fee > 0);
+        long dataBytes = Math.addExact(4L * 1024 * 1024, fee);
+        var budget = new ProfileReceiveBudget(Math.addExact(dataBytes, 2), 1, 1, 1, 1, 1);
+        try (IsolatedSegmentStorage storage = recoveryStorage(config, budget)) {
+            storage.restart();
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            var index = (SegmentDerivedIndex) storageField(storage, "index");
+            var arena = (SegmentArenaControlLog) storageField(storage, "arena");
+            var bookie = (SegmentBookieControlLog) storageField(storage, "bookie");
+            var coverage = index.coverage();
+            long arenaCut = arena.appliedThrough();
+            long bookieCut = bookie.appliedThrough();
+            long heldBytes = dataBytes - fee + 1;
+            try (var held = budget.reserveDataWorkingSet(heldBytes)) {
+                AtomicInteger replies = new AtomicInteger();
+                assertFalse(storage.compactAllocations(new UUID(0, 950), List.of(5L, 6L),
+                        new IsolatedSegmentStorage.CompactionRequest((result, failure) -> replies.incrementAndGet())));
+                assertNull(storageField(storage, "compaction"));
+                assertNull(storageField(storage, "indexCheckpoint"));
+                assertEquals(coverage, index.coverage());
+                assertEquals(arenaCut, arena.appliedThrough());
+                assertEquals(bookieCut, bookie.appliedThrough());
+                assertEquals(0, replies.get());
+                assertEquals(heldBytes, budget.used(ProfileReceiveBudget.Lane.DATA));
+            }
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        }
+        assertTrue(budget.closeAdmissionAndDrain().isDone());
+    }
+
     @Test
     public void graphCompactionRequiresGroupNetGainPreservesSharedLiveDataAndReusesFreedSource() throws Exception {
         for (int workers : new int[] {1, 4}) {
@@ -15576,12 +15663,17 @@ public class SegmentBookieControlLogTest {
 
     private IsolatedSegmentStorage multiBatchStorage(IsolatedSegmentConfig config, int workers, int bufferBytes,
                                                      long sourceBytes) {
+        return multiBatchStorage(config, workers, bufferBytes, sourceBytes, null);
+    }
+
+    private IsolatedSegmentStorage multiBatchStorage(IsolatedSegmentConfig config, int workers, int bufferBytes,
+            long sourceBytes, ProfileReceiveBudget budget) {
         int buffers = workers * 2;
         return new IsolatedSegmentStorage(config, identity(), key((byte) 3), VALIDATOR,
                 new SegmentExecutionGroup.Settings(workers, 3, 6, buffers, bufferBytes, sourceBytes,
                         buffers * (bufferBytes + 4095L) + sourceBytes, Duration.ofSeconds(5)),
                 new IsolatedSegmentStorage.Limits(1024 * 1024, 4096, 4096, 1, 1,
-                        new SegmentDataPhysicalDriver.BatchLimits(bufferBytes, 16, Duration.ofSeconds(30))));
+                        new SegmentDataPhysicalDriver.BatchLimits(bufferBytes, 16, Duration.ofSeconds(30))), budget);
     }
 
     @Test
@@ -15656,14 +15748,26 @@ public class SegmentBookieControlLogTest {
     public void laterCompactionCopyForceUnknownRetainsSourcesAndOnlyEarlierMoveSelectors() throws Exception {
         IsolatedSegmentConfig config = coverageRecoveryConfig("later-compaction-copy-unknown");
         createMultiBatchCompactionVictims(config, 19);
-        IsolatedSegmentStorage storage = multiBatchStorage(config, 4, 4096, 4096);
+        long fee = SegmentDataRecovery.compactionCapacity(config, 4096, 4096);
+        var budget = new ProfileReceiveBudget(Math.addExact(4L * 1024 * 1024 + 2, fee), 1, 1, 1, 1, 1);
+        CountDownLatch secondCopyForce = new CountDownLatch(1);
+        CountDownLatch releaseSecondCopy = new CountDownLatch(1);
+        AtomicInteger copyForces = new AtomicInteger();
+        IsolatedSegmentStorage storage = multiBatchStorage(config, 4, 4096, 4096, budget);
         boolean expectedFailedClose = false;
+        Object operation = null;
         try {
             storage.restart();
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
             var field = IsolatedSegmentStorage.class.getDeclaredField("files");
             field.setAccessible(true);
             IsolatedSegmentFiles files = (IsolatedSegmentFiles) field.get(storage);
-            SegmentFileIo copyIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false);
+            SegmentFileIo copyIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 2, false, () -> {
+                if (copyForces.incrementAndGet() == 2) {
+                    secondCopyForce.countDown();
+                    await(releaseSecondCopy);
+                }
+            });
             files.dataIo = copyIo;
             CompletableFuture<IsolatedSegmentStorage.CompactionResult> response = new CompletableFuture<>();
             AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -15672,6 +15776,16 @@ public class SegmentBookieControlLogTest {
                         failure.set(cause);
                         response.complete(result);
                     })));
+            assertTrue(secondCopyForce.await(5, TimeUnit.SECONDS));
+            expectedFailedClose = true;
+            operation = storageField(storage, "compaction");
+            assertNotNull(operation);
+            assertFalse(response.isDone());
+            assertEquals(fee, budget.used(ProfileReceiveBudget.Lane.DATA));
+            var creditField = operation.getClass().getDeclaredField("metadataCredit");
+            creditField.setAccessible(true);
+            assertNotNull(creditField.get(operation));
+            releaseSecondCopy.countDown();
             IsolatedSegmentStorage.CompactionResult result = response.get(5, TimeUnit.SECONDS);
             assertNotNull(failure.get());
             assertEquals(IsolatedSegmentStorage.CompactionStatus.UNKNOWN, result.status());
@@ -15681,12 +15795,16 @@ public class SegmentBookieControlLogTest {
             assertEquals(-SegmentArenaControlLog.BLOCK_BYTES, result.netFreedBytes());
             assertEquals(2, copyIo.forces);
         } finally {
+            releaseSecondCopy.countDown();
             if (expectedFailedClose) {
                 assertThrows(IOException.class, storage::close);
             } else {
                 storage.close();
             }
         }
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertCompactionMetadataRetired(operation);
+        assertTrue(budget.closeAdmissionAndDrain().isDone());
         try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
             assertEquals(0, arena.retiredAllocations().size());
             assertEquals(1, arena.allocationGeneration(0, 4096));
@@ -16362,9 +16480,12 @@ public class SegmentBookieControlLogTest {
             CountDownLatch forced = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
             AtomicInteger replies = new AtomicInteger();
-            IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 16, 3);
+            long fee = SegmentDataRecovery.compactionCapacity(config, 16, 4096);
+            var budget = new ProfileReceiveBudget(Math.addExact(4L * 1024 * 1024 + 2, fee), 1, 1, 1, 1, 1);
+            IsolatedSegmentStorage storage = storage(config, workers, 6, 4, 16, 3, budget);
             try {
                 storage.restart();
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
                 IsolatedSegmentStorage.CompactionRequest request =
                         new IsolatedSegmentStorage.CompactionRequest((result, cause) -> replies.incrementAndGet());
                 assertTrue(storage.compactAllocations(new UUID(0, 916), List.of(5L, 6L), request,
@@ -16373,6 +16494,16 @@ public class SegmentBookieControlLogTest {
                             await(release);
                         })));
                 assertTrue(forced.await(5, TimeUnit.SECONDS));
+                Object operation = storageField(storage, "compaction");
+                assertNotNull(operation);
+                assertEquals(fee, budget.used(ProfileReceiveBudget.Lane.DATA));
+                var creditField = operation.getClass().getDeclaredField("metadataCredit");
+                var planField = operation.getClass().getDeclaredField("plan");
+                creditField.setAccessible(true);
+                planField.setAccessible(true);
+                Object credit = creditField.get(operation);
+                assertNotNull(credit);
+                assertNotNull(planField.get(operation));
                 ByteBuf bytes = entry(context(), 4);
                 try {
                     assertFalse(storage.submitNormal(context(), filled(20, (byte) 5), bytes,
@@ -16384,10 +16515,16 @@ public class SegmentBookieControlLogTest {
                         new IsolatedSegmentStorage.CompactionRequest((result, cause) -> { })));
                 assertTrue(request.stopWaiting());
                 assertFalse(storage.close(Duration.ofMillis(50)));
+                assertEquals(fee, budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertSame(credit, creditField.get(operation));
+                assertNotNull(planField.get(operation));
                 assertThrows(IOException.class, () -> SegmentDerivedIndex.open(config, identity(), 16));
                 release.countDown();
                 assertTrue(storage.close(Duration.ofSeconds(5)));
                 assertEquals(0, replies.get());
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertCompactionMetadataRetired(operation);
+                assertTrue(budget.closeAdmissionAndDrain().isDone());
             } finally {
                 release.countDown();
                 storage.close();
@@ -16825,7 +16962,24 @@ public class SegmentBookieControlLogTest {
                 CompletableFuture<SegmentArenaControlLog.Result> waiter = new CompletableFuture<>();
                 AtomicReference<SegmentArenaControlLog.Result> actual = new AtomicReference<>();
                 AtomicInteger callbacks = new AtomicInteger();
+                CountDownLatch ownerHeld = new CountDownLatch(1);
+                CountDownLatch releaseOwner = new CountDownLatch(1);
+                Object command;
                 try {
+                    assertTrue(fixture.owner.submit(0, new SegmentOwnerLoop.Command() {
+                        @Override
+                        public void run(SegmentOwnerLoop.Ticket ticket) {
+                            ownerHeld.countDown();
+                            await(releaseOwner);
+                            ticket.complete(() -> { });
+                        }
+
+                        @Override
+                        public void failed(Throwable cause) {
+                            throw new AssertionError(cause);
+                        }
+                    }));
+                    assertTrue(ownerHeld.await(5, TimeUnit.SECONDS));
                     assertTrue(control.submitMove(move, (results, failure) -> {
                         fixture.owner.requireOwner();
                         assertNull(failure);
@@ -16833,6 +16987,9 @@ public class SegmentBookieControlLogTest {
                         actual.set(results.get(0));
                         waiter.complete(results.get(0));
                     }));
+                    command = queuedControlCommand(fixture.owner);
+                    assertTrue(((List<?>) retainedControlBatch(command)).contains(move));
+                    releaseOwner.countDown();
                     assertTrue(atForce.await(5, TimeUnit.SECONDS));
                     assertTrue(waiter.cancel(false));
                     assertThrows(IllegalStateException.class, move::close);
@@ -16841,10 +16998,12 @@ public class SegmentBookieControlLogTest {
                     assertFalse(fixture.group.shutdown(Duration.ofMillis(20)));
                     assertNull(actual.get());
                 } finally {
+                    releaseOwner.countDown();
                     release.countDown();
                 }
                 assertTrue(fixture.group.shutdown(Duration.ofSeconds(5)));
                 assertEquals(1, callbacks.get());
+                assertNull(retainedControlBatch(command));
                 assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, actual.get().status());
                 assertEquals(copy.copies().get(0).location(), fixture.arena.resolveLocation(fixture.sources.get(0)));
                 try (IsolatedSegmentFiles.DataReadLease ignored = fixture.files.pinDataRead()) {

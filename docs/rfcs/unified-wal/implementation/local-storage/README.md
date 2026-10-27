@@ -1818,3 +1818,26 @@ JDK17/21压缩alignment8、JDK21宽指针alignment8、JDK21压缩alignment256四
 十组矩阵的私有Driver/Admission等17种类型采用明确标记的零初始化shell浅大小witness，不是活Driver、协议或生命周期验证；Source和JDK容器另由实际构造图测量。这些有限图及源代码计数不证明所有history状态可同时达到或完整live peak。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/driver-metadata-evidence-16933ee7`，TLA未改、TLC未执行，旧模型与测量不移绑。
 
 任意callback/transport图、raw bulk/FrozenBatch normal/recovery入口、compaction plan/copy集合、opaque checksum/JDK/native、完整retained heap/同时峰值/GC/RSS与full-bytes/B11仍OPEN。Main具体issuer/受保护输入、完整G1及其余16步继续OPEN，完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Compaction 计划元数据与终态退休
+
+2026-10-28在父源码 `3b78f0084d6a9d2a3d65ec12bd920c0d2789b620` 上，为持有原 recoveryBudget 的 service compaction 的已知私有 Java 图增加动态 DATA 预留。继续使用原 `ProfileReceiveBudget.DataWorkingSet`；在构造 `CompactionOperation`、启动 index checkpoint 或构造计划前一次预留，缺额返回原有拒绝结果。金额来自冻结的 execution buffer 几何，不从准入线程访问 owner pool。原十项 service 常驻 DATA 金额、CONTROL 金额与生产 quota 不变。
+
+容量上界以 `C=limits.indexedEntries()`、最多16个 victim 和现有 buffer 可容纳的 `scanRecords` 为输入，当前 COPY/MOVE chunk 为 `min(C, scanRecords)`。obsolete/terminal 原始记录仍须解析，不能用活计划的 C 截断 raw scan。新增金额覆盖两代计划、一次 capture 的集合/数组桥接、Source/Location/context/address/Generation/64字符十六进制摘要，以及当前 COPY/MOVE/FREE 的私有准备图。tail 重测期间旧计划与新 capture 可共存；不按 C 复制 payload backing。实际 backing 仍由原 owner pool 支付，原 service maintenance parser envelope 继续承担单批解析，FREE 验证 successor 所需的嵌套 point-record workspace 单独加入。
+
+在自己的实际 owner terminal 清除 plan/victims/destination/move/frees/durableCopy/ticket 后归还 credit；`stopWaiting` 只取消交付，不归还仍活跃的图。无 ticket 的准备失败和未接收路径也退回已取得的额度。MOVE I/O 从可清字段取得 DurableRelocation，旧 I/O wrapper 不直接捕获整组 copy；tail 重测同样经操作字段取得 sources/destination。
+
+`SubmittedCommands` 与 `ControlWrite` 在原 CONTROL ticket/I/O 流程中持有命令，保护成功释放后先清 batch/durable/completion，再调用原 completion。两个新壳分别仅2/4个引用字段，沿用原 capture 额度，旧金额不变；保护释放异常不伪造完成。已 apply 的 MOVE/FREE 事实可继续由 Arena CONTROL authority 持有，操作退根不等于删掉这些共享事实。
+
+COPY 的子 physical ticket 与 compaction 父 ticket 各自持有资源。早期 UNKNOWN 消费并清掉原 Driver Completion 后，父续调只接收 null copy；同一 shard owner 保证该回调返回后才运行父续调。因此私有计划图可在自己的终态退休，而未结束的子 I/O/FrozenBatch 仍归原 Driver 的实际 physical/owner 双门负责。本包不把父回调或 caller 取消当作子物理终止。
+
+原 Storage/ArenaDriver 上三项缺费/持有回归均真实失败，零 error/skip；原 CONTROL 上缓存真实 queued MOVE 命令的回归在 force、apply 与 owner 排空后仍发现 batch 引用，真实失败。最终三个 compaction 回归方法与首轮 RED 字节一致；CONTROL 回归独立保存输入和 patch。修复准入线程 pool 访问后，11项定向实际文件测试全部通过，覆盖预算拒绝、取消、COPY force UNKNOWN、多批、重测、retained tail、终态无需复制、MOVE/FREE 与 CONTROL 退根。
+
+最终本地相关整类308项中303通过、5项Linux专属按平台条件跳过，SDK整类240项全部通过；合并548个用例身份中543通过，零failure/error，只有上述5项skip。旧307项本地与240项SDK身份全部保留，仅新增一项compaction缺费测试。最终11项定向、本地整类和SDK整类使用同一1194输入，源码全匹配；SDK后407份冻结class与target仍逐份SHA相同。
+
+JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩指针四布局，分别执行 C=1/16/256、buffer=4KiB/64KiB 六格真实 capture/plan 构造；共享 tail 包装与满额后拒绝源另计，全部有限图均低于该费用。C256/4KiB 的共享 tail/拒绝源图在两种压缩布局为135240 bytes、宽指针171128 bytes，对照费用606752 bytes；256-byte对齐为871424/5716992 bytes。这里实测的是单代 capture/plan 的子图，费用还支付更大的两代/COPY/MOVE/FREE准备范围，不冒充整条活峰值。CONTROL 两个初始化壳仅测浅大小，借用 null outer，不执行协议方法；四布局均容纳于原 captured8，P1/16/64 的纯 CONTROL 金额与冻结旧实现相等。javac、四个Java与runner全部exit0、无timeout，1194输入、407份冻结class及target前后SHA一致，实际加载的可读CodeSource/resource SHA留档。
+
+仓库Spotless/Checkstyle实际exit0。独立RAT实际exit1，仍为443个既有路径，路径和字节均与父3b78f0084d一致，无新增，不称CI全绿。七个已终结run的30份文件逐SHA/uid/inode及无reader核对后保留硬链接归档并删除原临时目录；移除逻辑字节7429039，普通数据块回收0，必要的源码、失败、命令、报告、冻结class和测量证据保留。
+
+证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/compaction-metadata-evidence-3b78f008`。首轮接入的三个 owner-thread error 与一次占满 CONTROL slot 的测试准备失败也保留，均不记作语义 RED 或 PASS。任意 caller/callback/transport 图、opaque JDK/provider/native、空退休 shell 的外部别名、完整 retained heap/实际同时峰值/GC/RSS 与整个 full-bytes/B11 仍未关闭。TLA未改、TLC未执行，历史模型与兼容回执不移绑；Main实际 issuer/受保护输入、完整G1和其余16步继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

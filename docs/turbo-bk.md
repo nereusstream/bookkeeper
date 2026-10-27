@@ -965,3 +965,6 @@ Segment production candidate 的最低 Gate：
 
 
 [Released SDK 与当前 Classic Bookie 的互操作](rfcs/unified-wal/implementation/profile-wire/README.md#released-sdk-与当前-classic-bookie-的互操作)：四版released SDK对固定28e4c48138当前Classic完成真实create/write/close、独立重读及健康同roots重启后重读，12个SDK进程/两次server/JDI effect与实际排空由canonical记录。原665-vector不重跑、不移绑；此分支PASS_SCOPED，完整G1仍BLOCKED_UNVERIFIED，Main可信输入与B11仍OPEN，完整目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[Compaction 计划元数据与终态退休](rfcs/unified-wal/implementation/local-storage/README.md#compaction-计划元数据与终态退休)：2026-10-28父3b78f0084d上，运行时计划在checkpoint前动态预留DATA额度，两代plan/capture及当前COPY/MOVE/FREE按已知几何计费；实际owner终态退根后退款，CONTROL旧wrapper先清根再交付，旧常驻金额与quota不变。真实RED/GREEN及有限对象图边界由canonical记录；full-bytes/B11、Main issuer、完整G1继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

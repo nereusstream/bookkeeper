@@ -1842,14 +1842,40 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             ProfileLedgerContext deletedContext) throws IOException {
         arena.requireUnusedOperation(operationId);
         arena.requireUnusedOperation(phaseId(operationId, "ALLOC"));
-        CompactionOperation operation = new CompactionOperation(operationId, victims, request, publicationIo,
-                selectVictims, deletedContext);
-        compaction = operation;
-        if (!maintainIndex(new IndexCheckpointRequest(operation::prepared), new SegmentFileIo(), true, operation)) {
-            compaction = null;
+        ProfileReceiveBudget.DataWorkingSet metadataCredit;
+        try {
+            metadataCredit = recoveryBudget == null ? null : recoveryBudget.reserveDataWorkingSet(
+                    SegmentDataRecovery.compactionCapacity(config, limits.indexedEntries(),
+                            executionSettings.bufferBytes()));
+        } catch (ProfileReceiveBudget.CapacityExceededException unavailable) {
             return false;
         }
-        return true;
+        CompactionOperation operation;
+        try {
+            operation = new CompactionOperation(operationId, victims, request, publicationIo,
+                    selectVictims, deletedContext, metadataCredit);
+        } catch (RuntimeException | Error failure) {
+            if (metadataCredit != null) {
+                metadataCredit.close();
+            }
+            throw failure;
+        }
+        compaction = operation;
+        try {
+            if (maintainIndex(new IndexCheckpointRequest(operation::prepared), new SegmentFileIo(), true, operation)) {
+                return true;
+            }
+        } catch (RuntimeException | Error failure) {
+            // Before a checkpoint owns workers, no asynchronous user can still hold this operation.
+            if (indexCheckpoint == null) {
+                compaction = null;
+                operation.retireMetadata();
+            }
+            throw failure;
+        }
+        compaction = null;
+        operation.retireMetadata();
+        return false;
     }
 
     boolean compactAllocations(UUID operationId, List<Long> allocationIds, CompactionRequest request,
@@ -1857,9 +1883,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         Objects.requireNonNull(operationId, "operationId");
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(publicationIo, "publicationIo");
+        if (operationId.equals(new UUID(0, 0)) || allocationIds.isEmpty() || allocationIds.size() > 16) {
+            throw new IllegalArgumentException("Compaction needs 1..16 unique same-stream allocations");
+        }
         allocationIds = List.copyOf(allocationIds);
-        if (operationId.equals(new UUID(0, 0)) || allocationIds.isEmpty() || allocationIds.size() > 16
-                || allocationIds.stream().distinct().count() != allocationIds.size()) {
+        if (allocationIds.stream().distinct().count() != allocationIds.size()) {
             throw new IllegalArgumentException("Compaction needs 1..16 unique same-stream allocations");
         }
         synchronized (gate) {
@@ -1894,8 +1922,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         private SegmentOwnerLoop.Ticket ticket;
         private SegmentBufferPool.Lease buffer;
         private SegmentDataRecovery.CompactionPlan plan;
+        private ProfileReceiveBudget.DataWorkingSet metadataCredit;
         private SegmentBatchFormat.RelocationBuilder copyBuilder;
         private SegmentBatchFormat.FrozenBatch copyBatch;
+        private SegmentDataPhysicalDriver.DurableRelocation durableCopy;
         private SegmentArenaControlLog.Allocation destination;
         private SegmentArenaMove move;
         private List<SegmentArenaControlLog.Free> frees;
@@ -1912,7 +1942,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
         private CompactionOperation(UUID operationId, List<SegmentArenaControlLog.Allocation> victims,
                                     CompactionRequest request, SegmentFileIo publicationIo, boolean selectVictims,
-                                    ProfileLedgerContext deletedContext) {
+                                    ProfileLedgerContext deletedContext,
+                                    ProfileReceiveBudget.DataWorkingSet metadataCredit) {
+            this.metadataCredit = metadataCredit;
             this.deletedContext = deletedContext;
             this.operationId = operationId;
             this.victims = List.copyOf(victims);
@@ -2008,11 +2040,13 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 return;
             }
             long nextSequence = drivers[shard].relocationAddress(retained, retained.offset()).sequence();
+            victims = sources;
+            destination = retained;
             execution.io().submitContinuing(ticket, () -> {
                 try (SegmentBookieControlLog.ReclamationLease lease = bookie.protectReclamation(config, identity);
                         IsolatedSegmentFiles.ReclamationGuard guard = files.protectReclamation(arena,
-                                retained.file(), lease)) {
-                    plan = guard.inspectCompactionTail(sources, retained, nextSequence, bookie,
+                                destination.file(), lease)) {
+                    plan = guard.inspectCompactionTail(victims, destination, nextSequence, bookie,
                             limits.indexedEntries(), buffer.bytes());
                 }
             }, failure -> {
@@ -2110,21 +2144,28 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             move = null;
             moveSubmitted = false;
-            execution.io().submitContinuing(ticket, () -> move = SegmentArenaMove.prepare(arena, files, bookie,
-                    copy, currentBatch().entries().stream().map(SegmentDataRecovery.CompactionEntry::source).toList(),
-                    buffer.bytes()), cause -> {
-                        releaseBuffer();
-                        if (cause != null) {
-                            finish(CompactionStatus.PARTIAL, cause);
-                        } else {
-                            moveSubmitted = allocator.submitMove(move, (results, error) ->
-                                    ticket.resume(() -> moved(results, error)));
-                            if (!moveSubmitted) {
-                                move.close();
-                                finish(CompactionStatus.PARTIAL, null);
-                            }
-                        }
-                    });
+            durableCopy = copy;
+            execution.io().submitContinuing(ticket, () -> {
+                try {
+                    move = SegmentArenaMove.prepare(arena, files, bookie, durableCopy,
+                            currentBatch().entries().stream()
+                                    .map(SegmentDataRecovery.CompactionEntry::source).toList(), buffer.bytes());
+                } finally {
+                    durableCopy = null;
+                }
+            }, cause -> {
+                releaseBuffer();
+                if (cause != null) {
+                    finish(CompactionStatus.PARTIAL, cause);
+                } else {
+                    moveSubmitted = allocator.submitMove(move, (results, error) ->
+                            ticket.resume(() -> moved(results, error)));
+                    if (!moveSubmitted) {
+                        move.close();
+                        finish(CompactionStatus.PARTIAL, null);
+                    }
+                }
+            });
         }
 
         private void moved(List<SegmentArenaControlLog.Result> results, Throwable failure) {
@@ -2195,7 +2236,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             finishing = true;
             if (ticket == null) {
-                deliver(status, failure);
+                try {
+                    deliver(status, failure);
+                } finally {
+                    terminal();
+                }
             } else {
                 ticket.complete(() -> deliver(status, failure));
             }
@@ -2220,7 +2265,23 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
         @Override
         public void terminal() {
+            retireMetadata();
             request.terminal();
+        }
+
+        private void retireMetadata() {
+            // Old I/O wrappers may retain this command after posting their result. Drop the graph before credit.
+            plan = null;
+            victims = null;
+            durableCopy = null;
+            destination = null;
+            move = null;
+            frees = null;
+            ticket = null;
+            if (metadataCredit != null) {
+                metadataCredit.close();
+                metadataCredit = null;
+            }
         }
 
         @Override

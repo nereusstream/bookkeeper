@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 
 /** One in-flight Arena control batch, forced off-owner and applied on its owner. */
@@ -83,6 +84,7 @@ final class SegmentArenaControlDriver {
                 layout.object(AtomicBoolean.class), layout.object(Object.class), layout.object(ArrayDeque.class),
                 layout.object(PoolCommand.class), layout.list(), notices, pools,
                 layout.object(SegmentOwnerLoop.Ticket.class), layout.object(AtomicReference.class),
+                // SubmittedCommands and ControlWrite each fit one of these existing eight capture shells.
                 SegmentControlCapacity.times(8, layout.captured(8)),
                 SegmentControlCapacity.times(pending, layout.object(FailureLease.class)));
     }
@@ -300,19 +302,7 @@ final class SegmentArenaControlDriver {
             boolean accepted;
             try {
                 log.claimProtectedCommands(batch);
-                accepted = owner.submitControl(new SegmentOwnerLoop.Command() {
-                    @Override
-                    public void run(SegmentOwnerLoop.Ticket ticket) {
-                        forceAndApply(ticket, batch, completion);
-                    }
-
-                    @Override
-                    public void failed(Throwable cause) {
-                        owner.requireOwner();
-                        log.finishProtectedCommands(batch);
-                        deliver(completion, null, cause);
-                    }
-                });
+                accepted = owner.submitControl(new SubmittedCommands(batch, completion));
             } catch (IOException failure) {
                 busy.set(false);
                 throw new IllegalStateException("FREE runtime protection could not be claimed", failure);
@@ -326,6 +316,24 @@ final class SegmentArenaControlDriver {
                 busy.set(false);
             }
             return accepted;
+        }
+    }
+
+    private final class SubmittedCommands implements SegmentOwnerLoop.Command {
+        private final ControlWrite write;
+
+        private SubmittedCommands(List<SegmentArenaControlLog.Command> batch, Completion completion) {
+            write = new ControlWrite(batch, completion);
+        }
+
+        @Override
+        public void run(SegmentOwnerLoop.Ticket ticket) {
+            io.submitControl(ticket, write, write);
+        }
+
+        @Override
+        public void failed(Throwable cause) {
+            write.accept(cause);
         }
     }
 
@@ -433,25 +441,48 @@ final class SegmentArenaControlDriver {
 
     private void forceAndApply(SegmentOwnerLoop.Ticket ticket,
                                List<? extends SegmentArenaControlLog.Command> batch, Completion completion) {
-        AtomicReference<SegmentArenaControlLog.DurableBatch> durable = new AtomicReference<>();
-        io.submitControl(ticket, () -> durable.set(log.appendDurably(batch)), cause -> {
+        ControlWrite write = new ControlWrite(batch, completion);
+        io.submitControl(ticket, write, write);
+    }
+
+    /** Old I/O wrappers retain this shell after posting; consume its command roots before callback code runs. */
+    private final class ControlWrite implements SegmentIoExecutor.Operation, Consumer<Throwable> {
+        private List<? extends SegmentArenaControlLog.Command> batch;
+        private Completion completion;
+        private SegmentArenaControlLog.DurableBatch durable;
+
+        private ControlWrite(List<? extends SegmentArenaControlLog.Command> batch, Completion completion) {
+            this.batch = batch;
+            this.completion = completion;
+        }
+
+        @Override
+        public void run() throws IOException {
+            // The original ticket's completion publication transfers this value to the owner.
+            durable = log.appendDurably(batch);
+        }
+
+        @Override
+        public void accept(Throwable cause) {
             owner.requireOwner();
-            if (cause != null) {
-                log.finishProtectedCommands(batch);
-                deliver(completion, null, cause);
-                return;
+            if (completion == null) {
+                throw new IllegalStateException("CONTROL result already delivered");
             }
-            List<SegmentArenaControlLog.Result> results;
-            try {
-                results = log.applyDurable(durable.get());
-            } catch (Throwable failure) {
-                log.finishProtectedCommands(batch);
-                deliver(completion, null, failure);
-                return;
+            List<SegmentArenaControlLog.Result> results = null;
+            if (cause == null) {
+                try {
+                    results = log.applyDurable(durable);
+                } catch (Throwable failure) {
+                    cause = failure;
+                }
             }
             log.finishProtectedCommands(batch);
-            deliver(completion, results, null);
-        });
+            Completion consumed = completion;
+            batch = null;
+            durable = null;
+            completion = null;
+            deliver(consumed, results, cause);
+        }
     }
 
     private void deliver(Completion completion, List<SegmentArenaControlLog.Result> results, Throwable failure) {
