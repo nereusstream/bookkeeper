@@ -490,6 +490,60 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    private static List<IsolatedSegmentFiles.Reservation> retainedPrefixReservations(SegmentPhysicalPrefix prefix)
+            throws ReflectiveOperationException {
+        var pendingField = SegmentPhysicalPrefix.class.getDeclaredField("pending");
+        pendingField.setAccessible(true);
+        var reservationField = Class.forName(SegmentPhysicalPrefix.class.getName() + "$Pending")
+                .getDeclaredField("reservation");
+        reservationField.setAccessible(true);
+        List<IsolatedSegmentFiles.Reservation> retained = new ArrayList<>();
+        for (Object pending : ((Map<?, ?>) pendingField.get(prefix)).values()) {
+            var reservation = (IsolatedSegmentFiles.Reservation) reservationField.get(pending);
+            if (reservation != null) {
+                retained.add(reservation);
+            }
+        }
+        return retained;
+    }
+
+    private static void assertHotPayloadRoots(SegmentHotDirectory hot,
+            List<IsolatedSegmentFiles.Reservation> expected, int coordinates) throws ReflectiveOperationException {
+        var batchesField = SegmentHotDirectory.class.getDeclaredField("pendingBatches");
+        var physicalField = SegmentHotDirectory.class.getDeclaredField("byPhysical");
+        var keysField = SegmentHotDirectory.class.getDeclaredField("pendingKeys");
+        var occupiedField = SegmentHotDirectory.class.getDeclaredField("occupied");
+        var candidatesField = SegmentHotDirectory.class.getDeclaredField("candidates");
+        var batchField = SegmentHotDirectory.Admission.class.getDeclaredField("batch");
+        var reservationField = SegmentHotDirectory.Admission.class.getDeclaredField("physical");
+        for (var field : List.of(batchesField, physicalField, keysField, occupiedField,
+                candidatesField, batchField, reservationField)) {
+            field.setAccessible(true);
+        }
+        Map<?, ?> batches = (Map<?, ?>) batchesField.get(hot);
+        Map<?, ?> physical = (Map<?, ?>) physicalField.get(hot);
+        Map<?, ?> keys = (Map<?, ?>) keysField.get(hot);
+        assertEquals(expected.size(), batches.size());
+        assertEquals(expected.size(), physical.size());
+        for (IsolatedSegmentFiles.Reservation reservation : expected) {
+            assertTrue(physical.containsKey(reservation));
+            assertTrue(batches.containsKey(reservation.batch()));
+            assertSame(physical.get(reservation), batches.get(reservation.batch()));
+        }
+        assertEquals(coordinates, keys.size());
+        assertEquals(coordinates, ((Set<?>) occupiedField.get(hot)).size());
+        assertTrue(((Map<?, ?>) candidatesField.get(hot)).isEmpty());
+        for (Object admission : keys.values()) {
+            var reservation = (IsolatedSegmentFiles.Reservation) reservationField.get(admission);
+            if (reservation == null) {
+                assertNull(batchField.get(admission));
+            } else {
+                assertTrue(expected.contains(reservation));
+                assertSame(reservation.batch(), batchField.get(admission));
+            }
+        }
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             assertTrue(latch.await(5, TimeUnit.SECONDS));
@@ -5546,9 +5600,9 @@ public class SegmentBookieControlLogTest {
                             }
                         }
                     });
-            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena,
-                    new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2),
-                    new SegmentHotDirectory(owner, config, identity, 2));
+            SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2);
+            SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, io, files, arena, prefix, hot);
             try {
                 assertTrue(driver.submitNormal(bookie, first, List.of(bookie.admitNormal(
                         context(), filled(20, (byte) 5)).orElseThrow()), (entries, failure) -> {
@@ -5580,9 +5634,19 @@ public class SegmentBookieControlLogTest {
                 assertTrue(secondFailure.get() instanceof IOException);
                 assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN, firstResults.get().get(0).status());
                 assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN, secondResults.get().get(0).status());
-                CountDownLatch ownerFinished = new CountDownLatch(1);
-                assertTrue(owner.control(ownerFinished::countDown));
-                assertTrue(ownerFinished.await(5, TimeUnit.SECONDS));
+                FutureTask<Void> ownerFinished = new FutureTask<>(() -> {
+                    List<IsolatedSegmentFiles.Reservation> retained = retainedPrefixReservations(prefix);
+                    assertEquals(1, retained.size());
+                    assertSame(second, retained.get(0).batch());
+                    assertHotPayloadRoots(hot, retained, 2);
+                    for (long entryId : new long[] {1, 2}) {
+                        assertTrue(hot.occupied(context(), entryId));
+                        assertFalse(hot.provesAbsent(context(), entryId));
+                    }
+                    return null;
+                });
+                assertTrue(owner.control(ownerFinished::run));
+                ownerFinished.get(5, TimeUnit.SECONDS);
                 try (SegmentBufferPool.Lease reusable = pool.acquire()) {
                     assertTrue(reusable != null);
                     assertNull(pool.acquire());
@@ -5593,6 +5657,10 @@ public class SegmentBookieControlLogTest {
                 releaseSecond.countDown();
                 io.shutdown();
                 assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+                assertTrue(retainedPrefixReservations(prefix).isEmpty());
+                assertHotPayloadRoots(hot, List.of(), 2);
                 try (SegmentBufferPool.Lease reusableFirst = pool.acquire();
                         SegmentBufferPool.Lease reusableSecond = pool.acquire()) {
                     assertTrue(reusableFirst != null);
@@ -5608,6 +5676,107 @@ public class SegmentBookieControlLogTest {
                 assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
             }
             assertNull(owner.failure());
+        }
+    }
+
+    @Test
+    public void ownerFailureRetainsDataReservationUntilActualIoTerminal() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        CountDownLatch forcing = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicInteger heldBuffers = new AtomicInteger();
+        AtomicReference<SegmentDataPhysicalDriver.NormalResult> result = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        IllegalStateException ownerFailure = new IllegalStateException("Injected owner control failure");
+        try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                        1024 * 1024, key((byte) 3), VALIDATOR)) {
+            grant(arena, 1);
+            bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+            files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                forcing.countDown();
+                await(releaseForce);
+            });
+            SegmentExecutionGroup group = SegmentExecutionGroup.start(config,
+                    new SegmentExecutionGroup.Settings(1, 2, 1, 1, 4096, 44, 8235, Duration.ofSeconds(5)));
+            SegmentOwnerLoop owner = group.owner(0);
+            SegmentPhysicalPrefix prefix = new SegmentPhysicalPrefix(owner, 0, new Generation(1), 1, 2);
+            SegmentHotDirectory hot = new SegmentHotDirectory(owner, config, identity, 2);
+            SegmentDataPhysicalDriver driver = new SegmentDataPhysicalDriver(0, owner, group.io(), files, arena,
+                    prefix, hot);
+            try {
+                assertTrue(driver.submitNormalInputs(bookie, new SegmentBatchFormat.Address(0, 0, 5,
+                        new Generation(1), new Generation(1), 1, 4096), List.of(sourceInput(group, context(), 1)),
+                        List.of(bookie.admitNormal(context(), filled(20, (byte) 5)).orElseThrow()),
+                        List.of(new SegmentDataPhysicalDriver.NormalRequest((entry, cause) -> {
+                            result.set(entry);
+                            failure.set(cause);
+                            completed.countDown();
+                        }))));
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                List<IsolatedSegmentFiles.Reservation> retained = retainedPrefixReservations(prefix);
+                assertEquals(1, retained.size());
+                IsolatedSegmentFiles.Reservation reservation = retained.get(0);
+                assertTrue(owner.control(() -> {
+                    heldBuffers.set(owner.pool().outstanding());
+                    assertTrue(hot.occupied(context(), 1));
+                    assertFalse(hot.provesAbsent(context(), 1));
+                    throw ownerFailure;
+                }));
+                long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (owner.failure() == null && System.nanoTime() < end) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertSame(ownerFailure, owner.failure());
+                assertEquals(1, heldBuffers.get());
+                assertEquals(1L, completed.getCount());
+                assertNull(result.get());
+                assertNull(failure.get());
+                assertFalse(reservation.durable());
+                assertEquals(4096, reservation.batch().bytes().remaining());
+                assertEquals(List.of(reservation), retainedPrefixReservations(prefix));
+                assertHotPayloadRoots(hot, List.of(reservation), 1);
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+                assertFalse(group.shutdown(Duration.ofMillis(50)));
+                assertEquals(1L, completed.getCount());
+                releaseForce.countDown();
+                assertTrue(completed.await(5, TimeUnit.SECONDS));
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                assertSame(ownerFailure, failure.get());
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN, result.get().status());
+                assertNull(result.get().candidate());
+                assertTrue(reservation.durable());
+                assertEquals(1, files.dataIo.forces);
+                assertTrue(arena.dataFileAvailable(0));
+                assertFalse(arena.hasDurableQuarantine(0));
+                assertTrue(retainedPrefixReservations(prefix).isEmpty());
+                assertHotPayloadRoots(hot, List.of(), 1);
+                assertThrows(IllegalStateException.class, () -> reservation.batch().bytes());
+                var pendingField = SegmentPhysicalPrefix.class.getDeclaredField("pending");
+                pendingField.setAccessible(true);
+                Map<?, ?> pending = (Map<?, ?>) pendingField.get(prefix);
+                assertEquals(1, pending.size());
+                Object terminal = pending.get(1L);
+                var completedField = terminal.getClass().getDeclaredField("completed");
+                var durableField = terminal.getClass().getDeclaredField("durable");
+                var throughField = SegmentPhysicalPrefix.class.getDeclaredField("durableThrough");
+                completedField.setAccessible(true);
+                durableField.setAccessible(true);
+                throughField.setAccessible(true);
+                assertTrue(completedField.getBoolean(terminal));
+                assertTrue(durableField.getBoolean(terminal));
+                assertEquals(0L, throughField.getLong(prefix));
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(3, (byte) 5)).status());
+            } finally {
+                releaseForce.countDown();
+                assertTrue(group.shutdown(Duration.ofSeconds(5)));
+            }
+            assertSame(ownerFailure, owner.failure());
         }
     }
 
@@ -14668,6 +14837,8 @@ public class SegmentBookieControlLogTest {
                         assertEquals(0, owner.pool().outstanding());
                         assertTrue(prefix.failed());
                         assertEquals(0, hot.candidateCount());
+                        assertHotPayloadRoots(hot, List.of(), 0);
+                        assertTrue(retainedPrefixReservations(prefix).isEmpty());
                         return null;
                     });
                     assertTrue(owner.control(released::run));

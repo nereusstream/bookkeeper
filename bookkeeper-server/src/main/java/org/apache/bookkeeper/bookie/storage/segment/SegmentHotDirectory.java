@@ -45,7 +45,7 @@ final class SegmentHotDirectory {
     record IndexCut(SegmentDataRecovery.StreamCoverage stream, int entries) { }
 
     static final class Admission {
-        private final SegmentBatchFormat.FrozenBatch batch;
+        private SegmentBatchFormat.FrozenBatch batch;
         private final List<Key> keys;
         private final List<SegmentPointRead.Location> locations;
         private IsolatedSegmentFiles.Reservation physical;
@@ -414,6 +414,22 @@ final class SegmentHotDirectory {
             pendingKeys.remove(key);
             occupied.remove(key);
         }
+    }
+
+    /** Drop completed payload roots while keeping unresolved coordinates occupied and never absent. */
+    void retireUnpublished(IsolatedSegmentFiles.Reservation physical) {
+        owner.requireOwner();
+        Admission admission = byPhysical.get(physical);
+        if (admission == null) {
+            return;
+        }
+        if (admission.physical != physical || pendingBatches.get(admission.batch) != admission) {
+            throw new IllegalStateException("Unpublished hot admission changed before retirement");
+        }
+        byPhysical.remove(physical);
+        pendingBatches.remove(admission.batch);
+        admission.batch = null;
+        admission.physical = null;
     }
 
     List<SegmentPointRead.Location> publish(SegmentPhysicalPrefix.DurableBatch ready) {

@@ -1685,3 +1685,22 @@ NormalBatcher 在 prepareBatch 解码出 context A，由 PendingNormal.key、Seg
 本阶段源码、各次命令/输入/XML、原失败、费用witness、四布局与等价核验位于 `/Users/liusinan/.codex/artifacts/unified-wal/point-read-metadata-evidence-c51f3ba9`。这只覆盖所列已知元数据；pre-admission/transport Pending/任意callback图、driver/执行器/pool、完整compaction、raw-unpooled、opaque JCA/native、实际同时状态数/寿命/live peak、独占retained heap、RSS及完整full-bytes/B11继续OPEN。TLA未改、TLC未执行，不移绑旧PASS；Main issuer/受保护输入、完整G1及其余16步仍OPEN，持续目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled边界保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
 验收后核对实际终态、lsof、inode与SHA，移除6个本轮native运行临时根（28文件、12609973逻辑字节）；全部硬链接归档保留，常规文件数据回收量为0。四个成功布局fixture已关闭并清理（16994098逻辑字节），首次模块访问失败的fixture仍保留（4248455逻辑字节），不删除失败证据。
+
+
+## 失败 DATA 前缀的 payload 引用退休
+
+2026-10-28在父源码 `a08d1043d195b1cdf483a54ed6ca2211a415401f` 上，沿真实 DATA failure 发现两条重复保留根：`prefix.pending→Pending.reservation→Reservation.batch→FrozenBatch.bytes/lease`，以及 Hot 的 `pendingBatches` key、`byPhysical` key 与 `pendingKeys→Admission.batch/physical`。已有双终态门已归还 lease，失败前缀仍把旧 batch/view 留在活动 storage 图中；仅在成功 close 清理不能覆盖无法健康关闭的失败 session。
+
+`SegmentPhysicalPrefix` 保留 sequence、completed/durable 与原 durable-through 推进，仅在失败后摘除已经观察到 completion 的 reservation 引用；仍在 I/O 的项继续持有精确身份，未知或重复 completion 仍拒绝。失败状态不构造不会被 driver 消费的 DurableBatch。首次退休扫描已完成项，此后只处理当前 completion，避免每个迟到结果重新扫描全部 Pending。Hot 同步移除对应的两张 identity map 根并清空 Admission.batch/physical，继续保留 pendingKeys、occupied 和 locations；没有释放 UNKNOWN 坐标、证明 MISSING、产生成功或提供 reclaim 权限。
+
+owner 已失败时，driver 仅在原实际 I/O completion、或原 Command.failed 实际终态入口之后观察并退休；未提交分支先沿原 cancel/physicalTerminal 路径。该入口记录 Reservation 的真实 durable flag，不伪造 I/O 失败、不推进 prefix、不发布 candidate。原 Obligation 的 physicalTerminal 与 ownerTerminal 双门继续负责实际 source/buffer/admission 归还。没有 wire/disk 格式、持久 authority、生产 quota 或 normal Add 的新 credit/atomic/MetadataStore往返变化。
+
+旧源码的三方法 RED 实际为1 failure、2 error、零跳过；两项 error 是 FutureTask 包装的目标断言：failed-prefix 已终结后仍有2个 reservation，期望只剩尚未完成的1个；relocation 的 Hot 根仍有1个，期望0。新增 owner-failure 方法在 force 已真实成功、返回 UNKNOWN 且未 quarantine 后仍保留 prefix 引用。修复后同一整份测试文件三方法全部通过；原 force/short-write、held I/O、UNKNOWN、pool只归还一块、Fence WAITING与终结后可推进等断言保留，未把测试改绿。
+
+本轮还确认 execution/pool 下一包需同时付已知 Java 图并在真实终止后退根：Input 在 admission 前可分配，未释放数量按全组 `floor(inputBudgetBytes/36)`，不能按 P；固定 pool backing 的既有费用不包含 Slot、Netty/NIO headers 和容器；storage 的 reads/drivers/hot 等多个别名继续持 owner/io，仅清 execution 字段不足。该后续包未在本切片实现，线程/JDK waiter、cleaner/leak tracker、opaque/native及B11继续OPEN。
+
+最终相关集为完整Bookie类283项及真实SDK的force失败、迟到DATA排空/关闭/删除/重用/重启两方法，共285项，零failure/error/skip；用例身份与父阶段282项加本轮一个新增方法及两条指定SDK方法逐一匹配。1194项冻结输入、1179项native子集均与实际源码匹配，RED到GREEN整份测试文件同字节。最终Spotless/Checkstyle exit0；独立RAT实际exit1，443个原路径与父a08d1043d1字节全同、无新增。源码、命令、阶段输入/XML与核验位于 `/Users/liusinan/.codex/artifacts/unified-wal/failed-prefix-retirement-evidence-a08d1043`。
+
+本轮仅证明所列内部强引用按真实终态退休与原行为回归；测试自己保存的reservation/closed facade属于外部alias，不声称立即GC、独占retained heap、native释放量、RSS下降或性能收益。没有新增布局/JVM测量或执行TLC，历史probe/model不移绑；统一full-bytes/B11、Main具体issuer/受保护装载、完整G1及其余16步仍OPEN，完整目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+验收后按实际终态、lsof、inode与SHA核对移除3个本轮native临时根（13文件、1223559逻辑字节），全部硬链接归档保留，常规文件数据回收量为0；失败回执、测试和原source绑定保留。

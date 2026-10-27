@@ -1787,6 +1787,9 @@ final class SegmentDataPhysicalDriver {
                 }
                 obligation.physicalTerminal();
             }
+            if (reserved != null) {
+                prefix.retireAfterOwnerFailure(reserved, hot);
+            }
             Throwable callbackFailure = registered ? null : deliver(obligation, null, failure, null);
             try {
                 failPending(failure);
@@ -1840,11 +1843,12 @@ final class SegmentDataPhysicalDriver {
             ioFailure = new IOException("DATA file has an unresolved failure");
         }
         if (owner.failure() != null) {
+            prefix.retireAfterOwnerFailure(reservation, hot);
             failPending(owner.failure());
             return;
         }
         try {
-            List<SegmentPhysicalPrefix.DurableBatch> ready = prefix.completed(reservation, ioFailure);
+            List<SegmentPhysicalPrefix.DurableBatch> ready = prefix.completed(reservation, ioFailure, hot);
             if (prefix.failed()) {
                 failPending(new IOException("Physical stream stopped before contiguous publication", ioFailure));
                 return;

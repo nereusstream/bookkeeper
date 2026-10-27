@@ -47,7 +47,7 @@ final class SegmentPhysicalPrefix {
     }
 
     private static final class Pending {
-        private final IsolatedSegmentFiles.Reservation reservation;
+        private IsolatedSegmentFiles.Reservation reservation;
         private boolean completed;
         private boolean durable;
 
@@ -65,6 +65,7 @@ final class SegmentPhysicalPrefix {
     private long nextSequence;
     private long durableThrough;
     private boolean failed;
+    private boolean retiringCompletions;
 
     SegmentPhysicalPrefix(SegmentOwnerLoop owner, int shard, Generation streamGeneration,
                           long firstSequence, int capacity) {
@@ -160,13 +161,12 @@ final class SegmentPhysicalPrefix {
     }
 
     List<DurableBatch> completed(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure) {
-        owner.requireOwner();
-        long sequence = reservation.address().sequence();
-        Pending current = pending.get(sequence);
-        if (current == null || current.reservation != reservation || current.completed) {
-            throw new IllegalArgumentException("Unknown or repeated physical completion");
-        }
-        current.completed = true;
+        return completed(reservation, ioFailure, null);
+    }
+
+    List<DurableBatch> completed(IsolatedSegmentFiles.Reservation reservation, Throwable ioFailure,
+                                 SegmentHotDirectory hot) {
+        Pending current = observeCompletion(reservation);
         current.durable = ioFailure == null && reservation.durable();
         if (!current.durable) {
             failed = true;
@@ -179,9 +179,55 @@ final class SegmentPhysicalPrefix {
             }
             pending.remove(durableThrough + 1);
             durableThrough++;
-            advanced.add(new DurableBatch(first.reservation));
+            if (!failed) {
+                advanced.add(new DurableBatch(first.reservation));
+            }
+        }
+        if (failed) {
+            retireCompleted(current, hot);
         }
         return List.copyOf(advanced);
+    }
+
+    /** The real I/O has returned, but a failed owner cannot publish or advance its prefix. */
+    void retireAfterOwnerFailure(IsolatedSegmentFiles.Reservation reservation, SegmentHotDirectory hot) {
+        Pending current = observeCompletion(reservation);
+        current.durable = reservation.durable();
+        retireCompleted(current, hot);
+    }
+
+    private Pending observeCompletion(IsolatedSegmentFiles.Reservation reservation) {
+        owner.requireOwner();
+        long sequence = reservation.address().sequence();
+        Pending current = pending.get(sequence);
+        if (current == null || current.reservation != reservation || current.completed) {
+            throw new IllegalArgumentException("Unknown or repeated physical completion");
+        }
+        current.completed = true;
+        return current;
+    }
+
+    private void retireCompleted(Pending current, SegmentHotDirectory hot) {
+        if (!retiringCompletions) {
+            // Earlier out-of-order completions can still be waiting behind the failed prefix.
+            for (Pending observed : pending.values()) {
+                if (observed.completed) {
+                    retirePayload(observed, hot);
+                }
+            }
+            retiringCompletions = true;
+        }
+        // This completion may already have been removed while advancing the old durable prefix.
+        retirePayload(current, hot);
+    }
+
+    private static void retirePayload(Pending completed, SegmentHotDirectory hot) {
+        if (completed.reservation != null) {
+            if (hot != null) {
+                hot.retireUnpublished(completed.reservation);
+            }
+            completed.reservation = null;
+        }
     }
 
     long durableThrough() {
