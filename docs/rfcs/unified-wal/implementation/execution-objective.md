@@ -309,3 +309,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [无客户端证书的真实 TLS 拒绝与预算归还](profile-wire/README.md#无客户端证书的真实-tls-拒绝与预算归还)：2026-10-27父47ba97ef85上，新增真实TLS1.3无客户端证书拒绝测试；以exact accepted server握手失败及实际channel终止为准，验证零明文/响应、AuthZ/authority read与存储effect，预算归零后同listener带证书UIC1完成durable INSTALL/ACTIVATE及normal admission。生产源码未改；定向1项及三类285项通过、冻结输入与用例匹配。实际格式/RAT回执由canonical节拥有。仅补认证边界证据，完整G1、Main issuer/装载、TLS总内存/full-bytes/B11及其余16步仍OPEN；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。
+
+
+[Owned Profile TLS 的 native 引用与服务终态](startup-readiness/README.md#owned-profile-tls-的-native-引用与服务终态)：2026-10-27父3414108da6上，明确无factory重载在原episode内创建TLS，实际listener/storage/credit/metadata/loops终结后释放；旧带factory重载仍borrowed。Profile handler选择/构造配置、refresh与close共用monitor，成功refresh释放旧owner、失败保留旧context，未交付engine异常归还；成功reinit拒绝，关闭幂等且拒绝新入口。相同probe字节在旧native context残留上RED、修复后2→1→0 GREEN；17项定向通过，五类540项中532通过/8为原Classic格式前置条件跳过、0失败错误。初次编译接线错误及原输入独立保留，源码/验证由canonical节拥有。仅补TLS实际ownership，不闭合Main issuer/装载、TLS总字节/full-bytes/B11、完整G1或其余16步；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。

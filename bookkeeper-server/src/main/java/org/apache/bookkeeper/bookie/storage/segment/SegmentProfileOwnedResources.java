@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
@@ -51,6 +52,7 @@ import org.apache.bookkeeper.meta.zk.ZKMetadataClientDriver;
 import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.tls.SecurityHandlerFactory;
 import org.apache.bookkeeper.tls.TLSContextFactory;
 import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 import org.apache.zookeeper.ZooKeeper;
@@ -94,7 +96,8 @@ public final class SegmentProfileOwnedResources {
 
     private final ServerConfiguration configuration;
     private final Settings settings;
-    private final TLSContextFactory tls;
+    private TLSContextFactory tls;
+    private final boolean ownsTls;
     private final ProfileReceiveBudget budget;
     private final SegmentProfileListener.Settings listenerSettings;
     private final InetSocketAddress address;
@@ -121,9 +124,28 @@ public final class SegmentProfileOwnedResources {
             InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
             ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
             ProfileDescriptorValidator validator) {
+        this(configuration, settings, Objects.requireNonNull(tls, "tls"), false, budget, connectionBytes,
+                connectionBaseBytes, trustDomain, address, staticAuthorizer, exactAuthorizer, read, validator);
+    }
+
+    SegmentProfileOwnedResources(ServerConfiguration configuration, Settings settings,
+            ProfileReceiveBudget budget, int connectionBytes, int connectionBaseBytes, String trustDomain,
+            InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
+            ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
+            ProfileDescriptorValidator validator) {
+        this(configuration, settings, null, true, budget, connectionBytes, connectionBaseBytes, trustDomain,
+                address, staticAuthorizer, exactAuthorizer, read, validator);
+    }
+
+    private SegmentProfileOwnedResources(ServerConfiguration configuration, Settings settings, TLSContextFactory tls,
+            boolean ownsTls, ProfileReceiveBudget budget, int connectionBytes, int connectionBaseBytes,
+            String trustDomain, InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
+            ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
+            ProfileDescriptorValidator validator) {
         this.configuration = configuration;
         this.settings = settings;
-        this.tls = Objects.requireNonNull(tls, "tls");
+        this.tls = tls;
+        this.ownsTls = ownsTls;
         this.budget = Objects.requireNonNull(budget, "budget");
         listenerSettings = new SegmentProfileListener.Settings(connectionBytes, connectionBaseBytes, trustDomain,
                 settings.policy().targetReadinessGeneration().value());
@@ -162,6 +184,10 @@ public final class SegmentProfileOwnedResources {
             String connect = ZKMetadataDriverBase.getZKServersFromServiceUri(uri);
             if (uri.getPath() == null || uri.getPath().equals("/") || configuration.getZkTimeout() < 1) {
                 throw new IllegalArgumentException("Explicit ZK ledger namespace/session timeout required");
+            }
+            if (ownsTls) {
+                tls = TLSContextFactory.forProfileServer();
+                tls.init(SecurityHandlerFactory.NodeType.Server, configuration, UnpooledByteBufAllocator.DEFAULT);
             }
             acceptor = new NioEventLoopGroup(1, new DefaultThreadFactory("profile-acceptor"));
             worker = new NioEventLoopGroup(settings.networkWorkers(), new DefaultThreadFactory("profile-worker"));
@@ -221,6 +247,8 @@ public final class SegmentProfileOwnedResources {
                     cold, settings.timeout());
             return new Environment(startup, new SegmentProfileService.Transport(tls, budget,
                     listenerSettings, address, acceptor, worker, control, read));
+        } catch (org.apache.bookkeeper.tls.SecurityException failure) {
+            throw new IOException("Owned Profile TLS initialization failed", failure);
         } catch (org.apache.commons.configuration2.ex.ConfigurationException
                 | org.apache.bookkeeper.meta.exceptions.MetadataException
                 | org.apache.zookeeper.KeeperException failure) {
@@ -302,6 +330,9 @@ public final class SegmentProfileOwnedResources {
                             group.terminationFuture().cause());
                 }
             }
+        }
+        if (ownsTls && tls != null) {
+            tls.closeProfileServer();
         }
         return true;
     }

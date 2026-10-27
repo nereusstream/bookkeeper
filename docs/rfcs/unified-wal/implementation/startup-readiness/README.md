@@ -458,6 +458,8 @@ archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-bootstrap-evidence
 
 ## 同一服务 episode 的 owned 资源初始化与终止
 
+当前 TLS ownership 增量见[Owned Profile TLS 的 native 引用与服务终态](#owned-profile-tls-的-native-引用与服务终态)；下述2026-10-12回执保留原实现及输入绑定。
+
 2026-10-12，`SegmentProfileService.withOwnedResources` 在原参数快照后返回一个尚未打开资源的 owner。`start` 才初始化同一次 `SegmentProfileOwnedResources`：一个 native ZooKeeper/原 watcher manager，原 ZKMetadataClientDriver/ledger-manager factory/AbstractZkLedgerManager，bounded cold executor、delete scheduler 和独立 acceptor/worker loops。原 driver 显式借用该 exact ZK client，后续 requirements/persistent/publisher/reservation/metadata store 全用同一 client 与 namespace；没有构造 Classic registration manager、目录、cookie 或 LedgerStorage。Metadata URI/session timeout 使用原配置，三个 Profile namespaces/ACL、实际 startup policy、有限 worker/queue/poll bounds 由明确 Settings 提供；required source/delete assignment 必须已 commissioned，不在启动中补造。
 
 控制路径复用原 install/activation/replacement/repair/delete authority readers，按原 purpose 选取，沿用 caller 的 static/exact Authorizer 与 nonblocking read policy；不是 auth-only 或 caller enum 授权。原 owner 的 native root/header/recovery/catch-up/Harness/registration/admission/consumer/SDK 路径继续使用。TLS factory 仍明确借用，receive budget 归这个 listener episode；secret key与physical/old-service proof仍来自外部 issuer。没有新重试层、每 entry MetadataStore 或另一套 control/data 格式。
@@ -532,3 +534,20 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'AbstractZkLedgerManagerTest
 
 
 [永久坐标根的 DATA 启动预留](../local-storage/README.md#永久坐标根的-data-预留与关闭退休)：2026-10-27父277f4d6514上，沿原单次DATA额度预留永久坐标HashSet/Key/context，缺额在storage构造/目录与index打开前拒绝；实际关闭退休共享hot/inventory根后才归还。六类618项、四种JVM布局与style验证及范围见canonical节，不提升full-bytes或生产Gate。
+
+
+## Owned Profile TLS 的 native 引用与服务终态
+
+2026-10-27，父 `3414108da6c8b30a25d5e7550b0d9b17953ba70f` 上，`SegmentProfileService.withOwnedResources` 增加明确省略 TLSContextFactory 参数的重载：冻结原 ServerConfiguration 中已有 key/certificate/trust/provider/refresh 设置，在原 owned resources.open 内创建 Profile server factory，再初始化原 ZK/metadata/executors；构造或 close-before-start 不创建 TLS/context/native loops。原接收 factory 的重载保持 borrowed，null 仍拒绝。secret key、requirements、old-service/Unix access proof、static/exact authorizer 和 read policy 继续来自原显式输入，未增加配置格式或 issuer。
+
+私有 TLS factory 在 listener、storage I/O/owner、账本 credit、cold/scheduler、LM/driver/ZK 及 worker/acceptor 的实际终态后关闭；此前未完成的排空步骤或异常不会提前释放仍活跃的 TLS。TLS 初始化失败包装为 IOException 并保留原 checked SecurityException cause，沿原 start finally/close 清理；metadata 初始化失败同样释放已经创建的私有 native context。原 borrowed 重载关闭后 caller factory 仍能构造 handler，caller 自己等待其网络终止后再关闭。
+
+`TLSContextFactory.closeProfileServer()` 幂等释放 factory 持有的 current context 引用并阻止再 init/造 handler，本身不宣称 engine 已排空。Profile 成功 init 后拒绝 reinit，失败 init 清空 context 并允许原 factory 重试；专用 newProfileServerTLSHandler 保留原 checked SecurityException 契约，通用 handler 在已关闭/未初始化时抛 IllegalStateException，Classic 误用此关闭 API 也明确拒绝。Classic STARTTLS/配置/refresh 路径不转移 ownership。
+
+当前 Netty 4.2.15 的实际 OPENSSL provider 使用 OpenSslServerContext/OpenSslEngine：engine retain parent，实际 engine deallocation 释放该引用，finalizer 不能作为 drain 事实。Profile factory monitor 覆盖选择/refresh 到 engine 构造和 protocol/cipher 配置交付，成功 refresh 释放旧 factory 引用，已交付旧 engine 继续持有原 context；失败 refresh 保留当前 context；配置异常释放尚未交付 engine。无 retired-context 列表、后台 watcher、额外生产线程或普通 Add 成本。
+
+独立刷新 contract probe 使用完全相同的 class 字节：旧 factory 原 class overlay 下实际 exit1，真实 mtime refresh 后旧 context refCnt 仍2，旧 engine 实际终结后仍1，命中 owner 泄漏断言；当前 factory 下 exit0，依次2→1→0。两次探针均显式清理 old/current native refs 至0，不依赖进程退出或 GC。基线 class/source 与原阶段输入绑定保留，未 checkout/revert 生产源码。首轮编译因新增 checked exception 接线缺失而失败、0 tests，保留原输入/源码/日志，不计产品 RED。
+
+修正后定向17项全部通过：10项 TLS factory 与7项真实服务测试，明确 assert实际 OPENSSL context/engine，JDK回退不能计 native release PASS。成功/失败刷新仍完成实际 TLS1.3 EmbeddedChannel handshake；两个竞争测试把实际 native engine 阻塞于 context lock，验证 close/refresh 不越过 factory monitor。原三节点 SDK Add/read、健康 generation restart、held DATA force/metadata scheduler、初始化失败/close-before-start/borrowed 接口各观察相应 actual terminal 与 native refCnt。扩大五类540项，532通过、8因原Classic证书格式前置条件跳过，failures/errors均0（Bookie282、SDK socket233、Profile TLS10、入口pipeline1、Classic参数化14其中6通过/8跳过）；用例身份与1194份最终输入、native1179份输入匹配。Spotless/Checkstyle exit0；独立RAT实际exit1，仍443个既有未批准路径，路径及全部字节与父提交一致、无新增。
+
+证据在 `/Users/liusinan/.codex/artifacts/unified-wal/owned-profile-tls-evidence-3414108d`；同一 contract probe class 的 SHA-256 为 `d6ec87db2d4e593612e2a5d2cc3a8328ea59fa68904d630030f2d7589e901811`。TLA 未改，旧模型结果不重绑；该增量不等于 TLS opaque/native/JDK 总字节已纳入预算。Main 外部 issuer/输入装载/实际部署进程、full-bytes/B11、完整G1与其余16步继续 OPEN；用户已冻结 Main 首版限已有旧服务的受控部署。生产 Gate OPEN，完整目标 active，OFF/SYSTEM/PARK 与 disabled 能力保持。

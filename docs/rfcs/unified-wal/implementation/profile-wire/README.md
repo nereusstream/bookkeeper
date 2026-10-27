@@ -2580,3 +2580,6 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentBookieControlLogTest
 ```
 
 本切片只证明实际 TLS/socket 缺证书拒绝、零 authority/effect 与连接预算归还；不构成完整 mixed-version G1、TLS native/JDK 总内存、Main issuer/输入装载或受控部署进程验收。TLA 未改，旧模型 PASS 不重绑；full-bytes/B11、完整16步和生产 Gate 继续 OPEN，默认 OFF/SYSTEM/PARK 与 disabled 能力保持。
+
+
+[Owned Profile TLS 的 native 引用与服务终态](../startup-readiness/README.md#owned-profile-tls-的-native-引用与服务终态)：2026-10-27父3414108da6上，明确无factory重载在原episode内创建TLS，实际listener/storage/credit/metadata/loops终结后释放；旧带factory重载仍borrowed。Profile handler选择/构造配置、refresh与close共用monitor，成功refresh释放旧owner、失败保留旧context，未交付engine异常归还；成功reinit拒绝，关闭幂等且拒绝新入口。相同probe字节在旧native context残留上RED、修复后2→1→0 GREEN；17项定向通过，五类540项中532通过/8为原Classic格式前置条件跳过、0失败错误。初次编译接线错误及原输入独立保留，源码/验证由canonical节拥有。仅补TLS实际ownership，不闭合Main issuer/装载、TLS总字节/full-bytes/B11、完整G1或其余16步；目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled保持。

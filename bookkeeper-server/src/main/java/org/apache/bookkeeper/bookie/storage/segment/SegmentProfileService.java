@@ -244,6 +244,24 @@ public final class SegmentProfileService implements AutoCloseable {
         return new SegmentProfileService(parameters, key, validator, resources);
     }
 
+    /**
+     * Own the TLS context loaded from the frozen configuration as part of the deferred service episode.
+     * Release its factory reference only after the listener and owned execution resources actually terminate.
+     */
+    public static SegmentProfileService withOwnedResources(ServerConfiguration configuration, SecretKey key,
+            ProfileDescriptorValidator validator, SegmentProfileOwnedResources.Settings settings,
+            ProfileReceiveBudget budget, int connectionBytes, int connectionBaseBytes,
+            String trustDomain, InetSocketAddress address,
+            org.apache.bookkeeper.common.profile.control.ProfileStaticOperationAuthorizer staticAuthorizer,
+            org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer exactAuthorizer,
+            SegmentProfileReadConfig read) {
+        var parameters = localParameters(configuration, settings.policy());
+        var resources = new SegmentProfileOwnedResources(new ServerConfiguration(configuration), settings,
+                budget, connectionBytes, connectionBaseBytes, trustDomain, address, staticAuthorizer, exactAuthorizer,
+                read, validator);
+        return new SegmentProfileService(parameters, key, validator, resources);
+    }
+
     private static long requiredLong(ServerConfiguration configuration, String field) {
         if (!configuration.containsKey(CONFIG_PREFIX + field)) {
             throw new IllegalArgumentException("Missing experimental Segment setting: " + field);

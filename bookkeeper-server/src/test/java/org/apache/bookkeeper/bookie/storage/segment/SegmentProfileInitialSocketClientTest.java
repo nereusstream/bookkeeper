@@ -37,9 +37,11 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.ssl.OpenSslContext;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
@@ -189,6 +191,31 @@ public class SegmentProfileInitialSocketClientTest {
         var field = IsolatedSegmentStorage.class.getDeclaredField("bookie");
         field.setAccessible(true);
         return (SegmentBookieControlLog) field.get(storage);
+    }
+
+    private static SslContext tlsContext(TLSContextFactory factory) throws Exception {
+        var field = TLSContextFactory.class.getDeclaredField("sslContext");
+        field.setAccessible(true);
+        return (SslContext) field.get(factory);
+    }
+
+    private static Object ownedResourceField(SegmentProfileService service, String name) throws Exception {
+        var resourcesField = SegmentProfileService.class.getDeclaredField("ownedResources");
+        resourcesField.setAccessible(true);
+        var field = SegmentProfileOwnedResources.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(resourcesField.get(service));
+    }
+
+    private static TLSContextFactory ownedTlsFactory(SegmentProfileService service) throws Exception {
+        return (TLSContextFactory) ownedResourceField(service, "tls");
+    }
+
+    private static ReferenceCounted nativeTlsContext(SslContext context) {
+        assertNotNull(context);
+        assertTrue(context instanceof OpenSslContext);
+        assertTrue(context instanceof ReferenceCounted);
+        return (ReferenceCounted) context;
     }
 
     private final class Fixture implements AutoCloseable {
@@ -729,6 +756,9 @@ public class SegmentProfileInitialSocketClientTest {
             clientGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
             worker.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
             acceptor.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
+            if (serverTls != null) {
+                serverTls.closeProfileServer();
+            }
             if (manager != null) {
                 manager.close();
             }
@@ -3039,6 +3069,7 @@ public class SegmentProfileInitialSocketClientTest {
         final SegmentProfileService.Startup startup;
         final SegmentProfileService.Transport transport;
         final boolean ownsResources;
+        SslContext ownedTlsContext;
         org.apache.bookkeeper.server.EmbeddedServer embedded;
 
         ServiceEpisode(Fixture fixture, int target, IsolatedSegmentConfig config,
@@ -3132,12 +3163,18 @@ public class SegmentProfileInitialSocketClientTest {
                 bootstrapConfiguration.setMetadataServiceUri("zk+longhierarchical://"
                         + fixture.cluster.getZooKeeperConnectString() + "/socket-ledgers");
                 bootstrapConfiguration.setZkTimeout(5000);
+                bootstrapConfiguration.setTLSProvider("OpenSSL");
+                bootstrapConfiguration.setTLSKeyStoreType("PEM");
+                bootstrapConfiguration.setTLSKeyStore(certificate("server-key.pem"));
+                bootstrapConfiguration.setTLSCertificatePath(certificate("server-san-cert.pem"));
+                bootstrapConfiguration.setTLSTrustStoreType("PEM");
+                bootstrapConfiguration.setTLSTrustStore(certificate("client-cert.pem"));
                 var owned = new SegmentProfileOwnedResources.Settings(requested, requiredRoot, root,
                         "/socket-initial",
                         ZooDefs.Ids.OPEN_ACL_UNSAFE, "ledger-profile", 4, Duration.ofSeconds(5),
                         Duration.ofMillis(100), 2, 4, 64);
                 service = SegmentProfileService.withOwnedResources(bootstrapConfiguration,
-                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, owned, fixture.serverTls, budget,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, owned, budget,
                         131072, 64, "socket-test", address, control.staticAuthorizer(),
                         control.exactAuthorizer(), read);
             } else {
@@ -3204,6 +3241,10 @@ public class SegmentProfileInitialSocketClientTest {
             fixture.nodes.set(target, storage());
             fixture.budgets.set(target, budget);
             if (ownsResources) {
+                var factory = ownedTlsFactory(service);
+                assertTrue(factory != fixture.serverTls);
+                ownedTlsContext = tlsContext(factory);
+                assertTrue(nativeTlsContext(ownedTlsContext).refCnt() > 0);
                 var peer = persistent.readPeer(fixture.identities.get(target).bookieId().toString()).peer();
                 assertNotNull(peer);
                 assertEquals("tls://127.0.0.1:" + bound.getPort(), peer.projection().endpoint());
@@ -3214,16 +3255,8 @@ public class SegmentProfileInitialSocketClientTest {
             }
         }
 
-        Object ownedResources() throws Exception {
-            var field = SegmentProfileService.class.getDeclaredField("ownedResources");
-            field.setAccessible(true);
-            return field.get(service);
-        }
-
         Object ownedField(String name) throws Exception {
-            var field = SegmentProfileOwnedResources.class.getDeclaredField(name);
-            field.setAccessible(true);
-            return field.get(ownedResources());
+            return ownedResourceField(service, name);
         }
 
         void assertOwnedResourcesTerminal(boolean terminal) throws Exception {
@@ -3235,6 +3268,13 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(terminal, ownedField("zkClosed"));
             assertEquals(terminal, ownedField("managerClosed"));
             assertEquals(terminal, ownedField("driverClosed"));
+            if (ownedTlsContext != null) {
+                if (terminal) {
+                    assertEquals(0, nativeTlsContext(ownedTlsContext).refCnt());
+                } else {
+                    assertTrue(nativeTlsContext(ownedTlsContext).refCnt() > 0);
+                }
+            }
         }
 
         @Override
@@ -3243,6 +3283,9 @@ public class SegmentProfileInitialSocketClientTest {
                 embedded.getLifecycleComponentStack().close();
             }
             service.close();
+            if (ownedTlsContext != null) {
+                assertEquals(0, nativeTlsContext(ownedTlsContext).refCnt());
+            }
             client.close();
         }
     }
@@ -3581,6 +3624,7 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(false, episode.ownedField("managerClosed"));
                     assertEquals(false, episode.ownedField("zkClosed"));
                     assertFalse(((EventLoopGroup) episode.ownedField("worker")).isShuttingDown());
+                    assertTrue(nativeTlsContext(episode.ownedTlsContext).refCnt() > 0);
                     release.countDown();
                     actual.get(5, TimeUnit.SECONDS);
                     assertTrue(episode.service.close(Duration.ofSeconds(5)));
@@ -3649,6 +3693,94 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void ownedProfileResourcesCloseBeforeStartNeverCreatesTlsOrNativeLoops() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("owned-not-started"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
+                assertNull(ownedTlsFactory(episode.service));
+                assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                assertNull(ownedTlsFactory(episode.service));
+                for (String name : List.of("worker", "acceptor", "cold", "scheduler", "zk")) {
+                    assertNull(episode.ownedField(name));
+                }
+                assertNull(episode.storage());
+                assertFalse(Files.exists(config.directory()));
+                assertNull(episode.persistent.readPeer("socket0:3181").peer());
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileTlsInitializationFailureCannotOpenStorageOrPublishWritable() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("owned-invalid-tls"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
+                var invalid = new ServerConfiguration(episode.bootstrapConfiguration);
+                invalid.setTLSKeyStore(config.directory().resolve("missing-server-key.pem").toString());
+                var control = fixture.controlConfigs.get(0);
+                var settings = (SegmentProfileOwnedResources.Settings) episode.ownedField("settings");
+                try (var failed = SegmentProfileService.withOwnedResources(invalid,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, episode.budget,
+                        131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
+                        control.staticAuthorizer(), control.exactAuthorizer(), null)) {
+                    var failure = assertThrows(IOException.class, () -> failed.start(false));
+                    assertTrue(failure.getCause() instanceof org.apache.bookkeeper.tls.SecurityException);
+                    assertTrue(failed.close(Duration.ofSeconds(5)));
+                    assertNotNull(ownedTlsFactory(failed));
+                    assertNull(tlsContext(ownedTlsFactory(failed)));
+                    for (String name : List.of("worker", "acceptor", "cold", "scheduler", "zk")) {
+                        assertNull(ownedResourceField(failed, name));
+                    }
+                    var storageField = SegmentProfileService.class.getDeclaredField("storage");
+                    storageField.setAccessible(true);
+                    assertNull(storageField.get(failed));
+                    assertFalse(Files.exists(config.directory()));
+                    assertNull(episode.persistent.readPeer("socket0:3181").peer());
+                    assertTrue(episode.publisher.readWritable("socket0:3181").isEmpty());
+                }
+            }
+        }
+    }
+
+    @Test
+    public void ownedProfileResourcesKeepCallerTlsFactoryUsableAfterBorrowedServiceCloses() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("borrowed-tls"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler(), false, true)) {
+                var control = fixture.controlConfigs.get(0);
+                var settings = (SegmentProfileOwnedResources.Settings) episode.ownedField("settings");
+                try (var borrowed = SegmentProfileService.withOwnedResources(episode.bootstrapConfiguration,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, fixture.serverTls,
+                        episode.budget, 131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
+                        control.staticAuthorizer(), control.exactAuthorizer(), null)) {
+                    borrowed.start(false);
+                    assertTrue(borrowed.close(Duration.ofSeconds(5)));
+                    assertTrue(ownedTlsFactory(borrowed) == fixture.serverTls);
+                    var context = tlsContext(fixture.serverTls);
+                    assertTrue(nativeTlsContext(context).refCnt() > 0);
+                    var handler = fixture.serverTls.newProfileServerTLSHandler();
+                    var channel = new EmbeddedChannel(handler);
+                    try {
+                        assertTrue(handler.engine().getNeedClientAuth());
+                    } finally {
+                        channel.finishAndReleaseAll();
+                    }
+                    assertTrue(nativeTlsContext(context).refCnt() > 0);
+                }
+            }
+        }
+    }
+
+    @Test
     public void ownedProfileInitializationFailureRetainsHandleAndDrainsActualPartialResources() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
             var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("owned-unopened"),
@@ -3671,20 +3803,36 @@ public class SegmentProfileInitialSocketClientTest {
                     invalid.setZkTimeout(1000);
                     var control = fixture.controlConfigs.get(0);
                     var failed = SegmentProfileService.withOwnedResources(invalid,
-                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, fixture.serverTls,
+                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings,
                             new ProfileReceiveBudget(524288, 131072, 262144, 8, 8, 8), 131072, 64, "socket-test",
                             new InetSocketAddress("127.0.0.1", 0), control.staticAuthorizer(),
                             control.exactAuthorizer(), null);
                     try {
-                        assertThrows(java.io.IOException.class, () -> failed.start(false));
+                        var starting = fixture.cold.submit(() -> {
+                            failed.start(false);
+                            return null;
+                        });
+                        SslContext context = null;
+                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                        while (context == null && !starting.isDone() && System.nanoTime() < until) {
+                            var factory = ownedTlsFactory(failed);
+                            if (factory != null) {
+                                assertTrue(factory != fixture.serverTls);
+                                context = tlsContext(factory);
+                            }
+                            if (context == null) {
+                                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                            }
+                        }
+                        var nativeContext = nativeTlsContext(context);
+                        assertTrue(nativeContext.refCnt() > 0);
+                        var failure = assertThrows(ExecutionException.class,
+                                () -> starting.get(5, TimeUnit.SECONDS));
+                        assertTrue(failure.getCause() instanceof IOException);
                         assertTrue(failed.close(Duration.ofSeconds(5)));
-                        var resourcesField = SegmentProfileService.class.getDeclaredField("ownedResources");
-                        resourcesField.setAccessible(true);
-                        var resources = resourcesField.get(failed);
+                        assertEquals(0, nativeContext.refCnt());
                         for (String name : List.of("worker", "acceptor")) {
-                            var terminal = SegmentProfileOwnedResources.class.getDeclaredField(name);
-                            terminal.setAccessible(true);
-                            assertTrue(((EventLoopGroup) terminal.get(resources)).isTerminated());
+                            assertTrue(((EventLoopGroup) ownedResourceField(failed, name)).isTerminated());
                         }
                         assertFalse(Files.exists(config.directory()));
                     } finally {

@@ -26,6 +26,7 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
+import io.netty.util.ReferenceCountUtil;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -157,6 +158,8 @@ public class TLSContextFactory implements SecurityHandlerFactory {
     private long certRefreshTime;
     private volatile long certLastRefreshTime;
     private boolean isServerCtx;
+    private boolean profileServerInitialized;
+    private boolean profileServerClosed;
 
     public TLSContextFactory() {
         this(false);
@@ -172,11 +175,32 @@ public class TLSContextFactory implements SecurityHandlerFactory {
     }
 
     /** Require the initialized immediate-mTLS server mode when installing a Profile endpoint. */
-    public SslHandler newProfileServerTLSHandler() throws SecurityException {
-        if (!profileServer || !isServerCtx) {
+    public synchronized SslHandler newProfileServerTLSHandler() throws SecurityException {
+        if (!hasProfileServerContext()) {
             throw new SecurityException("Profile server TLS context is not initialized");
         }
         return newTLSHandler();
+    }
+
+    private boolean hasProfileServerContext() {
+        return profileServer && !profileServerClosed && profileServerInitialized;
+    }
+
+    /**
+     * Release the Profile factory's context reference once and reject subsequent initialization or handlers.
+     * Callers must close their Profile channels first; this method does not drain the engines they own.
+     */
+    public synchronized void closeProfileServer() {
+        if (!profileServer) {
+            throw new IllegalStateException("TLS factory is not a Profile server factory");
+        }
+        if (!profileServerClosed) {
+            profileServerClosed = true;
+            profileServerInitialized = false;
+            SslContext previous = sslContext;
+            sslContext = null;
+            ReferenceCountUtil.release(previous);
+        }
     }
 
     /** Extract verified leaf identity; the listener must establish endpoint and immediate-TLS facts itself. */
@@ -518,15 +542,25 @@ public class TLSContextFactory implements SecurityHandlerFactory {
             sslContextBuilder.protocols("TLSv1.3");
         }
 
-        sslContext = sslContextBuilder.build();
+        SslContext replacement = sslContextBuilder.build();
+        SslContext previous = sslContext;
+        sslContext = replacement;
         certLastRefreshTime = System.currentTimeMillis();
+        if (profileServer) {
+            ReferenceCountUtil.release(previous);
+        }
     }
 
     @Override
     public synchronized void init(NodeType type, AbstractConfiguration conf, ByteBufAllocator allocator)
             throws SecurityException {
-        if (profileServer && type != NodeType.Server) {
-            throw new SecurityException("Profile TLS context requires server mode");
+        if (profileServer) {
+            if (profileServerClosed || profileServerInitialized) {
+                throw new SecurityException("Profile TLS context is closed or already initialized");
+            }
+            if (type != NodeType.Server) {
+                throw new SecurityException("Profile TLS context requires server mode");
+            }
         }
         this.allocator = allocator;
         this.config = conf;
@@ -559,6 +593,9 @@ public class TLSContextFactory implements SecurityHandlerFactory {
             if (enabledCiphers != null && !enabledCiphers.isEmpty()) {
                 ciphers = enabledCiphers.split(",");
             }
+            if (profileServer) {
+                profileServerInitialized = true;
+            }
         } catch (KeyStoreException e) {
             throw new RuntimeException("Standard keystore type missing", e);
         } catch (NoSuchAlgorithmException e) {
@@ -575,6 +612,13 @@ public class TLSContextFactory implements SecurityHandlerFactory {
             throw new SecurityException("Invalid TLS configuration", e);
         } catch (NoSuchProviderException e) {
             throw new SecurityException("No such provider", e);
+        } finally {
+            if (profileServer && !profileServerInitialized) {
+                SslContext previous = sslContext;
+                sslContext = null;
+                isServerCtx = false;
+                ReferenceCountUtil.release(previous);
+            }
         }
     }
 
@@ -585,37 +629,56 @@ public class TLSContextFactory implements SecurityHandlerFactory {
 
     @Override
     public SslHandler newTLSHandler(String peer, int port) {
+        if (profileServer) {
+            synchronized (this) {
+                if (!hasProfileServerContext()) {
+                    throw new IllegalStateException("Profile server TLS context is not initialized");
+                }
+                return createTLSHandler(peer, port);
+            }
+        }
+        return createTLSHandler(peer, port);
+    }
+
+    private SslHandler createTLSHandler(String peer, int port) {
         SslHandler sslHandler = getSSLContext().newHandler(allocator, peer, port);
+        boolean configured = false;
+        try {
+            if (protocols != null && protocols.length != 0) {
+                sslHandler.engine().setEnabledProtocols(protocols);
+            }
+            log.debug(e -> e
+                    .attr("protocols", Arrays.toString(sslHandler.engine().getEnabledProtocols()))
+                    .log("Enabled cipher protocols"));
 
-        if (protocols != null && protocols.length != 0) {
-            sslHandler.engine().setEnabledProtocols(protocols);
+            if (ciphers != null && ciphers.length != 0) {
+                sslHandler.engine().setEnabledCipherSuites(ciphers);
+            }
+            log.debug(e -> e
+                    .attr("cipherSuites", Arrays.toString(sslHandler.engine().getEnabledCipherSuites()))
+                    .log("Enabled cipher suites"));
+
+            if (type == NodeType.Client) {
+                // Netty 4.2 enables HTTPS endpoint identification by default on the client side. Honor the
+                // BookKeeper configuration by explicitly setting the algorithm (or clearing it when disabled).
+                SSLParameters sslParameters = sslHandler.engine().getSSLParameters();
+                boolean hostnameVerificationEnabled =
+                        ((ClientConfiguration) config).getHostnameVerificationEnabled();
+                sslParameters.setEndpointIdentificationAlgorithm(hostnameVerificationEnabled ? "HTTPS" : null);
+                sslHandler.engine().setSSLParameters(sslParameters);
+                log.debug()
+                        .attr("endpointIdentificationAlgorithm",
+                                hostnameVerificationEnabled ? "HTTPS" : "disabled")
+                        .log("endpointIdentificationAlgorithm");
+            }
+
+            configured = true;
+            return sslHandler;
+        } finally {
+            if (profileServer && !configured) {
+                ReferenceCountUtil.release(sslHandler.engine());
+            }
         }
-        log.debug(e -> e
-                .attr("protocols", Arrays.toString(sslHandler.engine().getEnabledProtocols()))
-                .log("Enabled cipher protocols"));
-
-        if (ciphers != null && ciphers.length != 0) {
-            sslHandler.engine().setEnabledCipherSuites(ciphers);
-        }
-        log.debug(e -> e
-                .attr("cipherSuites", Arrays.toString(sslHandler.engine().getEnabledCipherSuites()))
-                .log("Enabled cipher suites"));
-
-        if (type == NodeType.Client) {
-            // Netty 4.2 enables HTTPS endpoint identification by default on the client side. Honor the
-            // BookKeeper configuration by explicitly setting the algorithm (or clearing it when disabled).
-            SSLParameters sslParameters = sslHandler.engine().getSSLParameters();
-            boolean hostnameVerificationEnabled =
-                    ((ClientConfiguration) config).getHostnameVerificationEnabled();
-            sslParameters.setEndpointIdentificationAlgorithm(hostnameVerificationEnabled ? "HTTPS" : null);
-            sslHandler.engine().setSSLParameters(sslParameters);
-            log.debug()
-                    .attr("endpointIdentificationAlgorithm",
-                            hostnameVerificationEnabled ? "HTTPS" : "disabled")
-                    .log("endpointIdentificationAlgorithm");
-        }
-
-        return sslHandler;
     }
 
     private void markAutoCertRefresh(String tlsCertificatePath, String tlsKeyStore, String tlsKeyStorePasswordPath,
