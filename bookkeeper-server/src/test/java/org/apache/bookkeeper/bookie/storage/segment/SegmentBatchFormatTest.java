@@ -340,6 +340,46 @@ public class SegmentBatchFormatTest {
     }
 
     @Test
+    public void pooledBatchParsingRejectsAnInsufficientRecordAllowanceWithoutTruncating() throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentBatchFormat.Address address = address(4096);
+        byte[] firstPayload = {1, 2, 3};
+        byte[] secondPayload = {4, 5};
+        ByteBuf first = entry(firstPayload, 3, 2, firstPayload.length, 8);
+        ByteBuf second = entry(secondPayload, 7, 6, secondPayload.length, 9);
+        try (SegmentBufferPool pool = new SegmentBufferPool(0, 1, 1, 4096, 4096, false, () -> { })) {
+            try (SegmentBatchFormat.FrozenBatch batch = SegmentBatchFormat.encodePooled(config, address,
+                    List.of(SegmentBatchFormat.entry(context(8), first),
+                            SegmentBatchFormat.entry(context(9), second)), pool)) {
+                assertTrue(batch.bytes().isDirect());
+                IOException refusal = assertThrows(IOException.class, () -> SegmentBatchParser.parse(
+                        batch.bytes(), address, config.bytesPerFile(), 1));
+                assertEquals("Batch record count exceeds metadata allowance", refusal.getMessage());
+                for (SegmentBatchParser.Batch parsed : List.of(
+                        SegmentBatchParser.parse(batch.bytes(), address, config.bytesPerFile(), 2),
+                        SegmentBatchParser.parse(batch.bytes(), address, config.bytesPerFile()))) {
+                    assertEquals(2, parsed.records().size());
+                    SegmentBatchParser.Record firstRecord = parsed.records().get(0);
+                    SegmentBatchParser.Record secondRecord = parsed.records().get(1);
+                    assertEquals(context(8), firstRecord.context());
+                    assertEquals(context(9), secondRecord.context());
+                    assertEquals(3, firstRecord.entryId());
+                    assertEquals(7, secondRecord.entryId());
+                    assertArrayEquals(firstPayload, bytes(firstRecord.entry().slice(
+                            SegmentBatchFormat.ENTRY_OVERHEAD, firstPayload.length)));
+                    assertArrayEquals(secondPayload, bytes(secondRecord.entry().slice(
+                            SegmentBatchFormat.ENTRY_OVERHEAD, secondPayload.length)));
+                }
+            }
+            pool.drainReturns();
+            assertEquals(0, pool.outstanding());
+        } finally {
+            first.release();
+            second.release();
+        }
+    }
+
+    @Test
     public void dataReservationAndCloseDecisionDoNotWaitForFileForce() throws Exception {
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(temporary.getRoot().toPath().resolve("data-lock"),
                 1, 4, 1, 4L * 1024 * 1024, 4096, 1024 * 1024, 2, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");

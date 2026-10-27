@@ -1016,6 +1016,7 @@ final class SegmentDataRecovery {
         long readBytes = 0;
         long coveredBatches = 0;
         long skippedBodyBytes = 0;
+        var parseLayout = recoveryBudget == null ? null : SegmentControlCapacity.Layout.hotSpot();
         List<SegmentPointRead.Location> entries = new ArrayList<>();
         HashSet<SegmentPointRead.Location> foundMoves = new HashSet<>();
         Map<StreamKey, StreamProgress> streams = new HashMap<>();
@@ -1103,7 +1104,9 @@ final class SegmentDataRecovery {
                         continue;
                     }
                     try (var pageCredit = recoveryBudget == null ? null
-                            : recoveryBudget.reserveDataWorkingSet(seed == null ? 4096 : SegmentBatchFormat.HEADER)) {
+                            : recoveryBudget.reserveDataWorkingSet(SegmentControlCapacity.sum(
+                                    seed == null ? 4096 : SegmentBatchFormat.HEADER,
+                                    SegmentBatchParser.workspaceCapacity(parseLayout, 0)))) {
                         ByteBuffer page = ByteBuffer.allocate(seed == null ? 4096 : SegmentBatchFormat.HEADER);
                         SegmentFileIo.readFully(data, page, offset);
                         readBytes += page.remaining();
@@ -1133,6 +1136,7 @@ final class SegmentDataRecovery {
                         }
                         int length = SegmentBatchParser.batchLength(page.slice(0, 128), address,
                                 config.bytesPerFile());
+                        int parsedRecords = page.getInt(76); // Validated by batchLength before any record allocation.
                         if (reused.isPresent() && length > reused.get().usedEnd() - offset) {
                             throw new IOException("Current reused DATA exceeds its healthy CLOSED tail");
                         }
@@ -1176,12 +1180,13 @@ final class SegmentDataRecovery {
                         }
                         // Parsed payload views remain inside this scope; inventory retains only locations.
                         try (var contentCredit = recoveryBudget == null ? null
-                                : recoveryBudget.reserveDataWorkingSet(length)) {
+                                : recoveryBudget.reserveDataWorkingSet(SegmentControlCapacity.sum(length,
+                                        SegmentBatchParser.workspaceCapacity(parseLayout, parsedRecords)))) {
                             ByteBuffer content = ByteBuffer.allocate(length);
                             SegmentFileIo.readFully(data, content, offset);
                             readBytes += length;
                             SegmentBatchParser.Batch parsed = SegmentBatchParser.parse(content, address,
-                                    config.bytesPerFile());
+                                    config.bytesPerFile(), parsedRecords);
                             for (SegmentBatchParser.Record record : parsed.records()) {
                                 if (SegmentOwnerLoop.shardFor(record.context().ledgerId(), config.logicalShards())
                                         != address.shard()) {

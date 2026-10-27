@@ -1616,3 +1616,30 @@ Inventory 常驻项为 Inventory/Scan、两个不可变列表、prefix map、C �
 最终独立 context 图在四个 JVM 全部通过：JDK21 compressed8/wide8/alignment256 与 JDK17 compressed8。S4/F3/H=C10000/P22 时，compressed8 整体7,312,112B≤19,312,160B，wide8 9,323,024B≤同模型，alignment256 46,567,680B≤165,443,072B；图明确有2C个内容/ledgerId/数组身份均不同的 context、4C份数组，inventory-only含C份context且不含Key。Identity table resize/高水位、List12/ListN/Map1/MapN、两个普通 map 的2万TreeNode，以及真实初始化的88份 Admission/Lease/AtomicBoolean/readonly view 已核验。1194份源码、387份冻结 class 与加载来源/hash 绑定；原共享阶段和首次 runner URL比较的后处理错误/Java exit0输出均保留。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/hot-metadata-capacity-evidence-d4837e0e`，有限图不等于 retained heap、RSS、native 分配、性能或完整状态数证明。
 
 服务 normal/recovery/compaction 都使用既有 pooled backing，故未按 J 再乘 payload；Slot、root ByteBuf/NIO view、pool queues、通用执行/I/O对象图及 native/opaque资源仍由各 owner 的其余预算闭合。包内 raw unpooled encoder 的 backing 在失败 admission 后没有现有 credit 接管，仍是真实剩余缺口，不能算本 fee 已覆盖。reserve/扫描解析临时图同样另列。TLA与wire/disk/authority未改，旧模型不重绑；B11/full-bytes、Main issuer/装载、完整G1、正式性能/掉电/NUMA及其余16步仍 OPEN/NOT_EXECUTED，生产 Gate OPEN，完整目标 active，OFF/SYSTEM/PARK与disabled保持。
+
+
+## Pooled 解析工作区与派生 pending context
+
+2026-10-27，父 `5d4cd9ccda54798f10056a2491765ecac953b7c1` 上，原 service 单次 DATA 启动预留增加 `SegmentDataPhysicalDriver.parsingCapacity`。`SegmentBatchParser.workspaceCapacity` 计 Batch/Record、context/UUID/entry view、locator/list，以及有界 CRC/slice/decode 临时图；`SegmentHotDirectory.parsingWorkspace` 再计容量检查前已创建的 Key/withinBatch HashSet 和可变/不可变列表。pooled backing 仍由原执行 pool 计费，未增加 ordinary Add 的 credit/atomic、线程、队列、MetadataStore、控制 force 或握手。
+
+```text
+cap = min(MAX_BATCH, execution.bufferBytes)
+K = min(MAX_RECORDS, (cap-HEADER-FOOTER)/(RECORD_HEADER+ENTRY_OVERHEAD))
+P=maxPendingEntries; W=workers; I=ioThreads; n=min(K,P)
+M = P + n*(W+I-1)
+新增 DATA = (W+1)*Hot.parsingWorkspace(K) + parsedPendingValues(M)
+```
+
+4 KiB 实际 pool 最多容纳20个最小196B record，不能一律按256条扩大发生于该 pool 的解析图。W 个 owner 同步解析，另外保守计入 storage gate 保护的一份维护批解析；该项不代表全部维护 plan 或 read consumer 图。每条 Record 真正留下的是 Record/UUID/context（含最终16/36数组）及一份 readonly entry view；中间 slice/CRC/EntryIdentity、60B输入与decode原始16/36数组只属于单条 helper 栈，以固定16view/3CRC等额度计，未按K累加全部历史分配。direct view attachment沿用共享pool root；不以此覆盖raw readonly heap CRC fallback backing。
+
+NormalBatcher 在 prepareBatch 解码出 context A，由 PendingNormal.key、SegmentEntryIdentity/payload view及 normals 列表保留；之后 PhysicalCommand 调用 hot.reserve 又解码出 context B。A/B 值相同但对象/数组不同，上一包 occupied/hot 只覆盖 B，不能当作 A 的费用。每entry原DATA ticket共用P，原tickets终结后返回窗口另覆盖W个owner及I−1个DATA I/O线程中的整批n；派生值费包括 PendingNormal/NormalKey/Identity/context A/view和保守列表存储，不宣称整个 Entry/source/Obligation、waiters内容或driver map都已计费。
+
+这项 M 依赖一处实际 ownership 修复：原 PoolCommand.batch 的 PoolSubmission 长期保留 callback，callback捕获leader Entry，其 future physical可在pool交付后继续形成/持有 PendingNormal A；旧CONTROL task因而能回指多个shard后来的DATA批。private PoolSubmission现由原owner在调用前take并清空completion，request保持不变；未调用leader尚无physical，已调用cell不再保留leader，当前callback局部至多一份归入owner窗口。原异常汇总、后续逐项投递和releaseBusy均保持。正常及前项callback抛错的两项真实driver测试在旧生产上均命中callback仍保留的RED；修复后观察调用前字段已空、真实合并force/APPLIED、下一次grant及actual线程排空，不依赖GC。
+
+启动冷扫描沿现有 credit 计费：pageCredit先覆盖count校验前固定工作区；contentCredit在原backing长度之外按第一次已验证header的实际n覆盖本批解析/locator元数据，不乘W/S。重读content通过新parse(...,maxRecords=n)入口，在分配records列表前拒绝超付额count，未截断记录；旧parse入口仍保持原格式和完整解码。真实pooled两record测试验证付额1整批拒绝、付额2及旧入口都保留完整context/entryId/payload。此处只结算本批临时图，未将跨批entries/foundMoves/seed/stream/ranges或postscan coordinates等集合冒充已随content credit结算。
+
+预算测试仅留足此前buffers/index/occupied/hot metadata/inventory五项，旧生产实际启动成功，命中expected IOException未抛出的RED；新费用在storage/目录open前拒绝。该测试使用实际frozen execution及fixture H=8/C=16，未修改quota或超时。两项callback RED、预算RED、三份测试源码及修复输入独立保存；6项定向全部通过。最终六类627项全通过（Arena43、format41、Bookie282、capacity3、SDK socket235、install-store23），failures/errors/skipped均0，输入与用例身份匹配。Spotless/Checkstyle exit0；独立RAT实际exit1，仍443个既有未批准路径，路径及全部字节与父提交相同、无新增。
+
+最终四JVM（21压缩8/宽8/对齐256、17压缩8）真实pooled encode/parse N1/2/20@4KiB、N256@64KiB及派生图全部不超模型。压缩8的N20 parser 7,088B≤16,824B、Hot 9,568B≤28,880B；N256 Hot 116,064B≤291,312B，wide8 156,024B≤同模型，alignment256 603,904B≤2,034,432B。P16/K20/W1/I2的M48图依次15,304/20,088/101,632B≤45,744/45,744/529,408B。A+B图明确512个context/1024份数组（N256），Pending key与Identity共享A而不共享B。1194份source、387份冻结class及实际加载来源/hash核验，compile/四Java/runner均exit0且无超时。固定临时对象数量及旧返回窗口仍来自静态控制流推导，真实浅大小witness和有限M48形状不是完整调用峰值/业务状态数量证明。
+
+证据在 `/Users/liusinan/.codex/artifacts/unified-wal/pooled-parse-workspace-evidence-5d4cd9cc`。返回给consumer的read Record/LeasedResult元数据、完整driver/source/执行器/pool图、compaction长期copies/hash/plan、跨批startup扫描集合/旧seed，以及raw grouped/unpooled路径仍需独立闭合。该增量不等于exclusive retained heap、GC/RSS/native或性能保证；TLA/wire/disk/authority未改，旧模型不重绑，full-bytes/B11、Main issuer/装载、完整G1、正式性能/掉电/NUMA及其余16步继续OPEN/NOT_EXECUTED。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。

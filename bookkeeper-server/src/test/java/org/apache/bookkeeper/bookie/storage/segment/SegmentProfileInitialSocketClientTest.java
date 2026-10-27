@@ -3615,6 +3615,41 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void ownedProfileServiceRejectsMissingPooledParserMetadataBudgetBeforeOpen() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("new-scope"),
+                    1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var requested = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), sdk.getClientCtx().getScheduler())) {
+                var executionField = SegmentProfileService.class.getDeclaredField("execution");
+                executionField.setAccessible(true);
+                var execution = (SegmentExecutionGroup.Settings) executionField.get(episode.service);
+                var settings = serviceSettings(config);
+                int coordinates = (Integer) settings.get("IndexedEntries");
+                int hotEntries = (Integer) settings.get("HotEntries");
+                long oldBytes = SegmentControlCapacity.sum(execution.reservedBufferBytes(),
+                        SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES,
+                        SegmentHotDirectory.occupiedCapacity(config.logicalShards(), coordinates),
+                        SegmentHotDirectory.metadataCapacity(config, execution, hotEntries),
+                        SegmentDataRecovery.inventoryCapacity(config, coordinates));
+                long heldBytes = ServiceEpisode.DATA_BYTES - oldBytes;
+                try (var held = episode.budget.reserveDataWorkingSet(heldBytes)) {
+                    assertThrows(java.io.IOException.class, () -> episode.service.start(false));
+                    assertNull(episode.storage());
+                    assertFalse(Files.exists(config.directory()));
+                    assertEquals(heldBytes, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                    assertTrue(episode.budget.closeConnectionsAndDrain().isDone());
+                    assertFalse(episode.budget.closeAdmissionAndDrain().isDone());
+                }
+                assertTrue(episode.budget.closeAdmissionAndDrain().isDone());
+                assertEquals(0, episode.budget.used(ProfileReceiveBudget.Lane.DATA));
+            }
+        }
+    }
+
+    @Test
     public void embeddedProfileServiceRunsSdkWithoutClassicOpenAndRetainsStackUntilActualDrain() throws Exception {
         runOwnedProfileService(true);
     }

@@ -24,10 +24,30 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.zip.CRC32C;
+import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 
 /** Independent bounded reader: validates bytes without calling the writer or its validation helpers. */
 final class SegmentBatchParser {
+    /** Decoded batch/locator graph and the bounded stack of nonescaping parser temporaries, excluding backing. */
+    static long workspaceCapacity(SegmentControlCapacity.Layout layout, int records) {
+        if (records < 0 || records > SegmentBatchFormat.MAX_RECORDS) {
+            throw new IllegalArgumentException("Bounded parser record count required");
+        }
+        long view = Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR"));
+        long record = SegmentControlCapacity.sum(layout.object(Record.class), layout.object(UUID.class),
+                layout.context(), layout.object(SegmentPointRead.Location.class), view);
+        // Only one parseRecord/helper stack is active; intermediate views/CRC/decode arrays do not escape it.
+        return SegmentControlCapacity.sum(layout.object(Batch.class),
+                SegmentControlCapacity.times(4, layout.list()),
+                SegmentControlCapacity.times(8, layout.refs(records)),
+                SegmentControlCapacity.times(16, view), SegmentControlCapacity.times(3, layout.object(CRC32C.class)),
+                layout.object(SegmentEntryIdentity.class), layout.bytes(60), layout.bytes(16), layout.bytes(36),
+                layout.bytes(0), layout.object(SegmentBatchFormat.Address.class),
+                SegmentControlCapacity.times(2, layout.object(Generation.class)),
+                SegmentControlCapacity.times(records, record));
+    }
+
     record Record(ProfileLedgerContext context, long entryId, long lac, long ledgerLength,
                   int origin, UUID moveId, long moveGeneration, long offset, ByteBuffer entry) {
         Record {
@@ -71,15 +91,23 @@ final class SegmentBatchParser {
     }
 
     static Batch parse(ByteBuffer input, SegmentBatchFormat.Address expected, long fileCapacity) throws IOException {
+        return parse(input, expected, fileCapacity, SegmentBatchFormat.MAX_RECORDS);
+    }
+
+    /** A cold caller binds the re-read content to the metadata allowance paid from its validated first header. */
+    static Batch parse(ByteBuffer input, SegmentBatchFormat.Address expected, long fileCapacity, int maxRecords)
+            throws IOException {
+        require(maxRecords >= 0 && maxRecords <= SegmentBatchFormat.MAX_RECORDS, "Invalid batch metadata allowance");
         ByteBuffer b = input.slice().order(ByteOrder.BIG_ENDIAN);
         int length = batchLength(b, expected, fileCapacity);
         require(b.remaining() == length, "Truncated or extra batch bytes");
+        int count = b.getInt(76);
+        require(count <= maxRecords, "Batch record count exceeds metadata allowance");
         int footer = length - 32;
         require(b.getLong(footer) == 0x5557454e44303031L && b.getLong(footer + 8) == expected.sequence()
                 && b.getInt(footer + 16) == length && b.getInt(footer + 24) == b.getInt(124)
                 && b.getInt(footer + 28) == crc(b, footer, 28), "Invalid or torn batch footer");
         require(b.getInt(footer + 20) == crc(b, 128, footer - 128), "Batch payload CRC mismatch");
-        int count = b.getInt(76);
         int end = 128 + b.getInt(80);
         List<Record> records = new ArrayList<>(count);
         int position = 128;

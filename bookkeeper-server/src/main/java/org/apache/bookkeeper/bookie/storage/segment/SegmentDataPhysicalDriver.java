@@ -322,6 +322,29 @@ final class SegmentDataPhysicalDriver {
     private final Map<NormalKey, PendingNormal> pendingNormals = new HashMap<>();
     private NormalBatcher normalBatcher;
 
+    /** Service pooled parsing plus its separately decoded PendingNormal values; other driver state is separate. */
+    static long parsingCapacity(IsolatedSegmentConfig config, SegmentExecutionGroup.Settings execution)
+            throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        int capacity = Math.min(SegmentBatchFormat.MAX_BATCH, execution.bufferBytes());
+        int records = Math.min(SegmentBatchFormat.MAX_RECORDS,
+                (capacity - SegmentBatchFormat.HEADER - SegmentBatchFormat.FOOTER)
+                        / (SegmentBatchFormat.RECORD_HEADER + SegmentBatchFormat.ENTRY_OVERHEAD));
+        // Each owner parses synchronously; the storage gate permits one concurrent maintenance batch scan.
+        long workspaces = SegmentControlCapacity.times(execution.workers() + 1L,
+                SegmentHotDirectory.parsingWorkspace(layout, records));
+        long returning = SegmentControlCapacity.sum(execution.workers(), execution.ioThreads() - 1L);
+        long held = SegmentControlCapacity.sum(config.maxPendingEntries(), SegmentControlCapacity.times(
+                Math.min(records, config.maxPendingEntries()), returning));
+        long value = SegmentControlCapacity.sum(layout.object(PendingNormal.class), layout.object(NormalKey.class),
+                layout.object(SegmentEntryIdentity.class), layout.context(),
+                Math.max(layout.buffer(), layout.object("java.nio.DirectByteBufferR")),
+                SegmentControlCapacity.times(2, layout.list()));
+        // Pool callbacks are consumed before invocation, so old CONTROL tasks retain no completed leader.
+        return SegmentControlCapacity.sum(workspaces, SegmentControlCapacity.times(held, value),
+                SegmentControlCapacity.times(2, layout.refs(held)));
+    }
+
     SegmentDataPhysicalDriver(int shard, SegmentOwnerLoop owner, SegmentIoExecutor io,
                               IsolatedSegmentFiles files, SegmentArenaControlLog authority,
                               SegmentPhysicalPrefix prefix, SegmentHotDirectory hot) {

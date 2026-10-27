@@ -126,6 +126,13 @@ final class SegmentHotDirectory {
         return sum(fixed, maps, admissions, locators, times(handles, batchHandle), pump);
     }
 
+    /** Includes rejected batches: keys and temporary locators are built before the final capacity check. */
+    static long parsingWorkspace(SegmentControlCapacity.Layout layout, int records) {
+        return sum(SegmentBatchParser.workspaceCapacity(layout, records), layout.object(Admission.class),
+                layout.hashSet(), times(4, layout.list()), times(16, layout.refs(records)),
+                times(records, sum(layout.object(Key.class), layout.hashEntry())), times(4, layout.captured(8)));
+    }
+
     /** The storage owner calls this only after successful resource close and actual execution termination. */
     void retireClosedState(SegmentExecutionGroup execution) {
         if (!execution.terminated() || execution.inputs().usedBytes() != 0) {

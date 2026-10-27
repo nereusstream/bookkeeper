@@ -40,7 +40,29 @@ final class SegmentArenaControlDriver {
     private final SegmentArenaControlLog log;
     private final int maintenanceBlocks;
     private final AtomicBoolean busy = new AtomicBoolean();
-    private record PoolSubmission(SegmentArenaControlLog.PoolRequest request, Completion completion) { }
+    private static final class PoolSubmission {
+        private final SegmentArenaControlLog.PoolRequest request;
+        private Completion completion;
+
+        private PoolSubmission(SegmentArenaControlLog.PoolRequest request, Completion completion) {
+            this.request = request;
+            this.completion = completion;
+        }
+
+        private SegmentArenaControlLog.PoolRequest request() {
+            return request;
+        }
+
+        /** Consumed on the original owner before callback code can publish a later DATA obligation. */
+        private Completion takeCompletion() {
+            Completion taken = completion;
+            completion = null;
+            if (taken == null) {
+                throw new IllegalStateException("Pool callback already consumed");
+            }
+            return taken;
+        }
+    }
     private final Object poolGate = new Object();
     private final List<PoolSubmission> pools = new ArrayList<>();
     private boolean collecting;
@@ -390,7 +412,7 @@ final class SegmentArenaControlDriver {
                 List<SegmentArenaControlLog.Result> one = failure == null && planned.get(i).isPresent()
                         ? List.of(results.get(result++)) : List.of();
                 try {
-                    batch.get(i).completion().complete(one, failure);
+                    batch.get(i).takeCompletion().complete(one, failure);
                 } catch (Throwable cause) {
                     if (callbackFailure == null) {
                         callbackFailure = cause;

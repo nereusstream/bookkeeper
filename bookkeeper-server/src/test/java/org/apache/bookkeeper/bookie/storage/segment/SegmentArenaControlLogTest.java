@@ -25,6 +25,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -1175,6 +1176,130 @@ public class SegmentArenaControlLogTest {
         assertNull(owner.failure());
         try (SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
             assertTrue(granted(replay, 4096, 1, 1, 1));
+        }
+    }
+
+    @Test
+    public void mergedPoolCallbacksReleaseTheirReferencesAfterDurableCompletion() throws Exception {
+        mergedPoolCallbacksReleaseReferences(false);
+    }
+
+    @Test
+    public void mergedPoolCallbackFailureStillReleasesAndDeliversRemainingCallbacks() throws Exception {
+        mergedPoolCallbacksReleaseReferences(true);
+    }
+
+    private void mergedPoolCallbacksReleaseReferences(boolean failFirst) throws Exception {
+        IsolatedSegmentConfig config = config();
+        SegmentFileHeader identity = identity();
+        SegmentOwnerLoop owner = new SegmentOwnerLoop(4, 1, 0, 1, 2);
+        SegmentIoExecutor io = new SegmentIoExecutor(1, 1, 1, 1);
+        SegmentFileIo fileIo = new SegmentFileIo();
+        CountDownLatch ownerBlocked = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
+        CountDownLatch poolsDone = new CountDownLatch(2);
+        AtomicInteger appliedPools = new AtomicInteger();
+        AtomicInteger retiredBeforeCallback = new AtomicInteger();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<List<?>> submissions = new AtomicReference<>(List.of());
+        AtomicReference<Field> completionField = new AtomicReference<>();
+        IllegalStateException callbackFailure = new IllegalStateException("Expected pool callback failure");
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity);
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity, 1024 * 1024, fileIo)) {
+            SegmentArenaControlDriver driver = new SegmentArenaControlDriver(owner, io, log);
+            SegmentArenaControlDriver.Completion completed = (applied, cause) -> {
+                owner.requireOwner();
+                failure.compareAndSet(null, cause);
+                if (applied != null && applied.size() == 1
+                        && applied.get(0).status() == SegmentArenaControlLog.Status.APPLIED_DURABLE) {
+                    appliedPools.incrementAndGet();
+                }
+                poolsDone.countDown();
+            };
+            try {
+                assertTrue(owner.control(() -> {
+                    ownerBlocked.countDown();
+                    try {
+                        if (!releaseOwner.await(5, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("Pool owner was not released");
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(interrupted);
+                    }
+                }));
+                owner.start();
+                assertTrue(ownerBlocked.await(5, TimeUnit.SECONDS));
+                for (int shard = 0; shard < 2; shard++) {
+                    int request = shard;
+                    assertTrue(driver.requestPool(new SegmentArenaControlLog.PoolRequest(
+                            shard, new Generation(1), 1, 1), (applied, cause) -> {
+                                try {
+                                    if (completionField.get().get(submissions.get().get(request)) == null) {
+                                        retiredBeforeCallback.incrementAndGet();
+                                    }
+                                } catch (Throwable problem) {
+                                    failure.compareAndSet(null, problem);
+                                }
+                                completed.complete(applied, cause);
+                                if (failFirst && request == 0) {
+                                    throw callbackFailure;
+                                }
+                            }));
+                }
+                var gateField = SegmentArenaControlDriver.class.getDeclaredField("poolGate");
+                var poolsField = SegmentArenaControlDriver.class.getDeclaredField("pools");
+                gateField.setAccessible(true);
+                poolsField.setAccessible(true);
+                synchronized (gateField.get(driver)) {
+                    submissions.set(List.copyOf((List<?>) poolsField.get(driver)));
+                }
+                assertEquals(2, submissions.get().size());
+                completionField.set(submissions.get().get(0).getClass().getDeclaredField("completion"));
+                completionField.get().setAccessible(true);
+                releaseOwner.countDown();
+                assertTrue(poolsDone.await(5, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                assertEquals(2, appliedPools.get());
+                assertEquals(1, fileIo.forces);
+                assertEquals(1, log.streamFirstSequence(0, 1).orElseThrow());
+                assertEquals(1, log.streamFirstSequence(1, 1).orElseThrow());
+
+                if (!failFirst) {
+                    CountDownLatch ownerIdle = new CountDownLatch(1);
+                    assertTrue(owner.control(ownerIdle::countDown));
+                    assertTrue(ownerIdle.await(5, TimeUnit.SECONDS));
+                    CountDownLatch nextDone = new CountDownLatch(1);
+                    assertTrue(driver.requestPool(new SegmentArenaControlLog.PoolRequest(
+                            2, new Generation(1), 1, 1), (applied, cause) -> {
+                                completed.complete(applied, cause);
+                                nextDone.countDown();
+                            }));
+                    assertTrue(nextDone.await(5, TimeUnit.SECONDS));
+                    assertNull(failure.get());
+                    assertEquals(3, appliedPools.get());
+                    assertEquals(1, log.streamFirstSequence(2, 1).orElseThrow());
+                }
+            } finally {
+                releaseOwner.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+            assertEquals(failFirst ? 1 : 2, fileIo.forces);
+            assertEquals(0, owner.controlPending());
+            assertEquals(0, owner.pending());
+            if (failFirst) {
+                assertTrue(owner.failure() instanceof IllegalStateException);
+                assertEquals(callbackFailure, owner.failure().getCause());
+            } else {
+                assertNull(owner.failure());
+            }
+            for (Object submission : submissions.get()) {
+                assertNull("Durable pool submission retained its callback", completionField.get().get(submission));
+            }
+            assertEquals("Callback ran before retiring its reference", 2, retiredBeforeCallback.get());
         }
     }
 
