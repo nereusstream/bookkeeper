@@ -568,10 +568,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                     inventory = SegmentDataRecovery.recoverPhysicalInventoryWhileLocked(config, identity,
                             authority, recoveryIo, maxEntries, maxStreams, guard.lock());
                 } else {
-                    SegmentDerivedIndex.RecoveryCoverage seed = index == null ? null
-                            : index.recoveryCoverage(authority, bookie).orElse(null);
-                    inventory = SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(config, identity,
-                            authority, bookie, recoveryIo, maxEntries, maxStreams, guard.lock(), seed, recoveryBudget);
+                    inventory = SegmentDataRecovery.recoverIndexedLocallyReadableInventoryWhileLocked(config,
+                            identity, authority, bookie, recoveryIo, maxEntries, maxStreams,
+                            guard.lock(), index, recoveryBudget);
                 }
                 result = new IsolatedSegmentFiles(config, identity, guard, true, inventory);
                 for (int file = 0; file < config.dataFiles(); file++) {

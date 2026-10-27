@@ -80,6 +80,33 @@ final class SegmentDerivedIndex implements AutoCloseable {
         }
     }
 
+    /** Bounded Java seed graph/codec workspace; opaque digest and RocksDB native state remain separate. */
+    static long recoveryCapacity(SegmentControlCapacity.Layout layout, int entries, int streams, long moves) {
+        long location = SegmentControlCapacity.sum(layout.object(SegmentPointRead.Location.class),
+                layout.object(SegmentBatchFormat.Address.class),
+                SegmentControlCapacity.times(2, layout.object(Generation.class)), layout.context());
+        long stream = SegmentControlCapacity.sum(layout.object(SegmentDataRecovery.StreamCoverage.class),
+                layout.object(Generation.class));
+        return SegmentControlCapacity.sum(SegmentControlCapacity.times(entries, location),
+                layout.object(RecoveryCoverage.class), SegmentControlCapacity.times(2, layout.object(Coverage.class)),
+                SegmentControlCapacity.times(2, layout.object(Published.class)), layout.object(Contents.class),
+                SegmentControlCapacity.times(3, layout.object(UUID.class)),
+                SegmentControlCapacity.times(2L * streams, stream),
+                SegmentControlCapacity.times(3, layout.list()),
+                SegmentControlCapacity.times(4, layout.refs(entries)),
+                SegmentControlCapacity.times(8, layout.refs(streams)),
+                layout.hashSet(), SegmentControlCapacity.times(entries, layout.hashEntry()),
+                layout.snapshot(moves, 0),
+                // Two candidate publication pages and one row decode/CRC/key comparison stack.
+                SegmentControlCapacity.times(2, layout.bytes(4096)),
+                SegmentControlCapacity.times(8, layout.buffer()),
+                SegmentControlCapacity.times(2, layout.bytes(LOCATION_KEY_BYTES)), layout.bytes(LOCATION_BYTES),
+                layout.bytes(60), layout.bytes(16), layout.bytes(36),
+                SegmentControlCapacity.times(6, layout.bytes(32)),
+                layout.object(java.util.zip.CRC32C.class), location,
+                SegmentControlCapacity.times(8, layout.captured(8)));
+    }
+
     private record Contents(long entries, byte[] digest) { }
     private record Published(Coverage coverage, byte[] digest) { }
 
@@ -200,10 +227,22 @@ final class SegmentDerivedIndex implements AutoCloseable {
     /** Optional startup seed; DATA headers/tail and current Bookie permissions still require verification. */
     synchronized Optional<RecoveryCoverage> recoveryCoverage(SegmentArenaControlLog arena,
                                                              SegmentBookieControlLog bookie) throws IOException {
+        return recoveryCoverage(arena, bookie, maxEntries);
+    }
+
+    synchronized Optional<RecoveryCoverage> recoveryCoverage(SegmentArenaControlLog arena,
+                                                             SegmentBookieControlLog bookie, int capacity)
+            throws IOException {
+        if (capacity < 1) {
+            throw new IllegalArgumentException("Positive optional recovery seed capacity required");
+        }
         requireOpen();
+        if (!arena.matchesScope(config, identity)) {
+            return Optional.empty();
+        }
         try {
             Coverage selected = coverage().orElse(null);
-            if (selected == null || !arena.matchesScope(config, identity)
+            if (selected == null || selected.entries() > capacity || !arena.matchesScope(config, identity)
                     || selected.arenaCut() > arena.appliedThrough()
                     || selected.bookieCut() > bookie.recoveryReadCut(config, identity)) {
                 return Optional.empty();

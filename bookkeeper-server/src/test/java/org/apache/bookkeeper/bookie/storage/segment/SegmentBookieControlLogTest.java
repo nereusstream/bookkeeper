@@ -10492,7 +10492,14 @@ public class SegmentBookieControlLogTest {
             assertFalse(arena.hasUnclosedDataSession());
             assertEquals(1, arena.dataSessionEpoch());
         }
-        var bounded = new ProfileReceiveBudget(2L * batchBytes + 8194, 1, 1, 1, 1, 1);
+        long scanBytes;
+        try (var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            scanBytes = SegmentDataRecovery.scanCapacity(SegmentControlCapacity.Layout.hotSpot(),
+                    16, config.logicalShards(), config.dataFiles(), arena.recoveryMoveCount(),
+                    arena.recoveryRetiredRangeCount(), arena.recoveryAllocationCount(), true);
+        }
+        var bounded = new ProfileReceiveBudget(Math.addExact(2L * batchBytes + 8194, scanBytes),
+                1, 1, 1, 1, 1);
         try (var replay = recoveryStorage(config, bounded)) {
             replay.restart();
             assertEquals(0, bounded.used(ProfileReceiveBudget.Lane.DATA));
@@ -10510,7 +10517,9 @@ public class SegmentBookieControlLogTest {
         try (var source = storage(config, 2, 6, 16)) {
             source.startNew();
             installStorage(source, install(44, 1, (byte) 5), activate(44, 2));
-            storageWrite(source, context(44), 1);
+            for (long entryId = 1; entryId <= 3; entryId++) {
+                storageWrite(source, context(44), entryId);
+            }
         }
         try (var lock = SegmentDataFileLock.open(config.directory());
                 var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
@@ -10539,13 +10548,18 @@ public class SegmentBookieControlLogTest {
                     }
                 });
                 assertTrue(syncing.await(5, TimeUnit.SECONDS));
+                long heldBytes = budget.used(ProfileReceiveBudget.Lane.DATA);
+                assertTrue(heldBytes > 4096);
                 assertTrue(caller.cancel(false));
                 assertNull(result.get());
                 assertEquals(1, terminal.getCount());
                 var drain = budget.closeAdmissionAndDrain();
+                assertFalse(drain.isDone());
+                assertEquals(heldBytes, budget.used(ProfileReceiveBudget.Lane.DATA));
                 release.countDown();
                 assertTrue(terminal.await(5, TimeUnit.SECONDS));
                 assertNull(failed.get());
+                assertEquals(3, result.get().scan().batches());
                 drain.get(5, TimeUnit.SECONDS);
                 assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
             } finally {
@@ -10553,6 +10567,17 @@ public class SegmentBookieControlLogTest {
                 executor.shutdownNow();
                 assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
             }
+            var forceBudget = new ProfileReceiveBudget(64 * 1024L + 2, 1, 1, 1, 1, 1);
+            var failedSync = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false,
+                    () -> assertTrue(forceBudget.used(ProfileReceiveBudget.Lane.DATA) > 4096));
+            IOException forceFailure = assertThrows(IOException.class, () ->
+                    SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(
+                            config, identity(), arena, bookie, failedSync, 16, config.logicalShards(),
+                            lock.lock(), null, forceBudget));
+            assertEquals("Injected force failure", forceFailure.getMessage());
+            assertEquals(1, failedSync.forces);
+            assertEquals(0, forceBudget.used(ProfileReceiveBudget.Lane.DATA));
+            assertTrue(forceBudget.closeAdmissionAndDrain().isDone());
             var location = result.get().uniqueLocation(arena, context(44), 1);
             long offset = location.recordOffset() + SegmentBatchFormat.RECORD_HEADER
                     + SegmentBatchFormat.ENTRY_OVERHEAD;
@@ -14356,8 +14381,17 @@ public class SegmentBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
                     bookie.submitBatch(List.of(tombstone(44, 20))).get(0).status());
             assertTrue(bookie.recoveryReadCut(config, identity()) > source.coverage().bookieCut());
+            assertEquals(1, source.coverage().entries());
+            var budget = new ProfileReceiveBudget(1024 * 1024L + 2, 1, 1, 1, 1, 1);
+            long scanBytes = SegmentDataRecovery.scanCapacity(SegmentControlCapacity.Layout.hotSpot(),
+                    1, 4, config.dataFiles(), arena.recoveryMoveCount(), arena.recoveryRetiredRangeCount(),
+                    arena.recoveryAllocationCount(), true);
+            var sync = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false,
+                    () -> assertEquals(Math.addExact(scanBytes, 4096L), budget.used(ProfileReceiveBudget.Lane.DATA)));
             try (IsolatedSegmentFiles files = IsolatedSegmentFiles.openForLocalResults(
-                    config, identity(), arena, bookie, new SegmentFileIo(), 32, 4, index)) {
+                    config, identity(), arena, bookie, sync, 1, 4, index, null, budget)) {
+                assertEquals(1, sync.forces);
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
                 assertTrue(files.startupInventory().usesIndexCoverage());
                 assertEquals(1, files.startupInventory().entries().size());
                 assertTrue(index.get(context(), 1).isEmpty());
@@ -14367,6 +14401,8 @@ public class SegmentBookieControlLogTest {
                 assertEquals(45, SegmentPointRead.read(config, identity(), arena,
                         index.get(context(45), 1).orElseThrow()).record().context().ledgerId());
             }
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertTrue(budget.closeAdmissionAndDrain().isDone());
         }
     }
 

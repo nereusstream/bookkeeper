@@ -1643,3 +1643,22 @@ NormalBatcher 在 prepareBatch 解码出 context A，由 PendingNormal.key、Seg
 最终四JVM（21压缩8/宽8/对齐256、17压缩8）真实pooled encode/parse N1/2/20@4KiB、N256@64KiB及派生图全部不超模型。压缩8的N20 parser 7,088B≤16,824B、Hot 9,568B≤28,880B；N256 Hot 116,064B≤291,312B，wide8 156,024B≤同模型，alignment256 603,904B≤2,034,432B。P16/K20/W1/I2的M48图依次15,304/20,088/101,632B≤45,744/45,744/529,408B。A+B图明确512个context/1024份数组（N256），Pending key与Identity共享A而不共享B。1194份source、387份冻结class及实际加载来源/hash核验，compile/四Java/runner均exit0且无超时。固定临时对象数量及旧返回窗口仍来自静态控制流推导，真实浅大小witness和有限M48形状不是完整调用峰值/业务状态数量证明。
 
 证据在 `/Users/liusinan/.codex/artifacts/unified-wal/pooled-parse-workspace-evidence-5d4cd9cc`。返回给consumer的read Record/LeasedResult元数据、完整driver/source/执行器/pool图、compaction长期copies/hash/plan、跨批startup扫描集合/旧seed，以及raw grouped/unpooled路径仍需独立闭合。该增量不等于exclusive retained heap、GC/RSS/native或性能保证；TLA/wire/disk/authority未改，旧模型不重绑，full-bytes/B11、Main issuer/装载、完整G1、正式性能/掉电/NUMA及其余16步继续OPEN/NOT_EXECUTED。目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+## 恢复扫描的跨批工作区
+
+2026-10-27在父源码 `9a195f5b7fe7035e31b280dda8439937a726c242` 上，补齐本地恢复中跨 batch 保留的已知 Java 元数据工作区。原 page/content credit 仍只支付当前批；新增一个冷路径 `DataWorkingSet` 从扫描集合分配前持有到 stream/CONTROL cut 与重复坐标校验完成。带 index 的入口在同一 credit 内先构建可选 seed，`IsolatedSegmentFiles` 不再在外部构建 seed 或双重预留。返回后的 inventory 由 service 原有启动容量继续持有；没有 normal Add 的新增 credit/atomic、配置 quota 扩容、格式或恢复 authority 变化。
+
+计量使用原 `SegmentControlCapacity.Layout`。`C=maxEntries`，`S=max(maxStreams, logicalShards)`；`M=selectedMoves.size()`、`R=retiredRanges.size()`、`A=currentAllocations.size()` 由原 Arena 直接读取三个 primitive count，预留前不构建大 snapshot。带预算入口持同一 authority monitor 到扫描/postcheck 完成，冻结这些数量；原无预算 direct 调用保持原控制切点校验行为。`M` 不能按 locally-readable 的 C 裁剪，`R` 不能按当前物理 segments 裁剪，range 总量取 `A+R`。
+
+令 `L=Location+Address+2*Generation+context`，扫描图包括 `(C+M)*L`、4 个 HashMap、2 个 HashSet、`(3S+2C+M)` 个 hash-entry envelope、`S*(2*StreamKey+Generation+StreamProgress+TreeMap+StreamPrefix)`、`(A+R)*(Long+SequenceRange+treeEntry)`、`C*(Integer+Coordinate)`，以及 entries 增长/复制、prefixes 的 S/2S bridge、输出 immutable 容器和文件高水位、M/R snapshot envelope 与固定遍历/单条 seed read 工作区。Arena 已有 MOVE target/range 元素是借用图；重新解析并放入 foundMoves 的 M 个 Location/context 是独立图。
+
+`SegmentDerivedIndex.recoveryCapacity` 另计旧 seed 的 `C*L`、seed entries/coverage 列表与复制数组、indexed HashSet、两候选 Coverage/Published/StreamCoverage、publication 页与单行 decode/CRC/key 比较工作区。新增有界 seed 重载在创建 entries 图前拒绝 `selected.entries>C`，继续完整 mandatory DATA scan；opaque digest 实现与 RocksDB native overhead 不由此公式闭合。已知 Java 解码图与旧 C、新 C 同时存活分别支付，不按相等 context 合并对象。
+
+真实三批 DATA 的旧实现 RED 已复现：最后 force 时仅剩 header credit 的4096 B，目标方法在 `heldBytes>4096` 失败；该方法与最终 GREEN 的字节完全相同。最终四项定向通过：三批 force 阻塞/cancel(false) 时 credit 不提前退，actual completion 后归零；实际 force 失败与 CRC 失败分别归零；不足预算不创建新 DATA session；外目录 seed 拒绝；`C=1` 的 terminal ledger44旧 seed 与 ledger45新 tail 同时恢复，force 时精确持有 scan fee+4096，返回后归零并保持原 tombstone/实际读取/coverage 断言。首轮另一个原成功额度未含新工作区而触发 CapacityExceeded 的回执独立保留；只在测试成功分支加明确 scan fee，原不足额度分支、生产 quota、超时和断言未弱化。
+
+四个独立 JVM（HotSpot21 compressed8/wide8/256对齐、HotSpot17 compressed8）的两组 seeded/unseeded 有限图均不超公式。较大 `C256/S16/F3/M1024/R512/A64` seeded 图有1536份独立context/3072数组、576个SequenceRange/TreeMapEntry：compressed8实际609152 B（17/21相同）与wide8实际781128 B均≤1535032 B，256对齐实际3869952 B≤12109056 B。较小 `C16/S4/F2/M64/R64/A16` 也通过，各 JVM 63条 initialized shallow witness 均在模型内。387个冻结class/真实CodeSource/target前后hash、1194个输入与独立编译/四Java/runner真实exit均核对通过，无超时或后处理失败。此图是有限阶段组合，并非真实调用同时峰值、状态数/寿命上界证明、独占retained heap、native、RSS或性能证据。
+
+首次完整相关集实际终态为627项、5失败/2错误/0跳过，并触发Surefire fork超时；全部7项在SDK/socket类，另外五类392项与该类228项通过。1194个输入与1179个native输入保持冻结、全部627用例身份匹配父阶段；失败回执与两份只读线程dump独立保留，不能写成全绿。同一冻结源码对这7项的定向复核全部通过，随后完整SDK/socket类235项单独复验也全部通过，零失败/错误/跳过；原超时/断言/SDK quota均未改；source追踪区分了startNew、budget-null replay及backup场景的真实budgeted restart，不能笼统归因为环境。最终按整类回执合并为其他五类392项与SDK235项通过，全部627用例身份与输入匹配；这不是初次整集Maven全绿，初次失败的具体根因仍未证明。style实际exit0；独立RAT实际exit1，443个原路径且字节与父9a195f5b7f全同、无新增。
+
+本阶段输入、两次失败/最终四项回执、probe源码/命令/结果与源字节核对位于 `/Users/liusinan/.codex/artifacts/unified-wal/recovery-scan-workspace-evidence-9a195f5b`；原 RED 与首轮欠额源码可从各自 patch/父Git对象重建并已核对，最终目标方法保持同字节。TLA未改、TLC未执行，不移绑旧PASS。point-read结果、driver/执行器/pool、完整compaction、raw-unpooled、opaque JCA/native及整个full-bytes/B11继续OPEN；Main具体issuer/受保护装载、完整G1与其余16步继续推进，目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled边界保持。

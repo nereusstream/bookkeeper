@@ -60,6 +60,61 @@ final class SegmentDataRecovery {
                 SegmentControlCapacity.times(config.logicalShards(), stream));
     }
 
+    private static long scanCapacity(IsolatedSegmentConfig config, SegmentArenaControlLog authority,
+                                     int entries, int streams, boolean seeded) throws IOException {
+        return scanCapacity(SegmentControlCapacity.Layout.hotSpot(), entries,
+                Math.max(streams, config.logicalShards()), config.dataFiles(),
+                authority.recoveryMoveCount(), authority.recoveryRetiredRangeCount(),
+                authority.recoveryAllocationCount(), seeded);
+    }
+
+    /** One quiesced scan, including the old optional seed until the new inventory passes all checks. */
+    static long scanCapacity(SegmentControlCapacity.Layout layout, int entries, int streams, int files,
+                             long moves, long retired, long allocations, boolean seeded) throws IOException {
+        if (entries < 1 || streams < 1 || files < 1 || moves < 0 || retired < 0 || allocations < 0) {
+            throw new IllegalArgumentException("Positive bounded recovery geometry required");
+        }
+        try {
+            long location = SegmentControlCapacity.sum(layout.object(SegmentPointRead.Location.class),
+                    layout.object(SegmentBatchFormat.Address.class),
+                    SegmentControlCapacity.times(2, layout.object(Generation.class)), layout.context());
+            long stream = SegmentControlCapacity.sum(SegmentControlCapacity.times(2, layout.object(StreamKey.class)),
+                    layout.object(Generation.class), layout.object(StreamProgress.class), layout.object(TreeMap.class),
+                    layout.object(StreamPrefix.class));
+            long range = SegmentControlCapacity.sum(layout.treeEntry(), layout.object(Long.class),
+                    layout.object(StreamProgress.SequenceRange.class));
+            return SegmentControlCapacity.sum(
+                    // The output graph coexists with mutable scan collections before this credit is retired.
+                    layout.object(PhysicalInventory.class), layout.object(Scan.class),
+                    layout.immutableList(entries), layout.immutableList(files), layout.immutableMap(streams),
+                    SegmentControlCapacity.times(files, layout.object(Long.class)),
+                    SegmentControlCapacity.times(SegmentControlCapacity.sum(entries, moves), location),
+                    SegmentControlCapacity.times(4, layout.hashMap()),
+                    SegmentControlCapacity.times(2, layout.hashSet()),
+                    SegmentControlCapacity.times(SegmentControlCapacity.sum(3L * streams, 2L * entries, moves),
+                            layout.hashEntry()),
+                    SegmentControlCapacity.times(streams, stream),
+                    SegmentControlCapacity.times(SegmentControlCapacity.sum(allocations, retired), range),
+                    SegmentControlCapacity.times(entries,
+                            SegmentControlCapacity.sum(layout.object(Integer.class), layout.object(Coordinate.class))),
+                    // ArrayList growth/copy, prefix Map.copyOf bridges, and borrowed Arena snapshots.
+                    SegmentControlCapacity.times(2, layout.list()),
+                    SegmentControlCapacity.times(4, layout.refs(entries)),
+                    SegmentControlCapacity.times(2, layout.refs(files)),
+                    layout.refs(streams), layout.refs(2L * streams),
+                    layout.snapshot(moves, 0), layout.snapshot(retired, 0),
+                    // One selected-seed record can be verified with scratch while all retained roots are live.
+                    SegmentBatchParser.workspaceCapacity(layout, 1), layout.object(SegmentPointRead.Result.class),
+                    SegmentControlCapacity.times(8, layout.buffer()),
+                    SegmentControlCapacity.times(8, layout.bytes(0)),
+                    SegmentControlCapacity.times(4, layout.object(Long.class)),
+                    SegmentControlCapacity.times(16, layout.captured(8)),
+                    seeded ? SegmentDerivedIndex.recoveryCapacity(layout, entries, streams, moves) : 0);
+        } catch (ArithmeticException | IllegalArgumentException unsupported) {
+            throw new IOException("Recovery workspace exceeds the supported heap model", unsupported);
+        }
+    }
+
     record CompactionEntry(SegmentArenaMove.Source source, String entrySha256) { }
     record CompactionBatch(List<CompactionEntry> entries, int bytes) {
         CompactionBatch {
@@ -870,6 +925,41 @@ final class SegmentDataRecovery {
     }
 
     static PhysicalInventory recoverLocallyReadableInventoryWhileLocked(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
+            SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
+            FileLock writerLock, SegmentDerivedIndex.RecoveryCoverage seed, ProfileReceiveBudget recoveryBudget)
+            throws IOException {
+        if (recoveryBudget == null) {
+            return scanLocallyReadableInventory(config, identity, authority, bookie, syncIo,
+                    maxEntries, maxStreams, writerLock, seed, null);
+        }
+        synchronized (authority) {
+            try (var scanCredit = recoveryBudget.reserveDataWorkingSet(scanCapacity(config, authority,
+                    maxEntries, maxStreams, seed != null))) {
+                return scanLocallyReadableInventory(config, identity, authority, bookie, syncIo,
+                        maxEntries, maxStreams, writerLock, seed, recoveryBudget);
+            }
+        }
+    }
+
+    /** Keep optional seed construction inside the same credit as the scan and duplicate-coordinate check. */
+    static PhysicalInventory recoverIndexedLocallyReadableInventoryWhileLocked(
+            IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
+            SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
+            FileLock writerLock, SegmentDerivedIndex index, ProfileReceiveBudget recoveryBudget) throws IOException {
+        synchronized (authority) {
+            try (var scanCredit = recoveryBudget == null ? null
+                    : recoveryBudget.reserveDataWorkingSet(scanCapacity(config, authority,
+                            maxEntries, maxStreams, index != null))) {
+                SegmentDerivedIndex.RecoveryCoverage seed = index == null ? null
+                        : index.recoveryCoverage(authority, bookie, maxEntries).orElse(null);
+                return scanLocallyReadableInventory(config, identity, authority, bookie, syncIo,
+                        maxEntries, maxStreams, writerLock, seed, recoveryBudget);
+            }
+        }
+    }
+
+    private static PhysicalInventory scanLocallyReadableInventory(
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
             SegmentBookieControlLog bookie, SegmentFileIo syncIo, int maxEntries, int maxStreams,
             FileLock writerLock, SegmentDerivedIndex.RecoveryCoverage seed, ProfileReceiveBudget recoveryBudget)

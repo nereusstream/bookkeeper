@@ -784,6 +784,21 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return !selectedMoves.isEmpty();
     }
 
+    synchronized int recoveryMoveCount() {
+        requireOpenHistory();
+        return selectedMoves.size();
+    }
+
+    synchronized int recoveryRetiredRangeCount() {
+        requireOpenHistory();
+        return retiredRanges.size();
+    }
+
+    synchronized int recoveryAllocationCount() {
+        requireOpenHistory();
+        return currentAllocations.size();
+    }
+
     synchronized List<SegmentPointRead.Location> currentMoveLocations() {
         requireOpenHistory();
         return selectedMoves.values().stream().map(selected -> selected.target()).toList();
