@@ -1077,6 +1077,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
+    /** Same derived base for acceptor registration and direct storage connection installation. */
+    int profileConnectionBaseBytes(int configuredBaseBytes) {
+        return SegmentProfileAddHandler.connectionBaseBytes(configuredBaseBytes, config.maxPendingEntries());
+    }
+
     /** Disposable socket integration only; the supplied readiness generation is not a recovery proof. */
     boolean installProfileConnection(io.netty.channel.ChannelPipeline pipeline, TLSContextFactory tls,
                                      ProfileReceiveBudget budget, int connectionLimit, int connectionBaseBytes,
@@ -1105,43 +1110,56 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 pipeline.channel().close();
                 return false;
             }
-            List<ProfileHello.Capability> capabilities = new java.util.ArrayList<>();
-            if (control != null) {
-                capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
-                        ProfileInitialControlCodec.SCHEMA));
-                capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
-                        ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
-                capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
-                        ProfileInitialControlCodec.RECOVERY_SCHEMA));
-                capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
-                        ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA));
-                capabilities.add(ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY);
-                capabilities.add(ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
-                capabilities.add(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
-                capabilities.add(ProfilePhysicalDeleteCodec.CAPABILITY);
+            int prepaidBase = profileConnectionBaseBytes(connectionBaseBytes);
+            if (!ProfileInboundPipeline.admitConnection(pipeline.channel(), budget, connectionLimit, prepaidBase)) {
+                return false;
             }
-            if (read != null) {
-                capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY);
-                if (read.lacAuthorization() != null) {
-                    capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.CAPABILITY);
-                    capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec
-                            .EXPLICIT_CAPABILITY);
+            boolean installed = false;
+            try {
+                List<ProfileHello.Capability> capabilities = new java.util.ArrayList<>();
+                if (control != null) {
+                    capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
+                            ProfileInitialControlCodec.SCHEMA));
+                    capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
+                            ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
+                    capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
+                            ProfileInitialControlCodec.RECOVERY_SCHEMA));
+                    capabilities.add(new ProfileHello.Capability(
+                            ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
+                            ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA));
+                    capabilities.add(ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY);
+                    capabilities.add(ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
+                    capabilities.add(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
+                    capabilities.add(ProfilePhysicalDeleteCodec.CAPABILITY);
+                }
+                if (read != null) {
+                    capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY);
+                    if (read.lacAuthorization() != null) {
+                        capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.CAPABILITY);
+                        capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec
+                                .EXPLICIT_CAPABILITY);
+                    }
+                }
+                if (control != null) {
+                    capabilities.add(ProfileOperationCodec.WRITE_LAC_CAPABILITY);
+                }
+                ProfileHello.Server hello = new ProfileHello.Server(
+                        EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
+                        identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(),
+                        capabilities);
+                SegmentProfileAddHandler handler = new SegmentProfileAddHandler(this, tls, trustDomain, hello,
+                        SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
+                        config.maxPendingEntries(), control, read);
+                installed = ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, prepaidBase,
+                        100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
+                        144 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
+                        handler, control != null, handler.frameMetadataBytes());
+                return installed;
+            } finally {
+                if (!installed) {
+                    pipeline.channel().close();
                 }
             }
-            if (control != null) {
-                capabilities.add(ProfileOperationCodec.WRITE_LAC_CAPABILITY);
-            }
-            ProfileHello.Server hello = new ProfileHello.Server(
-                    EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
-                    identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(),
-                    capabilities);
-            SegmentProfileAddHandler handler = new SegmentProfileAddHandler(this, tls, trustDomain, hello,
-                    SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
-                    config.maxPendingEntries(), control, read);
-            return ProfileInboundPipeline.install(pipeline, tls, budget, connectionLimit, connectionBaseBytes,
-                    100 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
-                    144 + SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
-                    handler, control != null, handler.frameMetadataBytes());
         }
     }
 

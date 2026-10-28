@@ -1921,3 +1921,31 @@ JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩�
 全部阶段与命令、失败原诊断、最终源码/class及模型回执归档于`/Users/liusinan/.codex/artifacts/unified-wal/connection-base-drain-evidence-8a5c302b`。最终Java与模型共有277个输入路径、SHA全同，合并源码/规则输入2102项；这是输入追溯范围，不是2102项行为验收。实际测试结果分别由proto-final-verification.json、sdk-verification.json及models-final/coverage-summary.json记录。
 
 六个已终结的Java/model原运行根，经逐文件SHA/uid/gid/mode、同inode硬链接归档和两次无reader检查后移除。1852个原文件路径共10240259逻辑bytes，全部证据硬链接保留，常规文件数据块实际回收0 bytes；没有删除任何阶段的失败日志、原模型输入/反例或最终源码/class。观察到的七个SDK进程PID及两轮style/RAT进程均已实际退出；该观察不冒充完整子进程清单。
+
+
+## 注册前预付已知连接元数据
+
+2026-10-28在父源码`ebce998bf12e47dff2f96823f4e69e6e53a75b10`上，将显式Segment Profile连接的已知Java对象费用加入原base，在acceptor提交child registration前支付；直接storage安装入口也先准入，再构造HELLO、应用handler和TLS pipeline。两处用同一派生价格、同一channel admission/permit/base credit，不重复收费。安装中途失败沿原关闭路径归还，base/slot仍按上一包的实际backing/workspace终态退休。原通用pipeline默认重载、SDK公共接口、协议和quota保持；正常Add没有新增metadata往返、控制fsync或握手。
+
+派生base保留原配置金额，另加已知固定对象费及`64 * maxPendingEntries`的pending-set高水位table费用。table清空后仍由连接base支付；每个活pending另付两个HashMap TreeNode壳以覆盖节点与转换重叠，不再逐pending重复收table。VM布局只在handler类初始化时读取一次，固定、pending及frame费用缓存，连接准入不重复探测。列明的对象包含handler/install-store、HELLO及受限capability/BookieId值、principal/transport受限值、admission/permit/credit/allocator/decoder/header、promise、定时任务和已知回调壳；borrowed service/控制根不在此重复计费。
+
+原真实socket测试在两个worker均阻塞时加强“已付金额大于原64”的断言，父实现得到真实RED：`Connection metadata was not prepaid: 64`，1 failure、0 error/skipped。该方法从RED到最终源码保持相同方法字节；GREEN验证排队期间金额稳定、超额连接在acceptor收到EOF、listener close等待实际处理后预算归零。新增真实listener欠额用例只给原64-byte unclassified额度，确认worker释放前已拒绝且各lane字节/slot为零。另补直接storage安装欠额用例，确认返回false、channel关闭、TLS及应用handler均未安装、预算归零。
+
+六项定向GREEN通过；随后接收decoder、allocator、真实TLS pipeline与真实SDK四整类共285项全部通过（43 proto、242 SDK，0 failure/error/skipped）。此后仅增加上述直接安装用例，生产四文件及所有旧方法字节未变，单独运行该项通过。整类285与最后定向1项分别绑定各自输入，未执行或宣称最终源码下单次286项整类。每阶段1179项native输入与1204项声明输入逐SHA核对；`full-and-probe-inputs.json`保留整类/测量的原输入，最终输入仅SDK测试文件增加一个方法。
+
+独立Instrumentation有限测量使用新冻结的17份项目JAR、169份外部JAR及新编译agent/probe，运行时不读target目录。四个布局均实际编译/运行exit0、无timeout，6个子进程已终结。以maxPending16、64项capability及协议上限字符串为样本，实测列明浅对象、受限值和容器高水位数组合计如下；配置base64另加到费用上。pending碰撞样本达到64-slot table，clear后仍计该数组及resize旧数组；这不是所有pending上限/历史状态的枚举。
+
+| JVM布局 | 已列明样本合计（B） | 元数据费用（B） |
+| --- | ---: | ---: |
+| JDK21 压缩指针、alignment8 | 10672 | 17984 |
+| JDK21 宽指针、alignment8 | 13216 | 17984 |
+| JDK21 压缩指针、alignment256 | 36608 | 89344 |
+| JDK17 压缩指针、alignment8 | 10672 | 17984 |
+
+测量的application/install-store/timer等部分采用明确标记的Unsafe零初始化shell，仅用于浅大小且borrowed children为null；不能作为活service、TLS、认证或存储成功证据。独立实际EmbeddedChannel部分另验证持有workspace时base/slot不退，最后workspace归还后实际drain。上述样本不包含其他Netty/JDK图、完整TLS/certificate/canonicalization/provider拒绝临时图、native、外部alias/dominator或同时峰值/GC/RSS/性能。真实SDK行为由原生测试提供，不能由sizeof shell替代；完整连接图/full-bytes/B11继续OPEN。
+
+证据位于`/Users/liusinan/.codex/artifacts/unified-wal/connection-metadata-evidence-ebce998b`。Spotless/Checkstyle实际exit0。原backing模型生命周期未改，本轮不重跑TLC、不移绑旧模型/100k B11/兼容回执。Main首版保持已有旧服务的受控部署，实际issuer/受保护装载、共同Classic/Profile route claim与完整G1、其余16步及生产Gate仍OPEN，完整目标active，OFF/SYSTEM/PARK和disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+独立RAT实际exit1，仍434个父ebce998bf1既有未批准路径，路径集合和bytes全同、无新增，不称CI全绿。最终核对1204项源码/规则、四阶段原生输入/用例身份、RED方法字节、17份私有JAR/169份外部JAR及所测class来源；3626份冻结class仍同当前target，后补测试类族48份单独归档。收尾审计初版截取方法多含一个分隔换行，修正审计边界后与原方法SHA吻合，原诊断留档，未修改原测试/测量回执。
+
+四个已终结原生run经逐文件SHA/uid/gid/mode、同inode硬链接归档及两次无reader核对后移除，19个文件路径共6653018逻辑bytes；原失败日志、XML和输入继续保留，常规文件数据块回收0 bytes。四布局的私有classpath、agent/probe源码/class及日志作为必要证据保留；不清理用户文件或其他任务产物。

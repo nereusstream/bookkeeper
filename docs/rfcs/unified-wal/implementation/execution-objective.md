@@ -372,3 +372,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [接收连接 base 与名额的实际终态](local-storage/README.md#接收连接-base-与名额的实际终态)：2026-10-28父8a5c302b57上，原receive预算的base与slot延后到最后实际frame/backing/workspace归还；真实retained-view RED/GREEN、三类43项及未修改SDK整类241项通过，原backing模型1正向/8指定反例符合预期。初次失败、源码/receipt与完整边界由canonical拥有。完整连接价格、full-bytes/B11、Main issuer、共同route claim/完整G1及其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[注册前预付已知连接元数据](local-storage/README.md#注册前预付已知连接元数据)：2026-10-28父ebce998bf1上，显式listener与直接storage入口在注册/应用构造前用原base支付已知连接对象及pending table高水位；共用一份credit并等实际drain。真实RED、六项定向、四整类285项及后补直接入口1项分别留存原源码绑定，四JVM有限浅大小/高水位样本低于列明费用。完整TLS/Netty/JDK/native图与峰值、full-bytes/B11、Main issuer、共同route claim/完整G1和其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持；范围及证据由canonical拥有。

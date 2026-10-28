@@ -2810,6 +2810,63 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void ownedProfileListenerRefusesUnpaidMetadataBeforeWorkerRegistration() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            fixture.listeners.get(0).close().sync();
+            var budget = new ProfileReceiveBudget(524288, 131072, 64, 1, 8, 8);
+            var listener = new SegmentProfileListener(fixture.nodes.get(0), fixture.serverTls, budget,
+                    new SegmentProfileListener.Settings(131072, 64, "socket-test", 0),
+                    new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker,
+                    fixture.controlConfigs.get(0), null);
+            var release = new CountDownLatch(1);
+            var blocked = new CountDownLatch(2);
+            try {
+                var address = listener.bound().get(5, TimeUnit.SECONDS);
+                for (var loop : fixture.worker) {
+                    loop.execute(() -> {
+                        blocked.countDown();
+                        await(release);
+                    });
+                }
+                assertTrue(blocked.await(5, TimeUnit.SECONDS));
+                try (var connection = new java.net.Socket()) {
+                    connection.connect(address, 1000);
+                    connection.setSoTimeout(1000);
+                    assertEquals(-1, connection.getInputStream().read());
+                    for (var lane : ProfileReceiveBudget.Lane.values()) {
+                        assertEquals(0, budget.used(lane));
+                        assertEquals(0, budget.usedConnections(lane));
+                    }
+                }
+            } finally {
+                release.countDown();
+                listener.closeAsync().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    public void directProfileConnectionRefusesUnpaidMetadataBeforeTlsInstallation() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            var budget = new ProfileReceiveBudget(524288, 131072, 64, 1, 8, 8);
+            var channel = new io.netty.channel.embedded.EmbeddedChannel();
+            try {
+                assertFalse(fixture.nodes.get(0).installProfileConnection(channel.pipeline(), fixture.serverTls,
+                        budget, 131072, 64, "socket-test", 0, fixture.controlConfigs.get(0), null));
+                assertFalse(channel.isActive());
+                assertNull(channel.pipeline().get(SslHandler.class));
+                assertNull(channel.pipeline().get(SegmentProfileAddHandler.class));
+                for (var lane : ProfileReceiveBudget.Lane.values()) {
+                    assertEquals(0, budget.used(lane));
+                    assertEquals(0, budget.usedConnections(lane));
+                }
+            } finally {
+                channel.finishAndReleaseAll();
+            }
+        }
+    }
+
+    @Test
     public void ownedProfileListenerWaitsForAcceptedSocketAlreadyQueuedToWorkers() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
             fixture.listeners.get(0).close().sync();
@@ -2851,7 +2908,8 @@ public class SegmentProfileInitialSocketClientTest {
                     assertTrue(accepted.await(5, TimeUnit.SECONDS));
                     parent.eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
                     assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-                    assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    long prepaid = budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED);
+                    assertTrue("Connection metadata was not prepaid: " + prepaid, prepaid > 64);
                     // Exhausted admission closes on the acceptor, while both worker loops remain blocked.
                     try (var refused = new java.net.Socket()) {
                         refused.connect(address, 1000);
@@ -2859,12 +2917,12 @@ public class SegmentProfileInitialSocketClientTest {
                         assertEquals(-1, refused.getInputStream().read());
                     }
                     assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-                    assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(prepaid, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                     var closing = listener.closeAsync();
                     assertThrows(java.util.concurrent.TimeoutException.class,
                             () -> closing.get(100, TimeUnit.MILLISECONDS));
                     assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-                    assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(prepaid, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                     release.countDown();
                     closing.get(5, TimeUnit.SECONDS);
                     connection.setSoTimeout(1000);

@@ -37,6 +37,7 @@ import org.apache.bookkeeper.common.profile.control.IsolatedProfileControlEndpoi
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.control.ProfileTransportContext;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
@@ -63,6 +64,16 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     private static final int RECOVERY_PREFIX_BYTES = 144;
     private static final int RESPONSE_BYTES = ProfileFrameCodec.OUTER_LENGTH_PREFIX
             + ProfileFrameHeader.ENCODED_LENGTH + ProfileStatus.ENCODED_LENGTH;
+    private static final int FIXED_CONNECTION_METADATA_BYTES;
+    private static final int PENDING_METADATA_BYTES;
+    private static final int FRAME_METADATA_BYTES;
+
+    static {
+        var layout = metadataLayout();
+        FIXED_CONNECTION_METADATA_BYTES = connectionMetadataBytes(layout, 0);
+        PENDING_METADATA_BYTES = pendingMetadataBytes(layout);
+        FRAME_METADATA_BYTES = frameMetadataBytes(layout);
+    }
     private final IsolatedSegmentStorage storage;
     private final TLSContextFactory tls;
     private final String trustDomain;
@@ -108,9 +119,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                              SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
         this.read = read;
         readLoanBytes = read == null ? 0 : SegmentPointRead.loanMetadataBytes();
-        var layout = metadataLayout();
-        pendingMetadataBytes = pendingMetadataBytes(layout);
-        frameMetadataBytes = frameMetadataBytes(layout);
+        pendingMetadataBytes = PENDING_METADATA_BYTES;
+        frameMetadataBytes = FRAME_METADATA_BYTES;
         this.control = control;
         physicalControl = control == null ? null : storage.profileInstallStore(control.timeout());
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -131,6 +141,52 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
 
     int frameMetadataBytes() {
         return frameMetadataBytes;
+    }
+
+    /** Keep configured padding and pay the known connection graph, including the pending-set high-water table. */
+    static int connectionBaseBytes(int configuredBaseBytes, int maxPending) {
+        if (configuredBaseBytes < ProfileFrameCodec.OUTER_LENGTH_PREFIX + ProfileFrameHeader.ENCODED_LENGTH
+                || maxPending < 1) {
+            throw new IllegalArgumentException("Invalid Profile connection base or pending bound");
+        }
+        return Math.addExact(configuredBaseBytes,
+                Math.addExact(FIXED_CONNECTION_METADATA_BYTES, Math.multiplyExact(64, maxPending)));
+    }
+
+    /** Known Java shells and bounded HELLO/principal values; opaque provider/runtime graphs remain separate. */
+    static int connectionMetadataBytes(SegmentControlCapacity.Layout layout, int maxPending) {
+        if (maxPending < 0) {
+            throw new IllegalArgumentException("Negative connection pending bound");
+        }
+        int capabilities = ProfileHello.MAX_CAPABILITIES;
+        return Math.toIntExact(SegmentControlCapacity.sum(
+                layout.object(SegmentProfileAddHandler.class), layout.hashSet(),
+                SegmentControlCapacity.times(64L, maxPending),
+                layout.object(SegmentProfileInstallStore.class),
+                layout.object(ProfileHello.Server.class), SegmentControlCapacity.times(2, layout.bytes(16)),
+                layout.object(java.util.ArrayList.class), layout.refs(2L * capabilities), layout.refs(capabilities),
+                layout.immutableList(capabilities),
+                SegmentControlCapacity.times(capabilities, layout.object(ProfileHello.Capability.class)),
+                layout.bytes(ProfileHello.MAX_BOOKIE_ID_BYTES),
+                layout.bytes(2L * ProfileHello.MAX_BOOKIE_ID_BYTES),
+                layout.string(ProfileHello.MAX_BOOKIE_ID_BYTES),
+                layout.object("java.nio.HeapByteBuffer"), layout.object("java.nio.HeapCharBuffer"),
+                layout.object("sun.nio.cs.UTF_8$Decoder"),
+                layout.object(ProfileTransportContext.class), layout.object(ProfilePrincipal.class),
+                SegmentControlCapacity.times(2, layout.string(ProfilePrincipal.MAX_COMPONENT_BYTES)),
+                SegmentControlCapacity.times(3, layout.bytes(ProfilePrincipal.MAX_COMPONENT_BYTES)),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileInboundPipeline$ConnectionAdmission"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveBudget$ConnectionPermit"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveBudget$Credit"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileByteBufAllocator"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveDecoder"),
+                layout.object("org.apache.bookkeeper.proto.profile.ProfileReceiveDecoder$HeldCredit"),
+                layout.object(AtomicBoolean.class), layout.object(CompletableFuture.class),
+                layout.bytes(ProfileFrameCodec.OUTER_LENGTH_PREFIX + ProfileFrameHeader.ENCODED_LENGTH),
+                layout.object("io.netty.channel.DefaultChannelPromise"),
+                SegmentControlCapacity.times(2, layout.object("io.netty.util.concurrent.ScheduledFutureTask")),
+                SegmentControlCapacity.times(2, layout.object("io.netty.util.concurrent.PromiseTask$RunnableAdapter")),
+                SegmentControlCapacity.times(6, layout.captured(2))));
     }
 
     /** Known header/root/frame shells; caller body views and opaque cleaner/runtime state are separate. */
@@ -164,7 +220,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 layout.object("io.netty.util.concurrent.PromiseTask$RunnableAdapter"),
                 // Timeout, read/storage callback, read terminal, queued delivery and downstream write listener.
                 layout.captured(2), layout.captured(4), layout.captured(1), layout.captured(5), layout.captured(3),
-                layout.object(ProfileStatus.class), layout.hashEntry()));
+                layout.object(ProfileStatus.class),
+                // The connection base already owns the pending-set table at its configured high water.
+                SegmentControlCapacity.times(2, layout.object("java.util.HashMap$TreeNode"))));
     }
 
     @Override

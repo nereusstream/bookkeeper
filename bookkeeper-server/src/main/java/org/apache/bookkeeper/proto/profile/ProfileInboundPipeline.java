@@ -64,6 +64,25 @@ public final class ProfileInboundPipeline {
         return new AdmittingGroup(worker, budget, connectionLimit, connectionBaseBytes);
     }
 
+    /** Prepay the same base before the storage application creates its connection-owned Java graph. */
+    public static boolean admitConnection(Channel channel, ProfileReceiveBudget budget,
+                                          int connectionLimit, int connectionBaseBytes) {
+        Objects.requireNonNull(channel, "channel");
+        Objects.requireNonNull(budget, "budget");
+        if (connectionBaseBytes < ProfileFrameCodec.OUTER_LENGTH_PREFIX + ProfileFrameHeader.ENCODED_LENGTH
+                || connectionLimit <= connectionBaseBytes) {
+            throw new IllegalArgumentException("Invalid fixed connection or receive limit");
+        }
+        if (!channel.isOpen()) {
+            return false;
+        }
+        if (admit(channel, budget, connectionLimit, connectionBaseBytes) == null) {
+            channel.close();
+            return false;
+        }
+        return true;
+    }
+
     private static final class ConnectionAdmission implements AutoCloseable {
         private final ProfileReceiveBudget budget;
         private final ProfileReceiveBudget.ConnectionPermit permit;

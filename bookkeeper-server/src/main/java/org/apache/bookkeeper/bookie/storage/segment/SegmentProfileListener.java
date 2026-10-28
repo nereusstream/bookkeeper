@@ -62,9 +62,10 @@ final class SegmentProfileListener {
         Objects.requireNonNull(acceptor, "acceptor");
         this.worker = Objects.requireNonNull(worker, "worker");
         this.budget = Objects.requireNonNull(budget, "budget");
+        int connectionBase = storage.profileConnectionBaseBytes(settings.connectionBaseBytes());
         children = new DefaultChannelGroup(worker.next(), true);
         ChannelFuture binding = new ServerBootstrap().group(acceptor, ProfileInboundPipeline.admittingGroup(
-                worker, budget, settings.connectionBytes(), settings.connectionBaseBytes()))
+                worker, budget, settings.connectionBytes(), connectionBase))
                 .channel(NioServerSocketChannel.class)
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
