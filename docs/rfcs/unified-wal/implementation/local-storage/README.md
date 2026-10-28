@@ -1949,3 +1949,6 @@ JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩�
 独立RAT实际exit1，仍434个父ebce998bf1既有未批准路径，路径集合和bytes全同、无新增，不称CI全绿。最终核对1204项源码/规则、四阶段原生输入/用例身份、RED方法字节、17份私有JAR/169份外部JAR及所测class来源；3626份冻结class仍同当前target，后补测试类族48份单独归档。收尾审计初版截取方法多含一个分隔换行，修正审计边界后与原方法SHA吻合，原诊断留档，未修改原测试/测量回执。
 
 四个已终结原生run经逐文件SHA/uid/gid/mode、同inode硬链接归档及两次无reader核对后移除，19个文件路径共6653018逻辑bytes；原失败日志、XML和输入继续保留，常规文件数据块回收0 bytes。四布局的私有classpath、agent/probe源码/class及日志作为必要证据保留；不清理用户文件或其他任务产物。
+
+
+[启动前沿用既有磁盘阈值](../startup-readiness/README.md#启动前沿用既有磁盘阈值)：2026-10-28父9cfe97c910上，显式Profile工厂冻结原DiskChecker hard/warn配置，可信root核对后、storage打开前检查已存在目录；hard拒绝、warn仅告警。只读入口避免恢复时创建缺失目录，Classic checkDir顺序保持；两条真实RED及最终9项定向通过，阶段源码/输入由canonical拥有。持续filesystem/维护预算、B17/B11、多Arena、Main issuer与完整16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。

@@ -50,6 +50,7 @@ import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.TLSContextFactory;
+import org.apache.bookkeeper.util.DiskChecker;
 import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 
 /**
@@ -158,8 +159,7 @@ public final class SegmentProfileService implements AutoCloseable {
         }
         Objects.requireNonNull(startup, "startup");
         var parameters = localParameters(configuration, startup.requested());
-        return new SegmentProfileService(parameters.config(), parameters.identity(), key, validator,
-                parameters.execution(), parameters.limits(), startup, transport);
+        return new SegmentProfileService(parameters, key, validator, startup, transport);
     }
 
     /**
@@ -177,7 +177,8 @@ public final class SegmentProfileService implements AutoCloseable {
     }
 
     private record LocalParameters(IsolatedSegmentConfig config, SegmentFileHeader identity,
-            SegmentExecutionGroup.Settings execution, IsolatedSegmentStorage.Limits limits) { }
+            SegmentExecutionGroup.Settings execution, IsolatedSegmentStorage.Limits limits,
+            float diskUsageThreshold, float diskUsageWarnThreshold) { }
 
     private static LocalParameters localParameters(ServerConfiguration configuration, StartupReadinessInput policy) {
         if (!isolatedConfigurationEnabled(configuration)) {
@@ -226,7 +227,8 @@ public final class SegmentProfileService implements AutoCloseable {
         var identity = new SegmentFileHeader(policy.compatibility().storageIncarnation(),
                 UUID.fromString(policy.requiredDevices().devices().get(0).deviceId()),
                 BookieId.parse(policy.compatibility().bookieId()));
-        return new LocalParameters(config, identity, execution, limits);
+        return new LocalParameters(config, identity, execution, limits,
+                configuration.getDiskUsageThreshold(), configuration.getDiskUsageWarnThreshold());
     }
 
     /** Deferred owned initialization; caller retains this handle when startup fails. TLS stays borrowed. */
@@ -291,6 +293,7 @@ public final class SegmentProfileService implements AutoCloseable {
     private final ProfileDescriptorValidator validator;
     private final SegmentExecutionGroup.Settings execution;
     private final IsolatedSegmentStorage.Limits limits;
+    private final DiskChecker diskChecker;
     private Startup startup;
     private Transport transport;
     private SegmentProfileOwnedResources ownedResources;
@@ -313,19 +316,14 @@ public final class SegmentProfileService implements AutoCloseable {
         this.validator = Objects.requireNonNull(validator, "validator");
         execution = parameters.execution();
         limits = parameters.limits();
+        diskChecker = new DiskChecker(parameters.diskUsageThreshold(), parameters.diskUsageWarnThreshold());
         ownedResources = resources;
     }
 
     /** No directory, storage constructor, listener or registration is opened here. */
-    SegmentProfileService(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
-            ProfileDescriptorValidator validator, SegmentExecutionGroup.Settings execution,
-            IsolatedSegmentStorage.Limits limits, Startup startup, Transport transport) {
-        this.config = Objects.requireNonNull(config, "config");
-        this.identity = Objects.requireNonNull(identity, "identity");
-        this.key = Objects.requireNonNull(key, "key");
-        this.validator = Objects.requireNonNull(validator, "validator");
-        this.execution = Objects.requireNonNull(execution, "execution");
-        this.limits = Objects.requireNonNull(limits, "limits");
+    private SegmentProfileService(LocalParameters parameters, SecretKey key,
+            ProfileDescriptorValidator validator, Startup startup, Transport transport) {
+        this(parameters, key, validator, null);
         this.startup = Objects.requireNonNull(startup, "startup");
         this.transport = Objects.requireNonNull(transport, "transport");
         if (transport.settings().readinessGeneration() != startup.requested().targetReadinessGeneration().value()
@@ -358,6 +356,11 @@ public final class SegmentProfileService implements AutoCloseable {
             var observed = source.observation().orElseThrow();
             var policy = IsolatedSegmentStorage.startupPolicy(observed, startup.requested(), config, identity);
             requireStorageRoots(policy.newScopeFallback());
+            try {
+                diskChecker.checkExistingDir((existing ? config.directory() : config.directory().getParent()).toFile());
+            } catch (DiskChecker.DiskWarnThresholdException warning) {
+                // DiskChecker already logged the advisory; the existing hard threshold alone rejects startup.
+            }
             startup.publisher().bindStartupRequirements(startup.requirements(), observed);
             requireLive();
             synchronized (gate) {

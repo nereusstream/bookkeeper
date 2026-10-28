@@ -578,3 +578,24 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'AbstractZkLedgerManagerTest
 
 
 [Driver normal 与 recovery 的已知 Java 容量](../local-storage/README.md#driver-normal-与-recovery-的已知-java-容量)：2026-10-28父16933ee747上，第十项DATA预留支付源/preparation、独立Bookie/owner集合及整串返回窗口的已知Java图；waiter成功post后换空容器，旧九项金额保持。公式、实际验证及有限测量边界由canonical拥有；raw/compaction/JDK/native、Main issuer、G1和B11仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+## 启动前沿用既有磁盘阈值
+
+2026-10-28在父源码`9cfe97c9102a2e67d620bfe156fe2efdeb3b790b`上，将原ServerConfiguration的diskUsageThreshold/diskUsageWarnThreshold接入显式Profile service。fromConfiguration及两个owned-resources工厂通过同一私有参数/构造路径冻结数值，caller在创建后修改原configuration不改变该episode。OFF默认和配置项不变；没有新增配置、monitor线程或资源框架。
+
+start沿原流程先取得commissioned requirements并核对可信storage roots，再在storage、listener及readiness发布前调用原DiskChecker。新目录检查已存在parent，existing恢复检查目标目录本身；hard threshold、目录不可访问和检查失败沿原失败清理拒绝启动，警告阈值仍只使用原checker的告警，不被改成硬拒绝。此检查是本机访问/使用率观察，不产生old-service、Unix隔离、key/policy或恢复authority，Main实际issuer和受保护装载仍OPEN。
+
+DiskChecker新增只读checkExistingDir，先检查目录/读写访问再检查使用率，不创建缺失目录。原Classic checkDir保持先检查使用率、再按原规则创建目录、再检查相同访问权限的顺序，仅抽取原权限判断共用。首次Profile接线使用原checkDir时，一个真实existing启动反例确认其意外创建缺失storage目录；改用只读入口后，该目录保持不存在，readiness/预算均不遗留。
+
+实际测试按当前filesystem使用率选择低于使用率的hard阈值，以及有效高hard/低warn组合；未填满设备或伪造空间耗尽。原实现忽略hard配置而成功启动，真实RED为expected DiskOutOfSpaceException but nothing was thrown，1 failure、0 error/skipped。该方法自有效RED起保持原字节，同时覆盖创建后修改caller配置及warn仍可真实启动/注册。首次夹具仅1MiB而不能容纳原两个1MiB pool/maintenance block，运行停在既有layout校验；该次error独立保留、不计语义RED，改用原fixture文件容量，没有扩大生产quota。
+
+首轮接线三项通过后，新增上述缺失existing目录反例得到真实assertFalse失败，0 error/skipped；该方法从此RED至最终源码也保持原字节。最终四项SDK定向及原TestDiskChecker整类五项共9项全部通过，零failure/error/skipped。各阶段保存自己的源码/规则、native输入、测试源码、Maven/XML，旧PASS不移绑；证据位于`/Users/liusinan/.codex/artifacts/unified-wal/disk-preflight-evidence-9cfe97c9`。
+
+本项只交付启动时现有阈值检查：尚无持续磁盘monitor/低水位恢复、filesystem共享预算与并发维护承诺、SST/control/checkpoint保留量或ENOSPC进展验收；不会把百分比检查当作B17维护字节预留。已创建DATA增长后的余量、完整full-bytes/B11、多Arena持久路由及其余16步仍待完成，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+最终真实SDK整类246项全部通过，与上述未修改的DiskChecker整类5项合计251个不同用例通过，0 failure/error/skipped；最终定向与SDK使用同一1206项声明输入，1179项原生输入分别为其子集，另外显式锁定本轮涉及的DiskChecker及其测试源码。原SDK方法全部保留，仅新增两个独立行为用例。Spotless/Checkstyle实际exit0；没有重跑旧compatibility corpus、released binary或TLC，原PASS不移绑。
+
+用户2026-10-28已同时冻结后续多Arena的固定清单/显式shard→Arena映射及新incarnation变更边界，已同步RFC-0003 §4、实施清单步骤10与execution-objective；当前代码仍只允许单Arena，该决策未作为多Arena运行时验收。
+
+独立RAT实际exit1，仍为父9cfe97c910既有434个未批准路径，路径集合及bytes全同、无新增，不称CI全绿。最终1203项非本轮修改的声明输入与父Git blob相同，两个语义RED的方法/测试字节及原Classic权限判断与创建顺序均已核对；60份相关编译class留档。六个终结run的25个文件经逐SHA/uid/gid/mode、同inode硬链接及两次无reader核对后移除原临时根，逻辑路径7403401 bytes；失败诊断、输入、日志与XML全部保留，常规文件数据块回收0 bytes。

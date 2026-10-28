@@ -85,6 +85,7 @@ NVMe device or WalArena
 - control log 通过自己的 checkpoint/rotation 协议回收；
 - superblock A/B 必须能检测 torn write、checksum failure 和 generation 回退。
 - 每个 superblock 必须绑定Bookie storage incarnation、Arena/device identity、Arena format/mandatory feature set、control/checkpoint generation和device-manifest generation；任一required device missing/mismatch/partial migration使整个Segment Bookie non-writable；
+- 首版多Arena采用用户2026-10-28冻结的固定Arena/device清单及显式shard→Arena映射，由同一受保护manifest绑定storage incarnation；不能从当前可读设备子集补出缺项或重算路由。同一incarnation内不增删Arena、不重新分配shard，变更必须走新incarnation bootstrap；Bookie route/fence/tombstone仍由RFC-0005的唯一Bookie控制owner决定，跨Arena搬迁继续unsupported。当前实现仍只允许单Arena，此项合同尚未接线。
 - Arena superblock保护新实现之间的format/recovery，不能单独阻止stock old binary启动。RFC-0005的Bookie/storage compatibility fence必须在任何Journal replay/Arena writer/registration之前由旧binary mandatory path fail-stop；仅创建新文件或unknown control record不是downgrade fence。
 - Round 7未证明同BookieId/同storage scope的stock-old-binary fence，因此same-scope format保持BLOCK；如果Spike B不能证明mandatory pre-open gate，当前合同必须采用RFC-0005锁定的new BookieId + new journal/ledger/index/Arena roots + new storage incarnation +独立OS/service credential scope，allocator不得继续假设原地升级。
 

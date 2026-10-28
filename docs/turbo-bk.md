@@ -1001,3 +1001,6 @@ Segment production candidate 的最低 Gate：
 
 
 [公开只读的逐台健康重启与旧发现拒绝](rfcs/unified-wal/implementation/profile-wire/README.md#公开只读的逐台健康重启与旧发现拒绝)：2026-10-28父982a18dad9上，三台真实Profile服务在原endpoint/identity逐台健康关闭重开，旧observation拒绝、新HELLO generation2及原entry读取有效，同一公开SDK/pool重新open/read并等双方实际drain，metadata版本不变。首轮四项与最终强化单项分别通过，生产Java未改，源码/run绑定及有限范围由canonical拥有。进程crash/跨版本rolling、Main issuer、共同route claim/完整G1、B11与其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
+
+
+[启动前沿用既有磁盘阈值](rfcs/unified-wal/implementation/startup-readiness/README.md#启动前沿用既有磁盘阈值)：2026-10-28父9cfe97c910上，显式Profile工厂冻结原DiskChecker hard/warn配置，可信root核对后、storage打开前检查已存在目录；hard拒绝、warn仅告警。只读入口避免恢复时创建缺失目录，Classic checkDir顺序保持；两条真实RED及最终9项定向通过，阶段源码/输入由canonical拥有。持续filesystem/维护预算、B17/B11、多Arena、Main issuer与完整16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。

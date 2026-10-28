@@ -3472,6 +3472,74 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void profileServiceDiskPreflightDoesNotCreateMissingRestartDirectory() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            var original = files(fixture.nodes.get(0)).config();
+            var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("missing-restart"),
+                    1, 1, 1, original.bytesPerFile(), 4096, 1024, 16,
+                    "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+            var policy = servicePolicy(config, fixture.identities.get(0), 1);
+            try (var episode = new ServiceEpisode(fixture, 0, config, policy, policy.compatibility(),
+                    new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup)) {
+                var configured = new ServerConfiguration(episode.bootstrapConfiguration)
+                        .setDiskUsageThreshold(Math.nextDown(1f)).setDiskUsageWarnThreshold(Math.nextDown(1f));
+                try (var guarded = SegmentProfileService.fromConfiguration(configured,
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, episode.startup, episode.transport)) {
+                    assertThrows(java.io.IOException.class, () -> guarded.start(true));
+                    assertFalse(Files.exists(config.directory()));
+                    assertNull(episode.persistent.readPeer("socket0:3181").peer());
+                    for (var lane : ProfileReceiveBudget.Lane.values()) {
+                        assertEquals(0, episode.budget.used(lane));
+                        assertEquals(0, episode.budget.usedConnections(lane));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void profileServiceHonorsFrozenDiskThresholdBeforeOpeningStorage() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            var parent = temporary.getRoot();
+            float usage = 1f - (float) parent.getUsableSpace() / (float) parent.getTotalSpace();
+            assertTrue(usage > 0);
+            float limit = usage / 4;
+            float high = Math.nextDown(1f);
+            assertTrue(usage < high);
+            var original = files(fixture.nodes.get(0)).config();
+            for (boolean warnOnly : List.of(false, true)) {
+                var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("disk-check"),
+                        1, 1, 1, original.bytesPerFile(), 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                var policy = servicePolicy(config, fixture.identities.get(0), 1);
+                try (var episode = new ServiceEpisode(fixture, 0, config, policy, policy.compatibility(),
+                        new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup)) {
+                    var configured = new ServerConfiguration(episode.bootstrapConfiguration)
+                            .setDiskUsageThreshold(warnOnly ? high : limit).setDiskUsageWarnThreshold(limit / 2);
+                    try (var guarded = SegmentProfileService.fromConfiguration(configured,
+                            new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, episode.startup, episode.transport)) {
+                        // The caller's later configuration changes must not alter the admitted episode policy.
+                        configured.setDiskUsageThreshold(warnOnly ? limit : high);
+                        if (warnOnly) {
+                            assertNotNull(guarded.start(false));
+                            assertTrue(Files.isDirectory(config.directory()));
+                            assertNotNull(episode.persistent.readPeer("socket0:3181").peer());
+                        } else {
+                            assertThrows(org.apache.bookkeeper.util.DiskChecker.DiskOutOfSpaceException.class,
+                                    () -> guarded.start(false));
+                            assertFalse(Files.exists(config.directory()));
+                            assertNull(episode.persistent.readPeer("socket0:3181").peer());
+                            for (var lane : ProfileReceiveBudget.Lane.values()) {
+                                assertEquals(0, episode.budget.used(lane));
+                                assertEquals(0, episode.budget.usedConnections(lane));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     public void ownedProfileServiceRejectsRequirementsBeforeStorageOpenAndCleansBindFailure() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true); BookKeeper sdk = sdk(fixture)) {
             for (int failure = 0; failure < 6; failure++) {

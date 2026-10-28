@@ -250,7 +250,18 @@ public class DiskChecker {
             throw new DiskErrorException("can not create directory: "
                     + dir);
         }
+        checkDirAccess(dir);
+        return usage;
+    }
 
+    /** Check access and usage without creating a missing storage or mount directory. */
+    public float checkExistingDir(File dir) throws DiskErrorException,
+            DiskOutOfSpaceException, DiskWarnThresholdException {
+        checkDirAccess(dir);
+        return checkDiskFull(dir);
+    }
+
+    private static void checkDirAccess(File dir) throws DiskErrorException {
         if (!dir.isDirectory()) {
             throw new DiskErrorException("not a directory: " + dir);
         }
@@ -264,7 +275,6 @@ public class DiskChecker {
             throw new DiskErrorException("directory is not writable: "
                     + dir);
         }
-        return usage;
     }
 
     /**

@@ -267,6 +267,8 @@ DATA durable → hot locator → local result
 
 单Arena读写回收稳定后加入第二个Arena，验证同Bookie的route/fence/tombstone一致性、required device部分失败与共享filesystem预算，不实现跨Arena搬迁。
 
+用户2026-10-28已冻结首版多Arena边界：固定Arena/device清单及显式shard→Arena映射纳入受保护manifest；同一storage incarnation内不增删Arena、不重新分配shard，变更通过新incarnation bootstrap。不能从可读设备子集重算映射；当前单Arena配置/文件头尚未接入该共同manifest，不因此标记步骤10完成。
+
 亲和性沿用B18的分离对照，worker数、batch、I/O、TLS范围、E/W/A和维护负载保持相同：
 
 | 对照 | 配置 |
@@ -945,3 +947,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [公开只读的逐台健康重启与旧发现拒绝](profile-wire/README.md#公开只读的逐台健康重启与旧发现拒绝)：2026-10-28父982a18dad9上，三台真实Profile服务在原endpoint/identity逐台健康关闭重开，旧observation拒绝、新HELLO generation2及原entry读取有效，同一公开SDK/pool重新open/read并等双方实际drain，metadata版本不变。首轮四项与最终强化单项分别通过，生产Java未改，源码/run绑定及有限范围由canonical拥有。进程crash/跨版本rolling、Main issuer、共同route claim/完整G1、B11与其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
+
+
+[启动前沿用既有磁盘阈值](startup-readiness/README.md#启动前沿用既有磁盘阈值)：2026-10-28父9cfe97c910上，显式Profile工厂冻结原DiskChecker hard/warn配置，可信root核对后、storage打开前检查已存在目录；hard拒绝、warn仅告警。只读入口避免恢复时创建缺失目录，Classic checkDir顺序保持；两条真实RED及最终9项定向通过，阶段源码/输入由canonical拥有。持续filesystem/维护预算、B17/B11、多Arena、Main issuer与完整16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
