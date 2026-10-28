@@ -1900,3 +1900,24 @@ JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩�
 仓库 Spotless/Checkstyle 实际 exit0；独立 RAT 实际 exit1，443个路径及字节均与父f4df185c7c相同，无新增，不称 CI 全绿。四个终结 run 的19份文件逐 SHA/uid/inode 与无 reader 核对后保留硬链接归档，移除原临时目录逻辑字节6528062，副本普通数据块回收0；必要源码、命令、RED/阶段输入和 XML 均保留。
 
 证据目录为 `/Users/liusinan/.codex/artifacts/unified-wal/accepted-socket-admission-evidence-f4df185c`。历史模型、100k B11和兼容回执保持原绑定；Main 实际 issuer/受保护输入、完整 G1及其余16步继续 OPEN，完整目标 active、生产 Gate OPEN，OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮 NOT_EXECUTED。
+
+
+## 接收连接 base 与名额的实际终态
+
+2026-10-28在父源码`8a5c302b57e64fe3edb9a5f0a2b9d8100b02b7d0`上修复原接收预算的提前归还：channel close/decoder移除时，原base credit与连接slot已退款，但已交给下游的frame、retained view、response/workspace或TLS close输出仍可能持有该连接资源。原retained-view用例加强实际终态断言后出现真实RED：预期1252 bytes、实际1188，恰好少计配置的64-byte base；不能以channel inactive或caller终态代替实际资源归还。
+
+原ConnectionPermit增加同一预算内的base归属，acceptor注册前准入与decoder直接安装均调用reserveBase；无新账本、队列或quota。close立即禁止新分配，但base的close请求在其他实际credit仍存活时延后退款，连接名额也只在该连接总字节归零时归还。最后一个backing/workspace返回后，在原receive monitor下统一结算base与slot，并以one-shot状态防止重复归还；原future通知仍在monitor之外。没有改变正常Add的存储、metadata、fsync或wire合同。
+
+原pricedHeaderAndFrameFollowDataLaneAndTheFinalRetainedView方法从RED到最终GREEN保持相同方法源码字节，覆盖frame关闭、channel关闭、最后derived view归还与全局drain。两类既有测试另覆盖heap/direct views、workspace、CONTROL分类失败/跨连接拒绝、半包与真实mTLS deadline后仍排队的close输出；资源存活时base/slot保留，最后实际release后仍必须全部归零。初次三类43项整集有10个失败：九处为旧“断连即退base/slot”的预期，另一个为新增slot拒绝断言误用原两名额夹具；后者改为明确的一名额测试范围，未扩大额度或弱化零归还断言。原失败源码/日志/XML保留，不计作PASS。
+
+最终协议/allocator/真实TLS pipeline三类43项，以及未修改的真实SDK整类241项均通过，合计284项、0 failure/error/skipped。SDK包含原服务关闭、真实I/O/cold输出持有、初始化失败、重启与公开create/Add/close/只读路径；这是相关回归范围，不证明所有历史恢复或完整系统Gate。四个Java阶段各保留原1179项native输入与1204项声明输入，不把初次RED/失败阶段移绑最终测试文件。
+
+同步扩展原ProfileBackingBudget，保留两个root、每root最多两个引用、capacity1..3及原lane/connection上限，显式保留关闭连接的base/slot直到最后backing/workspace返回。七份原配置加入默认FALSE的提前归还开关及新生命周期性质，原六个故障开关与预期性质保持；新增base/slot两个独立反例配置。TLC1.7.4/Corretto21.0.10、单worker、heap512MiB/direct64MiB、seed1/fp0、无symmetry/state constraint下，正向完整搜索2404 distinct states、queue0；八个反例均以exit12命中各自指定invariant，runner汇总exit0。原CHECK_DEADLOCK FALSE，有限模型不证明liveness、fsync、真实TLS/native或完整峰值；旧模型/100k B11证据保持原source绑定。
+
+本轮只闭合已有base与slot的实际生命周期，尚未为完整socket/Netty/TLS/decoder/JDK/native对象图定价，也没有新的内存峰值、RSS或性能结论。固定连接对象价格与原accept批次/backlog边界、完整full-bytes/B11继续OPEN；Main issuer/受保护输入、共同Classic/Profile route claim与完整G1、其余16步及生产Gate仍OPEN，完整目标active，OFF/SYSTEM/PARK和disabled保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+初次RAT实际exit1、445项，原immutable-parent核验也拒绝了本轮已修改的既有未批准模型文件；原报告与核验失败保留。仅对本轮触及的9个cfg、原TLA module和model runner补全标准ASF许可头，cfg/TLA可执行体及Python AST均未改变；两个新cfg不再新增未批准项，另消除9个父提交既有项。最终Spotless/Checkstyle exit0，RAT实际仍exit1、434项，剩余路径及bytes均与父8a5c302b57相同，无新增，不称CI全绿。许可头补全前ahbf78io与最终71jf684q的九配置结果一致，分别保留原source/receipt；Java实现与284项已通过测试的源码保持不变。
+
+全部阶段与命令、失败原诊断、最终源码/class及模型回执归档于`/Users/liusinan/.codex/artifacts/unified-wal/connection-base-drain-evidence-8a5c302b`。最终Java与模型共有277个输入路径、SHA全同，合并源码/规则输入2102项；这是输入追溯范围，不是2102项行为验收。实际测试结果分别由proto-final-verification.json、sdk-verification.json及models-final/coverage-summary.json记录。
+
+六个已终结的Java/model原运行根，经逐文件SHA/uid/gid/mode、同inode硬链接归档和两次无reader检查后移除。1852个原文件路径共10240259逻辑bytes，全部证据硬链接保留，常规文件数据块实际回收0 bytes；没有删除任何阶段的失败日志、原模型输入/反例或最终源码/class。观察到的七个SDK进程PID及两轮style/RAT进程均已实际退出；该观察不冒充完整子进程清单。

@@ -1773,3 +1773,6 @@ python3 scripts/unified-wal/run-storage-models.py --tool /Users/liusinan/.codex/
 ```
 
 最终1173模型输入与1183冻结Java输入的277重合路径SHA一致，合并2079 unique 输入。初次 Java oracle 修正前的模型回执保留原绑定；最终4配置重新执行并核对当前输入。Java 三项真实网络及扩大五类278项提供实际 cold/force/CONTROL output/SDK dependency 事实；本投影不实现原生ZK/TLS/fsync/字节分配，不证明 liveness、完整A+C+D、完整B11/full-bytes、恢复或CLOSED权限。命令/manifest/raw output/coverage/trace与实际终态位于 `/Users/liusinan/.codex/artifacts/unified-wal/sdk-replacement-evidence-d232f2df/models`。目标 active、生产 Gate OPEN，OFF/SYSTEM/PARK 与 disabled 保持。
+
+
+2026-10-28 [接收连接base与slot实际终态](../local-storage/README.md#接收连接-base-与名额的实际终态)更新原ProfileBackingBudget的关闭语义：保留base/slot直到最后root/resize temporary/workspace实际返回，最后return同步结算；原历史“断连即释放base/slot”结果保持旧source绑定。增加BaseHeldThroughActualDrain、SlotHeldThroughActualDrain及ClosedEmptyReturnsBaseAndSlot，原七cfg保留原故障开关/预期性质，新增两个独立提前归还反例。初次ahbf78io及补全11个task-owned ASF许可头后的最终71jf684q均为9配置，正向完整2404 distinct/queue0，八个指定反例均exit12且性质匹配，runner exit0；许可注释之外的cfg/TLA体与Python AST保持。1175模型输入与1204 Java输入共有277同SHA路径、合并2102项。TLC1.7.4/Corretto21.0.10/单worker/heap512/direct64MiB/seed1/fp0，无symmetry/state constraint，CHECK_DEADLOCK FALSE。未跑完整A+C+D；真实基准、fsync/TLS/native/JDK全对象与峰值由实现验证另行负责，完整B11/G1/生产Gate保持OPEN。

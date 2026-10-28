@@ -369,3 +369,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [Classic 与 Profile 的共同 route claim 接线缺口](profile-wire/README.md#classic-与-profile-的共同-route-claim-接线缺口)：2026-10-28父628fae199b的源码复核确认，显式Profile模式与Classic栈分离，原Classic handle入口没有接Profile本地控制owner；独立TLS连接拒绝不证明RFC-0001 §7.1共同持久claim。首版公共服务边界待答复，未增加legacy listener或双引擎模式；这项完整合同继续OPEN。本轮仅文档同步、未执行新运行时测试，完整G1/B11/Main issuer与生产Gate仍OPEN，目标active、OFF/SYSTEM/PARK及disabled保持。
+
+
+[接收连接 base 与名额的实际终态](local-storage/README.md#接收连接-base-与名额的实际终态)：2026-10-28父8a5c302b57上，原receive预算的base与slot延后到最后实际frame/backing/workspace归还；真实retained-view RED/GREEN、三类43项及未修改SDK整类241项通过，原backing模型1正向/8指定反例符合预期。初次失败、源码/receipt与完整边界由canonical拥有。完整连接价格、full-bytes/B11、Main issuer、共同route claim/完整G1及其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

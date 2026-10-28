@@ -2719,3 +2719,6 @@ Corretto21.0.10下，最终run `/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T
 这是完整合同的接线缺口，不是已经复现的“当前独立Profile服务接受旧Classic写入”故障。给独立TLS端口发送旧wire，或者证明Profile分支没有Classic对象，都不能替代同一slot的竞争、restart恢复及语义拒绝验收；也不能为补一个错误码而私自新增legacy listener或同进程双引擎模式。首版是否继续保持独立cohort，或在本阶段接共同route/legacy入口，涉及公共服务和部署语义，已依AGENTS.md §1询问；答复前不新增该接口。无论首版选择如何，共同claim的完整合同都不能从16步/G1清单中自动删除。
 
 本次只有源码与合同复核，没有执行新的网络测试、RAT或模型，也没有修改生产代码。既有实验wire值、旧PASS及其source/run绑定保持，完整G1仍为BLOCKED_UNVERIFIED；Main issuer/受保护装载、full-bytes/B11、其余16步及生产Gate继续OPEN，目标active，OFF/SYSTEM/PARK与disabled边界保持。
+
+
+[接收连接 base 与名额的实际终态](../local-storage/README.md#接收连接-base-与名额的实际终态)：2026-10-28父8a5c302b57上，原receive预算的base与slot延后到最后实际frame/backing/workspace归还；真实retained-view RED/GREEN、三类43项及未修改SDK整类241项通过，原backing模型1正向/8指定反例符合预期。初次失败、源码/receipt与完整边界由canonical拥有。完整连接价格、full-bytes/B11、Main issuer、共同route claim/完整G1及其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

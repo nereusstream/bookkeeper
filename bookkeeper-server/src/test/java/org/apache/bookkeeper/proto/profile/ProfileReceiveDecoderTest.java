@@ -131,11 +131,13 @@ public class ProfileReceiveDecoderTest {
             view = received.body().retainedSlice(0, 16);
             received.close();
             channel.finish();
-            assertEquals(metadata + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(64 + metadata + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
             assertFalse(budget.closeAdmissionAndDrain().isDone());
             view.release();
             view = null;
             assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
             assertTrue(budget.closeAdmissionAndDrain().isDone());
         } finally {
             if (view != null && view.refCnt() > 0) {
@@ -208,7 +210,7 @@ public class ProfileReceiveDecoderTest {
                     var held = workspace;
                     assertThrows(IOException.class, () -> receiver.markControlAuthorized(request, held));
                     assertFalse(channel.isActive());
-                    assertEquals(needed - 64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(needed, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                     assertEquals(100, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                     assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
                 }
@@ -253,7 +255,7 @@ public class ProfileReceiveDecoderTest {
         var retired = budget.closeAdmissionAndDrain();
         assertFalse(retired.isDone());
         channel.finish();
-        assertEquals(add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(64 + add.length, budget.used(ProfileReceiveBudget.Lane.DATA));
         assertFalse(retired.isDone());
         received.close();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
@@ -533,10 +535,11 @@ public class ProfileReceiveDecoderTest {
         assertThrows(IOException.class, () -> channel.writeInbound(
                 Unpooled.wrappedBuffer(frame(ProfileOperation.ADD_NORMAL, 0))));
         assertFalse(channel.isActive());
-        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
-        assertEquals(fence.length, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+        assertEquals(64 + fence.length, budget.used(ProfileReceiveBudget.Lane.CONTROL));
         retained[0].close();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
     }
 
     @Test
@@ -561,7 +564,7 @@ public class ProfileReceiveDecoderTest {
         assertFalse(channel.isActive());
         assertTrue(other.isActive());
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
-        assertEquals(fence.length + 64 + 75, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(fence.length + 128 + 75, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         assertEquals(75, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         candidate.close();
         foreign.close();
@@ -586,14 +589,15 @@ public class ProfileReceiveDecoderTest {
         ProfileInboundPipeline.ResponseCredit workspace = decoder.reserveResponse(75);
         assertThrows(IOException.class, () -> decoder.markControlAuthorized(candidate, workspace));
         assertFalse(channel.isActive());
-        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-        assertEquals(fence.length + 75, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(64 + fence.length + 75, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         assertEquals(75, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
         assertEquals(0, budget.workspaceBytes(ProfileReceiveBudget.Lane.CONTROL));
         candidate.close();
         workspace.close();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         assertEquals(0, budget.workspaceBytes(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
@@ -773,12 +777,13 @@ public class ProfileReceiveDecoderTest {
         server.advanceTimeBy(11, TimeUnit.SECONDS);
         server.runScheduledPendingTasks();
         assertFalse(server.isActive());
-        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-        // EmbeddedChannel still owns queued TLS close output after the connection slot is returned.
+        assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        // Queued TLS close output keeps the closed connection's slot until its actual release.
         assertTrue(budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED) > 0);
         client.finishAndReleaseAll();
         server.finishAndReleaseAll();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
     @Test
@@ -818,12 +823,13 @@ public class ProfileReceiveDecoderTest {
         server.advanceTimeBy(16, TimeUnit.SECONDS);
         server.runScheduledPendingTasks();
         assertFalse(server.isActive());
-        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
-        // EmbeddedChannel still owns queued TLS close output after the connection slot is returned.
+        assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+        // Queued TLS close output keeps the closed connection's slot until its actual release.
         assertTrue(budget.used(ProfileReceiveBudget.Lane.DATA) > 0);
         client.finishAndReleaseAll();
         server.finishAndReleaseAll();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
     }
 
     @Test
@@ -909,7 +915,7 @@ public class ProfileReceiveDecoderTest {
         assertThrows(IOException.class, () -> channel.writeInbound(Unpooled.wrappedBuffer(
                 Arrays.copyOf(fence, 1))));
         assertFalse(channel.isActive());
-        assertEquals(fence.length, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(64 + fence.length, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         pending.close();
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         channel.finishAndReleaseAll();

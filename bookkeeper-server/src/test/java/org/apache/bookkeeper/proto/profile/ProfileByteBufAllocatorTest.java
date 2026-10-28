@@ -142,10 +142,12 @@ public class ProfileByteBufAllocatorTest {
         root.release();
         client.close();
         assertFalse(client.drained().isDone());
+        assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
         assertEquals(0, client.usedBytes());
         assertEquals(496, client.workspaceBytes());
         workspace.close();
         assertEquals(0, client.workspaceBytes());
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
         assertTrue(client.drained().isDone());
         assertThrows(ProfileReceiveBudget.CapacityExceededException.class, () -> client.reserveWorkspace(1));
     }
@@ -273,7 +275,7 @@ public class ProfileByteBufAllocatorTest {
                 assertEquals(128, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                 root.release();
                 permit.close();
-                assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                 assertEquals(128, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                 assertThrows(IllegalStateException.class, () -> allocator.heapBuffer(1, 1));
                 assertThrows(IllegalStateException.class, () -> allocator.directBuffer(1, 1));
@@ -285,6 +287,7 @@ public class ProfileByteBufAllocatorTest {
                 permit.close();
             }
             assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
         }
     }
 
@@ -403,7 +406,7 @@ public class ProfileByteBufAllocatorTest {
 
     @Test
     public void deliveredFrameRetainedBodyOutlivesFrameAndChannelWithoutReturningBackingEarly() throws Exception {
-        ProfileReceiveBudget budget = budget();
+        var budget = new ProfileReceiveBudget(1024, 256, 256, 1, 2, 1);
         ProfileReceiveBudget.ConnectionPermit permit = budget.admitUnclassified();
         ProfileReceiveDecoder decoder = new ProfileReceiveDecoder(budget, permit, 256, 64);
         ProfileByteBufAllocator allocator = new ProfileByteBufAllocator(permit);
@@ -420,11 +423,16 @@ public class ProfileByteBufAllocatorTest {
         channel.finishAndReleaseAll();
         try {
             assertFalse(channel.isActive());
-            assertEquals(hello.length, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-            assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertEquals(64 + hello.length, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+            assertNull(budget.admitUnclassified());
         } finally {
             retained.release();
         }
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        try (var replacement = budget.admitUnclassified()) {
+            assertNotNull(replacement);
+        }
     }
 }

@@ -38,6 +38,8 @@ public final class ProfileReceiveBudget {
         private long workspaceBytes;
         private long peakBytes;
         private boolean closed;
+        private boolean slotReturned;
+        private Credit baseCredit;
         private final CompletableFuture<Void> drained = new CompletableFuture<>();
 
         private ConnectionPermit() {
@@ -54,6 +56,17 @@ public final class ProfileReceiveBudget {
 
         Credit reserve(int requested) {
             return reserve(requested, false);
+        }
+
+        /** Keep the fixed connection charge until every actual frame/backing/workspace owner has returned. */
+        Credit reserveBase(int requested) {
+            synchronized (ProfileReceiveBudget.this) {
+                if (baseCredit != null) {
+                    throw new IllegalStateException("Connection base is already reserved");
+                }
+                baseCredit = reserve(requested);
+                return baseCredit;
+            }
         }
 
         Credit reserveWorkspace(int requested) {
@@ -86,7 +99,6 @@ public final class ProfileReceiveBudget {
             synchronized (ProfileReceiveBudget.this) {
                 if (!closed) {
                     closed = true;
-                    usedConnections[lane.ordinal()]--;
                 }
             }
             completeConnectionDrainIfIdle();
@@ -96,8 +108,19 @@ public final class ProfileReceiveBudget {
 
         private void completeConnectionDrainIfIdle() {
             synchronized (ProfileReceiveBudget.this) {
-                if (!closed || bytes != 0) {
+                if (!closed) {
                     return;
+                }
+                if (baseCredit != null && baseCredit.closed && bytes == baseCredit.bytes) {
+                    baseCredit.refund();
+                    baseCredit = null;
+                }
+                if (bytes != 0) {
+                    return;
+                }
+                if (!slotReturned) {
+                    slotReturned = true;
+                    usedConnections[lane.ordinal()]--;
                 }
             }
             drained.complete(null);
@@ -183,13 +206,11 @@ public final class ProfileReceiveBudget {
                     throw new IllegalStateException("Receive credit returned twice");
                 }
                 closed = true;
-                usedBytes[lane.ordinal()] -= bytes;
-                if (connection != null) {
-                    connection.bytes -= bytes;
-                    connectionBytes -= bytes;
-                    if (workspace) {
-                        connection.workspaceBytes -= bytes;
-                        usedWorkspaceBytes[lane.ordinal()] -= bytes;
+                boolean base = connection != null && connection.baseCredit == this;
+                if (!base || connection.bytes == bytes) {
+                    refund();
+                    if (base) {
+                        connection.baseCredit = null;
                     }
                 }
             }
@@ -198,6 +219,19 @@ public final class ProfileReceiveBudget {
             }
             completeConnectionsDrainIfIdle();
             completeDrainIfIdle();
+        }
+
+        /** Called under the receive ledger monitor, including a deferred base refund. */
+        private void refund() {
+            usedBytes[lane.ordinal()] -= bytes;
+            if (connection != null) {
+                connection.bytes -= bytes;
+                connectionBytes -= bytes;
+                if (workspace) {
+                    connection.workspaceBytes -= bytes;
+                    usedWorkspaceBytes[lane.ordinal()] -= bytes;
+                }
+            }
         }
     }
 

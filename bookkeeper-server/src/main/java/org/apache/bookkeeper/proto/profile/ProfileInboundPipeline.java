@@ -118,7 +118,7 @@ public final class ProfileInboundPipeline {
         ConnectionAdmission admission = null;
         try {
             permit.limit(connectionLimit);
-            base = permit.reserve(connectionBaseBytes);
+            base = permit.reserveBase(connectionBaseBytes);
             if (base == null) {
                 permit.close();
                 return null;

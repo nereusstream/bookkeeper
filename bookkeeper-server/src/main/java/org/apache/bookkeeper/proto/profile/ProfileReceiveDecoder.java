@@ -125,7 +125,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
                 throw new IOException("Priced frame metadata requires the charged backing allocator");
             }
             if (baseCredit == null) {
-                baseCredit = charge(connectionBaseBytes);
+                baseCredit = hold(connectionPermit.reserveBase(connectionBaseBytes));
             }
         } catch (IOException failure) {
             ctx.close();
