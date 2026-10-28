@@ -47,7 +47,11 @@ import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
+import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore;
+import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
 import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore;
+import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
+import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.discover.BookieServiceInfo;
 import org.apache.bookkeeper.discover.ZKRegistrationClient;
 import org.apache.bookkeeper.discover.profile.ProfileInitialLifecycleCoordinator;
@@ -55,6 +59,7 @@ import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool;
 import org.apache.bookkeeper.discover.profile.ProfileReservation;
+import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
@@ -73,10 +78,14 @@ public final class CurrentProfileMixedCreateProbe {
 
     /** The driver owns the old stock process and must stop it before commanding this fixture to EXIT. */
     public static void main(String[] arguments) throws Exception {
-        if (arguments.length != 2 || !UUID.fromString(arguments[0]).toString().equals(arguments[0])) {
-            throw new IllegalArgumentException("usage: CurrentProfileMixedCreateProbe <nonce> <fresh-receipt-root>");
+        if (arguments.length < 2 || arguments.length > 3
+                || !UUID.fromString(arguments[0]).toString().equals(arguments[0])
+                || arguments.length == 3 && !List.of("missing", "misdirected").contains(arguments[2])) {
+            throw new IllegalArgumentException(
+                    "usage: CurrentProfileMixedCreateProbe <nonce> <fresh-receipt-root> [missing|misdirected]");
         }
         String nonce = arguments[0];
+        boolean misdirected = arguments.length == 3 && arguments[2].equals("misdirected");
         Path output = Files.createDirectory(Path.of(arguments[1])).toRealPath();
         var test = new SegmentProfileInitialSocketClientTest();
         test.temporary.create();
@@ -131,11 +140,16 @@ public final class CurrentProfileMixedCreateProbe {
             ProfileCreateRequest original = (ProfileCreateRequest) outer(
                     "publicCreateRequest", new Class<?>[] {type}, fixture);
             var scopes = new ArrayList<>(original.reservation().installs());
-            ProfileControlScope prior = scopes.get(2);
-            scopes.set(2, new ProfileControlScope(prior.operation(), prior.purpose(), prior.ledgerId(),
-                    prior.ledgerInstanceId(), prior.descriptorIdentity(), old.toString(),
-                    prior.targetStorageIncarnation(), prior.authorityDomain(), prior.authorityGeneration(),
-                    prior.operationId(), prior.publicSemanticPayloadIdentity(), null));
+            ZKProfileEphemeralRegistrationStore badPublisher = null;
+            if (misdirected) {
+                badPublisher = publishThird(fixture, registry, "tls://" + old, true);
+            } else {
+                ProfileControlScope prior = scopes.get(2);
+                scopes.set(2, new ProfileControlScope(prior.operation(), prior.purpose(), prior.ledgerId(),
+                        prior.ledgerInstanceId(), prior.descriptorIdentity(), old.toString(),
+                        prior.targetStorageIncarnation(), prior.authorityDomain(), prior.authorityGeneration(),
+                        prior.operationId(), prior.publicSemanticPayloadIdentity(), null));
+            }
             var cohort = scopes.stream().map(s -> BookieId.parse(s.targetBookie())).toList();
             var desired = LedgerMetadataBuilder.from(original.desired()).replaceEnsembleEntry(0, cohort).build();
             var mixed = new ProfileCreateRequest(desired,
@@ -154,10 +168,17 @@ public final class CurrentProfileMixedCreateProbe {
                     new ProfileRecoveryPeerPool.Limits(6, 12, 2, 1060, Duration.ofSeconds(5)));
             sdk.enableProfile(new ProfileInitialLifecycleCoordinator(reservations, metadata, validator, cold),
                     new ProfileRecoveryCoordinator(reservations, metadata, cold), validator, pool, 4);
+            var thirdObserved = registry.readPeer(cohort.get(2).toString());
             publish(output.resolve("prepared.json"), Map.of("oldBookie", old.toString(),
                     "nativeRegistrationOwner", stat.getEphemeralOwner(), "nativeRegistrationBirth", stat.getCzxid(),
                     "nativeRegistrationSha256", hash(registration), "protocols", protocols,
-                    "selectedE", cohort.stream().map(Object::toString).toList()));
+                    "selectedE", cohort.stream().map(Object::toString).toList(),
+                    "scenario", misdirected ? "misdirected" : "missing",
+                    "thirdProfilePeerFound", thirdObserved.status() == ProfileRegistrationStore.ReadStatus.FOUND,
+                    "thirdProfileEndpoint", thirdObserved.peer() == null ? ""
+                            : thirdObserved.peer().projection().endpoint(),
+                    "thirdProfilePublisherSession", thirdObserved.peer() == null ? 0
+                            : thirdObserved.peer().publisherSession()));
             marker("PREPARED", nonce);
             require(input, "REJECT " + nonce);
             var before = namespace(zk);
@@ -200,7 +221,14 @@ public final class CurrentProfileMixedCreateProbe {
                     "poolActualDrain", true));
             marker("REJECTED", nonce);
             require(input, "POSITIVE " + nonce);
-            register(fixture, 2);
+            if (badPublisher != null) {
+                badPublisher.demote(cohort.get(2).toString());
+                var third = (io.netty.channel.Channel) ((List<?>) field(fixture, "listeners")).get(2);
+                publishThird(fixture, registry, "tls://127.0.0.1:"
+                        + ((java.net.InetSocketAddress) third.localAddress()).getPort(), false);
+            } else {
+                register(fixture, 2);
+            }
             try (BookKeeper positive = (BookKeeper) outer("sdk", new Class<?>[] {type}, fixture)) {
                 var positivePool = (ProfileRecoveryPeerPool) outer("enablePublicCreate",
                         new Class<?>[] {BookKeeper.class, type, ZKProfileRegistrationStore.class, Duration.class},
@@ -270,6 +298,48 @@ public final class CurrentProfileMixedCreateProbe {
             values.add(((Number) method.invoke(bookie)).longValue());
         }
         return values;
+    }
+
+    private static ZKProfileEphemeralRegistrationStore publishThird(Object fixture,
+            ZKProfileRegistrationStore registry, String endpoint, boolean fresh) throws Exception {
+        ProfileCreateRequest request = (ProfileCreateRequest) outer("publicCreateRequest",
+                new Class<?>[] {fixture.getClass()}, fixture);
+        var scope = request.reservation().installs().get(2);
+        if (fresh) {
+            var template = registry.read(request.reservation().installs().get(0).targetBookie())
+                    .versionedRecord().orElseThrow().record();
+            var record = new ProfileReadinessRecord(scope.targetBookie(),
+                    new StorageIncarnation(scope.targetStorageIncarnation()), template.engine(),
+                    template.protocolMajor(), template.protocolMinor(), template.capabilityGeneration(),
+                    template.localFormatGeneration(), template.deviceManifestIdentity(),
+                    template.deviceManifestGeneration(), template.effectiveAssignmentGeneration(),
+                    template.localReadinessGeneration(), template.minimumReaderVersion(),
+                    template.minimumWriterVersion(), template.capabilityHints(), template.state());
+            if (registry.compareAndSet(scope.targetBookie(), -1, 0, record).status()
+                    != ProfileRegistrationStore.CasStatus.APPLIED) {
+                throw new IllegalStateException("Fresh third readiness was not published");
+            }
+        }
+        var ready = registry.read(scope.targetBookie()).versionedRecord().orElseThrow();
+        var record = ready.record();
+        var projection = new ProfileServiceInfoProjection(record.bookieId(), record.storageIncarnation(),
+                record.localReadinessGeneration(), ready.storeVersion(), endpoint, record.capabilityHints());
+        var publisher = new ZKProfileEphemeralRegistrationStore((ZooKeeper) field(fixture, "zk"),
+                "/socket-readiness", scope.targetBookie(), ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        if (publisher.publishServiceInfo(projection).status()
+                    != EphemeralProfileRegistrationStore.PublicationStatus.APPLIED
+                || publisher.registerWritable(new EphemeralProfileRegistrationStore.WritableRegistration(
+                        record.bookieId(), record.storageIncarnation(), record.localReadinessGeneration(),
+                        ready.storeVersion())).status()
+                        != EphemeralProfileRegistrationStore.PublicationStatus.APPLIED) {
+            throw new IllegalStateException("Third projection was not published by its actual nonce");
+        }
+        var observed = registry.readPeer(scope.targetBookie());
+        if (observed.status() != ProfileRegistrationStore.ReadStatus.FOUND
+                || !observed.peer().projection().equals(projection)) {
+            throw new IllegalStateException("Published third endpoint is not the actual registered observation");
+        }
+        return publisher;
     }
 
     private static ZKProfileRegistrationStore register(Object fixture, int node) throws Exception {

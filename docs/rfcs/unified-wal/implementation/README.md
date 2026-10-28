@@ -927,3 +927,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [真实 mixed E 的公开 SDK 创建拒绝](profile-wire/README.md#真实-mixed-e-的公开-sdk-创建拒绝)：2026-10-28父f134939c1b上，两个实际Profile peer与四版released Classic第三目标组成3/3/2选E，公开create均在fresh claim前返回NotEnoughBookies；旧连接/effect和双方持久状态变化均为零，pool实际排空。随后同fixture全Profile公开create/Add/close/只读成功，证据与失败诊断由canonical拥有。完整mixed/rolling/auth/stable G1、Main issuer和B11仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[误指旧 endpoint 的真实 Profile hint 拒绝](profile-wire/README.md#误指旧-endpoint-的真实-profile-hint-拒绝)：2026-10-28父d74303e8d5上，完整原生Profile发现记录为第三个当前身份指向四版旧Classic endpoint，公开create均在fresh claim前拒绝；旧端口实际CTRL/DATA连接退出且零Classic effect，双方持久状态不变、pool实际排空。原publisher公开demote并以新nonce修正endpoint后，五个同fixture公开create/Add/close/只读控制成功，含一版默认missing回归。原生产Java/Fixture/Oracle/observer/lock未改；源码/run及验证和清理由canonical拥有。完整G1、Main issuer/受保护装载、B11与其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

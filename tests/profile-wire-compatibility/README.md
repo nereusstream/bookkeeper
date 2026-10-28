@@ -96,7 +96,9 @@ positive要求port=0、使用声明的测试证书；reject要求本run拥有的
 `current/src/CurrentProfileMixedCreateProbe.java`在standalone current JVM中复用原真实SDK/file/ZK/mTLS Fixture，driver再启动对应released Classic Main与原observer。该实验留在reactor/CI之外，不要求常规Java测试自行下载或启动released binary。
 
 ```text
-CurrentProfileMixedCreateProbe <nonce> <fresh-receipt-root>
+CurrentProfileMixedCreateProbe <nonce> <fresh-receipt-root> [missing|misdirected]
 ```
 
 helper依次接受matching `PREPARE <nonce> <owned-old-BookieId>`、`REJECT <nonce>`、`POSITIVE <nonce>`、`EXIT <nonce>`；driver必须证明其私有ZK/Bookie/JDWP端口由相应PID拥有，并在EXIT前终止旧服务。17个冻结项目JAR前置四个精确测试证书的file-resource目录，供原fixture的file URL读取；helper/fixture字节码未替换。完整命令、原始输入与四版本scope由[真实mixed E记录](../../docs/rfcs/unified-wal/implementation/profile-wire/README.md#真实-mixed-e-的公开-sdk-创建拒绝)拥有，完整G1保持BLOCKED_UNVERIFIED。
+
+默认`missing`保持第三个E为旧Classic身份、缺少Profile readiness的原模式。`misdirected`保留第三个当前Profile身份，由原生publisher发布完整readiness/service-info/writable，但将其endpoint指向driver拥有的旧Classic端口；拒绝后由原publisher公开`demote`并以新nonce发布正确endpoint，再执行同一fixture的公开create/Add/close/只读控制。四版误指场景与一版默认模式回归的独立源码/run绑定由[误指hint记录](../../docs/rfcs/unified-wal/implementation/profile-wire/README.md#误指旧-endpoint-的真实-profile-hint-拒绝)拥有；这些发现输入不构成Main/commissioning authority。

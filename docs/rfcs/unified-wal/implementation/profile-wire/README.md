@@ -2674,3 +2674,22 @@ helper通过反射复用既有SegmentProfileInitialSocketClientTest的真实file
 最终1204份源码/规则输入、冻结JAR/JDK、实际class来源与30个PID均已独立核验；旧candidate其余字段未改变。helper按原Checkstyle9.3独立检查、仓库Spotless/Checkstyle均exit0；独立RAT实际exit1，443个路径及字节均与父f134939c1b相同，无新增，不称CI全绿。三轮终结后的14个私有tmp/storage根经逐文件SHA/uid/gid/mode、压缩归档逐字节和两次无reader检查后移除；逻辑字节148417710，保留压缩数据370584 bytes，实际物理回收未测。另删除一份未编译/未使用的1452-byte预备namespace helper副本，原源与SHA仍在既有归档；原run的SHA manifest可经精确数据归档继续核验，失败、源码/class、命令、原日志及正式结果均保留。
 
 本轮闭合上述真实初始mixed选E拒绝切片。虚假/过时hint、缺capability但能握手的peer、完整rolling restart/incarnation/generation、按target选择的只读/恢复、PROFILE/TOMBSTONED路由错误码、完整auth/issuer与general stable control-body接受仍须分别验收。完整G1继续BLOCKED_UNVERIFIED；Main实际issuer/受保护输入、full-bytes/B11和其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled边界保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 误指旧 endpoint 的真实 Profile hint 拒绝
+
+2026-10-28在父源码`d74303e8d537cf21ebc039bbc6c22352e16a36c5`上扩展现有standalone `CurrentProfileMixedCreateProbe`，增加可选`misdirected`模式；默认两参数`missing`模式保留。四版released Classic `4.14.8 / 4.15.5 / 4.16.7 / 4.17.2`各完成一次误指场景，另以4.14.8完成一次原两参数回归，五个episode均PASS_SCOPED。先前四版本missing结果仍绑定原源码/run，不移绑本轮helper。
+
+misdirected的E/W/A仍为3/3/2，三个选定身份均为当前Profile节点。实验publisher通过真实ZK API为第三身份建立完整READY、service-info与writable，readPeer实际FOUND，endpoint却为本episode旧Classic的`tls://host:port`；旧Main自身注册仍仅为bookie-rpc，没有发布Profile readiness。该发现输入属于受控fixture，不证明Main启动或commissioning authority，也不替代CTRL/DATA的mTLS/HELLO验证。前两个Profile目标实际连接成功后，公开BookKeeper.createProfileLedger对误指第三目标返回NotEnoughBookies（-6），在fresh claim、INSTALL和DATA之前失败。
+
+四个误指episode的原JDI observer均记录旧端口2次channelActive/2次channelInactive、零remaining channel及零Classic RPC/CREATE/master-key/Add/Journal effect；旧Main日志各有两次TooLongFrameException。默认missing回归的该phase仍为零连接/空map。拒绝窗口内，三个当前节点全部文件SHA、applied cut（均-1）及`/socket-ledgers`、`/socket-initial`、`/socket-readiness`的完整bytes/stat快照前后相同，没有fresh reservation或ledger44 metadata；旧storage快照也相同。SDK关闭后原pool的连接/RPC/backing/workspace实际归零，未以caller异常代替实际排空。
+
+拒绝后保留坏hint的原publisher执行公开demote，退休该nonce，再由新publisher nonce在同一persistent readiness下发布第三节点的真实endpoint；没有直接改ZK bytes或接管旧nonce。随后五个episode均以同一fixture、ledger44/instance/opId完成公开create、三目标activation、普通Add entry0、writer close及公开CLOSED只读open/read，完整4-byte payload与length4匹配。每个episode前后另有三个全新released SDK进程完成真实Classic create/write/close/read、独立重读和再次新建，证明旧服务及observer有效；它们的effect不计入拒绝窗口。
+
+生产main/test模块源码与`f66d2639feeffd8ef31aa2f27761096ea003963b`一致，复用该源码的17个私有项目JAR及四个已核对相同bytes的测试证书文件资源；运行不读target。current helper/原Fixture使用Corretto21.0.10，old Main/SDK/observer使用锁定Zulu17.0.6和各版released classpath。原生产Java、Fixture、observer、Oracle、corpus、lock和pom均未改；本轮不重跑旧665-vector、SDK240项或模型。
+
+证据位于`/Users/liusinan/.codex/artifacts/unified-wal/misdirected-peer-compat-evidence-d74303e8`，最终run为`run-20261028T105218Z-b1d44ea8-655d-40a5-8661-a891a9f779e2`。6次javac、5个fixture、5个old Main、5个observer和15个旧SDK共36个子进程全部实际终结，无timeout；31个exit0，5个旧Main在控制结束后受控SIGTERM为143。各fixture实际关闭storage/credit/cold/metadata/ZK及event-loop groups，原PID和Bookie/JDWP/ZK端口均已终结。首次编译exit0后的独立Checkstyle发现一行超长，折行前源码/class与诊断保留；本轮没有失败的native matrix。最终helper独立Checkstyle及仓库Spotless/Checkstyle均exit0；RAT实际exit1，仍443个父d74303e8既有路径且bytes全同，无新增。
+
+最终1204份源码/规则输入、冻结依赖与七项声明的helper/Fixture/锁定/构建输入、编译class和加载来源均已复核，36个PID均已退出；candidate此前所有字段保持。11个已终结私有tmp/storage根经逐文件SHA/uid/gid/mode、压缩归档及两次无reader检查后移除，逻辑数据148351890 bytes，保留压缩数据380741 bytes，实际物理回收未测。原run SHA manifest经精确数据归档继续核验；诊断、命令、源码/class、原日志与回执全部保留。
+
+本轮仅闭合完整发现hint误指普通旧Classic endpoint的拒绝。具备TLS但缺少必需capability/HELLO身份错误的peer、其他过时hint、rolling restart/incarnation/generation、target-specific只读/恢复、PROFILE/TOMBSTONED路由错误码、完整auth/issuer及general stable control-body仍待验收。Main首版保持已有真实旧服务的受控部署范围，具体issuer与受保护输入装载仍OPEN；full-bytes/B11及其余16步也保持OPEN，目标active，完整G1为BLOCKED_UNVERIFIED，生产Gate OPEN，OFF/SYSTEM/PARK与disabled边界保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

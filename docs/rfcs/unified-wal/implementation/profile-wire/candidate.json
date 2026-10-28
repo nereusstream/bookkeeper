@@ -164,5 +164,46 @@
     "stockClassicPositiveSdkProcesses": 12,
     "remaining": "Other hint/capability, rolling/incarnation/generation, target-specific read/recovery, route/status, full auth/issuer and stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED",
     "productionAuthority": false
+  },
+  "realMisdirectedProfileHintCreate": {
+    "status": "PASS_SCOPED",
+    "sourceParent": "d74303e8d537cf21ebc039bbc6c22352e16a36c5",
+    "unchangedProductionRuntimeSourceParent": "f66d2639feeffd8ef31aa2f27761096ea003963b",
+    "runIdentity": "run-20261028T105218Z-b1d44ea8-655d-40a5-8661-a891a9f779e2",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/misdirected-peer-compat-evidence-d74303e8",
+    "releasedClassicEndpoints": [
+      "4.14.8",
+      "4.15.5",
+      "4.16.7",
+      "4.17.2"
+    ],
+    "defaultMissingRegression": [
+      "4.14.8"
+    ],
+    "selectedE": "Three current Profile identities; third native READY/service-info/writable advertises tls:// pointing to a live released non-TLS Classic endpoint",
+    "quorum": [
+      3,
+      3,
+      2
+    ],
+    "oldNativeProtocols": [
+      "bookie-rpc"
+    ],
+    "result": "NotEnoughBookiesException before fresh claim/INSTALL/DATA",
+    "verifiedProfilePeers": 2,
+    "oldMisdirectedChannelsPerEpisode": {
+      "channelActive": 2,
+      "channelInactive": 2,
+      "remaining": 0
+    },
+    "oldClassicEffects": 0,
+    "newReservationAndLedgerMetadata": false,
+    "localStorageAndThreeNamespaces": "UNCHANGED_IN_REJECTION_WINDOW",
+    "poolActualDrain": true,
+    "hintCorrection": "Original publisher public demote, then fresh publisher nonce with correct endpoint; no raw byte replacement",
+    "allProfilePositive": "Five same-fixture public create/Add/close/read controls; E=3 activated, entry0, CLOSED length4",
+    "stockClassicPositiveSdkProcesses": 15,
+    "remaining": "Capable TLS peer capability/HELLO identity, other stale hints, rolling/incarnation/generation, target-specific read/recovery, route/status, full auth/issuer and stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED",
+    "productionAuthority": false
   }
 }
