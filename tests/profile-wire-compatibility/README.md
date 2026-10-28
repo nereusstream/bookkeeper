@@ -78,3 +78,14 @@ StockClassicClientProbe <version> <create|read> <metadata-uri> <receipt.json> [l
 ```
 
 fresh仅接受不存在的私有root和matching `/uw-classic-interop-<nonce>` namespace，使用非强制format；existing要求前episode健康close、PID已退出且cookie/roots/URI/BookieId匹配，不format。服务端stdin依次接受 `CLOSE <nonce>`、`EXIT <nonce>`，二者分别验证。客户端运行必须仅含对应锁定released classpath与其独立helper classes；current server只使用冻结的当前classpath。复现脚本、实际完整javac/java命令、JDK/JAR锁及资源来源在上述run的 `run.py`、`inputs/manifest.json` 和各process receipt；复现必须生成新的run/namespace/port身份，不能覆盖已有结果。
+
+
+## Current Profile client to released Classic
+
+`current/src/CurrentProfileHandshakeProbe.java`通过公开CONTROL/DATA client入口检查实际连接，不修改生产类。仅`positive`模式创建一个只接HELLO的真实mTLS peer；`reject`模式必须由fresh隔离driver提供其实际stock端口。反射只观察并排空真实失败连接owner，不替换TLS、store或transport。原消息/promise继续沿原pipeline传递。
+
+```text
+CurrentProfileHandshakeProbe <positive|reject> <port> <cert-root> <fresh-receipt.json>
+```
+
+positive要求port=0、使用声明的测试证书；reject要求本run拥有的loopback端口。新helper单独用current冻结classpath编译，不加入released编译目录或常规reactor/CI。四版实际负向路径、前后Classic控制、JDI零effect、native快照与完整命令由[当前拒绝记录](../../docs/rfcs/unified-wal/implementation/profile-wire/README.md#实际-profile-client-对-released-classic-的拒绝)拥有；完整G1保持BLOCKED_UNVERIFIED。

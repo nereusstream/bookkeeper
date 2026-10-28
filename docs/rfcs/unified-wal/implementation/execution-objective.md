@@ -354,3 +354,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [worker 注册前的 socket 准入](local-storage/README.md#worker-注册前的-socket-准入)：2026-10-28父f4df185c7c上，显式listener在child registration排队前取得原slot/base，超额连接在acceptor实际关闭；同一credit交给decoder，失败和close沿原owner实际排空。真实RED/GREEN及证据边界由canonical拥有；完整连接图/full-bytes/B11、Main issuer、完整G1与生产Gate仍OPEN，目标active，OFF/SYSTEM/PARK与disabled保持。
+
+
+[实际 Profile client 对 released Classic 的拒绝](profile-wire/README.md#实际-profile-client-对-released-classic-的拒绝)：2026-10-28父f66d2639fe上，两类公开client对四版真实stock共8次拒绝，零明文Profile/Classic回退、JDI零effect、storage/namespace不变且实际连接/credit排空；前后旧SDK控制及独立mTLS/HELLO-only控制有效。源码、失败诊断、45子进程终态及有限范围由canonical拥有；其他mixed/auth/route/startup/stable接受、完整G1/B11/Main issuer仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

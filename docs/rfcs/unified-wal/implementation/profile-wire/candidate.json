@@ -108,5 +108,32 @@
     "oracle": "CLOSED, LAC=1, length=74, entry IDs=0/1 and exact two 37-byte payloads; per-phase positive RPC/read and create/master-key/Add/Journal effects; zero remaining channels; actual registration/port/PID termination",
     "productionAuthority": false,
     "remaining": "PROFILE/TOMBSTONED rejection, new Profile/old, mixed ensemble, full auth/principal/issuer, Profile restart/incarnation/generation/status and general stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED"
+  },
+  "currentProfileClientToReleasedClassic": {
+    "status": "PASS_SCOPED",
+    "currentProductionSourceParent": "f66d2639feeffd8ef31aa2f27761096ea003963b",
+    "runIdentity": "run-20261028T004344Z-1d1570dc-7ea0-4d6f-8c20-7ca9ec645c1e",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/profile-client-old-bookie-evidence-f66d2639",
+    "releasedBookies": [
+      "4.14.8",
+      "4.15.5",
+      "4.16.7",
+      "4.17.2"
+    ],
+    "clientRoles": [
+      "CONTROL",
+      "DATA"
+    ],
+    "negativeConnections": 8,
+    "plaintextProfileWrites": 0,
+    "legacyFallback": false,
+    "stockEffects": "ZERO_WITH_BEFORE_AND_AFTER_CLASSIC_CONTROLS",
+    "actualChannels": "2_ACTIVE_2_INACTIVE_ZERO_REMAINING_PER_VERSION",
+    "actualClientBackingAndWorkspaceAfterDrain": 0,
+    "stockStorageAndNamespace": "UNCHANGED",
+    "stockConfiguration": "Classic InterleavedLedgerStorage, journalSyncData=true, ordinary non-TLS Classic port",
+    "positiveClientControl": "Four real mTLS/HELLO-only attempts; no storage or authority proof",
+    "remaining": "Other TLS/auth configurations, registered discovery, mixed ensemble, PROFILE/TOMBSTONED route/status, incarnation/generation/startup and general stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED",
+    "productionAuthority": false
   }
 }

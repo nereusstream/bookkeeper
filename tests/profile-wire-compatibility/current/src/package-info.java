@@ -17,4 +17,4 @@
  * under the License.
  */
 
-/** Current-build Classic process probes kept separate from the released-artifact compilation directory. */
+/** Current-build process probes kept separate from the released-artifact compilation directory. */

@@ -2634,3 +2634,22 @@ run `run-20261027T214732Z-a99a0951-4f97-41a0-b2ad-a9b979487062` 位于 `/Users/l
 最终审计核验原172份run文件SHA、12份回执与逐phase effect、所有27个PID已退出，冻结输入复核无变。cookie结论来自existing真实启动校验、相同三类实际Classic目录及末态cookie副本，未独立采集重启前cookie SHA，不冒充前后独立字节比较。已结束的current-data/zk-data逐文件SHA/uid/gid/mode与105847-byte压缩归档核对，两次无reader检查后才移除原目录；回执另有普通副本，原PASS/input绑定保留。仓库Spotless/Checkstyle exit0；独立RAT实际exit1，仍443个父28e4c48138既有路径且字节全同，无新增，不称CI全绿。
 
 本轮闭合四版旧SDK到当前Classic的有限正向路径与健康同roots重启，不产生Profile route authority、old-service退役或新scope权限证明。PROFILE/TOMBSTONED下的旧normal/recovery拒绝、new Profile/old、mixed ensemble、完整auth/principal/issuer、Profile restart/incarnation/generation/status与general stable control-body仍未全部验收。完整G1保持BLOCKED_UNVERIFIED，生产Gate OPEN；Main外部可信输入与full-bytes/B11继续OPEN，完整16步目标active，OFF/SYSTEM/PARK和disabled边界保持。
+
+
+## 实际 Profile client 对 released Classic 的拒绝
+
+2026-10-28，生产组件快照绑定父源码 `f66d2639feeffd8ef31aa2f27761096ea003963b`，新增独立 `CurrentProfileHandshakeProbe`，通过公开 ProfileInitialControlClient/ProfileNormalDataClient 入口验证四版 released Classic Bookie。旧665-vector corpus、released decoder/stock Oracle、observer、artifact lock和既有互操作结果均不重跑、不改写、不移绑。当前客户端和helper使用Corretto21.0.10与17个已冻结项目classpath JAR；旧Main、旧SDK与原JDI observer使用锁定Zulu17.0.6，各版stock classpath只含对应released依赖，运行不再读target。
+
+四版 `4.14.8 / 4.15.5 / 4.16.7 / 4.17.2` 分别启动真实stock Main，固定InterleavedLedgerStorage和journalSyncData=true，使用fresh私有loopback端口、UUID namespace与可丢弃目录。每版先用相同released SDK完成Classic create/write/close/read；负向阶段分别发起一次CONTROL和DATA Profile连接，再以旧SDK重读原CLOSED ledger并新建、写入、关闭、重读另一ledger。Classic控制沿原helper的E/W/A=1/1/1及两条37-byte CRC32C记录，CLOSED/LAC1/length74与payload逐字节匹配。前后Classic控制实际触发RPC/read、handle/descriptor、master-key、Add与Journal路径，不能以空observer计数替代正向校验。
+
+最终8次负向连接均未ready、mTLS握手失败；观察到实际TLS ClientHello及TLS记录，没有任何明文Profile写入，每次只创建一个连接。原始写观察器放在TLS前，明文观察器放在TLS后；原消息、索引和promise照常传递。反射只取得真实失败连接的内部owner并调用其既有closeAsync/计费查询，不构造或替换生产对象。先等待实际close/drain及event-loop barrier，再核对handshake终态、backing/workspace为0和channel关闭；不以caller失败代替实际终结，也不把本地握手timeout计作旧peer拒绝。四版旧服务各实际记录两次TooLongFrameException；原JDI observer在该阶段各见2 active/2 inactive、zero remaining，processRequest、handle/master-key、allocation相关入口、Add/recovery Add和Journal effect均为0。各版负向窗口的完整storage文件与namespace bytes/stat快照均不变。
+
+helper另有前后两个真实mTLS/HELLO正向控制，共4次DATA/CONTROL连接成功，证书、实际公开client入口及明文观察器均生效；该peer只接受HELLO，没有Bookie storage、route或authority，不能当作Profile安装、Add、恢复或生产服务成功证据。旧服务上的负向结果也只闭合所测Classic端口配置下的连接拒绝及不降级：尚不涵盖其他TLS/auth配置、registered discovery、mixed初始ensemble、PROFILE/TOMBSTONED route错误码、restart/incarnation/generation或general stable control-body接受。
+
+首轮准备缺输出目录、首次helper编译直接引用包私有transport的诊断均保留。首个完整run在实际close/drain前读取握手终态导致helper断言失败；未计PASS，保留源码、manifest、compiled classes、原日志与全部子进程终态。最终helper改用公开两类client入口，并在实际终结后读取同一handshake future；最终四版组合使用同一份冻结源码，原no-fallback、zero-effect和计费断言保持。生产Java和原observer均未修改，本轮不重跑已通过的SDK整类或旧模型。
+
+最终run `run-20261028T004344Z-1d1570dc-7ea0-4d6f-8c20-7ca9ec645c1e` 位于 `/Users/liusinan/.codex/artifacts/unified-wal/profile-client-old-bookie-evidence-f66d2639`。6次javac、6个Profile helper、12个旧SDK、8个namespace检查、4次cluster init、4个stock Main、4个observer及1个ZK共45个子进程均终结，无timeout；其中40个exit0，4个stock Main和ZK在完成验证后受控SIGTERM为143，不称所有进程exit0。完整命令、JDK/JAR锁、类加载/实际class SHA、配置、原日志、逐阶段effect、native快照与失败阶段保留。
+
+最终1203份源码/规则输入、冻结classpath、实际class来源与45个PID均已独立复核；旧candidate其余字段保持原值。新helper按仓库原Checkstyle9.3规则独立检查通过，仓库Spotless/Checkstyle exit0；独立RAT实际exit1，443个路径及字节均与父f66d2639fe相同，无新增，不称CI全绿。两轮实际终结后的7个私有storage/ZK目录经逐文件SHA/uid/gid/mode、压缩归档逐字节和两次无reader检查后移除；逻辑字节218198876，保留压缩数据226890 bytes，实际物理回收未测。另删除9184-byte的重复runtime-base脚本，其完整等价前缀仍保存在run.py；原命令、失败、源码/class、receipt/effect、快照、归档和原run SHA manifest保持可核验。
+
+完整G1继续BLOCKED_UNVERIFIED，Main实际issuer/受保护输入、full-bytes/B11及其余16步仍OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled边界保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
