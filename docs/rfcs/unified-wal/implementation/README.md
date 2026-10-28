@@ -930,3 +930,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [误指旧 endpoint 的真实 Profile hint 拒绝](profile-wire/README.md#误指旧-endpoint-的真实-profile-hint-拒绝)：2026-10-28父d74303e8d5上，完整原生Profile发现记录为第三个当前身份指向四版旧Classic endpoint，公开create均在fresh claim前拒绝；旧端口实际CTRL/DATA连接退出且零Classic effect，双方持久状态不变、pool实际排空。原publisher公开demote并以新nonce修正endpoint后，五个同fixture公开create/Add/close/只读控制成功，含一版默认missing回归。原生产Java/Fixture/Oracle/observer/lock未改；源码/run及验证和清理由canonical拥有。完整G1、Main issuer/受保护装载、B11与其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[公开 create 的第三目标 HELLO 拒绝](profile-wire/README.md#公开-create-的第三目标-hello-拒绝)：2026-10-28父7f0ffdc6f3上，原真实SDK fixture的第三目标分别返回错误BookieId或缺UIC1控制capability，即使另两个目标满足AQ，公开create仍在fresh claim前拒绝，持久状态不变且pool实际排空；解除故障后同一请求完成三目标create/Add/close/只读。五项定向测试通过，生产Java未改，范围与原诊断由canonical拥有。完整G1、Main issuer/受保护装载、B11及其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

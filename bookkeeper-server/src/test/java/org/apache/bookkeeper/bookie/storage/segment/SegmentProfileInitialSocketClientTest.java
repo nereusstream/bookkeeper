@@ -111,6 +111,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileFrame;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrameHeader;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
+import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperation;
 import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
@@ -259,6 +260,7 @@ public class SegmentProfileInitialSocketClientTest {
         final List<List<Integer>> dataResults = new ArrayList<>();
         volatile boolean holdFirstReplies;
         final AtomicInteger replyFault = new AtomicInteger();
+        final AtomicInteger faultedHelloReplies = new AtomicInteger();
         final AtomicInteger lostDurableRecoveryCloseReplies = new AtomicInteger();
         final AtomicInteger faultTarget = new AtomicInteger(2);
         volatile long helloReadinessGeneration;
@@ -513,18 +515,27 @@ public class SegmentProfileInitialSocketClientTest {
                                                             frame.setInt(frame.writerIndex() - 4, (int) crc.getValue());
                                                         }
                                                     }
-                                                    if (fault == 29 && op == ProfileOperation.HELLO.wireValue()) {
+                                                    if ((fault == 29 || fault == 32 || fault == 33)
+                                                            && op == ProfileOperation.HELLO.wireValue()) {
                                                         byte[] encoded = new byte[frame.readableBytes()];
                                                         frame.getBytes(frame.readerIndex(), encoded);
                                                         var decoded = ProfileFrameCodec.decode(encoded,
                                                                 ProfileFrameCodec.DecodePhase.PRE_HELLO);
                                                         var original = ProfileHello.decodeServer(decoded.body());
+                                                        var omitted = fault == 33 ? new ProfileHello.Capability(
+                                                                ProfileInitialControlCodec.CAPABILITY_ID,
+                                                                ProfileInitialControlCodec.SCHEMA)
+                                                                : ProfilePhysicalDeleteCodec.CAPABILITY;
                                                         var reduced = new ProfileHello.Server(original.activeEngine(),
                                                                 original.storageIncarnation(),
-                                                                original.readinessGeneration(), original.bookieId(),
+                                                                original.readinessGeneration(),
+                                                                fault == 32 ? "unexpected:3181" : original.bookieId(),
                                                                 original.capabilities().stream().filter(cap ->
-                                                                    !cap.equals(ProfilePhysicalDeleteCodec.CAPABILITY))
+                                                                    fault == 32 || !cap.equals(omitted))
                                                                         .toList()).encode();
+                                                        if (fault != 29) {
+                                                            faultedHelloReplies.incrementAndGet();
+                                                        }
                                                         var header = decoded.header();
                                                         var response = new ProfileFrame(new ProfileFrameHeader(
                                                                 header.protocolMajor(), header.protocolMinor(),
@@ -15456,6 +15467,58 @@ public class SegmentProfileInitialSocketClientTest {
                 if (stopper != null) {
                     stopper.join(15000);
                 }
+            }
+        }
+    }
+
+    @Test
+    public void publicProfileCreateRejectsThirdHelloBeforeClaimAndRetainsExactFreshRequest() throws Exception {
+        for (int fault : List.of(32, 33)) {
+            try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true);
+                    BookKeeper sdk = sdk(fixture)) {
+                var registry = registerPublicCreatePeers(fixture);
+                var pool = enablePublicCreate(sdk, fixture, registry, Duration.ofSeconds(5));
+                var request = publicCreateRequest(fixture);
+                var cuts = new ArrayList<Long>();
+                for (var node : fixture.nodes) {
+                    cuts.add(bookie(node).appliedThrough());
+                }
+                var writes = fixture.nodeIo.stream().map(io -> io.writes).toList();
+                fixture.replyFault.set(fault);
+                assertEquals(BKException.Code.NotEnoughBookiesException, BKException.getExceptionCode(assertThrows(
+                        ExecutionException.class, () -> sdk.createProfileLedger(request).get(10, TimeUnit.SECONDS))));
+                assertTrue(fixture.faultedHelloReplies.get() > 0);
+                for (int target = 0; target < 3; target++) {
+                    assertEquals(cuts.get(target).longValue(), bookie(fixture.nodes.get(target)).appliedThrough());
+                }
+                assertEquals(writes, fixture.nodeIo.stream().map(io -> io.writes).toList());
+                assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.NOT_FOUND,
+                        fixture.reservations.read(44).status());
+                assertNull(fixture.zk.exists(((AbstractZkLedgerManager) fixture.manager).getLedgerPath(44), false));
+                assertEquals(0, pool.usage().reservedConnections());
+                assertEquals(0, pool.usage().reservedRpcSlots());
+                assertEquals(0, pool.backingBytes());
+                assertEquals(0, pool.codecWorkspaceBytes());
+                for (var identity : fixture.identities) {
+                    assertEquals(org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.ReadStatus.FOUND,
+                            registry.readPeer(identity.bookieId().toString()).status());
+                }
+                fixture.replyFault.set(0);
+                var writer = (ProfileLedgerHandle) sdk.createProfileLedger(request).get(10, TimeUnit.SECONDS);
+                for (int target = 0; target < 3; target++) {
+                    assertTrue(fixture.normal(target));
+                }
+                assertEquals(0, writer.addEntry(bytes(16, 8)));
+                writer.closeAsync().get(30, TimeUnit.SECONDS);
+                var closed = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue();
+                assertEquals(LedgerMetadata.State.CLOSED, closed.getState());
+                assertEquals(16, closed.getLength());
+                try (var reader = sdk.openProfileLedgerReadOnly(44, fixture.password).get(10, TimeUnit.SECONDS);
+                        var entries = reader.readAsync(0, 0).get(5, TimeUnit.SECONDS)) {
+                    assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+                }
+                assertEquals(0, pool.usage().reservedConnections());
+                assertEquals(0, pool.backingBytes());
             }
         }
     }

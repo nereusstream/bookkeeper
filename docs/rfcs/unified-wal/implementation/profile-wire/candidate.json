@@ -205,5 +205,33 @@
     "stockClassicPositiveSdkProcesses": 15,
     "remaining": "Capable TLS peer capability/HELLO identity, other stale hints, rolling/incarnation/generation, target-specific read/recovery, route/status, full auth/issuer and stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED",
     "productionAuthority": false
+  },
+  "publicCreateThirdHelloGate": {
+    "status": "PASS_SCOPED",
+    "sourceParent": "7f0ffdc6f3cd5075d22228a0d366a81cc9ab5385",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/hello-create-gate-evidence-7f0ffdc6",
+    "test": "publicProfileCreateRejectsThirdHelloBeforeClaimAndRetainsExactFreshRequest",
+    "scenarios": [
+      "third current mTLS peer with wrong HELLO BookieId",
+      "third current mTLS peer missing UIC1/schema1 control capability"
+    ],
+    "quorum": [
+      3,
+      3,
+      2
+    ],
+    "result": "NotEnoughBookiesException before fresh claim/INSTALL/DATA",
+    "nativePeerRegistrations": "FOUND after rejection; published by original fixture APIs",
+    "persistentState": "applied cut and local I/O writes unchanged; reservation NOT_FOUND and ledger metadata absent",
+    "poolActualDrain": true,
+    "sameRequestPositive": "Both episodes: E=3 activated, Add entry0, CLOSED length16, public readonly exact payload",
+    "focusedTests": 5,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "productionJavaChanged": false,
+    "releasedBinaryRerun": false,
+    "fullG1": "BLOCKED_UNVERIFIED",
+    "productionAuthority": false
   }
 }

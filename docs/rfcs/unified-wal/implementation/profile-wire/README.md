@@ -2693,3 +2693,18 @@ misdirected的E/W/A仍为3/3/2，三个选定身份均为当前Profile节点。�
 最终1204份源码/规则输入、冻结依赖与七项声明的helper/Fixture/锁定/构建输入、编译class和加载来源均已复核，36个PID均已退出；candidate此前所有字段保持。11个已终结私有tmp/storage根经逐文件SHA/uid/gid/mode、压缩归档及两次无reader检查后移除，逻辑数据148351890 bytes，保留压缩数据380741 bytes，实际物理回收未测。原run SHA manifest经精确数据归档继续核验；诊断、命令、源码/class、原日志与回执全部保留。
 
 本轮仅闭合完整发现hint误指普通旧Classic endpoint的拒绝。具备TLS但缺少必需capability/HELLO身份错误的peer、其他过时hint、rolling restart/incarnation/generation、target-specific只读/恢复、PROFILE/TOMBSTONED路由错误码、完整auth/issuer及general stable control-body仍待验收。Main首版保持已有真实旧服务的受控部署范围，具体issuer与受保护输入装载仍OPEN；full-bytes/B11及其余16步也保持OPEN，目标active，完整G1为BLOCKED_UNVERIFIED，生产Gate OPEN，OFF/SYSTEM/PARK与disabled边界保持。Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 公开 create 的第三目标 HELLO 拒绝
+
+2026-10-28在父源码`7f0ffdc6f3cd5075d22228a0d366a81cc9ab5385`上，补充原SegmentProfileInitialSocketClientTest的一项公开SDK验收，用两个真实fixture episode覆盖E/W/A=3/3/2的第三目标：其mTLS连接能完成并产生实际HELLO响应，但分别返回错误BookieId或缺少UIC1/schema1控制capability。三个目标的原生Profile注册均存在，另外两个目标保持正常。原生产客户端的HELLO验证与全E门槛无需修改；本轮只有测试变更，不是产品缺陷修复。
+
+复用原file/ZK/mTLS Fixture及第三目标的原outbound故障注入器；新增fault32仅替换HELLO的BookieId，fault33仅移除既有UIC1/schema1，保留其他能力与身份。fault29仍只移除原physical-delete能力，其原测试一并回归。新的观察计数只确认实际HELLO已走过故障注入，主要断言仍为公开结果和持久状态：公开create返回NotEnoughBookies（-6），三个Bookie applied cut与文件I/O写次数不变，reservation为NOT_FOUND，ledger44 metadata不存在，pool连接/RPC/backing/workspace均实际归零，三个原生readPeer仍FOUND。缺UIC1时DATA连接本身不能替代完整CTRL/DATA验证或满足第三个E。
+
+每个episode解除该响应故障后，直接复用同一SDK、同一ProfileCreateRequest及原ledger44/instance/opId。公开create成功并完成三个目标activation，普通Add返回entry0，writer close后metadata为CLOSED/length16，再由公开CLOSED只读open/read核对完整16-byte payload。该正向验证在拒绝断言之后，证明失败未消耗fresh origin；没有恢复/绕过旧claim，也未让错误HELLO参与成功。
+
+Corretto21.0.10下，最终run `/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-local-mXOGxGqH` 的五项定向测试全部通过（0 failure/error/skipped），包括新增用例、原单连接HELLO身份/capability拒绝、registered endpoint/TLS/incarnation/readiness拒绝、registered CTRL/DATA成功及fault29物理删除能力拒绝。证据目录为`/Users/liusinan/.codex/artifacts/unified-wal/hello-create-gate-evidence-7f0ffdc6`；1179项native输入与1204项声明源码/规则输入分别保留，最终源码和48个编译测试class归档。前两次运行均停在testCompile、未执行业务测试，分别为漏import与测试lambda的checked exception，原源码/日志/exit1保留；最终修正为原codec import与直接循环，不弱化断言。
+
+最终源码/规则SHA、48个测试class、实际五个testcase身份和原candidate字段已复核；仓库Spotless/Checkstyle exit0。RAT实际exit1，仍443个父7f0ffdc6既有路径且bytes全同，无新增，不称CI全绿。三次构建终结后，原临时根的10个文件经SHA/相同inode硬链接归档和两次无reader检查才移除，逻辑路径数据1031904 bytes；保留的硬链接证据占用相同数据块，因此该批常规文件数据实际回收0 bytes。原失败诊断、输入、日志、XML和源码/class均保留。
+
+本轮未重跑SDK整类、released binary矩阵、665-vector或模型，既有PASS保持原源码/run绑定。新增证据属于当前SDK/当前Profile真实连接的公开create门槛，不能当作old binary或完整G1证明。其他HELLO/capability版本、rolling restart/incarnation/generation、target-specific只读/恢复、PROFILE/TOMBSTONED路由错误码、完整auth/issuer与general stable control-body仍待验收。Main issuer/受保护装载、full-bytes/B11和其余16步继续OPEN；完整G1保持BLOCKED_UNVERIFIED，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled边界保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
