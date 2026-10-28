@@ -2802,7 +2802,7 @@ public class SegmentProfileInitialSocketClientTest {
     public void ownedProfileListenerWaitsForAcceptedSocketAlreadyQueuedToWorkers() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
             fixture.listeners.get(0).close().sync();
-            var budget = fixture.budgets.get(0);
+            var budget = new ProfileReceiveBudget(524288, 131072, 262144, 1, 8, 8);
             var listener = new SegmentProfileListener(fixture.nodes.get(0), fixture.serverTls, budget,
                     new SegmentProfileListener.Settings(131072, 64, "socket-test", 0),
                     new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker,
@@ -2838,16 +2838,30 @@ public class SegmentProfileInitialSocketClientTest {
                 try (var connection = new java.net.Socket()) {
                     connection.connect(address, 1000);
                     assertTrue(accepted.await(5, TimeUnit.SECONDS));
+                    parent.eventLoop().submit(() -> { }).get(5, TimeUnit.SECONDS);
+                    assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    // Exhausted admission closes on the acceptor, while both worker loops remain blocked.
+                    try (var refused = new java.net.Socket()) {
+                        refused.connect(address, 1000);
+                        refused.setSoTimeout(1000);
+                        assertEquals(-1, refused.getInputStream().read());
+                    }
+                    assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                     var closing = listener.closeAsync();
                     assertThrows(java.util.concurrent.TimeoutException.class,
                             () -> closing.get(100, TimeUnit.MILLISECONDS));
-                    for (var lane : ProfileReceiveBudget.Lane.values()) {
-                        assertEquals(0, budget.usedConnections(lane));
-                    }
+                    assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                    assertEquals(64, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                     release.countDown();
                     closing.get(5, TimeUnit.SECONDS);
                     connection.setSoTimeout(1000);
                     assertEquals(-1, connection.getInputStream().read());
+                    for (var lane : ProfileReceiveBudget.Lane.values()) {
+                        assertEquals(0, budget.usedConnections(lane));
+                        assertEquals(0, budget.used(lane));
+                    }
                 }
             } finally {
                 release.countDown();

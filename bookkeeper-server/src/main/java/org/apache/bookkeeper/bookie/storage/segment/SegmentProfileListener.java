@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.TLSContextFactory;
 
@@ -62,7 +63,9 @@ final class SegmentProfileListener {
         this.worker = Objects.requireNonNull(worker, "worker");
         this.budget = Objects.requireNonNull(budget, "budget");
         children = new DefaultChannelGroup(worker.next(), true);
-        ChannelFuture binding = new ServerBootstrap().group(acceptor, worker).channel(NioServerSocketChannel.class)
+        ChannelFuture binding = new ServerBootstrap().group(acceptor, ProfileInboundPipeline.admittingGroup(
+                worker, budget, settings.connectionBytes(), settings.connectionBaseBytes()))
+                .channel(NioServerSocketChannel.class)
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel channel) throws Exception {

@@ -18,7 +18,9 @@
 package org.apache.bookkeeper.proto.profile;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.netty.bootstrap.Bootstrap;
@@ -30,7 +32,9 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
+import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -45,6 +49,7 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.wire.ProfileFrame;
@@ -60,6 +65,74 @@ import org.junit.Test;
 public class ProfileInboundPipelineSocketTest {
     private static String certificate(String name) throws Exception {
         return Paths.get(ProfileInboundPipelineSocketTest.class.getClassLoader().getResource(name).toURI()).toString();
+    }
+
+    @Test
+    public void failedPipelineConstructionReturnsPrepaidBaseBeforeOrAfterDecoderHandoff() throws Exception {
+        for (int metadataBytes : new int[] {-1, 0}) {
+            var budget = new ProfileReceiveBudget(1024, 256, 512, 1, 1, 1);
+            var channel = new EmbeddedChannel();
+            try {
+                Class<? extends Exception> failure = metadataBytes < 0 ? IllegalArgumentException.class
+                        : org.apache.bookkeeper.tls.SecurityException.class;
+                assertThrows(failure, () -> ProfileInboundPipeline.install(channel.pipeline(),
+                        TLSContextFactory.forProfileServer(), budget, 512, 64,
+                        ProfileFrameCodec.ABSOLUTE_FRAME_MAX, ProfileFrameCodec.ABSOLUTE_FRAME_MAX,
+                        new ChannelInboundHandlerAdapter(), false, metadataBytes));
+                assertFalse(channel.isOpen());
+                for (var lane : ProfileReceiveBudget.Lane.values()) {
+                    assertEquals(0, budget.usedConnections(lane));
+                    assertEquals(0, budget.used(lane));
+                }
+                budget.closeAdmissionAndDrain().get(5, TimeUnit.SECONDS);
+            } finally {
+                channel.finishAndReleaseAll();
+            }
+        }
+    }
+
+    @Test
+    public void acceptedSocketFailureReturnsPrepaidAdmissionBeforePipelineInitialization() throws Exception {
+        // Incompatible registration, rejected registration, and insufficient base bytes are independent exits.
+        for (int failureMode = 0; failureMode < 3; failureMode++) {
+            var budget = new ProfileReceiveBudget(1024, 256, failureMode == 2 ? 63 : 512, 1, 1, 1);
+            EventLoopGroup acceptor = new NioEventLoopGroup(1);
+            EventLoopGroup worker = failureMode == 0 ? new DefaultEventLoopGroup(1) : new NioEventLoopGroup(1);
+            if (failureMode == 1) {
+                worker.shutdownGracefully(0, 0, TimeUnit.SECONDS).sync();
+            }
+            var initialized = new AtomicInteger();
+            Channel listener = null;
+            try {
+                listener = new ServerBootstrap().group(acceptor,
+                                ProfileInboundPipeline.admittingGroup(worker, budget, 512, 64))
+                        .channel(NioServerSocketChannel.class)
+                        .childHandler(new ChannelInitializer<SocketChannel>() {
+                            @Override
+                            protected void initChannel(SocketChannel channel) {
+                                initialized.incrementAndGet();
+                            }
+                        }).bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
+                try (var client = new java.net.Socket()) {
+                    client.connect(listener.localAddress(), 1000);
+                    client.setSoTimeout(1000);
+                    assertEquals(-1, client.getInputStream().read());
+                }
+                listener.eventLoop().submit(() -> { }).sync();
+                assertEquals(0, initialized.get());
+                for (var lane : ProfileReceiveBudget.Lane.values()) {
+                    assertEquals(0, budget.usedConnections(lane));
+                    assertEquals(0, budget.used(lane));
+                }
+                budget.closeAdmissionAndDrain().get(5, TimeUnit.SECONDS);
+            } finally {
+                if (listener != null) {
+                    listener.close().syncUninterruptibly();
+                }
+                worker.shutdownGracefully(0, 0, TimeUnit.SECONDS).syncUninterruptibly();
+                acceptor.shutdownGracefully(0, 0, TimeUnit.SECONDS).syncUninterruptibly();
+            }
+        }
     }
 
     @Test

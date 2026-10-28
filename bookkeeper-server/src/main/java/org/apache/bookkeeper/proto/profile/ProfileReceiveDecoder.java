@@ -95,13 +95,24 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
 
     ProfileReceiveDecoder(ProfileReceiveBudget budget, ProfileReceiveBudget.ConnectionPermit connectionPermit,
                           int connectionLimit, int connectionBaseBytes, int frameMetadataBytes) {
+        this(budget, connectionPermit, connectionLimit, connectionBaseBytes, frameMetadataBytes, null);
+    }
+
+    ProfileReceiveDecoder(ProfileReceiveBudget budget, ProfileReceiveBudget.ConnectionPermit connectionPermit,
+                          int connectionLimit, int connectionBaseBytes, int frameMetadataBytes,
+                          ProfileReceiveBudget.Credit prepaidBase) {
         this.budget = Objects.requireNonNull(budget, "budget");
         this.connectionPermit = Objects.requireNonNull(connectionPermit, "connectionPermit");
         if (connectionBaseBytes < FIXED_HEADER_BYTES || connectionLimit <= connectionBaseBytes
                 || frameMetadataBytes < 0) {
             throw new IllegalArgumentException("Invalid fixed connection or receive limit");
         }
-        connectionPermit.limit(connectionLimit);
+        if (prepaidBase == null) {
+            connectionPermit.limit(connectionLimit);
+        } else {
+            prepaidBase.require(connectionPermit, connectionBaseBytes);
+            baseCredit = new HeldCredit(prepaidBase);
+        }
         this.connectionBaseBytes = connectionBaseBytes;
         this.frameMetadataBytes = frameMetadataBytes;
     }
@@ -113,7 +124,9 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
             if (frameMetadataBytes != 0 && !(ctx.alloc() instanceof ProfileByteBufAllocator)) {
                 throw new IOException("Priced frame metadata requires the charged backing allocator");
             }
-            baseCredit = charge(connectionBaseBytes);
+            if (baseCredit == null) {
+                baseCredit = charge(connectionBaseBytes);
+            }
         } catch (IOException failure) {
             ctx.close();
             throw failure;
@@ -482,7 +495,7 @@ final class ProfileReceiveDecoder extends ChannelInboundHandlerAdapter {
         context = null;
     }
 
-    private void releaseBase() {
+    void releaseBase() {
         if (baseCredit != null) {
             baseCredit.close();
             baseCredit = null;

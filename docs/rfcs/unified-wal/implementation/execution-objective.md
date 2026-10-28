@@ -351,3 +351,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [接收 frame 元数据与 backing 终态](local-storage/README.md#接收-frame-元数据与-backing-终态)：2026-10-28父5331415a09上，service在首个header字节前用原credit预留已知metadata，完整校验后grow backing；CONTROL整帧转移、weighted resize及最后view归还均沿用原总账。原通用pipeline重载及quota不变，真实RED/GREEN与有限对象图由canonical拥有；full-bytes/B11、Main issuer、完整G1与生产Gate仍OPEN，完整目标active，OFF/SYSTEM/PARK与disabled保持。
+
+
+[worker 注册前的 socket 准入](local-storage/README.md#worker-注册前的-socket-准入)：2026-10-28父f4df185c7c上，显式listener在child registration排队前取得原slot/base，超额连接在acceptor实际关闭；同一credit交给decoder，失败和close沿原owner实际排空。真实RED/GREEN及证据边界由canonical拥有；完整连接图/full-bytes/B11、Main issuer、完整G1与生产Gate仍OPEN，目标active，OFF/SYSTEM/PARK与disabled保持。

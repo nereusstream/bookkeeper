@@ -1883,3 +1883,20 @@ JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩�
 仓库Spotless/Checkstyle实际exit0；独立RAT实际exit1，443个路径及字节与父5331415a09全部相同，无新增，不称CI全绿。七个终结run的33份文件逐SHA/uid/inode及无reader核对后保留硬链接归档，删除原临时目录，移除逻辑字节7414591，副本常规数据块回收0。必要源码、失败/oracle修正、命令/XML、冻结class与四布局证据保留。
 
 证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/frame-metadata-evidence-5331415a`。历史模型、100k B11及兼容回执不移绑；Main实际issuer/受保护输入、完整G1与其余16步继续OPEN，完整目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## worker 注册前的 socket 准入
+
+2026-10-28在父源码 `f4df185c7ca7e0f23d4be51ddf6b9045c9ade753` 上修正已接受连接在 worker 排队期间尚未入账的缺口。显式 SegmentProfileListener 在提交 Netty child registration 前取得原 UNCLASSIFIED 连接 slot 和配置的 base bytes；配额耗尽或 admission 已退休时在 acceptor 上关闭 socket，不向阻塞的 worker 提交注册任务。只包装原 EventLoopGroup 的 registration，调度、线程和 lifecycle 仍委托调用方持有的原 group，没有新增独立配额、线程或请求队列。
+
+同一份 permit/base credit 经 channel admission 交给原 decoder，原 TLS allocator、连接上限、DATA/CONTROL 整体转移及后续 backing 计费继续共用一份总账，不重复收取 base。registration 失败时先实际关闭 socket，再退回尚未交接的 base/slot；不兼容 group 的失败不保证 closeFuture 完成，因此保留显式清理。decoder 构造前后或 TLS handler 创建失败均退回相应 owner；已交接的 base 也受 closeFuture 保护，channelInactive/handlerRemoved 仍使用原幂等的 releaseBase。listener 关闭保留 stay-closed children 与原 worker barriers，不能以 caller timeout 或仅停止 admission 提前完成。
+
+真实 socket RED 在两个 worker 均阻塞且已接受连接时得到 expected 1 / actual 0 的 slot 反例。原用例现在确认排队连接持有一个 slot/64 base bytes、第二连接在 worker 尚未释放时即 EOF，listener close 仍等待原排队连接实际处理关闭后归零。另以真实 NIO socket 分别验证 incompatible group、terminated worker 和不足 base bytes 三条拒绝路径，均不初始化 child pipeline且不遗留额度。EmbeddedChannel 的两个构造失败分支只验证交接前/后清理，不能冒充真实 TLS 握手。
+
+本包只闭合注册任务入队前的连接准入和这份 base 的所有权。base 仍是已有配置值，不宣称支付完整 socket/Netty/TLS/decoder/JDK/native 保留图；新增 admission 壳、注册任务及其他固定连接图的全字节价格、关闭后外部别名和完整同时峰值继续属于 full-bytes/B11 OPEN 范围；Netty 本次 accept 批次和内核 backlog 也不在本次证明中。没有增加 quota，也没有改 SDK 公共入口、协议、存储/恢复语义或 Main authority。
+
+分阶段验证为：接收/allocator/真实 TLS pipeline 三类及原 listener 三用例45项通过；补充交接失败用例后 pipeline 整类3项通过；最终 SDK 整类240项全部通过，零 failure/error/skip。定向阶段与最终阶段的生产源码相同，输入差异仅为 pipeline 测试中新增的构造失败用例；socket 与 SDK 使用同一份最终1194输入，各阶段1179份 native 子集逐 SHA 匹配。整份 SDK 测试自真实 RED 到最终整类保持同字节；旧41个 proto 与240个 SDK 用例身份保留，新增两条 proto 方法。上述阶段按各自输入保留，不将旧 PASS 移绑到新增后的测试文件。独立只读审查未发现本轮范围内的实质问题。
+
+仓库 Spotless/Checkstyle 实际 exit0；独立 RAT 实际 exit1，443个路径及字节均与父f4df185c7c相同，无新增，不称 CI 全绿。四个终结 run 的19份文件逐 SHA/uid/inode 与无 reader 核对后保留硬链接归档，移除原临时目录逻辑字节6528062，副本普通数据块回收0；必要源码、命令、RED/阶段输入和 XML 均保留。
+
+证据目录为 `/Users/liusinan/.codex/artifacts/unified-wal/accepted-socket-admission-evidence-f4df185c`。历史模型、100k B11和兼容回执保持原绑定；Main 实际 issuer/受保护输入、完整 G1及其余16步继续 OPEN，完整目标 active、生产 Gate OPEN，OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮 NOT_EXECUTED。
