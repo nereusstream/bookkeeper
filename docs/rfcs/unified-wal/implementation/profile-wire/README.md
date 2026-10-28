@@ -2653,3 +2653,24 @@ helper另有前后两个真实mTLS/HELLO正向控制，共4次DATA/CONTROL连接
 最终1203份源码/规则输入、冻结classpath、实际class来源与45个PID均已独立复核；旧candidate其余字段保持原值。新helper按仓库原Checkstyle9.3规则独立检查通过，仓库Spotless/Checkstyle exit0；独立RAT实际exit1，443个路径及字节均与父f66d2639fe相同，无新增，不称CI全绿。两轮实际终结后的7个私有storage/ZK目录经逐文件SHA/uid/gid/mode、压缩归档逐字节和两次无reader检查后移除；逻辑字节218198876，保留压缩数据226890 bytes，实际物理回收未测。另删除9184-byte的重复runtime-base脚本，其完整等价前缀仍保存在run.py；原命令、失败、源码/class、receipt/effect、快照、归档和原run SHA manifest保持可核验。
 
 完整G1继续BLOCKED_UNVERIFIED，Main实际issuer/受保护输入、full-bytes/B11及其余16步仍OPEN；目标active、生产Gate OPEN、默认OFF/SYSTEM/PARK与disabled边界保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## 真实 mixed E 的公开 SDK 创建拒绝
+
+2026-10-28在父源码 `f134939c1bfae16abea3631cd95467952273c47a` 上新增外置 `CurrentProfileMixedCreateProbe`。实际E/W/A=3/3/2的选定E由两个当前Profile目标和一个真实released Classic Bookie组成；即使两个Profile目标足够组成AQ，缺少第三个E的Profile能力仍必须在fresh claim、INSTALL和DATA前失败。四版 `4.14.8 / 4.15.5 / 4.16.7 / 4.17.2` 分别完成该拒绝及前后正向控制，当前为PASS_SCOPED，完整G1仍BLOCKED_UNVERIFIED。
+
+helper通过反射复用既有SegmentProfileInitialSocketClientTest的真实file/ZK/mTLS fixture、原SDK构造与注册helper，不替换store、transport、coordinator或成功结果。Profile侧readiness由该fixture的原实验publisher实际写入ZK；它是测试发现输入，不提供Main/commissioning或生产authority证明。旧Main以自身session发布真实bookie-rpc注册，其BookieId明确放进请求的第三个E；没有为旧目标伪造Profile readiness。helper读取原生注册bytes/stat，确认old publisher存活、协议仅Classic且Profile readPeer为NOT_FOUND。原peer pool随后实际验证两个当前目标各自CONTROL/DATA的mTLS/HELLO与cold复核，再由公开BookKeeper.createProfileLedger拒绝缺失的第三个peer。
+
+四版均返回既有NotEnoughBookiesException（-6），old目标没有连接或Classic RPC。原JDI observer的mixed阶段channel/effect map均为空，零remaining channel；前后released SDK真实Classic create/write/close/read证明observer与旧服务有效。拒绝前后三个Profile Bookie的applied cut均保持-1、全部本地文件SHA不变，`/socket-ledgers`、`/socket-initial`、`/socket-readiness`的完整bytes/stat快照相同；fresh reservation和ledger44 metadata仍不存在。SDK关闭后原pool的连接/RPC额度、backing与workspace均为0。旧Classic storage快照也相同，不把caller失败当作实际排空。
+
+每版随后在同一fixture为原第三个当前Profile节点发布注册，用原完整E重新执行同一ledger44/instance/opId的公开create。三目标均实际activation，普通Add返回entry0，writer close后metadata为CLOSED/LAC0/length4，再经公开只读open读回原4-byte payload。该正向阶段在负向快照窗口之外，验证拒绝没有消耗fresh origin或破坏后续合法创建；它不构成旧Classic目标参与Profile成功的证据。最终fixture实际关闭全部storage/credit/cold/metadata/ZK与三个event-loop group后才报告CLOSED并退出。
+
+运行使用原Corretto21.0.10 current快照和锁定Zulu17.0.6 released classpath。17个项目JAR最初固定于生产源码f66d2639fe；其main/test模块源码与本轮父f134939c1b一致，经过输入SHA核对后复用runtime bytes，helper独立编译。原fixture需要file URL读取四个测试证书，因此classpath前置已冻结的四个文件资源目录；四份bytes逐一与原JAR资源相同，不改变fixture或产品代码。实际runtime不读target，stock classpath没有当前classes。
+
+首轮JAR资源FileSystemNotFound、首版helper五项样式问题及修复前源码均保留。第二轮实际mixed拒绝已成立，但driver错误地将observer的零事件空map写成显式0/0格式而失败；该轮不计完整PASS。修正只接受原observer的空map，未修改observer或零连接/effect要求。最终四版共用同一份helper源码和冻结输入；原生产Java、Fixture、released Oracle、observer、corpus、lock与旧PASS绑定保持，不重跑旧665-vector、SDK整类或模型。
+
+最终run `run-20261028T012118Z-7638522c-bc31-40b7-be12-b44cfb9f3a93` 位于 `/Users/liusinan/.codex/artifacts/unified-wal/mixed-create-compat-evidence-f134939c`。6次javac、4个fixture进程、4个stock Main、4个observer和12个旧SDK共30个子进程实际终结，无timeout；26个exit0，4个stock Main在前后控制完成后受控SIGTERM为143，不能写成所有进程exit0。四个fixture各自拥有私有ZK端口、longhierarchical namespace和独立DATA根；失败阶段与最终阶段分别保留原始输入、源码/class、命令/config、ClassLoader/JDK/JAR、回执、snapshot/effect和实际退出码。
+
+最终1204份源码/规则输入、冻结JAR/JDK、实际class来源与30个PID均已独立核验；旧candidate其余字段未改变。helper按原Checkstyle9.3独立检查、仓库Spotless/Checkstyle均exit0；独立RAT实际exit1，443个路径及字节均与父f134939c1b相同，无新增，不称CI全绿。三轮终结后的14个私有tmp/storage根经逐文件SHA/uid/gid/mode、压缩归档逐字节和两次无reader检查后移除；逻辑字节148417710，保留压缩数据370584 bytes，实际物理回收未测。另删除一份未编译/未使用的1452-byte预备namespace helper副本，原源与SHA仍在既有归档；原run的SHA manifest可经精确数据归档继续核验，失败、源码/class、命令、原日志及正式结果均保留。
+
+本轮闭合上述真实初始mixed选E拒绝切片。虚假/过时hint、缺capability但能握手的peer、完整rolling restart/incarnation/generation、按target选择的只读/恢复、PROFILE/TOMBSTONED路由错误码、完整auth/issuer与general stable control-body接受仍须分别验收。完整G1继续BLOCKED_UNVERIFIED；Main实际issuer/受保护输入、full-bytes/B11和其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled边界保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。

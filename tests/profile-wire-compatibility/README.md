@@ -89,3 +89,14 @@ CurrentProfileHandshakeProbe <positive|reject> <port> <cert-root> <fresh-receipt
 ```
 
 positive要求port=0、使用声明的测试证书；reject要求本run拥有的loopback端口。新helper单独用current冻结classpath编译，不加入released编译目录或常规reactor/CI。四版实际负向路径、前后Classic控制、JDI零effect、native快照与完整命令由[当前拒绝记录](../../docs/rfcs/unified-wal/implementation/profile-wire/README.md#实际-profile-client-对-released-classic-的拒绝)拥有；完整G1保持BLOCKED_UNVERIFIED。
+
+
+## Actual mixed initial E
+
+`current/src/CurrentProfileMixedCreateProbe.java`在standalone current JVM中复用原真实SDK/file/ZK/mTLS Fixture，driver再启动对应released Classic Main与原observer。该实验留在reactor/CI之外，不要求常规Java测试自行下载或启动released binary。
+
+```text
+CurrentProfileMixedCreateProbe <nonce> <fresh-receipt-root>
+```
+
+helper依次接受matching `PREPARE <nonce> <owned-old-BookieId>`、`REJECT <nonce>`、`POSITIVE <nonce>`、`EXIT <nonce>`；driver必须证明其私有ZK/Bookie/JDWP端口由相应PID拥有，并在EXIT前终止旧服务。17个冻结项目JAR前置四个精确测试证书的file-resource目录，供原fixture的file URL读取；helper/fixture字节码未替换。完整命令、原始输入与四版本scope由[真实mixed E记录](../../docs/rfcs/unified-wal/implementation/profile-wire/README.md#真实-mixed-e-的公开-sdk-创建拒绝)拥有，完整G1保持BLOCKED_UNVERIFIED。

@@ -135,5 +135,34 @@
     "positiveClientControl": "Four real mTLS/HELLO-only attempts; no storage or authority proof",
     "remaining": "Other TLS/auth configurations, registered discovery, mixed ensemble, PROFILE/TOMBSTONED route/status, incarnation/generation/startup and general stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED",
     "productionAuthority": false
+  },
+  "realMixedInitialCreate": {
+    "status": "PASS_SCOPED",
+    "sourceParent": "f134939c1bfae16abea3631cd95467952273c47a",
+    "unchangedProductionRuntimeSourceParent": "f66d2639feeffd8ef31aa2f27761096ea003963b",
+    "runIdentity": "run-20261028T012118Z-7638522c-bc31-40b7-be12-b44cfb9f3a93",
+    "evidenceDirectory": "/Users/liusinan/.codex/artifacts/unified-wal/mixed-create-compat-evidence-f134939c",
+    "releasedClassicTargets": [
+      "4.14.8",
+      "4.15.5",
+      "4.16.7",
+      "4.17.2"
+    ],
+    "selectedE": "Two real current Profile peers and one live released Classic target",
+    "quorum": [
+      3,
+      3,
+      2
+    ],
+    "result": "NotEnoughBookiesException before fresh claim/INSTALL/DATA",
+    "verifiedProfilePeers": 2,
+    "oldConnectionsAndEffects": 0,
+    "newReservationAndLedgerMetadata": false,
+    "localStorageAndThreeNamespaces": "UNCHANGED_IN_REJECTION_WINDOW",
+    "poolActualDrain": true,
+    "allProfilePositive": "Four same-fixture fresh public create/Add/close/read controls; E=3 activated, entry0, CLOSED length4",
+    "stockClassicPositiveSdkProcesses": 12,
+    "remaining": "Other hint/capability, rolling/incarnation/generation, target-specific read/recovery, route/status, full auth/issuer and stable control-body acceptance remain OPEN; full G1 stays BLOCKED_UNVERIFIED",
+    "productionAuthority": false
   }
 }

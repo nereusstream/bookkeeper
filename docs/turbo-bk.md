@@ -980,3 +980,6 @@ Segment production candidate 的最低 Gate：
 
 
 [实际 Profile client 对 released Classic 的拒绝](rfcs/unified-wal/implementation/profile-wire/README.md#实际-profile-client-对-released-classic-的拒绝)：2026-10-28父f66d2639fe上，两类公开client对四版真实stock共8次拒绝，零明文Profile/Classic回退、JDI零effect、storage/namespace不变且实际连接/credit排空；前后旧SDK控制及独立mTLS/HELLO-only控制有效。源码、失败诊断、45子进程终态及有限范围由canonical拥有；其他mixed/auth/route/startup/stable接受、完整G1/B11/Main issuer仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[真实 mixed E 的公开 SDK 创建拒绝](rfcs/unified-wal/implementation/profile-wire/README.md#真实-mixed-e-的公开-sdk-创建拒绝)：2026-10-28父f134939c1b上，两个实际Profile peer与四版released Classic第三目标组成3/3/2选E，公开create均在fresh claim前返回NotEnoughBookies；旧连接/effect和双方持久状态变化均为零，pool实际排空。随后同fixture全Profile公开create/Add/close/只读成功，证据与失败诊断由canonical拥有。完整mixed/rolling/auth/stable G1、Main issuer和B11仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
