@@ -2725,3 +2725,18 @@ Corretto21.0.10下，最终run `/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T
 
 
 [注册前预付已知连接元数据](../local-storage/README.md#注册前预付已知连接元数据)：2026-10-28父ebce998bf1上，显式listener与直接storage入口在注册/应用构造前用原base支付已知连接对象及pending table高水位；共用一份credit并等实际drain。真实RED、六项定向、四整类285项及后补直接入口1项分别留存原源码绑定，四JVM有限浅大小/高水位样本低于列明费用。完整TLS/Netty/JDK/native图与峰值、full-bytes/B11、Main issuer、共同route claim/完整G1和其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持；范围及证据由canonical拥有。
+
+
+## 公开只读的逐台健康重启与旧发现拒绝
+
+2026-10-28在父源码`982a18dad9ac84890dff18f0b38d95538fe0852e`上，补充原SegmentProfileInitialSocketClientTest的公开CLOSED只读验收，生产Java、SDK接口和wire未改。已有generation手工更新与HELLO期间发现记录变化拒绝的测试保持；本项改由三台真实SegmentProfileService逐台完成健康close、同storage identity/目录重开、readiness及ephemeral registration发布，再由同一公开SDK及原owned peer pool重新open/read。
+
+原PublicProfileReadonlyEpisode先完成两个非空entry及durable writer close；公开reader实际核对两份16-byte payload并关闭，pool连接实际归零。逐台退休原服务时，原listener/storage及其budget字节/slot均终结，native readPeer不再返回旧peer。仅保留fixture借出的registry ZK session供原pool继续使用，未关闭并重建SDK来绕过刷新。重开复用同一endpoint、BookieId与storage incarnation，readiness从1升至2，沿真实startup/requirements和原publisher发布；旧RegisteredPeer重新验证失败，持旧observation的实际connectRegistered尝试拒绝并归零backing/workspace。
+
+新的registered连接实际完成mTLS/HELLO且报告generation2，读出的原entry完整编码与重启前相同；该连接实际关闭后先等待服务端slot归零。随后原SDK再次公开只读open/read，核对两份payload，并观察新服务实际持有两条CTRL/DATA连接，证明pool包含这个重开的目标。reader关闭后，等待新服务端slot实际归零，pool的连接/RPC/backing/workspace也全部归零；三个目标各执行一次。标准ledger metadata version在整个读取/重启序列中保持不变。有限等待只观察实际预算终态，不代替资源release，也不修改服务配额。
+
+首轮新增项与原generation/同ID incarnation拒绝、HELLO持有期间变更拒绝、公开只读默认边界共四项定向通过（0 failure/error/skipped）。随后仅强化新增项为复用原endpoint并明确等待服务端drain，最后单独运行该项通过；两个阶段分别保存测试文件、1204项声明输入与1179项native子集，不把首轮四项PASS移绑最终测试文件。旧三个方法及其余原测试字节未改，没有重跑SDK整类、released binary矩阵、665-vector或TLC，旧PASS保持原source/run绑定。
+
+证据位于`/Users/liusinan/.codex/artifacts/unified-wal/rolling-readonly-evidence-982a18da`。本项是同主机、同JVM、三Bookie、单Arena及健康CLOSED storage session的服务逐台重开；fixture的ZK/TLS/event loops和显式外部信任输入仍为借用。它不证明进程崩溃/unclosed-session恢复、同ID新incarnation接管、跨版本进程rolling、Main实际issuer/受保护装载、全部target-specific恢复/auth或共同Classic/Profile route claim。完整G1继续BLOCKED_UNVERIFIED，full-bytes/B11及其余16步和生产Gate仍OPEN，目标active，OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既有434个未批准路径，路径集合和bytes全同、无新增，不称CI全绿。1203项非本测试声明输入与父Git blob全部相同，新增测试及小型drain观察helper之外的原测试整份字节保持；最终48份测试class已归档。两份终结run的8个文件经SHA/uid/gid/mode、同inode硬链接和两次无reader核对后移除原临时根，逻辑路径829323 bytes；原命令、输入、XML及Maven日志继续保留，常规文件数据块回收0 bytes。

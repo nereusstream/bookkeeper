@@ -15781,6 +15781,102 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void publicProfileReadonlyRefreshesActualRollingServiceEpisodesAndRejectsOldObservations() throws Exception {
+        try (var episode = new PublicProfileReadonlyEpisode()) {
+            var fixture = episode.fixture;
+            var sdk = episode.sdk;
+            sdk.enableProfileReadOnly(episode.coordinator, episode.pool, 4);
+            var before = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+            try (var initial = sdk.openProfileLedgerReadOnly(44, fixture.password).get(5, TimeUnit.SECONDS);
+                    var entries = initial.readAsync(0, 1).get(5, TimeUnit.SECONDS)) {
+                assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+                assertArrayEquals(bytes(16, 9), entries.getEntry(1).getEntryBytes());
+            }
+            assertEquals(0, episode.pool.usage().reservedConnections());
+            for (int target = 0; target < 3; target++) {
+                var previous = episode.episodes.get(target);
+                var identity = fixture.identities.get(target);
+                var oldPeer = previous.persistent.readPeer(identity.bookieId().toString()).peer();
+                assertNotNull(oldPeer);
+                var original = fixture.dataClients.get(target).readEntry(fixture.context(), 0)
+                        .get(5, TimeUnit.SECONDS);
+                assertEquals(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.Outcome.FOUND,
+                        original.outcome());
+                var address = (InetSocketAddress) fixture.listeners.get(target).localAddress();
+                // Keep the borrowed registry session live; only retire the actual service and its listener.
+                previous.service.close();
+                for (var lane : ProfileReceiveBudget.Lane.values()) {
+                    assertEquals(0, previous.budget.used(lane));
+                    assertEquals(0, previous.budget.usedConnections(lane));
+                }
+                assertNull(previous.persistent.readPeer(identity.bookieId().toString()).peer());
+                var requested = servicePolicy(previous.config, identity, 2);
+                var restarted = new ServiceEpisode(fixture, target, previous.config, requested, null,
+                        address, sdk.getClientCtx().getScheduler(), false, false,
+                        serviceRestartHeadroom(previous.config));
+                episode.episodes.add(restarted);
+                restarted.replaceNode(fixture, target, true);
+                var peer = restarted.persistent.readPeer(identity.bookieId().toString()).peer();
+                assertNotNull(peer);
+                assertEquals(oldPeer.projection().endpoint(), peer.projection().endpoint());
+                assertEquals(2, peer.projection().readinessGeneration().value());
+                assertArrayEquals(oldPeer.projection().storageIncarnation().value(),
+                        peer.projection().storageIncarnation().value());
+                assertNull(restarted.persistent.revalidatePeer(oldPeer).peer());
+                var stale = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        restarted.persistent, oldPeer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
+                try {
+                    assertThrows(ExecutionException.class, () -> stale.completion().get(5, TimeUnit.SECONDS));
+                } finally {
+                    stale.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                assertEquals(0, stale.backingBytes());
+                assertEquals(0, stale.codecWorkspaceBytes());
+                var connected = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        restarted.persistent, peer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
+                try {
+                    var recovered = connected.completion().get(5, TimeUnit.SECONDS);
+                    assertEquals(2, recovered.hello().readinessGeneration());
+                    var restored = recovered.readEntry(fixture.context(), 0).get(5, TimeUnit.SECONDS);
+                    assertEquals(original.outcome(), restored.outcome());
+                    assertEquals(original.entry(), restored.entry());
+                } finally {
+                    connected.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                awaitProfileConnectionDrain(restarted.budget);
+                try (var reader = sdk.openProfileLedgerReadOnly(44, fixture.password).get(5, TimeUnit.SECONDS);
+                        var entries = reader.readAsync(0, 1).get(5, TimeUnit.SECONDS)) {
+                    assertArrayEquals(bytes(16, 8), entries.getEntry(0).getEntryBytes());
+                    assertArrayEquals(bytes(16, 9), entries.getEntry(1).getEntryBytes());
+                    int connections = 0;
+                    for (var lane : ProfileReceiveBudget.Lane.values()) {
+                        connections += restarted.budget.usedConnections(lane);
+                    }
+                    assertEquals(2, connections);
+                }
+                assertEquals(before.getVersion(), fixture.manager.readLedgerMetadata(44)
+                        .get(5, TimeUnit.SECONDS).getVersion());
+                assertEquals(0, episode.pool.usage().reservedConnections());
+                assertEquals(0, episode.pool.usage().reservedRpcSlots());
+                assertEquals(0, episode.pool.backingBytes());
+                assertEquals(0, episode.pool.codecWorkspaceBytes());
+                awaitProfileConnectionDrain(restarted.budget);
+            }
+        }
+    }
+
+    private static void awaitProfileConnectionDrain(ProfileReceiveBudget budget) {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (java.util.Arrays.stream(ProfileReceiveBudget.Lane.values())
+                .anyMatch(lane -> budget.usedConnections(lane) != 0) && System.nanoTime() < until) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        for (var lane : ProfileReceiveBudget.Lane.values()) {
+            assertEquals(0, budget.usedConnections(lane));
+        }
+    }
+
+    @Test
     public void publicProfileReadonlySdkUsesOwnedRegisteredPeersAndPreservesDefaultBoundary() throws Exception {
         try (var episode = new PublicProfileReadonlyEpisode()) {
             var sdk = episode.sdk;

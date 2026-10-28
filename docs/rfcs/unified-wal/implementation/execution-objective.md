@@ -375,3 +375,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [注册前预付已知连接元数据](local-storage/README.md#注册前预付已知连接元数据)：2026-10-28父ebce998bf1上，显式listener与直接storage入口在注册/应用构造前用原base支付已知连接对象及pending table高水位；共用一份credit并等实际drain。真实RED、六项定向、四整类285项及后补直接入口1项分别留存原源码绑定，四JVM有限浅大小/高水位样本低于列明费用。完整TLS/Netty/JDK/native图与峰值、full-bytes/B11、Main issuer、共同route claim/完整G1和其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持；范围及证据由canonical拥有。
+
+
+[公开只读的逐台健康重启与旧发现拒绝](profile-wire/README.md#公开只读的逐台健康重启与旧发现拒绝)：2026-10-28父982a18dad9上，三台真实Profile服务在原endpoint/identity逐台健康关闭重开，旧observation拒绝、新HELLO generation2及原entry读取有效，同一公开SDK/pool重新open/read并等双方实际drain，metadata版本不变。首轮四项与最终强化单项分别通过，生产Java未改，源码/run绑定及有限范围由canonical拥有。进程crash/跨版本rolling、Main issuer、共同route claim/完整G1、B11与其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
