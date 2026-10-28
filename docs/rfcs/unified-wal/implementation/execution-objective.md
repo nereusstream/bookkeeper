@@ -366,3 +366,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [公开 create 的第三目标 HELLO 拒绝](profile-wire/README.md#公开-create-的第三目标-hello-拒绝)：2026-10-28父7f0ffdc6f3上，原真实SDK fixture的第三目标分别返回错误BookieId或缺UIC1控制capability，即使另两个目标满足AQ，公开create仍在fresh claim前拒绝，持久状态不变且pool实际排空；解除故障后同一请求完成三目标create/Add/close/只读。五项定向测试通过，生产Java未改，范围与原诊断由canonical拥有。完整G1、Main issuer/受保护装载、B11及其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
+
+
+[Classic 与 Profile 的共同 route claim 接线缺口](profile-wire/README.md#classic-与-profile-的共同-route-claim-接线缺口)：2026-10-28父628fae199b的源码复核确认，显式Profile模式与Classic栈分离，原Classic handle入口没有接Profile本地控制owner；独立TLS连接拒绝不证明RFC-0001 §7.1共同持久claim。首版公共服务边界待答复，未增加legacy listener或双引擎模式；这项完整合同继续OPEN。本轮仅文档同步、未执行新运行时测试，完整G1/B11/Main issuer与生产Gate仍OPEN，目标active、OFF/SYSTEM/PARK及disabled保持。

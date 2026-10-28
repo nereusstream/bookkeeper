@@ -2708,3 +2708,14 @@ Corretto21.0.10下，最终run `/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T
 最终源码/规则SHA、48个测试class、实际五个testcase身份和原candidate字段已复核；仓库Spotless/Checkstyle exit0。RAT实际exit1，仍443个父7f0ffdc6既有路径且bytes全同，无新增，不称CI全绿。三次构建终结后，原临时根的10个文件经SHA/相同inode硬链接归档和两次无reader检查才移除，逻辑路径数据1031904 bytes；保留的硬链接证据占用相同数据块，因此该批常规文件数据实际回收0 bytes。原失败诊断、输入、日志、XML和源码/class均保留。
 
 本轮未重跑SDK整类、released binary矩阵、665-vector或模型，既有PASS保持原源码/run绑定。新增证据属于当前SDK/当前Profile真实连接的公开create门槛，不能当作old binary或完整G1证明。其他HELLO/capability版本、rolling restart/incarnation/generation、target-specific只读/恢复、PROFILE/TOMBSTONED路由错误码、完整auth/issuer与general stable control-body仍待验收。Main issuer/受保护装载、full-bytes/B11和其余16步继续OPEN；完整G1保持BLOCKED_UNVERIFIED，目标active、生产Gate OPEN、OFF/SYSTEM/PARK与disabled边界保持，Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
+
+
+## Classic 与 Profile 的共同 route claim 接线缺口
+
+2026-10-28，按父源码`628fae199b088cc86bc56110de412b99f05bff63`复核RFC-0001 §7.1后，完整G1的剩余项需要明确区分“旧连接拒绝”与“共同持久route claim”。RFC要求legacy normal/recovery Add与Profile install竞争同一ledgerId的ABSENT/CLASSIC/PROFILE/TOMBSTONED slot，且旧read/LAC/fence等在Classic handle、master-key或payload创建前拒绝。此前released客户端、误指endpoint与公开create测试没有覆盖这条共同claim接线，不据此提升其完成状态。
+
+当前[EmbeddedServer显式Profile分支](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/server/EmbeddedServer.java)在Classic资源构造前选择独立Profile lifecycle，并拒绝混入Classic资源；该模式没有Classic Bookie/ledger storage服务栈。原[BookieImpl](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/BookieImpl.java)的normal/recovery Add共同进入getLedgerForEntry，再调用原HandleFactory；[HandleFactoryImpl](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/HandleFactoryImpl.java)仍按原Classic ledger storage创建/缓存descriptor、校验master key，未连接Profile本地控制owner。Profile侧[SegmentBookieControlLog](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBookieControlLog.java)持有自己的ledger与tombstone持久状态，但这不是与上述Classic入口共享的原子claim。默认Classic行为保持。
+
+这是完整合同的接线缺口，不是已经复现的“当前独立Profile服务接受旧Classic写入”故障。给独立TLS端口发送旧wire，或者证明Profile分支没有Classic对象，都不能替代同一slot的竞争、restart恢复及语义拒绝验收；也不能为补一个错误码而私自新增legacy listener或同进程双引擎模式。首版是否继续保持独立cohort，或在本阶段接共同route/legacy入口，涉及公共服务和部署语义，已依AGENTS.md §1询问；答复前不新增该接口。无论首版选择如何，共同claim的完整合同都不能从16步/G1清单中自动删除。
+
+本次只有源码与合同复核，没有执行新的网络测试、RAT或模型，也没有修改生产代码。既有实验wire值、旧PASS及其source/run绑定保持，完整G1仍为BLOCKED_UNVERIFIED；Main issuer/受保护装载、full-bytes/B11、其余16步及生产Gate继续OPEN，目标active，OFF/SYSTEM/PARK与disabled边界保持。
