@@ -1007,3 +1007,6 @@ Segment production candidate 的最低 Gate：
 
 
 [固定 Arena manifest 与显式 v2 身份基础](rfcs/unified-wal/implementation/local-storage/README.md#固定-arena-manifest-与显式-v2-身份基础)：2026-10-30按指定规划裁决接完整固定拓扑、独立Bookie控制根及v2角色/共同identity，v1字节保持；实际多Arena运行/恢复/维护尚未接线，单Arena服务显式拒绝v2部分图。源码、原失败/父反例、定向补验和独立parser证据由canonical拥有，style通过、RAT433既有路径无新增，不称CI全绿。Main受控issuer/loader和共同Classic/Profile route claim已裁定待实现，完整16步目标active，生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
+
+
+[独立 Bookie owner 与严格 Arena 成员接线](rfcs/unified-wal/implementation/local-storage/README.md#独立-bookie-owner-与严格-arena-成员接线)：2026-10-30父f59731767a上解耦Bookie control根并绑定完整manifest，per-Arena原生文件/allocator/index验证固定shard；实际两Arena写读、健康重开、index互换/丢失重建与独立FREE由同一Bookie owner驱动，七类409项同源码通过。实际style/RAT及阶段边界由canonical拥有；service v2发布、共同Classic route、Main及全局预算仍OPEN，完整目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。

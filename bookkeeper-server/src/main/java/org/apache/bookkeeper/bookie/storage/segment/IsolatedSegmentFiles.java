@@ -353,6 +353,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     static IsolatedSegmentFiles create(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentFileIo io)
             throws IOException {
+        identity.requireStoredManifest(config, -4);
         // Never adopt, clean or truncate an existing directory, including symlinks to an existing scope.
         Files.createDirectory(config.directory());
         SegmentDataFileLock guard = SegmentDataFileLock.create(config.directory());
@@ -376,7 +377,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             }
             writeIdentity(config.directory().resolve("superblock-a"), identity.encode(config, -1), io);
             writeIdentity(config.directory().resolve("superblock-b"), identity.encode(config, -2), io);
-            writeIdentity(config.directory().resolve("bookie-control"), identity.encode(config, -3), io);
+            if (identity.manifest() == null) {
+                writeIdentity(config.directory().resolve("bookie-control"), identity.encode(config, -3), io);
+            }
             writeIdentity(config.directory().resolve("arena-control"), identity.encode(config, -4), io);
             io.force(guard.channel(), true);
             syncDirectory(config.directory());
@@ -490,7 +493,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 throw new IOException("Local-result restart requires a closed managed DATA session");
             }
             for (int shard = 0; shard < config.logicalShards(); shard++) {
-                authority.restartStreamForShard(shard);
+                if (identity.ownsShard(shard)) {
+                    authority.restartStreamForShard(shard);
+                }
             }
             long cut = bookie.recoveryReadCut(config, identity);
             IsolatedSegmentFiles result = openAppendOnly(config, identity, authority, bookie,
@@ -631,7 +636,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         int file = batch.address().fileIndex();
         if (closed || reclamation != null || sessionAuthority != null && !sessionReady
                 || file < 0 || file >= data.size() || failed[file]
-                || batch.address().shard() >= config.logicalShards()
+                || batch.address().shard() >= config.logicalShards() || !identity.ownsShard(batch.address().shard())
                 || file != batch.address().shard() % config.dataFiles()
                 || pendingReservations >= config.maxPendingEntries()) {
             throw new IOException("File is unavailable");
@@ -828,7 +833,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             SegmentArenaControlLog authority, int shard) throws IOException {
         if (closed || reclamation != null || !sessionReady || restartBookie == null || authority != sessionAuthority
                 || !authority.permitsDataWriter(this) || shard < 0 || shard >= restoredShards.length
-                || restoredShards[shard] || restartBookieCut != restartBookie.recoveryReadCut(config, identity)) {
+                || !identity.ownsShard(shard) || restoredShards[shard]
+                || restartBookieCut != restartBookie.recoveryReadCut(config, identity)) {
             throw new IOException("Clean restart owner bootstrap is unavailable or already consumed");
         }
         for (int file = 0; file < config.dataFiles(); file++) {
@@ -929,7 +935,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return !closed && config.sameStorageScope(otherConfig) && identity.equals(otherIdentity);
     }
 
-    private static void writeIdentity(Path path, ByteBuffer bytes, SegmentFileIo io) throws IOException {
+    static void writeIdentity(Path path, ByteBuffer bytes, SegmentFileIo io) throws IOException {
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
             io.writeFully(channel, bytes, 0);
             io.force(channel, true);

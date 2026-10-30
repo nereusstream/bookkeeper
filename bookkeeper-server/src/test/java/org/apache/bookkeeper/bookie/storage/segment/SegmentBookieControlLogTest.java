@@ -20,6 +20,7 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
@@ -744,6 +745,314 @@ public class SegmentBookieControlLogTest {
         assertTrue(completed.await(5, TimeUnit.SECONDS));
         assertNull(failure.get());
         return status.get();
+    }
+
+    private SegmentArenaManifest multiArenaManifest(String name) throws IOException {
+        Path parent = temporary.getRoot().toPath().toRealPath();
+        return new SegmentArenaManifest(identity().incarnation(), identity().bookieId(),
+                List.of(new SegmentArenaManifest.Arena(new UUID(0, 9), parent.resolve(name + "-a"), 1, 4194304),
+                        new SegmentArenaManifest.Arena(new UUID(0, 10), parent.resolve(name + "-b"), 1, 4194304)),
+                parent.resolve(name + "-control"), List.of(1, 0, 1, 0));
+    }
+
+    private static SegmentDataPhysicalDriver.NormalResult writeManifestEntry(SegmentExecutionGroup group,
+            IsolatedSegmentFiles files, SegmentArenaControlLog arena, SegmentBookieControlLog bookie,
+            long ledgerId) throws Exception {
+        int shard = SegmentOwnerLoop.shardFor(ledgerId, files.config().logicalShards());
+        arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC,
+                new UUID(0, 5), new Generation(1), 0, 0, shard, new Generation(1), 5, 4096, 1, 1)));
+        SegmentOwnerLoop owner = group.owner(shard);
+        var driver = new SegmentDataPhysicalDriver(shard, owner, group.io(), files, arena,
+                new SegmentPhysicalPrefix(owner, shard, new Generation(1), 1, 4),
+                new SegmentHotDirectory(owner, files.config(), files.identity(), 2));
+        ByteBuf encoded = entry(context(ledgerId), 0);
+        SegmentBatchFormat.FrozenBatch batch;
+        try {
+            batch = SegmentBatchFormat.encode(files.config(), new SegmentBatchFormat.Address(
+                    0, shard, 5, new Generation(1), new Generation(1), 1, 4096),
+                    List.of(SegmentBatchFormat.entry(context(ledgerId), encoded)));
+        } finally {
+            encoded.release();
+        }
+        var result = new CompletableFuture<SegmentDataPhysicalDriver.NormalResult>();
+        assertTrue(driver.submitNormal(bookie, batch,
+                List.of(bookie.admitNormal(context(ledgerId), filled(20, (byte) 5)).orElseThrow()),
+                (entries, error) -> {
+                    if (error != null) {
+                        result.completeExceptionally(error);
+                    } else {
+                        result.complete(entries.get(0));
+                    }
+                }));
+        var published = result.get(5, TimeUnit.SECONDS);
+        ownerBarrier(owner);
+        assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, published.status());
+        return published;
+    }
+
+    @Test
+    public void twoManifestArenasShareBookieAuthorityForRealDataRestartIndexRebuildAndIndependentFree()
+            throws Exception {
+        var manifest = multiArenaManifest("data");
+        var control = manifest.bookieConfig(config());
+        var global = SegmentFileHeader.forBookie(manifest);
+        var a = manifest.arenaConfig(config(), 0);
+        var b = manifest.arenaConfig(config(), 1);
+        var aid = SegmentFileHeader.forArena(manifest, 0);
+        var bid = SegmentFileHeader.forArena(manifest, 1);
+        SegmentPointRead.Location first;
+        SegmentPointRead.Location second;
+        var controlIo = new SegmentFileIo();
+        try (var bookie = SegmentBookieControlLog.createManifestControl(control, manifest, manifest.identity(),
+                1048576, key((byte) 3), VALIDATOR, controlIo);
+                var filesA = IsolatedSegmentFiles.create(a, aid);
+                var filesB = IsolatedSegmentFiles.create(b, bid);
+                var arenaA = SegmentArenaControlLog.open(a, aid, 1048576);
+                var arenaB = SegmentArenaControlLog.open(b, bid, 1048576)) {
+            try {
+                assertFalse(Files.exists(a.directory().resolve("bookie-control")));
+                assertFalse(Files.exists(b.directory().resolve("bookie-control")));
+                filesA.startSession(arenaA);
+                filesB.startSession(arenaB);
+                assertThrows(IllegalArgumentException.class, () -> arenaA.submitBatch(List.of(
+                        new SegmentArenaControlLog.Allocation(SegmentControlFormat.Type.ALLOC, new UUID(0, 8),
+                                new Generation(1), 0, 0, 0, new Generation(1), 8, 4096, 1, 1))));
+                assertEquals(4096, filesA.nextOffset(0));
+                bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                        install(45, 3, (byte) 5), activate(45, 4)));
+                int forces = controlIo.forces;
+                var group = SegmentExecutionGroup.start(control,
+                        new SegmentExecutionGroup.Settings(1, 2, 4, 2, 4096, 8192, 24574,
+                                Duration.ofSeconds(5)));
+                try {
+                    assertSame(group.owner(0), group.owner(1));
+                    first = writeManifestEntry(group, filesB, arenaB, bookie, 44).candidate();
+                    second = writeManifestEntry(group, filesA, arenaA, bookie, 45).candidate();
+                    assertEquals(forces, controlIo.forces); // Normal DATA does not append or force Bookie control.
+                    assertEquals(1, filesA.dataIo.forces);
+                    assertEquals(1, filesB.dataIo.forces);
+                    assertEquals(44, SegmentPointRead.read(b, bid, arenaB, first).record().context().ledgerId());
+                    assertEquals(45, SegmentPointRead.read(a, aid, arenaA, second).record().context().ledgerId());
+                    assertThrows(IOException.class, () -> SegmentPointRead.read(a, aid, arenaA, first));
+                    assertTrue(bookie.matchesScope(filesA));
+                    assertTrue(bookie.matchesScope(filesB));
+                } finally {
+                    assertTrue(group.shutdown(Duration.ofSeconds(5)));
+                }
+            } finally {
+                filesA.close();
+                filesB.close();
+            }
+            bookie.rotate();
+        }
+        for (int restart = 0; restart < 2; restart++) {
+            try (var bookie = SegmentBookieControlLog.open(control, global, 1048576, key((byte) 3), VALIDATOR);
+                    var arenaA = SegmentArenaControlLog.open(a, aid, 1048576);
+                    var arenaB = SegmentArenaControlLog.open(b, bid, 1048576);
+                    var indexA = SegmentDerivedIndex.open(a, aid, 4);
+                    var indexB = SegmentDerivedIndex.open(b, bid, 4);
+                    var filesA = IsolatedSegmentFiles.openForLocalResults(a, aid, arenaA, bookie,
+                            new SegmentFileIo(), 4, 4, indexA);
+                    var filesB = IsolatedSegmentFiles.openForLocalResults(b, bid, arenaB, bookie,
+                            new SegmentFileIo(), 4, 4, indexB)) {
+                assertEquals(List.of(second), filesA.startupInventory().entries());
+                assertEquals(List.of(first), filesB.startupInventory().entries());
+                assertEquals(45, SegmentPointRead.read(a, aid, arenaA, second).record().context().ledgerId());
+                assertEquals(44, SegmentPointRead.read(b, bid, arenaB, first).record().context().ledgerId());
+                if (restart == 1) {
+                    assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                            bookie.submitFence(fence(10, (byte) 5)).status());
+                    bookie.submitBatch(List.of(tombstone(45, 11)));
+                    assertFalse(bookie.normalAdmission(context(44), filled(20, (byte) 5)));
+                    assertFalse(bookie.locallyReadableCoordinate(context(45), 0));
+                    var free = arenaA.prepareFree(new UUID(0, 12), 5, filesA, bookie, ByteBuffer.allocate(4096));
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                            arenaA.submitBatch(List.of(free)).get(0).status());
+                    assertNotNull(arenaB.currentAllocation(5));
+                    assertEquals(44, SegmentPointRead.read(b, bid, arenaB, first).record().context().ledgerId());
+                }
+            }
+            if (restart == 0) {
+                Path firstIndex = SegmentDerivedIndex.directory(a);
+                Path secondIndex = SegmentDerivedIndex.directory(b);
+                Path swapping = firstIndex.resolveSibling("swapped-index");
+                Files.move(firstIndex, swapping);
+                Files.move(secondIndex, firstIndex);
+                Files.move(swapping, secondIndex);
+                assertThrows(IOException.class, () -> SegmentDerivedIndex.open(a, aid, 4));
+                assertThrows(IOException.class, () -> SegmentDerivedIndex.open(b, bid, 4));
+                for (Path root : List.of(firstIndex, secondIndex)) {
+                    try (var paths = Files.walk(root)) {
+                        for (Path file : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                            Files.delete(file);
+                        }
+                    }
+                }
+            }
+        }
+        try (var bookie = SegmentBookieControlLog.open(control, global, 1048576, key((byte) 3), VALIDATOR);
+                var arenaA = SegmentArenaControlLog.open(a, aid, 1048576);
+                var arenaB = SegmentArenaControlLog.open(b, bid, 1048576)) {
+            assertTrue(bookie.hasTerminalTombstone(context(45)));
+            assertFalse(bookie.normalAdmission(context(44), filled(20, (byte) 5)));
+            assertThrows(IOException.class, () -> arenaA.currentAllocation(5));
+            assertNotNull(arenaB.currentAllocation(5));
+        }
+    }
+
+    @Test
+    public void manifestBookieOwnerRecoversIndependentlyAndSharesEveryMemberCutAndAdmissionGate() throws Exception {
+        var manifest = multiArenaManifest("owner");
+        var control = manifest.bookieConfig(config());
+        var global = SegmentFileHeader.forBookie(manifest);
+        var a = manifest.arenaConfig(config(), 0);
+        var b = manifest.arenaConfig(config(), 1);
+        var aid = SegmentFileHeader.forArena(manifest, 0);
+        var bid = SegmentFileHeader.forArena(manifest, 1);
+        try (var bookie = SegmentBookieControlLog.createManifestControl(control, manifest, manifest.identity(),
+                1048576, key((byte) 3), VALIDATOR, new SegmentFileIo())) {
+            assertFalse(Files.exists(a.directory()));
+            assertFalse(Files.exists(b.directory()));
+            assertFalse(Files.exists(control.directory().resolve("data-0")));
+            assertFalse(Files.exists(control.directory().resolve("arena-control")));
+            assertTrue(bookie.matchesScope(a, aid));
+            assertTrue(bookie.matchesScope(b, bid));
+            assertFalse(bookie.matchesScope(b, aid));
+            assertFalse(bookie.matchesScope(a,
+                    new SegmentFileHeader(aid.incarnation(), aid.arenaId(), aid.bookieId())));
+            var changed = new SegmentArenaManifest(manifest.incarnation(), manifest.bookieId(), manifest.arenas(),
+                    manifest.controlDirectory(), List.of(0, 1, 0, 1));
+            assertFalse(bookie.matchesScope(a, SegmentFileHeader.forArena(changed, 0)));
+            bookie.submitBatch(List.of(install(44, 1, (byte) 5), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4)));
+            assertEquals(bookie.recoveryReadCut(a, aid), bookie.recoveryReadCut(b, bid));
+            var pending = bookie.appendDurably(List.of(install(46, 5, (byte) 5)));
+            assertThrows(IOException.class, () -> bookie.recoveryReadCut(a, aid));
+            assertThrows(IOException.class, () -> bookie.recoveryReadCut(b, bid));
+            bookie.applyDurable(pending);
+            var first = bookie.admitNormal(context(44), filled(20, (byte) 5)).orElseThrow();
+            var second = bookie.admitNormal(context(45), filled(20, (byte) 5)).orElseThrow();
+            try {
+                assertThrows(IOException.class, () -> bookie.protectReclamation(a, aid));
+                assertThrows(IOException.class, () -> bookie.recoveryReadCut(b, bid));
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                        bookie.submitFence(fence(6, (byte) 5)).status());
+                second.physicalTerminal();
+                assertThrows(IOException.class, () -> bookie.recoveryReadCut(a, aid));
+                assertEquals(SegmentBookieControlLog.FenceStatus.WAITING_PRECUT,
+                        bookie.submitFence(fence(6, (byte) 5)).status());
+                first.physicalTerminal();
+                assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                        bookie.submitFence(fence(6, (byte) 5)).status());
+            } finally {
+                first.releaseUnclaimed();
+                second.releaseUnclaimed();
+            }
+            try (var lease = bookie.protectReclamation(a, aid)) {
+                assertTrue(bookie.admitNormal(context(45), filled(20, (byte) 5)).isEmpty());
+                assertEquals(bookie.recoveryReadCut(a, aid), bookie.recoveryReadCut(b, bid));
+            }
+            bookie.checkpoint();
+            bookie.rotate();
+        }
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(control, global, 1048576,
+                key((byte) 4), VALIDATOR));
+        try (var replay = SegmentBookieControlLog.open(control, global, 1048576, key((byte) 3), VALIDATOR)) {
+            assertFalse(replay.normalAdmission(context(44), filled(20, (byte) 5)));
+            assertTrue(replay.normalAdmission(context(45), filled(20, (byte) 5)));
+            assertFalse(replay.normalAdmission(context(46), filled(20, (byte) 5)));
+            assertEquals(replay.recoveryReadCut(a, aid), replay.recoveryReadCut(b, bid));
+            assertFalse(Files.exists(a.directory()));
+            assertFalse(Files.exists(b.directory()));
+        }
+    }
+
+    @Test(timeout = 15000)
+    public void manifestBookieInitializationRetainsFailedCandidatesAndNeverAdoptsADifferentScope() throws Exception {
+        var manifest = multiArenaManifest("failed-owner");
+        var control = manifest.bookieConfig(config());
+        var other = new ManifestIdentity(filled(32, (byte) 8));
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.createManifestControl(control, manifest, other,
+                1048576, key((byte) 3), VALIDATOR, new SegmentFileIo()));
+        assertFalse(Files.exists(control.directory()));
+        for (int force = 1; force <= 4; force++) {
+            var scope = multiArenaManifest("force-" + force);
+            var scopeConfig = scope.bookieConfig(config());
+            var io = new SegmentFileIo(Integer.MAX_VALUE, -1, force, false);
+            assertThrows(IOException.class, () -> SegmentBookieControlLog.createManifestControl(scopeConfig, scope,
+                    scope.identity(), 1048576, key((byte) 3), VALIDATOR, io));
+            assertTrue(Files.exists(scope.path()));
+            byte[] candidate = Files.readAllBytes(scope.path());
+            assertThrows(IOException.class, () -> SegmentBookieControlLog.createManifestControl(scopeConfig, scope,
+                    scope.identity(), 1048576, key((byte) 3), VALIDATOR, new SegmentFileIo()));
+            assertArrayEquals(candidate, Files.readAllBytes(scope.path()));
+            if (force < 4) {
+                assertThrows(IOException.class, () -> SegmentBookieControlLog.open(scopeConfig,
+                        SegmentFileHeader.forBookie(scope), 1048576, key((byte) 3), VALIDATOR));
+            } else {
+                // Complete bytes may survive a lost force result; explicit replay must synchronize them anew.
+                try (var recovered = SegmentBookieControlLog.open(scopeConfig, SegmentFileHeader.forBookie(scope),
+                        1048576, key((byte) 3), VALIDATOR)) {
+                    assertEquals(-1, recovered.recoveryReadCut(scopeConfig, SegmentFileHeader.forBookie(scope)));
+                }
+            }
+        }
+        Path parent = temporary.getRoot().toPath().toRealPath();
+        Path alias = parent.resolve("alias-parent");
+        Files.createSymbolicLink(alias, parent);
+        var aliased = new SegmentArenaManifest(identity().incarnation(), identity().bookieId(),
+                List.of(new SegmentArenaManifest.Arena(new UUID(0, 9), alias.resolve("aliased-a"), 1, 4194304)),
+                parent.resolve("alias-control"), List.of(0, 0, 0, 0));
+        try (var ignored = SegmentBookieControlLog.createManifestControl(aliased.bookieConfig(config()), aliased,
+                aliased.identity(), 1048576, key((byte) 3), VALIDATOR, new SegmentFileIo())) {
+            assertThrows(IOException.class, () -> IsolatedSegmentFiles.create(
+                    aliased.arenaConfig(config(), 0), SegmentFileHeader.forArena(aliased, 0)));
+            assertFalse(Files.exists(parent.resolve("aliased-a")));
+        }
+        var member = multiArenaManifest("nonregular");
+        var memberConfig = member.arenaConfig(config(), 0);
+        var memberId = SegmentFileHeader.forArena(member, 0);
+        try (var ignored = SegmentBookieControlLog.createManifestControl(member.bookieConfig(config()), member,
+                member.identity(), 1048576, key((byte) 3), VALIDATOR, new SegmentFileIo())) {
+            try (var files = IsolatedSegmentFiles.create(memberConfig, memberId)) {
+                assertTrue(files.matchesScope(memberConfig, memberId));
+            }
+            Path data = IsolatedSegmentFiles.dataPath(memberConfig, 0);
+            Files.delete(data);
+            var fifo = new ProcessBuilder("/usr/bin/mkfifo", "-m", "600", data.toString()).start();
+            assertTrue(fifo.waitFor(5, TimeUnit.SECONDS));
+            assertEquals(0, fifo.exitValue());
+            var io = new SegmentFileIo();
+            assertThrows(IOException.class, () -> SegmentArenaControlLog.open(memberConfig, memberId, 1048576, io));
+            assertEquals(0, io.forces);
+        }
+    }
+
+    @Test
+    public void manifestCredentialCannotBeReboundByCopyingControlRecordsAndRewritingIdentityPage() throws Exception {
+        var original = multiArenaManifest("aad-source");
+        var source = original.bookieConfig(config());
+        try (var owner = SegmentBookieControlLog.createManifestControl(source, original, original.identity(),
+                1048576, key((byte) 3), VALIDATOR, new SegmentFileIo())) {
+            owner.submitBatch(List.of(install(1, (byte) 5), activate(2)));
+        }
+        var target = new SegmentArenaManifest(original.incarnation(), original.bookieId(), original.arenas(),
+                original.controlDirectory().resolveSibling("aad-target-control"), original.shardArenas());
+        var destination = target.bookieConfig(config());
+        try (var ignored = SegmentBookieControlLog.createManifestControl(destination, target, target.identity(),
+                1048576, key((byte) 3), VALIDATOR, new SegmentFileIo())) {
+            assertNotEquals(original.identity(), target.identity());
+        }
+        byte[] copied = Files.readAllBytes(source.directory().resolve("bookie-control"));
+        ByteBuffer replacement = SegmentFileHeader.forBookie(target).encode(destination, -3);
+        System.arraycopy(replacement.array(), 0, copied, 0, 4096);
+        Files.write(destination.directory().resolve("bookie-control"), copied);
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(destination,
+                SegmentFileHeader.forBookie(target), 1048576, key((byte) 3), VALIDATOR));
+        try (var unchanged = SegmentBookieControlLog.open(source, SegmentFileHeader.forBookie(original),
+                1048576, key((byte) 3), VALIDATOR)) {
+            assertTrue(unchanged.normalAdmission(context(), filled(20, (byte) 5)));
+        }
     }
 
     @Test

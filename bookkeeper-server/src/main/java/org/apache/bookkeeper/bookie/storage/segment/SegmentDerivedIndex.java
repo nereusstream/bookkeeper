@@ -159,7 +159,8 @@ final class SegmentDerivedIndex implements AutoCloseable {
             throw new IllegalArgumentException("Positive derived rebuild capacity required");
         }
         this.maxEntries = maxEntries;
-        scope = digest().digest(identity.encode(config, -3).array());
+        identity.requireStoredManifest(config, -4);
+        scope = digest().digest(identity.encode(config, identity.manifest() == null ? -3 : -4).array());
         RocksDB.loadLibrary();
         cache = new LRUCache(BLOCK_CACHE_BYTES, -1, true);
         options = new Options().setCreateIfMissing(true).setUseFsync(true)
@@ -840,6 +841,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
         try {
             end = Math.addExact(a.offset(), location.batchLength());
             if (a.fileIndex() >= config.dataFiles() || a.shard() >= config.logicalShards()
+                    || !identity.ownsShard(a.shard())
                     || a.shard() != SegmentOwnerLoop.shardFor(location.context().ledgerId(), config.logicalShards())
                     || a.offset() < 4096 || end > config.bytesPerFile()
                     || location.batchLength() < 4096 || location.batchLength() > 2 * 1024 * 1024

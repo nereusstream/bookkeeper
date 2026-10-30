@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-30 当前增量为[固定 Arena manifest 与显式 v2 身份基础](#固定-arena-manifest-与显式-v2-身份基础)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-30 当前增量为[独立 Bookie owner 与严格 Arena 成员接线](#独立-bookie-owner-与严格-arena-成员接线)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -1973,3 +1973,27 @@ v2页同时绑定共同manifest与文件角色。Bookie控制根独立，身份�
 五个本轮native临时运行根在终态后，经原始26文件的SHA/uid/gid/mode、相同inode硬链接归档和两次无reader检查后移除，逻辑路径数据7,264,618 bytes；证据硬链接继续持有数据块，常规文件数据回收0 bytes。原失败、输入、日志/XML、源码/class及独立probe均保留，未清理其他任务或受保护PDF。
 
 下一步仍须接唯一Bookie control的严格manifest成员scope、每Arena files/control/index与全局shard owner/预算，再做真实双Arena写读、fence/tombstone、重启/索引丢失重建、回收、缺设备/互换/初建中断验收；初建与restart不得互相补造缺项。Main受控issuer/loader及共同Classic/Profile route claim已裁定但尚未实现。本项是步骤10的必要格式依赖，不是多Arena完成；全16步目标active，B11/B17、完整G1和生产Gate继续OPEN，OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。
+
+
+## 独立 Bookie owner 与严格 Arena 成员接线
+
+2026-10-30在父源码`f59731767a3ad481d76136988e7ef35547f01e03`上，把显式v2格式接入现有Bookie/Arena control、DATA文件与派生index的本地路径。Bookie owner现在可独立于DATA引擎创建/恢复：createManifestControl先验证外部commissioned identity及独立root/config，CREATE_NEW目录后先持久完整manifest，再写/force两个Bookie superblock及唯一bookie-control、同步锁/目录/父目录。只验证并恢复自身文件和完整manifest，不把“成员属于此manifest”宣布为设备已恢复或readiness可写。失败关闭本次native资源并保留候选，同路径create不采用/覆盖；全部身份页字节已完整留下的force未知可经显式open重新同步恢复，不伪报原create成功。v1路径和字节保持原规则。
+
+全局Bookie scope使用明确的Bookie角色，其matchesScope/recoveryReadCut/reclamation/index cut只接受同一完整manifest中精确匹配的root、Arena UUID、持久几何与全局shard定义。纯Bookie成员判断不读取DATA，不持状态锁做磁盘I/O。原pending/writing/rotation/active-admission及唯一reclamation lease条件保留；任一Arena的已接纳请求未终结都阻止全局quiescent cut。v2 at-rest verifier的原AES-GCM AAD另加共同manifest identity，控制内容复制后即使重写合法v2身份页，仍不能绑定另一manifest；原v1 AAD不变。
+
+per-Arena create/open消费已存完整manifest，只创建本Arena的DATA、superblock和arena-control，不复制Bookie日志；打开前核对canonical root/parent，拒绝alias。身份页读入口要求regular file，避免FIFO阻塞。allocator的ALLOC/POOL、DATA范围预留、driver初始化、clean owner恢复和index定位检查固定shard→Arena；不从可读子集重新映射。v2派生index/coverage沿用原格式封套，以本Arena的v2身份页摘要绑定，而非Bookie角色；RocksDB及恢复扫描消费同一Bookie applied cut，没有第二份ledger状态。
+
+四项新增真实验证复用原SegmentBookieControlLogTest：
+
+- 独立Bookie根在两个Arena尚未创建时完成INSTALL/ACTIVATE、全局pending/admission/fence/reclamation门、checkpoint/rotation和重开；错误key、错成员root、v1身份及不同mapping拒绝。该结果仅证明控制owner，不发布设备READY。
+- 同一完整manifest的两Arena使用[1,0,1,0]映射、不同ledger却相同file/allocation/offset数值，一个执行组及同一Bookie owner提供正常DATA本地持久结果和点读；DATA各一次force，Bookie force计数不变。健康关闭后两次重开，实际RocksDB互换拒绝、全索引删除后重建，原两条DATA可读；全局fence/tombstone生效，A的整allocation FREE不影响B，重放保持。
+- wrong commissioned identity在建目录前拒绝；manifest、两个superblock、control文件force边界失败保留候选且create重试不覆盖；完整control页的未知结果经显式replay重新同步。真实symlink父目录不建DATA，真实FIFO DATA在Arena recovery force前拒绝。
+- 复制已安装的Bookie控制records到相同Bookie/incarnation、不同manifest的合法新控制根，仅重写身份页仍解封失败；原根正向重开及原凭据保持有效。
+
+初期两次testCompile失败分别为漏import和测试误用不存在的query；一轮实际DATA组合在最后把FREE后的query错误当作null，而原API按契约抛IOException，已改为明确拒绝断言。原诊断和各阶段源码/输入全部保留，不计产品RED。11项控制/原manifest、12项DATA组合及路径强化各自通过，最终七类**409项同源码整轮通过，0 failure/error/skipped**：Bookie control288、Arena43、格式41、配置2、manifest8、install23及实际service/SDK/健康rolling/readiness四项。没有重跑完整SDK246、stock矩阵或TLC，也不把旧PASS移绑本轮。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/manifest-owner-evidence-f5973176`保存各源码/输入/命令/日志/XML，native输入1181项、外层声明1208项；当前相关134个class已匹配归档。Spotless/Checkstyle exit0；实际RAT exit1，本次修改的RFC-0005补齐ASF声明后432个父源码既有路径/字节仍未批准，无新增，不称CI全绿。新增v2共享owner及两Arena组合没有完整模型、掉电或性能结论。
+
+七个本轮native临时根在终态后，经原始35文件的SHA/uid/gid/mode、同inode硬链接归档及两次无reader检查后移除，逻辑路径数据3,046,133 bytes；原证据数据块由硬链接保留，常规文件数据回收0。编译/fixture错误、阶段源码、实际输入及全部日志/XML保留，未清理其他任务或受保护PDF。
+
+当前IsolatedSegmentStorage和SegmentProfileService的运行/发布图仍为单Arena，v2构造拒绝保持；新本地creator不生产commissioning、旧服务退役/UID隔离、Main输入或registration authority。共同Classic/Profile route claim及全部legacy入口、完整多Arena startup/readiness、每Arena维护/coverage协同、全局buffer/CONTROL/index/filesystem预算仍须接线并验收；本地组合不关闭步骤10/B11/B17、完整G1或生产Gate。全16步目标active，默认OFF/SYSTEM/PARK和disabled能力保持；Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。

@@ -514,6 +514,9 @@ final class SegmentDataPhysicalDriver {
         this.authority = Objects.requireNonNull(authority, "authority");
         this.prefix = Objects.requireNonNull(prefix, "prefix");
         this.hot = Objects.requireNonNull(hot, "hot");
+        if (!files.identity().ownsShard(shard)) {
+            throw new IllegalArgumentException("DATA driver shard belongs to another manifest Arena");
+        }
         if (!files.supportsLocalResults()) {
             throw new IllegalArgumentException("Append-only physical restart has no local-result authority");
         }

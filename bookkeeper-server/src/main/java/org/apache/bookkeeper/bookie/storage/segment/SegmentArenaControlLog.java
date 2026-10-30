@@ -562,6 +562,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(io, "io");
+        identity.requireStoredManifest(config, -4);
         if (maxLogBytes < FIRST_RECORD + 192) {
             throw new IllegalArgumentException("Control log capacity cannot hold one record");
         }
@@ -1586,7 +1587,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     void validatePoolRequest(PoolRequest request) {
-        if (request.shard() >= config.logicalShards()
+        if (request.shard() >= config.logicalShards() || !identity.ownsShard(request.shard())
                 || request.blocks() > (config.bytesPerFile() - FIRST_RECORD) / BLOCK_BYTES) {
             throw new IllegalArgumentException("Pool request exceeds the fixed Arena configuration");
         }
@@ -2100,7 +2101,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         validateIdentityFile(config.directory().resolve("superblock-a"), identity, -1, 4096);
         validateIdentityFile(config.directory().resolve("superblock-b"), identity, -2, 4096);
-        validateIdentityFile(config.directory().resolve("bookie-control"), identity, -3, -1);
+        if (identity.manifest() == null) {
+            validateIdentityFile(config.directory().resolve("bookie-control"), identity, -3, -1);
+        }
         for (int file = 0; file < config.dataFiles(); file++) {
             validateIdentityFile(IsolatedSegmentFiles.dataPath(config, file), identity, file,
                     config.bytesPerFile());
@@ -2109,8 +2112,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private void validateIdentityFile(Path path, SegmentFileHeader identity, int fileId, long expectedSize)
             throws IOException {
-        if (Files.isSymbolicLink(path)) {
-            throw new IOException("Isolated storage file cannot be a symlink: " + path);
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Isolated storage file must be a regular file: " + path);
         }
         try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
             boolean superblock = fileId == -1 || fileId == -2;
@@ -2314,6 +2317,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private void validateAllocationIdentity(AllocationIdentity command) {
         if (command.file() < 0 || command.file() >= config.dataFiles()
                 || command.ownerShard() < 0 || command.ownerShard() >= config.logicalShards()
+                || !identity.ownsShard(command.ownerShard())
                 || command.file() != command.ownerShard() % config.dataFiles()
                 || command.ownerGeneration() == null || command.allocationId() <= 0 || command.blocks() < 1
                 || command.streamFirstSequence() < 0 || command.streamFirstSequence() == Long.MAX_VALUE

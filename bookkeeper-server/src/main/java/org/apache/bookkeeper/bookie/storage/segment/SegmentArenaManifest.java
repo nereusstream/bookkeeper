@@ -117,6 +117,22 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
         return controlDirectory.resolve(FILE_NAME);
     }
 
+    IsolatedSegmentConfig arenaConfig(IsolatedSegmentConfig runtime, int arena) {
+        Arena member = arenas.get(arena);
+        return localConfig(runtime, member.directory(), member.dataFiles(), member.bytesPerFile());
+    }
+
+    IsolatedSegmentConfig bookieConfig(IsolatedSegmentConfig runtime) {
+        // Bookie headers carry zero DATA geometry; these values are never used to open DATA in this root.
+        return localConfig(runtime, controlDirectory, runtime.dataFiles(), runtime.bytesPerFile());
+    }
+
+    private IsolatedSegmentConfig localConfig(IsolatedSegmentConfig runtime, Path root, int files, long bytes) {
+        return new IsolatedSegmentConfig(root, 1, shardArenas.size(), files, bytes, runtime.alignment(),
+                runtime.maxPayloadBytes(), runtime.maxPendingEntries(), runtime.backend(), runtime.affinity(),
+                runtime.numaPolicy(), runtime.waitStrategy());
+    }
+
     /** Create once inside the externally protected control root. Failure never authorizes adoption or replacement. */
     void writeNew(SegmentFileIo io) throws IOException {
         Path file = path();

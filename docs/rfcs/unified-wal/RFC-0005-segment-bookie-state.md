@@ -1,3 +1,21 @@
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
 # RFC-0005：Segment Bookie State、Operation Semantics 与 ACK Authority
 
 > 状态：**Proposed / P0 Prerequisite**<br>
@@ -148,6 +166,12 @@ per-Arena ArenaControlLog + allocator checkpoint
 Data Arena
     payload and recoverable record framing
 ```
+
+2026-10-30本地v2接线：[独立Bookie owner与严格Arena成员](implementation/local-storage/README.md#独立-bookie-owner-与严格-arena-成员接线)已从DATA根解耦Bookie control，消费共同完整manifest并以独立Bookie角色恢复；每Arena不复制route/fence/tombstone日志。cut/reclamation保留全局pending/实际admission排空，scope严格匹配全部manifest及成员root/几何/shard，v2 verifier的AAD绑定共同manifest。双Arena实际DATA、健康重开、index互换/丢失重建和独立FREE已有局部验证；服务运行/发布图、共同Classic route入口、全局预算及完整模型/生产Gate仍OPEN。控制owner可打开不等于required设备已恢复或writable。
+
+共同Classic route的后续格式已裁定、尚未实现：复用Owner.BOOKIE/Type.ROUTE(code1)，64-byte body按schema u32、action u32、value i64、启用binding UUID[16]、共同manifest identity[32]编码，连同原128/16字节framing恰为208 bytes。CLAIM_CLASSIC只做ABSENT→CLASSIC，matching幂等、PROFILE/TOMBSTONED冲突；BOOTSTRAP_COMPLETE的value是完成导入的前序applied cut，空导入明确用空cut，不借ledgerId 0表示。外层保留原operationId/generation/expected-generation/sequence与校验，固定claim generation不改owner。同operationId不同body冲突，两动作归同一operation index、顺序apply和流式checkpoint；CLASSIC数据删除不释放route，没有已验证GC则保留、容量不足拒绝。
+
+启用绑定由固定native commissioning sidecar、每个真实Classic root的current/route-claim-binding及本日志BOOTSTRAP_COMPLETE共同封口；新manifest schema包含全部Classic root/角色，原manifest schema解释不变。绑定持久scope、操作UUID、完整manifest及control root引用；只在独占PREPARED、完整本地枚举/必要Journal replay/flush确认后封口并开放install/registration。OFF或marker部分丢失不能绕过；episode nonce不作磁盘世代。首次请求由BookieImpl异步借原CONTROL执行，回已注入的Classic执行器续接；不是owner上运行Classic I/O。208-byte下界不变仍须增加typed容量中的真实route variant/index、pending跟随者、master-key快照、续接票据和checkpoint暂存费用，不能沿用旧Profile费用当证明。
 
 Bookie级日志是跨Arena ledger权限的唯一持久化owner；不把相同route/fence/grant分别交给多个Arena决定。其conditional transition按bounded per-ledger顺序执行，物理append/fsync可跨ledger group commit；只记录控制事实，不重复记录DATA payload，不给normal Add增加控制日志fsync。实现前在Spike B manifest锁定record/batch边界、完整prefix、A/B checkpoint/rotation、credential protection及queue/waiter上限。
 

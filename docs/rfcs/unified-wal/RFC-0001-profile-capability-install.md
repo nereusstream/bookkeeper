@@ -504,6 +504,10 @@ normal Add 与 legacy `RECOVERY_ADD` 变体都必须经过相同 routing gate。
 
 2026-10-30规划裁决：共同slot由现有Bookie control持久owner统一拥有并独立于Segment DATA装配；首创建以外只查本地已应用状态。HandleFactory缓存命中、只读入口、Journal replay及read/LAC/fence/force同样不得绕过，已有Classic数据须在独占启动期依据完整存储/journal纳入，authority缺失或冲突阻止writable。PROFILE/TOMBSTONED上的legacy请求使用已有EUA，Profile仍保留具体状态；纯Classic默认保持，持久启用标记不能被OFF绕过。首版继续独立cohort，不以此新增常驻legacy listener或生产双引擎模式。实际入口接线、共同竞争/UNKNOWN/重启及成本验收尚OPEN，详见[当前接线缺口](implementation/profile-wire/README.md#classic-与-profile-的共同-route-claim-接线缺口)。
 
+2026-10-30进一步接线裁决（尚未实现）：BookieImpl的normal/recovery Add、WRITE_LAC及fence负责ABSENT的异步durable CLASSIC claim；read/LAC/watch/枚举和force不创建claim，PROFILE/TOMBSTONED均在原副作用前EUA，PENDING/UNKNOWN/未完成bootstrap不能解释为ABSENT/NoSuchEntry。HandleFactory在缓存与创建前仅同步检查已应用route，不等待或追加控制记录；processor只作既有调度及逐项错误映射。续接必须回提前注入的既有非event-loop Classic写/高优先级执行器，route-enabled配置没有该执行器则拒绝启动，不CallerRuns回Netty/CONTROL owner。首次等待先取有限count/bytes/续接名额，票据接管原ByteBuf，跟随者保存在owner的有界pending下；caller取消/断连不撤销已接纳claim，输入/回调/processor按实际CONTROL、续接、Journal和输出终态归还，不让同请求既抛错又回调。forceLedger须独立检查，Journal replay须早于masterKeyCache.put检查，清理已有watch仍允许。
+
+启用固定采用native commissioning sidecar＋所有实际Classic root的current/route-claim-binding＋Bookie control封口；先于目录管理器、LedgerStorage、Journal及可能建目录的Cookie helper只读preflight，直接构造BookieImpl也消费同一验证上下文。即使OFF也读固定native绑定，部分/缺失/未知不能退回默认；只有确认从未启用的Classic走原路径。新manifest schema明确纳入所有journal/ledger/有效index根，物理共用根去重并保存角色，不能拿旧cohort迁移证据目录代替本域成员；已绑定清单不原地修改。独占PREPARED及markers持久后，完整本地枚举和全部必要journal副作用先取得CLASSIC claim，replay/flush确认再写BOOTSTRAP_COMPLETE及条件化完成native绑定，之后才install/registration。该规定不新增生产双引擎模式或stock binary fence证明。
+
 ### 7.2 幂等与冲突
 
 | 已有状态 | 请求 | 结果 |

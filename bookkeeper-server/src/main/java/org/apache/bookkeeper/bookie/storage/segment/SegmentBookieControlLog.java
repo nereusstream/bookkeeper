@@ -763,11 +763,61 @@ final class SegmentBookieControlLog implements AutoCloseable {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(descriptorValidator, "descriptorValidator");
         Objects.requireNonNull(io, "io");
+        if (identity.manifest() != null && !identity.bookieScope()) {
+            throw new IOException("Bookie control requires its manifest's independent Bookie scope");
+        }
+        identity.requireStoredManifest(config, -3);
         if (maxLogBytes < FIRST_RECORD + 2048) {
             throw new IllegalArgumentException("Bookie control capacity cannot hold an install");
         }
         SegmentDataFileLock writerLock = SegmentDataFileLock.openControl(
                 config.directory().resolve("bookie-control.lock"));
+        return openWhileLocked(config, identity, maxLogBytes, key, descriptorValidator, io, writerLock);
+    }
+
+    /** Fresh controlled initialization of the independent Bookie owner; no Arena or DATA engine is constructed. */
+    static SegmentBookieControlLog createManifestControl(IsolatedSegmentConfig config, SegmentArenaManifest manifest,
+            org.apache.bookkeeper.common.profile.startup.ManifestIdentity commissioned, long maxLogBytes,
+            SecretKey key, ProfileDescriptorValidator validator, SegmentFileIo io) throws IOException {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(validator, "validator");
+        Objects.requireNonNull(io, "io");
+        SegmentFileHeader identity = SegmentFileHeader.forBookie(manifest);
+        if (!manifest.identity().equals(commissioned) || !identity.matchesManifestScope(config)
+                || maxLogBytes < FIRST_RECORD + 2048) {
+            throw new IOException("Commissioned manifest and independent Bookie control scope required");
+        }
+        Files.createDirectory(config.directory(),
+                java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")));
+        SegmentDataFileLock writerLock = SegmentDataFileLock.openControl(
+                config.directory().resolve("bookie-control.lock"));
+        try {
+            // Persist the full commissioned topology before any member identity or control state.
+            manifest.writeNew(io);
+            IsolatedSegmentFiles.writeIdentity(config.directory().resolve("superblock-a"),
+                    identity.encode(config, -1), io);
+            IsolatedSegmentFiles.writeIdentity(config.directory().resolve("superblock-b"),
+                    identity.encode(config, -2), io);
+            IsolatedSegmentFiles.writeIdentity(config.directory().resolve("bookie-control"),
+                    identity.encode(config, -3), io);
+            io.force(writerLock.channel(), true);
+            IsolatedSegmentFiles.syncDirectory(config.directory());
+            IsolatedSegmentFiles.syncDirectory(config.directory().getParent());
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                writerLock.close();
+            } catch (IOException cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        }
+        return openWhileLocked(config, identity, maxLogBytes, key, validator, io, writerLock);
+    }
+
+    private static SegmentBookieControlLog openWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SecretKey key, ProfileDescriptorValidator descriptorValidator, SegmentFileIo io,
+            SegmentDataFileLock writerLock) throws IOException {
         FileChannel original = null;
         SegmentBookieControlLog result = null;
         try {
@@ -1725,11 +1775,22 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     synchronized boolean matchesScope(IsolatedSegmentFiles files) {
-        return !closed && files.matchesScope(config, identity);
+        if (identity.manifest() == null) {
+            return !closed && files.matchesScope(config, identity);
+        }
+        return matchesScope(files.config(), files.identity()) && files.matchesScope(files.config(), files.identity());
     }
 
     synchronized boolean matchesScope(IsolatedSegmentConfig source, SegmentFileHeader sourceIdentity) {
-        return !closed && !failed && config.sameStorageScope(source) && identity.equals(sourceIdentity);
+        if (closed || failed) {
+            return false;
+        }
+        if (identity.manifest() == null) {
+            return config.sameStorageScope(source) && identity.equals(sourceIdentity);
+        }
+        return identity.bookieScope() && sourceIdentity != null
+                && identity.manifest().equals(sourceIdentity.manifest())
+                && sourceIdentity.matchesManifestScope(source);
     }
 
     /** A diagnostic change counter; actual reclamation still requires its existing protected lease. */
@@ -3281,11 +3342,16 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private byte[] storageBinding(ProfileControlScope scope) {
         byte[] bookie = identity.bookieId().toString().getBytes(StandardCharsets.UTF_8);
         byte[] context = context(scope).encode();
-        return ByteBuffer.allocate(16 + 16 + 2 + bookie.length + context.length)
+        int extra = identity.manifest() == null ? 0 : 32;
+        ByteBuffer binding = ByteBuffer.allocate(16 + 16 + 2 + bookie.length + context.length + extra)
                 .put(identity.incarnation().value())
                 .putLong(identity.arenaId().getMostSignificantBits())
                 .putLong(identity.arenaId().getLeastSignificantBits())
-                .putShort((short) bookie.length).put(bookie).put(context).array();
+                .putShort((short) bookie.length).put(bookie).put(context);
+        if (identity.manifest() != null) {
+            binding.put(identity.manifest().identity().value());
+        }
+        return binding.array();
     }
 
     private static ProfileLedgerContext context(ProfileControlScope scope) {
@@ -3304,6 +3370,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         validateIdentity(config.directory().resolve("superblock-a"), -1, 4096);
         validateIdentity(config.directory().resolve("superblock-b"), -2, 4096);
+        if (identity.manifest() != null) {
+            identity.requireStoredManifest(config, -3);
+            validateIdentity(config.directory().resolve("bookie-control"), -3, -1);
+            return; // Per-Arena recovery and whole-Bookie readiness belong to the complete storage graph.
+        }
         validateIdentity(config.directory().resolve("arena-control"), -4, -1);
         for (int file = 0; file < config.dataFiles(); file++) {
             validateIdentity(IsolatedSegmentFiles.dataPath(config, file), file, config.bytesPerFile());
@@ -3312,8 +3383,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private void validateIdentity(Path path, int fileId, long expectedSize) throws IOException {
-        if (Files.isSymbolicLink(path)) {
-            throw new IOException("Isolated storage file cannot be a symlink");
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Isolated storage file must be a regular file");
         }
         try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
             boolean superblock = fileId == -1 || fileId == -2;

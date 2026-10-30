@@ -20,6 +20,9 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.zip.CRC32C;
@@ -68,6 +71,34 @@ record SegmentFileHeader(StorageIncarnation incarnation, UUID arenaId, BookieId 
             }
         }
         return -1; // Explicit Bookie control scope, independent of every member Arena.
+    }
+
+    boolean bookieScope() {
+        return manifest != null && arenaId.equals(BOOKIE_SCOPE);
+    }
+
+    boolean ownsShard(int shard) {
+        return manifest == null || !bookieScope() && shard >= 0 && shard < manifest.shardArenas().size()
+                && manifest.arenaForShard(shard) == arenaIndex();
+    }
+
+    boolean matchesManifestScope(IsolatedSegmentConfig config) {
+        return manifest != null && matchesManifestLayout(config, bookieScope() ? -3 : -4);
+    }
+
+    void requireStoredManifest(IsolatedSegmentConfig config, int fileId) throws IOException {
+        if (manifest == null) {
+            return;
+        }
+        if (!matchesManifestLayout(config, fileId)) {
+            throw new IOException("Complete Arena manifest member scope does not match");
+        }
+        Path root = config.directory();
+        Path existing = Files.exists(root, LinkOption.NOFOLLOW_LINKS) ? root : root.getParent();
+        if (!existing.equals(existing.toRealPath())
+                || !manifest.equals(SegmentArenaManifest.read(manifest.path(), manifest.identity()))) {
+            throw new IOException("Stored complete Arena manifest or canonical member root does not match");
+        }
     }
 
     private boolean matchesManifestLayout(IsolatedSegmentConfig config, int fileId) {

@@ -28,7 +28,7 @@ DATA fileId 从0递增；superblock A/B 为 -1/-2，Bookie/Arena control 为 -3/
 
 ## 多 Arena 的显式 v2 身份基础
 
-2026-10-30按指定规划会话裁决新增`SegmentArenaManifest`和v2身份页编码/校验；原三参数`SegmentFileHeader`仍产生上述逐字节不变的v1。当前仅完成固定拓扑的文件输入与身份基础，实际storage/service仍拒绝v2图，不能据此启动部分Arena或发布readiness。多Arena运行、唯一Bookie控制owner、全部成员恢复、索引/coverage及维护接线仍OPEN。
+2026-10-30按指定规划会话裁决新增`SegmentArenaManifest`和v2身份页编码/校验；原三参数`SegmentFileHeader`仍产生上述逐字节不变的v1。后续本地接线已使独立Bookie control及两个Arena的真实文件/恢复/index可共享此scope；实际storage/service运行与发布图仍拒绝v2，完整required设备启动、预算和维护仍OPEN，不能据局部owner或部分Arena发布readiness。
 
 manifest采用big-endian的`UWAMAN01`、schema u32=1、incarnation[16]、BookieId、Arena数量、独立Bookie control root、全局shard数量、按UUID字符串升序的全部Arena及逐shard的Arena索引。文本为u32长度加严格UTF-8；BookieId最多255 bytes，root最多4096 bytes，Arena和shard各1～64，单个输入最多1 MiB。每Arena记录UUID、绝对规范root、DATA文件数及每文件容量，root之间及与control root不得嵌套/重叠，全部容量用checked arithmetic。映射明确保留每个全局shard，不依赖worker或当前可读设备。manifest identity为`SHA-256(ASCII("BookKeeper/SegmentArenaManifest/v1\0") || 完整编码)`，不含可调worker/CPU/NUMA/准入额度或运行期checkpoint，也不含反向引用该digest的身份页。
 
@@ -42,6 +42,10 @@ v2仍为4096 bytes，offset 8显式version=2，offset112的mandatory feature为3
 | 400 | manifest identity[32] |
 | 432 / 436 / 440 | Arena数量u32 / role u32（1 Bookie、2 Arena）/ Arena index i32（Bookie为-1） |
 | 444～4092 / 4092 | zero reserved / CRC32C `[0,4092)` |
+
+v2 Bookie控制根由createManifestControl消费外部commissioned identity，在不存在的独立目录先保存完整manifest，再创建superblock-a/b和bookie-control并force/sync；per-Arena目录只创建其DATA、superblock-a/b和arena-control。Bookie的打开/恢复只验证自身文件及共同manifest，整Bookie的required设备恢复/readiness另由完整服务图证明。native member开/建要求canonical root或现有parent，allocator/driver/恢复/index均检查固定shard成员。
+
+v2 INSTALL verifier仍使用原49-byte AES-GCM sealed字段，原storage binding（incarnation、零Arena UUID、BookieId及ledger context）后附manifest identity[32]作为AAD；v1 binding与bytes保持。Bookie/Arena control framing和checkpoint/rotation封套不改为另一套格式，其native身份页必须分别是相应scope的v2；派生index/coverage的scope digest在v2使用Arena身份页fileId=-4，v1仍用-3。复制control并重写身份页不能绕过verifier的manifest绑定，互换Arena index也不能通过scope校验。
 
 v2校验同时检查完整manifest、所属root/config、文件角色及成员身份；修改mapping、布局、root或成员会改变共同身份，重算页CRC不使其匹配旧manifest。v1/v2互拒，v2不混入v1成员；不提供same-incarnation转换或header重盖章入口。需要搬运数据仍走新scope verified export/rebuild。此格式基础不提供stock Classic binary fence，现有目录/credential隔离合同保持。
 

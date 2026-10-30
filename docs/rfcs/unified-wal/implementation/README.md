@@ -267,7 +267,7 @@ DATA durable → hot locator → local result
 
 单Arena读写回收稳定后加入第二个Arena，验证同Bookie的route/fence/tombstone一致性、required device部分失败与共享filesystem预算，不实现跨Arena搬迁。
 
-用户2026-10-28已冻结首版多Arena边界：固定Arena/device清单及显式shard→Arena映射纳入受保护manifest；同一storage incarnation内不增删Arena、不重新分配shard，变更通过新incarnation bootstrap。不能从可读设备子集重算映射；当前服务图仍限单Arena；2026-10-30已接有界完整manifest与显式v2身份基础，但实际多Arena control/index/owner/恢复及全局预算尚未接线，不因此标记步骤10完成。
+用户2026-10-28已冻结首版多Arena边界：固定Arena/device清单及显式shard→Arena映射纳入受保护manifest；同一storage incarnation内不增删Arena、不重新分配shard，变更通过新incarnation bootstrap。不能从可读设备子集重算映射；当前服务图仍限单Arena；2026-10-30已接有界完整manifest与显式v2身份基础，但独立Bookie owner/per-Arena control/index/固定shard与本地恢复已接入真实组合，完整服务发布、维护协同及全局预算仍未接线，不因此标记步骤10完成。
 
 亲和性沿用B18的分离对照，worker数、batch、I/O、TLS范围、E/W/A和维护负载保持相同：
 
@@ -953,3 +953,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [固定 Arena manifest 与显式 v2 身份基础](local-storage/README.md#固定-arena-manifest-与显式-v2-身份基础)：2026-10-30父5a965e38d5上新增完整固定拓扑文件及v2角色/共同identity，v1字节和严格版本边界保持；实际单Arena服务构造仍拒绝v2部分图。格式51项、四类596项的原5失败/父版本同例复现、13项补验、最终8项FIFO拒绝及独立旧parser/逐位CRC/实际class证据由canonical拥有，未称整轮全绿。style通过，RAT433既有路径无新增；多Arena实际运行、Main发行者/装载、共同route claim和完整16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
+
+
+[独立 Bookie owner 与严格 Arena 成员接线](local-storage/README.md#独立-bookie-owner-与严格-arena-成员接线)：2026-10-30父f59731767a上，v2独立控制根先保存commissioned完整manifest，Bookie scope/cut和AAD绑定整体，每Arena文件/allocator/index/driver验证固定成员与shard。真实双Arena normal DATA、健康重开、index互换拒绝/全丢失重建、fence/tombstone/独立FREE及错误候选验证已接；最终七类409项同源码通过，早期fixture/编译诊断保留。style及RAT实际状态由canonical拥有，service v2图仍拒绝，不能据控制owner或局部组合发布writable。共同route入口、Main、全局预算与完整16步/Gate仍OPEN，目标active，OFF/SYSTEM/PARK与disabled保持。
