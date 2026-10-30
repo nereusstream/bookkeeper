@@ -36,6 +36,9 @@ import org.apache.bookkeeper.net.BookieId;
 
 /** Fixed native binding preflight before Classic storage side effects. It never creates a path or repairs authority. */
 public final class ClassicRouteStartup {
+    /** Presence is a retained local-use exclusion, never a native binding or cluster authority fact. */
+    public static final String FRESH_LOCK_FILE_NAME = "fresh-classic-owner.lock";
+
     private ClassicRouteStartup() { }
 
     /** One startup episode only; this token is neither a persistent incarnation nor a common-owner permission. */
@@ -88,6 +91,7 @@ public final class ClassicRouteStartup {
                     + (read == null ? "null backend result" : read.status() + ": " + read.detail()));
         }
         for (Path root : List.of(configuration.directory(), SegmentDerivedIndex.directory(configuration))) {
+            requireNoFreshOwner(root);
             requireAbsentMarker(root.resolve(SegmentClassicRootBindings.FILE_NAME));
             // RocksDB has a regular CURRENT file, also named current on case-insensitive filesystems.
             // Only a retained Classic directory can contain the nested marker.
@@ -123,10 +127,22 @@ public final class ClassicRouteStartup {
             roots.addAll(scope.index());
         }
         for (String root : roots) {
-            Path marker = Path.of(root).toAbsolutePath().normalize().resolve("current")
+            Path directory = Path.of(root).toAbsolutePath().normalize();
+            requireNoFreshOwner(directory);
+            Path marker = directory.resolve("current")
                     .resolve(SegmentClassicRootBindings.FILE_NAME);
             requireAbsentMarker(marker);
         }
+    }
+
+    private static void requireNoFreshOwner(Path directory) throws IOException {
+        try {
+            Files.readAttributes(directory.resolve(FRESH_LOCK_FILE_NAME), BasicFileAttributes.class,
+                    LinkOption.NOFOLLOW_LINKS);
+        } catch (NoSuchFileException absent) {
+            return;
+        }
+        throw new IOException("Storage root retains a fresh Classic owner marker; its explicit owner is required");
     }
 
     private static void requireAbsentMarker(Path marker) throws IOException {

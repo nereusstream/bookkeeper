@@ -962,3 +962,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [共同启用的 native 绑定、根标记与启动拒绝](local-storage/README.md#共同启用的-native-绑定根标记与启动拒绝)：2026-10-30父4c02a7378b上，真实ZK固定namespace的PREPARED/ENABLED、原Cookie/native出生条件及实际根marker子组件已实现，Classic/Profile启动前冷读拒绝不允许OFF/unknown/null绕过；普通未绑定ZK Classic保留原路径。Profile manager-only冷读不获得mutation能力，旧driver二进制可装载与unsupported运行时拒绝分开说明。实际验证与source/receipt由canonical拥有。完整共同owner装配、Classic导入/replay/flush/异步claim、fresh-disposable Null上下文、Main/G1/full-bytes和16步总验收继续OPEN，目标active，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+[fresh Classic 根租约与重用拒绝](local-storage/README.md#fresh-classic-根租约与重用拒绝)：2026-10-31父a9a06410d5上，完整空根的真实独占租约、持久一次使用标记与物理身份复核已接线到根资源子组件，Classic/Profile冷启动不绕过标记；五类29项及style通过，原失败/默认目录恢复及有限证据由canonical拥有。稳定fresh外层owner/permit/逐资源初始化与实际drain仍未实现，不增加EmbeddedServer fresh。共同owner/Main/G1/full-bytes及完整16步保持OPEN，目标active，OFF/SYSTEM/PARK和disabled保持。

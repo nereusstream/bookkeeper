@@ -3586,21 +3586,23 @@ public class SegmentProfileInitialSocketClientTest {
     @Test
     public void nativeAbsenceCannotEraseCommonMarkersInActualProfileRoots() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true)) {
-            for (int placement = 0; placement < 3; placement++) {
+            for (int placement = 0; placement < 5; placement++) {
                 var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("retained-marker"),
                         1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16,
                         "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
                 var requested = servicePolicy(config, fixture.identities.get(0), 1);
-                Path markerRoot = placement == 0 ? config.directory() : placement == 1
+                Path markerRoot = placement == 0 || placement == 3 ? config.directory() : placement == 1
                         ? config.directory().resolve("current") : SegmentDerivedIndex.directory(config);
                 Files.createDirectories(markerRoot);
-                Path marker = markerRoot.resolve(SegmentClassicRootBindings.FILE_NAME);
+                Path marker = markerRoot.resolve(placement >= 3 ? ClassicRouteStartup.FRESH_LOCK_FILE_NAME
+                        : SegmentClassicRootBindings.FILE_NAME);
                 byte[] candidate = new byte[]{1, 2, 3};
                 Files.write(marker, candidate);
                 try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
                         new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup)) {
                     var failure = assertThrows(IOException.class, () -> episode.service.start(false));
-                    assertTrue(failure.getMessage().contains("retains a common binding"));
+                    assertTrue(failure.getMessage().contains(placement >= 3
+                            ? "fresh Classic owner marker" : "retains a common binding"));
                     assertNull(episode.storage());
                     assertArrayEquals(candidate, Files.readAllBytes(marker));
                     try (var members = Files.list(config.directory())) {

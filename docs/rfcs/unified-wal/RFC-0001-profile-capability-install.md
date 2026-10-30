@@ -514,7 +514,7 @@ normal Add 与 legacy `RECOVERY_ADD` 变体都必须经过相同 routing gate。
 
 独立Profile启动也必须在storage/目录/发布前执行同一native检查，不能绕过EmbeddedServer的Classic分支。由实际AbstractZkLedgerManager借用自身ZK与固定ledger root提供窄冷读，ProfileLedgerMetadataStore转发；manager-only可读但不获得mutation能力，非ZK不推导替代namespace。当前独立v1图仅接受权威ABSENT且实际Arena/control/index根无保留marker；FOUND（含匹配PREPARED/ENABLED）、未知、不可用、损坏和null均拒绝，不访问未使用的Classic默认目录。ABSENT不代替commissioning/root互斥，也不关闭完整G1。
 
-Null的例外需另行显式NO_CLUSTER_AUTHORITY上下文：完整实际root集全新且无历史/身份/共同标记，factory持有独占所有权，绑定Bookie、canonical roots及单次episode，消费前复核物理身份；不注册、不用于Profile、共同commissioning或restart。不得由公开构造器/布尔配置、Null/unsupported默认路径伪造，实际清理未终结不能重新发行。该上下文当前尚未实现，普通Null启动拒绝保持。 进一步冻结首个切片仅支持显式本地fresh Classic及内置InterleavedLedgerStorage，稳定外层owner先返回再初始化，逐项登记并只在实际可重试drain完成后解锁；不把shutdown返回码或isRunning=false当终态，不新增EmbeddedServer fresh入口。实现仍OPEN，详见执行正文的后续接续。
+Null的例外需另行显式NO_CLUSTER_AUTHORITY上下文：完整实际root集全新且无历史/身份/共同标记，factory持有独占所有权，绑定Bookie、canonical roots及单次episode，消费前复核物理身份；不注册、不用于Profile、共同commissioning或restart。不得由公开构造器/布尔配置、Null/unsupported默认路径伪造，实际清理未终结不能重新发行。该上下文当前尚未实现，普通Null启动拒绝保持。 进一步冻结首个切片仅支持显式本地fresh Classic及内置InterleavedLedgerStorage，稳定外层owner先返回再初始化，逐项登记并只在实际可重试drain完成后解锁；不把shutdown返回码或isRunning=false当终态，不新增EmbeddedServer fresh入口。实现仍OPEN，详见执行正文的后续接续。 根资源子组件已新增持久`fresh-classic-owner.lock`，仅作为本地一次使用排除；Classic/Profile各实际根发现它均拒绝普通未绑定路径。该子组件不发行上下文、集群authority或实际drain证明，完整fresh入口仍OPEN。
 
 ### 7.2 幂等与冲突
 

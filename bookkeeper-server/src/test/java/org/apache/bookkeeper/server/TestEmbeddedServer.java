@@ -42,6 +42,7 @@ import lombok.Cleanup;
 import org.apache.bookkeeper.bookie.BookieImpl;
 import org.apache.bookkeeper.bookie.BookieResources;
 import org.apache.bookkeeper.bookie.LedgerDirsManager;
+import org.apache.bookkeeper.bookie.LedgerStorage;
 import org.apache.bookkeeper.bookie.LegacyCookieValidation;
 import org.apache.bookkeeper.bookie.UncleanShutdownDetectionImpl;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileService;
@@ -61,7 +62,9 @@ import org.apache.bookkeeper.stats.NullStatsProvider;
 import org.apache.bookkeeper.stats.StatsLogger;
 import org.apache.bookkeeper.stats.StatsProvider;
 import org.apache.bookkeeper.util.DiskChecker;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -71,6 +74,13 @@ import org.mockito.junit.MockitoJUnitRunner;
  */
 @RunWith(MockitoJUnitRunner.class)
 public class TestEmbeddedServer {
+    @Rule
+    public final TemporaryFolder temporary = new TemporaryFolder();
+
+    private void configureClassicRoots(ServerConfiguration configuration) throws IOException {
+        configuration.setJournalDirName(temporary.newFolder("journal").getCanonicalPath());
+        configuration.setLedgerDirNames(new String[]{temporary.newFolder("ledger").getCanonicalPath()});
+    }
 
     // These assembly tests stub the storage/Cookie/Bookie graph. Express native absence explicitly;
     // a Null backend must never acquire that fact in production.
@@ -138,6 +148,9 @@ public class TestEmbeddedServer {
                 CALLS_REAL_METHODS);
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
+        // Assembly tests already mock Bookie/BookieServer; do not open an unowned real storage backend.
+        bookieResourcesMockedStatic.when(() -> BookieResources.createLedgerStorage(
+                any(), any(), any(), any(), any(), any())).thenReturn(mock(LedgerStorage.class));
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createAllocator(any())).thenReturn(mock(ByteBufAllocatorWithOomHandler.class));
 
@@ -146,6 +159,7 @@ public class TestEmbeddedServer {
             .setAutoRecoveryDaemonEnabled(false)
             .setHttpServerEnabled(false)
             .setExtraServerComponents(new String[] { TestComponent.class.getName() });
+        configureClassicRoots(serverConf);
         BookieConfiguration conf = new BookieConfiguration(serverConf);
 
         @Cleanup
@@ -191,6 +205,7 @@ public class TestEmbeddedServer {
                 .setAutoRecoveryDaemonEnabled(false)
                 .setHttpServerEnabled(false)
                 .setExtraServerComponents(new String[]{TestComponent.class.getName()});
+        configureClassicRoots(serverConf);
         BookieConfiguration conf = new BookieConfiguration(serverConf);
 
         StatsProvider statsProvider = new NullStatsProvider();
@@ -215,6 +230,9 @@ public class TestEmbeddedServer {
         MockedStatic<BookieResources> bookieResourcesMockedStatic = mockStatic(BookieResources.class);
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
+        // Assembly tests already mock Bookie/BookieServer; do not open an unowned real storage backend.
+        bookieResourcesMockedStatic.when(() -> BookieResources.createLedgerStorage(
+                any(), any(), any(), any(), any(), any())).thenReturn(mock(LedgerStorage.class));
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createAllocator(any())).thenReturn(byteBufFromResources);
 
@@ -277,6 +295,9 @@ public class TestEmbeddedServer {
                 CALLS_REAL_METHODS);
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
+        // Assembly tests already mock Bookie/BookieServer; do not open an unowned real storage backend.
+        bookieResourcesMockedStatic.when(() -> BookieResources.createLedgerStorage(
+                any(), any(), any(), any(), any(), any())).thenReturn(mock(LedgerStorage.class));
 
         ServerConfiguration serverConf = new ServerConfiguration()
             .setAllowLoopback(true)
@@ -284,6 +305,7 @@ public class TestEmbeddedServer {
             .setHttpServerEnabled(false)
             .setExtraServerComponents(new String[] { "bad-server-component"})
             .setIgnoreExtraServerComponentsStartupFailures(true);
+        configureClassicRoots(serverConf);
         BookieConfiguration conf = new BookieConfiguration(serverConf);
 
         @Cleanup
@@ -326,6 +348,9 @@ public class TestEmbeddedServer {
                 CALLS_REAL_METHODS);
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
+        // Assembly tests already mock Bookie/BookieServer; do not open an unowned real storage backend.
+        bookieResourcesMockedStatic.when(() -> BookieResources.createLedgerStorage(
+                any(), any(), any(), any(), any(), any())).thenReturn(mock(LedgerStorage.class));
 
         ServerConfiguration serverConf = new ServerConfiguration()
             .setAllowLoopback(true)
@@ -333,6 +358,7 @@ public class TestEmbeddedServer {
             .setHttpServerEnabled(false)
             .setExtraServerComponents(new String[] { "bad-server-component"})
             .setIgnoreExtraServerComponentsStartupFailures(false);
+        configureClassicRoots(serverConf);
         BookieConfiguration conf = new BookieConfiguration(serverConf);
 
         @Cleanup

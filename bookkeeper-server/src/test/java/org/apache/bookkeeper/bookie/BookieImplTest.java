@@ -34,7 +34,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.conf.ServerConfiguration;
-import org.apache.bookkeeper.conf.TestBKConfiguration;
 import org.apache.bookkeeper.discover.RegistrationManager;
 import org.apache.bookkeeper.meta.MetadataBookieDriver;
 import org.apache.bookkeeper.net.BookieId;
@@ -64,7 +63,7 @@ public class BookieImplTest extends BookKeeperClusterTestCase {
     @Test
     public void testWriteLac() throws Exception {
         final String metadataServiceUri = zkUtil.getMetadataServiceUri();
-        ServerConfiguration conf = TestBKConfiguration.newServerConfiguration();
+        ServerConfiguration conf = newServerConfiguration();
         conf.setMetadataServiceUri(metadataServiceUri);
 
         MetadataBookieDriver metadataDriver = BookieResources.createMetadataDriver(
@@ -130,7 +129,7 @@ public class BookieImplTest extends BookKeeperClusterTestCase {
 
     public void mockAddEntryReleased(int flag) throws Exception {
         final String metadataServiceUri = zkUtil.getMetadataServiceUri();
-        ServerConfiguration conf = TestBKConfiguration.newServerConfiguration();
+        ServerConfiguration conf = newServerConfiguration();
         conf.setMetadataServiceUri(metadataServiceUri);
 
         MetadataBookieDriver metadataDriver = BookieResources.createMetadataDriver(

@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-30 当前增量为[共同启用的 native 绑定、根标记与启动拒绝](#共同启用的-native-绑定根标记与启动拒绝)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-31 当前增量为[fresh Classic 根租约与重用拒绝](#fresh-classic-根租约与重用拒绝)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -2043,3 +2043,24 @@ EmbeddedServer取得RegistrationManager后、目录管理器/Cookie/storage之�
 整轮归档native输入1192项；随后仅补齐测试脚本的ASF声明及五项既有Classic依赖声明，全部最终Java输入及153个相关class逐字节不变，最终harness的1197输入另有原根/native两类21项通过。两份源码锁与桥接记录分别保留，不把前一轮harness字节改绑为后一轮。源码外层声明1224项，另有9份既有文档绑定；证据目录`/Users/liusinan/.codex/artifacts/unified-wal/common-startup-evidence-4c02a737`拥有各阶段源码/命令/日志/XML、错误与最终class。实际RAT exit1，剩余431个父源码既有路径/字节未批准，无新增；本次已触碰的测试脚本补齐ASF声明消除其中1项，受保护PDF预先排除且未读取。不称CI全绿。未运行新模型、stock矩阵、掉电、性能或full-bytes测量，不提升完整G1、Main或生产Gate。
 
 本轮10个native临时根在确认终态、67个原始文件的SHA/权限/owner与归档同inode硬链接匹配，以及两次无reader检查后移除；移除路径的逻辑字节12,465,042，归档保留同一数据块，常规文件数据回收0。历史失败、全部回执和源码/class保留，未清理其他任务或受保护PDF。
+
+
+## fresh Classic 根租约与重用拒绝
+
+2026-10-31在父源码`a9a06410d521c0dadb47482833a0e69f40bf9f1e`上，实现显式fresh owner所需的包内根资源子组件FreshClassicRoots。构造只冻结Bookie与完整journal/ledger/有效index配置，不打开文件；acquire先核验全部现存空根，按物理身份合并alias及index fallback，再逐根CREATE_NEW 0600的`fresh-classic-owner.lock`并持有真实FileLock，force文件与目录。该文件是持久的一次使用排除标记，不是native共同绑定，不含集群authority或可用于restart的许可。缺根、历史/未知文件和已有候选均拒绝；失败保留已取得的channel/lock，由原资源对象显式关闭，不在失败处丢失owner或删除候选。
+
+使用前复核Bookie/完整配置、每个configured alias原来绑定的成员、canonical目录fileKey、原标记fileKey/私有权限及实际所持FileLock。相同路径、相同空字节和权限不能替换物理目录或标记，alias也不能从一个已持成员悄悄改指另一个成员。close与获取/核验串行，只释放自身资源并保留候选；未acquire即close不建文件，close后不能再次acquire。资源子组件本身不证明Bookie实际drain，其未来外层owner必须在全部使用者实际终结后才调用close。
+
+Classic preflight/原上下文consume及独立Profile启动在各自实际根上也拒绝该fresh标记，即使native查询是ABSENT，避免把本地fresh排除标记当成普通ZK未绑定scope或Profile资格。未使用的Classic默认目录仍不访问。当前没有公开fresh入口，没有发行NO_CLUSTER_AUTHORITY permit，普通Null/unsupported构造仍拒绝；稳定外层owner、逐资源初始化/构造失败登记、入口admission及Bookie/Journal/Interleaved/执行器实际可重试drain继续待接线，首版不增加EmbeddedServer fresh分支。
+
+七个新文件系统场景用第二JVM直接tryLock实际标记，验证持有/释放、并发或restart重用拒绝、有效index fallback、alias换目标、完整根在首个文件前验证、真实权限错误后的部分获取、目录/标记同字节物理重建及未acquire关闭；当前macOS实际7项无跳过。最终五类29项通过，0 failure/error/skipped：根租约7、原根/Classic组合11、BookieImpl3、Embedded5，以及实际Profile marker/owned SDK/健康rolling三项。Spotless/Checkstyle通过。该局部组合不重跑或移绑父695项/完整SDK248的回执，不证明完整fresh生命周期。
+
+首轮新夹具误用废弃getJournalDirName，返回默认`/tmp/bk-txn`而非本测试目录，导致默认目录被移动；进程终态后，经两次lsof范围检查，在不读取/复制原内容的条件下将原目录按原inode及原直接子项名恢复，测试新建空目录/标记另行保留。夹具改用真实多目录getter，并为全部配置路径的文件操作加上必须位于本测试TemporaryFolder内的独立检查。第二次夹具错误是在同JVM复制持锁文件，关闭第二fd导致POSIX锁被操作系统释放；改为独立构造相同空标记，避免测试自身扰动原锁，再以第二JVM观察。两轮错误、实际恢复记录和各自输入/日志/XML都保留，不计产品RED或成功证据。证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-owner-evidence-a9a06410`拥有这些原始结果与最终源码/回执。
+
+本项是已冻结fresh方案的必要根资源依赖，不授予注册、共同commissioning、原scope恢复、Main或生产使用；共同owner/导入/replay/flush/异步claim、full-bytes和完整G1/生产Gate继续OPEN，全16步目标active，默认OFF/SYSTEM/PARK及disabled保持。Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。
+
+最终native源码锁1199项，外层1226项源码加9份既有文档，归档63个相关class。实际RAT exit1，仍为431个父源码既有未批准路径/字节，无新增，不称CI全绿。未执行新TLC、stock矩阵、完整SDK或性能/掉电测量。五个终态native临时目录在逐文件同inode/hash/mode/owner及两次无reader检查后移除，32文件/3,448,368逻辑字节，硬链接归档保留全部数据块、常规数据回收0；恢复记录及测试新建的空目录/零字节标记保留，原默认目录不参与清理。
+
+其后核对到本轮采用的既有BookieImplTest同样使用全局默认根，将两处配置替换为已有BookKeeperClusterTestCase的临时根工厂，原写入/资源释放断言不变；最终隔离配置下五类29项和Spotless/Checkstyle再次通过。前一轮29项保留原输入，不移绑到这次测试夹具修改；实际生产Java未随这次夹具隔离改变。
+
+同轮还将本已mock Bookie/BookieServer的EmbeddedServer四个装配单测配置到各自TemporaryFolder，并显式mock其存储后端，避免创建无人接管的真实DB/默认目录；原组件顺序及ownership断言保持。该夹具修改后五项单测和style独立通过，生产Java及此前60个相关class逐字节不变，29项整轮与5项补验分别保留原输入/桥接，不把装配mock当真实存储或fresh drain证明。
