@@ -426,3 +426,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-31接续[fresh Journal 的完整资源图关闭](local-storage/README.md#fresh-journal-的完整资源图关闭)：包内fresh Journal沿原Journal→ForceWrite链排空已接纳工作，分别保存连续force、checkpoint/lastMark及首次native close结果；首版配置冻结Journal V6/FileInfo V1，不静默改写。实际验证及原阶段证据由该节拥有。下一项为根锁逐句柄释放结果，再接稳定outer owner/facade和一次性permit；尚不发行fresh许可或解锁根，完整fresh/ACK、Main/G1/full-bytes与16步Gate继续OPEN，持续目标active。
+
+
+2026-10-31接续[fresh 根租约的逐句柄释放结果](local-storage/README.md#fresh-根租约的逐句柄释放结果)：marker锁/channel及目录同步/枚举句柄分别保留首次native释放结果，原操作失败与资源drained分离，sticky或未知关闭不因no-op升级成功；永久marker保留。两类26项及RED/GREEN原绑定由该节拥有。下一项继续稳定outer owner/facade、逐资源登记与一次性permit；当前不构成完整fresh或根释放前提证明，Main/G1/full-bytes及16步总验收仍OPEN，目标active。

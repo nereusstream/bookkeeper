@@ -2188,3 +2188,18 @@ append quiesce保留checkpoint入口，供实际Sync等外部使用者完成最�
 最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码一致、无新增，保护PDF在读取前排除。最终native输入1262项、外层1289源码加9文档及132份交付class留存。八个已终态native临时目录的66个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节103,440,556；归档硬链接保留全部数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-journal-evidence-0821b6fa`保存各阶段原始inputs、源码、XML和日志，不移绑旧PASS。下一依赖为FreshClassicRoots逐句柄释放结果，然后接稳定outer owner/facade及一次性permit；当前仍不发行NO_CLUSTER_AUTHORITY/fresh许可，不解锁根，不证明全Bookie、output/ACK或full-bytes终态。共同owner、Main/G1及完整16步总验收继续OPEN/active，默认OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
+
+
+## fresh 根租约的逐句柄释放结果
+
+2026-10-31在父源码`a6f49858f7b1cf64071d4bc1e5ab66a29a69e5c8`上，FreshClassicRoots补齐首次释放记录；不再用最终isValid/isOpen汇总成功。每个实际marker FileLock和FileChannel分别保存是否取得、首次close是否开始/返回及原cause。关闭前已经无效而没有owner记录的句柄为sticky未知；首次release/close抛错后，重复close只观察原结果，不以第二次no-op升级DRAINED，不反复追加suppressed。
+
+原release失败后，尚未开始的marker channel仍执行首次close，其他独立root也继续清理；各句柄结果分别返回。channel close成功可能实际解除锁，但不能清除release失败，也不笼统声明所有锁仍持有或均已释放。“不重复”仅指owner的显式release/close，channel close内部仍可能由JDK执行解锁。永久CREATE_NEW marker和数据保留，不重新取得或重新包装为fresh。
+
+目录同步FileChannel和枚举DirectoryStream也在open之前有owner槽，取得后先登记再force/遍历，首次关闭结果与原操作错误分别保存。原操作失败且全部句柄成功关闭可以报告资源drained，但不恢复fresh资格；任一native close失败或未知均不drained。操作与close同时失败时保留原cause和一次suppressed。成功临时对象立即退役，失败对象保留，未增加provider、线程、队列或成功句柄的无限历史。
+
+acquire和close继续串行，外部关闭等待实际初始化返回；实际初始化或正在close的线程不得重入阻塞等待自身。包内closeForFresh给出不可变逐句柄结果，既有AutoCloseable.close沿同一状态并重报原关闭错误；多个根的失败仍全部汇总，按原cause身份去重suppressed，不丢弃独立失败。该子入口只能在初始化和全部storage实际使用者终结、外层允许进入根释放阶段后调用；它本身不能证明该外层前提，完整owner/facade和permit仍未接线。
+
+两条真实RED均在父实现上按预期失败：首次marker native close异常后的第二次close错误返回成功，以及JDK实际中断自动关闭后owner错误返回成功。最终两类26项同源码通过，0 failure/error/skipped：fresh根租约15项及原Classic/Profile根绑定11项；阶段25项保留原源码/class，不移绑到新增多根错误汇总后的实现。新增验证沿原第二JVM探针观察真实锁，覆盖release失败/channel成功的分离、独立根清理、挂起release时锁仍持有/返回后释放、自等待拒绝、目录force失败但资源可排空、目录close失败保留、枚举操作/close同时失败及多根错误汇总去重。注入仅包装测试中的真实FileLock/FileChannel/DirectoryStream，不以mock成功替代native结果；保留RED和GREEN各自输入、源码和XML。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-root-release-evidence-a6f49858`保留三阶段原始inputs、源码和XML，以及阶段GREEN与最终交付的class；最终native输入1262项、外层1289源码加9文档及15份交付class。最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码一致，无新增，保护PDF在读取前排除。三个已终态native临时目录的14个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节1,419,892；归档硬链接保留全部数据，常规文件数据块回收0。未清理默认目录或其他任务资源。未复跑已封存Journal185项或完整SDK、stock、TLC、Rust JNI、性能/掉电矩阵。本切片只补齐根资源结果，下一块继续稳定outer owner/facade、逐资源装配及一次性permit，尚无完整fresh、全Bookie/output ACK、共同owner/Main/G1/full-bytes或16步总验收结论；目标active，生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。

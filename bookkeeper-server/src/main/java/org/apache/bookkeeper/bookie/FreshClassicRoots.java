@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -44,16 +45,86 @@ final class FreshClassicRoots implements AutoCloseable {
     private record Scope(BookieId bookie, List<String> journal, List<String> ledger, List<String> index) { }
     private record Alias(Path configured, Root member) { }
 
+    record ReleaseResult(Path path, String kind, boolean acquired, boolean closeAttempted,
+                         boolean closeReturned, Throwable failure) { }
+
+    record FreshDrainResult(boolean drained, Throwable acquisitionFailure, List<ReleaseResult> releases) {
+        Throwable closeFailure() {
+            for (ReleaseResult result : releases) {
+                if (result.failure() != null) {
+                    return result.failure();
+                }
+            }
+            return null;
+        }
+    }
+
+    /** One first native-close result, shared by acquisition cleanup and final root cleanup. */
+    private static final class CloseRecord<T extends AutoCloseable> {
+        final Path path;
+        final String kind;
+        T resource;
+        boolean acquired;
+        boolean closeAttempted;
+        boolean closeReturned;
+        Throwable failure;
+
+        CloseRecord(Path path, String kind) {
+            this.path = path;
+            this.kind = kind;
+        }
+
+        void acquired(T resource) {
+            this.resource = resource;
+            acquired = true;
+        }
+
+        void close() {
+            if (closeAttempted) {
+                if (!closeReturned) {
+                    throw new IllegalStateException("Fresh native close is still executing");
+                }
+                return;
+            }
+            if (!acquired) {
+                return;
+            }
+            closeAttempted = true;
+            try {
+                if (resource instanceof FileChannel channel && !channel.isOpen()
+                        || resource instanceof FileLock lock && !lock.isValid()) {
+                    throw new IOException("Fresh " + kind + " closed without an observed native result: " + path);
+                }
+                resource.close();
+                resource = null;
+            } catch (Throwable closeFailure) {
+                failure = closeFailure;
+            } finally {
+                closeReturned = true;
+            }
+        }
+
+        boolean drained() {
+            return !acquired || closeReturned && failure == null;
+        }
+
+        ReleaseResult result() {
+            return new ReleaseResult(path, kind, acquired, closeAttempted, closeReturned, failure);
+        }
+    }
+
     private static final class Root {
         final Path directory;
         final Object directoryKey;
-        FileChannel channel;
-        FileLock lock;
+        final CloseRecord<FileChannel> channel;
+        final CloseRecord<FileLock> lock;
         Object markerKey;
 
         Root(Path directory, Object directoryKey) {
             this.directory = directory;
             this.directoryKey = directoryKey;
+            channel = new CloseRecord<>(marker(), "marker channel");
+            lock = new CloseRecord<>(marker(), "root lock");
         }
 
         Path marker() {
@@ -64,10 +135,13 @@ final class FreshClassicRoots implements AutoCloseable {
     private final Scope scope;
     private final List<Root> roots = new ArrayList<>();
     private final List<Alias> aliases = new ArrayList<>();
+    private final List<CloseRecord<?>> auxiliary = new ArrayList<>();
     private boolean attempted;
     private boolean ready;
     private boolean closing;
-    private boolean closed;
+    private Thread acquiringThread;
+    private Thread closingThread;
+    private Throwable acquisitionFailure;
 
     /** Pure configuration snapshot: acquire is separate so failures never lose the resource owner. */
     FreshClassicRoots(ServerConfiguration configuration) throws IOException {
@@ -79,6 +153,18 @@ final class FreshClassicRoots implements AutoCloseable {
             throw new IOException("Fresh root ownership can only be acquired once");
         }
         attempted = true;
+        acquiringThread = Thread.currentThread();
+        try {
+            acquireRoots();
+        } catch (IOException | RuntimeException | Error failure) {
+            acquisitionFailure = failure;
+            throw failure;
+        } finally {
+            acquiringThread = null;
+        }
+    }
+
+    private void acquireRoots() throws IOException {
         for (String configured : configuredRoots(scope)) {
             Path directory = Path.of(configured).toRealPath();
             var attributes = directoryAttributes(directory);
@@ -107,22 +193,21 @@ final class FreshClassicRoots implements AutoCloseable {
             verifyDirectory(root);
             // CREATE_NEW prevents opening a second channel for any old marker, even after close or failure.
             // Closing another channel to an in-process POSIX lock scope could otherwise drop the original lock.
-            root.channel = FileChannel.open(root.marker(),
+            root.channel.acquired(FileChannel.open(root.marker(),
                     Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
-                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))));
             try {
-                root.lock = root.channel.tryLock();
+                FileLock lock = root.channel.resource.tryLock();
+                if (lock == null) {
+                    throw new IOException("Fresh root already has an owner");
+                }
+                root.lock.acquired(lock);
             } catch (OverlappingFileLockException overlapping) {
                 throw new IOException("Fresh root already has an owner", overlapping);
             }
-            if (root.lock == null) {
-                throw new IOException("Fresh root already has an owner");
-            }
             root.markerKey = markerAttributes(root.marker()).fileKey();
-            root.channel.force(true);
-            try (var directory = FileChannel.open(root.directory, StandardOpenOption.READ)) {
-                directory.force(true);
-            }
+            root.channel.resource.force(true);
+            syncDirectory(root);
         }
         for (Root root : roots) {
             verifyHeld(root);
@@ -199,18 +284,57 @@ final class FreshClassicRoots implements AutoCloseable {
 
     private static void verifyHeld(Root root) throws IOException {
         verifyDirectory(root);
-        if (root.channel == null || !root.channel.isOpen() || root.lock == null || !root.lock.isValid()
+        if (root.channel.resource == null || !root.channel.resource.isOpen()
+                || root.lock.resource == null || !root.lock.resource.isValid()
                 || !root.markerKey.equals(markerAttributes(root.marker()).fileKey())) {
             throw new IOException("Fresh root no longer holds its original exclusive marker");
         }
     }
 
-    private static void requireMembers(Root root, boolean ownMarker) throws IOException {
-        try (var members = Files.newDirectoryStream(root.directory)) {
-            for (Path member : members) {
+    private void syncDirectory(Root root) throws IOException {
+        var directory = new CloseRecord<FileChannel>(root.directory, "directory sync channel");
+        auxiliary.add(directory);
+        Throwable failure = null;
+        try {
+            directory.acquired(FileChannel.open(root.directory, StandardOpenOption.READ));
+            directory.resource.force(true);
+        } catch (IOException | RuntimeException | Error operationFailure) {
+            failure = operationFailure;
+            throw operationFailure;
+        } finally {
+            finishAuxiliary(directory, failure);
+        }
+    }
+
+    private void requireMembers(Root root, boolean ownMarker) throws IOException {
+        var members = new CloseRecord<DirectoryStream<Path>>(root.directory, "directory listing");
+        auxiliary.add(members);
+        Throwable failure = null;
+        try {
+            members.acquired(Files.newDirectoryStream(root.directory));
+            for (Path member : members.resource) {
                 if (!ownMarker || !member.equals(root.marker())) {
                     throw new IOException("Fresh root contains historical or unclassified files: " + member);
                 }
+            }
+        } catch (IOException | RuntimeException | Error operationFailure) {
+            failure = operationFailure;
+            throw operationFailure;
+        } finally {
+            finishAuxiliary(members, failure);
+        }
+    }
+
+    private void finishAuxiliary(CloseRecord<?> resource, Throwable operationFailure) throws IOException {
+        resource.close();
+        if (resource.drained()) {
+            auxiliary.remove(resource);
+        }
+        if (resource.failure != null) {
+            if (operationFailure == null) {
+                throwCloseFailure(resource.failure);
+            } else if (operationFailure != resource.failure) {
+                operationFailure.addSuppressed(resource.failure);
             }
         }
     }
@@ -218,41 +342,71 @@ final class FreshClassicRoots implements AutoCloseable {
     /** Release resources only. Persistent candidates and data are never removed or relabelled fresh. */
     @Override
     public synchronized void close() throws IOException {
-        if (closed) {
-            return;
-        }
-        closing = true;
-        ready = false;
-        IOException first = null;
-        for (int i = roots.size() - 1; i >= 0; i--) {
-            Root root = roots.get(i);
-            try {
-                if (root.lock != null && root.lock.isValid()) {
-                    root.lock.release();
+        FreshDrainResult result = closeForFresh();
+        Throwable failure = result.closeFailure();
+        if (failure != null) {
+            for (ReleaseResult release : result.releases()) {
+                Throwable other = release.failure();
+                if (other != null && other != failure) {
+                    boolean included = false;
+                    for (Throwable suppressed : failure.getSuppressed()) {
+                        included |= suppressed == other;
+                    }
+                    if (!included) {
+                        failure.addSuppressed(other);
+                    }
                 }
-            } catch (IOException failure) {
-                first = append(first, failure);
             }
-            try {
-                if (root.channel != null && root.channel.isOpen()) {
-                    root.channel.close();
-                }
-            } catch (IOException failure) {
-                first = append(first, failure);
-            }
-        }
-        closed = roots.stream().allMatch(root -> (root.channel == null || !root.channel.isOpen())
-                && (root.lock == null || !root.lock.isValid()));
-        if (first != null) {
-            throw first;
+            throwCloseFailure(failure);
         }
     }
 
-    private static IOException append(IOException first, IOException failure) {
-        if (first == null) {
-            return failure;
+    /** Called only after initialization and every external storage user have actually returned. */
+    synchronized FreshDrainResult closeForFresh() {
+        Thread current = Thread.currentThread();
+        if (current == acquiringThread || current == closingThread) {
+            throw new IllegalStateException("Fresh root resource activity cannot await its own close");
         }
-        first.addSuppressed(failure);
-        return first;
+        closingThread = current;
+        try {
+            closing = true;
+            ready = false;
+            boolean drained = true;
+            List<ReleaseResult> releases = new ArrayList<>();
+            for (int i = roots.size() - 1; i >= 0; i--) {
+                Root root = roots.get(i);
+                // Closing the marker fd may release its native lock even if explicit release failed.
+                // These two original results remain independent, and a failure is never erased.
+                root.lock.close();
+                root.channel.close();
+                releases.add(root.lock.result());
+                releases.add(root.channel.result());
+                drained &= root.lock.drained() && root.channel.drained();
+            }
+            for (CloseRecord<?> resource : List.copyOf(auxiliary)) {
+                resource.close();
+                if (resource.drained()) {
+                    auxiliary.remove(resource);
+                } else {
+                    releases.add(resource.result());
+                    drained = false;
+                }
+            }
+            return new FreshDrainResult(drained, acquisitionFailure, List.copyOf(releases));
+        } finally {
+            closingThread = null;
+        }
+    }
+
+    private static void throwCloseFailure(Throwable failure) throws IOException {
+        if (failure instanceof IOException io) {
+            throw io;
+        } else if (failure instanceof RuntimeException runtime) {
+            throw runtime;
+        } else if (failure instanceof Error error) {
+            throw error;
+        } else {
+            throw new IOException("Fresh root native close failed", failure);
+        }
     }
 }
