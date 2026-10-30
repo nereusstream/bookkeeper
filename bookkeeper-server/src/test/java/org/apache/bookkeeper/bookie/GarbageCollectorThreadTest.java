@@ -56,9 +56,7 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.Spy;
 
 /**
  * Unit test for {@link GarbageCollectorThread}.
@@ -69,8 +67,6 @@ public class GarbageCollectorThreadTest {
 
     private final TmpDirs tmpDirs = new TmpDirs();
 
-    @InjectMocks
-    @Spy
     private GarbageCollectorThread mockGCThread;
 
     @Mock
@@ -87,6 +83,8 @@ public class GarbageCollectorThreadTest {
     public void setUp() throws Exception {
         conf.setAllowLoopback(true);
         openMocks(this);
+        mockGCThread = spy(new GarbageCollectorThread(conf, ledgerManager, null, ledgerStorage,
+                mock(EntryLogger.class), statsLogger, gcExecutor));
     }
 
     @After

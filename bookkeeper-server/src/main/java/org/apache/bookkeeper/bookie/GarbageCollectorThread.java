@@ -28,6 +28,7 @@ import com.google.common.base.Strings;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedList;
@@ -67,6 +68,10 @@ public class GarbageCollectorThread implements Runnable {
     private final EntryLogMetadataMap entryLogMetaMap;
 
     private final ScheduledExecutorService gcExecutor;
+    private final boolean freshLifecycle;
+    private volatile Thread freshExecutorThread;
+    private boolean freshStopRequested;
+    private boolean freshMetadataClosed;
     Future<?> scheduledFuture = null;
 
     // This is the fixed delay in milliseconds before running the Garbage Collector Thread again.
@@ -155,6 +160,17 @@ public class GarbageCollectorThread implements Runnable {
         return Executors.newSingleThreadScheduledExecutor(new DefaultThreadFactory("GarbageCollectorThread"));
     }
 
+    /** Local GC only: a fresh store has no authority to infer deletion from cluster metadata. */
+    static GarbageCollectorThread forFresh(ServerConfiguration conf, LedgerDirsManager directories,
+            CompactableLedgerStorage storage, EntryLogger entryLogger, StatsLogger statsLogger) throws IOException {
+        Object cachePath = conf.getProperty("gcEntryLogMetadataCachePath");
+        if (conf.isGcEntryLogMetadataCacheEnabled()
+                || (cachePath != null && !"".equals(cachePath))) {
+            throw new IllegalArgumentException("Fresh GC requires the default in-memory metadata map without a path");
+        }
+        return new GarbageCollectorThread(conf, null, directories, storage, entryLogger, statsLogger, null, true);
+    }
+
     /**
      * Create a garbage collector thread.
      *
@@ -170,7 +186,19 @@ public class GarbageCollectorThread implements Runnable {
                                   StatsLogger statsLogger,
                                   ScheduledExecutorService gcExecutor)
         throws IOException {
-        this.gcExecutor = gcExecutor;
+        this(conf, ledgerManager, ledgerDirsManager, ledgerStorage, entryLogger, statsLogger, gcExecutor, false);
+    }
+
+    private GarbageCollectorThread(ServerConfiguration conf,
+                                   LedgerManager ledgerManager,
+                                   LedgerDirsManager ledgerDirsManager,
+                                   CompactableLedgerStorage ledgerStorage,
+                                   EntryLogger entryLogger,
+                                   StatsLogger statsLogger,
+                                   ScheduledExecutorService gcExecutor,
+                                   boolean freshLifecycle) throws IOException {
+        this.freshLifecycle = freshLifecycle;
+        this.gcExecutor = freshLifecycle ? newFreshExecutor() : gcExecutor;
         this.conf = conf;
 
         this.ledgerDirsManager = ledgerDirsManager;
@@ -308,6 +336,21 @@ public class GarbageCollectorThread implements Runnable {
 
         lastMinorCompactionTime = lastMajorCompactionTime =
             lastEntryLocationCompactionTime = System.currentTimeMillis();
+    }
+
+    private ScheduledExecutorService newFreshExecutor() {
+        return Executors.newSingleThreadScheduledExecutor(new DefaultThreadFactory("GarbageCollectorThread") {
+            @Override
+            protected Thread newThread(Runnable runnable, String name) {
+                Thread thread = super.newThread(runnable, name);
+                freshExecutorThread = thread;
+                return thread;
+            }
+        });
+    }
+
+    boolean isCurrentExecutorThread() {
+        return Thread.currentThread() == freshExecutorThread;
     }
 
     private EntryLogMetadataMap createEntryLogMetadataMap() throws IOException {
@@ -798,26 +841,75 @@ public class GarbageCollectorThread implements Runnable {
      * @throws InterruptedException if there is an exception stopping gc thread.
      */
     @SuppressFBWarnings("SWL_SLEEP_WITH_LOCK_HELD")
-    public synchronized void shutdown() throws InterruptedException {
-        if (!this.running) {
+    public void shutdown() throws InterruptedException {
+        if (freshLifecycle) {
+            try {
+                shutdownForFresh();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
             return;
         }
-        this.running = false;
-        log.info("Shutting down GarbageCollectorThread");
+        synchronized (this) {
+            if (!this.running) {
+                return;
+            }
+            this.running = false;
+            log.info("Shutting down GarbageCollectorThread");
 
-        throttler.cancelledAcquire();
-        compactor.throttler.cancelledAcquire();
-        while (!compacting.compareAndSet(false, true)) {
-            // Wait till the thread stops compacting
-            Thread.sleep(100);
+            throttler.cancelledAcquire();
+            compactor.throttler.cancelledAcquire();
+            while (!compacting.compareAndSet(false, true)) {
+                // Wait till the thread stops compacting
+                Thread.sleep(100);
+            }
+
+            // Interrupt GC executor thread
+            gcExecutor.shutdownNow();
+            try {
+                entryLogMetaMap.close();
+            } catch (Exception e) {
+                log.warn().exception(e).log("Failed to close entryLog metadata-map");
+            }
         }
+    }
 
-        // Interrupt GC executor thread
-        gcExecutor.shutdownNow();
-        try {
-            entryLogMetaMap.close();
-        } catch (Exception e) {
-            log.warn().exception(e).log("Failed to close entryLog metadata-map");
+    /**
+     * Called by the fresh close worker after request producers have stopped. Task cancellation and
+     * running=false do not prove that entry-log I/O has returned; keep the metadata map until the
+     * original executor has actually terminated. Do not interrupt compaction's file channels.
+     */
+    void shutdownForFresh() throws IOException, InterruptedException {
+        if (!freshLifecycle || isCurrentExecutorThread()) {
+            throw new IllegalStateException("Fresh GC drain requires an external fresh close worker");
+        }
+        synchronized (this) {
+            try {
+                if (!freshStopRequested) {
+                    running = false;
+                    throttler.cancelledAcquire();
+                    compactor.throttler.cancelledAcquire();
+                    if (scheduledFuture != null) {
+                        scheduledFuture.cancel(false);
+                    }
+                    gcExecutor.shutdown();
+                    freshStopRequested = true;
+                }
+                while (!gcExecutor.awaitTermination(5, TimeUnit.MINUTES)) {
+                    log.info("Waiting for the original fresh GC executor to terminate");
+                }
+                Thread executorThread = freshExecutorThread;
+                if (executorThread != null) {
+                    executorThread.join();
+                }
+                if (!freshMetadataClosed) {
+                    entryLogMetaMap.close();
+                    freshMetadataClosed = true;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw e;
+            }
         }
     }
 

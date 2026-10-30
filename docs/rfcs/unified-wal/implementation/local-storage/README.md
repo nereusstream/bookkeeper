@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-31 当前增量为[fresh 执行器的实际终结与严格 flush](#fresh-执行器的实际终结与严格-flush)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-31 当前增量为[fresh GC 的删除权威与实际终结](#fresh-gc-的删除权威与实际终结)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -2081,3 +2081,19 @@ Classic preflight/原上下文consume及独立Profile启动在各自实际根上
 三个执行器是完整fresh生命周期的必要依赖，不是完整fresh或生产启动验收。共同owner/Classic导入/replay/flush/异步claim、Main issuer、G1/full-bytes和16步总验收继续OPEN，目标active，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-drain-evidence-03835ed5`保留四阶段输入/源码/日志/XML及32个相关class，最终native输入1202项，外层1229源码加9文档。Spotless/Checkstyle exit0；实际RAT exit1，431个父源码既有未批准路径/字节无变化、无新增，保护PDF预先排除且未读取。四个终态native临时目录的22个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节2,109,462，归档硬链接保留全部数据块，常规数据回收0。未清理其他任务或默认目录。
+
+## fresh GC 的删除权威与实际终结
+
+2026-10-31在父源码`6b47e4de8ead6deef1d88f6cdf7ca6cc09865abc`上，包内GC fresh工厂固定使用`null LedgerManager`，不接收调用方manager或以NullLedgerManager的空枚举推断集群删除。指定规划会话已冻结此边界：仅跳过依赖集群权威的scan-and-compare ledger删除，正常GC执行器、entry-log metadata提取、本地存活判断、默认compaction与预分配保留。它不是native ABSENT或registration例外，也不发行fresh上下文。普通权威Classic仍使用原构造参数和关闭逻辑。
+
+fresh关闭取消周期调度但不interrupt正在运行的文件I/O；等待原executor termination及实际线程退出后才关闭内存metadata map。调用方中断恢复标志并保留原停止进度，后续继续等待同一执行器；成功关闭不重复清理。自线程等待在取得关闭monitor前拒绝，即使线程改名，调用普通shutdown入口也不能绕过；未start关闭可重复。该子入口只适用于由fresh工厂构造的资源，未来外层owner须在启动前登记它并先关闭请求生产者；仍未接公开fresh生命周期。
+
+工厂在构造前拒绝persistent map及任何实际非空、非字符串或多值cache path。规划会话澄清以create收到的有效配置值为边界：未设置/空串允许，仍保留的空白拒绝且不额外trim；调用前已被Commons Configuration裁成空串的原字符串不可追溯。未来owner必须捕获同一批值再验证和冻结，不在复制时重新归一化，不修改普通Classic setter或全局delimiter行为；完整owner配置冻结仍未实现。
+
+四项新增测试在TemporaryFolder的真实Interleaved索引/entry-log上接fresh GC子组件：关闭metadata二次验证时，真实GC周期和metadata提取执行后ledger仍可读；扫描future取消而实际文件扫描仍被挂起、关闭方中断及后续等待均保留map，不中断原扫描，真实线程退出后才清理；自线程改名拒绝、普通实例不能调用fresh drain、未start重复关闭；persistent/空白/多值/非法类型路径在构造前拒绝。测试源码仅替换未启动的GC子组件，不提供公开raw backend旁路，也不把该夹具称为完整fresh启动或ACK验收。
+
+最终五类30项同源码通过，0 failure/error/skipped：fresh GC4、原executor4、SyncThread8、BookieImpl3、原根/Classic组合11。另一个独立轮次的新GC4通过，旧GC6场景中5通过、DirectEntryLogger场景因本机Mac OS X/aarch64无JNI候选库报错；该轮整体exit1，不能称全部通过，也未跳过或修改该有效测试。首轮新增构造器影响Mockito隐式装配及配置库trim导致的失败原样保留，旧测试改为显式装配同一生产构造器，断言不变；不把夹具错误改称产品RED。最后一轮只追加fresh专用实际线程join及原值类型校验，不移绑前轮回执；完整SDK、stock矩阵、TLC及Linux JNI未重跑。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-gc-evidence-6b47e4de`分别保留三阶段输入/源码/日志/XML及43个相关class，最终native输入1225项。完整外层owner/窄facade、初始化逐资源登记、Journal/预分配/entry logger与文件cache严格关闭仍OPEN，不能因GC子组件已终结而提前解锁或发行许可。共同owner/Main/G1/full-bytes与完整16步验收继续OPEN，目标active，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
+
+本轮Spotless/Checkstyle exit0；实际RAT exit1，431个未批准路径及其字节与父源码一致、无新增，保护PDF在读取前排除。三个已终态native临时目录的18个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节2,841,116；归档硬链接保留数据，常规文件数据块回收0。未清理默认目录或其他任务资源。

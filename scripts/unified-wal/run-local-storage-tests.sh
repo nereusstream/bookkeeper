@@ -85,10 +85,20 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / nam
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/server/TestEmbeddedServer.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie') / name for name in
              ('BookieImplTest.java', 'TestBookieImpl.java', 'FreshClassicRootsTest.java', 'SyncThreadTest.java',
-              'FreshClassicExecutorDrainTest.java'))
+              'FreshClassicExecutorDrainTest.java', 'FreshClassicGcDrainTest.java', 'GarbageCollectorThreadTest.java',
+              'MockLedgerStorage.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
              ('bookie/Cookie.java', 'bookie/LegacyCookieValidation.java', 'util/PortManager.java',
-              'bookie/FreshClassicRoots.java', 'bookie/LedgerDirsMonitor.java'))
+              'bookie/FreshClassicRoots.java', 'bookie/LedgerDirsMonitor.java', 'bookie/GarbageCollectorThread.java',
+              'bookie/ScanAndCompareGarbageCollector.java', 'bookie/EntryLogMetadataMap.java',
+              'bookie/InMemoryEntryLogMetadataMap.java', 'bookie/AbstractLogCompactor.java',
+              'bookie/EntryLogCompactor.java', 'bookie/TransactionalEntryLogCompactor.java',
+              'bookie/DefaultEntryLogger.java', 'bookie/EntryLoggerAllocator.java', 'bookie/EntryLogManager.java',
+              'bookie/EntryLogManagerBase.java', 'bookie/EntryLogManagerForSingleEntryLog.java',
+              'bookie/EntryLogManagerForEntryLogPerLedger.java', 'bookie/LedgerCacheImpl.java',
+              'bookie/BufferedChannel.java', 'bookie/BufferedReadChannel.java', 'bookie/EntryLogMetadata.java',
+              'bookie/storage/EntryLogger.java', 'bookie/stats/GarbageCollectorStats.java'))
+paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/EntryLogTestUtils.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper') / name for name in
              ('conf/TestBKConfiguration.java', 'test/BookKeeperClusterTestCase.java'))
 paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/component') / name for name in
